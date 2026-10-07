@@ -1,0 +1,877 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claw</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --border: #e2e2dc;
+    --accent: #c2410c; --accent-soft: #fff1e8; --user: #eef2ff; --code-bg: #f1f1ec;
+    --ok: #15803d; --err: #b91c1c; --err-soft: #fef2f2; --warn-soft: #fffbeb; --warn: #b45309;
+    --add: #e8f6ec; --del: #fdecec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161614; --panel: #1f1f1c; --text: #ececE6; --muted: #9a9a92; --border: #33332f;
+      --accent: #fb923c; --accent-soft: #2d1d12; --user: #1e2338; --code-bg: #262622;
+      --ok: #4ade80; --err: #f87171; --err-soft: #2d1515; --warn-soft: #2b2312; --warn: #fbbf24;
+      --add: #12301c; --del: #3a1717;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column;
+  }
+  button, select, textarea, input { font: inherit; color: inherit; }
+  button {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 12px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  select { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; max-width: 100%; }
+  code, pre, textarea.mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 13px; }
+
+  header.topbar {
+    display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center;
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  .brand { font-weight: 700; font-size: 17px; }
+  .workspace { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 160px; min-width: 0; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .controls label { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--muted); }
+  #model-select { width: 300px; }
+
+  main#log { flex: 1; overflow-y: auto; padding: 16px; }
+  .inner { max-width: 920px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+  .empty { color: var(--muted); text-align: center; margin-top: 12vh; }
+  .empty h1 { color: var(--text); font-size: 24px; margin-bottom: 4px; }
+  .empty .chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 16px; }
+
+  .msg { border-radius: 12px; padding: 10px 14px; overflow-wrap: anywhere; }
+  .msg.user { background: var(--user); align-self: flex-end; max-width: 85%; white-space: pre-wrap; }
+  .msg.user.collapsed { max-height: 7.5em; overflow: hidden; position: relative; cursor: pointer; }
+  .msg.assistant { background: var(--panel); border: 1px solid var(--border); }
+  .md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
+  .md h1, .md h2, .md h3 { line-height: 1.3; margin: 14px 0 6px; }
+  .md h1 { font-size: 20px; } .md h2 { font-size: 18px; } .md h3, .md h4 { font-size: 16px; }
+  .md p { margin: 6px 0; }
+  .md ul, .md ol { margin: 6px 0; padding-left: 24px; }
+  .md code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  .md pre.code { background: var(--code-bg); padding: 10px 12px; border-radius: 8px; overflow-x: auto; position: relative; }
+  .md pre.code code { background: none; padding: 0; }
+  .md pre.code[data-lang]::before { content: attr(data-lang); position: absolute; top: 4px; right: 8px; font-size: 11px; color: var(--muted); }
+  .md blockquote { border-left: 3px solid var(--border); margin: 6px 0; padding: 2px 12px; color: var(--muted); }
+  .md table { border-collapse: collapse; margin: 8px 0; display: block; overflow-x: auto; }
+  .md th, .md td { border: 1px solid var(--border); padding: 4px 10px; text-align: left; }
+  .md a { color: var(--accent); }
+  .md hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+  .diagram { background: var(--code-bg); border-radius: 8px; padding: 8px; overflow-x: auto; margin: 6px 0; }
+  .tool-body pre.stderr { color: var(--err); }
+  .tool-body .note { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+  .diagram-actions { display: flex; gap: 8px; align-items: center; margin: 4px 0 8px; font-size: 13px; color: var(--muted); }
+  .diagram-actions button { padding: 3px 10px; font-size: 13px; }
+
+  details.tool { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; font-size: 14px; }
+  details.tool > summary { list-style: none; cursor: pointer; padding: 7px 12px; display: flex; gap: 8px; align-items: center; }
+  details.tool > summary::-webkit-details-marker { display: none; }
+  .tool-name { font-weight: 600; white-space: nowrap; }
+  .tool-target { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+  .tool-state { margin-left: auto; white-space: nowrap; font-size: 13px; }
+  details.tool.running .tool-state { color: var(--muted); }
+  details.tool.ok .tool-state { color: var(--ok); }
+  details.tool.error { border-color: var(--err); }
+  details.tool.error .tool-state { color: var(--err); }
+  .tool-body { border-top: 1px solid var(--border); padding: 8px 12px; display: flex; flex-direction: column; gap: 6px; }
+  .tool-body .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .tool-body pre { margin: 0; background: var(--code-bg); padding: 8px 10px; border-radius: 6px; overflow: auto; max-height: 420px; white-space: pre-wrap; }
+  .diff { margin: 0; background: var(--code-bg); border-radius: 6px; overflow: auto; max-height: 420px; padding: 6px 0; }
+  .diff div { padding: 0 10px; white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+  .diff .del { background: var(--del); } .diff .add { background: var(--add); }
+
+  .perm { background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+  .perm .title { font-weight: 600; color: var(--warn); }
+  .perm pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--panel); padding: 6px 10px; border-radius: 6px; }
+  .perm .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .perm textarea { width: 100%; resize: vertical; min-height: 2.4em; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); padding: 6px 10px; }
+  .perm.resolved { background: var(--panel); border-color: var(--border); }
+  .perm.resolved .title { color: var(--muted); }
+  .perm .decision { font-size: 14px; color: var(--muted); }
+
+  .info { background: var(--panel); border: 1px dashed var(--border); border-radius: 10px; padding: 10px 12px; }
+  .info pre { margin: 0; white-space: pre-wrap; overflow-x: auto; }
+  .error { background: var(--err-soft); border: 1px solid var(--err); border-radius: 10px; padding: 10px 12px; }
+  .error .hint { color: var(--muted); font-size: 14px; margin-top: 4px; }
+
+  footer.composer { background: var(--panel); border-top: 1px solid var(--border); padding: 8px 16px 12px; }
+  .composer .inner { gap: 6px; position: relative; }
+  .statusline { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12.5px; color: var(--muted); min-height: 18px; }
+  .statusline .busy { color: var(--accent); font-weight: 600; }
+  .statusline .offline { color: var(--err); }
+  .input-row { display: flex; gap: 8px; align-items: flex-end; }
+  #input { flex: 1; resize: none; min-height: 52px; max-height: 40vh; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--bg); }
+  #input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  #send, #stop { height: 44px; }
+  #stop { border-color: var(--err); color: var(--err); }
+  #suggestions { position: absolute; bottom: 100%; left: 0; right: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.12); max-height: 260px; overflow-y: auto; }
+  #suggestions div { padding: 6px 12px; cursor: pointer; display: flex; gap: 12px; }
+  #suggestions div.active, #suggestions div:hover { background: var(--accent-soft); }
+  #suggestions b { min-width: 110px; }
+  #suggestions span { color: var(--muted); }
+
+  #sessions-panel { position: fixed; top: 56px; right: 16px; width: min(420px, calc(100vw - 32px)); max-height: 60vh; overflow-y: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.18); z-index: 10; padding: 6px; }
+  #sessions-panel button { display: flex; width: 100%; justify-content: space-between; border: none; border-radius: 8px; text-align: left; }
+  #sessions-panel button:hover { background: var(--accent-soft); }
+  #toast { position: fixed; bottom: 120px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 20; }
+  #toast.show { opacity: .92; }
+  .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--accent); border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -1px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (max-width: 640px) { #model-select { width: 100%; } .controls label { flex: 1 1 100%; } .msg.user { max-width: 100%; } }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">🦞 Claw</div>
+  <div class="workspace" id="cwd" title=""></div>
+  <div class="controls">
+    <label>Modèle <select id="model-select" aria-label="Modèle"></select></label>
+    <label>Permissions
+      <select id="mode-select" aria-label="Mode de permission">
+        <option value="prompt">Demander avant d'agir</option>
+        <option value="read-only">Plan (lecture seule)</option>
+        <option value="workspace-write">Éditer sans demander</option>
+        <option value="danger-full-access">Accès complet</option>
+      </select>
+    </label>
+    <button id="sessions-btn" type="button">Sessions</button>
+    <button id="new-btn" type="button">Nouvelle conversation</button>
+  </div>
+</header>
+<div id="sessions-panel" hidden></div>
+<main id="log" aria-live="polite"><div class="inner" id="log-inner"></div></main>
+<footer class="composer">
+  <div class="inner">
+    <div id="suggestions" hidden role="listbox"></div>
+    <div class="statusline">
+      <span id="busy"></span><span id="usage"></span><span id="quota"></span><span id="conn"></span>
+    </div>
+    <div class="input-row">
+      <textarea id="input" rows="2" placeholder="Décrivez une tâche… ou tapez / pour les commandes (/review, /audit, /archi, /fix…)" aria-label="Message"></textarea>
+      <button id="send" class="primary" type="button">Envoyer</button>
+      <button id="stop" type="button" hidden title="Arrêter le tour en cours (Échap)">Arrêter</button>
+    </div>
+  </div>
+</footer>
+<div id="toast" role="status"></div>
+<script>
+"use strict";
+(() => {
+  const MERMAID_URL = "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js";
+  const MERMAID_SRI = "sha384-rbtjAdnIQE/aQJGEgXrVUlMibdfTSa4PQju4HDhN3sR2PmaKFzhEafuePsl9H/9I";
+  const COMMANDS = [
+    ["/review", "revue de code (diff courant par défaut)"],
+    ["/audit", "audit du projet"],
+    ["/archi", "conception d'architecture : /archi <besoin>"],
+    ["/adr", "rédiger un ADR : /adr <décision>"],
+    ["/fix", "lancer les tests et corriger : /fix [commande]"],
+    ["/undo", "annuler le dernier tour (fichiers et conversation)"],
+    ["/checkpoints", "points de restauration"],
+    ["/hooks", "hooks configurés"],
+    ["/models", "modèles gratuits recommandés pour le code"],
+    ["/model", "afficher ou changer le modèle"],
+    ["/permissions", "afficher ou changer le mode"],
+    ["/mcp", "serveurs MCP connectés"],
+    ["/cost", "jetons et coût de la session"],
+    ["/compact", "résumer l'historique"],
+    ["/clear", "nouvelle conversation"],
+    ["/help", "aide"],
+  ];
+  const TOOL_ICONS = { bash: "⌘", PowerShell: "⌘", read_file: "📄", write_file: "✏️", edit_file: "✏️",
+    glob_search: "🔎", grep_search: "🔎", WebFetch: "🌐", WebSearch: "🌐", Agent: "🤖", TodoWrite: "☑️" };
+
+  const $ = (id) => document.getElementById(id);
+  const log = $("log"), logInner = $("log-inner"), input = $("input"), sendBtn = $("send");
+  const modelSelect = $("model-select"), modeSelect = $("mode-select");
+
+  // ---------------------------------------------------------------- jeton
+  const params = new URLSearchParams(location.search);
+  let token = params.get("token") || "";
+  try {
+    if (token) sessionStorage.setItem("claw-token", token);
+    else token = sessionStorage.getItem("claw-token") || "";
+  } catch (_) { /* stockage indisponible */ }
+  if (params.has("token")) history.replaceState(null, "", location.pathname);
+
+  let status = {}, busySince = null, currentAssistant = null, pendingTools = [], mermaidCount = 0;
+  let pendingPermissions = 0, freeModels = [], suggestionIndex = -1, customCommands = [];
+
+  // ---------------------------------------------------------------- utilitaires
+  const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+  function toast(message) {
+    const node = $("toast");
+    node.textContent = message;
+    node.classList.add("show");
+    clearTimeout(toast.timer);
+    toast.timer = setTimeout(() => node.classList.remove("show"), 3200);
+  }
+  async function api(path, body) {
+    const options = { method: body === undefined ? "GET" : "POST", headers: { "X-Claw-Token": token } };
+    if (body !== undefined) {
+      options.headers["Content-Type"] = "application/json";
+      options.body = JSON.stringify(body);
+    }
+    const response = await fetch(path, options);
+    if (!response.ok) {
+      let message = response.statusText;
+      try { message = (await response.json()).error || message; } catch (_) {}
+      throw new Error(message);
+    }
+    return response.status === 200 ? response.json() : null;
+  }
+  const nearBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 120;
+  function scrollToBottom(force) { if (force || nearBottom()) log.scrollTop = log.scrollHeight; }
+  function append(node) {
+    const stick = nearBottom();
+    const empty = logInner.querySelector(".empty");
+    if (empty) empty.remove();
+    logInner.appendChild(node);
+    if (stick) scrollToBottom(true);
+    return node;
+  }
+
+  // ---------------------------------------------------------------- Markdown
+  function renderInline(escaped) {
+    return escaped.split(/(`[^`\n]+`)/g).map((part) => {
+      if (part.length > 1 && part.startsWith("`") && part.endsWith("`")) return "<code>" + part.slice(1, -1) + "</code>";
+      return part
+        .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/(^|[^*\w])\*([^*\s][^*\n]*?)\*(?!\w)/g, "$1<em>$2</em>")
+        .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    }).join("");
+  }
+  const isListLine = (line) => /^\s*([-*+]|\d+[.)])\s+/.test(line);
+  const isBlockStart = (line) => /^\s*```/.test(line) || /^#{1,6}\s/.test(line) || /^\s*>/.test(line) || isListLine(line);
+  function renderTable(rows) {
+    const cells = (row) => row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => renderInline(escapeHtml(c.trim())));
+    const head = cells(rows[0]);
+    let html = "<table><thead><tr>" + head.map((c) => "<th>" + c + "</th>").join("") + "</tr></thead><tbody>";
+    for (const row of rows.slice(2)) html += "<tr>" + cells(row).map((c) => "<td>" + c + "</td>").join("") + "</tr>";
+    return html + "</tbody></table>";
+  }
+  function renderMarkdown(source) {
+    const lines = source.replace(/\r\n/g, "\n").split("\n");
+    let html = "", i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      const fence = line.match(/^\s*```\s*([\w+#.-]*)\s*$/);
+      if (fence) {
+        const lang = fence[1].toLowerCase(), buffer = [];
+        i++;
+        while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) buffer.push(lines[i++]);
+        i++;
+        const code = escapeHtml(buffer.join("\n"));
+        html += lang === "mermaid"
+          ? '<div class="mermaid-block"><pre class="code" data-lang="mermaid"><code>' + code + "</code></pre></div>"
+          : '<pre class="code"' + (lang ? ' data-lang="' + escapeHtml(lang) + '"' : "") + "><code>" + code + "</code></pre>";
+        continue;
+      }
+      const heading = line.match(/^(#{1,6})\s+(.*)$/);
+      if (heading) {
+        const level = heading[1].length;
+        html += "<h" + level + ">" + renderInline(escapeHtml(heading[2])) + "</h" + level + ">";
+        i++;
+        continue;
+      }
+      if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { html += "<hr>"; i++; continue; }
+      if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|?\s*:?-{2,}/.test(lines[i + 1])) {
+        const rows = [];
+        while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(lines[i++]);
+        html += renderTable(rows);
+        continue;
+      }
+      if (/^\s*>/.test(line)) {
+        const quoted = [];
+        while (i < lines.length && /^\s*>/.test(lines[i])) quoted.push(lines[i++].replace(/^\s*>\s?/, ""));
+        html += "<blockquote>" + renderMarkdown(quoted.join("\n")) + "</blockquote>";
+        continue;
+      }
+      if (isListLine(line)) {
+        const ordered = /^\s*\d+[.)]\s+/.test(line), items = [];
+        while (i < lines.length && (isListLine(lines[i]) || (/^\s{2,}\S/.test(lines[i]) && items.length))) {
+          if (isListLine(lines[i])) items.push(lines[i].replace(/^\s*([-*+]|\d+[.)])\s+/, ""));
+          else items[items.length - 1] += "\n" + lines[i].trim();
+          i++;
+        }
+        const tag = ordered ? "ol" : "ul";
+        html += "<" + tag + ">" + items.map((item) => "<li>" + renderInline(escapeHtml(item)).replace(/\n/g, "<br>") + "</li>").join("") + "</" + tag + ">";
+        continue;
+      }
+      if (line.trim() === "") { i++; continue; }
+      const paragraph = [line];
+      i++;
+      while (i < lines.length && lines[i].trim() !== "" && !isBlockStart(lines[i]) && !/^\s*\|.*\|\s*$/.test(lines[i])) paragraph.push(lines[i++]);
+      html += "<p>" + renderInline(escapeHtml(paragraph.join("\n"))).replace(/\n/g, "<br>") + "</p>";
+    }
+    return html;
+  }
+
+  // ---------------------------------------------------------------- Mermaid (à la demande)
+  let mermaidPromise = null;
+  const mermaidAuto = () => { try { return localStorage.getItem("claw-mermaid-auto") === "1"; } catch (_) { return false; } };
+  function loadMermaid() {
+    if (!mermaidPromise) {
+      mermaidPromise = new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = MERMAID_URL;
+        script.integrity = MERMAID_SRI;
+        script.crossOrigin = "anonymous";
+        script.onload = () => {
+          const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+          window.mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: dark ? "dark" : "default" });
+          resolve(window.mermaid);
+        };
+        script.onerror = () => { mermaidPromise = null; reject(new Error("Mermaid n'a pas pu être chargé (hors ligne ?)")); };
+        document.head.appendChild(script);
+      });
+    }
+    return mermaidPromise;
+  }
+  async function renderDiagram(block, actions) {
+    const code = block.querySelector("code").textContent;
+    actions.textContent = "Chargement du diagramme…";
+    try {
+      const mermaid = await loadMermaid();
+      const { svg } = await mermaid.render("claw-mermaid-" + (++mermaidCount), code);
+      const diagram = el("div", "diagram");
+      diagram.innerHTML = svg;
+      block.querySelector("pre").hidden = true;
+      block.insertBefore(diagram, block.firstChild);
+      actions.textContent = "";
+      const toggle = el("button", null, "Voir le code");
+      toggle.type = "button";
+      toggle.onclick = () => {
+        const pre = block.querySelector("pre");
+        pre.hidden = !pre.hidden;
+        toggle.textContent = pre.hidden ? "Voir le code" : "Masquer le code";
+      };
+      actions.appendChild(toggle);
+    } catch (error) {
+      actions.textContent = "Diagramme non rendu : " + error.message;
+    }
+  }
+  function decorateDiagrams(root) {
+    for (const block of root.querySelectorAll(".mermaid-block")) {
+      if (block.dataset.ready) continue;
+      block.dataset.ready = "1";
+      const actions = el("div", "diagram-actions");
+      block.appendChild(actions);
+      if (mermaidAuto()) { renderDiagram(block, actions); continue; }
+      const button = el("button", null, "Afficher le diagramme");
+      button.type = "button";
+      button.onclick = () => {
+        try { localStorage.setItem("claw-mermaid-auto", "1"); } catch (_) {}
+        renderDiagram(block, actions);
+      };
+      actions.append(button, el("span", null, "(charge Mermaid depuis cdn.jsdelivr.net, version vérifiée)"));
+    }
+  }
+
+  // ---------------------------------------------------------------- messages
+  function addUser(text) {
+    const node = el("div", "msg user", text);
+    if (text.length > 600) {
+      node.classList.add("collapsed");
+      node.title = "Cliquer pour tout afficher";
+      node.onclick = () => node.classList.remove("collapsed");
+    }
+    append(node);
+  }
+  function appendAssistant(text) {
+    if (!currentAssistant) {
+      const node = el("div", "msg assistant");
+      const body = el("div", "md");
+      node.appendChild(body);
+      append(node);
+      currentAssistant = { body, text: "", frame: 0 };
+    }
+    currentAssistant.text += text;
+    if (!currentAssistant.frame) {
+      const target = currentAssistant;
+      target.frame = requestAnimationFrame(() => {
+        target.frame = 0;
+        const stick = nearBottom();
+        target.body.innerHTML = renderMarkdown(target.text);
+        if (stick) scrollToBottom(true);
+      });
+    }
+  }
+  function finishAssistant() {
+    if (!currentAssistant) return;
+    if (currentAssistant.frame) cancelAnimationFrame(currentAssistant.frame);
+    currentAssistant.body.innerHTML = renderMarkdown(currentAssistant.text);
+    decorateDiagrams(currentAssistant.body);
+    currentAssistant = null;
+  }
+
+  function parseJson(text) { try { return JSON.parse(text); } catch (_) { return null; } }
+  function toolTarget(name, input) {
+    const value = parseJson(input) || {};
+    switch (name) {
+      case "bash": case "PowerShell": return "$ " + (value.command || "");
+      case "read_file": case "write_file": case "edit_file": return value.path || "";
+      case "NotebookEdit": return value.notebook_path || "";
+      case "glob_search": return value.pattern || "";
+      case "grep_search": return (value.pattern || "") + (value.path ? "  dans " + value.path : "");
+      case "WebFetch": return value.url || "";
+      case "WebSearch": return value.query || "";
+      case "Agent": return (value.subagent_type || "general-purpose") + " · " + (value.description || "");
+      case "TodoWrite": return (value.todos ? value.todos.length : 0) + " tâche(s)";
+      default: return input.replace(/\s+/g, " ").slice(0, 140);
+    }
+  }
+  function diffView(oldText, newText) {
+    const box = el("div", "diff");
+    for (const line of (oldText || "").split("\n")) box.appendChild(el("div", "del", "- " + line));
+    for (const line of (newText || "").split("\n")) box.appendChild(el("div", "add", "+ " + line));
+    return box;
+  }
+  function addToolCall(name, input) {
+    const card = el("details", "tool running");
+    const summary = el("summary");
+    const icon = TOOL_ICONS[name] || (name.startsWith("mcp__") ? "🔌" : "🔧");
+    summary.append(el("span", null, icon), el("span", "tool-name", name), el("span", "tool-target", toolTarget(name, input)), el("span", "tool-state", "en cours…"));
+    card.appendChild(summary);
+    const body = el("div", "tool-body");
+    const value = parseJson(input);
+    if (name === "edit_file" && value) {
+      body.append(el("div", "label", "Modification"), diffView(value.old_string, value.new_string));
+    } else if (name === "write_file" && value) {
+      const preview = String(value.content || "").split("\n");
+      body.append(el("div", "label", "Contenu écrit (" + preview.length + " lignes)"),
+        el("pre", null, preview.slice(0, 80).join("\n") + (preview.length > 80 ? "\n…" : "")));
+    } else {
+      body.append(el("div", "label", "Entrée"), el("pre", null, value ? JSON.stringify(value, null, 2) : input));
+    }
+    card.appendChild(body);
+    append(card);
+    pendingTools.push({ name, card, body });
+  }
+  // Chemin relatif au dossier du projet, sans le préfixe Windows « \\?\ ».
+  function displayPath(path) {
+    let clean = String(path || "").replace(/^\\\\\?\\/, "");
+    const cwd = (status.cwd || "").replace(/^\\\\\?\\/, "");
+    if (cwd && clean.toLowerCase().startsWith(cwd.toLowerCase())) {
+      clean = clean.slice(cwd.length).replace(/^[\\/]+/, "") || clean;
+    }
+    return clean;
+  }
+  // Affiche l'essentiel du résultat (sortie de commande, contenu lu…) plutôt que le JSON brut.
+  function resultView(output, isError) {
+    const box = el("div");
+    box.style.display = "contents";
+    const value = parseJson(output);
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      if ("stdout" in value || "stderr" in value) {
+        if (value.stdout) box.append(el("div", "label", "Sortie"), el("pre", null, value.stdout));
+        if (value.stderr) box.append(el("div", "label", "Erreurs"), el("pre", "stderr", value.stderr));
+        if (!value.stdout && !value.stderr) box.append(el("div", "label", "Aucune sortie"));
+        if (value.returnCodeInterpretation) {
+          box.append(el("div", "label", value.returnCodeInterpretation.replace("exit_code:", "code de sortie ")));
+        }
+        if (value.backgroundTaskId) box.append(el("div", "label", "Lancé en arrière-plan (pid " + value.backgroundTaskId + ")"));
+        return box;
+      }
+      if (value.file && typeof value.file.content === "string") {
+        const file = value.file;
+        const last = file.startLine + Math.max(file.numLines, 1) - 1;
+        box.append(el("div", "note", displayPath(file.filePath) + " · lignes " + file.startLine + "–" + last + " sur " + file.totalLines),
+          el("pre", null, file.content));
+        return box;
+      }
+      if (value.filePath && (value.structuredPatch || value.content !== undefined)) {
+        const created = value.type === "create";
+        box.append(el("div", "note", (created ? "Fichier créé : " : "Fichier modifié : ") + displayPath(value.filePath)));
+        return box;
+      }
+      if (Array.isArray(value.filenames)) {
+        box.append(el("div", "label", value.filenames.length + " fichier(s)"),
+          el("pre", null, value.content || value.filenames.join("\n") || "(aucun)"));
+        return box;
+      }
+    }
+    box.append(el("div", "label", isError ? "Erreur" : "Résultat"),
+      el("pre", isError ? "stderr" : null, value ? JSON.stringify(value, null, 2) : (output || "(vide)")));
+    return box;
+  }
+  function attachToolResult(name, output, isError) {
+    let index = pendingTools.findIndex((tool) => tool.name === name);
+    if (index < 0 && pendingTools.length) index = 0;
+    let entry;
+    if (index >= 0) entry = pendingTools.splice(index, 1)[0];
+    else { addToolCall(name, "{}"); entry = pendingTools.pop(); }
+    entry.card.classList.remove("running");
+    entry.card.classList.add(isError ? "error" : "ok");
+    entry.card.querySelector(".tool-state").textContent = isError ? "✗ erreur" : "✓ terminé";
+    entry.body.append(resultView(output, isError));
+    if (isError) entry.card.open = true;
+  }
+
+  function updateTitle() {
+    document.title = (pendingPermissions > 0 ? "⚠ Autorisation · " : status.busy ? "… " : "") + "Claw";
+  }
+  function addPermission(event) {
+    const card = el("div", "perm");
+    card.id = "perm-" + event.id;
+    card.append(el("div", "title", "Autorisation requise · " + event.tool), el("pre", null, event.target),
+      el("div", "decision", "Mode actuel : " + event.mode));
+    const actions = el("div", "actions");
+    const feedback = el("textarea");
+    feedback.placeholder = "Consigne pour l'agent en cas de refus (facultatif)";
+    const send = async (decision) => {
+      for (const button of actions.querySelectorAll("button")) button.disabled = true;
+      try {
+        await api("/api/permission", { id: event.id, decision, feedback: feedback.value });
+      } catch (error) {
+        toast("Réponse non transmise : " + error.message);
+        for (const button of actions.querySelectorAll("button")) button.disabled = false;
+      }
+    };
+    const once = el("button", "primary", "Autoriser une fois");
+    once.type = "button";
+    once.onclick = () => send("once");
+    actions.appendChild(once);
+    if (event.suggested_rule) {
+      const always = el("button", null, "Toujours : " + event.suggested_rule + (event.session_only ? " (cette session)" : " (enregistré)"));
+      always.type = "button";
+      always.title = event.session_only ? "Valable jusqu'à la fin de la session" : "Ajouté à .claw/settings.local.json";
+      always.onclick = () => send("always");
+      actions.appendChild(always);
+    }
+    const deny = el("button", null, "Refuser");
+    deny.type = "button";
+    deny.onclick = () => send("deny");
+    actions.appendChild(deny);
+    card.append(actions, feedback);
+    append(card);
+    pendingPermissions++;
+    updateTitle();
+    once.focus({ preventScroll: true });
+  }
+  function resolvePermission(id, decision) {
+    const card = $("perm-" + id);
+    if (!card) return;
+    card.classList.add("resolved");
+    for (const node of card.querySelectorAll(".actions, textarea")) node.remove();
+    card.querySelector(".decision").textContent = "→ " + decision;
+    pendingPermissions = Math.max(0, pendingPermissions - 1);
+    updateTitle();
+  }
+  function addInfo(text) {
+    const node = el("div", "info");
+    node.appendChild(el("pre", null, text));
+    append(node);
+  }
+  function addError(message, hint) {
+    const node = el("div", "error");
+    node.appendChild(el("div", null, "Erreur : " + message));
+    if (hint && hint !== "claw --help") node.appendChild(el("div", "hint", "Conseil : " + hint));
+    append(node);
+  }
+  function resetLog() {
+    currentAssistant = null;
+    pendingTools = [];
+    pendingPermissions = 0;
+    logInner.textContent = "";
+    const empty = el("div", "empty");
+    empty.append(el("h1", null, "Que construit-on ?"),
+      el("div", null, "Claw lit, modifie et teste le code de ce dossier. Chaque action sensible vous est soumise."));
+    const chips = el("div", "chips");
+    for (const [command, label] of [["/audit", "Auditer le projet"], ["/review", "Relire mes changements"], ["/archi ", "Concevoir une architecture"], ["/fix", "Faire passer les tests"]]) {
+      const chip = el("button", null, label);
+      chip.type = "button";
+      chip.onclick = () => { input.value = command; input.focus(); onInput(); };
+      chips.appendChild(chip);
+    }
+    empty.appendChild(chips);
+    logInner.appendChild(empty);
+    updateTitle();
+  }
+
+  function render(event) {
+    switch (event.type) {
+      case "user_message": finishAssistant(); addUser(event.text); break;
+      case "assistant_text": appendAssistant(event.text); break;
+      case "tool_call": finishAssistant(); addToolCall(event.name, event.input); break;
+      case "tool_result": attachToolResult(event.name, event.output, event.is_error); break;
+      case "permission": finishAssistant(); addPermission(event); break;
+      case "permission_resolved": resolvePermission(event.id, event.decision); break;
+      case "info": finishAssistant(); addInfo(event.text); break;
+      case "error": finishAssistant(); addError(event.message, event.hint); break;
+      case "turn_done": finishAssistant(); break;
+      case "status": applyStatus(event.status); break;
+      case "reset": resetLog(); break;
+    }
+  }
+
+  // ---------------------------------------------------------------- état
+  function setModelOptions() {
+    const current = status.model || "";
+    modelSelect.textContent = "";
+    const known = new Set(freeModels.map((model) => model.id));
+    if (current && !known.has(current)) {
+      const group = el("optgroup");
+      group.label = "Modèle actuel";
+      const option = el("option", null, current);
+      option.value = current;
+      group.appendChild(option);
+      modelSelect.appendChild(group);
+    }
+    if (freeModels.length) {
+      const group = el("optgroup");
+      group.label = "Gratuits recommandés pour le code";
+      freeModels.forEach((model, index) => {
+        const option = el("option", null, (index + 1) + ". " + model.id + " · " + model.context);
+        option.value = model.id;
+        option.title = model.reasons.join(" · ");
+        group.appendChild(option);
+      });
+      modelSelect.appendChild(group);
+    }
+    const other = el("option", null, "Autre modèle…");
+    other.value = "__other__";
+    modelSelect.appendChild(other);
+    modelSelect.value = current;
+  }
+  function applyStatus(next) {
+    const modelChanged = next.model !== status.model;
+    status = next;
+    $("cwd").textContent = next.cwd || "";
+    $("cwd").title = next.cwd || "";
+    if (modelChanged) setModelOptions();
+    modeSelect.value = next.permission_mode;
+    if (next.busy && !busySince) busySince = Date.now();
+    if (!next.busy) busySince = null;
+    sendBtn.disabled = !!next.busy;
+    sendBtn.hidden = !!next.busy;
+    $("stop").hidden = !next.busy;
+    $("stop").disabled = false;
+    $("usage").textContent = "Jetons : " + next.input_tokens + " entrée · " + next.output_tokens + " sortie" + (next.cost ? " · " + next.cost : "");
+    tickBusy();
+    updateTitle();
+  }
+  function tickBusy() {
+    const node = $("busy");
+    if (!busySince) { node.textContent = ""; node.className = ""; return; }
+    const seconds = Math.round((Date.now() - busySince) / 1000);
+    node.className = "busy";
+    node.innerHTML = '<span class="spinner"></span>' + escapeHtml("L'agent travaille… " + seconds + " s");
+  }
+  setInterval(tickBusy, 1000);
+
+  async function loadModels() {
+    try {
+      const data = await api("/api/models");
+      freeModels = data.models || [];
+      $("quota").textContent = data.quota ? "Quota gratuit : " + data.quota : "";
+    } catch (error) {
+      $("quota").textContent = "Catalogue indisponible : " + error.message;
+    }
+    setModelOptions();
+  }
+
+  async function loadCustomCommands() {
+    try {
+      const data = await api("/api/commands");
+      customCommands = (data.commands || []).map((command) => [
+        command.name,
+        [command.hint, command.description].filter(Boolean).join(" — ") + " (" + command.scope + ")",
+      ]);
+    } catch (_) { customCommands = []; }
+  }
+
+  // ---------------------------------------------------------------- envoi
+  async function sendMessage() {
+    const text = input.value.trim();
+    if (!text) return;
+    if (status.busy) { toast("L'agent travaille encore : attendez la fin du tour."); return; }
+    hideSuggestions();
+    try {
+      await api("/api/message", { text });
+      input.value = "";
+      autoGrow();
+    } catch (error) {
+      toast(error.message);
+    }
+  }
+  function autoGrow() {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + "px";
+  }
+  function hideSuggestions() { $("suggestions").hidden = true; suggestionIndex = -1; }
+  function onInput() {
+    autoGrow();
+    const value = input.value;
+    const box = $("suggestions");
+    if (!value.startsWith("/") || value.includes(" ") || value.includes("\n")) { hideSuggestions(); return; }
+    const matches = COMMANDS.concat(customCommands)
+      .filter(([command]) => command.toLowerCase().startsWith(value.toLowerCase()));
+    if (!matches.length) { hideSuggestions(); return; }
+    box.textContent = "";
+    matches.forEach(([command, label], index) => {
+      const row = el("div");
+      row.setAttribute("role", "option");
+      row.append(el("b", null, command), el("span", null, label));
+      row.onmousedown = (event) => { event.preventDefault(); completeCommand(command); };
+      if (index === suggestionIndex) row.classList.add("active");
+      box.appendChild(row);
+    });
+    box.hidden = false;
+  }
+  function completeCommand(command) {
+    input.value = command + " ";
+    hideSuggestions();
+    input.focus();
+    autoGrow();
+  }
+  input.addEventListener("input", () => { suggestionIndex = -1; onInput(); });
+  input.addEventListener("keydown", (event) => {
+    const box = $("suggestions");
+    if (!box.hidden) {
+      const rows = box.querySelectorAll("div");
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        suggestionIndex = (suggestionIndex + (event.key === "ArrowDown" ? 1 : rows.length - 1)) % rows.length;
+        onInput();
+        return;
+      }
+      if (event.key === "Tab" || (event.key === "Enter" && suggestionIndex >= 0)) {
+        event.preventDefault();
+        const row = rows[Math.max(0, suggestionIndex)];
+        completeCommand(row.querySelector("b").textContent);
+        return;
+      }
+      if (event.key === "Escape") { hideSuggestions(); return; }
+    }
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      sendMessage();
+    }
+  });
+  sendBtn.addEventListener("click", sendMessage);
+  async function interruptTurn() {
+    if (!status.busy) return;
+    $("stop").disabled = true;
+    try { await api("/api/interrupt", {}); toast("Interruption demandée…"); }
+    catch (error) { toast(error.message); $("stop").disabled = false; }
+  }
+  $("stop").addEventListener("click", interruptTurn);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && status.busy && $("suggestions").hidden) interruptTurn();
+  });
+
+  modelSelect.addEventListener("change", async () => {
+    let value = modelSelect.value;
+    if (value === "__other__") {
+      value = (prompt("Identifiant du modèle (ex. qwen/qwen3-coder:free) :") || "").trim();
+      if (!value) { modelSelect.value = status.model; return; }
+    }
+    try { await api("/api/model", { value }); }
+    catch (error) { toast(error.message); modelSelect.value = status.model; }
+  });
+  modeSelect.addEventListener("change", async () => {
+    const value = modeSelect.value;
+    if (value === "danger-full-access" && !confirm("Accès complet : l'agent exécutera toutes les commandes sans rien demander. Continuer ?")) {
+      modeSelect.value = status.permission_mode;
+      return;
+    }
+    try { await api("/api/permissions", { value }); }
+    catch (error) { toast(error.message); modeSelect.value = status.permission_mode; }
+  });
+  $("new-btn").addEventListener("click", async () => {
+    if (logInner.querySelector(".msg") && !confirm("Commencer une nouvelle conversation ? L'actuelle reste sauvegardée (bouton Sessions).")) return;
+    try { await api("/api/new", {}); } catch (error) { toast(error.message); }
+  });
+  $("sessions-btn").addEventListener("click", async (event) => {
+    event.stopPropagation();
+    const panel = $("sessions-panel");
+    if (!panel.hidden) { panel.hidden = true; return; }
+    panel.textContent = "Chargement…";
+    panel.hidden = false;
+    try {
+      const data = await api("/api/sessions");
+      panel.textContent = "";
+      if (!data.sessions.length) panel.appendChild(el("div", "info", "Aucune session sauvegardée."));
+      for (const session of data.sessions) {
+        const button = el("button");
+        button.type = "button";
+        const when = new Date(session.modified * 1000).toLocaleString("fr-FR");
+        button.append(el("span", null, (session.id === status.session_id ? "● " : "") + when),
+          el("span", null, session.messages + " message(s)"));
+        button.title = session.id;
+        button.onclick = async () => {
+          panel.hidden = true;
+          try { await api("/api/resume", { value: session.id }); } catch (error) { toast(error.message); }
+        };
+        panel.appendChild(button);
+      }
+    } catch (error) {
+      panel.textContent = "Erreur : " + error.message;
+    }
+  });
+  document.addEventListener("click", (event) => {
+    const panel = $("sessions-panel");
+    if (!panel.hidden && !panel.contains(event.target)) panel.hidden = true;
+  });
+
+  // ---------------------------------------------------------------- flux SSE
+  function connect() {
+    const source = new EventSource("/api/events?token=" + encodeURIComponent(token));
+    source.addEventListener("snapshot", (message) => {
+      const data = JSON.parse(message.data);
+      resetLog();
+      status = {};
+      applyStatus(data.status);
+      for (const event of data.transcript) render(event);
+      finishAssistant();
+      scrollToBottom(true);
+      $("conn").textContent = "";
+    });
+    source.addEventListener("event", (message) => render(JSON.parse(message.data)));
+    source.addEventListener("resync", () => { source.close(); connect(); });
+    source.onerror = () => {
+      const node = $("conn");
+      node.className = "offline";
+      // Fermée définitivement (ex. 401) : le jeton change à chaque lancement de `claw serve`.
+      node.textContent = source.readyState === EventSource.CLOSED
+        ? "Déconnecté : si « claw serve » a été relancé, ouvrez la nouvelle adresse affichée dans le terminal."
+        : "Connexion perdue, reconnexion…";
+    };
+  }
+
+  resetLog();
+  if (!token) {
+    addError("jeton d'accès manquant", "ouvrez l'adresse complète affichée par « claw serve » (elle contient ?token=…)");
+    sendBtn.disabled = true;
+  } else {
+    connect();
+    loadModels();
+    loadCustomCommands();
+    input.addEventListener("focus", loadCustomCommands);
+    input.focus();
+  }
+})();
+</script>
+</body>
+</html>

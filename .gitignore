@@ -1,0 +1,11 @@
+__pycache__/
+archive/
+.omx/
+.clawd-agents/
+# Claude Code local artifacts
+.claude/settings.local.json
+.claude/sessions/
+# Claw : sessions, points de restauration et réglages locaux
+.claw/sessions/
+.claw/checkpoints/
+.claw/settings.local.json

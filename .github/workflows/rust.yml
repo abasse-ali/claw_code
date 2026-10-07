@@ -1,0 +1,107 @@
+name: Rust
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: rust
+
+jobs:
+  fmt:
+    name: Formatage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Configurer git (tests des commandes /branch et /worktree)
+        run: |
+          git config --global user.name "claw-ci"
+          git config --global user.email "claw-ci@example.invalid"
+          git config --global init.defaultBranch main
+      - name: Compilation
+        run: cargo build --workspace --all-targets --locked
+      # Les tests changent le dossier courant du processus : un seul fil.
+      - name: Tests
+        run: cargo test --workspace --locked -- --test-threads=1
+
+  release:
+    name: Binaire ${{ matrix.target }}
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [fmt, test]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Compilation release
+        run: cargo build --release --locked -p claw-cli --target ${{ matrix.target }}
+      - name: Archive (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $name = "claw-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force $name | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/claw.exe" $name
+          Copy-Item README.md $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          "ASSET=rust/$name.zip" >> $env:GITHUB_ENV
+      - name: Archive (Linux, macOS)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          name="claw-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "$name"
+          cp "target/${{ matrix.target }}/release/claw" README.md "$name/"
+          tar czf "$name.tar.gz" "$name"
+          echo "ASSET=rust/$name.tar.gz" >> "$GITHUB_ENV"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          generate_release_notes: true
