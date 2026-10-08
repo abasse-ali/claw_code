@@ -380,8 +380,28 @@ pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, 
         .iter()
         .filter(|model| model.is_free() && model.supports_tools)
         .count();
-    let ranked = api::rank_free_coding_models(&catalog)
+    // Même ordre que le choix automatique : les modèles mesurés par
+    // `/models bench` d'abord (y compris hors du classement), puis le classement.
+    let heuristic = api::rank_free_coding_models(&catalog);
+    let ranked = preferred_free_models(&catalog)
         .into_iter()
+        .filter_map(|id| {
+            heuristic
+                .iter()
+                .find(|entry| entry.model.id == id)
+                .cloned()
+                .or_else(|| {
+                    catalog
+                        .models
+                        .iter()
+                        .find(|model| model.id == id)
+                        .map(|model| RankedModel {
+                            model: model.clone(),
+                            score: 0.0,
+                            reasons: Vec::new(),
+                        })
+                })
+        })
         .filter(|entry| {
             filter.as_ref().is_none_or(|filter| {
                 // `/models vision` : modèles qui lisent les images.
@@ -418,11 +438,14 @@ pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, 
     }
     lines.extend([
         String::new(),
-        "Classement : rang dans la catégorie programmation d'OpenRouter, spécialisation et"
+        "Classement : d'abord les modèles mesurés par /models bench (tâches réussies, puis"
             .to_string(),
-        "benchmarks de code cités par le modèle, puis taille. Seuls les modèles gratuits qui"
+        "rapidité), puis rang dans la catégorie programmation d'OpenRouter, spécialisation et"
             .to_string(),
-        "savent appeler des outils sont listés (indispensable pour un agent).".to_string(),
+        "benchmarks de code cités, taille. Seuls les modèles gratuits qui savent appeler des"
+            .to_string(),
+        "outils sont listés (indispensable pour un agent) ; les incompatibles mesurés sont écartés."
+            .to_string(),
         String::new(),
         "Suite".to_string(),
         "  /model <id>            utiliser ce modèle dans la session".to_string(),
@@ -462,21 +485,19 @@ fn render_ranking(ranked: &[RankedModel], current_model: &str) -> Vec<String> {
         } else {
             ""
         };
-        let vision = if entry.model.supports_images {
-            " · 👁 images"
-        } else {
-            ""
-        };
-        let bench = measured
-            .get(&entry.model.id)
-            .map(|result| format!(" · mesuré : {}", result.summary()))
-            .unwrap_or_default();
+        let mut details = entry.reasons.clone();
+        if entry.model.supports_images {
+            details.push("👁 images".to_string());
+        }
+        if let Some(result) = measured.get(&entry.model.id) {
+            details.push(format!("mesuré : {}", result.summary()));
+        }
         lines.push(format!(
-            "  {:<2} {:<width$}  {:>8}  {}{vision}{bench}{marker}",
+            "  {:<2} {:<width$}  {:>8}  {}{marker}",
             index + 1,
             entry.model.id,
             format_context(entry.model.context_length),
-            entry.reasons.join(" · "),
+            details.join(" · "),
         ));
     }
     lines
