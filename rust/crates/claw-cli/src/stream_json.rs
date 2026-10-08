@@ -42,11 +42,13 @@ impl StreamJsonObserver {
     }
 
     fn assistant(&self, content: Value) {
-        emit(&json!({
+        let mut event = json!({
             "type": "assistant",
             "session_id": self.session_id,
-            "message": { "role": "assistant", "content": [content] },
-        }));
+            "message": { "role": "assistant" },
+        });
+        event["message"]["content"] = Value::Array(vec![content]);
+        emit(&event);
     }
 
     /// Publie le texte (et le raisonnement) accumulés depuis le dernier événement.

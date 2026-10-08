@@ -1,7 +1,9 @@
 mod acp;
 mod approval;
 mod bench;
+mod clipboard;
 mod credits;
+mod doctor;
 mod init;
 mod input;
 mod live;
@@ -15,6 +17,7 @@ mod web;
 
 use std::collections::BTreeSet;
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::net::TcpListener;
@@ -198,6 +201,7 @@ fn error_hint(problem: &str) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Serveurs compatibles déclarés dans la config (`providers`) : nécessaires
     // dès l'analyse des arguments pour reconnaître `nom:modèle`.
@@ -243,6 +247,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", models::models_report(args.as_deref(), &current)?);
         }
         CliAction::Credits => println!("{}", credits::report(true)),
+        CliAction::Doctor { model } => println!(
+            "{}",
+            doctor::report(&model.unwrap_or_else(default_model), &version_summary())
+        ),
         CliAction::PrintSystemPrompt { cwd, date } => print_system_prompt(cwd, date),
         CliAction::Version => print_version(),
         CliAction::ResumeSession {
@@ -270,7 +278,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             model,
             allowed_tools,
             permission_mode,
-        } => acp::serve(model, permission_mode, allowed_tools)?,
+        } => acp::serve(model, permission_mode, allowed_tools),
         CliAction::Mcp { args } => match mcp_cli::run(&args) {
             Ok(report) => println!("{report}"),
             Err(error) => return Err(error.into()),
@@ -350,6 +358,9 @@ enum CliAction {
         model: Option<String>,
     },
     Credits,
+    Doctor {
+        model: Option<String>,
+    },
     Serve {
         host: String,
         port: u16,
@@ -616,6 +627,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             model,
         }),
         "credits" | "solde" => Ok(CliAction::Credits),
+        "doctor" | "diagnostic" => Ok(CliAction::Doctor { model }),
         "system-prompt" => parse_system_prompt_args(&rest[1..]),
         "login" => Ok(CliAction::Login),
         "logout" => Ok(CliAction::Logout),
@@ -645,6 +657,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         other if other.starts_with('/') => match SlashCommand::parse(&rest.join(" ")) {
             Some(SlashCommand::Models { args }) => Ok(CliAction::Models { args, model }),
             Some(SlashCommand::Credits) => Ok(CliAction::Credits),
+            Some(SlashCommand::Doctor) => Ok(CliAction::Doctor { model }),
             Some(SlashCommand::Expert { command, args }) => Ok(CliAction::Prompt {
                 prompt: expert_command_prompt(command, args.as_deref())?,
                 model: model.unwrap_or_else(default_model),
@@ -1056,9 +1069,10 @@ fn wait_for_oauth_callback(
 }
 
 fn print_system_prompt(cwd: PathBuf, date: String) {
-    match load_system_prompt(cwd.clone(), date, env::consts::OS, "unknown") {
+    let skills = commands::skills_prompt_section(&cwd);
+    match load_system_prompt(cwd, date, env::consts::OS, "unknown") {
         Ok(mut sections) => {
-            sections.extend(commands::skills_prompt_section(&cwd));
+            sections.extend(skills);
             println!("{}", sections.join("\n\n"));
         }
         Err(error) => {
@@ -1467,6 +1481,7 @@ fn run_resume_command(
         | SlashCommand::Bashes { .. }
         | SlashCommand::Models { .. }
         | SlashCommand::Credits
+        | SlashCommand::Doctor
         | SlashCommand::Teleport { .. }
         | SlashCommand::DebugToolCall
         | SlashCommand::Resume { .. }
@@ -1480,6 +1495,7 @@ fn run_resume_command(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_repl(
     model: String,
     allowed_tools: Option<AllowedToolSet>,
@@ -1488,6 +1504,8 @@ fn run_repl(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode)?;
     let mut editor = input::LineEditor::new("> ", slash_command_completion_candidates());
+    editor.set_command_help(slash_command_menu_entries());
+    transcript::set_interactive(true);
     println!("{}\n", cli.startup_banner());
     // Crédits lus en arrière-plan : la ligne d'état les montre dès qu'ils arrivent.
     if credits::is_openrouter_model(&cli.model) {
@@ -1615,6 +1633,19 @@ fn run_repl(
                     editor.set_initial_text(text);
                 }
             }
+            // Ctrl+O : le dernier tour en entier, puis retour à la saisie.
+            input::ReadOutcome::ShowDetails(text) => {
+                println!("{}", transcript::turn_details());
+                if !text.is_empty() {
+                    editor.set_initial_text(text);
+                }
+            }
+            // Échap Échap : revenir avant un message précédent et le corriger.
+            input::ReadOutcome::Rewind => match cli.rewind_prompt() {
+                Ok(Some(request)) => editor.set_initial_text(request),
+                Ok(None) => {}
+                Err(error) => eprintln!("{}", render_cli_error(&error.to_string())),
+            },
             input::ReadOutcome::Exit => {
                 cli.persist_session()?;
                 cli.session_hook_end("exit");
@@ -1773,6 +1804,7 @@ impl LiveCli {
 
     fn run_turn(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let started = Instant::now();
+        transcript::begin_turn();
         live::start("Réflexion…");
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
         let (mut text, images) = take_image_attachments(input);
@@ -1846,7 +1878,12 @@ impl LiveCli {
             PermissionMode::ReadOnly => "‖ mode plan",
             PermissionMode::DangerFullAccess | PermissionMode::Allow => "▲ accès complet",
         };
-        let mut line = format!("  {mode} (Maj+Tab pour changer) · {}", self.model);
+        let mut line = format!("  {mode} (Maj+Tab) · {}", self.model);
+        let window = usize::try_from(api::context_window_for_model(&self.model)).unwrap_or(0);
+        if window > 0 {
+            let used = self.runtime.estimated_context_tokens();
+            let _ = write!(line, " · contexte {} %", (used * 100 / window).min(100));
+        }
         if credits::is_openrouter_model(&self.model) {
             if let Some(credits) = credits::cached_line() {
                 line.push_str(" · ");
@@ -1854,6 +1891,57 @@ impl LiveCli {
             }
         }
         line
+    }
+
+    /// Échap Échap : liste des derniers messages ; celui choisi est annulé
+    /// (conversation et fichiers) et revient dans la saisie pour être corrigé.
+    fn rewind_prompt(&mut self) -> Result<Option<String>, Box<dyn std::error::Error>> {
+        let turns = runtime::checkpoint::list();
+        if turns.is_empty() {
+            println!(
+                "  ⎿  {}Aucun message précédent à reprendre.{}",
+                transcript::DIM,
+                transcript::RESET
+            );
+            return Ok(None);
+        }
+        let recent: Vec<String> = turns
+            .iter()
+            .rev()
+            .take(9)
+            .map(|turn| turn.request.clone())
+            .collect();
+        let options: Vec<String> = recent
+            .iter()
+            .enumerate()
+            .map(|(index, request)| {
+                let first_line = request.lines().next().unwrap_or_default();
+                let preview = transcript::clip(first_line, 70);
+                if index == 0 {
+                    format!("{preview}  (dernier message)")
+                } else {
+                    format!("{preview}  (il y a {} messages)", index + 1)
+                }
+            })
+            .collect();
+        let body = vec![format!(
+            "{}La conversation et les fichiers modifiés par Claw reviennent à l'état d'avant ce message.{}",
+            transcript::DIM,
+            transcript::RESET
+        )];
+        let answer = approval::ask(
+            "Revenir en arrière",
+            &body,
+            "Reprendre à partir de quel message ?",
+            &options,
+        )?;
+        let approval::Answer::Pick(index) = answer else {
+            return Ok(None);
+        };
+        let report = undo_turns(&mut self.runtime, Some(&(index + 1).to_string()))?;
+        println!("{}{report}{}", transcript::DIM, transcript::RESET);
+        self.persist_session()?;
+        Ok(recent.get(index).cloned())
     }
 
     /// Maj+Tab : demander → éditions acceptées → plan → demander.
@@ -2093,6 +2181,10 @@ impl LiveCli {
             }
             SlashCommand::Credits => {
                 println!("{}", credits::report(true));
+                false
+            }
+            SlashCommand::Doctor => {
+                println!("{}", doctor::report(&self.model, &version_summary()));
                 false
             }
             SlashCommand::Teleport { target } => {
@@ -2819,7 +2911,14 @@ fn undo_turns<C: ApiClient, T: ToolExecutor>(
     } else {
         "  Conversation     inchangée (elle a été compactée depuis)".to_string()
     });
-    lines.push(format!("  Votre demande    {}", report.request));
+    let mut request_lines = report.request.lines();
+    let first_line = request_lines.next().unwrap_or_default();
+    let more = if request_lines.next().is_some() {
+        " …"
+    } else {
+        ""
+    };
+    lines.push(format!("  Votre demande    {first_line}{more}"));
     lines.push(
         "  Remarque         les modifications faites par des commandes shell ne sont pas annulées"
             .to_string(),
@@ -3152,7 +3251,7 @@ fn append_project_note(note: &str) -> Result<PathBuf, Box<dyn std::error::Error>
     if !contents.ends_with('\n') {
         contents.push('\n');
     }
-    contents.push_str(&format!("- {note}\n"));
+    let _ = writeln!(contents, "- {note}");
     fs::write(&path, contents)?;
     Ok(path)
 }
@@ -3203,6 +3302,11 @@ fn render_repl_help() -> String {
         "  Quitter              exit, /exit ou /quit".to_string(),
         "  Mode                 Maj+Tab : demander → éditions acceptées → plan".to_string(),
         "  Effacer l'écran      clear (la conversation est gardée)".to_string(),
+        "  Commandes            « / » ouvre le menu : ↑↓ choisit, Tab complète, Entrée lance".to_string(),
+        "  Détails              Ctrl+O montre le dernier tour en entier (sorties, raisonnement)".to_string(),
+        "  Revenir en arrière   Échap Échap (saisie vide) : reprendre avant un message précédent".to_string(),
+        "  Image                Alt+V joint l'image du presse-papiers".to_string(),
+        "  Diagnostic           /doctor vérifie clés, modèles, Ollama, Git, shell".to_string(),
         "  Mode vim             /vim active l'édition modale".to_string(),
         "  Historique           Haut/Bas rappelle les demandes précédentes".to_string(),
         "  Complétion           Tab parcourt les commandes correspondantes".to_string(),
@@ -3719,6 +3823,11 @@ fn parse_titled_body(value: &str) -> Option<(String, String)> {
     Some((title.to_string(), body.to_string()))
 }
 
+/// « 0.1.0 · commit 8d78bcc » (diagnostic).
+fn version_summary() -> String {
+    format!("{VERSION} · commit {}", GIT_SHA.unwrap_or("inconnu"))
+}
+
 fn render_version_report() -> String {
     let git_sha = GIT_SHA.unwrap_or("inconnu");
     let target = BUILD_TARGET.unwrap_or("inconnue");
@@ -3939,7 +4048,7 @@ impl InternalPromptProgressReporter {
                     command_label: "Ultraplan",
                     task_label: task.to_string(),
                     step: 0,
-                    phase: "planning started".to_string(),
+                    phase: "planification démarrée".to_string(),
                     detail: Some(format!("task: {task}")),
                     saw_final_text: false,
                 }),
@@ -3964,11 +4073,11 @@ impl InternalPromptProgressReporter {
                 .expect("internal prompt progress state poisoned");
             state.step += 1;
             state.phase = if state.step == 1 {
-                "analyzing request".to_string()
+                "analyse de la demande".to_string()
             } else {
-                "reviewing findings".to_string()
+                "examen des résultats".to_string()
             };
-            state.detail = Some(format!("task: {}", state.task_label));
+            state.detail = Some(format!("tâche : {}", state.task_label));
             state.clone()
         };
         self.write_line(&format_internal_prompt_progress_line(
@@ -3988,7 +4097,7 @@ impl InternalPromptProgressReporter {
                 .lock()
                 .expect("internal prompt progress state poisoned");
             state.step += 1;
-            state.phase = format!("running {name}");
+            state.phase = format!("outil {name}");
             state.detail = Some(detail);
             state.clone()
         };
@@ -4017,7 +4126,7 @@ impl InternalPromptProgressReporter {
             }
             state.saw_final_text = true;
             state.step += 1;
-            state.phase = "drafting final plan".to_string();
+            state.phase = "rédaction du plan final".to_string();
             state.detail = (!detail.is_empty()).then_some(detail);
             state.clone()
         };
@@ -4173,14 +4282,14 @@ fn describe_tool_progress(name: &str, input: &str) -> String {
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
             if command.is_empty() {
-                "running shell command".to_string()
+                "commande shell".to_string()
             } else {
-                format!("command {}", truncate_for_summary(command.trim(), 100))
+                format!("commande {}", truncate_for_summary(command.trim(), 100))
             }
         }
-        "read_file" | "Read" => format!("reading {}", extract_tool_path(&parsed)),
-        "write_file" | "Write" => format!("writing {}", extract_tool_path(&parsed)),
-        "edit_file" | "Edit" => format!("editing {}", extract_tool_path(&parsed)),
+        "read_file" | "Read" => format!("lecture de {}", extract_tool_path(&parsed)),
+        "write_file" | "Write" => format!("écriture de {}", extract_tool_path(&parsed)),
+        "edit_file" | "Edit" => format!("modification de {}", extract_tool_path(&parsed)),
         "glob_search" | "Glob" => {
             let pattern = parsed
                 .get("pattern")
@@ -4190,7 +4299,7 @@ fn describe_tool_progress(name: &str, input: &str) -> String {
                 .get("path")
                 .and_then(|value| value.as_str())
                 .unwrap_or(".");
-            format!("glob `{pattern}` in {scope}")
+            format!("fichiers `{pattern}` dans {scope}")
         }
         "grep_search" | "Grep" => {
             let pattern = parsed
@@ -4201,19 +4310,19 @@ fn describe_tool_progress(name: &str, input: &str) -> String {
                 .get("path")
                 .and_then(|value| value.as_str())
                 .unwrap_or(".");
-            format!("grep `{pattern}` in {scope}")
+            format!("recherche `{pattern}` dans {scope}")
         }
         "web_search" | "WebSearch" => parsed
             .get("query")
             .and_then(|value| value.as_str())
             .map_or_else(
-                || "running web search".to_string(),
-                |query| format!("query {}", truncate_for_summary(query, 100)),
+                || "recherche web".to_string(),
+                |query| format!("recherche web {}", truncate_for_summary(query, 100)),
             ),
         _ => {
             let summary = summarize_tool_payload(input);
             if summary.is_empty() {
-                format!("running {name}")
+                format!("outil {name}")
             } else {
                 format!("{name}: {summary}")
             }
@@ -4298,7 +4407,7 @@ fn build_runtime_with_ui(
     Ok(ConversationRuntime::new_with_features(
         session,
         DefaultRuntimeClient::new(
-            model,
+            &model,
             enable_tools,
             emit_output,
             allowed_tools.clone(),
@@ -4575,6 +4684,7 @@ fn print_proposed_plan(input: &str) {
 }
 
 /// Titre, corps (lignes prêtes à encadrer) et question d'une autorisation.
+#[allow(clippy::too_many_lines)]
 fn permission_box_content(tool_name: &str, input: &str) -> (String, Vec<String>, String) {
     let value = serde_json::from_str::<serde_json::Value>(input).unwrap_or_default();
     let field = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
@@ -4813,7 +4923,7 @@ struct DefaultRuntimeClient {
 
 impl DefaultRuntimeClient {
     fn new(
-        model: String,
+        model: &str,
         enable_tools: bool,
         emit_output: bool,
         allowed_tools: Option<AllowedToolSet>,
@@ -4827,10 +4937,10 @@ impl DefaultRuntimeClient {
             .as_ref()
             .map(|config| config.fallback_models().to_vec())
             .unwrap_or_default();
-        let chain_models = models::model_chain(&model, &fallback_models);
+        let chain_models = models::model_chain(model, &fallback_models);
         // Sans remplaçant, une clé absente doit être signalée dès le démarrage.
         if chain_models.len() == 1 {
-            build_provider_client(&model)?;
+            build_provider_client(model)?;
         }
         let small_model = env::var("CLAW_SMALL_MODEL")
             .ok()
@@ -5043,6 +5153,9 @@ impl ApiClient for DefaultRuntimeClient {
                             if let Some(entry) = signed_thinking.get_mut(&delta.index) {
                                 entry.0.push_str(&thinking);
                             }
+                            if emit {
+                                transcript::record_thinking(&thinking);
+                            }
                             reasoning
                                 .push(out, &thinking)
                                 .map_err(|error| RuntimeError::new(error.to_string()))?;
@@ -5143,7 +5256,7 @@ impl ApiClient for DefaultRuntimeClient {
                             observer.tool_call(name, input);
                         }
                         AssistantEvent::Thinking { thinking, .. } => {
-                            observer.thinking_delta(thinking)
+                            observer.thinking_delta(thinking);
                         }
                         AssistantEvent::Usage(_) | AssistantEvent::MessageStop => {}
                     }
@@ -5315,6 +5428,39 @@ fn collect_tool_results(summary: &runtime::TurnSummary) -> Vec<serde_json::Value
             _ => None,
         })
         .collect()
+}
+
+/// Menu qui s'ouvre sous la saisie quand on tape « / » : nom et description.
+fn slash_command_menu_entries() -> Vec<(String, String)> {
+    let mut entries: Vec<(String, String)> = slash_command_specs()
+        .iter()
+        .map(|spec| (format!("/{}", spec.name), spec.summary.to_string()))
+        .collect();
+    entries.extend([
+        (
+            "/vim".to_string(),
+            "Active ou coupe l'édition modale vim".to_string(),
+        ),
+        ("/exit".to_string(), "Quitte Claw".to_string()),
+    ]);
+    if let Ok(cwd) = env::current_dir() {
+        for command in commands::discover_custom_commands(&cwd) {
+            let summary = command
+                .description
+                .clone()
+                .unwrap_or_else(|| "Commande personnalisée".to_string());
+            entries.push((format!("/{}", command.qualified_name()), summary));
+        }
+    }
+    for (name, description) in tools::mcp_prompt_commands() {
+        entries.push((
+            name,
+            description.unwrap_or_else(|| "Prompt MCP".to_string()),
+        ));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries.dedup_by(|left, right| left.0 == right.0);
+    entries
 }
 
 fn slash_command_completion_candidates() -> Vec<String> {
@@ -5671,7 +5817,7 @@ impl ToolExecutor for CliToolExecutor {
                 if self.emit_output {
                     transcript::print_call(name, input);
                 }
-                self.report(name, result)
+                self.report(name, input, result)
             })
             .collect()
     }
@@ -5681,13 +5827,13 @@ impl ToolExecutor for CliToolExecutor {
             transcript::print_call(tool_name, input);
         }
         if let Err(error) = self.check_allowed(tool_name) {
-            return self.report(tool_name, Err(error.to_string()));
+            return self.report(tool_name, input, Err(error.to_string()));
         }
         if self.emit_output {
             live::show(&transcript::running_label(tool_name));
         }
         let result = Self::run_tool(&self.tool_registry, tool_name, input);
-        self.report(tool_name, result)
+        self.report(tool_name, input, result)
     }
 }
 
@@ -5696,6 +5842,7 @@ impl CliToolExecutor {
     fn report(
         &mut self,
         tool_name: &str,
+        input: &str,
         result: Result<String, String>,
     ) -> Result<String, ToolError> {
         if let Some(observer) = &self.observer {
@@ -5709,6 +5856,7 @@ impl CliToolExecutor {
                 Ok(output) => (output.as_str(), false),
                 Err(error) => (error.as_str(), true),
             };
+            transcript::record_result(tool_name, input, text, is_error);
             let mut out = live::LiveStdout::new();
             writeln!(
                 out,
@@ -6694,7 +6842,7 @@ mod tests {
             command_label: "Ultraplan",
             task_label: "ship plugin progress".to_string(),
             step: 3,
-            phase: "running read_file".to_string(),
+            phase: "outil read_file".to_string(),
             detail: Some("reading rust/crates/claw-cli/src/main.rs".to_string()),
             saw_final_text: false,
         };
@@ -6728,7 +6876,7 @@ mod tests {
         assert!(started.contains("étape 3"));
         assert!(heartbeat.contains("toujours en cours"));
         assert!(heartbeat.contains("9 s"));
-        assert!(heartbeat.contains("phase running read_file"));
+        assert!(heartbeat.contains("phase outil read_file"));
         assert!(completed.contains("terminé"));
         assert!(completed.contains("3 étape(s)"));
         assert!(failed.contains("échec"));
@@ -6739,7 +6887,7 @@ mod tests {
     fn describe_tool_progress_summarizes_known_tools() {
         assert_eq!(
             describe_tool_progress("read_file", r#"{"path":"src/main.rs"}"#),
-            "reading src/main.rs"
+            "lecture de src/main.rs"
         );
         assert!(
             describe_tool_progress("bash", r#"{"command":"cargo test -p claw-cli"}"#)
@@ -6747,7 +6895,7 @@ mod tests {
         );
         assert_eq!(
             describe_tool_progress("grep_search", r#"{"pattern":"ultraplan","path":"rust"}"#),
-            "grep `ultraplan` in rust"
+            "recherche `ultraplan` dans rust"
         );
     }
 

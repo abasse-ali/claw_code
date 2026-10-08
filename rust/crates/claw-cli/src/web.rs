@@ -582,6 +582,7 @@ impl Worker {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn slash_command(&mut self, text: &str) -> Result<(), String> {
         match SlashCommand::parse(text) {
             Some(SlashCommand::Expert { command, args }) => {
@@ -605,6 +606,9 @@ impl Worker {
                 self.info(models::models_report(args.as_deref(), &self.model)?);
             }
             Some(SlashCommand::Credits) => self.info(crate::credits::report(true)),
+            Some(SlashCommand::Doctor) => self.info(crate::transcript::strip_ansi(
+                &crate::doctor::report(&self.model, &crate::version_summary()),
+            )),
             Some(SlashCommand::Mcp) => {
                 let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
                 let config = runtime::ConfigLoader::default_for(cwd)

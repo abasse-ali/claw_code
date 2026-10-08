@@ -1,5 +1,7 @@
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::io::{self, IsTerminal, Write};
+use std::time::{Duration, Instant};
 
 use crossterm::cursor::{MoveToColumn, MoveUp};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -13,7 +15,20 @@ pub enum ReadOutcome {
     Exit,
     /// Maj+Tab : changer de mode de permission, en gardant le texte saisi.
     CycleMode(String),
+    /// Ctrl+O : sorties et raisonnement complets du dernier tour (texte gardé).
+    ShowDetails(String),
+    /// Échap deux fois, saisie vide : revenir avant un message précédent.
+    Rewind,
 }
+
+/// Un collage plus long que ceci est remplacé par « [Texte collé n°1 : 40 lignes] ».
+const PASTE_MAX_LINES: usize = 6;
+const PASTE_MAX_CHARS: usize = 1_200;
+/// Lignes du menu des commandes affichées sous la saisie.
+const MENU_ROWS: usize = 6;
+/// Délai maximal entre deux Échap pour « Échap Échap ».
+const DOUBLE_ESCAPE: Duration = Duration::from_millis(800);
+const ACCENT: &str = "\x1b[38;2;215;119;87m";
 
 /// Cadre de saisie à la Claude Code : un trait au-dessus et au-dessous de la
 /// zone de saisie, puis une ligne d'état (mode, modèle…).
@@ -21,6 +36,8 @@ pub enum ReadOutcome {
 struct Frame {
     width: usize,
     status: String,
+    /// Lignes affichées à la place de la ligne d'état (menu, avis).
+    below: Vec<String>,
 }
 
 impl Frame {
@@ -28,10 +45,26 @@ impl Frame {
         format!("\x1b[38;5;240m{}\x1b[0m", "─".repeat(self.width))
     }
 
-    fn status_line(&self) -> String {
-        let visible: String = self.status.chars().take(self.width).collect();
-        format!("\x1b[2m{visible}\x1b[0m")
+    fn below_lines(&self) -> Vec<String> {
+        if self.below.is_empty() {
+            vec![format!("\x1b[2m{}\x1b[0m", clip(&self.status, self.width))]
+        } else {
+            self.below.clone()
+        }
     }
+}
+
+/// Coupe un texte sans couleurs à `limit` caractères.
+fn clip(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(limit.saturating_sub(1)).collect();
+    format!("{kept}…")
+}
+
+fn terminal_columns() -> usize {
+    terminal::size().map_or(80, |(columns, _)| usize::from(columns).max(20))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +113,13 @@ struct EditSession {
     rendered_lines: usize,
     /// Le dernier rendu avait un cadre (trait au-dessus de la saisie).
     framed: bool,
+    /// Ligne choisie dans le menu des commandes.
+    menu_index: usize,
+    /// Menu fermé avec Échap (jusqu'à la prochaine modification du texte).
+    menu_hidden: bool,
+    last_escape: Option<Instant>,
+    /// Avis affiché sous la saisie jusqu'à la touche suivante.
+    notice: Option<String>,
 }
 
 impl EditSession {
@@ -101,6 +141,10 @@ impl EditSession {
             rendered_cursor_row: 0,
             rendered_lines: 1,
             framed: false,
+            menu_index: 0,
+            menu_hidden: false,
+            last_escape: None,
+            notice: None,
         }
     }
 
@@ -204,6 +248,7 @@ impl EditSession {
         base_prompt: &str,
         vim_enabled: bool,
         frame: Option<&Frame>,
+        columns: usize,
     ) -> io::Result<()> {
         self.clear_render(out)?;
 
@@ -212,14 +257,19 @@ impl EditSession {
         }
         let prompt = self.prompt(base_prompt, vim_enabled);
         let buffer = self.visible_buffer();
-        write!(out, "{prompt}{buffer}")?;
+        write!(out, "{prompt}{}", buffer.replace('\n', "\r\n"))?;
 
-        let (cursor_row, cursor_col, total_lines) = self.cursor_layout(prompt.as_ref());
+        let (cursor_row, cursor_col, total_lines) = self.cursor_layout(prompt.as_ref(), columns);
         let mut rows_to_move_up = total_lines.saturating_sub(cursor_row + 1);
         if let Some(frame) = frame {
-            // Trait du bas et ligne d'état sous la saisie, puis retour au curseur.
-            write!(out, "\r\n{}\r\n{}", frame.rule(), frame.status_line())?;
-            rows_to_move_up += 2;
+            // Trait du bas puis ligne d'état (ou menu) sous la saisie, puis
+            // retour au curseur.
+            let below = frame.below_lines();
+            write!(out, "\r\n{}", frame.rule())?;
+            for line in &below {
+                write!(out, "\r\n{line}")?;
+            }
+            rows_to_move_up += 1 + below.len();
         }
         if rows_to_move_up > 0 {
             queue!(out, MoveUp(to_u16(rows_to_move_up)?))?;
@@ -243,30 +293,56 @@ impl EditSession {
         self.clear_render(out)?;
         let prompt = self.prompt(base_prompt, vim_enabled);
         let buffer = self.visible_buffer();
+        let buffer = buffer.replace('\n', "\r\n");
         if self.framed {
             write!(out, "\x1b[38;5;245m{prompt}{buffer}\x1b[0m")?;
         } else {
             write!(out, "{prompt}{buffer}")?;
         }
-        writeln!(out)
+        write!(out, "\r\n")?;
+        out.flush()
     }
 
-    fn cursor_layout(&self, prompt: &str) -> (usize, usize, usize) {
+    /// Rangée et colonne du curseur, nombre de rangées occupées, en tenant
+    /// compte des lignes plus longues que le terminal (retour à la ligne).
+    fn cursor_layout(&self, prompt: &str, columns: usize) -> (usize, usize, usize) {
+        let columns = columns.max(1);
         let active_text = self.active_text();
         let cursor = if self.mode == EditorMode::Command {
             self.command_cursor
         } else {
             self.cursor
         };
+        let prompt_width = prompt.chars().count();
+        let cursor_line = active_text[..cursor].matches('\n').count();
+        let line_start = active_text[..cursor]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
 
-        let cursor_prefix = &active_text[..cursor];
-        let cursor_row = cursor_prefix.bytes().filter(|byte| *byte == b'\n').count();
-        let cursor_col = match cursor_prefix.rsplit_once('\n') {
-            Some((_, suffix)) => suffix.chars().count(),
-            None => prompt.chars().count() + cursor_prefix.chars().count(),
-        };
-        let total_lines = active_text.bytes().filter(|byte| *byte == b'\n').count() + 1;
-        (cursor_row, cursor_col, total_lines)
+        let mut rows_before = 0;
+        let mut total_rows = 0;
+        let mut cursor_line_width = 0;
+        for (index, line) in active_text.split('\n').enumerate() {
+            let width = line.chars().count() + if index == 0 { prompt_width } else { 0 };
+            let rows = width.div_ceil(columns).max(1);
+            if index < cursor_line {
+                rows_before += rows;
+            }
+            if index == cursor_line {
+                cursor_line_width = width;
+            }
+            total_rows += rows;
+        }
+        let offset = active_text[line_start..cursor].chars().count()
+            + if cursor_line == 0 { prompt_width } else { 0 };
+        let (mut row, mut col) = (rows_before + offset / columns, offset % columns);
+        // Juste après le dernier caractère d'une ligne qui remplit sa rangée :
+        // le terminal garde le curseur au bout de cette rangée.
+        if col == 0 && offset > 0 && offset == cursor_line_width {
+            row -= 1;
+            col = columns - 1;
+        }
+        (row, col, total_rows)
     }
 }
 
@@ -277,6 +353,8 @@ enum KeyAction {
     Exit,
     ToggleVim,
     CycleMode,
+    ShowDetails,
+    Rewind,
 }
 
 pub struct LineEditor {
@@ -290,6 +368,13 @@ pub struct LineEditor {
     initial_text: Option<String>,
     /// Ligne d'état sous la saisie ; `None` : saisie sans cadre.
     status: Option<String>,
+    /// Commandes slash et leur description, pour le menu sous la saisie.
+    commands: Vec<(String, String)>,
+    /// Collages longs et images remplacés dans la saisie par un repère
+    /// (« [Image n°1] »), remis à leur place à l'envoi.
+    attachments: Vec<(String, String)>,
+    paste_count: usize,
+    image_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,6 +396,10 @@ impl LineEditor {
             completion_state: None,
             initial_text: None,
             status: None,
+            commands: Vec::new(),
+            attachments: Vec::new(),
+            paste_count: 0,
+            image_count: 0,
         }
     }
 
@@ -319,13 +408,173 @@ impl LineEditor {
         self.status = Some(status.into());
     }
 
-    fn frame(&self) -> Option<Frame> {
-        let status = self.status.clone()?;
-        let width = terminal::size().map_or(80, |(columns, _)| usize::from(columns));
-        Some(Frame {
-            width: width.saturating_sub(1).max(20),
-            status,
-        })
+    /// Commandes proposées dans le menu qui s'ouvre quand on tape « / ».
+    pub fn set_command_help(&mut self, commands: Vec<(String, String)>) {
+        self.commands = commands;
+    }
+
+    fn draw(&self, session: &mut EditSession, out: &mut impl Write) -> io::Result<()> {
+        let columns = terminal_columns();
+        let frame = self.status.as_ref().map(|status| Frame {
+            width: columns.saturating_sub(1).max(20),
+            status: status.clone(),
+            below: self.below_lines(session, columns.saturating_sub(1).max(20)),
+        });
+        session.render(out, &self.prompt, self.vim_enabled, frame.as_ref(), columns)
+    }
+
+    /// Avis, ou menu des commandes qui commencent par le texte saisi.
+    fn below_lines(&self, session: &EditSession, width: usize) -> Vec<String> {
+        if let Some(notice) = &session.notice {
+            return vec![format!(
+                "\x1b[38;5;203m  {}\x1b[0m",
+                clip(notice, width.saturating_sub(2))
+            )];
+        }
+        let matches = self.menu_matches(session);
+        if matches.is_empty() {
+            return Vec::new();
+        }
+        let selected = session.menu_index.min(matches.len() - 1);
+        let start = (selected + 1).saturating_sub(MENU_ROWS);
+        let window = &matches[start..(start + MENU_ROWS).min(matches.len())];
+        let name_width = window
+            .iter()
+            .map(|index| self.commands[*index].0.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(24);
+        let mut lines = Vec::new();
+        for (offset, index) in window.iter().enumerate() {
+            let (name, summary) = &self.commands[*index];
+            let head = format!("  {name:<name_width$}  ");
+            let summary = clip(summary, width.saturating_sub(head.chars().count()));
+            lines.push(if start + offset == selected {
+                format!("{ACCENT}{head}{summary}\x1b[0m")
+            } else {
+                format!("{head}\x1b[2m{summary}\x1b[0m")
+            });
+        }
+        if matches.len() > MENU_ROWS {
+            lines.push(format!(
+                "\x1b[2m  {}/{} · ↑↓ pour choisir · Tab complète · Entrée lance\x1b[0m",
+                selected + 1,
+                matches.len()
+            ));
+        }
+        lines
+    }
+
+    /// Commandes dont le nom commence par le texte saisi (« /mo » : /model…).
+    fn menu_matches(&self, session: &EditSession) -> Vec<usize> {
+        let text = &session.text;
+        if self.commands.is_empty()
+            || session.menu_hidden
+            || !matches!(session.mode, EditorMode::Plain | EditorMode::Insert)
+            || !text.starts_with('/')
+            || text.contains(char::is_whitespace)
+            || session.cursor != text.len()
+        {
+            return Vec::new();
+        }
+        self.commands
+            .iter()
+            .enumerate()
+            .filter(|(_, (name, _))| name.starts_with(text.as_str()))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Touches du menu : flèches, Tab, Entrée, Échap. `None` : touche ordinaire.
+    fn handle_menu_key(&mut self, session: &mut EditSession, key: KeyEvent) -> Option<KeyAction> {
+        let matches = self.menu_matches(session);
+        if matches.is_empty()
+            || key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return None;
+        }
+        let count = matches.len();
+        let selected = session.menu_index.min(count - 1);
+        let name = self.commands[matches[selected]].0.clone();
+        match key.code {
+            KeyCode::Up => session.menu_index = (selected + count - 1) % count,
+            KeyCode::Down => session.menu_index = (selected + 1) % count,
+            KeyCode::Tab => {
+                session.text = format!("{name} ");
+                session.cursor = session.text.len();
+            }
+            KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+                session.text = name;
+                session.cursor = session.text.len();
+                return Some(Self::submit_or_toggle(session));
+            }
+            KeyCode::Esc => session.menu_hidden = true,
+            _ => return None,
+        }
+        Some(KeyAction::Continue)
+    }
+
+    /// Un long collage devient un repère dans la saisie ; le texte complet
+    /// est remis à l'envoi.
+    fn collapse_paste(&mut self, session: &mut EditSession, start: usize) {
+        let end = session.cursor;
+        if session.mode == EditorMode::Command || start >= end || end > session.text.len() {
+            return;
+        }
+        let pasted = session.text[start..end].to_string();
+        let lines = pasted.lines().count();
+        if lines <= PASTE_MAX_LINES && pasted.chars().count() <= PASTE_MAX_CHARS {
+            return;
+        }
+        self.paste_count += 1;
+        let placeholder = format!("[Texte collé n°{} : {lines} lignes]", self.paste_count);
+        session.text.replace_range(start..end, &placeholder);
+        session.cursor = start + placeholder.len();
+        self.attachments.push((placeholder, pasted));
+    }
+
+    /// Alt+V : image du presse-papiers jointe à la demande (« [Image n°1] »).
+    fn paste_image(&mut self, session: &mut EditSession) {
+        match crate::clipboard::save_image() {
+            Ok(path) => {
+                self.image_count += 1;
+                let placeholder = format!("[Image n°{}]", self.image_count);
+                let after_word = session.text[..session.cursor]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|ch| !ch.is_whitespace());
+                let insertion = if after_word {
+                    format!(" {placeholder} ")
+                } else {
+                    format!("{placeholder} ")
+                };
+                Self::insert_active_text(session, &insertion);
+                self.attachments
+                    .push((placeholder, format!("@\"{}\"", path.display())));
+            }
+            Err(error) => session.notice = Some(error),
+        }
+    }
+
+    /// Texte envoyé : les repères de collage et d'image reprennent leur contenu.
+    fn expand_attachments(&mut self, line: String) -> String {
+        let mut expanded = line;
+        for (placeholder, content) in self.attachments.drain(..) {
+            expanded = expanded.replace(&placeholder, &content);
+        }
+        expanded
+    }
+
+    /// Touche reçue au milieu d'un collage : du texte, jamais une commande.
+    fn paste_key(session: &mut EditSession, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => Self::insert_active_text(session, "\n"),
+            KeyCode::Tab => Self::insert_active_text(session, "\t"),
+            KeyCode::Char(ch) => Self::insert_active_char(session, ch),
+            _ => {}
+        }
     }
 
     /// Pré-remplit la prochaine saisie.
@@ -342,6 +591,7 @@ impl LineEditor {
         self.history.push(entry);
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn read_line(&mut self) -> io::Result<ReadOutcome> {
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
             return self.read_line_fallback();
@@ -354,45 +604,111 @@ impl LineEditor {
             session.cursor = text.len();
             session.text = text;
         }
-        let frame = self.frame();
-        session.render(&mut stdout, &self.prompt, self.vim_enabled, frame.as_ref())?;
+        self.draw(&mut session, &mut stdout)?;
 
+        // Un collage arrive comme une rafale de touches : une Entrée suivie
+        // d'autres touches déjà reçues est un saut de ligne, pas un envoi.
+        let mut pending: VecDeque<Event> = VecDeque::new();
+        let mut burst_origin: Option<usize> = None;
+        let mut pasting: Option<usize> = None;
         loop {
-            let Event::Key(key) = event::read()? else {
-                continue;
+            let event = match pending.pop_front() {
+                Some(event) => event,
+                None => event::read()?,
             };
-            if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-                continue;
+            let queued = !pending.is_empty() || event::poll(Duration::ZERO)?;
+            let action = match event {
+                Event::Paste(text) => {
+                    let start = session.cursor;
+                    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                    Self::insert_active_text(&mut session, &text);
+                    self.collapse_paste(&mut session, start);
+                    KeyAction::Continue
+                }
+                Event::Key(key)
+                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                {
+                    let key = normalize_key(key);
+                    if pasting.is_some() {
+                        Self::paste_key(&mut session, key);
+                        KeyAction::Continue
+                    } else {
+                        if queued && burst_origin.is_none() {
+                            burst_origin = Some(session.cursor);
+                        }
+                        let plain_enter = key.code == KeyCode::Enter && key.modifiers.is_empty();
+                        if plain_enter && queued && paste_follows(&mut pending)? {
+                            pasting = Some(burst_origin.unwrap_or(session.cursor));
+                            Self::insert_active_text(&mut session, "\n");
+                            KeyAction::Continue
+                        } else if queued && key.code == KeyCode::Tab && key.modifiers.is_empty() {
+                            Self::insert_active_text(&mut session, "\t");
+                            KeyAction::Continue
+                        } else {
+                            let before = session.text.clone();
+                            let action = self.handle_key_event(&mut session, key);
+                            if session.text != before {
+                                session.menu_index = 0;
+                                session.menu_hidden = false;
+                            }
+                            action
+                        }
+                    }
+                }
+                _ => KeyAction::Continue,
+            };
+            // Fin de la rafale : le collage est replié s'il est long.
+            let wait = if pasting.is_some() {
+                Duration::from_millis(15)
+            } else {
+                Duration::ZERO
+            };
+            if pending.is_empty() && !event::poll(wait)? {
+                burst_origin = None;
+                if let Some(start) = pasting.take() {
+                    self.collapse_paste(&mut session, start);
+                }
             }
 
-            match self.handle_key_event(&mut session, key) {
+            match action {
                 KeyAction::Continue => {
-                    session.render(&mut stdout, &self.prompt, self.vim_enabled, frame.as_ref())?;
+                    if pasting.is_none() {
+                        self.draw(&mut session, &mut stdout)?;
+                    }
                 }
                 KeyAction::CycleMode => {
                     session.clear_render(&mut stdout)?;
                     return Ok(ReadOutcome::CycleMode(session.text.clone()));
                 }
+                KeyAction::ShowDetails => {
+                    session.clear_render(&mut stdout)?;
+                    return Ok(ReadOutcome::ShowDetails(session.text.clone()));
+                }
+                KeyAction::Rewind => {
+                    session.clear_render(&mut stdout)?;
+                    return Ok(ReadOutcome::Rewind);
+                }
                 KeyAction::Submit(line) => {
                     session.finalize_render(&mut stdout, &self.prompt, self.vim_enabled)?;
-                    return Ok(ReadOutcome::Submit(line));
+                    return Ok(ReadOutcome::Submit(self.expand_attachments(line)));
                 }
                 KeyAction::Cancel => {
+                    self.attachments.clear();
                     session.clear_render(&mut stdout)?;
-                    writeln!(stdout)?;
+                    write!(stdout, "\r\n")?;
                     return Ok(ReadOutcome::Cancel);
                 }
                 KeyAction::Exit => {
                     session.clear_render(&mut stdout)?;
-                    writeln!(stdout)?;
+                    write!(stdout, "\r\n")?;
                     return Ok(ReadOutcome::Exit);
                 }
                 KeyAction::ToggleVim => {
                     session.clear_render(&mut stdout)?;
                     self.vim_enabled = !self.vim_enabled;
-                    writeln!(
+                    write!(
                         stdout,
-                        "Mode vim {}.",
+                        "Mode vim {}.\r\n",
                         if self.vim_enabled {
                             "activé"
                         } else {
@@ -400,7 +716,7 @@ impl LineEditor {
                         }
                     )?;
                     session = EditSession::new(self.vim_enabled);
-                    session.render(&mut stdout, &self.prompt, self.vim_enabled, frame.as_ref())?;
+                    self.draw(&mut session, &mut stdout)?;
                 }
             }
         }
@@ -422,7 +738,7 @@ impl LineEditor {
                 buffer.pop();
             }
 
-            if self.handle_submission(&buffer) == Submission::ToggleVim {
+            if Self::handle_submission(&buffer) == Submission::ToggleVim {
                 self.vim_enabled = !self.vim_enabled;
                 writeln!(
                     stdout,
@@ -444,9 +760,30 @@ impl LineEditor {
         if key.code != KeyCode::Tab {
             self.completion_state = None;
         }
+        session.notice = None;
+        if let Some(action) = self.handle_menu_key(session, key) {
+            return action;
+        }
+        if key.code != KeyCode::Esc {
+            session.last_escape = None;
+        }
+
+        // Alt+V (ou Ctrl+V si le terminal la laisse passer) : image du presse-papiers.
+        let alt_v = key.modifiers.contains(KeyModifiers::ALT)
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('v' | 'V'));
+        if alt_v {
+            self.paste_image(session);
+            return KeyAction::Continue;
+        }
 
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
+                KeyCode::Char('o' | 'O') => return KeyAction::ShowDetails,
+                KeyCode::Char('v' | 'V') if !key.modifiers.contains(KeyModifiers::ALT) => {
+                    self.paste_image(session);
+                    return KeyAction::Continue;
+                }
                 KeyCode::Char('c' | 'C') => {
                     return if session.has_input() {
                         KeyAction::Cancel
@@ -456,7 +793,7 @@ impl LineEditor {
                 }
                 KeyCode::Char('j' | 'J') => {
                     if session.mode != EditorMode::Normal && session.mode != EditorMode::Visual {
-                        self.insert_active_text(session, "\n");
+                        Self::insert_active_text(session, "\n");
                     }
                     return KeyAction::Continue;
                 }
@@ -464,7 +801,7 @@ impl LineEditor {
                     if session.current_len() == 0 {
                         return KeyAction::Exit;
                     }
-                    self.delete_char_under_cursor(session);
+                    Self::delete_char_under_cursor(session);
                     return KeyAction::Continue;
                 }
                 _ => {}
@@ -474,26 +811,26 @@ impl LineEditor {
         match key.code {
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 if session.mode != EditorMode::Normal && session.mode != EditorMode::Visual {
-                    self.insert_active_text(session, "\n");
+                    Self::insert_active_text(session, "\n");
                 }
                 KeyAction::Continue
             }
-            KeyCode::Enter => self.submit_or_toggle(session),
-            KeyCode::Esc => self.handle_escape(session),
+            KeyCode::Enter => Self::submit_or_toggle(session),
+            KeyCode::Esc => Self::handle_escape(session),
             KeyCode::Backspace => {
-                self.handle_backspace(session);
+                Self::handle_backspace(session);
                 KeyAction::Continue
             }
             KeyCode::Delete => {
-                self.delete_char_under_cursor(session);
+                Self::delete_char_under_cursor(session);
                 KeyAction::Continue
             }
             KeyCode::Left => {
-                self.move_left(session);
+                Self::move_left(session);
                 KeyAction::Continue
             }
             KeyCode::Right => {
-                self.move_right(session);
+                Self::move_right(session);
                 KeyAction::Continue
             }
             KeyCode::Up => {
@@ -505,11 +842,11 @@ impl LineEditor {
                 KeyAction::Continue
             }
             KeyCode::Home => {
-                self.move_line_start(session);
+                Self::move_line_start(session);
                 KeyAction::Continue
             }
             KeyCode::End => {
-                self.move_line_end(session);
+                Self::move_line_end(session);
                 KeyAction::Continue
             }
             KeyCode::Tab => {
@@ -527,11 +864,11 @@ impl LineEditor {
 
     fn handle_char(&mut self, session: &mut EditSession, ch: char) {
         match session.mode {
-            EditorMode::Plain => self.insert_active_char(session, ch),
-            EditorMode::Insert => self.insert_active_char(session, ch),
+            EditorMode::Plain | EditorMode::Insert | EditorMode::Command => {
+                Self::insert_active_char(session, ch);
+            }
             EditorMode::Normal => self.handle_normal_char(session, ch),
-            EditorMode::Visual => self.handle_visual_char(session, ch),
-            EditorMode::Command => self.insert_active_char(session, ch),
+            EditorMode::Visual => Self::handle_visual_char(session, ch),
         }
     }
 
@@ -551,10 +888,10 @@ impl LineEditor {
         }
 
         match ch {
-            'h' => self.move_left(session),
-            'j' => self.move_down(session),
-            'k' => self.move_up(session),
-            'l' => self.move_right(session),
+            'h' => Self::move_left(session),
+            'j' => Self::move_down(session),
+            'k' => Self::move_up(session),
+            'l' => Self::move_right(session),
             'd' | 'y' => session.pending_operator = Some(ch),
             'p' => self.paste_after(session),
             'i' => session.enter_insert_mode(),
@@ -564,20 +901,37 @@ impl LineEditor {
         }
     }
 
-    fn handle_visual_char(&mut self, session: &mut EditSession, ch: char) {
+    fn handle_visual_char(session: &mut EditSession, ch: char) {
         match ch {
-            'h' => self.move_left(session),
-            'j' => self.move_down(session),
-            'k' => self.move_up(session),
-            'l' => self.move_right(session),
+            'h' => Self::move_left(session),
+            'j' => Self::move_down(session),
+            'k' => Self::move_up(session),
+            'l' => Self::move_right(session),
             'v' => session.enter_normal_mode(),
             _ => {}
         }
     }
 
-    fn handle_escape(&mut self, session: &mut EditSession) -> KeyAction {
+    fn handle_escape(session: &mut EditSession) -> KeyAction {
         match session.mode {
-            EditorMode::Plain => KeyAction::Continue,
+            // Échap deux fois : efface la saisie, ou (saisie vide) propose de
+            // revenir avant un message précédent.
+            EditorMode::Plain => {
+                let now = Instant::now();
+                let double = session
+                    .last_escape
+                    .is_some_and(|at| now.duration_since(at) < DOUBLE_ESCAPE);
+                session.last_escape = if double { None } else { Some(now) };
+                if !double {
+                    KeyAction::Continue
+                } else if session.text.is_empty() {
+                    KeyAction::Rewind
+                } else {
+                    session.text.clear();
+                    session.cursor = 0;
+                    KeyAction::Continue
+                }
+            }
             EditorMode::Insert => {
                 if session.cursor > 0 {
                     session.cursor = previous_boundary(&session.text, session.cursor);
@@ -597,9 +951,9 @@ impl LineEditor {
         }
     }
 
-    fn handle_backspace(&mut self, session: &mut EditSession) {
+    fn handle_backspace(session: &mut EditSession) {
         match session.mode {
-            EditorMode::Normal | EditorMode::Visual => self.move_left(session),
+            EditorMode::Normal | EditorMode::Visual => Self::move_left(session),
             EditorMode::Command => {
                 if session.command_cursor <= 1 {
                     session.exit_command_mode();
@@ -613,15 +967,15 @@ impl LineEditor {
         }
     }
 
-    fn submit_or_toggle(&mut self, session: &EditSession) -> KeyAction {
+    fn submit_or_toggle(session: &EditSession) -> KeyAction {
         let line = session.current_line();
-        match self.handle_submission(&line) {
+        match Self::handle_submission(&line) {
             Submission::Submit => KeyAction::Submit(line),
             Submission::ToggleVim => KeyAction::ToggleVim,
         }
     }
 
-    fn handle_submission(&mut self, line: &str) -> Submission {
+    fn handle_submission(line: &str) -> Submission {
         if line.trim() == "/vim" {
             Submission::ToggleVim
         } else {
@@ -629,12 +983,12 @@ impl LineEditor {
         }
     }
 
-    fn insert_active_char(&mut self, session: &mut EditSession, ch: char) {
+    fn insert_active_char(session: &mut EditSession, ch: char) {
         let mut buffer = [0; 4];
-        self.insert_active_text(session, ch.encode_utf8(&mut buffer));
+        Self::insert_active_text(session, ch.encode_utf8(&mut buffer));
     }
 
-    fn insert_active_text(&mut self, session: &mut EditSession, text: &str) {
+    fn insert_active_text(session: &mut EditSession, text: &str) {
         if session.mode == EditorMode::Command {
             session
                 .command_buffer
@@ -646,7 +1000,7 @@ impl LineEditor {
         }
     }
 
-    fn move_left(&self, session: &mut EditSession) {
+    fn move_left(session: &mut EditSession) {
         if session.mode == EditorMode::Command {
             session.command_cursor =
                 previous_command_boundary(&session.command_buffer, session.command_cursor);
@@ -655,7 +1009,7 @@ impl LineEditor {
         }
     }
 
-    fn move_right(&self, session: &mut EditSession) {
+    fn move_right(session: &mut EditSession) {
         if session.mode == EditorMode::Command {
             session.command_cursor = next_boundary(&session.command_buffer, session.command_cursor);
         } else {
@@ -663,7 +1017,7 @@ impl LineEditor {
         }
     }
 
-    fn move_line_start(&self, session: &mut EditSession) {
+    fn move_line_start(session: &mut EditSession) {
         if session.mode == EditorMode::Command {
             session.command_cursor = 1;
         } else {
@@ -671,7 +1025,7 @@ impl LineEditor {
         }
     }
 
-    fn move_line_end(&self, session: &mut EditSession) {
+    fn move_line_end(session: &mut EditSession) {
         if session.mode == EditorMode::Command {
             session.command_cursor = session.command_buffer.len();
         } else {
@@ -679,21 +1033,21 @@ impl LineEditor {
         }
     }
 
-    fn move_up(&self, session: &mut EditSession) {
+    fn move_up(session: &mut EditSession) {
         if session.mode == EditorMode::Command {
             return;
         }
         session.cursor = move_vertical(&session.text, session.cursor, -1);
     }
 
-    fn move_down(&self, session: &mut EditSession) {
+    fn move_down(session: &mut EditSession) {
         if session.mode == EditorMode::Command {
             return;
         }
         session.cursor = move_vertical(&session.text, session.cursor, 1);
     }
 
-    fn delete_char_under_cursor(&self, session: &mut EditSession) {
+    fn delete_char_under_cursor(session: &mut EditSession) {
         match session.mode {
             EditorMode::Command => {
                 if session.command_cursor < session.command_buffer.len() {
@@ -882,14 +1236,56 @@ struct RawModeGuard;
 impl RawModeGuard {
     fn new() -> io::Result<Self> {
         terminal::enable_raw_mode().map_err(io::Error::other)?;
+        // Hors Windows, le terminal signale les collages (Event::Paste).
+        #[cfg(not(windows))]
+        let _ = crossterm::execute!(io::stdout(), crossterm::event::EnableBracketedPaste);
         Ok(Self)
     }
 }
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
+        #[cfg(not(windows))]
+        let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableBracketedPaste);
         let _ = terminal::disable_raw_mode();
     }
+}
+
+/// Certains terminaux livrent les sauts de ligne d'un collage comme des
+/// caractères : ils valent la touche Entrée.
+fn normalize_key(key: KeyEvent) -> KeyEvent {
+    match key.code {
+        KeyCode::Char('\r' | '\n')
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..key
+            }
+        }
+        _ => key,
+    }
+}
+
+/// Après une Entrée suivie d'autres événements déjà reçus : lit ceux qui
+/// attendent et dit s'il s'agit d'un collage (d'autres touches suivent) ou
+/// seulement des relâchements de touches.
+fn paste_follows(pending: &mut VecDeque<Event>) -> io::Result<bool> {
+    let is_key = |event: &Event| {
+        matches!(event, Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            && matches!(key.code, KeyCode::Char(_) | KeyCode::Enter | KeyCode::Tab))
+    };
+    for wait in [Duration::ZERO, Duration::from_millis(10)] {
+        while event::poll(wait)? {
+            pending.push_back(event::read()?);
+            if pending.iter().any(is_key) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(pending.iter().any(is_key))
 }
 
 fn previous_boundary(text: &str, cursor: usize) -> usize {
@@ -944,8 +1340,12 @@ fn move_vertical(text: &str, cursor: usize, delta: isize) -> usize {
     let current_start = starts[current_row];
     let current_col = text[current_start..cursor].chars().count();
 
-    let max_row = starts.len().saturating_sub(1) as isize;
-    let target_row = (current_row as isize + delta).clamp(0, max_row) as usize;
+    let max_row = starts.len().saturating_sub(1);
+    let target_row = if delta < 0 {
+        current_row.saturating_sub(delta.unsigned_abs())
+    } else {
+        (current_row + delta.unsigned_abs()).min(max_row)
+    };
     if target_row == current_row {
         return cursor;
     }
@@ -970,14 +1370,9 @@ fn line_starts(text: &str) -> Vec<usize> {
 }
 
 fn byte_index_for_char_column(text: &str, column: usize) -> usize {
-    let mut current = 0;
-    for (index, _) in text.char_indices() {
-        if current == column {
-            return index;
-        }
-        current += 1;
-    }
-    text.len()
+    text.char_indices()
+        .nth(column)
+        .map_or(text.len(), |(index, _)| index)
 }
 
 fn current_line_delete_range(text: &str, cursor: usize) -> (usize, usize, usize) {
@@ -1123,9 +1518,9 @@ mod tests {
         let mut editor = LineEditor::new("> ", vec!["/help".to_string(), "/vim".to_string()]);
 
         // quand
-        let first = editor.handle_submission("/vim");
+        let first = LineEditor::handle_submission("/vim");
         editor.vim_enabled = true;
-        let second = editor.handle_submission("/vim");
+        let second = LineEditor::handle_submission("/vim");
 
         // alors
         assert!(matches!(first, super::Submission::ToggleVim));
@@ -1140,7 +1535,7 @@ mod tests {
         let mut session = EditSession::new(true);
         session.text = "hello".to_string();
         session.cursor = session.text.len();
-        let _ = editor.handle_escape(&mut session);
+        let _ = LineEditor::handle_escape(&mut session);
 
         // quand
         editor.handle_char(&mut session, 'h');
@@ -1160,7 +1555,7 @@ mod tests {
         let mut session = EditSession::new(true);
         session.text = "alpha\nbeta\ngamma".to_string();
         session.cursor = 0;
-        let _ = editor.handle_escape(&mut session);
+        let _ = LineEditor::handle_escape(&mut session);
 
         // quand
         editor.handle_char(&mut session, 'y');
@@ -1179,7 +1574,7 @@ mod tests {
         let mut session = EditSession::new(true);
         session.text = "alpha\nbeta\ngamma".to_string();
         session.cursor = 0;
-        let _ = editor.handle_escape(&mut session);
+        let _ = LineEditor::handle_escape(&mut session);
 
         // quand
         editor.handle_char(&mut session, 'j');
@@ -1199,7 +1594,7 @@ mod tests {
         let mut session = EditSession::new(true);
         session.text = "alpha\nbeta".to_string();
         session.cursor = 0;
-        let _ = editor.handle_escape(&mut session);
+        let _ = LineEditor::handle_escape(&mut session);
 
         // quand
         editor.handle_char(&mut session, 'v');
@@ -1226,13 +1621,13 @@ mod tests {
         let mut session = EditSession::new(true);
         session.text = "draft".to_string();
         session.cursor = session.text.len();
-        let _ = editor.handle_escape(&mut session);
+        let _ = LineEditor::handle_escape(&mut session);
 
         // quand
         editor.handle_char(&mut session, ':');
         editor.handle_char(&mut session, 'q');
         editor.handle_char(&mut session, '!');
-        let action = editor.submit_or_toggle(&session);
+        let action = LineEditor::submit_or_toggle(&session);
 
         // alors
         assert_eq!(session.mode, EditorMode::Command);
@@ -1308,5 +1703,108 @@ mod tests {
 
         // alors
         assert!(matches!(action, KeyAction::Cancel));
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn session_with(text: &str) -> EditSession {
+        let mut session = EditSession::new(false);
+        session.text = text.to_string();
+        session.cursor = session.text.len();
+        session
+    }
+
+    #[test]
+    fn long_lines_wrap_over_several_rows() {
+        // 25 caractères après « > » sur 10 colonnes : 3 rangées.
+        let session = session_with(&"a".repeat(25));
+        assert_eq!(session.cursor_layout("> ", 10), (2, 7, 3));
+
+        // Ligne qui remplit exactement sa rangée : le curseur reste au bout.
+        let session = session_with(&"a".repeat(8));
+        assert_eq!(session.cursor_layout("> ", 10), (0, 9, 1));
+
+        // Plusieurs lignes, dont une longue.
+        let session = session_with("abc\ndefghijklmno");
+        assert_eq!(session.cursor_layout("> ", 10), (2, 2, 3));
+    }
+
+    #[test]
+    fn long_pastes_become_a_placeholder_restored_on_submit() {
+        let mut editor = LineEditor::new("> ", vec![]);
+        let pasted = (1..=10)
+            .map(|n| format!("ligne {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut session = session_with("voici : ");
+        let start = session.cursor;
+        LineEditor::insert_active_text(&mut session, &pasted);
+        editor.collapse_paste(&mut session, start);
+        assert_eq!(session.text, "voici : [Texte collé n°1 : 10 lignes]");
+        assert_eq!(
+            editor.expand_attachments(session.text.clone()),
+            format!("voici : {pasted}")
+        );
+
+        // Un court collage reste tel quel.
+        let mut session = session_with("");
+        LineEditor::insert_active_text(&mut session, "a\nb");
+        editor.collapse_paste(&mut session, 0);
+        assert_eq!(session.text, "a\nb");
+    }
+
+    #[test]
+    fn slash_menu_filters_commands_and_runs_the_selection() {
+        let mut editor = LineEditor::new("> ", vec![]);
+        editor.set_command_help(vec![
+            ("/help".to_string(), "Aide".to_string()),
+            ("/model".to_string(), "Change de modèle".to_string()),
+            ("/models".to_string(), "Modèles gratuits".to_string()),
+        ]);
+        let mut session = session_with("/mo");
+        assert_eq!(editor.menu_matches(&session).len(), 2);
+        let lines = editor.below_lines(&session, 60);
+        assert!(lines[0].contains("/model") && lines[0].contains("Change de modèle"));
+        assert!(lines[1].contains("/models"));
+
+        let _ = editor.handle_key_event(&mut session, key(KeyCode::Down));
+        let action = editor.handle_key_event(&mut session, key(KeyCode::Enter));
+        assert!(matches!(action, KeyAction::Submit(line) if line == "/models"));
+
+        // Tab complète, Échap ferme le menu.
+        let mut session = session_with("/he");
+        let _ = editor.handle_key_event(&mut session, key(KeyCode::Tab));
+        assert_eq!(session.text, "/help ");
+        let mut session = session_with("/mo");
+        let _ = editor.handle_key_event(&mut session, key(KeyCode::Esc));
+        assert!(editor.menu_matches(&session).is_empty());
+    }
+
+    #[test]
+    fn double_escape_clears_the_input_then_offers_to_rewind() {
+        let mut editor = LineEditor::new("> ", vec![]);
+        let mut session = session_with("brouillon");
+        let first = editor.handle_key_event(&mut session, key(KeyCode::Esc));
+        assert!(matches!(first, KeyAction::Continue));
+        assert_eq!(session.text, "brouillon");
+        let _ = editor.handle_key_event(&mut session, key(KeyCode::Esc));
+        assert!(session.text.is_empty());
+
+        let _ = editor.handle_key_event(&mut session, key(KeyCode::Esc));
+        let action = editor.handle_key_event(&mut session, key(KeyCode::Esc));
+        assert!(matches!(action, KeyAction::Rewind));
+    }
+
+    #[test]
+    fn ctrl_o_asks_for_the_full_last_turn() {
+        let mut editor = LineEditor::new("> ", vec![]);
+        let mut session = session_with("en cours");
+        let action = editor.handle_key_event(
+            &mut session,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert!(matches!(action, KeyAction::ShowDetails));
     }
 }

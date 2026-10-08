@@ -51,7 +51,9 @@ impl Channel {
     }
 
     fn notify(method: &str, params: Value) {
-        Self::send(&json!({ "jsonrpc": "2.0", "method": method, "params": params }));
+        let mut message = json!({ "jsonrpc": "2.0", "method": method });
+        message["params"] = params;
+        Self::send(&message);
     }
 
     /// Requête vers l'éditeur ; attend sa réponse (ou l'annulation du tour).
@@ -62,7 +64,9 @@ impl Channel {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(id, sender);
-        Self::send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }));
+        let mut message = json!({ "jsonrpc": "2.0", "id": id, "method": method });
+        message["params"] = params;
+        Self::send(&message);
         let deadline = std::time::Instant::now() + PERMISSION_TIMEOUT;
         let reply = loop {
             match receiver.recv_timeout(Duration::from_millis(200)) {
@@ -136,10 +140,9 @@ struct AcpObserver {
 
 impl AcpObserver {
     fn update(&self, update: Value) {
-        Channel::notify(
-            "session/update",
-            json!({ "sessionId": self.session_id, "update": update }),
-        );
+        let mut params = json!({ "sessionId": self.session_id });
+        params["update"] = update;
+        Channel::notify("session/update", params);
     }
 }
 
@@ -395,8 +398,7 @@ impl AcpServer {
                 let id = params
                     .get("sessionId")
                     .and_then(Value::as_str)
-                    .ok_or((-32602, "sessionId manquant".to_string()))?
-                    .to_string();
+                    .ok_or((-32602, "sessionId manquant".to_string()))?;
                 self.new_session(params, Some(id)).map(|_| Value::Null)
             }
             "session/set_mode" => {
@@ -431,16 +433,12 @@ impl AcpServer {
         }
     }
 
-    fn new_session(
-        &mut self,
-        params: &Value,
-        load: Option<String>,
-    ) -> Result<Value, (i64, String)> {
+    fn new_session(&mut self, params: &Value, load: Option<&str>) -> Result<Value, (i64, String)> {
         if let Some(cwd) = params.get("cwd").and_then(Value::as_str) {
             std::env::set_current_dir(cwd)
                 .map_err(|error| (-32602, format!("dossier {cwd} : {error}")))?;
         }
-        let (handle, session) = match &load {
+        let (handle, session) = match load {
             Some(id) => {
                 let handle =
                     resolve_session_reference(id).map_err(|error| (-32602, error.to_string()))?;
@@ -591,7 +589,7 @@ pub(crate) fn serve(
     model: String,
     permission_mode: PermissionMode,
     allowed_tools: Option<AllowedToolSet>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) {
     let channel = Channel {
         pending: Arc::new(Mutex::new(BTreeMap::new())),
         next_id: Arc::new(AtomicU64::new(1_000)),
@@ -616,7 +614,6 @@ pub(crate) fn serve(
                         break;
                     }
                 }
-                (Some(_), None) => {}
                 (None, Some(id)) => {
                     if let Some(sender) = id.as_u64().and_then(|id| {
                         reader_channel
@@ -628,7 +625,7 @@ pub(crate) fn serve(
                         let _ = sender.send(message);
                     }
                 }
-                (None, None) => {}
+                (_, None) => {}
             }
         }
     });
@@ -655,5 +652,4 @@ pub(crate) fn serve(
         };
         Channel::send(&reply);
     }
-    Ok(())
 }

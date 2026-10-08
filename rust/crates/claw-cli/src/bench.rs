@@ -13,6 +13,7 @@
 //! automatique du modèle gratuit.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -353,7 +354,7 @@ fn run_claw(
     let mut timed_out = false;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(_)) | Err(_) => break,
             Ok(None) if started.elapsed() > timeout => {
                 timed_out = true;
                 let _ = child.kill();
@@ -361,7 +362,6 @@ fn run_claw(
                 break;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(200)),
-            Err(_) => break,
         }
     }
     let lines = reader.join().unwrap_or_default();
@@ -672,6 +672,7 @@ fn find_python() -> Option<PathBuf> {
 }
 
 /// Lance la recherche ; `progress` reçoit l'avancement ligne par ligne.
+#[allow(clippy::too_many_lines)]
 pub fn run(args: &str, progress: &mut dyn FnMut(&str)) -> Result<String, String> {
     let options = parse_options(args)?;
     let models = candidates(&options)?;
@@ -806,10 +807,11 @@ pub fn run(args: &str, progress: &mut dyn FnMut(&str)) -> Result<String, String>
         report.push('\n');
         report.push_str(&apply_best(&ranked)?);
     } else if let Some(best) = best_choice(&ranked) {
-        report.push_str(&format!(
+        let _ = write!(
+            report,
             "\n\nMeilleur choix : {model}. Pour l'utiliser par défaut : /models bench --appliquer\n(ou \"model\": \"{model}\" dans ~/.claw/settings.json).",
             model = best.model
-        ));
+        );
     } else {
         report.push_str(
             "\n\nAucun modèle n'a réussi de tâche : la configuration actuelle est conservée.",
@@ -948,7 +950,7 @@ mod tests {
 
     #[test]
     fn ranks_by_success_then_speed_and_puts_incompatible_last() {
-        let mut results = vec![
+        let mut results = [
             result("a/lent:free", true, 3, 3, &[90.0, 80.0, 100.0]),
             result("b/refuse:free", false, 0, 0, &[]),
             result("c/rapide:free", true, 3, 3, &[10.0, 20.0, 15.0]),

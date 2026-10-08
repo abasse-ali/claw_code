@@ -329,6 +329,23 @@ pub fn first_local_model() -> Option<String> {
         })
 }
 
+/// Serveurs locaux connus, leur adresse et leurs modèles (`claw doctor`).
+pub(crate) fn local_servers() -> Vec<(String, String, Result<Vec<String>, String>)> {
+    api::compat_providers()
+        .into_iter()
+        .filter(|provider| provider.local)
+        .map(|provider| {
+            let models = provider_models(&provider, Duration::from_millis(1500)).map(|models| {
+                models
+                    .into_iter()
+                    .filter(|model| !model.contains("embed"))
+                    .collect()
+            });
+            (provider.name.clone(), provider.base_url.clone(), models)
+        })
+        .collect()
+}
+
 /// Modèles des serveurs locaux en marche (`ollama:qwen3.5:4b`…), pour `/models bench --local`.
 pub(crate) fn local_models() -> Vec<String> {
     api::compat_providers()

@@ -341,6 +341,14 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         category: SlashCommandCategory::Core,
     },
     SlashCommandSpec {
+        name: "doctor",
+        aliases: &["diagnostic"],
+        summary: "Vérifie l'installation : clés, modèles, Ollama, Git, shell, terminal",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
         name: "mcp",
         aliases: &[],
         summary: "Affiche les serveurs MCP connectés et leurs outils",
@@ -498,6 +506,7 @@ pub enum SlashCommand {
         args: Option<String>,
     },
     Credits,
+    Doctor,
     Teleport {
         target: Option<String>,
     },
@@ -607,6 +616,7 @@ impl SlashCommand {
                 args: remainder_after_command(trimmed, command),
             },
             "credits" | "solde" => Self::Credits,
+            "doctor" | "diagnostic" => Self::Doctor,
             "model" => Self::Model {
                 model: parts.next().map(ToOwned::to_owned),
             },
@@ -2051,6 +2061,7 @@ pub fn handle_slash_command(
         | SlashCommand::Bashes { .. }
         | SlashCommand::Models { .. }
         | SlashCommand::Credits
+        | SlashCommand::Doctor
         | SlashCommand::Teleport { .. }
         | SlashCommand::DebugToolCall
         | SlashCommand::Model { .. }
@@ -2459,7 +2470,7 @@ mod tests {
         assert!(help.contains("alias : /plugins, /marketplace"));
         assert!(help.contains("/agents"));
         assert!(help.contains("/skills"));
-        assert_eq!(slash_command_specs().len(), 41);
+        assert_eq!(slash_command_specs().len(), 42);
         assert_eq!(resume_supported_slash_commands().len(), 13);
     }
 

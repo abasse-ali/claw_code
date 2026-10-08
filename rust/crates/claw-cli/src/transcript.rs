@@ -22,8 +22,27 @@ pub const RESET: &str = "\x1b[0m";
 const RESULT_PREFIX: &str = "  ⎿  ";
 const RESULT_INDENT: &str = "     ";
 /// Lignes de sortie montrées sous un outil (le reste : « … +N lignes »).
-const PREVIEW_LINES: usize = 6;
-const DIFF_LINES: usize = 24;
+/// Taille des aperçus : compacte sous chaque outil, complète avec Ctrl+O.
+struct Limits {
+    lines: usize,
+    diff: usize,
+    names: usize,
+    /// Montrer le contenu d'un fichier lu (pas seulement son nombre de lignes).
+    read_content: bool,
+}
+
+const COMPACT: Limits = Limits {
+    lines: 6,
+    diff: 24,
+    names: 5,
+    read_content: false,
+};
+const FULL: Limits = Limits {
+    lines: 2_000,
+    diff: 2_000,
+    names: 500,
+    read_content: true,
+};
 const DIFF_CONTEXT: usize = 2;
 const REMOVED_BG: &str = "\x1b[48;5;52m";
 const ADDED_BG: &str = "\x1b[48;5;22m";
@@ -322,10 +341,26 @@ fn preview(text: &str, max_lines: usize, color: &str) -> Vec<String> {
 }
 
 fn more_lines(count: usize) -> String {
+    let hint = if interactive() {
+        " (Ctrl+O pour tout voir)"
+    } else {
+        ""
+    };
     format!(
-        "{DIM}… +{count} ligne{}{RESET}",
+        "{DIM}… +{count} ligne{}{hint}{RESET}",
         if count > 1 { "s" } else { "" }
     )
+}
+
+/// REPL interactif : Ctrl+O y montre le dernier tour en entier.
+static INTERACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_interactive(enabled: bool) {
+    INTERACTIVE.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn interactive() -> bool {
+    INTERACTIVE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn plural(count: u64, word: &str) -> String {
@@ -335,31 +370,36 @@ fn plural(count: u64, word: &str) -> String {
 /// Résultat d'un outil, sous son appel.
 #[must_use]
 pub fn tool_result(name: &str, output: &str, is_error: bool) -> String {
+    render_result(name, output, is_error, &COMPACT)
+}
+
+fn render_result(name: &str, output: &str, is_error: bool, limits: &Limits) -> String {
     if is_error {
-        return error_result(output);
+        return error_result(output, limits);
     }
     let parsed: Value =
         serde_json::from_str(output).unwrap_or_else(|_| Value::String(output.to_string()));
     let lines = match name {
-        "bash" | "Bash" | "PowerShell" => bash_result(&parsed),
-        "read_file" | "Read" => read_result(&parsed),
-        "write_file" | "Write" => write_result(&parsed),
-        "edit_file" | "Edit" => edit_result(&parsed),
-        "glob_search" | "Glob" => glob_result(&parsed),
-        "grep_search" | "Grep" => grep_result(&parsed),
+        "bash" | "Bash" | "PowerShell" => bash_result(&parsed, limits),
+        "read_file" | "Read" => read_result(&parsed, limits),
+        "write_file" | "Write" => write_result(&parsed, limits),
+        "edit_file" | "Edit" => edit_result(&parsed, limits),
+        "glob_search" | "Glob" => glob_result(&parsed, limits),
+        "grep_search" | "Grep" => grep_result(&parsed, limits),
         "TodoWrite" => todo_result(&parsed),
-        "WebFetch" => web_fetch_result(&parsed),
-        _ => generic_result(&parsed),
+        "WebFetch" if !limits.read_content => web_fetch_result(&parsed),
+        _ => generic_result(&parsed, limits),
     };
     result_block(&lines)
 }
 
-fn error_result(output: &str) -> String {
+fn error_result(output: &str, limits: &Limits) -> String {
     let text = output.trim();
     if text == runtime::interrupt::INTERRUPTED_MESSAGE {
         return result_block(&[format!("{RED}Interrompu{RESET}")]);
     }
-    let mut lines = preview(text, 4, RED);
+    let max_lines = if limits.read_content { limits.lines } else { 4 };
+    let mut lines = preview(text, max_lines, RED);
     if let Some(first) = lines.first_mut() {
         *first = format!("{RED}Erreur : {RESET}{first}");
     } else {
@@ -368,7 +408,7 @@ fn error_result(output: &str) -> String {
     result_block(&lines)
 }
 
-fn bash_result(parsed: &Value) -> Vec<String> {
+fn bash_result(parsed: &Value, limits: &Limits) -> Vec<String> {
     if let Some(task) = str_field(parsed, &["backgroundTaskId"]) {
         return vec![format!(
             "Lancée en arrière-plan {DIM}({task} · /bashes){RESET}"
@@ -378,10 +418,10 @@ fn bash_result(parsed: &Value) -> Vec<String> {
     let stderr = str_field(parsed, &["stderr"]).unwrap_or_default();
     let mut lines = Vec::new();
     if !stdout.trim().is_empty() {
-        lines.extend(preview(stdout, PREVIEW_LINES, ""));
+        lines.extend(preview(stdout, limits.lines, ""));
     }
     if !stderr.trim().is_empty() {
-        lines.extend(preview(stderr, PREVIEW_LINES, RED));
+        lines.extend(preview(stderr, limits.lines, RED));
     }
     match str_field(parsed, &["returnCodeInterpretation"]) {
         Some("interrupted") => lines.push(format!("{RED}Interrompue{RESET}")),
@@ -398,7 +438,7 @@ fn bash_result(parsed: &Value) -> Vec<String> {
     lines
 }
 
-fn read_result(parsed: &Value) -> Vec<String> {
+fn read_result(parsed: &Value, limits: &Limits) -> Vec<String> {
     let file = parsed.get("file").unwrap_or(parsed);
     let num_lines = file.get("numLines").and_then(Value::as_u64).unwrap_or(0);
     let total = file
@@ -411,7 +451,14 @@ fn read_result(parsed: &Value) -> Vec<String> {
         let end = start + num_lines.saturating_sub(1);
         let _ = write!(line, " {DIM}(lignes {start}-{end} sur {total}){RESET}");
     }
-    vec![line]
+    let mut lines = vec![line];
+    if limits.read_content {
+        let content = str_field(file, &["content"]).unwrap_or_default();
+        let rows: Vec<&str> = content.lines().collect();
+        let first = usize::try_from(start).unwrap_or(1);
+        lines.extend(numbered(&rows, first, limits.lines, content_width()));
+    }
+    lines
 }
 
 /// Lignes numérotées (aperçu d'un fichier écrit) tenant dans `width` colonnes.
@@ -441,7 +488,7 @@ pub fn numbered(
     out
 }
 
-fn write_result(parsed: &Value) -> Vec<String> {
+fn write_result(parsed: &Value, limits: &Limits) -> Vec<String> {
     let path = path_field(parsed).unwrap_or_else(|| "?".to_string());
     let content = str_field(parsed, &["content"]).unwrap_or_default();
     let lines: Vec<&str> = content.lines().collect();
@@ -454,7 +501,7 @@ fn write_result(parsed: &Value) -> Vec<String> {
         "{verb} {BOLD}{path}{RESET} {DIM}({}){RESET}",
         plural(lines.len() as u64, "ligne")
     )];
-    out.extend(numbered(&lines, 1, PREVIEW_LINES, content_width()));
+    out.extend(numbered(&lines, 1, limits.lines, content_width()));
     out
 }
 
@@ -623,7 +670,7 @@ pub fn expand_to_lines(
     ))
 }
 
-fn edit_result(parsed: &Value) -> Vec<String> {
+fn edit_result(parsed: &Value, limits: &Limits) -> Vec<String> {
     let raw_path = str_field(parsed, &["filePath", "path"]).unwrap_or("?");
     let path = display_path(raw_path);
     let old_string = str_field(parsed, &["oldString"]).unwrap_or_default();
@@ -664,13 +711,13 @@ fn edit_result(parsed: &Value) -> Vec<String> {
         new_text,
         first_line,
         file.as_deref(),
-        DIFF_LINES,
+        limits.diff,
         content_width(),
     ));
     lines
 }
 
-fn names_preview(parsed: &Value) -> Vec<String> {
+fn names_preview(parsed: &Value, max_lines: usize) -> Vec<String> {
     let names: Vec<String> = parsed
         .get("filenames")
         .and_then(Value::as_array)
@@ -682,10 +729,10 @@ fn names_preview(parsed: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default();
-    preview(&names.join("\n"), 5, "")
+    preview(&names.join("\n"), max_lines, "")
 }
 
-fn glob_result(parsed: &Value) -> Vec<String> {
+fn glob_result(parsed: &Value, limits: &Limits) -> Vec<String> {
     let count = parsed.get("numFiles").and_then(Value::as_u64).unwrap_or(0);
     let mut lines = vec![if count == 0 {
         "Aucun fichier trouvé".to_string()
@@ -696,11 +743,11 @@ fn glob_result(parsed: &Value) -> Vec<String> {
             if count > 1 { "s" } else { "" }
         )
     }];
-    lines.extend(names_preview(parsed));
+    lines.extend(names_preview(parsed, limits.names));
     lines
 }
 
-fn grep_result(parsed: &Value) -> Vec<String> {
+fn grep_result(parsed: &Value, limits: &Limits) -> Vec<String> {
     let matches = parsed.get("numMatches").and_then(Value::as_u64);
     let files = parsed.get("numFiles").and_then(Value::as_u64).unwrap_or(0);
     let content = str_field(parsed, &["content"]).unwrap_or_default();
@@ -717,9 +764,9 @@ fn grep_result(parsed: &Value) -> Vec<String> {
     };
     let mut lines = vec![summary];
     if content.trim().is_empty() {
-        lines.extend(names_preview(parsed));
+        lines.extend(names_preview(parsed, limits.names));
     } else {
-        lines.extend(preview(content, 5, ""));
+        lines.extend(preview(content, limits.names, ""));
     }
     lines
 }
@@ -757,11 +804,11 @@ fn web_fetch_result(parsed: &Value) -> Vec<String> {
             let size = format!("{:.1}", bytes as f64 / 1024.0).replace('.', ",");
             vec![format!("Reçu {size} Ko {DIM}({code} {code_text}){RESET}")]
         }
-        _ => generic_result(parsed),
+        _ => generic_result(parsed, &COMPACT),
     }
 }
 
-fn generic_result(parsed: &Value) -> Vec<String> {
+fn generic_result(parsed: &Value, limits: &Limits) -> Vec<String> {
     let text = match parsed {
         Value::String(text) => text.clone(),
         Value::Null => String::new(),
@@ -773,7 +820,74 @@ fn generic_result(parsed: &Value) -> Vec<String> {
     if text.trim().is_empty() {
         return vec![format!("{DIM}Terminé{RESET}")];
     }
-    preview(&text, PREVIEW_LINES, "")
+    preview(&text, limits.lines, "")
+}
+
+/// Le dernier tour en entier (Ctrl+O) : raisonnement et sorties complètes.
+#[derive(Default)]
+struct TurnRecord {
+    thinking: String,
+    tools: Vec<(String, String, String, bool)>,
+}
+
+static LAST_TURN: Mutex<Option<TurnRecord>> = Mutex::new(None);
+
+fn last_turn() -> std::sync::MutexGuard<'static, Option<TurnRecord>> {
+    LAST_TURN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Nouveau tour : le précédent n'est plus montré par Ctrl+O.
+pub fn begin_turn() {
+    *last_turn() = Some(TurnRecord::default());
+}
+
+pub fn record_thinking(text: &str) {
+    if let Some(record) = last_turn().as_mut() {
+        record.thinking.push_str(text);
+    }
+}
+
+pub fn record_result(name: &str, input: &str, output: &str, is_error: bool) {
+    if let Some(record) = last_turn().as_mut() {
+        record.tools.push((
+            name.to_string(),
+            input.to_string(),
+            output.to_string(),
+            is_error,
+        ));
+    }
+}
+
+/// Affichage de Ctrl+O.
+#[must_use]
+pub fn turn_details() -> String {
+    let guard = last_turn();
+    let Some(record) = guard
+        .as_ref()
+        .filter(|record| !record.thinking.trim().is_empty() || !record.tools.is_empty())
+    else {
+        return format!(
+            "{DIM}  ⎿  Rien à déplier : le dernier tour n'a ni raisonnement ni outil.{RESET}"
+        );
+    };
+    let mut out = format!("{DIM}── Dernier tour en entier (Ctrl+O) ──{RESET}\n");
+    if !record.thinking.trim().is_empty() {
+        let _ = write!(out, "\n{DIM}\x1b[3m∴ Réflexion{RESET}\n");
+        for line in wrap(record.thinking.trim(), content_width()) {
+            let _ = writeln!(out, "  {DIM}\x1b[3m{line}{RESET}");
+        }
+    }
+    for (name, input, output, is_error) in &record.tools {
+        let _ = write!(
+            out,
+            "\n{}\n{}\n",
+            tool_call_line(name, input),
+            render_result(name, output, *is_error, &FULL)
+        );
+    }
+    out
 }
 
 /// Appels reçus du modèle mais pas encore affichés : chaque appel s'affiche
@@ -864,7 +978,12 @@ impl ThinkingDisplay {
             self.prefixer.reset();
         } else {
             let seconds = started.elapsed().as_secs().max(1);
-            writeln!(out, "\n{DIM}\x1b[3m∴ Réflexion ({seconds} s){RESET}")?;
+            let hint = if interactive() {
+                " · Ctrl+O pour la lire"
+            } else {
+                ""
+            };
+            writeln!(out, "\n{DIM}\x1b[3m∴ Réflexion ({seconds} s{hint}){RESET}")?;
         }
         out.flush()
     }
@@ -1069,6 +1188,30 @@ mod tests {
         prefixer.finish_line(&mut out).unwrap();
         let text = strip_ansi(&String::from_utf8(out).unwrap());
         assert_eq!(text, "\n● Titre :\n\n  • un\n  • deux\n");
+    }
+
+    #[test]
+    fn ctrl_o_shows_the_whole_last_turn() {
+        begin_turn();
+        assert!(strip_ansi(&turn_details()).contains("Rien à déplier"));
+        let stdout = (0..20)
+            .map(|n| format!("ligne {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        record_thinking("Je lis d'abord ");
+        record_thinking("le fichier.");
+        record_result(
+            "bash",
+            r#"{"command":"seq 20"}"#,
+            &serde_json::json!({ "stdout": stdout, "stderr": "" }).to_string(),
+            false,
+        );
+        let details = strip_ansi(&turn_details());
+        assert!(details.contains("Je lis d'abord le fichier."));
+        assert!(details.contains("● Commande(seq 20)"));
+        assert!(details.contains("ligne 19"));
+        assert!(!details.contains("+14 lignes"));
+        begin_turn();
     }
 
     #[test]

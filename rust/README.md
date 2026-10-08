@@ -395,7 +395,21 @@ Claw lit aussi `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` 
   d'outils `● Commande(cargo test)` avec leur résultat en retrait `⎿` (premières lignes, diff
   numéroté, liste de tâches □ ■ ✓), indicateur animé `✻ Réflexion… (12 s)` pendant le travail et
   `✻ Terminé en 12 s` à la fin du tour. `CLAW_NO_SPINNER=1` retire l'indicateur animé.
+- La ligne d'état indique aussi le remplissage du contexte (`contexte 34 %`) : au-delà du seuil,
+  la conversation est résumée automatiquement.
+- Taper `/` ouvre le menu des commandes avec leur description : flèches pour choisir, `Tab` pour
+  compléter, `Entrée` pour lancer, `Échap` pour fermer.
+- `Ctrl+O` montre le dernier tour en entier : raisonnement complet et sorties non coupées des
+  outils (sous chaque outil, les sorties longues s'arrêtent à « … +N lignes »).
+- `Échap` deux fois efface la saisie ; saisie vide, il propose de revenir avant un message
+  précédent : la conversation et les fichiers modifiés par Claw reviennent en arrière et le message
+  revient dans la saisie pour être corrigé (comme `/undo`).
+- Coller un texte de plusieurs lignes le garde en un seul message ; un long collage s'affiche
+  `[Texte collé n°1 : 40 lignes]` et part en entier. `Alt+V` joint l'image du presse-papiers
+  (`[Image n°1]`).
 - `clear` (ou `cls`) efface l'écran, `exit` (ou `quit`) quitte.
+- `claw doctor` (ou `/doctor`) vérifie l'installation : copie de `claw` utilisée, configuration,
+  modèle et secours, clé et crédits OpenRouter, Ollama, Git, shell, bac à sable, terminal.
 - `Échap` (ou `Ctrl+C`) interrompt le tour en cours ; ce que vous tapez pendant un tour est gardé :
   une ligne validée par `Entrée` part juste après, le reste pré-remplit la saisie (Windows ; sous
   Linux et macOS, `Ctrl+C`).
