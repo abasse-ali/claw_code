@@ -132,7 +132,7 @@ fn listen(stop: &AtomicBool, typed: &Mutex<TypeAhead>) {
             }
             last_interrupt = Some(Instant::now());
             runtime::interrupt::request_interrupt();
-            notice("⏹ Interruption demandée…");
+            notice("■ Interruption demandée…");
             continue;
         }
         let mut buffer = typed
@@ -144,7 +144,7 @@ fn listen(stop: &AtomicBool, typed: &Mutex<TypeAhead>) {
                 if !line.trim().is_empty() {
                     buffer.lines.push(line.clone());
                     drop(buffer);
-                    notice(&format!("↪ en file d'attente : {line}"));
+                    notice(&format!("↳ en file d'attente : {line}"));
                 }
             }
             KeyCode::Backspace => {

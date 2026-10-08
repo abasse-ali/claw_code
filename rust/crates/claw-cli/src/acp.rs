@@ -211,7 +211,7 @@ impl TurnObserver for AcpObserver {
     fn notice(&self, text: &str) {
         self.update(json!({
             "sessionUpdate": "agent_thought_chunk",
-            "content": { "type": "text", "text": format!("⚠ {text}\n") },
+            "content": { "type": "text", "text": format!("▲ {text}\n") },
         }));
     }
 }

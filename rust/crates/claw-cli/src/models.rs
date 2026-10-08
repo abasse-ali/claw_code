@@ -531,7 +531,7 @@ fn render_ranking(ranked: &[RankedModel], current_model: &str) -> Vec<String> {
         };
         let mut details = entry.reasons.clone();
         if entry.model.supports_images {
-            details.push("👁 images".to_string());
+            details.push("lit les images".to_string());
         }
         if let Some(result) = measured.get(&entry.model.id) {
             details.push(format!("mesuré : {}", result.summary()));

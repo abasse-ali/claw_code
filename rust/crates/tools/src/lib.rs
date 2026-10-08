@@ -2578,7 +2578,7 @@ impl ProviderRuntimeClient {
 }
 
 fn notify_subagent_fallback(text: &str) {
-    eprintln!("  ↳ ⚠ {text}");
+    eprintln!("  ↳ ▲ {text}");
 }
 
 impl ApiClient for ProviderRuntimeClient {

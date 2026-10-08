@@ -154,7 +154,7 @@ fn install_interrupt_handler() {
                     last_press = Some(now);
                     runtime::interrupt::request_interrupt();
                     live::suspend(|| {
-                        eprintln!("\n⏹ Interruption du tour… (Ctrl+C à nouveau pour quitter claw)");
+                        eprintln!("\n■ Interruption du tour… (Ctrl+C à nouveau pour quitter claw)");
                     });
                 }
             });
@@ -1554,7 +1554,7 @@ fn run_repl(
                             cli.refresh_system_prompt()?;
                             Ok(path)
                         }) {
-                            Ok(path) => println!("📝 Noté dans {}", path.display()),
+                            Ok(path) => println!("  ⎿  Noté dans {}", path.display()),
                             Err(error) => eprintln!("note impossible : {error}"),
                         }
                     }
@@ -1843,8 +1843,8 @@ impl LiveCli {
         let mode = match self.permission_mode {
             PermissionMode::Prompt => "⏵ demander avant d'agir",
             PermissionMode::WorkspaceWrite => "⏵⏵ éditions acceptées",
-            PermissionMode::ReadOnly => "⏸ mode plan",
-            PermissionMode::DangerFullAccess | PermissionMode::Allow => "⚠ accès complet",
+            PermissionMode::ReadOnly => "‖ mode plan",
+            PermissionMode::DangerFullAccess | PermissionMode::Allow => "▲ accès complet",
         };
         let mut line = format!("  {mode} (Maj+Tab pour changer) · {}", self.model);
         if credits::is_openrouter_model(&self.model) {
@@ -3130,7 +3130,7 @@ fn custom_allowed_tools(tools: &[String]) -> Option<AllowedToolSet> {
     match normalize_allowed_tools(&[names.join(",")]) {
         Ok(set) => set,
         Err(error) => {
-            eprintln!("⚠ allowed-tools ignoré : {error}");
+            eprintln!("▲ allowed-tools ignoré : {error}");
             None
         }
     }
@@ -4140,7 +4140,7 @@ fn format_internal_prompt_progress_line(
     match event {
         InternalPromptProgressEvent::Started => {
             format!(
-                "🧭 {} · planification démarrée · {status}",
+                "● {} · planification démarrée · {status}",
                 snapshot.command_label
             )
         }
@@ -4152,7 +4152,7 @@ fn format_internal_prompt_progress_line(
             snapshot.command_label
         ),
         InternalPromptProgressEvent::Complete => format!(
-            "✔ {} · terminé · {elapsed_seconds} s · {} étape(s)",
+            "✓ {} · terminé · {elapsed_seconds} s · {} étape(s)",
             snapshot.command_label, snapshot.step
         ),
         InternalPromptProgressEvent::Failed => format!(
@@ -4966,7 +4966,7 @@ impl ApiClient for DefaultRuntimeClient {
             let out: &mut dyn Write = if emit { &mut stdout } else { &mut sink };
             let renderer = TerminalRenderer::new();
             let mut markdown_stream = MarkdownStreamState::default();
-            // Réponse préfixée `⏺`, raisonnement résumé en une ligne `∴`.
+            // Réponse préfixée `●`, raisonnement résumé en une ligne `∴`.
             let mut answer = transcript::Prefixer::assistant();
             let mut reasoning = transcript::ThinkingDisplay::new();
             let mut events = Vec::new();
@@ -5239,14 +5239,14 @@ fn take_image_attachments(input: &str) -> (String, Vec<runtime::attachments::Ima
     let files = runtime::attachments::file_mention_blocks(input, &cwd);
     let (mut text, images, errors) = runtime::attachments::extract_image_attachments(input, &cwd);
     if !files.is_empty() {
-        eprintln!("📎 {} fichier(s) joint(s)", files.len());
+        eprintln!("+ {} fichier(s) joint(s)", files.len());
         text = format!("{text}\n\n{}", files.join("\n\n"));
     }
     for error in errors {
-        eprintln!("⚠ image ignorée : {error}");
+        eprintln!("▲ image ignorée : {error}");
     }
     if !images.is_empty() {
-        eprintln!("🖼 {} image(s) jointe(s)", images.len());
+        eprintln!("+ {} image(s) jointe(s)", images.len());
     }
     (text, images)
 }
@@ -5254,7 +5254,7 @@ fn take_image_attachments(input: &str) -> (String, Vec<runtime::attachments::Ima
 /// Signale une bascule de modèle (terminal et interface web).
 fn notify_fallback(emit: bool, observer: Option<&SharedObserver>, text: &str) {
     if emit {
-        live::suspend(|| eprintln!("\n⚠ {text}"));
+        live::suspend(|| eprintln!("\n▲ {text}"));
     }
     if let Some(observer) = observer {
         observer.notice(text);

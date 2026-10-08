@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-const FRAMES: [&str; 6] = ["·", "✢", "✳", "✶", "✻", "✽"];
+const FRAMES: [&str; 6] = ["·", "✢", "*", "✶", "✻", "✽"];
 const ACCENT: &str = "\x1b[38;2;215;119;87m";
 
 struct State {

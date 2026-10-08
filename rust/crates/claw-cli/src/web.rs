@@ -569,7 +569,7 @@ impl Worker {
         match result {
             Ok(_) => self.app.publish(WebEvent::TurnDone),
             Err(error) if runtime::interrupt::is_interruption(&error.to_string()) => {
-                self.info("⏹ Tour interrompu.");
+                self.info("■ Tour interrompu.");
                 self.app.publish(WebEvent::TurnDone);
             }
             Err(error) => {

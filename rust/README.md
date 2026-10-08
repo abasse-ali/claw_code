@@ -332,7 +332,7 @@ citée). `claw models bench` (ou `/models bench` dans le REPL et l'interface web
 1. **Sonde de compatibilité** de chaque modèle gratuit qui appelle des outils (≈ 3 requêtes) : il
    doit lire un fichier avec `read_file` et en citer le code secret. Écarte les modèles refusés à
    Claw (403), introuvables (404), trop lents, qui n'appellent pas les outils ou répondent faux ;
-   un modèle seulement surchargé ou limité par son fournisseur est noté « ⏸ indisponible pour
+   un modèle seulement surchargé ou limité par son fournisseur est noté « ‖ indisponible pour
    l'instant » sans être écarté.
 2. **Trois tâches de code** sur les 4 meilleurs modèles compatibles (corriger un bug, implémenter
    une fonction, renommer dans plusieurs fichiers), vérifiées par les tests du projet (Python).
@@ -391,9 +391,9 @@ Claw lit aussi `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` 
 ### Terminal
 
 - Affichage à la manière de Claude Code : encadré d'accueil, saisie entre deux traits avec la
-  ligne d'état dessous (mode, modèle, crédits OpenRouter), réponses précédées de `⏺`, appels
-  d'outils `⏺ Commande(cargo test)` avec leur résultat en retrait `⎿` (premières lignes, diff
-  numéroté, liste de tâches ☐ ◼ ☒), indicateur animé `✻ Réflexion… (12 s)` pendant le travail et
+  ligne d'état dessous (mode, modèle, crédits OpenRouter), réponses précédées de `●`, appels
+  d'outils `● Commande(cargo test)` avec leur résultat en retrait `⎿` (premières lignes, diff
+  numéroté, liste de tâches □ ■ ✓), indicateur animé `✻ Réflexion… (12 s)` pendant le travail et
   `✻ Terminé en 12 s` à la fin du tour. `CLAW_NO_SPINNER=1` retire l'indicateur animé.
 - `clear` (ou `cls`) efface l'écran, `exit` (ou `quit`) quitte.
 - `Échap` (ou `Ctrl+C`) interrompt le tour en cours ; ce que vous tapez pendant un tour est gardé :

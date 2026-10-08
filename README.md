@@ -1,7 +1,7 @@
 # Réécriture du Projet Claw Code
 
 <p align="center">
-  <strong>⭐ Le dépôt le plus rapide de l'histoire à dépasser 50 000 étoiles, atteignant ce jalon en seulement 2 heures après sa publication ⭐</strong>
+  <strong>Le dépôt le plus rapide de l'histoire à dépasser 50 000 étoiles, atteignant ce jalon en seulement 2 heures après sa publication</strong>
 </p>
 
 <p align="center">

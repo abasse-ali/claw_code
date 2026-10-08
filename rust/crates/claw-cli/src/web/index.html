@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Claw</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23f0601a'/%3E%3Ctext x='16' y='23' font-size='19' text-anchor='middle'%3E%F0%9F%A6%9E%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23f0601a'/%3E%3Cg transform='translate(4 4)' fill='none' stroke='%23fff' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M6 19c.3-5 2.3-9.6 6-13'/%3E%3Cpath d='M10.6 20c.3-5 2.3-9.6 6-13'/%3E%3Cpath d='M15.2 20.5c.3-4 1.8-7.6 4.3-10.3'/%3E%3C/g%3E%3C/svg%3E">
 <style>
   /* ------------------------------------------------------------------ thèmes */
   :root {
@@ -80,6 +80,7 @@
   .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
   .logo { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; font-size: 16px; flex: none;
     background: linear-gradient(135deg, #ff8a4c, #e8490c); box-shadow: 0 2px 10px rgba(255, 106, 40, .35); }
+  .logo svg { width: 62%; height: 62%; }
   .project { display: flex; flex-direction: column; min-width: 0; line-height: 1.2; }
   .project b { font-size: 14px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .project span { font-size: 11.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -288,7 +289,7 @@
 <body>
 <header class="top">
   <div class="brand">
-    <div class="logo" aria-hidden="true">🦞</div>
+    <div class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M6 19c.3-5 2.3-9.6 6-13"/><path d="M10.6 20c.3-5 2.3-9.6 6-13"/><path d="M15.2 20.5c.3-4 1.8-7.6 4.3-10.3"/></svg></div>
     <div class="project"><b id="project-name">Claw</b><span id="project-path"></span></div>
   </div>
   <div class="spacer"></div>
@@ -375,6 +376,7 @@
   ];
 
   // ---------------------------------------------------------------- icônes (SVG en ligne)
+  const LOGO_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M6 19c.3-5 2.3-9.6 6-13"/><path d="M10.6 20c.3-5 2.3-9.6 6-13"/><path d="M15.2 20.5c.3-4 1.8-7.6 4.3-10.3"/></svg>';
   const ICONS = {
     terminal: '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>',
     file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>',
@@ -1039,7 +1041,8 @@
     activePermission = null;
     logInner.textContent = "";
     const empty = el("div", "empty");
-    const logo = el("div", "logo", "🦞");
+    const logo = el("div", "logo");
+    logo.innerHTML = LOGO_SVG;
     const title = el("h1");
     title.innerHTML = 'Que construit-on dans <em id="empty-project">' + escapeHtml(basename(status.cwd) || "ce projet") + "</em> ?";
     empty.append(logo, title, el("p", null, "Claw lit, modifie et teste le code de ce dossier. Chaque action sensible vous est soumise."));
@@ -1151,7 +1154,7 @@
   }
   // Résumé court d'une mesure de /models bench pour le menu (détail en info-bulle).
   function shortMeasure(text) {
-    if (text.startsWith("⏸")) return "⏸ indisponible";
+    if (text.startsWith("‖")) return "‖ indisponible";
     if (text.startsWith("✗")) return "✗ incompatible";
     const tasks = text.match(/^(\d+\/\d+) tâches(?: · (\d+ s))?/);
     if (tasks) return tasks[1] + (tasks[2] ? " · " + tasks[2] : "");
@@ -1180,7 +1183,7 @@
         for (const model of models) {
           const extra = el("span");
           if (model.measured) {
-            const bad = model.measured.startsWith("✗") || model.measured.startsWith("⏸");
+            const bad = model.measured.startsWith("✗") || model.measured.startsWith("‖");
             const badge = el("span", "measured" + (bad ? " bad" : ""), shortMeasure(model.measured));
             badge.title = "Mesuré par /models bench : " + model.measured;
             extra.append(badge);
@@ -1316,7 +1319,7 @@
 
   // ---------------------------------------------------------------- état de l'agent
   function updateTitle() {
-    document.title = (pendingPermissions > 0 ? "⚠ Autorisation · " : status.busy ? "● " : "") + (basename(status.cwd) || "Claw") + " · Claw";
+    document.title = (pendingPermissions > 0 ? "▲ Autorisation · " : status.busy ? "● " : "") + (basename(status.cwd) || "Claw") + " · Claw";
   }
   function setActivity(text) {
     currentActivity = text;

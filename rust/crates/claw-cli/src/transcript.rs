@@ -1,5 +1,5 @@
-//! Affichage du terminal à la manière de Claude Code : réponses `⏺`, appels
-//! d'outils `⏺ Commande(cargo test)` suivis de leur résultat `  ⎿  …`, diffs
+//! Affichage du terminal à la manière de Claude Code : réponses `●`, appels
+//! d'outils `● Commande(cargo test)` suivis de leur résultat `  ⎿  …`, diffs
 //! numérotés et encadrés (accueil, demandes d'autorisation).
 
 use std::collections::VecDeque;
@@ -237,7 +237,7 @@ fn tool_argument(name: &str, input: &Value) -> Option<String> {
     Some(one_line)
 }
 
-/// `⏺ Commande(cargo test)` : ligne affichée quand le modèle appelle un outil.
+/// `● Commande(cargo test)` : ligne affichée quand le modèle appelle un outil.
 #[must_use]
 pub fn tool_call_line(name: &str, input: &str) -> String {
     let parsed: Value =
@@ -248,10 +248,10 @@ pub fn tool_call_line(name: &str, input: &str) -> String {
         .max(20);
     match tool_argument(name, &parsed) {
         Some(argument) if !argument.is_empty() => format!(
-            "{GREEN}⏺{RESET} {BOLD}{label}{RESET}({})",
+            "{GREEN}●{RESET} {BOLD}{label}{RESET}({})",
             clip(&argument, room)
         ),
-        _ => format!("{GREEN}⏺{RESET} {BOLD}{label}{RESET}"),
+        _ => format!("{GREEN}●{RESET} {BOLD}{label}{RESET}"),
     }
 }
 
@@ -739,9 +739,9 @@ fn todo_result(parsed: &Value) -> Vec<String> {
         .map(|todo| {
             let content = str_field(todo, &["content"]).unwrap_or("?");
             match str_field(todo, &["status"]) {
-                Some("completed") => format!("{GREEN}☒{RESET} {DIM}\x1b[9m{content}{RESET}"),
-                Some("in_progress") => format!("{ACCENT}◼{RESET} {BOLD}{content}{RESET}"),
-                _ => format!("☐ {content}"),
+                Some("completed") => format!("{GREEN}✓{RESET} {DIM}\x1b[9m{content}{RESET}"),
+                Some("in_progress") => format!("{ACCENT}■{RESET} {BOLD}{content}{RESET}"),
+                _ => format!("□ {content}"),
             }
         })
         .collect()
@@ -870,7 +870,7 @@ impl ThinkingDisplay {
     }
 }
 
-/// Préfixe le texte de l'assistant : `⏺ ` sur la première ligne d'une réponse,
+/// Préfixe le texte de l'assistant : `● ` sur la première ligne d'une réponse,
 /// deux espaces sur les suivantes. Les lignes vides ne sont écrites qu'entre
 /// deux lignes de texte (ni avant ni après la réponse).
 pub struct Prefixer {
@@ -885,7 +885,7 @@ pub struct Prefixer {
 impl Prefixer {
     #[must_use]
     pub fn assistant() -> Self {
-        Self::new("⏺", "")
+        Self::new("●", "")
     }
 
     #[must_use]
@@ -899,7 +899,7 @@ impl Prefixer {
         }
     }
 
-    /// Le prochain texte commence une nouvelle réponse (nouveau `⏺`).
+    /// Le prochain texte commence une nouvelle réponse (nouveau `●`).
     pub fn reset(&mut self) {
         self.first = true;
         self.blank.clear();
@@ -952,16 +952,16 @@ mod tests {
     #[test]
     fn tool_call_lines_name_the_action_and_its_target() {
         let line = strip_ansi(&tool_call_line("bash", r#"{"command":"cargo test"}"#));
-        assert_eq!(line, "⏺ Commande(cargo test)");
+        assert_eq!(line, "● Commande(cargo test)");
         let line = strip_ansi(&tool_call_line("read_file", r#"{"path":"src/main.rs"}"#));
-        assert_eq!(line, "⏺ Lecture(src/main.rs)");
+        assert_eq!(line, "● Lecture(src/main.rs)");
         let line = strip_ansi(&tool_call_line("TodoWrite", r#"{"todos":[]}"#));
-        assert_eq!(line, "⏺ Tâches");
+        assert_eq!(line, "● Tâches");
         let line = strip_ansi(&tool_call_line(
             "grep_search",
             r#"{"pattern":"fn main","path":"src"}"#,
         ));
-        assert_eq!(line, "⏺ Recherche(\"fn main\" dans src)");
+        assert_eq!(line, "● Recherche(\"fn main\" dans src)");
     }
 
     #[test]
@@ -1046,7 +1046,7 @@ mod tests {
         .to_string();
         assert_eq!(
             strip_ansi(&tool_result("TodoWrite", &output, false)),
-            "  ⎿  ☒ Lire\n     ◼ Écrire\n     ☐ Tester"
+            "  ⎿  ✓ Lire\n     ■ Écrire\n     □ Tester"
         );
     }
 
@@ -1059,7 +1059,7 @@ mod tests {
         prefixer.write(&mut out, "suite.\n").unwrap();
         prefixer.finish_line(&mut out).unwrap();
         let text = strip_ansi(&String::from_utf8(out).unwrap());
-        assert_eq!(text, "\n⏺ Bonjour,\n\n  voici la suite.\n");
+        assert_eq!(text, "\n● Bonjour,\n\n  voici la suite.\n");
 
         // Blocs Markdown successifs : une ligne vide entre eux, aucune à la fin.
         let mut out = Vec::new();
@@ -1068,7 +1068,7 @@ mod tests {
         prefixer.write(&mut out, "• un\n• deux\n\n").unwrap();
         prefixer.finish_line(&mut out).unwrap();
         let text = strip_ansi(&String::from_utf8(out).unwrap());
-        assert_eq!(text, "\n⏺ Titre :\n\n  • un\n  • deux\n");
+        assert_eq!(text, "\n● Titre :\n\n  • un\n  • deux\n");
     }
 
     #[test]

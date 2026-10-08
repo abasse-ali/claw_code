@@ -142,7 +142,7 @@ impl BenchResult {
         let reason = self.reason.as_deref().unwrap_or("incompatible");
         if !self.compatible {
             return if self.transient {
-                format!("⏸ indisponible pour l'instant ({reason})")
+                format!("‖ indisponible pour l'instant ({reason})")
             } else {
                 format!("✗ {reason}")
             };
@@ -725,7 +725,7 @@ pub fn run(args: &str, progress: &mut dyn FnMut(&str)) -> Result<String, String>
             match &failure {
                 None => format!("✓ compatible ({seconds:.0} s)"),
                 Some(failure) if failure.transient => {
-                    format!("⏸ indisponible pour l'instant ({})", failure.reason)
+                    format!("‖ indisponible pour l'instant ({})", failure.reason)
                 }
                 Some(failure) => format!("✗ {}", failure.reason),
             }
@@ -784,7 +784,7 @@ pub fn run(args: &str, progress: &mut dyn FnMut(&str)) -> Result<String, String>
                     TaskOutcome::Unavailable(cause) => {
                         result.skipped = u32::try_from(TASKS.len() - position).unwrap_or(0);
                         result.reason = Some(cause.clone());
-                        format!("⏸ non mesurée ({cause}) : tâches suivantes passées")
+                        format!("‖ non mesurée ({cause}) : tâches suivantes passées")
                     }
                 };
                 progress(&format!("  {model} · {} : {line}", task.id));
@@ -976,7 +976,7 @@ mod tests {
         assert_eq!(results[0].summary(), "3/3 tâches · 15 s");
         assert_eq!(
             results[4].summary(),
-            "⏸ indisponible pour l'instant (surchargé)"
+            "‖ indisponible pour l'instant (surchargé)"
         );
         assert_eq!(results[5].summary(), "✗ refusé");
     }
