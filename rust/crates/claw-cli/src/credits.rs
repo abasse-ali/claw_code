@@ -167,17 +167,25 @@ pub fn current_line(fresh: bool) -> Option<String> {
     }
 }
 
-/// Ligne courte tirée du cache seulement, sans requête réseau (ligne d'état
-/// sous la saisie).
+/// Forme compacte tirée du cache seulement, sans requête réseau, pour la
+/// ligne d'état sous la saisie : « 8,25 $ · 678/1000 gratuites ».
 #[must_use]
 pub fn cached_line() -> Option<String> {
     let cache = CACHE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match cache.as_ref() {
-        Some((_, Ok(status))) => Some(short_line(&live(status))),
-        _ => None,
+    let Some((_, Ok(status))) = cache.as_ref() else {
+        return None;
+    };
+    let status = live(status);
+    let mut parts = Vec::new();
+    if let Some(balance) = status.balance() {
+        parts.push(dollars(balance));
     }
+    if let Some(free) = status.free_requests {
+        parts.push(format!("{}/{} gratuites", free.remaining, free.limit));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// Rapport de `/credits`.

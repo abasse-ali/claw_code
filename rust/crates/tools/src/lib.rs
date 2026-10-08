@@ -127,6 +127,45 @@ impl GlobalToolRegistry {
         })
     }
 
+    /// Nom d'un outil tel que le registre l'attend, quand le modèle l'appelle
+    /// avec une autre casse ou sous son nom Claude Code (« Bash », « Read »,
+    /// « MultiEdit »…). `None` si l'outil est inconnu.
+    #[must_use]
+    pub fn resolve_tool_name(&self, name: &str) -> Option<String> {
+        let known = mvp_tool_specs()
+            .iter()
+            .map(|spec| spec.name.to_string())
+            .chain(
+                self.plugin_tools
+                    .iter()
+                    .map(|tool| tool.definition().name.clone()),
+            )
+            .chain(self.mcp_tools.iter().map(|tool| tool.name.clone()))
+            .collect::<Vec<_>>();
+        if known.iter().any(|candidate| candidate == name) {
+            return Some(name.to_string());
+        }
+        let claude = canonical_agent_tool_name(name);
+        if known.contains(&claude) {
+            return Some(claude);
+        }
+        let normalized = normalize_tool_name(name);
+        let short = match normalized.as_str() {
+            "read" => "read_file",
+            "write" => "write_file",
+            "edit" | "multiedit" | "multi_edit" => "edit_file",
+            "glob" => "glob_search",
+            "grep" => "grep_search",
+            _ => "",
+        };
+        if !short.is_empty() {
+            return Some(short.to_string());
+        }
+        known
+            .into_iter()
+            .find(|candidate| normalize_tool_name(candidate) == normalized)
+    }
+
     pub fn normalize_allowed_tools(
         &self,
         values: &[String],
@@ -4422,6 +4461,27 @@ mod tests {
             serde_json::from_str(&selected).expect("valid json");
         assert_eq!(selected_output["matches"][0], "Agent");
         assert_eq!(selected_output["matches"][1], "Skill");
+
+        let registry = super::GlobalToolRegistry::builtin();
+        assert_eq!(registry.resolve_tool_name("bash").as_deref(), Some("bash"));
+        assert_eq!(registry.resolve_tool_name("Bash").as_deref(), Some("bash"));
+        assert_eq!(
+            registry.resolve_tool_name("Read").as_deref(),
+            Some("read_file")
+        );
+        assert_eq!(
+            registry.resolve_tool_name("MultiEdit").as_deref(),
+            Some("edit_file")
+        );
+        assert_eq!(
+            registry.resolve_tool_name("GREP").as_deref(),
+            Some("grep_search")
+        );
+        assert_eq!(
+            registry.resolve_tool_name("todowrite").as_deref(),
+            Some("TodoWrite")
+        );
+        assert_eq!(registry.resolve_tool_name("inconnu"), None);
 
         let aliased = execute_tool("ToolSearch", &json!({"query": "AgentTool"}))
             .expect("ToolSearch should support tool aliases");

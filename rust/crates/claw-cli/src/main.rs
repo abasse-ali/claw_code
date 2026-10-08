@@ -4694,7 +4694,7 @@ fn permission_box_content(tool_name: &str, input: &str) -> (String, Vec<String>,
     let bold = |line: String| format!("{}{line}{}", transcript::BOLD, transcript::RESET);
     let proceed = "Voulez-vous continuer ?".to_string();
     match tool_name {
-        "bash" | "PowerShell" => {
+        "bash" | "Bash" | "PowerShell" => {
             let mut body: Vec<String> = wrap(field("command").unwrap_or_default())
                 .into_iter()
                 .map(bold)
@@ -4702,10 +4702,10 @@ fn permission_box_content(tool_name: &str, input: &str) -> (String, Vec<String>,
             if let Some(description) = field("description").filter(|text| !text.trim().is_empty()) {
                 body.extend(wrap(description).into_iter().map(dim));
             }
-            let title = if tool_name == "bash" {
-                "Commande shell"
-            } else {
+            let title = if tool_name == "PowerShell" {
                 "Commande PowerShell"
+            } else {
+                "Commande shell"
             };
             (title.to_string(), body, proceed)
         }
@@ -5180,6 +5180,8 @@ impl ApiClient for DefaultRuntimeClient {
                                 .map_err(|error| RuntimeError::new(error.to_string()))?;
                         }
                         if let Some((id, name, input)) = pending_tools.remove(&stop.index) {
+                            // « Bash », « Read »… (noms de Claude Code) : nom du registre.
+                            let name = self.tool_registry.resolve_tool_name(&name).unwrap_or(name);
                             if let Some(progress_reporter) = &self.progress_reporter {
                                 progress_reporter.mark_tool_phase(&name, &input);
                             }
@@ -5247,7 +5249,17 @@ impl ApiClient for DefaultRuntimeClient {
             let (_, response) =
                 runtime::interrupt::interruptible(self.chain.send(&build_complete, &mut notify))
                     .await?;
-            let events = response_to_events(response, out)?;
+            let events = response_to_events(response, out)?
+                .into_iter()
+                .map(|event| match event {
+                    AssistantEvent::ToolUse { id, name, input } => AssistantEvent::ToolUse {
+                        id,
+                        name: self.tool_registry.resolve_tool_name(&name).unwrap_or(name),
+                        input,
+                    },
+                    other => other,
+                })
+                .collect::<Vec<_>>();
             if let Some(observer) = &self.observer {
                 for event in &events {
                     match event {

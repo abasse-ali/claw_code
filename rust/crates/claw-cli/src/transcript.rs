@@ -989,6 +989,53 @@ impl ThinkingDisplay {
     }
 }
 
+/// Coupe une ligne colorée en morceaux d'au plus `width` caractères visibles,
+/// de préférence sur un espace.
+fn wrap_ansi(line: &str, width: usize) -> Vec<String> {
+    if width < 10 || visible_width(line) <= width {
+        return vec![line.to_string()];
+    }
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    let mut visible = 0;
+    // Dernier espace de la ligne en cours : (position dans `current`, caractères visibles avant).
+    let mut last_space: Option<(usize, usize)> = None;
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            current.push(ch);
+            if chars.peek() == Some(&'[') {
+                for next in chars.by_ref() {
+                    current.push(next);
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if visible == width {
+            if let Some((index, before)) = last_space.filter(|(_, before)| *before > width / 3) {
+                let rest = current.split_off(index);
+                pieces.push(std::mem::take(&mut current));
+                current = rest.strip_prefix(' ').unwrap_or(&rest).to_string();
+                visible -= before + 1;
+            } else {
+                pieces.push(std::mem::take(&mut current));
+                visible = 0;
+            }
+            last_space = None;
+        }
+        if ch == ' ' {
+            last_space = Some((current.len(), visible));
+        }
+        current.push(ch);
+        visible += 1;
+    }
+    pieces.push(current);
+    pieces
+}
+
 /// Préfixe le texte de l'assistant : `● ` sur la première ligne d'une réponse,
 /// deux espaces sur les suivantes. Les lignes vides ne sont écrites qu'entre
 /// deux lignes de texte (ni avant ni après la réponse).
@@ -1030,7 +1077,15 @@ impl Prefixer {
             let body = piece.trim_end_matches('\n').trim_end_matches('\r');
             if self.at_line_start {
                 if strip_ansi(body).trim().is_empty() {
-                    if !self.first && ends_line {
+                    // Une seule ligne vide entre deux blocs ; celles d'un bloc
+                    // de code (fond coloré) sont gardées telles quelles.
+                    let plain = !body.contains("48;");
+                    let repeated = plain
+                        && self
+                            .blank
+                            .last()
+                            .is_some_and(|previous| !previous.contains("48;"));
+                    if !self.first && ends_line && !repeated {
                         self.blank.push(body.to_string());
                     }
                     continue;
@@ -1044,6 +1099,19 @@ impl Prefixer {
                 } else {
                     write!(out, "  {}", self.style)?;
                 }
+                // Ligne plus large que le terminal : la suite reste en retrait.
+                let segments = wrap_ansi(body, terminal_width().saturating_sub(3));
+                for (index, segment) in segments.iter().enumerate() {
+                    if index > 0 {
+                        write!(out, "\n  {}", self.style)?;
+                    }
+                    write!(out, "{segment}")?;
+                }
+                if ends_line {
+                    writeln!(out, "{RESET}")?;
+                }
+                self.at_line_start = ends_line;
+                continue;
             }
             write!(out, "{body}")?;
             if ends_line {
@@ -1179,6 +1247,20 @@ mod tests {
         prefixer.finish_line(&mut out).unwrap();
         let text = strip_ansi(&String::from_utf8(out).unwrap());
         assert_eq!(text, "\n● Bonjour,\n\n  voici la suite.\n");
+
+        // Lignes vides répétées : une seule.
+        let mut out = Vec::new();
+        let mut prefixer = Prefixer::assistant();
+        prefixer.write(&mut out, "Bloc\n\n\n\nSuite\n").unwrap();
+        let text = strip_ansi(&String::from_utf8(out).unwrap());
+        assert_eq!(text, "\n● Bloc\n\n  Suite\n");
+
+        // Ligne trop longue : coupée sur un espace, la suite en retrait.
+        let long = "mot ".repeat(40);
+        let pieces = wrap_ansi(long.trim_end(), 30);
+        assert!(pieces.iter().all(|piece| visible_width(piece) <= 30));
+        assert_eq!(pieces.concat().replace(' ', ""), long.replace(' ', ""));
+        assert!(pieces[1].starts_with("mot"));
 
         // Blocs Markdown successifs : une ligne vide entre eux, aucune à la fin.
         let mut out = Vec::new();
