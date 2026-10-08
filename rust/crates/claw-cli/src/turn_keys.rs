@@ -97,9 +97,11 @@ impl Drop for TurnKeyListener {
 }
 
 fn notice(text: &str) {
-    let mut stderr = std::io::stderr();
-    let _ = write!(stderr, "\r\n\x1b[2m{text}\x1b[0m\r\n");
-    let _ = stderr.flush();
+    crate::live::suspend(|| {
+        let mut stderr = std::io::stderr();
+        let _ = write!(stderr, "\r\n\x1b[2m{text}\x1b[0m\r\n");
+        let _ = stderr.flush();
+    });
 }
 
 fn listen(stop: &AtomicBool, typed: &Mutex<TypeAhead>) {
@@ -149,7 +151,7 @@ fn listen(stop: &AtomicBool, typed: &Mutex<TypeAhead>) {
                 buffer.partial.pop();
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                buffer.partial.push(c)
+                buffer.partial.push(c);
             }
             _ => {}
         }

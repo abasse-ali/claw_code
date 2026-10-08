@@ -1,10 +1,6 @@
 use std::fmt::Write as FmtWrite;
-use std::io::{self, Write};
 
-use crossterm::cursor::{MoveToColumn, RestorePosition, SavePosition};
-use crossterm::style::{Color, Print, ResetColor, SetForegroundColor, Stylize};
-use crossterm::terminal::{Clear, ClearType};
-use crossterm::{execute, queue};
+use crossterm::style::{Color, Stylize};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
@@ -21,9 +17,6 @@ pub struct ColorTheme {
     quote: Color,
     table_border: Color,
     code_block_border: Color,
-    spinner_active: Color,
-    spinner_done: Color,
-    spinner_failed: Color,
 }
 
 impl Default for ColorTheme {
@@ -37,81 +30,7 @@ impl Default for ColorTheme {
             quote: Color::DarkGrey,
             table_border: Color::DarkCyan,
             code_block_border: Color::DarkGrey,
-            spinner_active: Color::Blue,
-            spinner_done: Color::Green,
-            spinner_failed: Color::Red,
         }
-    }
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Spinner {
-    frame_index: usize,
-}
-
-impl Spinner {
-    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn tick(
-        &mut self,
-        label: &str,
-        theme: &ColorTheme,
-        out: &mut impl Write,
-    ) -> io::Result<()> {
-        let frame = Self::FRAMES[self.frame_index % Self::FRAMES.len()];
-        self.frame_index += 1;
-        queue!(
-            out,
-            SavePosition,
-            MoveToColumn(0),
-            Clear(ClearType::CurrentLine),
-            SetForegroundColor(theme.spinner_active),
-            Print(format!("{frame} {label}")),
-            ResetColor,
-            RestorePosition
-        )?;
-        out.flush()
-    }
-
-    pub fn finish(
-        &mut self,
-        label: &str,
-        theme: &ColorTheme,
-        out: &mut impl Write,
-    ) -> io::Result<()> {
-        self.frame_index = 0;
-        execute!(
-            out,
-            MoveToColumn(0),
-            Clear(ClearType::CurrentLine),
-            SetForegroundColor(theme.spinner_done),
-            Print(format!("✔ {label}\n")),
-            ResetColor
-        )?;
-        out.flush()
-    }
-
-    pub fn fail(
-        &mut self,
-        label: &str,
-        theme: &ColorTheme,
-        out: &mut impl Write,
-    ) -> io::Result<()> {
-        self.frame_index = 0;
-        execute!(
-            out,
-            MoveToColumn(0),
-            Clear(ClearType::CurrentLine),
-            SetForegroundColor(theme.spinner_failed),
-            Print(format!("✘ {label}\n")),
-            ResetColor
-        )?;
-        out.flush()
     }
 }
 
@@ -240,11 +159,6 @@ impl TerminalRenderer {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    #[must_use]
-    pub fn color_theme(&self) -> &ColorTheme {
-        &self.color_theme
     }
 
     #[must_use]
@@ -589,15 +503,6 @@ impl TerminalRenderer {
 
         colored_output
     }
-
-    pub fn stream_markdown(&self, markdown: &str, out: &mut impl Write) -> io::Result<()> {
-        let rendered_markdown = self.markdown_to_ansi(markdown);
-        write!(out, "{rendered_markdown}")?;
-        if !rendered_markdown.ends_with('\n') {
-            writeln!(out)?;
-        }
-        out.flush()
-    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -696,7 +601,7 @@ fn strip_ansi(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{strip_ansi, MarkdownStreamState, Spinner, TerminalRenderer};
+    use super::{strip_ansi, MarkdownStreamState, TerminalRenderer};
 
     #[test]
     fn renders_markdown_with_styling_and_lists() {
@@ -780,21 +685,5 @@ mod tests {
             .push(&renderer, "```\n")
             .expect("closed code fence flushes");
         assert!(strip_ansi(&code).contains("fn main()"));
-    }
-
-    #[test]
-    fn spinner_advances_frames() {
-        let terminal_renderer = TerminalRenderer::new();
-        let mut spinner = Spinner::new();
-        let mut out = Vec::new();
-        spinner
-            .tick("Working", terminal_renderer.color_theme(), &mut out)
-            .expect("tick succeeds");
-        spinner
-            .tick("Working", terminal_renderer.color_theme(), &mut out)
-            .expect("tick succeeds");
-
-        let output = String::from_utf8_lossy(&out);
-        assert!(output.contains("Working"));
     }
 }

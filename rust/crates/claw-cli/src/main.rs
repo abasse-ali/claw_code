@@ -1,18 +1,20 @@
 mod acp;
+mod approval;
 mod bench;
 mod credits;
 mod init;
 mod input;
+mod live;
 mod mcp_cli;
 mod models;
 mod render;
 mod stream_json;
+mod transcript;
 mod turn_keys;
 mod web;
 
 use std::collections::BTreeSet;
 use std::env;
-use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::net::TcpListener;
@@ -38,7 +40,7 @@ use commands::{
 use compat_harness::{extract_manifest, UpstreamPaths};
 use init::initialize_repo;
 use plugins::{PluginManager, PluginManagerConfig};
-use render::{MarkdownStreamState, Spinner, TerminalRenderer};
+use render::{MarkdownStreamState, TerminalRenderer};
 use runtime::{
     clear_oauth_credentials, generate_pkce_pair, generate_state, load_system_prompt,
     parse_oauth_callback_request_target, save_oauth_credentials, ApiClient, ApiRequest,
@@ -151,7 +153,9 @@ fn install_interrupt_handler() {
                     }
                     last_press = Some(now);
                     runtime::interrupt::request_interrupt();
-                    eprintln!("\n⏹ Interruption du tour… (Ctrl+C à nouveau pour quitter claw)");
+                    live::suspend(|| {
+                        eprintln!("\n⏹ Interruption du tour… (Ctrl+C à nouveau pour quitter claw)");
+                    });
                 }
             });
         });
@@ -1484,7 +1488,13 @@ fn run_repl(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode)?;
     let mut editor = input::LineEditor::new("> ", slash_command_completion_candidates());
-    println!("{}", cli.startup_banner());
+    println!("{}\n", cli.startup_banner());
+    // Crédits lus en arrière-plan : la ligne d'état les montre dès qu'ils arrivent.
+    if credits::is_openrouter_model(&cli.model) {
+        thread::spawn(|| {
+            let _ = credits::account_status(false);
+        });
+    }
     match resume {
         Some(path) => {
             // La session vide créée au démarrage est remplacée par la session reprise.
@@ -1503,10 +1513,11 @@ fn run_repl(
             if !cli.typeahead.partial.is_empty() {
                 editor.set_initial_text(std::mem::take(&mut cli.typeahead.partial));
             }
+            editor.set_status(cli.status_line());
             editor.read_line()?
         } else {
             let next = cli.typeahead.lines.remove(0);
-            println!("> {next}");
+            println!("\x1b[38;5;245m> {next}\x1b[0m");
             input::ReadOutcome::Submit(next)
         };
         match outcome {
@@ -1515,7 +1526,13 @@ fn run_repl(
                 if trimmed.is_empty() {
                     continue;
                 }
-                if matches!(trimmed, "/exit" | "/quit") {
+                // « clear » ou « cls » seuls : efface l'écran (la conversation reste).
+                if matches!(trimmed, "clear" | "cls") {
+                    print!("\x1b[2J\x1b[3J\x1b[H");
+                    println!("{}\n", cli.startup_banner());
+                    continue;
+                }
+                if matches!(trimmed, "/exit" | "/quit" | "exit" | "quit") {
                     cli.persist_session()?;
                     cli.session_hook_end("exit");
                     break;
@@ -1589,6 +1606,15 @@ fn run_repl(
                 }
             }
             input::ReadOutcome::Cancel => {}
+            // Maj+Tab : mode suivant, le texte en cours de saisie est conservé.
+            input::ReadOutcome::CycleMode(text) => {
+                if let Err(error) = cli.cycle_permission_mode() {
+                    eprintln!("{}", render_cli_error(&error.to_string()));
+                }
+                if !text.is_empty() {
+                    editor.set_initial_text(text);
+                }
+            }
             input::ReadOutcome::Exit => {
                 cli.persist_session()?;
                 cli.session_hook_end("exit");
@@ -1675,6 +1701,7 @@ impl LiveCli {
         );
     }
 
+    /// Encadré d'accueil à la Claude Code, puis une astuce.
     fn startup_banner(&self) -> String {
         let color = io::stdout().is_terminal();
         let cwd = env::current_dir().ok();
@@ -1682,69 +1709,71 @@ impl LiveCli {
             || "<inconnu>".to_string(),
             |path| path.display().to_string(),
         );
-        let workspace_name = cwd
-            .as_ref()
-            .and_then(|path| path.file_name())
-            .and_then(|name| name.to_str())
-            .unwrap_or("workspace");
         let git_branch = status_context(Some(&self.session.path))
             .ok()
             .and_then(|context| context.git_branch);
-        let workspace_summary = git_branch.as_deref().map_or_else(
-            || workspace_name.to_string(),
-            |branch| format!("{workspace_name} · {branch}"),
-        );
         let has_claw_md = cwd
             .as_ref()
             .is_some_and(|path| path.join("CLAW.md").is_file());
-        let mut lines = vec![
+        let width = transcript::terminal_width().saturating_sub(1).clamp(40, 76);
+        let room = width.saturating_sub(16);
+        let (accent, bold, dim, reset) = (
+            transcript::ACCENT,
+            transcript::BOLD,
+            transcript::DIM,
+            transcript::RESET,
+        );
+        let mut rows = vec![
+            format!("{accent}✻{reset} Bienvenue dans {bold}Claw Code{reset} !"),
+            String::new(),
+            format!("  {dim}/help pour l'aide, /status pour l'état de la session{reset}"),
+            String::new(),
             format!(
-                "{} {}",
-                if color {
-                    "\x1b[1;38;5;45m🦞 Claw Code\x1b[0m"
-                } else {
-                    "Claw Code"
-                },
-                if color {
-                    "\x1b[2m· prêt\x1b[0m"
-                } else {
-                    "· prêt"
-                }
+                "  {dim}dossier :{reset} {}",
+                transcript::clip_start(&cwd_display, room)
             ),
-            format!("  Projet           {workspace_summary}"),
-            format!("  Dossier          {cwd_display}"),
-            format!("  Modèle           {}", self.model),
-            format!("  Permissions      {}", self.permission_mode.as_str()),
-            format!("  Session          {}", self.session.id),
-            format!(
-                "  Pour commencer   {}",
-                if has_claw_md {
-                    "décrivez une tâche · /help · /status"
-                } else {
-                    "/init · /help · /status"
-                }
-            ),
-            "  Édition          Tab complète · Échap ou Ctrl+C interrompt un tour · ce que vous tapez pendant un tour part ensuite"
-                .to_string(),
-            "  Multiligne       Maj+Entrée ou Ctrl+J insère un saut de ligne".to_string(),
         ];
-        if !has_claw_md {
-            lines.push(
-                "  Premier lancement /init crée CLAW.md, .claw.json et les fichiers de session"
-                    .to_string(),
-            );
+        if let Some(branch) = git_branch {
+            rows.push(format!(
+                "  {dim}branche :{reset} {}",
+                transcript::clip(&branch, room)
+            ));
         }
-        lines.join("\n")
+        rows.push(format!(
+            "  {dim}modèle  :{reset} {}",
+            transcript::clip(&self.model, room)
+        ));
+        let mut lines = transcript::boxed(&rows, width, accent);
+        lines.push(String::new());
+        if has_claw_md {
+            lines.push(format!(
+                " {dim}※ Astuce : Maj+Tab change de mode · Échap interrompt · Maj+Entrée ajoute une ligne{reset}"
+            ));
+        } else {
+            lines.extend([
+                " Pour bien commencer :".to_string(),
+                String::new(),
+                format!(" 1. Lancez {bold}/init{reset} pour créer CLAW.md, les consignes du projet"),
+                " 2. Décrivez une tâche : Claw lit, modifie, lance les commandes et vérifie"
+                    .to_string(),
+                " 3. Soyez aussi précis qu'avec un collègue pour de meilleurs résultats"
+                    .to_string(),
+                format!(
+                    " {dim}※ Maj+Tab change de mode · Échap interrompt · Maj+Entrée ajoute une ligne{reset}"
+                ),
+            ]);
+        }
+        let banner = lines.join("\n");
+        if color {
+            banner
+        } else {
+            transcript::strip_ansi(&banner)
+        }
     }
 
     fn run_turn(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let mut spinner = Spinner::new();
-        let mut stdout = io::stdout();
-        spinner.tick(
-            "🦀 Réflexion…",
-            TerminalRenderer::new().color_theme(),
-            &mut stdout,
-        )?;
+        let started = Instant::now();
+        live::start("Réflexion…");
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
         let (mut text, images) = take_image_attachments(input);
         if !self.pending_context.is_empty() {
@@ -1757,54 +1786,96 @@ impl LiveCli {
             self.runtime
                 .run_turn_with_images(text, images, Some(&mut permission_prompter));
         let typed = keys.finish();
+        live::stop();
+        transcript::flush_calls();
         self.typeahead.lines.extend(typed.lines);
         if !typed.partial.is_empty() {
             self.typeahead.partial = typed.partial;
         }
         match result {
             Ok(_) => {
-                spinner.finish(
-                    "✨ Terminé",
-                    TerminalRenderer::new().color_theme(),
-                    &mut stdout,
-                )?;
-                println!();
-                self.print_credits_line();
+                self.print_turn_footer(started.elapsed());
                 self.persist_session()?;
                 self.sync_permission_mode()?;
                 Ok(())
             }
             Err(error) if runtime::interrupt::is_interruption(&error.to_string()) => {
-                spinner.fail(
-                    "⏹ Tour interrompu",
-                    TerminalRenderer::new().color_theme(),
-                    &mut stdout,
-                )?;
-                println!();
+                // Un refus s'accroche sous l'appel refusé ; une interruption
+                // (Échap pendant la réponse) se détache du texte.
+                let (gap, message) = if permission_prompter.refused {
+                    ("", "Refusé · dites à Claw comment continuer")
+                } else {
+                    ("\n", "Interrompu · que doit faire Claw maintenant ?")
+                };
+                println!(
+                    "{gap}  ⎿  {}{message}{}\n",
+                    transcript::RED,
+                    transcript::RESET
+                );
                 self.persist_session()?;
                 Ok(())
             }
-            Err(error) => {
-                spinner.fail(
-                    "❌ Échec de la requête",
-                    TerminalRenderer::new().color_theme(),
-                    &mut stdout,
-                )?;
-                Err(Box::new(error))
-            }
+            Err(error) => Err(Box::new(error)),
         }
     }
 
-    /// Crédits `OpenRouter` après chaque réponse (`CLAW_CREDITS=0` pour masquer).
-    fn print_credits_line(&self) {
-        if !credits::is_openrouter_model(&self.model)
-            || env::var("CLAW_CREDITS").is_ok_and(|value| value.trim() == "0")
+    /// `✻ Terminé en 12 s · OpenRouter : 8,25 $ restants · …` après chaque
+    /// réponse (`CLAW_CREDITS=0` masque les crédits).
+    fn print_turn_footer(&self, elapsed: Duration) {
+        let mut parts = vec![format!("Terminé en {}", format_elapsed(elapsed))];
+        if credits::is_openrouter_model(&self.model)
+            && !env::var("CLAW_CREDITS").is_ok_and(|value| value.trim() == "0")
         {
-            return;
+            if let Some(line) = credits::current_line(true) {
+                parts.push(format!("OpenRouter : {line}"));
+            }
         }
-        if let Some(line) = credits::current_line(true) {
-            println!("\x1b[2mOpenRouter : {line}\x1b[0m");
+        println!(
+            "\n{}✻ {}{}\n",
+            transcript::DIM,
+            parts.join(" · "),
+            transcript::RESET
+        );
+    }
+
+    /// Ligne d'état sous la saisie : mode de permission, modèle, crédits.
+    fn status_line(&self) -> String {
+        let mode = match self.permission_mode {
+            PermissionMode::Prompt => "⏵ demander avant d'agir",
+            PermissionMode::WorkspaceWrite => "⏵⏵ éditions acceptées",
+            PermissionMode::ReadOnly => "⏸ mode plan",
+            PermissionMode::DangerFullAccess | PermissionMode::Allow => "⚠ accès complet",
+        };
+        let mut line = format!("  {mode} (Maj+Tab pour changer) · {}", self.model);
+        if credits::is_openrouter_model(&self.model) {
+            if let Some(credits) = credits::cached_line() {
+                line.push_str(" · ");
+                line.push_str(&credits);
+            }
         }
+        line
+    }
+
+    /// Maj+Tab : demander → éditions acceptées → plan → demander.
+    fn cycle_permission_mode(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let next = match self.permission_mode {
+            PermissionMode::Prompt => PermissionMode::WorkspaceWrite,
+            PermissionMode::WorkspaceWrite => PermissionMode::ReadOnly,
+            _ => PermissionMode::Prompt,
+        };
+        let session = self.runtime.session().clone();
+        self.runtime = build_runtime(
+            session,
+            self.model.clone(),
+            self.system_prompt.clone(),
+            true,
+            true,
+            self.allowed_tools.clone(),
+            next,
+            None,
+        )?;
+        self.permission_mode = next;
+        Ok(())
     }
 
     fn run_turn_with_output(
@@ -3129,7 +3200,9 @@ fn render_repl_help() -> String {
         "  Pour commencer       décrivez une tâche en langage courant, ou utilisez les commandes ci-dessous."
             .to_string(),
         "  Essentiel            /help · /status · /model · /permissions · /compact".to_string(),
-        "  Quitter              /exit ou /quit".to_string(),
+        "  Quitter              exit, /exit ou /quit".to_string(),
+        "  Mode                 Maj+Tab : demander → éditions acceptées → plan".to_string(),
+        "  Effacer l'écran      clear (la conversation est gardée)".to_string(),
         "  Mode vim             /vim active l'édition modale".to_string(),
         "  Historique           Haut/Bas rappelle les demandes précédentes".to_string(),
         "  Complétion           Tab parcourt les commandes correspondantes".to_string(),
@@ -4318,16 +4391,97 @@ const PLAN_MODE_PROMPT: &str = "# Plan mode
 
 struct CliPermissionPrompter {
     current_mode: PermissionMode,
+    /// L'utilisateur a refusé (Échap, « Non ») : le tour s'arrête pour sa consigne.
+    refused: bool,
 }
 
 impl CliPermissionPrompter {
     fn new(current_mode: PermissionMode) -> Self {
-        Self { current_mode }
+        Self {
+            current_mode,
+            refused: false,
+        }
     }
-}
 
-impl runtime::PermissionPrompter for CliPermissionPrompter {
-    fn decide(
+    /// « Oui, toujours » : règle enregistrée pour le projet (ou la session).
+    fn allow_always(rule: &str) -> runtime::PermissionPromptDecision {
+        let note = if rule_is_session_only(rule) {
+            format!("Règle « {rule} » active pour cette session")
+        } else {
+            match env::current_dir()
+                .map_err(|error| error.to_string())
+                .and_then(|cwd| persist_allow_rule(&cwd, rule))
+            {
+                Ok(path) => format!(
+                    "Règle « {rule} » enregistrée dans {}",
+                    transcript::display_path(&path.display().to_string())
+                ),
+                Err(error) => format!(
+                    "Règle « {rule} » active pour cette session (non enregistrée : {error})"
+                ),
+            }
+        };
+        println!("  ⎿  {}{note}{}", transcript::DIM, transcript::RESET);
+        runtime::PermissionPromptDecision::AllowAlways {
+            rule: rule.to_string(),
+        }
+    }
+
+    /// Encadré avec choix aux flèches (terminal interactif).
+    fn decide_with_menu(
+        &mut self,
+        request: &runtime::PermissionRequest,
+    ) -> runtime::PermissionPromptDecision {
+        let plan = request.tool_name == "ExitPlanMode";
+        if plan {
+            print_proposed_plan(&request.input);
+        }
+        let (title, body, question) = permission_box_content(&request.tool_name, &request.input);
+        let rule = request.suggested_rule.clone().filter(|_| !plan);
+        let mut options = vec!["Oui".to_string()];
+        if let Some(rule) = &rule {
+            options.push(format!(
+                "Oui, et ne plus demander pour {rule} {}",
+                if rule_is_session_only(rule) {
+                    "pendant cette session"
+                } else {
+                    "dans ce projet"
+                }
+            ));
+        }
+        options.push(if plan {
+            "Non, continuer à planifier (Échap)".to_string()
+        } else {
+            "Non, et dire à Claw quoi faire autrement (Échap)".to_string()
+        });
+        let answer = match approval::ask(&title, &body, &question, &options) {
+            Ok(answer) => answer,
+            Err(error) => {
+                return runtime::PermissionPromptDecision::Deny {
+                    reason: format!("échec de la demande d'approbation : {error}"),
+                }
+            }
+        };
+        match (answer, &rule) {
+            (approval::Answer::Pick(0), _) => runtime::PermissionPromptDecision::Allow,
+            (approval::Answer::Pick(1), Some(rule)) => Self::allow_always(rule),
+            _ => {
+                // Comme dans Claude Code : le tour s'arrête et l'utilisateur dit
+                // quoi faire à la place.
+                self.refused = true;
+                runtime::interrupt::request_interrupt();
+                runtime::PermissionPromptDecision::Deny {
+                    reason: format!(
+                        "l'utilisateur a refusé l'outil '{}' ; attendez sa consigne avant de continuer",
+                        request.tool_name
+                    ),
+                }
+            }
+        }
+    }
+
+    /// Question en mode texte (entrée non interactive) : o, t, n ou une consigne.
+    fn decide_with_text(
         &mut self,
         request: &runtime::PermissionRequest,
     ) -> runtime::PermissionPromptDecision {
@@ -4365,20 +4519,7 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
         match parse_permission_answer(&response) {
             PermissionAnswer::Once => runtime::PermissionPromptDecision::Allow,
             PermissionAnswer::Always => match &request.suggested_rule {
-                Some(rule) => {
-                    if !rule_is_session_only(rule) {
-                        match env::current_dir()
-                            .map_err(|error| error.to_string())
-                            .and_then(|cwd| persist_allow_rule(&cwd, rule))
-                        {
-                            Ok(path) => println!("  Règle `{rule}` ajoutée à {}", path.display()),
-                            Err(error) => println!(
-                                "  Règle `{rule}` active pour cette session (non enregistrée : {error})"
-                            ),
-                        }
-                    }
-                    runtime::PermissionPromptDecision::AllowAlways { rule: rule.clone() }
-                }
+                Some(rule) => Self::allow_always(rule),
                 None => runtime::PermissionPromptDecision::Allow,
             },
             PermissionAnswer::Deny => runtime::PermissionPromptDecision::Deny {
@@ -4393,6 +4534,151 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
                     request.tool_name
                 ),
             },
+        }
+    }
+}
+
+impl runtime::PermissionPrompter for CliPermissionPrompter {
+    fn decide(
+        &mut self,
+        request: &runtime::PermissionRequest,
+    ) -> runtime::PermissionPromptDecision {
+        live::hide();
+        transcript::print_call(&request.tool_name, &request.input);
+        if approval::interactive() {
+            self.decide_with_menu(request)
+        } else {
+            self.decide_with_text(request)
+        }
+    }
+}
+
+/// Plan proposé (`ExitPlanMode`), affiché en entier avant la question.
+fn print_proposed_plan(input: &str) {
+    let plan = serde_json::from_str::<serde_json::Value>(input)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("plan")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .filter(|plan| !plan.trim().is_empty());
+    if let Some(plan) = plan {
+        let rendered = TerminalRenderer::new().markdown_to_ansi(&plan);
+        let mut out = io::stdout();
+        let mut answer = transcript::Prefixer::assistant();
+        let _ = answer.write(&mut out, &rendered);
+        let _ = answer.finish_line(&mut out);
+        println!();
+    }
+}
+
+/// Titre, corps (lignes prêtes à encadrer) et question d'une autorisation.
+fn permission_box_content(tool_name: &str, input: &str) -> (String, Vec<String>, String) {
+    let value = serde_json::from_str::<serde_json::Value>(input).unwrap_or_default();
+    let field = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
+    let width = approval::box_width().saturating_sub(6);
+    let wrap = |text: &str| transcript::wrap(text, width);
+    let dim = |line: String| format!("{}{line}{}", transcript::DIM, transcript::RESET);
+    let bold = |line: String| format!("{}{line}{}", transcript::BOLD, transcript::RESET);
+    let proceed = "Voulez-vous continuer ?".to_string();
+    match tool_name {
+        "bash" | "PowerShell" => {
+            let mut body: Vec<String> = wrap(field("command").unwrap_or_default())
+                .into_iter()
+                .map(bold)
+                .collect();
+            if let Some(description) = field("description").filter(|text| !text.trim().is_empty()) {
+                body.extend(wrap(description).into_iter().map(dim));
+            }
+            let title = if tool_name == "bash" {
+                "Commande shell"
+            } else {
+                "Commande PowerShell"
+            };
+            (title.to_string(), body, proceed)
+        }
+        "edit_file" => {
+            let raw = field("path").unwrap_or("?");
+            let old_string = field("old_string").unwrap_or_default();
+            let new_string = field("new_string").unwrap_or_default();
+            // Lignes complètes du fichier actuel, numérotées.
+            let expanded = fs::read_to_string(raw)
+                .ok()
+                .and_then(|file| transcript::expand_to_lines(&file, old_string, new_string));
+            let (first, old_text, new_text) = match &expanded {
+                Some((first, old_block, new_block)) => {
+                    (Some(*first), old_block.as_str(), new_block.as_str())
+                }
+                None => (None, old_string, new_string),
+            };
+            let mut body = vec![bold(transcript::display_path(raw))];
+            body.extend(transcript::render_diff(
+                old_text, new_text, first, None, 14, width,
+            ));
+            (
+                "Modifier un fichier".to_string(),
+                body,
+                "Appliquer cette modification ?".to_string(),
+            )
+        }
+        "write_file" => {
+            let raw = field("path").unwrap_or("?");
+            let content = field("content").unwrap_or_default();
+            let lines: Vec<&str> = content.lines().collect();
+            let exists = Path::new(raw).exists();
+            let mut body = vec![format!(
+                "{} {}",
+                bold(transcript::display_path(raw)),
+                dim(format!("({} lignes)", lines.len()))
+            )];
+            body.extend(transcript::numbered(&lines, 1, 10, width));
+            if exists {
+                (
+                    "Réécrire un fichier".to_string(),
+                    body,
+                    "Remplacer ce fichier ?".to_string(),
+                )
+            } else {
+                (
+                    "Créer un fichier".to_string(),
+                    body,
+                    "Créer ce fichier ?".to_string(),
+                )
+            }
+        }
+        "WebFetch" => {
+            let mut body: Vec<String> = wrap(field("url").unwrap_or("?"))
+                .into_iter()
+                .map(bold)
+                .collect();
+            if let Some(prompt) = field("prompt") {
+                body.extend(wrap(prompt).into_iter().take(4).map(dim));
+            }
+            ("Lire une page web".to_string(), body, proceed)
+        }
+        "Agent" => {
+            let mut body: Vec<String> = wrap(field("description").unwrap_or("sous-agent"))
+                .into_iter()
+                .map(bold)
+                .collect();
+            if let Some(prompt) = field("prompt") {
+                body.extend(wrap(prompt).into_iter().take(6).map(dim));
+            }
+            ("Lancer un sous-agent".to_string(), body, proceed)
+        }
+        "ExitPlanMode" => (
+            "Plan prêt".to_string(),
+            vec![dim(
+                "Approuver passe en mode « éditions acceptées » pour l'appliquer.".to_string(),
+            )],
+            "Approuver ce plan ?".to_string(),
+        ),
+        _ => {
+            let summary = describe_permission_target(tool_name, input);
+            let body = wrap(&summary).into_iter().take(10).collect();
+            (format!("Outil {tool_name}"), body, proceed)
         }
     }
 }
@@ -4609,7 +4895,9 @@ fn resolve_cli_auth_source() -> Result<AuthSource, Box<dyn std::error::Error>> {
 impl ApiClient for DefaultRuntimeClient {
     fn summarize(&mut self, system_prompt: &str, transcript: &str) -> Option<String> {
         if self.emit_output {
-            println!("\n⟳ Contexte presque plein : résumé de la conversation en cours…");
+            live::suspend(|| {
+                println!("\n⟳ Contexte presque plein : résumé de la conversation en cours…");
+            });
         }
         let emit = self.emit_output;
         let observer = self.observer.clone();
@@ -4630,7 +4918,7 @@ impl ApiClient for DefaultRuntimeClient {
 
     fn notify(&mut self, notice: &str) {
         if self.emit_output {
-            println!("⟳ {notice}");
+            live::suspend(|| println!("⟳ {notice}"));
         }
         if let Some(observer) = &self.observer {
             observer.notice(notice);
@@ -4661,6 +4949,9 @@ impl ApiClient for DefaultRuntimeClient {
         let emit = self.emit_output;
         let observer = self.observer.clone();
         let mut notify = move |text: &str| notify_fallback(emit, observer.as_ref(), text);
+        if emit {
+            live::show("Réflexion…");
+        }
 
         self.runtime.block_on(async {
             let opened =
@@ -4670,21 +4961,19 @@ impl ApiClient for DefaultRuntimeClient {
             credits::note_request(&opened.model);
             let mut stream = opened.stream;
             let mut first_event = opened.first_event;
-            let mut stdout = io::stdout();
+            let mut stdout = live::LiveStdout::new();
             let mut sink = io::sink();
-            let out: &mut dyn Write = if self.emit_output {
-                &mut stdout
-            } else {
-                &mut sink
-            };
+            let out: &mut dyn Write = if emit { &mut stdout } else { &mut sink };
             let renderer = TerminalRenderer::new();
             let mut markdown_stream = MarkdownStreamState::default();
+            // Réponse préfixée `⏺`, raisonnement résumé en une ligne `∴`.
+            let mut answer = transcript::Prefixer::assistant();
+            let mut reasoning = transcript::ThinkingDisplay::new();
             let mut events = Vec::new();
             // Indexé par bloc : les modèles compatibles OpenAI émettent souvent
             // plusieurs appels d'outils en parallèle dont les deltas s'entrelacent.
             let mut pending_tools = PendingTools::new();
             let mut saw_stop = false;
-            let mut thinking_open = false;
             let mut signed_thinking = SignedThinking::new();
 
             loop {
@@ -4726,17 +5015,17 @@ impl ApiClient for DefaultRuntimeClient {
                     ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
                         ContentBlockDelta::TextDelta { text } => {
                             if !text.is_empty() {
-                                if thinking_open {
-                                    thinking_open = false;
-                                    writeln!(out, "\x1b[0m\n")
-                                        .map_err(|error| RuntimeError::new(error.to_string()))?;
-                                }
+                                reasoning
+                                    .close(out)
+                                    .map_err(|error| RuntimeError::new(error.to_string()))?;
                                 if let Some(progress_reporter) = &self.progress_reporter {
                                     progress_reporter.mark_text_phase(&text);
                                 }
+                                // Un bloc complet : la ligne vide qui le sépare du
+                                // suivant est retirée par le rendu, on la remet.
                                 if let Some(rendered) = markdown_stream.push(&renderer, &text) {
-                                    write!(out, "{rendered}")
-                                        .and_then(|()| out.flush())
+                                    answer
+                                        .write(out, &format!("{rendered}\n\n"))
                                         .map_err(|error| RuntimeError::new(error.to_string()))?;
                                 }
                                 if let Some(observer) = &self.observer {
@@ -4754,13 +5043,8 @@ impl ApiClient for DefaultRuntimeClient {
                             if let Some(entry) = signed_thinking.get_mut(&delta.index) {
                                 entry.0.push_str(&thinking);
                             }
-                            if !thinking_open {
-                                thinking_open = true;
-                                write!(out, "\x1b[2;3m💭 ")
-                                    .map_err(|error| RuntimeError::new(error.to_string()))?;
-                            }
-                            write!(out, "{thinking}")
-                                .and_then(|()| out.flush())
+                            reasoning
+                                .push(out, &thinking)
                                 .map_err(|error| RuntimeError::new(error.to_string()))?;
                             if let Some(observer) = &self.observer {
                                 observer.thinking_delta(&thinking);
@@ -4774,24 +5058,27 @@ impl ApiClient for DefaultRuntimeClient {
                     },
                     ApiStreamEvent::ContentBlockStop(stop) => {
                         finish_signed_thinking(stop.index, &mut signed_thinking, &mut events);
-                        if thinking_open {
-                            thinking_open = false;
-                            writeln!(out, "\x1b[0m")
-                                .map_err(|error| RuntimeError::new(error.to_string()))?;
-                        }
+                        reasoning
+                            .close(out)
+                            .map_err(|error| RuntimeError::new(error.to_string()))?;
                         if let Some(rendered) = markdown_stream.flush(&renderer) {
-                            write!(out, "{rendered}")
-                                .and_then(|()| out.flush())
+                            answer
+                                .write(out, &rendered)
                                 .map_err(|error| RuntimeError::new(error.to_string()))?;
                         }
                         if let Some((id, name, input)) = pending_tools.remove(&stop.index) {
                             if let Some(progress_reporter) = &self.progress_reporter {
                                 progress_reporter.mark_tool_phase(&name, &input);
                             }
-                            // Display tool call now that input is fully accumulated
-                            writeln!(out, "\n{}", format_tool_call_start(&name, &input))
-                                .and_then(|()| out.flush())
+                            // L'appel s'affiche juste avant son exécution (ou sa
+                            // demande d'autorisation), son résultat dessous.
+                            answer
+                                .finish_line(out)
                                 .map_err(|error| RuntimeError::new(error.to_string()))?;
+                            answer.reset();
+                            if emit {
+                                transcript::queue_call(&name, &input);
+                            }
                             if let Some(observer) = &self.observer {
                                 observer.tool_call(&name, &input);
                             }
@@ -4809,14 +5096,20 @@ impl ApiClient for DefaultRuntimeClient {
                     ApiStreamEvent::MessageStop(_) => {
                         saw_stop = true;
                         if let Some(rendered) = markdown_stream.flush(&renderer) {
-                            write!(out, "{rendered}")
-                                .and_then(|()| out.flush())
+                            answer
+                                .write(out, &rendered)
                                 .map_err(|error| RuntimeError::new(error.to_string()))?;
                         }
                         events.push(AssistantEvent::MessageStop);
                     }
                 }
             }
+            reasoning
+                .close(out)
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            answer
+                .finish_line(out)
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
 
             if !saw_stop
                 && events.iter().any(|event| {
@@ -4858,6 +5151,16 @@ impl ApiClient for DefaultRuntimeClient {
             }
             Ok(events)
         })
+    }
+}
+
+/// Durée lisible : `8 s`, `2 min 05 s`.
+fn format_elapsed(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    if seconds < 60 {
+        format!("{} s", seconds.max(1))
+    } else {
+        format!("{} min {:02} s", seconds / 60, seconds % 60)
     }
 }
 
@@ -4951,7 +5254,7 @@ fn take_image_attachments(input: &str) -> (String, Vec<runtime::attachments::Ima
 /// Signale une bascule de modèle (terminal et interface web).
 fn notify_fallback(emit: bool, observer: Option<&SharedObserver>, text: &str) {
     if emit {
-        eprintln!("\n⚠ {text}");
+        live::suspend(|| eprintln!("\n⚠ {text}"));
     }
     if let Some(observer) = observer {
         observer.notice(text);
@@ -5096,94 +5399,6 @@ fn edit_distance(left: &str, right: &str) -> usize {
     previous[right_chars.len()]
 }
 
-fn format_tool_call_start(name: &str, input: &str) -> String {
-    let parsed: serde_json::Value =
-        serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()));
-
-    let detail = match name {
-        "bash" | "Bash" => format_bash_call(&parsed),
-        "read_file" | "Read" => {
-            let path = extract_tool_path(&parsed);
-            format!("\x1b[2m📄 Lecture de {path}…\x1b[0m")
-        }
-        "write_file" | "Write" => {
-            let path = extract_tool_path(&parsed);
-            let lines = parsed
-                .get("content")
-                .and_then(|value| value.as_str())
-                .map_or(0, |content| content.lines().count());
-            format!("\x1b[1;32m✏️ Écriture de {path}\x1b[0m \x1b[2m({lines} lignes)\x1b[0m")
-        }
-        "edit_file" | "Edit" => {
-            let path = extract_tool_path(&parsed);
-            let old_value = parsed
-                .get("old_string")
-                .or_else(|| parsed.get("oldString"))
-                .and_then(|value| value.as_str())
-                .unwrap_or_default();
-            let new_value = parsed
-                .get("new_string")
-                .or_else(|| parsed.get("newString"))
-                .and_then(|value| value.as_str())
-                .unwrap_or_default();
-            format!(
-                "\x1b[1;33m📝 Modification de {path}\x1b[0m{}",
-                format_patch_preview(old_value, new_value)
-                    .map(|preview| format!("\n{preview}"))
-                    .unwrap_or_default()
-            )
-        }
-        "glob_search" | "Glob" => format_search_start("🔎 Glob", &parsed),
-        "grep_search" | "Grep" => format_search_start("🔎 Grep", &parsed),
-        "web_search" | "WebSearch" => parsed
-            .get("query")
-            .and_then(|value| value.as_str())
-            .unwrap_or("?")
-            .to_string(),
-        _ => summarize_tool_payload(input),
-    };
-
-    let border = "─".repeat(name.len() + 8);
-    format!(
-        "\x1b[38;5;245m╭─ \x1b[1;36m{name}\x1b[0;38;5;245m ─╮\x1b[0m\n\x1b[38;5;245m│\x1b[0m {detail}\n\x1b[38;5;245m╰{border}╯\x1b[0m"
-    )
-}
-
-fn format_tool_result(name: &str, output: &str, is_error: bool) -> String {
-    let icon = if is_error {
-        "\x1b[1;31m✗\x1b[0m"
-    } else {
-        "\x1b[1;32m✓\x1b[0m"
-    };
-    if is_error {
-        let summary = truncate_for_summary(output.trim(), 160);
-        return if summary.is_empty() {
-            format!("{icon} \x1b[38;5;245m{name}\x1b[0m")
-        } else {
-            format!("{icon} \x1b[38;5;245m{name}\x1b[0m\n\x1b[38;5;203m{summary}\x1b[0m")
-        };
-    }
-
-    let parsed: serde_json::Value =
-        serde_json::from_str(output).unwrap_or(serde_json::Value::String(output.to_string()));
-    match name {
-        "bash" | "Bash" => format_bash_result(icon, &parsed),
-        "read_file" | "Read" => format_read_result(icon, &parsed),
-        "write_file" | "Write" => format_write_result(icon, &parsed),
-        "edit_file" | "Edit" => format_edit_result(icon, &parsed),
-        "glob_search" | "Glob" => format_glob_result(icon, &parsed),
-        "grep_search" | "Grep" => format_grep_result(icon, &parsed),
-        _ => format_generic_tool_result(icon, name, &parsed),
-    }
-}
-
-const DISPLAY_TRUNCATION_NOTICE: &str =
-    "\x1b[2m… sortie tronquée à l'affichage ; le résultat complet est conservé dans la session.\x1b[0m";
-const READ_DISPLAY_MAX_LINES: usize = 80;
-const READ_DISPLAY_MAX_CHARS: usize = 6_000;
-const TOOL_OUTPUT_DISPLAY_MAX_LINES: usize = 60;
-const TOOL_OUTPUT_DISPLAY_MAX_CHARS: usize = 4_000;
-
 fn extract_tool_path(parsed: &serde_json::Value) -> String {
     let raw = parsed
         .get("file_path")
@@ -5204,281 +5419,10 @@ fn extract_tool_path(parsed: &serde_json::Value) -> String {
         .unwrap_or_else(|| cleaned.to_string())
 }
 
-fn format_search_start(label: &str, parsed: &serde_json::Value) -> String {
-    let pattern = parsed
-        .get("pattern")
-        .and_then(|value| value.as_str())
-        .unwrap_or("?");
-    let scope = parsed
-        .get("path")
-        .and_then(|value| value.as_str())
-        .unwrap_or(".");
-    format!("{label} {pattern}\n\x1b[2mdans {scope}\x1b[0m")
-}
-
-fn format_patch_preview(old_value: &str, new_value: &str) -> Option<String> {
-    if old_value.is_empty() && new_value.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "\x1b[38;5;203m- {}\x1b[0m\n\x1b[38;5;70m+ {}\x1b[0m",
-        truncate_for_summary(first_visible_line(old_value), 72),
-        truncate_for_summary(first_visible_line(new_value), 72)
-    ))
-}
-
-fn format_bash_call(parsed: &serde_json::Value) -> String {
-    let command = parsed
-        .get("command")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    if command.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\x1b[48;5;236;38;5;255m $ {} \x1b[0m",
-            truncate_for_summary(command, 160)
-        )
-    }
-}
-
 fn first_visible_line(text: &str) -> &str {
     text.lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or(text)
-}
-
-fn format_bash_result(icon: &str, parsed: &serde_json::Value) -> String {
-    let mut lines = vec![format!("{icon} \x1b[38;5;245mbash\x1b[0m")];
-    if let Some(task_id) = parsed
-        .get("backgroundTaskId")
-        .and_then(|value| value.as_str())
-    {
-        write!(&mut lines[0], " en arrière-plan ({task_id})").expect("write to string");
-    } else if let Some(status) = parsed
-        .get("returnCodeInterpretation")
-        .and_then(|value| value.as_str())
-        .filter(|status| !status.is_empty())
-    {
-        write!(&mut lines[0], " {status}").expect("write to string");
-    }
-
-    if let Some(stdout) = parsed.get("stdout").and_then(|value| value.as_str()) {
-        if !stdout.trim().is_empty() {
-            lines.push(truncate_output_for_display(
-                stdout,
-                TOOL_OUTPUT_DISPLAY_MAX_LINES,
-                TOOL_OUTPUT_DISPLAY_MAX_CHARS,
-            ));
-        }
-    }
-    if let Some(stderr) = parsed.get("stderr").and_then(|value| value.as_str()) {
-        if !stderr.trim().is_empty() {
-            lines.push(format!(
-                "\x1b[38;5;203m{}\x1b[0m",
-                truncate_output_for_display(
-                    stderr,
-                    TOOL_OUTPUT_DISPLAY_MAX_LINES,
-                    TOOL_OUTPUT_DISPLAY_MAX_CHARS,
-                )
-            ));
-        }
-    }
-
-    lines.join("\n\n")
-}
-
-fn format_read_result(icon: &str, parsed: &serde_json::Value) -> String {
-    let file = parsed.get("file").unwrap_or(parsed);
-    let path = extract_tool_path(file);
-    let start_line = file
-        .get("startLine")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(1);
-    let num_lines = file
-        .get("numLines")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    let total_lines = file
-        .get("totalLines")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(num_lines);
-    let content = file
-        .get("content")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let end_line = start_line.saturating_add(num_lines.saturating_sub(1));
-
-    format!(
-        "{icon} \x1b[2m📄 Lu {path} (lignes {}-{} sur {})\x1b[0m\n{}",
-        start_line,
-        end_line.max(start_line),
-        total_lines,
-        truncate_output_for_display(content, READ_DISPLAY_MAX_LINES, READ_DISPLAY_MAX_CHARS)
-    )
-}
-
-fn format_write_result(icon: &str, parsed: &serde_json::Value) -> String {
-    let path = extract_tool_path(parsed);
-    let kind = parsed
-        .get("type")
-        .and_then(|value| value.as_str())
-        .unwrap_or("write");
-    let line_count = parsed
-        .get("content")
-        .and_then(|value| value.as_str())
-        .map_or(0, |content| content.lines().count());
-    format!(
-        "{icon} \x1b[1;32m✏️ {} {path}\x1b[0m \x1b[2m({line_count} lignes)\x1b[0m",
-        if kind == "create" {
-            "Créé"
-        } else {
-            "Mis à jour"
-        },
-    )
-}
-
-fn format_structured_patch_preview(parsed: &serde_json::Value) -> Option<String> {
-    let hunks = parsed.get("structuredPatch")?.as_array()?;
-    let mut preview = Vec::new();
-    for hunk in hunks.iter().take(2) {
-        let lines = hunk.get("lines")?.as_array()?;
-        for line in lines.iter().filter_map(|value| value.as_str()).take(6) {
-            match line.chars().next() {
-                Some('+') => preview.push(format!("\x1b[38;5;70m{line}\x1b[0m")),
-                Some('-') => preview.push(format!("\x1b[38;5;203m{line}\x1b[0m")),
-                _ => preview.push(line.to_string()),
-            }
-        }
-    }
-    if preview.is_empty() {
-        None
-    } else {
-        Some(preview.join("\n"))
-    }
-}
-
-fn format_edit_result(icon: &str, parsed: &serde_json::Value) -> String {
-    let path = extract_tool_path(parsed);
-    let suffix = if parsed
-        .get("replaceAll")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        " (toutes les occurrences)"
-    } else {
-        ""
-    };
-    let preview = format_structured_patch_preview(parsed).or_else(|| {
-        let old_value = parsed
-            .get("oldString")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default();
-        let new_value = parsed
-            .get("newString")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default();
-        format_patch_preview(old_value, new_value)
-    });
-
-    match preview {
-        Some(preview) => format!("{icon} \x1b[1;33m📝 Modifié {path}{suffix}\x1b[0m\n{preview}"),
-        None => format!("{icon} \x1b[1;33m📝 Modifié {path}{suffix}\x1b[0m"),
-    }
-}
-
-fn format_glob_result(icon: &str, parsed: &serde_json::Value) -> String {
-    let num_files = parsed
-        .get("numFiles")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    let filenames = parsed
-        .get("filenames")
-        .and_then(|value| value.as_array())
-        .map(|files| {
-            files
-                .iter()
-                .filter_map(|value| value.as_str())
-                .take(8)
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default();
-    if filenames.is_empty() {
-        format!("{icon} \x1b[38;5;245mglob_search\x1b[0m {num_files} fichier(s) trouvé(s)")
-    } else {
-        format!(
-            "{icon} \x1b[38;5;245mglob_search\x1b[0m {num_files} fichier(s) trouvé(s)\n{filenames}"
-        )
-    }
-}
-
-fn format_grep_result(icon: &str, parsed: &serde_json::Value) -> String {
-    let num_matches = parsed
-        .get("numMatches")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    let num_files = parsed
-        .get("numFiles")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    let content = parsed
-        .get("content")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let filenames = parsed
-        .get("filenames")
-        .and_then(|value| value.as_array())
-        .map(|files| {
-            files
-                .iter()
-                .filter_map(|value| value.as_str())
-                .take(8)
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default();
-    let summary = format!(
-        "{icon} \x1b[38;5;245mgrep_search\x1b[0m {num_matches} correspondance(s) dans {num_files} fichier(s)"
-    );
-    if !content.trim().is_empty() {
-        format!(
-            "{summary}\n{}",
-            truncate_output_for_display(
-                content,
-                TOOL_OUTPUT_DISPLAY_MAX_LINES,
-                TOOL_OUTPUT_DISPLAY_MAX_CHARS,
-            )
-        )
-    } else if !filenames.is_empty() {
-        format!("{summary}\n{filenames}")
-    } else {
-        summary
-    }
-}
-
-fn format_generic_tool_result(icon: &str, name: &str, parsed: &serde_json::Value) -> String {
-    let rendered_output = match parsed {
-        serde_json::Value::String(text) => text.clone(),
-        serde_json::Value::Null => String::new(),
-        serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-            serde_json::to_string_pretty(parsed).unwrap_or_else(|_| parsed.to_string())
-        }
-        _ => parsed.to_string(),
-    };
-    let preview = truncate_output_for_display(
-        &rendered_output,
-        TOOL_OUTPUT_DISPLAY_MAX_LINES,
-        TOOL_OUTPUT_DISPLAY_MAX_CHARS,
-    );
-
-    if preview.is_empty() {
-        format!("{icon} \x1b[38;5;245m{name}\x1b[0m")
-    } else if preview.contains('\n') {
-        format!("{icon} \x1b[38;5;245m{name}\x1b[0m\n{preview}")
-    } else {
-        format!("{icon} \x1b[38;5;245m{name}:\x1b[0m {preview}")
-    }
 }
 
 fn summarize_tool_payload(payload: &str) -> String {
@@ -5497,50 +5441,6 @@ fn truncate_for_summary(value: &str, limit: usize) -> String {
     } else {
         truncated
     }
-}
-
-fn truncate_output_for_display(content: &str, max_lines: usize, max_chars: usize) -> String {
-    let original = content.trim_end_matches('\n');
-    if original.is_empty() {
-        return String::new();
-    }
-
-    let mut preview_lines = Vec::new();
-    let mut used_chars = 0usize;
-    let mut truncated = false;
-
-    for (index, line) in original.lines().enumerate() {
-        if index >= max_lines {
-            truncated = true;
-            break;
-        }
-
-        let newline_cost = usize::from(!preview_lines.is_empty());
-        let available = max_chars.saturating_sub(used_chars + newline_cost);
-        if available == 0 {
-            truncated = true;
-            break;
-        }
-
-        let line_chars = line.chars().count();
-        if line_chars > available {
-            preview_lines.push(line.chars().take(available).collect::<String>());
-            truncated = true;
-            break;
-        }
-
-        preview_lines.push(line.to_string());
-        used_chars += newline_cost + line_chars;
-    }
-
-    let mut preview = preview_lines.join("\n");
-    if truncated {
-        if !preview.is_empty() {
-            preview.push('\n');
-        }
-        preview.push_str(DISPLAY_TRUNCATION_NOTICE);
-    }
-    preview
 }
 
 /// Appels d'outils en cours de réception, par index de bloc : (id, nom, entrée JSON).
@@ -5605,8 +5505,10 @@ fn push_output_block(
         OutputContentBlock::Text { text } => {
             if !text.is_empty() {
                 let rendered = TerminalRenderer::new().markdown_to_ansi(&text);
-                write!(out, "{rendered}")
-                    .and_then(|()| out.flush())
+                let mut answer = transcript::Prefixer::assistant();
+                answer
+                    .write(out, &rendered)
+                    .and_then(|()| answer.finish_line(out))
                     .map_err(|error| RuntimeError::new(error.to_string()))?;
                 events.push(AssistantEvent::TextDelta(text));
             }
@@ -5678,7 +5580,6 @@ fn response_to_events(
 }
 
 struct CliToolExecutor {
-    renderer: TerminalRenderer,
     emit_output: bool,
     allowed_tools: Option<AllowedToolSet>,
     tool_registry: GlobalToolRegistry,
@@ -5692,7 +5593,6 @@ impl CliToolExecutor {
         tool_registry: GlobalToolRegistry,
     ) -> Self {
         Self {
-            renderer: TerminalRenderer::new(),
             emit_output,
             allowed_tools,
             tool_registry,
@@ -5741,7 +5641,7 @@ impl ToolExecutor for CliToolExecutor {
 
     fn execute_batch(&mut self, calls: &[(String, String)]) -> Vec<Result<String, ToolError>> {
         if self.emit_output {
-            eprintln!("⇉ {} appels d'outils en parallèle", calls.len());
+            live::show(&format!("{} outils en parallèle…", calls.len()));
         }
         let outcomes = std::thread::scope(|scope| {
             let handles = calls
@@ -5767,12 +5667,25 @@ impl ToolExecutor for CliToolExecutor {
         calls
             .iter()
             .zip(outcomes)
-            .map(|((name, _), result)| self.report(name, result))
+            .map(|((name, input), result)| {
+                if self.emit_output {
+                    transcript::print_call(name, input);
+                }
+                self.report(name, result)
+            })
             .collect()
     }
 
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
-        self.check_allowed(tool_name)?;
+        if self.emit_output {
+            transcript::print_call(tool_name, input);
+        }
+        if let Err(error) = self.check_allowed(tool_name) {
+            return self.report(tool_name, Err(error.to_string()));
+        }
+        if self.emit_output {
+            live::show(&transcript::running_label(tool_name));
+        }
         let result = Self::run_tool(&self.tool_registry, tool_name, input);
         self.report(tool_name, result)
     }
@@ -5791,26 +5704,21 @@ impl CliToolExecutor {
                 Err(error) => observer.tool_result(tool_name, error, true),
             }
         }
-        match result {
-            Ok(output) => {
-                if self.emit_output {
-                    let markdown = format_tool_result(tool_name, &output, false);
-                    self.renderer
-                        .stream_markdown(&markdown, &mut io::stdout())
-                        .map_err(|error| ToolError::new(error.to_string()))?;
-                }
-                Ok(output)
-            }
-            Err(error) => {
-                if self.emit_output {
-                    let markdown = format_tool_result(tool_name, &error, true);
-                    self.renderer
-                        .stream_markdown(&markdown, &mut io::stdout())
-                        .map_err(|stream_error| ToolError::new(stream_error.to_string()))?;
-                }
-                Err(ToolError::new(error))
-            }
+        if self.emit_output {
+            let (text, is_error) = match &result {
+                Ok(output) => (output.as_str(), false),
+                Err(error) => (error.as_str(), true),
+            };
+            let mut out = live::LiveStdout::new();
+            writeln!(
+                out,
+                "{}",
+                transcript::tool_result(tool_name, text, is_error)
+            )
+            .and_then(|()| out.flush())
+            .map_err(|error| ToolError::new(error.to_string()))?;
         }
+        result.map_err(ToolError::new)
     }
 }
 
@@ -5974,13 +5882,12 @@ mod tests {
         describe_tool_progress, filter_tool_specs, format_compact_report, format_cost_report,
         format_internal_prompt_progress_line, format_model_report, format_model_switch_report,
         format_permissions_report, format_permissions_switch_report, format_resume_report,
-        format_status_report, format_tool_call_start, format_tool_result,
-        normalize_permission_mode, parse_args, parse_git_status_metadata, permission_policy,
-        print_help_to, push_output_block, render_config_report, render_memory_report,
-        render_repl_help, render_unknown_repl_command, resolve_model_alias, response_to_events,
-        resume_supported_slash_commands, slash_command_completion_candidates, status_context,
-        CliAction, CliOutputFormat, InternalPromptProgressEvent, InternalPromptProgressState,
-        PendingTools, SlashCommand, StatusUsage, DEFAULT_MODEL,
+        format_status_report, normalize_permission_mode, parse_args, parse_git_status_metadata,
+        permission_policy, print_help_to, push_output_block, render_config_report,
+        render_memory_report, render_repl_help, render_unknown_repl_command, resolve_model_alias,
+        response_to_events, resume_supported_slash_commands, slash_command_completion_candidates,
+        status_context, CliAction, CliOutputFormat, InternalPromptProgressEvent,
+        InternalPromptProgressState, PendingTools, SlashCommand, StatusUsage, DEFAULT_MODEL,
     };
     use api::{MessageResponse, OutputContentBlock, Usage};
     use plugins::{PluginTool, PluginToolDefinition, PluginToolPermission};
@@ -6779,108 +6686,6 @@ mod tests {
         assert!(help.contains("Haut/Bas"));
         assert!(help.contains("Tab parcourt"));
         assert!(help.contains("Maj+Entrée ou Ctrl+J"));
-    }
-
-    #[test]
-    fn tool_rendering_helpers_compact_output() {
-        let start = format_tool_call_start("read_file", r#"{"path":"src/main.rs"}"#);
-        assert!(start.contains("read_file"));
-        assert!(start.contains("src/main.rs"));
-
-        let done = format_tool_result(
-            "read_file",
-            r#"{"file":{"filePath":"src/main.rs","content":"hello","numLines":1,"startLine":1,"totalLines":1}}"#,
-            false,
-        );
-        assert!(done.contains("📄 Lu src/main.rs"));
-        assert!(done.contains("hello"));
-    }
-
-    #[test]
-    fn tool_rendering_truncates_large_read_output_for_display_only() {
-        let content = (0..200)
-            .map(|index| format!("line {index:03}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let output = json!({
-            "file": {
-                "filePath": "src/main.rs",
-                "content": content,
-                "numLines": 200,
-                "startLine": 1,
-                "totalLines": 200
-            }
-        })
-        .to_string();
-
-        let rendered = format_tool_result("read_file", &output, false);
-
-        assert!(rendered.contains("line 000"));
-        assert!(rendered.contains("line 079"));
-        assert!(!rendered.contains("line 199"));
-        assert!(rendered.contains("résultat complet est conservé dans la session"));
-        assert!(output.contains("line 199"));
-    }
-
-    #[test]
-    fn tool_rendering_truncates_large_bash_output_for_display_only() {
-        let stdout = (0..120)
-            .map(|index| format!("stdout {index:03}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let output = json!({
-            "stdout": stdout,
-            "stderr": "",
-            "returnCodeInterpretation": "completed successfully"
-        })
-        .to_string();
-
-        let rendered = format_tool_result("bash", &output, false);
-
-        assert!(rendered.contains("stdout 000"));
-        assert!(rendered.contains("stdout 059"));
-        assert!(!rendered.contains("stdout 119"));
-        assert!(rendered.contains("résultat complet est conservé dans la session"));
-        assert!(output.contains("stdout 119"));
-    }
-
-    #[test]
-    fn tool_rendering_truncates_generic_long_output_for_display_only() {
-        let items = (0..120)
-            .map(|index| format!("payload {index:03}"))
-            .collect::<Vec<_>>();
-        let output = json!({
-            "summary": "plugin payload",
-            "items": items,
-        })
-        .to_string();
-
-        let rendered = format_tool_result("plugin_echo", &output, false);
-
-        assert!(rendered.contains("plugin_echo"));
-        assert!(rendered.contains("payload 000"));
-        assert!(rendered.contains("payload 040"));
-        assert!(!rendered.contains("payload 080"));
-        assert!(!rendered.contains("payload 119"));
-        assert!(rendered.contains("résultat complet est conservé dans la session"));
-        assert!(output.contains("payload 119"));
-    }
-
-    #[test]
-    fn tool_rendering_truncates_raw_generic_output_for_display_only() {
-        let output = (0..120)
-            .map(|index| format!("raw {index:03}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let rendered = format_tool_result("plugin_echo", &output, false);
-
-        assert!(rendered.contains("plugin_echo"));
-        assert!(rendered.contains("raw 000"));
-        assert!(rendered.contains("raw 059"));
-        assert!(!rendered.contains("raw 119"));
-        assert!(rendered.contains("résultat complet est conservé dans la session"));
-        assert!(output.contains("raw 119"));
     }
 
     #[test]

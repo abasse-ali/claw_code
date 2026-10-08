@@ -446,7 +446,9 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "required": ["todos"],
                 "additionalProperties": false
             }),
-            required_permission: PermissionMode::WorkspaceWrite,
+            // Simple liste de suivi (.claw-todos.json) : jamais de demande
+            // d'autorisation, y compris en mode plan, comme dans Claude Code.
+            required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
             name: "Skill",

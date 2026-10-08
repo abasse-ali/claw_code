@@ -11,6 +11,27 @@ pub enum ReadOutcome {
     Submit(String),
     Cancel,
     Exit,
+    /// Maj+Tab : changer de mode de permission, en gardant le texte saisi.
+    CycleMode(String),
+}
+
+/// Cadre de saisie à la Claude Code : un trait au-dessus et au-dessous de la
+/// zone de saisie, puis une ligne d'état (mode, modèle…).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Frame {
+    width: usize,
+    status: String,
+}
+
+impl Frame {
+    fn rule(&self) -> String {
+        format!("\x1b[38;5;240m{}\x1b[0m", "─".repeat(self.width))
+    }
+
+    fn status_line(&self) -> String {
+        let visible: String = self.status.chars().take(self.width).collect();
+        format!("\x1b[2m{visible}\x1b[0m")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +78,8 @@ struct EditSession {
     history_backup: Option<String>,
     rendered_cursor_row: usize,
     rendered_lines: usize,
+    /// Le dernier rendu avait un cadre (trait au-dessus de la saisie).
+    framed: bool,
 }
 
 impl EditSession {
@@ -77,6 +100,7 @@ impl EditSession {
             history_backup: None,
             rendered_cursor_row: 0,
             rendered_lines: 1,
+            framed: false,
         }
     }
 
@@ -166,8 +190,9 @@ impl EditSession {
     }
 
     fn clear_render(&self, out: &mut impl Write) -> io::Result<()> {
-        if self.rendered_cursor_row > 0 {
-            queue!(out, MoveUp(to_u16(self.rendered_cursor_row)?))?;
+        let rows_up = self.rendered_cursor_row + usize::from(self.framed);
+        if rows_up > 0 {
+            queue!(out, MoveUp(to_u16(rows_up)?))?;
         }
         queue!(out, MoveToColumn(0), Clear(ClearType::FromCursorDown))?;
         out.flush()
@@ -178,15 +203,24 @@ impl EditSession {
         out: &mut impl Write,
         base_prompt: &str,
         vim_enabled: bool,
+        frame: Option<&Frame>,
     ) -> io::Result<()> {
         self.clear_render(out)?;
 
+        if let Some(frame) = frame {
+            write!(out, "{}\r\n", frame.rule())?;
+        }
         let prompt = self.prompt(base_prompt, vim_enabled);
         let buffer = self.visible_buffer();
         write!(out, "{prompt}{buffer}")?;
 
         let (cursor_row, cursor_col, total_lines) = self.cursor_layout(prompt.as_ref());
-        let rows_to_move_up = total_lines.saturating_sub(cursor_row + 1);
+        let mut rows_to_move_up = total_lines.saturating_sub(cursor_row + 1);
+        if let Some(frame) = frame {
+            // Trait du bas et ligne d'état sous la saisie, puis retour au curseur.
+            write!(out, "\r\n{}\r\n{}", frame.rule(), frame.status_line())?;
+            rows_to_move_up += 2;
+        }
         if rows_to_move_up > 0 {
             queue!(out, MoveUp(to_u16(rows_to_move_up)?))?;
         }
@@ -195,9 +229,11 @@ impl EditSession {
 
         self.rendered_cursor_row = cursor_row;
         self.rendered_lines = total_lines;
+        self.framed = frame.is_some();
         Ok(())
     }
 
+    /// Après validation : le cadre disparaît, le message reste en gris (« > … »).
     fn finalize_render(
         &self,
         out: &mut impl Write,
@@ -207,7 +243,11 @@ impl EditSession {
         self.clear_render(out)?;
         let prompt = self.prompt(base_prompt, vim_enabled);
         let buffer = self.visible_buffer();
-        write!(out, "{prompt}{buffer}")?;
+        if self.framed {
+            write!(out, "\x1b[38;5;245m{prompt}{buffer}\x1b[0m")?;
+        } else {
+            write!(out, "{prompt}{buffer}")?;
+        }
         writeln!(out)
     }
 
@@ -236,6 +276,7 @@ enum KeyAction {
     Cancel,
     Exit,
     ToggleVim,
+    CycleMode,
 }
 
 pub struct LineEditor {
@@ -247,6 +288,8 @@ pub struct LineEditor {
     completion_state: Option<CompletionState>,
     /// Texte placé dans la prochaine saisie (tapé pendant le tour précédent).
     initial_text: Option<String>,
+    /// Ligne d'état sous la saisie ; `None` : saisie sans cadre.
+    status: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,7 +310,22 @@ impl LineEditor {
             vim_enabled: false,
             completion_state: None,
             initial_text: None,
+            status: None,
         }
+    }
+
+    /// Encadre la saisie (traits) avec cette ligne d'état dessous.
+    pub fn set_status(&mut self, status: impl Into<String>) {
+        self.status = Some(status.into());
+    }
+
+    fn frame(&self) -> Option<Frame> {
+        let status = self.status.clone()?;
+        let width = terminal::size().map_or(80, |(columns, _)| usize::from(columns));
+        Some(Frame {
+            width: width.saturating_sub(1).max(20),
+            status,
+        })
     }
 
     /// Pré-remplit la prochaine saisie.
@@ -296,7 +354,8 @@ impl LineEditor {
             session.cursor = text.len();
             session.text = text;
         }
-        session.render(&mut stdout, &self.prompt, self.vim_enabled)?;
+        let frame = self.frame();
+        session.render(&mut stdout, &self.prompt, self.vim_enabled, frame.as_ref())?;
 
         loop {
             let Event::Key(key) = event::read()? else {
@@ -308,7 +367,11 @@ impl LineEditor {
 
             match self.handle_key_event(&mut session, key) {
                 KeyAction::Continue => {
-                    session.render(&mut stdout, &self.prompt, self.vim_enabled)?;
+                    session.render(&mut stdout, &self.prompt, self.vim_enabled, frame.as_ref())?;
+                }
+                KeyAction::CycleMode => {
+                    session.clear_render(&mut stdout)?;
+                    return Ok(ReadOutcome::CycleMode(session.text.clone()));
                 }
                 KeyAction::Submit(line) => {
                     session.finalize_render(&mut stdout, &self.prompt, self.vim_enabled)?;
@@ -337,7 +400,7 @@ impl LineEditor {
                         }
                     )?;
                     session = EditSession::new(self.vim_enabled);
-                    session.render(&mut stdout, &self.prompt, self.vim_enabled)?;
+                    session.render(&mut stdout, &self.prompt, self.vim_enabled, frame.as_ref())?;
                 }
             }
         }
@@ -453,6 +516,7 @@ impl LineEditor {
                 self.complete_slash_command(session);
                 KeyAction::Continue
             }
+            KeyCode::BackTab => KeyAction::CycleMode,
             KeyCode::Char(ch) => {
                 self.handle_char(session, ch);
                 KeyAction::Continue

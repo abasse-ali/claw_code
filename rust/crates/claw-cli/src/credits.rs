@@ -167,6 +167,19 @@ pub fn current_line(fresh: bool) -> Option<String> {
     }
 }
 
+/// Ligne courte tirée du cache seulement, sans requête réseau (ligne d'état
+/// sous la saisie).
+#[must_use]
+pub fn cached_line() -> Option<String> {
+    let cache = CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match cache.as_ref() {
+        Some((_, Ok(status))) => Some(short_line(&live(status))),
+        _ => None,
+    }
+}
+
 /// Rapport de `/credits`.
 #[must_use]
 pub fn report(fresh: bool) -> String {

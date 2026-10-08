@@ -116,8 +116,13 @@ est retenu ; avec `OPENROUTER_API_KEY`, le quota gratuit du jour est affiché.
 | `danger-full-access` | `bypassPermissions` | Tout est autorisé sans demande |
 
 Les commandes en lecture seule (`git status`, `git diff`, `ls`, `cat`…) ne déclenchent pas de demande.
-À chaque demande : `o` (oui, une fois), `t` (toujours : enregistre la règle proposée dans
-`.claw/settings.local.json`), `n` (non), ou une consigne libre transmise à l'agent.
+Dans le terminal, `Maj+Tab` passe d'un mode à l'autre (demander → éditions acceptées → plan) ; le
+mode actif s'affiche sous la zone de saisie. Chaque demande s'ouvre dans un encadré (commande,
+diff numéroté de la modification…) avec un choix aux flèches ou au chiffre : `1` oui, `2` oui et
+ne plus demander (la règle proposée est enregistrée dans `.claw/settings.local.json`), `3` ou
+`Échap` non : le tour s'arrête et vous dites à Claw quoi faire à la place. Sans terminal
+interactif (ou avec `CLAW_PLAIN_PROMPTS=1`), la question est posée en texte : `o`, `t`, `n` ou
+une consigne libre transmise à l'agent.
 
 Règles dans n'importe quel fichier de config (elles s'additionnent ; `deny` prime toujours) :
 
@@ -368,7 +373,8 @@ Claw lit aussi `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` 
   `CLAW_REASONING`) règle l'effort de réflexion des modèles qui raisonnent (DeepSeek-R1, Qwen3,
   GLM, série o d'OpenAI…) et des modèles Claude via l'API Anthropic (raisonnement étendu, blocs
   signés conservés et renvoyés avec les appels d'outils ; pas via OpenRouter). Le raisonnement
-  s'affiche à part (💭 dans le terminal, bloc repliable dans l'interface web) ; `off` le masque.
+  s'affiche à part (une ligne `∴ Réflexion (5 s)` dans le terminal, le texte complet avec
+  `CLAW_SHOW_THINKING=1` ; bloc repliable dans l'interface web) ; `off` le masque.
 
 ### Travail de l'agent
 
@@ -384,6 +390,12 @@ Claw lit aussi `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` 
 
 ### Terminal
 
+- Affichage à la manière de Claude Code : encadré d'accueil, saisie entre deux traits avec la
+  ligne d'état dessous (mode, modèle, crédits OpenRouter), réponses précédées de `⏺`, appels
+  d'outils `⏺ Commande(cargo test)` avec leur résultat en retrait `⎿` (premières lignes, diff
+  numéroté, liste de tâches ☐ ◼ ☒), indicateur animé `✻ Réflexion… (12 s)` pendant le travail et
+  `✻ Terminé en 12 s` à la fin du tour. `CLAW_NO_SPINNER=1` retire l'indicateur animé.
+- `clear` (ou `cls`) efface l'écran, `exit` (ou `quit`) quitte.
 - `Échap` (ou `Ctrl+C`) interrompt le tour en cours ; ce que vous tapez pendant un tour est gardé :
   une ligne validée par `Entrée` part juste après, le reste pré-remplit la saisie (Windows ; sous
   Linux et macOS, `Ctrl+C`).
