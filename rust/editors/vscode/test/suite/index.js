@@ -99,6 +99,15 @@ async function run() {
     assert.ok(api.panel.webview.html.includes(api.server.url), "le panneau ne pointe pas vers claw serve");
   });
 
+  // L'en-tête seul ne suffit pas : la page doit réellement se charger dans le
+  // panneau (son script se connecte alors au flux d'événements).
+  await step("la page de claw se charge réellement dans le panneau", async () => {
+    await waitFor("connexion de la page du panneau", async () => {
+      const answer = await api.server.request("GET", "/api/viewers");
+      return answer && answer.viewers >= 1;
+    }, 30000);
+  });
+
   await step("la page de claw accepte d'être affichée dans le panneau", async () => {
     const headers = await fetchHeaders(api.server.port);
     const csp = headers["content-security-policy"] || "";

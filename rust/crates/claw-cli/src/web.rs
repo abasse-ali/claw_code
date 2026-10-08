@@ -871,7 +871,7 @@ async fn index() -> Response {
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(if embed {
-            "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self' vscode-webview:"
+            "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self' vscode-webview: vscode-file:"
         } else {
             "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
         }),
@@ -1058,6 +1058,13 @@ async fn get_models(State(app): State<WebApp>, headers: HeaderMap) -> ApiResult 
 }
 
 /// Commandes personnalisées, pour les suggestions du champ de saisie.
+/// Pages connectées au flux d'événements : prouve qu'une page (navigateur,
+/// panneau de VS Code) s'est réellement chargée et exécute son script.
+async fn get_viewers(State(app): State<WebApp>, headers: HeaderMap) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    Ok(Json(json!({ "viewers": app.events.receiver_count() })).into_response())
+}
+
 async fn get_commands(State(app): State<WebApp>, headers: HeaderMap) -> ApiResult {
     authorize(&app, &headers, None)?;
     let cwd = std::env::current_dir()
@@ -1109,6 +1116,7 @@ fn router(app: WebApp) -> Router {
         .route("/api/models", get(get_models))
         .route("/api/sessions", get(get_sessions))
         .route("/api/commands", get(get_commands))
+        .route("/api/viewers", get(get_viewers))
         .with_state(app)
 }
 
