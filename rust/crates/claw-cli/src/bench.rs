@@ -654,7 +654,9 @@ fn candidates(options: &BenchOptions) -> Result<Vec<String>, String> {
         models.retain(|model| model.to_ascii_lowercase().contains(filter));
     }
     if models.is_empty() {
-        return Err(if has_key || options.include_local {
+        return Err(if let Some(filter) = &options.filter {
+            format!("aucun modèle gratuit ne correspond à « {filter} » (voir /models)")
+        } else if has_key || options.include_local {
             "aucun modèle à tester".to_string()
         } else {
             "aucune clé OpenRouter : définissez OPENROUTER_API_KEY, ou ajoutez --local pour les modèles locaux".to_string()
