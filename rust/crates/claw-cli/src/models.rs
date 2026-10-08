@@ -101,23 +101,73 @@ pub fn register_cached_limits() {
     });
 }
 
-/// Modèles gratuits par ordre de préférence : ceux mesurés par `/models bench`
-/// (réussite puis rapidité), puis le classement du catalogue, sans les modèles
-/// mesurés incompatibles avec Claw.
-fn preferred_free_models(catalog: &ModelCatalog) -> Vec<String> {
-    let listed = |id: &str| catalog.models.iter().any(|model| model.id == id);
-    let incompatible = crate::bench::measured_incompatible();
-    let mut ordered: Vec<String> = crate::bench::measured_free_models()
-        .into_iter()
-        .map(|result| result.model)
-        .filter(|id| listed(id))
-        .collect();
-    for entry in api::rank_free_coding_models(catalog) {
-        if !ordered.contains(&entry.model.id) && !incompatible.contains(&entry.model.id) {
-            ordered.push(entry.model.id);
-        }
+/// Poids des mesures de `/models bench` : réussite aux tâches (×1 si toutes,
+/// ×0,4 si aucune), compatible seulement sondé (×0,95), non mesuré (×0,9),
+/// indisponible pour l'instant (×0,75) ; `None` si incompatible avec Claw.
+pub(crate) fn measurement_factor(result: Option<&crate::bench::BenchResult>) -> Option<f64> {
+    match result {
+        None => Some(0.9),
+        Some(result) if !result.compatible && !result.transient => None,
+        Some(result) if !result.compatible => Some(0.75),
+        Some(result) if result.total == 0 => Some(0.95),
+        Some(result) => Some(0.4 + 0.6 * f64::from(result.passed) / f64::from(result.total)),
     }
-    ordered
+}
+
+/// Efficacité d'un modèle pour le code : sa puissance (rang programmation,
+/// taille, spécialisation) pondérée par ses mesures. Un modèle hors catalogue
+/// (Ollama…) est jugé sur son nom.
+pub(crate) fn efficiency(
+    id: &str,
+    catalog: Option<&ModelCatalog>,
+    result: Option<&crate::bench::BenchResult>,
+) -> Option<(f64, Vec<String>)> {
+    let factor = measurement_factor(result)?;
+    let fallback = ModelCatalog::default();
+    let catalog = catalog.unwrap_or(&fallback);
+    let model = catalog
+        .models
+        .iter()
+        .find(|model| model.id == id)
+        .cloned()
+        .unwrap_or_else(|| api::OpenRouterModel {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            context_length: None,
+            max_completion_tokens: None,
+            prompt_price: 0.0,
+            completion_price: 0.0,
+            supports_tools: true,
+            supports_images: false,
+        });
+    let (power, reasons) = api::model_power(&model, catalog);
+    Some(((power.max(0.0) + 5.0) * factor, reasons))
+}
+
+/// Modèles gratuits du plus efficace au moins efficace : ceux retenus pour le
+/// code par le catalogue et ceux mesurés par `/models bench`, sans les
+/// incompatibles avec Claw.
+fn preferred_free_models(catalog: &ModelCatalog) -> Vec<String> {
+    let measured = crate::bench::recent_results();
+    let retained: Vec<String> = api::rank_free_coding_models(catalog)
+        .into_iter()
+        .map(|entry| entry.model.id)
+        .collect();
+    let mut scored: Vec<(f64, String)> = catalog
+        .models
+        .iter()
+        .filter(|model| {
+            model.is_free() && model.supports_tools && !model.id.starts_with("openrouter/")
+        })
+        .filter(|model| retained.contains(&model.id) || measured.contains_key(&model.id))
+        .filter_map(|model| {
+            efficiency(&model.id, Some(catalog), measured.get(&model.id))
+                .map(|(score, _)| (score, model.id.clone()))
+        })
+        .collect();
+    scored.sort_by(|left, right| right.0.total_cmp(&left.0));
+    scored.into_iter().map(|(_, id)| id).collect()
 }
 
 /// Meilleur modèle gratuit pour le code (télécharge le catalogue si besoin),
@@ -382,25 +432,18 @@ pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, 
         .count();
     // Même ordre que le choix automatique : les modèles mesurés par
     // `/models bench` d'abord (y compris hors du classement), puis le classement.
-    let heuristic = api::rank_free_coding_models(&catalog);
+    // Du plus efficace au moins efficace, avec les raisons de sa puissance.
+    let measured = crate::bench::recent_results();
     let ranked = preferred_free_models(&catalog)
         .into_iter()
         .filter_map(|id| {
-            heuristic
-                .iter()
-                .find(|entry| entry.model.id == id)
-                .cloned()
-                .or_else(|| {
-                    catalog
-                        .models
-                        .iter()
-                        .find(|model| model.id == id)
-                        .map(|model| RankedModel {
-                            model: model.clone(),
-                            score: 0.0,
-                            reasons: Vec::new(),
-                        })
-                })
+            let model = catalog.models.iter().find(|model| model.id == id)?;
+            let (score, reasons) = efficiency(&id, Some(&catalog), measured.get(&id))?;
+            Some(RankedModel {
+                model: model.clone(),
+                score,
+                reasons,
+            })
         })
         .filter(|entry| {
             filter.as_ref().is_none_or(|filter| {
@@ -438,14 +481,15 @@ pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, 
     }
     lines.extend([
         String::new(),
-        "Classement : d'abord les modèles mesurés par /models bench (tâches réussies, puis"
+        "Classement par efficacité, le plus puissant en tête : rang dans la catégorie programmation"
             .to_string(),
-        "rapidité), puis rang dans la catégorie programmation d'OpenRouter, spécialisation et"
+        "d'OpenRouter, taille effective (paramètres actifs et totaux), spécialisation code, versions"
             .to_string(),
-        "benchmarks de code cités, taille. Seuls les modèles gratuits qui savent appeler des"
+        "allégées pénalisées ; pondéré par /models bench (tâches réussies, compatibilité avec Claw)."
             .to_string(),
-        "outils sont listés (indispensable pour un agent) ; les incompatibles mesurés sont écartés."
+        "Seuls les modèles gratuits qui savent appeler des outils sont listés ; les incompatibles"
             .to_string(),
+        "mesurés sont écartés.".to_string(),
         String::new(),
         "Suite".to_string(),
         "  /model <id>            utiliser ce modèle dans la session".to_string(),
@@ -542,22 +586,20 @@ pub fn cost_line(model: &str, usage: TokenUsage) -> Option<String> {
 /// Classement des modèles gratuits pour le code et quota, au format JSON de l'interface web.
 pub fn free_coding_models_json() -> Result<serde_json::Value, String> {
     let (catalog, warning) = catalog(false)?;
-    // Même ordre que le choix automatique : modèles mesurés d'abord.
-    let reasons: std::collections::BTreeMap<String, Vec<String>> =
-        api::rank_free_coding_models(&catalog)
-            .into_iter()
-            .map(|entry| (entry.model.id, entry.reasons))
-            .collect();
+    // Même ordre que le choix automatique : du plus efficace au moins efficace.
     let measured = crate::bench::recent_results();
     let models = preferred_free_models(&catalog)
         .into_iter()
         .filter_map(|id| catalog.models.iter().find(|model| model.id == id))
         .map(|model| {
+            let (score, reasons) = efficiency(&model.id, Some(&catalog), measured.get(&model.id))
+                .unwrap_or((0.0, Vec::new()));
             serde_json::json!({
                 "id": model.id,
                 "name": model.name,
                 "context": format_context(model.context_length),
-                "reasons": reasons.get(&model.id).cloned().unwrap_or_default(),
+                "reasons": reasons,
+                "score": score.round(),
                 "measured": measured.get(&model.id).map(crate::bench::BenchResult::summary),
             })
         })

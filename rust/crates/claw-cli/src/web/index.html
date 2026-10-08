@@ -112,7 +112,7 @@
   .item .grow b { font-weight: 550; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .item .grow span { font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .item .check { color: var(--accent); }
-  .item .measured { font-size: 11.5px; color: var(--ok); white-space: nowrap; }
+  .item .measured { font-size: 11.5px; color: var(--ok); white-space: nowrap; flex: none; }
   .item .measured.bad { color: var(--text-3); }
   .menu .custom { display: flex; gap: 6px; padding: 6px 2px 2px; border-top: 1px solid var(--border); margin-top: 6px; }
   .menu .custom input { flex: 1; height: 32px; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface-2); padding: 0 10px; outline: none; font-family: var(--mono); font-size: 12.5px; }
@@ -1149,6 +1149,15 @@
     item.onclick = () => { closeMenu(); onPick(); };
     return item;
   }
+  // Résumé court d'une mesure de /models bench pour le menu (détail en info-bulle).
+  function shortMeasure(text) {
+    if (text.startsWith("⏸")) return "⏸ indisponible";
+    if (text.startsWith("✗")) return "✗ incompatible";
+    const tasks = text.match(/^(\d+\/\d+) tâches(?: · (\d+ s))?/);
+    if (tasks) return tasks[1] + (tasks[2] ? " · " + tasks[2] : "");
+    if (text.startsWith("✓")) return "✓ compatible";
+    return text;
+  }
   async function setModel(value) {
     try { await api("/api/model", { value }); } catch (error) { toast(error.message); }
   }
@@ -1167,15 +1176,20 @@
           check.innerHTML = svg("check");
           list.append(menuItem(shortModel(status.model).name, status.model, () => {}, check));
         }
-        if (models.length) list.append(el("div", "group", "Gratuits pour le code"));
+        if (models.length) list.append(el("div", "group", "Gratuits, du plus puissant au moins puissant"));
         for (const model of models) {
           const extra = el("span");
           if (model.measured) {
             const bad = model.measured.startsWith("✗") || model.measured.startsWith("⏸");
-            extra.append(el("span", "measured" + (bad ? " bad" : ""), model.measured.replace(/^mesuré : /, "")));
+            const badge = el("span", "measured" + (bad ? " bad" : ""), shortMeasure(model.measured));
+            badge.title = "Mesuré par /models bench : " + model.measured;
+            extra.append(badge);
           }
           if (model.id === status.model) { const check = el("span", "check"); check.innerHTML = svg("check"); extra.append(check); }
-          list.append(menuItem(shortModel(model.id).name, model.id + " · " + model.context, () => setModel(model.id), extra));
+          const power = (model.reasons || []).slice(0, 2).concat(model.context || []).join(" · ");
+          const item = menuItem(shortModel(model.id).name, power || model.id, () => setModel(model.id), extra);
+          item.title = model.id;
+          list.append(item);
         }
         if (!list.children.length) list.append(el("div", "group", "Aucun modèle trouvé"));
       };

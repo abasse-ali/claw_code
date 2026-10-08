@@ -468,6 +468,115 @@ fn score_coding_model(model: &OpenRouterModel, catalog: &ModelCatalog) -> Option
     })
 }
 
+/// Puissance estimée d'un modèle pour le code, indépendamment de sa
+/// compatibilité avec Claw : rang dans le classement programmation
+/// d'`OpenRouter`, taille (paramètres actifs et totaux, lus dans l'identifiant
+/// ou la description), spécialisation code, benchmarks cités ; les versions
+/// allégées (mini, nano…) sont pénalisées. Renvoie le score et ses raisons.
+#[must_use]
+pub fn model_power(model: &OpenRouterModel, catalog: &ModelCatalog) -> (f64, Vec<String>) {
+    let description = model.description.to_ascii_lowercase();
+    let id = model.id.to_ascii_lowercase();
+    let mut score = 0.0;
+    let mut reasons = Vec::new();
+
+    let base_id = model.id.trim_end_matches(":free");
+    if let Some(position) = catalog
+        .programming_ranking
+        .iter()
+        .position(|ranked| ranked == &model.id || ranked == base_id)
+    {
+        #[allow(clippy::cast_precision_loss)]
+        let bonus = 100.0 - position as f64;
+        score += bonus.max(0.0);
+        reasons.push(format!("n°{} en programmation", position + 1));
+    }
+
+    let total = total_parameters_billions(&description, &id);
+    let active = active_parameters_billions(&description, &id).or(total);
+    // Taille effective : un MoE vaut à peu près la moyenne géométrique de ses
+    // paramètres totaux et actifs ; la capacité croît comme le logarithme.
+    let effective = match (active, total) {
+        (Some(active), Some(total)) => Some((active * total).sqrt()),
+        (active, total) => active.or(total),
+    };
+    if let Some(effective) = effective {
+        score += effective.clamp(1.0, 120.0).log2() * 12.0;
+    }
+    match (active, total) {
+        (Some(active), Some(total)) if (active - total).abs() > 0.5 => reasons.push(format!(
+            "{} Md de paramètres ({} actifs)",
+            format_billions(total),
+            format_billions(active)
+        )),
+        (_, Some(total)) => reasons.push(format!("{} Md de paramètres", format_billions(total))),
+        (Some(active), None) => reasons.push(format!(
+            "{} Md de paramètres actifs",
+            format_billions(active)
+        )),
+        (None, None) => {}
+    }
+
+    if id.contains("coder")
+        || id.contains("-code")
+        || id.contains("codestral")
+        || CODING_SPECIALIZATION
+            .iter()
+            .any(|phrase| description.contains(phrase))
+    {
+        score += 25.0;
+        reasons.push("spécialisé code".to_string());
+    } else if description.contains("coding") || description.contains("programming") {
+        score += 10.0;
+    }
+    if CODE_BENCHMARKS
+        .iter()
+        .any(|(needle, _)| description.contains(needle))
+    {
+        score += 10.0;
+    }
+    let lightweight = id
+        .split(['/', '-', ':', '.', '_'])
+        .any(|part| matches!(part, "mini" | "nano" | "tiny" | "small" | "lite"));
+    if lightweight {
+        score -= 10.0;
+        reasons.push("version allégée".to_string());
+    }
+    if model.context_length.unwrap_or(0) >= 200_000 {
+        score += 5.0;
+    }
+    (score, reasons)
+}
+
+/// Paramètres totaux (en milliards) : `-120b`, `27b`, `2.6b` dans l'identifiant,
+/// sinon « 120B parameters » dans la description. Un `-a12b` (actifs) ne compte pas.
+fn total_parameters_billions(description: &str, id: &str) -> Option<f64> {
+    let from_id = id
+        .split(['/', '-', ':', '_'])
+        .filter(|part| {
+            !part.starts_with('a')
+                || part.len() < 2
+                || !part[1..].starts_with(|ch: char| ch.is_ascii_digit())
+        })
+        .filter_map(|part| part.strip_suffix('b'))
+        .filter_map(|number| number.parse::<f64>().ok())
+        .filter(|value| *value > 0.0 && *value < 5_000.0)
+        .fold(None, |best: Option<f64>, value| {
+            Some(best.map_or(value, |best| best.max(value)))
+        });
+    if from_id.is_some() {
+        return from_id;
+    }
+    let words = description
+        .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == '(' || ch == ')')
+        .collect::<Vec<_>>();
+    words.windows(2).find_map(|pair| {
+        (pair[1].starts_with("param") || pair[1].starts_with("total"))
+            .then(|| parse_billions(pair[0].trim_end_matches('-')))
+            .flatten()
+    })
+}
+
 /// Paramètres actifs (en milliards) d'un modèle `MoE`, lus dans la description
 /// (« 55B active », « 33B-A3B ») ou l'identifiant (« -a55b »).
 fn active_parameters_billions(description: &str, id: &str) -> Option<f64> {
@@ -504,7 +613,7 @@ fn format_billions(value: f64) -> String {
     if (value - value.round()).abs() < 0.05 {
         format!("{value:.0}")
     } else {
-        format!("{value:.1}")
+        format!("{value:.1}").replace('.', ",")
     }
 }
 
@@ -552,8 +661,8 @@ pub fn model_limits(model: &str) -> Option<ModelLimits> {
 #[cfg(test)]
 mod tests {
     use super::{
-        active_parameters_billions, parse_model_list, rank_free_coding_models, ModelCatalog,
-        OpenRouterModel,
+        active_parameters_billions, model_power, parse_model_list, rank_free_coding_models,
+        total_parameters_billions, ModelCatalog, OpenRouterModel,
     };
 
     fn model(id: &str, description: &str, free: bool, tools: bool) -> OpenRouterModel {
@@ -671,5 +780,50 @@ mod tests {
             Some(12.0)
         );
         assert_eq!(active_parameters_billions("no size", "plain/model"), None);
+    }
+
+    #[test]
+    fn power_ranks_big_and_proven_models_above_small_or_light_ones() {
+        let catalog = ModelCatalog {
+            fetched_at: 0,
+            models: Vec::new(),
+            programming_ranking: vec!["nvidia/nemotron-3-ultra-550b-a55b".to_string()],
+        };
+        let power = |id: &str, description: &str| {
+            model_power(&model(id, description, true, true), &catalog).0
+        };
+        let ultra = power(
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
+            "A 550B MoE model with 55B active parameters.",
+        );
+        let super_ = power("nvidia/nemotron-3-super-120b-a12b:free", "Hybrid MoE.");
+        let gemma = power("google/gemma-4-31b-it:free", "Open model.");
+        let coder = power(
+            "cohere/north-mini-code:free",
+            "A coding model with 3B active parameters.",
+        );
+        let tiny = power("liquid/lfm-2.5-2.6b:free", "Small and fast.");
+        let mini = power("apodex/apodex-1.1-mini:free", "Fast assistant.");
+        assert!(ultra > super_ && super_ > gemma, "{ultra} {super_} {gemma}");
+        assert!(gemma > tiny && coder > tiny, "{gemma} {coder} {tiny}");
+        assert!(tiny > mini || mini < 0.0, "{tiny} {mini}");
+
+        assert_eq!(
+            total_parameters_billions("", "nvidia/nemotron-3-super-120b-a12b"),
+            Some(120.0)
+        );
+        assert_eq!(
+            total_parameters_billions("", "liquid/lfm-2.5-2.6b"),
+            Some(2.6)
+        );
+        assert_eq!(
+            total_parameters_billions("a 70b parameters model", "x/y"),
+            Some(70.0)
+        );
+        let (_, reasons) = model_power(
+            &model("nvidia/nemotron-3-super-120b-a12b:free", "", true, true),
+            &catalog,
+        );
+        assert_eq!(reasons, ["120 Md de paramètres (12 actifs)"]);
     }
 }

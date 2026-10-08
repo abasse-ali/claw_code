@@ -227,25 +227,21 @@ fn save_results(new_results: &[BenchResult]) {
     }
 }
 
-/// Modèles `OpenRouter` gratuits mesurés compatibles, du meilleur au moins bon.
-#[must_use]
-pub fn measured_free_models() -> Vec<BenchResult> {
-    let mut good: Vec<BenchResult> = recent_results()
-        .into_values()
-        .filter(|result| result.compatible && is_openrouter_free(&result.model))
-        .collect();
-    good.sort_by(compare_results);
-    good
-}
-
-/// Modèles mesurés incompatibles (à écarter du choix automatique).
-#[must_use]
-pub fn measured_incompatible() -> Vec<String> {
-    recent_results()
-        .into_values()
-        .filter(|result| !result.compatible && !result.transient)
-        .map(|result| result.model)
-        .collect()
+/// Du plus efficace (le plus puissant parmi ceux qui marchent avec Claw) au
+/// moins efficace ; les incompatibles en dernier, puis réussite et rapidité.
+fn rank_by_efficiency(results: &mut [BenchResult]) {
+    let catalog = super::models::catalog(false)
+        .ok()
+        .map(|(catalog, _)| catalog);
+    let score = |result: &BenchResult| {
+        super::models::efficiency(&result.model, catalog.as_ref(), Some(result))
+            .map_or(f64::MIN, |(score, _)| score)
+    };
+    results.sort_by(|a, b| {
+        score(b)
+            .total_cmp(&score(a))
+            .then_with(|| compare_results(a, b))
+    });
 }
 
 /// `org/modele:free` : un seul « : », celui de `:free` (pas `groq:…`).
@@ -802,7 +798,7 @@ pub fn run(args: &str, progress: &mut dyn FnMut(&str)) -> Result<String, String>
 
     save_results(&results);
     let mut ranked = results.clone();
-    ranked.sort_by(compare_results);
+    rank_by_efficiency(&mut ranked);
     let mut report = render_report(&ranked);
     if options.apply {
         report.push('\n');
@@ -829,7 +825,8 @@ fn render_report(ranked: &[BenchResult]) -> String {
         .max(6);
     let mut lines = vec![
         String::new(),
-        "Résultats (gardés 14 jours ; le choix automatique du modèle gratuit les suit)".to_string(),
+        "Résultats, du plus efficace au moins efficace (gardés 14 jours ; le choix automatique les suit)"
+            .to_string(),
         format!("  #  {:<width$}  Résultat", "Modèle"),
     ];
     for (index, result) in ranked.iter().enumerate() {
