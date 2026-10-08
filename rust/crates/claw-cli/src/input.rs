@@ -245,6 +245,8 @@ pub struct LineEditor {
     yank_buffer: YankBuffer,
     vim_enabled: bool,
     completion_state: Option<CompletionState>,
+    /// Texte placé dans la prochaine saisie (tapé pendant le tour précédent).
+    initial_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,7 +266,13 @@ impl LineEditor {
             yank_buffer: YankBuffer::default(),
             vim_enabled: false,
             completion_state: None,
+            initial_text: None,
         }
+    }
+
+    /// Pré-remplit la prochaine saisie.
+    pub fn set_initial_text(&mut self, text: String) {
+        self.initial_text = Some(text);
     }
 
     pub fn push_history(&mut self, entry: impl Into<String>) {
@@ -284,6 +292,10 @@ impl LineEditor {
         let _raw_mode = RawModeGuard::new()?;
         let mut stdout = io::stdout();
         let mut session = EditSession::new(self.vim_enabled);
+        if let Some(text) = self.initial_text.take() {
+            session.cursor = text.len();
+            session.text = text;
+        }
         session.render(&mut stdout, &self.prompt, self.vim_enabled)?;
 
         loop {
@@ -317,11 +329,11 @@ impl LineEditor {
                     self.vim_enabled = !self.vim_enabled;
                     writeln!(
                         stdout,
-                        "Vim mode {}.",
+                        "Mode vim {}.",
                         if self.vim_enabled {
-                            "enabled"
+                            "activé"
                         } else {
-                            "disabled"
+                            "désactivé"
                         }
                     )?;
                     session = EditSession::new(self.vim_enabled);
@@ -372,20 +384,20 @@ impl LineEditor {
 
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
-                KeyCode::Char('c') | KeyCode::Char('C') => {
+                KeyCode::Char('c' | 'C') => {
                     return if session.has_input() {
                         KeyAction::Cancel
                     } else {
                         KeyAction::Exit
                     };
                 }
-                KeyCode::Char('j') | KeyCode::Char('J') => {
+                KeyCode::Char('j' | 'J') => {
                     if session.mode != EditorMode::Normal && session.mode != EditorMode::Visual {
                         self.insert_active_text(session, "\n");
                     }
                     return KeyAction::Continue;
                 }
-                KeyCode::Char('d') | KeyCode::Char('D') => {
+                KeyCode::Char('d' | 'D') => {
                     if session.current_len() == 0 {
                         return KeyAction::Exit;
                     }
@@ -708,16 +720,23 @@ impl LineEditor {
             session.cursor = candidate.len();
             return;
         }
-        let Some(prefix) = slash_command_prefix(&session.text, session.cursor) else {
+        let (prefix, matches) = if let Some(prefix) =
+            slash_command_prefix(&session.text, session.cursor)
+        {
+            let matches = self
+                .completions
+                .iter()
+                .filter(|candidate| candidate.starts_with(prefix) && candidate.as_str() != prefix)
+                .cloned()
+                .collect::<Vec<_>>();
+            (prefix.to_string(), matches)
+        } else if let Some((prefix, matches)) = at_file_completions(&session.text, session.cursor) {
+            (prefix, matches)
+        } else {
             self.completion_state = None;
             return;
         };
-        let matches = self
-            .completions
-            .iter()
-            .filter(|candidate| candidate.starts_with(prefix) && candidate.as_str() != prefix)
-            .cloned()
-            .collect::<Vec<_>>();
+        let prefix = prefix.as_str();
         if matches.is_empty() {
             self.completion_state = None;
             return;
@@ -750,12 +769,11 @@ impl LineEditor {
             return;
         }
 
-        let next_index = match session.history_index {
-            Some(index) => index.saturating_sub(1),
-            None => {
-                session.history_backup = Some(session.text.clone());
-                self.history.len() - 1
-            }
+        let next_index = if let Some(index) = session.history_index {
+            index.saturating_sub(1)
+        } else {
+            session.history_backup = Some(session.text.clone());
+            self.history.len() - 1
         };
 
         session.history_index = Some(next_index);
@@ -949,6 +967,41 @@ fn render_selected_text(text: &str, start: usize, end: usize) -> String {
     }
 
     rendered
+}
+
+/// `… @src/ma` + Tab : lignes complètes avec les fichiers et dossiers qui
+/// commencent ainsi (relatifs au dossier courant, dossiers suivis de `/`).
+fn at_file_completions(line: &str, pos: usize) -> Option<(String, Vec<String>)> {
+    if pos != line.len() {
+        return None;
+    }
+    let word_start = line.rfind(char::is_whitespace).map_or(0, |index| index + 1);
+    let partial = line[word_start..].strip_prefix('@')?;
+    let (dir_part, name_part) = match partial.rfind(['/', '\\']) {
+        Some(index) => (&partial[..=index], &partial[index + 1..]),
+        None => ("", partial),
+    };
+    let base = std::env::current_dir()
+        .ok()?
+        .join(if dir_part.is_empty() { "." } else { dir_part });
+    let lower = name_part.to_lowercase();
+    let mut entries = std::fs::read_dir(base)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let hidden = name.starts_with('.') && !name_part.starts_with('.');
+            if hidden || !name.to_lowercase().starts_with(&lower) {
+                return None;
+            }
+            let suffix = if entry.path().is_dir() { "/" } else { "" };
+            Some(format!("{}@{dir_part}{name}{suffix}", &line[..word_start]))
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries.truncate(50);
+    entries.retain(|candidate| candidate != line);
+    Some((line.to_string(), entries))
 }
 
 fn slash_command_prefix(line: &str, pos: usize) -> Option<&str> {

@@ -215,12 +215,30 @@ fn discover_instruction_files(cwd: &Path) -> std::io::Result<Vec<ContextFile>> {
     directories.reverse();
 
     let mut files = Vec::new();
+    // Instructions personnelles valables pour tous les projets (Claw et Claude Code).
+    if let Some(home) = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+    {
+        for candidate in [
+            home.join(".claw").join("CLAW.md"),
+            home.join(".claude").join("CLAUDE.md"),
+        ] {
+            push_context_file(&mut files, candidate)?;
+        }
+    }
+    // Puis du dossier racine au dossier courant : fichiers de Claw, de Claude
+    // Code et `AGENTS.md` (convention partagée par Codex, Cursor…).
     for dir in directories {
         for candidate in [
             dir.join("CLAW.md"),
             dir.join("CLAW.local.md"),
             dir.join(".claw").join("CLAW.md"),
             dir.join(".claw").join("instructions.md"),
+            dir.join("CLAUDE.md"),
+            dir.join("CLAUDE.local.md"),
+            dir.join(".claude").join("CLAUDE.md"),
+            dir.join("AGENTS.md"),
         ] {
             push_context_file(&mut files, candidate)?;
         }

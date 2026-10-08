@@ -75,20 +75,34 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
     let sandbox_status = sandbox_status_for_input(&input, &cwd);
 
     if input.run_in_background.unwrap_or(false) {
-        let mut child = prepare_command(&input.command, &cwd, &sandbox_status, false);
-        let child = child
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
+        // Sous Windows, le PID du shell MSYS permet d'arrêter tout le groupe.
+        let pid_file = cfg!(windows).then(shell_group_pid_file);
+        let wrapped = pid_file.as_deref().map_or_else(
+            || input.command.clone(),
+            |path| with_group_pid_capture(&input.command, path),
+        );
+        #[allow(unused_mut)]
+        let mut command = prepare_command(&wrapped, &cwd, &sandbox_status, false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let container = take_last_container();
+        let task_id = crate::bash_tasks::spawn(command, &input.command, pid_file)?;
+        if let Some(name) = container {
+            crate::bash_tasks::set_container(&task_id, name);
+        }
 
         return Ok(BashCommandOutput {
-            stdout: String::new(),
+            stdout: format!(
+                "Started in the background as {task_id}. Read its output with BashOutput (bash_id: \"{task_id}\") and stop it with KillShell."
+            ),
             stderr: String::new(),
             raw_output_path: None,
             interrupted: false,
             is_image: None,
-            background_task_id: Some(child.id().to_string()),
+            background_task_id: Some(task_id),
             backgrounded_by_user: Some(false),
             assistant_auto_backgrounded: Some(false),
             dangerously_disable_sandbox: input.dangerously_disable_sandbox,
@@ -127,7 +141,7 @@ fn with_group_pid_capture(command: &str, pid_file: &std::path::Path) -> String {
 
 /// Tue tout le groupe de processus MSYS du shell (suivi par Cygwin même quand
 /// la parenté Windows est rompue).
-fn kill_shell_group(pid_file: &std::path::Path) {
+pub(crate) fn kill_shell_group(pid_file: &std::path::Path) {
     let Ok(pid) = std::fs::read_to_string(pid_file) else {
         return;
     };
@@ -184,6 +198,7 @@ async fn execute_bash_async(
         |pid_file| with_group_pid_capture(&input.command, pid_file),
     );
     let mut command = prepare_tokio_command(&command_text, &cwd, &sandbox_status, true);
+    let container_name = take_last_container();
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -207,6 +222,9 @@ async fn execute_bash_async(
                 kill_shell_group(pid_file);
             }
             kill_process_tree(pid);
+        }
+        if let Some(name) = &container_name {
+            stop_container(name);
         }
         if let Some(pid_file) = &group_pid_file {
             let _ = std::fs::remove_file(pid_file);
@@ -299,7 +317,59 @@ fn sandbox_status_for_input(input: &BashCommandInput, cwd: &std::path::Path) -> 
         input.filesystem_mode,
         input.allowed_mounts.clone(),
     );
-    resolve_sandbox_status_for_request(&request, cwd)
+    let mut status = resolve_sandbox_status_for_request(&request, cwd);
+    if input.dangerously_disable_sandbox != Some(true) {
+        status.container = config.container();
+    }
+    status
+}
+
+/// Conteneurs démarrés par ce processus et encore actifs (pour les arrêter).
+static RUNNING_CONTAINERS: std::sync::Mutex<Vec<(String, crate::sandbox::ContainerSandbox)>> =
+    std::sync::Mutex::new(Vec::new());
+thread_local! {
+    static LAST_CONTAINER: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+fn remember_container(name: &str, sandbox: &crate::sandbox::ContainerSandbox) {
+    RUNNING_CONTAINERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((name.to_string(), sandbox.clone()));
+    LAST_CONTAINER.with(|last| *last.borrow_mut() = Some(name.to_string()));
+}
+
+/// Nom du dernier conteneur préparé sur ce fil (tâches de fond).
+pub(crate) fn take_last_container() -> Option<String> {
+    LAST_CONTAINER.with(|last| last.borrow_mut().take())
+}
+
+/// Arrête un conteneur démarré par Claw.
+pub(crate) fn stop_container(name: &str) {
+    let entry = {
+        let mut running = RUNNING_CONTAINERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        running
+            .iter()
+            .position(|(running_name, _)| running_name == name)
+            .map(|position| running.remove(position))
+    };
+    if let Some((name, sandbox)) = entry {
+        sandbox.stop(&name);
+    }
+}
+
+/// Arrête tous les conteneurs encore actifs (fin de Claw).
+pub fn stop_all_containers() {
+    let running = std::mem::take(
+        &mut *RUNNING_CONTAINERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for (name, sandbox) in running {
+        sandbox.stop(&name);
+    }
 }
 
 fn prepare_command(
@@ -308,6 +378,13 @@ fn prepare_command(
     sandbox_status: &SandboxStatus,
     create_dirs: bool,
 ) -> Command {
+    if let Some(container) = &sandbox_status.container {
+        let (args, name) = container.run_args(command, cwd);
+        remember_container(&name, container);
+        let mut prepared = Command::new(&container.program);
+        prepared.args(args).current_dir(cwd);
+        return prepared;
+    }
     if create_dirs {
         prepare_sandbox_dirs(cwd);
     }
@@ -335,6 +412,13 @@ fn prepare_tokio_command(
     sandbox_status: &SandboxStatus,
     create_dirs: bool,
 ) -> TokioCommand {
+    if let Some(container) = &sandbox_status.container {
+        let (args, name) = container.run_args(command, cwd);
+        remember_container(&name, container);
+        let mut prepared = TokioCommand::new(&container.program);
+        prepared.args(args).current_dir(cwd);
+        return prepared;
+    }
     if create_dirs {
         prepare_sandbox_dirs(cwd);
     }

@@ -293,6 +293,22 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         category: SlashCommandCategory::Core,
     },
     SlashCommandSpec {
+        name: "bashes",
+        aliases: &["tasks"],
+        summary: "Commandes lancées en arrière-plan par l'agent (état, arrêt : /bashes kill <id>)",
+        argument_hint: Some("[kill <id>]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "think",
+        aliases: &["reasoning"],
+        summary: "Règle le raisonnement du modèle (off, low, medium, high)",
+        argument_hint: Some("[off|low|medium|high]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
         name: "hooks",
         aliases: &[],
         summary: "Liste les hooks configurés (PreToolUse, Stop, SessionStart…)",
@@ -459,6 +475,12 @@ pub enum SlashCommand {
         args: Option<String>,
     },
     Mcp,
+    Think {
+        level: Option<String>,
+    },
+    Bashes {
+        args: Option<String>,
+    },
     Undo {
         count: Option<String>,
     },
@@ -561,6 +583,12 @@ impl SlashCommand {
             },
             "debug-tool-call" => Self::DebugToolCall,
             "mcp" => Self::Mcp,
+            "think" | "reasoning" => Self::Think {
+                level: parts.next().map(ToOwned::to_owned),
+            },
+            "bashes" | "tasks" => Self::Bashes {
+                args: remainder_after_command(trimmed, command),
+            },
             "undo" | "rewind" => Self::Undo {
                 count: parts.next().map(ToOwned::to_owned),
             },
@@ -634,6 +662,29 @@ pub fn resume_supported_slash_commands() -> Vec<&'static SlashCommandSpec> {
         .iter()
         .filter(|spec| spec.resume_supported)
         .collect()
+}
+
+/// Section du prompt système listant les compétences disponibles (nom et
+/// description), pour que le modèle sache quand appeler l'outil `Skill`.
+#[must_use]
+pub fn skills_prompt_section(cwd: &Path) -> Option<String> {
+    let skills = load_skills_from_roots(&discover_skill_roots(cwd)).ok()?;
+    let active = skills
+        .iter()
+        .filter(|skill| skill.shadowed_by.is_none() && skill.origin == SkillOrigin::SkillsDir)
+        .take(40)
+        .map(|skill| match &skill.description {
+            Some(description) => format!("- {}: {description}", skill.name),
+            None => format!("- {}", skill.name),
+        })
+        .collect::<Vec<_>>();
+    if active.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "# Skills\nThese skills are installed. When a task matches one, load its instructions with the Skill tool (argument `skill` = the name) before starting:\n{}",
+        active.join("\n")
+    ))
 }
 
 #[must_use]
@@ -757,7 +808,7 @@ pub fn suggest_slash_commands(input: &str, limit: usize) -> Vec<String> {
         })
         .collect::<Vec<_>>();
 
-    ranked.sort_by(|left, right| left.cmp(right));
+    ranked.sort();
     ranked.dedup_by(|left, right| left.2 == right.2);
     ranked
         .into_iter()
@@ -782,9 +833,11 @@ pub struct PluginsCommandResult {
 enum DefinitionSource {
     ProjectCodex,
     ProjectClaw,
+    ProjectClaude,
     UserCodexHome,
     UserCodex,
     UserClaw,
+    UserClaude,
 }
 
 impl DefinitionSource {
@@ -792,9 +845,11 @@ impl DefinitionSource {
         match self {
             Self::ProjectCodex => "Projet (.codex)",
             Self::ProjectClaw => "Projet (.claw)",
+            Self::ProjectClaude => "Projet (.claude)",
             Self::UserCodexHome => "Utilisateur ($CODEX_HOME)",
             Self::UserCodex => "Utilisateur (~/.codex)",
             Self::UserClaw => "Utilisateur (~/.claw)",
+            Self::UserClaude => "Utilisateur (~/.claude)",
         }
     }
 }
@@ -996,7 +1051,7 @@ pub fn handle_branch_slash_command(
             Ok(if trimmed.is_empty() {
                 "Branche\n  Résultat         aucune branche trouvée".to_string()
             } else {
-                format!("Branche\n  Résultat         listées\n\n{}", trimmed)
+                format!("Branche\n  Résultat         listées\n\n{trimmed}")
             })
         }
         Some("create") => {
@@ -1036,7 +1091,7 @@ pub fn handle_worktree_slash_command(
             Ok(if trimmed.is_empty() {
                 "Worktree\n  Résultat         aucun worktree trouvé".to_string()
             } else {
-                format!("Worktree\n  Résultat         listés\n\n{}", trimmed)
+                format!("Worktree\n  Résultat         listés\n\n{trimmed}")
             })
         }
         Some("add") => {
@@ -1430,6 +1485,11 @@ fn discover_definition_roots(cwd: &Path, leaf: &str) -> Vec<(DefinitionSource, P
             DefinitionSource::ProjectClaw,
             ancestor.join(".claw").join(leaf),
         );
+        push_unique_root(
+            &mut roots,
+            DefinitionSource::ProjectClaude,
+            ancestor.join(".claude").join(leaf),
+        );
     }
 
     if let Ok(codex_home) = env::var("CODEX_HOME") {
@@ -1452,6 +1512,11 @@ fn discover_definition_roots(cwd: &Path, leaf: &str) -> Vec<(DefinitionSource, P
             DefinitionSource::UserClaw,
             home.join(".claw").join(leaf),
         );
+        push_unique_root(
+            &mut roots,
+            DefinitionSource::UserClaude,
+            home.join(".claude").join(leaf),
+        );
     }
 
     roots
@@ -1471,6 +1536,12 @@ fn discover_skill_roots(cwd: &Path) -> Vec<SkillRoot> {
             &mut roots,
             DefinitionSource::ProjectClaw,
             ancestor.join(".claw").join("skills"),
+            SkillOrigin::SkillsDir,
+        );
+        push_unique_skill_root(
+            &mut roots,
+            DefinitionSource::ProjectClaude,
+            ancestor.join(".claude").join("skills"),
             SkillOrigin::SkillsDir,
         );
         push_unique_skill_root(
@@ -1521,6 +1592,12 @@ fn discover_skill_roots(cwd: &Path) -> Vec<SkillRoot> {
             &mut roots,
             DefinitionSource::UserClaw,
             home.join(".claw").join("skills"),
+            SkillOrigin::SkillsDir,
+        );
+        push_unique_skill_root(
+            &mut roots,
+            DefinitionSource::UserClaude,
+            home.join(".claude").join("skills"),
             SkillOrigin::SkillsDir,
         );
         push_unique_skill_root(
@@ -1797,9 +1874,11 @@ fn render_agents_report(agents: &[AgentSummary]) -> String {
     for source in [
         DefinitionSource::ProjectCodex,
         DefinitionSource::ProjectClaw,
+        DefinitionSource::ProjectClaude,
         DefinitionSource::UserCodexHome,
         DefinitionSource::UserCodex,
         DefinitionSource::UserClaw,
+        DefinitionSource::UserClaude,
     ] {
         let group = agents
             .iter()
@@ -1855,9 +1934,11 @@ fn render_skills_report(skills: &[SkillSummary]) -> String {
     for source in [
         DefinitionSource::ProjectCodex,
         DefinitionSource::ProjectClaw,
+        DefinitionSource::ProjectClaude,
         DefinitionSource::UserCodexHome,
         DefinitionSource::UserCodex,
         DefinitionSource::UserClaw,
+        DefinitionSource::UserClaude,
     ] {
         let group = skills
             .iter()
@@ -1958,6 +2039,8 @@ pub fn handle_slash_command(
         | SlashCommand::Undo { .. }
         | SlashCommand::Checkpoints
         | SlashCommand::Hooks
+        | SlashCommand::Think { .. }
+        | SlashCommand::Bashes { .. }
         | SlashCommand::Models { .. }
         | SlashCommand::Teleport { .. }
         | SlashCommand::DebugToolCall
@@ -1983,17 +2066,16 @@ pub fn handle_slash_command(
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_branch_slash_command, handle_commit_push_pr_slash_command,
-        handle_commit_slash_command, handle_plugins_slash_command, handle_slash_command,
-        handle_worktree_slash_command, load_agents_from_roots, load_skills_from_roots,
-        render_agents_report, render_plugins_report, render_skills_report,
+        handle_branch_slash_command, handle_commit_slash_command, handle_plugins_slash_command,
+        handle_slash_command, handle_worktree_slash_command, load_agents_from_roots,
+        load_skills_from_roots, render_agents_report, render_plugins_report, render_skills_report,
         render_slash_command_help, resume_supported_slash_commands, slash_command_specs,
-        suggest_slash_commands, CommitPushPrRequest, DefinitionSource, ExpertCommand, SkillOrigin,
-        SkillRoot, SlashCommand,
+        suggest_slash_commands, DefinitionSource, ExpertCommand, SkillOrigin, SkillRoot,
+        SlashCommand,
     };
     use plugins::{PluginKind, PluginManager, PluginManagerConfig, PluginMetadata, PluginSummary};
     use runtime::{CompactionConfig, ContentBlock, ConversationMessage, MessageRole, Session};
-    use std::env;
+
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -2362,7 +2444,7 @@ mod tests {
         assert!(help.contains("alias : /plugins, /marketplace"));
         assert!(help.contains("/agents"));
         assert!(help.contains("/skills"));
-        assert_eq!(slash_command_specs().len(), 38);
+        assert_eq!(slash_command_specs().len(), 40);
         assert_eq!(resume_supported_slash_commands().len(), 13);
     }
 
@@ -2770,6 +2852,17 @@ mod tests {
             &repo,
         )
         .expect("worktree add succeeds");
+        // Chemin réel du worktree : sous Windows, le dossier temporaire peut être
+        // un nom court 8.3 (`RUNNER~1`) alors que git affiche le nom long.
+        let canonical_worktree = fs::canonicalize(&worktree_path)
+            .map(|path| {
+                path.display()
+                    .to_string()
+                    .trim_start_matches(r"\\?\")
+                    .replace('\\', "/")
+                    .to_lowercase()
+            })
+            .expect("canonical worktree path");
         let listed_worktrees =
             handle_worktree_slash_command(Some("list"), None, None, &repo).expect("list succeeds");
         let removed = handle_worktree_slash_command(
@@ -2786,12 +2879,13 @@ mod tests {
         assert!(switched.contains("main"));
         assert!(added.contains("wt-demo"));
         // git affiche les chemins avec des « / », y compris sous Windows.
-        assert!(listed_worktrees.replace('\\', "/").contains(
-            &worktree_path
-                .to_str()
-                .expect("utf8 path")
+        assert!(
+            listed_worktrees
                 .replace('\\', "/")
-        ));
+                .to_lowercase()
+                .contains(&canonical_worktree),
+            "{listed_worktrees} / {canonical_worktree}"
+        );
         assert!(removed.contains("Résultat         retiré"));
 
         let _ = fs::remove_dir_all(repo);

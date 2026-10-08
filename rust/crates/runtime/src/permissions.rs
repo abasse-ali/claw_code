@@ -212,6 +212,11 @@ impl PermissionPolicy {
         self.active_mode
     }
 
+    /// Change le mode en cours de session (plan approuvé, `/permissions`).
+    pub fn set_active_mode(&mut self, mode: PermissionMode) {
+        self.active_mode = mode;
+    }
+
     #[must_use]
     pub fn rules(&self) -> &PermissionRules {
         &self.rules
@@ -684,6 +689,25 @@ fn suggest_rule(tool_name: &str, target: &ToolTarget) -> Option<String> {
         ToolTarget::Url(url) => Some(format!("WebFetch(domain:{})", url_host(url))),
         _ => Some(tool_name.to_string()),
     }
+}
+
+// ------------------------------------------------------------ bascule de mode
+
+static MODE_SWITCH: std::sync::Mutex<Option<PermissionMode>> = std::sync::Mutex::new(None);
+
+/// Demande un changement de mode pour la suite du tour (par exemple après
+/// l'approbation d'un plan) ; appliqué par la boucle de conversation.
+pub fn request_mode_switch(mode: PermissionMode) {
+    *MODE_SWITCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(mode);
+}
+
+pub(crate) fn take_mode_switch() -> Option<PermissionMode> {
+    MODE_SWITCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
 }
 
 #[cfg(test)]

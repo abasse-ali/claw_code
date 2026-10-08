@@ -1,3 +1,8 @@
 target/
 .omx/
 .clawd-agents/
+
+# Paquets de l'extension VS Code
+editors/vscode/*.vsix
+# Rapports des sous-agents (générés)
+.claw-agents/

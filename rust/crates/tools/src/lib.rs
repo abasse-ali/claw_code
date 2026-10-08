@@ -1,4 +1,5 @@
 mod mcp_bridge;
+pub mod mcp_oauth;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -8,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use mcp_bridge::connected_mcp_tools;
 pub use mcp_bridge::{
-    call_mcp_tool, ensure_mcp_started, mcp_status_report, shutdown_mcp, McpToolEntry,
+    call_mcp_tool, ensure_mcp_started, mcp_prompt_commands, mcp_prompt_invocation,
+    mcp_status_report, shutdown_mcp, McpPromptEntry, McpResourceEntry, McpToolEntry,
 };
 
 use api::{
@@ -515,6 +517,45 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
+            name: "BashOutput",
+            description: "Read the new output of a command started with run_in_background (bash_id from its result), and whether it is still running. Use it to follow dev servers, watchers or long builds.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "bash_id": { "type": "string" }
+                },
+                "required": ["bash_id"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "KillShell",
+            description: "Stop a command started with run_in_background (and its child processes).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "shell_id": { "type": "string" }
+                },
+                "required": ["shell_id"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "ExitPlanMode",
+            description: "In plan mode, submit your finished plan to the user for approval. If approved, the session switches to edit mode and you continue by implementing the plan. Only call it once the plan is complete (files to change, approach, risks, verification).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "plan": { "type": "string", "description": "The plan, in Markdown." }
+                },
+                "required": ["plan"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "Sleep",
             description: "Wait for a specified duration without holding a shell process.",
             input_schema: json!({
@@ -623,6 +664,9 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
         "NotebookEdit" => from_value::<NotebookEditInput>(input).and_then(run_notebook_edit),
         "Sleep" => from_value::<SleepInput>(input).and_then(run_sleep),
+        "BashOutput" => from_value::<BashOutputInput>(input).and_then(run_bash_output),
+        "KillShell" => from_value::<KillShellInput>(input).and_then(run_kill_shell),
+        "ExitPlanMode" => from_value::<ExitPlanModeInput>(input).and_then(run_exit_plan_mode),
         "SendUserMessage" | "Brief" => from_value::<BriefInput>(input).and_then(run_brief),
         "Config" => from_value::<ConfigInput>(input).and_then(run_config),
         "StructuredOutput" => {
@@ -852,6 +896,89 @@ struct SleepInput {
 }
 
 #[derive(Debug, Deserialize)]
+struct BashOutputInput {
+    #[serde(alias = "shell_id", alias = "id")]
+    bash_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct KillShellInput {
+    #[serde(alias = "bash_id", alias = "id")]
+    shell_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExitPlanModeInput {
+    plan: String,
+}
+
+fn background_task_json(task: &runtime::bash_tasks::TaskOutput) -> Value {
+    json!({
+        "bash_id": task.id,
+        "command": task.command,
+        "status": if task.running { "running" } else { "exited" },
+        "exitCode": task.exit_code,
+        "elapsedSeconds": task.elapsed_secs,
+        "newOutput": task.new_output,
+        "outputTruncated": task.truncated,
+    })
+}
+
+fn run_bash_output(input: BashOutputInput) -> Result<String, String> {
+    let task = runtime::bash_tasks::read_output(input.bash_id.trim())?;
+    to_pretty_json(background_task_json(&task))
+}
+
+fn run_kill_shell(input: KillShellInput) -> Result<String, String> {
+    let task = runtime::bash_tasks::kill(input.shell_id.trim())?;
+    to_pretty_json(background_task_json(&task))
+}
+
+/// Présente le plan à l'utilisateur (même invite que les autorisations) ; s'il
+/// l'approuve, la session passe en mode `workspace-write` pour la suite du tour.
+fn run_exit_plan_mode(input: ExitPlanModeInput) -> Result<String, String> {
+    let current_mode = current_subagent_context()
+        .map_or(PermissionMode::Prompt, |context| context.permission_mode);
+    if current_mode != PermissionMode::ReadOnly {
+        return Ok("Not in plan mode: continue with the task.".to_string());
+    }
+    let request = PermissionRequest {
+        tool_name: "ExitPlanMode".to_string(),
+        input: json!({ "plan": input.plan }).to_string(),
+        current_mode,
+        required_mode: PermissionMode::WorkspaceWrite,
+        suggested_rule: None,
+    };
+    let decision = {
+        let mut slot = subagent_prompter_slot()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match slot.as_mut() {
+            Some(prompter) => prompter.decide(&request),
+            None => PermissionPromptDecision::Deny {
+                reason: "no interactive user to approve the plan".to_string(),
+            },
+        }
+    };
+    match decision {
+        PermissionPromptDecision::Allow | PermissionPromptDecision::AllowAlways { .. } => {
+            runtime::request_mode_switch(PermissionMode::WorkspaceWrite);
+            if let Some(context) = subagent_context_slot()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_mut()
+            {
+                context.permission_mode = PermissionMode::WorkspaceWrite;
+            }
+            Ok("The user approved the plan. The session is now in workspace-write mode: implement the plan now, step by step, and verify the result.".to_string())
+        }
+        PermissionPromptDecision::Deny { reason } => Ok(format!(
+            "The user did not approve the plan ({reason}). Stay in plan mode: ask what to change, or revise the plan."
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct BriefInput {
     message: String,
     attachments: Option<Vec<String>>,
@@ -972,6 +1099,7 @@ struct AgentJob {
     permission_mode: PermissionMode,
     permission_rules: PermissionRules,
     hooks: runtime::RuntimeHookConfig,
+    fallback_models: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1100,22 +1228,98 @@ fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
     })
 }
 
-fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String> {
-    let started = Instant::now();
-    let client = build_http_client()?;
-    let search_url = build_search_url(&input.query)?;
+/// Moteur de recherche : API configurée (`SearXNG`, Brave, Tavily) sinon la page
+/// HTML de `DuckDuckGo`. Renvoie les résultats et le nom du moteur utilisé.
+fn search_hits(client: &Client, query: &str) -> Result<(Vec<SearchHit>, &'static str), String> {
+    let env = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let hits_from = |items: Option<&Vec<Value>>, title: &str, url: &str| {
+        items
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                Some(SearchHit {
+                    title: item.get(title)?.as_str()?.to_string(),
+                    url: item.get(url)?.as_str()?.to_string(),
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    if let Some(base) = env("CLAW_SEARXNG_URL") {
+        let url = format!("{}/search", base.trim_end_matches('/'));
+        let response: Value = client
+            .get(url)
+            .query(&[("q", query), ("format", "json")])
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .and_then(reqwest::blocking::Response::json)
+            .map_err(|error| {
+                format!("SearXNG : {error} (activez le format json dans settings.yml)")
+            })?;
+        return Ok((
+            hits_from(
+                response.get("results").and_then(Value::as_array),
+                "title",
+                "url",
+            ),
+            "SearXNG",
+        ));
+    }
+    if let Some(key) = env("BRAVE_API_KEY") {
+        let response: Value = client
+            .get("https://api.search.brave.com/res/v1/web/search")
+            .query(&[("q", query), ("count", "10")])
+            .header("X-Subscription-Token", key)
+            .header("Accept", "application/json")
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .and_then(reqwest::blocking::Response::json)
+            .map_err(|error| format!("Brave Search : {error}"))?;
+        let results = response
+            .get("web")
+            .and_then(|web| web.get("results"))
+            .and_then(Value::as_array);
+        return Ok((hits_from(results, "title", "url"), "Brave"));
+    }
+    if let Some(key) = env("TAVILY_API_KEY") {
+        let response: Value = client
+            .post("https://api.tavily.com/search")
+            .json(&json!({ "api_key": key, "query": query, "max_results": 8 }))
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .and_then(reqwest::blocking::Response::json)
+            .map_err(|error| format!("Tavily : {error}"))?;
+        return Ok((
+            hits_from(
+                response.get("results").and_then(Value::as_array),
+                "title",
+                "url",
+            ),
+            "Tavily",
+        ));
+    }
+    let search_url = build_search_url(query)?;
     let response = client
         .get(search_url)
         .send()
         .map_err(|error| error.to_string())?;
-
     let final_url = response.url().clone();
     let html = response.text().map_err(|error| error.to_string())?;
     let mut hits = extract_search_hits(&html);
-
     if hits.is_empty() && final_url.host_str().is_some() {
         hits = extract_search_hits_from_generic_links(&html);
     }
+    Ok((hits, "DuckDuckGo"))
+}
+
+fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String> {
+    let started = Instant::now();
+    let client = build_http_client()?;
+    let (mut hits, engine) = search_hits(&client, &input.query)?;
 
     if let Some(allowed) = input.allowed_domains.as_ref() {
         hits.retain(|hit| host_matches_list(&hit.url, allowed));
@@ -1128,7 +1332,10 @@ fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String>
     hits.truncate(8);
 
     let summary = if hits.is_empty() {
-        format!("No web search results matched the query {:?}.", input.query)
+        format!(
+            "No web search results matched the query {:?} ({engine}).",
+            input.query
+        )
     } else {
         let rendered_hits = hits
             .iter()
@@ -1601,6 +1808,8 @@ pub struct SubagentContext {
     /// Hooks de la session : `PreToolUse`/`PostToolUse` s'appliquent aussi aux
     /// sous-agents, et `SubagentStop` à leur fin.
     pub hooks: runtime::RuntimeHookConfig,
+    /// Chaîne de modèles de la session, essayée si le modèle de l'agent échoue.
+    pub fallback_models: Vec<String>,
 }
 
 /// Demande d'approbation partagée avec les sous-agents synchrones.
@@ -1724,13 +1933,21 @@ fn prepare_agent_job(input: AgentInput) -> Result<AgentJob, String> {
                 .map(|tool| tool.name),
         );
     }
-    let (permission_mode, permission_rules, hooks) = context.map_or(
+    let (permission_mode, permission_rules, hooks, fallback_models) = context.map_or(
         (
             PermissionMode::Prompt,
             PermissionRules::default(),
             runtime::RuntimeHookConfig::default(),
+            Vec::new(),
         ),
-        |context| (context.permission_mode, context.rules, context.hooks),
+        |context| {
+            (
+                context.permission_mode,
+                context.rules,
+                context.hooks,
+                context.fallback_models,
+            )
+        },
     );
     // Les rôles en lecture seule ne modifient jamais rien, quel que soit le mode.
     let permission_mode = if definition.read_only {
@@ -1781,6 +1998,7 @@ fn prepare_agent_job(input: AgentInput) -> Result<AgentJob, String> {
         permission_mode,
         permission_rules,
         hooks,
+        fallback_models,
     })
 }
 
@@ -1837,19 +2055,10 @@ fn run_agent_conversation(job: &AgentJob, interactive: bool) -> Result<String, S
     }
 
     let summary = if interactive {
-        let mut slot = subagent_prompter_slot()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match slot.as_mut() {
-            Some(prompter) => {
-                let mut labeled = LabeledPrompter {
-                    label: &label,
-                    inner: prompter.as_mut(),
-                };
-                runtime.run_turn(job.prompt.clone(), Some(&mut labeled))
-            }
-            None => runtime.run_turn(job.prompt.clone(), None),
-        }
+        // Plusieurs sous-agents peuvent tourner en parallèle : l'invite partagée
+        // n'est verrouillée que le temps de chaque demande d'autorisation.
+        let mut labeled = SlotPrompter { label: &label };
+        runtime.run_turn(job.prompt.clone(), Some(&mut labeled))
     } else {
         runtime.run_turn(job.prompt.clone(), None)
     }
@@ -1857,18 +2066,39 @@ fn run_agent_conversation(job: &AgentJob, interactive: bool) -> Result<String, S
     Ok(final_assistant_text(&summary))
 }
 
-/// Indique à l'utilisateur quel sous-agent demande une approbation.
-struct LabeledPrompter<'a> {
+/// Demande d'approbation d'un sous-agent, transmise à l'invite de la session
+/// (verrouillée le temps de la demande) avec le nom du sous-agent.
+struct SlotPrompter<'a> {
     label: &'a str,
-    inner: &'a mut dyn PermissionPrompter,
 }
 
-impl PermissionPrompter for LabeledPrompter<'_> {
+impl PermissionPrompter for SlotPrompter<'_> {
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
-        eprintln!("\n[sous-agent {}]", self.label);
-        self.inner.decide(request)
+        let mut slot = subagent_prompter_slot()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match slot.as_mut() {
+            Some(prompter) => {
+                eprintln!("\n[sous-agent {}]", self.label);
+                prompter.decide(request)
+            }
+            None => PermissionPromptDecision::Deny {
+                reason: "no interactive prompt available for this sub-agent".to_string(),
+            },
+        }
     }
 }
+
+/// Outils sans effet de bord, exécutables en parallèle.
+pub const PARALLEL_SAFE_TOOLS: &[&str] = &[
+    "Agent",
+    "read_file",
+    "glob_search",
+    "grep_search",
+    "WebFetch",
+    "WebSearch",
+    "BashOutput",
+];
 
 fn build_agent_runtime(
     job: &AgentJob,
@@ -1884,7 +2114,8 @@ fn build_agent_runtime(
         threshold_tokens: api::auto_compaction_threshold(&model),
         preserve_recent_messages: 6,
     };
-    let api_client = ProviderRuntimeClient::new(&model, allowed_tools.clone())?;
+    let api_client =
+        ProviderRuntimeClient::new(&model, &job.fallback_models, allowed_tools.clone())?;
     let tool_executor =
         SubagentToolExecutor::new(allowed_tools).with_progress_label(progress_label);
     Ok(ConversationRuntime::new_with_features(
@@ -1931,8 +2162,8 @@ fn resolve_agent_model_for(
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     };
     requested
-        .and_then(non_empty)
-        .or_else(|| definition.model.as_deref().and_then(non_empty))
+        .and_then(usable_agent_model)
+        .or_else(|| definition.model.as_deref().and_then(usable_agent_model))
         .or_else(|| configured_agent_model(&definition.subagent_type))
         .or_else(|| context.and_then(|context| non_empty(&context.model)))
         .map_or_else(
@@ -1990,17 +2221,46 @@ fn resolve_agent_definition(subagent_type: &str) -> AgentDefinition {
     }
 }
 
-/// `.claw/agents` du projet (et de ses parents), puis `~/.claw/agents`.
+/// `.claw/agents` puis `.claude/agents` du projet (et de ses parents), puis
+/// ceux du dossier personnel.
 fn custom_agent_dirs(cwd: &Path) -> Vec<PathBuf> {
     let mut dirs = cwd
         .ancestors()
-        .map(|ancestor| ancestor.join(".claw").join("agents"))
+        .flat_map(|ancestor| {
+            [
+                ancestor.join(".claw").join("agents"),
+                ancestor.join(".claude").join("agents"),
+            ]
+        })
         .collect::<Vec<_>>();
     if let Some(home) = std::env::var_os("HOME") {
-        dirs.push(PathBuf::from(home).join(".claw").join("agents"));
+        let home = PathBuf::from(home);
+        dirs.push(home.join(".claw").join("agents"));
+        dirs.push(home.join(".claude").join("agents"));
     }
-    dirs.dedup();
-    dirs
+    let mut unique = Vec::new();
+    for dir in dirs {
+        if !unique.contains(&dir) {
+            unique.push(dir);
+        }
+    }
+    unique
+}
+
+/// Alias Claude des agents de Claude Code (`sonnet`, `opus`, `haiku`) : sans
+/// identifiants Anthropic, l'agent prend le modèle de la session.
+fn usable_agent_model(model: &str) -> Option<String> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("inherit") {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let claude_alias =
+        matches!(lower.as_str(), "sonnet" | "opus" | "haiku") || lower.starts_with("claude-");
+    if claude_alias && !api::has_anthropic_credentials() {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 /// Cherche un agent Markdown (en-tête `name`, `description`, `tools`, `model`,
@@ -2293,31 +2553,44 @@ fn format_agent_terminal_output(status: &str, result: Option<&str>, error: Optio
 
 struct ProviderRuntimeClient {
     runtime: tokio::runtime::Runtime,
-    client: ProviderClient,
-    model: String,
+    chain: api::ModelChain,
     allowed_tools: BTreeSet<String>,
 }
 
 impl ProviderRuntimeClient {
-    fn new(model: &str, allowed_tools: BTreeSet<String>) -> Result<Self, String> {
+    fn new(
+        model: &str,
+        fallback_models: &[String],
+        allowed_tools: BTreeSet<String>,
+    ) -> Result<Self, String> {
         let model = resolve_model_alias(model);
-        let client = ProviderClient::from_model(&model).map_err(|error| error.to_string())?;
+        let mut models = vec![model.clone()];
+        models.extend(fallback_models.iter().cloned());
+        if models.len() == 1 {
+            ProviderClient::from_model(&model).map_err(|error| error.to_string())?;
+        }
         Ok(Self {
             runtime: tokio::runtime::Runtime::new().map_err(|error| error.to_string())?,
-            client,
-            model,
+            chain: api::ModelChain::new(models, Box::new(ProviderClient::from_model)),
             allowed_tools,
         })
     }
 }
 
+fn notify_subagent_fallback(text: &str) {
+    eprintln!("  ↳ ⚠ {text}");
+}
+
 impl ApiClient for ProviderRuntimeClient {
     fn summarize(&mut self, system_prompt: &str, transcript: &str) -> Option<String> {
+        let build = |model: &str| api::summary_request(model, system_prompt, transcript);
+        let mut notify = notify_subagent_fallback;
         self.runtime
             .block_on(runtime::interrupt::interruptible(
-                api::summarize_transcript(&self.client, &self.model, system_prompt, transcript),
+                self.chain.send(&build, &mut notify),
             ))
             .ok()
+            .map(|(_, response)| api::response_text(&response))
             .filter(|summary| !summary.trim().is_empty())
     }
 
@@ -2341,25 +2614,41 @@ impl ApiClient for ProviderRuntimeClient {
                     }),
             )
             .collect::<Vec<_>>();
-        let message_request = MessageRequest {
-            model: self.model.clone(),
-            max_tokens: max_tokens_for_model(&self.model),
-            messages: convert_messages(&request.messages),
-            system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n")),
-            tools: (!tools.is_empty()).then_some(tools),
-            tool_choice: (!self.allowed_tools.is_empty()).then_some(ToolChoice::Auto),
+        let messages = convert_messages(&request.messages);
+        let system =
+            (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n"));
+        let tools = (!tools.is_empty()).then_some(tools);
+        let tool_choice = (!self.allowed_tools.is_empty()).then_some(ToolChoice::Auto);
+        let build = move |model: &str| MessageRequest {
+            model: model.to_string(),
+            max_tokens: max_tokens_for_model(model),
+            messages: messages.clone(),
+            system: system.clone(),
+            tools: tools.clone(),
+            tool_choice: tool_choice.clone(),
             stream: true,
         };
+        let mut notify = notify_subagent_fallback;
 
         self.runtime.block_on(async {
-            let mut stream =
-                runtime::interrupt::interruptible(self.client.stream_message(&message_request))
+            let opened =
+                runtime::interrupt::interruptible(self.chain.open_stream(&build, &mut notify))
                     .await?;
+            let mut stream = opened.stream;
+            let mut first_event = opened.first_event;
             let mut events = Vec::new();
             let mut pending_tools: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
             let mut saw_stop = false;
+            let mut signed_thinking = SignedThinking::new();
 
-            while let Some(event) = runtime::interrupt::interruptible(stream.next_event()).await? {
+            loop {
+                let event = match first_event.take() {
+                    Some(event) => event,
+                    None => match runtime::interrupt::interruptible(stream.next_event()).await? {
+                        Some(event) => event,
+                        None => break,
+                    },
+                };
                 match event {
                     ApiStreamEvent::MessageStart(start) => {
                         for block in start.message.content {
@@ -2367,6 +2656,11 @@ impl ApiClient for ProviderRuntimeClient {
                         }
                     }
                     ApiStreamEvent::ContentBlockStart(start) => {
+                        start_signed_thinking(
+                            &start.content_block,
+                            start.index,
+                            &mut signed_thinking,
+                        );
                         push_output_block(
                             start.content_block,
                             start.index,
@@ -2386,10 +2680,19 @@ impl ApiClient for ProviderRuntimeClient {
                                 input.push_str(&partial_json);
                             }
                         }
-                        ContentBlockDelta::ThinkingDelta { .. }
-                        | ContentBlockDelta::SignatureDelta { .. } => {}
+                        ContentBlockDelta::ThinkingDelta { thinking } => {
+                            if let Some(entry) = signed_thinking.get_mut(&delta.index) {
+                                entry.0.push_str(&thinking);
+                            }
+                        }
+                        ContentBlockDelta::SignatureDelta { signature } => {
+                            if let Some(entry) = signed_thinking.get_mut(&delta.index) {
+                                entry.1.push_str(&signature);
+                            }
+                        }
                     },
                     ApiStreamEvent::ContentBlockStop(stop) => {
+                        finish_signed_thinking(stop.index, &mut signed_thinking, &mut events);
                         if let Some((id, name, input)) = pending_tools.remove(&stop.index) {
                             events.push(AssistantEvent::ToolUse { id, name, input });
                         }
@@ -2425,12 +2728,13 @@ impl ApiClient for ProviderRuntimeClient {
                 return Ok(events);
             }
 
-            let response =
-                runtime::interrupt::interruptible(self.client.send_message(&MessageRequest {
-                    stream: false,
-                    ..message_request.clone()
-                }))
-                .await?;
+            let build_complete = |model: &str| MessageRequest {
+                stream: false,
+                ..build(model)
+            };
+            let (_, response) =
+                runtime::interrupt::interruptible(self.chain.send(&build_complete, &mut notify))
+                    .await?;
             Ok(response_to_events(response))
         })
     }
@@ -2515,6 +2819,20 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                         }],
                         is_error: *is_error,
                     },
+                    ContentBlock::Image { media_type, data } => InputContentBlock::Image {
+                        source: api::ImageSource::base64(media_type.clone(), data.clone()),
+                    },
+                    ContentBlock::Thinking {
+                        thinking,
+                        signature,
+                        redacted,
+                    } => match redacted {
+                        Some(data) => InputContentBlock::RedactedThinking { data: data.clone() },
+                        None => InputContentBlock::Thinking {
+                            thinking: thinking.clone(),
+                            signature: signature.clone(),
+                        },
+                    },
                 })
                 .collect::<Vec<_>>();
             (!content.is_empty()).then(|| InputMessage {
@@ -2523,6 +2841,53 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
             })
         })
         .collect()
+}
+
+/// Raisonnements signés en cours de réception, par index de bloc :
+/// (texte, signature, contenu chiffré éventuel).
+type SignedThinking = std::collections::BTreeMap<u32, (String, String, Option<String>)>;
+
+/// Début d'un bloc de raisonnement Claude (à renvoyer ensuite à l'API).
+fn start_signed_thinking(block: &OutputContentBlock, index: u32, signed: &mut SignedThinking) {
+    match block {
+        OutputContentBlock::Thinking {
+            thinking,
+            signature,
+        } => {
+            signed.insert(
+                index,
+                (
+                    thinking.clone(),
+                    signature.clone().unwrap_or_default(),
+                    None,
+                ),
+            );
+        }
+        OutputContentBlock::RedactedThinking { data } => {
+            let data = data
+                .as_str()
+                .map_or_else(|| data.to_string(), ToOwned::to_owned);
+            signed.insert(index, (String::new(), String::new(), Some(data)));
+        }
+        _ => {}
+    }
+}
+
+/// Fin d'un bloc : un raisonnement signé devient un événement conservé.
+fn finish_signed_thinking(
+    index: u32,
+    signed: &mut SignedThinking,
+    events: &mut Vec<AssistantEvent>,
+) {
+    if let Some((thinking, signature, redacted)) = signed.remove(&index) {
+        if !signature.is_empty() || redacted.is_some() {
+            events.push(AssistantEvent::Thinking {
+                thinking,
+                signature,
+                redacted,
+            });
+        }
+    }
 }
 
 fn push_output_block(
@@ -4105,7 +4470,6 @@ mod tests {
             },
         )
         .expect("Agent should succeed");
-        std::env::remove_var("CLAW_AGENT_STORE");
 
         assert_eq!(manifest.name, "ship-audit");
         assert_eq!(manifest.subagent_type.as_deref(), Some("Explore"));
@@ -4155,6 +4519,9 @@ mod tests {
         .expect("Agent should normalize explicit names");
         let named_output: serde_json::Value = serde_json::from_str(&named).expect("valid json");
         assert_eq!(named_output["name"], "ship-audit");
+        // Retirée seulement maintenant : les appels ci-dessus écriraient sinon
+        // dans le `.claw-agents` du dépôt.
+        std::env::remove_var("CLAW_AGENT_STORE");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -4334,6 +4701,7 @@ mod tests {
             permission_mode: PermissionMode::Prompt,
             rules: PermissionRules::default(),
             hooks: runtime::RuntimeHookConfig::default(),
+            fallback_models: Vec::new(),
         };
         let mut definition = resolve_agent_definition("Explore");
         assert_eq!(
@@ -4344,10 +4712,22 @@ mod tests {
             resolve_agent_model_for(None, &definition, Some(&context)),
             "qwen/qwen3-coder"
         );
+        // Alias Claude (agents de Claude Code) : utilisé seulement avec des
+        // identifiants Anthropic, sinon l'agent prend le modèle de la session.
         definition.model = Some("haiku".to_string());
+        let expected = if api::has_anthropic_credentials() {
+            "claude-haiku-4-5-20251001"
+        } else {
+            "qwen/qwen3-coder"
+        };
         assert_eq!(
             resolve_agent_model_for(None, &definition, Some(&context)),
-            "claude-haiku-4-5-20251001"
+            expected
+        );
+        definition.model = Some("deepseek/deepseek-chat:free".to_string());
+        assert_eq!(
+            resolve_agent_model_for(None, &definition, Some(&context)),
+            "deepseek/deepseek-chat:free"
         );
         definition.model = None;
         assert_eq!(
@@ -4681,7 +5061,9 @@ mod tests {
         let write_update_output: serde_json::Value =
             serde_json::from_str(&write_update).expect("json");
         assert_eq!(write_update_output["type"], "update");
-        assert_eq!(write_update_output["originalFile"], "alpha\nbeta\nalpha\n");
+        // Le contenu d'origine n'est plus renvoyé au modèle (économie de contexte).
+        assert!(write_update_output["originalFile"].is_null());
+        assert!(write_update_output["structuredPatch"].is_array());
 
         let read_full = execute_tool("read_file", &json!({ "path": "nested/demo.txt" }))
             .expect("read full should succeed");

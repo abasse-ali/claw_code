@@ -24,6 +24,7 @@ pub enum ProviderClient {
     Xai(OpenAiCompatClient),
     OpenAi(OpenAiCompatClient),
     OpenRouter(OpenAiCompatClient),
+    Compat(OpenAiCompatClient),
 }
 
 impl ProviderClient {
@@ -50,6 +51,13 @@ impl ProviderClient {
             ProviderKind::OpenRouter => Ok(Self::OpenRouter(OpenAiCompatClient::from_env(
                 OpenAiCompatConfig::openrouter(),
             )?)),
+            ProviderKind::Compat => {
+                let (provider, name) = providers::compat::split_compat_model(&resolved_model)
+                    .ok_or_else(|| ApiError::Auth(format!("fournisseur inconnu pour {model}")))?;
+                Ok(Self::Compat(OpenAiCompatClient::for_compat_provider(
+                    &provider, &name,
+                )?))
+            }
         }
     }
 
@@ -60,6 +68,7 @@ impl ProviderClient {
             Self::Xai(_) => ProviderKind::Xai,
             Self::OpenAi(_) => ProviderKind::OpenAi,
             Self::OpenRouter(_) => ProviderKind::OpenRouter,
+            Self::Compat(_) => ProviderKind::Compat,
         }
     }
 
@@ -69,9 +78,10 @@ impl ProviderClient {
     ) -> Result<MessageResponse, ApiError> {
         match self {
             Self::ClawApi(client) => send_via_provider(client, request).await,
-            Self::Xai(client) | Self::OpenAi(client) | Self::OpenRouter(client) => {
-                send_via_provider(client, request).await
-            }
+            Self::Xai(client)
+            | Self::OpenAi(client)
+            | Self::OpenRouter(client)
+            | Self::Compat(client) => send_via_provider(client, request).await,
         }
     }
 
@@ -83,11 +93,12 @@ impl ProviderClient {
             Self::ClawApi(client) => stream_via_provider(client, request)
                 .await
                 .map(MessageStream::ClawApi),
-            Self::Xai(client) | Self::OpenAi(client) | Self::OpenRouter(client) => {
-                stream_via_provider(client, request)
-                    .await
-                    .map(MessageStream::OpenAiCompat)
-            }
+            Self::Xai(client)
+            | Self::OpenAi(client)
+            | Self::OpenRouter(client)
+            | Self::Compat(client) => stream_via_provider(client, request)
+                .await
+                .map(MessageStream::OpenAiCompat),
         }
     }
 }
@@ -133,14 +144,10 @@ pub fn read_openrouter_base_url() -> String {
     openai_compat::read_base_url(OpenAiCompatConfig::openrouter())
 }
 
-/// Fait résumer `transcript` par le modèle, sans outils (compaction du contexte).
-pub async fn summarize_transcript(
-    client: &ProviderClient,
-    model: &str,
-    system_prompt: &str,
-    transcript: &str,
-) -> Result<String, ApiError> {
-    let request = MessageRequest {
+/// Requête de résumé d'une conversation, sans outils (compaction du contexte).
+#[must_use]
+pub fn summary_request(model: &str, system_prompt: &str, transcript: &str) -> MessageRequest {
+    MessageRequest {
         model: model.to_string(),
         max_tokens: providers::max_tokens_for_model(model).min(8_192),
         messages: vec![crate::types::InputMessage::user_text(format!(
@@ -150,9 +157,13 @@ pub async fn summarize_transcript(
         tools: None,
         tool_choice: None,
         stream: false,
-    };
-    let response = client.send_message(&request).await?;
-    Ok(response
+    }
+}
+
+/// Texte d'une réponse complète (blocs de texte mis bout à bout).
+#[must_use]
+pub fn response_text(response: &MessageResponse) -> String {
+    response
         .content
         .iter()
         .filter_map(|block| match block {
@@ -160,7 +171,20 @@ pub async fn summarize_transcript(
             _ => None,
         })
         .collect::<Vec<_>>()
-        .join(""))
+        .join("")
+}
+
+/// Fait résumer `transcript` par le modèle, sans outils (compaction du contexte).
+pub async fn summarize_transcript(
+    client: &ProviderClient,
+    model: &str,
+    system_prompt: &str,
+    transcript: &str,
+) -> Result<String, ApiError> {
+    let response = client
+        .send_message(&summary_request(model, system_prompt, transcript))
+        .await?;
+    Ok(response_text(&response))
 }
 
 /// Vrai si une clé Anthropic ou une connexion OAuth sauvegardée est disponible.

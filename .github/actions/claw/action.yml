@@ -1,0 +1,86 @@
+name: Claw Code
+description: Lance l'agent de code Claw sur une demande (issue, pull request, commentaire) avec n'importe quel modèle OpenRouter ou compatible.
+inputs:
+  prompt:
+    description: Demande à confier à l'agent.
+    required: true
+  model:
+    description: Modèle (ex. qwen/qwen3-coder:free). Vide = meilleur modèle gratuit pour le code.
+    required: false
+    default: ""
+  permission-mode:
+    description: read-only (analyse), workspace-write (modifie les fichiers) ou danger-full-access.
+    required: false
+    default: workspace-write
+  openrouter-api-key:
+    description: Clé OpenRouter (secret).
+    required: false
+    default: ""
+  install:
+    description: release (binaire de la dernière release du dépôt) ou source (compilation).
+    required: false
+    default: source
+outputs:
+  result:
+    description: Réponse finale de l'agent.
+    value: ${{ steps.run.outputs.result }}
+  changed:
+    description: "true si l'agent a modifié des fichiers suivis par git."
+    value: ${{ steps.run.outputs.changed }}
+runs:
+  using: composite
+  steps:
+    - name: Installer Claw (release)
+      if: inputs.install == 'release'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/claw"
+        gh release download --repo "$GITHUB_REPOSITORY" --pattern "*x86_64-unknown-linux-gnu.tar.gz" --dir "$RUNNER_TEMP/claw"
+        tar xzf "$RUNNER_TEMP"/claw/*.tar.gz -C "$RUNNER_TEMP/claw" --strip-components=1
+        echo "$RUNNER_TEMP/claw" >> "$GITHUB_PATH"
+
+    - name: Installer Rust
+      if: inputs.install != 'release'
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Installer Claw (source)
+      if: inputs.install != 'release'
+      shell: bash
+      run: cargo install --path rust/crates/claw-cli --locked --root "$RUNNER_TEMP/claw" && echo "$RUNNER_TEMP/claw/bin" >> "$GITHUB_PATH"
+
+    - name: Lancer l'agent
+      id: run
+      shell: bash
+      env:
+        OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
+        CLAW_PROMPT: ${{ inputs.prompt }}
+        CLAW_MODEL_INPUT: ${{ inputs.model }}
+        CLAW_MODE: ${{ inputs.permission-mode }}
+        CLAW_NO_BROWSER: "1"
+      run: |
+        set -uo pipefail
+        args=(--permission-mode "$CLAW_MODE" --output-format stream-json)
+        if [ -n "$CLAW_MODEL_INPUT" ]; then args+=(--model "$CLAW_MODEL_INPUT"); fi
+        claw "${args[@]}" prompt "$CLAW_PROMPT" | tee "$RUNNER_TEMP/claw.jsonl"
+        result=$(python3 - "$RUNNER_TEMP/claw.jsonl" <<'PY'
+        import json, sys
+        result = ""
+        for line in open(sys.argv[1], encoding="utf-8"):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "result":
+                result = event.get("result") or event.get("error") or ""
+        print(result)
+        PY
+        )
+        {
+          echo "result<<CLAW_EOF"
+          echo "$result"
+          echo "CLAW_EOF"
+        } >> "$GITHUB_OUTPUT"
+        if git status --porcelain | grep -q .; then echo "changed=true" >> "$GITHUB_OUTPUT"; else echo "changed=false" >> "$GITHUB_OUTPUT"; fi

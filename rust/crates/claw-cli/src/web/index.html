@@ -114,6 +114,16 @@
   .statusline .busy { color: var(--accent); font-weight: 600; }
   .statusline .offline { color: var(--err); }
   .input-row { display: flex; gap: 8px; align-items: flex-end; }
+  #attachments { display: flex; gap: 8px; flex-wrap: wrap; }
+  #attachments:empty { display: none; }
+  .thumb { position: relative; width: 64px; height: 64px; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .thumb button { position: absolute; top: 2px; right: 2px; padding: 0 6px; font-size: 12px; line-height: 18px; border-radius: 9px; }
+  .msg.thinking { color: var(--muted, #888); font-size: 13px; }
+  .msg.thinking pre { white-space: pre-wrap; margin: 6px 0 0; max-height: 280px; overflow-y: auto; font-family: inherit; font-style: italic; }
+  .msg.user-image { align-self: flex-end; max-width: min(360px, 80%); padding: 4px; }
+  .msg.user-image img { max-width: 100%; border-radius: 8px; display: block; }
+  footer.composer.dragging { outline: 2px dashed var(--accent, #4a7); outline-offset: -6px; }
   #input { flex: 1; resize: none; min-height: 52px; max-height: 40vh; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--bg); }
   #input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   #send, #stop { height: 44px; }
@@ -160,8 +170,9 @@
     <div class="statusline">
       <span id="busy"></span><span id="usage"></span><span id="quota"></span><span id="conn"></span>
     </div>
+    <div id="attachments" aria-label="Images jointes"></div>
     <div class="input-row">
-      <textarea id="input" rows="2" placeholder="Décrivez une tâche… ou tapez / pour les commandes (/review, /audit, /archi, /fix…)" aria-label="Message"></textarea>
+      <textarea id="input" rows="2" placeholder="Décrivez une tâche… / pour les commandes · collez ou glissez une capture d'écran" aria-label="Message"></textarea>
       <button id="send" class="primary" type="button">Envoyer</button>
       <button id="stop" type="button" hidden title="Arrêter le tour en cours (Échap)">Arrêter</button>
     </div>
@@ -182,6 +193,8 @@
     ["/undo", "annuler le dernier tour (fichiers et conversation)"],
     ["/checkpoints", "points de restauration"],
     ["/hooks", "hooks configurés"],
+    ["/think", "raisonnement du modèle : off, low, medium, high"],
+    ["/bashes", "commandes en arrière-plan"],
     ["/models", "modèles gratuits recommandés pour le code"],
     ["/model", "afficher ou changer le modèle"],
     ["/permissions", "afficher ou changer le mode"],
@@ -389,6 +402,14 @@
   }
 
   // ---------------------------------------------------------------- messages
+  function addUserImage(url) {
+    const node = el("div", "msg user user-image");
+    const image = document.createElement("img");
+    image.src = url;
+    image.alt = "Image jointe";
+    node.appendChild(image);
+    append(node);
+  }
   function addUser(text) {
     const node = el("div", "msg user", text);
     if (text.length > 600) {
@@ -416,6 +437,20 @@
         if (stick) scrollToBottom(true);
       });
     }
+  }
+  // Raisonnement du modèle : bloc repliable, avant la réponse.
+  let thinkingNode = null;
+  function appendThinking(text) {
+    if (!thinkingNode) {
+      finishAssistant();
+      const details = el("details", "msg thinking");
+      details.append(el("summary", null, "💭 Réflexion du modèle"), el("pre"));
+      append(details);
+      thinkingNode = details.querySelector("pre");
+    }
+    const stick = nearBottom();
+    thinkingNode.textContent += text;
+    if (stick) scrollToBottom(true);
   }
   function finishAssistant() {
     if (!currentAssistant) return;
@@ -612,7 +647,9 @@
   function render(event) {
     switch (event.type) {
       case "user_message": finishAssistant(); addUser(event.text); break;
-      case "assistant_text": appendAssistant(event.text); break;
+      case "user_image": finishAssistant(); addUserImage(event.url); break;
+      case "assistant_text": thinkingNode = null; appendAssistant(event.text); break;
+      case "thinking": appendThinking(event.text); break;
       case "tool_call": finishAssistant(); addToolCall(event.name, event.input); break;
       case "tool_result": attachToolResult(event.name, event.output, event.is_error); break;
       case "permission": finishAssistant(); addPermission(event); break;
@@ -704,17 +741,79 @@
   // ---------------------------------------------------------------- envoi
   async function sendMessage() {
     const text = input.value.trim();
-    if (!text) return;
-    if (status.busy) { toast("L'agent travaille encore : attendez la fin du tour."); return; }
+    if (!text && !pendingImages.length) return;
+    if (status.busy) toast("Message mis en file d'attente : il partira à la fin du tour en cours.");
     hideSuggestions();
     try {
-      await api("/api/message", { text });
+      const images = pendingImages.map(({ media_type, data }) => ({ media_type, data }));
+      await api("/api/message", { text, images });
       input.value = "";
+      pendingImages = [];
+      renderAttachments();
       autoGrow();
     } catch (error) {
       toast(error.message);
     }
   }
+
+  // ---------------------------------------------------------------- images jointes
+  let pendingImages = [];
+  const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+  function renderAttachments() {
+    const box = $("attachments");
+    box.textContent = "";
+    pendingImages.forEach((image, index) => {
+      const thumb = el("div", "thumb");
+      const preview = document.createElement("img");
+      preview.src = image.url;
+      preview.alt = "Image à envoyer";
+      const remove = el("button", null, "×");
+      remove.type = "button";
+      remove.title = "Retirer cette image";
+      remove.onclick = () => { pendingImages.splice(index, 1); renderAttachments(); };
+      thumb.append(preview, remove);
+      box.appendChild(thumb);
+    });
+  }
+  function addImageFile(file) {
+    if (!file || !IMAGE_TYPES.includes(file.type)) {
+      toast("Format non pris en charge (png, jpg, gif, webp).");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) { toast("Image trop lourde (5 Mo maximum)."); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = String(reader.result);
+      pendingImages.push({ media_type: file.type, data: url.slice(url.indexOf(",") + 1), url });
+      renderAttachments();
+    };
+    reader.readAsDataURL(file);
+  }
+  input.addEventListener("paste", (event) => {
+    const files = [...(event.clipboardData?.items || [])]
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile());
+    if (files.length) {
+      event.preventDefault();
+      files.forEach(addImageFile);
+    }
+  });
+  const composer = document.querySelector("footer.composer");
+  composer.addEventListener("dragover", (event) => {
+    if ([...(event.dataTransfer?.types || [])].includes("Files")) {
+      event.preventDefault();
+      composer.classList.add("dragging");
+    }
+  });
+  composer.addEventListener("dragleave", () => composer.classList.remove("dragging"));
+  composer.addEventListener("drop", (event) => {
+    composer.classList.remove("dragging");
+    const files = [...(event.dataTransfer?.files || [])].filter((file) => file.type.startsWith("image/"));
+    if (files.length) {
+      event.preventDefault();
+      files.forEach(addImageFile);
+    }
+  });
   function autoGrow() {
     input.style.height = "auto";
     input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + "px";

@@ -325,7 +325,15 @@ impl ClawApiClient {
             .header("content-type", "application/json");
         let mut request_builder = self.auth.apply(request_builder);
 
-        request_builder = request_builder.json(request);
+        let mut body = serde_json::to_value(request).map_err(ApiError::from)?;
+        // `/think` : raisonnement étendu (les blocs signés sont renvoyés ensuite).
+        if let Some(budget) = super::reasoning::anthropic_thinking_budget() {
+            body["thinking"] = serde_json::json!({ "type": "enabled", "budget_tokens": budget });
+            if request.max_tokens <= budget {
+                body["max_tokens"] = serde_json::json!(budget + 8_192);
+            }
+        }
+        request_builder = request_builder.json(&body);
         request_builder.send().await.map_err(ApiError::from)
     }
 

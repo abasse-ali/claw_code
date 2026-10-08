@@ -208,6 +208,10 @@ pub fn render_transcript_for_summary(messages: &[ConversationMessage]) -> String
                     if *is_error { " (error)" } else { "" },
                     truncate_summary(output, TRANSCRIPT_TOOL_OUTPUT_LIMIT)
                 ),
+                ContentBlock::Thinking { .. } => continue,
+                ContentBlock::Image { media_type, .. } => {
+                    format!("{role} attached an image ({media_type})")
+                }
             };
             transcript.push_str(&entry);
             transcript.push_str("\n\n");
@@ -265,7 +269,9 @@ fn summarize_messages(messages: &[ConversationMessage]) -> String {
         .filter_map(|block| match block {
             ContentBlock::ToolUse { name, .. } => Some(name.as_str()),
             ContentBlock::ToolResult { tool_name, .. } => Some(tool_name.as_str()),
-            ContentBlock::Text { .. } => None,
+            ContentBlock::Text { .. }
+            | ContentBlock::Image { .. }
+            | ContentBlock::Thinking { .. } => None,
         })
         .collect::<Vec<_>>();
     tool_names.sort_unstable();
@@ -380,6 +386,8 @@ fn summarize_block(block: &ContentBlock) -> String {
             "tool_result {tool_name}: {}{output}",
             if *is_error { "error " } else { "" }
         ),
+        ContentBlock::Image { media_type, .. } => format!("image ({media_type})"),
+        ContentBlock::Thinking { thinking, .. } => format!("thinking: {thinking}"),
     };
     truncate_summary(&raw, 160)
 }
@@ -431,6 +439,7 @@ fn collect_key_files(messages: &[ConversationMessage]) -> Vec<String> {
             ContentBlock::Text { text } => text.as_str(),
             ContentBlock::ToolUse { input, .. } => input.as_str(),
             ContentBlock::ToolResult { output, .. } => output.as_str(),
+            ContentBlock::Image { .. } | ContentBlock::Thinking { .. } => "",
         })
         .flat_map(extract_file_candidates)
         .collect::<Vec<_>>();
@@ -453,6 +462,8 @@ fn first_text_block(message: &ConversationMessage) -> Option<&str> {
         ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
         ContentBlock::ToolUse { .. }
         | ContentBlock::ToolResult { .. }
+        | ContentBlock::Image { .. }
+        | ContentBlock::Thinking { .. }
         | ContentBlock::Text { .. } => None,
     })
 }
@@ -503,6 +514,9 @@ pub(crate) fn estimate_message_tokens(message: &ConversationMessage) -> usize {
             ContentBlock::ToolResult {
                 tool_name, output, ..
             } => (tool_name.len() + output.len()) / 4 + 1,
+            // Une image coûte environ 1 500 jetons, quelle que soit sa taille en base64.
+            ContentBlock::Image { .. } => 1_500,
+            ContentBlock::Thinking { thinking, .. } => thinking.len() / 4 + 1,
         })
         .sum()
 }

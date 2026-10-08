@@ -527,6 +527,44 @@ impl McpServerManager {
         Ok(response)
     }
 
+    /// Serveurs stdio gérés (noms de la config).
+    #[must_use]
+    pub fn server_names(&self) -> Vec<String> {
+        self.servers.keys().cloned().collect()
+    }
+
+    /// Requête JSON-RPC quelconque vers un serveur stdio (`resources/list`,
+    /// `prompts/get`…). Renvoie le résultat brut ou l'erreur du serveur.
+    pub async fn request_raw(
+        &mut self,
+        server_name: &str,
+        method: &'static str,
+        params: Option<JsonValue>,
+    ) -> Result<JsonValue, McpServerManagerError> {
+        self.ensure_server_ready(server_name).await?;
+        let request_id = self.take_request_id();
+        let server = self.server_mut(server_name)?;
+        let process =
+            server
+                .process
+                .as_mut()
+                .ok_or_else(|| McpServerManagerError::InvalidResponse {
+                    server_name: server_name.to_string(),
+                    method,
+                    details: "processus du serveur manquant après l'initialisation".to_string(),
+                })?;
+        let response: JsonRpcResponse<JsonValue> =
+            process.request(request_id, method, params).await?;
+        if let Some(error) = response.error {
+            return Err(McpServerManagerError::InvalidResponse {
+                server_name: server_name.to_string(),
+                method,
+                details: format!("erreur {} : {}", error.code, error.message),
+            });
+        }
+        Ok(response.result.unwrap_or(JsonValue::Null))
+    }
+
     pub async fn shutdown(&mut self) -> Result<(), McpServerManagerError> {
         let server_names = self.servers.keys().cloned().collect::<Vec<_>>();
         for server_name in server_names {

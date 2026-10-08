@@ -18,7 +18,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use async_stream::stream;
-use axum::extract::{Query, State};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
@@ -63,6 +63,14 @@ pub(crate) struct ServeOptions {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WebEvent {
     UserMessage {
+        text: String,
+    },
+    /// Image jointe par l'utilisateur (URL `data:`).
+    UserImage {
+        url: String,
+    },
+    /// Raisonnement du modèle, affiché dans un bloc repliable.
+    Thinking {
         text: String,
     },
     AssistantText {
@@ -129,7 +137,7 @@ enum PermissionReply {
 }
 
 enum WorkerCommand {
-    Message(String),
+    Message(String, Vec<runtime::attachments::ImageAttachment>),
     SetModel(String),
     SetPermissions(String),
     NewConversation,
@@ -215,6 +223,12 @@ struct WebObserver {
 impl TurnObserver for WebObserver {
     fn text_delta(&self, text: &str) {
         self.app.publish(WebEvent::AssistantText {
+            text: text.to_string(),
+        });
+    }
+
+    fn thinking_delta(&self, text: &str) {
+        self.app.publish(WebEvent::Thinking {
             text: text.to_string(),
         });
     }
@@ -473,15 +487,33 @@ impl Worker {
 
     fn handle(&mut self, command: WorkerCommand) -> Result<(), String> {
         match command {
-            WorkerCommand::Message(text) => {
-                self.app
-                    .publish(WebEvent::UserMessage { text: text.clone() });
-                if text.trim_start().starts_with('/') {
-                    self.slash_command(text.trim())
-                } else {
-                    self.run_turn(&text);
-                    Ok(())
+            WorkerCommand::Message(text, mut images) => {
+                if !text.trim().is_empty() {
+                    self.app
+                        .publish(WebEvent::UserMessage { text: text.clone() });
                 }
+                if text.trim_start().starts_with('/') && images.is_empty() {
+                    return self.slash_command(text.trim());
+                }
+                // `@capture.png` dans le texte, comme dans le terminal.
+                let cwd = std::env::current_dir().unwrap_or_default();
+                let files = runtime::attachments::file_mention_blocks(&text, &cwd);
+                let (mut text, cited, errors) =
+                    runtime::attachments::extract_image_attachments(&text, &cwd);
+                if !files.is_empty() {
+                    text = format!("{text}\n\n{}", files.join("\n\n"));
+                }
+                for error in errors {
+                    self.info(format!("Image ignorée : {error}"));
+                }
+                images.extend(cited);
+                for image in &images {
+                    self.app.publish(WebEvent::UserImage {
+                        url: format!("data:{};base64,{}", image.media_type, image.data),
+                    });
+                }
+                self.run_turn_with_images(&text, images);
+                Ok(())
             }
             WorkerCommand::SetModel(model) => self.set_model(&model),
             WorkerCommand::SetPermissions(mode) => self.set_permissions(&mode),
@@ -491,12 +523,29 @@ impl Worker {
     }
 
     fn run_turn(&mut self, prompt: &str) {
+        self.run_turn_with_images(prompt, Vec::new());
+    }
+
+    fn run_turn_with_images(
+        &mut self,
+        prompt: &str,
+        images: Vec<runtime::attachments::ImageAttachment>,
+    ) {
         let mut prompter = WebPrompter {
             app: self.app.clone(),
             mode: self.permission_mode,
         };
-        let result = self.runtime.run_turn(prompt, Some(&mut prompter));
+        let result = self
+            .runtime
+            .run_turn_with_images(prompt, images, Some(&mut prompter));
         self.persist();
+        // Plan approuvé pendant le tour : la session reste en workspace-write.
+        let active = self.runtime.permission_policy().active_mode();
+        if active != self.permission_mode {
+            if let Err(error) = self.set_permissions(active.as_str()) {
+                self.info(format!("Changement de mode impossible : {error}"));
+            }
+        }
         match result {
             Ok(_) => self.app.publish(WebEvent::TurnDone),
             Err(error) if runtime::interrupt::is_interruption(&error.to_string()) => {
@@ -556,6 +605,12 @@ impl Worker {
             Some(SlashCommand::Hooks) => {
                 self.info(crate::render_hooks_report(self.runtime.hooks().config()));
             }
+            Some(SlashCommand::Think { level }) => {
+                self.info(crate::apply_think_command(level.as_deref()));
+            }
+            Some(SlashCommand::Bashes { args }) => {
+                self.info(crate::render_background_tasks(args.as_deref()));
+            }
             Some(SlashCommand::Compact) => {
                 let result = self.runtime.compact(runtime::CompactionConfig::default());
                 let removed = result.removed_message_count;
@@ -574,7 +629,7 @@ impl Worker {
                 self.info(report);
             }
             Some(SlashCommand::Help) => self.info(format!(
-                "{}\n\nDans l'interface web : /review /audit /archi /adr /fix /undo /checkpoints /hooks /models /mcp /model /permissions /cost /compact /clear.\nLes autres commandes s'utilisent dans le terminal.\n\n{}",
+                "{}\n\nDans l'interface web : /review /audit /archi /adr /fix /undo /checkpoints /hooks /think /bashes /models /mcp /model /permissions /cost /compact /clear.\nLes autres commandes s'utilisent dans le terminal.\n\n{}",
                 render_slash_command_help(),
                 commands::render_custom_commands_help(
                     &std::env::current_dir().unwrap_or_default()
@@ -583,8 +638,23 @@ impl Worker {
             Some(SlashCommand::Unknown(name)) => {
                 let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
                 match commands::resolve_custom_command(&cwd, text) {
-                    Some(invocation) => self.run_turn(&invocation?.prompt),
-                    None => self.info(format!("Commande inconnue : /{name}. Tapez /help.")),
+                    Some(invocation) => {
+                        let invocation = invocation?;
+                        // Modèle propre à la commande : le temps de ce tour.
+                        match invocation.command.model.clone() {
+                            Some(model) => {
+                                let previous = self.model.clone();
+                                self.set_model(&model)?;
+                                self.run_turn(&invocation.prompt);
+                                self.set_model(&previous)?;
+                            }
+                            None => self.run_turn(&invocation.prompt),
+                        }
+                    }
+                    None => match tools::mcp_prompt_invocation(text) {
+                        Some(prompt) => self.run_turn(&prompt?),
+                        None => self.info(format!("Commande inconnue : /{name}. Tapez /help.")),
+                    },
                 }
             }
             Some(_) => self.info(
@@ -679,6 +749,12 @@ fn transcript_from_messages(messages: &[ConversationMessage]) -> Vec<WebEvent> {
                     output: output.clone(),
                     is_error: *is_error,
                 },
+                (ContentBlock::Image { media_type, data }, _) => WebEvent::UserImage {
+                    url: format!("data:{media_type};base64,{data}"),
+                },
+                (ContentBlock::Thinking { thinking, .. }, _) => WebEvent::Thinking {
+                    text: thinking.clone(),
+                },
             });
         }
     }
@@ -694,7 +770,16 @@ struct TokenQuery {
 
 #[derive(Deserialize)]
 struct MessageBody {
+    #[serde(default)]
     text: String,
+    #[serde(default)]
+    images: Vec<ImageBody>,
+}
+
+#[derive(Deserialize)]
+struct ImageBody {
+    media_type: String,
+    data: String,
 }
 
 #[derive(Deserialize)]
@@ -767,22 +852,29 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 }
 
 async fn index() -> Response {
+    // `claw serve --embed` : la page peut s'afficher dans un panneau de VS Code
+    // (et seulement là) ; sinon elle refuse tout cadre.
+    let embed = std::env::var("CLAW_WEB_EMBED").is_ok_and(|value| value.trim() == "1");
     let mut response = Html(PAGE).into_response();
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
-        ),
+        HeaderValue::from_static(if embed {
+            "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self' vscode-webview:"
+        } else {
+            "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
+        }),
     );
     headers.insert(
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
     );
-    headers.insert(
-        header::HeaderName::from_static("x-frame-options"),
-        HeaderValue::from_static("DENY"),
-    );
+    if !embed {
+        headers.insert(
+            header::HeaderName::from_static("x-frame-options"),
+            HeaderValue::from_static("DENY"),
+        );
+    }
     response
 }
 
@@ -831,10 +923,37 @@ async fn post_message(
     Json(body): Json<MessageBody>,
 ) -> ApiResult {
     authorize(&app, &headers, None)?;
-    if body.text.trim().is_empty() {
+    if body.text.trim().is_empty() && body.images.is_empty() {
         return Err(api_error(StatusCode::BAD_REQUEST, "message vide"));
     }
-    send_command(&app, WorkerCommand::Message(body.text))
+    let mut images = Vec::new();
+    for image in body.images {
+        if !matches!(
+            image.media_type.as_str(),
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        ) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "format d'image non pris en charge (png, jpg, gif, webp)",
+            ));
+        }
+        // ~5 Mo une fois décodée.
+        if image.data.len() > runtime::attachments::MAX_IMAGE_BYTES / 3 * 4 + 4 {
+            return Err(api_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "image trop lourde (5 Mo maximum)",
+            ));
+        }
+        images.push(runtime::attachments::ImageAttachment {
+            media_type: image.media_type,
+            data: image.data,
+            path: std::path::PathBuf::from("collée"),
+        });
+    }
+    app.commands
+        .send(WorkerCommand::Message(body.text, images))
+        .map_err(|_| api_error(StatusCode::SERVICE_UNAVAILABLE, "l'agent est arrêté"))?;
+    Ok(StatusCode::ACCEPTED.into_response())
 }
 
 async fn post_permission(
@@ -966,7 +1085,10 @@ fn router(app: WebApp) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/api/events", get(events))
-        .route("/api/message", post(post_message))
+        .route(
+            "/api/message",
+            post(post_message).layer(DefaultBodyLimit::max(48 * 1024 * 1024)),
+        )
         .route("/api/permission", post(post_permission))
         .route("/api/model", post(post_model))
         .route("/api/permissions", post(post_permissions))

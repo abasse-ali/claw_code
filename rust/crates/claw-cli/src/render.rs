@@ -255,7 +255,10 @@ impl TerminalRenderer {
         let mut code_buffer = String::new();
         let mut in_code_block = false;
 
-        for event in Parser::new_ext(markdown, Options::all()) {
+        // Sans « ponctuation intelligente » : `--model` ou `"…"` restent tels quels
+        // (options de commande, chemins), essentiel pour un agent de code.
+        let options = Options::all().difference(Options::ENABLE_SMART_PUNCTUATION);
+        for event in Parser::new_ext(markdown, options) {
             self.render_event(
                 event,
                 &mut state,

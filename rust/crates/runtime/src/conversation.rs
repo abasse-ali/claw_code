@@ -24,6 +24,12 @@ pub struct ApiRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssistantEvent {
     TextDelta(String),
+    /// Bloc de raisonnement signé (modèles Claude), conservé dans la session.
+    Thinking {
+        thinking: String,
+        signature: String,
+        redacted: Option<String>,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -56,6 +62,19 @@ pub struct AutoCompactionConfig {
 
 pub trait ToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
+
+    /// Outil sans effet de bord, exécutable en même temps que d'autres.
+    fn parallel_safe(&self, _tool_name: &str) -> bool {
+        false
+    }
+
+    /// Exécute plusieurs appels sûrs ; par défaut l'un après l'autre.
+    fn execute_batch(&mut self, calls: &[(String, String)]) -> Vec<Result<String, ToolError>> {
+        calls
+            .iter()
+            .map(|(name, input)| self.execute(name, input))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,10 +364,26 @@ where
     pub fn run_turn(
         &mut self,
         user_input: impl Into<String>,
+        prompter: Option<&mut dyn PermissionPrompter>,
+    ) -> Result<TurnSummary, RuntimeError> {
+        self.run_turn_with_images(user_input, Vec::new(), prompter)
+    }
+
+    /// Comme `run_turn`, avec des images jointes à la demande.
+    pub fn run_turn_with_images(
+        &mut self,
+        user_input: impl Into<String>,
+        images: Vec<crate::attachments::ImageAttachment>,
         mut prompter: Option<&mut dyn PermissionPrompter>,
     ) -> Result<TurnSummary, RuntimeError> {
         clear_interrupt();
-        let user_message = self.user_message_with_hooks(user_input.into())?;
+        let mut user_message = self.user_message_with_hooks(user_input.into())?;
+        user_message
+            .blocks
+            .extend(images.into_iter().map(|image| ContentBlock::Image {
+                media_type: image.media_type,
+                data: image.data,
+            }));
         self.session.messages.push(user_message);
 
         let mut assistant_messages = Vec::new();
@@ -416,6 +451,9 @@ where
                 break;
             }
 
+            if self.run_parallel_batch(&pending_tool_uses, &mut prompter, &mut tool_results) {
+                continue;
+            }
             for (tool_use_id, tool_name, input) in pending_tool_uses {
                 // Après une interruption, chaque appel restant reçoit un résultat :
                 // un appel d'outil sans résultat rendrait la conversation invalide.
@@ -440,6 +478,10 @@ where
                 );
                 self.session.messages.push(result_message.clone());
                 tool_results.push(result_message);
+                // Plan approuvé (ExitPlanMode) : la suite du tour peut modifier.
+                if let Some(mode) = crate::permissions::take_mode_switch() {
+                    self.permission_policy.set_active_mode(mode);
+                }
             }
         }
 
@@ -486,6 +528,104 @@ where
             });
         }
         Ok(user_message)
+    }
+
+    /// Plusieurs appels sans effet (sous-agents, lectures, recherches) : les
+    /// autorisations et hooks restent séquentiels, l'exécution est simultanée.
+    /// Renvoie faux si le lot ne s'y prête pas (traitement appel par appel).
+    fn run_parallel_batch(
+        &mut self,
+        calls: &[(String, String, String)],
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+        tool_results: &mut Vec<ConversationMessage>,
+    ) -> bool {
+        if calls.len() < 2
+            || interrupt_requested()
+            || !calls
+                .iter()
+                .all(|(_, name, _)| self.tool_executor.parallel_safe(name))
+        {
+            return false;
+        }
+        // 1. Autorisations et hooks PreToolUse, dans l'ordre.
+        let mut results: Vec<Option<ConversationMessage>> = vec![None; calls.len()];
+        let mut ready = Vec::new();
+        let mut pre_messages = Vec::new();
+        for (index, (id, name, input)) in calls.iter().enumerate() {
+            let mut notifying = prompter.as_mut().map(|prompt| NotifyingPrompter {
+                hooks: &self.hook_runner,
+                inner: &mut **prompt,
+            });
+            let outcome = self.permission_policy.authorize(
+                name,
+                input,
+                notifying
+                    .as_mut()
+                    .map(|prompt| prompt as &mut dyn PermissionPrompter),
+            );
+            match outcome {
+                PermissionOutcome::Deny { reason } => {
+                    results[index] = Some(ConversationMessage::tool_result(
+                        id.clone(),
+                        name.clone(),
+                        reason,
+                        true,
+                    ));
+                }
+                PermissionOutcome::Allow => {
+                    let pre = self.hook_runner.run_pre_tool_use(name, input);
+                    if pre.is_denied() {
+                        let fallback = format!("hook PreToolUse : outil `{name}` refusé");
+                        results[index] = Some(ConversationMessage::tool_result(
+                            id.clone(),
+                            name.clone(),
+                            format_hook_message(&pre, &fallback),
+                            true,
+                        ));
+                    } else {
+                        ready.push(index);
+                        pre_messages.push(pre.messages().to_vec());
+                    }
+                }
+            }
+        }
+        // 2. Exécution simultanée des appels autorisés.
+        let batch = ready
+            .iter()
+            .map(|index| (calls[*index].1.clone(), calls[*index].2.clone()))
+            .collect::<Vec<_>>();
+        let outputs = if batch.is_empty() {
+            Vec::new()
+        } else {
+            self.tool_executor.execute_batch(&batch)
+        };
+        // 3. Hooks PostToolUse et résultats, dans l'ordre d'origine.
+        for ((index, outcome), pre) in ready.iter().zip(outputs).zip(pre_messages) {
+            let (id, name, input) = &calls[*index];
+            let (mut output, mut is_error) = match outcome {
+                Ok(output) => (output, false),
+                Err(error) => (error.to_string(), true),
+            };
+            output = merge_hook_feedback(&pre, output, false);
+            let post = self
+                .hook_runner
+                .run_post_tool_use(name, input, &output, is_error);
+            if post.is_denied() {
+                is_error = true;
+            }
+            output = merge_hook_feedback(post.messages(), output, post.is_denied());
+            results[*index] = Some(ConversationMessage::tool_result(
+                id.clone(),
+                name.clone(),
+                output,
+                is_error,
+            ));
+        }
+        for message in results.into_iter().flatten() {
+            self.session.messages.push(message.clone());
+            tool_results.push(message);
+        }
+        true
     }
 
     /// Autorisation, hooks `PreToolUse`/`PostToolUse`, point de restauration
@@ -657,7 +797,22 @@ fn build_assistant_message(
             AssistantEvent::TextDelta(delta) => text.push_str(&delta),
             AssistantEvent::ToolUse { id, name, input } => {
                 flush_text_block(&mut text, &mut blocks);
+                // Arguments mal formés (petits modèles) : réparés si possible, sinon
+                // laissés tels quels pour que l'outil renvoie une erreur explicite.
+                let input = crate::json_repair::repair_tool_input(&input).unwrap_or(input);
                 blocks.push(ContentBlock::ToolUse { id, name, input });
+            }
+            AssistantEvent::Thinking {
+                thinking,
+                signature,
+                redacted,
+            } => {
+                flush_text_block(&mut text, &mut blocks);
+                blocks.push(ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                    redacted,
+                });
             }
             AssistantEvent::Usage(value) => usage = Some(value),
             AssistantEvent::MessageStop => {

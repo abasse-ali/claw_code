@@ -75,6 +75,45 @@ pub enum InputContentBlock {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
     },
+    /// Image en base64 (format de l'API Anthropic).
+    Image {
+        source: ImageSource,
+    },
+    /// Raisonnement d'un modèle Claude, renvoyé tel quel (signature comprise)
+    /// avec les appels d'outils, comme l'exige l'API Anthropic.
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageSource {
+    /// Toujours `base64`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub media_type: String,
+    pub data: String,
+}
+
+impl ImageSource {
+    #[must_use]
+    pub fn base64(media_type: impl Into<String>, data: impl Into<String>) -> Self {
+        Self {
+            kind: "base64".to_string(),
+            media_type: media_type.into(),
+            data: data.into(),
+        }
+    }
+
+    /// URL `data:` utilisée par les API compatibles `OpenAI`.
+    #[must_use]
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.media_type, self.data)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -3,13 +3,17 @@
 //! Les serveurs sont connectés une seule fois par processus, à la première
 //! construction du runtime, puis réutilisés ; leurs outils sont exposés au modèle
 //! sous la forme `mcp__<serveur>__<outil>`. Transports pris en charge : `stdio`
-//! (processus local) et `http` (« Streamable HTTP », serveurs distants).
+//! (processus local), `http` (« Streamable HTTP ») et `sse` (ancien transport
+//! des serveurs distants). Les ressources MCP sont lisibles par deux outils
+//! (`ListMcpResources`, `ReadMcpResource`) et les prompts MCP deviennent des
+//! commandes `/mcp__<serveur>__<prompt>`.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
-use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::io::BufRead;
+use std::sync::{mpsc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use runtime::{
     mcp_server_log_path, mcp_tool_name, ManagedMcpTool, McpServerConfig, McpServerManager, McpTool,
@@ -91,6 +95,319 @@ struct McpBridge {
     signature: String,
     tools: Vec<McpToolEntry>,
     servers: BTreeMap<String, ServerState>,
+    resources: Vec<McpResourceEntry>,
+    prompts: Vec<McpPromptEntry>,
+}
+
+/// Ressource MCP (fichier, schéma, document…) d'un serveur.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpResourceEntry {
+    pub server: String,
+    pub uri: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub mime_type: Option<String>,
+}
+
+/// Prompt MCP, invoqué comme une commande `/mcp__<serveur>__<prompt>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpPromptEntry {
+    pub server: String,
+    pub name: String,
+    pub command: String,
+    pub description: Option<String>,
+    /// (nom, obligatoire) dans l'ordre déclaré.
+    pub arguments: Vec<(String, bool)>,
+}
+
+const LIST_RESOURCES_TOOL: &str = "ListMcpResources";
+const READ_RESOURCE_TOOL: &str = "ReadMcpResource";
+
+impl McpBridge {
+    /// Requête JSON-RPC vers un serveur, quel que soit son transport.
+    fn request(
+        &mut self,
+        server: &str,
+        method: &'static str,
+        params: Value,
+    ) -> Result<Value, String> {
+        if let Some(client) = self.http.get_mut(server) {
+            return client.request(method, &params);
+        }
+        let McpBridge { runtime, stdio, .. } = self;
+        let timeout = env_duration("CLAW_MCP_TOOL_TIMEOUT_MS", DEFAULT_CALL_TIMEOUT);
+        runtime
+            .block_on(async {
+                tokio::time::timeout(timeout, stdio.request_raw(server, method, Some(params))).await
+            })
+            .map_err(|_| format!("le serveur MCP `{server}` n'a pas répondu à {method}"))?
+            .map_err(|error| error.to_string())
+    }
+
+    /// Ressources et prompts des serveurs connectés (ignorés s'ils n'en ont pas).
+    fn discover_extras(&mut self) {
+        let connected = self
+            .servers
+            .iter()
+            .filter(|(_, state)| matches!(state, ServerState::Connected { .. }))
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        for server in connected {
+            if let Ok(result) = self.request(&server, "resources/list", json!({})) {
+                for resource in result
+                    .get("resources")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some(uri) = resource.get("uri").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let text = |key: &str| {
+                        resource
+                            .get(key)
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned)
+                    };
+                    self.resources.push(McpResourceEntry {
+                        server: server.clone(),
+                        uri: uri.to_string(),
+                        name: text("name").unwrap_or_else(|| uri.to_string()),
+                        description: text("description"),
+                        mime_type: text("mimeType"),
+                    });
+                }
+            }
+            if let Ok(result) = self.request(&server, "prompts/list", json!({})) {
+                for prompt in result
+                    .get("prompts")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some(name) = prompt.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let arguments = prompt
+                        .get("arguments")
+                        .and_then(Value::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|argument| {
+                                    let name = argument.get("name")?.as_str()?.to_string();
+                                    let required = argument
+                                        .get("required")
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(false);
+                                    Some((name, required))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    self.prompts.push(McpPromptEntry {
+                        server: server.clone(),
+                        name: name.to_string(),
+                        command: mcp_tool_name(&server, name),
+                        description: prompt
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned),
+                        arguments,
+                    });
+                }
+            }
+        }
+        if !self.resources.is_empty() {
+            self.tools.push(resource_tool(
+                LIST_RESOURCES_TOOL,
+                "List the resources (files, documents, schemas…) exposed by the connected MCP servers. Optional `server` filters by server name.",
+                json!({ "type": "object", "properties": { "server": { "type": "string" } } }),
+            ));
+            self.tools.push(resource_tool(
+                READ_RESOURCE_TOOL,
+                "Read an MCP resource by its URI (from ListMcpResources).",
+                json!({
+                    "type": "object",
+                    "properties": { "server": { "type": "string" }, "uri": { "type": "string" } },
+                    "required": ["server", "uri"]
+                }),
+            ));
+        }
+    }
+}
+
+fn resource_tool(name: &str, description: &str, schema: Value) -> McpToolEntry {
+    McpToolEntry {
+        name: name.to_string(),
+        qualified_name: name.to_string(),
+        raw_name: name.to_string(),
+        server: String::new(),
+        description: Some(description.to_string()),
+        input_schema: schema,
+        read_only: true,
+    }
+}
+
+/// Outils `ListMcpResources` / `ReadMcpResource`.
+fn call_resource_tool(bridge: &mut McpBridge, name: &str, input: &Value) -> Result<String, String> {
+    let server = input.get("server").and_then(Value::as_str);
+    if name == LIST_RESOURCES_TOOL {
+        let listed = bridge
+            .resources
+            .iter()
+            .filter(|resource| server.is_none_or(|server| resource.server == server))
+            .map(|resource| {
+                json!({
+                    "server": resource.server,
+                    "uri": resource.uri,
+                    "name": resource.name,
+                    "description": resource.description,
+                    "mimeType": resource.mime_type,
+                })
+            })
+            .collect::<Vec<_>>();
+        return serde_json::to_string_pretty(&listed).map_err(|error| error.to_string());
+    }
+    let server = server.ok_or("le champ `server` est requis")?;
+    let uri = input
+        .get("uri")
+        .and_then(Value::as_str)
+        .ok_or("le champ `uri` est requis")?;
+    let result = bridge.request(server, "resources/read", json!({ "uri": uri }))?;
+    let mut parts = Vec::new();
+    for content in result
+        .get("contents")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(text) = content.get("text").and_then(Value::as_str) {
+            parts.push(text.to_string());
+        } else if let Some(blob) = content.get("blob").and_then(Value::as_str) {
+            parts.push(format!(
+                "[contenu binaire {} : {} octets en base64]",
+                content
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?"),
+                blob.len()
+            ));
+        }
+    }
+    Ok(parts.join("\n\n"))
+}
+
+/// Prompts MCP connus, pour la complétion et `/help`.
+#[must_use]
+pub fn mcp_prompt_commands() -> Vec<(String, Option<String>)> {
+    lock_bridge()
+        .as_ref()
+        .map(|bridge| {
+            bridge
+                .prompts
+                .iter()
+                .map(|prompt| (format!("/{}", prompt.command), prompt.description.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `/mcp__serveur__prompt arguments` → texte de la demande fourni par le serveur.
+#[must_use]
+pub fn mcp_prompt_invocation(input: &str) -> Option<Result<String, String>> {
+    let rest = input.trim_start().strip_prefix('/')?;
+    let (name, arguments) = rest
+        .split_once(char::is_whitespace)
+        .map_or((rest, ""), |(name, arguments)| (name, arguments.trim()));
+    let mut slot = lock_bridge();
+    let bridge = slot.as_mut()?;
+    let prompt = bridge
+        .prompts
+        .iter()
+        .find(|prompt| prompt.command == name)?
+        .clone();
+    let values = split_prompt_arguments(arguments);
+    let mut params = serde_json::Map::new();
+    for (index, (argument, required)) in prompt.arguments.iter().enumerate() {
+        // Le dernier argument reçoit le reste du texte.
+        let value = if index + 1 == prompt.arguments.len() && values.len() > index {
+            values[index..].join(" ")
+        } else {
+            values.get(index).cloned().unwrap_or_default()
+        };
+        if value.is_empty() && *required {
+            return Some(Err(format!(
+                "argument « {argument} » requis : /{} {}",
+                prompt.command,
+                prompt
+                    .arguments
+                    .iter()
+                    .map(|(name, required)| if *required {
+                        format!("<{name}>")
+                    } else {
+                        format!("[{name}]")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )));
+        }
+        if !value.is_empty() {
+            params.insert(argument.clone(), Value::String(value));
+        }
+    }
+    let result = bridge.request(
+        &prompt.server,
+        "prompts/get",
+        json!({ "name": prompt.name, "arguments": params }),
+    );
+    Some(result.map(|result| {
+        result
+            .get("messages")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|message| {
+                let content = message.get("content")?;
+                content
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .or_else(|| {
+                        content.get("resource").and_then(|resource| {
+                            resource
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .map(ToOwned::to_owned)
+                        })
+                    })
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }))
+}
+
+fn split_prompt_arguments(text: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for c in text.chars() {
+        match (quote, c) {
+            (Some(open), c) if c == open => quote = None,
+            (Some(_), c) => current.push(c),
+            (None, '"' | '\'') => quote = Some(c),
+            (None, c) if c.is_whitespace() => {
+                if !current.is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                }
+            }
+            (None, c) => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
 }
 
 fn bridge_slot() -> &'static Mutex<Option<McpBridge>> {
@@ -149,6 +466,9 @@ pub fn call_mcp_tool(name: &str, input: &Value) -> Result<String, String> {
     let bridge = slot
         .as_mut()
         .ok_or_else(|| "aucun serveur MCP n'est connecté".to_string())?;
+    if name == LIST_RESOURCES_TOOL || name == READ_RESOURCE_TOOL {
+        return call_resource_tool(bridge, name, input);
+    }
     let entry = bridge
         .tools
         .iter()
@@ -216,6 +536,23 @@ pub fn mcp_status_report(config: &RuntimeConfig) -> String {
             ServerState::Failed(reason) => format!("  ✘ {name:<20} échec · {reason}"),
             ServerState::Unsupported(reason) => format!("  ○ {name:<20} ignoré · {reason}"),
         });
+    }
+    if !bridge.resources.is_empty() {
+        lines.push(format!(
+            "  Ressources       {} (outils ListMcpResources / ReadMcpResource)",
+            bridge.resources.len()
+        ));
+    }
+    if !bridge.prompts.is_empty() {
+        lines.push(String::new());
+        lines.push("Prompts (commandes)".to_string());
+        for prompt in &bridge.prompts {
+            lines.push(format!(
+                "  /{}  {}",
+                prompt.command,
+                prompt.description.as_deref().unwrap_or("")
+            ));
+        }
     }
     if !bridge.tools.is_empty() {
         lines.push(String::new());
@@ -285,18 +622,41 @@ impl McpBridge {
         }
 
         let mut http = BTreeMap::new();
+        let mut transports = BTreeMap::new();
         for (name, server) in servers {
             match &server.config {
                 McpServerConfig::Stdio(_) => {}
-                McpServerConfig::Http(remote) => {
-                    let mut client =
-                        HttpMcpClient::new(&remote.url, &remote.headers, discovery_timeout);
-                    match client.initialize().and_then(|()| client.list_tools()) {
-                        Ok(remote_tools) => {
+                McpServerConfig::Http(remote) | McpServerConfig::Sse(remote) => {
+                    let sse = matches!(server.config, McpServerConfig::Sse(_));
+                    transports.insert(name.clone(), if sse { "sse" } else { "http" });
+                    let client = if sse {
+                        HttpMcpClient::new_sse(
+                            name,
+                            &remote.url,
+                            &remote.headers,
+                            discovery_timeout,
+                        )
+                    } else {
+                        Ok(HttpMcpClient::new(
+                            name,
+                            &remote.url,
+                            &remote.headers,
+                            discovery_timeout,
+                        ))
+                    };
+                    let connected = client.and_then(|mut client| {
+                        client.initialize()?;
+                        let tools = client.list_tools()?;
+                        Ok((client, tools))
+                    });
+                    match connected.map(|(client, tools)| (Some(client), tools)) {
+                        Ok((client, remote_tools)) => {
                             tools.extend(remote_tools.iter().map(|tool| {
                                 McpToolEntry::from_tool(name, mcp_tool_name(name, &tool.name), tool)
                             }));
-                            http.insert(name.clone(), client);
+                            if let Some(client) = client {
+                                http.insert(name.clone(), client);
+                            }
                         }
                         Err(error) => {
                             states.insert(name.clone(), ServerState::Failed(error));
@@ -307,7 +667,7 @@ impl McpBridge {
                     states.insert(
                         name.clone(),
                         ServerState::Unsupported(format!(
-                            "transport {:?} non pris en charge (utilisez stdio ou http)",
+                            "transport {:?} non pris en charge (utilisez stdio, http ou sse)",
                             other_transport_label(other)
                         )),
                     );
@@ -318,11 +678,7 @@ impl McpBridge {
         for name in servers.keys() {
             if !states.contains_key(name) {
                 let count = tools.iter().filter(|tool| &tool.server == name).count();
-                let transport = if http.contains_key(name) {
-                    "http"
-                } else {
-                    "stdio"
-                };
+                let transport = transports.get(name).copied().unwrap_or("stdio");
                 states.insert(
                     name.clone(),
                     ServerState::Connected {
@@ -348,14 +704,18 @@ impl McpBridge {
             }
         );
 
-        Ok(Self {
+        let mut bridge = Self {
             runtime,
             stdio,
             http,
             signature,
             tools,
             servers: states,
-        })
+            resources: Vec::new(),
+            prompts: Vec::new(),
+        };
+        bridge.discover_extras();
+        Ok(bridge)
     }
 
     fn shutdown(&mut self) {
@@ -463,10 +823,105 @@ struct HttpMcpClient {
     headers: Vec<(String, String)>,
     session_id: Option<String>,
     next_id: u64,
+    server: String,
+    /// Ancien transport SSE : adresse des POST et messages reçus du flux.
+    sse: Option<SseChannel>,
+}
+
+struct SseChannel {
+    endpoint: String,
+    messages: mpsc::Receiver<Value>,
 }
 
 impl HttpMcpClient {
-    fn new(url: &str, headers: &BTreeMap<String, String>, timeout: Duration) -> Self {
+    fn new(server: &str, url: &str, headers: &BTreeMap<String, String>, timeout: Duration) -> Self {
+        let mut client = Self::without_auth(server, url, headers, timeout);
+        // Jeton obtenu par `claw mcp login` si aucun en-tête n'est configuré.
+        if !client
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        {
+            if let Some(token) = crate::mcp_oauth::access_token(server) {
+                client
+                    .headers
+                    .push(("Authorization".to_string(), format!("Bearer {token}")));
+            }
+        }
+        client
+    }
+
+    /// Ancien transport SSE : un flux GET reçoit l'adresse des POST puis les réponses.
+    fn new_sse(
+        server: &str,
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        let mut client = Self::new(server, url, headers, timeout);
+        let mut request = reqwest::blocking::Client::builder()
+            .build()
+            .map_err(|error| error.to_string())?
+            .get(&client.url)
+            .header(reqwest::header::ACCEPT, "text/event-stream");
+        for (name, value) in &client.headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        let response = request
+            .send()
+            .map_err(|error| format!("connexion SSE impossible à {} : {error}", client.url))?;
+        if !response.status().is_success() {
+            return Err(auth_hint(server, response.status(), "connexion SSE"));
+        }
+        let (endpoint_tx, endpoint_rx) = mpsc::channel::<String>();
+        let (message_tx, message_rx) = mpsc::channel::<Value>();
+        std::thread::spawn(move || {
+            let reader = std::io::BufReader::new(response);
+            let mut event = String::new();
+            let mut data = Vec::new();
+            for line in reader.lines() {
+                let Ok(line) = line else { return };
+                if line.is_empty() {
+                    let payload = data.join("\n");
+                    if event == "endpoint" {
+                        let _ = endpoint_tx.send(payload);
+                    } else if let Ok(message) = serde_json::from_str::<Value>(&payload) {
+                        if message_tx.send(message).is_err() {
+                            return;
+                        }
+                    }
+                    event.clear();
+                    data.clear();
+                } else if let Some(value) = line.strip_prefix("event:") {
+                    event = value.trim().to_string();
+                } else if let Some(value) = line.strip_prefix("data:") {
+                    data.push(value.trim_start().to_string());
+                }
+            }
+        });
+        let endpoint = endpoint_rx.recv_timeout(timeout).map_err(|_| {
+            format!(
+                "le serveur SSE {} n'a pas indiqué son adresse de messages",
+                client.url
+            )
+        })?;
+        let endpoint = reqwest::Url::parse(&client.url)
+            .and_then(|base| base.join(&endpoint))
+            .map_err(|error| format!("adresse de messages invalide : {error}"))?
+            .to_string();
+        client.sse = Some(SseChannel {
+            endpoint,
+            messages: message_rx,
+        });
+        Ok(client)
+    }
+
+    fn without_auth(
+        server: &str,
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        timeout: Duration,
+    ) -> Self {
         Self {
             http: reqwest::blocking::Client::builder()
                 .timeout(timeout.max(env_duration(
@@ -482,6 +937,8 @@ impl HttpMcpClient {
                 .collect(),
             session_id: None,
             next_id: 1,
+            server: server.to_string(),
+            sse: None,
         }
     }
 
@@ -536,6 +993,12 @@ impl HttpMcpClient {
         self.next_id += 1;
         let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         let response = self.post(&body)?;
+        if self.sse.is_some() {
+            if !response.status().is_success() {
+                return Err(auth_hint(&self.server, response.status(), method));
+            }
+            return self.wait_sse_response(id, method);
+        }
         if let Some(session_id) = response
             .headers()
             .get("mcp-session-id")
@@ -551,13 +1014,9 @@ impl HttpMcpClient {
             .is_some_and(|value| value.starts_with("text/event-stream"));
         let text = response.text().map_err(|error| error.to_string())?;
         if !status.is_success() {
-            let hint = if status.as_u16() == 401 || status.as_u16() == 403 {
-                " (vérifiez l'en-tête Authorization dans \"headers\")"
-            } else {
-                ""
-            };
             return Err(format!(
-                "HTTP {status} pour {method}{hint} : {}",
+                "{} : {}",
+                auth_hint(&self.server, status, method),
                 text.chars().take(300).collect::<String>()
             ));
         }
@@ -593,10 +1052,41 @@ impl HttpMcpClient {
         }
     }
 
+    /// Réponse au message `id`, reçue sur le flux SSE.
+    fn wait_sse_response(&mut self, id: u64, method: &str) -> Result<Value, String> {
+        let timeout = env_duration("CLAW_MCP_TOOL_TIMEOUT_MS", DEFAULT_CALL_TIMEOUT);
+        let deadline = Instant::now() + timeout;
+        let channel = self.sse.as_ref().ok_or("transport SSE fermé")?;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let message = channel
+                .messages
+                .recv_timeout(remaining)
+                .map_err(|_| format!("pas de réponse SSE à {method}"))?;
+            if message.get("id") != Some(&json!(id)) {
+                continue;
+            }
+            if let Some(error) = message.get("error") {
+                return Err(format!(
+                    "erreur MCP pour {method} : {}",
+                    error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("erreur inconnue")
+                ));
+            }
+            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+        }
+    }
+
     fn post(&self, body: &Value) -> Result<reqwest::blocking::Response, String> {
+        let target = self
+            .sse
+            .as_ref()
+            .map_or(self.url.as_str(), |channel| channel.endpoint.as_str());
         let mut request = self
             .http
-            .post(&self.url)
+            .post(target)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(
                 reqwest::header::ACCEPT,
@@ -624,6 +1114,17 @@ impl HttpMcpClient {
                 .header("Mcp-Session-Id", session_id)
                 .send();
         }
+    }
+}
+
+/// Message d'erreur HTTP, avec la marche à suivre si une connexion est requise.
+fn auth_hint(server: &str, status: reqwest::StatusCode, what: &str) -> String {
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        format!(
+            "HTTP {status} pour {what} : connexion requise — lancez `claw mcp login {server}` (ou ajoutez un en-tête Authorization dans \"headers\")"
+        )
+    } else {
+        format!("HTTP {status} pour {what}")
     }
 }
 

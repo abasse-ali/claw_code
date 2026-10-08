@@ -22,6 +22,9 @@ pub struct OpenRouterModel {
     pub prompt_price: f64,
     pub completion_price: f64,
     pub supports_tools: bool,
+    /// Accepte des images en entrée (modèle multimodal).
+    #[serde(default)]
+    pub supports_images: bool,
 }
 
 impl OpenRouterModel {
@@ -77,6 +80,14 @@ struct RawModel {
     top_provider: Option<RawTopProvider>,
     #[serde(default)]
     supported_parameters: Option<Vec<String>>,
+    #[serde(default)]
+    architecture: Option<RawArchitecture>,
+}
+
+#[derive(Default, Deserialize)]
+struct RawArchitecture {
+    #[serde(default)]
+    input_modalities: Option<Vec<String>>,
 }
 
 #[derive(Default, Deserialize)]
@@ -199,6 +210,10 @@ fn parse_model_list(body: &str) -> Result<Vec<OpenRouterModel>, ApiError> {
             supports_tools: raw
                 .supported_parameters
                 .is_some_and(|parameters| parameters.iter().any(|parameter| parameter == "tools")),
+            supports_images: raw
+                .architecture
+                .and_then(|architecture| architecture.input_modalities)
+                .is_some_and(|modalities| modalities.iter().any(|modality| modality == "image")),
             id: raw.id,
         })
         .collect())
@@ -451,6 +466,7 @@ mod tests {
             prompt_price: if free { 0.0 } else { 0.000_001 },
             completion_price: if free { 0.0 } else { 0.000_002 },
             supports_tools: tools,
+            supports_images: false,
         }
     }
 

@@ -9,3 +9,5 @@ archive/
 .claw/sessions/
 .claw/checkpoints/
 .claw/settings.local.json
+# Rapports des sous-agents (générés)
+.claw-agents/

@@ -58,7 +58,13 @@ impl RuntimePermissionRuleConfig {
 pub struct ConfigEntry {
     pub source: ConfigSource,
     pub path: PathBuf,
+    /// Fichier de Claude Code : seuls `permissions`, `hooks` et `mcpServers`
+    /// sont repris, et un fichier illisible est ignoré au lieu de bloquer.
+    pub foreign: bool,
 }
+
+/// Clés reprises des fichiers de Claude Code.
+const FOREIGN_KEYS: &[&str] = &["permissions", "hooks", "mcpServers"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfig {
@@ -87,7 +93,25 @@ pub struct RuntimeFeatureConfig {
     permission_mode: Option<ResolvedPermissionMode>,
     permission_rules: RuntimePermissionRuleConfig,
     agent_models: BTreeMap<String, String>,
+    fallback_models: Vec<String>,
+    small_model: Option<String>,
+    providers: Vec<RuntimeProviderConfig>,
     sandbox: SandboxConfig,
+}
+
+/// Serveur compatible `OpenAI` déclaré dans `providers` (utilisé avec le
+/// préfixe `nom:` devant le modèle).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RuntimeProviderConfig {
+    pub name: String,
+    pub base_url: String,
+    pub api_key_env: Option<String>,
+    pub local: bool,
+    pub context_window: Option<u64>,
+    pub max_output_tokens: Option<u32>,
+    pub headers: BTreeMap<String, String>,
+    /// `"toolMode": "text"` : outils décrits dans le prompt (modèles sans appel natif).
+    pub text_tools: bool,
 }
 
 /// Une commande de hook, éventuellement filtrée par un `matcher` (nom d'outil,
@@ -247,34 +271,65 @@ impl ConfigLoader {
         &self.config_home
     }
 
+    /// Fichiers de configuration, du moins prioritaire au plus prioritaire.
+    /// Ceux de Claude Code passent avant leurs équivalents Claw (qui l'emportent) ;
+    /// `CLAW_NO_CLAUDE_CONFIG=1` les ignore.
     #[must_use]
     pub fn discover(&self) -> Vec<ConfigEntry> {
-        let user_legacy_path = self.config_home.parent().map_or_else(
+        let home = self.config_home.parent().map(Path::to_path_buf);
+        let user_legacy_path = home.as_ref().map_or_else(
             || PathBuf::from(".claw.json"),
             |parent| parent.join(".claw.json"),
         );
-        vec![
-            ConfigEntry {
-                source: ConfigSource::User,
-                path: user_legacy_path,
-            },
-            ConfigEntry {
-                source: ConfigSource::User,
-                path: self.config_home.join("settings.json"),
-            },
-            ConfigEntry {
-                source: ConfigSource::Project,
-                path: self.cwd.join(".claw.json"),
-            },
-            ConfigEntry {
-                source: ConfigSource::Project,
-                path: self.cwd.join(".claw").join("settings.json"),
-            },
-            ConfigEntry {
-                source: ConfigSource::Local,
-                path: self.cwd.join(".claw").join("settings.local.json"),
-            },
-        ]
+        let native = |source, path| ConfigEntry {
+            source,
+            path,
+            foreign: false,
+        };
+        let foreign = |source, path| ConfigEntry {
+            source,
+            path,
+            foreign: true,
+        };
+        let claude =
+            std::env::var("CLAW_NO_CLAUDE_CONFIG").map_or(true, |value| value.trim() != "1");
+        let mut entries = Vec::new();
+        if claude {
+            if let Some(home) = &home {
+                entries.push(foreign(
+                    ConfigSource::User,
+                    home.join(".claude").join("settings.json"),
+                ));
+            }
+        }
+        entries.push(native(ConfigSource::User, user_legacy_path));
+        entries.push(native(
+            ConfigSource::User,
+            self.config_home.join("settings.json"),
+        ));
+        if claude {
+            entries.push(foreign(ConfigSource::Project, self.cwd.join(".mcp.json")));
+            entries.push(foreign(
+                ConfigSource::Project,
+                self.cwd.join(".claude").join("settings.json"),
+            ));
+        }
+        entries.push(native(ConfigSource::Project, self.cwd.join(".claw.json")));
+        entries.push(native(
+            ConfigSource::Project,
+            self.cwd.join(".claw").join("settings.json"),
+        ));
+        if claude {
+            entries.push(foreign(
+                ConfigSource::Local,
+                self.cwd.join(".claude").join("settings.local.json"),
+            ));
+        }
+        entries.push(native(
+            ConfigSource::Local,
+            self.cwd.join(".claw").join("settings.local.json"),
+        ));
+        entries
     }
 
     pub fn load(&self) -> Result<RuntimeConfig, ConfigError> {
@@ -284,8 +339,16 @@ impl ConfigLoader {
         let mut permission_rules = RuntimePermissionRuleConfig::default();
 
         for entry in self.discover() {
-            let Some(value) = read_optional_json_object(&entry.path)? else {
-                continue;
+            let value = if entry.foreign {
+                match read_foreign_settings(&entry) {
+                    Some(value) => value,
+                    None => continue,
+                }
+            } else {
+                let Some(value) = read_optional_json_object(&entry.path)? else {
+                    continue;
+                };
+                value
             };
             merge_mcp_servers(&mut mcp_servers, entry.source, &value, &entry.path)?;
             merge_permission_rules(&mut permission_rules, &value, &entry.path)?;
@@ -307,6 +370,9 @@ impl ConfigLoader {
             permission_mode: parse_optional_permission_mode(&merged_value)?,
             permission_rules,
             agent_models: parse_agent_models(&merged_value),
+            fallback_models: parse_string_list(&merged_value, "fallbackModels"),
+            small_model: parse_optional_string(&merged_value, "smallModel"),
+            providers: parse_providers(&merged_value)?,
             sandbox: parse_optional_sandbox_config(&merged_value)?,
         };
 
@@ -402,6 +468,30 @@ impl RuntimeConfig {
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(agent))
             .map(|(_, model)| model.as_str())
+    }
+
+    /// Modèles de secours, essayés dans l'ordre si le principal échoue (`fallbackModels`).
+    #[must_use]
+    pub fn fallback_models(&self) -> &[String] {
+        &self.feature_config.fallback_models
+    }
+
+    /// Niveau de raisonnement demandé aux modèles (`reasoning` : off, low, medium, high).
+    #[must_use]
+    pub fn reasoning(&self) -> Option<&str> {
+        self.merged.get("reasoning").and_then(JsonValue::as_str)
+    }
+
+    /// Petit modèle pour les tâches simples : résumés de compaction (`smallModel`).
+    #[must_use]
+    pub fn small_model(&self) -> Option<&str> {
+        self.feature_config.small_model.as_deref()
+    }
+
+    /// Serveurs compatibles `OpenAI` déclarés (`providers`).
+    #[must_use]
+    pub fn providers(&self) -> &[RuntimeProviderConfig] {
+        &self.feature_config.providers
     }
 
     #[must_use]
@@ -617,6 +707,25 @@ impl McpServerConfig {
     }
 }
 
+/// Fichier de Claude Code réduit aux clés comprises par Claw ; `None` s'il est
+/// absent ou si ces clés ne peuvent pas être lues.
+fn read_foreign_settings(entry: &ConfigEntry) -> Option<BTreeMap<String, JsonValue>> {
+    let object = read_optional_json_object(&entry.path).ok()??;
+    let subset: BTreeMap<String, JsonValue> = object
+        .into_iter()
+        .filter(|(key, _)| FOREIGN_KEYS.contains(&key.as_str()))
+        .collect();
+    // Validation à blanc : un réglage incompatible ne doit pas casser Claw.
+    let mut servers = BTreeMap::new();
+    let mut rules = RuntimePermissionRuleConfig::default();
+    merge_mcp_servers(&mut servers, entry.source, &subset, &entry.path).ok()?;
+    merge_permission_rules(&mut rules, &subset, &entry.path).ok()?;
+    let value = JsonValue::Object(subset.clone());
+    parse_optional_hooks_config(&value).ok()?;
+    parse_optional_permission_mode(&value).ok()?;
+    Some(subset)
+}
+
 fn read_optional_json_object(
     path: &Path,
 ) -> Result<Option<BTreeMap<String, JsonValue>>, ConfigError> {
@@ -711,6 +820,84 @@ fn parse_agent_models(root: &JsonValue) -> BTreeMap<String, String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn parse_string_list(root: &JsonValue, key: &str) -> Vec<String> {
+    root.as_object()
+        .and_then(|object| object.get(key))
+        .and_then(JsonValue::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_optional_string(root: &JsonValue, key: &str) -> Option<String> {
+    root.as_object()
+        .and_then(|object| object.get(key))
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// `"providers": {"nom": {"baseUrl": "...", "apiKeyEnv": "...", "local": true,
+/// "contextWindow": 65536, "maxOutputTokens": 8192, "headers": {...}}}`.
+fn parse_providers(root: &JsonValue) -> Result<Vec<RuntimeProviderConfig>, ConfigError> {
+    let Some(providers) = root.as_object().and_then(|object| object.get("providers")) else {
+        return Ok(Vec::new());
+    };
+    let providers = expect_object(providers, "merged settings.providers")?;
+    let mut parsed = Vec::new();
+    for (name, value) in providers {
+        let context = format!("merged settings.providers.{name}");
+        let object = expect_object(value, &context)?;
+        let base_url = object
+            .get("baseUrl")
+            .or_else(|| object.get("base_url"))
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ConfigError::Parse(format!("{context} : le champ baseUrl est requis"))
+            })?;
+        let number = |key: &str| {
+            object
+                .get(key)
+                .and_then(JsonValue::as_i64)
+                .and_then(|value| u64::try_from(value).ok())
+                .filter(|value| *value > 0)
+        };
+        parsed.push(RuntimeProviderConfig {
+            name: name.clone(),
+            base_url: base_url.to_string(),
+            api_key_env: object
+                .get("apiKeyEnv")
+                .and_then(JsonValue::as_str)
+                .map(ToOwned::to_owned),
+            local: object
+                .get("local")
+                .and_then(JsonValue::as_bool)
+                .unwrap_or_else(|| {
+                    base_url.contains("localhost") || base_url.contains("127.0.0.1")
+                }),
+            context_window: number("contextWindow"),
+            max_output_tokens: number("maxOutputTokens")
+                .and_then(|value| u32::try_from(value).ok()),
+            headers: optional_string_map(object, "headers", &context)?.unwrap_or_default(),
+            text_tools: object
+                .get("toolMode")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|mode| mode.eq_ignore_ascii_case("text")),
+        });
+    }
+    Ok(parsed)
 }
 
 fn parse_optional_language(root: &JsonValue) -> Option<String> {
@@ -908,6 +1095,9 @@ fn parse_optional_sandbox_config(root: &JsonValue) -> Result<SandboxConfig, Conf
         filesystem_mode,
         allowed_mounts: optional_string_array(sandbox, "allowedMounts", "merged settings.sandbox")?
             .unwrap_or_default(),
+        backend: optional_string(sandbox, "backend", "merged settings.sandbox")?
+            .map(ToOwned::to_owned),
+        image: optional_string(sandbox, "image", "merged settings.sandbox")?.map(ToOwned::to_owned),
     })
 }
 

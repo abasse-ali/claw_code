@@ -34,6 +34,18 @@ pub enum ContentBlock {
         output: String,
         is_error: bool,
     },
+    /// Image jointe par l'utilisateur (capture d'écran, maquette…), en base64.
+    Image {
+        media_type: String,
+        data: String,
+    },
+    /// Raisonnement signé d'un modèle Claude, à renvoyer avec les appels
+    /// d'outils (`redacted` : raisonnement chiffré, renvoyé tel quel).
+    Thinking {
+        thinking: String,
+        signature: String,
+        redacted: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -291,6 +303,32 @@ impl ContentBlock {
                 object.insert("output".to_string(), JsonValue::String(output.clone()));
                 object.insert("is_error".to_string(), JsonValue::Bool(*is_error));
             }
+            Self::Thinking {
+                thinking,
+                signature,
+                redacted,
+            } => {
+                object.insert(
+                    "type".to_string(),
+                    JsonValue::String("thinking".to_string()),
+                );
+                object.insert("thinking".to_string(), JsonValue::String(thinking.clone()));
+                object.insert(
+                    "signature".to_string(),
+                    JsonValue::String(signature.clone()),
+                );
+                if let Some(data) = redacted {
+                    object.insert("redacted".to_string(), JsonValue::String(data.clone()));
+                }
+            }
+            Self::Image { media_type, data } => {
+                object.insert("type".to_string(), JsonValue::String("image".to_string()));
+                object.insert(
+                    "media_type".to_string(),
+                    JsonValue::String(media_type.clone()),
+                );
+                object.insert("data".to_string(), JsonValue::String(data.clone()));
+            }
         }
         JsonValue::Object(object)
     }
@@ -320,6 +358,18 @@ impl ContentBlock {
                     .get("is_error")
                     .and_then(JsonValue::as_bool)
                     .ok_or_else(|| SessionError::Format("is_error manquant".to_string()))?,
+            }),
+            "thinking" => Ok(Self::Thinking {
+                thinking: required_string(object, "thinking")?,
+                signature: required_string(object, "signature")?,
+                redacted: object
+                    .get("redacted")
+                    .and_then(JsonValue::as_str)
+                    .map(ToOwned::to_owned),
+            }),
+            "image" => Ok(Self::Image {
+                media_type: required_string(object, "media_type")?,
+                data: required_string(object, "data")?,
             }),
             other => Err(SessionError::Format(format!(
                 "type de bloc non pris en charge : {other}"

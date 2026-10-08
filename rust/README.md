@@ -191,8 +191,15 @@ forme `mcp__<serveur>__<outil>` et sont aussi disponibles pour les sous-agents.
 ```
 
 - Transports : `stdio` (processus local ; sous Windows, `npx`/`uvx` passent par `cmd /C`
-  automatiquement) et `http` (Streamable HTTP, réponses JSON ou SSE, session `Mcp-Session-Id`).
-  `sse` (ancien protocole), `ws` et l'OAuth MCP ne sont pas encore pris en charge.
+  automatiquement), `http` (Streamable HTTP, session `Mcp-Session-Id`) et `sse` (ancien protocole).
+- Gestion en ligne de commande : `claw mcp add <nom> -- <commande> [args]` (stdio, `-e CLE=val`),
+  `claw mcp add --transport http|sse <nom> <url>` (`-H "Nom: valeur"`), `claw mcp add-json`,
+  `claw mcp list`, `get`, `remove` ; `--scope project|local|user`.
+- **OAuth** : `claw mcp login <nom>` connecte un serveur distant protégé (découverte, enregistrement
+  du client, PKCE, navigateur) ; le jeton est conservé dans `~/.claw/mcp-oauth.json` et renouvelé
+  automatiquement. `CLAW_NO_BROWSER=1` affiche seulement l'adresse (machine distante).
+- **Ressources** : outils `ListMcpResources` et `ReadMcpResource` quand un serveur en expose.
+- **Prompts** : chaque prompt MCP devient une commande `/mcp__<serveur>__<prompt> arguments`.
 - `${VAR}` dans `url` et `headers` est remplacé par la variable d'environnement (pas de jeton en clair).
 - `/mcp` affiche l'état des serveurs et leurs outils. Le journal d'un serveur stdio est écrit dans
   `%TEMP%\claw-mcp\<serveur>.log`.
@@ -260,6 +267,113 @@ Fais une revue du fichier $1 en te concentrant sur $2.
 remplacés ; sans `$ARGUMENTS`, les arguments sont ajoutés à la fin. Un sous-dossier donne aussi
 la forme `/dossier:nom`. Fonctionne dans le terminal, en ligne de commande (`claw /revue …`) et
 dans l'interface web ; `/help` les liste.
+
+En-tête facultatif : `model` (modèle utilisé pour ce tour), `allowed-tools` (outils autorisés,
+ex. `Bash(git status:*), Read`). Si `allowed-tools` autorise `Bash`, chaque `` !`commande` `` du
+texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` joint un fichier.
+
+### Fournisseurs et modèles (sans dépendre d'un seul service)
+
+- **OpenRouter** (`vendeur/modèle`, ex. `qwen/qwen3-coder:free`) et **Anthropic** (`claude-…`).
+- **Serveurs compatibles OpenAI** avec un préfixe `nom:` : `ollama:qwen2.5-coder:7b`,
+  `lmstudio:…`, `llamacpp:…` (locaux, sans clé, hors ligne) ; `groq:`, `mistral:`, `deepseek:`,
+  `gemini:`, `cerebras:`, `together:`, `fireworks:` (clé `<NOM>_API_KEY`). Adresse modifiable par
+  `<NOM>_BASE_URL` (et `OLLAMA_HOST`). Vos propres serveurs :
+
+  ```json
+  { "providers": { "gpu": { "baseUrl": "http://serveur:8000/v1", "apiKeyEnv": "GPU_KEY", "contextWindow": 65536, "toolMode": "text" } } }
+  ```
+- Sans aucune clé, Claw utilise le premier modèle d'un serveur local qui répond (Ollama…).
+  `claw models local` (ou `/models local`) liste les serveurs et leurs modèles. Pour Ollama,
+  lancez-le avec `OLLAMA_CONTEXT_LENGTH=32768` : son contexte par défaut est trop petit.
+- **Bascule automatique** : si le modèle répond « quota atteint » (429), est indisponible ou si le
+  serveur est arrêté, la requête part sur le modèle suivant : `"fallbackModels": ["groq:llama-3.3-70b-versatile", "ollama:qwen2.5-coder:7b"]`
+  (ou `CLAW_FALLBACK_MODELS`, liste séparée par des virgules). Sans liste, un modèle gratuit
+  d'OpenRouter bascule sur les suivants du classement. Un modèle en échec est mis de côté un
+  moment ; `CLAW_FALLBACK=0` désactive la bascule.
+- `"smallModel"` (ou `CLAW_SMALL_MODEL`) : petit modèle utilisé pour les résumés de compaction.
+
+### Fiabilité avec les petits modèles
+
+- `edit_file` tolère les différences de fins de ligne (CRLF), d'espaces de fin et d'indentation
+  (le nouveau texte est réindenté), refuse une occurrence ambiguë et indique la ligne la plus
+  proche quand le texte est introuvable.
+- Les arguments JSON mal formés des appels d'outils sont réparés (bloc de code, virgules finales,
+  retours à la ligne bruts, `True`/`None`, sortie tronquée).
+- **Mode texte** pour les modèles sans appel d'outils natif : les outils sont décrits dans le
+  prompt et le modèle répond en blocs `<tool_call>`. Il s'active seul quand le serveur refuse le
+  paramètre `tools` (et reste retenu), ou avec `"toolMode": "text"` / `CLAW_TOOL_MODE=text`.
+
+### Compatibilité avec Claude Code
+
+Claw lit aussi `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` (et
+`~/.claude/CLAUDE.md`, `~/.claw/CLAW.md`), les agents de `.claude/agents/`, les compétences de
+`.claude/skills/`, les commandes de `.claude/commands/`, et dans `.claude/settings.json`,
+`.claude/settings.local.json`, `~/.claude/settings.json` et `.mcp.json` les clés `permissions`,
+`hooks` et `mcpServers` (les fichiers de Claw l'emportent). Un agent Claude Code déclaré avec
+`model: sonnet` prend le modèle de la session si vous n'avez pas de clé Anthropic.
+`CLAW_NO_CLAUDE_CONFIG=1` ignore ces fichiers.
+
+### Images et raisonnement
+
+- **Images** : `@capture.png` (ou un chemin d'image glissé dans le terminal) joint l'image à la
+  demande ; dans l'interface web, collez ou glissez une capture. `/models vision` liste les modèles
+  gratuits qui lisent les images. Format png, jpg, gif ou webp, 5 Mo maximum.
+- **Raisonnement** : `/think off|low|medium|high` (ou `"reasoning"` dans la config,
+  `CLAW_REASONING`) règle l'effort de réflexion des modèles qui raisonnent (DeepSeek-R1, Qwen3,
+  GLM, série o d'OpenAI…) et des modèles Claude via l'API Anthropic (raisonnement étendu, blocs
+  signés conservés et renvoyés avec les appels d'outils ; pas via OpenRouter). Le raisonnement
+  s'affiche à part (💭 dans le terminal, bloc repliable dans l'interface web) ; `off` le masque.
+
+### Travail de l'agent
+
+- **Parallélisme** : plusieurs sous-agents, lectures ou recherches demandés dans un même message
+  s'exécutent en même temps (les autorisations restent posées une par une).
+- **Tâches de fond** : une commande lancée avec `run_in_background` (serveur de dev, mode watch…)
+  garde sa sortie, que l'agent lit avec `BashOutput` et arrête avec `KillShell`. `/bashes` les
+  liste (`/bashes kill <id>`) ; elles s'arrêtent quand Claw se termine.
+- **Mode plan** : en `read-only`, l'agent soumet son plan avec l'outil `ExitPlanMode` ; si vous
+  l'approuvez, la session passe en `workspace-write` et l'agent l'applique dans le même tour.
+- **Reprise** : `claw --continue` (ou `-c`) reprend la dernière session du projet, `claw --resume`
+  sans argument propose la liste des sessions récentes.
+
+### Terminal
+
+- `Échap` (ou `Ctrl+C`) interrompt le tour en cours ; ce que vous tapez pendant un tour est gardé :
+  une ligne validée par `Entrée` part juste après, le reste pré-remplit la saisie (Windows ; sous
+  Linux et macOS, `Ctrl+C`).
+- `!commande` exécute une commande shell directement ; sa sortie accompagne la demande suivante.
+- `#note` ajoute une consigne à la section « Notes » de `CLAW.md` (prise en compte aussitôt).
+- `@chemin` joint le contenu d'un fichier (ou la liste d'un dossier) à la demande ; `Tab` complète
+  les chemins après `@`.
+- `/init` crée les fichiers de base puis fait analyser le projet par le modèle pour rédiger
+  `CLAW.md` (commandes de build et de test, architecture, conventions).
+- Dans l'interface web, un message envoyé pendant un tour part à la fin de celui-ci.
+
+### Automatisation et éditeurs
+
+- `--output-format stream-json` : un événement JSON par ligne (init, texte, `tool_use`,
+  `tool_result`, `result` avec usage et coût). `--input-format stream-json` lit les tours sur
+  l'entrée standard (`{"type":"user","message":{"content":"…"}}`), pour piloter Claw depuis un
+  script. Sans terminal, une demande d'autorisation est refusée et signalée en JSON.
+- **GitHub** : l'action `.github/actions/claw` et un exemple de workflow « `@claw` dans un
+  commentaire » sont décrits dans [`docs/github-action.md`](docs/github-action.md).
+- **VS Code** : l'extension `editors/vscode` (paquet `claw-code-0.1.0.vsix`, à installer avec
+  « Extensions : installer depuis VSIX… ») ouvre l'agent dans un panneau (`Ctrl+Alt+K`), envoie la
+  sélection (`Ctrl+Alt+L`) ou le fichier courant ; voir `editors/vscode/README.md`.
+- **Éditeurs** : `claw acp` fait de Claw un agent de l'Agent Client Protocol (Zed, Neovim avec
+  CodeCompanion, Emacs…). Dans Zed : `"agent_servers": { "Claw": { "command": "claw", "args": ["acp"] } }`.
+  Les autorisations s'affichent dans l'éditeur, les modes de permission y sont sélectionnables.
+- **Recherche web** : `CLAW_SEARXNG_URL` (SearXNG, libre et auto-hébergeable, format json activé),
+  `BRAVE_API_KEY` ou `TAVILY_API_KEY` ; à défaut, la page de résultats de DuckDuckGo.
+
+### Bac à sable des commandes
+
+Sous Linux, les commandes peuvent être isolées par namespaces (`unshare`). Sur tous les systèmes
+(Windows compris), `"sandbox": { "backend": "docker", "image": "rust:1", "networkIsolation": true }`
+(ou `CLAW_SANDBOX=docker|podman`, `CLAW_SANDBOX_IMAGE`) exécute chaque commande shell dans un
+conteneur qui ne voit que le dossier du projet (`/workspace`), sans réseau si demandé ; les
+conteneurs sont arrêtés à l'interruption, au délai dépassé et à la fin de Claw.
 
 ### Langue des réponses
 

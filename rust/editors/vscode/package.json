@@ -1,0 +1,123 @@
+{
+  "name": "claw-code",
+  "displayName": "Claw Code",
+  "description": "Agent de code et d'architecture avec n'importe quel modèle (OpenRouter, Ollama, Groq…) dans VS Code.",
+  "version": "0.1.0",
+  "publisher": "claw-code",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages",
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "claw.open",
+        "title": "Ouvrir l'agent",
+        "category": "Claw",
+        "icon": "$(hubot)"
+      },
+      {
+        "command": "claw.ask",
+        "title": "Poser une question",
+        "category": "Claw"
+      },
+      {
+        "command": "claw.sendSelection",
+        "title": "Envoyer la sélection",
+        "category": "Claw"
+      },
+      {
+        "command": "claw.askAboutFile",
+        "title": "Demander à propos de ce fichier",
+        "category": "Claw"
+      },
+      {
+        "command": "claw.interrupt",
+        "title": "Interrompre le tour en cours",
+        "category": "Claw"
+      },
+      {
+        "command": "claw.openInBrowser",
+        "title": "Ouvrir dans le navigateur",
+        "category": "Claw"
+      },
+      {
+        "command": "claw.stop",
+        "title": "Arrêter l'agent",
+        "category": "Claw"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "claw.sendSelection",
+          "when": "editorHasSelection",
+          "group": "claw@1"
+        },
+        {
+          "command": "claw.askAboutFile",
+          "group": "claw@2"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "claw.askAboutFile",
+          "when": "!explorerResourceIsFolder",
+          "group": "claw@1"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "claw.open",
+          "group": "navigation"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "claw.open",
+        "key": "ctrl+alt+k",
+        "mac": "cmd+alt+k"
+      },
+      {
+        "command": "claw.sendSelection",
+        "key": "ctrl+alt+l",
+        "mac": "cmd+alt+l",
+        "when": "editorHasSelection"
+      }
+    ],
+    "configuration": {
+      "title": "Claw Code",
+      "properties": {
+        "claw.path": {
+          "type": "string",
+          "default": "claw",
+          "description": "Chemin de l'exécutable claw (par défaut : celui du PATH)."
+        },
+        "claw.model": {
+          "type": "string",
+          "default": "",
+          "description": "Modèle à utiliser (ex. qwen/qwen3-coder:free, ollama:qwen2.5-coder:7b). Vide : réglage de Claw."
+        },
+        "claw.permissionMode": {
+          "type": "string",
+          "default": "",
+          "enum": [
+            "",
+            "prompt",
+            "read-only",
+            "workspace-write",
+            "danger-full-access"
+          ],
+          "description": "Mode de permission de l'agent. Vide : réglage de Claw (prompt par défaut)."
+        }
+      }
+    }
+  }
+}

@@ -284,7 +284,7 @@ impl LspClient {
 
             if let Err(error) = result {
                 let mut pending = pending_requests.lock().await;
-                let drained = pending.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+                let drained = pending.keys().copied().collect::<Vec<_>>();
                 for id in drained {
                     if let Some(sender) = pending.remove(&id) {
                         let _ = sender.send(Err(LspError::Protocol(error.to_string())));

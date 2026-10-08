@@ -1,4 +1,6 @@
+pub mod attachments;
 mod bash;
+pub mod bash_tasks;
 mod bootstrap;
 pub mod checkpoint;
 mod compact;
@@ -8,6 +10,7 @@ mod file_ops;
 mod hooks;
 pub mod interrupt;
 mod json;
+pub mod json_repair;
 mod mcp;
 mod mcp_client;
 mod mcp_stdio;
@@ -16,6 +19,7 @@ mod permissions;
 mod prompt;
 mod remote;
 pub mod sandbox;
+pub use bash::stop_all_containers;
 mod session;
 mod usage;
 
@@ -31,7 +35,7 @@ pub use config::{
     McpManagedProxyServerConfig, McpOAuthConfig, McpRemoteServerConfig, McpSdkServerConfig,
     McpServerConfig, McpStdioServerConfig, McpTransport, McpWebSocketServerConfig, OAuthConfig,
     ResolvedPermissionMode, RuntimeConfig, RuntimeFeatureConfig, RuntimeHookConfig,
-    RuntimePermissionRuleConfig, RuntimePluginConfig, ScopedMcpServerConfig,
+    RuntimePermissionRuleConfig, RuntimePluginConfig, RuntimeProviderConfig, ScopedMcpServerConfig,
     CLAW_SETTINGS_SCHEMA_NAME,
 };
 pub use conversation::{
@@ -73,8 +77,9 @@ pub use oauth::{
     PkceChallengeMethod, PkceCodePair,
 };
 pub use permissions::{
-    PermissionMode, PermissionOutcome, PermissionPolicy, PermissionPromptDecision,
-    PermissionPrompter, PermissionRequest, PermissionRule, PermissionRules,
+    request_mode_switch, PermissionMode, PermissionOutcome, PermissionPolicy,
+    PermissionPromptDecision, PermissionPrompter, PermissionRequest, PermissionRule,
+    PermissionRules,
 };
 pub use prompt::{
     current_date_iso, load_system_prompt, prepend_bullets, ContextFile, ProjectContext,

@@ -6,7 +6,9 @@
 //! `/front:composant`. Le contenu (sans l'en-tête YAML) est envoyé comme
 //! demande, avec `$ARGUMENTS` (tous les arguments) et `$1`…`$9` remplacés ;
 //! sans `$ARGUMENTS`, les arguments sont ajoutés à la fin. En-tête reconnu :
-//! `description`, `argument-hint`.
+//! `description`, `argument-hint`, `model` (modèle du tour) et `allowed-tools`
+//! (outils autorisés ; `Bash` permet aussi les lignes `` !`commande` ``, dont la
+//! sortie est insérée dans la demande).
 
 use std::env;
 use std::fs;
@@ -23,6 +25,10 @@ pub struct CustomCommand {
     pub namespace: Option<String>,
     pub description: Option<String>,
     pub argument_hint: Option<String>,
+    /// Modèle à utiliser pour ce tour (`model` dans l'en-tête).
+    pub model: Option<String>,
+    /// Outils autorisés pour ce tour (`allowed-tools`), vide = tous.
+    pub allowed_tools: Vec<String>,
     pub path: PathBuf,
     /// « projet » ou « utilisateur ».
     pub scope: &'static str,
@@ -42,8 +48,89 @@ impl CustomCommand {
     pub fn expand(&self, arguments: &str) -> Result<String, String> {
         let contents = fs::read_to_string(&self.path)
             .map_err(|error| format!("lecture de {} impossible : {error}", self.path.display()))?;
-        Ok(expand_template(strip_frontmatter(&contents), arguments))
+        let expanded = expand_template(strip_frontmatter(&contents), arguments);
+        let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Ok(run_inline_commands(&expanded, self.allows_bash(), &cwd))
     }
+
+    /// `allowed-tools` autorise `Bash` (condition des lignes `` !`commande` ``).
+    #[must_use]
+    pub fn allows_bash(&self) -> bool {
+        self.allowed_tools
+            .iter()
+            .any(|tool| tool.trim().to_ascii_lowercase().starts_with("bash"))
+    }
+}
+
+/// Remplace chaque `` !`commande` `` par la sortie de la commande, exécutée
+/// dans le projet (seulement si `allowed-tools` autorise Bash).
+fn run_inline_commands(text: &str, allowed: bool, cwd: &Path) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("!`") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('`') else {
+            break;
+        };
+        output.push_str(&rest[..start]);
+        let command = &after[..end];
+        if allowed {
+            let result = plugins::posix_shell_command(command)
+                .current_dir(cwd)
+                .stdin(std::process::Stdio::null())
+                .output();
+            match result {
+                Ok(result) => {
+                    let stdout = String::from_utf8_lossy(&result.stdout)
+                        .trim_end()
+                        .to_string();
+                    let stderr = String::from_utf8_lossy(&result.stderr)
+                        .trim_end()
+                        .to_string();
+                    output.push_str(if stdout.is_empty() { &stderr } else { &stdout });
+                }
+                Err(error) => {
+                    output.push_str(&format!("(commande `{command}` impossible : {error})"));
+                }
+            }
+        } else {
+            output.push_str(&format!(
+                "!`{command}` (non exécutée : ajoutez Bash à allowed-tools dans l'en-tête de la commande)"
+            ));
+        }
+        rest = &after[end + 1..];
+    }
+    output.push_str(rest);
+    output
+}
+
+/// `Bash(git add:*), Read, Edit` → éléments séparés (virgules hors parenthèses).
+fn split_tool_list(value: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut depth = 0_i32;
+    let mut current = String::new();
+    for c in value.trim().trim_matches(['[', ']']).chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                current.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(c);
+            }
+            ',' if depth == 0 => {
+                items.push(std::mem::take(&mut current));
+            }
+            c => current.push(c),
+        }
+    }
+    items.push(current);
+    items
+        .into_iter()
+        .map(|item| item.trim().trim_matches(['"', '\'']).to_string())
+        .filter(|item| !item.is_empty())
+        .collect()
 }
 
 /// Une commande personnalisée invoquée et la demande qu'elle produit.
@@ -155,6 +242,10 @@ fn collect_markdown(
             description: frontmatter_value(&contents, "description")
                 .or_else(|| first_body_line(&contents)),
             argument_hint: frontmatter_value(&contents, "argument-hint"),
+            model: frontmatter_value(&contents, "model").filter(|model| model != "inherit"),
+            allowed_tools: frontmatter_value(&contents, "allowed-tools")
+                .map(|value| split_tool_list(&value))
+                .unwrap_or_default(),
             path,
             scope,
         });
@@ -368,8 +459,24 @@ fn split_arguments(arguments: &str) -> Vec<String> {
 mod tests {
     use super::{
         discover_custom_commands, expand_template, render_custom_commands_help,
-        resolve_custom_command, split_arguments,
+        resolve_custom_command, run_inline_commands, split_arguments, split_tool_list,
     };
+
+    #[test]
+    fn parses_tool_lists_and_runs_inline_commands_only_when_allowed() {
+        assert_eq!(
+            split_tool_list("Bash(git add:*), Bash(git status:*), Read"),
+            vec!["Bash(git add:*)", "Bash(git status:*)", "Read"]
+        );
+        let cwd = std::env::temp_dir();
+        assert_eq!(
+            run_inline_commands("Statut : !`echo propre`.", true, &cwd),
+            "Statut : propre."
+        );
+        assert!(
+            run_inline_commands("Statut : !`echo propre`.", false, &cwd).contains("non exécutée")
+        );
+    }
     use std::fs;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {

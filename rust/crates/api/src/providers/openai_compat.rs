@@ -12,6 +12,8 @@ use crate::types::{
     ToolChoice, ToolDefinition, ToolResultContentBlock, Usage,
 };
 
+use super::reasoning::{self, ReasoningEffort, ThinkTagFilter};
+use super::text_tools::{self, TextToolFilter};
 use super::{Provider, ProviderFuture};
 
 pub const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1";
@@ -99,6 +101,10 @@ pub struct OpenAiCompatClient {
     http: reqwest::Client,
     api_key: String,
     base_url: String,
+    /// Nom du modèle envoyé au serveur (sans le préfixe `fournisseur:`).
+    model_name: Option<String>,
+    /// `OpenRouter`, `OpenAI`, `ollama`… (format du paramètre de raisonnement).
+    provider_name: String,
     extra_headers: Vec<(String, String)>,
     max_retries: u32,
     initial_backoff: Duration,
@@ -112,6 +118,8 @@ impl OpenAiCompatClient {
             http: reqwest::Client::new(),
             api_key: api_key.into(),
             base_url: read_base_url(config),
+            model_name: None,
+            provider_name: config.provider_name.to_string(),
             extra_headers: config.extra_headers(),
             max_retries: DEFAULT_MAX_RETRIES,
             initial_backoff: DEFAULT_INITIAL_BACKOFF,
@@ -127,6 +135,59 @@ impl OpenAiCompatClient {
             ));
         };
         Ok(Self::new(api_key, config))
+    }
+
+    /// Client pour un fournisseur compatible (`ollama:`, `groq:`, serveur de la config).
+    pub fn for_compat_provider(
+        provider: &super::compat::CompatProvider,
+        model_name: &str,
+    ) -> Result<Self, ApiError> {
+        let api_key = provider.api_key().unwrap_or_default();
+        if provider.requires_key && api_key.is_empty() {
+            return Err(ApiError::Auth(format!(
+                "clé manquante pour le fournisseur {} : définissez {}",
+                provider.name,
+                provider
+                    .api_key_env
+                    .as_deref()
+                    .unwrap_or("la variable de clé")
+            )));
+        }
+        Ok(Self {
+            http: reqwest::Client::new(),
+            api_key,
+            base_url: provider.base_url.clone(),
+            model_name: Some(model_name.to_string()),
+            provider_name: provider.name.clone(),
+            extra_headers: provider.headers.clone(),
+            max_retries: DEFAULT_MAX_RETRIES,
+            initial_backoff: DEFAULT_INITIAL_BACKOFF,
+            max_backoff: DEFAULT_MAX_BACKOFF,
+        })
+    }
+
+    /// Modèles proposés par le serveur (`GET /models`).
+    pub async fn list_models(&self) -> Result<Vec<String>, ApiError> {
+        let url = format!("{}/models", self.base_url.trim_end_matches('/'));
+        let mut builder = self.http.get(&url);
+        if !self.api_key.is_empty() {
+            builder = builder.bearer_auth(&self.api_key);
+        }
+        let response = expect_success(builder.send().await?).await?;
+        let payload = response.json::<Value>().await?;
+        let mut models = payload
+            .get("data")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("id").and_then(Value::as_str))
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        models.sort();
+        Ok(models)
     }
 
     #[must_use]
@@ -156,10 +217,10 @@ impl OpenAiCompatClient {
             stream: false,
             ..request.clone()
         };
-        let response = self.send_with_retry(&request).await?;
+        let (response, text_mode) = self.send_negotiated(&request).await?;
         let request_id = request_id_from_headers(response.headers());
         let payload = response.json::<ChatCompletionResponse>().await?;
-        let mut normalized = normalize_response(&request.model, payload)?;
+        let mut normalized = normalize_response(&request.model, payload, text_mode)?;
         if normalized.request_id.is_none() {
             normalized.request_id = request_id;
         }
@@ -170,28 +231,56 @@ impl OpenAiCompatClient {
         &self,
         request: &MessageRequest,
     ) -> Result<MessageStream, ApiError> {
-        let response = self
-            .send_with_retry(&request.clone().with_streaming())
+        let (response, text_mode) = self
+            .send_negotiated(&request.clone().with_streaming())
             .await?;
+        let mut state = StreamState::new(request.model.clone());
+        state.text_mode = text_mode;
         Ok(MessageStream {
             request_id: request_id_from_headers(response.headers()),
             response,
             parser: OpenAiSseParser::new(),
             pending: VecDeque::new(),
             done: false,
-            state: StreamState::new(request.model.clone()),
+            state,
         })
+    }
+
+    /// Envoie la requête avec des outils natifs, ou en mode texte si le modèle
+    /// l'exige ; un refus du paramètre `tools` fait basculer (et retenir) le mode texte.
+    async fn send_negotiated(
+        &self,
+        request: &MessageRequest,
+    ) -> Result<(reqwest::Response, bool), ApiError> {
+        let has_tools = request
+            .tools
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty());
+        let text_mode = has_tools && text_tools::text_tools_enabled(&request.model);
+        match self.send_with_retry(request, text_mode).await {
+            Ok(response) => Ok((response, text_mode)),
+            Err(error)
+                if has_tools
+                    && !text_mode
+                    && text_tools::is_tools_unsupported_error(&error.to_string()) =>
+            {
+                text_tools::enable_text_tools(&request.model);
+                Ok((self.send_with_retry(request, true).await?, true))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn send_with_retry(
         &self,
         request: &MessageRequest,
+        text_mode: bool,
     ) -> Result<reqwest::Response, ApiError> {
         let mut attempts = 0;
 
         let last_error = loop {
             attempts += 1;
-            let retryable_error = match self.send_raw_request(request).await {
+            let retryable_error = match self.send_raw_request(request, text_mode).await {
                 Ok(response) => match expect_success(response).await {
                     Ok(response) => return Ok(response),
                     Err(error) if error.is_retryable() && attempts <= self.max_retries + 1 => error,
@@ -217,21 +306,35 @@ impl OpenAiCompatClient {
     async fn send_raw_request(
         &self,
         request: &MessageRequest,
+        text_mode: bool,
     ) -> Result<reqwest::Response, ApiError> {
         let request_url = chat_completions_endpoint(&self.base_url);
         let mut builder = self
             .http
             .post(&request_url)
-            .header("content-type", "application/json")
-            .bearer_auth(&self.api_key);
+            .header("content-type", "application/json");
+        // Les serveurs locaux n'ont souvent pas de clé.
+        if !self.api_key.is_empty() {
+            builder = builder.bearer_auth(&self.api_key);
+        }
         for (name, value) in &self.extra_headers {
             builder = builder.header(name.as_str(), value.as_str());
         }
-        builder
-            .json(&build_chat_completion_request(request))
-            .send()
-            .await
-            .map_err(ApiError::from)
+        let mut payload = build_chat_completion_request_with(request, text_mode);
+        if let Some(name) = &self.model_name {
+            payload["model"] = Value::String(name.clone());
+        }
+        if let Some(effort) = reasoning::reasoning_effort()
+            .filter(|effort| *effort != ReasoningEffort::Off)
+            .filter(|_| reasoning::effort_applies_to(&request.model))
+        {
+            if self.provider_name == "OpenRouter" {
+                payload["reasoning"] = json!({ "effort": effort.as_str() });
+            } else {
+                payload["reasoning_effort"] = Value::String(effort.as_str().to_string());
+            }
+        }
+        builder.json(&payload).send().await.map_err(ApiError::from)
     }
 
     fn backoff_for_attempt(&self, attempt: u32) -> Result<Duration, ApiError> {
@@ -344,6 +447,11 @@ struct StreamState {
     stop_reason: Option<String>,
     usage: Option<Usage>,
     tool_calls: BTreeMap<u32, ToolCallState>,
+    /// Appels d'outils écrits dans le texte (`<tool_call>`), extraits en fin de flux.
+    text_mode: bool,
+    text_filter: TextToolFilter,
+    /// Raisonnement écrit entre `<think>` dans le texte.
+    think_filter: ThinkTagFilter,
 }
 
 impl StreamState {
@@ -357,7 +465,86 @@ impl StreamState {
             stop_reason: None,
             usage: None,
             tool_calls: BTreeMap::new(),
+            text_mode: false,
+            text_filter: TextToolFilter::default(),
+            think_filter: ThinkTagFilter::default(),
         }
+    }
+
+    /// Raisonnement du modèle, affiché à part (sauf `/think off`).
+    fn push_thinking(text: String, events: &mut Vec<StreamEvent>) {
+        if text.is_empty() || reasoning::reasoning_effort() == Some(ReasoningEffort::Off) {
+            return;
+        }
+        events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+            index: 999,
+            delta: ContentBlockDelta::ThinkingDelta { thinking: text },
+        }));
+    }
+
+    fn push_answer_text(&mut self, text: String, events: &mut Vec<StreamEvent>) {
+        let visible = if self.text_mode {
+            self.text_filter.push(&text)
+        } else {
+            text
+        };
+        self.push_text(visible, events);
+    }
+
+    fn push_text(&mut self, text: String, events: &mut Vec<StreamEvent>) {
+        if text.is_empty() {
+            return;
+        }
+        if !self.text_started {
+            self.text_started = true;
+            events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                index: 0,
+                content_block: OutputContentBlock::Text {
+                    text: String::new(),
+                },
+            }));
+        }
+        events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+            index: 0,
+            delta: ContentBlockDelta::TextDelta { text },
+        }));
+    }
+
+    /// Fin du flux en mode texte : texte restant puis appels extraits.
+    fn finish_text_tools(&mut self, events: &mut Vec<StreamEvent>) {
+        let (rest, raw) = self.text_filter.finish();
+        self.push_text(rest, events);
+        let (_, calls) = text_tools::extract_tool_calls(&raw);
+        if calls.is_empty() {
+            return;
+        }
+        if self.text_started && !self.text_finished {
+            self.text_finished = true;
+            events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
+                index: 0,
+            }));
+        }
+        for (offset, (name, input)) in calls.into_iter().enumerate() {
+            let index = 1_000 + u32::try_from(offset).unwrap_or(0);
+            events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                index,
+                content_block: OutputContentBlock::ToolUse {
+                    id: format!("text_call_{offset}"),
+                    name,
+                    input: json!({}),
+                },
+            }));
+            events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                index,
+                delta: ContentBlockDelta::InputJsonDelta {
+                    partial_json: input.to_string(),
+                },
+            }));
+            events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
+                index,
+            }));
+        }
+        self.stop_reason = Some("tool_use".to_string());
     }
 
     fn ingest_chunk(&mut self, chunk: ChatCompletionChunk) -> Result<Vec<StreamEvent>, ApiError> {
@@ -413,20 +600,16 @@ impl StreamState {
         }
 
         for choice in chunk.choices {
+            for thought in [choice.delta.reasoning, choice.delta.reasoning_content]
+                .into_iter()
+                .flatten()
+            {
+                Self::push_thinking(thought, &mut events);
+            }
             if let Some(content) = choice.delta.content.filter(|value| !value.is_empty()) {
-                if !self.text_started {
-                    self.text_started = true;
-                    events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
-                        index: 0,
-                        content_block: OutputContentBlock::Text {
-                            text: String::new(),
-                        },
-                    }));
-                }
-                events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
-                    index: 0,
-                    delta: ContentBlockDelta::TextDelta { text: content },
-                }));
+                let (text, thought) = self.think_filter.push(&content);
+                Self::push_thinking(thought, &mut events);
+                self.push_answer_text(text, &mut events);
             }
 
             for tool_call in choice.delta.tool_calls {
@@ -477,6 +660,12 @@ impl StreamState {
         self.finished = true;
 
         let mut events = Vec::new();
+        let (rest_text, rest_thought) = self.think_filter.finish();
+        Self::push_thinking(rest_thought, &mut events);
+        self.push_answer_text(rest_text, &mut events);
+        if self.text_mode {
+            self.finish_text_tools(&mut events);
+        }
         if self.text_started && !self.text_finished {
             self.text_finished = true;
             events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
@@ -659,6 +848,12 @@ struct ChunkChoice {
 struct ChunkDelta {
     #[serde(default)]
     content: Option<String>,
+    /// Raisonnement (`OpenRouter`, Ollama…).
+    #[serde(default)]
+    reasoning: Option<String>,
+    /// Raisonnement (`DeepSeek`, vLLM…).
+    #[serde(default)]
+    reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Vec<DeltaToolCall>,
 }
@@ -693,16 +888,39 @@ struct ErrorBody {
     message: Option<String>,
 }
 
+#[cfg(test)]
 fn build_chat_completion_request(request: &MessageRequest) -> Value {
+    build_chat_completion_request_with(request, false)
+}
+
+fn build_chat_completion_request_with(request: &MessageRequest, text_mode: bool) -> Value {
+    let text_mode = text_mode
+        && request
+            .tools
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty());
     let mut messages = Vec::new();
-    if let Some(system) = request.system.as_ref().filter(|value| !value.is_empty()) {
+    let mut system = request.system.clone().unwrap_or_default();
+    if text_mode {
+        if !system.is_empty() {
+            system.push_str("\n\n");
+        }
+        system.push_str(&text_tools::tool_protocol_prompt(
+            request.tools.as_deref().unwrap_or_default(),
+        ));
+    }
+    if !system.is_empty() {
         messages.push(json!({
             "role": "system",
             "content": system,
         }));
     }
-    for message in &request.messages {
-        messages.extend(translate_message(message));
+    if text_mode {
+        messages.extend(translate_messages_as_text(&request.messages));
+    } else {
+        for message in &request.messages {
+            messages.extend(translate_message(message));
+        }
     }
 
     let mut payload = json!({
@@ -717,15 +935,75 @@ fn build_chat_completion_request(request: &MessageRequest) -> Value {
         payload["stream_options"] = json!({ "include_usage": true });
     }
 
-    if let Some(tools) = &request.tools {
-        payload["tools"] =
-            Value::Array(tools.iter().map(openai_tool_definition).collect::<Vec<_>>());
-    }
-    if let Some(tool_choice) = &request.tool_choice {
-        payload["tool_choice"] = openai_tool_choice(tool_choice);
+    if !text_mode {
+        if let Some(tools) = &request.tools {
+            payload["tools"] =
+                Value::Array(tools.iter().map(openai_tool_definition).collect::<Vec<_>>());
+        }
+        if let Some(tool_choice) = &request.tool_choice {
+            payload["tool_choice"] = openai_tool_choice(tool_choice);
+        }
     }
 
     payload
+}
+
+/// Historique en mode texte : appels et résultats d'outils écrits en clair,
+/// messages `user`/`assistant` uniquement (pas de rôle `tool`).
+fn translate_messages_as_text(messages: &[InputMessage]) -> Vec<Value> {
+    let mut names = BTreeMap::new();
+    let mut translated: Vec<Value> = Vec::new();
+    for message in messages {
+        let mut parts = Vec::new();
+        let mut images = Vec::new();
+        for block in &message.content {
+            match block {
+                InputContentBlock::Image { source } => images.push(image_part(source)),
+                InputContentBlock::Thinking { .. } | InputContentBlock::RedactedThinking { .. } => {
+                }
+                InputContentBlock::Text { text } => parts.push(text.clone()),
+                InputContentBlock::ToolUse { id, name, input } => {
+                    names.insert(id.clone(), name.clone());
+                    parts.push(text_tools::render_tool_call(name, input));
+                }
+                InputContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => parts.push(text_tools::render_tool_result(
+                    names.get(tool_use_id).map_or("tool", String::as_str),
+                    &flatten_tool_result_content(content),
+                    *is_error,
+                )),
+            }
+        }
+        if parts.is_empty() && images.is_empty() {
+            continue;
+        }
+        let role = if message.role == "assistant" {
+            "assistant"
+        } else {
+            "user"
+        };
+        let content = parts.join("\n\n");
+        if !images.is_empty() && role == "user" {
+            translated
+                .push(json!({ "role": role, "content": content_with_images(&content, images) }));
+            continue;
+        }
+        // Deux messages consécutifs du même rôle sont fusionnés.
+        match translated.last_mut() {
+            Some(last) if last["role"] == role => {
+                let merged = format!(
+                    "{}\n\n{content}",
+                    last["content"].as_str().unwrap_or_default()
+                );
+                last["content"] = Value::String(merged);
+            }
+            _ => translated.push(json!({ "role": role, "content": content })),
+        }
+    }
+    translated
 }
 
 fn translate_message(message: &InputMessage) -> Vec<Value> {
@@ -750,7 +1028,10 @@ fn translate_assistant_message(message: &InputMessage) -> Vec<Value> {
                     "arguments": input.to_string(),
                 }
             })),
-            InputContentBlock::ToolResult { .. } => {}
+            InputContentBlock::ToolResult { .. }
+            | InputContentBlock::Image { .. }
+            | InputContentBlock::Thinking { .. }
+            | InputContentBlock::RedactedThinking { .. } => {}
         }
     }
     if text.is_empty() && tool_calls.is_empty() {
@@ -783,7 +1064,11 @@ fn translate_user_message(message: &InputMessage) -> Vec<Value> {
                 "content": if *is_error { format!("[error] {output}") } else { output },
             }))
         }
-        InputContentBlock::Text { .. } | InputContentBlock::ToolUse { .. } => None,
+        InputContentBlock::Text { .. }
+        | InputContentBlock::ToolUse { .. }
+        | InputContentBlock::Image { .. }
+        | InputContentBlock::Thinking { .. }
+        | InputContentBlock::RedactedThinking { .. } => None,
     });
     // Plusieurs blocs de texte (demande + contexte des hooks) forment un seul
     // message : certains fournisseurs refusent deux messages `user` consécutifs.
@@ -792,7 +1077,11 @@ fn translate_user_message(message: &InputMessage) -> Vec<Value> {
         .iter()
         .filter_map(|block| match block {
             InputContentBlock::Text { text } => Some(text.as_str()),
-            InputContentBlock::ToolResult { .. } | InputContentBlock::ToolUse { .. } => None,
+            InputContentBlock::ToolResult { .. }
+            | InputContentBlock::ToolUse { .. }
+            | InputContentBlock::Image { .. }
+            | InputContentBlock::Thinking { .. }
+            | InputContentBlock::RedactedThinking { .. } => None,
         })
         .collect::<Vec<_>>()
         .join(
@@ -800,13 +1089,42 @@ fn translate_user_message(message: &InputMessage) -> Vec<Value> {
 
 ",
         );
-    let texts = (!text.is_empty()).then(|| {
-        json!({
-            "role": "user",
-            "content": text,
+    let images = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            InputContentBlock::Image { source } => Some(image_part(source)),
+            _ => None,
         })
-    });
+        .collect::<Vec<_>>();
+    let texts = if images.is_empty() {
+        (!text.is_empty()).then(|| {
+            json!({
+                "role": "user",
+                "content": text,
+            })
+        })
+    } else {
+        Some(json!({
+            "role": "user",
+            "content": content_with_images(&text, images),
+        }))
+    };
     tool_results.chain(texts).collect()
+}
+
+fn image_part(source: &crate::types::ImageSource) -> Value {
+    json!({ "type": "image_url", "image_url": { "url": source.data_url() } })
+}
+
+/// Contenu multimodal : le texte puis les images.
+fn content_with_images(text: &str, images: Vec<Value>) -> Value {
+    let mut parts = Vec::new();
+    if !text.is_empty() {
+        parts.push(json!({ "type": "text", "text": text }));
+    }
+    parts.extend(images);
+    Value::Array(parts)
 }
 
 fn flatten_tool_result_content(content: &[ToolResultContentBlock]) -> String {
@@ -845,6 +1163,7 @@ fn openai_tool_choice(tool_choice: &ToolChoice) -> Value {
 fn normalize_response(
     model: &str,
     response: ChatCompletionResponse,
+    text_mode: bool,
 ) -> Result<MessageResponse, ApiError> {
     let choice = response
         .choices
@@ -854,8 +1173,29 @@ fn normalize_response(
             "la réponse chat completion ne contient pas de choices",
         ))?;
     let mut content = Vec::new();
-    if let Some(text) = choice.message.content.filter(|value| !value.is_empty()) {
-        content.push(OutputContentBlock::Text { text });
+    let mut finish_reason = choice.finish_reason.clone();
+    if let Some(text) = choice
+        .message
+        .content
+        .map(|text| reasoning::split_think_tags(&text).0)
+        .filter(|value| !value.is_empty())
+    {
+        if text_mode {
+            let (visible, calls) = text_tools::extract_tool_calls(&text);
+            if !visible.is_empty() {
+                content.push(OutputContentBlock::Text { text: visible });
+            }
+            for (offset, (name, input)) in calls.into_iter().enumerate() {
+                content.push(OutputContentBlock::ToolUse {
+                    id: format!("text_call_{offset}"),
+                    name,
+                    input,
+                });
+                finish_reason = Some("tool_calls".to_string());
+            }
+        } else {
+            content.push(OutputContentBlock::Text { text });
+        }
     }
     for tool_call in choice.message.tool_calls {
         content.push(OutputContentBlock::ToolUse {
@@ -871,9 +1211,7 @@ fn normalize_response(
         role: choice.message.role,
         content,
         model: response.model.if_empty_then(model.to_string()),
-        stop_reason: choice
-            .finish_reason
-            .map(|value| normalize_finish_reason(&value)),
+        stop_reason: finish_reason.map(|value| normalize_finish_reason(&value)),
         stop_sequence: None,
         usage: Usage {
             input_tokens: response

@@ -5,7 +5,10 @@ use crate::error::ApiError;
 use crate::types::{MessageRequest, MessageResponse};
 
 pub mod claw_provider;
+pub mod compat;
 pub mod openai_compat;
+pub mod reasoning;
+pub mod text_tools;
 
 pub type ProviderFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ApiError>> + Send + 'a>>;
 
@@ -29,6 +32,8 @@ pub enum ProviderKind {
     Xai,
     OpenAi,
     OpenRouter,
+    /// Serveur compatible `OpenAI` désigné par un préfixe (`ollama:`, `groq:`…).
+    Compat,
 }
 
 impl ProviderKind {
@@ -39,6 +44,7 @@ impl ProviderKind {
             Self::Xai => "xai",
             Self::OpenAi => "openai",
             Self::OpenRouter => "openrouter",
+            Self::Compat => "compatible-openai",
         }
     }
 
@@ -191,7 +197,7 @@ pub fn resolve_model_alias(model: &str) -> String {
                     "grok-2" => "grok-2",
                     _ => trimmed,
                 },
-                ProviderKind::OpenAi | ProviderKind::OpenRouter => trimmed,
+                ProviderKind::OpenAi | ProviderKind::OpenRouter | ProviderKind::Compat => trimmed,
             })
         })
         .map_or_else(|| trimmed.to_string(), ToOwned::to_owned)
@@ -222,6 +228,10 @@ pub fn metadata_for_model(model: &str) -> Option<ProviderMetadata> {
 /// 4. sinon, le premier fournisseur dont les identifiants sont présents.
 #[must_use]
 pub fn detect_provider_kind(model: &str) -> ProviderKind {
+    // `ollama:…`, `groq:…` : le préfixe désigne le serveur sans ambiguïté.
+    if compat::split_compat_model(model).is_some() {
+        return ProviderKind::Compat;
+    }
     if let Some(kind) = forced_provider_kind() {
         return kind;
     }
@@ -261,6 +271,13 @@ fn is_openrouter_model_id(model: &str) -> bool {
 /// 200 000 pour Claude et 128 000 par défaut.
 #[must_use]
 pub fn context_window_for_model(model: &str) -> u64 {
+    if let Some((provider, _)) = compat::split_compat_model(model) {
+        return std::env::var("CLAW_CONTEXT_WINDOW")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or_else(|| provider.default_context_window());
+    }
     let canonical = resolve_model_alias(model);
     if let Some(window) =
         crate::openrouter::model_limits(&canonical).and_then(|limits| limits.context_length)
@@ -305,6 +322,12 @@ pub fn max_tokens_for_model(model: &str) -> u32 {
         .filter(|value| *value > 0)
     {
         return value;
+    }
+    if let Some((provider, _)) = compat::split_compat_model(model) {
+        let by_context = context_window_for_model(model) / 4;
+        return u32::try_from(u64::from(provider.default_max_output_tokens()).min(by_context))
+            .unwrap_or(8_192)
+            .max(1_024);
     }
     let canonical = resolve_model_alias(model);
     if is_openrouter_model_id(&canonical) {
@@ -367,6 +390,7 @@ mod tests {
                     prompt_price: 0.0,
                     completion_price: 0.0,
                     supports_tools: true,
+                    supports_images: false,
                 },
                 crate::openrouter::OpenRouterModel {
                     id: "huge/ctx:free".to_string(),
@@ -377,6 +401,7 @@ mod tests {
                     prompt_price: 0.0,
                     completion_price: 0.0,
                     supports_tools: true,
+                    supports_images: false,
                 },
             ],
         };

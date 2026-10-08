@@ -133,9 +133,193 @@ fn format_age(seconds: u64) -> String {
     }
 }
 
-/// Rapport de `/models [refresh|<recherche>]`.
+/// Meilleurs modèles gratuits du cache (sans réseau), pour la bascule automatique.
+pub fn ranked_free_coding_models(limit: usize) -> Vec<String> {
+    load_cached_catalog()
+        .map(|catalog| {
+            api::rank_free_coding_models(&catalog)
+                .into_iter()
+                .take(limit)
+                .map(|entry| entry.model.id)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Enregistre les serveurs compatibles déclarés dans la config (`providers`).
+pub fn register_configured_providers(config: &runtime::RuntimeConfig) {
+    api::register_compat_providers(
+        config
+            .providers()
+            .iter()
+            .map(|provider| api::CompatProvider {
+                name: provider.name.clone(),
+                base_url: provider.base_url.clone(),
+                api_key_env: provider.api_key_env.clone(),
+                requires_key: provider.api_key_env.is_some() && !provider.local,
+                local: provider.local,
+                context_window: provider.context_window,
+                max_output_tokens: provider.max_output_tokens,
+                headers: provider
+                    .headers
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect(),
+                text_tools: provider.text_tools,
+            })
+            .collect(),
+    );
+}
+
+/// Chaîne de modèles d'une session : le principal, puis `CLAW_FALLBACK_MODELS`
+/// (liste séparée par des virgules) ou `fallbackModels` de la config. Sans liste
+/// et pour un modèle gratuit d'`OpenRouter`, les meilleurs modèles gratuits du
+/// classement servent de secours. `CLAW_FALLBACK=0` désactive la bascule.
+pub fn model_chain(primary: &str, configured: &[String]) -> Vec<String> {
+    let mut chain = vec![primary.to_string()];
+    if env::var("CLAW_FALLBACK").is_ok_and(|value| value.trim() == "0") {
+        return chain;
+    }
+    let from_env = env::var("CLAW_FALLBACK_MODELS")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|models| !models.is_empty());
+    let explicit = from_env.unwrap_or_else(|| configured.to_vec());
+    if explicit.is_empty() {
+        if primary.contains('/') && primary.ends_with(":free") {
+            chain.extend(ranked_free_coding_models(4));
+        }
+    } else {
+        chain.extend(explicit);
+    }
+    let mut unique: Vec<String> = Vec::new();
+    for model in chain {
+        let model = api::resolve_model_alias(&model);
+        if !unique.contains(&model) {
+            unique.push(model);
+        }
+    }
+    unique
+}
+
+/// Modèles proposés par un fournisseur compatible (`GET /models`).
+fn provider_models(
+    provider: &api::CompatProvider,
+    timeout: Duration,
+) -> Result<Vec<String>, String> {
+    let client = api::OpenAiCompatClient::for_compat_provider(provider, "")
+        .map_err(|error| error.to_string())?;
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
+    runtime
+        .block_on(async { tokio::time::timeout(timeout, client.list_models()).await })
+        .map_err(|_| "pas de réponse".to_string())?
+        .map_err(|error| {
+            let text = error.to_string();
+            if text.contains("connect") || text.contains("error sending request") {
+                "serveur arrêté".to_string()
+            } else {
+                text.chars().take(80).collect()
+            }
+        })
+}
+
+/// Premier modèle d'un serveur local en marche (Ollama, LM Studio, llama.cpp…),
+/// pour démarrer sans aucune clé.
+pub fn first_local_model() -> Option<String> {
+    api::compat_providers()
+        .into_iter()
+        .filter(|provider| provider.local)
+        .find_map(|provider| {
+            provider_models(&provider, Duration::from_millis(700))
+                .ok()?
+                .into_iter()
+                .find(|model| !model.contains("embed"))
+                .map(|model| format!("{}:{model}", provider.name))
+        })
+}
+
+/// `/models local` : fournisseurs compatibles et modèles disponibles.
+pub fn providers_report(current_model: &str) -> String {
+    let mut lines = vec![
+        "Fournisseurs compatibles OpenAI (préfixe nom:modèle)".to_string(),
+        "  Utilisation      /model ollama:qwen2.5-coder:7b · /model groq:llama-3.3-70b-versatile"
+            .to_string(),
+        String::new(),
+    ];
+    for provider in api::compat_providers() {
+        let kind = if provider.local { "local" } else { "en ligne" };
+        if !provider.is_configured() {
+            lines.push(format!(
+                "  {:<10} {kind:<8} clé absente ({})",
+                provider.name,
+                provider.api_key_env.as_deref().unwrap_or("?")
+            ));
+            continue;
+        }
+        let timeout = if provider.local {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_secs(8)
+        };
+        match provider_models(&provider, timeout) {
+            Ok(models) if models.is_empty() => lines.push(format!(
+                "  {:<10} {kind:<8} {} · aucun modèle installé",
+                provider.name, provider.base_url
+            )),
+            Ok(models) => {
+                lines.push(format!(
+                    "  {:<10} {kind:<8} {} · {} modèle(s)",
+                    provider.name,
+                    provider.base_url,
+                    models.len()
+                ));
+                for model in models.iter().take(12) {
+                    let id = format!("{}:{model}", provider.name);
+                    let marker = if id == current_model {
+                        "  ● actuel"
+                    } else {
+                        ""
+                    };
+                    lines.push(format!("      {id}{marker}"));
+                }
+                if models.len() > 12 {
+                    lines.push(format!("      … et {} autre(s)", models.len() - 12));
+                }
+            }
+            Err(reason) => lines.push(format!(
+                "  {:<10} {kind:<8} {} · {reason}",
+                provider.name, provider.base_url
+            )),
+        }
+    }
+    lines.extend([
+        String::new(),
+        "Serveur personnel : \"providers\": {\"monserveur\": {\"baseUrl\": \"http://hote:8000/v1\", \"apiKeyEnv\": \"MA_CLE\"}}"
+            .to_string(),
+        "Secours automatique : \"fallbackModels\": [\"groq:llama-3.3-70b-versatile\", \"ollama:qwen2.5-coder:7b\"]"
+            .to_string(),
+        "Ollama : lancez-le avec OLLAMA_CONTEXT_LENGTH=32768 (le contexte par défaut est trop petit pour un agent)."
+            .to_string(),
+    ]);
+    lines.join("\n")
+}
+
+/// Rapport de `/models [refresh|local|<recherche>]`.
 pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, String> {
     let args = args.map(str::trim).filter(|value| !value.is_empty());
+    if matches!(
+        args,
+        Some("local" | "locaux" | "fournisseurs" | "providers")
+    ) {
+        return Ok(providers_report(current_model));
+    }
     let refresh = args == Some("refresh");
     let filter = args.filter(|_| !refresh).map(str::to_ascii_lowercase);
     let (catalog, warning) = catalog(refresh)?;
@@ -148,7 +332,9 @@ pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, 
         .into_iter()
         .filter(|entry| {
             filter.as_ref().is_none_or(|filter| {
-                entry.model.id.to_ascii_lowercase().contains(filter)
+                // `/models vision` : modèles qui lisent les images.
+                (filter == "vision" && entry.model.supports_images)
+                    || entry.model.id.to_ascii_lowercase().contains(filter)
                     || entry.model.name.to_ascii_lowercase().contains(filter)
             })
         })
@@ -190,6 +376,10 @@ pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, 
         "  /model <id>            utiliser ce modèle dans la session".to_string(),
         "  \"model\": \"<id>\"        dans .claw.json pour le garder".to_string(),
         "  /models refresh        recharger le catalogue".to_string(),
+        "  /models local          modèles locaux (Ollama, LM Studio…) et autres fournisseurs"
+            .to_string(),
+        "  /models vision         modèles qui lisent les images (joindre : @capture.png)"
+            .to_string(),
         "  /models <recherche>    filtrer (ex. /models poolside)".to_string(),
         String::new(),
         "Bon à savoir : chaque étape de l'agent (un appel au modèle) consomme une requête du"
@@ -216,8 +406,13 @@ fn render_ranking(ranked: &[RankedModel], current_model: &str) -> Vec<String> {
         } else {
             ""
         };
+        let vision = if entry.model.supports_images {
+            " · 👁 images"
+        } else {
+            ""
+        };
         lines.push(format!(
-            "  {:<2} {:<width$}  {:>8}  {}{marker}",
+            "  {:<2} {:<width$}  {:>8}  {}{vision}{marker}",
             index + 1,
             entry.model.id,
             format_context(entry.model.context_length),
@@ -313,6 +508,7 @@ mod tests {
                 prompt_price: 0.0,
                 completion_price: 0.0,
                 supports_tools: true,
+                supports_images: false,
             },
             score: 50.0,
             reasons: vec!["spécialisé code".to_string()],

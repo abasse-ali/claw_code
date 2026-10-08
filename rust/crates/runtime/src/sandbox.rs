@@ -31,6 +31,97 @@ pub struct SandboxConfig {
     pub network_isolation: Option<bool>,
     pub filesystem_mode: Option<FilesystemIsolationMode>,
     pub allowed_mounts: Vec<String>,
+    /// `docker` ou `podman` : commandes exécutées dans un conteneur (tous systèmes).
+    #[serde(default)]
+    pub backend: Option<String>,
+    /// Image du conteneur (défaut : `debian:stable-slim`).
+    #[serde(default)]
+    pub image: Option<String>,
+}
+
+/// Exécution des commandes dans un conteneur : seul le projet est monté.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContainerSandbox {
+    pub program: String,
+    pub image: String,
+    pub network_isolation: bool,
+    pub extra_mounts: Vec<String>,
+}
+
+impl SandboxConfig {
+    /// Moteur de conteneur choisi (`CLAW_SANDBOX` puis `sandbox.backend`).
+    #[must_use]
+    pub fn container(&self) -> Option<ContainerSandbox> {
+        let backend = std::env::var("CLAW_SANDBOX")
+            .ok()
+            .or_else(|| self.backend.clone())?
+            .trim()
+            .to_ascii_lowercase();
+        if !matches!(backend.as_str(), "docker" | "podman") || self.enabled == Some(false) {
+            return None;
+        }
+        Some(ContainerSandbox {
+            program: backend,
+            image: std::env::var("CLAW_SANDBOX_IMAGE")
+                .ok()
+                .or_else(|| self.image.clone())
+                .unwrap_or_else(|| "debian:stable-slim".to_string()),
+            network_isolation: self.network_isolation.unwrap_or(false),
+            extra_mounts: self.allowed_mounts.clone(),
+        })
+    }
+}
+
+static CONTAINER_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+impl ContainerSandbox {
+    /// Arguments de `docker run` (ou `podman run`) pour `command` dans `cwd` ;
+    /// renvoie aussi le nom donné au conteneur (pour l'arrêter).
+    #[must_use]
+    pub fn run_args(&self, command: &str, cwd: &Path) -> (Vec<String>, String) {
+        let name = format!(
+            "claw-{}-{}",
+            std::process::id(),
+            CONTAINER_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let mut args = vec![
+            "run".to_string(),
+            "--rm".to_string(),
+            "-i".to_string(),
+            "--init".to_string(),
+            "--name".to_string(),
+            name.clone(),
+            "-v".to_string(),
+            format!("{}:/workspace", cwd.display()),
+            "-w".to_string(),
+            "/workspace".to_string(),
+            "-e".to_string(),
+            "HOME=/tmp".to_string(),
+        ];
+        if self.network_isolation {
+            args.push("--network".to_string());
+            args.push("none".to_string());
+        }
+        for mount in &self.extra_mounts {
+            args.push("-v".to_string());
+            args.push(format!("{mount}:{mount}:ro"));
+        }
+        args.push(self.image.clone());
+        args.push("sh".to_string());
+        args.push("-lc".to_string());
+        args.push(command.to_string());
+        (args, name)
+    }
+
+    /// Arrête et supprime un conteneur (interruption, délai dépassé, fin de Claw).
+    pub fn stop(&self, name: &str) {
+        let _ = std::process::Command::new(&self.program)
+            .args(["rm", "-f", name])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -65,6 +156,9 @@ pub struct SandboxStatus {
     pub in_container: bool,
     pub container_markers: Vec<String>,
     pub fallback_reason: Option<String>,
+    /// Commandes exécutées dans un conteneur Docker/Podman.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<ContainerSandbox>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,7 +255,8 @@ pub fn resolve_sandbox_status(config: &SandboxConfig, cwd: &Path) -> SandboxStat
 #[must_use]
 pub fn resolve_sandbox_status_for_request(request: &SandboxRequest, cwd: &Path) -> SandboxStatus {
     let container = detect_container_environment();
-    let namespace_supported = cfg!(target_os = "linux") && command_exists("unshare");
+    let namespace_supported =
+        cfg!(target_os = "linux") && command_exists("unshare") && user_namespaces_allowed();
     let network_supported = namespace_supported;
     let filesystem_active =
         request.enabled && request.filesystem_mode != FilesystemIsolationMode::Off;
@@ -169,7 +264,7 @@ pub fn resolve_sandbox_status_for_request(request: &SandboxRequest, cwd: &Path) 
 
     if request.enabled && request.namespace_restrictions && !namespace_supported {
         fallback_reasons.push(
-            "isolation par namespace indisponible (nécessite Linux avec `unshare`)".to_string(),
+            "isolation par namespace indisponible (nécessite Linux avec `unshare` et les namespaces utilisateur autorisés)".to_string(),
         );
     }
     if request.enabled && request.network_isolation && !network_supported {
@@ -207,6 +302,7 @@ pub fn resolve_sandbox_status_for_request(request: &SandboxRequest, cwd: &Path) 
         in_container: container.in_container,
         container_markers: container.markers,
         fallback_reason: (!fallback_reasons.is_empty()).then(|| fallback_reasons.join("; ")),
+        container: None,
     }
 }
 
@@ -280,6 +376,22 @@ fn normalize_mounts(mounts: &[String], cwd: &Path) -> Vec<String> {
         .collect()
 }
 
+/// `unshare --user` peut être refusé même s'il est installé (Ubuntu 24.04 et
+/// AppArmor, conteneurs, runners de CI) : on l'essaie une fois avant de s'en
+/// servir, sinon les commandes s'exécutent sans isolation au lieu d'échouer.
+fn user_namespaces_allowed() -> bool {
+    static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ALLOWED.get_or_init(|| {
+        std::process::Command::new("unshare")
+            .args(["--user", "--map-root-user", "--mount", "--fork", "true"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    })
+}
+
 fn command_exists(command: &str) -> bool {
     env::var_os("PATH")
         .is_some_and(|paths| env::split_paths(&paths).any(|path| path.join(command).exists()))
@@ -325,6 +437,7 @@ mod tests {
             network_isolation: Some(false),
             filesystem_mode: Some(FilesystemIsolationMode::WorkspaceOnly),
             allowed_mounts: vec!["logs".to_string()],
+            ..SandboxConfig::default()
         };
 
         let request = config.resolve_request(
@@ -363,5 +476,46 @@ mod tests {
             assert!(launcher.args.iter().any(|arg| arg == "--mount"));
             assert!(launcher.args.iter().any(|arg| arg == "--net") == status.network_active);
         }
+    }
+}
+
+#[cfg(test)]
+mod container_tests {
+    use super::SandboxConfig;
+    use std::path::Path;
+
+    #[test]
+    fn container_backend_mounts_only_the_workspace() {
+        let config = SandboxConfig {
+            backend: Some("podman".to_string()),
+            image: Some("rust:1".to_string()),
+            network_isolation: Some(true),
+            allowed_mounts: vec!["/data".to_string()],
+            ..SandboxConfig::default()
+        };
+        let container = config.container().expect("backend configuré");
+        assert_eq!(container.program, "podman");
+        let (args, name) = container.run_args("cargo test", Path::new("/projet"));
+        assert!(name.starts_with("claw-"));
+        assert_eq!(&args[..4], ["run", "--rm", "-i", "--init"]);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-v", "/projet:/workspace"]));
+        assert!(args.windows(2).any(|pair| pair == ["--network", "none"]));
+        assert!(args.windows(2).any(|pair| pair == ["-v", "/data:/data:ro"]));
+        assert_eq!(
+            &args[args.len() - 4..],
+            ["rust:1", "sh", "-lc", "cargo test"]
+        );
+
+        let disabled = SandboxConfig {
+            backend: Some("docker".to_string()),
+            enabled: Some(false),
+            ..SandboxConfig::default()
+        };
+        assert!(disabled.container().is_none());
+        assert!(
+            SandboxConfig::default().container().is_none() || std::env::var("CLAW_SANDBOX").is_ok()
+        );
     }
 }
