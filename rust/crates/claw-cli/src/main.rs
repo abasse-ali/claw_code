@@ -1802,11 +1802,8 @@ impl LiveCli {
         {
             return;
         }
-        if let Some(Ok(status)) = credits::account_status(true) {
-            println!(
-                "\x1b[2mOpenRouter : {}\x1b[0m",
-                credits::short_line(&status)
-            );
+        if let Some(line) = credits::current_line(true) {
+            println!("\x1b[2mOpenRouter : {line}\x1b[0m");
         }
     }
 
@@ -4669,6 +4666,8 @@ impl ApiClient for DefaultRuntimeClient {
             let opened =
                 runtime::interrupt::interruptible(self.chain.open_stream(&build, &mut notify))
                     .await?;
+            // Chaque étape de l'agent compte : l'affichage des crédits suit en direct.
+            credits::note_request(&opened.model);
             let mut stream = opened.stream;
             let mut first_event = opened.first_event;
             let mut stdout = io::stdout();

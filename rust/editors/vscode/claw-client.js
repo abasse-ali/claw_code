@@ -137,6 +137,69 @@ class ClawServer {
     });
   }
 
+  /**
+   * S'abonne aux événements de `claw serve` (flux SSE, rôle `status` : ne
+   * compte pas comme une page ouverte). Reconnexion automatique tant que le
+   * serveur tourne ; `stop()` ferme l'abonnement.
+   */
+  subscribe(onEvent) {
+    let retrying = false;
+    const retry = () => {
+      if (retrying || !this.running) return;
+      retrying = true;
+      setTimeout(() => {
+        retrying = false;
+        connect();
+      }, 2000);
+    };
+    const connect = () => {
+      if (!this.running || !this.port || !this.token) return;
+      const request = http.get(
+        {
+          host: "127.0.0.1",
+          port: this.port,
+          path: "/api/events?role=status",
+          headers: { Host: `127.0.0.1:${this.port}`, "X-Claw-Token": this.token, Accept: "text/event-stream" },
+        },
+        (response) => {
+          if (response.statusCode !== 200) {
+            response.resume();
+            retry();
+            return;
+          }
+          let buffer = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk) => {
+            buffer += chunk.replace(/\r\n/g, "\n");
+            let end;
+            while ((end = buffer.indexOf("\n\n")) >= 0) {
+              const block = buffer.slice(0, end);
+              buffer = buffer.slice(end + 2);
+              const name = (block.match(/^event:\s*(.*)$/m) || [])[1];
+              const data = block
+                .split("\n")
+                .filter((line) => line.startsWith("data:"))
+                .map((line) => line.slice(5).replace(/^ /, ""))
+                .join("\n");
+              if (name === "event" && data) {
+                try {
+                  onEvent(JSON.parse(data));
+                } catch (_) {
+                  /* événement illisible ignoré */
+                }
+              }
+            }
+          });
+          response.on("end", retry);
+          response.on("error", retry);
+        },
+      );
+      request.on("error", retry);
+      this.eventsRequest = request;
+    };
+    connect();
+  }
+
   /** Envoie un message à l'agent (mis en file d'attente si un tour est en cours). */
   send(text, images) {
     return this.request("POST", "/api/message", { text, images: images || [] });
@@ -147,6 +210,10 @@ class ClawServer {
   }
 
   stop() {
+    if (this.eventsRequest) {
+      this.eventsRequest.destroy();
+      this.eventsRequest = null;
+    }
     if (this.process) {
       this.process.kill();
       this.process = null;

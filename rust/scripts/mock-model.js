@@ -22,6 +22,8 @@ const logPath = option("--log");
 const write = option("--write");
 const read = option("--read");
 const port = Number(option("--port") || 0);
+// Requêtes faites à des modèles « :free » : décomptées du quota fictif.
+let freeRequests = 0;
 
 function lastUserText(messages) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -104,7 +106,7 @@ const server = http.createServer((request, response) => {
   }
   if (request.method === "GET" && request.url.endsWith("/key")) {
     response.writeHead(200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ data: { usage_daily: 0, limit_remaining: null, free_model_daily_requests: { used: 322, limit: 1000, remaining: 678 } } }));
+    response.end(JSON.stringify({ data: { usage_daily: 0, limit_remaining: null, free_model_daily_requests: { used: 322 + freeRequests, limit: 1000, remaining: 678 - freeRequests } } }));
     return;
   }
   if (request.method === "GET" && request.url.endsWith("/models")) {
@@ -130,6 +132,7 @@ const server = http.createServer((request, response) => {
       return;
     }
     if (logPath) fs.appendFileSync(logPath, `${JSON.stringify(body)}\n`);
+    if (String(body.model || "").endsWith(":free")) freeRequests += 1;
     const answer = reply(body);
     const model = body.model || "mock";
     if (body.stream) streamReply(response, model, answer);

@@ -112,6 +112,19 @@ async function run() {
     await waitFor("crédits dans la barre d'état", () => api.statusText.includes("8,25 $"), 20000);
   });
 
+  await step("les crédits se mettent à jour en temps réel pendant que l'agent travaille", async () => {
+    // Modèle gratuit « OpenRouter » servi par le faux modèle : chaque étape
+    // décompte une requête gratuite, poussée aussitôt à la barre d'état.
+    await api.server.request("POST", "/api/model", { value: "mock/codeur:free" });
+    await api.server.send("Réponds bonjour");
+    await waitFor(
+      "décompte d'une requête gratuite (sans attendre l'actualisation périodique)",
+      () => /· 67[0-7] gratuites/.test(api.statusText),
+      4000,
+    );
+    await api.server.request("POST", "/api/model", { value: "ollama:mock" });
+  });
+
   await step("la page de claw accepte d'être affichée dans le panneau", async () => {
     const headers = await fetchHeaders(api.server.port);
     const csp = headers["content-security-policy"] || "";

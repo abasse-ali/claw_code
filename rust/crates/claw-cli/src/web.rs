@@ -108,6 +108,11 @@ enum WebEvent {
     Status {
         status: StatusView,
     },
+    /// Crédits `OpenRouter` à jour (après chaque étape de l'agent, puis
+    /// confirmés par `OpenRouter`).
+    Credits {
+        credits: serde_json::Value,
+    },
     Reset,
 }
 
@@ -153,6 +158,20 @@ struct WebApp {
     view: Arc<Mutex<SharedView>>,
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<PermissionReply>>>>,
     next_permission_id: Arc<AtomicU64>,
+    /// Pages ouvertes (navigateur, panneau de VS Code), sans les abonnements
+    /// de la barre d'état (`?role=status`).
+    page_viewers: Arc<AtomicU64>,
+}
+
+/// Retire la page du compte quand son flux d'événements se ferme.
+struct ViewerGuard(Option<Arc<AtomicU64>>);
+
+impl Drop for ViewerGuard {
+    fn drop(&mut self) {
+        if let Some(count) = &self.0 {
+            count.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
 }
 
 impl WebApp {
@@ -185,7 +204,8 @@ impl WebApp {
                     view.transcript.push(event.clone());
                 }
             }
-            WebEvent::TurnDone => {}
+            // Pas rejoués à la reconnexion : la page relit /api/credits.
+            WebEvent::TurnDone | WebEvent::Credits { .. } => {}
             _ => view.transcript.push(event.clone()),
         }
         let _ = self.events.send(event);
@@ -778,6 +798,9 @@ fn transcript_from_messages(messages: &[ConversationMessage]) -> Vec<WebEvent> {
 #[derive(Deserialize)]
 struct TokenQuery {
     token: Option<String>,
+    /// `status` : abonnement de la barre d'état de VS Code (pas une page).
+    #[serde(default)]
+    role: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -906,7 +929,13 @@ async fn events(
             app.events.subscribe(),
         )
     };
+    let is_page = query.role.as_deref() != Some("status");
+    if is_page {
+        app.page_viewers.fetch_add(1, Ordering::SeqCst);
+    }
+    let guard = ViewerGuard(is_page.then(|| Arc::clone(&app.page_viewers)));
     let stream = stream! {
+        let _guard = guard;
         yield Ok::<Event, Infallible>(Event::default().event("snapshot").data(snapshot.to_string()));
         loop {
             match receiver.recv().await {
@@ -1059,6 +1088,47 @@ async fn get_models(State(app): State<WebApp>, headers: HeaderMap) -> ApiResult 
 }
 
 /// Commandes personnalisées, pour les suggestions du champ de saisie.
+/// Crédits en temps réel : chaque requête de l'agent est décomptée et envoyée
+/// aussitôt aux pages ouvertes ; les chiffres d'`OpenRouter` sont relus 5 s
+/// après une activité (confirmation) et toutes les 20 s, seulement si une page
+/// regarde.
+fn spawn_credits_pump(app: WebApp) {
+    if std::env::var("OPENROUTER_API_KEY").map_or(true, |key| key.trim().is_empty()) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("claw-web-credits".to_string())
+        .spawn(move || {
+            let mut published = u64::MAX;
+            let mut last_fetch: Option<std::time::Instant> = None;
+            let mut awaiting_confirmation = false;
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                if app.events.receiver_count() == 0 {
+                    continue;
+                }
+                let since_fetch = last_fetch.map_or(std::time::Duration::MAX, |at| at.elapsed());
+                if since_fetch >= std::time::Duration::from_secs(20)
+                    || (awaiting_confirmation && since_fetch >= std::time::Duration::from_secs(5))
+                {
+                    let _ = crate::credits::account_status(true);
+                    last_fetch = Some(std::time::Instant::now());
+                    awaiting_confirmation = false;
+                }
+                let generation = crate::credits::generation();
+                if generation != published {
+                    // Une requête notée (et non une relecture) attend confirmation.
+                    awaiting_confirmation |= last_fetch
+                        .is_some_and(|at| at.elapsed() >= std::time::Duration::from_millis(400));
+                    published = generation;
+                    app.publish(WebEvent::Credits {
+                        credits: crate::credits::json(false),
+                    });
+                }
+            }
+        });
+}
+
 /// Crédits `OpenRouter` (en-tête de la page, barre d'état de VS Code) ; mis en
 /// cache 15 s côté serveur.
 async fn get_credits(State(app): State<WebApp>, headers: HeaderMap) -> ApiResult {
@@ -1073,7 +1143,11 @@ async fn get_credits(State(app): State<WebApp>, headers: HeaderMap) -> ApiResult
 /// panneau de VS Code) s'est réellement chargée et exécute son script.
 async fn get_viewers(State(app): State<WebApp>, headers: HeaderMap) -> ApiResult {
     authorize(&app, &headers, None)?;
-    Ok(Json(json!({ "viewers": app.events.receiver_count() })).into_response())
+    Ok(Json(json!({
+        "viewers": app.page_viewers.load(Ordering::SeqCst),
+        "subscribers": app.events.receiver_count(),
+    }))
+    .into_response())
 }
 
 async fn get_commands(State(app): State<WebApp>, headers: HeaderMap) -> ApiResult {
@@ -1158,7 +1232,10 @@ pub(crate) fn serve(options: ServeOptions) -> Result<(), Box<dyn std::error::Err
         view: Arc::new(Mutex::new(SharedView::default())),
         pending: Arc::new(Mutex::new(HashMap::new())),
         next_permission_id: Arc::new(AtomicU64::new(1)),
+        page_viewers: Arc::new(AtomicU64::new(0)),
     };
+
+    spawn_credits_pump(app.clone());
 
     // Construction du runtime dans le thread de l'agent (MCP, plugins…).
     let worker_app = app.clone();

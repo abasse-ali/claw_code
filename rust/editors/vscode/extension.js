@@ -37,23 +37,43 @@ function setStatus(text, tooltip) {
   statusItem.tooltip = credits ? `${tooltip}\nOpenRouter : ${credits.detail}` : tooltip;
 }
 
-/** Crédits OpenRouter dans la barre d'état, tant que Claw tourne (toutes les 30 s). */
-async function refreshCredits(running) {
-  try {
-    const data = await running.request("GET", "/api/credits");
-    credits = data && data.available && data.balance_text
-      ? { balance: data.balance_text, detail: `${data.text} (mis à jour à ${new Date().toLocaleTimeString()})` }
-      : null;
-  } catch (_) {
-    return; // affichage précédent conservé
+/** Affiche des crédits reçus (événement en direct ou lecture de /api/credits). */
+function applyCredits(running, data) {
+  if (data && data.available && data.balance_text) {
+    const free = data.free ? ` · ${data.free.remaining} gratuites` : "";
+    const session = data.session && data.session.free + data.session.paid
+      ? `\nCette session : ${data.session.free} requête(s) gratuite(s), ${data.session.paid} payante(s)`
+      : "";
+    credits = {
+      balance: `${data.balance_text}${free}`,
+      detail: `${data.text}${session}\nMis à jour à ${new Date().toLocaleTimeString()}`,
+    };
+  } else {
+    credits = null;
   }
   if (running.running) setStatus("$(hubot) Claw", `Claw actif dans ${running.options.cwd}`);
 }
 
+async function refreshCredits(running) {
+  try {
+    applyCredits(running, await running.request("GET", "/api/credits"));
+  } catch (_) {
+    // affichage précédent conservé
+  }
+}
+
+/**
+ * Crédits OpenRouter en temps réel dans la barre d'état : chaque étape de
+ * l'agent arrive par le flux d'événements de claw ; une lecture par minute
+ * sert de secours.
+ */
 function startCredits(running) {
   stopCredits();
   refreshCredits(running);
-  creditsTimer = setInterval(() => refreshCredits(running), 30000);
+  running.subscribe((event) => {
+    if (event.type === "credits") applyCredits(running, event.credits);
+  });
+  creditsTimer = setInterval(() => refreshCredits(running), 60000);
 }
 
 function stopCredits() {

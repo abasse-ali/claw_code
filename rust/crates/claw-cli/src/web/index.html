@@ -662,6 +662,7 @@
       case "error": finishAssistant(); addError(event.message, event.hint); break;
       case "turn_done": finishAssistant(); break;
       case "status": applyStatus(event.status); break;
+      case "credits": renderCredits(event.credits); break;
       case "reset": resetLog(); break;
     }
   }
@@ -696,23 +697,30 @@
     modelSelect.appendChild(other);
     modelSelect.value = current;
   }
-  // Crédits OpenRouter : au chargement, à la fin de chaque réponse et chaque minute.
-  async function loadCredits() {
+  // Crédits OpenRouter en temps réel : le serveur envoie un événement « credits »
+  // à chaque étape de l'agent (décompte immédiat) puis à chaque relecture des
+  // chiffres d'OpenRouter ; /api/credits sert au chargement et en secours.
+  function renderCredits(data) {
     const node = $("credits");
-    let data;
-    try {
-      data = await api("/api/credits");
-    } catch (_) {
-      return; // on garde l'affichage précédent
-    }
     if (!data || !data.available) { node.hidden = true; return; }
     const parts = [];
     if (data.balance_text) parts.push("<strong>" + escapeHtml(data.balance_text) + "</strong>");
     if (data.free) parts.push(escapeHtml(data.free.remaining + "/" + data.free.limit + " gratuites"));
     node.innerHTML = "OpenRouter " + parts.join(" · ");
-    node.title = data.text + " — mis à jour à " + new Date().toLocaleTimeString();
+    const session = data.session && (data.session.free + data.session.paid)
+      ? " · cette session : " + data.session.free + " gratuite(s), " + data.session.paid + " payante(s)"
+      : "";
+    const pending = data.pending ? " · " + data.pending + " en attente de confirmation d'OpenRouter" : "";
+    node.title = data.text + session + pending + " — " + new Date().toLocaleTimeString();
     node.classList.toggle("low", typeof data.balance === "number" && data.balance < 1);
     node.hidden = false;
+  }
+  async function loadCredits() {
+    try {
+      renderCredits(await api("/api/credits"));
+    } catch (_) {
+      // affichage précédent conservé
+    }
   }
   setInterval(loadCredits, 60000);
 

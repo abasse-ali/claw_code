@@ -2,6 +2,7 @@
 //! gratuites restantes, pour le terminal (`/credits`, ligne après chaque
 //! réponse), l'interface web et la barre d'état de VS Code.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,40 @@ const CACHE_FOR: Duration = Duration::from_secs(15);
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(10);
 
 static CACHE: Mutex<Option<(Instant, Result<AccountStatus, String>)>> = Mutex::new(None);
+
+/// Requêtes gratuites faites par ce processus depuis la dernière lecture des
+/// chiffres d'`OpenRouter` : décomptées tout de suite à l'écran, puis
+/// confirmées par la lecture suivante.
+static FREE_SINCE_FETCH: AtomicU64 = AtomicU64::new(0);
+/// Requêtes `OpenRouter` de ce processus (gratuites, payantes).
+static SESSION_FREE: AtomicU64 = AtomicU64::new(0);
+static SESSION_PAID: AtomicU64 = AtomicU64::new(0);
+/// Change à chaque requête notée ou lecture faite : l'affichage se met à jour.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn is_free_model(model: &str) -> bool {
+    model.ends_with(":free") || model == "openrouter/free"
+}
+
+/// Une requête vient de partir vers `model` (une étape de l'agent).
+pub fn note_request(model: &str) {
+    if !is_openrouter_model(model) {
+        return;
+    }
+    if is_free_model(model) {
+        FREE_SINCE_FETCH.fetch_add(1, Ordering::SeqCst);
+        SESSION_FREE.fetch_add(1, Ordering::SeqCst);
+    } else {
+        SESSION_PAID.fetch_add(1, Ordering::SeqCst);
+    }
+    GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Numéro de version de l'affichage (requête notée ou chiffres relus).
+#[must_use]
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::SeqCst)
+}
 
 fn openrouter_key() -> Option<String> {
     std::env::var("OPENROUTER_API_KEY")
@@ -38,9 +73,30 @@ pub fn account_status(fresh: bool) -> Option<Result<AccountStatus, String>> {
             return Some(status.clone());
         }
     }
+    // Les requêtes notées pendant la lecture ne sont peut-être pas encore
+    // comptées par OpenRouter : seules celles d'avant sont soldées.
+    let noted_before = FREE_SINCE_FETCH.load(Ordering::SeqCst);
     let status = fetch(&key);
+    if status.is_ok() {
+        let _ = FREE_SINCE_FETCH.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            Some(count.saturating_sub(noted_before))
+        });
+    }
     *cache = Some((Instant::now(), status.clone()));
+    GENERATION.fetch_add(1, Ordering::SeqCst);
     Some(status)
+}
+
+/// État avec les requêtes gratuites faites depuis la dernière lecture déjà
+/// décomptées (affichage en temps réel).
+fn live(status: &AccountStatus) -> AccountStatus {
+    let pending = FREE_SINCE_FETCH.load(Ordering::SeqCst);
+    let mut live = status.clone();
+    if let Some(free) = live.free_requests.as_mut() {
+        free.remaining = free.remaining.saturating_sub(pending);
+        free.used += pending;
+    }
+    live
 }
 
 fn fetch(key: &str) -> Result<AccountStatus, String> {
@@ -102,6 +158,15 @@ pub fn short_line(status: &AccountStatus) -> String {
     }
 }
 
+/// Ligne courte à jour (requêtes en attente de confirmation déjà décomptées).
+#[must_use]
+pub fn current_line(fresh: bool) -> Option<String> {
+    match account_status(fresh)? {
+        Ok(status) => Some(short_line(&live(&status))),
+        Err(_) => None,
+    }
+}
+
 /// Rapport de `/credits`.
 #[must_use]
 pub fn report(fresh: bool) -> String {
@@ -110,7 +175,7 @@ pub fn report(fresh: bool) -> String {
             return "Crédits OpenRouter : aucune clé (définissez OPENROUTER_API_KEY).".to_string()
         }
         Some(Err(error)) => return format!("Crédits OpenRouter indisponibles : {error}"),
-        Some(Ok(status)) => status,
+        Some(Ok(status)) => live(&status),
     };
     let mut lines = vec!["Crédits OpenRouter".to_string()];
     if let (Some(balance), Some(total), Some(used)) =
@@ -138,30 +203,51 @@ pub fn report(fresh: bool) -> String {
             free.remaining, free.limit
         ));
     }
+    let (free, paid) = session_requests();
+    if free + paid > 0 {
+        lines.push(format!(
+            "  Cette session    {free} requête(s) gratuite(s), {paid} payante(s)"
+        ));
+    }
     lines.push("  Achat de crédits https://openrouter.ai/settings/credits".to_string());
     lines.join("\n")
 }
 
-/// Données pour l'interface web et la barre d'état de VS Code.
+fn session_requests() -> (u64, u64) {
+    (
+        SESSION_FREE.load(Ordering::SeqCst),
+        SESSION_PAID.load(Ordering::SeqCst),
+    )
+}
+
+/// Données pour l'interface web et la barre d'état de VS Code, avec les
+/// requêtes faites depuis la dernière lecture déjà décomptées.
 #[must_use]
 pub fn json(fresh: bool) -> serde_json::Value {
+    let (session_free, session_paid) = session_requests();
     match account_status(fresh) {
         None => serde_json::json!({ "available": false, "reason": "aucune clé OpenRouter" }),
         Some(Err(error)) => serde_json::json!({ "available": false, "reason": error }),
-        Some(Ok(status)) => serde_json::json!({
-            "available": true,
-            "balance": status.balance(),
-            "balance_text": status.balance().map(dollars),
-            "used": status.credits_used,
-            "total": status.credits_total,
-            "today": status.key_usage_today,
-            "free": status.free_requests.map(|free| serde_json::json!({
-                "used": free.used,
-                "limit": free.limit,
-                "remaining": free.remaining,
-            })),
-            "text": short_line(&status),
-        }),
+        Some(Ok(status)) => {
+            let status = live(&status);
+            serde_json::json!({
+                "available": true,
+                "balance": status.balance(),
+                "balance_text": status.balance().map(dollars),
+                "used": status.credits_used,
+                "total": status.credits_total,
+                "today": status.key_usage_today,
+                "free": status.free_requests.map(|free| serde_json::json!({
+                    "used": free.used,
+                    "limit": free.limit,
+                    "remaining": free.remaining,
+                })),
+                "session": { "free": session_free, "paid": session_paid },
+                // Requêtes décomptées en attendant la confirmation d'OpenRouter.
+                "pending": FREE_SINCE_FETCH.load(Ordering::SeqCst),
+                "text": short_line(&status),
+            })
+        }
     }
 }
 
