@@ -95,6 +95,18 @@ function jsonReply(response, model, answer) {
 }
 
 const server = http.createServer((request, response) => {
+  // Compte OpenRouter fictif (OPENROUTER_BASE_URL=http://127.0.0.1:<port>/v1) :
+  // 10 $ achetés, 1,75 $ utilisés, 678/1000 requêtes gratuites restantes.
+  if (request.method === "GET" && request.url.endsWith("/credits")) {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ data: { total_credits: 10, total_usage: 1.75 } }));
+    return;
+  }
+  if (request.method === "GET" && request.url.endsWith("/key")) {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ data: { usage_daily: 0, limit_remaining: null, free_model_daily_requests: { used: 322, limit: 1000, remaining: 678 } } }));
+    return;
+  }
   if (request.method === "GET" && request.url.endsWith("/models")) {
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({ object: "list", data: [{ id: "mock", object: "model" }] }));

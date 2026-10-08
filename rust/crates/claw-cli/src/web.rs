@@ -584,6 +584,7 @@ impl Worker {
             Some(SlashCommand::Models { args }) => {
                 self.info(models::models_report(args.as_deref(), &self.model)?);
             }
+            Some(SlashCommand::Credits) => self.info(crate::credits::report(true)),
             Some(SlashCommand::Mcp) => {
                 let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
                 let config = runtime::ConfigLoader::default_for(cwd)
@@ -1058,6 +1059,16 @@ async fn get_models(State(app): State<WebApp>, headers: HeaderMap) -> ApiResult 
 }
 
 /// Commandes personnalisées, pour les suggestions du champ de saisie.
+/// Crédits `OpenRouter` (en-tête de la page, barre d'état de VS Code) ; mis en
+/// cache 15 s côté serveur.
+async fn get_credits(State(app): State<WebApp>, headers: HeaderMap) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    let credits = tokio::task::spawn_blocking(|| crate::credits::json(false))
+        .await
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()))?;
+    Ok(Json(credits).into_response())
+}
+
 /// Pages connectées au flux d'événements : prouve qu'une page (navigateur,
 /// panneau de VS Code) s'est réellement chargée et exécute son script.
 async fn get_viewers(State(app): State<WebApp>, headers: HeaderMap) -> ApiResult {
@@ -1117,6 +1128,7 @@ fn router(app: WebApp) -> Router {
         .route("/api/sessions", get(get_sessions))
         .route("/api/commands", get(get_commands))
         .route("/api/viewers", get(get_viewers))
+        .route("/api/credits", get(get_credits))
         .with_state(app)
 }
 

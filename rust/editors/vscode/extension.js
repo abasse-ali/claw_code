@@ -9,6 +9,8 @@ const { ClawServer, selectionMessage } = require("./claw-client");
 let server = null;
 let panel = null;
 let statusItem = null;
+let creditsTimer = null;
+let credits = null;
 
 function workspaceFolder() {
   const editor = vscode.window.activeTextEditor;
@@ -31,8 +33,33 @@ function settings() {
 
 function setStatus(text, tooltip) {
   if (!statusItem) return;
-  statusItem.text = text;
-  statusItem.tooltip = tooltip;
+  statusItem.text = credits ? `${text} · ${credits.balance}` : text;
+  statusItem.tooltip = credits ? `${tooltip}\nOpenRouter : ${credits.detail}` : tooltip;
+}
+
+/** Crédits OpenRouter dans la barre d'état, tant que Claw tourne (toutes les 30 s). */
+async function refreshCredits(running) {
+  try {
+    const data = await running.request("GET", "/api/credits");
+    credits = data && data.available && data.balance_text
+      ? { balance: data.balance_text, detail: `${data.text} (mis à jour à ${new Date().toLocaleTimeString()})` }
+      : null;
+  } catch (_) {
+    return; // affichage précédent conservé
+  }
+  if (running.running) setStatus("$(hubot) Claw", `Claw actif dans ${running.options.cwd}`);
+}
+
+function startCredits(running) {
+  stopCredits();
+  refreshCredits(running);
+  creditsTimer = setInterval(() => refreshCredits(running), 30000);
+}
+
+function stopCredits() {
+  if (creditsTimer) clearInterval(creditsTimer);
+  creditsTimer = null;
+  credits = null;
 }
 
 /** Démarre `claw serve` pour le dossier ouvert (une seule fois). */
@@ -42,6 +69,7 @@ async function ensureServer() {
   if (!cwd) throw new Error("Ouvrez d'abord un dossier de projet.");
   server = new ClawServer({ ...settings(), cwd });
   server.onExit((code, stderr) => {
+    stopCredits();
     setStatus("$(circle-slash) Claw", "Claw est arrêté");
     if (code !== 0 && code !== null) {
       vscode.window.showErrorMessage(`Claw s'est arrêté (code ${code}). ${stderr.split("\n").slice(-3).join(" ")}`);
@@ -53,6 +81,7 @@ async function ensureServer() {
     () => server.start(),
   );
   setStatus("$(hubot) Claw", `Claw actif dans ${cwd}`);
+  startCredits(server);
   return server;
 }
 
@@ -162,6 +191,7 @@ function activate(context) {
       await vscode.env.openExternal(vscode.Uri.parse(running.url));
     })),
     vscode.commands.registerCommand("claw.stop", () => {
+      stopCredits();
       if (server) server.stop();
       if (panel) panel.dispose();
     }),
@@ -174,6 +204,9 @@ function activate(context) {
     },
     get panel() {
       return panel;
+    },
+    get statusText() {
+      return statusItem ? statusItem.text : "";
     },
   };
 }

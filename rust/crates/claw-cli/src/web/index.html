@@ -110,6 +110,9 @@
 
   footer.composer { background: var(--panel); border-top: 1px solid var(--border); padding: 8px 16px 12px; }
   .composer .inner { gap: 6px; position: relative; }
+  .credits { font-size: 13px; color: var(--muted); white-space: nowrap; }
+  .credits strong { color: var(--text); font-weight: 600; }
+  .credits.low strong { color: var(--err); }
   .statusline { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12.5px; color: var(--muted); min-height: 18px; }
   .statusline .busy { color: var(--accent); font-weight: 600; }
   .statusline .offline { color: var(--err); }
@@ -148,6 +151,7 @@
 <header class="topbar">
   <div class="brand">🦞 Claw</div>
   <div class="workspace" id="cwd" title=""></div>
+  <div class="credits" id="credits" hidden></div>
   <div class="controls">
     <label>Modèle <select id="model-select" aria-label="Modèle"></select></label>
     <label>Permissions
@@ -692,7 +696,28 @@
     modelSelect.appendChild(other);
     modelSelect.value = current;
   }
+  // Crédits OpenRouter : au chargement, à la fin de chaque réponse et chaque minute.
+  async function loadCredits() {
+    const node = $("credits");
+    let data;
+    try {
+      data = await api("/api/credits");
+    } catch (_) {
+      return; // on garde l'affichage précédent
+    }
+    if (!data || !data.available) { node.hidden = true; return; }
+    const parts = [];
+    if (data.balance_text) parts.push("<strong>" + escapeHtml(data.balance_text) + "</strong>");
+    if (data.free) parts.push(escapeHtml(data.free.remaining + "/" + data.free.limit + " gratuites"));
+    node.innerHTML = "OpenRouter " + parts.join(" · ");
+    node.title = data.text + " — mis à jour à " + new Date().toLocaleTimeString();
+    node.classList.toggle("low", typeof data.balance === "number" && data.balance < 1);
+    node.hidden = false;
+  }
+  setInterval(loadCredits, 60000);
+
   function applyStatus(next) {
+    const turnFinished = status.busy && !next.busy;
     const modelChanged = next.model !== status.model;
     status = next;
     $("cwd").textContent = next.cwd || "";
@@ -708,6 +733,7 @@
     $("usage").textContent = "Jetons : " + next.input_tokens + " entrée · " + next.output_tokens + " sortie" + (next.cost ? " · " + next.cost : "");
     tickBusy();
     updateTitle();
+    if (turnFinished) loadCredits();
   }
   function tickBusy() {
     const node = $("busy");
@@ -722,7 +748,7 @@
     try {
       const data = await api("/api/models");
       freeModels = data.models || [];
-      $("quota").textContent = data.quota ? "Quota gratuit : " + data.quota : "";
+      $("quota").textContent = "";
     } catch (error) {
       $("quota").textContent = "Catalogue indisponible : " + error.message;
     }
@@ -967,6 +993,7 @@
   } else {
     connect();
     loadModels();
+    loadCredits();
     loadCustomCommands();
     input.addEventListener("focus", loadCustomCommands);
     input.focus();

@@ -333,6 +333,14 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         category: SlashCommandCategory::Core,
     },
     SlashCommandSpec {
+        name: "credits",
+        aliases: &["solde"],
+        summary: "Crédits OpenRouter en temps réel : solde, dépense du jour, requêtes gratuites restantes",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
         name: "mcp",
         aliases: &[],
         summary: "Affiche les serveurs MCP connectés et leurs outils",
@@ -489,6 +497,7 @@ pub enum SlashCommand {
     Models {
         args: Option<String>,
     },
+    Credits,
     Teleport {
         target: Option<String>,
     },
@@ -597,6 +606,7 @@ impl SlashCommand {
             "models" => Self::Models {
                 args: remainder_after_command(trimmed, command),
             },
+            "credits" | "solde" => Self::Credits,
             "model" => Self::Model {
                 model: parts.next().map(ToOwned::to_owned),
             },
@@ -2040,6 +2050,7 @@ pub fn handle_slash_command(
         | SlashCommand::Think { .. }
         | SlashCommand::Bashes { .. }
         | SlashCommand::Models { .. }
+        | SlashCommand::Credits
         | SlashCommand::Teleport { .. }
         | SlashCommand::DebugToolCall
         | SlashCommand::Model { .. }
@@ -2448,7 +2459,7 @@ mod tests {
         assert!(help.contains("alias : /plugins, /marketplace"));
         assert!(help.contains("/agents"));
         assert!(help.contains("/skills"));
-        assert_eq!(slash_command_specs().len(), 40);
+        assert_eq!(slash_command_specs().len(), 41);
         assert_eq!(resume_supported_slash_commands().len(), 13);
     }
 

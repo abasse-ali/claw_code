@@ -113,6 +113,106 @@ struct RawKeyInfo {
 struct RawKeyData {
     #[serde(default)]
     free_model_daily_requests: Option<RawQuota>,
+    #[serde(default)]
+    usage_daily: Option<f64>,
+    #[serde(default)]
+    limit_remaining: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct RawCredits {
+    data: RawCreditsData,
+}
+
+#[derive(Deserialize)]
+struct RawCreditsData {
+    #[serde(default)]
+    total_credits: f64,
+    #[serde(default)]
+    total_usage: f64,
+}
+
+/// État du compte `OpenRouter` : crédits, dépense du jour de la clé, quota gratuit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountStatus {
+    /// Crédits achetés (en dollars), `None` si l'API ne les donne pas à cette clé.
+    pub credits_total: Option<f64>,
+    /// Crédits consommés (en dollars).
+    pub credits_used: Option<f64>,
+    /// Dépense du jour de cette clé (en dollars).
+    pub key_usage_today: Option<f64>,
+    /// Plafond restant de cette clé, si elle en a un.
+    pub key_limit_remaining: Option<f64>,
+    /// Requêtes gratuites du jour.
+    pub free_requests: Option<FreeModelQuota>,
+}
+
+impl AccountStatus {
+    /// Solde restant (en dollars).
+    #[must_use]
+    pub fn balance(&self) -> Option<f64> {
+        Some(self.credits_total? - self.credits_used?)
+    }
+}
+
+/// Crédits (`GET /credits`) et clé (`GET /key`), lus en parallèle.
+pub async fn fetch_account_status(
+    base_url: &str,
+    api_key: &str,
+) -> Result<AccountStatus, ApiError> {
+    let base = base_url.trim_end_matches('/');
+    let client = reqwest::Client::new();
+    let get = |path: &str| {
+        client
+            .get(format!("{base}/{path}"))
+            .bearer_auth(api_key)
+            .send()
+    };
+    let (credits, key) = tokio::join!(get("credits"), get("key"));
+    let credits = match credits {
+        Ok(response) if response.status().is_success() => {
+            serde_json::from_str::<RawCredits>(&response.text().await?)
+                .ok()
+                .map(|raw| raw.data)
+        }
+        Ok(_) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let key = match key {
+        Ok(response) if response.status().is_success() => {
+            serde_json::from_str::<RawKeyInfo>(&response.text().await?)
+                .ok()
+                .map(|raw| raw.data)
+        }
+        Ok(response) => {
+            let status = response.status();
+            if credits.is_none() {
+                // Clé refusée : rien à afficher, l'erreur dit pourquoi.
+                return Err(ApiError::Api {
+                    status,
+                    error_type: None,
+                    message: None,
+                    body: response.text().await.unwrap_or_default(),
+                    retryable: false,
+                });
+            }
+            None
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(AccountStatus {
+        credits_total: credits.as_ref().map(|data| data.total_credits),
+        credits_used: credits.as_ref().map(|data| data.total_usage),
+        key_usage_today: key.as_ref().and_then(|data| data.usage_daily),
+        key_limit_remaining: key.as_ref().and_then(|data| data.limit_remaining),
+        free_requests: key
+            .and_then(|data| data.free_model_daily_requests)
+            .map(|quota| FreeModelQuota {
+                used: quota.used,
+                limit: quota.limit,
+                remaining: quota.remaining,
+            }),
+    })
 }
 
 #[derive(Deserialize)]

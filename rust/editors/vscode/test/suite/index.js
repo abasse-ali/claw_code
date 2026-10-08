@@ -108,6 +108,10 @@ async function run() {
     }, 30000);
   });
 
+  await step("la barre d'état affiche les crédits OpenRouter", async () => {
+    await waitFor("crédits dans la barre d'état", () => api.statusText.includes("8,25 $"), 20000);
+  });
+
   await step("la page de claw accepte d'être affichée dans le panneau", async () => {
     const headers = await fetchHeaders(api.server.port);
     const csp = headers["content-security-policy"] || "";

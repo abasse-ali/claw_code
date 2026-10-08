@@ -1,5 +1,6 @@
 mod acp;
 mod bench;
+mod credits;
 mod init;
 mod input;
 mod mcp_cli;
@@ -237,6 +238,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let current = model.unwrap_or_else(default_model);
             println!("{}", models::models_report(args.as_deref(), &current)?);
         }
+        CliAction::Credits => println!("{}", credits::report(true)),
         CliAction::PrintSystemPrompt { cwd, date } => print_system_prompt(cwd, date),
         CliAction::Version => print_version(),
         CliAction::ResumeSession {
@@ -343,6 +345,7 @@ enum CliAction {
         args: Option<String>,
         model: Option<String>,
     },
+    Credits,
     Serve {
         host: String,
         port: u16,
@@ -608,6 +611,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             args: join_optional_args(&rest[1..]),
             model,
         }),
+        "credits" | "solde" => Ok(CliAction::Credits),
         "system-prompt" => parse_system_prompt_args(&rest[1..]),
         "login" => Ok(CliAction::Login),
         "logout" => Ok(CliAction::Logout),
@@ -636,6 +640,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         // `claw /review`, `claw /fix "cargo test"`… : prompt ponctuel spécialisé.
         other if other.starts_with('/') => match SlashCommand::parse(&rest.join(" ")) {
             Some(SlashCommand::Models { args }) => Ok(CliAction::Models { args, model }),
+            Some(SlashCommand::Credits) => Ok(CliAction::Credits),
             Some(SlashCommand::Expert { command, args }) => Ok(CliAction::Prompt {
                 prompt: expert_command_prompt(command, args.as_deref())?,
                 model: model.unwrap_or_else(default_model),
@@ -1457,6 +1462,7 @@ fn run_resume_command(
         | SlashCommand::Think { .. }
         | SlashCommand::Bashes { .. }
         | SlashCommand::Models { .. }
+        | SlashCommand::Credits
         | SlashCommand::Teleport { .. }
         | SlashCommand::DebugToolCall
         | SlashCommand::Resume { .. }
@@ -1763,6 +1769,7 @@ impl LiveCli {
                     &mut stdout,
                 )?;
                 println!();
+                self.print_credits_line();
                 self.persist_session()?;
                 self.sync_permission_mode()?;
                 Ok(())
@@ -1785,6 +1792,21 @@ impl LiveCli {
                 )?;
                 Err(Box::new(error))
             }
+        }
+    }
+
+    /// Crédits `OpenRouter` après chaque réponse (`CLAW_CREDITS=0` pour masquer).
+    fn print_credits_line(&self) {
+        if !credits::is_openrouter_model(&self.model)
+            || env::var("CLAW_CREDITS").is_ok_and(|value| value.trim() == "0")
+        {
+            return;
+        }
+        if let Some(Ok(status)) = credits::account_status(true) {
+            println!(
+                "\x1b[2mOpenRouter : {}\x1b[0m",
+                credits::short_line(&status)
+            );
         }
     }
 
@@ -1999,6 +2021,10 @@ impl LiveCli {
                     Ok(report) => println!("{report}"),
                     Err(error) => eprintln!("{}", render_cli_error(&error)),
                 }
+                false
+            }
+            SlashCommand::Credits => {
+                println!("{}", credits::report(true));
                 false
             }
             SlashCommand::Teleport { target } => {
@@ -5881,6 +5907,7 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         "  claw mcp add|list|remove|login        Serveurs MCP (stdio, http, sse, OAuth)",
         "  claw acp                              Agent pour les éditeurs (Zed, Neovim… via ACP)",
         "  claw models [refresh|recherche]       Modèles gratuits recommandés pour le code",
+        "  claw credits                          Crédits OpenRouter : solde, requêtes gratuites restantes",
         "  claw agents                           Liste les agents configurés",
         "  claw skills                           Liste les compétences installées",
         "  claw init                             Crée CLAW.md et les fichiers locaux",

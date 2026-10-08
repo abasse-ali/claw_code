@@ -45,6 +45,9 @@ async function main() {
         CLAW_TEST_LOG: logPath,
         CLAW_TEST_WORKSPACE: workspace,
         OLLAMA_BASE_URL: mock.baseUrl,
+        // Compte OpenRouter fictif servi par le faux modèle (crédits en barre d'état).
+        OPENROUTER_BASE_URL: mock.baseUrl,
+        OPENROUTER_API_KEY: "sk-or-test-factice",
         CLAW_CONFIG_HOME: path.join(root, "claw-home"),
         CLAW_NO_CLAUDE_CONFIG: "1",
       },

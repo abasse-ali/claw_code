@@ -7,8 +7,9 @@ mod sse;
 mod types;
 
 pub use openrouter::{
-    fetch_free_quota, fetch_model_catalog, model_limits, rank_free_coding_models,
-    register_model_limits, FreeModelQuota, ModelCatalog, ModelLimits, OpenRouterModel, RankedModel,
+    fetch_account_status, fetch_free_quota, fetch_model_catalog, model_limits,
+    rank_free_coding_models, register_model_limits, AccountStatus, FreeModelQuota, ModelCatalog,
+    ModelLimits, OpenRouterModel, RankedModel,
 };
 
 pub use client::{
