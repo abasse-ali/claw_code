@@ -149,9 +149,7 @@ fn command_roots(cwd: &Path) -> Vec<(PathBuf, &'static str)> {
             roots.push((path, scope));
         }
     };
-    let home = env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
-        .map(PathBuf::from);
+    let home = runtime::home_dir();
     for ancestor in cwd.ancestors() {
         // Le dossier personnel est traité comme portée « utilisateur ».
         if home.as_deref() == Some(ancestor) {

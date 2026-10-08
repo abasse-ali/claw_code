@@ -32,7 +32,7 @@ pub struct StoredToken {
 fn store_path() -> PathBuf {
     std::env::var_os("CLAW_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claw")))
+        .or_else(|| runtime::home_dir().map(|home| home.join(".claw")))
         .unwrap_or_else(|| PathBuf::from(".claw"))
         .join("mcp-oauth.json")
 }

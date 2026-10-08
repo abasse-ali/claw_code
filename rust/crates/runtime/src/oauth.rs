@@ -328,9 +328,13 @@ fn credentials_home_dir() -> io::Result<PathBuf> {
     if let Some(path) = std::env::var_os("CLAW_CONFIG_HOME") {
         return Ok(PathBuf::from(path));
     }
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME n'est pas défini"))?;
-    Ok(PathBuf::from(home).join(".claw"))
+    let home = crate::home_dir().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "dossier personnel introuvable (HOME, USERPROFILE)",
+        )
+    })?;
+    Ok(home.join(".claw"))
 }
 
 fn read_credentials_root(path: &PathBuf) -> io::Result<Map<String, Value>> {

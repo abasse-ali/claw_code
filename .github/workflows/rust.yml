@@ -51,7 +51,25 @@ jobs:
         run: cargo build --workspace --all-targets --locked
       # Les tests changent le dossier courant du processus : un seul fil.
       - name: Tests
-        run: cargo test --workspace --locked -- --test-threads=1
+        shell: bash
+        run: cargo test --workspace --locked --no-fail-fast -- --test-threads=1 2>&1 | tee test-output.log
+      # Les journaux exigent d'être connecté à GitHub, les annotations sont
+      # publiques : chaque test en échec y figure avec sa sortie.
+      - name: Annoter les tests en échec
+        if: failure()
+        shell: bash
+        run: |
+          [ -f test-output.log ] || exit 0
+          tr -d '\r' < test-output.log | awk '
+            /^---- .* stdout ----$/ {
+              if (msg != "") print substr(msg, 1, 4000)
+              title = $2; gsub(/%/, "%25", title); gsub(/:/, "%3A", title); gsub(/,/, "%2C", title)
+              msg = "::error title=Test en échec " title "::"; next
+            }
+            /^failures:$/ { if (msg != "") print substr(msg, 1, 4000); msg = ""; next }
+            msg != "" { gsub(/%/, "%25"); msg = msg $0 "%0A"; next }
+            /^error: / { print "::error::" $0 }
+            END { if (msg != "") print substr(msg, 1, 4000) }'
 
   release:
     name: Binaire ${{ matrix.target }}

@@ -559,8 +559,8 @@ fn path_pattern_matches(pattern: &str, path: &str, cwd: &Path) -> bool {
 
     let mut pattern = pattern.replace('\\', "/");
     if let Some(rest) = pattern.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            pattern = format!("{}/{rest}", PathBuf::from(home).display()).replace('\\', "/");
+        if let Some(home) = crate::home_dir() {
+            pattern = format!("{}/{rest}", home.display()).replace('\\', "/");
         }
     }
     let pattern = pattern.trim_start_matches("./").to_string();

@@ -1759,8 +1759,7 @@ fn resolve_skill_path(skill: &str) -> Result<std::path::PathBuf, String> {
     if let Ok(codex_home) = std::env::var("CODEX_HOME") {
         candidates.push(std::path::PathBuf::from(codex_home).join("skills"));
     }
-    if let Ok(home) = std::env::var("HOME") {
-        let home = std::path::PathBuf::from(home);
+    if let Some(home) = runtime::home_dir() {
         for dir in [".claw", ".claude", ".codex", ".agents"] {
             candidates.push(home.join(dir).join("skills"));
         }
@@ -2233,8 +2232,7 @@ fn custom_agent_dirs(cwd: &Path) -> Vec<PathBuf> {
             ]
         })
         .collect::<Vec<_>>();
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
+    if let Some(home) = runtime::home_dir() {
         dirs.push(home.join(".claw").join("agents"));
         dirs.push(home.join(".claude").join("agents"));
     }
@@ -3470,7 +3468,7 @@ struct ReplRuntime {
 fn resolve_repl_runtime(language: &str) -> Result<ReplRuntime, String> {
     match language.trim().to_ascii_lowercase().as_str() {
         "python" | "py" => Ok(ReplRuntime {
-            program: detect_first_command(&["python3", "python"])
+            program: detect_first_command(&["python3", "python", "py"])
                 .ok_or_else(|| String::from("python runtime not found"))?,
             args: &["-c"],
         }),
@@ -3662,8 +3660,8 @@ fn config_home_dir() -> Result<PathBuf, String> {
     if let Ok(path) = std::env::var("CLAW_CONFIG_HOME") {
         return Ok(PathBuf::from(path));
     }
-    let home = std::env::var("HOME").map_err(|_| String::from("HOME is not set"))?;
-    Ok(PathBuf::from(home).join(".claw"))
+    let home = runtime::home_dir().ok_or_else(|| String::from("home directory not found"))?;
+    Ok(home.join(".claw"))
 }
 
 fn read_json_object(path: &Path) -> Result<serde_json::Map<String, Value>, String> {
@@ -3763,12 +3761,7 @@ fn detect_powershell_shell() -> std::io::Result<&'static str> {
 }
 
 fn command_exists(command: &str) -> bool {
-    std::process::Command::new("sh")
-        .arg("-lc")
-        .arg(format!("command -v {command} >/dev/null 2>&1"))
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    runtime::find_executable(command).is_some()
 }
 
 #[allow(clippy::too_many_lines)]

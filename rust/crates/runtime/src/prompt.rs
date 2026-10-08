@@ -216,10 +216,7 @@ fn discover_instruction_files(cwd: &Path) -> std::io::Result<Vec<ContextFile>> {
 
     let mut files = Vec::new();
     // Instructions personnelles valables pour tous les projets (Claw et Claude Code).
-    if let Some(home) = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-    {
+    if let Some(home) = crate::home_dir() {
         for candidate in [
             home.join(".claw").join("CLAW.md"),
             home.join(".claude").join("CLAUDE.md"),

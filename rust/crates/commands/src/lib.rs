@@ -1500,8 +1500,7 @@ fn discover_definition_roots(cwd: &Path, leaf: &str) -> Vec<(DefinitionSource, P
         );
     }
 
-    if let Some(home) = env::var_os("HOME") {
-        let home = PathBuf::from(home);
+    if let Some(home) = runtime::home_dir() {
         push_unique_root(
             &mut roots,
             DefinitionSource::UserCodex,
@@ -1574,8 +1573,7 @@ fn discover_skill_roots(cwd: &Path) -> Vec<SkillRoot> {
         );
     }
 
-    if let Some(home) = env::var_os("HOME") {
-        let home = PathBuf::from(home);
+    if let Some(home) = runtime::home_dir() {
         push_unique_skill_root(
             &mut roots,
             DefinitionSource::UserCodex,
@@ -2075,15 +2073,19 @@ mod tests {
     };
     use plugins::{PluginKind, PluginManager, PluginManagerConfig, PluginMetadata, PluginSummary};
     use runtime::{CompactionConfig, ContentBlock, ConversationMessage, MessageRole, Session};
-
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[cfg(unix)]
+    use super::{handle_commit_push_pr_slash_command, CommitPushPrRequest};
+    #[cfg(unix)]
+    use std::env;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::sync::{Mutex, OnceLock};
 
     fn temp_dir(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -2093,6 +2095,7 @@ mod tests {
         std::env::temp_dir().join(format!("commands-plugin-{label}-{nanos}"))
     }
 
+    #[cfg(unix)]
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -2151,6 +2154,7 @@ mod tests {
         root
     }
 
+    #[cfg(unix)]
     fn init_bare_repo(label: &str) -> PathBuf {
         let root = temp_dir(label);
         let output = Command::new("git")

@@ -15,6 +15,7 @@ mod mcp;
 mod mcp_client;
 mod mcp_stdio;
 mod oauth;
+mod paths;
 mod permissions;
 mod prompt;
 mod remote;
@@ -76,6 +77,7 @@ pub use oauth::{
     OAuthCallbackParams, OAuthRefreshRequest, OAuthTokenExchangeRequest, OAuthTokenSet,
     PkceChallengeMethod, PkceCodePair,
 };
+pub use paths::{find_executable, home_dir};
 pub use permissions::{
     request_mode_switch, PermissionMode, PermissionOutcome, PermissionPolicy,
     PermissionPromptDecision, PermissionPrompter, PermissionRequest, PermissionRule,
