@@ -69,13 +69,20 @@ claw serve                 # ouvre http://127.0.0.1:8787/?token=… dans le navi
 claw serve --port 9000 --no-open
 ```
 
-Même agent que dans le terminal (modèle, permissions, MCP, sous-agents, sessions), dans une page :
-réponses en direct avec Markdown, tableaux et code ; cartes d'outils repliables (diffs en
-couleur pour les éditions, sortie des commandes) ; **demandes de permission à valider dans la
-page** (une fois / toujours / refuser avec consigne) ; diagrammes Mermaid affichés à la demande ;
-choix du modèle parmi les gratuits recommandés pour le code, du mode de permission, nouvelle
-conversation et reprise des sessions ; commandes `/review`, `/audit`, `/archi`, `/adr`, `/fix`,
-`/models`, `/mcp`, `/cost`, `/compact`…
+Même agent que dans le terminal (modèle, permissions, MCP, sous-agents, sessions), dans une page
+sombre ou claire (thème du système, de VS Code ou choisi) :
+
+- réponses en direct (seule la fin du message est re-rendue pendant le flux) avec Markdown,
+  tableaux et code coloré avec bouton « Copier » ;
+- **frise des étapes de l'agent** : une ligne par outil (icône, cible, durée, `+3 −1` pour une
+  modification), dépliable sur le diff ligne à ligne, la sortie, le contenu lu ou la liste de
+  tâches ; la barre d'activité au-dessus de la saisie dit ce que fait l'agent ;
+- **demandes de permission dans la page**, au clavier : `Entrée` autoriser, `A` toujours,
+  `Échap` refuser (avec consigne facultative) ;
+- palette `Ctrl+K` (actions, modèles, modes, commandes), suggestions `/`, images collées,
+  glissées ou jointes, crédits OpenRouter en direct, modèle et mode en un clic, sessions ;
+- diagrammes Mermaid à la demande ; commandes `/review`, `/audit`, `/archi`, `/adr`, `/fix`,
+  `/models`, `/credits`, `/mcp`, `/cost`, `/compact`…
 
 Sécurité : écoute sur `127.0.0.1` uniquement (sauf `--host`), jeton secret aléatoire à chaque
 lancement exigé par toute l'API, contrôle des en-têtes `Host` et `Origin` (DNS rebinding,

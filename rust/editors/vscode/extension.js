@@ -105,8 +105,15 @@ async function ensureServer() {
   return server;
 }
 
+/** Thème de l'éditeur, transmis à la page de Claw (`?theme=`). */
+function editorTheme() {
+  const kind = vscode.window.activeColorTheme.kind;
+  return kind === vscode.ColorThemeKind.Light || kind === vscode.ColorThemeKind.HighContrastLight ? "light" : "dark";
+}
+
 function panelHtml(url, port) {
   const origin = `http://127.0.0.1:${port}`;
+  const src = `${url}&embed=1&theme=${editorTheme()}`;
   return `<!doctype html>
 <html lang="fr">
 <head>
@@ -114,7 +121,7 @@ function panelHtml(url, port) {
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; frame-src ${origin}; style-src 'unsafe-inline';">
 <style>html, body, iframe { margin: 0; padding: 0; width: 100%; height: 100%; border: 0; overflow: hidden; }</style>
 </head>
-<body><iframe src="${url}" title="Claw" allow="clipboard-read; clipboard-write"></iframe></body>
+<body><iframe src="${src}" title="Claw" allow="clipboard-read; clipboard-write"></iframe></body>
 </html>`;
 }
 
@@ -199,6 +206,12 @@ function activate(context) {
   statusItem.command = "claw.open";
   setStatus("$(hubot) Claw", "Ouvrir Claw");
   statusItem.show();
+  // Le panneau suit le thème de l'éditeur (la page se recharge, la conversation reste).
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveColorTheme(() => {
+      if (panel && server && server.running && server.url) panel.webview.html = panelHtml(server.url, server.port);
+    }),
+  );
   context.subscriptions.push(
     statusItem,
     vscode.commands.registerCommand("claw.open", guard(openPanel)),

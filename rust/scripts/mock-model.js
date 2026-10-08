@@ -21,6 +21,8 @@ function option(name) {
 const logPath = option("--log");
 const write = option("--write");
 const read = option("--read");
+// --reply fichier : texte de la réponse finale (Markdown de démonstration).
+const replyFile = option("--reply");
 const port = Number(option("--port") || 0);
 // Requêtes faites à des modèles « :free » : décomptées du quota fictif.
 let freeRequests = 0;
@@ -60,7 +62,9 @@ function reply(body) {
     };
   }
   const asked = lastUserText(messages).split("\n")[0].slice(0, 80);
-  const text = hasToolResult ? "Fichier écrit par le modèle factice." : `Réponse du modèle factice à : ${asked}`;
+  const text = replyFile
+    ? fs.readFileSync(replyFile, "utf8")
+    : hasToolResult ? "Fichier écrit par le modèle factice." : `Réponse du modèle factice à : ${asked}`;
   return { text };
 }
 
