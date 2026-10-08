@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claw</title>
+<title>Claw Code</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23f0601a'/%3E%3Cg transform='translate(4 4)' fill='none' stroke='%23fff' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M6 19c.3-5 2.3-9.6 6-13'/%3E%3Cpath d='M10.6 20c.3-5 2.3-9.6 6-13'/%3E%3Cpath d='M15.2 20.5c.3-4 1.8-7.6 4.3-10.3'/%3E%3C/g%3E%3C/svg%3E">
 <style>
   /* ------------------------------------------------------------------ thèmes */
@@ -50,7 +50,15 @@
     background: var(--bg); color: var(--text);
     font: 14.5px/1.6 var(--font); -webkit-font-smoothing: antialiased;
     display: flex; flex-direction: column; overflow: hidden;
+    /* L'habillage (barres, boutons, menus) ne se sélectionne pas à la souris ;
+       seuls les contenus utiles à copier restent sélectionnables. */
+    -webkit-user-select: none; user-select: none;
   }
+  .user, .md, .step-body, .card pre, .card .hint, .perm pre, .diff, .dialog .big, .dialog .rows, .dialog .link, input, textarea {
+    -webkit-user-select: text; user-select: text;
+  }
+  button, .codehead, .copy { -webkit-user-select: none; user-select: none; }
+  img, svg { -webkit-user-drag: none; }
   button, input, textarea, select { font: inherit; color: inherit; }
   button { cursor: pointer; background: none; border: 0; padding: 0; }
   button:disabled { cursor: not-allowed; opacity: .45; }
@@ -91,7 +99,7 @@
   .pill .sub { color: var(--text-3); font-weight: 400; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); flex: none; }
   .tag { font-size: 10.5px; font-weight: 600; letter-spacing: .02em; padding: 1px 6px; border-radius: 999px; background: var(--ok-soft); color: var(--ok); }
-  #credits { cursor: default; }
+  #credits { cursor: pointer; }
   #credits b { font-weight: 650; font-variant-numeric: tabular-nums; }
   #credits .sep { width: 1px; height: 14px; background: var(--border-strong); }
   #credits.low b { color: var(--err); }
@@ -115,6 +123,8 @@
   .item .check { color: var(--accent); }
   .item .measured { font-size: 11.5px; color: var(--ok); white-space: nowrap; flex: none; }
   .item .measured.bad { color: var(--text-3); }
+  .item .grow span.mono { font-family: var(--mono); font-size: 11.5px; }
+  .item .lead { width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex: none; }
   .menu .custom { display: flex; gap: 6px; padding: 6px 2px 2px; border-top: 1px solid var(--border); margin-top: 6px; }
   .menu .custom input { flex: 1; height: 32px; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface-2); padding: 0 10px; outline: none; font-family: var(--mono); font-size: 12.5px; }
 
@@ -248,6 +258,14 @@
   #input { display: block; width: 100%; resize: none; border: 0; outline: none; background: transparent; padding: 12px 14px 4px; min-height: 48px; max-height: 40vh; line-height: 1.55; }
   #input::placeholder { color: var(--text-3); }
   .tools { display: flex; align-items: center; gap: 4px; padding: 4px 8px 8px; }
+  /* sélecteur de modèle : nom, et dessous l'identifiant réel du modèle */
+  .model-pick { display: inline-flex; align-items: center; gap: 8px; height: 40px; padding: 0 9px; margin-left: 2px; border-radius: 10px; border: 1px solid transparent;
+    max-width: min(360px, 56vw); min-width: 0; text-align: left; color: var(--text); transition: background .15s, border-color .15s; }
+  .model-pick:hover { background: var(--surface-2); border-color: var(--border); }
+  .model-pick > svg.i { color: var(--text-3); }
+  .model-pick .names { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+  .model-pick .names b { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .model-pick .names > span { font-family: var(--mono); font-size: 11px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tools .hint { font-size: 11.5px; color: var(--text-3); margin-left: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .send { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--accent); color: var(--on-accent); transition: background .15s, transform .1s; }
   .send:hover:not(:disabled) { background: var(--accent-2); }
@@ -269,12 +287,36 @@
   #palette { width: min(600px, calc(100vw - 24px)); position: static; max-height: 60vh; }
   #palette input.search { height: 42px; font-size: 15px; }
 
+  /* fenêtre de détail (crédits) */
+  #dialog-backdrop { position: fixed; inset: 0; z-index: 45; background: rgba(0, 0, 0, .45); display: grid; place-items: center; padding: 16px; animation: fade .12s; }
+  .dialog { width: min(440px, 100%); max-height: calc(100vh - 32px); overflow: auto; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--r-lg); box-shadow: var(--shadow); padding: 18px 18px 16px; animation: pop .16s var(--ease); }
+  .dialog-head { display: flex; align-items: center; gap: 9px; font-weight: 650; font-size: 15px; margin-bottom: 14px; }
+  .dialog-head > svg.i { color: var(--accent); }
+  .dialog .big { font-size: 32px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .dialog .big small { font-size: 13px; font-weight: 500; color: var(--text-2); margin-left: 7px; letter-spacing: 0; }
+  .dialog .big.low { color: var(--err); }
+  .dialog .rows { display: grid; grid-template-columns: auto 1fr; gap: 9px 16px; margin: 16px 0 4px; font-size: 13.5px; }
+  .dialog .rows dt { color: var(--text-2); }
+  .dialog .rows dd { margin: 0; text-align: right; font-weight: 550; font-variant-numeric: tabular-nums; }
+  .dialog .quota { margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: var(--r); background: var(--surface-2); }
+  .dialog .quota .line { display: flex; justify-content: space-between; gap: 10px; font-size: 13.5px; }
+  .dialog .quota b { font-variant-numeric: tabular-nums; }
+  .dialog .bar { height: 6px; border-radius: 6px; background: var(--surface-3); overflow: hidden; margin: 8px 0 7px; }
+  .dialog .bar i { display: block; height: 100%; background: var(--ok); border-radius: 6px; }
+  .dialog .bar.low i { background: var(--warn); }
+  .dialog .note { font-size: 12.5px; color: var(--text-2); }
+  .dialog .link { font-family: var(--mono); font-size: 11.5px; color: var(--text-3); overflow-wrap: anywhere; }
+  .dialog .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; align-items: center; margin-top: 16px; }
+  .dialog .actions .note { margin-right: auto; }
+  .dialog a.btn { text-decoration: none; }
+
   #toast { position: fixed; left: 50%; bottom: 120px; transform: translate(-50%, 8px); z-index: 50; padding: 9px 14px; border-radius: var(--r); background: var(--text); color: var(--bg); font-size: 13.5px; opacity: 0; transition: opacity .2s, transform .2s var(--ease); pointer-events: none; max-width: min(520px, 90vw); }
   #toast.show { opacity: .95; transform: translate(-50%, 0); }
 
   /* ------------------------------------------------------------------ petits écrans, panneau VS Code */
   @media (max-width: 720px) {
-    .project span, .pill .sub, .pill .tag, .tools .hint, .hide-narrow { display: none; }
+    .project span, .pill .sub, .pill .tag, .tools .hint, .hide-narrow, #sessions-btn .label { display: none; }
+    .model-pick { max-width: calc(100vw - 190px); }
     .pill { max-width: 150px; padding: 0 9px; }
     header.top { gap: 6px; padding: 0 10px; }
     .col { padding: 18px 14px 24px; }
@@ -290,14 +332,12 @@
 <header class="top">
   <div class="brand">
     <div class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M6 19c.3-5 2.3-9.6 6-13"/><path d="M10.6 20c.3-5 2.3-9.6 6-13"/><path d="M15.2 20.5c.3-4 1.8-7.6 4.3-10.3"/></svg></div>
-    <div class="project"><b id="project-name">Claw</b><span id="project-path"></span></div>
+    <div class="project"><b>Claw Code</b><span id="project-path"></span></div>
   </div>
   <div class="spacer"></div>
-  <div class="pill" id="credits" hidden></div>
-  <button class="pill" id="model-btn" type="button" aria-haspopup="true" title="Changer de modèle (Ctrl+K)"></button>
+  <button class="pill" id="credits" type="button" aria-haspopup="dialog" title="Crédits OpenRouter : voir le détail" hidden></button>
   <button class="pill" id="mode-btn" type="button" aria-haspopup="true" title="Mode de permission"></button>
-  <button class="icon-btn hide-narrow" id="sessions-btn" type="button" title="Sessions précédentes" aria-label="Sessions précédentes"></button>
-  <button class="icon-btn" id="new-btn" type="button" title="Nouvelle conversation" aria-label="Nouvelle conversation"></button>
+  <button class="pill" id="sessions-btn" type="button" aria-haspopup="true" title="Sessions : nouvelle session ou reprise d'une précédente"></button>
   <button class="icon-btn hide-narrow" id="theme-btn" type="button" title="Thème" aria-label="Changer de thème"></button>
 </header>
 
@@ -321,6 +361,7 @@
       <div class="tools">
         <button class="icon-btn" id="attach-btn" type="button" title="Joindre une image (ou coller / glisser)" aria-label="Joindre une image"></button>
         <button class="icon-btn" id="slash-btn" type="button" title="Commandes" aria-label="Commandes"></button>
+        <button class="model-pick" id="model-btn" type="button" aria-haspopup="true" title="Changer de modèle (Ctrl+K)"></button>
         <span class="hint"><kbd>Entrée</kbd> envoyer · <kbd>Maj</kbd>+<kbd>Entrée</kbd> ligne · <kbd>Ctrl</kbd>+<kbd>K</kbd> actions</span>
         <div class="spacer"></div>
         <button class="send" id="send" type="button" title="Envoyer (Entrée)" aria-label="Envoyer"></button>
@@ -515,6 +556,14 @@
     if (compat && !value.includes("/")) return { name: compat[2], sub: compat[1], free: compat[1] === "ollama" || compat[1] === "lmstudio" || compat[1] === "llamacpp" };
     const name = value.split("/").pop().replace(/:free$/, "");
     return { name: name || value, sub: value.includes("/") ? value.split("/")[0] : "", free: value.endsWith(":free") };
+  }
+
+  // Nom lisible d'un modèle : celui du catalogue (« Cohere: North Mini Code »),
+  // sinon l'identifiant mis en forme. L'identifiant réel s'affiche dessous.
+  function modelName(id) {
+    const known = freeModels.find((model) => model.id === id);
+    if (known && known.name) return known.name.replace(/\s*\(free\)\s*$/i, "");
+    return shortModel(id).name.replace(/[-_]+/g, " ").replace(/(^|\s)[a-z]/g, (letter) => letter.toUpperCase());
   }
 
   // ---------------------------------------------------------------- coloration syntaxique
@@ -1045,6 +1094,7 @@
     logo.innerHTML = LOGO_SVG;
     const title = el("h1");
     title.innerHTML = 'Que construit-on dans <em id="empty-project">' + escapeHtml(basename(status.cwd) || "ce projet") + "</em> ?";
+    title.title = "Dossier du projet";
     empty.append(logo, title, el("p", null, "Claw lit, modifie et teste le code de ce dossier. Chaque action sensible vous est soumise."));
     const starters = el("div", "starters");
     for (const [icon, label, hint, command] of STARTERS) {
@@ -1087,10 +1137,13 @@
   function modeLabel(mode) { return (MODES.find(([id]) => id === mode) || [mode, mode])[1]; }
   function renderModelButton() {
     const model = shortModel(status.model);
-    $("model-btn").innerHTML = svg("cpu") + '<span class="label">' + escapeHtml(model.name || "Modèle") + "</span>" +
-      (model.sub ? '<span class="sub">' + escapeHtml(model.sub) + "</span>" : "") +
+    $("model-btn").innerHTML = svg("cpu") + '<span class="names"><b>' + escapeHtml(modelName(status.model) || "Modèle") + "</b>" +
+      "<span>" + escapeHtml(status.model || "aucun modèle") + "</span></span>" +
       (model.free ? '<span class="tag">gratuit</span>' : "") + svg("chevronDown");
-    $("model-btn").title = (status.model || "") + " — changer de modèle";
+    $("model-btn").title = "Changer de modèle (Ctrl+K)";
+  }
+  function renderSessionsButton() {
+    $("sessions-btn").innerHTML = svg("history") + '<span class="label">Sessions</span>' + svg("chevronDown");
   }
   function renderModeButton() {
     const mode = MODES.find(([id]) => id === status.permission_mode) || MODES[0];
@@ -1098,9 +1151,12 @@
     $("mode-btn").title = mode[2];
   }
   let lastCreditsText = "";
+  let lastCredits = null;
   function renderCredits(data) {
     const node = $("credits");
     if (!data || !data.available) { node.hidden = true; return; }
+    lastCredits = data;
+    if (creditsDialog) creditsDialog(data);
     const html = svg("coins") + (data.balance_text ? "<b>" + escapeHtml(data.balance_text) + "</b>" : "") +
       (data.free ? '<span class="sep"></span><span class="free"><b>' + data.free.remaining + '</b> <span class="sub">/ ' + data.free.limit + " gratuites</span></span>" : "");
     if (html !== lastCreditsText) {
@@ -1111,7 +1167,7 @@
     const session = data.session && (data.session.free + data.session.paid)
       ? "\nCette session : " + data.session.free + " gratuite(s), " + data.session.paid + " payante(s)" : "";
     const pending = data.pending ? "\n" + data.pending + " en attente de confirmation d'OpenRouter" : "";
-    node.title = "OpenRouter : " + data.text + session + pending + "\nMis à jour à " + new Date().toLocaleTimeString();
+    node.title = "OpenRouter : " + data.text + session + pending + "\nCliquer pour le détail";
     node.classList.toggle("low", typeof data.balance === "number" && data.balance < 1);
     node.hidden = false;
   }
@@ -1119,6 +1175,110 @@
     try { renderCredits(await api("/api/credits")); } catch (_) { /* affichage précédent conservé */ }
   }
   setInterval(loadCredits, 60000);
+
+  // Fenêtre de détail des crédits, au centre de la page (clic sur la pastille).
+  const money = (amount) => typeof amount !== "number" ? "—"
+    : (Math.abs(amount) > 0 && Math.abs(amount) < 0.01 ? amount.toFixed(4) : amount.toFixed(2)).replace(".", ",") + " $";
+  function untilUtcMidnight() {
+    const now = new Date();
+    const next = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+    const minutes = Math.max(0, Math.round((next - now.getTime()) / 60000));
+    return Math.floor(minutes / 60) + " h " + String(minutes % 60).padStart(2, "0");
+  }
+  let creditsDialog = null;
+  function openCreditsDialog() {
+    closeMenu();
+    if ($("dialog-backdrop")) return;
+    const backdrop = el("div");
+    backdrop.id = "dialog-backdrop";
+    const panel = el("div", "dialog");
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "true");
+    panel.setAttribute("aria-label", "Crédits OpenRouter");
+    backdrop.append(panel);
+    const onKey = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      close();
+    };
+    const close = () => {
+      creditsDialog = null;
+      document.removeEventListener("keydown", onKey, true);
+      backdrop.remove();
+      input.focus();
+    };
+    document.addEventListener("keydown", onKey, true);
+    backdrop.onmousedown = (event) => { if (event.target === backdrop) close(); };
+    const refresh = async (button) => {
+      if (button) button.disabled = true;
+      try { renderCredits(await api("/api/credits?fresh=1")); } catch (error) { toast(error.message); }
+      if (button) button.disabled = false;
+    };
+    creditsDialog = (data) => {
+      panel.textContent = "";
+      const head = el("div", "dialog-head");
+      head.innerHTML = svg("coins") + "<span>Crédits OpenRouter</span>";
+      const spacer = el("span", "spacer");
+      const x = el("button", "icon-btn");
+      x.type = "button";
+      x.title = "Fermer (Échap)";
+      x.setAttribute("aria-label", "Fermer");
+      x.innerHTML = svg("x");
+      x.onclick = close;
+      head.append(spacer, x);
+      panel.append(head);
+
+      const low = typeof data.balance === "number" && data.balance < 1;
+      const big = el("div", "big" + (low ? " low" : ""));
+      big.textContent = money(data.balance);
+      big.append(el("small", null, "restants"));
+      panel.append(big);
+
+      const rows = el("dl", "rows");
+      const row = (label, value) => { rows.append(el("dt", null, label), el("dd", null, value)); };
+      row("Crédits achetés", money(data.total));
+      row("Crédits utilisés", money(data.used));
+      row("Dépensé aujourd'hui (cette clé)", money(data.today));
+      const session = data.session || { free: 0, paid: 0 };
+      row("Requêtes de cette session", session.free + " gratuite(s) · " + session.paid + " payante(s)");
+      if (data.pending) row("En attente de confirmation", String(data.pending));
+      panel.append(rows);
+
+      if (data.free) {
+        const quota = el("div", "quota");
+        const line = el("div", "line");
+        line.append(el("span", null, "Requêtes gratuites aujourd'hui"));
+        const count = el("b", null, data.free.remaining + " / " + data.free.limit);
+        line.append(count);
+        const share = data.free.limit ? Math.max(0, Math.min(100, (data.free.remaining / data.free.limit) * 100)) : 0;
+        const bar = el("div", "bar" + (share < 15 ? " low" : ""));
+        const fill = el("i");
+        fill.style.width = share + "%";
+        bar.append(fill);
+        const tier = data.free.limit >= 1000
+          ? "Palier à " + data.free.limit + " par jour (au moins 10 $ de crédits achetés)."
+          : "Palier à " + data.free.limit + " par jour : avec 10 $ de crédits achetés, il passe à 1000.";
+        quota.append(line, bar, el("div", "note", data.free.used + " utilisée(s) · remise à zéro à minuit UTC, dans " + untilUtcMidnight() + ". " + tier));
+        panel.append(quota);
+      }
+
+      const actions = el("div", "actions");
+      actions.append(el("span", "note", "Mis à jour à " + new Date().toLocaleTimeString("fr-FR")));
+      const again = el("button", "btn", "Actualiser");
+      again.type = "button";
+      again.onclick = () => refresh(again);
+      const buy = el("a", "btn primary", "Acheter des crédits");
+      buy.href = "https://openrouter.ai/settings/credits";
+      buy.target = "_blank";
+      buy.rel = "noopener noreferrer";
+      actions.append(again, buy);
+      panel.append(actions, el("div", "link", "openrouter.ai/settings/credits"));
+    };
+    creditsDialog(lastCredits || { available: true });
+    document.body.appendChild(backdrop);
+    refresh(null);
+  }
 
   // ---------------------------------------------------------------- menus
   let openMenu = null;
@@ -1133,20 +1293,28 @@
     menu.dataset.anchor = anchor.id;
     build(menu);
     document.body.appendChild(menu);
+    // Vers le bas sous la barre du haut, vers le haut depuis la zone de saisie ;
+    // aligné sur le bord du bouton le plus proche du centre.
     const rect = anchor.getBoundingClientRect();
-    menu.style.top = rect.bottom + 6 + "px";
-    const right = Math.max(12, window.innerWidth - rect.right);
-    menu.style.right = right + "px";
+    if (rect.top > window.innerHeight / 2) {
+      menu.style.top = "auto";
+      menu.style.bottom = Math.max(12, window.innerHeight - rect.top + 6) + "px";
+      menu.style.maxHeight = "min(70vh, " + Math.max(200, rect.top - 24) + "px)";
+    } else {
+      menu.style.top = rect.bottom + 6 + "px";
+    }
+    if (rect.left + rect.width / 2 < window.innerWidth / 2) menu.style.left = Math.max(12, rect.left) + "px";
+    else menu.style.right = Math.max(12, window.innerWidth - rect.right) + "px";
     openMenu = menu;
     const search = menu.querySelector("input.search");
     if (search) search.focus();
   }
-  function menuItem(title, subtitle, onPick, extra) {
+  function menuItem(title, subtitle, onPick, extra, subtitleClass) {
     const item = el("button", "item");
     item.type = "button";
     const grow = el("span", "grow");
     grow.append(el("b", null, title));
-    if (subtitle) grow.append(el("span", null, subtitle));
+    if (subtitle) grow.append(el("span", subtitleClass || null, subtitle));
     item.append(grow);
     if (extra) item.append(extra);
     item.onclick = () => { closeMenu(); onPick(); };
@@ -1177,7 +1345,7 @@
           list.append(el("div", "group", "Actuel"));
           const check = el("span", "check");
           check.innerHTML = svg("check");
-          list.append(menuItem(shortModel(status.model).name, status.model, () => {}, check));
+          list.append(menuItem(modelName(status.model), status.model, () => {}, check, "mono"));
         }
         if (models.length) list.append(el("div", "group", "Gratuits, du plus puissant au moins puissant"));
         for (const model of models) {
@@ -1189,9 +1357,10 @@
             extra.append(badge);
           }
           if (model.id === status.model) { const check = el("span", "check"); check.innerHTML = svg("check"); extra.append(check); }
-          const power = (model.reasons || []).slice(0, 2).concat(model.context || []).join(" · ");
-          const item = menuItem(shortModel(model.id).name, power || model.id, () => setModel(model.id), extra);
-          item.title = model.id;
+          // Nom du modèle, et dessous son identifiant réel ; sa puissance en info-bulle.
+          const power = (model.reasons || []).concat(model.context ? ["contexte " + model.context] : []).join(" · ");
+          const item = menuItem(modelName(model.id), model.id, () => setModel(model.id), extra, "mono");
+          item.title = power || model.id;
           list.append(item);
         }
         if (!list.children.length) list.append(el("div", "group", "Aucun modèle trouvé"));
@@ -1230,28 +1399,38 @@
       menu.append(list);
     });
   }
+  // Bouton « Sessions » : nouvelle session, ou reprise d'une session précédente.
   async function openSessionsMenu() {
     showMenu($("sessions-btn"), (menu) => {
       const list = el("div", "list");
-      list.append(el("div", "group", "Chargement…"));
+      const fresh = menuItem("Nouvelle session", "Repartir d'une conversation vide · Ctrl+Maj+O", () => newConversation());
+      const lead = el("span", "lead");
+      lead.innerHTML = svg("plus");
+      fresh.prepend(lead);
+      const previous = el("div");
+      previous.append(el("div", "group", "Chargement…"));
+      list.append(fresh, previous);
       menu.append(list);
       api("/api/sessions").then((data) => {
-        list.textContent = "";
-        list.append(el("div", "group", "Sessions précédentes"));
-        if (!data.sessions.length) list.append(el("div", "group", "Aucune session sauvegardée"));
+        previous.textContent = "";
+        previous.append(el("div", "group", "Sessions précédentes"));
+        if (!data.sessions.length) previous.append(el("div", "group", "Aucune session sauvegardée"));
         for (const session of data.sessions) {
           const current = session.id === status.session_id;
           const extra = current ? (() => { const c = el("span", "check"); c.innerHTML = svg("check"); return c; })() : null;
-          list.append(menuItem(relativeTime(session.modified), session.messages + " message(s) · " + session.id, async () => {
+          const title = session.preview || (session.messages ? "Session sans texte" : "Session vide");
+          const item = menuItem(title, relativeTime(session.modified) + " · " + session.messages + " message(s)" + (current ? " · en cours" : ""), async () => {
             if (current) return;
             try { await api("/api/resume", { value: session.id }); } catch (error) { toast(error.message); }
-          }, extra));
+          }, extra);
+          item.title = session.id;
+          previous.append(item);
         }
-      }).catch((error) => { list.textContent = ""; list.append(el("div", "group", "Erreur : " + error.message)); });
+      }).catch((error) => { previous.textContent = ""; previous.append(el("div", "group", "Erreur : " + error.message)); });
     });
   }
   document.addEventListener("mousedown", (event) => {
-    if (openMenu && !openMenu.contains(event.target) && !event.target.closest(".pill, .icon-btn")) closeMenu();
+    if (openMenu && !openMenu.contains(event.target) && !event.target.closest(".pill, .icon-btn, .model-pick")) closeMenu();
   });
 
   // ---------------------------------------------------------------- palette (Ctrl+K)
@@ -1270,13 +1449,14 @@
     document.body.appendChild(backdrop);
     const close = () => { backdrop.remove(); input.focus(); };
     const actions = [
-      ["Actions", "Nouvelle conversation", "Ctrl+Maj+O", () => newConversation()],
+      ["Actions", "Nouvelle session", "Ctrl+Maj+O", () => newConversation()],
       ["Actions", "Sessions précédentes", "", () => openSessionsMenu()],
+      ["Actions", "Crédits OpenRouter", "Solde, requêtes gratuites", () => openCreditsDialog()],
       ["Actions", "Arrêter le tour en cours", "Échap", () => interruptTurn()],
       ["Actions", "Joindre une image", "", () => $("file-input").click()],
       ["Actions", "Changer de thème", "", () => cycleTheme()],
       ...MODES.map(([id, label, hint]) => ["Mode", "Mode : " + label, hint, () => setMode(id)]),
-      ...freeModels.map((model) => ["Modèle", shortModel(model.id).name, model.id + (model.measured ? " · " + model.measured : ""), () => setModel(model.id)]),
+      ...freeModels.map((model) => ["Modèle", modelName(model.id), model.id + (model.measured ? " · " + model.measured : ""), () => setModel(model.id)]),
       ...COMMANDS.concat(customCommands).map(([command, label]) => ["Commande", command, label, () => { input.value = command + " "; onInput(); }]),
     ];
     let active = 0, shown = [];
@@ -1319,7 +1499,8 @@
 
   // ---------------------------------------------------------------- état de l'agent
   function updateTitle() {
-    document.title = (pendingPermissions > 0 ? "▲ Autorisation · " : status.busy ? "● " : "") + (basename(status.cwd) || "Claw") + " · Claw";
+    const project = basename(status.cwd);
+    document.title = (pendingPermissions > 0 ? "▲ Autorisation · " : status.busy ? "● " : "") + "Claw Code" + (project ? " · " + project : "");
   }
   function setActivity(text) {
     currentActivity = text;
@@ -1334,7 +1515,6 @@
     const wasBusy = !!status.busy;
     const modelChanged = next.model !== status.model;
     status = next;
-    $("project-name").textContent = basename(next.cwd) || "Claw";
     $("project-path").textContent = (next.cwd || "").replace(/^\\\\\?\\/, "");
     $("project-path").title = $("project-path").textContent;
     const emptyProject = $("empty-project");
@@ -1405,7 +1585,7 @@
     try { await api("/api/interrupt", {}); setActivity("Interruption demandée…"); } catch (error) { toast(error.message); }
   }
   async function newConversation() {
-    if (logInner.querySelector(".user, .md") && !confirm("Commencer une nouvelle conversation ? L'actuelle reste dans les sessions.")) return;
+    if (logInner.querySelector(".user, .md") && !confirm("Commencer une nouvelle session ? L'actuelle reste dans les sessions précédentes.")) return;
     try { await api("/api/new", {}); } catch (error) { toast(error.message); }
   }
   function cycleTheme() {
@@ -1539,7 +1719,7 @@
   $("model-btn").addEventListener("click", openModelMenu);
   $("mode-btn").addEventListener("click", openModeMenu);
   $("sessions-btn").addEventListener("click", openSessionsMenu);
-  $("new-btn").addEventListener("click", newConversation);
+  $("credits").addEventListener("click", openCreditsDialog);
   $("theme-btn").addEventListener("click", cycleTheme);
   $("to-bottom").addEventListener("click", () => scrollToBottom(true));
   log.addEventListener("scroll", updateToBottom, { passive: true });
@@ -1603,8 +1783,7 @@
   // ---------------------------------------------------------------- démarrage
   if (embedded) root.dataset.embed = "1";
   applyTheme();
-  $("sessions-btn").innerHTML = svg("history");
-  $("new-btn").innerHTML = svg("plus");
+  renderSessionsButton();
   $("attach-btn").innerHTML = svg("clip");
   $("slash-btn").innerHTML = svg("slash");
   $("to-bottom").innerHTML = svg("arrowDown") + "Derniers messages";

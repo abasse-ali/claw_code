@@ -121,7 +121,7 @@ function panelHtml(url, port) {
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; frame-src ${origin}; style-src 'unsafe-inline';">
 <style>html, body, iframe { margin: 0; padding: 0; width: 100%; height: 100%; border: 0; overflow: hidden; }</style>
 </head>
-<body><iframe src="${src}" title="Claw" allow="clipboard-read; clipboard-write"></iframe></body>
+<body><iframe src="${src}" title="Claw Code" allow="clipboard-read; clipboard-write"></iframe></body>
 </html>`;
 }
 
@@ -131,7 +131,7 @@ async function openPanel() {
     panel.reveal(vscode.ViewColumn.Beside, true);
     return running;
   }
-  panel = vscode.window.createWebviewPanel("claw", "Claw", { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true }, {
+  panel = vscode.window.createWebviewPanel("claw", "Claw Code", { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true }, {
     enableScripts: true,
     retainContextWhenHidden: true,
   });

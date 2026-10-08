@@ -1135,9 +1135,21 @@ fn spawn_credits_pump(app: WebApp) {
 
 /// Crédits `OpenRouter` (en-tête de la page, barre d'état de VS Code) ; mis en
 /// cache 15 s côté serveur.
-async fn get_credits(State(app): State<WebApp>, headers: HeaderMap) -> ApiResult {
+/// `?fresh=1` relit les chiffres chez `OpenRouter` (fenêtre de détail).
+#[derive(Deserialize)]
+struct CreditsQuery {
+    #[serde(default)]
+    fresh: Option<String>,
+}
+
+async fn get_credits(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Query(query): Query<CreditsQuery>,
+) -> ApiResult {
     authorize(&app, &headers, None)?;
-    let credits = tokio::task::spawn_blocking(|| crate::credits::json(false))
+    let fresh = query.fresh.as_deref() == Some("1");
+    let credits = tokio::task::spawn_blocking(move || crate::credits::json(fresh))
         .await
         .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()))?;
     Ok(Json(credits).into_response())
@@ -1182,6 +1194,8 @@ async fn get_sessions(State(app): State<WebApp>, headers: HeaderMap) -> ApiResul
                 "id": session.id,
                 "modified": session.modified_epoch_secs,
                 "messages": session.message_count,
+                // Début de la première demande, pour reconnaître la session.
+                "preview": crate::session_preview(&session.path),
             })
         })
         .collect::<Vec<_>>();
