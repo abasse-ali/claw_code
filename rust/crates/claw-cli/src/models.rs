@@ -197,7 +197,15 @@ pub fn model_chain(primary: &str, configured: &[String]) -> Vec<String> {
             chain.extend(ranked_free_coding_models(4));
         }
     } else {
-        chain.extend(explicit);
+        // « free » : les meilleurs modèles gratuits d'OpenRouter pour le code, à
+        // cette place de la liste (ex. ["free", "ollama:qwen2.5-coder:7b"]).
+        for model in explicit {
+            if model.eq_ignore_ascii_case("free") {
+                chain.extend(ranked_free_coding_models(4));
+            } else {
+                chain.push(model);
+            }
+        }
     }
     let mut unique: Vec<String> = Vec::new();
     for model in chain {
@@ -517,5 +525,22 @@ mod tests {
         assert!(lines[1].contains("pool/laguna:free"));
         assert!(lines[1].contains("256k"));
         assert!(lines[1].ends_with("spécialisé code  ● actuel"));
+    }
+
+    #[test]
+    fn free_keyword_expands_in_place_in_the_fallback_chain() {
+        let chain = super::model_chain(
+            "qwen/qwen3-coder:free",
+            &["free".to_string(), "ollama:qwen2.5-coder:7b".to_string()],
+        );
+        assert_eq!(
+            chain.first().map(String::as_str),
+            Some("qwen/qwen3-coder:free")
+        );
+        assert_eq!(
+            chain.last().map(String::as_str),
+            Some("ollama:qwen2.5-coder:7b")
+        );
+        assert!(!chain.iter().any(|model| model == "free"), "{chain:?}");
     }
 }

@@ -289,7 +289,9 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
 - **Bascule automatique** : si le modèle répond « quota atteint » (429), est indisponible ou si le
   serveur est arrêté, la requête part sur le modèle suivant : `"fallbackModels": ["groq:llama-3.3-70b-versatile", "ollama:qwen2.5-coder:7b"]`
   (ou `CLAW_FALLBACK_MODELS`, liste séparée par des virgules). Sans liste, un modèle gratuit
-  d'OpenRouter bascule sur les suivants du classement. Un modèle en échec est mis de côté un
+  d'OpenRouter bascule sur les suivants du classement ; `"free"` dans la liste insère ce
+  classement à sa place : `["free", "ollama:qwen2.5-coder:7b"]` essaie les meilleurs modèles
+  gratuits puis le modèle local (hors ligne, quota épuisé). Un modèle en échec est mis de côté un
   moment ; `CLAW_FALLBACK=0` désactive la bascule.
 - `"smallModel"` (ou `CLAW_SMALL_MODEL`) : petit modèle utilisé pour les résumés de compaction.
 

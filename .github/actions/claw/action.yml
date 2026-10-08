@@ -60,7 +60,6 @@ runs:
         set -euo pipefail
         case "$RUNNER_OS-$RUNNER_ARCH" in
           Linux-X64) target=x86_64-unknown-linux-gnu; archive=tar.gz ;;
-          macOS-ARM64) target=aarch64-apple-darwin; archive=tar.gz ;;
           Windows-X64) target=x86_64-pc-windows-msvc; archive=zip ;;
           *) echo "::error::Pas de binaire publié pour $RUNNER_OS-$RUNNER_ARCH : utilisez install: source"; exit 1 ;;
         esac

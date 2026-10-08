@@ -77,12 +77,12 @@ Réglages utiles :
   (`GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}`…).
 - `permission-mode: read-only` pour une revue sans modification.
 - `install: release` pour télécharger le binaire de la dernière release de Claw
-  (Linux x64, macOS ARM, Windows x64) au lieu de le compiler, ce qui est bien plus
+  (Linux x64, Windows x64) au lieu de le compiler, ce qui est bien plus
   rapide. Il faut qu'une release existe (tag `v*`).
 
 L'action échoue si l'agent échoue (clé absente, modèle indisponible…) ; ses sorties
 restent renseignées.
 
-Le job « Action GitHub » de la CI vérifie l'action à chaque push avec un faux
-modèle (`rust/scripts/mock-model.js`) : compilation, appel d'outil, `result` et
+Le workflow « Intégration » vérifie l'action quand elle change (ou à la demande)
+avec un faux modèle (`rust/scripts/mock-model.js`) : compilation, appel d'outil, `result` et
 `changed`.
