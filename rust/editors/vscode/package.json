@@ -13,6 +13,11 @@
     "Other"
   ],
   "main": "./extension.js",
+  "scripts": {
+    "test:client": "node test/client.test.js",
+    "test:vscode": "node test/run-vscode.js",
+    "package": "npx @vscode/vsce package"
+  },
   "activationEvents": [],
   "contributes": {
     "commands": [
@@ -119,5 +124,8 @@
         }
       }
     }
+  },
+  "devDependencies": {
+    "@vscode/test-electron": "^3.1.0"
   }
 }

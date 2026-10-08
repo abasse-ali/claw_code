@@ -149,7 +149,7 @@ pub fn read_file(
     Ok(ReadFileOutput {
         kind: String::from("text"),
         file: TextFilePayload {
-            file_path: absolute_path.to_string_lossy().into_owned(),
+            file_path: display_path(&absolute_path),
             content: selected,
             num_lines: end_index.saturating_sub(start_index),
             start_line: start_index.saturating_add(1),
@@ -172,7 +172,7 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
         } else {
             String::from("create")
         },
-        file_path: absolute_path.to_string_lossy().into_owned(),
+        file_path: display_path(&absolute_path),
         content: content.to_owned(),
         structured_patch: make_patch(original_file.as_deref().unwrap_or(""), content),
         original_file,
@@ -205,7 +205,7 @@ pub fn edit_file(
     fs::write(&absolute_path, &updated)?;
 
     Ok(EditFileOutput {
-        file_path: absolute_path.to_string_lossy().into_owned(),
+        file_path: display_path(&absolute_path),
         old_string: old_string.to_owned(),
         new_string: new_string.to_owned(),
         original_file: original_file.clone(),
@@ -458,7 +458,7 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
     let search_pattern = if Path::new(pattern).is_absolute() {
         pattern.to_owned()
     } else {
-        base_dir.join(pattern).to_string_lossy().into_owned()
+        display_path(&base_dir.join(pattern))
     };
 
     let mut matches = Vec::new();
@@ -481,7 +481,7 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
     let filenames = matches
         .into_iter()
         .take(100)
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|path| display_path(&path))
         .collect::<Vec<_>>();
 
     Ok(GlobSearchOutput {
@@ -535,7 +535,7 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
         if output_mode == "count" {
             let count = regex.find_iter(&file_contents).count();
             if count > 0 {
-                filenames.push(file_path.to_string_lossy().into_owned());
+                filenames.push(display_path(&file_path));
                 total_matches += count;
             }
             continue;
@@ -554,16 +554,16 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
             continue;
         }
 
-        filenames.push(file_path.to_string_lossy().into_owned());
+        filenames.push(display_path(&file_path));
         if output_mode == "content" {
             for index in matched_lines {
                 let start = index.saturating_sub(input.before.unwrap_or(context));
                 let end = (index + input.after.unwrap_or(context) + 1).min(lines.len());
                 for (current, line) in lines.iter().enumerate().take(end).skip(start) {
                     let prefix = if input.line_numbers.unwrap_or(true) {
-                        format!("{}:{}:", file_path.to_string_lossy(), current + 1)
+                        format!("{}:{}:", display_path(&file_path), current + 1)
                     } else {
-                        format!("{}:", file_path.to_string_lossy())
+                        format!("{}:", display_path(&file_path))
                     };
                     content_lines.push(format!("{prefix}{line}"));
                 }
@@ -677,6 +677,16 @@ fn make_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
     }]
 }
 
+/// Chemin montré au modèle : sans le préfixe `\\?\` que `canonicalize` ajoute
+/// sous Windows (`\\?\D:\projet` devient `D:\projet`), qui déroute les modèles.
+fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC") => rest.to_string(),
+        _ => text.into_owned(),
+    }
+}
+
 fn normalize_path(path: &str) -> io::Result<PathBuf> {
     let candidate = if Path::new(path).is_absolute() {
         PathBuf::from(path)
@@ -714,6 +724,20 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{edit_file, glob_search, grep_search, read_file, write_file, GrepSearchInput};
+
+    #[test]
+    fn shown_paths_have_no_windows_verbatim_prefix() {
+        use std::path::Path;
+        assert_eq!(
+            super::display_path(Path::new(r"\\?\D:\projet\a.rs")),
+            r"D:\projet\a.rs"
+        );
+        assert_eq!(
+            super::display_path(Path::new(r"\\?\UNC\serveur\partage")),
+            r"\\?\UNC\serveur\partage"
+        );
+        assert_eq!(super::display_path(Path::new("/home/a.rs")), "/home/a.rs");
+    }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()

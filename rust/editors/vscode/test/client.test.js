@@ -1,20 +1,22 @@
-// Test du client sans VS Code : démarre `claw serve`, envoie une sélection,
-// vérifie que le modèle (faux serveur) la reçoit et que la page accepte d'être
-// affichée dans un panneau VS Code.
-// Usage : node test/client.test.js <claw> <dossier> <journal du faux modèle>
+// Test du client sans VS Code : démarre `claw serve` face au faux modèle,
+// envoie une sélection, vérifie que le modèle la reçoit et que la page accepte
+// d'être affichée dans un panneau VS Code.
+// Usage : node test/client.test.js <chemin de claw>
 "use strict";
 
 const assert = require("assert");
 const fs = require("fs");
 const http = require("http");
+const os = require("os");
+const path = require("path");
 const { ClawServer, selectionMessage } = require("../claw-client");
+const { startMockModel } = require("./mock");
 
-const [claw, cwd, logPath] = process.argv.slice(2);
 const results = [];
 
 function check(label, condition, detail) {
   results.push(Boolean(condition));
-  console.log(`${condition ? "OK  " : "ÉCHEC "}${label}${condition || detail === undefined ? "" : `  (${detail})`}`);
+  console.log(`${condition ? "OK     " : "ÉCHEC  "}${label}${condition || detail === undefined ? "" : `  (${detail})`}`);
 }
 
 function get(port, path) {
@@ -30,8 +32,17 @@ function get(port, path) {
 }
 
 (async () => {
+  if (!process.argv[2]) throw new Error("usage : node test/client.test.js <chemin de claw>");
+  const claw = path.resolve(process.argv[2]);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "claw-client-"));
+  const cwd = path.join(root, "projet");
+  fs.mkdirSync(cwd);
+  const logPath = path.join(root, "modele.jsonl");
   fs.writeFileSync(logPath, "");
-  const server = new ClawServer({ clawPath: claw, cwd, model: "ollama:t", permissionMode: "read-only" });
+  const mock = await startMockModel(logPath);
+  const env = { OLLAMA_BASE_URL: mock.baseUrl, CLAW_CONFIG_HOME: path.join(root, "claw-home"), CLAW_NO_CLAUDE_CONFIG: "1" };
+
+  const server = new ClawServer({ clawPath: claw, cwd, model: "ollama:mock", permissionMode: "read-only", env });
   const started = await server.start();
   check("claw serve démarré, adresse et jeton lus", started.port > 0 && /^[A-Za-z0-9_-]{20,}$/.test(started.token), JSON.stringify(started));
 
@@ -67,6 +78,7 @@ function get(port, path) {
   server.stop();
   await new Promise((resolve) => setTimeout(resolve, 500));
   check("arrêt du serveur", !server.running);
+  mock.child.kill();
   console.log(`\n${results.filter(Boolean).length}/${results.length} vérifications réussies`);
   process.exit(results.every(Boolean) ? 0 : 1);
 })().catch((error) => {

@@ -319,7 +319,13 @@ fn sandbox_status_for_input(input: &BashCommandInput, cwd: &std::path::Path) -> 
     );
     let mut status = resolve_sandbox_status_for_request(&request, cwd);
     if input.dangerously_disable_sandbox != Some(true) {
-        status.container = config.container();
+        // Les options de la commande (isolateNetwork, allowedMounts) priment
+        // sur la configuration, comme pour le bac à sable par namespaces.
+        status.container = config.container().map(|mut container| {
+            container.network_isolation = request.network_isolation;
+            container.extra_mounts.clone_from(&status.allowed_mounts);
+            container
+        });
     }
     status
 }

@@ -2,7 +2,9 @@ target/
 .omx/
 .clawd-agents/
 
-# Paquets de l'extension VS Code
+# Extension VS Code : paquets, dépendances, VS Code téléchargé pour les tests
 editors/vscode/*.vsix
+editors/vscode/node_modules/
+editors/vscode/.vscode-test/
 # Rapports des sous-agents (générés)
 .claw-agents/

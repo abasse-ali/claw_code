@@ -167,6 +167,15 @@ function activate(context) {
     }),
     { dispose: () => server && server.stop() },
   );
+  // État exposé aux autres extensions et aux tests d'intégration.
+  return {
+    get server() {
+      return server;
+    },
+    get panel() {
+      return panel;
+    },
+  };
 }
 
 function deactivate() {

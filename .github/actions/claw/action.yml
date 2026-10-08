@@ -5,7 +5,7 @@ inputs:
     description: Demande à confier à l'agent.
     required: true
   model:
-    description: Modèle (ex. qwen/qwen3-coder:free). Vide = meilleur modèle gratuit pour le code.
+    description: Modèle (ex. qwen/qwen3-coder:free, groq:llama-3.3-70b-versatile). Vide = meilleur modèle gratuit pour le code.
     required: false
     default: ""
   permission-mode:
@@ -13,11 +13,11 @@ inputs:
     required: false
     default: workspace-write
   openrouter-api-key:
-    description: Clé OpenRouter (secret).
+    description: Clé OpenRouter (secret). Les autres fournisseurs lisent leur variable d'environnement (GROQ_API_KEY…).
     required: false
     default: ""
   install:
-    description: release (binaire de la dernière release du dépôt) ou source (compilation).
+    description: release (binaire de la dernière release de Claw) ou source (compilation de la version de l'action).
     required: false
     default: source
 outputs:
@@ -25,22 +25,54 @@ outputs:
     description: Réponse finale de l'agent.
     value: ${{ steps.run.outputs.result }}
   changed:
-    description: "true si l'agent a modifié des fichiers suivis par git."
+    description: "true si l'agent a modifié des fichiers du dépôt (hors .claw/)."
     value: ${{ steps.run.outputs.changed }}
 runs:
   using: composite
   steps:
+    # Le dépôt de Claw est celui de l'action (téléchargé dans _actions/<propriétaire>/<dépôt>/<ref>),
+    # pas celui du projet qui l'utilise.
+    - name: Localiser Claw
+      id: locate
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        action_path=$(printf '%s' "$ACTION_PATH" | tr '\\' '/')
+        root=$(cd "$action_path/../../.." && pwd)
+        case "$action_path" in
+          */_actions/*)
+            repo=$(printf '%s' "$action_path" | sed -E 's#.*/_actions/([^/]+)/([^/]+)/.*#\1/\2#') ;;
+          *)
+            repo="$GITHUB_REPOSITORY" ;;
+        esac
+        echo "root=$root" >> "$GITHUB_OUTPUT"
+        echo "repo=$repo" >> "$GITHUB_OUTPUT"
+
     - name: Installer Claw (release)
       if: inputs.install == 'release'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
+        CLAW_REPO: ${{ steps.locate.outputs.repo }}
       run: |
         set -euo pipefail
-        mkdir -p "$RUNNER_TEMP/claw"
-        gh release download --repo "$GITHUB_REPOSITORY" --pattern "*x86_64-unknown-linux-gnu.tar.gz" --dir "$RUNNER_TEMP/claw"
-        tar xzf "$RUNNER_TEMP"/claw/*.tar.gz -C "$RUNNER_TEMP/claw" --strip-components=1
-        echo "$RUNNER_TEMP/claw" >> "$GITHUB_PATH"
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64) target=x86_64-unknown-linux-gnu; archive=tar.gz ;;
+          macOS-ARM64) target=aarch64-apple-darwin; archive=tar.gz ;;
+          Windows-X64) target=x86_64-pc-windows-msvc; archive=zip ;;
+          *) echo "::error::Pas de binaire publié pour $RUNNER_OS-$RUNNER_ARCH : utilisez install: source"; exit 1 ;;
+        esac
+        dir="$RUNNER_TEMP/claw"
+        mkdir -p "$dir"
+        gh release download --repo "$CLAW_REPO" --pattern "*-$target.$archive" --dir "$dir"
+        if [ "$archive" = zip ]; then
+          unzip -q -o "$dir"/*.zip -d "$dir"
+        else
+          tar xzf "$dir"/*.tar.gz -C "$dir"
+        fi
+        dirname "$(find "$dir" -type f \( -name claw -o -name claw.exe \) | head -n 1)" >> "$GITHUB_PATH"
 
     - name: Installer Rust
       if: inputs.install != 'release'
@@ -49,13 +81,18 @@ runs:
     - name: Installer Claw (source)
       if: inputs.install != 'release'
       shell: bash
-      run: cargo install --path rust/crates/claw-cli --locked --root "$RUNNER_TEMP/claw" && echo "$RUNNER_TEMP/claw/bin" >> "$GITHUB_PATH"
+      env:
+        CLAW_ROOT: ${{ steps.locate.outputs.root }}
+      run: |
+        set -euo pipefail
+        cargo install --path "$CLAW_ROOT/rust/crates/claw-cli" --locked --root "$RUNNER_TEMP/claw"
+        echo "$RUNNER_TEMP/claw/bin" >> "$GITHUB_PATH"
 
     - name: Lancer l'agent
       id: run
       shell: bash
       env:
-        OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key }}
+        OPENROUTER_API_KEY: ${{ inputs.openrouter-api-key || env.OPENROUTER_API_KEY }}
         CLAW_PROMPT: ${{ inputs.prompt }}
         CLAW_MODEL_INPUT: ${{ inputs.model }}
         CLAW_MODE: ${{ inputs.permission-mode }}
@@ -64,23 +101,35 @@ runs:
         set -uo pipefail
         args=(--permission-mode "$CLAW_MODE" --output-format stream-json)
         if [ -n "$CLAW_MODEL_INPUT" ]; then args+=(--model "$CLAW_MODEL_INPUT"); fi
-        claw "${args[@]}" prompt "$CLAW_PROMPT" | tee "$RUNNER_TEMP/claw.jsonl"
-        result=$(python3 - "$RUNNER_TEMP/claw.jsonl" <<'PY'
+        log="$RUNNER_TEMP/claw.jsonl"
+        claw "${args[@]}" prompt "$CLAW_PROMPT" | tee "$log"
+        status=${PIPESTATUS[0]}
+        python=$(command -v python3 || command -v python)
+        result=$("$python" - "$log" <<'PY'
         import json, sys
+        sys.stdout.reconfigure(encoding="utf-8")  # sortie de l'action en UTF-8, même sous Windows
         result = ""
-        for line in open(sys.argv[1], encoding="utf-8"):
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if event.get("type") == "result":
-                result = event.get("result") or event.get("error") or ""
+        with open(sys.argv[1], encoding="utf-8") as lines:
+            for line in lines:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") == "result":
+                    result = event.get("result") or event.get("error") or ""
         print(result)
         PY
         )
+        delimiter="CLAW_$(date +%s)_$RANDOM$RANDOM"
         {
-          echo "result<<CLAW_EOF"
+          echo "result<<$delimiter"
           echo "$result"
-          echo "CLAW_EOF"
+          echo "$delimiter"
         } >> "$GITHUB_OUTPUT"
-        if git status --porcelain | grep -q .; then echo "changed=true" >> "$GITHUB_OUTPUT"; else echo "changed=false" >> "$GITHUB_OUTPUT"; fi
+        # Les sessions de Claw (.claw/) ne comptent pas comme une modification.
+        if [ -n "$(git status --porcelain -- . ':(exclude).claw' 2>/dev/null)" ]; then
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+        fi
+        exit "$status"

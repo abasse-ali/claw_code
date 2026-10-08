@@ -34,7 +34,8 @@ pub struct SandboxConfig {
     /// `docker` ou `podman` : commandes exécutées dans un conteneur (tous systèmes).
     #[serde(default)]
     pub backend: Option<String>,
-    /// Image du conteneur (défaut : `debian:stable-slim`).
+    /// Image du conteneur (défaut : `docker.io/library/debian:stable-slim`, nom
+    /// complet car Podman refuse souvent les noms courts).
     #[serde(default)]
     pub image: Option<String>,
 }
@@ -65,10 +66,23 @@ impl SandboxConfig {
             image: std::env::var("CLAW_SANDBOX_IMAGE")
                 .ok()
                 .or_else(|| self.image.clone())
-                .unwrap_or_else(|| "debian:stable-slim".to_string()),
+                .unwrap_or_else(|| "docker.io/library/debian:stable-slim".to_string()),
             network_isolation: self.network_isolation.unwrap_or(false),
             extra_mounts: self.allowed_mounts.clone(),
         })
+    }
+}
+
+/// Chemin d'un montage dans le conteneur Linux : identique sous Unix,
+/// `D:\donnees` devient `/mnt/d/donnees`.
+fn container_mount_target(source: &str) -> String {
+    let bytes = source.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        let rest = source[2..].replace('\\', "/");
+        let rest = rest.trim_start_matches('/');
+        format!("/mnt/{}/{rest}", char::from(bytes[0]).to_ascii_lowercase())
+    } else {
+        source.to_string()
     }
 }
 
@@ -84,6 +98,9 @@ impl ContainerSandbox {
             std::process::id(),
             CONTAINER_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
+        // Docker ne comprend pas les chemins Windows étendus (\\?\D:\projet).
+        let workspace = cwd.display().to_string();
+        let workspace = workspace.strip_prefix(r"\\?\").unwrap_or(&workspace);
         let mut args = vec![
             "run".to_string(),
             "--rm".to_string(),
@@ -92,25 +109,52 @@ impl ContainerSandbox {
             "--name".to_string(),
             name.clone(),
             "-v".to_string(),
-            format!("{}:/workspace", cwd.display()),
+            format!("{workspace}:/workspace"),
             "-w".to_string(),
             "/workspace".to_string(),
             "-e".to_string(),
             "HOME=/tmp".to_string(),
         ];
+        args.extend(self.user_args());
         if self.network_isolation {
             args.push("--network".to_string());
             args.push("none".to_string());
         }
         for mount in &self.extra_mounts {
+            let source = mount.strip_prefix(r"\\?\").unwrap_or(mount);
             args.push("-v".to_string());
-            args.push(format!("{mount}:{mount}:ro"));
+            args.push(format!("{source}:{}:ro", container_mount_target(source)));
         }
         args.push(self.image.clone());
         args.push("sh".to_string());
         args.push("-lc".to_string());
         args.push(command.to_string());
         (args, name)
+    }
+
+    /// Sous Linux, les fichiers créés dans le projet doivent appartenir à
+    /// l'utilisateur et non à root : Docker reçoit son uid:gid, Podman sans
+    /// privilèges garde son identité (`keep-id`). Docker Desktop (Windows,
+    /// macOS) s'en charge lui-même.
+    fn user_args(&self) -> Vec<String> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // /proc/self appartient à l'utilisateur effectif du processus.
+            if let Ok(metadata) = fs::metadata("/proc/self") {
+                if metadata.uid() != 0 {
+                    return if self.program == "podman" {
+                        vec!["--userns=keep-id".to_string()]
+                    } else {
+                        vec![
+                            "--user".to_string(),
+                            format!("{}:{}", metadata.uid(), metadata.gid()),
+                        ]
+                    };
+                }
+            }
+        }
+        Vec::new()
     }
 
     /// Arrête et supprime un conteneur (interruption, délai dépassé, fin de Claw).
@@ -517,5 +561,44 @@ mod container_tests {
         assert!(
             SandboxConfig::default().container().is_none() || std::env::var("CLAW_SANDBOX").is_ok()
         );
+    }
+
+    #[test]
+    fn windows_paths_are_usable_by_docker() {
+        let config = SandboxConfig {
+            backend: Some("docker".to_string()),
+            allowed_mounts: vec![r"\\?\C:\Données\ref".to_string()],
+            ..SandboxConfig::default()
+        };
+        let container = config.container().expect("backend configuré");
+        let (args, _) = container.run_args("ls", Path::new(r"\\?\D:\Mes_Projets\app"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-v", r"D:\Mes_Projets\app:/workspace"]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-v", r"C:\Données\ref:/mnt/c/Données/ref:ro"]),
+            "{args:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_containers_keep_the_user_identity() {
+        use std::os::unix::fs::MetadataExt;
+        let uid = std::fs::metadata("/proc/self").expect("/proc/self").uid();
+        for (program, expected) in [("docker", "--user"), ("podman", "--userns=keep-id")] {
+            let config = SandboxConfig {
+                backend: Some(program.to_string()),
+                ..SandboxConfig::default()
+            };
+            let (args, _) = config
+                .container()
+                .expect("backend configuré")
+                .run_args("id -u", Path::new("/projet"));
+            assert_eq!(args.iter().any(|arg| arg == expected), uid != 0, "{args:?}");
+        }
     }
 }

@@ -71,6 +71,96 @@ jobs:
             /^error: / { print "::error::" $0 }
             END { if (msg != "") print substr(msg, 1, 4000) }'
 
+  vscode:
+    name: Extension VS Code (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            claw: ../../target/debug/claw
+            # VS Code a besoin d'un écran : serveur X virtuel.
+            display: xvfb-run -a
+          - os: windows-latest
+            claw: ../../target/debug/claw.exe
+            display: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Compilation de claw
+        run: cargo build --locked -p claw-cli
+      - name: Dépendances de l'extension
+        working-directory: rust/editors/vscode
+        run: npm ci
+      - name: Client (sans VS Code)
+        working-directory: rust/editors/vscode
+        shell: bash
+        run: node test/client.test.js ${{ matrix.claw }}
+      - name: Extension dans un vrai VS Code
+        working-directory: rust/editors/vscode
+        shell: bash
+        run: ${{ matrix.display }} node test/run-vscode.js ${{ matrix.claw }}
+
+  sandbox:
+    name: Bac à sable ${{ matrix.engine }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [docker, podman]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Image du bac à sable
+        run: ${{ matrix.engine }} pull docker.io/library/debian:stable-slim
+      - name: Commandes dans un conteneur ${{ matrix.engine }}
+        env:
+          CLAW_TEST_CONTAINER: ${{ matrix.engine }}
+        run: cargo test --locked -p runtime --test container_sandbox -- --ignored --test-threads=1
+
+  action:
+    name: Action GitHub (faux modèle)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Démarrer le faux modèle
+        run: |
+          nohup node scripts/mock-model.js --write "claw-action-test.txt=écrit par l'agent" > "$RUNNER_TEMP/mock.out" 2>&1 &
+          for _ in $(seq 50); do grep -q PORT "$RUNNER_TEMP/mock.out" && break; sleep 0.2; done
+          echo "OLLAMA_BASE_URL=http://127.0.0.1:$(awk '/PORT/{print $2}' "$RUNNER_TEMP/mock.out")/v1" >> "$GITHUB_ENV"
+      - name: Lancer l'action
+        id: claw
+        uses: ./.github/actions/claw
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/rust/target
+        with:
+          prompt: Crée le fichier de test
+          model: ollama:mock
+          permission-mode: workspace-write
+      - name: Vérifier les sorties de l'action
+        working-directory: .
+        env:
+          RESULT: ${{ steps.claw.outputs.result }}
+          CHANGED: ${{ steps.claw.outputs.changed }}
+        run: |
+          set -x
+          test "$CHANGED" = true
+          grep -q "écrit par l'agent" claw-action-test.txt
+          case "$RESULT" in *"Fichier écrit"*) ;; *) echo "résultat inattendu : $RESULT"; exit 1 ;; esac
+
   release:
     name: Binaire ${{ matrix.target }}
     if: startsWith(github.ref, 'refs/tags/v')

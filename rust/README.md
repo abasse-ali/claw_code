@@ -370,10 +370,19 @@ Claw lit aussi `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` 
 ### Bac à sable des commandes
 
 Sous Linux, les commandes peuvent être isolées par namespaces (`unshare`). Sur tous les systèmes
-(Windows compris), `"sandbox": { "backend": "docker", "image": "rust:1", "networkIsolation": true }`
+(Windows compris), `"sandbox": { "backend": "docker", "image": "docker.io/library/rust:1", "networkIsolation": true }`
 (ou `CLAW_SANDBOX=docker|podman`, `CLAW_SANDBOX_IMAGE`) exécute chaque commande shell dans un
 conteneur qui ne voit que le dossier du projet (`/workspace`), sans réseau si demandé ; les
 conteneurs sont arrêtés à l'interruption, au délai dépassé et à la fin de Claw.
+
+- Image par défaut : `docker.io/library/debian:stable-slim`. Donnez des noms complets
+  (`docker.io/library/…`) : Podman refuse souvent les noms courts.
+- `allowedMounts` ajoute des dossiers en lecture seule (`D:\donnees` devient `/mnt/d/donnees`).
+  L'option `isolateNetwork` d'une commande prime sur `networkIsolation`.
+- Sous Linux, les fichiers créés dans le projet appartiennent à l'utilisateur (Docker reçoit son
+  uid:gid, Podman sans privilèges garde son identité), pas à root.
+- Testé en CI avec Docker et Podman : `CLAW_TEST_CONTAINER=docker cargo test -p runtime --test
+  container_sandbox -- --ignored --test-threads=1`.
 
 ### Langue des réponses
 

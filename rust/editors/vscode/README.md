@@ -28,3 +28,14 @@ n'accepte d'être affichée que dans un panneau de VS Code.
 - `claw.path` : exécutable (défaut `claw`).
 - `claw.model` : modèle, par exemple `qwen/qwen3-coder:free` ou `ollama:qwen2.5-coder:7b`.
 - `claw.permissionMode` : `prompt`, `read-only`, `workspace-write` ou `danger-full-access`.
+
+## Tests
+
+Depuis `editors/vscode`, après `npm ci` et `cargo build -p claw-cli` :
+
+- `node test/client.test.js ../../target/debug/claw` : pilotage de `claw serve` sans VS Code.
+- `node test/run-vscode.js ../../target/debug/claw` : l'extension dans un vrai VS Code, téléchargé
+  à part avec un profil isolé (votre éditeur n'est pas touché), face à un faux modèle
+  (`rust/scripts/mock-model.js`). Sous Linux sans écran : `xvfb-run -a node test/run-vscode.js …`.
+
+La CI les exécute sous Linux et Windows.
