@@ -123,11 +123,17 @@ impl PermissionPrompter for StreamJsonPrompter {
             "subtype": "permission_denied",
             "tool_name": request.tool_name,
             "required_mode": request.required_mode.as_str(),
-            "hint": "relancez avec --permission-mode workspace-write (ou danger-full-access) ou une règle allow",
+            "hint": "autorisez la commande par une règle (\"permissions\": {\"allow\": [\"Bash(python:*)\"]}) ou relancez avec --permission-mode danger-full-access",
         }));
+        // Ce texte est lu par le modèle : il doit comprendre qu'insister (avec un
+        // autre shell, une autre syntaxe) ne servira à rien.
         PermissionPromptDecision::Deny {
             reason: format!(
-                "permission refusée en mode non interactif ({} requis)",
+                "Refusé : {} demande l'accord de l'utilisateur (mode {} requis), impossible dans \
+                 cette session non interactive. Ne relancez pas cette commande, même avec un autre \
+                 outil ou une autre syntaxe : poursuivez sans elle et indiquez à la fin la règle qui \
+                 l'autoriserait (par exemple \"Bash(python:*)\" dans permissions.allow).",
+                request.tool_name,
                 request.required_mode.as_str()
             ),
         }

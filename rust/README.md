@@ -305,6 +305,28 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
 - **Mode texte** pour les modèles sans appel d'outils natif : les outils sont décrits dans le
   prompt et le modèle répond en blocs `<tool_call>`. Il s'active seul quand le serveur refuse le
   paramètre `tools` (et reste retenu), ou avec `"toolMode": "text"` / `CLAW_TOOL_MODE=text`.
+- Un appel écrit en JSON brut au lieu d'un appel natif (`{"name": "read_file", "arguments": …}`,
+  fréquent avec Ollama) est reconnu s'il forme toute la réponse et nomme un outil proposé.
+
+### Évaluer un modèle sur de vraies tâches
+
+`python scripts/eval-tasks.py --model <modèle>` lance Claw sur six petites tâches vérifiées
+automatiquement (corriger un bug, implémenter une fonction, écrire des tests qui détectent un bug,
+renommer dans plusieurs fichiers, déplacer une constante, analyser en lecture seule) et affiche le
+taux de réussite, la durée et les outils appelés ; `--rapport fichier.json` garde le détail. La
+bascule vers d'autres modèles est coupée pour mesurer le modèle demandé.
+
+Mesures sur un PC portable (i7-8750H, 16 Go, GTX 1050 4 Go, Ollama 0.40) :
+
+| Modèle local | Réussite | Durée par tâche | Remarque |
+|---|---|---|---|
+| `qwen2.5-coder:7b` | 0/6 | 1 à 5 min | n'appelle aucun outil : demande le contenu des fichiers |
+| `qwen3.5:4b` | 4/6 | 1 à 10 min | lit, modifie, lance les tests ; échoue sur la fonction la plus difficile (délai) et copie la fonction dans ses tests au lieu de l'importer |
+
+Un modèle local de cette taille dépanne hors ligne ; pour le travail courant, un modèle en ligne
+(OpenRouter) reste bien plus rapide et fiable. Les commandes shell d'une tâche non interactive
+(`claw prompt`, action GitHub) ne passent qu'avec des règles `permissions.allow` : le script
+autorise `Bash(python:*)` dans chaque projet de test.
 
 ### Compatibilité avec Claude Code
 

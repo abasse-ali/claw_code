@@ -152,6 +152,44 @@ pub fn extract_tool_calls(text: &str) -> (String, Vec<(String, Value)>) {
     (visible.trim().to_string(), calls)
 }
 
+/// Appels écrits en JSON brut au lieu d'outils natifs (qwen2.5-coder sous
+/// Ollama répond `{"name": "read_file", "arguments": {…}}` en texte). Retenu
+/// seulement si toute la réponse est faite de tels objets (éventuellement dans
+/// un bloc ```json) et qu'ils nomment des outils proposés.
+#[must_use]
+pub fn salvage_json_tool_calls(text: &str, known_tools: &[String]) -> Option<Vec<(String, Value)>> {
+    let mut body = text.trim();
+    if let Some(fenced) = body.strip_prefix("```") {
+        body = fenced
+            .split_once('\n')?
+            .1
+            .trim_end()
+            .strip_suffix("```")?
+            .trim();
+    }
+    if !body.starts_with('{') {
+        return None;
+    }
+    let mut calls = Vec::new();
+    for value in serde_json::Deserializer::from_str(body).into_iter::<Value>() {
+        let value = value.ok()?;
+        let name = value.get("name")?.as_str()?;
+        if !known_tools.iter().any(|tool| tool == name) {
+            return None;
+        }
+        let arguments = match value
+            .get("arguments")
+            .or_else(|| value.get("parameters"))?
+            .clone()
+        {
+            Value::String(text) => serde_json::from_str(&text).unwrap_or(Value::String(text)),
+            other => other,
+        };
+        calls.push((name.to_string(), arguments));
+    }
+    (!calls.is_empty()).then_some(calls)
+}
+
 fn parse_call(body: &str) -> Option<(String, Value)> {
     let repaired = crate::providers::text_tools::lenient_json(body.trim())?;
     let name = repaired.get("name")?.as_str()?.to_string();
@@ -240,7 +278,9 @@ impl TextToolFilter {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_tool_calls, is_tools_unsupported_error, TextToolFilter};
+    use super::{
+        extract_tool_calls, is_tools_unsupported_error, salvage_json_tool_calls, TextToolFilter,
+    };
     use serde_json::json;
 
     #[test]
@@ -303,5 +343,38 @@ mod tests {
             "No endpoints found that support tool use"
         ));
         assert!(!is_tools_unsupported_error("rate limit exceeded"));
+    }
+
+    #[test]
+    fn salvages_raw_json_calls_naming_known_tools_only() {
+        let tools = vec!["read_file".to_string(), "bash".to_string()];
+        let calls = salvage_json_tool_calls(
+            "{\"name\": \"read_file\", \"arguments\": {\"path\": \"stats.py\"}}",
+            &tools,
+        )
+        .expect("appel récupéré");
+        assert_eq!(
+            calls,
+            vec![("read_file".to_string(), json!({"path": "stats.py"}))]
+        );
+
+        let several = "```json
+{\"name\": \"bash\", \"arguments\": \"{\\\"command\\\": \\\"ls\\\"}\"}
+{\"name\": \"read_file\", \"parameters\": {\"path\": \"a\"}}
+```";
+        let calls = salvage_json_tool_calls(several, &tools).expect("deux appels");
+        assert_eq!(calls[0], ("bash".to_string(), json!({"command": "ls"})));
+        assert_eq!(calls[1].0, "read_file");
+
+        // Outil inconnu, texte autour, JSON sans arguments : pas un appel.
+        assert!(
+            salvage_json_tool_calls("{\"name\": \"rm_rf\", \"arguments\": {}}", &tools).is_none()
+        );
+        assert!(
+            salvage_json_tool_calls("Voici : {\"name\": \"bash\", \"arguments\": {}}", &tools)
+                .is_none()
+        );
+        assert!(salvage_json_tool_calls("{\"name\": \"bash\"}", &tools).is_none());
+        assert!(salvage_json_tool_calls("{\"nom\": \"Dupont\", \"age\": 3}", &tools).is_none());
     }
 }

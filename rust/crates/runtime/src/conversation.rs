@@ -152,6 +152,12 @@ pub const HOOK_CONTEXT_PREFIX: &str = "[Contexte ajouté par les hooks]";
 /// Préfixe des relances demandées par un hook `Stop`.
 pub const STOP_HOOK_PREFIX: &str = "[Hook Stop]";
 
+/// Réponse sans texte ni appel d'outil (petits modèles qui ne font que raisonner).
+const EMPTY_RESPONSE_ERROR: &str = "le modèle n'a renvoyé aucun contenu";
+
+/// Relance unique après une réponse vide, au lieu d'échouer.
+const EMPTY_RESPONSE_NUDGE: &str = "[Claw] Ta dernière réponse était vide. Continue la tâche avec les outils si elle n'est pas finie ; sinon, réponds à l'utilisateur en résumant ce que tu as fait et le résultat des vérifications.";
+
 /// Demande l'avis des hooks `Notification` avant chaque demande d'autorisation.
 struct NotifyingPrompter<'a> {
     hooks: &'a HookRunner,
@@ -390,6 +396,7 @@ where
         let mut tool_results = Vec::new();
         let mut iterations = 0;
         let mut stop_continuations = 0;
+        let mut empty_nudged = false;
 
         loop {
             iterations += 1;
@@ -420,7 +427,17 @@ where
                 }
                 Err(error) => return Err(error),
             };
-            let (assistant_message, usage) = build_assistant_message(events)?;
+            let (assistant_message, usage) = match build_assistant_message(events) {
+                Ok(built) => built,
+                Err(error) if error.to_string() == EMPTY_RESPONSE_ERROR && !empty_nudged => {
+                    empty_nudged = true;
+                    self.session
+                        .messages
+                        .push(ConversationMessage::user_text(EMPTY_RESPONSE_NUDGE));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if let Some(usage) = usage {
                 self.usage_tracker.record(usage);
             }
@@ -829,7 +846,7 @@ fn build_assistant_message(
         ));
     }
     if blocks.is_empty() {
-        return Err(RuntimeError::new("le modèle n'a renvoyé aucun contenu"));
+        return Err(RuntimeError::new(EMPTY_RESPONSE_ERROR));
     }
 
     Ok((
@@ -1113,6 +1130,67 @@ mod tests {
             &summary.tool_results[0].blocks[0],
             ContentBlock::ToolResult { is_error: true, output, .. } if output == "not now"
         ));
+    }
+
+    #[test]
+    fn an_empty_reply_is_followed_up_once_instead_of_failing() {
+        struct EmptyThenText {
+            calls: usize,
+        }
+        impl ApiClient for EmptyThenText {
+            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                self.calls += 1;
+                if self.calls == 1 {
+                    // Petit modèle : uniquement du raisonnement, rien d'affichable.
+                    return Ok(vec![AssistantEvent::MessageStop]);
+                }
+                let nudged = request.messages.iter().any(|message| {
+                    message.blocks.iter().any(|block| {
+                        matches!(block, ContentBlock::Text { text } if text == super::EMPTY_RESPONSE_NUDGE)
+                    })
+                });
+                assert!(nudged, "la relance doit être envoyée au modèle");
+                Ok(vec![
+                    AssistantEvent::TextDelta("Terminé.".to_string()),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            EmptyThenText { calls: 0 },
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+            vec!["system".to_string()],
+        );
+        let summary = runtime
+            .run_turn("corrige le bug", None)
+            .expect("une réponse vide ne doit pas faire échouer le tour");
+        assert_eq!(runtime.api_client.calls, 2);
+        assert!(matches!(
+            summary.assistant_messages.last().and_then(|message| message.blocks.first()),
+            Some(ContentBlock::Text { text }) if text == "Terminé."
+        ));
+
+        // Deux réponses vides de suite : l'erreur est rendue.
+        struct AlwaysEmpty;
+        impl ApiClient for AlwaysEmpty {
+            fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                Ok(vec![AssistantEvent::MessageStop])
+            }
+        }
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            AlwaysEmpty,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+            vec!["system".to_string()],
+        );
+        assert!(runtime.run_turn("corrige le bug", None).is_err());
     }
 
     struct RecordingTextApi {

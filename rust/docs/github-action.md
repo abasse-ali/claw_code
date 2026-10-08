@@ -76,6 +76,10 @@ Réglages utiles :
   (`groq:…`, `mistral:…`, `ollama:…`) lisent leur clé dans l'environnement du job
   (`GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}`…).
 - `permission-mode: read-only` pour une revue sans modification.
+- En `workspace-write`, personne ne peut approuver une commande pendant le job : les commandes
+  shell sont refusées, l'agent ne peut donc pas lancer les tests. Autorisez celles dont il a
+  besoin dans `.claw/settings.json` du dépôt :
+  `{"permissions": {"allow": ["Bash(cargo test:*)", "Bash(npm test:*)"]}}`.
 - `install: release` pour télécharger le binaire de la dernière release de Claw
   (Linux x64, Windows x64) au lieu de le compiler, ce qui est bien plus
   rapide. Il faut qu'une release existe (tag `v*`).

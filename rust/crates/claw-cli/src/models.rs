@@ -241,6 +241,10 @@ fn provider_models(
 /// Premier modèle d'un serveur local en marche (Ollama, LM Studio, llama.cpp…),
 /// pour démarrer sans aucune clé.
 pub fn first_local_model() -> Option<String> {
+    // Les tests ne doivent pas dépendre d'un Ollama lancé sur la machine.
+    if cfg!(test) {
+        return None;
+    }
     api::compat_providers()
         .into_iter()
         .filter(|provider| provider.local)

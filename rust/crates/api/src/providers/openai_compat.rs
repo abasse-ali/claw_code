@@ -220,7 +220,13 @@ impl OpenAiCompatClient {
         let (response, text_mode) = self.send_negotiated(&request).await?;
         let request_id = request_id_from_headers(response.headers());
         let payload = response.json::<ChatCompletionResponse>().await?;
-        let mut normalized = normalize_response(&request.model, payload, text_mode)?;
+        let known_tools: Vec<String> = request
+            .tools
+            .iter()
+            .flatten()
+            .map(|tool| tool.name.clone())
+            .collect();
+        let mut normalized = normalize_response(&request.model, payload, text_mode, &known_tools)?;
         if normalized.request_id.is_none() {
             normalized.request_id = request_id;
         }
@@ -234,8 +240,7 @@ impl OpenAiCompatClient {
         let (response, text_mode) = self
             .send_negotiated(&request.clone().with_streaming())
             .await?;
-        let mut state = StreamState::new(request.model.clone());
-        state.text_mode = text_mode;
+        let state = StreamState::new(request.model.clone()).with_tools(request, text_mode);
         Ok(MessageStream {
             request_id: request_id_from_headers(response.headers()),
             response,
@@ -452,6 +457,11 @@ struct StreamState {
     text_filter: TextToolFilter,
     /// Raisonnement écrit entre `<think>` dans le texte.
     think_filter: ThinkTagFilter,
+    /// Outils proposés au modèle (pour reconnaître un appel écrit en JSON brut).
+    known_tools: Vec<String>,
+    /// Outils natifs : début de réponse retenu tant qu'il peut être un appel
+    /// écrit en JSON brut (`{"name": …}`) ; `None` une fois le texte libéré.
+    held_text: Option<String>,
 }
 
 impl StreamState {
@@ -468,7 +478,25 @@ impl StreamState {
             text_mode: false,
             text_filter: TextToolFilter::default(),
             think_filter: ThinkTagFilter::default(),
+            known_tools: Vec::new(),
+            held_text: None,
         }
+    }
+
+    /// Outils de la requête ; en mode natif, la réponse est retenue tant
+    /// qu'elle peut être un appel écrit en JSON.
+    fn with_tools(mut self, request: &MessageRequest, text_mode: bool) -> Self {
+        self.text_mode = text_mode;
+        self.known_tools = request
+            .tools
+            .iter()
+            .flatten()
+            .map(|tool| tool.name.clone())
+            .collect();
+        if !text_mode && !self.known_tools.is_empty() {
+            self.held_text = Some(String::new());
+        }
+        self
     }
 
     /// Raisonnement du modèle, affiché à part (sauf `/think off`).
@@ -485,10 +513,34 @@ impl StreamState {
     fn push_answer_text(&mut self, text: String, events: &mut Vec<StreamEvent>) {
         let visible = if self.text_mode {
             self.text_filter.push(&text)
+        } else if let Some(held) = self.held_text.as_mut() {
+            held.push_str(&text);
+            let start = held.trim_start();
+            if start.is_empty() || start.starts_with('{') || start.starts_with('`') {
+                return;
+            }
+            self.held_text.take().unwrap_or_default()
         } else {
             text
         };
         self.push_text(visible, events);
+    }
+
+    /// Fin du flux en mode natif : la réponse retenue est un appel écrit en
+    /// JSON (converti en appel d'outil) ou du texte ordinaire (affiché).
+    fn finish_held_text(&mut self, events: &mut Vec<StreamEvent>) {
+        let Some(held) = self.held_text.take() else {
+            return;
+        };
+        let calls = if self.tool_calls.is_empty() {
+            text_tools::salvage_json_tool_calls(&held, &self.known_tools)
+        } else {
+            None
+        };
+        match calls {
+            Some(calls) => self.push_text_tool_calls(calls, events),
+            None => self.push_text(held, events),
+        }
     }
 
     fn push_text(&mut self, text: String, events: &mut Vec<StreamEvent>) {
@@ -514,10 +566,18 @@ impl StreamState {
     fn finish_text_tools(&mut self, events: &mut Vec<StreamEvent>) {
         let (rest, raw) = self.text_filter.finish();
         self.push_text(rest, events);
-        let (_, calls) = text_tools::extract_tool_calls(&raw);
+        let (_, mut calls) = text_tools::extract_tool_calls(&raw);
         if calls.is_empty() {
-            return;
+            calls =
+                text_tools::salvage_json_tool_calls(&raw, &self.known_tools).unwrap_or_default();
         }
+        if !calls.is_empty() {
+            self.push_text_tool_calls(calls, events);
+        }
+    }
+
+    /// Appels d'outils trouvés dans le texte, ajoutés comme des appels natifs.
+    fn push_text_tool_calls(&mut self, calls: Vec<(String, Value)>, events: &mut Vec<StreamEvent>) {
         if self.text_started && !self.text_finished {
             self.text_finished = true;
             events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
@@ -665,6 +725,8 @@ impl StreamState {
         self.push_answer_text(rest_text, &mut events);
         if self.text_mode {
             self.finish_text_tools(&mut events);
+        } else {
+            self.finish_held_text(&mut events);
         }
         if self.text_started && !self.text_finished {
             self.text_finished = true;
@@ -1164,6 +1226,7 @@ fn normalize_response(
     model: &str,
     response: ChatCompletionResponse,
     text_mode: bool,
+    known_tools: &[String],
 ) -> Result<MessageResponse, ApiError> {
     let choice = response
         .choices
@@ -1180,21 +1243,31 @@ fn normalize_response(
         .map(|text| reasoning::split_think_tags(&text).0)
         .filter(|value| !value.is_empty())
     {
-        if text_mode {
-            let (visible, calls) = text_tools::extract_tool_calls(&text);
+        let (visible, mut calls) = if text_mode {
+            text_tools::extract_tool_calls(&text)
+        } else {
+            (text.clone(), Vec::new())
+        };
+        // Appel écrit en JSON brut au lieu d'un appel natif.
+        if calls.is_empty() && choice.message.tool_calls.is_empty() {
+            if let Some(salvaged) = text_tools::salvage_json_tool_calls(&text, known_tools) {
+                calls = salvaged;
+            }
+        }
+        if calls.is_empty() {
             if !visible.is_empty() {
                 content.push(OutputContentBlock::Text { text: visible });
             }
-            for (offset, (name, input)) in calls.into_iter().enumerate() {
-                content.push(OutputContentBlock::ToolUse {
-                    id: format!("text_call_{offset}"),
-                    name,
-                    input,
-                });
-                finish_reason = Some("tool_calls".to_string());
-            }
-        } else {
-            content.push(OutputContentBlock::Text { text });
+        } else if text_mode && !visible.is_empty() {
+            content.push(OutputContentBlock::Text { text: visible });
+        }
+        for (offset, (name, input)) in calls.into_iter().enumerate() {
+            content.push(OutputContentBlock::ToolUse {
+                id: format!("text_call_{offset}"),
+                name,
+                input,
+            });
+            finish_reason = Some("tool_calls".to_string());
         }
     }
     for tool_call in choice.message.tool_calls {
@@ -1540,5 +1613,82 @@ mod tests {
             .ingest_chunk(chunk)
             .expect_err("un chunk d'erreur doit échouer");
         assert!(error.to_string().contains("Provider disconnected"));
+    }
+
+    /// Flux d'une réponse en texte découpée en morceaux, outils natifs proposés.
+    fn stream_text(pieces: &[&str]) -> Vec<crate::types::StreamEvent> {
+        let request = MessageRequest {
+            model: "ollama:qwen".to_string(),
+            max_tokens: 64,
+            messages: vec![InputMessage::user_text("Corrige le bug")],
+            system: None,
+            tools: Some(vec![ToolDefinition {
+                name: "read_file".to_string(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+            }]),
+            tool_choice: None,
+            stream: true,
+        };
+        let mut state = StreamState::new("ollama:qwen".to_string()).with_tools(&request, false);
+        let mut events = Vec::new();
+        for piece in pieces {
+            let frame = format!(
+                "data: {}",
+                json!({"id": "c", "choices": [{"index": 0, "delta": {"content": piece}}]})
+            );
+            let chunk = parse_sse_frame(&frame).expect("frame").expect("chunk");
+            events.extend(state.ingest_chunk(chunk).expect("morceau"));
+        }
+        events.extend(state.finish().expect("fin"));
+        events
+    }
+
+    fn texts_and_tools(events: &[crate::types::StreamEvent]) -> (String, Vec<String>) {
+        use crate::types::{ContentBlockDelta, OutputContentBlock, StreamEvent};
+        let mut text = String::new();
+        let mut tools = Vec::new();
+        for event in events {
+            match event {
+                StreamEvent::ContentBlockDelta(delta) => {
+                    if let ContentBlockDelta::TextDelta { text: piece } = &delta.delta {
+                        text.push_str(piece);
+                    }
+                }
+                StreamEvent::ContentBlockStart(start) => {
+                    if let OutputContentBlock::ToolUse { name, .. } = &start.content_block {
+                        tools.push(name.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        (text, tools)
+    }
+
+    #[test]
+    fn raw_json_tool_call_in_text_becomes_a_tool_call() {
+        let events = stream_text(&[
+            "{\"name\": \"read_",
+            "file\", \"arguments\": {\"path\": ",
+            "\"stats.py\"}}",
+        ]);
+        let (text, tools) = texts_and_tools(&events);
+        assert_eq!(text, "", "le JSON de l'appel ne doit pas s'afficher");
+        assert_eq!(tools, ["read_file"]);
+
+        // Texte ordinaire : affiché au fil de l'eau, sans appel.
+        let first = stream_text(&["Le bug ", "est ligne 4."]);
+        assert_eq!(
+            texts_and_tools(&first),
+            ("Le bug est ligne 4.".to_string(), Vec::new())
+        );
+
+        // JSON qui n'est pas un appel : affiché à la fin, tel quel.
+        let other = stream_text(&["{\"total\": ", "3}"]);
+        assert_eq!(
+            texts_and_tools(&other),
+            ("{\"total\": 3}".to_string(), Vec::new())
+        );
     }
 }

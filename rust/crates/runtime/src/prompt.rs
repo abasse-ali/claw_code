@@ -490,6 +490,7 @@ fn get_simple_intro_section(has_output_style: bool) -> String {
 
 fn get_engineering_workflow_section() -> String {
     let items = prepend_bullets(vec![
+        "Work autonomously with your tools: when you need information that is in the project (file contents, error messages, test results), read the files or run the commands yourself instead of asking the user; ask only for decisions or facts that the project cannot tell you.".to_string(),
         "Understand before acting: locate the relevant code with search tools and read it; identify the language, framework, build system and test commands (CLAW.md, README, manifests such as Cargo.toml, package.json, pyproject.toml).".to_string(),
         "For non-trivial work, state a short plan first and track multi-step work with TodoWrite.".to_string(),
         "Follow the conventions of the surrounding code: naming, error handling, formatting, comment density and test style.".to_string(),
