@@ -679,9 +679,10 @@
       const group = el("optgroup");
       group.label = "Gratuits recommandés pour le code";
       freeModels.forEach((model, index) => {
-        const option = el("option", null, (index + 1) + ". " + model.id + " · " + model.context);
+        const measured = model.measured ? " · " + model.measured : "";
+        const option = el("option", null, (index + 1) + ". " + model.id + " · " + model.context + measured);
         option.value = model.id;
-        option.title = model.reasons.join(" · ");
+        option.title = model.reasons.join(" · ") || "mesuré avec /models bench";
         group.appendChild(option);
       });
       modelSelect.appendChild(group);

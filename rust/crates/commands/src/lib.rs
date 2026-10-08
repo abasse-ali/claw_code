@@ -327,8 +327,8 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "models",
         aliases: &[],
-        summary: "Modèles gratuits d'OpenRouter les mieux placés en code, et quota du jour",
-        argument_hint: Some("[refresh|recherche]"),
+        summary: "Modèles gratuits d'OpenRouter les mieux placés en code, quota du jour ; bench : mesure ceux compatibles avec Claw",
+        argument_hint: Some("[refresh|local|bench|recherche]"),
         resume_supported: false,
         category: SlashCommandCategory::Core,
     },

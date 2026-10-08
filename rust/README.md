@@ -312,25 +312,35 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
 - Un appel écrit en JSON brut au lieu d'un appel natif (`{"name": "read_file", "arguments": …}`,
   fréquent avec Ollama) est reconnu s'il forme toute la réponse et nomme un outil proposé.
 
-### Évaluer un modèle sur de vraies tâches
+### Trouver les meilleurs modèles gratuits compatibles : `claw models bench`
 
-`python scripts/eval-tasks.py --model <modèle>` lance Claw sur six petites tâches vérifiées
-automatiquement (corriger un bug, implémenter une fonction, écrire des tests qui détectent un bug,
-renommer dans plusieurs fichiers, déplacer une constante, analyser en lecture seule) et affiche le
-taux de réussite, la durée et les outils appelés ; `--rapport fichier.json` garde le détail. La
-bascule vers d'autres modèles est coupée pour mesurer le modèle demandé.
+Le classement de `/models` repose sur des signaux indirects (rang OpenRouter, spécialisation
+citée). `claw models bench` (ou `/models bench` dans le REPL et l'interface web) **mesure** :
 
-Mesures sur un PC portable (i7-8750H, 16 Go, GTX 1050 4 Go, Ollama 0.40) :
+1. **Sonde de compatibilité** de chaque modèle gratuit qui appelle des outils (≈ 3 requêtes) : il
+   doit lire un fichier avec `read_file` et en citer le code secret. Écarte les modèles refusés à
+   Claw (403), introuvables (404), trop lents, qui n'appellent pas les outils ou répondent faux ;
+   un modèle seulement surchargé ou limité par son fournisseur est noté « ⏸ indisponible pour
+   l'instant » sans être écarté.
+2. **Trois tâches de code** sur les 4 meilleurs modèles compatibles (corriger un bug, implémenter
+   une fonction, renommer dans plusieurs fichiers), vérifiées par les tests du projet (Python).
+   Une tâche que le modèle n'a pas pu faire faute de disponibilité n'est pas comptée comme un
+   échec, et le modèle suivant prend sa place.
 
-| Modèle local | Réussite | Durée par tâche | Remarque |
-|---|---|---|---|
-| `qwen2.5-coder:7b` | 0/6 | 1 à 5 min | n'appelle aucun outil : demande le contenu des fichiers |
-| `qwen3.5:4b` | 4/6 | 1 à 10 min | lit, modifie, lance les tests ; échoue sur la fonction la plus difficile (délai) et copie la fonction dans ses tests au lieu de l'importer |
+Options : `--rapide` (sonde seulement), `--local` (ajoute Ollama, LM Studio…), `--max N` (modèles
+qui passent les tâches), `--appliquer` (règle le meilleur comme `"model"` dans
+`~/.claw/settings.json`, avec `"fallbackModels": ["free", …modèles locaux déjà prévus]`), et un
+filtre (`claw models bench cohere`). Les résultats sont gardés 14 jours dans
+`~/.claw/model-bench.json` : `/models` les affiche, le choix automatique du modèle gratuit et le
+mot-clé `"free"` de `fallbackModels` mettent les modèles mesurés en tête et écartent les
+incompatibles. Chaque essai lance `claw prompt` dans un projet temporaire où `Bash(python:*)`
+est autorisé (sans règle `permissions.allow`, une tâche non interactive ne peut lancer aucune
+commande).
 
-Un modèle local de cette taille dépanne hors ligne ; pour le travail courant, un modèle en ligne
-(OpenRouter) reste bien plus rapide et fiable. Les commandes shell d'une tâche non interactive
-(`claw prompt`, action GitHub) ne passent qu'avec des règles `permissions.allow` : le script
-autorise `Bash(python:*)` dans chaque projet de test.
+Mesures sur un PC portable (i7-8750H, 16 Go, GTX 1050 4 Go, Ollama 0.40) : un modèle local de
+4 milliards de paramètres (`qwen3.5:4b`) réussit la plupart des tâches mais en 1 à 10 minutes
+chacune, `qwen2.5-coder:7b` n'appelle aucun outil. En ligne, `cohere/north-mini-code:free` a
+réussi toutes les tâches en quelques dizaines de secondes.
 
 ### Compatibilité avec Claude Code
 

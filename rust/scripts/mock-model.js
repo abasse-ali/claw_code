@@ -2,11 +2,12 @@
 // Faux modèle compatible OpenAI (chat/completions, SSE) pour les tests
 // d'intégration : extension VS Code, action GitHub.
 //
-//   node mock-model.js [--port N] [--log fichier] [--write chemin=contenu]
+//   node mock-model.js [--port N] [--log fichier] [--write chemin=contenu] [--read chemin]
 //
 // Affiche « PORT <n> » une fois prêt. Chaque requête est ajoutée au journal
 // (une ligne JSON). Avec --write, le premier tour demande l'outil write_file,
-// puis le modèle conclut quand il reçoit le résultat de l'outil.
+// puis le modèle conclut quand il reçoit le résultat de l'outil. Avec --read,
+// il demande read_file puis répond avec le contenu lu (sonde de `claw models bench`).
 "use strict";
 
 const fs = require("fs");
@@ -19,6 +20,7 @@ function option(name) {
 
 const logPath = option("--log");
 const write = option("--write");
+const read = option("--read");
 const port = Number(option("--port") || 0);
 
 function lastUserText(messages) {
@@ -36,6 +38,13 @@ function lastUserText(messages) {
 function reply(body) {
   const messages = body.messages || [];
   const hasToolResult = messages.some((message) => message.role === "tool");
+  if (read && !hasToolResult) {
+    return { toolCall: { id: "call_mock_read", name: "read_file", arguments: JSON.stringify({ path: read }) } };
+  }
+  if (read) {
+    const result = [...messages].reverse().find((message) => message.role === "tool");
+    return { text: `Contenu lu : ${typeof result.content === "string" ? result.content : JSON.stringify(result.content)}` };
+  }
   if (write && !hasToolResult) {
     const separator = write.indexOf("=");
     const path = separator > 0 ? write.slice(0, separator) : write;

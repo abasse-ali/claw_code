@@ -1,4 +1,5 @@
 mod acp;
+mod bench;
 mod init;
 mod input;
 mod mcp_cli;

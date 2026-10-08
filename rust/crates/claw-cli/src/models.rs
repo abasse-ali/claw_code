@@ -43,7 +43,7 @@ fn save_catalog(catalog: &ModelCatalog) {
     }
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
@@ -63,7 +63,7 @@ fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, String> {
 
 /// Catalogue en cache s'il a moins de 24 h (sauf `refresh`), sinon téléchargé ;
 /// en cas d'échec réseau, le cache périmé sert de secours.
-fn catalog(refresh: bool) -> Result<(ModelCatalog, Option<String>), String> {
+pub(crate) fn catalog(refresh: bool) -> Result<(ModelCatalog, Option<String>), String> {
     let cached = load_cached_catalog();
     if !refresh {
         if let Some(catalog) = cached
@@ -101,16 +101,35 @@ pub fn register_cached_limits() {
     });
 }
 
+/// Modèles gratuits par ordre de préférence : ceux mesurés par `/models bench`
+/// (réussite puis rapidité), puis le classement du catalogue, sans les modèles
+/// mesurés incompatibles avec Claw.
+fn preferred_free_models(catalog: &ModelCatalog) -> Vec<String> {
+    let listed = |id: &str| catalog.models.iter().any(|model| model.id == id);
+    let incompatible = crate::bench::measured_incompatible();
+    let mut ordered: Vec<String> = crate::bench::measured_free_models()
+        .into_iter()
+        .map(|result| result.model)
+        .filter(|id| listed(id))
+        .collect();
+    for entry in api::rank_free_coding_models(catalog) {
+        if !ordered.contains(&entry.model.id) && !incompatible.contains(&entry.model.id) {
+            ordered.push(entry.model.id);
+        }
+    }
+    ordered
+}
+
 /// Meilleur modèle gratuit pour le code (télécharge le catalogue si besoin),
 /// en évitant ceux mis de côté (refusés à Claw, quota épuisé…).
 pub fn best_free_coding_model() -> Option<String> {
     let (catalog, _) = catalog(false).ok()?;
-    let ranked = api::rank_free_coding_models(&catalog);
-    ranked
+    let preferred = preferred_free_models(&catalog);
+    preferred
         .iter()
-        .find(|entry| api::model_available(&entry.model.id))
-        .or_else(|| ranked.first())
-        .map(|entry| entry.model.id.clone())
+        .find(|id| api::model_available(id))
+        .or_else(|| preferred.first())
+        .cloned()
 }
 
 fn format_context(tokens: Option<u64>) -> String {
@@ -140,11 +159,10 @@ fn format_age(seconds: u64) -> String {
 pub fn ranked_free_coding_models(limit: usize) -> Vec<String> {
     load_cached_catalog()
         .map(|catalog| {
-            api::rank_free_coding_models(&catalog)
+            preferred_free_models(&catalog)
                 .into_iter()
-                .filter(|entry| api::model_available(&entry.model.id))
+                .filter(|id| api::model_available(id))
                 .take(limit)
-                .map(|entry| entry.model.id)
                 .collect()
         })
         .unwrap_or_default()
@@ -261,6 +279,21 @@ pub fn first_local_model() -> Option<String> {
         })
 }
 
+/// Modèles des serveurs locaux en marche (`ollama:qwen3.5:4b`…), pour `/models bench --local`.
+pub(crate) fn local_models() -> Vec<String> {
+    api::compat_providers()
+        .into_iter()
+        .filter(|provider| provider.local)
+        .flat_map(|provider| {
+            provider_models(&provider, Duration::from_secs(2))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|model| !model.contains("embed"))
+                .map(move |model| format!("{}:{model}", provider.name))
+        })
+        .collect()
+}
+
 /// `/models local` : fournisseurs compatibles et modèles disponibles.
 pub fn providers_report(current_model: &str) -> String {
     let mut lines = vec![
@@ -336,6 +369,9 @@ pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, 
     ) {
         return Ok(providers_report(current_model));
     }
+    if args.is_some_and(|args| args == "bench" || args.starts_with("bench ")) {
+        return crate::bench::run(args.unwrap_or_default(), &mut |line| println!("{line}"));
+    }
     let refresh = args == Some("refresh");
     let filter = args.filter(|_| !refresh).map(str::to_ascii_lowercase);
     let (catalog, warning) = catalog(refresh)?;
@@ -397,6 +433,9 @@ pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, 
         "  /models vision         modèles qui lisent les images (joindre : @capture.png)"
             .to_string(),
         "  /models <recherche>    filtrer (ex. /models poolside)".to_string(),
+        "  /models bench          mesurer les modèles gratuits compatibles avec Claw sur de vraies"
+            .to_string(),
+        "                         tâches (≈ 15 min ; --rapide, --local, --appliquer)".to_string(),
         String::new(),
         "Bon à savoir : chaque étape de l'agent (un appel au modèle) consomme une requête du"
             .to_string(),
@@ -415,6 +454,7 @@ fn render_ranking(ranked: &[RankedModel], current_model: &str) -> Vec<String> {
         .max()
         .unwrap_or(0)
         .max(6);
+    let measured = crate::bench::recent_results();
     let mut lines = vec![format!("  #  {:<width$}  Contexte  Pourquoi", "Modèle")];
     for (index, entry) in ranked.iter().enumerate() {
         let marker = if entry.model.id == current_model {
@@ -427,8 +467,12 @@ fn render_ranking(ranked: &[RankedModel], current_model: &str) -> Vec<String> {
         } else {
             ""
         };
+        let bench = measured
+            .get(&entry.model.id)
+            .map(|result| format!(" · mesuré : {}", result.summary()))
+            .unwrap_or_default();
         lines.push(format!(
-            "  {:<2} {:<width$}  {:>8}  {}{vision}{marker}",
+            "  {:<2} {:<width$}  {:>8}  {}{vision}{bench}{marker}",
             index + 1,
             entry.model.id,
             format_context(entry.model.context_length),
@@ -477,14 +521,23 @@ pub fn cost_line(model: &str, usage: TokenUsage) -> Option<String> {
 /// Classement des modèles gratuits pour le code et quota, au format JSON de l'interface web.
 pub fn free_coding_models_json() -> Result<serde_json::Value, String> {
     let (catalog, warning) = catalog(false)?;
-    let models = api::rank_free_coding_models(&catalog)
+    // Même ordre que le choix automatique : modèles mesurés d'abord.
+    let reasons: std::collections::BTreeMap<String, Vec<String>> =
+        api::rank_free_coding_models(&catalog)
+            .into_iter()
+            .map(|entry| (entry.model.id, entry.reasons))
+            .collect();
+    let measured = crate::bench::recent_results();
+    let models = preferred_free_models(&catalog)
         .into_iter()
-        .map(|entry| {
+        .filter_map(|id| catalog.models.iter().find(|model| model.id == id))
+        .map(|model| {
             serde_json::json!({
-                "id": entry.model.id,
-                "name": entry.model.name,
-                "context": format_context(entry.model.context_length),
-                "reasons": entry.reasons,
+                "id": model.id,
+                "name": model.name,
+                "context": format_context(model.context_length),
+                "reasons": reasons.get(&model.id).cloned().unwrap_or_default(),
+                "measured": measured.get(&model.id).map(crate::bench::BenchResult::summary),
             })
         })
         .collect::<Vec<_>>();

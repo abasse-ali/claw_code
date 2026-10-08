@@ -570,6 +570,17 @@ impl Worker {
                     Err(usage) => self.info(usage),
                 }
             }
+            Some(SlashCommand::Models { args })
+                if args
+                    .as_deref()
+                    .is_some_and(|args| args == "bench" || args.starts_with("bench ")) =>
+            {
+                // Plusieurs minutes : l'avancement s'affiche dans la page au fil de l'eau.
+                let report = crate::bench::run(args.as_deref().unwrap_or_default(), &mut |line| {
+                    self.info(line);
+                })?;
+                self.info(report);
+            }
             Some(SlashCommand::Models { args }) => {
                 self.info(models::models_report(args.as_deref(), &self.model)?);
             }
