@@ -57,6 +57,37 @@ impl ApiError {
             | Self::BackoffOverflow { .. } => false,
         }
     }
+
+    /// Délai avant la remise à zéro d'une limite de débit, annoncée par le
+    /// serveur (`X-RateLimit-Reset` en millisecondes dans le corps d'erreur
+    /// d'`OpenRouter`, ou `Retry-After` en secondes).
+    #[must_use]
+    pub fn rate_limit_reset(&self) -> Option<Duration> {
+        let body = match self {
+            Self::Api { body, .. } => body,
+            Self::RetriesExhausted { last_error, .. } => return last_error.rate_limit_reset(),
+            _ => return None,
+        };
+        let value: serde_json::Value = serde_json::from_str(body).ok()?;
+        let headers = value.pointer("/error/metadata/headers")?;
+        let header = |name: &str| {
+            headers.as_object()?.iter().find_map(|(key, value)| {
+                key.eq_ignore_ascii_case(name).then(|| match value {
+                    serde_json::Value::String(text) => text.trim().parse::<u64>().ok(),
+                    other => other.as_u64(),
+                })?
+            })
+        };
+        if let Some(reset_ms) = header("X-RateLimit-Reset") {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| {
+                    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+                });
+            return Some(Duration::from_millis(reset_ms.saturating_sub(now_ms)));
+        }
+        header("Retry-After").map(Duration::from_secs)
+    }
 }
 
 impl Display for ApiError {

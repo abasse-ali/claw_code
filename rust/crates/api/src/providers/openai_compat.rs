@@ -22,8 +22,12 @@ pub const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_OPENROUTER_APP_TITLE: &str = "Claw Code";
 const REQUEST_ID_HEADER: &str = "request-id";
 const ALT_REQUEST_ID_HEADER: &str = "x-request-id";
-const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_millis(200);
-const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(2);
+// Surcharges passagères des fournisseurs (429 « temporarily rate-limited », 503) :
+// quelques secondes d'attente avant de basculer sur un autre modèle.
+const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_millis(800);
+const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(4);
+/// Attente maximale de la remise à zéro d'une limite par minute.
+const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(70);
 const DEFAULT_MAX_RETRIES: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,7 +303,15 @@ impl OpenAiCompatClient {
                 break retryable_error;
             }
 
-            tokio::time::sleep(self.backoff_for_attempt(attempts)?).await;
+            // Limite par minute (20 requêtes pour les modèles gratuits d'OpenRouter) :
+            // attendre sa remise à zéro plutôt que d'échouer. Au-delà (quota du
+            // jour), on rend l'erreur pour basculer sur un autre modèle.
+            let delay = match retryable_error.rate_limit_reset() {
+                Some(reset) if reset <= MAX_RATE_LIMIT_WAIT => reset + Duration::from_millis(500),
+                Some(_) => break retryable_error,
+                None => self.backoff_for_attempt(attempts)?,
+            };
+            tokio::time::sleep(delay).await;
         };
 
         Err(ApiError::RetriesExhausted {
@@ -611,9 +623,17 @@ impl StreamState {
         // OpenRouter signale les erreurs survenues en cours de flux dans un chunk
         // `{"error": {...}}` après l'en-tête 200 : on les remonte comme erreur d'API.
         if let Some(error) = chunk.error {
-            let body = serde_json::to_string(&error).unwrap_or_default();
+            // Code HTTP du fournisseur s'il est donné (503 surcharge, 429 limite).
+            let status = error
+                .get("code")
+                .and_then(Value::as_u64)
+                .and_then(|code| u16::try_from(code).ok())
+                .and_then(|code| reqwest::StatusCode::from_u16(code).ok())
+                .filter(|status| status.is_client_error() || status.is_server_error())
+                .unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
+            let body = json!({ "error": error }).to_string();
             return Err(ApiError::Api {
-                status: reqwest::StatusCode::BAD_GATEWAY,
+                status,
                 error_type: error.get("code").map(|code| match code {
                     Value::String(value) => value.clone(),
                     other => other.to_string(),
@@ -623,7 +643,7 @@ impl StreamState {
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned),
                 body,
-                retryable: false,
+                retryable: is_retryable_status(status),
             });
         }
 
@@ -1613,6 +1633,34 @@ mod tests {
             .ingest_chunk(chunk)
             .expect_err("un chunk d'erreur doit échouer");
         assert!(error.to_string().contains("Provider disconnected"));
+
+        // Surcharge du fournisseur : code conservé, erreur réessayable.
+        let chunk = parse_sse_frame(
+            "data: {\"error\":{\"code\":503,\"message\":\"Upstream error from Nvidia: Service temporarily overloaded\"}}",
+        )
+        .expect("frame valide")
+        .expect("chunk présent");
+        let error = StreamState::new("x/y".to_string())
+            .ingest_chunk(chunk)
+            .expect_err("surcharge");
+        assert!(error.is_retryable(), "{error}");
+        assert!(matches!(error, ApiError::Api { status, .. } if status.as_u16() == 503));
+
+        // Limite par minute : délai de remise à zéro lu dans les en-têtes rapportés.
+        let reset_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("horloge")
+            .as_millis()
+            + 12_000;
+        let frame = format!(
+            "data: {{\"error\":{{\"code\":429,\"message\":\"Rate limit exceeded: free-models-per-min.\",\"metadata\":{{\"headers\":{{\"X-RateLimit-Limit\":\"20\",\"X-RateLimit-Reset\":\"{reset_ms}\"}}}}}}}}"
+        );
+        let chunk = parse_sse_frame(&frame).expect("frame").expect("chunk");
+        let error = StreamState::new("x/y".to_string())
+            .ingest_chunk(chunk)
+            .expect_err("limite");
+        let wait = error.rate_limit_reset().expect("délai annoncé");
+        assert!(wait.as_secs() >= 10 && wait.as_secs() <= 12, "{wait:?}");
     }
 
     /// Flux d'une réponse en texte découpée en morceaux, outils natifs proposés.

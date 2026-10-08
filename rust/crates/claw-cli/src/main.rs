@@ -61,6 +61,10 @@ fn default_model() -> String {
     {
         return resolve_model_alias(model.trim());
     }
+    // Les tests ne dépendent ni de la config de l'utilisateur ni de ses clés.
+    if cfg!(test) {
+        return DEFAULT_MODEL.to_string();
+    }
     if let Some(model) = env::current_dir()
         .ok()
         .and_then(|cwd| ConfigLoader::default_for(&cwd).load().ok())
@@ -196,6 +200,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|cwd| ConfigLoader::default_for(&cwd).load().ok());
     if let Some(config) = &startup_config {
         models::register_configured_providers(config);
+    }
+    // Modèles mis de côté longtemps (quota du jour épuisé, modèle refusé à
+    // Claw) : retenus d'un lancement à l'autre pour ne pas les réessayer.
+    if let Ok(cwd) = env::current_dir() {
+        api::set_cooldown_store(
+            ConfigLoader::default_for(&cwd)
+                .config_home()
+                .join("model-cooldowns.json"),
+        );
     }
     init_reasoning_effort(startup_config.as_ref());
     let args: Vec<String> = env::args().skip(1).collect();

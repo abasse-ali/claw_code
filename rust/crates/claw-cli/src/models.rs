@@ -101,13 +101,16 @@ pub fn register_cached_limits() {
     });
 }
 
-/// Meilleur modèle gratuit pour le code (télécharge le catalogue si besoin).
+/// Meilleur modèle gratuit pour le code (télécharge le catalogue si besoin),
+/// en évitant ceux mis de côté (refusés à Claw, quota épuisé…).
 pub fn best_free_coding_model() -> Option<String> {
     let (catalog, _) = catalog(false).ok()?;
-    api::rank_free_coding_models(&catalog)
-        .into_iter()
-        .next()
-        .map(|entry| entry.model.id)
+    let ranked = api::rank_free_coding_models(&catalog);
+    ranked
+        .iter()
+        .find(|entry| api::model_available(&entry.model.id))
+        .or_else(|| ranked.first())
+        .map(|entry| entry.model.id.clone())
 }
 
 fn format_context(tokens: Option<u64>) -> String {
@@ -139,6 +142,7 @@ pub fn ranked_free_coding_models(limit: usize) -> Vec<String> {
         .map(|catalog| {
             api::rank_free_coding_models(&catalog)
                 .into_iter()
+                .filter(|entry| api::model_available(&entry.model.id))
                 .take(limit)
                 .map(|entry| entry.model.id)
                 .collect()

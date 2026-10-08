@@ -291,7 +291,11 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
   (ou `CLAW_FALLBACK_MODELS`, liste séparée par des virgules). Sans liste, un modèle gratuit
   d'OpenRouter bascule sur les suivants du classement ; `"free"` dans la liste insère ce
   classement à sa place : `["free", "ollama:qwen2.5-coder:7b"]` essaie les meilleurs modèles
-  gratuits puis le modèle local (hors ligne, quota épuisé). Un modèle en échec est mis de côté un
+  gratuits puis le modèle local (hors ligne, quota épuisé). Limite par minute (20 requêtes pour
+  les modèles gratuits d'OpenRouter) : Claw attend sa remise à zéro ; surcharge passagère d'un
+  fournisseur : quelques réessais sur place ; quota du jour épuisé ou modèle refusé à Claw (403,
+  « only available on agentic harnesses ») : mis de côté jusqu'à la remise à zéro ou 24 h, et
+  retenu d'un lancement à l'autre (`~/.claw/model-cooldowns.json`). Un modèle en échec est mis de côté un
   moment ; `CLAW_FALLBACK=0` désactive la bascule.
 - `"smallModel"` (ou `CLAW_SMALL_MODEL`) : petit modèle utilisé pour les résumés de compaction.
 

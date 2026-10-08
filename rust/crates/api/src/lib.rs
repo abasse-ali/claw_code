@@ -28,8 +28,8 @@ pub use providers::{
     max_tokens_for_model, resolve_model_alias, ProviderKind,
 };
 pub use routing::{
-    mark_model_unavailable, model_available, reset_model_cooldowns, ClientFactory, ModelChain,
-    OpenedStream,
+    mark_model_unavailable, model_available, reset_model_cooldowns, set_cooldown_store,
+    ClientFactory, ModelChain, OpenedStream,
 };
 pub use sse::{parse_frame, SseParser};
 pub use types::{

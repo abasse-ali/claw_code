@@ -4,8 +4,9 @@
 //! pour ne pas le réessayer à chaque tour.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::client::{MessageStream, ProviderClient};
 use crate::error::ApiError;
@@ -15,7 +16,64 @@ use crate::types::{MessageRequest, MessageResponse, StreamEvent};
 /// (il est commun à tous les modèles `:free`).
 const OPENROUTER_FREE_KEY: &str = "openrouter:*:free";
 
+/// Mises de côté assez longues pour être gardées d'un lancement à l'autre
+/// (quota du jour épuisé, modèle refusé à Claw).
+const PERSISTED_COOLDOWN: Duration = Duration::from_secs(600);
+
+/// Réessais sur place d'un modèle surchargé (erreur arrivée dans le flux).
+const IN_PLACE_RETRIES: u32 = 2;
+
 static COOLDOWN: Mutex<BTreeMap<String, Instant>> = Mutex::new(BTreeMap::new());
+static COOLDOWN_STORE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+fn now_epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// Fichier où garder les longues mises de côté : celles encore valides sont
+/// rechargées, les suivantes y sont enregistrées.
+pub fn set_cooldown_store(path: PathBuf) {
+    if let Some(entries) = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<BTreeMap<String, u64>>(&text).ok())
+    {
+        let now = now_epoch_secs();
+        with_cooldown(|map| {
+            for (model, until) in entries.into_iter().filter(|(_, until)| *until > now) {
+                map.insert(model, Instant::now() + Duration::from_secs(until - now));
+            }
+        });
+    }
+    *COOLDOWN_STORE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path);
+}
+
+fn persist_long_cooldowns() {
+    let Some(path) = COOLDOWN_STORE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    else {
+        return;
+    };
+    let (now, epoch) = (Instant::now(), now_epoch_secs());
+    let entries: BTreeMap<String, u64> = with_cooldown(|map| {
+        map.iter()
+            .map(|(model, until)| (model, until.saturating_duration_since(now)))
+            .filter(|(_, left)| *left >= PERSISTED_COOLDOWN)
+            .map(|(model, left)| (model.clone(), epoch + left.as_secs()))
+            .collect()
+    });
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string_pretty(&entries) {
+        let _ = std::fs::write(path, text);
+    }
+}
 
 fn with_cooldown<T>(action: impl FnOnce(&mut BTreeMap<String, Instant>) -> T) -> T {
     action(
@@ -62,9 +120,13 @@ impl ApiError {
     #[must_use]
     pub fn is_fallback_worthy(&self) -> bool {
         match self {
+            // 403 : modèle réservé à certaines applications (« only available on
+            // agentic harnesses ») ou interdit à cette clé.
             Self::Api { status, .. } => {
-                matches!(status.as_u16(), 402 | 404 | 408 | 409 | 429 | 500..=599)
-                    || error_text(self).contains("rate limit")
+                matches!(
+                    status.as_u16(),
+                    402 | 403 | 404 | 408 | 409 | 429 | 500..=599
+                ) || error_text(self).contains("rate limit")
             }
             Self::RetriesExhausted { last_error, .. } => last_error.is_fallback_worthy(),
             Self::Http(error) => error.is_connect() || error.is_timeout() || error.is_request(),
@@ -78,11 +140,25 @@ impl ApiError {
     }
 }
 
-/// Durée de mise de côté selon l'erreur.
+fn api_status(error: &ApiError) -> Option<u16> {
+    match error {
+        ApiError::Api { status, .. } => Some(status.as_u16()),
+        ApiError::RetriesExhausted { last_error, .. } => api_status(last_error),
+        _ => None,
+    }
+}
+
+/// Durée de mise de côté selon l'erreur : jusqu'à la remise à zéro annoncée
+/// par le serveur, sinon selon le type d'erreur.
 fn cooldown_for(error: &ApiError) -> Duration {
     let text = error_text(error);
-    if text.contains("per-day") || text.contains("per day") || text.contains("daily") {
-        Duration::from_secs(3_600)
+    if let Some(reset) = error.rate_limit_reset() {
+        reset.max(Duration::from_secs(30))
+    } else if api_status(error) == Some(403) {
+        Duration::from_secs(24 * 3_600)
+    } else if text.contains("per-day") || text.contains("per day") || text.contains("daily") {
+        // Les quotas du jour d'OpenRouter repartent à minuit UTC.
+        Duration::from_secs(86_400 - now_epoch_secs() % 86_400 + 60)
     } else if text.contains("429") || text.contains("rate limit") {
         Duration::from_secs(90)
     } else {
@@ -98,6 +174,29 @@ fn record_failure(model: &str, error: &ApiError) {
         && (text.contains("free-models-per-day") || text.contains("per-day"))
     {
         mark_model_unavailable(OPENROUTER_FREE_KEY, duration);
+    }
+    if duration >= PERSISTED_COOLDOWN {
+        persist_long_cooldowns();
+    }
+}
+
+/// Erreur passagère arrivée dans le flux (surcharge du fournisseur) : le même
+/// modèle peut répondre quelques secondes plus tard. Les erreurs HTTP sont déjà
+/// réessayées par le client (`RetriesExhausted`).
+fn retry_in_place_delay(error: &ApiError, attempt: u32) -> Option<Duration> {
+    let ApiError::Api { status, .. } = error else {
+        return None;
+    };
+    if !error.is_retryable() || attempt > IN_PLACE_RETRIES {
+        return None;
+    }
+    match error.rate_limit_reset() {
+        Some(reset) if reset <= Duration::from_secs(70) => Some(reset + Duration::from_millis(500)),
+        Some(_) => None,
+        None if status.as_u16() == 429 || status.is_server_error() => {
+            Some(Duration::from_secs(2 * u64::from(attempt)))
+        }
+        None => None,
     }
 }
 
@@ -192,14 +291,25 @@ impl ModelChain {
         let mut last_error = None;
         for (index, model) in order.iter().enumerate() {
             let is_last = index + 1 == order.len();
-            let attempt = async {
-                let client = self.client(model)?;
-                let mut stream = client.stream_message(&build(model)).await?;
-                // Certaines erreurs (quota OpenRouter) arrivent dans le flux.
-                let first_event = stream.next_event().await?;
-                Ok::<_, ApiError>((stream, first_event))
-            }
-            .await;
+            let mut tries = 0;
+            let attempt = loop {
+                tries += 1;
+                let attempt = async {
+                    let client = self.client(model)?;
+                    let mut stream = client.stream_message(&build(model)).await?;
+                    // Certaines erreurs (quota, surcharge) arrivent dans le flux.
+                    let first_event = stream.next_event().await?;
+                    Ok::<_, ApiError>((stream, first_event))
+                }
+                .await;
+                match &attempt {
+                    Err(error) => match retry_in_place_delay(error, tries) {
+                        Some(delay) => tokio::time::sleep(delay).await,
+                        None => break attempt,
+                    },
+                    Ok(_) => break attempt,
+                }
+            };
             match attempt {
                 Ok((stream, first_event)) => {
                     return Ok(OpenedStream {
@@ -309,5 +419,93 @@ mod tests {
         mark_model_unavailable("a/x:free", Duration::from_secs(60));
         assert_eq!(chain.attempt_order(), ["b/y:free", "a/x:free"]);
         reset_model_cooldowns();
+    }
+
+    fn api_error(status: u16, body: &str) -> crate::error::ApiError {
+        crate::error::ApiError::Api {
+            status: reqwest::StatusCode::from_u16(status).expect("statut"),
+            error_type: None,
+            message: None,
+            body: body.to_string(),
+            retryable: matches!(status, 429 | 500..=599),
+        }
+    }
+
+    #[test]
+    fn restricted_and_rate_limited_models_are_set_aside_for_the_right_time() {
+        let restricted = api_error(
+            403,
+            r#"{"error":{"message":"inkling:free is only available on agentic harnesses."}}"#,
+        );
+        assert!(restricted.is_fallback_worthy());
+        assert_eq!(
+            super::cooldown_for(&restricted),
+            Duration::from_secs(24 * 3_600)
+        );
+
+        let reset_ms = (super::now_epoch_secs() + 40) * 1_000;
+        let per_minute = api_error(
+            429,
+            &format!(
+                r#"{{"error":{{"metadata":{{"headers":{{"X-RateLimit-Reset":"{reset_ms}"}}}}}}}}"#
+            ),
+        );
+        let wait = super::cooldown_for(&per_minute);
+        assert!(
+            wait <= Duration::from_secs(40) && wait >= Duration::from_secs(30),
+            "{wait:?}"
+        );
+
+        // Surcharge dans le flux : réessayée sur place, deux fois au plus.
+        let overloaded = api_error(503, "{}");
+        assert_eq!(
+            super::retry_in_place_delay(&overloaded, 1),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(super::retry_in_place_delay(&overloaded, 3), None);
+        // Déjà réessayée par le client HTTP, ou quota du jour : on bascule.
+        let exhausted = crate::error::ApiError::RetriesExhausted {
+            attempts: 3,
+            last_error: Box::new(api_error(503, "{}")),
+        };
+        assert_eq!(super::retry_in_place_delay(&exhausted, 1), None);
+        let tomorrow_ms = (super::now_epoch_secs() + 7_200) * 1_000;
+        let per_day = api_error(
+            429,
+            &format!(
+                r#"{{"error":{{"metadata":{{"headers":{{"X-RateLimit-Reset":"{tomorrow_ms}"}}}}}}}}"#
+            ),
+        );
+        assert_eq!(super::retry_in_place_delay(&per_day, 1), None);
+    }
+
+    #[test]
+    fn long_cooldowns_survive_a_restart() {
+        reset_model_cooldowns();
+        let store = std::env::temp_dir().join(format!(
+            "claw-cooldowns-{}-{}.json",
+            std::process::id(),
+            super::now_epoch_secs()
+        ));
+        super::set_cooldown_store(store.clone());
+        super::record_failure(
+            "thinkingmachines/inkling:free",
+            &api_error(
+                403,
+                r#"{"error":{"message":"only available on agentic harnesses"}}"#,
+            ),
+        );
+        super::record_failure("court/modele:free", &api_error(503, "{}"));
+        // Nouveau lancement : seule la longue mise de côté revient.
+        reset_model_cooldowns();
+        assert!(model_available("thinkingmachines/inkling:free"));
+        super::set_cooldown_store(store.clone());
+        assert!(!model_available("thinkingmachines/inkling:free"));
+        assert!(model_available("court/modele:free"));
+        *super::COOLDOWN_STORE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        reset_model_cooldowns();
+        let _ = std::fs::remove_file(store);
     }
 }
