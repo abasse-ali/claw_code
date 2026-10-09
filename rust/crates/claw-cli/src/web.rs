@@ -126,6 +126,20 @@ enum WebEvent {
     Credits {
         credits: serde_json::Value,
     },
+    /// Le modèle de la session ne répond plus, ou l'agent n'avance plus :
+    /// l'utilisateur fait réessayer le même modèle, en choisit un autre, ou
+    /// arrête le tour (`POST /api/model-question`).
+    ModelQuestion {
+        id: u64,
+        model: String,
+        reason: String,
+        stuck: bool,
+        suggestions: Vec<String>,
+    },
+    ModelQuestionResolved {
+        id: u64,
+        decision: String,
+    },
     /// Le modèle vient de répondre sans appeler d'outil : sa réponse finale,
     /// sauf si un contrôle de Claw le renvoie au travail.
     AnswerDrafted,
@@ -206,6 +220,13 @@ enum PermissionReply {
     Deny(Option<String>),
 }
 
+/// Réponse à la question sur le modèle.
+enum ModelReply {
+    Retry,
+    Switch(String),
+    Stop,
+}
+
 enum WorkerCommand {
     Message(String, Vec<runtime::attachments::ImageAttachment>),
     SetModel(String),
@@ -222,6 +243,11 @@ struct WebApp {
     commands: mpsc::Sender<WorkerCommand>,
     view: Arc<Mutex<SharedView>>,
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<PermissionReply>>>>,
+    /// Questions sur le modèle en attente de réponse.
+    pending_models: Arc<Mutex<HashMap<u64, mpsc::Sender<ModelReply>>>>,
+    /// Modèle choisi par l'utilisateur pendant un tour : il devient celui de
+    /// la session à la fin du tour.
+    chosen_model: Arc<Mutex<Option<String>>>,
     next_permission_id: Arc<AtomicU64>,
     /// Pages ouvertes (navigateur, panneau de VS Code), sans les abonnements
     /// de la barre d'état (`?role=status`).
@@ -461,6 +487,81 @@ impl PermissionPrompter for WebPrompter {
     }
 }
 
+/// Pose dans la page la question « réessayer, changer de modèle ou arrêter »
+/// et attend la réponse (15 min au plus, ou jusqu'à l'interruption du tour).
+struct WebModelPrompter {
+    app: WebApp,
+}
+
+impl crate::model_switch::ModelSwitchPrompter for WebModelPrompter {
+    fn ask(
+        &self,
+        question: &crate::model_switch::ModelQuestion,
+    ) -> crate::model_switch::ModelDecision {
+        use crate::model_switch::ModelDecision;
+        let id = self.app.next_permission_id.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel();
+        self.app
+            .pending_models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, sender);
+        self.app.publish(WebEvent::ModelQuestion {
+            id,
+            model: question.model.clone(),
+            reason: question.reason.clone(),
+            stuck: question.stuck,
+            suggestions: question.suggestions.clone(),
+        });
+        let deadline = std::time::Instant::now() + PERMISSION_TIMEOUT;
+        let reply = loop {
+            match receiver.recv_timeout(Duration::from_millis(300)) {
+                Err(mpsc::RecvTimeoutError::Timeout)
+                    if !runtime::interrupt::interrupt_requested()
+                        && std::time::Instant::now() < deadline => {}
+                other => break other,
+            }
+        };
+        self.app
+            .pending_models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id);
+        let (decision, label) = match reply {
+            Ok(ModelReply::Retry) if question.stuck => {
+                (ModelDecision::Retry, "le même modèle continue".to_string())
+            }
+            Ok(ModelReply::Retry) => (
+                ModelDecision::Retry,
+                "nouvel essai avec le même modèle".to_string(),
+            ),
+            Ok(ModelReply::Switch(model)) => {
+                let model = resolve_model_alias(model.trim());
+                *self
+                    .app
+                    .chosen_model
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(model.clone());
+                let label = format!("modèle choisi : {model}");
+                (ModelDecision::Switch(model), label)
+            }
+            Ok(ModelReply::Stop) => (ModelDecision::Stop, "tour arrêté".to_string()),
+            Err(_) if runtime::interrupt::interrupt_requested() => {
+                (ModelDecision::Stop, "tour interrompu".to_string())
+            }
+            Err(_) => (
+                ModelDecision::Stop,
+                "pas de réponse : tour arrêté".to_string(),
+            ),
+        };
+        self.app.publish(WebEvent::ModelQuestionResolved {
+            id,
+            decision: label,
+        });
+        decision
+    }
+}
+
 type WebRuntime = ConversationRuntime<DefaultRuntimeClient, CliToolExecutor>;
 
 /// Thread propriétaire de la conversation : il traite les commandes une à une.
@@ -484,6 +585,7 @@ fn web_ui(app: &WebApp, mode: PermissionMode) -> RuntimeUi {
                 mode,
             }) as tools::SubagentPrompter
         }),
+        model_prompter: Some(Arc::new(WebModelPrompter { app: app.clone() })),
     }
 }
 
@@ -649,6 +751,18 @@ impl Worker {
             .runtime
             .run_turn_with_images(prompt, images, Some(&mut prompter));
         self.persist();
+        // Modèle choisi par l'utilisateur pendant le tour : il reste celui de la session.
+        let chosen = self
+            .app
+            .chosen_model
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(model) = chosen.filter(|model| *model != self.model) {
+            if let Err(error) = self.set_model(&model) {
+                self.info(format!("Changement de modèle impossible : {error}"));
+            }
+        }
         // Plan approuvé pendant le tour : la session reste en workspace-write.
         let active = self.runtime.permission_policy().active_mode();
         if active != self.permission_mode {
@@ -932,6 +1046,15 @@ struct TokenQuery {
 }
 
 #[derive(Deserialize)]
+struct ModelQuestionBody {
+    id: u64,
+    /// `retry`, `switch` (avec `model`) ou `stop`.
+    decision: String,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct EditorDiagnosticsBody {
     id: u64,
     #[serde(default)]
@@ -1167,6 +1290,36 @@ async fn post_permission(
         .lock_pending()
         .remove(&body.id)
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "demande déjà traitée ou expirée"))?;
+    let _ = sender.send(reply);
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Réponse de l'utilisateur à la question sur le modèle.
+async fn post_model_question(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Json(body): Json<ModelQuestionBody>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    let reply = match body.decision.as_str() {
+        "retry" => ModelReply::Retry,
+        "stop" => ModelReply::Stop,
+        "switch" => {
+            let model = body
+                .model
+                .map(|model| model.trim().to_string())
+                .filter(|model| !model.is_empty())
+                .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "modèle manquant"))?;
+            ModelReply::Switch(model)
+        }
+        _ => return Err(api_error(StatusCode::BAD_REQUEST, "décision inconnue")),
+    };
+    let sender = app
+        .pending_models
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&body.id)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "question déjà traitée ou expirée"))?;
     let _ = sender.send(reply);
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1553,6 +1706,7 @@ fn router(app: WebApp) -> Router {
             post(post_message).layer(DefaultBodyLimit::max(48 * 1024 * 1024)),
         )
         .route("/api/permission", post(post_permission))
+        .route("/api/model-question", post(post_model_question))
         .route("/api/model", post(post_model).get(get_model_info))
         .route("/api/permissions", post(post_permissions))
         .route("/api/new", post(post_new))
@@ -1597,6 +1751,8 @@ pub(crate) fn serve(options: ServeOptions) -> Result<(), Box<dyn std::error::Err
         commands,
         view: Arc::new(Mutex::new(SharedView::default())),
         pending: Arc::new(Mutex::new(HashMap::new())),
+        pending_models: Arc::new(Mutex::new(HashMap::new())),
+        chosen_model: Arc::new(Mutex::new(None)),
         next_permission_id: Arc::new(AtomicU64::new(1)),
         page_viewers: Arc::new(AtomicU64::new(0)),
     };

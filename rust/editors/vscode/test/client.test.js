@@ -169,13 +169,50 @@ function get(port, path) {
       && fs.readFileSync(target, "utf8") === "deuxième version\n",
     `${JSON.stringify(asked)} ${JSON.stringify(events.filter((event) => ["notice", "info", "error", "turn_done", "tool_call"].includes(event.type)).slice(-12))}`);
 
-  // Le fournisseur du modèle lâche en cours de réponse (504) : la requête repart sur le modèle de secours.
-  const fragile = new ClawServer({
+  // Le fournisseur du modèle lâche en cours de réponse (504). Claw ne change pas de modèle
+  // de lui-même : le même modèle reprend une fois, puis la question est posée.
+  const asking = new ClawServer({
     clawPath: claw,
     cwd,
     model: "ollama:panne",
     permissionMode: "read-only",
     env: { ...env, CLAW_FALLBACK_MODELS: "ollama:mock" },
+  });
+  await asking.start();
+  const askingEvents = [];
+  asking.subscribe((event) => askingEvents.push(event));
+  await wait("abonnement", () => askingEvents.some((event) => event.type === "status"));
+  await asking.send("Réponds bonjour malgré la panne");
+  await wait("question sur le modèle", () => askingEvents.some((event) => event.type === "model_question"), 160);
+  const question = askingEvents.find((event) => event.type === "model_question") || { suggestions: [] };
+  const retried = askingEvents.some((event) => event.type === "notice"
+    && event.text === "ollama:panne : le fournisseur ne répond pas (erreur 504). Nouvel essai avec le même modèle");
+  check("après une panne, le même modèle reprend puis Claw demande avant d'en changer",
+    retried && question.model === "ollama:panne" && question.stuck === false && question.reason === "le fournisseur ne répond pas (erreur 504)"
+      && question.suggestions.includes("ollama:mock") && !askingEvents.some((event) => event.type === "assistant_text"),
+    JSON.stringify(askingEvents.filter((event) => ["notice", "model_question", "error"].includes(event.type)).slice(-4)));
+  await asking.request("POST", "/api/model-question", { id: question.id, decision: "switch", model: "ollama:mock" });
+  await wait("fin du tour avec le modèle choisi", () => askingEvents.some((event) => event.type === "turn_done"), 160);
+  await wait("modèle de la session", () => {
+    const statuses = askingEvents.filter((event) => event.type === "status" && event.status);
+    return statuses.length > 0 && statuses[statuses.length - 1].status.model === "ollama:mock" && !statuses[statuses.length - 1].status.busy;
+  });
+  const lastStatus = askingEvents.filter((event) => event.type === "status" && event.status).pop() || { status: {} };
+  const resolved = askingEvents.find((event) => event.type === "model_question_resolved") || {};
+  check("le modèle choisi prend la suite et devient celui de la session",
+    askingEvents.filter((event) => event.type === "assistant_text").map((event) => event.text).join("").includes("Réponse du modèle factice")
+      && resolved.decision === "modèle choisi : ollama:mock" && lastStatus.status.model === "ollama:mock"
+      && !askingEvents.some((event) => event.type === "error"),
+    JSON.stringify([resolved, lastStatus.status.model]));
+  asking.stop();
+
+  // Avec "modelSwitch": "auto", la requête repart d'elle-même sur le modèle de secours.
+  const fragile = new ClawServer({
+    clawPath: claw,
+    cwd,
+    model: "ollama:panne",
+    permissionMode: "read-only",
+    env: { ...env, CLAW_FALLBACK_MODELS: "ollama:mock", CLAW_MODEL_SWITCH: "auto" },
   });
   await fragile.start();
   const fragileEvents = [];
@@ -185,7 +222,7 @@ function get(port, path) {
   await wait("fin du tour après la panne", () => fragileEvents.some((event) => event.type === "turn_done"), 160);
   const switched = fragileEvents.find((event) => event.type === "notice" && event.text.includes("a cessé de répondre"));
   const answered = fragileEvents.filter((event) => event.type === "assistant_text").map((event) => event.text).join("");
-  check("une panne du fournisseur en cours de réponse fait repartir la requête sur le modèle de secours",
+  check("en mode automatique, la requête repart seule sur le modèle de secours",
     Boolean(switched) && switched.text === "ollama:panne a cessé de répondre (erreur 504) → la requête repart sur ollama:mock"
       && answered.includes("Réponse du modèle factice") && !fragileEvents.some((event) => event.type === "error"),
     JSON.stringify(fragileEvents.filter((event) => ["notice", "error", "assistant_text", "turn_done"].includes(event.type)).slice(-6)));

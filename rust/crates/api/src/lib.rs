@@ -30,8 +30,9 @@ pub use providers::{
     max_tokens_for_model, resolve_model_alias, ProviderKind,
 };
 pub use routing::{
-    mark_model_unavailable, model_available, reset_model_cooldowns, set_cooldown_store,
-    upstream_failure_status, ClientFactory, ModelChain, OpenedStream, UPSTREAM_SWITCHES,
+    mark_model_unavailable, model_available, model_failure_reason, reset_model_cooldowns,
+    set_cooldown_store, upstream_failure_status, ClientFactory, ModelChain, OpenedStream,
+    UPSTREAM_SWITCHES,
 };
 pub use sse::{parse_frame, SseParser};
 pub use types::{

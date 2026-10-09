@@ -321,6 +321,20 @@
   .dock-inner { max-width: 800px; margin: 0 auto; position: relative; }
   .activity { display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px 12px; margin-bottom: 8px; border-radius: var(--r); border: 1px solid var(--border); background: var(--surface); font-size: 13px; animation: pop .16s var(--ease); }
   .activity .what { color: var(--text-2); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Question en attente (autorisation, modèle) : épinglée au-dessus de la saisie, toujours visible. */
+  .ask { display: flex; flex-direction: column; gap: 9px; padding: 11px 12px; margin-bottom: 8px; border-radius: var(--r); border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--border)); background: var(--warn-soft); font-size: 13px; animation: pop .16s var(--ease); max-height: 60vh; overflow: auto; }
+  .ask .what { font-weight: 650; display: flex; align-items: center; gap: 8px; }
+  .ask .detail { color: var(--text-2); line-height: 1.45; }
+  .ask .detail.mono { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ask .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .ask .actions .btn { min-height: 34px; }
+  .ask .actions kbd { margin-left: 2px; }
+  .ask .choices { display: flex; flex-direction: column; gap: 6px; }
+  .ask .choice { display: flex; align-items: baseline; gap: 8px; width: 100%; height: auto; min-height: 36px; padding: 7px 10px; text-align: left; justify-content: flex-start; flex-wrap: wrap; }
+  .ask .choice small { color: var(--text-3); font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; }
+  .ask .choice .measured { font-size: 11.5px; color: var(--ok); margin-left: auto; }
+  .ask .other { display: flex; gap: 8px; }
+  .ask .other input { flex: 1; min-width: 0; height: 34px; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface-2); color: var(--text); padding: 0 10px; outline: none; font-family: var(--mono); font-size: 12.5px; }
   .activity .time { color: var(--text-3); font-variant-numeric: tabular-nums; }
   .spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--accent-soft); border-top-color: var(--accent); animation: spin .7s linear infinite; flex: none; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -454,6 +468,7 @@
   <button id="to-bottom" type="button" hidden></button>
   <div class="dock-inner">
     <div id="suggestions" hidden></div>
+    <div class="ask" id="ask" hidden></div>
     <div class="activity" id="activity" hidden>
       <div class="spin"></div>
       <span class="what" id="activity-what">Claw travaille…</span>
@@ -1246,7 +1261,8 @@
     card.append(title, el("pre", null, event.target), el("div", "meta", "Mode actuel : " + modeLabel(event.mode)), actions, feedback);
     append(card);
     pendingPermissions++;
-    activePermission = { id: event.id, send, hasAlways: !!always };
+    activePermission = { id: event.id, send, hasAlways: !!always, tool: event.tool, target: event.target || "", rule: event.suggested_rule || "" };
+    renderAsk();
     updateTitle();
     scrollToBottom(true);
     once.focus({ preventScroll: true });
@@ -1260,7 +1276,109 @@
     card.querySelector(".meta").textContent = "→ " + label;
     pendingPermissions = Math.max(0, pendingPermissions - 1);
     if (activePermission && activePermission.id === id) activePermission = null;
+    renderAsk();
     updateTitle();
+  }
+
+  // ---------------------------------------------------------------- question épinglée
+  // La question en attente (autorisation, changement de modèle) reste
+  // au-dessus de la saisie : ses boutons sont visibles où que soit le fil.
+  let activeModelQuestion = null;
+  function renderAsk() {
+    const bar = $("ask");
+    bar.textContent = "";
+    const question = activeModelQuestion;
+    const permission = question ? null : activePermission;
+    bar.hidden = !question && !permission;
+    $("activity").hidden = !status.busy || !bar.hidden;
+    if (bar.hidden) return;
+    const what = el("div", "what");
+    const actions = el("div", "actions");
+    const button = (label, className, action, key) => {
+      const node = el("button", "btn " + className, label);
+      node.type = "button";
+      if (key) node.append(el("kbd", null, key));
+      node.onclick = action;
+      actions.appendChild(node);
+      return node;
+    };
+    if (permission) {
+      what.innerHTML = svg("shield");
+      what.append("Autorisation demandée · " + permission.tool);
+      const detail = el("div", "detail mono", permission.target.replace(/\s+/g, " ").trim());
+      detail.title = permission.target;
+      button("Autoriser", "primary", () => permission.send("once"), "Entrée");
+      if (permission.hasAlways) button("Toujours", "", () => permission.send("always"), "A").title = "Toujours : " + permission.rule;
+      button("Refuser", "danger", () => permission.send("deny"), "Échap");
+      bar.append(what, detail, actions);
+      return;
+    }
+    const name = modelName(question.model);
+    what.innerHTML = svg("alert");
+    what.append(question.stuck ? "L'agent n'avance plus avec " + name : name + " ne répond plus");
+    const detail = el("div", "detail", question.stuck
+      ? "Deux essais n'ont pas suffi. Le même modèle peut continuer, ou vous confiez la suite à un autre."
+      : "Raison : " + question.reason + ". Le même modèle peut réessayer, ou vous en choisissez un autre.");
+    const answer = async (decision, model) => {
+      for (const node of bar.querySelectorAll("button")) node.disabled = true;
+      try {
+        await api("/api/model-question", { id: question.id, decision, model });
+      } catch (error) {
+        toast("Réponse non transmise : " + error.message);
+        for (const node of bar.querySelectorAll("button")) node.disabled = false;
+      }
+    };
+    if (question.choosing) {
+      const choices = el("div", "choices");
+      for (const id of question.suggestions) {
+        const choice = el("button", "btn choice");
+        choice.type = "button";
+        choice.append(el("b", null, modelName(id)), el("small", null, id));
+        if (shortModel(id).free) choice.append(el("span", "measured", "gratuit"));
+        choice.onclick = () => answer("switch", id);
+        choices.appendChild(choice);
+      }
+      const other = el("div", "other");
+      const field = document.createElement("input");
+      field.type = "text";
+      field.placeholder = "Autre modèle : identifiant exact";
+      field.setAttribute("aria-label", "Autre modèle");
+      const use = el("button", "btn", "Utiliser");
+      use.type = "button";
+      const useOther = () => { const value = field.value.trim(); if (value) answer("switch", value); };
+      use.onclick = useOther;
+      field.onkeydown = (event) => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); useOther(); } };
+      other.append(field, use);
+      button("Retour", "", () => { question.choosing = false; renderAsk(); });
+      bar.append(what, el("div", "detail", "Quel modèle prend la suite ? Il devient le modèle de la session."), choices, other, actions);
+      return;
+    }
+    button(question.stuck ? "Continuer avec le même modèle" : "Réessayer avec le même modèle", "primary", () => answer("retry"));
+    button("Changer de modèle", "", () => { question.choosing = true; renderAsk(); });
+    button("Arrêter le tour", "danger", () => answer("stop"));
+    bar.append(what, detail, actions);
+  }
+  function addModelQuestion(event) {
+    finishAssistant();
+    const card = el("div", "perm");
+    card.id = "mq-" + event.id;
+    const title = el("div", "card-title");
+    title.innerHTML = svg("alert");
+    title.append(event.stuck ? "L'agent n'avance plus" : "Le modèle ne répond plus");
+    card.append(title, el("pre", null, event.model + " : " + event.reason), el("div", "meta", "Votre réponse est attendue au-dessus de la zone de saisie."));
+    append(card);
+    activeModelQuestion = { id: event.id, model: event.model, reason: event.reason, stuck: !!event.stuck, suggestions: event.suggestions || [], choosing: false };
+    renderAsk();
+    scrollToBottom(true);
+  }
+  function resolveModelQuestion(id, decision) {
+    const card = $("mq-" + id);
+    if (card) {
+      card.classList.add("resolved");
+      card.querySelector(".meta").textContent = "→ " + decision;
+    }
+    if (activeModelQuestion && activeModelQuestion.id === id) activeModelQuestion = null;
+    renderAsk();
   }
 
   // ---------------------------------------------------------------- autres événements
@@ -1292,6 +1410,9 @@
     pendingTools = [];
     pendingPermissions = 0;
     activePermission = null;
+    activeModelQuestion = null;
+    draftAnswer = null;
+    renderAsk();
     logInner.textContent = "";
     const empty = el("div", "empty");
     const logo = el("div", "logo");
@@ -1328,6 +1449,8 @@
       case "tool_result": attachToolResult(event.name, event.output, event.is_error); break;
       case "permission": addPermission(event); break;
       case "permission_resolved": resolvePermission(event.id, event.decision); break;
+      case "model_question": addModelQuestion(event); break;
+      case "model_question_resolved": resolveModelQuestion(event.id, event.decision); break;
       case "info": finishAssistant(); addInfo(event.text); break;
       case "notice": finishAssistant(); addNote(event.text); break;
       case "answer_drafted": markDraftAnswer(); break;
@@ -2325,7 +2448,7 @@
     if (modelChanged) renderModelButton();
     renderModeButton();
     if (next.busy && !busySince) { busySince = Date.now(); setActivity("Claw réfléchit…"); }
-    $("activity").hidden = !next.busy;
+    $("activity").hidden = !next.busy || !$("ask").hidden;
     sendBtn.classList.toggle("stop", !!next.busy);
     sendBtn.innerHTML = svg(next.busy ? "stop" : "arrowUp");
     sendBtn.title = next.busy ? "Arrêter (Échap) - un message tapé partira à la fin du tour" : "Envoyer (Entrée)";
@@ -2548,7 +2671,19 @@
   $("credits").addEventListener("click", openCreditsDialog);
   $("theme-btn").addEventListener("click", cycleTheme);
   $("to-bottom").addEventListener("click", () => scrollToBottom(true));
-  log.addEventListener("scroll", updateToBottom, { passive: true });
+  // Le bas du fil reste visible quand le contenu grandit après coup (une
+  // carte qui s'ouvre) ou que la fenêtre rétrécit : sinon les boutons d'une
+  // demande d'autorisation pouvaient se retrouver sous le bord, hors de vue.
+  let stuckToBottom = true;
+  log.addEventListener("scroll", () => { stuckToBottom = nearBottom(); updateToBottom(); }, { passive: true });
+  if (window.ResizeObserver) {
+    const keepBottom = new ResizeObserver(() => {
+      if (stuckToBottom) log.scrollTop = log.scrollHeight;
+      updateToBottom();
+    });
+    keepBottom.observe(log);
+    keepBottom.observe(logInner);
+  }
   log.addEventListener("click", async (event) => {
     const button = event.target.closest("[data-copy]");
     if (!button) return;

@@ -10,6 +10,7 @@ mod input;
 mod likeness;
 mod live;
 mod mcp_cli;
+mod model_switch;
 mod models;
 mod render;
 mod stream_json;
@@ -2243,6 +2244,7 @@ impl LiveCli {
                 subagent_prompter: Arc::new(|| {
                     Box::new(stream_json::StreamJsonPrompter) as tools::SubagentPrompter
                 }),
+                model_prompter: None,
             }),
         )?;
         stream_json::emit(&json!({
@@ -4840,6 +4842,12 @@ fn build_runtime_with_ui(
     ui: Option<RuntimeUi>,
 ) -> Result<ConversationRuntime<DefaultRuntimeClient, CliToolExecutor>, Box<dyn std::error::Error>>
 {
+    // Dans le terminal, la question se pose si quelqu'un est là pour répondre.
+    let model_prompter = match &ui {
+        Some(ui) => ui.model_prompter.clone(),
+        None if emit_output => model_switch::TerminalModelPrompter::if_interactive(),
+        None => None,
+    };
     let emit_output = emit_output && ui.is_none();
     let observer = ui.as_ref().map(|ui| Arc::clone(&ui.observer));
     let (feature_config, tool_registry) = build_runtime_plugin_state()?;
@@ -4904,7 +4912,8 @@ fn build_runtime_with_ui(
             progress_reporter,
         )?
         .with_observer(observer.clone())
-        .with_start_notice(planner_notice),
+        .with_start_notice(planner_notice)
+        .with_model_prompter(model_prompter),
         CliToolExecutor::new(allowed_tools.clone(), emit_output, tool_registry.clone())
             .with_observer(observer),
         policy,
@@ -5410,6 +5419,9 @@ type SharedObserver = Arc<dyn TurnObserver>;
 struct RuntimeUi {
     observer: SharedObserver,
     subagent_prompter: Arc<dyn Fn() -> tools::SubagentPrompter + Send + Sync>,
+    /// Pose la question « réessayer, changer de modèle ou arrêter » ; `None`
+    /// quand personne n'est là pour répondre (script, protocole d'éditeur).
+    model_prompter: Option<model_switch::SharedModelPrompter>,
 }
 
 struct DefaultRuntimeClient {
@@ -5431,6 +5443,10 @@ struct DefaultRuntimeClient {
     escalation: models::Escalation,
     /// Chaîne habituelle, mise de côté pendant une escalade.
     saved_chain: Option<api::ModelChain>,
+    /// Présent : Claw ne change jamais de modèle sans le demander.
+    model_prompter: Option<model_switch::SharedModelPrompter>,
+    /// Modèles de secours configurés, proposés quand la question se pose.
+    candidates: Vec<String>,
 }
 
 impl DefaultRuntimeClient {
@@ -5480,6 +5496,8 @@ impl DefaultRuntimeClient {
             start_notice: None,
             escalation: models::Escalation::configured(),
             saved_chain: None,
+            model_prompter: None,
+            candidates: Vec::new(),
         })
     }
 
@@ -5491,6 +5509,46 @@ impl DefaultRuntimeClient {
     fn with_start_notice(mut self, notice: Option<String>) -> Self {
         self.start_notice = notice;
         self
+    }
+
+    /// Avec quelqu'un pour répondre (et sauf `"modelSwitch": "auto"`), la
+    /// session ne garde que son modèle : les secours deviennent des
+    /// propositions, faites à l'utilisateur quand le modèle ne répond plus.
+    fn with_model_prompter(mut self, prompter: Option<model_switch::SharedModelPrompter>) -> Self {
+        let Some(prompter) = prompter.filter(|_| model_switch::ask_before_switching()) else {
+            return self;
+        };
+        let models = self.chain.models().to_vec();
+        if let Some((primary, others)) = models.split_first() {
+            self.candidates = others.to_vec();
+            self.chain = api::ModelChain::new(vec![primary.clone()], cli_client_factory());
+            self.model_prompter = Some(prompter);
+        }
+        self
+    }
+
+    /// Modèles proposés à la place de `current` : le gratuit le plus puissant
+    /// d'abord, puis les secours configurés.
+    fn model_suggestions(&self, current: &str) -> Vec<String> {
+        let strongest: Vec<String> = models::Escalation::StrongestFree
+            .target(current)
+            .into_iter()
+            .collect();
+        model_switch::suggestions(current, &strongest, &self.candidates)
+    }
+
+    /// Le modèle choisi par l'utilisateur prend la suite et devient celui de la session.
+    fn switch_to(&mut self, next: &str) {
+        let previous = self.chain.primary().to_string();
+        self.candidates.retain(|model| model != next);
+        if !previous.is_empty() && !self.candidates.contains(&previous) {
+            self.candidates.insert(0, previous);
+        }
+        self.chain = api::ModelChain::new(vec![next.to_string()], cli_client_factory());
+        ACTIVE_MODEL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone_from(&next.to_string());
     }
 }
 
@@ -5602,6 +5660,31 @@ impl ApiClient for DefaultRuntimeClient {
         if self.saved_chain.is_some() {
             return None;
         }
+        // Quelqu'un est là pour décider : Claw propose, il ne change pas seul.
+        if let Some(prompter) = self.model_prompter.clone() {
+            let current = self.chain.primary().to_string();
+            let suggestions = self.model_suggestions(&current);
+            if suggestions.is_empty() {
+                return None;
+            }
+            let question = model_switch::ModelQuestion {
+                model: current,
+                reason: "deux essais n'ont pas suffi".to_string(),
+                stuck: true,
+                suggestions,
+            };
+            return match prompter.ask(&question) {
+                model_switch::ModelDecision::Switch(next) => {
+                    self.switch_to(&next);
+                    Some(next)
+                }
+                model_switch::ModelDecision::Retry => None,
+                model_switch::ModelDecision::Stop => {
+                    runtime::interrupt::request_interrupt();
+                    None
+                }
+            };
+        }
         // Choisi au moment du blocage : le classement et les disponibilités changent.
         let model = self.escalation.target(self.chain.primary())?;
         // Le modèle fort d'abord ; s'il est indisponible, la chaîne habituelle.
@@ -5655,8 +5738,11 @@ impl ApiClient for DefaultRuntimeClient {
         // lâche en cours de réponse (504, surcharge), elle repart sur un autre modèle.
         let mut retries_left = BROKEN_STREAM_RETRIES;
         let mut switches_left = api::UPSTREAM_SWITCHES;
+        // Avant de poser la question, le même modèle reprend une fois de lui-même.
+        let mut same_model_retries = 1_u32;
         let answering = std::cell::RefCell::new(String::new());
         loop {
+            answering.borrow_mut().clear();
             let result: Result<Vec<AssistantEvent>, RuntimeError> = self.runtime.block_on(async {
                 let opened =
                     runtime::interrupt::interruptible(self.chain.open_stream(&build, &mut notify))
@@ -5889,6 +5975,53 @@ impl ApiClient for DefaultRuntimeClient {
                     }
                     notify("Connexion coupée pendant la réponse : nouvelle tentative");
                     std::thread::sleep(Duration::from_millis(1_500));
+                    if emit {
+                        live::show("Réflexion…");
+                    }
+                }
+                // Quelqu'un est là pour décider : le même modèle reprend, et
+                // Claw demande avant d'en changer.
+                Err(error) if self.model_prompter.is_some() => {
+                    let Some(reason) = api::model_failure_reason(&error.to_string()) else {
+                        return Err(error);
+                    };
+                    let Some(prompter) = self.model_prompter.clone() else {
+                        return Err(error);
+                    };
+                    let model = self.chain.primary().to_string();
+                    if emit {
+                        transcript::discard_calls();
+                    }
+                    // Panne en cours de réponse : un nouvel essai d'office.
+                    let started = !answering.borrow().is_empty();
+                    if started && same_model_retries > 0 {
+                        same_model_retries -= 1;
+                        notify(&format!(
+                            "{model} : {reason}. Nouvel essai avec le même modèle"
+                        ));
+                        std::thread::sleep(Duration::from_secs(2));
+                    } else {
+                        let question = model_switch::ModelQuestion {
+                            suggestions: self.model_suggestions(&model),
+                            model: model.clone(),
+                            reason,
+                            stuck: false,
+                        };
+                        match prompter.ask(&question) {
+                            model_switch::ModelDecision::Retry => {
+                                notify(&format!("Nouvel essai avec {model}"));
+                            }
+                            model_switch::ModelDecision::Switch(next) => {
+                                self.switch_to(&next);
+                                notify(&format!("{next} prend la suite, à votre demande"));
+                            }
+                            model_switch::ModelDecision::Stop => {
+                                return Err(RuntimeError::new(
+                                    runtime::interrupt::INTERRUPTED_MESSAGE,
+                                ));
+                            }
+                        }
+                    }
                     if emit {
                         live::show("Réflexion…");
                     }

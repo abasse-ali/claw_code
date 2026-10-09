@@ -228,6 +228,35 @@ pub fn upstream_failure_status(error: &str) -> Option<u16> {
     matches!(status, 408 | 429 | 500..=599).then_some(status)
 }
 
+/// Raison lisible d'un échec propre au modèle ou à son fournisseur, lue dans
+/// le texte d'une erreur : un autre modèle pourrait répondre, ou le même un
+/// peu plus tard. `None` pour une erreur de la requête elle-même (400…).
+#[must_use]
+pub fn model_failure_reason(error: &str) -> Option<String> {
+    const MARKER: &str = "l'api a retourné ";
+    if let Some(position) = error.rfind(MARKER) {
+        let status: u16 = error[position + MARKER.len()..].get(..3)?.parse().ok()?;
+        return Some(match status {
+            401 => "clé refusée (erreur 401)".to_string(),
+            402 => "crédits insuffisants (erreur 402)".to_string(),
+            403 => "modèle refusé à cette clé (erreur 403)".to_string(),
+            404 => "modèle introuvable (erreur 404)".to_string(),
+            429 => "quota ou limite de requêtes atteinte (erreur 429)".to_string(),
+            408 | 409 | 500..=599 => format!("le fournisseur ne répond pas (erreur {status})"),
+            _ => return None,
+        });
+    }
+    if error.contains("identifiants") && error.contains("manquants") {
+        Some("clé manquante".to_string())
+    } else if error.contains("erreur d'authentification") {
+        Some("clé refusée".to_string())
+    } else if error.contains("erreur http :") {
+        Some("serveur injoignable ou délai dépassé".to_string())
+    } else {
+        None
+    }
+}
+
 pub type ClientFactory = Box<dyn Fn(&str) -> Result<ProviderClient, ApiError> + Send>;
 
 /// Chaîne de modèles : le principal puis ses remplaçants.
@@ -453,7 +482,7 @@ mod tests {
 
     #[test]
     fn a_failure_in_the_middle_of_an_answer_hands_over_to_the_next_model() {
-        use super::upstream_failure_status;
+        use super::{model_failure_reason, upstream_failure_status};
         assert_eq!(
             upstream_failure_status(
                 "l'api a retourné 504 Gateway Timeout (504) : Upstream idle timeout exceeded"
@@ -475,6 +504,31 @@ mod tests {
             upstream_failure_status("l'api a retourné 400 Bad Request : invalid tool schema"),
             None
         );
+        // La même lecture, en clair, pour la question posée à l'utilisateur.
+        assert_eq!(
+            model_failure_reason(
+                "l'api a retourné 504 Gateway Timeout (504) : Upstream idle timeout exceeded"
+            )
+            .as_deref(),
+            Some("le fournisseur ne répond pas (erreur 504)")
+        );
+        assert_eq!(
+            model_failure_reason("l'api a retourné 429 Too Many Requests : free-models-per-day")
+                .as_deref(),
+            Some("quota ou limite de requêtes atteinte (erreur 429)")
+        );
+        assert_eq!(
+            model_failure_reason(
+                "identifiants OpenRouter manquants ; définissez OPENROUTER_API_KEY avant d'appeler l'API OpenRouter"
+            )
+            .as_deref(),
+            Some("clé manquante")
+        );
+        assert_eq!(
+            model_failure_reason("l'api a retourné 400 Bad Request : invalid tool schema"),
+            None
+        );
+        assert_eq!(model_failure_reason("erreur json : EOF"), None);
         assert_eq!(
             upstream_failure_status("l'api a retourné 401 Unauthorized : User not found"),
             None

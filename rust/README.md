@@ -87,7 +87,9 @@ sombre ou claire (thème du système, de VS Code ou choisi) :
   modification), dépliable sur le diff ligne à ligne, la sortie, le contenu lu ou la liste de
   tâches ; la barre d'activité au-dessus de la saisie dit ce que fait l'agent ;
 - **demandes de permission dans la page**, au clavier : `Entrée` autoriser, `A` toujours,
-  `Échap` refuser (avec consigne facultative) ;
+  `Échap` refuser (avec consigne facultative). La demande en attente est aussi **épinglée
+  au-dessus de la zone de saisie**, avec ses boutons : elle reste visible où que soit le fil,
+  même sur un petit écran ou dans une fenêtre réduite ;
 - palette `Ctrl+K` (actions, modèles, modes, commandes), suggestions `/`, images collées,
   glissées ou jointes, modèle et mode en un clic ;
 - **crédits OpenRouter en direct** : solde et requêtes gratuites du jour sont les chiffres
@@ -355,6 +357,16 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
 - Sans aucune clé, Claw utilise le premier modèle d'un serveur local qui répond (Ollama…).
   `claw models local` (ou `/models local`) liste les serveurs et leurs modèles. Pour Ollama,
   lancez-le avec `OLLAMA_CONTEXT_LENGTH=32768` : son contexte par défaut est trop petit.
+- **Changer de modèle : c'est vous qui décidez.** Dans le terminal, l'interface web et le
+  panneau de VS Code, Claw ne passe jamais à un autre modèle de lui-même. Quand le modèle de la
+  session ne répond plus (panne du fournisseur, quota, clé refusée), il reprend une fois
+  d'office si la panne est arrivée en cours de réponse, puis Claw demande : **réessayer avec le
+  même modèle**, **changer de modèle** (vous le choisissez parmi les secours configurés et le
+  gratuit le plus puissant, ou vous tapez un identifiant), ou **arrêter le tour**. Le modèle
+  choisi devient celui de la session. La même question est posée quand l'agent n'avance plus
+  (voir « Escalade »). `"modelSwitch": "auto"` (ou `CLAW_MODEL_SWITCH=auto`) rétablit la bascule
+  sans question décrite ci-dessous ; elle s'applique aussi d'office quand personne n'est là pour
+  répondre (`claw prompt` dans un script, action GitHub, sous-agents).
 - **Bascule automatique** : si le modèle répond « quota atteint » (429), est indisponible ou si le
   serveur est arrêté, la requête part sur le modèle suivant : `"fallbackModels": ["groq:llama-3.3-70b-versatile", "ollama:qwen2.5-coder:7b"]`
   (ou `CLAW_FALLBACK_MODELS`, liste séparée par des virgules). Sans liste, un modèle gratuit
@@ -412,7 +424,7 @@ applique**, quel que soit le modèle.
 | Second avis | L'outil `Consult` (et `/avis <question>`) pose la même question à plusieurs autres modèles ; l'agent compare et décide | `CLAW_COUNCIL=0` |
 | Leçons | L'outil `Remember` note une leçon utile au projet dans `.claw/lessons.md` (80 au plus), relue au début de chaque session | `CLAW_LESSONS=0` |
 | Modèle de planification | En mode plan, `"plannerModel"` réfléchit à la place du modèle de la session, qui exécute ensuite le plan approuvé | `CLAW_PLANNER=0` |
-| Escalade | Au deuxième échec de la vérification, ou au deuxième recadrage, **le modèle gratuit le plus puissant du moment** reprend la fin du tour ; le tour suivant repart avec le modèle habituel. Sans réglage à faire, et jamais vers un modèle payant | `CLAW_ESCALATION=0` |
+| Escalade | Au deuxième échec de la vérification, ou au deuxième recadrage, Claw vous demande si un autre modèle doit prendre la suite (le gratuit le plus puissant est proposé en premier) ; avec `"modelSwitch": "auto"` ou sans personne pour répondre, **le modèle gratuit le plus puissant du moment** reprend la fin du tour ; le tour suivant repart avec le modèle habituel. Sans réglage à faire, et jamais vers un modèle payant | `CLAW_ESCALATION=0` |
 | Erreurs de l'éditeur | Avec l'extension VS Code : quand le tour a modifié des fichiers, Claw demande à l'éditeur les erreurs qu'il y voit (compilation, types, lint) et les renvoie au modèle, deux fois au plus par tour. L'outil `EditorDiagnostics` permet aussi au modèle de les lire quand il veut | `CLAW_EDITOR_DIAGNOSTICS=0` |
 | Contrôle des exigences | Quand le tour a modifié au moins 5 lignes et que la vérification passe, le modèle liste chaque exigence de la demande et de la documentation du code (cas limites compris), retrouve le code qui la couvre et la façon dont elle est vérifiée (un test existant, une commande lancée, ou le code lui-même), et corrige ce qui manque, avant la relecture. Il n'invente ni tests ni résultats. Une requête de plus par tour concerné | `CLAW_CHECKLIST=0` |
 

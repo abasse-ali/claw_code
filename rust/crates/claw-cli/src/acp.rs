@@ -376,6 +376,7 @@ impl AcpServer {
                         calls: Arc::clone(&prompter_calls),
                     }) as tools::SubagentPrompter
                 }),
+                model_prompter: None,
             }),
         )
         .map_err(|error| error.to_string())
