@@ -1894,6 +1894,29 @@ mod tests {
     }
 
     #[test]
+    fn the_page_never_relies_on_browser_dialogs() {
+        // `confirm`, `alert` et `prompt` sont bloqués dans le panneau de VS Code :
+        // ils répondent « non » sans rien afficher, et l'action ne se fait pas
+        // (« Nouvelle session » ne faisait plus rien). La page a ses propres boîtes.
+        for call in [
+            "!confirm(",
+            " confirm(",
+            "window.confirm(",
+            "!alert(",
+            " alert(",
+            "window.alert(",
+            " prompt(",
+            "window.prompt(",
+        ] {
+            assert!(
+                !super::PAGE.contains(call),
+                "boîte du navigateur dans la page : {call}"
+            );
+        }
+        assert!(super::PAGE.contains("function askConfirm("));
+    }
+
+    #[test]
     fn rebuilds_transcript_from_saved_messages() {
         let events = transcript_from_messages(&[
             ConversationMessage::user_text("bonjour"),

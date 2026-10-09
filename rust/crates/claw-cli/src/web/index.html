@@ -1466,6 +1466,26 @@
     return dialog;
   }
 
+  // Confirmation dans la page. Le `confirm()` du navigateur est bloqué dans
+  // le panneau de VS Code : il répond « non » sans rien afficher.
+  function askConfirm(title, message, label) {
+    return new Promise((resolve) => {
+      const dialog = openDialog(title);
+      let accepted = false;
+      dialog.onClose = () => resolve(accepted);
+      const yes = el("button", "btn danger", label);
+      yes.type = "button";
+      yes.onclick = () => { accepted = true; dialog.close(); };
+      const no = el("button", "btn", "Annuler");
+      no.type = "button";
+      no.onclick = () => dialog.close();
+      const actions = el("div", "actions");
+      actions.append(no, yes);
+      dialog.panel.append(dialog.head("alert"), el("div", "desc", message), actions);
+      yes.focus();
+    });
+  }
+
   let creditsDialog = null;
   function openCreditsDialog() {
     if (creditsDialog) return;
@@ -2075,7 +2095,14 @@
     });
   }
   async function setMode(value) {
-    if (value === "danger-full-access" && !confirm("Accès complet : l'agent exécutera toutes les commandes sans rien demander. Continuer ?")) return;
+    if (value === "danger-full-access" && value !== status.permission_mode) {
+      const accepted = await askConfirm(
+        "Accès complet",
+        "L'agent exécutera toutes les commandes et modifiera les fichiers sans rien vous demander.",
+        "Activer l'accès complet",
+      );
+      if (!accepted) return;
+    }
     try { await api("/api/permissions", { value }); } catch (error) { toast(error.message); }
   }
   function openModeMenu() {
@@ -2376,9 +2403,16 @@
     if (!status.busy) return;
     try { await api("/api/interrupt", {}); setActivity("Interruption demandée…"); } catch (error) { toast(error.message); }
   }
+  // Sans confirmation : la session en cours reste dans les sessions précédentes.
   async function newConversation() {
-    if (logInner.querySelector(".user, .md") && !confirm("Commencer une nouvelle session ? L'actuelle reste dans les sessions précédentes.")) return;
-    try { await api("/api/new", {}); } catch (error) { toast(error.message); }
+    if (status.busy) {
+      toast("Un tour est en cours : arrêtez-le (Échap) ou attendez sa fin avant d'ouvrir une nouvelle session.");
+      return;
+    }
+    try {
+      await api("/api/new", {});
+      if (logInner.querySelector(".user, .md")) toast("Nouvelle session. La précédente reste dans « Sessions ».");
+    } catch (error) { toast(error.message); }
   }
   function cycleTheme() {
     themePref = { auto: "light", light: "dark", dark: "auto" }[themePref];
