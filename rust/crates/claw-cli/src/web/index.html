@@ -369,6 +369,9 @@
   .dialog .measure .line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
   .dialog .measure .btn { height: 30px; font-size: 13px; }
   .dialog-head .mini { margin-right: 2px; }
+  .dialog-head > span:not(.spacer) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .btn.back { height: 28px; padding: 0 10px 0 6px; gap: 3px; font-size: 12.5px; flex: none; }
+  .dialog .actions .btn.back { margin-right: auto; }
 
   #toast { position: fixed; left: 50%; bottom: 120px; transform: translate(-50%, 8px); z-index: 50; padding: 9px 14px; border-radius: var(--r); background: var(--text); color: var(--bg); font-size: 13.5px; opacity: 0; transition: opacity .2s, transform .2s var(--ease); pointer-events: none; max-width: min(520px, 90vw); }
   #toast.show { opacity: .95; transform: translate(-50%, 0); }
@@ -496,6 +499,7 @@
     plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
     history: '<path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/>',
     arrowUp: '<line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/>',
+    arrowLeft: '<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>',
     arrowDown: '<line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/>',
     stop: '<rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="currentColor"/>',
     clip: '<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
@@ -1433,8 +1437,18 @@
   const tokenCount = (count) => typeof count !== "number" ? "—"
     : count >= 1000000 ? String(Math.round(count / 100000) / 10).replace(".", ",") + (count >= 2000000 ? " millions" : " million") + " de jetons"
     : count.toLocaleString("fr-FR") + " jetons";
-  async function openModelInfo(id) {
+  // `back` (facultatif) rouvre la liste d'où la fiche a été demandée.
+  async function openModelInfo(id, back) {
     const dialog = openDialog("Informations sur le modèle");
+    const backButton = () => {
+      const button = el("button", "btn back");
+      button.type = "button";
+      button.innerHTML = svg("arrowLeft");
+      button.append(el("span", null, "Modèles"));
+      button.title = "Revenir à la liste des modèles";
+      button.onclick = () => { dialog.close(); back(); };
+      return button;
+    };
     const panel = dialog.panel;
     const name = el("div", "name", modelName(id));
     const body = el("div");
@@ -1449,6 +1463,7 @@
     };
     paintPin();
     head.insertBefore(pin, head.lastChild);
+    if (back) head.prepend(backButton());
     panel.append(head, name, el("div", "ident", id), body);
     let info;
     try {
@@ -1519,6 +1534,7 @@
       body.append(el("div", "note source", "Données du catalogue OpenRouter, lu " + relativeTime(info.catalog_at) + "."));
     }
     const actions = el("div", "actions");
+    if (back) actions.append(backButton());
     if (info.url) {
       const link = el("a", "btn", "Voir sur OpenRouter");
       link.href = info.url;
@@ -1673,7 +1689,8 @@
       toast(error.message);
     }
   }
-  function openModelMenu() {
+  // `restore` (facultatif) : recherche et position à retrouver au retour d'une fiche.
+  function openModelMenu(restore) {
     showMenu($("model-btn"), (menu) => {
       const search = el("input", "search");
       search.placeholder = "Rechercher un modèle…";
@@ -1688,6 +1705,11 @@
       const cats = el("div", "cats");
       const list = el("div", "list");
       const known = (id) => freeModels.find((entry) => entry.id === id);
+      // Fiche d'un modèle, avec de quoi revenir à cette liste telle qu'elle était.
+      const openInfo = (id) => {
+        const here = { query: search.value, scrollTop: list.scrollTop };
+        openModelInfo(id, () => openModelMenu(here));
+      };
       // Spécialités du modèle, sous son identifiant.
       const specialtyLine = (item, text) => {
         if (text) item.querySelector(".grow").append(el("span", "spec", text));
@@ -1700,7 +1722,7 @@
         specialtyLine(item, model ? (model.specialties || []).map((specialty) => specialty.label).join(" · ") : "");
         const star = miniButton("star", favorite ? "Retirer des favoris" : "Épingler en haut du menu",
           async () => { await toggleFavorite(id); fill(); }, favorite ? "on" : "");
-        row.append(item, star, miniButton("info", "Informations sur ce modèle", () => openModelInfo(id)));
+        row.append(item, star, miniButton("info", "Informations sur ce modèle", () => openInfo(id)));
         return row;
       };
       // Modèle payant d'un classement OpenRouter : prix affiché, confirmation avant usage.
@@ -1724,7 +1746,7 @@
           row.replaceWith(bar);
           yes.focus();
         };
-        row.append(item, miniButton("info", "Informations sur ce modèle", () => openModelInfo(entry.id)));
+        row.append(item, miniButton("info", "Informations sur ce modèle", () => openInfo(entry.id)));
         return row;
       };
       // Ce qui s'affiche à droite d'un modèle : nouveauté, mesure, coche.
@@ -1835,7 +1857,10 @@
       custom.append(field, go);
       menu.append(search, find, cats, list, custom);
       paintCategories();
+      if (restore && typeof restore.query === "string") search.value = restore.query;
       fill();
+      // La position se rétablit une fois le menu affiché.
+      if (restore && typeof restore.scrollTop === "number") setTimeout(() => { list.scrollTop = restore.scrollTop; }, 0);
     });
   }
   async function setMode(value) {

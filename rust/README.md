@@ -100,7 +100,8 @@ sombre ou claire (thème du système, de VS Code ou choisi) :
   `~/.claw/favorite-models.json`, commun au navigateur et à VS Code) ; le bouton d'information
   ouvre sa fiche (fournisseur, contexte, réponse maximale, prix, rang, puissance estimée,
   mesures de `/models bench`, disponibilité, lien vers OpenRouter) d'où l'on peut le **mesurer**
-  d'un clic, sur les trois tâches de code ou sur les tâches de raisonnement ;
+  d'un clic, sur les trois tâches de code ou sur les tâches de raisonnement, puis revenir à la
+  liste par « Modèles » (même catégorie, même recherche, même position) ;
 - **sessions** : nouvelle session, reprise d'une session précédente, **recherche** dans les
   titres et dans le texte des messages (l'extrait trouvé s'affiche), **titre** modifiable
   (crayon), effacement d'une session (corbeille) ou de toutes les précédentes, après
@@ -485,6 +486,14 @@ Claw lit aussi `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` 
 `hooks` et `mcpServers` (les fichiers de Claw l'emportent). Un agent Claude Code déclaré avec
 `model: sonnet` prend le modèle de la session si vous n'avez pas de clé Anthropic.
 `CLAW_NO_CLAUDE_CONFIG=1` ignore ces fichiers.
+
+**Compétences (skills)** : un dossier `<nom>/SKILL.md` placé dans `.claude/skills/` (ou
+`.claw/skills/`, `.codex/skills/`) du projet, d'un dossier parent ou du dossier personnel. Claw
+donne au modèle le nom et la description de chacune (40 au plus) ; quand une demande y
+correspond, le modèle charge ses instructions avec l'outil `Skill` et lit les fichiers qui
+l'accompagnent. `claw skills` (ou `/skills`) les liste. Ne sont pas lues : les compétences
+synchronisées par l'application Claude (`~/.claude/skills/synced/…`) et celles des plugins de
+Claude Code, souvent liées à des outils que Claw n'a pas (navigateur intégré, connecteurs).
 
 ### Images et raisonnement
 
