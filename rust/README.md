@@ -491,9 +491,25 @@ Claw lit aussi `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` 
 `.claw/skills/`, `.codex/skills/`) du projet, d'un dossier parent ou du dossier personnel. Claw
 donne au modèle le nom et la description de chacune (40 au plus) ; quand une demande y
 correspond, le modèle charge ses instructions avec l'outil `Skill` et lit les fichiers qui
-l'accompagnent. `claw skills` (ou `/skills`) les liste. Ne sont pas lues : les compétences
-synchronisées par l'application Claude (`~/.claude/skills/synced/…`) et celles des plugins de
-Claude Code, souvent liées à des outils que Claw n'a pas (navigateur intégré, connecteurs).
+l'accompagnent. `claw skills` (ou `/skills`) les liste. Une compétence marquée
+`disable-model-invocation: true` ne se lance que par `/nom`.
+
+Claw importe aussi :
+
+- les compétences **synchronisées par l'application Claude** (`~/.claude/skills/synced/…`, un
+  dossier par compte, le plus récent l'emporte) ;
+- celles des **plugins de Claude Code** installés et activés (`installed_plugins.json` et
+  `enabledPlugins` des réglages de Claude Code), sous le nom `plugin:compétence`.
+
+Elles passent après celles des dossiers ci-dessus en cas de nom commun. Celles qui ne peuvent
+pas fonctionner dans Claw sont listées par `/skills` avec la raison, mais pas proposées au
+modèle : champ `compatibility` réservé à l'application de bureau Claude (navigateur intégré,
+contrôle de l'ordinateur), outils MCP que Claw n'a pas (`mcp__serveur__…` sans serveur de ce
+nom dans la configuration), ou connecteurs de claude.ai (`docs`, `google-workspace`, `morning`,
+`setup-writing-style`). Pour forcer l'une d'elles, copiez son dossier dans `~/.claw/skills/`.
+Les compétences de documents (`pdf`, `docx`, `xlsx`, `pptx`) lancent des scripts Python : leurs
+bibliothèques (pypdf, python-docx, openpyxl…) doivent être installées. `CLAW_NO_CLAUDE_CONFIG=1`
+coupe cet import.
 
 ### Images et raisonnement
 

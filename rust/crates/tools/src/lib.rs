@@ -2002,8 +2002,15 @@ fn resolve_skill_path(skill: &str) -> Result<std::path::PathBuf, String> {
         }
     }
 
+    // Compétences de l'application Claude et des plugins de Claude Code.
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(path) = runtime::claude_skills::find_imported_skill(&cwd, requested) {
+            return Ok(path);
+        }
+    }
+
     Err(format!(
-        "unknown skill: {requested} (searched .claw/skills, .claude/skills and .codex/skills in the project and home directory)"
+        "unknown skill: {requested} (searched .claw/skills, .claude/skills and .codex/skills in the project and home directory, the skills synced by the Claude app and those of enabled Claude Code plugins)"
     ))
 }
 
@@ -4641,6 +4648,76 @@ mod tests {
             .expect("path")
             .replace('\\', "/")
             .ends_with("/help/SKILL.md"));
+    }
+
+    #[test]
+    fn skill_loads_skills_synced_by_the_claude_app() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = temp_path("skill-home");
+        let workspace = temp_path("skill-app-workspace");
+        let synced = home
+            .join(".claude")
+            .join("skills")
+            .join("synced")
+            .join("compte");
+        for (name, header) in [
+            ("pdf", "description: Travailler sur des PDF\n"),
+            (
+                "computer-use",
+                "description: Ordinateur\ncompatibility: \"Claude desktop app\"\n",
+            ),
+        ] {
+            std::fs::create_dir_all(synced.join(name)).expect("skill dir");
+            std::fs::write(
+                synced.join(name).join("SKILL.md"),
+                format!("---\nname: {name}\n{header}---\nLance scripts/outil.py\n"),
+            )
+            .expect("skill file");
+        }
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+            ["HOME", "USERPROFILE", "CLAW_NO_CLAUDE_CONFIG"]
+                .into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect();
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
+        std::env::remove_var("CLAW_NO_CLAUDE_CONFIG");
+        let original_dir = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&workspace).expect("set cwd");
+
+        let loaded = execute_tool("Skill", &json!({ "skill": "pdf" }));
+        let refused = execute_tool("Skill", &json!({ "skill": "computer-use" }));
+        std::env::set_var("CLAW_NO_CLAUDE_CONFIG", "1");
+        let disabled = execute_tool("Skill", &json!({ "skill": "pdf" }));
+
+        std::env::set_current_dir(original_dir).expect("restore cwd");
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&workspace);
+
+        let output: serde_json::Value =
+            serde_json::from_str(&loaded.expect("Skill pdf")).expect("valid json");
+        assert!(output["path"]
+            .as_str()
+            .expect("path")
+            .replace('\\', "/")
+            .ends_with("/synced/compte/pdf/SKILL.md"));
+        assert!(output["prompt"]
+            .as_str()
+            .expect("prompt")
+            .contains("scripts/outil.py"));
+        // Prévue pour l'application de bureau : non proposée.
+        assert!(refused.is_err());
+        // CLAW_NO_CLAUDE_CONFIG=1 coupe l'import.
+        assert!(disabled.is_err());
     }
 
     #[test]

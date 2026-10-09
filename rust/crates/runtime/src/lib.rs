@@ -3,6 +3,7 @@ mod bash;
 pub mod bash_tasks;
 mod bootstrap;
 pub mod checkpoint;
+pub mod claude_skills;
 mod compact;
 mod config;
 mod conversation;

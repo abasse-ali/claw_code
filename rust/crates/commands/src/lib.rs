@@ -653,8 +653,7 @@ impl SlashCommand {
             },
             "session" => Self::Session {
                 action: parts.next().map(ToOwned::to_owned),
-                // Tout le reste de la ligne : `rename <id> <titre de plusieurs mots>`.
-                target: Some(parts.collect::<Vec<_>>().join(" ")).filter(|rest| !rest.is_empty()),
+                target: rest_of_line(parts),
             },
             "plugin" | "plugins" | "marketplace" => Self::Plugins {
                 action: parts.next().map(ToOwned::to_owned),
@@ -700,13 +699,19 @@ pub fn resume_supported_slash_commands() -> Vec<&'static SlashCommandSpec> {
 /// description), pour que le modèle sache quand appeler l'outil `Skill`.
 #[must_use]
 pub fn skills_prompt_section(cwd: &Path) -> Option<String> {
-    let skills = load_skills_from_roots(&discover_skill_roots(cwd)).ok()?;
+    let skills = load_all_skills(cwd).ok()?;
     let active = skills
         .iter()
-        .filter(|skill| skill.shadowed_by.is_none() && skill.origin == SkillOrigin::SkillsDir)
+        .filter(|skill| {
+            skill.shadowed_by.is_none()
+                && skill.origin == SkillOrigin::SkillsDir
+                && skill.model_invocable
+                && skill.unavailable.is_none()
+        })
         .take(40)
         .map(|skill| match &skill.description {
-            Some(description) => format!("- {}: {description}", skill.name),
+            // Description coupée : 40 compétences ne doivent pas noyer le prompt.
+            Some(description) => format!("- {}: {}", skill.name, shorten(description, 400)),
             None => format!("- {}", skill.name),
         })
         .collect::<Vec<_>>();
@@ -870,6 +875,10 @@ enum DefinitionSource {
     UserCodex,
     UserClaw,
     UserClaude,
+    /// Compétences synchronisées par l'application Claude.
+    ClaudeApp,
+    /// Compétences des plugins de Claude Code activés.
+    ClaudePlugin,
 }
 
 impl DefinitionSource {
@@ -882,6 +891,8 @@ impl DefinitionSource {
             Self::UserCodex => "Utilisateur (~/.codex)",
             Self::UserClaw => "Utilisateur (~/.claw)",
             Self::UserClaude => "Utilisateur (~/.claude)",
+            Self::ClaudeApp => "Application Claude (synchronisées)",
+            Self::ClaudePlugin => "Plugins de Claude Code",
         }
     }
 }
@@ -903,6 +914,10 @@ struct SkillSummary {
     source: DefinitionSource,
     shadowed_by: Option<DefinitionSource>,
     origin: SkillOrigin,
+    /// Le modèle peut la choisir de lui-même (sinon seulement `/nom`).
+    model_invocable: bool,
+    /// Pourquoi elle n'est pas proposée (compétence importée de Claude).
+    unavailable: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1053,11 +1068,7 @@ pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
 
 pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::Result<String> {
     match normalize_optional_args(args) {
-        None | Some("list") => {
-            let roots = discover_skill_roots(cwd);
-            let skills = load_skills_from_roots(&roots)?;
-            Ok(render_skills_report(&skills))
-        }
+        None | Some("list") => Ok(render_skills_report(&load_all_skills(cwd)?)),
         Some("-h" | "--help" | "help") => Ok(render_skills_usage(None)),
         Some(args) => Ok(render_skills_usage(Some(args))),
     }
@@ -1753,6 +1764,8 @@ fn load_skills_from_roots(roots: &[SkillRoot]) -> std::io::Result<Vec<SkillSumma
                         source: root.source,
                         shadowed_by: None,
                         origin: root.origin,
+                        model_invocable: model_invocable(&contents),
+                        unavailable: None,
                     });
                 }
                 SkillOrigin::LegacyCommandsDir => {
@@ -1784,6 +1797,8 @@ fn load_skills_from_roots(roots: &[SkillRoot]) -> std::io::Result<Vec<SkillSumma
                         source: root.source,
                         shadowed_by: None,
                         origin: root.origin,
+                        model_invocable: model_invocable(&contents),
+                        unavailable: None,
                     });
                 }
             }
@@ -1839,6 +1854,63 @@ fn parse_frontmatter_value(contents: &str, key: &str) -> Option<String> {
         .find_map(|line| line.trim().strip_prefix(&prefix).map(str::trim))
         .map(unquote_frontmatter_value)
         .filter(|value| !value.is_empty())
+}
+
+/// Faux si l'en-tête demande `disable-model-invocation: true` (compétence
+/// lancée seulement par `/nom`).
+fn model_invocable(contents: &str) -> bool {
+    parse_frontmatter_value(contents, "disable-model-invocation")
+        .is_none_or(|value| !value.eq_ignore_ascii_case("true"))
+}
+
+/// Compétences des dossiers du projet et de l'utilisateur, puis celles
+/// importées de Claude (application, plugins), qui ne masquent jamais une
+/// compétence de même nom déjà trouvée.
+fn load_all_skills(cwd: &Path) -> std::io::Result<Vec<SkillSummary>> {
+    let mut skills = load_skills_from_roots(&discover_skill_roots(cwd))?;
+    let mut active: BTreeMap<String, DefinitionSource> = skills
+        .iter()
+        .filter(|skill| skill.shadowed_by.is_none())
+        .map(|skill| (skill.name.to_ascii_lowercase(), skill.source))
+        .collect();
+    for imported in runtime::claude_skills::imported_skills(cwd) {
+        let source = match imported.origin {
+            runtime::claude_skills::ImportedOrigin::ClaudeApp => DefinitionSource::ClaudeApp,
+            runtime::claude_skills::ImportedOrigin::ClaudePlugin(_) => {
+                DefinitionSource::ClaudePlugin
+            }
+        };
+        let key = imported.name.to_ascii_lowercase();
+        let shadowed_by = active.get(&key).copied();
+        if shadowed_by.is_none() && imported.unavailable.is_none() {
+            active.insert(key, source);
+        }
+        skills.push(SkillSummary {
+            name: imported.name,
+            description: imported.description,
+            source,
+            shadowed_by,
+            origin: SkillOrigin::SkillsDir,
+            model_invocable: imported.model_invocable,
+            unavailable: imported.unavailable,
+        });
+    }
+    Ok(skills)
+}
+
+/// Texte coupé à `max` caractères, avec « … ».
+fn shorten(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// Mots restants d'une commande, réunis par des espaces (`None` s'il n'y en a
+/// pas) : `/session rename <id> <titre de plusieurs mots>`.
+fn rest_of_line<'a>(parts: impl Iterator<Item = &'a str>) -> Option<String> {
+    Some(parts.collect::<Vec<_>>().join(" ")).filter(|rest| !rest.is_empty())
 }
 
 fn parse_skill_frontmatter(contents: &str) -> (Option<String>, Option<String>) {
@@ -1953,7 +2025,7 @@ fn render_skills_report(skills: &[SkillSummary]) -> String {
 
     let total_active = skills
         .iter()
-        .filter(|skill| skill.shadowed_by.is_none())
+        .filter(|skill| skill.shadowed_by.is_none() && skill.unavailable.is_none())
         .count();
     let mut lines = vec![
         "Compétences".to_string(),
@@ -1969,6 +2041,8 @@ fn render_skills_report(skills: &[SkillSummary]) -> String {
         DefinitionSource::UserCodex,
         DefinitionSource::UserClaw,
         DefinitionSource::UserClaude,
+        DefinitionSource::ClaudeApp,
+        DefinitionSource::ClaudePlugin,
     ] {
         let group = skills
             .iter()
@@ -1980,12 +2054,19 @@ fn render_skills_report(skills: &[SkillSummary]) -> String {
 
         lines.push(format!("{}:", source.label()));
         for skill in group {
+            if let Some(reason) = &skill.unavailable {
+                lines.push(format!("  (non proposée : {reason}) {}", skill.name));
+                continue;
+            }
             let mut parts = vec![skill.name.clone()];
             if let Some(description) = &skill.description {
-                parts.push(description.clone());
+                parts.push(shorten(description, 160));
             }
             if let Some(detail) = skill.origin.detail_label() {
                 parts.push(detail.to_string());
+            }
+            if !skill.model_invocable {
+                parts.push(format!("seulement par /{}", skill.name));
             }
             let detail = parts.join(" · ");
             match skill.shadowed_by {

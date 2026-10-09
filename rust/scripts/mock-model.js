@@ -3,11 +3,13 @@
 // d'intégration : extension VS Code, action GitHub.
 //
 //   node mock-model.js [--port N] [--log fichier] [--write chemin=contenu] [--read chemin]
+//                      [--tool nom=arguments-json]
 //
 // Affiche « PORT <n> » une fois prêt. Chaque requête est ajoutée au journal
 // (une ligne JSON). Avec --write, le premier tour demande l'outil write_file,
 // puis le modèle conclut quand il reçoit le résultat de l'outil. Avec --read,
 // il demande read_file puis répond avec le contenu lu (sonde de `claw models bench`).
+// Avec --tool, il appelle l'outil donné puis répond avec le début de son résultat.
 "use strict";
 
 const fs = require("fs");
@@ -21,6 +23,7 @@ function option(name) {
 const logPath = option("--log");
 const write = option("--write");
 const read = option("--read");
+const tool = option("--tool");
 // --reply fichier : texte de la réponse finale (Markdown de démonstration).
 const replyFile = option("--reply");
 const port = Number(option("--port") || 0);
@@ -42,6 +45,17 @@ function lastUserText(messages) {
 function reply(body) {
   const messages = body.messages || [];
   const hasToolResult = messages.some((message) => message.role === "tool");
+  if (tool && !hasToolResult) {
+    const separator = tool.indexOf("=");
+    const name = separator > 0 ? tool.slice(0, separator) : tool;
+    const args = separator > 0 ? tool.slice(separator + 1) : "{}";
+    return { toolCall: { id: "call_mock_tool", name, arguments: args } };
+  }
+  if (tool) {
+    const result = [...messages].reverse().find((message) => message.role === "tool");
+    const content = typeof result.content === "string" ? result.content : JSON.stringify(result.content);
+    return { text: `Résultat de l'outil : ${content.slice(0, 400)}` };
+  }
   if (read && !hasToolResult) {
     return { toolCall: { id: "call_mock_read", name: "read_file", arguments: JSON.stringify({ path: read }) } };
   }
