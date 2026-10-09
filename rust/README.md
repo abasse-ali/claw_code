@@ -176,7 +176,8 @@ est retenu ; avec `OPENROUTER_API_KEY`, le quota gratuit du jour est affiché.
   sinon ; 20 par minute) est compté **par compte**, sur la journée UTC : une nouvelle clé API
   n'y change rien, OpenRouter l'écrit dans sa documentation. Pour continuer une fois le quota
   atteint : un modèle local (`ollama:…`) ou un autre fournisseur qui a son propre quota gratuit
-  (`groq:`, `cerebras:`, `gemini:`, `mistral:`), chacun avec sa clé.
+  (`gemini:`, `groq:`), chacun avec sa clé. Le plan gratuit de Mistral ne permet plus de créer
+  de clé API (constaté le 10 octobre 2026) : `mistral:` demande un plan payant.
 - La limite de jetons de sortie suit le catalogue (sortie maximale et contexte du modèle) ;
   `/cost` indique le coût estimé (0 $ pour un modèle gratuit).
 - Chaque étape de l'agent consomme une requête du quota gratuit ; en cas de limite atteinte
