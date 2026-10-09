@@ -18,6 +18,8 @@
 // Un modèle dont le nom contient « panne » commence à réfléchir puis son
 // fournisseur lâche : erreur 504 envoyée dans le flux, comme le fait OpenRouter.
 // « panne-une-fois » ne lâche qu'à sa première requête, puis répond.
+// Un modèle dont le nom contient « strict » refuse tout champ inconnu, comme
+// l'API de Mistral : une requête avec stream_options reçoit une erreur 422.
 "use strict";
 
 const fs = require("fs");
@@ -212,6 +214,11 @@ const server = http.createServer((request, response) => {
     }
     if (logPath) fs.appendFileSync(logPath, `${JSON.stringify(body)}\n`);
     if (String(body.model || "").endsWith(":free")) freeRequests += 1;
+    if (String(body.model || "").includes("strict") && body.stream_options !== undefined) {
+      response.writeHead(422, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ detail: [{ type: "extra_forbidden", loc: ["body", "stream_options"], msg: "Extra inputs are not permitted" }] }));
+      return;
+    }
     const answer = reply(body);
     const model = body.model || "mock";
     const once = String(model).includes("panne-une-fois");

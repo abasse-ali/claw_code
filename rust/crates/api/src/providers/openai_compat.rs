@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -160,6 +161,37 @@ impl OpenAiCompatConfig {
         }
         headers
     }
+}
+
+/// Serveurs qui ont refusé le champ `stream_options` pendant cette exécution.
+fn stream_options_refusals() -> &'static Mutex<BTreeSet<String>> {
+    static REFUSALS: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+    REFUSALS.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+/// Le serveur accepte `stream_options` (usage des jetons en fin de flux).
+/// L'API de Mistral refuse tout champ inconnu de sa spécification, et celui-ci
+/// n'y figure pas ; elle envoie l'usage dans le dernier morceau sans qu'on le
+/// demande. Un serveur qui l'a déjà refusé est retenu.
+fn accepts_stream_options(base_url: &str) -> bool {
+    !base_url.contains("api.mistral.ai")
+        && !stream_options_refusals()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(base_url)
+}
+
+fn remember_stream_options_refusal(base_url: &str) {
+    stream_options_refusals()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(base_url.to_string());
+}
+
+/// L'erreur vient du champ `stream_options`, que ce serveur ne connaît pas.
+fn is_stream_options_error(error: &ApiError) -> bool {
+    matches!(error, ApiError::Api { status, .. } if matches!(status.as_u16(), 400 | 422))
+        && error.to_string().contains("stream_options")
 }
 
 #[derive(Debug, Clone)]
@@ -330,7 +362,20 @@ impl OpenAiCompatClient {
             .as_ref()
             .is_some_and(|tools| !tools.is_empty());
         let text_mode = has_tools && text_tools::text_tools_enabled(&request.model);
-        match self.send_with_retry(request, text_mode).await {
+        let first = match self.send_with_retry(request, text_mode).await {
+            // Serveur strict : il ne connaît pas `stream_options`. On le
+            // retient et la même requête repart sans ce champ.
+            Err(error)
+                if request.stream
+                    && accepts_stream_options(&self.base_url)
+                    && is_stream_options_error(&error) =>
+            {
+                remember_stream_options_refusal(&self.base_url);
+                self.send_with_retry(request, text_mode).await
+            }
+            other => other,
+        };
+        match first {
             Ok(response) => Ok((response, text_mode)),
             Err(error)
                 if has_tools
@@ -408,6 +453,11 @@ impl OpenAiCompatClient {
         );
         if let Some(name) = &self.model_name {
             payload["model"] = Value::String(name.clone());
+        }
+        if !accepts_stream_options(&self.base_url) {
+            if let Some(fields) = payload.as_object_mut() {
+                fields.remove("stream_options");
+            }
         }
         if let Some(effort) = reasoning::reasoning_effort()
             .filter(|effort| *effort != ReasoningEffort::Off)
@@ -1842,6 +1892,38 @@ mod tests {
     };
     use serde_json::json;
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn strict_servers_do_not_get_stream_options() {
+        use super::{
+            accepts_stream_options, is_stream_options_error, remember_stream_options_refusal,
+        };
+        // Mistral refuse tout champ absent de sa spécification.
+        assert!(!accepts_stream_options("https://api.mistral.ai/v1"));
+        assert!(accepts_stream_options("https://openrouter.ai/api/v1"));
+        assert!(accepts_stream_options(
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        ));
+        // Un serveur qui le refuse une fois est retenu.
+        let strict = "https://strict.example.test/v1";
+        assert!(accepts_stream_options(strict));
+        remember_stream_options_refusal(strict);
+        assert!(!accepts_stream_options(strict));
+
+        let refusal = |status: u16, body: &str| crate::error::ApiError::Api {
+            status: reqwest::StatusCode::from_u16(status).expect("statut"),
+            error_type: None,
+            message: None,
+            body: body.to_string(),
+            retryable: false,
+        };
+        assert!(is_stream_options_error(&refusal(
+            422,
+            r#"{"detail":[{"type":"extra_forbidden","loc":["body","stream_options"],"msg":"Extra inputs are not permitted"}]}"#
+        )));
+        assert!(!is_stream_options_error(&refusal(422, "invalid model")));
+        assert!(!is_stream_options_error(&refusal(500, "stream_options")));
+    }
 
     #[test]
     fn request_translation_uses_openai_compatible_shape() {

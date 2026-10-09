@@ -411,6 +411,9 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
   `.claw/` (sessions, points de restauration, liste de suivi `todos.json`, dossiers `sandbox/`
   des commandes isolées), rien à la racine. Les `.sandbox-home`, `.sandbox-tmp` vides et le
   `.claw-todos.json` laissés par une version précédente sont retirés ou déplacés au premier usage.
+- **Serveurs stricts** : l'API de Mistral refuse tout champ absent de sa spécification. Claw ne
+  lui envoie donc pas `stream_options` (elle donne l'usage des jetons sans qu'on le demande), et
+  si un autre serveur refuse ce champ, Claw le retient et renvoie la requête sans lui.
 - `"smallModel"` (ou `CLAW_SMALL_MODEL`) : petit modèle utilisé pour les résumés de compaction.
 
 ### Fiabilité avec les petits modèles
