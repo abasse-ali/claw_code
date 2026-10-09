@@ -189,7 +189,10 @@
   .shortcuts { margin-top: 22px; font-size: 12px; color: var(--text-3); display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
 
   .user { align-self: flex-end; max-width: 82%; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-lg) var(--r-lg) 6px var(--r-lg);
-    padding: 10px 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    padding: 10px 14px; white-space: pre-wrap; overflow-wrap: anywhere; position: relative; }
+  /* heure d'envoi, au-dessus de la bulle */
+  .user[data-time] { margin-top: 12px; }
+  .user[data-time]::before { content: attr(data-time); position: absolute; right: 4px; top: -19px; font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
   .user.collapsed { max-height: 9.5em; overflow: hidden; cursor: pointer; mask-image: linear-gradient(#000 60%, transparent); }
   .user-image { align-self: flex-end; max-width: min(340px, 75%); border-radius: var(--r); overflow: hidden; border: 1px solid var(--border); }
   .user-image img { display: block; width: 100%; }
@@ -219,23 +222,47 @@
   .mermaid-block .diagram { padding: 14px; overflow-x: auto; background: var(--surface); }
   .mermaid-block .actions { display: flex; gap: 8px; align-items: center; padding: 8px 12px; font-size: 12.5px; color: var(--text-3); border-top: 1px solid var(--border); }
 
-  /* étapes de l'agent (outils), en frise */
-  .steps { display: flex; flex-direction: column; position: relative; padding-left: 4px; }
-  .steps::before { content: ""; position: absolute; left: 17px; top: 14px; bottom: 14px; width: 1px; background: var(--border); }
+  /* frise du tour, à la manière de Claude Code : une ligne verticale, un point
+     par texte, par étape et par avis ; elle s'interrompt à chaque message */
+  .col > .md, .col > .steps, .col > .tl-note { position: relative; padding-left: 26px; }
+  .col > .md::before, .col > .steps::before, .col > .tl-note::before {
+    content: ""; position: absolute; left: 8px; top: -7px; bottom: -7px; width: 1px; background: var(--border); }
+  .col > .md::after { content: ""; position: absolute; left: 4px; top: .6em; width: 9px; height: 9px; border-radius: 50%; background: var(--text-3); }
+  .tl-note { font-size: 12.5px; color: var(--text-2); line-height: 1.5; }
+  .col > .tl-note::after { content: ""; position: absolute; left: 5px; top: .45em; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--text-3); background: var(--bg); box-sizing: border-box; }
+
+  /* étapes de l'agent (outils) */
+  .steps { display: flex; flex-direction: column; }
   .step { position: relative; }
   .step-row { width: 100%; display: flex; align-items: center; gap: 10px; padding: 5px 8px 5px 2px; border-radius: var(--r-sm); text-align: left; min-height: 34px; }
   .step-row:hover { background: var(--surface); }
-  .step-ic { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; flex: none; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-2); position: relative; z-index: 1; }
-  .step.ok .step-ic { color: var(--ok); }
-  .step.error .step-ic { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, var(--border)); background: var(--err-soft); }
-  .step.running .step-ic { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+  /* le point de l'étape, sur la ligne de la frise : vert réussi, rouge en
+     erreur, orange qui pulse pendant l'exécution, gris pour la réflexion */
+  .step-ic { position: absolute; left: -22px; top: 12px; width: 9px; height: 9px; border-radius: 50%; background: var(--text-3); z-index: 1; }
+  .step-ic svg { display: none; }
+  .step.ok .step-ic { background: var(--ok); }
+  .step.error .step-ic { background: var(--err); }
+  .step.running .step-ic { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 4px var(--accent-soft); } }
   .step-verb { font-size: 13px; font-weight: 600; white-space: nowrap; }
   .step-target { font-family: var(--mono); font-size: 12.3px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
   .step-meta { font-size: 12px; color: var(--text-3); white-space: nowrap; font-variant-numeric: tabular-nums; }
   .step-meta .add { color: var(--ok); } .step-meta .del { color: var(--err); }
   .step-row .chev { color: var(--text-3); transition: transform .15s; }
   .step.open .chev { transform: rotate(90deg); }
-  .step-body { margin: 2px 0 8px 40px; display: flex; flex-direction: column; gap: 8px; animation: pop .14s var(--ease); }
+  .step-body { margin: 2px 0 8px 2px; display: flex; flex-direction: column; gap: 8px; animation: pop .14s var(--ease); }
+  /* commande : ENTRÉE (la commande) et SORTIE (son résultat), ouvertes d'office */
+  .step.cmd .step-target { font-family: var(--font); font-size: 13px; }
+  .io { border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--code-bg); overflow: hidden; }
+  .io-row { display: grid; grid-template-columns: 70px minmax(0, 1fr); }
+  .io-row + .io-row { border-top: 1px solid var(--border); }
+  .io-k { padding: 9px 0 0 12px; font-size: 10.5px; font-weight: 650; letter-spacing: .07em; color: var(--text-3); }
+  .step-body .io pre.io-v { margin: 0; padding: 8px 12px 8px 0; border: 0; border-radius: 0; background: none; max-height: none; font-size: 12.3px; }
+  .step-body .io pre.io-v.clipped { max-height: 9.4em; overflow: hidden; mask-image: linear-gradient(#000 65%, transparent); }
+  .step-body .io pre.io-v.err { color: var(--err); }
+  .io-v .spin { margin: 2px 0; }
+  .io-more { margin: 0 0 8px; font-size: 12px; color: var(--accent); justify-self: start; }
+  .io-more:hover { text-decoration: underline; }
   .step-body .label { font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); }
   .step-body pre { margin: 0; padding: 10px 12px; background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-sm); font-size: 12.3px; line-height: 1.5; overflow: auto; max-height: 380px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .step-body pre.stderr { color: var(--err); }
@@ -563,6 +590,9 @@
 
   // ---------------------------------------------------------------- état
   let status = {}, busySince = null, currentAssistant = null, thinkingStep = null, pendingTools = [];
+  // Historique rejoué d'un coup à la connexion : les durées n'y ont pas de sens.
+  let replaying = false;
+  const elapsed = (started) => replaying ? "" : seconds(Date.now() - started);
   let pendingPermissions = 0, freeModels = [], customCommands = [], mermaidCount = 0, currentActivity = "";
   // Heure du catalogue OpenRouter utilisé, et modèles apparus à la dernière recherche.
   let modelsCatalogAt = 0, newModelIds = new Set();
@@ -696,14 +726,16 @@
   }
 
   // ---------------------------------------------------------------- Markdown
+  // Le code en ligne est mis de côté le temps d'appliquer gras, italique et
+  // liens : « **`nom`** » doit rendre un code en gras.
   function renderInline(escaped) {
-    return escaped.split(/(`[^`\n]+`)/g).map((part) => {
-      if (part.length > 1 && part.startsWith("`") && part.endsWith("`")) return "<code>" + part.slice(1, -1) + "</code>";
-      return part
-        .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-        .replace(/(^|[^*\w])\*([^*\s][^*\n]*?)\*(?!\w)/g, "$1<em>$2</em>")
-        .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-    }).join("");
+    const codes = [];
+    const text = escaped
+      .replace(/`([^`\n]+)`/g, (_, code) => { codes.push(code); return "\uE000" + (codes.length - 1) + "\uE001"; })
+      .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*\w])\*([^*\s][^*\n]*?)\*(?!\w)/g, "$1<em>$2</em>")
+      .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    return text.replace(/\uE000(\d+)\uE001/g, (_, index) => "<code>" + codes[Number(index)] + "</code>");
   }
   const isListLine = (line) => /^\s*([-*+]|\d+[.)])\s+/.test(line);
   const isBlockStart = (line) => /^\s*```/.test(line) || /^#{1,6}\s/.test(line) || /^\s*>/.test(line) || isListLine(line);
@@ -843,8 +875,9 @@
   }
 
   // ---------------------------------------------------------------- messages
-  function addUser(text) {
+  function addUser(text, at) {
     const node = el("div", "user", text);
+    if (at) node.dataset.time = new Date(at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
     if (text.length > 700) {
       node.classList.add("collapsed");
       node.title = "Cliquer pour tout afficher";
@@ -949,7 +982,7 @@
     if (!thinkingStep) return;
     thinkingStep.row.querySelector(".step-verb").classList.remove("shimmer");
     thinkingStep.step.classList.remove("running");
-    thinkingStep.meta.textContent = seconds(Date.now() - thinkingStep.started);
+    thinkingStep.meta.textContent = elapsed(thinkingStep.started);
     thinkingStep = null;
   }
 
@@ -1016,9 +1049,25 @@
     finishThinking();
     const value = parseJson(rawInput);
     const [icon, verb, target] = describeTool(name, value, rawInput);
-    const parts = makeStep("running", icon, verb, target);
+    const command = (name === "bash" || name === "PowerShell") && value && value.command;
+    // Commande : sa description en titre, la commande et sa sortie dessous.
+    const parts = makeStep("running" + (command ? " cmd" : ""), icon, verb, command && value.description ? value.description : target);
     parts.meta.innerHTML = '<span class="spin" style="display:inline-block;vertical-align:-2px"></span>';
-    if (name === "edit_file" && value) {
+    if (command) {
+      const io = el("div", "io");
+      const input = el("div", "io-row");
+      const code = el("pre", "io-v");
+      code.innerHTML = highlight(value.command, name === "PowerShell" ? "ps1" : "sh");
+      input.append(el("span", "io-k", "ENTRÉE"), code);
+      const output = el("div", "io-row");
+      const result = el("pre", "io-v");
+      result.innerHTML = '<span class="spin"></span>';
+      output.append(el("span", "io-k", "SORTIE"), result);
+      io.append(input, output);
+      parts.body.append(io);
+      parts.output = { row: output, pre: result };
+      toggleStep(parts.step, true);
+    } else if (name === "edit_file" && value) {
       const { box, added, removed } = diffView(value.old_string, value.new_string);
       parts.body.append(box);
       parts.summary = '<span class="add">+' + added + '</span> <span class="del">−' + removed + "</span>";
@@ -1073,17 +1122,50 @@
       el("pre", isError ? "stderr" : null, value ? JSON.stringify(value, null, 2) : (output || "(vide)")));
     return { box, summary: "" };
   }
+  // Sortie d'une commande dans sa carte : les 6 premières lignes, le reste sur demande.
+  function fillCommandOutput(entry, output, isError) {
+    const value = parseJson(output);
+    let text = output || "";
+    let summary = "";
+    let failed = isError;
+    if (value && typeof value === "object" && ("stdout" in value || "stderr" in value)) {
+      text = [value.stdout, value.stderr].filter(Boolean).join(value.stdout && value.stderr ? "\n" : "");
+      if (value.returnCodeInterpretation) { summary = value.returnCodeInterpretation.replace("exit_code:", "code "); failed = true; }
+      if (value.backgroundTaskId) text = (text ? text + "\n" : "") + "Lancé en arrière-plan (" + value.backgroundTaskId + ")";
+    }
+    const pre = entry.output.pre;
+    pre.textContent = text.trim() ? text.replace(/\s+$/, "") : "(aucune sortie)";
+    pre.classList.toggle("err", failed && Boolean(text.trim()));
+    const lines = pre.textContent.split("\n").length;
+    if (lines > 6) {
+      pre.classList.add("clipped");
+      const more = el("button", "io-more", "Afficher les " + lines + " lignes");
+      more.type = "button";
+      more.onclick = () => { pre.classList.remove("clipped"); more.remove(); };
+      entry.output.row.append(el("span"), more);
+    }
+    return { summary, failed };
+  }
   function attachToolResult(name, output, isError) {
     let index = pendingTools.findIndex((tool) => tool.name === name);
     if (index < 0 && pendingTools.length) index = 0;
     if (index < 0) { addToolCall(name, "{}"); index = pendingTools.length - 1; }
     const entry = pendingTools.splice(index, 1)[0];
+    if (entry.output) {
+      // Un code de sortie non nul est un échec, même si l'outil a répondu.
+      const { summary, failed } = fillCommandOutput(entry, output, isError);
+      entry.step.classList.remove("running");
+      entry.step.classList.add(failed ? "error" : "ok");
+      entry.meta.innerHTML = [summary, elapsed(entry.started)].filter(Boolean).join(" · ");
+      if (!pendingTools.length) setActivity("Réflexion…");
+      return;
+    }
     const { box, summary } = resultView(output, isError);
     entry.body.append(box);
     entry.step.classList.remove("running");
     entry.step.classList.add(isError ? "error" : "ok");
     if (isError) entry.ic.innerHTML = svg("x");
-    const parts = [entry.summary || summary, seconds(Date.now() - entry.started)].filter(Boolean);
+    const parts = [entry.summary || summary, elapsed(entry.started)].filter(Boolean);
     entry.meta.innerHTML = parts.join(" · ");
     if (isError) toggleStep(entry.step, true);
     if (!pendingTools.length) setActivity("Réflexion…");
@@ -1152,7 +1234,12 @@
   }
 
   // ---------------------------------------------------------------- autres événements
+  // Avis du runtime (vérification, relecture, escalade…) : une ligne de la frise.
+  function addNote(text) {
+    append(el("div", "tl-note", text));
+  }
   function addInfo(text) {
+    if (text.startsWith("⟳ ")) { addNote(text.slice(2)); return; }
     const card = el("div", "card info");
     const title = el("div", "card-title");
     title.innerHTML = svg("info");
@@ -1203,7 +1290,7 @@
   }
   function render(event) {
     switch (event.type) {
-      case "user_message": finishAssistant(); addUser(event.text); break;
+      case "user_message": finishAssistant(); addUser(event.text, event.at); break;
       case "user_image": finishAssistant(); addUserImage(event.url); break;
       case "assistant_text": finishThinking(); appendAssistant(event.text); break;
       case "thinking": appendThinking(event.text); break;
@@ -1212,6 +1299,7 @@
       case "permission": addPermission(event); break;
       case "permission_resolved": resolvePermission(event.id, event.decision); break;
       case "info": finishAssistant(); addInfo(event.text); break;
+      case "notice": finishAssistant(); addNote(event.text); break;
       case "error": finishAssistant(); addError(event.message, event.hint); break;
       case "turn_done": finishAssistant(); if (benchPending) { benchPending = false; loadModels(); } break;
       case "status": applyStatus(event.status); break;
@@ -2418,8 +2506,13 @@
       status = {};
       resetLog();
       applyStatus(data.status);
-      for (const event of data.transcript) render(event);
-      finishAssistant();
+      replaying = true;
+      try {
+        for (const event of data.transcript) render(event);
+        finishAssistant();
+      } finally {
+        replaying = false;
+      }
       scrollToBottom(true);
       setConnection("", "Connecté");
     });

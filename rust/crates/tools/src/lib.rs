@@ -330,7 +330,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "properties": {
                     "command": { "type": "string" },
                     "timeout": { "type": "integer", "minimum": 1 },
-                    "description": { "type": "string" },
+                    "description": { "type": "string", "description": "What the command does, in 5 to 10 words, shown to the user (e.g. \"Run the unit tests\")" },
                     "run_in_background": { "type": "boolean" },
                     "dangerouslyDisableSandbox": { "type": "boolean" }
                 },
@@ -736,7 +736,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "properties": {
                     "command": { "type": "string" },
                     "timeout": { "type": "integer", "minimum": 1 },
-                    "description": { "type": "string" },
+                    "description": { "type": "string", "description": "What the command does, in 5 to 10 words, shown to the user (e.g. \"Run the unit tests\")" },
                     "run_in_background": { "type": "boolean" }
                 },
                 "required": ["command"],

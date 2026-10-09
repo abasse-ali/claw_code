@@ -65,6 +65,9 @@ pub(crate) struct ServeOptions {
 enum WebEvent {
     UserMessage {
         text: String,
+        /// Heure d'envoi (millisecondes Unix) ; absente pour une session reprise.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        at: Option<u64>,
     },
     /// Image jointe par l'utilisateur (URL `data:`).
     UserImage {
@@ -99,6 +102,11 @@ enum WebEvent {
         decision: String,
     },
     Info {
+        text: String,
+    },
+    /// Avis du runtime (vérification, relecture, escalade…), affiché comme une
+    /// ligne de la frise et non comme un rapport.
+    Notice {
         text: String,
     },
     Error {
@@ -279,8 +287,8 @@ impl TurnObserver for WebObserver {
     }
 
     fn notice(&self, text: &str) {
-        self.app.publish(WebEvent::Info {
-            text: format!("⟳ {text}"),
+        self.app.publish(WebEvent::Notice {
+            text: text.to_string(),
         });
     }
 }
@@ -519,8 +527,14 @@ impl Worker {
         match command {
             WorkerCommand::Message(text, mut images) => {
                 if !text.trim().is_empty() {
-                    self.app
-                        .publish(WebEvent::UserMessage { text: text.clone() });
+                    let at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok());
+                    self.app.publish(WebEvent::UserMessage {
+                        text: text.clone(),
+                        at,
+                    });
                 }
                 if text.trim_start().starts_with('/') && images.is_empty() {
                     return self.slash_command(text.trim());
@@ -786,7 +800,10 @@ fn transcript_from_messages(messages: &[ConversationMessage]) -> Vec<WebEvent> {
                 (ContentBlock::Text { text }, _) if text.starts_with(runtime::STOP_HOOK_PREFIX) => {
                     WebEvent::Info { text: text.clone() }
                 }
-                (ContentBlock::Text { text }, _) => WebEvent::UserMessage { text: text.clone() },
+                (ContentBlock::Text { text }, _) => WebEvent::UserMessage {
+                    text: text.clone(),
+                    at: None,
+                },
                 (ContentBlock::ToolUse { name, input, .. }, _) => WebEvent::ToolCall {
                     name: name.clone(),
                     input: input.clone(),
@@ -1527,7 +1544,9 @@ mod tests {
             ConversationMessage::user_text("bonjour"),
             ConversationMessage::tool_result("t1", "bash", "ok", false),
         ]);
-        assert!(matches!(&events[0], WebEvent::UserMessage { text } if text == "bonjour"));
+        assert!(
+            matches!(&events[0], WebEvent::UserMessage { text, at: None } if text == "bonjour")
+        );
         assert!(matches!(&events[1], WebEvent::ToolResult { name, .. } if name == "bash"));
     }
 }
