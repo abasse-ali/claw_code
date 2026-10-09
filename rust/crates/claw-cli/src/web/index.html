@@ -2804,16 +2804,50 @@
     keepBottom.observe(log);
     keepBottom.observe(logInner);
   }
+  // Copie dans le presse-papiers. Dans le panneau de VS Code, l'API du navigateur
+  // est refusée à la page (« Write permission denied ») : la commande de copie
+  // classique, elle, y reste permise après un clic.
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_) {
+      return copyWithCommand(text);
+    }
+  }
+
+  function copyWithCommand(text) {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.readOnly = true;
+    area.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;";
+    // Le texte exact, quoi que le navigateur retienne de la sélection.
+    const fill = (event) => {
+      event.clipboardData.setData("text/plain", text);
+      event.preventDefault();
+    };
+    const focused = document.activeElement;
+    document.body.appendChild(area);
+    area.select();
+    document.addEventListener("copy", fill, true);
+    let copied = false;
+    try {
+      copied = document.execCommand("copy");
+    } catch (_) {
+      copied = false;
+    }
+    document.removeEventListener("copy", fill, true);
+    area.remove();
+    if (focused && focused.focus) focused.focus({ preventScroll: true });
+    return copied;
+  }
+
   log.addEventListener("click", async (event) => {
     const button = event.target.closest("[data-copy]");
     if (!button) return;
     const code = button.closest(".codeblock").querySelector("pre code").textContent;
-    try {
-      await navigator.clipboard.writeText(code);
-      button.innerHTML = svg("check") + "Copié";
-    } catch (_) {
-      button.textContent = "Copie impossible";
-    }
+    if (await copyText(code)) button.innerHTML = svg("check") + "Copié";
+    else button.textContent = "Copie impossible";
     setTimeout(() => { button.innerHTML = svg("copy") + "Copier"; }, 1600);
   });
 

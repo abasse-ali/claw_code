@@ -2205,6 +2205,16 @@ mod tests {
     }
 
     #[test]
+    fn the_copy_button_does_not_depend_on_the_clipboard_api() {
+        // Dans le panneau de VS Code, `navigator.clipboard.writeText` est refusé
+        // à la page (« Write permission denied ») : le bouton « Copier » doit
+        // se rabattre sur la commande de copie, qui y est permise.
+        assert_eq!(super::PAGE.matches("navigator.clipboard.").count(), 1);
+        assert!(super::PAGE.contains("return copyWithCommand(text);"));
+        assert!(super::PAGE.contains(r#"document.execCommand("copy")"#));
+    }
+
+    #[test]
     fn rebuilds_transcript_from_saved_messages() {
         let events = transcript_from_messages(&[
             ConversationMessage::user_text("bonjour"),
