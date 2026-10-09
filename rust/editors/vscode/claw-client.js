@@ -4,8 +4,91 @@
 "use strict";
 
 const { spawn } = require("child_process");
+const fs = require("fs");
 const http = require("http");
 const net = require("net");
+const path = require("path");
+
+/**
+ * Chemin complet de l'exécutable `claw` : le réglage « claw.path » s'il
+ * désigne un fichier, sinon le premier `claw` du PATH. `null` s'il est
+ * introuvable.
+ */
+function resolveExecutable(clawPath, env = process.env) {
+  const name = clawPath || "claw";
+  const windows = process.platform === "win32";
+  const suffixes = windows ? ["", ...(env.PATHEXT || ".EXE;.CMD;.BAT").split(";").filter(Boolean)] : [""];
+  const candidates = /[\\/]/.test(name) || path.isAbsolute(name)
+    ? [path.resolve(name)]
+    : (env.PATH || env.Path || "").split(path.delimiter).filter(Boolean).map((directory) => path.join(directory, name));
+  for (const candidate of candidates) {
+    for (const suffix of suffixes) {
+      try {
+        // Chemin réel : casse du disque, noms longs, cible d'un lien.
+        if (fs.statSync(candidate + suffix).isFile()) return fs.realpathSync.native(candidate + suffix);
+      } catch (_) {
+        /* candidat suivant */
+      }
+    }
+  }
+  return null;
+}
+
+/** Empreinte d'un fichier (date et taille) : change quand claw est réinstallé. */
+function fileStamp(file) {
+  try {
+    const stat = fs.statSync(file);
+    return `${Math.round(stat.mtimeMs)}-${stat.size}`;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Copie de travail de l'exécutable dans `directory`. Sous Windows, un
+ * programme en cours d'exécution verrouille son fichier : lancer `claw.exe`
+ * lui-même ferait échouer sa réinstallation tant que le panneau est ouvert.
+ * Les anciennes copies sont retirées quand plus rien ne s'en sert.
+ */
+function workingCopy(executable, directory) {
+  fs.mkdirSync(directory, { recursive: true });
+  const target = path.join(directory, `claw-${fileStamp(executable)}${path.extname(executable)}`);
+  if (!fs.existsSync(target)) fs.copyFileSync(executable, target);
+  for (const name of fs.readdirSync(directory)) {
+    const file = path.join(directory, name);
+    if (file === target || !name.startsWith("claw-")) continue;
+    try {
+      fs.unlinkSync(file);
+    } catch (_) {
+      /* encore utilisée par une autre fenêtre */
+    }
+  }
+  return target;
+}
+
+/**
+ * Surveille l'exécutable installé ; `onChange` est appelé quand il a été
+ * remplacé et que son écriture est finie (deux lectures identiques de suite).
+ * Renvoie la fonction qui arrête la surveillance.
+ */
+function watchExecutable(executable, onChange, intervalMs = 2000) {
+  let known = fileStamp(executable);
+  let candidate = null;
+  const timer = setInterval(() => {
+    const now = fileStamp(executable);
+    if (now === null || now === known) {
+      candidate = null;
+    } else if (candidate === now) {
+      known = now;
+      candidate = null;
+      onChange();
+    } else {
+      candidate = now;
+    }
+  }, intervalMs);
+  if (timer.unref) timer.unref();
+  return () => clearInterval(timer);
+}
 
 /** Port TCP libre sur la boucle locale. */
 function findFreePort() {
@@ -181,9 +264,11 @@ class ClawServer {
                 .filter((line) => line.startsWith("data:"))
                 .map((line) => line.slice(5).replace(/^ /, ""))
                 .join("\n");
-              if (name === "event" && data) {
+              if ((name === "event" || name === "snapshot") && data) {
                 try {
-                  onEvent(JSON.parse(data));
+                  const parsed = JSON.parse(data);
+                  // L'état initial arrive dans un « snapshot » : rendu comme un événement d'état.
+                  onEvent(name === "snapshot" ? { type: "status", status: parsed.status } : parsed);
                 } catch (_) {
                   /* événement illisible ignoré */
                 }
@@ -237,4 +322,12 @@ function selectionMessage({ instruction, relativePath, startLine, endLine, langu
   return `${header}Extrait de \`${relativePath}\` (${lines}) :\n\`\`\`${languageId || ""}\n${text}\n\`\`\``;
 }
 
-module.exports = { ClawServer, findFreePort, selectionMessage };
+module.exports = {
+  ClawServer,
+  findFreePort,
+  selectionMessage,
+  resolveExecutable,
+  fileStamp,
+  workingCopy,
+  watchExecutable,
+};

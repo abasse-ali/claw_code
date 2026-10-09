@@ -2,7 +2,7 @@
   "name": "claw-code",
   "displayName": "Claw Code",
   "description": "Agent de code et d'architecture avec n'importe quel modèle (OpenRouter, Ollama, Groq…) dans VS Code.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "claw-code",
   "engines": {
     "vscode": "^1.85.0"
@@ -50,6 +50,11 @@
       {
         "command": "claw.openInBrowser",
         "title": "Ouvrir dans le navigateur",
+        "category": "Claw"
+      },
+      {
+        "command": "claw.reload",
+        "title": "Recharger le panneau",
         "category": "Claw"
       },
       {

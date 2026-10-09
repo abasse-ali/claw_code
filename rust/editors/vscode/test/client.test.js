@@ -9,7 +9,7 @@ const fs = require("fs");
 const http = require("http");
 const os = require("os");
 const path = require("path");
-const { ClawServer, selectionMessage } = require("../claw-client");
+const { ClawServer, selectionMessage, resolveExecutable, workingCopy, watchExecutable } = require("../claw-client");
 const { startMockModel } = require("./mock");
 
 const results = [];
@@ -78,6 +78,40 @@ function get(port, path) {
   server.stop();
   await new Promise((resolve) => setTimeout(resolve, 500));
   check("arrêt du serveur", !server.running);
+
+  // Mise à jour de claw : exécutable retrouvé, copie de travail, surveillance.
+  const installDir = path.join(root, "installe");
+  fs.mkdirSync(installDir);
+  const installed = path.join(installDir, path.basename(claw));
+  fs.copyFileSync(claw, installed);
+  const bare = path.basename(claw, path.extname(claw));
+  const found = resolveExecutable(bare, { PATH: installDir, PATHEXT: process.env.PATHEXT });
+  const real = fs.realpathSync.native(installed);
+  check("exécutable retrouvé dans le PATH et par son chemin", found === real && resolveExecutable(installed) === real
+    && resolveExecutable("claw-introuvable", { PATH: installDir }) === null, `${found} / ${real}`);
+
+  const copies = path.join(root, "copies");
+  const first = workingCopy(installed, copies);
+  const future = new Date(Date.now() + 5000);
+  fs.utimesSync(installed, future, future);
+  const second = workingCopy(installed, copies);
+  check("copie de travail refaite pour une nouvelle version, l'ancienne retirée",
+    first !== second && fs.existsSync(second) && !fs.existsSync(first) && fs.readdirSync(copies).length === 1,
+    fs.readdirSync(copies).join(", "));
+
+  let changes = 0;
+  const stop = watchExecutable(installed, () => (changes += 1), 100);
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  const quiet = changes;
+  // Comme `cargo install` : nouveau fichier écrit à côté, puis mis à la place de l'ancien.
+  const incoming = installed + ".nouveau";
+  fs.copyFileSync(claw, incoming);
+  const later = new Date(Date.now() + 10000);
+  fs.utimesSync(incoming, later, later);
+  fs.renameSync(incoming, installed);
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  stop();
+  check("remplacement de l'exécutable détecté une seule fois", quiet === 0 && changes === 1, `${quiet} puis ${changes}`);
   mock.child.kill();
   console.log(`\n${results.filter(Boolean).length}/${results.length} vérifications réussies`);
   process.exit(results.every(Boolean) ? 0 : 1);

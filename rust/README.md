@@ -87,10 +87,16 @@ sombre ou claire (thème du système, de VS Code ou choisi) :
   dernière lecture, **requêtes de Claw par modèle** aujourd'hui, et **rythme** (« à ce rythme,
   quota épuisé vers 18:05 », d'après la dernière heure). Sous 100 requêtes gratuites restantes
   (puis 20, puis 0) la pastille passe à l'orange et un message prévient, une fois par seuil ;
-- **menu des modèles** : nom et identifiant réel de chaque modèle gratuit, du plus puissant au
-  moins puissant ; le bouton « Rechercher les modèles gratuits les plus puissants » relit le
-  catalogue et le classement programmation d'OpenRouter (sinon gardés 24 h) et signale les
-  nouveaux venus ; l'étoile épingle un modèle en **favori**, en haut du menu (gardé dans
+- **menu des modèles** : nom, identifiant réel et **spécialités** de chaque modèle gratuit, avec
+  une **catégorie par spécialité** (Programmation, Images, Raisonnement, Apprentissage et
+  recherche, Audio et vidéo, Long contexte, Traduction, Santé, Marketing… ; les catégories sans
+  modèle gratuit sont repliées sous « Autres catégories »). Une catégorie liste les modèles
+  gratuits, puis les payants les plus utilisés chez OpenRouter, marqués « payant » avec leur
+  prix et une confirmation avant usage. Le bouton « Rechercher les modèles gratuits les plus
+  puissants » relit le catalogue et les classements d'OpenRouter (sinon gardés 24 h) et signale
+  les nouveaux venus : ce sont des lectures publiques, faites sans la clé, qui **ne consomment
+  aucune requête gratuite** (seuls les messages à un modèle et « Mesurer » en consomment) ;
+  l'étoile épingle un modèle en **favori**, en haut du menu (gardé dans
   `~/.claw/favorite-models.json`, commun au navigateur et à VS Code) ; le bouton d'information
   ouvre sa fiche (fournisseur, contexte, réponse maximale, prix, rang, puissance estimée,
   mesures de `/models bench`, disponibilité, lien vers OpenRouter) d'où l'on peut le **mesurer**
@@ -116,7 +122,14 @@ et benchmarks de code cités par le modèle, puis taille. Chaque ligne indique p
 est retenu ; avec `OPENROUTER_API_KEY`, le quota gratuit du jour est affiché.
 
 - `/models refresh` recharge le catalogue (sinon mis en cache 24 h dans `~/.claw/cache/`),
-  `/models <recherche>` filtre, `/model <id>` change de modèle.
+  `/models <recherche>` filtre, `/model <id>` change de modèle. Lire le catalogue ne consomme
+  aucune requête gratuite : c'est une page publique d'OpenRouter, lue sans la clé.
+- **Spécialités** : chaque modèle porte celles que des faits vérifiables justifient : son rang
+  dans les douze catégories d'usage d'OpenRouter (programmation, apprentissage et recherche,
+  sciences, technologie, traduction, finance, santé, droit, marketing, référencement, jeu de
+  rôle, culture générale), ce qu'il sait lire (images, son, vidéo), un contexte d'au moins
+  500 000 jetons, et ce que sa description met en avant (code, raisonnement, recherche,
+  documents). `/models` les rappelle après « aussi : ».
 - Sans modèle configuré et avec seulement une clé OpenRouter, l'agent démarre sur le premier
   modèle de ce classement.
 - La limite de jetons de sortie suit le catalogue (sortie maximale et contexte du modèle) ;
@@ -549,9 +562,12 @@ Claw lit aussi `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` 
   script. Sans terminal, une demande d'autorisation est refusée et signalée en JSON.
 - **GitHub** : l'action `.github/actions/claw` et un exemple de workflow « `@claw` dans un
   commentaire » sont décrits dans [`docs/github-action.md`](docs/github-action.md).
-- **VS Code** : l'extension `editors/vscode` (paquet `claw-code-0.1.0.vsix`, à installer avec
+- **VS Code** : l'extension `editors/vscode` (paquet `claw-code-0.2.0.vsix`, à installer avec
   « Extensions : installer depuis VSIX… ») ouvre l'agent dans un panneau (`Ctrl+Alt+K`), envoie la
-  sélection (`Ctrl+Alt+L`) ou le fichier courant ; voir `editors/vscode/README.md`.
+  sélection (`Ctrl+Alt+L`) ou le fichier courant. Après une mise à jour de `claw`
+  (`cargo install`), le panneau **se recharge seul** sur la même session, à la fin du tour en
+  cours ; sous Windows il lance une copie de `claw.exe`, pour que le fichier installé ne soit
+  pas verrouillé pendant la mise à jour. Voir `editors/vscode/README.md`.
 - **Éditeurs** : `claw acp` fait de Claw un agent de l'Agent Client Protocol (Zed, Neovim avec
   CodeCompanion, Emacs…). Dans Zed : `"agent_servers": { "Claw": { "command": "claw", "args": ["acp"] } }`.
   Les autorisations s'affichent dans l'éditeur, les modes de permission y sont sélectionnables.

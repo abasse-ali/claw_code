@@ -148,6 +148,18 @@
   .menu .foot { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 6px; }
   .menu .foot .wide { margin-bottom: 0; }
   .menu .hint-line { font-size: 11.5px; color: var(--text-3); padding: 0 10px 4px; }
+  /* catégories de modèles : une pastille par spécialité */
+  .menu .cats { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 2px 7px; flex: none; }
+  .cat { display: inline-flex; align-items: center; gap: 5px; height: 23px; padding: 0 9px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-2); font-size: 11.5px; font-weight: 550; color: var(--text-2); white-space: nowrap; transition: border-color .15s, color .15s, background .15s; }
+  .cat:hover { border-color: var(--border-strong); color: var(--text); }
+  .cat.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .cat.nofree { opacity: .62; }
+  .cat.more { border-style: dashed; }
+  .cat i { font-style: normal; font-size: 10.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+  .cat.on i { color: inherit; }
+  .item .grow span.spec { font-size: 11px; margin-top: 1px; }
+  .menu .confirm.pay { background: var(--warn-soft); }
+  .menu .confirm.pay > span { white-space: normal; }
   .item .fresh { font-size: 10.5px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; color: var(--accent); flex: none; }
   .item .aside { display: inline-flex; align-items: center; gap: 8px; flex: none; }
 
@@ -542,6 +554,10 @@
   let pendingPermissions = 0, freeModels = [], customCommands = [], mermaidCount = 0, currentActivity = "";
   // Heure du catalogue OpenRouter utilisé, et modèles apparus à la dernière recherche.
   let modelsCatalogAt = 0, newModelIds = new Set();
+  // Catégories de modèles (une par spécialité) et celle affichée dans le menu.
+  let modelCategories = [], modelCategory = "programming";
+  // Les catégories sans modèle gratuit restent repliées tant qu'on ne les demande pas.
+  let showPaidOnlyCategories = false;
   // Modèles épinglés en haut du menu (gardés par Claw, communs à toutes les fenêtres).
   let favoriteModels = [];
   // Une mesure de modèle est en cours : la liste sera relue à la fin du tour.
@@ -1462,6 +1478,17 @@
 
     if (info.description) body.append(el("div", "desc", info.description));
 
+    // Ses spécialités, chacune avec le fait qui la justifie.
+    if (info.specialties && info.specialties.length) {
+      const block = el("div", "usage");
+      block.append(el("div", "usage-title", "Spécialités"));
+      const list = el("dl", "rows");
+      list.style.margin = "0";
+      for (const specialty of info.specialties) list.append(el("dt", null, specialty.label), el("dd", null, specialty.detail));
+      block.append(list);
+      body.append(block);
+    }
+
     const rows = el("dl", "rows");
     const row = (label, value, detail) => {
       const dd = el("dd", null, value);
@@ -1629,9 +1656,10 @@
       const warning = await loadModels(true);
       if (warning) { toast(warning); return; }
       const best = freeModels[0];
-      toast(freeModels.length + " modèle(s) gratuit(s) pour le code"
+      toast(freeModels.length + " modèle(s) gratuit(s)"
         + (newModelIds.size ? " · " + newModelIds.size + " nouveau(x)" : "")
-        + (best ? " · le plus puissant : " + modelName(best.id) : ""));
+        + (best ? " · le plus puissant : " + modelName(best.id) : "")
+        + " · aucune requête gratuite consommée");
     } catch (error) {
       toast("Recherche impossible : " + error.message);
     }
@@ -1651,25 +1679,57 @@
       search.placeholder = "Rechercher un modèle…";
       const find = el("button", "btn wide");
       find.type = "button";
-      find.title = "Relit le catalogue et le classement programmation d'OpenRouter, puis reclasse les modèles gratuits pour le code";
+      find.title = "Relit le catalogue public et les classements d'OpenRouter, puis reclasse les modèles gratuits. Ne consomme aucune requête gratuite.";
       const findLabel = (busy) => {
         find.innerHTML = svg(busy ? "search" : "spark");
         find.append(el("span", null, busy ? "Recherche sur OpenRouter…" : "Rechercher les modèles gratuits les plus puissants"));
       };
       findLabel(false);
+      const cats = el("div", "cats");
       const list = el("div", "list");
+      const known = (id) => freeModels.find((entry) => entry.id === id);
+      // Spécialités du modèle, sous son identifiant.
+      const specialtyLine = (item, text) => {
+        if (text) item.querySelector(".grow").append(el("span", "spec", text));
+      };
       const modelRow = (id, onPick, extra) => {
         const favorite = favoriteModels.includes(id);
         const row = el("div", "row");
+        const item = menuItem(modelName(id), id, onPick, extra, "mono");
+        const model = known(id);
+        specialtyLine(item, model ? (model.specialties || []).map((specialty) => specialty.label).join(" · ") : "");
         const star = miniButton("star", favorite ? "Retirer des favoris" : "Épingler en haut du menu",
           async () => { await toggleFavorite(id); fill(); }, favorite ? "on" : "");
-        row.append(menuItem(modelName(id), id, onPick, extra, "mono"), star,
-          miniButton("info", "Informations sur ce modèle", () => openModelInfo(id)));
+        row.append(item, star, miniButton("info", "Informations sur ce modèle", () => openModelInfo(id)));
+        return row;
+      };
+      // Modèle payant d'un classement OpenRouter : prix affiché, confirmation avant usage.
+      const paidRow = (entry) => {
+        const row = el("div", "row");
+        const price = money(entry.prompt_price) + " en entrée, " + money(entry.completion_price) + " en sortie par million de jetons";
+        const extra = el("span", "aside");
+        extra.append(el("span", "measured bad", "payant"));
+        const item = menuItem((entry.name || entry.id).replace(/\s*\(free\)\s*$/i, ""), entry.id, () => {}, extra, "mono");
+        specialtyLine(item, "n°" + entry.rank + " de la catégorie · " + money(entry.prompt_price) + " / " + money(entry.completion_price) + " par million");
+        item.title = price;
+        item.onclick = () => {
+          const bar = el("div", "confirm pay");
+          const yes = el("button", "btn primary", "Utiliser");
+          yes.type = "button";
+          const no = el("button", "btn", "Annuler");
+          no.type = "button";
+          bar.append(el("span", null, "Modèle payant : " + price + "."), yes, no);
+          yes.onclick = () => { closeMenu(); setModel(entry.id); };
+          no.onclick = () => bar.replaceWith(row);
+          row.replaceWith(bar);
+          yes.focus();
+        };
+        row.append(item, miniButton("info", "Informations sur ce modèle", () => openModelInfo(entry.id)));
         return row;
       };
       // Ce qui s'affiche à droite d'un modèle : nouveauté, mesure, coche.
       const badges = (id) => {
-        const model = freeModels.find((entry) => entry.id === id);
+        const model = known(id);
         const extra = el("span", "aside");
         if (newModelIds.has(id)) extra.append(el("span", "fresh", "nouveau"));
         if (model && model.measured) {
@@ -1686,8 +1746,31 @@
         return extra;
       };
       const matches = (id, query) => {
-        const model = freeModels.find((entry) => entry.id === id);
-        return !query || id.toLowerCase().includes(query) || ((model && model.name) || "").toLowerCase().includes(query);
+        const model = known(id);
+        return !query || id.toLowerCase().includes(query) || ((model && model.name) || "").toLowerCase().includes(query)
+          || ((model && model.specialties) || []).some((specialty) => specialty.label.toLowerCase().includes(query));
+      };
+      const paintCategories = () => {
+        cats.textContent = "";
+        let hidden = 0;
+        for (const category of modelCategories) {
+          const free = category.models.length;
+          if (!free && !showPaidOnlyCategories && category.key !== modelCategory) { hidden += 1; continue; }
+          const chip = el("button", "cat" + (category.key === modelCategory ? " on" : "") + (free ? "" : " nofree"), category.label);
+          chip.type = "button";
+          chip.append(el("i", null, String(free)));
+          chip.title = free + " modèle(s) gratuit(s)" + (category.paid.length ? " · " + category.paid.length + " payant(s) parmi les plus utilisés chez OpenRouter" : "");
+          chip.onclick = () => { modelCategory = category.key; paintCategories(); fill(); list.scrollTop = 0; };
+          cats.append(chip);
+        }
+        if (hidden || showPaidOnlyCategories) {
+          const more = el("button", "cat more", showPaidOnlyCategories ? "Moins de catégories" : "Autres catégories");
+          more.type = "button";
+          if (hidden) more.append(el("i", null, String(hidden)));
+          more.title = "Catégories d'OpenRouter sans modèle gratuit (modèles payants seulement)";
+          more.onclick = () => { showPaidOnlyCategories = !showPaidOnlyCategories; paintCategories(); };
+          cats.append(more);
+        }
       };
       const fill = () => {
         const query = search.value.trim().toLowerCase();
@@ -1698,22 +1781,33 @@
           list.append(el("div", "group", "Favoris"));
           for (const id of favorites) list.append(modelRow(id, pick(id), badges(id)));
         }
-        const known = (id) => freeModels.some((model) => model.id === id) || favoriteModels.includes(id);
-        if (status.model && !known(status.model) && matches(status.model, query)) {
+        if (status.model && !known(status.model) && !favoriteModels.includes(status.model) && matches(status.model, query)) {
           list.append(el("div", "group", "Actuel"));
           list.append(modelRow(status.model, () => {}, checkMark()));
         }
-        const models = freeModels.filter((model) => matches(model.id, query));
-        if (models.length) {
-          list.append(el("div", "group", "Gratuits, du plus puissant au moins puissant"));
+        // Une recherche porte sur tous les modèles gratuits, quelle que soit la catégorie.
+        const category = modelCategories.find((entry) => entry.key === modelCategory) || modelCategories[0];
+        const ids = query || !category ? freeModels.map((model) => model.id) : category.models;
+        const models = ids.map(known).filter(Boolean).filter((model) => matches(model.id, query));
+        const title = query ? "Modèles gratuits trouvés"
+          : !category || category.key === "programming" ? "Gratuits, du plus puissant au moins puissant"
+          : category.key === "all" ? "Tous les modèles gratuits"
+          : "Gratuits · " + category.label;
+        if (models.length || (category && !query)) {
+          list.append(el("div", "group", title));
           if (modelsCatalogAt) list.append(el("div", "hint-line", "Catalogue OpenRouter lu " + relativeTime(modelsCatalogAt)));
         }
+        if (!models.length && category && !query) list.append(el("div", "hint-line", "Aucun modèle gratuit dans cette catégorie."));
         for (const model of models) {
           // Nom du modèle, et dessous son identifiant réel ; sa puissance en info-bulle.
           const power = (model.reasons || []).concat(model.context ? ["contexte " + model.context] : []).join(" · ");
           const row = modelRow(model.id, pick(model.id), badges(model.id));
           row.firstChild.title = power || model.id;
           list.append(row);
+        }
+        if (!query && category && category.paid.length) {
+          list.append(el("div", "group", "Payants les plus utilisés chez OpenRouter"));
+          for (const entry of category.paid) list.append(paidRow(entry));
         }
         if (!list.children.length) list.append(el("div", "group", "Aucun modèle trouvé"));
       };
@@ -1723,6 +1817,7 @@
         await searchBestModels();
         find.disabled = false;
         findLabel(false);
+        paintCategories();
         fill();
       };
       search.oninput = fill;
@@ -1738,7 +1833,8 @@
       go.onclick = useCustom;
       field.onkeydown = (event) => { if (event.key === "Enter") useCustom(); };
       custom.append(field, go);
-      menu.append(search, find, list, custom);
+      menu.append(search, find, cats, list, custom);
+      paintCategories();
       fill();
     });
   }
@@ -1996,6 +2092,7 @@
       freeModels = data.models || [];
       modelsCatalogAt = data.catalog_at || 0;
       favoriteModels = data.favorites || [];
+      modelCategories = data.categories || [];
       warning = data.warning || "";
       // Modèles apparus depuis la liste précédente.
       newModelIds = new Set(fresh && known.size ? freeModels.filter((model) => !known.has(model.id)).map((model) => model.id) : []);

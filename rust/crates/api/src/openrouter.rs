@@ -1,6 +1,6 @@
-//! Catalogue `OpenRouter` : liste des modèles, classement de la catégorie
-//! « programming », quota quotidien des modèles gratuits, et sélection des
-//! modèles gratuits les mieux placés en code.
+//! Catalogue `OpenRouter` : liste des modèles, classements par catégorie
+//! d'usage, spécialités de chaque modèle, quota quotidien des modèles gratuits,
+//! et sélection des modèles gratuits les mieux placés en code.
 
 use std::collections::BTreeMap;
 use std::sync::{OnceLock, RwLock};
@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::ApiError;
 
 /// Modèle du catalogue, réduit aux informations utiles à l'agent.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// Une capacité indépendante par booléen (outils, images, son, vidéo, raisonnement).
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct OpenRouterModel {
     pub id: String,
     pub name: String,
@@ -25,6 +27,15 @@ pub struct OpenRouterModel {
     /// Accepte des images en entrée (modèle multimodal).
     #[serde(default)]
     pub supports_images: bool,
+    /// Accepte du son en entrée.
+    #[serde(default)]
+    pub supports_audio: bool,
+    /// Accepte de la vidéo en entrée.
+    #[serde(default)]
+    pub supports_video: bool,
+    /// Sait raisonner avant de répondre (paramètre `reasoning`).
+    #[serde(default)]
+    pub supports_reasoning: bool,
 }
 
 impl OpenRouterModel {
@@ -37,12 +48,72 @@ impl OpenRouterModel {
 /// Catalogue complet tel que mis en cache sur disque.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelCatalog {
+    /// Format du cache : un catalogue d'une version antérieure est relu.
+    #[serde(default)]
+    pub version: u32,
     /// Horodatage Unix (secondes) du téléchargement.
     pub fetched_at: u64,
     pub models: Vec<OpenRouterModel>,
     /// Identifiants du classement « programming » d'`OpenRouter`, du premier au dernier.
     pub programming_ranking: Vec<String>,
+    /// Classement de chaque catégorie d'usage d'`OpenRouter` (voir
+    /// [`OPENROUTER_CATEGORIES`]) : identifiants, du plus utilisé au moins utilisé.
+    #[serde(default)]
+    pub category_rankings: BTreeMap<String, Vec<String>>,
 }
+
+/// Version du format de [`ModelCatalog`] écrit par cette version de Claw.
+pub const CATALOG_VERSION: u32 = 2;
+
+/// Catégories d'usage d'`OpenRouter` (`GET /models?category=…`) et leur nom.
+pub const OPENROUTER_CATEGORIES: &[(&str, &str)] = &[
+    ("programming", "Programmation"),
+    ("academia", "Apprentissage et recherche"),
+    ("science", "Sciences"),
+    ("technology", "Technologie"),
+    ("translation", "Traduction"),
+    ("finance", "Finance"),
+    ("health", "Santé"),
+    ("legal", "Droit"),
+    ("marketing", "Marketing"),
+    ("marketing/seo", "Référencement"),
+    ("roleplay", "Jeu de rôle"),
+    ("trivia", "Culture générale"),
+];
+
+/// Spécialités affichées, dans l'ordre : catégories d'`OpenRouter` et
+/// capacités lues dans le catalogue (images, son, raisonnement, contexte).
+pub const SPECIALTIES: &[(&str, &str)] = &[
+    ("programming", "Programmation"),
+    ("reasoning", "Raisonnement"),
+    ("vision", "Images"),
+    ("audio_video", "Audio et vidéo"),
+    ("academia", "Apprentissage et recherche"),
+    ("science", "Sciences"),
+    ("technology", "Technologie"),
+    ("data", "Données et documents"),
+    ("long_context", "Long contexte"),
+    ("translation", "Traduction"),
+    ("finance", "Finance"),
+    ("health", "Santé"),
+    ("legal", "Droit"),
+    ("marketing", "Marketing"),
+    ("marketing/seo", "Référencement"),
+    ("roleplay", "Jeu de rôle"),
+    ("trivia", "Culture générale"),
+];
+
+/// Spécialité d'un modèle et ce qui la justifie.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Specialty {
+    pub key: &'static str,
+    pub label: &'static str,
+    /// Le fait sur lequel elle repose : « n°3 chez `OpenRouter` », « lit les images »…
+    pub detail: String,
+}
+
+/// Contexte à partir duquel un modèle est dit « long contexte » (en jetons).
+const LONG_CONTEXT_TOKENS: u64 = 500_000;
 
 /// Quota quotidien des modèles gratuits (`GET /key`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,20 +296,36 @@ struct RawQuota {
     remaining: u64,
 }
 
-/// Télécharge le catalogue et le classement « programming ».
+/// Télécharge le catalogue et le classement de chaque catégorie d'usage. Ces
+/// lectures sont publiques : aucune clé n'est envoyée et aucune requête du
+/// quota gratuit n'est consommée.
 pub async fn fetch_model_catalog(base_url: &str) -> Result<ModelCatalog, ApiError> {
     let http = reqwest::Client::new();
     let base = base_url.trim_end_matches('/');
     let models = get_models(&http, &format!("{base}/models")).await?;
-    // Le classement est un plus : son absence ne doit pas empêcher /models.
-    let programming_ranking = get_models(&http, &format!("{base}/models?category=programming"))
-        .await
-        .map(|ranked| ranked.into_iter().map(|model| model.id).collect())
-        .unwrap_or_default();
+    // Les classements sont un plus : leur absence ne doit pas empêcher /models.
+    let mut requests = tokio::task::JoinSet::new();
+    for (category, _) in OPENROUTER_CATEGORIES {
+        let http = http.clone();
+        let url = format!("{base}/models?category={category}");
+        requests.spawn(async move { (*category, get_models(&http, &url).await) });
+    }
+    let mut category_rankings = BTreeMap::new();
+    while let Some(answer) = requests.join_next().await {
+        if let Ok((category, Ok(ranked))) = answer {
+            let ids: Vec<String> = ranked.into_iter().map(|model| model.id).collect();
+            category_rankings.insert(category.to_string(), ids);
+        }
+    }
     Ok(ModelCatalog {
+        version: CATALOG_VERSION,
         fetched_at: unix_now(),
         models,
-        programming_ranking,
+        programming_ranking: category_rankings
+            .get("programming")
+            .cloned()
+            .unwrap_or_default(),
+        category_rankings,
     })
 }
 
@@ -293,28 +380,35 @@ fn parse_model_list(body: &str) -> Result<Vec<OpenRouterModel>, ApiError> {
     Ok(list
         .data
         .into_iter()
-        .map(|raw| OpenRouterModel {
-            name: if raw.name.is_empty() {
-                raw.id.clone()
-            } else {
-                raw.name
-            },
-            description: raw.description.unwrap_or_default(),
-            context_length: raw.context_length.and_then(non_negative_u64),
-            max_completion_tokens: raw
-                .top_provider
-                .and_then(|provider| provider.max_completion_tokens)
-                .and_then(non_negative_u64),
-            prompt_price: price(raw.pricing.prompt.as_ref()),
-            completion_price: price(raw.pricing.completion.as_ref()),
-            supports_tools: raw
-                .supported_parameters
-                .is_some_and(|parameters| parameters.iter().any(|parameter| parameter == "tools")),
-            supports_images: raw
+        .map(|raw| {
+            let parameters = raw.supported_parameters.unwrap_or_default();
+            let supports = |wanted: &str| parameters.iter().any(|parameter| parameter == wanted);
+            let inputs = raw
                 .architecture
                 .and_then(|architecture| architecture.input_modalities)
-                .is_some_and(|modalities| modalities.iter().any(|modality| modality == "image")),
-            id: raw.id,
+                .unwrap_or_default();
+            let reads = |wanted: &str| inputs.iter().any(|modality| modality == wanted);
+            OpenRouterModel {
+                name: if raw.name.is_empty() {
+                    raw.id.clone()
+                } else {
+                    raw.name
+                },
+                description: raw.description.unwrap_or_default(),
+                context_length: raw.context_length.and_then(non_negative_u64),
+                max_completion_tokens: raw
+                    .top_provider
+                    .and_then(|provider| provider.max_completion_tokens)
+                    .and_then(non_negative_u64),
+                prompt_price: price(raw.pricing.prompt.as_ref()),
+                completion_price: price(raw.pricing.completion.as_ref()),
+                supports_tools: supports("tools"),
+                supports_images: reads("image"),
+                supports_audio: reads("audio"),
+                supports_video: reads("video"),
+                supports_reasoning: supports("reasoning") || supports("include_reasoning"),
+                id: raw.id,
+            }
         })
         .collect())
 }
@@ -466,6 +560,97 @@ fn score_coding_model(model: &OpenRouterModel, catalog: &ModelCatalog) -> Option
         score,
         reasons,
     })
+}
+
+/// Rang (à partir de 1) d'un modèle dans une catégorie d'`OpenRouter` ; la
+/// variante payante d'un modèle gratuit compte aussi.
+#[must_use]
+pub fn category_rank(model_id: &str, category: &str, catalog: &ModelCatalog) -> Option<usize> {
+    let base_id = model_id.trim_end_matches(":free");
+    let ranking = match catalog.category_rankings.get(category) {
+        Some(ranking) => ranking,
+        None if category == "programming" => &catalog.programming_ranking,
+        None => return None,
+    };
+    ranking
+        .iter()
+        .position(|ranked| ranked == model_id || ranked == base_id)
+        .map(|position| position + 1)
+}
+
+/// Le mot entier `word` figure dans `text` (déjà en minuscules).
+fn has_word(text: &str, word: &str) -> bool {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .any(|token| token == word)
+}
+
+/// Spécialités d'un modèle, d'après des faits vérifiables : son rang dans les
+/// catégories d'usage d'`OpenRouter`, ce qu'il sait lire (images, son, vidéo),
+/// la taille de son contexte, et ce que sa description met en avant.
+#[must_use]
+pub fn model_specialties(model: &OpenRouterModel, catalog: &ModelCatalog) -> Vec<Specialty> {
+    let description = model.description.to_ascii_lowercase();
+    let mentions = |phrases: &[&str]| phrases.iter().any(|phrase| description.contains(phrase));
+    SPECIALTIES
+        .iter()
+        .filter_map(|(key, label)| {
+            let ranked = category_rank(&model.id, key, catalog)
+                .map(|rank| format!("n°{rank} de la catégorie chez OpenRouter"));
+            let detail = ranked.or_else(|| match *key {
+                "programming" => score_coding_model(model, catalog).map(|scored| {
+                    scored
+                        .reasons
+                        .into_iter()
+                        .find(|reason| !reason.contains("paramètres"))
+                        .unwrap_or_else(|| "le code fait partie de ses points forts".to_string())
+                }),
+                "reasoning" => (model.supports_reasoning && description.contains("reasoning"))
+                    .then(|| "raisonnement mis en avant dans sa description".to_string()),
+                "vision" => model.supports_images.then(|| "lit les images".to_string()),
+                "audio_video" => match (model.supports_audio, model.supports_video) {
+                    (true, true) => Some("lit le son et la vidéo".to_string()),
+                    (true, false) => Some("lit le son".to_string()),
+                    (false, true) => Some("lit la vidéo".to_string()),
+                    (false, false) => None,
+                },
+                "academia" => mentions(&[
+                    "research",
+                    "academic",
+                    "education",
+                    "tutor",
+                    "forecasting",
+                    "scientific",
+                ])
+                .then(|| "études et recherche citées dans sa description".to_string()),
+                "data" => (mentions(&["data extraction", "document"])
+                    || has_word(&description, "rag"))
+                .then(|| {
+                    "extraction de données et documents cités dans sa description".to_string()
+                }),
+                "long_context" => model
+                    .context_length
+                    .filter(|tokens| *tokens >= LONG_CONTEXT_TOKENS)
+                    .map(|tokens| format!("contexte de {} jetons", group_thousands(tokens))),
+                "translation" => mentions(&["multilingual", "translation"])
+                    .then(|| "langues citées dans sa description".to_string()),
+                _ => None,
+            })?;
+            Some(Specialty { key, label, detail })
+        })
+        .collect()
+}
+
+/// « 1 000 000 » : milliers séparés par une espace.
+fn group_thousands(value: u64) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(' ');
+        }
+        grouped.push(digit);
+    }
+    grouped
 }
 
 /// Puissance estimée d'un modèle pour le code, indépendamment de sa
@@ -661,9 +846,11 @@ pub fn model_limits(model: &str) -> Option<ModelLimits> {
 #[cfg(test)]
 mod tests {
     use super::{
-        active_parameters_billions, model_power, parse_model_list, rank_free_coding_models,
-        total_parameters_billions, ModelCatalog, OpenRouterModel,
+        active_parameters_billions, category_rank, model_power, model_specialties,
+        parse_model_list, rank_free_coding_models, total_parameters_billions, ModelCatalog,
+        OpenRouterModel,
     };
+    use std::collections::BTreeMap;
 
     fn model(id: &str, description: &str, free: bool, tools: bool) -> OpenRouterModel {
         OpenRouterModel {
@@ -676,6 +863,7 @@ mod tests {
             completion_price: if free { 0.0 } else { 0.000_002 },
             supports_tools: tools,
             supports_images: false,
+            ..Default::default()
         }
     }
 
@@ -701,6 +889,8 @@ mod tests {
     #[test]
     fn ranks_only_free_tool_capable_coding_models_with_reasons() {
         let catalog = ModelCatalog {
+            version: 0,
+            category_rankings: BTreeMap::new(),
             fetched_at: 0,
             programming_ranking: vec!["big/frontier".to_string(), "lab/ultra:free".to_string()],
             models: vec![
@@ -742,6 +932,8 @@ mod tests {
                 .expect("lecture")
         };
         let catalog = ModelCatalog {
+            version: 0,
+            category_rankings: BTreeMap::new(),
             fetched_at: 0,
             models: parse_model_list(&read("CLAW_OR_MODELS")).expect("catalogue"),
             programming_ranking: parse_model_list(&read("CLAW_OR_PROGRAMMING"))
@@ -783,8 +975,85 @@ mod tests {
     }
 
     #[test]
+    fn specialties_come_from_rankings_capabilities_and_descriptions() {
+        let models = parse_model_list(
+            r#"{"data":[
+                {"id":"lab/omni:free","name":"Omni","context_length":1000000,
+                 "description":"A frontier reasoning model. Liquid advises against using it for agentic coding.",
+                 "pricing":{"prompt":"0","completion":"0"},
+                 "supported_parameters":["tools","reasoning"],
+                 "architecture":{"input_modalities":["text","image","audio","video"]}},
+                {"id":"pool/coder:free","name":"Coder","context_length":262144,
+                 "description":"The latest coding agent model. Good at data extraction and RAG.",
+                 "pricing":{"prompt":"0","completion":"0"},
+                 "supported_parameters":["tools"]},
+                {"id":"res/scholar:free","name":"Scholar","context_length":65536,
+                 "description":"Built for long-horizon research and forecasting, with storage for drafts.",
+                 "pricing":{"prompt":"0","completion":"0"},
+                 "supported_parameters":["tools","include_reasoning"]}
+            ]}"#,
+        )
+        .expect("catalogue");
+        assert!(
+            models[0].supports_audio && models[0].supports_video && models[0].supports_reasoning
+        );
+        assert!(!models[1].supports_reasoning && models[2].supports_reasoning);
+
+        let catalog = ModelCatalog {
+            category_rankings: BTreeMap::from([
+                (
+                    "translation".to_string(),
+                    vec!["x/autre".to_string(), "lab/omni".to_string()],
+                ),
+                (
+                    "programming".to_string(),
+                    vec!["pool/coder:free".to_string()],
+                ),
+            ]),
+            models: models.clone(),
+            ..ModelCatalog::default()
+        };
+        assert_eq!(
+            category_rank("lab/omni:free", "translation", &catalog),
+            Some(2)
+        );
+        assert_eq!(category_rank("lab/omni:free", "finance", &catalog), None);
+
+        let keys = |index: usize| -> Vec<&str> {
+            model_specialties(&models[index], &catalog)
+                .into_iter()
+                .map(|specialty| specialty.key)
+                .collect()
+        };
+        // Capacités et rang ; le code déconseillé par la description n'est pas une spécialité.
+        assert_eq!(
+            keys(0),
+            [
+                "reasoning",
+                "vision",
+                "audio_video",
+                "long_context",
+                "translation"
+            ]
+        );
+        assert_eq!(keys(1), ["programming", "data"]);
+        // « storage » ne contient pas le mot « rag ».
+        assert_eq!(keys(2), ["academia"]);
+        let omni = model_specialties(&models[0], &catalog);
+        assert_eq!(omni[2].detail, "lit le son et la vidéo");
+        assert_eq!(omni[3].detail, "contexte de 1 000 000 jetons");
+        assert_eq!(omni[4].detail, "n°2 de la catégorie chez OpenRouter");
+        assert_eq!(
+            model_specialties(&models[1], &catalog)[0].detail,
+            "n°1 de la catégorie chez OpenRouter"
+        );
+    }
+
+    #[test]
     fn power_ranks_big_and_proven_models_above_small_or_light_ones() {
         let catalog = ModelCatalog {
+            version: 0,
+            category_rankings: BTreeMap::new(),
             fetched_at: 0,
             models: Vec::new(),
             programming_ranking: vec!["nvidia/nemotron-3-ultra-550b-a55b".to_string()],

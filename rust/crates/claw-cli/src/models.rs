@@ -68,6 +68,7 @@ pub(crate) fn catalog(refresh: bool) -> Result<(ModelCatalog, Option<String>), S
     if !refresh {
         if let Some(catalog) = cached
             .as_ref()
+            .filter(|catalog| catalog.version == api::CATALOG_VERSION)
             .filter(|catalog| unix_now().saturating_sub(catalog.fetched_at) < CACHE_TTL_SECS)
         {
             return Ok((catalog.clone(), None));
@@ -151,6 +152,7 @@ pub(crate) fn efficiency(
             completion_price: 0.0,
             supports_tools: true,
             supports_images: false,
+            ..Default::default()
         });
     let (power, reasons) = api::model_power(&model, catalog);
     Some(((power.max(0.0) + 5.0) * factor, reasons))
@@ -558,7 +560,7 @@ pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, 
             None => "  Aucun modèle gratuit n'a de signal de code fiable aujourd'hui.".to_string(),
         });
     } else {
-        lines.extend(render_ranking(&ranked, current_model));
+        lines.extend(render_ranking(&ranked, current_model, &catalog));
     }
     lines.extend([
         String::new(),
@@ -595,7 +597,11 @@ pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, 
     Ok(lines.join("\n"))
 }
 
-fn render_ranking(ranked: &[RankedModel], current_model: &str) -> Vec<String> {
+fn render_ranking(
+    ranked: &[RankedModel],
+    current_model: &str,
+    catalog: &ModelCatalog,
+) -> Vec<String> {
     let width = ranked
         .iter()
         .map(|entry| entry.model.id.len())
@@ -611,8 +617,14 @@ fn render_ranking(ranked: &[RankedModel], current_model: &str) -> Vec<String> {
             ""
         };
         let mut details = entry.reasons.clone();
-        if entry.model.supports_images {
-            details.push("lit les images".to_string());
+        // Ses autres spécialités (le classement est déjà celui du code).
+        let others: Vec<&str> = api::model_specialties(&entry.model, catalog)
+            .into_iter()
+            .filter(|specialty| specialty.key != "programming")
+            .map(|specialty| specialty.label)
+            .collect();
+        if !others.is_empty() {
+            details.push(format!("aussi : {}", others.join(", ").to_lowercase()));
         }
         if let Some(result) = measured.get(&entry.model.id) {
             details.push(format!("mesuré : {}", result.summary()));
@@ -781,24 +793,97 @@ pub fn model_info_json(id: &str) -> serde_json::Value {
         "hard": hard(result.and_then(|result| result.hard.as_ref())),
         "hard_unassisted": hard(result.and_then(|result| result.hard_unassisted.as_ref())),
         "available": api::model_available(id),
+        "specialties": match (entry, catalog.as_ref()) {
+            (Some(model), Some(catalog)) => specialties_json(&api::model_specialties(model, catalog)),
+            _ => Vec::new(),
+        },
         "url": (compat.is_none() && id.contains('/')).then(|| format!("https://openrouter.ai/{id}")),
         "catalog_at": catalog.as_ref().map(|catalog| catalog.fetched_at),
     })
 }
 
-/// Classement des modèles gratuits pour le code et quota, au format JSON de
-/// l'interface web. `refresh` relit le catalogue et le classement programmation
-/// chez `OpenRouter` au lieu du cache de 24 h (bouton « Rechercher »).
+fn specialties_json(specialties: &[api::Specialty]) -> Vec<serde_json::Value> {
+    specialties
+        .iter()
+        .map(|specialty| {
+            serde_json::json!({
+                "key": specialty.key,
+                "label": specialty.label,
+                "detail": specialty.detail,
+            })
+        })
+        .collect()
+}
+
+/// Modèles payants les plus utilisés d'une catégorie d'`OpenRouter`, parmi
+/// ceux qui savent appeler des outils (cinq au plus), avec leur prix.
+fn paid_models_json(category: &str, catalog: &ModelCatalog) -> Vec<serde_json::Value> {
+    let Some(ranking) = catalog.category_rankings.get(category) else {
+        return Vec::new();
+    };
+    ranking
+        .iter()
+        .enumerate()
+        .filter_map(|(position, id)| {
+            let model = catalog.models.iter().find(|model| &model.id == id)?;
+            if model.is_free() || !model.supports_tools {
+                return None;
+            }
+            Some(serde_json::json!({
+                "id": model.id,
+                "name": model.name,
+                "context": format_context(model.context_length),
+                "rank": position + 1,
+                "prompt_price": price_per_million(model.prompt_price)?,
+                "completion_price": price_per_million(model.completion_price)?,
+            }))
+        })
+        .take(5)
+        .collect()
+}
+
+/// Modèles gratuits et quota au format JSON de l'interface web : tous les
+/// modèles gratuits utilisables par l'agent (appels d'outils, pas un routeur,
+/// pas mesurés incompatibles) avec leurs spécialités, et une catégorie par
+/// spécialité. `refresh` relit le catalogue et les classements chez
+/// `OpenRouter` au lieu du cache de 24 h (bouton « Rechercher »).
 pub fn free_coding_models_json(refresh: bool) -> Result<serde_json::Value, String> {
     let (catalog, warning) = catalog(refresh)?;
-    // Même ordre que le choix automatique : du plus efficace au moins efficace.
-    let measured = crate::bench::recent_results();
-    let models = preferred_free_models(&catalog)
-        .into_iter()
-        .filter_map(|id| catalog.models.iter().find(|model| model.id == id))
-        .map(|model| {
-            let (score, reasons) = efficiency(&model.id, Some(&catalog), measured.get(&model.id))
-                .unwrap_or((0.0, Vec::new()));
+    let mut view = models_view_json(&catalog, &crate::bench::recent_results());
+    view["quota"] = serde_json::json!(free_quota_line());
+    view["warning"] = serde_json::json!(warning);
+    view["favorites"] = serde_json::json!(favorite_models());
+    Ok(view)
+}
+
+/// Modèles gratuits utilisables, leurs spécialités et les catégories, pour un
+/// catalogue et des mesures donnés (sans accès réseau).
+fn models_view_json(
+    catalog: &ModelCatalog,
+    measured: &std::collections::BTreeMap<String, crate::bench::BenchResult>,
+) -> serde_json::Value {
+    // Du plus efficace au moins efficace, comme le choix automatique.
+    let mut usable: Vec<(&api::OpenRouterModel, f64, Vec<String>, Vec<api::Specialty>)> = catalog
+        .models
+        .iter()
+        .filter(|model| {
+            model.is_free() && model.supports_tools && !model.id.starts_with("openrouter/")
+        })
+        .filter_map(|model| {
+            let (score, reasons) = efficiency(&model.id, Some(catalog), measured.get(&model.id))?;
+            Some((
+                model,
+                score,
+                reasons,
+                api::model_specialties(model, catalog),
+            ))
+        })
+        .collect();
+    usable.sort_by(|left, right| right.1.total_cmp(&left.1));
+
+    let models = usable
+        .iter()
+        .map(|(model, score, reasons, specialties)| {
             serde_json::json!({
                 "id": model.id,
                 "name": model.name,
@@ -807,17 +892,59 @@ pub fn free_coding_models_json(refresh: bool) -> Result<serde_json::Value, Strin
                 "score": score.round(),
                 "measured": measured.get(&model.id).map(crate::bench::BenchResult::summary),
                 "available": api::model_available(&model.id),
+                "specialties": specialties_json(specialties),
             })
         })
         .collect::<Vec<_>>();
-    Ok(serde_json::json!({
+
+    // Une catégorie par spécialité : « Programmation » garde le classement du
+    // code, les autres rangent par rang chez OpenRouter puis par efficacité.
+    let mut categories = vec![
+        serde_json::json!({
+            "key": "programming",
+            "label": "Programmation",
+            "models": preferred_free_models(catalog),
+            "paid": paid_models_json("programming", catalog),
+        }),
+        serde_json::json!({
+            "key": "all",
+            "label": "Tous",
+            "models": usable.iter().map(|entry| entry.0.id.as_str()).collect::<Vec<_>>(),
+            "paid": [],
+        }),
+    ];
+    for (key, label) in api::SPECIALTIES
+        .iter()
+        .filter(|(key, _)| *key != "programming")
+    {
+        let mut members: Vec<(usize, usize, &str)> = usable
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.3.iter().any(|specialty| specialty.key == *key))
+            .map(|(order, entry)| {
+                let rank = api::category_rank(&entry.0.id, key, catalog).unwrap_or(usize::MAX);
+                (rank, order, entry.0.id.as_str())
+            })
+            .collect();
+        members.sort_unstable();
+        let paid = paid_models_json(key, catalog);
+        if members.is_empty() && paid.is_empty() {
+            continue;
+        }
+        categories.push(serde_json::json!({
+            "key": key,
+            "label": label,
+            "models": members.iter().map(|member| member.2).collect::<Vec<_>>(),
+            "paid": paid,
+        }));
+    }
+
+    serde_json::json!({
         "models": models,
-        "quota": free_quota_line(),
-        "warning": warning,
+        "categories": categories,
         // Heure (secondes Unix) du catalogue utilisé pour ce classement.
         "catalog_at": catalog.fetched_at,
-        "favorites": favorite_models(),
-    }))
+    })
 }
 
 #[cfg(test)]
@@ -864,6 +991,135 @@ mod tests {
         assert_eq!(super::price_per_million(-1.0), None);
     }
 
+    /// Catalogue fictif : deux modèles gratuits utilisables, un sans outils, le
+    /// routeur, et deux payants classés en droit.
+    fn specialty_catalog() -> api::ModelCatalog {
+        let model =
+            |id: &str, description: &str, price: f64, tools: bool, images: bool| OpenRouterModel {
+                id: id.to_string(),
+                name: id.to_string(),
+                description: description.to_string(),
+                context_length: Some(262_144),
+                prompt_price: price,
+                completion_price: price * 4.0,
+                supports_tools: tools,
+                supports_images: images,
+                ..Default::default()
+            };
+        api::ModelCatalog {
+            version: api::CATALOG_VERSION,
+            fetched_at: 42,
+            models: vec![
+                model(
+                    "pool/coder:free",
+                    "The latest coding agent model with 8B active parameters.",
+                    0.0,
+                    true,
+                    false,
+                ),
+                model(
+                    "lab/vue:free",
+                    "A multimodal assistant with 12B active parameters.",
+                    0.0,
+                    true,
+                    true,
+                ),
+                model(
+                    "lab/muet:free",
+                    "A vision model without tool calling.",
+                    0.0,
+                    false,
+                    true,
+                ),
+                model("openrouter/free", "Router.", 0.0, true, true),
+                model(
+                    "big/droit",
+                    "A model for legal work.",
+                    0.000_002,
+                    true,
+                    false,
+                ),
+                model(
+                    "big/sans-outils",
+                    "A model for legal work.",
+                    0.000_001,
+                    false,
+                    false,
+                ),
+            ],
+            programming_ranking: Vec::new(),
+            category_rankings: std::collections::BTreeMap::from([(
+                "legal".to_string(),
+                vec![
+                    "big/sans-outils".to_string(),
+                    "big/droit".to_string(),
+                    "lab/vue".to_string(),
+                ],
+            )]),
+        }
+    }
+
+    #[test]
+    fn models_are_grouped_by_specialty_with_paid_ones_apart() {
+        let catalog = specialty_catalog();
+        let view = super::models_view_json(&catalog, &std::collections::BTreeMap::new());
+
+        // Seuls les modèles gratuits qui appellent des outils (et pas le routeur).
+        let ids: Vec<&str> = view["models"]
+            .as_array()
+            .expect("modèles")
+            .iter()
+            .map(|entry| entry["id"].as_str().expect("id"))
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"pool/coder:free") && ids.contains(&"lab/vue:free"));
+
+        let category = |key: &str| {
+            view["categories"]
+                .as_array()
+                .expect("catégories")
+                .iter()
+                .find(|entry| entry["key"] == key)
+                .cloned()
+        };
+        let keys: Vec<String> = view["categories"]
+            .as_array()
+            .expect("catégories")
+            .iter()
+            .map(|entry| entry["key"].as_str().expect("clé").to_string())
+            .collect();
+        assert_eq!(keys, ["programming", "all", "vision", "legal"]);
+        assert_eq!(
+            category("vision").expect("images")["models"],
+            serde_json::json!(["lab/vue:free"])
+        );
+        // Droit : le modèle gratuit classé (par sa variante payante), puis le payant
+        // qui appelle des outils, avec son prix par million de jetons.
+        let legal = category("legal").expect("droit");
+        assert_eq!(legal["label"], "Droit");
+        assert_eq!(legal["models"], serde_json::json!(["lab/vue:free"]));
+        assert_eq!(legal["paid"].as_array().expect("payants").len(), 1);
+        assert_eq!(legal["paid"][0]["id"], "big/droit");
+        assert_eq!(legal["paid"][0]["rank"], 2);
+        assert!((legal["paid"][0]["prompt_price"].as_f64().expect("prix") - 2.0).abs() < 1e-9);
+        assert_eq!(view["catalog_at"], 42);
+
+        // Spécialités portées par chaque modèle.
+        let vue = view["models"]
+            .as_array()
+            .expect("modèles")
+            .iter()
+            .find(|entry| entry["id"] == "lab/vue:free")
+            .expect("modèle");
+        let labels: Vec<&str> = vue["specialties"]
+            .as_array()
+            .expect("spécialités")
+            .iter()
+            .map(|entry| entry["label"].as_str().expect("nom"))
+            .collect();
+        assert_eq!(labels, ["Images", "Droit"]);
+    }
+
     #[test]
     fn ranking_marks_the_current_model() {
         let entry = RankedModel {
@@ -877,11 +1133,12 @@ mod tests {
                 completion_price: 0.0,
                 supports_tools: true,
                 supports_images: false,
+                ..Default::default()
             },
             score: 50.0,
             reasons: vec!["spécialisé code".to_string()],
         };
-        let lines = render_ranking(&[entry], "pool/laguna:free");
+        let lines = render_ranking(&[entry], "pool/laguna:free", &api::ModelCatalog::default());
         assert!(lines[1].contains("pool/laguna:free"));
         assert!(lines[1].contains("256k"));
         assert!(lines[1].ends_with("spécialisé code  ● actuel"));

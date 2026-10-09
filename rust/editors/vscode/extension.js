@@ -4,13 +4,22 @@
 
 const path = require("path");
 const vscode = require("vscode");
-const { ClawServer, selectionMessage } = require("./claw-client");
+const { ClawServer, selectionMessage, resolveExecutable, workingCopy, watchExecutable } = require("./claw-client");
 
 let server = null;
 let panel = null;
 let statusItem = null;
 let creditsTimer = null;
 let credits = null;
+// Dossier de l'extension où garder la copie de travail de claw.
+let storageDir = null;
+// Surveillance de l'exécutable installé, dernier état reçu de claw serve.
+let stopWatching = null;
+let lastStatus = null;
+// Une nouvelle version de claw attend la fin du tour en cours.
+let updatePending = false;
+let reloading = false;
+let reloadCount = 0;
 
 function workspaceFolder() {
   const editor = vscode.window.activeTextEditor;
@@ -72,6 +81,11 @@ function startCredits(running) {
   refreshCredits(running);
   running.subscribe((event) => {
     if (event.type === "credits") applyCredits(running, event.credits);
+    if (event.type === "status" && event.status && running === server) {
+      lastStatus = event.status;
+      // Tour terminé : une mise à jour en attente peut s'appliquer.
+      maybeReload();
+    }
   });
   creditsTimer = setInterval(() => refreshCredits(running), 60000);
 }
@@ -82,19 +96,48 @@ function stopCredits() {
   credits = null;
 }
 
+/**
+ * Exécutable installé et celui à lancer. Sous Windows le panneau lance une
+ * copie : l'exécutable installé reste libre d'être remplacé par une mise à jour.
+ */
+function launchPaths(clawPath) {
+  const installed = resolveExecutable(clawPath);
+  if (!installed) return { installed: null, run: clawPath };
+  if (process.platform === "win32" && storageDir) {
+    try {
+      return { installed, run: workingCopy(installed, path.join(storageDir, "bin")) };
+    } catch (_) {
+      // Copie impossible (disque plein, droits) : l'exécutable installé est lancé tel quel.
+    }
+  }
+  return { installed, run: installed };
+}
+
 /** Démarre `claw serve` pour le dossier ouvert (une seule fois). */
 async function ensureServer() {
   if (server && server.running && server.url) return server;
   const cwd = workspaceFolder();
   if (!cwd) throw new Error("Ouvrez d'abord un dossier de projet.");
-  server = new ClawServer({ ...settings(), cwd });
-  server.onExit((code, stderr) => {
+  const config = settings();
+  const launch = launchPaths(config.clawPath);
+  const started = new ClawServer({ ...config, clawPath: launch.run, cwd });
+  server = started;
+  started.onExit((code, stderr) => {
+    // Un serveur remplacé (rechargement) ne touche plus à l'affichage.
+    if (server !== started) return;
     stopCredits();
     setStatus("$(circle-slash) Claw", "Claw est arrêté");
     if (code !== 0 && code !== null) {
       vscode.window.showErrorMessage(`Claw s'est arrêté (code ${code}). ${stderr.split("\n").slice(-3).join(" ")}`);
     }
   });
+  if (stopWatching) stopWatching();
+  stopWatching = launch.installed
+    ? watchExecutable(launch.installed, () => {
+        updatePending = true;
+        maybeReload();
+      })
+    : null;
   setStatus("$(sync~spin) Claw", "Démarrage de Claw…");
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: "Démarrage de Claw…" },
@@ -103,6 +146,59 @@ async function ensureServer() {
   setStatus("$(hubot) Claw", `Claw actif dans ${cwd}`);
   startCredits(server);
   return server;
+}
+
+/**
+ * Applique une mise à jour de claw dès que l'agent est au repos : sinon elle
+ * attend la fin du tour en cours (signalée par l'événement d'état suivant).
+ */
+async function maybeReload() {
+  if (!updatePending || reloading) return;
+  if (!server || !server.running) {
+    // Rien ne tourne : le prochain démarrage prendra la nouvelle version.
+    updatePending = false;
+    return;
+  }
+  if (lastStatus && lastStatus.busy) {
+    setStatus("$(sync) Claw", "Mise à jour de Claw en attente : le panneau se rechargera à la fin du tour en cours");
+    return;
+  }
+  updatePending = false;
+  try {
+    await reloadServer("Claw a été mis à jour : le panneau s'est rechargé");
+  } catch (error) {
+    vscode.window.showErrorMessage(`Claw : rechargement impossible après la mise à jour (${error.message})`);
+  }
+}
+
+/**
+ * Relance `claw serve` (avec l'exécutable installé du moment), reprend la
+ * session en cours et recharge le panneau.
+ */
+async function reloadServer(message) {
+  if (reloading) return;
+  reloading = true;
+  try {
+    const sessionId = lastStatus && lastStatus.session_id;
+    const previous = server;
+    server = null;
+    lastStatus = null;
+    stopCredits();
+    if (previous) previous.stop();
+    const running = await ensureServer();
+    if (sessionId) {
+      try {
+        await running.request("POST", "/api/resume", { value: sessionId });
+      } catch (_) {
+        // Session vide, jamais enregistrée : la nouvelle session suffit.
+      }
+    }
+    if (panel) panel.webview.html = panelHtml(running.url, running.port);
+    reloadCount += 1;
+    vscode.window.setStatusBarMessage(message, 6000);
+  } finally {
+    reloading = false;
+  }
 }
 
 /** Thème de l'éditeur, transmis à la page de Claw (`?theme=`). */
@@ -202,6 +298,7 @@ function guard(action) {
 }
 
 function activate(context) {
+  storageDir = context.globalStorageUri ? context.globalStorageUri.fsPath : null;
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusItem.command = "claw.open";
   setStatus("$(hubot) Claw", "Ouvrir Claw");
@@ -223,12 +320,24 @@ function activate(context) {
       const running = await ensureServer();
       await vscode.env.openExternal(vscode.Uri.parse(running.url));
     })),
+    vscode.commands.registerCommand("claw.reload", guard(async () => {
+      if (server && server.running) await reloadServer("Panneau Claw rechargé");
+      else await openPanel();
+    })),
     vscode.commands.registerCommand("claw.stop", () => {
       stopCredits();
+      updatePending = false;
+      if (stopWatching) stopWatching();
+      stopWatching = null;
       if (server) server.stop();
       if (panel) panel.dispose();
     }),
-    { dispose: () => server && server.stop() },
+    {
+      dispose: () => {
+        if (stopWatching) stopWatching();
+        if (server) server.stop();
+      },
+    },
   );
   // État exposé aux autres extensions et aux tests d'intégration.
   return {
@@ -241,10 +350,19 @@ function activate(context) {
     get statusText() {
       return statusItem ? statusItem.text : "";
     },
+    /** Session en cours dans claw serve (`null` tant que l'état n'est pas reçu). */
+    get sessionId() {
+      return lastStatus ? lastStatus.session_id : null;
+    },
+    /** Nombre de rechargements (mise à jour de claw ou commande claw.reload). */
+    get reloadCount() {
+      return reloadCount;
+    },
   };
 }
 
 function deactivate() {
+  if (stopWatching) stopWatching();
   if (server) server.stop();
 }
 

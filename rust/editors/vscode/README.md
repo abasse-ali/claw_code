@@ -17,11 +17,23 @@ L'agent Claw (n'importe quel modèle : OpenRouter, Ollama, Groq…) dans un pann
 | Claw : Poser une question | | Envoie une demande sans quitter l'éditeur |
 | Claw : Interrompre le tour en cours | | Arrête l'agent |
 | Claw : Ouvrir dans le navigateur | | Même session dans le navigateur |
+| Claw : Recharger le panneau | | Relance Claw et recharge le panneau, sur la même session |
 | Claw : Arrêter l'agent | | Arrête le serveur local |
 
 Les autorisations, l'historique, les images collées et les commandes (`/review`, `/undo`…) sont
 ceux de l'interface web de Claw. Le serveur n'écoute que sur `127.0.0.1` avec un jeton, et la page
 n'accepte d'être affichée que dans un panneau de VS Code.
+
+## Mise à jour de claw
+
+Quand l'exécutable `claw` est remplacé (par exemple `cargo install --path crates/claw-cli
+--locked`), le panneau s'en aperçoit en quelques secondes : il relance Claw, reprend la session
+en cours et se recharge. Si l'agent travaille, il attend la fin du tour (la barre d'état
+l'indique).
+
+Sous Windows, un programme en cours d'exécution verrouille son fichier. Le panneau lance donc
+une copie de `claw.exe`, gardée dans le dossier de l'extension : l'exécutable installé reste
+libre d'être remplacé pendant que le panneau est ouvert.
 
 ## Réglages
 

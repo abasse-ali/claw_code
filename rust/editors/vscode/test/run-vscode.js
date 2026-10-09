@@ -13,8 +13,13 @@ const { startMockModel } = require("./mock");
 
 async function main() {
   if (!process.argv[2]) throw new Error("usage : node test/run-vscode.js <chemin de claw>");
-  const claw = path.resolve(process.argv[2]);
+  const source = path.resolve(process.argv[2]);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "claw-vscode-"));
+  // Exécutable « installé » propre à l'essai : la suite le remplace pour
+  // simuler une mise à jour de claw.
+  fs.mkdirSync(path.join(root, "installe"));
+  const claw = path.join(root, "installe", path.basename(source));
+  fs.copyFileSync(source, claw);
   const workspace = path.join(root, "projet");
   fs.mkdirSync(path.join(workspace, ".vscode"), { recursive: true });
   fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
@@ -44,6 +49,8 @@ async function main() {
       extensionTestsEnv: {
         CLAW_TEST_LOG: logPath,
         CLAW_TEST_WORKSPACE: workspace,
+        CLAW_TEST_SOURCE: source,
+        CLAW_TEST_INSTALLED: claw,
         OLLAMA_BASE_URL: mock.baseUrl,
         // Compte OpenRouter fictif servi par le faux modèle (crédits en barre d'état).
         OPENROUTER_BASE_URL: mock.baseUrl,

@@ -15,6 +15,7 @@ const COMMANDS = [
   "claw.askAboutFile",
   "claw.interrupt",
   "claw.openInBrowser",
+  "claw.reload",
   "claw.stop",
 ];
 
@@ -159,6 +160,34 @@ async function run() {
       const received = modelMessages();
       return received.includes("Fais une revue") && received.includes('println!("bonjour")');
     });
+  });
+
+  // Mise à jour de claw pendant que le panneau est ouvert : l'exécutable
+  // installé doit pouvoir être remplacé (il n'est pas verrouillé par le
+  // panneau), puis le panneau se recharge seul sur la même session.
+  await step("le panneau se recharge seul après une mise à jour de claw", async () => {
+    await waitFor("session connue de l'extension", () => Boolean(api.sessionId), 15000);
+    await waitFor("agent au repos", async () => {
+      const sessions = await api.server.request("GET", "/api/sessions");
+      return sessions.sessions.some((session) => session.id === api.sessionId && session.messages >= 2);
+    }, 30000);
+    const before = api.server;
+    const session = api.sessionId;
+    const reloads = api.reloadCount;
+    const installed = process.env.CLAW_TEST_INSTALLED;
+    const incoming = `${installed}.nouveau`;
+    fs.copyFileSync(process.env.CLAW_TEST_SOURCE, incoming);
+    const later = new Date(Date.now() + 60000);
+    fs.utimesSync(incoming, later, later);
+    fs.renameSync(incoming, installed);
+    await waitFor("nouveau claw serve", () => api.reloadCount === reloads + 1 && api.server && api.server !== before && api.server.running, 40000);
+    assert.ok(!before.running, "l'ancien claw serve tourne encore");
+    assert.ok(api.panel && api.panel.webview.html.includes(api.server.url), "le panneau ne pointe pas vers le nouveau claw serve");
+    await waitFor("page rechargée dans le panneau", async () => {
+      const answer = await api.server.request("GET", "/api/viewers");
+      return answer && answer.viewers >= 1;
+    }, 30000);
+    await waitFor("session reprise", () => api.sessionId === session, 15000);
   });
 
   await step("claw.interrupt répond sans erreur", async () => {

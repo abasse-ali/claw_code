@@ -7,9 +7,10 @@ mod sse;
 mod types;
 
 pub use openrouter::{
-    fetch_account_status, fetch_free_quota, fetch_model_catalog, model_limits, model_power,
-    rank_free_coding_models, register_model_limits, AccountStatus, FreeModelQuota, ModelCatalog,
-    ModelLimits, OpenRouterModel, RankedModel,
+    category_rank, fetch_account_status, fetch_free_quota, fetch_model_catalog, model_limits,
+    model_power, model_specialties, rank_free_coding_models, register_model_limits, AccountStatus,
+    FreeModelQuota, ModelCatalog, ModelLimits, OpenRouterModel, RankedModel, Specialty,
+    CATALOG_VERSION, OPENROUTER_CATEGORIES, SPECIALTIES,
 };
 
 pub use client::{

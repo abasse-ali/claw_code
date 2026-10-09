@@ -378,6 +378,8 @@ mod tests {
     #[test]
     fn openrouter_max_tokens_follow_catalog_limits() {
         let catalog = crate::openrouter::ModelCatalog {
+            version: 0,
+            category_rankings: std::collections::BTreeMap::new(),
             fetched_at: 0,
             programming_ranking: Vec::new(),
             models: vec![
@@ -391,6 +393,7 @@ mod tests {
                     completion_price: 0.0,
                     supports_tools: true,
                     supports_images: false,
+                    ..Default::default()
                 },
                 crate::openrouter::OpenRouterModel {
                     id: "huge/ctx:free".to_string(),
@@ -402,6 +405,7 @@ mod tests {
                     completion_price: 0.0,
                     supports_tools: true,
                     supports_images: false,
+                    ..Default::default()
                 },
             ],
         };
