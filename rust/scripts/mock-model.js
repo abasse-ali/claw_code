@@ -14,6 +14,9 @@
 // Un message de l'utilisateur peut aussi piloter le modèle, le temps de son tour :
 //   [mock:write chemin=contenu]         demande write_file
 //   [mock:tool Nom={"argument": 1}]     appelle cet outil, puis cite son résultat
+//
+// Un modèle dont le nom contient « panne » commence à réfléchir puis son
+// fournisseur lâche : erreur 504 envoyée dans le flux, comme le fait OpenRouter.
 "use strict";
 
 const fs = require("fs");
@@ -146,6 +149,15 @@ function streamReply(response, model, answer) {
   response.end("data: [DONE]\n\n");
 }
 
+/** Réponse commencée puis abandonnée par le fournisseur (erreur dans le flux). */
+function streamFailure(response, model) {
+  response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+  const base = { id: "chatcmpl-mock", object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model };
+  response.write(chunk({ ...base, choices: [{ index: 0, delta: { role: "assistant", reasoning: "Je commence à réfléchir. " }, finish_reason: null }] }));
+  response.write(chunk({ error: { code: 504, message: "Upstream idle timeout exceeded" } }));
+  response.end("data: [DONE]\n\n");
+}
+
 function jsonReply(response, model, answer) {
   const message = answer.toolCall
     ? { role: "assistant", content: null, tool_calls: [{ id: answer.toolCall.id, type: "function", function: { name: answer.toolCall.name, arguments: answer.toolCall.arguments } }] }
@@ -199,7 +211,8 @@ const server = http.createServer((request, response) => {
     if (String(body.model || "").endsWith(":free")) freeRequests += 1;
     const answer = reply(body);
     const model = body.model || "mock";
-    if (body.stream) streamReply(response, model, answer);
+    if (body.stream && String(model).includes("panne")) streamFailure(response, model);
+    else if (body.stream) streamReply(response, model, answer);
     else jsonReply(response, model, answer);
   });
 });

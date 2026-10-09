@@ -296,6 +296,27 @@ pub fn resolve_sandbox_status(config: &SandboxConfig, cwd: &Path) -> SandboxStat
     resolve_sandbox_status_for_request(&request, cwd)
 }
 
+/// Dossiers `HOME` et temporaire des commandes isolées : rangés dans `.claw/`
+/// pour ne pas encombrer la racine du projet.
+#[must_use]
+pub fn sandbox_dirs(cwd: &Path) -> (PathBuf, PathBuf) {
+    let base = cwd.join(".claw").join("sandbox");
+    (base.join("home"), base.join("tmp"))
+}
+
+/// Crée les dossiers des commandes isolées, et retire ceux que d'anciennes
+/// versions posaient à la racine du projet (`.sandbox-home`, `.sandbox-tmp`)
+/// quand ils sont vides.
+pub fn prepare_sandbox_dirs(cwd: &Path) {
+    let (home, tmp) = sandbox_dirs(cwd);
+    let _ = fs::create_dir_all(home);
+    let _ = fs::create_dir_all(tmp);
+    for legacy in [".sandbox-home", ".sandbox-tmp"] {
+        // Sans effet sur un dossier qui contient quelque chose.
+        let _ = fs::remove_dir(cwd.join(legacy));
+    }
+}
+
 #[must_use]
 pub fn resolve_sandbox_status_for_request(request: &SandboxRequest, cwd: &Path) -> SandboxStatus {
     let container = detect_container_environment();
@@ -379,8 +400,7 @@ pub fn build_linux_sandbox_command(
     args.push("-lc".to_string());
     args.push(command.to_string());
 
-    let sandbox_home = cwd.join(".sandbox-home");
-    let sandbox_tmp = cwd.join(".sandbox-tmp");
+    let (sandbox_home, sandbox_tmp) = sandbox_dirs(cwd);
     let mut env = vec![
         ("HOME".to_string(), sandbox_home.display().to_string()),
         ("TMPDIR".to_string(), sandbox_tmp.display().to_string()),
@@ -527,6 +547,32 @@ mod tests {
 mod container_tests {
     use super::SandboxConfig;
     use std::path::Path;
+
+    #[test]
+    fn working_folders_live_under_dot_claw_not_at_the_project_root() {
+        let root = std::env::temp_dir().join(format!(
+            "claw-rangement-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("horloge")
+                .as_nanos()
+        ));
+        // Restes d'une ancienne version : un dossier vide, un dossier qui sert.
+        std::fs::create_dir_all(root.join(".sandbox-home")).expect("dossier");
+        std::fs::create_dir_all(root.join(".sandbox-tmp")).expect("dossier");
+        std::fs::write(root.join(".sandbox-tmp").join("garde.txt"), "x").expect("fichier");
+
+        super::prepare_sandbox_dirs(&root);
+
+        let (home, tmp) = super::sandbox_dirs(&root);
+        assert_eq!(home, root.join(".claw").join("sandbox").join("home"));
+        assert!(home.is_dir() && tmp.is_dir());
+        // Le dossier vide disparaît ; celui qui contient quelque chose reste.
+        assert!(!root.join(".sandbox-home").exists());
+        assert!(root.join(".sandbox-tmp").join("garde.txt").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn container_backend_mounts_only_the_workspace() {

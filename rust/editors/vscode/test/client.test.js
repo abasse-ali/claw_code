@@ -169,6 +169,28 @@ function get(port, path) {
       && fs.readFileSync(target, "utf8") === "deuxième version\n",
     `${JSON.stringify(asked)} ${JSON.stringify(events.filter((event) => ["notice", "info", "error", "turn_done", "tool_call"].includes(event.type)).slice(-12))}`);
 
+  // Le fournisseur du modèle lâche en cours de réponse (504) : la requête repart sur le modèle de secours.
+  const fragile = new ClawServer({
+    clawPath: claw,
+    cwd,
+    model: "ollama:panne",
+    permissionMode: "read-only",
+    env: { ...env, CLAW_FALLBACK_MODELS: "ollama:mock" },
+  });
+  await fragile.start();
+  const fragileEvents = [];
+  fragile.subscribe((event) => fragileEvents.push(event));
+  await wait("abonnement", () => fragileEvents.some((event) => event.type === "status"));
+  await fragile.send("Réponds bonjour malgré la panne");
+  await wait("fin du tour après la panne", () => fragileEvents.some((event) => event.type === "turn_done"), 160);
+  const switched = fragileEvents.find((event) => event.type === "notice" && event.text.includes("a cessé de répondre"));
+  const answered = fragileEvents.filter((event) => event.type === "assistant_text").map((event) => event.text).join("");
+  check("une panne du fournisseur en cours de réponse fait repartir la requête sur le modèle de secours",
+    Boolean(switched) && switched.text === "ollama:panne a cessé de répondre (erreur 504) → la requête repart sur ollama:mock"
+      && answered.includes("Réponse du modèle factice") && !fragileEvents.some((event) => event.type === "error"),
+    JSON.stringify(fragileEvents.filter((event) => ["notice", "error", "assistant_text", "turn_done"].includes(event.type)).slice(-6)));
+  fragile.stop();
+
   let rejected = false;
   try {
     await new ClawServer({ clawPath: claw, cwd }).request("POST", "/api/message", { text: "x" });

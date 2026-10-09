@@ -486,7 +486,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "required": ["todos"],
                 "additionalProperties": false
             }),
-            // Simple liste de suivi (.claw-todos.json) : jamais de demande
+            // Simple liste de suivi (.claw/todos.json) : jamais de demande
             // d'autorisation, y compris en mode plan, comme dans Claude Code.
             required_permission: PermissionMode::ReadOnly,
         },
@@ -2093,7 +2093,21 @@ fn todo_store_path() -> Result<std::path::PathBuf, String> {
         return Ok(std::path::PathBuf::from(path));
     }
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    Ok(cwd.join(".claw-todos.json"))
+    Ok(todo_store_in(&cwd))
+}
+
+/// Liste de suivi du projet, rangée dans `.claw/`. Celle que d'anciennes
+/// versions posaient à la racine (`.claw-todos.json`) y est déplacée.
+fn todo_store_in(cwd: &std::path::Path) -> std::path::PathBuf {
+    let store = cwd.join(".claw").join("todos.json");
+    let legacy = cwd.join(".claw-todos.json");
+    if legacy.is_file() && !store.exists() {
+        if let Some(parent) = store.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::rename(&legacy, &store);
+    }
+    store
 }
 
 fn resolve_skill_path(skill: &str) -> Result<std::path::PathBuf, String> {
@@ -3028,118 +3042,141 @@ impl ApiClient for ProviderRuntimeClient {
         };
         let mut notify = notify_subagent_fallback;
 
-        self.runtime.block_on(async {
-            let opened =
-                runtime::interrupt::interruptible(self.chain.open_stream(&build, &mut notify))
-                    .await?;
-            note_model_request(&opened.model);
-            let mut stream = opened.stream;
-            let mut first_event = opened.first_event;
-            let mut events = Vec::new();
-            let mut pending_tools: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
-            let mut saw_stop = false;
-            let mut signed_thinking = SignedThinking::new();
-            // Jamais de tiret cadratin dans ce qu'un sous-agent écrit.
-            let mut text_dashes = runtime::typography::DashFilter::default();
+        // Quand le fournisseur du modèle lâche en cours de réponse (504,
+        // surcharge), la requête repart sur un autre modèle de la chaîne.
+        let mut switches_left = api::UPSTREAM_SWITCHES;
+        let answering = std::cell::RefCell::new(String::new());
+        loop {
+            let result: Result<Vec<AssistantEvent>, RuntimeError> = self.runtime.block_on(async {
+                let opened =
+                    runtime::interrupt::interruptible(self.chain.open_stream(&build, &mut notify))
+                        .await?;
+                answering.borrow_mut().clone_from(&opened.model);
+                note_model_request(&opened.model);
+                let mut stream = opened.stream;
+                let mut first_event = opened.first_event;
+                let mut events = Vec::new();
+                let mut pending_tools: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
+                let mut saw_stop = false;
+                let mut signed_thinking = SignedThinking::new();
+                // Jamais de tiret cadratin dans ce qu'un sous-agent écrit.
+                let mut text_dashes = runtime::typography::DashFilter::default();
 
-            loop {
-                let event = match first_event.take() {
-                    Some(event) => event,
-                    None => match runtime::interrupt::interruptible(stream.next_event()).await? {
+                loop {
+                    let event = match first_event.take() {
                         Some(event) => event,
-                        None => break,
-                    },
-                };
-                match event {
-                    ApiStreamEvent::MessageStart(start) => {
-                        for block in start.message.content {
-                            push_output_block(block, 0, &mut events, &mut pending_tools, true);
-                        }
-                    }
-                    ApiStreamEvent::ContentBlockStart(start) => {
-                        start_signed_thinking(
-                            &start.content_block,
-                            start.index,
-                            &mut signed_thinking,
-                        );
-                        push_output_block(
-                            start.content_block,
-                            start.index,
-                            &mut events,
-                            &mut pending_tools,
-                            true,
-                        );
-                    }
-                    ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
-                        ContentBlockDelta::TextDelta { text } => {
-                            let text = text_dashes.push(&text);
-                            if !text.is_empty() {
-                                events.push(AssistantEvent::TextDelta(text));
+                        None => match runtime::interrupt::interruptible(stream.next_event()).await?
+                        {
+                            Some(event) => event,
+                            None => break,
+                        },
+                    };
+                    match event {
+                        ApiStreamEvent::MessageStart(start) => {
+                            for block in start.message.content {
+                                push_output_block(block, 0, &mut events, &mut pending_tools, true);
                             }
                         }
-                        ContentBlockDelta::InputJsonDelta { partial_json } => {
-                            if let Some((_, _, input)) = pending_tools.get_mut(&delta.index) {
-                                input.push_str(&partial_json);
+                        ApiStreamEvent::ContentBlockStart(start) => {
+                            start_signed_thinking(
+                                &start.content_block,
+                                start.index,
+                                &mut signed_thinking,
+                            );
+                            push_output_block(
+                                start.content_block,
+                                start.index,
+                                &mut events,
+                                &mut pending_tools,
+                                true,
+                            );
+                        }
+                        ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
+                            ContentBlockDelta::TextDelta { text } => {
+                                let text = text_dashes.push(&text);
+                                if !text.is_empty() {
+                                    events.push(AssistantEvent::TextDelta(text));
+                                }
+                            }
+                            ContentBlockDelta::InputJsonDelta { partial_json } => {
+                                if let Some((_, _, input)) = pending_tools.get_mut(&delta.index) {
+                                    input.push_str(&partial_json);
+                                }
+                            }
+                            ContentBlockDelta::ThinkingDelta { thinking } => {
+                                if let Some(entry) = signed_thinking.get_mut(&delta.index) {
+                                    entry.0.push_str(&thinking);
+                                }
+                            }
+                            ContentBlockDelta::SignatureDelta { signature } => {
+                                if let Some(entry) = signed_thinking.get_mut(&delta.index) {
+                                    entry.1.push_str(&signature);
+                                }
+                            }
+                        },
+                        ApiStreamEvent::ContentBlockStop(stop) => {
+                            finish_signed_thinking(stop.index, &mut signed_thinking, &mut events);
+                            if let Some((id, name, input)) = pending_tools.remove(&stop.index) {
+                                events.push(AssistantEvent::ToolUse { id, name, input });
                             }
                         }
-                        ContentBlockDelta::ThinkingDelta { thinking } => {
-                            if let Some(entry) = signed_thinking.get_mut(&delta.index) {
-                                entry.0.push_str(&thinking);
-                            }
+                        ApiStreamEvent::MessageDelta(delta) => {
+                            events.push(AssistantEvent::Usage(TokenUsage {
+                                input_tokens: delta.usage.input_tokens,
+                                output_tokens: delta.usage.output_tokens,
+                                cache_creation_input_tokens: 0,
+                                cache_read_input_tokens: 0,
+                            }));
                         }
-                        ContentBlockDelta::SignatureDelta { signature } => {
-                            if let Some(entry) = signed_thinking.get_mut(&delta.index) {
-                                entry.1.push_str(&signature);
-                            }
+                        ApiStreamEvent::MessageStop(_) => {
+                            saw_stop = true;
+                            events.push(AssistantEvent::MessageStop);
                         }
-                    },
-                    ApiStreamEvent::ContentBlockStop(stop) => {
-                        finish_signed_thinking(stop.index, &mut signed_thinking, &mut events);
-                        if let Some((id, name, input)) = pending_tools.remove(&stop.index) {
-                            events.push(AssistantEvent::ToolUse { id, name, input });
-                        }
-                    }
-                    ApiStreamEvent::MessageDelta(delta) => {
-                        events.push(AssistantEvent::Usage(TokenUsage {
-                            input_tokens: delta.usage.input_tokens,
-                            output_tokens: delta.usage.output_tokens,
-                            cache_creation_input_tokens: 0,
-                            cache_read_input_tokens: 0,
-                        }));
-                    }
-                    ApiStreamEvent::MessageStop(_) => {
-                        saw_stop = true;
-                        events.push(AssistantEvent::MessageStop);
                     }
                 }
-            }
 
-            if !saw_stop
-                && events.iter().any(|event| {
-                    matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
-                        || matches!(event, AssistantEvent::ToolUse { .. })
-                })
-            {
-                events.push(AssistantEvent::MessageStop);
-            }
+                if !saw_stop
+                    && events.iter().any(|event| {
+                        matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
+                            || matches!(event, AssistantEvent::ToolUse { .. })
+                    })
+                {
+                    events.push(AssistantEvent::MessageStop);
+                }
 
-            if events
-                .iter()
-                .any(|event| matches!(event, AssistantEvent::MessageStop))
-            {
-                return Ok(events);
-            }
+                if events
+                    .iter()
+                    .any(|event| matches!(event, AssistantEvent::MessageStop))
+                {
+                    return Ok(events);
+                }
 
-            let build_complete = |model: &str| MessageRequest {
-                stream: false,
-                ..build(model)
+                let build_complete = |model: &str| MessageRequest {
+                    stream: false,
+                    ..build(model)
+                };
+                let (model, response) = runtime::interrupt::interruptible(
+                    self.chain.send(&build_complete, &mut notify),
+                )
+                .await?;
+                note_model_request(&model);
+                Ok(response_to_events(response))
+            });
+            let Err(error) = result else {
+                return result;
             };
-            let (model, response) =
-                runtime::interrupt::interruptible(self.chain.send(&build_complete, &mut notify))
-                    .await?;
-            note_model_request(&model);
-            Ok(response_to_events(response))
-        })
+            let failed = answering.borrow().clone();
+            let next = api::upstream_failure_status(&error.to_string())
+                .filter(|_| switches_left > 0 && !failed.is_empty())
+                .and_then(|status| Some((status, self.chain.switch_after_failure(&failed)?)));
+            let Some((status, next)) = next else {
+                return Err(error);
+            };
+            switches_left -= 1;
+            notify(&format!(
+                "{failed} a cessé de répondre (erreur {status}) → la requête repart sur {next}"
+            ));
+        }
     }
 }
 
@@ -4652,6 +4689,22 @@ mod tests {
                 "{\"pattern\":\"TODO\"}".to_string(),
             ))
         );
+    }
+
+    #[test]
+    fn todo_list_lives_under_dot_claw_and_the_old_one_is_moved_there() {
+        let root = temp_path("todo-rangement");
+        std::fs::create_dir_all(&root).expect("dossier");
+        let store = root.join(".claw").join("todos.json");
+        assert_eq!(super::todo_store_in(&root), store);
+        assert!(!store.exists());
+
+        // Liste laissée à la racine par une ancienne version : déplacée, pas perdue.
+        std::fs::write(root.join(".claw-todos.json"), "[]").expect("ancienne liste");
+        assert_eq!(super::todo_store_in(&root), store);
+        assert_eq!(std::fs::read_to_string(&store).expect("liste"), "[]");
+        assert!(!root.join(".claw-todos.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

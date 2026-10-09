@@ -366,6 +366,16 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
   « only available on agentic harnesses ») : mis de côté jusqu'à la remise à zéro ou 24 h, et
   retenu d'un lancement à l'autre (`~/.claw/model-cooldowns.json`). Un modèle en échec est mis de côté un
   moment ; `CLAW_FALLBACK=0` désactive la bascule.
+  **Panne en cours de réponse** : quand le fournisseur d'un modèle lâche alors qu'il a déjà
+  commencé à répondre (504 « Upstream idle timeout », surcharge, erreur interne), le tour ne
+  s'arrête plus sur une erreur : la même requête repart sur le modèle suivant de la chaîne, et le
+  modèle fautif est mis de côté cinq minutes pour que les étapes suivantes ne l'attendent pas
+  (« … a cessé de répondre (erreur 504) → la requête repart sur … »). Sans autre modèle, une
+  nouvelle tentative est faite. Les sous-agents font de même.
+- **Fichiers de travail** : tout ce que Claw écrit pour lui-même dans un projet est rangé dans
+  `.claw/` (sessions, points de restauration, liste de suivi `todos.json`, dossiers `sandbox/`
+  des commandes isolées), rien à la racine. Les `.sandbox-home`, `.sandbox-tmp` vides et le
+  `.claw-todos.json` laissés par une version précédente sont retirés ou déplacés au premier usage.
 - `"smallModel"` (ou `CLAW_SMALL_MODEL`) : petit modèle utilisé pour les résumés de compaction.
 
 ### Fiabilité avec les petits modèles

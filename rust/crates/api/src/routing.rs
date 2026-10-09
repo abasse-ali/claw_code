@@ -210,6 +210,24 @@ fn retry_in_place_delay(error: &ApiError, attempt: u32) -> Option<Duration> {
     }
 }
 
+/// Changements de modèle, pour une même requête, après une panne du
+/// fournisseur en cours de réponse.
+pub const UPSTREAM_SWITCHES: u32 = 3;
+/// Mise de côté du modèle dont le fournisseur a lâché en cours de réponse.
+const UPSTREAM_COOLDOWN: Duration = Duration::from_secs(300);
+
+/// Statut d'une panne du fournisseur lue dans le texte d'une erreur (délai
+/// dépassé, surcharge, erreur interne, limite) : un autre modèle peut répondre
+/// à la même requête. `None` pour une erreur de la requête elle-même (400,
+/// 401…) ou sans statut.
+#[must_use]
+pub fn upstream_failure_status(error: &str) -> Option<u16> {
+    const MARKER: &str = "l'api a retourné ";
+    let after = &error[error.rfind(MARKER)? + MARKER.len()..];
+    let status: u16 = after.get(..3)?.parse().ok()?;
+    matches!(status, 408 | 429 | 500..=599).then_some(status)
+}
+
 pub type ClientFactory = Box<dyn Fn(&str) -> Result<ProviderClient, ApiError> + Send>;
 
 /// Chaîne de modèles : le principal puis ses remplaçants.
@@ -268,6 +286,20 @@ impl ModelChain {
     #[must_use]
     pub fn primary(&self) -> &str {
         self.models.first().map_or("", String::as_str)
+    }
+
+    /// Le fournisseur de `failed` a lâché en cours de réponse : s'il reste un
+    /// autre modèle disponible, `failed` est mis de côté quelques minutes (les
+    /// étapes suivantes ne l'attendent plus) et ce modèle est renvoyé.
+    #[must_use]
+    pub fn switch_after_failure(&self, failed: &str) -> Option<String> {
+        let next = self
+            .models
+            .iter()
+            .find(|model| model.as_str() != failed && model_available(model))
+            .cloned()?;
+        mark_model_unavailable(failed, UPSTREAM_COOLDOWN);
+        Some(next)
     }
 
     /// Ordre d'essai : les modèles disponibles d'abord, puis ceux mis de côté
@@ -416,6 +448,53 @@ mod tests {
             model_available("ollama:qwen3"),
             "les autres fournisseurs restent disponibles"
         );
+        reset_model_cooldowns();
+    }
+
+    #[test]
+    fn a_failure_in_the_middle_of_an_answer_hands_over_to_the_next_model() {
+        use super::upstream_failure_status;
+        assert_eq!(
+            upstream_failure_status(
+                "l'api a retourné 504 Gateway Timeout (504) : Upstream idle timeout exceeded"
+            ),
+            Some(504)
+        );
+        assert_eq!(
+            upstream_failure_status(
+                "l'api a échoué après 3 tentatives : l'api a retourné 503 Service Unavailable : overloaded"
+            ),
+            Some(503)
+        );
+        assert_eq!(
+            upstream_failure_status("l'api a retourné 429 Too Many Requests : rate limit"),
+            Some(429)
+        );
+        // Erreurs de la requête elle-même, ou sans statut : pas de changement de modèle.
+        assert_eq!(
+            upstream_failure_status("l'api a retourné 400 Bad Request : invalid tool schema"),
+            None
+        );
+        assert_eq!(
+            upstream_failure_status("l'api a retourné 401 Unauthorized : User not found"),
+            None
+        );
+        assert_eq!(upstream_failure_status("erreur json : EOF"), None);
+
+        reset_model_cooldowns();
+        let chain = ModelChain::new(
+            vec!["a/lent:free".into(), "b/suivant:free".into()],
+            Box::new(crate::client::ProviderClient::from_model),
+        );
+        assert_eq!(
+            chain.switch_after_failure("a/lent:free").as_deref(),
+            Some("b/suivant:free")
+        );
+        assert!(!model_available("a/lent:free"));
+        assert_eq!(chain.attempt_order(), ["b/suivant:free", "a/lent:free"]);
+        // Plus personne d'autre de disponible : le modèle n'est pas mis de côté.
+        assert_eq!(chain.switch_after_failure("b/suivant:free"), None);
+        assert!(model_available("b/suivant:free"));
         reset_model_cooldowns();
     }
 

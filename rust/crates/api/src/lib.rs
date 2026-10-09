@@ -31,7 +31,7 @@ pub use providers::{
 };
 pub use routing::{
     mark_model_unavailable, model_available, reset_model_cooldowns, set_cooldown_store,
-    ClientFactory, ModelChain, OpenedStream,
+    upstream_failure_status, ClientFactory, ModelChain, OpenedStream, UPSTREAM_SWITCHES,
 };
 pub use sse::{parse_frame, SseParser};
 pub use types::{

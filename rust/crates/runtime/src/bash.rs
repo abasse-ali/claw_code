@@ -409,8 +409,9 @@ fn prepare_command(
         prepared.env("PYTHONIOENCODING", "utf-8");
     }
     if sandbox_status.filesystem_active {
-        prepared.env("HOME", cwd.join(".sandbox-home"));
-        prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
+        let (home, tmp) = crate::sandbox::sandbox_dirs(cwd);
+        prepared.env("HOME", home);
+        prepared.env("TMPDIR", tmp);
     }
     prepared
 }
@@ -446,15 +447,15 @@ fn prepare_tokio_command(
         prepared.env("PYTHONIOENCODING", "utf-8");
     }
     if sandbox_status.filesystem_active {
-        prepared.env("HOME", cwd.join(".sandbox-home"));
-        prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
+        let (home, tmp) = crate::sandbox::sandbox_dirs(cwd);
+        prepared.env("HOME", home);
+        prepared.env("TMPDIR", tmp);
     }
     prepared
 }
 
 fn prepare_sandbox_dirs(cwd: &std::path::Path) {
-    let _ = std::fs::create_dir_all(cwd.join(".sandbox-home"));
-    let _ = std::fs::create_dir_all(cwd.join(".sandbox-tmp"));
+    crate::sandbox::prepare_sandbox_dirs(cwd);
 }
 
 #[cfg(test)]

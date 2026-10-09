@@ -199,6 +199,8 @@ fn error_hint(problem: &str) -> &'static str {
         "vérifiez la clé OPENROUTER_API_KEY (ou ANTHROPIC_API_KEY pour un modèle Claude direct)"
     } else if lower.contains("image") && (lower.contains("support") || lower.contains("modalit")) {
         "ce modèle ne lit pas les images : choisissez un modèle multimodal (/models vision)"
+    } else if api::upstream_failure_status(problem).is_some() {
+        "le fournisseur du modèle a cessé de répondre (surcharge ou délai dépassé) et aucun autre modèle n'a pris le relais : renvoyez la demande, ou changez de modèle (/model)"
     } else if lower.contains("identifiants") && lower.contains("manquants") {
         "aucune clé API trouvée : définissez OPENROUTER_API_KEY (clé gratuite sur https://openrouter.ai/keys) puis relancez claw"
     } else {
@@ -5633,13 +5635,17 @@ impl ApiClient for DefaultRuntimeClient {
         }
 
         // Une connexion coupée pendant la réponse ne fait pas échouer le tour :
-        // la même requête est relancée.
+        // la même requête est relancée. Quand c'est le fournisseur du modèle qui
+        // lâche en cours de réponse (504, surcharge), elle repart sur un autre modèle.
         let mut retries_left = BROKEN_STREAM_RETRIES;
+        let mut switches_left = api::UPSTREAM_SWITCHES;
+        let answering = std::cell::RefCell::new(String::new());
         loop {
             let result: Result<Vec<AssistantEvent>, RuntimeError> = self.runtime.block_on(async {
                 let opened =
                     runtime::interrupt::interruptible(self.chain.open_stream(&build, &mut notify))
                         .await?;
+                answering.borrow_mut().clone_from(&opened.model);
                 // Chaque étape de l'agent compte : l'affichage des crédits suit en direct.
                 credits::note_request(&opened.model);
                 let mut stream = opened.stream;
@@ -5871,7 +5877,34 @@ impl ApiClient for DefaultRuntimeClient {
                         live::show("Réflexion…");
                     }
                 }
-                other => return other,
+                Err(error) => {
+                    let failed = answering.borrow().clone();
+                    let Some(status) = api::upstream_failure_status(&error.to_string())
+                        .filter(|_| switches_left > 0 && !failed.is_empty())
+                    else {
+                        return Err(error);
+                    };
+                    if emit {
+                        transcript::discard_calls();
+                    }
+                    if let Some(next) = self.chain.switch_after_failure(&failed) {
+                        switches_left -= 1;
+                        notify(&format!(
+                            "{failed} a cessé de répondre (erreur {status}) → la requête repart sur {next}"
+                        ));
+                    } else {
+                        // Aucun autre modèle : une seule nouvelle tentative, après une pause.
+                        switches_left = 0;
+                        notify(&format!(
+                            "{failed} a cessé de répondre (erreur {status}) : nouvelle tentative"
+                        ));
+                        std::thread::sleep(Duration::from_secs(3));
+                    }
+                    if emit {
+                        live::show("Réflexion…");
+                    }
+                }
+                Ok(events) => return Ok(events),
             }
         }
     }
@@ -5917,7 +5950,6 @@ fn active_model() -> String {
 
 /// Relances après une connexion coupée en cours de réponse.
 const BROKEN_STREAM_RETRIES: u32 = 2;
-
 /// La réponse s'est interrompue côté réseau (et non par l'utilisateur ou par
 /// un refus du fournisseur) : la même requête peut être relancée.
 fn is_broken_stream(error: &str) -> bool {
@@ -7199,6 +7231,14 @@ mod tests {
                 model: Some("qwen/qwen3-coder:free".to_string())
             }
         );
+    }
+
+    #[test]
+    fn an_upstream_failure_that_reaches_the_user_comes_with_a_hint() {
+        assert!(super::error_hint(
+            "l'api a retourné 504 Gateway Timeout (504) : Upstream idle timeout exceeded"
+        )
+        .contains("a cessé de répondre"));
     }
 
     #[test]
