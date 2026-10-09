@@ -57,6 +57,8 @@ async function main() {
         OPENROUTER_API_KEY: "sk-or-test-factice",
         CLAW_CONFIG_HOME: path.join(root, "claw-home"),
         CLAW_NO_CLAUDE_CONFIG: "1",
+        // L'essai ne reprend pas les clés du compte de la machine.
+        CLAW_NO_USER_ENV: "1",
       },
     });
   } finally {

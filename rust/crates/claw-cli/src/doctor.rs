@@ -166,11 +166,15 @@ fn openrouter_check(model: &str) -> Check {
             "clé absente : définissez OPENROUTER_API_KEY (variable d'environnement utilisateur)",
         ),
         None => Check::new(Level::Info, "OpenRouter", "pas de clé (facultatif ici)"),
-        Some(Ok(_)) => Check::new(
-            Level::Ok,
-            "OpenRouter",
-            crate::credits::current_line(false).unwrap_or_default(),
-        ),
+        Some(Ok(_)) => {
+            let mut detail = crate::credits::current_line(false).unwrap_or_default();
+            if crate::user_env::was_adopted("OPENROUTER_API_KEY") {
+                detail.push_str(
+                    " (clé lue dans les variables du compte Windows : le programme qui a lancé Claw ne la transmettait pas)",
+                );
+            }
+            Check::new(Level::Ok, "OpenRouter", detail)
+        }
         Some(Err(error)) => Check::new(
             if needed { Level::Fail } else { Level::Warn },
             "OpenRouter",

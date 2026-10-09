@@ -49,7 +49,13 @@ function get(port, path) {
   const logPath = path.join(root, "modele.jsonl");
   fs.writeFileSync(logPath, "");
   const mock = await startMockModel(logPath);
-  const env = { OLLAMA_BASE_URL: mock.baseUrl, CLAW_CONFIG_HOME: path.join(root, "claw-home"), CLAW_NO_CLAUDE_CONFIG: "1" };
+  // CLAW_NO_USER_ENV : l'essai ne reprend pas les clés du compte de la machine.
+  const env = {
+    OLLAMA_BASE_URL: mock.baseUrl,
+    CLAW_CONFIG_HOME: path.join(root, "claw-home"),
+    CLAW_NO_CLAUDE_CONFIG: "1",
+    CLAW_NO_USER_ENV: "1",
+  };
 
   const server = new ClawServer({ clawPath: claw, cwd, model: "ollama:mock", permissionMode: "read-only", env });
   const started = await server.start();

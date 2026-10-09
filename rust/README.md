@@ -59,6 +59,15 @@ de `.claw.json`. Le modèle choisi doit prendre en charge l'appel d'outils (*too
 | `CLAW_PROVIDER` | Force le fournisseur : `anthropic`, `openrouter`, `openai`, `xai` |
 | `CLAW_MAX_TOKENS` | Plafond de jetons de sortie (défaut 16 384 pour OpenRouter) |
 
+**Windows : « clé manquante » alors que la clé est définie.** Un programme garde l'environnement
+reçu à son démarrage : VS Code ouvert par le clic droit « Ouvrir avec Code », un terminal resté
+ouvert ou une tâche planifiée peuvent ignorer une variable créée depuis. Claw relit donc au
+démarrage les variables de votre compte dans le registre (`HKCU\Environment`, puis celles de la
+machine si aucune clé n'est trouvée) et adopte celles qui lui servent et qui manquent : clés
+(`*_API_KEY`, `*_AUTH_TOKEN`), adresses (`*_BASE_URL`), `CLAW_*`, `OLLAMA_*`. Une variable déjà
+présente n'est jamais remplacée, et aucune valeur n'est affichée. `claw doctor` le signale
+(« clé lue dans les variables du compte Windows ») ; `CLAW_NO_USER_ENV=1` coupe cette reprise.
+
 Sous Windows, l'outil `bash` et les hooks utilisent le bash de Git for Windows,
 détecté automatiquement ; `CLAW_SHELL` permet d'indiquer un autre `bash.exe`.
 

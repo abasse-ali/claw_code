@@ -15,6 +15,7 @@ mod render;
 mod stream_json;
 mod transcript;
 mod turn_keys;
+mod user_env;
 mod web;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -109,6 +110,8 @@ type AllowedToolSet = BTreeSet<String>;
 
 fn main() {
     ensure_home_env();
+    // Clés définies dans le compte mais absentes de l'environnement reçu.
+    user_env::adopt();
     let result = run();
     // Les serveurs de dev et autres commandes de fond ne survivent pas à Claw.
     runtime::bash_tasks::kill_all();
