@@ -388,8 +388,9 @@ pub(crate) fn run_claw(
             prompt,
         ])
         .current_dir(project)
-        // Mesurer ce modèle, pas ses remplaçants.
+        // Mesurer ce modèle, pas ses remplaçants ni celui qui le relèverait.
         .env("CLAW_FALLBACK", "0")
+        .env("CLAW_ESCALATION", "0")
         .envs(envs.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

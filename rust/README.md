@@ -94,7 +94,7 @@ sombre ou claire (thème du système, de VS Code ou choisi) :
   réponse maximale, orientation code et agents de sa description, rang en programmation chez
   OpenRouter, spécialités en commun, mesures de Claw. C'est une ressemblance de profil, pas une
   égalité d'intelligence : « Mesurer ce modèle » vérifie ses capacités réelles. Dans le terminal :
-  `/models claude`, qui propose aussi le plus proche comme `"escalationModel"` gratuit.
+  `/models claude`.
   Sous les gratuits, **« Payants proches ou mieux classés »** liste au plus huit modèles payants
   par référence : ceux qui ressemblent à Claude au moins autant que le meilleur gratuit (60 % au
   minimum) et ceux qui le devancent au classement en programmation d'OpenRouter (un classement
@@ -393,7 +393,8 @@ applique**, quel que soit le modèle.
 | Second avis | L'outil `Consult` (et `/avis <question>`) pose la même question à plusieurs autres modèles ; l'agent compare et décide | `CLAW_COUNCIL=0` |
 | Leçons | L'outil `Remember` note une leçon utile au projet dans `.claw/lessons.md` (80 au plus), relue au début de chaque session | `CLAW_LESSONS=0` |
 | Modèle de planification | En mode plan, `"plannerModel"` réfléchit à la place du modèle de la session, qui exécute ensuite le plan approuvé | `CLAW_PLANNER=0` |
-| Escalade | Au deuxième échec de la vérification, ou au deuxième recadrage, `"escalationModel"` (un modèle plus fort) reprend la fin du tour ; le tour suivant repart avec le modèle habituel | `CLAW_ESCALATION=0` |
+| Escalade | Au deuxième échec de la vérification, ou au deuxième recadrage, **le modèle gratuit le plus puissant du moment** reprend la fin du tour ; le tour suivant repart avec le modèle habituel. Sans réglage à faire, et jamais vers un modèle payant | `CLAW_ESCALATION=0` |
+| Erreurs de l'éditeur | Avec l'extension VS Code : quand le tour a modifié des fichiers, Claw demande à l'éditeur les erreurs qu'il y voit (compilation, types, lint) et les renvoie au modèle, deux fois au plus par tour. L'outil `EditorDiagnostics` permet aussi au modèle de les lire quand il veut | `CLAW_EDITOR_DIAGNOSTICS=0` |
 | Contrôle des exigences | Quand le tour a modifié au moins 5 lignes et que la vérification passe, le modèle liste chaque exigence de la demande et de la documentation du code (cas limites compris), désigne le code et le test qui la couvrent, et corrige ce qui manque, avant la relecture. Une requête de plus par tour concerné | `CLAW_CHECKLIST=0` |
 
 `CLAW_HARNESS=0` les coupe toutes. Réglages dans `.claw/settings.json` ou `~/.claw/settings.json` :
@@ -402,9 +403,9 @@ applique**, quel que soit le modèle.
 {
   "verify": "cargo test --quiet",
   "review": true,
-  "advisorModels": ["openai/gpt-5", "anthropic/claude-sonnet-4.5"],
-  "plannerModel": "anthropic/claude-sonnet-4.5",
-  "escalationModel": "anthropic/claude-sonnet-4.5"
+  "advisorModels": ["nvidia/nemotron-3-ultra-550b-a55b:free", "cohere/north-mini-code:free"],
+  "plannerModel": "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "escalationModel": "free"
 }
 ```
 
@@ -419,9 +420,15 @@ applique**, quel que soit le modèle.
   laisse la place au suivant ; une consultation dure 90 s au plus.
 - `"plannerModel"` : un modèle fort pour réfléchir, un modèle gratuit pour exécuter. Claw l'annonce
   au début du tour (« Mode plan : la réflexion est confiée à … »).
-- `"escalationModel"` (ou `CLAW_ESCALATION_MODEL`) : le modèle gratuit fait le travail courant, un
-  modèle fort n'est payé que lorsque l'agent est bloqué. Claw l'annonce (« L'agent n'avance plus :
-  … reprend la fin du tour ») ; s'il est indisponible, la chaîne habituelle prend le relais.
+- `"escalationModel"` (ou `CLAW_ESCALATION_MODEL`) : qui reprend un tour bloqué. Sans réglage, ou
+  avec `"free"` : **le modèle gratuit le plus puissant** du classement de `/models` (taille, rang
+  en programmation, spécialisation, mesures de `/models bench`), choisi au moment du blocage
+  parmi les modèles disponibles, dans le catalogue déjà en cache. Si le modèle de la session est
+  déjà le plus puissant, il n'y a pas d'escalade. `"off"` la coupe ; un identifiant de modèle
+  impose ce modèle-là (un payant ne sert donc que si vous l'écrivez vous-même). `/models` montre
+  le choix du moment, ligne « Escalade ». Claw l'annonce (« L'agent n'avance plus : … reprend la
+  fin du tour ») ; s'il est indisponible, la chaîne habituelle prend le relais. `/models bench`
+  mesure chaque modèle seul, sans escalade.
 
 Les avis des autres modèles ne sont jamais des ordres : ils reviennent au modèle de la session
 comme des remarques à confronter au code. Les diagnostics d'un serveur de langage (LSP) ne sont
@@ -613,12 +620,23 @@ coupe cet import.
   script. Sans terminal, une demande d'autorisation est refusée et signalée en JSON.
 - **GitHub** : l'action `.github/actions/claw` et un exemple de workflow « `@claw` dans un
   commentaire » sont décrits dans [`docs/github-action.md`](docs/github-action.md).
-- **VS Code** : l'extension `editors/vscode` (paquet `claw-code-0.2.0.vsix`, à installer avec
+- **VS Code** : l'extension `editors/vscode` (paquet `claw-code-0.3.0.vsix`, à installer avec
   « Extensions : installer depuis VSIX… ») ouvre l'agent dans un panneau (`Ctrl+Alt+K`), envoie la
-  sélection (`Ctrl+Alt+L`) ou le fichier courant. Après une mise à jour de `claw`
-  (`cargo install`), le panneau **se recharge seul** sur la même session, à la fin du tour en
-  cours ; sous Windows il lance une copie de `claw.exe`, pour que le fichier installé ne soit
-  pas verrouillé pendant la mise à jour. Voir `editors/vscode/README.md`.
+  sélection (`Ctrl+Alt+L`) ou le fichier courant.
+  - **Diff de l'éditeur** : quand l'agent demande l'autorisation d'écrire ou de modifier un
+    fichier, le changement s'ouvre dans un diff de VS Code (fichier actuel à gauche, proposition
+    à droite), avec **Accepter** et **Refuser** dans la barre de titre du diff et dans la barre
+    d'état (`Ctrl+Entrée`, `Ctrl+Maj+Retour arrière`). Rien n'est écrit avant l'accord ; un refus
+    peut porter une consigne pour l'agent. La réponse peut aussi se donner dans le panneau.
+  - **Problèmes de l'éditeur** : l'agent lit les erreurs que VS Code souligne (voir « Erreurs de
+    l'éditeur » dans les aides au raisonnement).
+  - **Fichiers modifiés** : après un tour qui a modifié des fichiers, un bouton de la barre d'état
+    ouvre le diff « avant Claw / maintenant » de chacun (aussi pour toute la session).
+  - Après une mise à jour de `claw` (`cargo install`), le panneau **se recharge seul** sur la
+    même session, à la fin du tour en cours ; sous Windows il lance une copie de `claw.exe`, pour
+    que le fichier installé ne soit pas verrouillé pendant la mise à jour.
+
+  Voir `editors/vscode/README.md`.
 - **Éditeurs** : `claw acp` fait de Claw un agent de l'Agent Client Protocol (Zed, Neovim avec
   CodeCompanion, Emacs…). Dans Zed : `"agent_servers": { "Claw": { "command": "claw", "args": ["acp"] } }`.
   Les autorisations s'affichent dans l'éditeur, les modes de permission y sont sélectionnables.

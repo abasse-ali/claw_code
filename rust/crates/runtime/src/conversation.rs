@@ -216,6 +216,10 @@ struct TurnAids {
     escalated: bool,
     /// Le modèle a déjà confronté son travail aux exigences pendant ce tour.
     checklisted: bool,
+    /// Des fichiers ont été modifiés depuis la dernière question à l'éditeur.
+    editor_dirty: bool,
+    /// Renvois au modèle pour des erreurs signalées par l'éditeur.
+    editor_rounds: usize,
 }
 
 /// Sortie et statut d'un message de résultat d'outil.
@@ -591,6 +595,13 @@ where
                         .push(ConversationMessage::user_text(feedback));
                     continue;
                 }
+                // L'éditeur relié voit-il des erreurs dans les fichiers modifiés ?
+                if let Some(feedback) = self.editor_gate(&mut aids) {
+                    self.session
+                        .messages
+                        .push(ConversationMessage::user_text(feedback));
+                    continue;
+                }
                 // Le modèle confronte son travail à chaque exigence.
                 if let Some(feedback) = self.requirements_gate(&mut aids) {
                     self.session
@@ -824,6 +835,7 @@ where
 
         if matches!(tool_name, "edit_file" | "write_file" | "NotebookEdit") && !is_error {
             aids.dirty = true;
+            aids.editor_dirty = true;
             aids.verified_commands.clear();
             let path = json_field(&output, "filePath").or_else(|| json_field(input, "path"));
             if let Some(path) = &path {
@@ -1125,6 +1137,48 @@ where
             }
         }
         (diffs, changed_lines)
+    }
+
+    /// Erreurs vues par l'éditeur : quand un éditeur est relié (VS Code) et que
+    /// le tour a modifié des fichiers, Claw lui demande les erreurs qu'il y
+    /// signale (types, compilation, lint) et les renvoie au modèle. Au plus
+    /// `MAX_EDITOR_ROUNDS` renvois par tour ; sans éditeur, rien ne se passe.
+    fn editor_gate(&mut self, aids: &mut TurnAids) -> Option<String> {
+        if !aids.editor_dirty
+            || aids.editor_rounds >= harness::MAX_EDITOR_ROUNDS
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::EditorDiagnostics)
+        {
+            return None;
+        }
+        let editor = crate::editor::connected()?;
+        aids.editor_dirty = false;
+        let paths: Vec<String> = aids
+            .originals
+            .keys()
+            .filter(|path| std::path::Path::new(path).is_file())
+            .cloned()
+            .collect();
+        if paths.is_empty() {
+            return None;
+        }
+        let files = crate::editor::check(&paths, harness::EDITOR_CHECK_TIMEOUT)?;
+        let errors = crate::editor::at_least(files, crate::editor::Severity::Error);
+        if errors.is_empty() {
+            if aids.editor_rounds > 0 {
+                self.api_client.notify(&format!(
+                    "{editor} ne signale plus d'erreur dans les fichiers modifiés"
+                ));
+            }
+            return None;
+        }
+        aids.editor_rounds += 1;
+        self.api_client.notify(&format!(
+            "{editor} signale {} erreur(s) dans les fichiers modifiés : transmises à l'agent",
+            crate::editor::count(&errors)
+        ));
+        Some(harness::editor_feedback(&editor, &errors))
     }
 
     /// Contrôle des exigences : quand le tour a modifié assez de code et que
@@ -2632,6 +2686,51 @@ mod tests {
                 .count(),
             1
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn errors_seen_by_the_connected_editor_go_back_to_the_model() {
+        use crate::editor::{tests::fake_editor, tests::problem, FileDiagnostics, Severity};
+        let (path, output) = written_file("editeur");
+        let shown = path.to_string_lossy().to_string();
+        let asked = fake_editor(vec![FileDiagnostics {
+            path: "total.py".to_string(),
+            diagnostics: vec![
+                problem(4, Severity::Error, "\"p\" is not defined"),
+                problem(1, Severity::Warning, "missing docstring"),
+            ],
+        }]);
+        let connection = crate::editor::connect("VS Code");
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                tool_step("write_file", r#"{"path":"total.py","content":"x"}"#),
+                text_step("C'est fait."),
+                text_step("Corrigé."),
+                text_step("Exigences vérifiées."),
+            ],
+            vec![PASSING],
+            vec!["LGTM"],
+            output,
+        );
+        let summary = runtime.run_turn("écris total.py", None).expect("tour");
+        drop(connection);
+
+        let observed = observed.borrow();
+        assert_eq!(summary.iterations, 4);
+        // Après la vérification réussie, l'éditeur est interrogé sur le fichier modifié.
+        assert_eq!(*asked.lock().expect("demandes"), [[shown]]);
+        let feedback = &observed.requests[2];
+        assert!(feedback.contains("VS Code reports 1 error(s) in the files you changed"));
+        assert!(feedback.contains("total.py:4:5: error:"));
+        assert!(feedback.contains("is not defined"));
+        // Les avertissements ne renvoient pas le modèle au travail.
+        assert!(!feedback.contains("missing docstring"));
+        assert!(observed.notices.iter().any(|notice| notice
+            == "VS Code signale 1 erreur(s) dans les fichiers modifiés : transmises à l'agent"));
+        // Sans nouvelle modification, l'éditeur n'est pas interrogé une seconde fois.
+        assert!(!observed.requests[3].contains("VS Code reports 1 error(s)\n"));
+        assert!(observed.requests[3].contains("check your work against every requirement"));
         let _ = std::fs::remove_file(path);
     }
 

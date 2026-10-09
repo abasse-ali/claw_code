@@ -2,7 +2,7 @@
   "name": "claw-code",
   "displayName": "Claw Code",
   "description": "Agent de code et d'architecture avec n'importe quel modèle (OpenRouter, Ollama, Groq…) dans VS Code.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "claw-code",
   "engines": {
     "vscode": "^1.85.0"
@@ -40,6 +40,34 @@
       {
         "command": "claw.askAboutFile",
         "title": "Demander à propos de ce fichier",
+        "category": "Claw"
+      },
+      {
+        "command": "claw.acceptEdit",
+        "title": "Accepter la modification proposée",
+        "category": "Claw",
+        "icon": "$(check)"
+      },
+      {
+        "command": "claw.rejectEdit",
+        "title": "Refuser la modification proposée",
+        "category": "Claw",
+        "icon": "$(close)"
+      },
+      {
+        "command": "claw.acceptEditAlways",
+        "title": "Toujours autoriser ce type de modification",
+        "category": "Claw"
+      },
+      {
+        "command": "claw.showChanges",
+        "title": "Voir les modifications du dernier tour",
+        "category": "Claw",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "claw.showSessionChanges",
+        "title": "Voir les modifications de la session",
         "category": "Claw"
       },
       {
@@ -84,8 +112,37 @@
       ],
       "editor/title": [
         {
+          "command": "claw.acceptEdit",
+          "when": "claw.editPending && resourceScheme == claw-proposed",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claw.rejectEdit",
+          "when": "claw.editPending && resourceScheme == claw-proposed",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claw.acceptEditAlways",
+          "when": "claw.editPending && resourceScheme == claw-proposed",
+          "group": "1_claw@1"
+        },
+        {
           "command": "claw.open",
-          "group": "navigation"
+          "group": "navigation@9"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "claw.acceptEdit",
+          "when": "claw.editPending"
+        },
+        {
+          "command": "claw.rejectEdit",
+          "when": "claw.editPending"
+        },
+        {
+          "command": "claw.acceptEditAlways",
+          "when": "claw.editPending"
         }
       ]
     },
@@ -100,6 +157,18 @@
         "key": "ctrl+alt+l",
         "mac": "cmd+alt+l",
         "when": "editorHasSelection"
+      },
+      {
+        "command": "claw.acceptEdit",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "claw.editPending && resourceScheme == claw-proposed"
+      },
+      {
+        "command": "claw.rejectEdit",
+        "key": "ctrl+shift+backspace",
+        "mac": "cmd+shift+backspace",
+        "when": "claw.editPending && resourceScheme == claw-proposed"
       }
     ],
     "configuration": {
@@ -126,6 +195,16 @@
             "danger-full-access"
           ],
           "description": "Mode de permission de l'agent. Vide : réglage de Claw (prompt par défaut)."
+        },
+        "claw.nativeDiff": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ouvrir chaque modification proposée par l'agent dans un diff de l'éditeur, avec Accepter et Refuser (en plus de la demande affichée dans le panneau)."
+        },
+        "claw.editorDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Laisser l'agent lire les problèmes signalés par l'éditeur (erreurs de compilation, de types, de lint) : outil EditorDiagnostics et contrôle des fichiers modifiés à la fin d'un tour."
         }
       }
     }

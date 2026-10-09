@@ -223,9 +223,12 @@ class ClawServer {
   /**
    * S'abonne aux événements de `claw serve` (flux SSE, rôle `status` : ne
    * compte pas comme une page ouverte). Reconnexion automatique tant que le
-   * serveur tourne ; `stop()` ferme l'abonnement.
+   * serveur tourne ; `stop()` ferme l'abonnement. Avec `options.editor` (nom
+   * de l'éditeur), l'abonné se déclare prêt à répondre aux demandes de
+   * diagnostics de Claw (événements `editor_sync`).
    */
-  subscribe(onEvent) {
+  subscribe(onEvent, options = {}) {
+    const editor = options.editor ? `&editor=${encodeURIComponent(options.editor)}` : "";
     let retrying = false;
     const retry = () => {
       if (retrying || !this.running) return;
@@ -241,7 +244,7 @@ class ClawServer {
         {
           host: "127.0.0.1",
           port: this.port,
-          path: "/api/events?role=status",
+          path: `/api/events?role=status${editor}`,
           headers: { Host: `127.0.0.1:${this.port}`, "X-Claw-Token": this.token, Accept: "text/event-stream" },
         },
         (response) => {
@@ -322,6 +325,41 @@ function selectionMessage({ instruction, relativePath, startLine, endLine, langu
   return `${header}Extrait de \`${relativePath}\` (${lines}) :\n\`\`\`${languageId || ""}\n${text}\n\`\`\``;
 }
 
+/** Gravités de VS Code (0 erreur, 1 avertissement, 2 information, 3 indice) dans le vocabulaire de Claw. */
+const SEVERITIES = ["error", "warning", "info", "hint"];
+
+/** Un diagnostic de VS Code tel que Claw l'attend (ligne et colonne à partir de 1). */
+function clawDiagnostic(diagnostic) {
+  const start = (diagnostic.range && diagnostic.range.start) || { line: 0, character: 0 };
+  const code = diagnostic.code && typeof diagnostic.code === "object" ? diagnostic.code.value : diagnostic.code;
+  return {
+    line: start.line + 1,
+    column: start.character + 1,
+    severity: SEVERITIES[diagnostic.severity] || "info",
+    message: String(diagnostic.message || ""),
+    source: diagnostic.source || null,
+    code: code === undefined || code === null || code === "" ? null : String(code),
+  };
+}
+
+/** Chemin montré à l'agent : relatif au dossier de travail quand le fichier s'y trouve. */
+function workspacePath(cwd, file) {
+  const relative = path.relative(cwd, file);
+  const inside = relative && !relative.startsWith("..") && !path.isAbsolute(relative);
+  return inside ? relative.split(path.sep).join("/") : file;
+}
+
+/**
+ * Réponse à une demande de diagnostics : `entries` est une liste de
+ * `[chemin absolu, diagnostics de VS Code]`.
+ */
+function diagnosticsAnswer(cwd, entries) {
+  return entries.map(([file, diagnostics]) => ({
+    path: workspacePath(cwd, file),
+    diagnostics: (diagnostics || []).map(clawDiagnostic),
+  }));
+}
+
 module.exports = {
   ClawServer,
   findFreePort,
@@ -330,4 +368,7 @@ module.exports = {
   fileStamp,
   workingCopy,
   watchExecutable,
+  clawDiagnostic,
+  workspacePath,
+  diagnosticsAnswer,
 };

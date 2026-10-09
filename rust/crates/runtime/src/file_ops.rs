@@ -218,6 +218,45 @@ pub fn edit_file(
     })
 }
 
+/// Ce que donnerait une écriture ou une modification, sans toucher au fichier :
+/// de quoi montrer le changement proposé avant de l'autoriser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditPreview {
+    /// Chemin absolu du fichier.
+    pub path: String,
+    /// Contenu actuel ; `None` si le fichier n'existe pas encore.
+    pub original: Option<String>,
+    pub updated: String,
+}
+
+/// Aperçu de `write_file`.
+pub fn preview_write(path: &str, content: &str) -> io::Result<EditPreview> {
+    let absolute_path = normalize_path_allow_missing(path)?;
+    Ok(EditPreview {
+        path: display_path(&absolute_path),
+        original: fs::read_to_string(&absolute_path).ok(),
+        updated: content.to_owned(),
+    })
+}
+
+/// Aperçu de `edit_file`, avec la même recherche tolérante que l'outil.
+pub fn preview_edit(
+    path: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+) -> io::Result<EditPreview> {
+    let absolute_path = normalize_path(path)?;
+    let original = fs::read_to_string(&absolute_path)?;
+    let (updated, _) = apply_edit(&original, old_string, new_string, replace_all)
+        .map_err(|message| io::Error::new(io::ErrorKind::NotFound, message))?;
+    Ok(EditPreview {
+        path: display_path(&absolute_path),
+        original: Some(original),
+        updated,
+    })
+}
+
 /// Remplace `old_string` par `new_string`. Recherche exacte d'abord, puis de
 /// plus en plus tolérante (fins de ligne, espaces de fin, indentation) : les
 /// modèles recopient souvent mal les blancs. Une occurrence ambiguë est refusée

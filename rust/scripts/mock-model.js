@@ -10,6 +10,10 @@
 // puis le modèle conclut quand il reçoit le résultat de l'outil. Avec --read,
 // il demande read_file puis répond avec le contenu lu (sonde de `claw models bench`).
 // Avec --tool, il appelle l'outil donné puis répond avec le début de son résultat.
+//
+// Un message de l'utilisateur peut aussi piloter le modèle, le temps de son tour :
+//   [mock:write chemin=contenu]         demande write_file
+//   [mock:tool Nom={"argument": 1}]     appelle cet outil, puis cite son résultat
 "use strict";
 
 const fs = require("fs");
@@ -42,8 +46,50 @@ function lastUserText(messages) {
   return "";
 }
 
+function messageText(message) {
+  if (typeof message.content === "string") return message.content;
+  return Array.isArray(message.content) ? message.content.map((part) => part.text || "").join("\n") : "";
+}
+
+/**
+ * Dernière consigne « [mock:…] » écrite par l'utilisateur, et si un résultat
+ * d'outil l'a déjà suivie (le modèle conclut alors par du texte).
+ */
+function lastDirective(messages) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role !== "user") continue;
+    const match = messageText(messages[index]).match(/\[mock:(write|tool) ([^\n]+)\]/);
+    if (!match) continue;
+    const separator = match[2].indexOf("=");
+    return {
+      kind: match[1],
+      name: separator > 0 ? match[2].slice(0, separator) : match[2],
+      value: separator > 0 ? match[2].slice(separator + 1) : "",
+      answered: messages.slice(index + 1).some((later) => later.role === "tool"),
+    };
+  }
+  return null;
+}
+
+let directiveCalls = 0;
+
+function directiveReply(directive, messages) {
+  if (!directive.answered) {
+    directiveCalls += 1;
+    const id = `call_mock_directive_${directiveCalls}`;
+    return directive.kind === "write"
+      ? { toolCall: { id, name: "write_file", arguments: JSON.stringify({ path: directive.name, content: `${directive.value}\n` }) } }
+      : { toolCall: { id, name: directive.name, arguments: directive.value || "{}" } };
+  }
+  if (directive.kind === "write") return { text: "Fichier écrit par le modèle factice." };
+  const result = [...messages].reverse().find((message) => message.role === "tool");
+  return { text: `Résultat de l'outil : ${messageText(result).slice(0, 400)}` };
+}
+
 function reply(body) {
   const messages = body.messages || [];
+  const directive = lastDirective(messages);
+  if (directive) return directiveReply(directive, messages);
   const hasToolResult = messages.some((message) => message.role === "tool");
   if (tool && !hasToolResult) {
     const separator = tool.indexOf("=");

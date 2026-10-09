@@ -9,7 +9,16 @@ const fs = require("fs");
 const http = require("http");
 const os = require("os");
 const path = require("path");
-const { ClawServer, selectionMessage, resolveExecutable, workingCopy, watchExecutable } = require("../claw-client");
+const {
+  ClawServer,
+  selectionMessage,
+  resolveExecutable,
+  workingCopy,
+  watchExecutable,
+  clawDiagnostic,
+  workspacePath,
+  diagnosticsAnswer,
+} = require("../claw-client");
 const { startMockModel } = require("./mock");
 
 const results = [];
@@ -66,6 +75,93 @@ function get(port, path) {
     received = fs.readFileSync(logPath, "utf8");
   }
   check("sélection reçue par le modèle (fichier, lignes, code)", received.includes("Explique ce code") && received.includes("src/lib.rs") && received.includes("lignes 3-5"), received.slice(0, 200));
+
+  // Éditeur relié : Claw lui demande les problèmes d'un fichier, l'outil les rend au modèle.
+  const wait = async (label, predicate, attempts = 80) => {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (await predicate()) return true;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    console.log(`       délai dépassé : ${label}`);
+    return false;
+  };
+  const events = [];
+  const asked = [];
+  server.subscribe(
+    (event) => {
+      events.push(event);
+      if (event.type !== "editor_sync") return;
+      asked.push(event.paths);
+      const problems = [
+        { range: { start: { line: 6, character: 2 } }, severity: 0, message: "type incompatible (essai)", source: "essai", code: { value: 2322 } },
+        { range: { start: { line: 0, character: 0 } }, severity: 1, message: "import inutile (essai)" },
+      ];
+      const files = diagnosticsAnswer(cwd, [[path.join(cwd, "src", "app.ts"), problems]]);
+      server.request("POST", "/api/editor/diagnostics", { id: event.id, files }).catch(() => undefined);
+    },
+    { editor: "Éditeur d'essai" },
+  );
+  assert.deepStrictEqual(clawDiagnostic({ range: { start: { line: 6, character: 2 } }, severity: 0, message: "m", source: "ts", code: { value: 2322 } }),
+    { line: 7, column: 3, severity: "error", message: "m", source: "ts", code: "2322" });
+  assert.strictEqual(workspacePath(cwd, path.join(cwd, "src", "app.ts")), "src/app.ts");
+  assert.strictEqual(workspacePath(cwd, path.join(root, "ailleurs.ts")), path.join(root, "ailleurs.ts"));
+  const count = (type) => events.filter((event) => event.type === type).length;
+  /** Envoie un message et attend la fin du tour qu'il ouvre. */
+  const turn = async (text, during) => {
+    const done = count("turn_done");
+    await server.send(text);
+    if (during) await during();
+    return wait(`fin du tour « ${text.slice(0, 30)} »`, () => count("turn_done") > done, 160);
+  };
+  // Le premier message a été envoyé avant l'abonnement : attendre que l'agent soit au repos.
+  await wait("agent au repos", () => {
+    const statuses = events.filter((event) => event.type === "status" && event.status);
+    return statuses.length > 0 && !statuses[statuses.length - 1].status.busy;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const problemLine = "src/app.ts:7:3: error: type incompatible (essai) [essai 2322]";
+  await turn('Quelles erreurs ? [mock:tool EditorDiagnostics={"path":"src/app.ts","severity":"error"}]');
+  const diagnosed = fs.readFileSync(logPath, "utf8").includes(problemLine);
+  received = fs.readFileSync(logPath, "utf8");
+  check("l'éditeur relié répond à l'outil EditorDiagnostics (erreurs seules)",
+    diagnosed && asked.length === 1 && asked[0][0] === "src/app.ts" && !received.split("EditorDiagnostics=").pop().includes("import inutile (essai)")
+      && received.includes('"name":"EditorDiagnostics"'),
+    `${JSON.stringify(asked)} ${received.slice(-300)}`);
+
+  // Demande de permission : la modification proposée accompagne la demande, rien n'est écrit avant l'accord.
+  await server.request("POST", "/api/permissions", { value: "prompt" });
+  const target = path.join(cwd, "notes", "essai.txt");
+  let permission = { proposal: {} };
+  let untouched = false;
+  await turn("Crée ce fichier [mock:write notes/essai.txt=bonjour de claw]", async () => {
+    await wait("demande de permission", () => events.some((event) => event.type === "permission" && event.proposal));
+    permission = events.find((event) => event.type === "permission" && event.proposal) || permission;
+    untouched = !fs.existsSync(target);
+    if (permission.id !== undefined) await server.request("POST", "/api/permission", { id: permission.id, decision: "once" });
+  });
+  check("la demande de permission porte le contenu proposé, sans rien écrire",
+    untouched && permission.proposal.after === "bonjour de claw\n" && permission.proposal.exists === false
+      && path.resolve(permission.proposal.path || "") === path.resolve(target),
+    JSON.stringify(permission.proposal));
+  const written = fs.existsSync(target) && fs.readFileSync(target, "utf8") === "bonjour de claw\n";
+  const turnChanges = await server.request("GET", "/api/changes?scope=turn");
+  check("le fichier accepté est écrit et listé parmi les modifications du tour",
+    written && turnChanges.files.length === 1 && turnChanges.files[0].existed === false && turnChanges.files[0].exists === true
+      && path.resolve(turnChanges.files[0].path) === path.resolve(target),
+    JSON.stringify(turnChanges));
+
+  // Après une modification, les erreurs que l'éditeur voit dans le fichier repartent au modèle.
+  await server.request("POST", "/api/permissions", { value: "workspace-write" });
+  asked.length = 0;
+  const notices = count("notice");
+  await turn("Réécris-le [mock:write notes/essai.txt=deuxième version]");
+  received = fs.readFileSync(logPath, "utf8");
+  const sentBack = events.filter((event) => event.type === "notice").slice(notices)
+    .some((event) => event.text.includes("signale 1 erreur(s) dans les fichiers modifiés"));
+  check("les erreurs de l'éditeur dans un fichier modifié repartent au modèle",
+    sentBack && asked.length === 1 && path.resolve(asked[0][0]) === path.resolve(target) && received.includes("Éditeur d'essai reports 1 error(s)")
+      && fs.readFileSync(target, "utf8") === "deuxième version\n",
+    `${JSON.stringify(asked)} ${JSON.stringify(events.filter((event) => ["notice", "info", "error", "turn_done", "tool_call"].includes(event.type)).slice(-12))}`);
 
   let rejected = false;
   try {

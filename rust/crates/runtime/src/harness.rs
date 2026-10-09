@@ -46,6 +46,8 @@ pub enum Aid {
     Escalation,
     /// Avant de conclure, le modèle confronte son travail à chaque exigence.
     Checklist,
+    /// Erreurs vues par l'éditeur relié (VS Code) dans les fichiers modifiés.
+    EditorDiagnostics,
 }
 
 impl Aid {
@@ -65,6 +67,7 @@ impl Aid {
             Self::TestGuard => "CLAW_TEST_GUARD",
             Self::Escalation => "CLAW_ESCALATION",
             Self::Checklist => "CLAW_CHECKLIST",
+            Self::EditorDiagnostics => "CLAW_EDITOR_DIAGNOSTICS",
         }
     }
 }
@@ -625,6 +628,25 @@ pub const CHECKLIST_PROMPT: &str = "[Claw] Before you finish, check your work ag
 pub fn escalation_feedback(model: &str) -> String {
     format!(
         "[Claw] You are {model}, a stronger model taking over this turn because the previous model was stuck. Re-read the user's request and the latest failure above, find the root cause yourself (do not trust the previous model's assumptions), fix it, and verify before answering."
+    )
+}
+
+// --- Erreurs vues par l'éditeur -------------------------------------------------------
+
+/// Renvois au modèle, par tour, pour des erreurs que l'éditeur signale.
+pub const MAX_EDITOR_ROUNDS: usize = 2;
+/// Attente de la réponse de l'éditeur (il laisse ses analyses se stabiliser).
+pub const EDITOR_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const MAX_EDITOR_PROBLEMS: usize = 30;
+
+/// Message adressé au modèle : les erreurs que l'éditeur signale dans les
+/// fichiers qu'il vient de modifier.
+#[must_use]
+pub fn editor_feedback(editor: &str, files: &[crate::editor::FileDiagnostics]) -> String {
+    format!(
+        "[Claw] {editor} reports {} error(s) in the files you changed during this turn:\n\n{}\n\nFix the ones your changes caused or left behind, then give your final answer. If one of them was already there before your changes and is unrelated to the request, say so instead of fixing it.",
+        crate::editor::count(files),
+        crate::editor::render(files, MAX_EDITOR_PROBLEMS)
     )
 }
 

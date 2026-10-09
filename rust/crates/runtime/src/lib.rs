@@ -7,6 +7,7 @@ pub mod claude_skills;
 mod compact;
 mod config;
 mod conversation;
+pub mod editor;
 mod file_ops;
 pub mod harness;
 mod hooks;
@@ -49,9 +50,9 @@ pub use conversation::{
     HOOK_CONTEXT_PREFIX, STOP_HOOK_PREFIX,
 };
 pub use file_ops::{
-    edit_file, glob_search, grep_search, read_file, write_file, EditFileOutput, GlobSearchOutput,
-    GrepSearchInput, GrepSearchOutput, ReadFileOutput, StructuredPatchHunk, TextFilePayload,
-    WriteFileOutput,
+    edit_file, glob_search, grep_search, preview_edit, preview_write, read_file, write_file,
+    EditFileOutput, EditPreview, GlobSearchOutput, GrepSearchInput, GrepSearchOutput,
+    ReadFileOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput,
 };
 pub use hooks::{set_session_info as set_hook_session_info, HookEvent, HookRunResult, HookRunner};
 pub use lsp::{

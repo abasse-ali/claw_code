@@ -511,6 +511,26 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "EditorDiagnostics",
+            description: "List the problems the user's editor (VS Code) currently reports: compile errors, type errors and lint warnings, exactly as underlined in the editor. Use it after changing code to see errors without running a build, and whenever the user mentions errors shown in their editor. Give `path` for one file, or nothing for the whole workspace. Each problem is `file:line:column: severity: message`.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File to check. Omit it to list the problems of the whole workspace."
+                    },
+                    "severity": {
+                        "type": "string",
+                        "enum": ["error", "warning", "all"],
+                        "description": "Least severe level to list: errors only, errors and warnings (default), or everything."
+                    }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "FindSymbol",
             description: "Find where a function, method, class, type, constant or variable is defined and every place it is used, across the whole project (files known to git, build and dependency folders skipped). Faster and more precise than grep for navigating code: give the bare name, e.g. `prix_ttc` or `Panier` (a qualified name like `Panier.total` searches `total`). Returns file:line for each definition and use.",
             input_schema: json!({
@@ -762,6 +782,8 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "FindSymbol" => {
             from_value::<FindSymbolInput>(input).and_then(|input| run_find_symbol(&input))
         }
+        "EditorDiagnostics" => from_value::<EditorDiagnosticsInput>(input)
+            .and_then(|input| run_editor_diagnostics(&input)),
         "Consult" => from_value::<ConsultInput>(input).and_then(run_consult),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
         "Agent" => from_value::<AgentInput>(input).and_then(run_agent),
@@ -903,6 +925,55 @@ struct FindSymbolInput {
     symbol: String,
     #[serde(default)]
     include_references: Option<bool>,
+}
+
+/// Problèmes signalés par l'éditeur relié (VS Code), pour un fichier ou pour
+/// tout l'espace de travail.
+fn run_editor_diagnostics(input: &EditorDiagnosticsInput) -> Result<String, String> {
+    use runtime::editor::{self, Severity};
+    let Some(name) = editor::connected() else {
+        return Err(
+            "no editor is connected to this session: run the project's build or tests instead"
+                .to_string(),
+        );
+    };
+    let least = match input.severity.as_deref().map(str::trim) {
+        Some("error" | "errors") => Severity::Error,
+        Some("all" | "info" | "hint") => Severity::Hint,
+        _ => Severity::Warning,
+    };
+    let paths: Vec<String> = input
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(|path| vec![path.to_string()])
+        .unwrap_or_default();
+    let Some(files) = editor::check(&paths, runtime::harness::EDITOR_CHECK_TIMEOUT) else {
+        return Err(format!(
+            "{name} did not answer in time: run the project's build or tests instead"
+        ));
+    };
+    let files = editor::at_least(files, least);
+    let severity_count = |severity: Severity| {
+        files
+            .iter()
+            .flat_map(|file| &file.diagnostics)
+            .filter(|diagnostic| diagnostic.severity == severity)
+            .count()
+    };
+    let listing = editor::render(&files, 60);
+    to_pretty_json(json!({
+        "editor": name,
+        "scope": paths.first().map_or("workspace", String::as_str),
+        "errors": severity_count(Severity::Error),
+        "warnings": severity_count(Severity::Warning),
+        "problems": if listing.is_empty() {
+            vec!["none reported".to_string()]
+        } else {
+            listing.lines().map(ToOwned::to_owned).collect::<Vec<_>>()
+        },
+    }))
 }
 
 /// Définitions et usages d'un symbole dans le projet (dossier de travail).
@@ -1083,6 +1154,12 @@ struct EditFileInput {
     old_string: String,
     new_string: String,
     replace_all: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EditorDiagnosticsInput {
+    path: Option<String>,
+    severity: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2383,6 +2460,7 @@ pub const PARALLEL_SAFE_TOOLS: &[&str] = &[
     "glob_search",
     "grep_search",
     "FindSymbol",
+    "EditorDiagnostics",
     "WebFetch",
     "WebSearch",
     "BashOutput",

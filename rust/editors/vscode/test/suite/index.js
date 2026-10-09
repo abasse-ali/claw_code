@@ -13,6 +13,11 @@ const COMMANDS = [
   "claw.ask",
   "claw.sendSelection",
   "claw.askAboutFile",
+  "claw.acceptEdit",
+  "claw.acceptEditAlways",
+  "claw.rejectEdit",
+  "claw.showChanges",
+  "claw.showSessionChanges",
   "claw.interrupt",
   "claw.openInBrowser",
   "claw.reload",
@@ -63,6 +68,12 @@ function answerInputBox(answer) {
   return () => {
     vscode.window.showInputBox = original;
   };
+}
+
+/** Même fichier : sous Windows, la lettre du lecteur change de casse d'un outil à l'autre. */
+function samePath(left, right) {
+  const normalize = (file) => (process.platform === "win32" ? path.resolve(file).toLowerCase() : path.resolve(file));
+  return normalize(left) === normalize(right);
 }
 
 function fetchHeaders(port) {
@@ -160,6 +171,109 @@ async function run() {
       const received = modelMessages();
       return received.includes("Fais une revue") && received.includes('println!("bonjour")');
     });
+  });
+
+  // Modification proposée : diff de l'éditeur, accepter ou refuser.
+  const notes = path.join(process.env.CLAW_TEST_WORKSPACE, "notes");
+  const essai = path.join(notes, "essai.txt");
+  const diffTabs = (side, scheme) => vscode.window.tabGroups.all
+    .flatMap((group) => group.tabs)
+    .filter((tab) => tab.input instanceof vscode.TabInputTextDiff && tab.input[side].scheme === scheme);
+  const proposal = () => waitFor(
+    "diff de la modification proposée",
+    () => diffTabs("modified", "claw-proposed").length === 1 && api.pendingEdits.length === 1,
+    40000,
+  );
+  /** L'agent a fini son tour : le mode de permission ne se change qu'au repos. */
+  const idle = async () => {
+    for (;;) {
+      await waitFor("agent au repos", () => api.busy === false, 60000);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      if (api.busy === false) return;
+    }
+  };
+  const setMode = async (mode) => {
+    await idle();
+    await api.server.request("POST", "/api/permissions", { value: mode });
+  };
+  const proposalClosed = () => waitFor(
+    "diff fermé",
+    () => diffTabs("modified", "claw-proposed").length === 0 && api.pendingEdits.length === 0,
+    15000,
+  );
+
+  await step("une modification proposée s'ouvre dans un diff de l'éditeur, sans être écrite", async () => {
+    await setMode("prompt");
+    await api.server.send("Crée ce fichier [mock:write notes/essai.txt=bonjour de claw]");
+    await proposal();
+    const edit = api.pendingEdits[0];
+    assert.ok(samePath(edit.path, essai), edit.path);
+    const proposed = await vscode.workspace.openTextDocument(edit.modified);
+    assert.strictEqual(proposed.getText(), "bonjour de claw\n");
+    assert.ok(!fs.existsSync(essai), "fichier écrit avant l'accord");
+  });
+
+  await step("Accepter applique la modification et ferme le diff", async () => {
+    await vscode.commands.executeCommand("claw.acceptEdit");
+    await waitFor("fichier écrit", () => fs.existsSync(essai) && fs.readFileSync(essai, "utf8") === "bonjour de claw\n", 20000);
+    await proposalClosed();
+  });
+
+  await step("Refuser laisse le fichier absent et transmet la consigne à l'agent", async () => {
+    const refus = path.join(notes, "refus.txt");
+    await api.server.send("Et celui-ci [mock:write notes/refus.txt=non merci]");
+    await proposal();
+    await vscode.commands.executeCommand("claw.rejectEdit", undefined, "pas ce fichier");
+    await proposalClosed();
+    await waitFor("consigne reçue par le modèle", () => modelMessages().includes("pas ce fichier"), 20000);
+    assert.ok(!fs.existsSync(refus), "fichier écrit malgré le refus");
+  });
+
+  // Problèmes vus par l'éditeur : ceux d'une collection de diagnostics d'essai.
+  const problems = vscode.languages.createDiagnosticCollection("essai-claw");
+  const problem = (line, column, message, severity) => {
+    const diagnostic = new vscode.Diagnostic(new vscode.Range(line, column, line, column + 4), message, severity);
+    diagnostic.source = "essai";
+    return diagnostic;
+  };
+
+  await step("l'agent lit les problèmes signalés par l'éditeur (outil EditorDiagnostics)", async () => {
+    problems.set(demo, [
+      problem(1, 4, "variable inconnue (essai)", vscode.DiagnosticSeverity.Error),
+      problem(0, 0, "style douteux (essai)", vscode.DiagnosticSeverity.Warning),
+    ]);
+    await api.server.send('Quelles erreurs vois-tu ? [mock:tool EditorDiagnostics={"path":"src/demo.rs"}]');
+    await waitFor("problèmes reçus par le modèle", () => {
+      const received = modelMessages();
+      return received.includes("src/demo.rs:2:5: error: variable inconnue (essai) [essai]")
+        && received.includes("src/demo.rs:1:1: warning: style douteux (essai) [essai]");
+    }, 40000);
+    assert.ok(fs.readFileSync(process.env.CLAW_TEST_LOG, "utf8").includes('"name":"EditorDiagnostics"'), "outil non proposé au modèle");
+  });
+
+  await step("les erreurs de l'éditeur dans un fichier modifié repartent à l'agent", async () => {
+    await setMode("workspace-write");
+    problems.set(vscode.Uri.file(essai), [problem(0, 0, "mot interdit (essai)", vscode.DiagnosticSeverity.Error)]);
+    await api.server.send("Réécris-le [mock:write notes/essai.txt=deuxième version]");
+    await waitFor("erreurs transmises au modèle", () => {
+      const received = modelMessages();
+      return received.includes("VS Code reports 1 error(s) in the files you changed") && received.includes("mot interdit (essai)");
+    }, 40000);
+    problems.clear();
+  });
+
+  await step("les fichiers modifiés par le tour s'ouvrent en diff (avant / maintenant)", async () => {
+    await waitFor("fichier réécrit", () => fs.readFileSync(essai, "utf8") === "deuxième version\n", 30000);
+    await vscode.commands.executeCommand("claw.showChanges");
+    await waitFor("diff avant / maintenant", () => diffTabs("original", "claw-before").length === 1, 15000);
+    assert.strictEqual(api.changedFiles.length, 1);
+    assert.ok(samePath(api.changedFiles[0], essai), api.changedFiles[0]);
+    const tab = diffTabs("original", "claw-before")[0];
+    const before = await vscode.workspace.openTextDocument(tab.input.original);
+    assert.strictEqual(before.getText(), "bonjour de claw\n");
+    assert.strictEqual(fs.readFileSync(essai, "utf8"), "deuxième version\n");
+    await vscode.window.tabGroups.close(tab, true);
+    await setMode("read-only");
   });
 
   // Mise à jour de claw pendant que le panneau est ouvert : l'exécutable

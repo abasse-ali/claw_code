@@ -162,7 +162,17 @@ pub(crate) fn efficiency(
 /// code par le catalogue et ceux mesurés par `/models bench`, sans les
 /// incompatibles avec Claw.
 fn preferred_free_models(catalog: &ModelCatalog) -> Vec<String> {
-    let measured = crate::bench::recent_results();
+    scored_free_models(catalog, &crate::bench::recent_results())
+        .into_iter()
+        .map(|(_, id)| id)
+        .collect()
+}
+
+/// Le même classement avec l'efficacité de chaque modèle.
+fn scored_free_models(
+    catalog: &ModelCatalog,
+    measured: &std::collections::BTreeMap<String, crate::bench::BenchResult>,
+) -> Vec<(f64, String)> {
     let retained: Vec<String> = api::rank_free_coding_models(catalog)
         .into_iter()
         .map(|entry| entry.model.id)
@@ -180,7 +190,112 @@ fn preferred_free_models(catalog: &ModelCatalog) -> Vec<String> {
         })
         .collect();
     scored.sort_by(|left, right| right.0.total_cmp(&left.0));
-    scored.into_iter().map(|(_, id)| id).collect()
+    scored
+}
+
+/// Modèle qui reprend la fin d'un tour quand l'agent n'avance plus
+/// (`escalationModel`, `CLAW_ESCALATION_MODEL`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Escalation {
+    /// Jamais : `"off"`, ou une session limitée à un seul modèle.
+    Off,
+    /// Le modèle gratuit le plus puissant du moment : sans réglage, ou `"free"`.
+    StrongestFree,
+    /// Le modèle que l'utilisateur a écrit lui-même.
+    Model(String),
+}
+
+impl Escalation {
+    /// `single_model` : la bascule entre modèles est coupée (`CLAW_FALLBACK=0`).
+    fn parse(setting: Option<&str>, single_model: bool) -> Self {
+        match setting.map(str::trim).filter(|value| !value.is_empty()) {
+            None if single_model => Self::Off,
+            None => Self::StrongestFree,
+            Some(value) => match value.to_ascii_lowercase().as_str() {
+                "off" | "none" | "non" | "aucun" | "false" | "0" => Self::Off,
+                "free" | "gratuit" | "auto" => Self::StrongestFree,
+                _ => Self::Model(api::resolve_model_alias(value)),
+            },
+        }
+    }
+
+    /// Réglage de la session : variable d'environnement, sinon configuration.
+    #[must_use]
+    pub fn configured() -> Self {
+        let setting = env::var("CLAW_ESCALATION_MODEL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                let cwd = env::current_dir().ok()?;
+                let config = ConfigLoader::default_for(&cwd).load().ok()?;
+                config.escalation_model().map(ToOwned::to_owned)
+            });
+        let single_model = env::var("CLAW_FALLBACK").is_ok_and(|value| value.trim() == "0");
+        Self::parse(setting.as_deref(), single_model)
+    }
+
+    /// Modèle qui prendrait le relais de `current` maintenant, s'il y en a un.
+    #[must_use]
+    pub fn target(&self, current: &str) -> Option<String> {
+        match self {
+            Self::Off => None,
+            Self::StrongestFree => strongest_free_model(current),
+            Self::Model(model) => Some(model.clone()).filter(|model| model != current),
+        }
+    }
+}
+
+/// Modèle gratuit le plus puissant, s'il l'est plus que `current` : lu dans le
+/// catalogue en cache (aucune requête), parmi les modèles disponibles. Rien
+/// sans clé `OpenRouter`, ni quand `current` est déjà le plus puissant.
+fn strongest_free_model(current: &str) -> Option<String> {
+    let has_key = env::var("OPENROUTER_API_KEY").is_ok_and(|key| !key.trim().is_empty());
+    if !has_key {
+        return None;
+    }
+    let catalog = load_cached_catalog()?;
+    strongest_free_in(
+        &catalog,
+        &crate::bench::recent_results(),
+        current,
+        api::model_available,
+    )
+}
+
+fn strongest_free_in(
+    catalog: &ModelCatalog,
+    measured: &std::collections::BTreeMap<String, crate::bench::BenchResult>,
+    current: &str,
+    available: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let current_score =
+        efficiency(current, Some(catalog), measured.get(current)).map_or(0.0, |(score, _)| score);
+    scored_free_models(catalog, measured)
+        .into_iter()
+        .find(|(_, id)| id != current && available(id))
+        .filter(|(score, _)| *score > current_score)
+        .map(|(_, id)| id)
+}
+
+/// Ligne « Escalade » de `/models` : ce qui se passe quand l'agent n'avance plus.
+fn escalation_line(current_model: &str) -> String {
+    if !runtime::harness::enabled(runtime::harness::Aid::Escalation) {
+        return "désactivée".to_string();
+    }
+    let escalation = Escalation::configured();
+    match (&escalation, escalation.target(current_model)) {
+        (Escalation::Off, _) => "désactivée".to_string(),
+        (Escalation::StrongestFree, Some(model)) => {
+            format!("{model} (le gratuit le plus puissant) reprend un tour bloqué")
+        }
+        (Escalation::StrongestFree, None) => {
+            "aucune : le modèle actuel est déjà le gratuit le plus puissant disponible".to_string()
+        }
+        (Escalation::Model(_), Some(model)) => {
+            format!("{model} (escalationModel) reprend un tour bloqué")
+        }
+        (Escalation::Model(_), None) => "aucune : c'est déjà le modèle de la session".to_string(),
+    }
 }
 
 /// Meilleur modèle gratuit pour le code (télécharge le catalogue si besoin),
@@ -718,11 +833,49 @@ fn claude_likeness_report() -> Result<String, String> {
         lines.push(String::new());
         lines.push("Suite".to_string());
         lines.push(format!("  /model {choice}"));
-        lines.push(format!(
-            "  \"escalationModel\": \"{choice}\"   (dans .claw/settings.json : reprend un tour bloqué)"
-        ));
+        lines.push(
+            "  Un tour bloqué est repris par le gratuit le plus puissant (voir /models, ligne Escalade)."
+                .to_string(),
+        );
     }
     Ok(lines.join("\n"))
+}
+
+/// Explication du classement et suite possible, au bas de `/models`.
+fn models_report_footer() -> Vec<String> {
+    vec![
+        String::new(),
+        "Classement par efficacité, le plus puissant en tête : rang dans la catégorie programmation"
+            .to_string(),
+        "d'OpenRouter, taille effective (paramètres actifs et totaux), spécialisation code, versions"
+            .to_string(),
+        "allégées pénalisées ; pondéré par /models bench (tâches réussies, compatibilité avec Claw)."
+            .to_string(),
+        "Seuls les modèles gratuits qui savent appeler des outils sont listés ; les incompatibles"
+            .to_string(),
+        "mesurés sont écartés.".to_string(),
+        String::new(),
+        "Suite".to_string(),
+        "  /model <id>            utiliser ce modèle dans la session".to_string(),
+        "  \"model\": \"<id>\"        dans .claw.json pour le garder".to_string(),
+        "  /models refresh        recharger le catalogue".to_string(),
+        "  /models local          modèles locaux (Ollama, LM Studio…) et autres fournisseurs"
+            .to_string(),
+        "  /models vision         modèles qui lisent les images (joindre : @capture.png)"
+            .to_string(),
+        "  /models claude         gratuits les plus proches de Claude Opus et Fable".to_string(),
+        "  /models <recherche>    filtrer (ex. /models poolside)".to_string(),
+        "  /models bench          mesurer les modèles gratuits compatibles avec Claw sur de vraies"
+            .to_string(),
+        "                         tâches (≈ 15 min ; --rapide, --local, --appliquer)".to_string(),
+        String::new(),
+        "Bon à savoir : chaque étape de l'agent (un appel au modèle) consomme une requête du"
+            .to_string(),
+        "quota gratuit. Selon le fournisseur, les requêtes vers un modèle gratuit peuvent être"
+            .to_string(),
+        "conservées : vérifiez sa politique de données avant d'y envoyer du code confidentiel."
+            .to_string(),
+    ]
 }
 
 /// Rapport de `/models [refresh|local|<recherche>]`.
@@ -785,6 +938,10 @@ pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, 
     if let Some(quota) = free_quota_line() {
         lines.push(format!("  Quota gratuit    {quota}"));
     }
+    lines.push(format!(
+        "  Escalade         {}",
+        escalation_line(current_model)
+    ));
     if let Some(warning) = warning {
         lines.push(format!("  Attention        {warning}"));
     }
@@ -797,39 +954,7 @@ pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, 
     } else {
         lines.extend(render_ranking(&ranked, current_model, &catalog));
     }
-    lines.extend([
-        String::new(),
-        "Classement par efficacité, le plus puissant en tête : rang dans la catégorie programmation"
-            .to_string(),
-        "d'OpenRouter, taille effective (paramètres actifs et totaux), spécialisation code, versions"
-            .to_string(),
-        "allégées pénalisées ; pondéré par /models bench (tâches réussies, compatibilité avec Claw)."
-            .to_string(),
-        "Seuls les modèles gratuits qui savent appeler des outils sont listés ; les incompatibles"
-            .to_string(),
-        "mesurés sont écartés.".to_string(),
-        String::new(),
-        "Suite".to_string(),
-        "  /model <id>            utiliser ce modèle dans la session".to_string(),
-        "  \"model\": \"<id>\"        dans .claw.json pour le garder".to_string(),
-        "  /models refresh        recharger le catalogue".to_string(),
-        "  /models local          modèles locaux (Ollama, LM Studio…) et autres fournisseurs"
-            .to_string(),
-        "  /models vision         modèles qui lisent les images (joindre : @capture.png)"
-            .to_string(),
-        "  /models claude         gratuits les plus proches de Claude Opus et Fable".to_string(),
-        "  /models <recherche>    filtrer (ex. /models poolside)".to_string(),
-        "  /models bench          mesurer les modèles gratuits compatibles avec Claw sur de vraies"
-            .to_string(),
-        "                         tâches (≈ 15 min ; --rapide, --local, --appliquer)".to_string(),
-        String::new(),
-        "Bon à savoir : chaque étape de l'agent (un appel au modèle) consomme une requête du"
-            .to_string(),
-        "quota gratuit. Selon le fournisseur, les requêtes vers un modèle gratuit peuvent être"
-            .to_string(),
-        "conservées : vérifiez sa politique de données avant d'y envoyer du code confidentiel."
-            .to_string(),
-    ]);
+    lines.extend(models_report_footer());
     Ok(lines.join("\n"))
 }
 
@@ -1574,6 +1699,121 @@ mod tests {
             .expect("modèles")
             .iter()
             .all(|entry| entry["id"].as_str().expect("id").ends_with(":free")));
+    }
+
+    #[test]
+    fn escalation_setting_defaults_to_the_strongest_free_model() {
+        use super::Escalation;
+        assert_eq!(Escalation::parse(None, false), Escalation::StrongestFree);
+        assert_eq!(
+            Escalation::parse(Some("  "), false),
+            Escalation::StrongestFree
+        );
+        assert_eq!(
+            Escalation::parse(Some("free"), true),
+            Escalation::StrongestFree
+        );
+        assert_eq!(
+            Escalation::parse(Some("Gratuit"), false),
+            Escalation::StrongestFree
+        );
+        // Une session limitée à un seul modèle ne change pas de modèle d'elle-même.
+        assert_eq!(Escalation::parse(None, true), Escalation::Off);
+        assert_eq!(Escalation::parse(Some("off"), false), Escalation::Off);
+        // Un modèle écrit par l'utilisateur est respecté, sauf si c'est déjà le sien.
+        let chosen = Escalation::parse(Some("lab/fort"), true);
+        assert_eq!(chosen, Escalation::Model("lab/fort".to_string()));
+        assert_eq!(chosen.target("lab/autre").as_deref(), Some("lab/fort"));
+        assert_eq!(chosen.target("lab/fort"), None);
+        assert_eq!(Escalation::Off.target("lab/autre"), None);
+    }
+
+    #[test]
+    fn escalation_picks_the_strongest_available_free_model() {
+        let model = |id: &str, description: &str, price: f64| OpenRouterModel {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: description.to_string(),
+            context_length: Some(262_144),
+            prompt_price: price,
+            completion_price: price,
+            supports_tools: true,
+            ..Default::default()
+        };
+        let coder = "A coding agent model with";
+        let catalog = api::ModelCatalog {
+            version: api::CATALOG_VERSION,
+            fetched_at: 42,
+            models: vec![
+                model(
+                    "lab/petit-mini:free",
+                    &format!("{coder} 4B parameters."),
+                    0.0,
+                ),
+                model("lab/moyen:free", &format!("{coder} 30B parameters."), 0.0),
+                model("lab/geant:free", &format!("{coder} 500B parameters."), 0.0),
+                model("lab/casse:free", &format!("{coder} 900B parameters."), 0.0),
+                model("big/payant", &format!("{coder} 900B parameters."), 0.000_01),
+            ],
+            programming_ranking: Vec::new(),
+            category_rankings: std::collections::BTreeMap::from([(
+                "programming".to_string(),
+                vec!["big/payant".to_string()],
+            )]),
+        };
+        let result = |id: &str, compatible: bool| {
+            let value = serde_json::json!({
+                "model": id, "tested_at": 1, "compatible": compatible, "passed": 3, "total": 3,
+            });
+            (
+                id.to_string(),
+                serde_json::from_value::<crate::bench::BenchResult>(value).expect("mesure"),
+            )
+        };
+        let measured = std::collections::BTreeMap::from([
+            result("lab/petit-mini:free", true),
+            result("lab/moyen:free", true),
+            result("lab/geant:free", true),
+            // Incompatible avec Claw : jamais retenu, même s'il est le plus gros.
+            result("lab/casse:free", false),
+        ]);
+        let ranking: Vec<String> = super::scored_free_models(&catalog, &measured)
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect();
+        assert_eq!(
+            ranking,
+            ["lab/geant:free", "lab/moyen:free", "lab/petit-mini:free"]
+        );
+
+        let target = |current: &str, down: &str| {
+            super::strongest_free_in(&catalog, &measured, current, |id| id != down)
+        };
+        // Le plus puissant reprend le tour, quel que soit le modèle de départ.
+        assert_eq!(
+            target("lab/petit-mini:free", "").as_deref(),
+            Some("lab/geant:free")
+        );
+        assert_eq!(
+            target("lab/moyen:free", "").as_deref(),
+            Some("lab/geant:free")
+        );
+        assert_eq!(
+            target("ollama:qwen3.5:4b", "").as_deref(),
+            Some("lab/geant:free")
+        );
+        // Déjà au sommet : rien de plus fort à appeler.
+        assert_eq!(target("lab/geant:free", ""), None);
+        // Le plus puissant est indisponible : le suivant, s'il est plus fort.
+        assert_eq!(
+            target("lab/petit-mini:free", "lab/geant:free").as_deref(),
+            Some("lab/moyen:free")
+        );
+        assert_eq!(target("lab/moyen:free", "lab/geant:free"), None);
+        // Jamais un payant, même mieux classé.
+        for current in ["lab/petit-mini:free", "lab/moyen:free", "lab/geant:free"] {
+            assert_ne!(target(current, "").as_deref(), Some("big/payant"));
+        }
     }
 
     #[test]

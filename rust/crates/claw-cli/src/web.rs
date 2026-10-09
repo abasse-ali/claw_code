@@ -96,6 +96,10 @@ enum WebEvent {
         mode: String,
         suggested_rule: Option<String>,
         session_only: bool,
+        /// Modification proposée (`write_file`, `edit_file`) : l'éditeur relié
+        /// l'affiche dans un diff avant que l'utilisateur ne réponde.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        proposal: Option<EditProposal>,
     },
     PermissionResolved {
         id: u64,
@@ -122,7 +126,53 @@ enum WebEvent {
     Credits {
         credits: serde_json::Value,
     },
+    /// Demande à l'éditeur relié : quels problèmes voit-il dans ces fichiers
+    /// (tous ceux de l'espace de travail si la liste est vide) ? Il répond
+    /// par `POST /api/editor/diagnostics` avec le même identifiant.
+    EditorSync {
+        id: u64,
+        paths: Vec<String>,
+    },
     Reset,
+}
+
+/// Fichier tel qu'il serait après une modification demandée par l'agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct EditProposal {
+    /// Chemin absolu.
+    path: String,
+    /// Le fichier existe déjà (sinon il serait créé).
+    exists: bool,
+    after: String,
+}
+
+/// Au-delà, la modification n'est pas jointe à la demande de permission.
+const MAX_PROPOSAL_BYTES: usize = 512 * 1024;
+
+/// Contenu qu'aurait le fichier si l'appel `tool` était autorisé, calculé
+/// comme le ferait l'outil, sans rien écrire.
+fn edit_proposal(tool: &str, input: &str) -> Option<EditProposal> {
+    let value = serde_json::from_str::<Value>(input).ok()?;
+    let text = |key: &str| value.get(key).and_then(Value::as_str);
+    let preview = match tool {
+        "write_file" => runtime::preview_write(text("path")?, text("content")?).ok()?,
+        "edit_file" => runtime::preview_edit(
+            text("path")?,
+            text("old_string")?,
+            text("new_string")?,
+            value
+                .get("replace_all")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        )
+        .ok()?,
+        _ => return None,
+    };
+    (preview.updated.len() <= MAX_PROPOSAL_BYTES).then(|| EditProposal {
+        path: preview.path,
+        exists: preview.original.is_some(),
+        after: preview.updated,
+    })
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -213,8 +263,9 @@ impl WebApp {
                     view.transcript.push(event.clone());
                 }
             }
-            // Pas rejoués à la reconnexion : la page relit /api/credits.
-            WebEvent::TurnDone | WebEvent::Credits { .. } => {}
+            // Pas rejoués à la reconnexion : la page relit /api/credits, et une
+            // demande à l'éditeur ne vaut que sur le moment.
+            WebEvent::TurnDone | WebEvent::Credits { .. } | WebEvent::EditorSync { .. } => {}
             _ => view.transcript.push(event.clone()),
         }
         let _ = self.events.send(event);
@@ -315,6 +366,7 @@ impl PermissionPrompter for WebPrompter {
                 .suggested_rule
                 .as_deref()
                 .is_some_and(rule_is_session_only),
+            proposal: edit_proposal(&request.tool_name, &request.input),
         });
         let deadline = std::time::Instant::now() + PERMISSION_TIMEOUT;
         let reply = loop {
@@ -841,6 +893,24 @@ struct TokenQuery {
     /// `status` : abonnement de la barre d'état de VS Code (pas une page).
     #[serde(default)]
     role: Option<String>,
+    /// Nom de l'éditeur qui s'abonne (`VS Code`) : il répond aux demandes
+    /// de diagnostics tant que son flux reste ouvert.
+    #[serde(default)]
+    editor: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct EditorDiagnosticsBody {
+    id: u64,
+    #[serde(default)]
+    files: Vec<runtime::editor::FileDiagnostics>,
+}
+
+#[derive(Deserialize)]
+struct ChangesQuery {
+    /// `turn` (le dernier tour, par défaut) ou `session`.
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -974,8 +1044,16 @@ async fn events(
         app.page_viewers.fetch_add(1, Ordering::SeqCst);
     }
     let guard = ViewerGuard(is_page.then(|| Arc::clone(&app.page_viewers)));
+    // Un éditeur relié le reste tant que son flux d'événements est ouvert.
+    let editor = query
+        .editor
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && name.len() <= 40)
+        .map(runtime::editor::connect);
     let stream = stream! {
         let _guard = guard;
+        let _editor = editor;
         yield Ok::<Event, Infallible>(Event::default().event("snapshot").data(snapshot.to_string()));
         loop {
             match receiver.recv().await {
@@ -1059,6 +1137,74 @@ async fn post_permission(
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "demande déjà traitée ou expirée"))?;
     let _ = sender.send(reply);
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Réponse de l'éditeur relié à une demande de diagnostics.
+async fn post_editor_diagnostics(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Json(body): Json<EditorDiagnosticsBody>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    if runtime::editor::deliver(body.id, body.files) {
+        Ok(StatusCode::NO_CONTENT.into_response())
+    } else {
+        Err(api_error(
+            StatusCode::NOT_FOUND,
+            "demande déjà traitée ou expirée",
+        ))
+    }
+}
+
+/// Au-delà, un fichier modifié est listé sans son contenu d'origine.
+const MAX_CHANGE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Fichiers modifiés par les outils de l'agent, avec leur contenu d'avant :
+/// ceux du dernier tour, ou de toute la session (le plus ancien état l'emporte).
+/// Un fichier revenu à son contenu d'origine n'est pas listé.
+fn changed_files(turns: &[runtime::checkpoint::TurnCheckpoint], whole_session: bool) -> Value {
+    let turns = if whole_session {
+        turns
+    } else {
+        // Le dernier tour qui a modifié quelque chose.
+        turns
+            .iter()
+            .rposition(|turn| !turn.files.is_empty())
+            .map_or(&turns[..0], |index| &turns[index..=index])
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut files = Vec::new();
+    for snapshot in turns.iter().flat_map(|turn| &turn.files) {
+        if !seen.insert(snapshot.path.clone()) {
+            continue;
+        }
+        let current = std::fs::read_to_string(&snapshot.path).ok();
+        if !snapshot.binary && current == snapshot.content {
+            continue;
+        }
+        let too_large = snapshot
+            .content
+            .as_ref()
+            .is_some_and(|content| content.len() > MAX_CHANGE_BYTES);
+        files.push(json!({
+            "path": snapshot.path.to_string_lossy(),
+            "existed": snapshot.content.is_some() || snapshot.binary,
+            "exists": snapshot.path.exists(),
+            "comparable": !snapshot.binary && !too_large,
+            "before": if snapshot.binary || too_large { None } else { snapshot.content.clone() },
+        }));
+    }
+    json!({ "scope": if whole_session { "session" } else { "turn" }, "files": files })
+}
+
+async fn get_changes(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Query(query): Query<ChangesQuery>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    let whole_session = query.scope.as_deref() == Some("session");
+    Ok(Json(changed_files(&runtime::checkpoint::list(), whole_session)).into_response())
 }
 
 async fn post_model(
@@ -1388,6 +1534,8 @@ fn router(app: WebApp) -> Router {
         .route("/api/sessions/clear", post(post_sessions_clear))
         .route("/api/commands", get(get_commands))
         .route("/api/viewers", get(get_viewers))
+        .route("/api/editor/diagnostics", post(post_editor_diagnostics))
+        .route("/api/changes", get(get_changes))
         .route("/api/credits", get(get_credits))
         .with_state(app)
 }
@@ -1422,6 +1570,15 @@ pub(crate) fn serve(options: ServeOptions) -> Result<(), Box<dyn std::error::Err
     };
 
     spawn_credits_pump(app.clone());
+
+    // Les demandes de Claw à l'éditeur relié partent par le flux d'événements.
+    let editor_app = app.clone();
+    runtime::editor::set_requester(Arc::new(move |id, paths| {
+        editor_app.publish(WebEvent::EditorSync {
+            id,
+            paths: paths.to_vec(),
+        });
+    }));
 
     // Construction du runtime dans le thread de l'agent (MCP, plugins…).
     let worker_app = app.clone();
@@ -1530,6 +1687,122 @@ mod tests {
                 .map(String::as_str),
             Some("192.168.1.10:9000")
         );
+    }
+
+    #[test]
+    fn a_permission_request_carries_the_proposed_file_content() {
+        let directory = std::env::temp_dir().join(format!(
+            "claw-proposal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("horloge")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("dossier");
+        let existing = directory.join("existant.txt");
+        std::fs::write(&existing, "un\ndeux\ntrois\n").expect("fichier");
+        let path = existing.to_string_lossy().to_string();
+
+        // edit_file : le fichier entier tel qu'il serait, sans y toucher.
+        let input = serde_json::json!({ "path": path, "old_string": "deux", "new_string": "DEUX" });
+        let proposal = super::edit_proposal("edit_file", &input.to_string()).expect("aperçu");
+        assert!(proposal.exists);
+        assert_eq!(proposal.after, "un\nDEUX\ntrois\n");
+        assert!(std::path::Path::new(&proposal.path).is_absolute());
+        assert_eq!(
+            std::fs::read_to_string(&existing).expect("lecture"),
+            "un\ndeux\ntrois\n"
+        );
+
+        // write_file sur un fichier qui n'existe pas : une création.
+        let new_path = directory.join("nouveau.txt").to_string_lossy().to_string();
+        let input = serde_json::json!({ "path": new_path, "content": "bonjour\n" });
+        let proposal = super::edit_proposal("write_file", &input.to_string()).expect("aperçu");
+        assert!(!proposal.exists);
+        assert_eq!(proposal.after, "bonjour\n");
+        assert!(!directory.join("nouveau.txt").exists());
+
+        // Texte introuvable ou autre outil : pas d'aperçu, la demande reste posée.
+        let input = serde_json::json!({ "path": path, "old_string": "absent", "new_string": "x" });
+        assert_eq!(super::edit_proposal("edit_file", &input.to_string()), None);
+        assert_eq!(super::edit_proposal("bash", r#"{"command":"ls"}"#), None);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn lists_the_files_changed_by_the_last_turn_or_the_session() {
+        use runtime::checkpoint::{FileSnapshot, TurnCheckpoint};
+        let directory = std::env::temp_dir().join(format!(
+            "claw-changes-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("horloge")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("dossier");
+        let write = |name: &str, content: &str| {
+            let path = directory.join(name);
+            std::fs::write(&path, content).expect("fichier");
+            path
+        };
+        let modified = write("modifie.txt", "après\n");
+        let created = write("cree.txt", "nouveau\n");
+        let restored = write("retabli.txt", "pareil\n");
+        let snapshot = |path: &std::path::Path, content: Option<&str>| FileSnapshot {
+            path: path.to_path_buf(),
+            content: content.map(ToOwned::to_owned),
+            binary: false,
+        };
+        let turn = |index: usize, files: Vec<FileSnapshot>| TurnCheckpoint {
+            message_index: index,
+            request: format!("tour {index}"),
+            created_at: 0,
+            files,
+        };
+        let turns = vec![
+            turn(
+                0,
+                vec![
+                    snapshot(&modified, Some("au début\n")),
+                    snapshot(&restored, Some("pareil\n")),
+                ],
+            ),
+            turn(
+                2,
+                vec![
+                    snapshot(&modified, Some("entre deux\n")),
+                    snapshot(&created, None),
+                ],
+            ),
+            // Un tour sans modification ne cache pas le précédent.
+            turn(4, Vec::new()),
+        ];
+
+        let last = super::changed_files(&turns, false);
+        assert_eq!(last["scope"], "turn");
+        let files = last["files"].as_array().expect("fichiers");
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0]["before"], "entre deux\n");
+        assert_eq!(files[1]["existed"], false);
+        assert_eq!(files[1]["before"], serde_json::Value::Null);
+        assert_eq!(files[1]["comparable"], true);
+
+        // Toute la session : l'état le plus ancien, sans le fichier revenu à l'identique.
+        let session = super::changed_files(&turns, true);
+        let files = session["files"].as_array().expect("fichiers");
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0]["before"], "au début\n");
+        assert!(files.iter().all(|file| !file["path"]
+            .as_str()
+            .expect("chemin")
+            .ends_with("retabli.txt")));
+        assert_eq!(
+            super::changed_files(&[], false)["files"],
+            serde_json::json!([])
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

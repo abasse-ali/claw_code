@@ -912,6 +912,10 @@ fn filter_tool_specs(
     allowed_tools: Option<&AllowedToolSet>,
 ) -> Vec<ToolDefinition> {
     let mut definitions = tool_registry.definitions(allowed_tools);
+    // Les problèmes de l'éditeur ne se lisent que si un éditeur est relié.
+    let editor = runtime::editor::connected().is_some()
+        && runtime::harness::enabled(runtime::harness::Aid::EditorDiagnostics);
+    definitions.retain(|definition| definition.name != "EditorDiagnostics" || editor);
     if allowed_tools.is_some() || !runtime::harness::enabled(runtime::harness::Aid::ToolDiet) {
         return definitions;
     }
@@ -5413,8 +5417,9 @@ struct DefaultRuntimeClient {
     observer: Option<SharedObserver>,
     /// Avis à donner avant la première requête (modèle de planification).
     start_notice: Option<String>,
-    /// Modèle plus fort qui reprend un tour bloqué (`escalationModel`).
-    escalation: Option<String>,
+    /// Modèle plus fort qui reprend un tour bloqué : par défaut le gratuit le
+    /// plus puissant du moment, sinon `escalationModel`.
+    escalation: models::Escalation,
     /// Chaîne habituelle, mise de côté pendant une escalade.
     saved_chain: Option<api::ModelChain>,
 }
@@ -5453,15 +5458,6 @@ impl DefaultRuntimeClient {
             models.extend(chain_models.iter().cloned());
             api::ModelChain::new(models, cli_client_factory())
         });
-        let escalation = env::var("CLAW_ESCALATION_MODEL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                config
-                    .as_ref()
-                    .and_then(|config| config.escalation_model().map(ToOwned::to_owned))
-            })
-            .map(|escalation| resolve_model_alias(&escalation));
         Ok(Self {
             runtime: tokio::runtime::Runtime::new()?,
             chain: api::ModelChain::new(chain_models, cli_client_factory()),
@@ -5473,7 +5469,7 @@ impl DefaultRuntimeClient {
             progress_reporter,
             observer: None,
             start_notice: None,
-            escalation,
+            escalation: models::Escalation::configured(),
             saved_chain: None,
         })
     }
@@ -5582,10 +5578,11 @@ impl ApiClient for DefaultRuntimeClient {
     }
 
     fn escalate(&mut self) -> Option<String> {
-        let model = self.escalation.clone()?;
-        if self.saved_chain.is_some() || self.chain.primary() == model {
+        if self.saved_chain.is_some() {
             return None;
         }
+        // Choisi au moment du blocage : le classement et les disponibilités changent.
+        let model = self.escalation.target(self.chain.primary())?;
         // Le modèle fort d'abord ; s'il est indisponible, la chaîne habituelle.
         let mut models = vec![model.clone()];
         models.extend(self.chain.models().iter().cloned());
