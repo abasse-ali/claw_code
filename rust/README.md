@@ -735,6 +735,16 @@ cargo run --bin claw -- login
 cargo install --path crates/claw-cli --locked
 ```
 
+Sous Windows, pour réinstaller pendant que `claw` tourne (panneau de VS Code ouvert) :
+
+```powershell
+.\scripts\install.ps1
+```
+
+Un programme en cours d'exécution verrouille son fichier : le script met l'ancien `claw.exe` de
+côté, installe, puis efface les anciennes copies. Si la compilation échoue ou est interrompue,
+l'ancienne version est remise en place.
+
 ### Construction depuis les sources
 
 ```bash
