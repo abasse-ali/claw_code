@@ -21,7 +21,7 @@ class ToolPool:
             f'Include MCP: {self.include_mcp}',
             f'Tool count: {len(self.tools)}',
         ]
-        lines.extend(f'- {tool.name} — {tool.source_hint}' for tool in self.tools[:15])
+        lines.extend(f'- {tool.name} - {tool.source_hint}' for tool in self.tools[:15])
         return '\n'.join(lines)
 
 

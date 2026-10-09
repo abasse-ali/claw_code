@@ -1121,7 +1121,7 @@ impl HttpMcpClient {
 fn auth_hint(server: &str, status: reqwest::StatusCode, what: &str) -> String {
     if status.as_u16() == 401 || status.as_u16() == 403 {
         format!(
-            "HTTP {status} pour {what} : connexion requise — lancez `claw mcp login {server}` (ou ajoutez un en-tête Authorization dans \"headers\")"
+            "HTTP {status} pour {what} : connexion requise - lancez `claw mcp login {server}` (ou ajoutez un en-tête Authorization dans \"headers\")"
         )
     } else {
         format!("HTTP {status} pour {what}")

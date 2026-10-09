@@ -60,7 +60,7 @@ class RuntimeSession:
         ]
         if self.routed_matches:
             lines.extend(
-                f'- [{match.kind}] {match.name} ({match.score}) — {match.source_hint}'
+                f'- [{match.kind}] {match.name} ({match.score}) - {match.source_hint}'
                 for match in self.routed_matches
             )
         else:

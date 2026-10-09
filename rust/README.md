@@ -94,7 +94,14 @@ sombre ou claire (thème du système, de VS Code ou choisi) :
   réponse maximale, orientation code et agents de sa description, rang en programmation chez
   OpenRouter, spécialités en commun, mesures de Claw. C'est une ressemblance de profil, pas une
   égalité d'intelligence : « Mesurer ce modèle » vérifie ses capacités réelles. Dans le terminal :
-  `/models claude`, qui propose aussi le plus proche comme `"escalationModel"` gratuit ;
+  `/models claude`, qui propose aussi le plus proche comme `"escalationModel"` gratuit.
+  Sous les gratuits, **« Payants proches ou mieux classés »** liste au plus huit modèles payants
+  par référence : ceux qui ressemblent à Claude au moins autant que le meilleur gratuit (60 % au
+  minimum) et ceux qui le devancent au classement en programmation d'OpenRouter (un classement
+  d'usage, pas d'intelligence), avec leur prix par million de jetons. Ils sont là pour
+  information : Claw ne choisit jamais un payant de lui-même (ni au démarrage, ni en secours, ni
+  pour l'escalade ou les avis). Un payant ne sert que si vous cliquez dessus puis confirmez son
+  prix, ou si vous tapez `/model <id>` ;
 - **menu des modèles** : nom, identifiant réel et **spécialités** de chaque modèle gratuit, avec
   une **catégorie par spécialité** (Programmation, Images, Raisonnement, Apprentissage et
   recherche, Audio et vidéo, Long contexte, Traduction, Santé, Marketing… ; les catégories sans
@@ -294,9 +301,9 @@ format que Claude Code, ou une simple liste de commandes) :
 | `PreToolUse` / `PostToolUse` | avant / après un outil (`matcher` : nom d'outil, `Edit\|Write`, regex) | refuse l'appel / marque une erreur |
 | `UserPromptSubmit` | à chaque demande ; stdout ajouté au contexte | rejette la demande |
 | `Stop` / `SubagentStop` | fin de tour de l'agent / d'un sous-agent | relance l'agent avec la raison (5 fois max) |
-| `SessionStart` / `SessionEnd` | début (`startup`, `resume`, `clear`) / fin de session | — |
-| `PreCompact` | avant une compaction (`auto`, `manual`) | — |
-| `Notification` | quand une autorisation est demandée (en arrière-plan) | — |
+| `SessionStart` / `SessionEnd` | début (`startup`, `resume`, `clear`) / fin de session | - |
+| `PreCompact` | avant une compaction (`auto`, `manual`) | - |
+| `Notification` | quand une autorisation est demandée (en arrière-plan) | - |
 
 Chaque hook reçoit sur stdin un JSON (`hook_event_name`, `session_id`, `cwd`, champs de
 l'événement). La raison d'un blocage est lue sur stderr (sinon stdout). La sortie JSON de
@@ -640,6 +647,13 @@ conteneurs sont arrêtés à l'interruption, au délai dépassé et à la fin de
 `"language": "français"` dans la config (par exemple `~/.claw/settings.json`) fixe la langue des
 réponses, y compris pour les commandes `/review`, `/audit`…
 
+**Pas de tiret cadratin.** Claw n'écrit jamais le tiret long (U+2014) : il met « - » à la place.
+Le prompt système le demande au modèle (réponses, code, commentaires, documents, messages de
+commit), et un filtre le remplace de toute façon dans tout ce qu'un modèle écrit : réponses,
+réflexion affichée, sous-agents, avis d'un autre modèle, résumés de conversation (« mot, tiret
+long, mot » devient « mot - mot »). Les fichiers que vous faites lire à l'agent ne sont pas
+modifiés. Un test échoue si ce caractère revient dans les sources du projet.
+
 La connexion OAuth est aussi disponible :
 
 ```bash
@@ -709,14 +723,14 @@ Depuis la version release :
 
 L'espace de travail Rust est l'implémentation produit active. Il comprend actuellement ces crates :
 
-- `claw-cli` — binaire orienté utilisateur
-- `api` — clients de fournisseurs et streaming
-- `runtime` — sessions, config, permissions, prompts et boucle d'exécution
-- `tools` — implémentations des outils intégrés
-- `commands` — registre et handlers des commandes slash
-- `plugins` — découverte, registre et support de cycle de vie des plugins
-- `lsp` — types de support du protocole de langage et helpers de processus
-- `server` et `compat-harness` — services de support et outillage de compatibilité
+- `claw-cli` - binaire orienté utilisateur
+- `api` - clients de fournisseurs et streaming
+- `runtime` - sessions, config, permissions, prompts et boucle d'exécution
+- `tools` - implémentations des outils intégrés
+- `commands` - registre et handlers des commandes slash
+- `plugins` - découverte, registre et support de cycle de vie des plugins
+- `lsp` - types de support du protocole de langage et helpers de processus
+- `server` et `compat-harness` - services de support et outillage de compatibilité
 
 ## Feuille de route
 

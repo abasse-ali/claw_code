@@ -1380,7 +1380,7 @@
   setInterval(loadCredits, 60000);
 
   // Fenêtre de détail des crédits, au centre de la page (clic sur la pastille).
-  const money = (amount) => typeof amount !== "number" ? "—"
+  const money = (amount) => typeof amount !== "number" ? "-"
     : (Math.abs(amount) > 0 && Math.abs(amount) < 0.01 ? amount.toFixed(4) : amount.toFixed(2)).replace(".", ",") + " $";
   function untilUtcMidnight() {
     const now = new Date();
@@ -1532,7 +1532,7 @@
   }
 
   // Fiche d'un modèle (petit bouton d'information du menu des modèles).
-  const tokenCount = (count) => typeof count !== "number" ? "—"
+  const tokenCount = (count) => typeof count !== "number" ? "-"
     : count >= 1000000 ? String(Math.round(count / 100000) / 10).replace(".", ",") + (count >= 2000000 ? " millions" : " million") + " de jetons"
     : count.toLocaleString("fr-FR") + " jetons";
   // `back` (facultatif) rouvre la liste d'où la fiche a été demandée.
@@ -1632,7 +1632,7 @@
       if (detail) dd.append(el("small", null, detail));
       rows.append(el("dt", null, label), dd);
     };
-    row("Fournisseur", info.provider || "—");
+    row("Fournisseur", info.provider || "-");
     if (typeof info.context_length === "number") row("Contexte", tokenCount(info.context_length));
     if (typeof info.max_output === "number") row("Réponse maximale", tokenCount(info.max_output));
     if (info.local) row("Prix", "Aucun", "modèle servi par cette machine");
@@ -1852,9 +1852,21 @@
         const row = el("div", "row");
         const price = money(entry.prompt_price) + " en entrée, " + money(entry.completion_price) + " en sortie par million de jetons";
         const extra = el("span", "aside");
+        const close = typeof entry.percent === "number";
+        if (close) {
+          const badge = el("span", "likeness", entry.percent + " %");
+          badge.title = "Ressemblance de profil avec la référence choisie, pas une égalité d'intelligence";
+          extra.append(badge);
+        }
         extra.append(el("span", "measured bad", "payant"));
         const item = menuItem((entry.name || entry.id).replace(/\s*\(free\)\s*$/i, ""), entry.id, () => {}, extra, "mono");
-        specialtyLine(item, "n°" + entry.rank + " de la catégorie · " + money(entry.prompt_price) + " / " + money(entry.completion_price) + " par million");
+        const prices = money(entry.prompt_price) + " / " + money(entry.completion_price) + " par million";
+        // Proches de Claude : ce qui le distingue (mieux classé, ou ce qui lui manque), puis son prix.
+        const detail = !close ? "n°" + entry.rank + " de la catégorie"
+          : entry.better_ranked ? "mieux classé que Claude en programmation (n°" + entry.rank + " contre n°" + entry.reference_rank + ")"
+          : entry.gaps && entry.gaps.length ? "✗ " + entry.gaps.join(", ").toLowerCase()
+          : "✓ aucun écart net";
+        specialtyLine(item, detail + " · " + prices);
         item.title = price;
         item.onclick = () => {
           const bar = el("div", "confirm pay");
@@ -1989,6 +2001,14 @@
         if (!query && category && category.paid.length) {
           list.append(el("div", "group", "Payants les plus utilisés chez OpenRouter"));
           for (const entry of category.paid) list.append(paidRow(entry));
+        }
+        // Proches de Claude : les payants proches ou mieux classés, utilisés
+        // seulement après un clic et la confirmation de leur prix.
+        const paidClose = claude && category.paid_by_reference ? category.paid_by_reference[likenessReference] || [] : [];
+        if (paidClose.length) {
+          list.append(el("div", "group", "Payants proches ou mieux classés"));
+          list.append(el("div", "hint-line", "Jamais utilisés sans votre choix : un clic, puis une confirmation avec le prix. Le classement en programmation d'OpenRouter mesure l'usage, pas l'intelligence."));
+          for (const entry of paidClose) list.append(paidRow(entry));
         }
         if (!list.children.length) list.append(el("div", "group", "Aucun modèle trouvé"));
       };
@@ -2249,7 +2269,7 @@
     $("activity").hidden = !next.busy;
     sendBtn.classList.toggle("stop", !!next.busy);
     sendBtn.innerHTML = svg(next.busy ? "stop" : "arrowUp");
-    sendBtn.title = next.busy ? "Arrêter (Échap) — un message tapé partira à la fin du tour" : "Envoyer (Entrée)";
+    sendBtn.title = next.busy ? "Arrêter (Échap) - un message tapé partira à la fin du tour" : "Envoyer (Entrée)";
     const tokens = (next.input_tokens || 0) + (next.output_tokens || 0);
     $("usage").textContent = tokens ? tokens.toLocaleString("fr-FR") + " jetons" + (next.cost ? " · " + next.cost : "") : "";
     if (wasBusy && !next.busy) {
@@ -2296,7 +2316,7 @@
       const data = await api("/api/commands");
       customCommands = (data.commands || []).map((command) => [
         command.name,
-        [command.hint, command.description].filter(Boolean).join(" — ") + " (" + command.scope + ")",
+        [command.hint, command.description].filter(Boolean).join(" - ") + " (" + command.scope + ")",
       ]);
     } catch (_) { customCommands = []; }
   }

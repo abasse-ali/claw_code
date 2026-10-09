@@ -126,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             commands = get_commands(include_plugin_commands=not args.no_plugin_commands, include_skill_commands=not args.no_skill_commands)
             output_lines = [f'Command entries: {len(commands)}', '']
-            output_lines.extend(f'- {module.name} — {module.source_hint}' for module in commands[: args.limit])
+            output_lines.extend(f'- {module.name} - {module.source_hint}' for module in commands[: args.limit])
             print('\n'.join(output_lines))
         return 0
     if args.command == 'tools':
@@ -136,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
             permission_context = ToolPermissionContext.from_iterables(args.deny_tool, args.deny_prefix)
             tools = get_tools(simple_mode=args.simple_mode, include_mcp=not args.no_mcp, permission_context=permission_context)
             output_lines = [f'Tool entries: {len(tools)}', '']
-            output_lines.extend(f'- {module.name} — {module.source_hint}' for module in tools[: args.limit])
+            output_lines.extend(f'- {module.name} - {module.source_hint}' for module in tools[: args.limit])
             print('\n'.join(output_lines))
         return 0
     if args.command == 'route':

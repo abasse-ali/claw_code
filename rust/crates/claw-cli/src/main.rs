@@ -1291,7 +1291,7 @@ fn format_permissions_report(mode: &str, rules: &PermissionRules) -> String {
 
     let render_rules = |rules: &[runtime::PermissionRule]| {
         if rules.is_empty() {
-            "—".to_string()
+            "-".to_string()
         } else {
             rules
                 .iter()
@@ -3750,7 +3750,7 @@ fn run_user_shell_command(command: &str) -> String {
     }
 }
 
-const INIT_ANALYSIS_PROMPT: &str = "/init — Analyze this repository and write (or improve) CLAW.md at its root: the file of instructions that every future session will read first. Explore the codebase with read and search tools, then include: a one-paragraph overview of the project; the exact commands to build, run, test (including a single test) and lint; the architecture (main modules and how they fit together, key entry points); conventions you observe (style, naming, error handling, test layout); and pitfalls a new contributor should know. Keep it concise and factual (no generic advice), prefer bullet lists, keep any existing useful content, and do not invent commands you have not seen in the project files. Write the file in the language the project already uses for its documentation.";
+const INIT_ANALYSIS_PROMPT: &str = "/init - Analyze this repository and write (or improve) CLAW.md at its root: the file of instructions that every future session will read first. Explore the codebase with read and search tools, then include: a one-paragraph overview of the project; the exact commands to build, run, test (including a single test) and lint; the architecture (main modules and how they fit together, key entry points); conventions you observe (style, naming, error handling, test layout); and pitfalls a new contributor should know. Keep it concise and factual (no generic advice), prefer bullet lists, keep any existing useful content, and do not invent commands you have not seen in the project files. Write the file in the language the project already uses for its documentation.";
 
 fn render_repl_help() -> String {
     [
@@ -4930,14 +4930,14 @@ fn expert_command_prompt(command: ExpertCommand, args: Option<&str>) -> Result<S
                 "the current uncommitted changes (`git diff` and `git diff --staged`), or the latest commit if the working tree is clean",
             );
             format!(
-                "/review — Act as a code reviewer for {target}.\n\n{}\n\nDo not modify any file. End by asking which findings I want you to fix.",
+                "/review - Act as a code reviewer for {target}.\n\n{}\n\nDo not modify any file. End by asking which findings I want you to fix.",
                 role("reviewer")
             )
         }
         ExpertCommand::Audit => {
             let scope = args.unwrap_or("this whole project");
             format!(
-                "/audit — Audit {scope}.\n\n{}\n\nDo not modify any file.",
+                "/audit - Audit {scope}.\n\n{}\n\nDo not modify any file.",
                 role("auditor")
             )
         }
@@ -4946,7 +4946,7 @@ fn expert_command_prompt(command: ExpertCommand, args: Option<&str>) -> Result<S
                 return Err("Usage : /archi <besoin ou sujet>  (ex. /archi découper le monolithe en services)".to_string());
             };
             format!(
-                "/archi — Design the architecture for: {topic}\n\n{}\n\nIf essential requirements are missing, ask me focused questions before designing. Do not modify files unless I ask you to.",
+                "/archi - Design the architecture for: {topic}\n\n{}\n\nIf essential requirements are missing, ask me focused questions before designing. Do not modify files unless I ask you to.",
                 role("architect")
             )
         }
@@ -4958,7 +4958,7 @@ fn expert_command_prompt(command: ExpertCommand, args: Option<&str>) -> Result<S
                 );
             };
             format!(
-                "/adr — Write an Architecture Decision Record about: {decision}\n\nBase it on our conversation and on the codebase. Store it in docs/adr/ (create the directory if needed) as NNNN-short-kebab-title.md, where NNNN is the next number after the existing records. Use the sections: Title, Status (Proposed), Date, Context, Decision, Alternatives considered (with their trade-offs), Consequences (positive and negative). Then create the file and show me its path."
+                "/adr - Write an Architecture Decision Record about: {decision}\n\nBase it on our conversation and on the codebase. Store it in docs/adr/ (create the directory if needed) as NNNN-short-kebab-title.md, where NNNN is the next number after the existing records. Use the sections: Title, Status (Proposed), Date, Context, Decision, Alternatives considered (with their trade-offs), Consequences (positive and negative). Then create the file and show me its path."
             )
         }
         ExpertCommand::Avis => {
@@ -4969,7 +4969,7 @@ fn expert_command_prompt(command: ExpertCommand, args: Option<&str>) -> Result<S
                 );
             };
             format!(
-                "/avis — Get independent second opinions on this question: {question}\n\nFirst gather what is needed to answer well (read the relevant code). Then call the Consult tool with the question and, in `context`, everything the other models need: code excerpts, constraints, what was already tried. Finally compare the answers: where they agree, where they differ and who is right given the code, and give your own recommendation with its main risk."
+                "/avis - Get independent second opinions on this question: {question}\n\nFirst gather what is needed to answer well (read the relevant code). Then call the Consult tool with the question and, in `context`, everything the other models need: code excerpts, constraints, what was already tried. Finally compare the answers: where they agree, where they differ and who is right given the code, and give your own recommendation with its main risk."
             )
         }
         ExpertCommand::Fix => {
@@ -4977,7 +4977,7 @@ fn expert_command_prompt(command: ExpertCommand, args: Option<&str>) -> Result<S
                 || "Detect the test command of this project.".to_string(),
                 |command| format!("Test command to use: `{command}`."),
             );
-            format!("/fix — {command}\n\n{}", role("tester"))
+            format!("/fix - {command}\n\n{}", role("tester"))
         }
     };
     Ok(format!("{prompt}{LANGUAGE_NOTE}"))
@@ -5539,7 +5539,7 @@ impl ApiClient for DefaultRuntimeClient {
             .ok()
             .map(|(model, response)| {
                 credits::note_request(&model);
-                api::response_text(&response)
+                runtime::typography::without_em_dash(&api::response_text(&response)).into_owned()
             })
             .filter(|summary| !summary.trim().is_empty())
     }
@@ -5658,6 +5658,10 @@ impl ApiClient for DefaultRuntimeClient {
                 let mut pending_tools = PendingTools::new();
                 let mut saw_stop = false;
                 let mut signed_thinking = SignedThinking::new();
+                // Jamais de tiret cadratin dans ce que Claw écrit ; la réflexion
+                // signée, elle, est renvoyée telle quelle au fournisseur.
+                let mut text_dashes = runtime::typography::DashFilter::default();
+                let mut thinking_dashes = runtime::typography::DashFilter::default();
 
                 loop {
                     let event = match first_event.take() {
@@ -5698,6 +5702,7 @@ impl ApiClient for DefaultRuntimeClient {
                         }
                         ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
                             ContentBlockDelta::TextDelta { text } => {
+                                let text = text_dashes.push(&text);
                                 if !text.is_empty() {
                                     reasoning
                                         .close(out)
@@ -5727,6 +5732,7 @@ impl ApiClient for DefaultRuntimeClient {
                                 if let Some(entry) = signed_thinking.get_mut(&delta.index) {
                                     entry.0.push_str(&thinking);
                                 }
+                                let thinking = thinking_dashes.push(&thinking);
                                 if emit {
                                     transcript::record_thinking(&thinking);
                                 }
@@ -6314,6 +6320,7 @@ fn push_output_block(
 ) -> Result<(), RuntimeError> {
     match block {
         OutputContentBlock::Text { text } => {
+            let text = runtime::typography::without_em_dash(&text).into_owned();
             if !text.is_empty() {
                 let rendered = TerminalRenderer::new().markdown_to_ansi(&text);
                 let mut answer = transcript::Prefixer::assistant();
@@ -6438,7 +6445,7 @@ impl CliToolExecutor {
     ) -> Result<String, String> {
         let value = serde_json::from_str(input).map_err(|error| {
             format!(
-                "invalid tool input JSON: {error} — send the call again with a valid JSON object"
+                "invalid tool input JSON: {error} - send the call again with a valid JSON object"
             )
         })?;
         registry.execute(tool_name, &value)
@@ -7145,7 +7152,7 @@ mod tests {
         assert!(report.contains("workspace-write    ● actuel"));
         assert!(report.contains("allow            Bash(cargo test:*)"));
         assert!(report.contains("deny             Read(.env)"));
-        assert!(report.contains("ask              —"));
+        assert!(report.contains("ask              -"));
     }
 
     #[test]
@@ -7211,7 +7218,7 @@ mod tests {
         let CliAction::Prompt { prompt, .. } = action else {
             panic!("expected a prompt action, got {action:?}");
         };
-        assert!(prompt.starts_with("/review — Act as a code reviewer for src/api."));
+        assert!(prompt.starts_with("/review - Act as a code reviewer for src/api."));
         assert!(parse_args(&["/archi".to_string()])
             .expect_err("topic required")
             .contains("Usage : /archi"));

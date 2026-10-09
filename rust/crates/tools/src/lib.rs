@@ -2908,7 +2908,9 @@ impl ApiClient for ProviderRuntimeClient {
                 self.chain.send(&build, &mut notify),
             ))
             .ok()
-            .map(|(_, response)| api::response_text(&response))
+            .map(|(_, response)| {
+                runtime::typography::without_em_dash(&api::response_text(&response)).into_owned()
+            })
             .filter(|summary| !summary.trim().is_empty())
     }
 
@@ -2959,6 +2961,8 @@ impl ApiClient for ProviderRuntimeClient {
             let mut pending_tools: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
             let mut saw_stop = false;
             let mut signed_thinking = SignedThinking::new();
+            // Jamais de tiret cadratin dans ce qu'un sous-agent écrit.
+            let mut text_dashes = runtime::typography::DashFilter::default();
 
             loop {
                 let event = match first_event.take() {
@@ -2990,6 +2994,7 @@ impl ApiClient for ProviderRuntimeClient {
                     }
                     ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
                         ContentBlockDelta::TextDelta { text } => {
+                            let text = text_dashes.push(&text);
                             if !text.is_empty() {
                                 events.push(AssistantEvent::TextDelta(text));
                             }
@@ -3219,6 +3224,7 @@ fn push_output_block(
 ) {
     match block {
         OutputContentBlock::Text { text } => {
+            let text = runtime::typography::without_em_dash(&text).into_owned();
             if !text.is_empty() {
                 events.push(AssistantEvent::TextDelta(text));
             }

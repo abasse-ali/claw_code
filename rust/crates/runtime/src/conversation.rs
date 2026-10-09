@@ -1313,7 +1313,7 @@ where
             return None;
         }
         self.api_client.notify(&format!(
-            "hook {} : l'agent continue — {reason}",
+            "hook {} : l'agent continue - {reason}",
             event.as_str()
         ));
         Some(reason)

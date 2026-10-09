@@ -534,6 +534,113 @@ fn closest_to<'a>(
     ranked
 }
 
+/// Modèle payant proche de Claude, ou mieux classé que lui en programmation.
+/// Proposé à titre d'information : il n'est utilisé que si l'utilisateur le
+/// choisit lui-même.
+struct PaidCandidate<'a> {
+    model: &'a api::OpenRouterModel,
+    likeness: crate::likeness::Likeness,
+    rank: Option<usize>,
+    reference_rank: Option<usize>,
+}
+
+impl PaidCandidate<'_> {
+    /// Écarts tirés du catalogue publié : un payant n'est jamais mesuré par
+    /// Claw (la mesure coûterait de l'argent), ce critère n'est donc pas un
+    /// écart utile à afficher.
+    fn published_gaps(&self) -> Vec<&'static str> {
+        let mut gaps = self.likeness.gaps();
+        gaps.retain(|label| *label != crate::likeness::MEASURED);
+        gaps
+    }
+
+    /// Mieux classé que Claude dans la catégorie programmation d'`OpenRouter`
+    /// (classement par usage, pas une mesure d'intelligence).
+    fn better_ranked(&self) -> bool {
+        matches!((self.rank, self.reference_rank), (Some(rank), Some(reference)) if rank < reference)
+    }
+
+    fn price(&self) -> String {
+        let per_million = |price: f64| format!("{:.2} $", price * 1_000_000.0).replace('.', ",");
+        format!(
+            "{} / {} par million",
+            per_million(self.model.prompt_price),
+            per_million(self.model.completion_price)
+        )
+    }
+
+    fn json(&self) -> serde_json::Value {
+        let likeness = self.likeness.json(false);
+        serde_json::json!({
+            "id": self.model.id,
+            "name": self.model.name,
+            "context": format_context(self.model.context_length),
+            "percent": self.likeness.percent,
+            "matches": likeness["matches"],
+            "gaps": self.published_gaps(),
+            "rank": self.rank,
+            "reference_rank": self.reference_rank,
+            "better_ranked": self.better_ranked(),
+            "prompt_price": price_per_million(self.model.prompt_price),
+            "completion_price": price_per_million(self.model.completion_price),
+        })
+    }
+}
+
+/// Payants listés au plus par référence.
+const PAID_CLOSE_LIMIT: usize = 8;
+/// Ressemblance minimale d'un payant, à défaut d'être au moins aussi proche
+/// que le meilleur gratuit.
+const PAID_CLOSE_FLOOR: u32 = 60;
+
+/// Modèles payants (appels d'outils, prix connu) au moins aussi proches de
+/// `reference` que le meilleur gratuit, ou mieux classés qu'elle en
+/// programmation ; sans les autres versions de sa propre famille.
+fn paid_close_to<'a>(
+    reference: &api::OpenRouterModel,
+    catalog: &'a ModelCatalog,
+    measured: &std::collections::BTreeMap<String, crate::bench::BenchResult>,
+    best_free: u32,
+) -> Vec<PaidCandidate<'a>> {
+    let floor = best_free.max(PAID_CLOSE_FLOOR);
+    let reference_rank = api::category_rank(&reference.id, "programming", catalog);
+    let mut candidates: Vec<PaidCandidate<'a>> = catalog
+        .models
+        .iter()
+        .filter(|model| {
+            !model.is_free()
+                && model.supports_tools
+                && model.prompt_price >= 0.0
+                && model.completion_price >= 0.0
+                && !model.id.contains(':')
+                && !model.id.starts_with("openrouter/")
+                && model.id != reference.id
+                && !crate::likeness::same_family(&model.id, &reference.id)
+        })
+        .map(|model| PaidCandidate {
+            model,
+            likeness: crate::likeness::likeness(model, reference, catalog, measured.get(&model.id)),
+            rank: api::category_rank(&model.id, "programming", catalog),
+            reference_rank,
+        })
+        .filter(|candidate| candidate.better_ranked() || candidate.likeness.percent >= floor)
+        .collect();
+    candidates.sort_by(|left, right| {
+        right
+            .likeness
+            .percent
+            .cmp(&left.likeness.percent)
+            .then_with(|| {
+                left.rank
+                    .unwrap_or(usize::MAX)
+                    .cmp(&right.rank.unwrap_or(usize::MAX))
+            })
+            .then_with(|| left.model.id.cmp(&right.model.id))
+    });
+    candidates.truncate(PAID_CLOSE_LIMIT);
+    candidates
+}
+
 /// `/models claude` : modèles gratuits les plus proches du dernier Opus et du
 /// dernier Fable, avec ce qui les rapproche et ce qui les en éloigne.
 fn claude_likeness_report() -> Result<String, String> {
@@ -559,10 +666,9 @@ fn claude_likeness_report() -> Result<String, String> {
             crate::likeness::display_name(reference),
             reference.id
         ));
-        for (model, likeness) in closest_to(reference, &models, &catalog, &measured)
-            .into_iter()
-            .take(6)
-        {
+        let ranked = closest_to(reference, &models, &catalog, &measured);
+        let best_free = ranked.first().map_or(0, |(_, likeness)| likeness.percent);
+        for (model, likeness) in ranked.into_iter().take(6) {
             first_choice.get_or_insert_with(|| model.id.clone());
             lines.push(format!("  {:>3} %  {}", likeness.percent, model.id));
             let matches = likeness.matches();
@@ -572,6 +678,29 @@ fn claude_likeness_report() -> Result<String, String> {
             }
             if !gaps.is_empty() {
                 lines.push(format!("         ✗ {}", gaps.join(", ").to_lowercase()));
+            }
+        }
+        let paid = paid_close_to(reference, &catalog, &measured, best_free);
+        if !paid.is_empty() {
+            lines.push("  Payants proches ou mieux classés (seulement si vous les choisissez : /model <id>)".to_string());
+            for candidate in paid.iter().take(5) {
+                let gaps = candidate.published_gaps();
+                let detail = if candidate.better_ranked() {
+                    format!(
+                        "mieux classé en programmation (n°{} contre n°{})",
+                        candidate.rank.unwrap_or_default(),
+                        candidate.reference_rank.unwrap_or_default()
+                    )
+                } else if gaps.is_empty() {
+                    "✓ aucun écart net".to_string()
+                } else {
+                    format!("✗ {}", gaps.join(", ").to_lowercase())
+                };
+                lines.push(format!(
+                    "  {:>3} %  {}  · payant",
+                    candidate.likeness.percent, candidate.model.id
+                ));
+                lines.push(format!("         {} · {detail}", candidate.price()));
             }
         }
     }
@@ -1017,6 +1146,8 @@ fn claude_category(
         &api::OpenRouterModel,
         Vec<(&api::OpenRouterModel, crate::likeness::Likeness)>,
     )],
+    catalog: &ModelCatalog,
+    measured: &std::collections::BTreeMap<String, crate::bench::BenchResult>,
 ) -> Option<serde_json::Value> {
     let (_, ranked) = closest.first()?;
     // En tête : les gratuits les plus proches de Claude, pour chaque référence.
@@ -1032,12 +1163,26 @@ fn claude_category(
             )
         })
         .collect();
+    // Payants proches ou mieux classés, par référence : jamais choisis sans
+    // un clic (et une confirmation) de l'utilisateur.
+    let paid_by_reference: serde_json::Map<String, serde_json::Value> = closest
+        .iter()
+        .map(|(reference, ranked)| {
+            let best_free = ranked.first().map_or(0, |(_, likeness)| likeness.percent);
+            let paid = paid_close_to(reference, catalog, measured, best_free);
+            (
+                reference.id.clone(),
+                serde_json::json!(paid.iter().map(PaidCandidate::json).collect::<Vec<_>>()),
+            )
+        })
+        .collect();
     Some(serde_json::json!({
         "key": "claude",
         "label": "Proches de Claude",
         "models": ranked.iter().map(|(model, _)| model.id.as_str()).collect::<Vec<_>>(),
         "by_reference": by_reference,
         "paid": [],
+        "paid_by_reference": paid_by_reference,
     }))
 }
 
@@ -1107,7 +1252,9 @@ fn models_view_json(
 
     // Une catégorie par spécialité : « Programmation » garde le classement du
     // code, les autres rangent par rang chez OpenRouter puis par efficacité.
-    let mut categories: Vec<serde_json::Value> = claude_category(&closest).into_iter().collect();
+    let mut categories: Vec<serde_json::Value> = claude_category(&closest, catalog, measured)
+        .into_iter()
+        .collect();
     categories.extend([
         serde_json::json!({
             "key": "programming",
@@ -1311,6 +1458,122 @@ mod tests {
             .map(|entry| entry["label"].as_str().expect("nom"))
             .collect();
         assert_eq!(labels, ["Images", "Droit"]);
+    }
+
+    /// Catalogue fictif autour de Claude : la référence, une version plus
+    /// ancienne, un gratuit proche, et des payants proches, classés ou lointains.
+    fn claude_catalog() -> api::ModelCatalog {
+        let flagship =
+            "Flagship model for demanding reasoning, coding, and long-horizon agentic work.";
+        let model = |id: &str, description: &str, context: u64, tools: bool| OpenRouterModel {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: description.to_string(),
+            context_length: Some(context),
+            max_completion_tokens: Some(context / 8),
+            prompt_price: if id.ends_with(":free") {
+                0.0
+            } else {
+                0.000_003
+            },
+            completion_price: if id.ends_with(":free") {
+                0.0
+            } else {
+                0.000_015
+            },
+            supports_tools: tools,
+            supports_reasoning: true,
+            supports_images: context >= 1_000_000,
+            ..Default::default()
+        };
+        api::ModelCatalog {
+            version: api::CATALOG_VERSION,
+            fetched_at: 42,
+            models: vec![
+                model("anthropic/claude-opus-5.5", flagship, 1_000_000, true),
+                model("anthropic/claude-opus-4.8", flagship, 1_000_000, true),
+                model("anthropic/claude-opus-5.5:batch", flagship, 1_000_000, true),
+                model("lab/proche:free", flagship, 262_144, true),
+                model("big/rival", flagship, 1_000_000, true),
+                model("big/sans-outils", flagship, 1_000_000, false),
+                model("big/classe", "A compact chat assistant.", 32_768, true),
+                model("big/loin", "A compact chat assistant.", 32_768, true),
+            ],
+            programming_ranking: Vec::new(),
+            category_rankings: std::collections::BTreeMap::from([(
+                "programming".to_string(),
+                vec![
+                    "big/classe".to_string(),
+                    "anthropic/claude-opus-5.5".to_string(),
+                    "big/rival".to_string(),
+                ],
+            )]),
+        }
+    }
+
+    #[test]
+    fn paid_models_close_to_claude_are_listed_apart_and_never_picked() {
+        let catalog = claude_catalog();
+        let measured = std::collections::BTreeMap::new();
+        let reference = catalog
+            .models
+            .iter()
+            .find(|model| model.id == "anthropic/claude-opus-5.5")
+            .expect("référence");
+
+        let paid = super::paid_close_to(reference, &catalog, &measured, 0);
+        let ids: Vec<&str> = paid
+            .iter()
+            .map(|candidate| candidate.model.id.as_str())
+            .collect();
+        // Le plus proche d'abord ; « big/classe » ressemble peu à Claude mais
+        // le devance au classement en programmation.
+        assert_eq!(ids, ["big/rival", "big/classe"]);
+        assert!(!paid[0].better_ranked() && paid[1].better_ranked());
+        assert!(paid[0].likeness.percent > paid[1].likeness.percent);
+        assert_eq!(paid[0].price(), "3,00 $ / 15,00 $ par million");
+        // Jamais mesuré : ce critère n'est pas présenté comme un écart.
+        assert!(!paid[0]
+            .published_gaps()
+            .contains(&crate::likeness::MEASURED));
+
+        // Un gratuit plus proche relève la barre : seul le mieux classé reste.
+        let stricter = super::paid_close_to(reference, &catalog, &measured, 101);
+        let ids: Vec<&str> = stricter
+            .iter()
+            .map(|candidate| candidate.model.id.as_str())
+            .collect();
+        assert_eq!(ids, ["big/classe"]);
+
+        // Interface web : les payants sont à part, par référence, et la liste
+        // proposée par défaut ne contient que des gratuits.
+        let view = super::models_view_json(&catalog, &measured);
+        let claude = view["categories"]
+            .as_array()
+            .expect("catégories")
+            .iter()
+            .find(|entry| entry["key"] == "claude")
+            .expect("proches de Claude");
+        assert_eq!(claude["models"], serde_json::json!(["lab/proche:free"]));
+        assert_eq!(claude["paid"], serde_json::json!([]));
+        let listed = &claude["paid_by_reference"]["anthropic/claude-opus-5.5"];
+        assert_eq!(listed[0]["id"], "big/rival");
+        assert_eq!(listed[0]["better_ranked"], false);
+        assert!((listed[0]["prompt_price"].as_f64().expect("prix") - 3.0).abs() < 1e-9);
+        let ranked = listed
+            .as_array()
+            .expect("payants")
+            .iter()
+            .find(|entry| entry["id"] == "big/classe")
+            .expect("mieux classé");
+        assert_eq!(ranked["better_ranked"], true);
+        assert_eq!(ranked["rank"], 1);
+        assert_eq!(ranked["reference_rank"], 2);
+        assert!(view["models"]
+            .as_array()
+            .expect("modèles")
+            .iter()
+            .all(|entry| entry["id"].as_str().expect("id").ends_with(":free")));
     }
 
     #[test]

@@ -35,6 +35,9 @@ const MIN_TOKENS: f64 = 4_096.0;
 /// Au-delà de ce rang en programmation, le critère ne rapporte plus rien.
 const RANK_SPAN: f64 = 50.0;
 
+/// Critère des mesures de Claw (les autres viennent du catalogue publié).
+pub(crate) const MEASURED: &str = "Mesuré par Claw";
+
 /// Un critère de comparaison : points obtenus sur le maximum, et le détail.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Criterion {
@@ -71,6 +74,14 @@ fn version(id: &str, family: &str) -> Option<(u32, u32)> {
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next().map_or(Some(0), |minor| minor.parse().ok())?;
     Some((major, minor))
+}
+
+/// Le modèle est une autre version de la famille de `reference` (un Opus plus
+/// ancien pour une référence Opus, par exemple).
+pub(crate) fn same_family(id: &str, reference: &str) -> bool {
+    FAMILIES
+        .iter()
+        .any(|family| version(id, family).is_some() && version(reference, family).is_some())
 }
 
 /// Dernier Opus et dernier Fable du catalogue (ceux qui y figurent).
@@ -291,7 +302,7 @@ pub(crate) fn likeness(
     criteria.extend(specialties_criterion(model, reference, catalog));
     let (ratio, detail) = measured_ratio(measured)
         .unwrap_or_else(|| (0.0, "pas encore mesuré (« Mesurer ce modèle »)".to_string()));
-    criteria.push(criterion("Mesuré par Claw", 10.0 * ratio, 10.0, detail));
+    criteria.push(criterion(MEASURED, 10.0 * ratio, 10.0, detail));
 
     let earned: f64 = criteria.iter().map(|criterion| criterion.earned).sum();
     let max: f64 = criteria.iter().map(|criterion| criterion.max).sum();

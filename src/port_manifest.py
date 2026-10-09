@@ -23,7 +23,7 @@ class PortManifest:
             'Top-level Python modules:',
         ]
         for module in self.top_level_modules:
-            lines.append(f'- `{module.name}` ({module.file_count} files) — {module.notes}')
+            lines.append(f'- `{module.name}` ({module.file_count} files) - {module.notes}')
         return '\n'.join(lines)
 
 

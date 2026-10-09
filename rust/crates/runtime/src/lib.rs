@@ -25,6 +25,7 @@ pub mod repo_map;
 pub mod sandbox;
 pub use bash::stop_all_containers;
 mod session;
+pub mod typography;
 mod usage;
 
 pub use bash::{execute_bash, BashCommandInput, BashCommandOutput};

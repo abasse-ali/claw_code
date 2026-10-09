@@ -92,5 +92,5 @@ def render_tool_index(limit: int = 20, query: str | None = None) -> str:
     if query:
         lines.append(f'Filtered by: {query}')
         lines.append('')
-    lines.extend(f'- {module.name} — {module.source_hint}' for module in modules)
+    lines.extend(f'- {module.name} - {module.source_hint}' for module in modules)
     return '\n'.join(lines)

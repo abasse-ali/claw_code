@@ -44,6 +44,6 @@ class PortingBacklog:
 
     def summary_lines(self) -> list[str]:
         return [
-            f'- {module.name} [{module.status}] — {module.responsibility} (from {module.source_hint})'
+            f'- {module.name} [{module.status}] - {module.responsibility} (from {module.source_hint})'
             for module in self.modules
         ]

@@ -12,7 +12,7 @@ class QueryEngineRuntime(QueryEnginePort):
             lines.append('No mirrored command/tool matches found.')
             return '\n'.join(lines)
         lines.append('Matches:')
-        lines.extend(f'- [{match.kind}] {match.name} ({match.score}) — {match.source_hint}' for match in matches)
+        lines.extend(f'- [{match.kind}] {match.name} ({match.score}) - {match.source_hint}' for match in matches)
         return '\n'.join(lines)
 
 

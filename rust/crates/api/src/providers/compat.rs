@@ -1,7 +1,7 @@
 //! Fournisseurs compatibles `OpenAI` désignés par un préfixe : `ollama:qwen2.5-coder:7b`,
 //! `groq:llama-3.3-70b-versatile`, `monserveur:mon-modele`…
 //!
-//! Préréglages : serveurs locaux (Ollama, LM Studio, llama.cpp — sans clé) et
+//! Préréglages : serveurs locaux (Ollama, LM Studio, llama.cpp - sans clé) et
 //! services en ligne (Groq, Mistral, `DeepSeek`, Gemini, Cerebras, Together,
 //! Fireworks). D'autres serveurs se déclarent dans la config (`providers`).
 

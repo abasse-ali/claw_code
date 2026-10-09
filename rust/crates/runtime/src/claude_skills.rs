@@ -188,7 +188,7 @@ fn enabled_plugins(claude_home: &Path, cwd: &Path) -> BTreeMap<String, bool> {
 }
 
 /// Dossiers d'installation des plugins (`installed_plugins.json`, dans son
-/// ancien format — un objet par plugin — ou le nouveau — une liste).
+/// ancien format - un objet par plugin - ou le nouveau - une liste).
 fn installed_plugins(claude_home: &Path) -> Vec<(String, PathBuf)> {
     let Some(value) =
         std::fs::read_to_string(claude_home.join("plugins").join("installed_plugins.json"))

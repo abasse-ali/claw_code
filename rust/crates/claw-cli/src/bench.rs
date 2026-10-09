@@ -2,7 +2,7 @@
 //! le code **et** compatibles avec Claw.
 //!
 //! 1. Sonde : un vrai appel d'outil (`read_file`) dont la réponse doit citer un
-//!    code secret — détecte les modèles refusés à Claw, surchargés, qui
+//!    code secret - détecte les modèles refusés à Claw, surchargés, qui
 //!    n'appellent pas les outils ou répondent faux (environ 2 requêtes).
 //! 2. Tâches : les meilleurs modèles compatibles corrigent un bug, implémentent
 //!    une fonction et renomment dans plusieurs fichiers ; les tests du projet

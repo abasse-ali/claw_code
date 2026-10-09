@@ -152,7 +152,7 @@ pub fn file_mention_blocks(input: &str, cwd: &Path) -> Vec<String> {
         } else if let Ok(bytes) = std::fs::read(&path) {
             if bytes.len() > MAX_FILE_MENTION_BYTES {
                 blocks.push(format!(
-                    "<file path=\"{token}\">(file too large to inline: {} KiB — read it with read_file)</file>",
+                    "<file path=\"{token}\">(file too large to inline: {} KiB - read it with read_file)</file>",
                     bytes.len() / 1024
                 ));
             } else if let Ok(text) = String::from_utf8(bytes) {
