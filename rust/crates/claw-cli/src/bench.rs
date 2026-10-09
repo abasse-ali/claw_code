@@ -720,7 +720,17 @@ pub(crate) fn candidates(options: &BenchOptions) -> Result<Vec<String>, String> 
         models.extend(super::models::local_models());
     }
     if let Some(filter) = &options.filter {
-        models.retain(|model| model.to_ascii_lowercase().contains(filter));
+        // Un identifiant complet désigne ce modèle et lui seul (« Mesurer ce modèle »).
+        let exact = models
+            .iter()
+            .any(|model| model.eq_ignore_ascii_case(filter));
+        models.retain(|model| {
+            if exact {
+                model.eq_ignore_ascii_case(filter)
+            } else {
+                model.to_ascii_lowercase().contains(filter)
+            }
+        });
     }
     if models.is_empty() {
         return Err(if let Some(filter) = &options.filter {

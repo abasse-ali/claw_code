@@ -2792,6 +2792,31 @@ fn notify_subagent_fallback(text: &str) {
     eprintln!("  ↳ ▲ {text}");
 }
 
+type RequestObserver = Box<dyn Fn(&str) + Send + Sync>;
+
+fn request_observer() -> &'static Mutex<Option<RequestObserver>> {
+    static SLOT: OnceLock<Mutex<Option<RequestObserver>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// `observer` reçoit le modèle de chaque requête envoyée par un sous-agent ou
+/// un modèle consulté : l'application y décompte crédits et quota gratuit.
+pub fn set_request_observer(observer: impl Fn(&str) + Send + Sync + 'static) {
+    *request_observer()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(observer));
+}
+
+pub(crate) fn note_model_request(model: &str) {
+    if let Some(observer) = request_observer()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+    {
+        observer(model);
+    }
+}
+
 impl ApiClient for ProviderRuntimeClient {
     fn summarize(&mut self, system_prompt: &str, transcript: &str) -> Option<String> {
         let build = |model: &str| api::summary_request(model, system_prompt, transcript);
@@ -2845,6 +2870,7 @@ impl ApiClient for ProviderRuntimeClient {
             let opened =
                 runtime::interrupt::interruptible(self.chain.open_stream(&build, &mut notify))
                     .await?;
+            note_model_request(&opened.model);
             let mut stream = opened.stream;
             let mut first_event = opened.first_event;
             let mut events = Vec::new();
@@ -2943,9 +2969,10 @@ impl ApiClient for ProviderRuntimeClient {
                 stream: false,
                 ..build(model)
             };
-            let (_, response) =
+            let (model, response) =
                 runtime::interrupt::interruptible(self.chain.send(&build_complete, &mut notify))
                     .await?;
+            note_model_request(&model);
             Ok(response_to_events(response))
         })
     }

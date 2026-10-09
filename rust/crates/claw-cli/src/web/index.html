@@ -103,6 +103,8 @@
   #credits b { font-weight: 650; font-variant-numeric: tabular-nums; }
   #credits .sep { width: 1px; height: 14px; background: var(--border-strong); }
   #credits.low b { color: var(--err); }
+  #credits.warn { border-color: var(--warn); }
+  #credits.warn .free b { color: var(--warn); }
   #credits.flash { animation: flash .7s var(--ease); }
   @keyframes flash { 0% { box-shadow: 0 0 0 0 var(--accent-soft); border-color: var(--accent); } 100% { box-shadow: 0 0 0 8px transparent; } }
 
@@ -133,6 +135,11 @@
   .mini { flex: none; width: 28px; height: 28px; display: inline-grid; place-items: center; border-radius: 7px; color: var(--text-3); transition: background .15s, color .15s; }
   .mini:hover { background: var(--surface-3); color: var(--text); }
   .mini.danger:hover { background: var(--err-soft); color: var(--err); }
+  .mini.on { color: var(--warn); }
+  .mini.on svg.i { fill: currentColor; }
+  .menu .rename { display: flex; align-items: center; gap: 6px; padding: 5px 6px; }
+  .menu .rename input { flex: 1; min-width: 0; height: 30px; border-radius: var(--r-sm); border: 1px solid var(--accent); background: var(--surface-2); padding: 0 9px; outline: none; font-size: 13px; }
+  .menu .rename .btn { height: 28px; padding: 0 10px; font-size: 12.5px; }
   .menu .confirm { display: flex; align-items: center; gap: 6px; padding: 6px 6px 6px 10px; border-radius: var(--r-sm); background: var(--err-soft); font-size: 13px; }
   .menu .confirm > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .menu .confirm .btn { height: 28px; padding: 0 10px; font-size: 12.5px; }
@@ -336,6 +343,20 @@
   .dialog .desc { margin-top: 12px; font-size: 13px; line-height: 1.5; color: var(--text-2); max-height: 126px; overflow: auto; }
   .dialog .rows dd small { display: block; font-weight: 400; font-size: 12px; color: var(--text-3); }
   .dialog .source { margin-top: 10px; }
+  .dialog .pace { margin-top: 5px; }
+  .dialog .pace.warn { color: var(--warn); }
+  .dialog .usage { margin-top: 14px; }
+  .dialog .usage-title { font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); margin-bottom: 7px; }
+  .dialog .usage-row { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(40px, 1fr) auto; align-items: center; gap: 10px; font-size: 13px; padding: 2px 0; }
+  .dialog .usage-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dialog .usage-bar { height: 6px; border-radius: 6px; background: var(--surface-3); overflow: hidden; }
+  .dialog .usage-bar i { display: block; height: 100%; background: var(--accent); border-radius: 6px; }
+  .dialog .usage-row b { font-variant-numeric: tabular-nums; min-width: 28px; text-align: right; }
+  .dialog .usage .note { margin-top: 7px; }
+  .dialog .measure { margin-top: 14px; padding: 11px 12px; border: 1px solid var(--border); border-radius: var(--r); background: var(--surface-2); }
+  .dialog .measure .line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+  .dialog .measure .btn { height: 30px; font-size: 13px; }
+  .dialog-head .mini { margin-right: 2px; }
 
   #toast { position: fixed; left: 50%; bottom: 120px; transform: translate(-50%, 8px); z-index: 50; padding: 9px 14px; border-radius: var(--r); background: var(--text); color: var(--bg); font-size: 13.5px; opacity: 0; transition: opacity .2s, transform .2s var(--ease); pointer-events: none; max-width: min(520px, 90vw); }
   #toast.show { opacity: .95; transform: translate(-50%, 0); }
@@ -476,6 +497,7 @@
     auto: '<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/>',
     cpu: '<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>',
     info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
+    star: '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
     trash: '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>',
     coins: '<circle cx="8" cy="8" r="6"/><path d="M18.09 10.37A6 6 0 1 1 10.34 18"/><path d="M7 6h1v4"/>',
     layers: '<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
@@ -520,6 +542,11 @@
   let pendingPermissions = 0, freeModels = [], customCommands = [], mermaidCount = 0, currentActivity = "";
   // Heure du catalogue OpenRouter utilisé, et modèles apparus à la dernière recherche.
   let modelsCatalogAt = 0, newModelIds = new Set();
+  // Modèles épinglés en haut du menu (gardés par Claw, communs à toutes les fenêtres).
+  let favoriteModels = [];
+  // Une mesure de modèle est en cours : la liste sera relue à la fin du tour.
+  let benchPending = false;
+  const quotaAlerts = new Set();
 
   // ---------------------------------------------------------------- utilitaires
   const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) =>
@@ -1156,7 +1183,7 @@
       case "permission_resolved": resolvePermission(event.id, event.decision); break;
       case "info": finishAssistant(); addInfo(event.text); break;
       case "error": finishAssistant(); addError(event.message, event.hint); break;
-      case "turn_done": finishAssistant(); break;
+      case "turn_done": finishAssistant(); if (benchPending) { benchPending = false; loadModels(); } break;
       case "status": applyStatus(event.status); break;
       case "credits": renderCredits(event.credits); break;
       case "reset": resetLog(); break;
@@ -1199,7 +1226,35 @@
     const pending = data.pending ? "\n" + data.pending + " en attente de confirmation d'OpenRouter" : "";
     node.title = "OpenRouter : " + data.text + session + pending + "\nCliquer pour le détail";
     node.classList.toggle("low", typeof data.balance === "number" && data.balance < 1);
+    node.classList.toggle("warn", !!data.low);
     node.hidden = false;
+    quotaAlert(data);
+  }
+  // « À ce rythme (≈ 42 requêtes/h), quota épuisé vers 18:05 », d'après les
+  // requêtes de la dernière heure ; vide sans recul suffisant.
+  function paceText(data) {
+    if (!data.pace || !data.free || data.free.remaining <= 0) return "";
+    const rate = "à ce rythme (≈ " + data.pace.per_hour + " requêtes/h)";
+    if (!data.pace.exhausted_at) return rate + ", le quota tient jusqu'à sa remise à zéro";
+    return rate + ", quota épuisé vers " + new Date(data.pace.exhausted_at * 1000).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+  }
+  // Alerte quand le quota gratuit passe sous 100, 20 puis 0 requêtes : une
+  // fois par seuil et par jour (UTC).
+  function quotaAlert(data) {
+    if (!data.free) return;
+    const left = data.free.remaining;
+    const threshold = left <= 0 ? 0 : left <= 20 ? 20 : left < 100 ? 100 : null;
+    if (threshold === null) return;
+    const key = "claw-quota-" + Math.floor(Date.now() / 86400000) + "-" + threshold;
+    if (quotaAlerts.has(key)) return;
+    quotaAlerts.add(key);
+    try {
+      if (sessionStorage.getItem(key)) return;
+      sessionStorage.setItem(key, "1");
+    } catch (_) { /* stockage indisponible : l'alerte reste unique pour cette page */ }
+    const pace = paceText(data);
+    toast(left <= 0 ? "Quota gratuit du jour épuisé (remise à zéro à minuit UTC)"
+      : "Il reste " + left + " requêtes gratuites aujourd'hui" + (pace ? " · " + pace : ""));
   }
   async function loadCredits() {
     try { renderCredits(await api("/api/credits")); } catch (_) { /* affichage précédent conservé */ }
@@ -1307,7 +1362,35 @@
           ? "Palier à " + data.free.limit + " par jour (au moins 10 $ de crédits achetés)."
           : "Palier à " + data.free.limit + " par jour : avec 10 $ de crédits achetés, il passe à 1000.";
         quota.append(line, bar, el("div", "note", data.free.used + " utilisée(s) · remise à zéro à minuit UTC, dans " + untilUtcMidnight() + ". " + tier));
+        const pace = paceText(data);
+        if (pace) {
+          const soon = data.pace.exhausted_at || data.low;
+          quota.append(el("div", "note pace" + (soon ? " warn" : ""), pace.charAt(0).toUpperCase() + pace.slice(1) + "."));
+        }
         panel.append(quota);
+      }
+
+      // Ce que chaque modèle a consommé aujourd'hui, d'après le journal de Claw.
+      if (data.by_model && data.by_model.length) {
+        const usage = el("div", "usage");
+        usage.append(el("div", "usage-title", "Requêtes de Claw aujourd'hui, par modèle"));
+        const most = data.by_model[0].requests || 1;
+        for (const entry of data.by_model.slice(0, 6)) {
+          const row = el("div", "usage-row");
+          const name = el("span", "usage-name", modelName(entry.model));
+          name.title = entry.model + (entry.free ? " (gratuit)" : " (payant)");
+          const bar = el("span", "usage-bar");
+          const fill = el("i");
+          fill.style.width = Math.max(3, (entry.requests / most) * 100) + "%";
+          bar.append(fill);
+          row.append(name, bar, el("b", null, String(entry.requests)));
+          usage.append(row);
+        }
+        const more = data.by_model.length - 6;
+        usage.append(el("div", "note", (more > 0 ? "Et " + more + " autre(s) modèle(s). " : "")
+          + (data.counted || 0) + " requête(s) comptée(s) par Claw sur cette machine"
+          + (data.free ? " ; OpenRouter en compte " + data.free.used + " gratuite(s) pour cette clé." : ".")));
+        panel.append(usage);
       }
 
       // D'où viennent les chiffres, et quand ils ont été lus pour la dernière fois.
@@ -1340,7 +1423,17 @@
     const name = el("div", "name", modelName(id));
     const body = el("div");
     body.append(el("div", "note source", "Chargement…"));
-    panel.append(dialog.head("info"), name, el("div", "ident", id), body);
+    const head = dialog.head("info");
+    const pin = miniButton("star", "", async () => { await toggleFavorite(id); paintPin(); });
+    const paintPin = () => {
+      const on = favoriteModels.includes(id);
+      pin.classList.toggle("on", on);
+      pin.title = on ? "Retirer des favoris" : "Épingler en haut du menu des modèles";
+      pin.setAttribute("aria-label", pin.title);
+    };
+    paintPin();
+    head.insertBefore(pin, head.lastChild);
+    panel.append(head, name, el("div", "ident", id), body);
     let info;
     try {
       info = await api("/api/model?id=" + encodeURIComponent(id));
@@ -1411,6 +1504,51 @@
       use.type = "button";
       use.onclick = () => { dialog.close(); setModel(id); };
       actions.append(use);
+    }
+
+    // Mesure sur de vraies tâches (/models bench), pour un modèle gratuit ou local.
+    if ((info.free === true || info.local) && info.tools !== false) {
+      const measure = el("div", "measure");
+      const idle = () => {
+        measure.textContent = "";
+        measure.append(el("div", "note", "Mesurer ce modèle sur de vraies tâches : le résultat sert à le classer."));
+        const line = el("div", "line");
+        const offer = (label, flag, requests, minutes) => {
+          const button = el("button", "btn", label);
+          button.type = "button";
+          button.onclick = () => {
+            measure.textContent = "";
+            measure.append(el("div", "note", "Lancer la mesure ? Elle occupe l'agent " + minutes + " et consomme jusqu'à " + requests
+              + " requêtes" + (info.local ? " locales." : " gratuites.")));
+            const confirmLine = el("div", "line");
+            const go = el("button", "btn primary", "Lancer");
+            go.type = "button";
+            go.onclick = async () => {
+              go.disabled = true;
+              try {
+                await api("/api/message", { text: "/models bench " + flag + (info.local ? "--local " : "") + id, images: [] });
+                benchPending = true;
+                dialog.close();
+                scrollToBottom(true);
+              } catch (error) {
+                toast(error.message);
+                go.disabled = false;
+              }
+            };
+            const back = el("button", "btn", "Annuler");
+            back.type = "button";
+            back.onclick = idle;
+            confirmLine.append(go, back);
+            measure.append(confirmLine);
+          };
+          return button;
+        };
+        line.append(offer("Trois tâches de code", "", 40, "quelques minutes"),
+          offer("Raisonnement (tests cachés)", "--difficile ", 85, "jusqu'à une heure"));
+        measure.append(line);
+      };
+      idle();
+      body.append(measure);
     }
     body.append(actions);
   }
@@ -1498,6 +1636,15 @@
       toast("Recherche impossible : " + error.message);
     }
   }
+  // Épingle un modèle en haut du menu, ou le retire des favoris.
+  async function toggleFavorite(id) {
+    try {
+      const result = await api("/api/models/favorite", { value: id, on: !favoriteModels.includes(id) });
+      favoriteModels = result.favorites || [];
+    } catch (error) {
+      toast(error.message);
+    }
+  }
   function openModelMenu() {
     showMenu($("model-btn"), (menu) => {
       const search = el("input", "search");
@@ -1512,40 +1659,59 @@
       findLabel(false);
       const list = el("div", "list");
       const modelRow = (id, onPick, extra) => {
+        const favorite = favoriteModels.includes(id);
         const row = el("div", "row");
-        row.append(menuItem(modelName(id), id, onPick, extra, "mono"),
+        const star = miniButton("star", favorite ? "Retirer des favoris" : "Épingler en haut du menu",
+          async () => { await toggleFavorite(id); fill(); }, favorite ? "on" : "");
+        row.append(menuItem(modelName(id), id, onPick, extra, "mono"), star,
           miniButton("info", "Informations sur ce modèle", () => openModelInfo(id)));
         return row;
+      };
+      // Ce qui s'affiche à droite d'un modèle : nouveauté, mesure, coche.
+      const badges = (id) => {
+        const model = freeModels.find((entry) => entry.id === id);
+        const extra = el("span", "aside");
+        if (newModelIds.has(id)) extra.append(el("span", "fresh", "nouveau"));
+        if (model && model.measured) {
+          const bad = model.measured.startsWith("✗") || model.measured.startsWith("‖");
+          const badge = el("span", "measured" + (bad ? " bad" : ""), shortMeasure(model.measured));
+          badge.title = "Mesuré par /models bench : " + model.measured;
+          extra.append(badge);
+        } else if (model && model.available === false) {
+          const badge = el("span", "measured bad", "mis de côté");
+          badge.title = "Quota atteint ou panne récente : réessayé plus tard";
+          extra.append(badge);
+        }
+        if (id === status.model) extra.append(checkMark());
+        return extra;
+      };
+      const matches = (id, query) => {
+        const model = freeModels.find((entry) => entry.id === id);
+        return !query || id.toLowerCase().includes(query) || ((model && model.name) || "").toLowerCase().includes(query);
       };
       const fill = () => {
         const query = search.value.trim().toLowerCase();
         list.textContent = "";
-        const models = freeModels.filter((model) => !query || model.id.toLowerCase().includes(query) || (model.name || "").toLowerCase().includes(query));
-        if (status.model && !freeModels.some((model) => model.id === status.model) && (!query || status.model.toLowerCase().includes(query))) {
+        const pick = (id) => (id === status.model ? () => {} : () => setModel(id));
+        const favorites = favoriteModels.filter((id) => matches(id, query));
+        if (favorites.length) {
+          list.append(el("div", "group", "Favoris"));
+          for (const id of favorites) list.append(modelRow(id, pick(id), badges(id)));
+        }
+        const known = (id) => freeModels.some((model) => model.id === id) || favoriteModels.includes(id);
+        if (status.model && !known(status.model) && matches(status.model, query)) {
           list.append(el("div", "group", "Actuel"));
           list.append(modelRow(status.model, () => {}, checkMark()));
         }
+        const models = freeModels.filter((model) => matches(model.id, query));
         if (models.length) {
           list.append(el("div", "group", "Gratuits, du plus puissant au moins puissant"));
           if (modelsCatalogAt) list.append(el("div", "hint-line", "Catalogue OpenRouter lu " + relativeTime(modelsCatalogAt)));
         }
         for (const model of models) {
-          const extra = el("span", "aside");
-          if (newModelIds.has(model.id)) extra.append(el("span", "fresh", "nouveau"));
-          if (model.measured) {
-            const bad = model.measured.startsWith("✗") || model.measured.startsWith("‖");
-            const badge = el("span", "measured" + (bad ? " bad" : ""), shortMeasure(model.measured));
-            badge.title = "Mesuré par /models bench : " + model.measured;
-            extra.append(badge);
-          } else if (model.available === false) {
-            const badge = el("span", "measured bad", "mis de côté");
-            badge.title = "Quota atteint ou panne récente : réessayé plus tard";
-            extra.append(badge);
-          }
-          if (model.id === status.model) extra.append(checkMark());
           // Nom du modèle, et dessous son identifiant réel ; sa puissance en info-bulle.
           const power = (model.reasons || []).concat(model.context ? ["contexte " + model.context] : []).join(" · ");
-          const row = modelRow(model.id, () => setModel(model.id), extra);
+          const row = modelRow(model.id, pick(model.id), badges(model.id));
           row.firstChild.title = power || model.id;
           list.append(row);
         }
@@ -1593,10 +1759,12 @@
       menu.append(list);
     });
   }
-  // Bouton « Sessions » : nouvelle session, reprise ou effacement d'une
-  // session précédente (celle en cours ne s'efface pas).
+  // Bouton « Sessions » : nouvelle session ; recherche, reprise, titre et
+  // effacement des sessions précédentes (celle en cours ne s'efface pas).
   async function openSessionsMenu() {
     showMenu($("sessions-btn"), (menu) => {
+      const search = el("input", "search");
+      search.placeholder = "Rechercher dans les sessions…";
       const list = el("div", "list");
       const fresh = menuItem("Nouvelle session", "Repartir d'une conversation vide · Ctrl+Maj+O", () => newConversation());
       const lead = el("span", "lead");
@@ -1604,7 +1772,8 @@
       fresh.prepend(lead);
       const previous = el("div");
       list.append(fresh, previous);
-      menu.append(list);
+      menu.append(search, list);
+      let query = "", request = 0;
       // Demande de confirmation à la place de `target` : l'effacement est définitif.
       const confirmBar = (target, question, label, action) => {
         const bar = el("div", "confirm");
@@ -1623,20 +1792,49 @@
         target.replaceWith(bar);
         yes.focus();
       };
+      // Saisie du titre à la place de la rangée ; vide : titre automatique.
+      const renameBar = (row, session) => {
+        const bar = el("div", "rename");
+        const field = el("input");
+        field.value = session.title || "";
+        field.maxLength = 80;
+        field.placeholder = session.preview || "Titre de la session";
+        const ok = el("button", "btn primary", "OK");
+        ok.type = "button";
+        const no = el("button", "btn", "Annuler");
+        no.type = "button";
+        const save = async () => {
+          ok.disabled = no.disabled = true;
+          try { await api("/api/sessions/rename", { id: session.id, title: field.value }); } catch (error) { toast(error.message); }
+          load();
+        };
+        ok.onclick = save;
+        no.onclick = () => bar.replaceWith(row);
+        field.onkeydown = (event) => {
+          if (event.key === "Enter") { event.preventDefault(); save(); }
+          else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); bar.replaceWith(row); }
+        };
+        bar.append(field, ok, no);
+        row.replaceWith(bar);
+        field.focus();
+        field.select();
+      };
       const render = (sessions) => {
         previous.textContent = "";
-        previous.append(el("div", "group", "Sessions précédentes"));
-        if (!sessions.length) previous.append(el("div", "group", "Aucune session sauvegardée"));
+        previous.append(el("div", "group", query ? "Sessions contenant « " + query + " »" : "Sessions précédentes"));
+        if (!sessions.length) previous.append(el("div", "group", query ? "Aucune session trouvée" : "Aucune session sauvegardée"));
         for (const session of sessions) {
           const current = session.id === status.session_id;
-          const title = session.preview || (session.messages ? "Session sans texte" : "Session vide");
-          const item = menuItem(title, relativeTime(session.modified) + " · " + session.messages + " message(s)" + (current ? " · en cours" : ""), async () => {
+          const title = session.title || session.preview || (session.messages ? "Session sans texte" : "Session vide");
+          const details = relativeTime(session.modified) + " · " + session.messages + " message(s)" + (current ? " · en cours" : "");
+          // Recherche : l'extrait trouvé remplace les détails.
+          const item = menuItem(title, session.snippet || details, async () => {
             if (current) return;
             try { await api("/api/resume", { value: session.id }); } catch (error) { toast(error.message); }
           }, current ? checkMark() : null);
-          item.title = session.id;
+          item.title = (session.title && session.preview ? session.preview + "\n" : "") + (session.snippet ? details + "\n" : "") + session.id;
           const row = el("div", "row");
-          row.append(item);
+          row.append(item, miniButton("edit", "Renommer cette session", () => renameBar(row, session)));
           if (!current) {
             row.append(miniButton("trash", "Effacer cette session", () => confirmBar(row, "Effacer « " + title + " » ?", "Effacer",
               () => api("/api/sessions/delete", { value: session.id })), "danger"));
@@ -1644,7 +1842,7 @@
           previous.append(row);
         }
         const others = sessions.filter((session) => session.id !== status.session_id).length;
-        if (others > 1) {
+        if (others > 1 && !query) {
           const foot = el("div", "foot");
           const all = el("button", "btn wide danger");
           all.type = "button";
@@ -1660,8 +1858,15 @@
       };
       const load = () => {
         if (!previous.children.length) previous.append(el("div", "group", "Chargement…"));
-        api("/api/sessions").then((data) => render(data.sessions || []))
+        const mine = ++request;
+        api("/api/sessions" + (query ? "?q=" + encodeURIComponent(query) : ""))
+          .then((data) => { if (mine === request) render(data.sessions || []); })
           .catch((error) => { previous.textContent = ""; previous.append(el("div", "group", "Erreur : " + error.message)); });
+      };
+      let typing = null;
+      search.oninput = () => {
+        clearTimeout(typing);
+        typing = setTimeout(() => { query = search.value.trim(); load(); }, 250);
       };
       load();
     });
@@ -1790,6 +1995,7 @@
       const data = await api("/api/models" + (fresh ? "?fresh=1" : ""));
       freeModels = data.models || [];
       modelsCatalogAt = data.catalog_at || 0;
+      favoriteModels = data.favorites || [];
       warning = data.warning || "";
       // Modèles apparus depuis la liste précédente.
       newModelIds = new Set(fresh && known.size ? freeModels.filter((model) => !known.has(model.id)).map((model) => model.id) : []);

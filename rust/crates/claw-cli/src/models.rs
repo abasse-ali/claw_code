@@ -664,6 +664,49 @@ pub fn cost_line(model: &str, usage: TokenUsage) -> Option<String> {
     estimated_cost(model, usage).map(|cost| format!("  Coût estimé      {cost}"))
 }
 
+fn favorites_path() -> Option<PathBuf> {
+    let cwd = env::current_dir().ok()?;
+    Some(
+        ConfigLoader::default_for(cwd)
+            .config_home()
+            .join("favorite-models.json"),
+    )
+}
+
+/// Modèles favoris de l'utilisateur, épinglés en haut du menu des modèles
+/// (`~/.claw/favorite-models.json`), dans l'ordre où ils ont été ajoutés.
+pub fn favorite_models() -> Vec<String> {
+    favorites_path()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+        .unwrap_or_default()
+}
+
+/// Liste des favoris après ajout ou retrait de `id` (sans doublon).
+fn with_favorite(mut favorites: Vec<String>, id: &str, favorite: bool) -> Vec<String> {
+    favorites.retain(|model| model != id);
+    if favorite {
+        favorites.push(id.to_string());
+    }
+    favorites
+}
+
+/// Ajoute ou retire un favori ; renvoie la nouvelle liste.
+pub fn set_favorite_model(id: &str, favorite: bool) -> Result<Vec<String>, String> {
+    let id = id.trim();
+    if id.is_empty() || id.len() > 200 || id.chars().any(char::is_control) {
+        return Err("identifiant de modèle invalide".to_string());
+    }
+    let path = favorites_path().ok_or("dossier de configuration introuvable")?;
+    let favorites = with_favorite(favorite_models(), id, favorite);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let contents = serde_json::to_string_pretty(&favorites).map_err(|error| error.to_string())?;
+    fs::write(path, contents).map_err(|error| format!("favoris non enregistrés : {error}"))?;
+    Ok(favorites)
+}
+
 /// Prix d'un million de jetons, en dollars (`None` si inconnu).
 fn price_per_million(price_per_token: f64) -> Option<f64> {
     (price_per_token >= 0.0).then_some(price_per_token * 1_000_000.0)
@@ -773,6 +816,7 @@ pub fn free_coding_models_json(refresh: bool) -> Result<serde_json::Value, Strin
         "warning": warning,
         // Heure (secondes Unix) du catalogue utilisé pour ce classement.
         "catalog_at": catalog.fetched_at,
+        "favorites": favorite_models(),
     }))
 }
 
@@ -809,6 +853,11 @@ mod tests {
             "https://openrouter.ai/acme/modele-inconnu-de-test:free"
         );
         assert!(remote["programming_rank"].is_null());
+
+        // Favoris : sans doublon, le dernier ajouté à la fin.
+        let favorites = super::with_favorite(vec!["a".to_string(), "b".to_string()], "a", true);
+        assert_eq!(favorites, ["b", "a"]);
+        assert_eq!(super::with_favorite(favorites, "b", false), ["a"]);
 
         let per_million = super::price_per_million(0.000_002).expect("prix");
         assert!((per_million - 2.0).abs() < 1e-9);

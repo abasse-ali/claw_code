@@ -38,9 +38,10 @@ use crate::{
     delete_managed_session, delete_other_sessions, describe_permission_target, error_hint,
     expert_command_prompt, format_compact_report, format_cost_report, format_model_report,
     format_permissions_report, list_managed_sessions, models, normalize_permission_mode,
-    open_browser, permission_mode_from_label, persist_allow_rule, render_slash_command_help,
-    resolve_model_alias, resolve_session_reference, rule_is_session_only, AllowedToolSet,
-    CliToolExecutor, DefaultRuntimeClient, RuntimeUi, SessionHandle, TurnObserver,
+    open_browser, permission_mode_from_label, persist_allow_rule, rename_managed_session,
+    render_slash_command_help, resolve_model_alias, resolve_session_reference,
+    rule_is_session_only, search_managed_sessions, session_titles, AllowedToolSet, CliToolExecutor,
+    DefaultRuntimeClient, RuntimeUi, SessionHandle, TurnObserver,
 };
 
 const PAGE: &str = include_str!("web/index.html");
@@ -1230,22 +1231,87 @@ async fn get_commands(State(app): State<WebApp>, headers: HeaderMap) -> ApiResul
     Ok(Json(json!({ "commands": commands })).into_response())
 }
 
-async fn get_sessions(State(app): State<WebApp>, headers: HeaderMap) -> ApiResult {
+/// `?q=texte` ne garde que les sessions qui contiennent ce texte (titre,
+/// identifiant ou message).
+#[derive(Deserialize)]
+struct SessionsQuery {
+    #[serde(default)]
+    q: Option<String>,
+}
+
+async fn get_sessions(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Query(query): Query<SessionsQuery>,
+) -> ApiResult {
     authorize(&app, &headers, None)?;
-    let sessions = list_managed_sessions()
-        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()))?
+    let failed = |error: Box<dyn std::error::Error>| {
+        api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
+    };
+    let search = query.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
+    let found = match search {
+        Some(text) => search_managed_sessions(text).map_err(failed)?,
+        None => list_managed_sessions()
+            .map_err(failed)?
+            .into_iter()
+            .map(|session| (session, None))
+            .collect(),
+    };
+    let titles = session_titles();
+    let sessions = found
         .into_iter()
-        .map(|session| {
+        .map(|(session, snippet)| {
             json!({
                 "id": session.id,
                 "modified": session.modified_epoch_secs,
                 "messages": session.message_count,
+                // Titre donné par l'utilisateur, s'il y en a un.
+                "title": titles.get(&session.id),
                 // Début de la première demande, pour reconnaître la session.
                 "preview": crate::session_preview(&session.path),
+                // Extrait du message où le texte cherché a été trouvé.
+                "snippet": snippet,
             })
         })
         .collect::<Vec<_>>();
     Ok(Json(json!({ "sessions": sessions })).into_response())
+}
+
+#[derive(Deserialize)]
+struct RenameBody {
+    id: String,
+    #[serde(default)]
+    title: String,
+}
+
+/// Donne un titre à une session (vide : titre automatique).
+async fn post_session_rename(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Json(body): Json<RenameBody>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    let title = rename_managed_session(&body.id, &body.title)
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, &error))?;
+    Ok(Json(json!({ "title": title })).into_response())
+}
+
+#[derive(Deserialize)]
+struct FavoriteBody {
+    value: String,
+    on: bool,
+}
+
+/// Épingle un modèle en haut du menu, ou le retire des favoris.
+async fn post_model_favorite(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Json(body): Json<FavoriteBody>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    let favorites = models::set_favorite_model(&body.value, body.on)
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, &error))?;
+    Ok(Json(json!({ "favorites": favorites })).into_response())
 }
 
 /// Efface une session précédente (jamais celle en cours).
@@ -1291,6 +1357,8 @@ fn router(app: WebApp) -> Router {
         .route("/api/models", get(get_models))
         .route("/api/sessions", get(get_sessions))
         .route("/api/sessions/delete", post(post_session_delete))
+        .route("/api/sessions/rename", post(post_session_rename))
+        .route("/api/models/favorite", post(post_model_favorite))
         .route("/api/sessions/clear", post(post_sessions_clear))
         .route("/api/commands", get(get_commands))
         .route("/api/viewers", get(get_viewers))

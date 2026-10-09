@@ -435,7 +435,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         name: "session",
         aliases: &[],
         summary: "Liste, change ou efface les sessions locales gérées",
-        argument_hint: Some("[list|switch <id>|delete <id>|clear]"),
+        argument_hint: Some("[list|switch <id>|rename <id> <titre>|delete <id>|clear]"),
         resume_supported: false,
         category: SlashCommandCategory::Session,
     },
@@ -653,7 +653,8 @@ impl SlashCommand {
             },
             "session" => Self::Session {
                 action: parts.next().map(ToOwned::to_owned),
-                target: parts.next().map(ToOwned::to_owned),
+                // Tout le reste de la ligne : `rename <id> <titre de plusieurs mots>`.
+                target: Some(parts.collect::<Vec<_>>().join(" ")).filter(|rest| !rest.is_empty()),
             },
             "plugin" | "plugins" | "marketplace" => Self::Plugins {
                 action: parts.next().map(ToOwned::to_owned),
@@ -2471,7 +2472,7 @@ mod tests {
         assert!(help.contains("/diff"));
         assert!(help.contains("/version"));
         assert!(help.contains("/export [fichier]"));
-        assert!(help.contains("/session [list|switch <id>|delete <id>|clear]"));
+        assert!(help.contains("/session [list|switch <id>|rename <id> <titre>|delete <id>|clear]"));
         assert!(help.contains(
             "/plugin [list|install <chemin>|enable <nom>|disable <nom>|uninstall <id>|update <id>]"
         ));

@@ -109,6 +109,7 @@ async fn answer(
         return Err(format!("pas de réponse après {} s", patience.as_secs()));
     };
     let (mut stream, mut event) = opened.map_err(|error| failure(model, &error))?;
+    crate::note_model_request(model);
 
     let mut text = String::new();
     let reading = async {

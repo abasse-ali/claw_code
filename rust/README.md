@@ -83,17 +83,22 @@ sombre ou claire (thème du système, de VS Code ou choisi) :
   glissées ou jointes, modèle et mode en un clic ;
 - **crédits OpenRouter en direct** : solde et requêtes gratuites du jour sont les chiffres
   d'OpenRouter lui-même (`GET /credits` et `GET /key`), décomptés à chaque requête de Claw puis
-  relus toutes les 20 s tant qu'une page est ouverte ; un clic ouvre le détail, avec l'heure de
-  la dernière lecture ;
+  relus toutes les 20 s tant qu'une page est ouverte. Un clic ouvre le détail : heure de la
+  dernière lecture, **requêtes de Claw par modèle** aujourd'hui, et **rythme** (« à ce rythme,
+  quota épuisé vers 18:05 », d'après la dernière heure). Sous 100 requêtes gratuites restantes
+  (puis 20, puis 0) la pastille passe à l'orange et un message prévient, une fois par seuil ;
 - **menu des modèles** : nom et identifiant réel de chaque modèle gratuit, du plus puissant au
   moins puissant ; le bouton « Rechercher les modèles gratuits les plus puissants » relit le
   catalogue et le classement programmation d'OpenRouter (sinon gardés 24 h) et signale les
-  nouveaux venus ; le petit bouton d'information à droite d'un modèle ouvre sa fiche
-  (fournisseur, contexte, réponse maximale, prix, rang, puissance estimée, mesures de
-  `/models bench`, disponibilité, lien vers OpenRouter) ;
-- **sessions** : nouvelle session, reprise d'une session précédente, effacement d'une session
-  (corbeille à droite) ou de toutes les précédentes, après confirmation ; la session en cours ne
-  s'efface pas ;
+  nouveaux venus ; l'étoile épingle un modèle en **favori**, en haut du menu (gardé dans
+  `~/.claw/favorite-models.json`, commun au navigateur et à VS Code) ; le bouton d'information
+  ouvre sa fiche (fournisseur, contexte, réponse maximale, prix, rang, puissance estimée,
+  mesures de `/models bench`, disponibilité, lien vers OpenRouter) d'où l'on peut le **mesurer**
+  d'un clic, sur les trois tâches de code ou sur les tâches de raisonnement ;
+- **sessions** : nouvelle session, reprise d'une session précédente, **recherche** dans les
+  titres et dans le texte des messages (l'extrait trouvé s'affiche), **titre** modifiable
+  (crayon), effacement d'une session (corbeille) ou de toutes les précédentes, après
+  confirmation ; la session en cours ne s'efface pas ;
 - diagrammes Mermaid à la demande ; commandes `/review`, `/audit`, `/archi`, `/adr`, `/fix`,
   `/models`, `/credits`, `/mcp`, `/cost`, `/compact`…
 
@@ -417,27 +422,41 @@ commande).
 dures au modèle par défaut (ou à celui du filtre), vérifiées par des **tests cachés** que le
 modèle ne voit jamais : une cause située dans un autre fichier que celui du symptôme, les cas
 limites d'une spécification, corriger sans toucher aux tests, un réglage à faire suivre dans
-quatre fichiers, un code correct mais trop lent, un évaluateur d'expressions. Modifier un test
-interdit compte comme un échec. `--sans-aide` rejoue les mêmes tâches sans les aides au
+quatre fichiers, un code correct mais trop lent, un évaluateur d'expressions. Quand la consigne
+interdit de toucher aux tests, les modifier est un échec ; dans tous les cas les tests visibles
+d'origine sont remis en place avant la vérification (les affaiblir ne sert à rien, en ajouter
+n'est pas une faute). `--sans-aide` rejoue les mêmes tâches sans les aides au
 raisonnement (`CLAW_HARNESS=0`) pour comparer ; les deux scores sont gardés, et celui obtenu avec
 les aides compte double dans le classement des modèles. Une tâche que le modèle n'a pas pu
 traiter (surcharge, flux coupé) est réessayée une fois. Environ 80 requêtes par série, 10 minutes
 au plus par tâche.
 
-Mesure du 9 octobre 2026 avec `cohere/north-mini-code:free`, une passe par série :
+Mesure du 9 octobre 2026, une passe par série : Claw avec `cohere/north-mini-code:free`, sans
+puis avec les aides, et **Claude Code** (`claude -p`, modèle Opus 5) sur les mêmes tâches, dans
+les mêmes conditions (fichiers visibles seulement, même consigne, Python autorisé, 600 s au plus).
 
-| Tâche | Sans aide | Avec les aides |
-|---|---|---|
-| Cause dans un autre fichier | réussie, 235 s | réussie, 129 s |
-| Cas limites d'une spécification | réussie, 202 s | échec (2 tests cachés) |
-| Corriger sans toucher aux tests | réussie, 212 s | réussie, 162 s |
-| Réglage à faire suivre dans quatre fichiers | réussie, 358 s | réussie, 128 s |
-| Correct mais trop lent | échec (test interdit modifié) | réussie, 199 s |
-| Priorités, parenthèses, moins unaire | réussie, 600 s (délai atteint) | réussie, 600 s (délai atteint) |
-| **Total** | **5/6, médiane 235 s** | **5/6, médiane 162 s** |
+| Tâche | Claw sans aide | Claw avec les aides | Claude Code |
+|---|---|---|---|
+| Cause dans un autre fichier | réussie, 74 s | réussie, 79 s | réussie, 92 s |
+| Cas limites d'une spécification | échec (2 tests cachés) | échec (2 tests cachés) | réussie, 54 s |
+| Corriger sans toucher aux tests | réussie, 462 s | réussie, 26 s | réussie, 45 s |
+| Réglage à faire suivre dans quatre fichiers | réussie, 349 s | réussie, 161 s | réussie, 47 s |
+| Correct mais trop lent | réussie, 145 s | réussie, 89 s | réussie, 108 s |
+| Priorités, parenthèses, moins unaire | réussie, 600 s (délai atteint) | réussie, 273 s | réussie, 99 s |
+| **Réussite** | **5/6** | **5/6** | **6/6** |
+| **Durée des cinq tâches réussies par tous** | 1 630 s | 628 s | 391 s |
+| **Coût** | 0 $ (requêtes gratuites) | 0 $ (requêtes gratuites) | ≈ 2,50 $ en équivalent API |
 
-Même taux de réussite, travail plus rapide avec les aides. Une seule passe ne suffit pas à
-départager deux scores voisins : rejouée seule, la tâche en échec avec les aides a réussi.
+- **Les aides** ne changent pas le taux de réussite de ce modèle mais divisent le temps de
+  travail par 2,6 ; une première mesure le même jour allait dans le même sens (médiane 162 s
+  contre 235 s).
+- **Claude Code** réussit les six tâches et va 1,6 fois plus vite que Claw avec ses aides sur
+  les cinq tâches communes. La tâche « cas limites », que ce modèle gratuit rate trois fois sur
+  cinq, est son vrai point faible : ni la vérification ni la relecture ne le rattrapent, parce
+  que les tests visibles passent.
+- Les durées varient beaucoup d'une passe à l'autre (462 s puis 26 s pour une même tâche) : une
+  seule passe donne un ordre de grandeur, pas un classement fin. Ces tâches sont petites (un à
+  quatre fichiers Python) ; l'écart dû au modèle se creuse sur un vrai projet.
 
 Mesures sur un PC portable (i7-8750H, 16 Go, GTX 1050 4 Go, Ollama 0.40) : un modèle local de
 4 milliards de paramètres (`qwen3.5:4b`) réussit la plupart des tâches mais en 1 à 10 minutes
@@ -478,9 +497,16 @@ Claw lit aussi `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` 
   Avec `"plannerModel"`, c'est ce modèle qui prépare le plan (voir « Aides au raisonnement »).
 - **Reprise** : `claw --continue` (ou `-c`) reprend la dernière session du projet, `claw --resume`
   sans argument propose la liste des sessions récentes.
-- **Ménage** : `/session delete <id>` efface une session enregistrée et ses points de
-  restauration ; `/session clear` efface toutes les précédentes (confirmation par
-  `/session clear oui`). Les sessions sont dans `.claw/sessions/` du projet.
+- **Ménage** : `/session rename <id> <titre>` donne un titre à une session (sans titre : retour
+  au début de la première demande) ; `/session delete <id>` efface une session enregistrée et
+  ses points de restauration ; `/session clear` efface toutes les précédentes (confirmation par
+  `/session clear oui`). Les sessions sont dans `.claw/sessions/` du projet, leurs titres dans
+  `.claw/session-titles.json`.
+- **Quota gratuit** : `/credits` donne aussi le rythme (« quota gratuit épuisé dans environ
+  2 h 10 ») et les requêtes de Claw par modèle ; après une réponse, le terminal prévient quand il
+  reste moins de 100, 20 puis 0 requêtes gratuites. Le décompte par modèle vient d'un journal
+  tenu par Claw (`~/.claw/usage/`, 14 jours), commun au terminal, à l'interface web, aux
+  sous-agents et aux mesures.
 
 ### Terminal
 

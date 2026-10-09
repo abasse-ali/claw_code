@@ -16,7 +16,7 @@ mod transcript;
 mod turn_keys;
 mod web;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
@@ -1936,6 +1936,10 @@ impl LiveCli {
             parts.join(" · "),
             transcript::RESET
         );
+        // Quota gratuit bas : dit une fois par seuil (100, 20, 0).
+        if let Some(warning) = credits::low_quota_warning() {
+            println!("{}▲ {warning}{}\n", transcript::RED, transcript::RESET);
+        }
     }
 
     /// Ligne d'état sous la saisie : mode de permission, modèle, crédits.
@@ -2667,6 +2671,24 @@ impl LiveCli {
                 );
                 Ok(true)
             }
+            Some("rename" | "renommer") => {
+                let Some((id, title)) = target.map(|target| {
+                    target
+                        .split_once(char::is_whitespace)
+                        .unwrap_or((target, ""))
+                }) else {
+                    println!("Usage : /session rename <identifiant de session> <titre>  (sans titre : titre automatique)");
+                    return Ok(false);
+                };
+                match rename_managed_session(id, title) {
+                    Ok(Some(title)) => println!(
+                        "Session renommée\n  Session          {id}\n  Titre            {title}"
+                    ),
+                    Ok(None) => println!("Titre automatique rétabli\n  Session          {id}"),
+                    Err(error) => println!("{error}"),
+                }
+                Ok(false)
+            }
             Some("delete" | "effacer") => {
                 let Some(target) = target else {
                     println!("Usage : /session delete <identifiant de session>");
@@ -2705,7 +2727,7 @@ impl LiveCli {
                 Ok(false)
             }
             Some(other) => {
-                println!("Action /session inconnue « {other} ». Utilisez /session list, /session switch <identifiant>, /session delete <identifiant> ou /session clear.");
+                println!("Action /session inconnue « {other} ». Utilisez /session list, /session switch <identifiant>, /session rename <identifiant> <titre>, /session delete <identifiant> ou /session clear.");
                 Ok(false)
             }
         }
@@ -3182,6 +3204,125 @@ fn list_managed_sessions() -> Result<Vec<ManagedSessionSummary>, Box<dyn std::er
     Ok(sessions)
 }
 
+/// Titres donnés aux sessions par l'utilisateur : `.claw/session-titles.json`
+/// (hors du dossier des sessions, où chaque fichier `.json` est une session).
+fn session_titles_path() -> Result<PathBuf, String> {
+    let dir = sessions_dir().map_err(|error| error.to_string())?;
+    dir.parent()
+        .map(|claw_dir| claw_dir.join("session-titles.json"))
+        .ok_or_else(|| "dossier .claw introuvable".to_string())
+}
+
+fn session_titles() -> BTreeMap<String, String> {
+    session_titles_path()
+        .ok()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+        .unwrap_or_default()
+}
+
+fn save_session_titles(titles: &BTreeMap<String, String>) -> Result<(), String> {
+    let path = session_titles_path()?;
+    let contents = serde_json::to_string_pretty(titles).map_err(|error| error.to_string())?;
+    fs::write(path, contents).map_err(|error| format!("titre non enregistré : {error}"))
+}
+
+/// Titre sur une ligne, espaces resserrés, 80 caractères au plus.
+fn clean_session_title(title: &str) -> String {
+    title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(80)
+        .collect()
+}
+
+/// Donne un titre à une session (un titre vide rend le titre automatique) ;
+/// renvoie le titre enregistré.
+fn rename_managed_session(id: &str, title: &str) -> Result<Option<String>, String> {
+    if !is_session_id(id) {
+        return Err(format!("identifiant de session invalide : {id}"));
+    }
+    let dir = sessions_dir().map_err(|error| error.to_string())?;
+    if !dir.join(format!("{id}.json")).is_file() {
+        return Err(format!("session introuvable : {id}"));
+    }
+    let title = clean_session_title(title);
+    let mut titles = session_titles();
+    if title.is_empty() {
+        titles.remove(id);
+    } else {
+        titles.insert(id.to_string(), title.clone());
+    }
+    save_session_titles(&titles)?;
+    Ok(Some(title).filter(|title| !title.is_empty()))
+}
+
+/// Minuscule d'un caractère, un pour un : les positions restent alignées
+/// avec le texte d'origine.
+fn lower_char(ch: char) -> char {
+    ch.to_lowercase().next().unwrap_or(ch)
+}
+
+/// Extrait d'une ligne autour de la première occurrence de `query`, cherchée
+/// sans tenir compte de la casse.
+fn search_snippet(text: &str, query: &str) -> Option<String> {
+    let query: Vec<char> = query.chars().map(lower_char).collect();
+    if query.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let lowered: Vec<char> = chars.iter().copied().map(lower_char).collect();
+    let at = lowered
+        .windows(query.len())
+        .position(|window| window == query.as_slice())?;
+    let start = at.saturating_sub(30);
+    let end = (at + query.len() + 50).min(chars.len());
+    let body: String = chars[start..end]
+        .iter()
+        .map(|ch| if ch.is_whitespace() { ' ' } else { *ch })
+        .collect();
+    Some(format!(
+        "{}{}{}",
+        if start > 0 { "…" } else { "" },
+        body.trim(),
+        if end < chars.len() { "…" } else { "" }
+    ))
+}
+
+/// Session trouvée par une recherche, avec l'extrait du message s'il y en a un.
+type FoundSession = (ManagedSessionSummary, Option<String>);
+
+/// Sessions du projet qui contiennent `query` : dans leur titre, leur
+/// identifiant ou le texte d'un message (alors avec l'extrait trouvé).
+fn search_managed_sessions(query: &str) -> Result<Vec<FoundSession>, Box<dyn std::error::Error>> {
+    let query = query.trim();
+    let titles = session_titles();
+    let mut found = Vec::new();
+    for session in list_managed_sessions()?.into_iter().take(300) {
+        let title = titles.get(&session.id).map_or("", String::as_str);
+        if search_snippet(title, query).is_some() || search_snippet(&session.id, query).is_some() {
+            found.push((session, None));
+            continue;
+        }
+        let snippet = Session::load_from_path(&session.path)
+            .ok()
+            .and_then(|saved| {
+                saved.messages.iter().find_map(|message| {
+                    message.blocks.iter().find_map(|block| match block {
+                        ContentBlock::Text { text } => search_snippet(text, query),
+                        _ => None,
+                    })
+                })
+            });
+        if snippet.is_some() {
+            found.push((session, snippet));
+        }
+    }
+    Ok(found)
+}
+
 /// Identifiant utilisable sans risque comme nom de fichier de session.
 fn is_session_id(id: &str) -> bool {
     !id.is_empty()
@@ -3204,6 +3345,10 @@ fn delete_managed_session(id: &str) -> Result<(), String> {
     fs::remove_file(&path).map_err(|error| format!("effacement impossible : {error}"))?;
     if let Some(claw_dir) = dir.parent() {
         let _ = fs::remove_file(claw_dir.join("checkpoints").join(format!("{id}.json")));
+    }
+    let mut titles = session_titles();
+    if titles.remove(id).is_some() {
+        let _ = save_session_titles(&titles);
     }
     Ok(())
 }
@@ -3271,13 +3416,17 @@ fn pick_session() -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
         return Ok(None);
     }
     println!("Sessions récentes");
+    let titles = session_titles();
     for (index, session) in sessions.iter().enumerate() {
         println!(
             "  {:>2}. {:<14} {:>3} msgs  {}",
             index + 1,
             format_relative_timestamp(session.modified_epoch_secs),
             session.message_count,
-            session_preview(&session.path)
+            titles
+                .get(&session.id)
+                .cloned()
+                .unwrap_or_else(|| session_preview(&session.path))
         );
     }
     print!("Numéro de la session (Entrée pour une nouvelle) : ");
@@ -3317,6 +3466,7 @@ fn render_session_list(active_session_id: &str) -> Result<String, Box<dyn std::e
         lines.push("  Aucune session enregistrée pour l'instant.".to_string());
         return Ok(lines.join("\n"));
     }
+    let titles = session_titles();
     for session in sessions {
         let marker = if session.id == active_session_id {
             "● active"
@@ -3329,6 +3479,14 @@ fn render_session_list(active_session_id: &str) -> Result<String, Box<dyn std::e
             msgs = session.message_count,
             modified = format_relative_timestamp(session.modified_epoch_secs),
         ));
+        // Titre donné par l'utilisateur, sinon début de la première demande.
+        let label = titles
+            .get(&session.id)
+            .cloned()
+            .unwrap_or_else(|| session_preview(&session.path));
+        if !label.is_empty() {
+            lines.push(format!("    « {label} »"));
+        }
         lines.push(format!("    {}", session.path.display()));
     }
     Ok(lines.join("\n"))
@@ -4537,6 +4695,8 @@ fn build_runtime_with_ui(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone_from(&model);
     tools::advisors::set_resolver(|| models::advisor_models(&active_model()));
+    // Sous-agents et modèles consultés comptent aussi dans les crédits du jour.
+    tools::set_request_observer(credits::note_request);
     let session_fallbacks = env::current_dir()
         .ok()
         .and_then(|cwd| ConfigLoader::default_for(&cwd).load().ok())
@@ -5204,7 +5364,10 @@ impl ApiClient for DefaultRuntimeClient {
                 chain.send(&build, &mut notify),
             ))
             .ok()
-            .map(|(_, response)| api::response_text(&response))
+            .map(|(model, response)| {
+                credits::note_request(&model);
+                api::response_text(&response)
+            })
             .filter(|summary| !summary.trim().is_empty())
     }
 
@@ -5466,10 +5629,11 @@ impl ApiClient for DefaultRuntimeClient {
                     stream: false,
                     ..build(model)
                 };
-                let (_, response) = runtime::interrupt::interruptible(
+                let (model, response) = runtime::interrupt::interruptible(
                     self.chain.send(&build_complete, &mut notify),
                 )
                 .await?;
+                credits::note_request(&model);
                 let events = response_to_events(response, out)?
                     .into_iter()
                     .map(|event| match event {
@@ -6693,7 +6857,7 @@ mod tests {
         assert!(help.contains("/diff"));
         assert!(help.contains("/version"));
         assert!(help.contains("/export [fichier]"));
-        assert!(help.contains("/session [list|switch <id>|delete <id>|clear]"));
+        assert!(help.contains("/session [list|switch <id>|rename <id> <titre>|delete <id>|clear]"));
         assert!(help.contains("/plugin"));
         assert!(help.contains("/plugins, /marketplace"));
         assert!(help.contains("/agents"));
@@ -7427,5 +7591,35 @@ mod tests {
         assert!(!super::is_session_id(&"a".repeat(81)));
         // Un identifiant refusé est rejeté avant tout accès au disque.
         assert!(super::delete_managed_session("../secret").is_err());
+        assert!(super::rename_managed_session("../secret", "x").is_err());
+    }
+
+    #[test]
+    fn session_titles_are_cleaned_and_text_is_found_ignoring_case() {
+        assert_eq!(
+            super::clean_session_title("  Cache   des\ttarifs \n v2 "),
+            "Cache des tarifs v2"
+        );
+        assert_eq!(
+            super::clean_session_title(&"é".repeat(120)).chars().count(),
+            80
+        );
+
+        let text = "Première ligne.\nLe module de FACTURATION dépend de tarifs.py et de devise.py, puis du rapport mensuel.";
+        let snippet = super::search_snippet(text, "facturation").expect("trouvé");
+        assert!(
+            snippet.contains("module de FACTURATION dépend"),
+            "{snippet}"
+        );
+        assert!(
+            !snippet.contains('\n') && snippet.ends_with('…'),
+            "{snippet}"
+        );
+        assert_eq!(super::search_snippet(text, "introuvable"), None);
+        assert_eq!(super::search_snippet(text, ""), None);
+        assert_eq!(
+            super::search_snippet("Élan", "élan").as_deref(),
+            Some("Élan")
+        );
     }
 }

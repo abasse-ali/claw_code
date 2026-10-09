@@ -25,7 +25,8 @@ pub(crate) struct HardTask {
     pub files: &'static [(&'static str, &'static str)],
     /// Tests ajoutés après le travail du modèle.
     pub hidden: &'static [(&'static str, &'static str)],
-    /// Fichiers que le modèle ne doit pas modifier (les tests visibles).
+    /// Fichiers que la consigne interdit de modifier : y toucher est un échec.
+    /// Vide quand la consigne n'en parle pas (ajouter des tests est alors permis).
     pub frozen: &'static [&'static str],
 }
 
@@ -58,7 +59,7 @@ pub(crate) const HARD_TASKS: &[HardTask] = &[
             task_file!("cas_limites", "test_intervalles.py"),
         ],
         hidden: &[task_file!("cas_limites", "test_cache_intervalles.py")],
-        frozen: &["test_intervalles.py"],
+        frozen: &[],
     },
     HardTask {
         id: "corriger sans toucher aux tests",
@@ -81,7 +82,7 @@ pub(crate) const HARD_TASKS: &[HardTask] = &[
             task_file!("plusieurs_fichiers", "test_commande.py"),
         ],
         hidden: &[task_file!("plusieurs_fichiers", "test_cache_decimales.py")],
-        frozen: &["test_commande.py"],
+        frozen: &[],
     },
     HardTask {
         id: "correct mais trop lent",
@@ -91,7 +92,7 @@ pub(crate) const HARD_TASKS: &[HardTask] = &[
             task_file!("trop_lent", "test_listes.py"),
         ],
         hidden: &[task_file!("trop_lent", "test_cache_listes.py")],
-        frozen: &["test_listes.py"],
+        frozen: &[],
     },
     HardTask {
         id: "priorités, parenthèses, moins unaire",
@@ -102,7 +103,7 @@ pub(crate) const HARD_TASKS: &[HardTask] = &[
             task_file!("calculatrice", "test_calcul.py"),
         ],
         hidden: &[task_file!("calculatrice", "test_cache_calcul.py")],
-        frozen: &["test_calcul.py"],
+        frozen: &[],
     },
 ];
 
@@ -162,7 +163,8 @@ fn run_tests(root: &Path, python: &Path) -> Result<(), String> {
     }
 }
 
-/// Vérifie le travail : tests visibles intacts, puis tous les tests passent.
+/// Vérifie le travail : fichiers interdits intacts, puis les tests visibles
+/// d'origine et les tests cachés passent tous.
 pub(crate) fn check(task: &HardTask, root: &Path, python: &Path) -> Result<(), String> {
     for name in task.frozen {
         let original = task
@@ -177,7 +179,13 @@ pub(crate) fn check(task: &HardTask, root: &Path, python: &Path) -> Result<(), S
             return Err(format!("a modifié {name} (interdit)"));
         }
     }
-    for (name, content) in task.hidden {
+    // Les tests visibles d'origine sont remis en place : les affaiblir ne sert
+    // à rien, et en ajouter n'est pas une faute.
+    let visible_tests = task
+        .files
+        .iter()
+        .filter(|(name, _)| name.starts_with("test_"));
+    for (name, content) in visible_tests.chain(task.hidden) {
         fs::write(root.join(name), content).map_err(|error| error.to_string())?;
     }
     run_tests(root, python)
@@ -427,6 +435,37 @@ mod tests {
         let error = check(task, &root, std::path::Path::new("python-introuvable"))
             .expect_err("test modifié");
         assert!(error.contains("a modifié test_panier.py"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_tasks_whose_prompt_forbids_it_freeze_the_tests() {
+        for task in HARD_TASKS {
+            let forbids = task.prompt.contains("sans modifier les tests")
+                || task.prompt.contains("interdit de modifier");
+            assert_eq!(!task.frozen.is_empty(), forbids, "{}", task.id);
+        }
+    }
+
+    #[test]
+    fn the_original_visible_tests_are_restored_before_running() {
+        // Tâche sans interdiction : des tests réécrits ne font pas échouer la
+        // vérification d'emblée, et le fichier d'origine est remis en place.
+        let task = &HARD_TASKS[5];
+        assert!(task.frozen.is_empty());
+        let root =
+            std::env::temp_dir().join(format!("claw-bench-restore-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("dossier");
+        for (name, content) in task.files {
+            std::fs::write(root.join(name), content).expect("fichier");
+        }
+        std::fs::write(root.join("test_calcul.py"), "# tests réécrits\n").expect("fichier");
+        let error = check(task, &root, std::path::Path::new("python-introuvable"))
+            .expect_err("python introuvable");
+        assert!(error.contains("python"), "{error}");
+        let restored = std::fs::read_to_string(root.join("test_calcul.py")).expect("lecture");
+        assert!(restored.contains("def test_"));
+        assert!(root.join("test_cache_calcul.py").is_file());
         let _ = std::fs::remove_dir_all(&root);
     }
 
