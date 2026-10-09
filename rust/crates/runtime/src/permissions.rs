@@ -103,7 +103,7 @@ impl PermissionRule {
         let covered: &[&str] = match self.tool.to_ascii_lowercase().as_str() {
             "bash" => &["bash"],
             "powershell" => &["PowerShell"],
-            "read" => &["read_file", "glob_search", "grep_search"],
+            "read" => &["read_file", "glob_search", "grep_search", "FindSymbol"],
             "edit" => &["edit_file", "write_file", "NotebookEdit"],
             "write" => &["write_file"],
             "glob" => &["glob_search"],

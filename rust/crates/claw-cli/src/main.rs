@@ -1352,6 +1352,150 @@ Suite
     )
 }
 
+/// « 12 300 » : milliers séparés par une espace.
+fn group_digits(value: usize) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(' ');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
+/// Jetons estimés d'un texte (environ quatre caractères par jeton).
+fn estimated_tokens(text: &str) -> usize {
+    text.len() / 4 + 1
+}
+
+/// Titre d'une partie du prompt système : sa première ligne, sans `#`.
+fn section_label(section: &str) -> String {
+    let first = section
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("(vide)")
+        .trim_start_matches('#')
+        .trim();
+    let label: String = first.chars().take(44).collect();
+    if first.chars().count() > 44 {
+        format!("{label}…")
+    } else {
+        label
+    }
+}
+
+/// Rapport de `/context` : prompt système, outils et conversation, en jetons
+/// estimés et en part de la fenêtre du modèle, avec les plus gros morceaux.
+fn format_context_report(
+    model: &str,
+    system_prompt: &[String],
+    tools: &[ToolDefinition],
+    session: &Session,
+) -> String {
+    let window = usize::try_from(api::context_window_for_model(model)).unwrap_or(usize::MAX);
+    let share = |tokens: usize| -> String {
+        if window == 0 {
+            return String::new();
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let percent = tokens as f64 * 100.0 / window as f64;
+        format!("{percent:.1} %").replace('.', ",")
+    };
+    let mut sections: Vec<(String, usize)> = system_prompt
+        .iter()
+        .map(|section| (section_label(section), estimated_tokens(section)))
+        .collect();
+    let prompt_tokens: usize = sections.iter().map(|(_, tokens)| tokens).sum();
+    let mut tool_sizes: Vec<(String, usize)> = tools
+        .iter()
+        .map(|tool| {
+            let schema = serde_json::to_string(&tool.input_schema).unwrap_or_default();
+            let text = format!(
+                "{}{}{schema}",
+                tool.name,
+                tool.description.as_deref().unwrap_or("")
+            );
+            (tool.name.clone(), estimated_tokens(&text))
+        })
+        .collect();
+    let tool_tokens: usize = tool_sizes.iter().map(|(_, tokens)| tokens).sum();
+    let conversation_tokens = runtime::estimate_session_tokens(session);
+    let total = prompt_tokens + tool_tokens + conversation_tokens;
+    let threshold = api::auto_compaction_threshold(model);
+
+    let row = |label: &str, tokens: usize, detail: String| {
+        format!(
+            "  {label:<16} ≈ {:>9} jetons  {:>7}{detail}",
+            group_digits(tokens),
+            share(tokens)
+        )
+    };
+    let mut lines = vec![
+        format!(
+            "Contexte
+  Modèle           {model} · fenêtre de {} jetons",
+            group_digits(window)
+        ),
+        row(
+            "Prompt système",
+            prompt_tokens,
+            format!("  · {} partie(s)", sections.len()),
+        ),
+        row(
+            "Outils",
+            tool_tokens,
+            format!("  · {} outil(s)", tools.len()),
+        ),
+        row(
+            "Conversation",
+            conversation_tokens,
+            format!("  · {} message(s)", session.messages.len()),
+        ),
+        row("Total", total, String::new()),
+        format!(
+            "  Compaction       automatique vers {} jetons{}",
+            group_digits(threshold),
+            if total >= threshold {
+                " (atteinte)"
+            } else {
+                ""
+            }
+        ),
+    ];
+    sections.sort_by(|left, right| right.1.cmp(&left.1));
+    tool_sizes.sort_by(|left, right| right.1.cmp(&left.1));
+    lines.push(String::new());
+    lines.push("Plus grosses parties du prompt".to_string());
+    for (label, tokens) in sections.iter().take(5) {
+        lines.push(format!("  ≈ {:>7}  {label}", group_digits(*tokens)));
+    }
+    lines.push("Plus gros outils".to_string());
+    for (name, tokens) in tool_sizes.iter().take(5) {
+        lines.push(format!("  ≈ {:>7}  {name}", group_digits(*tokens)));
+    }
+    lines.push(String::new());
+    lines.push("Suite".to_string());
+    lines.push("  /compact         Résume l'historique pour libérer de la place".to_string());
+    lines.push("  /clear           Repart d'une conversation vide".to_string());
+    lines.join("\n")
+}
+
+/// `/context` pour une session : outils réellement proposés au modèle.
+fn context_report_for(
+    model: &str,
+    system_prompt: &[String],
+    allowed_tools: Option<&AllowedToolSet>,
+    session: &Session,
+) -> String {
+    let tools = build_runtime_plugin_state()
+        .map(|(_, registry)| filter_tool_specs(&registry, allowed_tools))
+        .unwrap_or_default();
+    format_context_report(model, system_prompt, &tools, session)
+}
+
 fn format_resume_report(session_path: &str, message_count: usize, turns: u32) -> String {
     format!(
         "Session reprise
@@ -1550,6 +1694,7 @@ fn run_resume_command(
         | SlashCommand::Models { .. }
         | SlashCommand::Credits
         | SlashCommand::Doctor
+        | SlashCommand::Context
         | SlashCommand::Teleport { .. }
         | SlashCommand::DebugToolCall
         | SlashCommand::Resume { .. }
@@ -2276,6 +2421,18 @@ impl LiveCli {
             SlashCommand::Clear { confirm } => self.clear_session(confirm)?,
             SlashCommand::Cost => {
                 self.print_cost();
+                false
+            }
+            SlashCommand::Context => {
+                println!(
+                    "{}",
+                    context_report_for(
+                        &self.model,
+                        &self.system_prompt,
+                        self.allowed_tools.as_ref(),
+                        self.runtime.session(),
+                    )
+                );
                 false
             }
             SlashCommand::Resume { session_path } => self.resume_session(session_path)?,
@@ -5255,6 +5412,10 @@ struct DefaultRuntimeClient {
     observer: Option<SharedObserver>,
     /// Avis à donner avant la première requête (modèle de planification).
     start_notice: Option<String>,
+    /// Modèle plus fort qui reprend un tour bloqué (`escalationModel`).
+    escalation: Option<String>,
+    /// Chaîne habituelle, mise de côté pendant une escalade.
+    saved_chain: Option<api::ModelChain>,
 }
 
 impl DefaultRuntimeClient {
@@ -5291,6 +5452,15 @@ impl DefaultRuntimeClient {
             models.extend(chain_models.iter().cloned());
             api::ModelChain::new(models, cli_client_factory())
         });
+        let escalation = env::var("CLAW_ESCALATION_MODEL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                config
+                    .as_ref()
+                    .and_then(|config| config.escalation_model().map(ToOwned::to_owned))
+            })
+            .map(|escalation| resolve_model_alias(&escalation));
         Ok(Self {
             runtime: tokio::runtime::Runtime::new()?,
             chain: api::ModelChain::new(chain_models, cli_client_factory()),
@@ -5302,6 +5472,8 @@ impl DefaultRuntimeClient {
             progress_reporter,
             observer: None,
             start_notice: None,
+            escalation,
+            saved_chain: None,
         })
     }
 
@@ -5405,6 +5577,25 @@ impl ApiClient for DefaultRuntimeClient {
                 self.notify(&format!("Aucun autre modèle n'a répondu ({error})"));
                 None
             }
+        }
+    }
+
+    fn escalate(&mut self) -> Option<String> {
+        let model = self.escalation.clone()?;
+        if self.saved_chain.is_some() || self.chain.primary() == model {
+            return None;
+        }
+        // Le modèle fort d'abord ; s'il est indisponible, la chaîne habituelle.
+        let mut models = vec![model.clone()];
+        models.extend(self.chain.models().iter().cloned());
+        let stronger = api::ModelChain::new(models, cli_client_factory());
+        self.saved_chain = Some(std::mem::replace(&mut self.chain, stronger));
+        Some(model)
+    }
+
+    fn restore_model(&mut self) {
+        if let Some(chain) = self.saved_chain.take() {
+            self.chain = chain;
         }
     }
 

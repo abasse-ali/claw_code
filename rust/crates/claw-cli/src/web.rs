@@ -665,6 +665,15 @@ impl Worker {
                 self.persist();
                 self.info(format_compact_report(removed, kept, removed == 0));
             }
+            Some(SlashCommand::Context) => {
+                let report = crate::context_report_for(
+                    &self.model,
+                    &self.system_prompt,
+                    self.allowed_tools.as_ref(),
+                    self.runtime.session(),
+                );
+                self.info(report);
+            }
             Some(SlashCommand::Cost) => {
                 let usage = self.runtime.usage().cumulative_usage();
                 let mut report = format_cost_report(usage);

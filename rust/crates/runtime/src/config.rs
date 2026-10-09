@@ -104,6 +104,9 @@ pub struct RuntimeFeatureConfig {
     advisor_models: Vec<String>,
     /// Modèle du mode plan : `plannerModel`.
     planner_model: Option<String>,
+    /// Modèle plus fort qui reprend un tour où l'agent n'avance plus :
+    /// `escalationModel`.
+    escalation_model: Option<String>,
 }
 
 /// Serveur compatible `OpenAI` déclaré dans `providers` (utilisé avec le
@@ -389,6 +392,7 @@ impl ConfigLoader {
                 == Some(false),
             advisor_models: parse_string_list(&merged_value, "advisorModels"),
             planner_model: parse_optional_string(&merged_value, "plannerModel"),
+            escalation_model: parse_optional_string(&merged_value, "escalationModel"),
         };
 
         Ok(RuntimeConfig {
@@ -525,6 +529,12 @@ impl RuntimeConfig {
     pub fn planner_model(&self) -> Option<&str> {
         self.feature_config.planner_model.as_deref()
     }
+
+    /// Modèle plus fort appelé quand l'agent n'avance plus (`escalationModel`).
+    #[must_use]
+    pub fn escalation_model(&self) -> Option<&str> {
+        self.feature_config.escalation_model.as_deref()
+    }
 }
 
 impl RuntimeFeatureConfig {
@@ -602,6 +612,12 @@ impl RuntimeFeatureConfig {
     #[must_use]
     pub fn planner_model(&self) -> Option<&str> {
         self.planner_model.as_deref()
+    }
+
+    /// Modèle plus fort appelé quand l'agent n'avance plus, s'il est réglé.
+    #[must_use]
+    pub fn escalation_model(&self) -> Option<&str> {
+        self.escalation_model.as_deref()
     }
 }
 

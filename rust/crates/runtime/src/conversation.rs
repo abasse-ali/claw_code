@@ -62,6 +62,15 @@ pub trait ApiClient {
     ) -> Option<Consultation> {
         None
     }
+
+    /// Confie la suite du tour à un modèle plus fort (`escalationModel`) ;
+    /// renvoie son nom, ou `None` s'il n'y en a pas.
+    fn escalate(&mut self) -> Option<String> {
+        None
+    }
+
+    /// Fin du tour : le modèle habituel reprend après une escalade.
+    fn restore_model(&mut self) {}
 }
 
 /// Pourquoi le runtime consulte un autre modèle.
@@ -203,6 +212,10 @@ struct TurnAids {
     check_failed: bool,
     /// Tests réécrits après un échec, déjà signalés.
     guarded_tests: std::collections::BTreeSet<String>,
+    /// Un modèle plus fort a repris le tour.
+    escalated: bool,
+    /// Le modèle a déjà confronté son travail aux exigences pendant ce tour.
+    checklisted: bool,
 }
 
 /// Sortie et statut d'un message de résultat d'outil.
@@ -480,10 +493,22 @@ where
         &mut self,
         user_input: impl Into<String>,
         images: Vec<crate::attachments::ImageAttachment>,
+        prompter: Option<&mut dyn PermissionPrompter>,
+    ) -> Result<TurnSummary, RuntimeError> {
+        let result = self.run_turn_inner(user_input.into(), images, prompter);
+        // Après une escalade, le tour suivant repart avec le modèle habituel.
+        self.api_client.restore_model();
+        result
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn run_turn_inner(
+        &mut self,
+        user_input: String,
+        images: Vec<crate::attachments::ImageAttachment>,
         mut prompter: Option<&mut dyn PermissionPrompter>,
     ) -> Result<TurnSummary, RuntimeError> {
         clear_interrupt();
-        let user_input = user_input.into();
         let request_text = user_input.clone();
         let mut user_message = self.user_message_with_hooks(user_input)?;
         user_message
@@ -561,6 +586,13 @@ where
             if pending_tool_uses.is_empty() {
                 // Le modèle dit avoir fini : Claw vérifie avant de le croire.
                 if let Some(feedback) = self.verification_gate(&mut aids, &mut prompter) {
+                    self.session
+                        .messages
+                        .push(ConversationMessage::user_text(feedback));
+                    continue;
+                }
+                // Le modèle confronte son travail à chaque exigence.
+                if let Some(feedback) = self.requirements_gate(&mut aids) {
                     self.session
                         .messages
                         .push(ConversationMessage::user_text(feedback));
@@ -839,6 +871,7 @@ where
                 // Deuxième rappel du tour : l'agent s'enlise, un autre modèle l'aide.
                 if aids.reminders == 2 && is_error {
                     notes.extend(self.advice_when_stuck(aids, Some(&output)));
+                    notes.extend(self.escalate_when_stuck(aids));
                 }
             }
         }
@@ -958,6 +991,11 @@ where
                         feedback.push_str("\n\n");
                         feedback.push_str(&advice);
                     }
+                    // Et un modèle plus fort reprend la suite, s'il est réglé.
+                    if let Some(takeover) = self.escalate_when_stuck(aids) {
+                        feedback.push_str("\n\n");
+                        feedback.push_str(&takeover);
+                    }
                 }
                 return Some(feedback);
             }
@@ -1048,21 +1086,23 @@ where
         Some(harness::unblock_feedback(&consultation.text))
     }
 
-    /// Relecture imposée : quand le tour a modifié assez de code et que la
-    /// vérification passe, un autre modèle relit le diff. Ses remarques sont
-    /// renvoyées au modèle (une relecture par tour). `None` : rien à corriger.
-    fn review_gate(&mut self, aids: &mut TurnAids, request: &str) -> Option<String> {
-        if aids.reviewed
-            || aids.verify_failing
-            || aids.originals.is_empty()
-            || self.subagent
-            || !self.review
-            || interrupt_requested()
-            || !harness::enabled(Aid::Review)
-        {
+    /// Escalade : un modèle plus fort (`escalationModel`) reprend la fin du tour
+    /// quand l'agent n'avance plus. Une fois par tour.
+    fn escalate_when_stuck(&mut self, aids: &mut TurnAids) -> Option<String> {
+        if aids.escalated || self.subagent || !harness::enabled(Aid::Escalation) {
             return None;
         }
-        aids.reviewed = true;
+        aids.escalated = true;
+        let model = self.api_client.escalate()?;
+        self.api_client.notify(&format!(
+            "L'agent n'avance plus : {model} reprend la fin du tour (escalationModel)"
+        ));
+        Some(harness::escalation_feedback(&model))
+    }
+
+    /// Diffs des fichiers modifiés pendant le tour (chemins relatifs au
+    /// dossier de travail) et nombre de lignes changées.
+    fn turn_diffs(aids: &TurnAids) -> (Vec<String>, usize) {
         let mut diffs = Vec::new();
         let mut changed_lines = 0;
         for (path, original) in &aids.originals {
@@ -1084,6 +1124,51 @@ where
                 diffs.push(diff);
             }
         }
+        (diffs, changed_lines)
+    }
+
+    /// Contrôle des exigences : quand le tour a modifié assez de code et que
+    /// la vérification passe, le modèle confronte son travail à chaque
+    /// exigence de la demande et du code (cas limites compris) avant de
+    /// conclure. Une fois par tour.
+    fn requirements_gate(&mut self, aids: &mut TurnAids) -> Option<String> {
+        if aids.checklisted
+            || aids.verify_failing
+            || aids.originals.is_empty()
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::Checklist)
+        {
+            return None;
+        }
+        let (diffs, changed_lines) = Self::turn_diffs(aids);
+        if diffs.is_empty()
+            || (changed_lines < harness::REVIEW_MIN_CHANGED_LINES && diffs.len() < 2)
+        {
+            return None;
+        }
+        aids.checklisted = true;
+        self.api_client
+            .notify("Claw fait confronter le travail à chaque exigence avant de conclure");
+        Some(harness::CHECKLIST_PROMPT.to_string())
+    }
+
+    /// Relecture imposée : quand le tour a modifié assez de code et que la
+    /// vérification passe, un autre modèle relit le diff. Ses remarques sont
+    /// renvoyées au modèle (une relecture par tour). `None` : rien à corriger.
+    fn review_gate(&mut self, aids: &mut TurnAids, request: &str) -> Option<String> {
+        if aids.reviewed
+            || aids.verify_failing
+            || aids.originals.is_empty()
+            || self.subagent
+            || !self.review
+            || interrupt_requested()
+            || !harness::enabled(Aid::Review)
+        {
+            return None;
+        }
+        aids.reviewed = true;
+        let (diffs, changed_lines) = Self::turn_diffs(aids);
         if diffs.is_empty()
             || (changed_lines < harness::REVIEW_MIN_CHANGED_LINES && diffs.len() < 2)
         {
@@ -2179,6 +2264,9 @@ mod tests {
         announced: Vec<String>,
         /// Demandes faites à un autre modèle (relecture, conseil).
         consults: Vec<(super::ConsultPurpose, String)>,
+        /// Escalades demandées, et retours au modèle habituel.
+        escalations: usize,
+        restored: usize,
     }
 
     /// Modèle scripté : une réponse par appel.
@@ -2187,6 +2275,8 @@ mod tests {
         observed: std::rc::Rc<std::cell::RefCell<Observed>>,
         /// Réponses de l'autre modèle consulté, dans l'ordre.
         advisor: std::collections::VecDeque<&'static str>,
+        /// Modèle plus fort disponible pour une escalade.
+        escalation: Option<&'static str>,
     }
 
     impl ApiClient for StepsApiClient {
@@ -2218,6 +2308,15 @@ mod tests {
                 model: "relecteur".to_string(),
                 text: text.to_string(),
             })
+        }
+
+        fn escalate(&mut self) -> Option<String> {
+            self.observed.borrow_mut().escalations += 1;
+            self.escalation.map(ToOwned::to_owned)
+        }
+
+        fn restore_model(&mut self) {
+            self.observed.borrow_mut().restored += 1;
         }
     }
 
@@ -2280,6 +2379,7 @@ mod tests {
                 steps: steps.into(),
                 observed: std::rc::Rc::clone(&observed),
                 advisor: advisor.into(),
+                escalation: None,
             },
             executor,
             PermissionPolicy::new(PermissionMode::DangerFullAccess),
@@ -2411,6 +2511,7 @@ mod tests {
             vec![
                 tool_step("write_file", r#"{"path":"total.py","content":"x"}"#),
                 text_step("C'est fait."),
+                text_step("Exigences vérifiées."),
                 text_step("Corrigé."),
             ],
             vec![PASSING],
@@ -2424,9 +2525,11 @@ mod tests {
         assert_eq!(observed.consults[0].0, super::ConsultPurpose::Review);
         assert!(observed.consults[0].1.contains("écris total.py"));
         assert!(observed.consults[0].1.contains("+def total(prix):"));
-        // Les remarques reviennent au modèle, qui reprend la main.
-        assert!(observed.requests[2].contains("Another model reviewed your changes"));
-        assert!(observed.requests[2].contains("liste vide non gérée"));
+        // Le modèle confronte d'abord son travail aux exigences…
+        assert!(observed.requests[2].contains("check your work against every requirement"));
+        // … puis les remarques du relecteur lui reviennent.
+        assert!(observed.requests[3].contains("Another model reviewed your changes"));
+        assert!(observed.requests[3].contains("liste vide non gérée"));
         assert!(observed.notices.iter().any(
             |notice| notice == "Relecture par relecteur : 1 remarque(s) transmise(s) à l'agent"
         ));
@@ -2440,13 +2543,14 @@ mod tests {
             vec![
                 tool_step("write_file", r#"{"path":"total.py","content":"x"}"#),
                 text_step("C'est fait."),
+                text_step("Exigences vérifiées."),
             ],
             vec![PASSING],
             vec!["LGTM"],
             output,
         );
         let summary = runtime.run_turn("écris total.py", None).expect("tour");
-        assert_eq!(summary.iterations, 2);
+        assert_eq!(summary.iterations, 3);
         assert!(observed
             .borrow()
             .notices
@@ -2499,6 +2603,84 @@ mod tests {
         assert!(!observed.requests[2].contains("Advice from another model"));
         assert!(observed.requests[3].contains("Advice from another model"));
         assert!(observed.requests[3].contains("La cause est dans devise.py"));
+    }
+
+    #[test]
+    fn substantial_work_is_checked_against_every_requirement_once() {
+        let (path, output) = written_file("exigences");
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                tool_step("write_file", r#"{"path":"total.py","content":"x"}"#),
+                text_step("C'est fait."),
+                text_step("Chaque exigence est couverte."),
+            ],
+            vec![PASSING],
+            vec!["LGTM"],
+            output,
+        );
+        let summary = runtime.run_turn("écris total.py", None).expect("tour");
+        let observed = observed.borrow();
+        // Une seule demande de contrôle, après la vérification réussie.
+        assert_eq!(summary.iterations, 3);
+        assert!(observed.requests[2].contains("check your work against every requirement"));
+        assert!(observed.requests[2].contains("edge cases"));
+        assert_eq!(
+            observed
+                .notices
+                .iter()
+                .filter(|notice| notice.starts_with("Claw fait confronter"))
+                .count(),
+            1
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_stronger_model_takes_over_after_the_second_failed_verification() {
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
+                text_step("Fait."),
+                text_step("Essai 1."),
+                text_step("Corrigé par le modèle fort."),
+            ],
+            vec![FAILING, FAILING, PASSING],
+            Vec::new(),
+            WRITTEN.to_string(),
+        );
+        runtime.api_client.escalation = Some("fort/modele");
+        runtime.run_turn("corrige", None).expect("tour");
+        {
+            let observed = observed.borrow();
+            // Une seule escalade, au deuxième échec ; le modèle habituel revient ensuite.
+            assert_eq!(observed.escalations, 1);
+            assert!(!observed.requests[2].contains("You are fort/modele"));
+            assert!(observed.requests[3].contains("You are fort/modele"));
+            assert!(observed.notices.iter().any(|notice| notice
+                == "L'agent n'avance plus : fort/modele reprend la fin du tour (escalationModel)"));
+            assert_eq!(observed.restored, 1);
+        }
+
+        // Sans modèle plus fort réglé : ni note au modèle ni avis.
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
+                text_step("Fait."),
+                text_step("Essai 1."),
+                text_step("Essai 2."),
+            ],
+            vec![FAILING, FAILING, PASSING],
+            Vec::new(),
+            WRITTEN.to_string(),
+        );
+        runtime.run_turn("corrige", None).expect("tour");
+        let observed = observed.borrow();
+        assert_eq!(observed.escalations, 1);
+        assert!(!observed.requests[3].contains("stronger model"));
+        assert!(!observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("reprend la fin du tour")));
     }
 
     #[test]

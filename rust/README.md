@@ -378,6 +378,8 @@ applique**, quel que soit le modèle.
 | Second avis | L'outil `Consult` (et `/avis <question>`) pose la même question à plusieurs autres modèles ; l'agent compare et décide | `CLAW_COUNCIL=0` |
 | Leçons | L'outil `Remember` note une leçon utile au projet dans `.claw/lessons.md` (80 au plus), relue au début de chaque session | `CLAW_LESSONS=0` |
 | Modèle de planification | En mode plan, `"plannerModel"` réfléchit à la place du modèle de la session, qui exécute ensuite le plan approuvé | `CLAW_PLANNER=0` |
+| Escalade | Au deuxième échec de la vérification, ou au deuxième recadrage, `"escalationModel"` (un modèle plus fort) reprend la fin du tour ; le tour suivant repart avec le modèle habituel | `CLAW_ESCALATION=0` |
+| Contrôle des exigences | Quand le tour a modifié au moins 5 lignes et que la vérification passe, le modèle liste chaque exigence de la demande et de la documentation du code (cas limites compris), désigne le code et le test qui la couvrent, et corrige ce qui manque, avant la relecture. Une requête de plus par tour concerné | `CLAW_CHECKLIST=0` |
 
 `CLAW_HARNESS=0` les coupe toutes. Réglages dans `.claw/settings.json` ou `~/.claw/settings.json` :
 
@@ -386,7 +388,8 @@ applique**, quel que soit le modèle.
   "verify": "cargo test --quiet",
   "review": true,
   "advisorModels": ["openai/gpt-5", "anthropic/claude-sonnet-4.5"],
-  "plannerModel": "anthropic/claude-sonnet-4.5"
+  "plannerModel": "anthropic/claude-sonnet-4.5",
+  "escalationModel": "anthropic/claude-sonnet-4.5"
 }
 ```
 
@@ -401,6 +404,9 @@ applique**, quel que soit le modèle.
   laisse la place au suivant ; une consultation dure 90 s au plus.
 - `"plannerModel"` : un modèle fort pour réfléchir, un modèle gratuit pour exécuter. Claw l'annonce
   au début du tour (« Mode plan : la réflexion est confiée à … »).
+- `"escalationModel"` (ou `CLAW_ESCALATION_MODEL`) : le modèle gratuit fait le travail courant, un
+  modèle fort n'est payé que lorsque l'agent est bloqué. Claw l'annonce (« L'agent n'avance plus :
+  … reprend la fin du tour ») ; s'il est indisponible, la chaîne habituelle prend le relais.
 
 Les avis des autres modèles ne sont jamais des ordres : ils reviennent au modèle de la session
 comme des remarques à confronter au code. Les diagnostics d'un serveur de langage (LSP) ne sont
@@ -527,6 +533,11 @@ coupe cet import.
 
 - **Parallélisme** : plusieurs sous-agents, lectures ou recherches demandés dans un même message
   s'exécutent en même temps (les autorisations restent posées une par une).
+- **Navigation dans le code** : l'outil `FindSymbol` donne, pour un nom de fonction, méthode,
+  classe, type ou constante, sa définition et chacun de ses usages (fichier et ligne) dans tout
+  le projet, hors dossiers de construction et dépendances ; plus précis qu'une recherche de texte.
+- **`/context`** : ce qui occupe la mémoire du modèle (prompt système, outils, conversation), en
+  jetons estimés et en part de sa fenêtre, avec les plus gros morceaux et le seuil de compaction.
 - **Tâches de fond** : une commande lancée avec `run_in_background` (serveur de dev, mode watch…)
   garde sa sortie, que l'agent lit avec `BashOutput` et arrête avec `KillShell`. `/bashes` les
   liste (`/bashes kill <id>`) ; elles s'arrêtent quand Claw se termine.

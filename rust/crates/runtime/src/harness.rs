@@ -42,6 +42,10 @@ pub enum Aid {
     ToolDiet,
     /// Signalement d'un test réécrit après un échec (faire passer n'est pas corriger).
     TestGuard,
+    /// Un modèle plus fort reprend le tour quand l'agent n'avance plus.
+    Escalation,
+    /// Avant de conclure, le modèle confronte son travail à chaque exigence.
+    Checklist,
 }
 
 impl Aid {
@@ -59,6 +63,8 @@ impl Aid {
             Self::PathHelp => "CLAW_PATH_HELP",
             Self::ToolDiet => "CLAW_TOOL_DIET",
             Self::TestGuard => "CLAW_TEST_GUARD",
+            Self::Escalation => "CLAW_ESCALATION",
+            Self::Checklist => "CLAW_CHECKLIST",
         }
     }
 }
@@ -605,6 +611,20 @@ pub fn removes_existing_lines(tool_output: &str) -> bool {
 pub fn test_guard_feedback(name: &str) -> String {
     format!(
         "[Claw] You changed existing lines of `{name}`, which is used to check the work, after a failing check. A check describes the expected behavior: making it pass by rewriting it proves nothing. Fix the code instead and restore the check, unless the user asked you to change it or the check itself is wrong; in that case say so explicitly in your final answer, with the reason."
+    )
+}
+
+// --- Exigences et escalade ------------------------------------------------------------
+
+/// Message adressé au modèle qui dit avoir fini un travail conséquent : il
+/// confronte son travail à chaque exigence avant de conclure (une fois par tour).
+pub const CHECKLIST_PROMPT: &str = "[Claw] Before you finish, check your work against every requirement. List each requirement from the user's request and from the docstrings, comments and specifications of the code you changed, one line each, including the edge cases they imply (empty or missing input, boundaries, invalid values, duplicates, ordering, large inputs). For each one, name the code that handles it and the test that proves it. If a requirement is not handled or not tested, fix it now: add the test, run it, correct the code. Do not weaken or delete existing tests. Then give your final answer.";
+
+/// Note adressée au modèle plus fort qui reprend le tour.
+#[must_use]
+pub fn escalation_feedback(model: &str) -> String {
+    format!(
+        "[Claw] You are {model}, a stronger model taking over this turn because the previous model was stuck. Re-read the user's request and the latest failure above, find the root cause yourself (do not trust the previous model's assumptions), fix it, and verify before answering."
     )
 }
 

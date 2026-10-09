@@ -172,6 +172,151 @@ fn symbols(path: &str, text: &str) -> Vec<String> {
     found
 }
 
+// --- Recherche d'un symbole (outil FindSymbol) ------------------------------------
+
+/// Définitions et usages gardés au plus dans une réponse.
+const MAX_DEFINITIONS: usize = 20;
+const MAX_REFERENCES: usize = 60;
+
+/// Endroit du projet où un symbole apparaît.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolHit {
+    pub path: String,
+    /// Numéro de ligne, à partir de 1.
+    pub line: usize,
+    /// Genre de définition (« fn », « class », « const »…) ; vide pour un usage.
+    pub kind: String,
+    pub code: String,
+}
+
+/// Résultat de [`find_symbol`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SymbolSearch {
+    pub definitions: Vec<SymbolHit>,
+    pub references: Vec<SymbolHit>,
+    /// Usages trouvés, y compris ceux qui ne sont pas rendus.
+    pub total_references: usize,
+    pub files_scanned: usize,
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_' || ch == '$'
+}
+
+/// `name` figure dans `line` comme un mot entier.
+fn contains_word(line: &str, name: &str) -> bool {
+    let mut start = 0;
+    while let Some(found) = line[start..].find(name) {
+        let at = start + found;
+        let end = at + name.len();
+        let before = line[..at].chars().next_back();
+        let after = line[end..].chars().next();
+        if !before.is_some_and(is_identifier_char) && !after.is_some_and(is_identifier_char) {
+            return true;
+        }
+        start = end;
+    }
+    false
+}
+
+/// Genre de définition si `line` définit `name` : motifs du langage appliqués
+/// à la ligne sans son indentation (méthodes comprises), puis affectations de
+/// premier niveau (`TVA = 0.2`, `const LIMITE = …`).
+fn definition_kind(path: &str, line: &str, name: &str) -> Option<String> {
+    static GENERIC: OnceLock<Regex> = OnceLock::new();
+    let trimmed = line.trim_start();
+    if let Some(patterns) = symbol_patterns(&extension(path)) {
+        for pattern in patterns {
+            if let Some(captures) = pattern.captures(trimmed) {
+                if &captures[2] == name {
+                    return Some(captures[1].to_string());
+                }
+            }
+        }
+    }
+    let generic = GENERIC.get_or_init(|| {
+        Regex::new(r"^(?:export\s+)?(?:pub(?:\([^)]*\))?\s+)?(function|def|class|fn|func|struct|interface|enum|trait|type|module|const|static|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)")
+            .expect("motif de définition")
+    });
+    if let Some(captures) = generic.captures(trimmed) {
+        if &captures[2] == name {
+            return Some(captures[1].to_string());
+        }
+    }
+    // Affectation de premier niveau (constante, variable de module).
+    let assigned = line
+        .strip_prefix(name)
+        .map(str::trim_start)
+        .is_some_and(|rest| rest.starts_with('=') && !rest.starts_with("=="));
+    assigned.then(|| "variable".to_string())
+}
+
+/// Nom recherché : le dernier segment d'un nom qualifié (`Panier.total`,
+/// `module::fonction`), s'il est un identifiant.
+fn bare_symbol(symbol: &str) -> Option<&str> {
+    let bare = symbol
+        .trim()
+        .rsplit(['.', ':'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches("()");
+    (!bare.is_empty() && bare.chars().all(is_identifier_char)).then_some(bare)
+}
+
+/// Où `symbol` est défini et utilisé dans les fichiers du projet `root`
+/// (ceux que git connaît, hors dossiers de construction et dépendances).
+#[must_use]
+pub fn find_symbol(root: &Path, symbol: &str) -> SymbolSearch {
+    let Some(name) = bare_symbol(symbol) else {
+        return SymbolSearch::default();
+    };
+    let mut search = SymbolSearch::default();
+    for path in project_files(root) {
+        let Ok(metadata) = std::fs::metadata(root.join(&path)) else {
+            continue;
+        };
+        if metadata.len() > MAX_FILE_BYTES {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(root.join(&path)) else {
+            continue;
+        };
+        search.files_scanned += 1;
+        if !text.contains(name) {
+            continue;
+        }
+        for (index, line) in text.lines().enumerate() {
+            if !contains_word(line, name) {
+                continue;
+            }
+            let code: String = line.trim().chars().take(200).collect();
+            match definition_kind(&path, line, name) {
+                Some(kind) if search.definitions.len() < MAX_DEFINITIONS => {
+                    search.definitions.push(SymbolHit {
+                        path: path.clone(),
+                        line: index + 1,
+                        kind,
+                        code,
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    search.total_references += 1;
+                    if search.references.len() < MAX_REFERENCES {
+                        search.references.push(SymbolHit {
+                            path: path.clone(),
+                            line: index + 1,
+                            kind: String::new(),
+                            code,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    search
+}
+
 /// Les fichiers d'entrée et proches de la racine d'abord, tests en dernier.
 fn importance(path: &str) -> (u8, usize, String) {
     let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
@@ -305,8 +450,71 @@ fn render(root: &Path, files: &[String], budget: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_listed, render, symbols};
+    use super::{bare_symbol, contains_word, find_symbol, is_listed, render, symbols};
     use std::fs;
+
+    #[test]
+    fn finds_definitions_and_uses_of_a_symbol() {
+        let root = std::env::temp_dir().join(format!(
+            "claw-find-symbol-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        fs::create_dir_all(root.join("src")).expect("dossier");
+        fs::create_dir_all(root.join("node_modules").join("lib")).expect("dossier");
+        fs::write(
+            root.join("tarifs.py"),
+            "TVA = 0.2\n\nclass Panier:\n    def total(self):\n        return prix_ttc(1, TVA)\n\ndef prix_ttc(prix, taux):\n    return prix * (1 + taux)\n",
+        )
+        .expect("fichier");
+        fs::write(
+            root.join("src").join("lib.rs"),
+            "pub fn prix_ttc() {}\n// prix_ttc_brut n'est pas prix_ttc_x\nfn appel() { prix_ttc(); }\n",
+        )
+        .expect("fichier");
+        fs::write(
+            root.join("node_modules").join("lib").join("x.js"),
+            "function prix_ttc() {}\n",
+        )
+        .expect("fichier");
+
+        let search = find_symbol(&root, "prix_ttc");
+        let definitions: Vec<(&str, usize, &str)> = search
+            .definitions
+            .iter()
+            .map(|hit| (hit.path.as_str(), hit.line, hit.kind.as_str()))
+            .collect();
+        // Les dépendances (node_modules) ne comptent pas.
+        assert_eq!(
+            definitions,
+            [("src/lib.rs", 1, "fn"), ("tarifs.py", 7, "def")]
+        );
+        let uses: Vec<(&str, usize)> = search
+            .references
+            .iter()
+            .map(|hit| (hit.path.as_str(), hit.line))
+            .collect();
+        // « prix_ttc_brut » et « prix_ttc_x » ne sont pas des usages.
+        assert_eq!(uses, [("src/lib.rs", 3), ("tarifs.py", 5)]);
+        assert_eq!(search.total_references, 2);
+
+        // Méthode indentée, constante de module, nom qualifié.
+        let total = find_symbol(&root, "Panier.total");
+        assert_eq!(total.definitions[0].kind, "def");
+        assert_eq!(total.definitions[0].line, 4);
+        let tva = find_symbol(&root, "TVA");
+        assert_eq!(
+            (tva.definitions[0].line, tva.definitions[0].kind.as_str()),
+            (1, "variable")
+        );
+        assert_eq!(tva.total_references, 1);
+
+        assert!(contains_word("a = f(x)", "f") && !contains_word("ff(x)", "f"));
+        assert_eq!(bare_symbol("crate::config::load()"), Some("load"));
+        assert_eq!(bare_symbol("a b"), None);
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn extracts_top_level_symbols_per_language() {

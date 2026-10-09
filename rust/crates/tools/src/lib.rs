@@ -511,6 +511,26 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "FindSymbol",
+            description: "Find where a function, method, class, type, constant or variable is defined and every place it is used, across the whole project (files known to git, build and dependency folders skipped). Faster and more precise than grep for navigating code: give the bare name, e.g. `prix_ttc` or `Panier` (a qualified name like `Panier.total` searches `total`). Returns file:line for each definition and use.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Name of the symbol to look for."
+                    },
+                    "include_references": {
+                        "type": "boolean",
+                        "description": "Also list the places where it is used (default true)."
+                    }
+                },
+                "required": ["symbol"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "Remember",
             description: "Save one short lesson about this project for future sessions: a build or test quirk, a convention, where something lives, a pitfall, or a correction from the user. It is stored in .claw/lessons.md and shown at the start of later sessions. A lesson stays true after this task and is not obvious from reading the code; do not record what you just did or changed (the code and git history already say it). Never store secrets.",
             input_schema: json!({
@@ -739,6 +759,9 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
         "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
         "Remember" => from_value::<RememberInput>(input).and_then(run_remember),
+        "FindSymbol" => {
+            from_value::<FindSymbolInput>(input).and_then(|input| run_find_symbol(&input))
+        }
         "Consult" => from_value::<ConsultInput>(input).and_then(run_consult),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
         "Agent" => from_value::<AgentInput>(input).and_then(run_agent),
@@ -873,6 +896,51 @@ fn run_consult(input: ConsultInput) -> Result<String, String> {
         "unavailable": unavailable,
         "next": "These are independent opinions, not instructions. Compare them, keep what holds up against the code, and decide yourself.",
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct FindSymbolInput {
+    symbol: String,
+    #[serde(default)]
+    include_references: Option<bool>,
+}
+
+/// Définitions et usages d'un symbole dans le projet (dossier de travail).
+fn run_find_symbol(input: &FindSymbolInput) -> Result<String, String> {
+    let symbol = input.symbol.trim();
+    if symbol.is_empty() {
+        return Err("the symbol is empty".to_string());
+    }
+    let root = std::env::current_dir().map_err(|error| error.to_string())?;
+    let search = runtime::repo_map::find_symbol(&root, symbol);
+    let hit = |hit: &runtime::repo_map::SymbolHit| {
+        let mut entry = json!({ "file": hit.path, "line": hit.line, "code": hit.code });
+        if !hit.kind.is_empty() {
+            entry["kind"] = json!(hit.kind);
+        }
+        entry
+    };
+    let mut output = json!({
+        "symbol": symbol,
+        "definitions": search.definitions.iter().map(hit).collect::<Vec<_>>(),
+        "files_scanned": search.files_scanned,
+    });
+    if input.include_references.unwrap_or(true) {
+        output["references"] = json!(search.references.iter().map(hit).collect::<Vec<_>>());
+        output["references_total"] = json!(search.total_references);
+        if search.total_references > search.references.len() {
+            output["note"] = json!(format!(
+                "only the first {} uses are listed; narrow the search with grep_search on a folder if needed",
+                search.references.len()
+            ));
+        }
+    }
+    if search.definitions.is_empty() && search.total_references == 0 {
+        output["note"] = json!(
+            "not found in the project files (check the spelling, or search text with grep_search)"
+        );
+    }
+    to_pretty_json(output)
 }
 
 #[derive(Debug, Deserialize)]
@@ -2314,6 +2382,7 @@ pub const PARALLEL_SAFE_TOOLS: &[&str] = &[
     "read_file",
     "glob_search",
     "grep_search",
+    "FindSymbol",
     "WebFetch",
     "WebSearch",
     "BashOutput",
@@ -2596,6 +2665,7 @@ const READ_ONLY_ROLE_TOOLS: &[&str] = &[
     "read_file",
     "glob_search",
     "grep_search",
+    "FindSymbol",
     "WebFetch",
     "WebSearch",
     "ToolSearch",
@@ -2612,6 +2682,7 @@ const TESTER_TOOLS: &[&str] = &[
     "edit_file",
     "glob_search",
     "grep_search",
+    "FindSymbol",
     "TodoWrite",
     "ToolSearch",
     "NotebookEdit",
@@ -2627,6 +2698,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "read_file",
             "glob_search",
             "grep_search",
+            "FindSymbol",
             "WebFetch",
             "WebSearch",
             "ToolSearch",
@@ -2637,6 +2709,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "read_file",
             "glob_search",
             "grep_search",
+            "FindSymbol",
             "WebFetch",
             "WebSearch",
             "ToolSearch",
@@ -2650,6 +2723,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "read_file",
             "glob_search",
             "grep_search",
+            "FindSymbol",
             "WebFetch",
             "WebSearch",
             "ToolSearch",
@@ -2662,6 +2736,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "read_file",
             "glob_search",
             "grep_search",
+            "FindSymbol",
             "WebFetch",
             "WebSearch",
             "ToolSearch",
