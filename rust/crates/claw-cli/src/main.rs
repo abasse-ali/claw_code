@@ -12,6 +12,7 @@ mod live;
 mod mcp_cli;
 mod model_switch;
 mod models;
+mod questions;
 mod render;
 mod stream_json;
 mod transcript;
@@ -922,6 +923,9 @@ fn filter_tool_specs(
     let editor = runtime::editor::connected().is_some()
         && runtime::harness::enabled(runtime::harness::Aid::EditorDiagnostics);
     definitions.retain(|definition| definition.name != "EditorDiagnostics" || editor);
+    // Les questions à choix ne se posent que si quelqu'un peut y répondre.
+    let questions = tools::question_asker_available();
+    definitions.retain(|definition| definition.name != "AskUserQuestion" || questions);
     if allowed_tools.is_some() || !runtime::harness::enabled(runtime::harness::Aid::ToolDiet) {
         return definitions;
     }
@@ -2245,6 +2249,7 @@ impl LiveCli {
                     Box::new(stream_json::StreamJsonPrompter) as tools::SubagentPrompter
                 }),
                 model_prompter: None,
+                question_asker: None,
             }),
         )?;
         stream_json::emit(&json!({
@@ -4848,6 +4853,12 @@ fn build_runtime_with_ui(
         None if emit_output => model_switch::TerminalModelPrompter::if_interactive(),
         None => None,
     };
+    // Les questions de l'agent se posent là où quelqu'un peut répondre.
+    tools::set_question_asker(match &ui {
+        Some(ui) => ui.question_asker.clone(),
+        None if emit_output => questions::terminal_asker(),
+        None => None,
+    });
     let emit_output = emit_output && ui.is_none();
     let observer = ui.as_ref().map(|ui| Arc::clone(&ui.observer));
     let (feature_config, tool_registry) = build_runtime_plugin_state()?;
@@ -5422,6 +5433,9 @@ struct RuntimeUi {
     /// Pose la question « réessayer, changer de modèle ou arrêter » ; `None`
     /// quand personne n'est là pour répondre (script, protocole d'éditeur).
     model_prompter: Option<model_switch::SharedModelPrompter>,
+    /// Pose les questions de l'agent (outil `AskUserQuestion`) ; `None` :
+    /// l'outil n'est pas proposé au modèle.
+    question_asker: Option<tools::SharedQuestionAsker>,
 }
 
 struct DefaultRuntimeClient {

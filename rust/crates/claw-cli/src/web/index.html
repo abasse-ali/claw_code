@@ -54,7 +54,7 @@
        seuls les contenus utiles à copier restent sélectionnables. */
     -webkit-user-select: none; user-select: none;
   }
-  .user, .md, .step-body, .card pre, .card .hint, .perm pre, .diff, .dialog .big, .dialog .rows, .dialog .link, .dialog .name, .dialog .ident, .dialog .desc, input, textarea {
+  .user, .md, .step-body, .card pre, .card .hint, .ask pre, .ask .question, .diff, .dialog .big, .dialog .rows, .dialog .link, .dialog .name, .dialog .ident, .dialog .desc, input, textarea {
     -webkit-user-select: text; user-select: text;
   }
   button, .codehead, .copy { -webkit-user-select: none; user-select: none; }
@@ -301,16 +301,6 @@
   .card.error .card-title { color: var(--err); margin-bottom: 4px; }
   .card.error .hint { font-size: 13px; color: var(--text-2); margin-top: 4px; }
 
-  .perm { border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--border)); background: var(--warn-soft); border-radius: var(--r); padding: 14px; display: flex; flex-direction: column; gap: 10px; }
-  .perm .card-title { color: var(--warn); margin: 0; }
-  .perm pre { margin: 0; padding: 10px 12px; border-radius: var(--r-sm); background: var(--surface); border: 1px solid var(--border); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
-  .perm .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-  .perm .actions kbd { margin-left: 2px; }
-  .perm textarea { width: 100%; min-height: 60px; resize: vertical; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface); padding: 8px 10px; outline: none; }
-  .perm textarea:focus { border-color: var(--accent); }
-  .perm .meta { font-size: 12px; color: var(--text-2); }
-  .perm.resolved { background: var(--surface); border-color: var(--border); }
-  .perm.resolved .card-title { color: var(--text-2); }
   .turn-end { align-self: flex-start; font-size: 12px; color: var(--text-3); display: inline-flex; gap: 6px; align-items: center; margin-top: -4px; }
 
   #to-bottom { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 4; height: 32px; padding: 0 12px; border-radius: 999px;
@@ -334,6 +324,14 @@
   .ask .choice small { color: var(--text-3); font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; }
   .ask .choice .measured { font-size: 11.5px; color: var(--ok); margin-left: auto; }
   .ask .other { display: flex; gap: 8px; }
+  .ask .more { font-size: 11.5px; color: var(--text-3); }
+  .ask .question { font-size: 14px; font-weight: 600; line-height: 1.4; }
+  .ask .hint { font-size: 12px; color: var(--text-3); margin-top: -4px; }
+  .ask .choice.on { border-color: var(--accent); background: var(--accent-soft); }
+  .ask .choice .desc { font-family: inherit; font-size: 12px; color: var(--text-2); flex-basis: 100%; }
+  .ask pre.target { margin: 0; padding: 9px 11px; border-radius: var(--r-sm); background: var(--surface); border: 1px solid var(--border); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 32vh; overflow: auto; }
+  .ask textarea { width: 100%; min-height: 56px; resize: vertical; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface); color: var(--text); padding: 8px 10px; outline: none; font: inherit; }
+  .ask textarea:focus, .ask .other input:focus { border-color: var(--accent); }
   .ask .other input { flex: 1; min-width: 0; height: 34px; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface-2); color: var(--text); padding: 0 10px; outline: none; font-family: var(--mono); font-size: 12.5px; }
   .activity .time { color: var(--text-3); font-variant-numeric: tabular-nums; }
   .spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--accent-soft); border-top-color: var(--accent); animation: spin .7s linear infinite; flex: none; }
@@ -663,12 +661,19 @@
     }
     return response.status === 200 ? response.json() : null;
   }
-  const nearBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 140;
+  // Le fil suit les nouveaux messages tant que l'utilisateur ne remonte pas.
+  // Dès qu'il fait défiler vers le haut, plus rien ne le ramène en bas : il
+  // y revient de lui-même, ou par le bouton « Derniers messages ».
+  let stuckToBottom = true, lastScrollTop = 0;
+  const bottomGap = () => log.scrollHeight - log.scrollTop - log.clientHeight;
+  const nearBottom = () => stuckToBottom;
   function scrollToBottom(force) {
-    if (force || nearBottom()) log.scrollTop = log.scrollHeight;
+    if (force) stuckToBottom = true;
+    if (stuckToBottom) log.scrollTop = log.scrollHeight;
+    lastScrollTop = log.scrollTop;
     updateToBottom();
   }
-  function updateToBottom() { $("to-bottom").hidden = nearBottom(); }
+  function updateToBottom() { $("to-bottom").hidden = stuckToBottom; }
   function append(node) {
     const stick = nearBottom();
     const empty = logInner.querySelector(".empty");
@@ -1046,6 +1051,10 @@
       case "WebSearch": return ["globe", "Recherche web", v.query || ""];
       case "Agent": return ["bot", "Sous-agent", (v.subagent_type || "général") + " · " + (v.description || "")];
       case "TodoWrite": return ["list", "Tâches", (v.todos || []).filter((t) => t.status === "completed").length + "/" + (v.todos || []).length + " terminées"];
+      case "AskUserQuestion": {
+        const list = Array.isArray(v.questions) ? v.questions : (v.question ? [v] : []);
+        return ["info", list.length > 1 ? "Questions" : "Question", list.map((item) => item.header || item.question || "").filter(Boolean).join(" · ")];
+      }
       case "BashOutput": case "KillShell": return ["terminal", name === "KillShell" ? "Arrêt de tâche" : "Sortie de tâche", v.bash_id || ""];
       default:
         if (name.startsWith("mcp__")) return ["plug", "MCP · " + name.split("__")[1], name.split("__").slice(2).join("__")];
@@ -1158,6 +1167,10 @@
         box.append(el("div", "note", (value.type === "create" ? "Fichier créé : " : "Fichier modifié : ") + displayPath(value.filePath)));
         return { box, summary: "" };
       }
+      if (Array.isArray(value.answers)) {
+        for (const item of value.answers) box.append(el("div", "label", item.question), el("div", "note", item.answer));
+        return { box, summary: value.answers.length > 1 ? value.answers.length + " réponses" : "1 réponse" };
+      }
       if (Array.isArray(value.filenames)) {
         box.append(el("pre", null, value.content || value.filenames.map(displayPath).join("\n") || "(aucun)"));
         return { box, summary: value.filenames.length + " fichier" + (value.filenames.length > 1 ? "s" : "") };
@@ -1216,207 +1229,267 @@
     if (!pendingTools.length) setActivity("Réflexion…");
   }
 
-  // ---------------------------------------------------------------- autorisations
-  let activePermission = null;
-  function addPermission(event) {
-    if (currentAssistant) finishAssistant();
-    const card = el("div", "perm");
-    card.id = "perm-" + event.id;
-    const title = el("div", "card-title");
-    title.innerHTML = svg("shield");
-    title.append("Claw demande l'autorisation · " + event.tool);
-    const feedback = el("textarea");
-    feedback.placeholder = "Consigne pour l'agent si vous refusez (facultatif)";
-    feedback.hidden = true;
-    const actions = el("div", "actions");
-    const send = async (decision) => {
-      for (const button of actions.querySelectorAll("button")) button.disabled = true;
-      try {
-        await api("/api/permission", { id: event.id, decision, feedback: feedback.value });
-      } catch (error) {
-        toast("Réponse non transmise : " + error.message);
-        for (const button of actions.querySelectorAll("button")) button.disabled = false;
-      }
-    };
-    const button = (label, className, key, decision) => {
-      const node = el("button", "btn " + className, label);
-      node.type = "button";
-      if (key) { const k = el("kbd", null, key); node.append(k); }
-      node.onclick = () => send(decision);
-      return node;
-    };
-    const once = button("Autoriser", "primary", "Entrée", "once");
-    actions.appendChild(once);
-    let always = null;
-    if (event.suggested_rule) {
-      always = button("Toujours : " + event.suggested_rule, "", "A", "always");
-      always.title = event.session_only ? "Valable jusqu'à la fin de la session" : "Ajouté à .claw/settings.local.json";
-      actions.appendChild(always);
-    }
-    actions.appendChild(button("Refuser", "danger", "Échap", "deny"));
-    const note = el("button", "btn", "Ajouter une consigne");
-    note.type = "button";
-    note.onclick = () => { feedback.hidden = false; note.remove(); feedback.focus(); };
-    actions.appendChild(note);
-    card.append(title, el("pre", null, event.target), el("div", "meta", "Mode actuel : " + modeLabel(event.mode)), actions, feedback);
-    append(card);
-    pendingPermissions++;
-    activePermission = { id: event.id, send, hasAlways: !!always, tool: event.tool, target: event.target || "", rule: event.suggested_rule || "" };
+  // ---------------------------------------------------------------- demandes épinglées
+  // Tout ce qui attend une réponse (autorisation, questions de l'agent, modèle
+  // qui ne répond plus) s'affiche au-dessus de la saisie, une demande à la
+  // fois, et disparaît une fois répondu : rien ne reste dans la conversation.
+  const asks = [];
+  let activePermission = null, activeModelQuestion = null;
+  function pushAsk(ask) {
+    if (asks.some((known) => known.key === ask.key)) return;
+    asks.push(ask);
     renderAsk();
-    updateTitle();
-    scrollToBottom(true);
-    once.focus({ preventScroll: true });
   }
-  function resolvePermission(id, decision) {
-    const card = $("perm-" + id);
-    if (!card) return;
-    card.classList.add("resolved");
-    for (const node of card.querySelectorAll(".actions, textarea")) node.remove();
-    const label = { once: "Autorisé une fois", always: "Toujours autorisé", deny: "Refusé" }[decision] || decision;
-    card.querySelector(".meta").textContent = "→ " + label;
-    pendingPermissions = Math.max(0, pendingPermissions - 1);
-    if (activePermission && activePermission.id === id) activePermission = null;
+  function dropAsk(key) {
+    const index = asks.findIndex((ask) => ask.key === key);
+    if (index < 0) return;
+    asks.splice(index, 1);
     renderAsk();
-    updateTitle();
   }
-
-  // ---------------------------------------------------------------- question épinglée
-  // La question en attente (autorisation, changement de modèle) reste
-  // au-dessus de la saisie : ses boutons sont visibles où que soit le fil.
-  let activeModelQuestion = null;
   function renderAsk() {
     const bar = $("ask");
     bar.textContent = "";
-    const question = activeModelQuestion;
-    const permission = question ? null : activePermission;
-    bar.hidden = !question && !permission;
+    const ask = asks[0] || null;
+    activePermission = ask && ask.kind === "permission" ? ask : null;
+    activeModelQuestion = ask && ask.kind === "model" ? ask : null;
+    pendingPermissions = asks.filter((entry) => entry.kind !== "model" || !entry.retryAt).length;
+    bar.hidden = !ask;
     $("activity").hidden = !status.busy || !bar.hidden;
-    if (bar.hidden) return;
-    const what = el("div", "what");
-    const actions = el("div", "actions");
-    const button = (label, className, action, key) => {
-      const node = el("button", "btn " + className, label);
-      node.type = "button";
-      if (key) node.append(el("kbd", null, key));
-      node.onclick = action;
-      actions.appendChild(node);
-      return node;
-    };
-    if (permission) {
-      what.innerHTML = svg("shield");
-      what.append("Autorisation demandée · " + permission.tool);
-      const detail = el("div", "detail mono", permission.target.replace(/\s+/g, " ").trim());
-      detail.title = permission.target;
-      button("Autoriser", "primary", () => permission.send("once"), "Entrée");
-      if (permission.hasAlways) button("Toujours", "", () => permission.send("always"), "A").title = "Toujours : " + permission.rule;
-      button("Refuser", "danger", () => permission.send("deny"), "Échap");
-      bar.append(what, detail, actions);
-      return;
-    }
-    const name = modelName(question.model);
-    what.innerHTML = svg("alert");
-    what.append(question.stuck ? "L'agent n'avance plus avec " + name : name + " ne répond plus");
-    // Essai automatique : sans réponse, le même modèle reprend tout seul.
-    const automatic = Boolean(question.retryAt);
-    const detail = el("div", "detail");
-    if (automatic) {
-      const count = el("b", "count", String(secondsLeft(question.retryAt)));
-      if (question.stuck) {
-        detail.append("Deux essais n'ont pas suffi. Sans réponse de votre part, le même modèle continue dans ", count, " s.");
-      } else {
-        const attempt = question.attempt ? " (essai " + question.attempt + " sur " + question.attempts + ")" : "";
-        detail.append("Raison : " + question.reason + ". Nouvel essai automatique dans ", count, " s" + attempt + ". Vous n'avez rien à faire.");
-      }
-    } else {
-      detail.textContent = question.stuck
-        ? "Deux essais n'ont pas suffi. Le même modèle peut continuer, ou vous confiez la suite à un autre."
-        : "Raison : " + question.reason + ". Les essais automatiques n'ont pas suffi : le même modèle peut réessayer, ou vous en choisissez un autre.";
-    }
-    const answer = async (decision, model) => {
-      for (const node of bar.querySelectorAll("button")) node.disabled = true;
-      try {
-        await api("/api/model-question", { id: question.id, decision, model });
-      } catch (error) {
-        toast("Réponse non transmise : " + error.message);
-        for (const node of bar.querySelectorAll("button")) node.disabled = false;
-      }
-    };
-    if (question.choosing) {
-      const choices = el("div", "choices");
-      for (const id of question.suggestions) {
-        const choice = el("button", "btn choice");
-        choice.type = "button";
-        choice.append(el("b", null, modelName(id)), el("small", null, id));
-        if (shortModel(id).free) choice.append(el("span", "measured", "gratuit"));
-        choice.onclick = () => answer("switch", id);
-        choices.appendChild(choice);
-      }
-      const other = el("div", "other");
-      const field = document.createElement("input");
-      field.type = "text";
-      field.placeholder = "Autre modèle : identifiant exact";
-      field.setAttribute("aria-label", "Autre modèle");
-      const use = el("button", "btn", "Utiliser");
-      use.type = "button";
-      const useOther = () => { const value = field.value.trim(); if (value) answer("switch", value); };
-      use.onclick = useOther;
-      field.onkeydown = (event) => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); useOther(); } };
-      other.append(field, use);
-      button("Retour", "", () => { question.choosing = false; renderAsk(); });
-      bar.append(what, el("div", "detail", "Quel modèle prend la suite ? Il devient le modèle de la session."), choices, other, actions);
-      return;
-    }
-    button(question.stuck ? "Continuer avec le même modèle" : automatic ? "Réessayer maintenant" : "Réessayer avec le même modèle", "primary", () => answer("retry"));
-    button("Changer de modèle", "", () => {
-      // Le temps de choisir, l'essai automatique attend.
-      if (question.retryAt) {
-        question.retryAt = null;
-        api("/api/model-question", { id: question.id, decision: "hold" }).catch(() => {});
-      }
-      question.choosing = true;
-      renderAsk();
-    });
-    button("Arrêter le tour", "danger", () => answer("stop"));
-    bar.append(what, detail, actions);
+    updateTitle();
+    if (!ask) return;
+    if (asks.length > 1) bar.append(el("div", "more", "Demande 1 sur " + asks.length));
+    ask.render(bar);
+    if (ask.sending) for (const node of bar.querySelectorAll("button")) node.disabled = true;
   }
+  function askButton(actions, label, className, action, key) {
+    const node = el("button", "btn " + className, label);
+    node.type = "button";
+    if (key) node.append(el("kbd", null, key));
+    node.onclick = action;
+    actions.appendChild(node);
+    return node;
+  }
+  // Envoie la réponse d'une demande ; en cas d'échec les boutons reviennent.
+  async function answerAsk(ask, path, body) {
+    if (ask.sending) return;
+    ask.sending = true;
+    renderAsk();
+    try {
+      await api(path, body);
+    } catch (error) {
+      toast("Réponse non transmise : " + error.message);
+      ask.sending = false;
+      renderAsk();
+    }
+  }
+
+  // Autorisation d'un outil.
+  function addPermission(event) {
+    if (currentAssistant) finishAssistant();
+    const ask = {
+      key: "perm-" + event.id, kind: "permission", id: event.id, hasAlways: !!event.suggested_rule,
+      noteOpen: false, note: "", sending: false,
+      send(decision) {
+        return answerAsk(ask, "/api/permission", { id: event.id, decision, feedback: decision === "deny" ? ask.note : "" });
+      },
+      render(bar) {
+        const what = el("div", "what");
+        what.innerHTML = svg("shield");
+        what.append("Claw demande l'autorisation · " + event.tool);
+        const actions = el("div", "actions");
+        askButton(actions, "Autoriser", "primary", () => ask.send("once"), "Entrée");
+        if (event.suggested_rule) {
+          const always = askButton(actions, "Toujours : " + event.suggested_rule, "", () => ask.send("always"), "A");
+          always.title = event.session_only ? "Valable jusqu'à la fin de la session" : "Ajouté à .claw/settings.local.json";
+        }
+        askButton(actions, "Refuser", "danger", () => ask.send("deny"), "Échap");
+        bar.append(what, el("pre", "target", event.target || ""));
+        if (ask.noteOpen) {
+          const note = el("textarea");
+          note.placeholder = "Consigne pour l'agent : que doit-il faire à la place ? Puis « Refuser ».";
+          note.value = ask.note;
+          note.oninput = () => { ask.note = note.value; };
+          bar.append(note);
+          setTimeout(() => note.focus(), 0);
+        } else {
+          askButton(actions, "Refuser avec une consigne", "", () => { ask.noteOpen = true; renderAsk(); });
+        }
+        bar.append(actions);
+      },
+    };
+    pushAsk(ask);
+  }
+  function resolvePermission(id, decision) {
+    dropAsk("perm-" + id);
+    // Une règle enregistrée change les prochaines demandes : elle laisse une ligne dans le fil.
+    const label = String(decision || "");
+    if (label.startsWith("toujours autorisé")) addNote(label.charAt(0).toUpperCase() + label.slice(1));
+  }
+
+  // Questions de l'agent, avec des réponses proposées (outil AskUserQuestion).
+  function addQuestion(event) {
+    if (currentAssistant) finishAssistant();
+    const questions = event.questions || [];
+    if (!questions.length) return;
+    const ask = {
+      key: "question-" + event.id, kind: "question", id: event.id, index: 0, sending: false,
+      picks: questions.map(() => new Set()), others: questions.map(() => ""),
+      answerOf(position) {
+        const other = ask.others[position].trim();
+        return [...ask.picks[position], ...(other ? [other] : [])].join(", ");
+      },
+      submit(dismissed) {
+        const answers = questions.map((question, position) => ({ question: question.question, answer: ask.answerOf(position) }));
+        return answerAsk(ask, "/api/question", dismissed ? { id: event.id, dismissed: true } : { id: event.id, answers });
+      },
+      next() {
+        if (!ask.answerOf(ask.index)) return;
+        if (ask.index < questions.length - 1) { ask.index += 1; renderAsk(); } else ask.submit(false);
+      },
+      render(bar) {
+        const question = questions[ask.index];
+        const picks = ask.picks[ask.index];
+        const what = el("div", "what");
+        what.innerHTML = svg("info");
+        what.append((questions.length > 1 ? "Question " + (ask.index + 1) + " sur " + questions.length : "Question") + (question.header ? " · " + question.header : ""));
+        const choices = el("div", "choices");
+        for (const option of question.options) {
+          const choice = el("button", "btn choice" + (picks.has(option.label) ? " on" : ""));
+          choice.type = "button";
+          choice.setAttribute("aria-pressed", String(picks.has(option.label)));
+          choice.append(el("b", null, option.label));
+          if (option.description) choice.append(el("small", "desc", option.description));
+          choice.onclick = () => {
+            if (question.multi_select) {
+              if (picks.has(option.label)) picks.delete(option.label); else picks.add(option.label);
+              renderAsk();
+            } else {
+              // Un clic répond et passe à la suite.
+              picks.clear();
+              picks.add(option.label);
+              ask.others[ask.index] = "";
+              ask.next();
+            }
+          };
+          choices.appendChild(choice);
+        }
+        const other = el("div", "other");
+        const field = document.createElement("input");
+        field.type = "text";
+        field.placeholder = question.multi_select ? "Autre réponse à ajouter (facultatif)" : "Autre réponse : tapez-la ici";
+        field.setAttribute("aria-label", "Autre réponse");
+        field.value = ask.others[ask.index];
+        other.append(field);
+        const actions = el("div", "actions");
+        const last = ask.index === questions.length - 1;
+        const go = askButton(actions, last ? (questions.length > 1 ? "Envoyer les réponses" : "Envoyer") : "Suivant", "primary", () => ask.next());
+        if (ask.index > 0) askButton(actions, "Précédent", "", () => { ask.index -= 1; renderAsk(); });
+        askButton(actions, "Ne pas répondre", "", () => ask.submit(true)).title = "L'agent continue avec les choix qui lui semblent les plus raisonnables";
+        const refresh = () => { go.disabled = ask.sending || !ask.answerOf(ask.index); };
+        field.oninput = () => {
+          ask.others[ask.index] = field.value;
+          // Une réponse tapée remplace la proposition choisie.
+          if (!question.multi_select && field.value.trim() && picks.size) { picks.clear(); for (const node of choices.children) node.classList.remove("on"); }
+          refresh();
+        };
+        field.onkeydown = (keyEvent) => {
+          if (keyEvent.key !== "Enter") return;
+          keyEvent.preventDefault();
+          keyEvent.stopPropagation();
+          ask.next();
+        };
+        bar.append(
+          what,
+          el("div", "question", question.question),
+          el("div", "hint", question.multi_select ? "Plusieurs réponses possibles, puis « " + go.firstChild.textContent + " »." : "Un clic sur une proposition répond."),
+          choices, other, actions,
+        );
+        refresh();
+      },
+    };
+    pushAsk(ask);
+  }
+  function resolveQuestion(id) { dropAsk("question-" + id); }
+
+  // Modèle qui ne répond plus, ou agent qui n'avance plus.
   const secondsLeft = (until) => Math.max(0, Math.ceil((until - Date.now()) / 1000));
+  function addModelQuestion(event) {
+    finishAssistant();
+    const automatic = typeof event.auto_retry_secs === "number";
+    const suggestions = event.suggestions || [];
+    const ask = {
+      key: "model-" + event.id, kind: "model", id: event.id, sending: false, choosing: false,
+      // Essai automatique : sans réponse, le même modèle reprend tout seul.
+      retryAt: automatic ? Date.now() + event.auto_retry_secs * 1000 : null,
+      answer(decision, model) { return answerAsk(ask, "/api/model-question", { id: event.id, decision, model }); },
+      render(bar) {
+        const name = modelName(event.model);
+        const what = el("div", "what");
+        what.innerHTML = svg("alert");
+        what.append(event.stuck ? "L'agent n'avance plus avec " + name : name + " ne répond plus");
+        const actions = el("div", "actions");
+        if (ask.choosing) {
+          const choices = el("div", "choices");
+          for (const id of suggestions) {
+            const choice = el("button", "btn choice");
+            choice.type = "button";
+            choice.append(el("b", null, modelName(id)), el("small", null, id));
+            if (shortModel(id).free) choice.append(el("span", "measured", "gratuit"));
+            choice.onclick = () => ask.answer("switch", id);
+            choices.appendChild(choice);
+          }
+          const other = el("div", "other");
+          const field = document.createElement("input");
+          field.type = "text";
+          field.placeholder = "Autre modèle : identifiant exact";
+          field.setAttribute("aria-label", "Autre modèle");
+          const use = el("button", "btn", "Utiliser");
+          use.type = "button";
+          const useOther = () => { const value = field.value.trim(); if (value) ask.answer("switch", value); };
+          use.onclick = useOther;
+          field.onkeydown = (keyEvent) => { if (keyEvent.key === "Enter") { keyEvent.preventDefault(); keyEvent.stopPropagation(); useOther(); } };
+          other.append(field, use);
+          askButton(actions, "Retour", "", () => { ask.choosing = false; renderAsk(); });
+          bar.append(what, el("div", "detail", "Quel modèle prend la suite ? Il devient le modèle de la session."), choices, other, actions);
+          return;
+        }
+        const waiting = Boolean(ask.retryAt);
+        const detail = el("div", "detail");
+        if (waiting) {
+          const count = el("b", "count", String(secondsLeft(ask.retryAt)));
+          if (event.stuck) {
+            detail.append("Deux essais n'ont pas suffi. Sans réponse de votre part, le même modèle continue dans ", count, " s.");
+          } else {
+            const attempt = event.attempt ? " (essai " + event.attempt + " sur " + event.attempts + ")" : "";
+            detail.append("Raison : " + event.reason + ". Nouvel essai automatique dans ", count, " s" + attempt + ". Vous n'avez rien à faire.");
+          }
+        } else {
+          detail.textContent = event.stuck
+            ? "Deux essais n'ont pas suffi. Le même modèle peut continuer, ou vous confiez la suite à un autre."
+            : "Raison : " + event.reason + ". Le même modèle peut réessayer, ou vous en choisissez un autre.";
+        }
+        askButton(actions, event.stuck ? "Continuer avec le même modèle" : waiting ? "Réessayer maintenant" : "Réessayer avec le même modèle", "primary", () => ask.answer("retry"));
+        askButton(actions, "Changer de modèle", "", () => {
+          // Le temps de choisir, l'essai automatique attend.
+          if (ask.retryAt) {
+            ask.retryAt = null;
+            api("/api/model-question", { id: event.id, decision: "hold" }).catch(() => {});
+          }
+          ask.choosing = true;
+          renderAsk();
+        });
+        askButton(actions, "Arrêter le tour", "danger", () => ask.answer("stop"));
+        bar.append(what, detail, actions);
+      },
+    };
+    pushAsk(ask);
+  }
+  function resolveModelQuestion(id) { dropAsk("model-" + id); }
   // Compte à rebours de l'essai automatique.
   setInterval(() => {
     const count = document.querySelector("#ask .count");
     if (count && activeModelQuestion && activeModelQuestion.retryAt) count.textContent = String(secondsLeft(activeModelQuestion.retryAt));
   }, 500);
-  function addModelQuestion(event) {
-    finishAssistant();
-    const automatic = typeof event.auto_retry_secs === "number";
-    // Un essai automatique ne laisse que son avis dans le fil ; la question
-    // qui attend une réponse y laisse une carte.
-    if (!automatic) {
-      const card = el("div", "perm");
-      card.id = "mq-" + event.id;
-      const title = el("div", "card-title");
-      title.innerHTML = svg("alert");
-      title.append(event.stuck ? "L'agent n'avance plus" : "Le modèle ne répond plus");
-      card.append(title, el("pre", null, event.model + " : " + event.reason), el("div", "meta", "Votre réponse est attendue au-dessus de la zone de saisie."));
-      append(card);
-    }
-    activeModelQuestion = {
-      id: event.id, model: event.model, reason: event.reason, stuck: !!event.stuck,
-      suggestions: event.suggestions || [], choosing: false,
-      retryAt: automatic ? Date.now() + event.auto_retry_secs * 1000 : null,
-      attempt: event.attempt || null, attempts: event.attempts || null,
-    };
-    renderAsk();
-    if (!automatic) scrollToBottom(true);
-  }
-  function resolveModelQuestion(id, decision) {
-    const card = $("mq-" + id);
-    if (card) {
-      card.classList.add("resolved");
-      card.querySelector(".meta").textContent = "→ " + decision;
-    }
-    if (activeModelQuestion && activeModelQuestion.id === id) activeModelQuestion = null;
-    renderAsk();
-  }
 
   // ---------------------------------------------------------------- autres événements
   // Avis du runtime (vérification, relecture, escalade…) : une ligne de la frise.
@@ -1445,9 +1518,7 @@
     currentAssistant = null;
     thinkingStep = null;
     pendingTools = [];
-    pendingPermissions = 0;
-    activePermission = null;
-    activeModelQuestion = null;
+    asks.length = 0;
     draftAnswer = null;
     renderAsk();
     logInner.textContent = "";
@@ -1487,7 +1558,9 @@
       case "permission": addPermission(event); break;
       case "permission_resolved": resolvePermission(event.id, event.decision); break;
       case "model_question": addModelQuestion(event); break;
-      case "model_question_resolved": resolveModelQuestion(event.id, event.decision); break;
+      case "model_question_resolved": resolveModelQuestion(event.id); break;
+      case "question": addQuestion(event); break;
+      case "question_resolved": resolveQuestion(event.id); break;
       case "info": finishAssistant(); addInfo(event.text); break;
       case "notice": finishAssistant(); addNote(event.text); break;
       case "answer_drafted": markDraftAnswer(); break;
@@ -2463,7 +2536,7 @@
   // ---------------------------------------------------------------- état de l'agent
   function updateTitle() {
     const project = basename(status.cwd);
-    document.title = (pendingPermissions > 0 ? "▲ Autorisation · " : status.busy ? "● " : "") + "Claw Code" + (project ? " · " + project : "");
+    document.title = (pendingPermissions > 0 ? "▲ Réponse attendue · " : status.busy ? "● " : "") + "Claw Code" + (project ? " · " + project : "");
   }
   function setActivity(text) {
     currentActivity = text;
@@ -2708,15 +2781,25 @@
   $("credits").addEventListener("click", openCreditsDialog);
   $("theme-btn").addEventListener("click", cycleTheme);
   $("to-bottom").addEventListener("click", () => scrollToBottom(true));
-  // Le bas du fil reste visible quand le contenu grandit après coup (une
-  // carte qui s'ouvre) ou que la fenêtre rétrécit : sinon les boutons d'une
-  // demande d'autorisation pouvaient se retrouver sous le bord, hors de vue.
-  let stuckToBottom = true;
-  log.addEventListener("scroll", () => { stuckToBottom = nearBottom(); updateToBottom(); }, { passive: true });
+  // Arrivé tout en bas, le fil se remet à suivre ; remonter le détache.
+  log.addEventListener("scroll", () => {
+    if (bottomGap() < 6) stuckToBottom = true;
+    else if (log.scrollTop < lastScrollTop - 1) stuckToBottom = false;
+    lastScrollTop = log.scrollTop;
+    updateToBottom();
+  }, { passive: true });
+  // La molette, le doigt ou le clavier vers le haut détachent tout de suite,
+  // même pendant que l'agent écrit.
+  log.addEventListener("wheel", (event) => { if (event.deltaY < 0) { stuckToBottom = false; updateToBottom(); } }, { passive: true });
+  log.addEventListener("touchmove", () => { if (bottomGap() > 6) { stuckToBottom = false; updateToBottom(); } }, { passive: true });
+  log.addEventListener("keydown", (event) => {
+    if (["PageUp", "ArrowUp", "Home"].includes(event.key)) { stuckToBottom = false; updateToBottom(); }
+  });
+  // Tant que le fil suit, il reste collé en bas quand son contenu grandit
+  // après coup (une carte qui s'ouvre) ou que la fenêtre change de taille.
   if (window.ResizeObserver) {
     const keepBottom = new ResizeObserver(() => {
-      if (stuckToBottom) log.scrollTop = log.scrollHeight;
-      updateToBottom();
+      if (stuckToBottom) { log.scrollTop = log.scrollHeight; lastScrollTop = log.scrollTop; }
     });
     keepBottom.observe(log);
     keepBottom.observe(logInner);

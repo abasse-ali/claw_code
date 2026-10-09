@@ -377,6 +377,7 @@ impl AcpServer {
                     }) as tools::SubagentPrompter
                 }),
                 model_prompter: None,
+                question_asker: None,
             }),
         )
         .map_err(|error| error.to_string())

@@ -86,10 +86,21 @@ sombre ou claire (thème du système, de VS Code ou choisi) :
 - **frise des étapes de l'agent** : une ligne par outil (icône, cible, durée, `+3 −1` pour une
   modification), dépliable sur le diff ligne à ligne, la sortie, le contenu lu ou la liste de
   tâches ; la barre d'activité au-dessus de la saisie dit ce que fait l'agent ;
-- **demandes de permission dans la page**, au clavier : `Entrée` autoriser, `A` toujours,
-  `Échap` refuser (avec consigne facultative). La demande en attente est aussi **épinglée
-  au-dessus de la zone de saisie**, avec ses boutons : elle reste visible où que soit le fil,
-  même sur un petit écran ou dans une fenêtre réduite ;
+- **une seule zone pour tout ce qui attend votre réponse**, épinglée au-dessus de la saisie et
+  toujours visible : rien ne reste dans la conversation une fois répondu.
+  - **Autorisations** : `Entrée` autoriser, `A` toujours, `Échap` refuser, ou « Refuser avec une
+    consigne ». Seule une règle « Toujours » enregistrée laisse une ligne dans le fil.
+  - **Questions de l'agent**, comme dans Claude Code : quand il a besoin d'un choix ou d'une
+    validation, l'agent appelle l'outil `AskUserQuestion` (1 à 4 questions, 2 à 4 propositions
+    chacune, la recommandée en premier). Un clic sur une proposition répond et passe à la
+    suite ; plusieurs réponses peuvent être cochées quand la question le permet ; un champ
+    « Autre réponse » accepte ce que vous tapez ; « Ne pas répondre » laisse l'agent décider.
+    Dans le terminal, les mêmes questions s'affichent en menus. L'outil n'est proposé au modèle
+    que si quelqu'un peut répondre.
+  - **Modèle qui ne répond plus** : compte à rebours de l'essai automatique, changement de modèle.
+- **défilement** : le fil suit les nouveaux messages tant que vous ne remontez pas. Dès que vous
+  faites défiler vers le haut, plus rien ne vous ramène en bas, même pendant que l'agent écrit ;
+  « Derniers messages » y retourne ;
 - palette `Ctrl+K` (actions, modèles, modes, commandes), suggestions `/`, images collées,
   glissées ou jointes, modèle et mode en un clic ;
 - **crédits OpenRouter en direct** : solde et requêtes gratuites du jour sont les chiffres

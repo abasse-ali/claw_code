@@ -1,6 +1,7 @@
 pub mod advisors;
 mod mcp_bridge;
 pub mod mcp_oauth;
+mod questions;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -12,6 +13,10 @@ use mcp_bridge::connected_mcp_tools;
 pub use mcp_bridge::{
     call_mcp_tool, ensure_mcp_started, mcp_prompt_commands, mcp_prompt_invocation,
     mcp_status_report, shutdown_mcp, McpPromptEntry, McpResourceEntry, McpToolEntry,
+};
+pub use questions::{
+    parse_questions, question_asker_available, set_question_asker, QuestionOption,
+    SharedQuestionAsker, UserAnswer, UserQuestion,
 };
 
 use api::{
@@ -511,6 +516,53 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "AskUserQuestion",
+            description: "Ask the user to choose between options, shown to them as clickable suggestions. Use it whenever you need a decision or a confirmation before continuing: the request is ambiguous, several approaches are reasonable, or the user asked you to wait for their validation. Ask 1 to 4 questions in one call. Give each question 2 to 4 concrete, mutually exclusive options, the one you recommend first with \"(Recommandé)\" at the end of its label (or the equivalent in the user's language), a one-sentence `description` of what each option implies, and a short `header` naming the topic (at most 12 characters). Set `multiSelect` when several options can be chosen together. Do not add an \"Other\" option: the user can always type their own answer. Never write these questions in your reply instead: call this tool, then continue the task with the answers it returns.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": {
+                                    "type": "string",
+                                    "description": "The complete question, ending with a question mark."
+                                },
+                                "header": {
+                                    "type": "string",
+                                    "description": "Very short topic label, at most 12 characters."
+                                },
+                                "options": {
+                                    "type": "array",
+                                    "minItems": 2,
+                                    "maxItems": 4,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": { "type": "string", "description": "The choice, in 1 to 5 words." },
+                                            "description": { "type": "string", "description": "What this choice implies, in one sentence." }
+                                        },
+                                        "required": ["label"]
+                                    }
+                                },
+                                "multiSelect": {
+                                    "type": "boolean",
+                                    "description": "True when several options can be chosen together."
+                                }
+                            },
+                            "required": ["question", "options"]
+                        }
+                    }
+                },
+                "required": ["questions"]
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "EditorDiagnostics",
             description: "List the problems the user's editor (VS Code) currently reports: compile errors, type errors and lint warnings, exactly as underlined in the editor. Use it after changing code to see errors without running a build, and whenever the user mentions errors shown in their editor. Give `path` for one file, or nothing for the whole workspace. Each problem is `file:line:column: severity: message`.",
             input_schema: json!({
@@ -784,6 +836,7 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         }
         "EditorDiagnostics" => from_value::<EditorDiagnosticsInput>(input)
             .and_then(|input| run_editor_diagnostics(&input)),
+        "AskUserQuestion" => questions::run_ask_user_question(input),
         "Consult" => from_value::<ConsultInput>(input).and_then(run_consult),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
         "Agent" => from_value::<AgentInput>(input).and_then(run_agent),

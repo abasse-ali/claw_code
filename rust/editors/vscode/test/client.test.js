@@ -134,6 +134,37 @@ function get(port, path) {
       && received.includes('"name":"EditorDiagnostics"'),
     `${JSON.stringify(asked)} ${received.slice(-300)}`);
 
+  // Questions de l'agent : proposées avec des choix, les réponses reviennent au modèle.
+  const asked2 = JSON.stringify({
+    questions: [
+      { question: "Quel moteur d'OCR ?", header: "OCR", options: [{ label: "EasyOCR (Recommandé)", description: "Plus simple" }, { label: "manga-ocr" }] },
+      { question: "Quelles langues cibles ?", multiSelect: true, options: ["Français", "Anglais"] },
+    ],
+  });
+  let questionEvent = { questions: [] };
+  await turn(`Propose une architecture [mock:tool AskUserQuestion=${asked2}]`, async () => {
+    await wait("questions de l'agent", () => events.some((event) => event.type === "question"));
+    questionEvent = events.find((event) => event.type === "question") || questionEvent;
+    if (questionEvent.id !== undefined) {
+      await server.request("POST", "/api/question", {
+        id: questionEvent.id,
+        answers: [
+          { question: "Quel moteur d'OCR ?", answer: "EasyOCR (Recommandé)" },
+          { question: "Quelles langues cibles ?", answer: "Français, Anglais" },
+        ],
+      });
+    }
+  });
+  received = fs.readFileSync(logPath, "utf8");
+  const questionResolved = events.find((event) => event.type === "question_resolved") || {};
+  check("l'agent pose ses questions avec des choix, les réponses lui reviennent",
+    questionEvent.questions.length === 2 && questionEvent.questions[0].header === "OCR"
+      && questionEvent.questions[0].options[0].description === "Plus simple" && questionEvent.questions[1].multi_select === true
+      && questionEvent.questions[1].options.map((option) => option.label).join() === "Français,Anglais"
+      && questionResolved.dismissed === false && questionResolved.answers.length === 2
+      && received.includes("Français, Anglais") && received.includes('"name":"AskUserQuestion"'),
+    JSON.stringify([questionEvent, questionResolved]).slice(0, 500));
+
   // Demande de permission : la modification proposée accompagne la demande, rien n'est écrit avant l'accord.
   await server.request("POST", "/api/permissions", { value: "prompt" });
   const target = path.join(cwd, "notes", "essai.txt");

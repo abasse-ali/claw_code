@@ -149,6 +149,18 @@ enum WebEvent {
         id: u64,
         decision: String,
     },
+    /// L'agent pose des questions à choix (outil `AskUserQuestion`) : la
+    /// page les présente, l'utilisateur répond par `POST /api/question`.
+    Question {
+        id: u64,
+        questions: Vec<tools::UserQuestion>,
+    },
+    QuestionResolved {
+        id: u64,
+        answers: Vec<tools::UserAnswer>,
+        /// L'utilisateur a écarté les questions, ou le tour a été interrompu.
+        dismissed: bool,
+    },
     /// Le modèle vient de répondre sans appeler d'outil : sa réponse finale,
     /// sauf si un contrôle de Claw le renvoie au travail.
     AnswerDrafted,
@@ -246,6 +258,9 @@ enum WorkerCommand {
     Resume(String),
 }
 
+/// Demandes posées dans la page et en attente de réponse, par identifiant.
+type Pending<T> = Arc<Mutex<HashMap<u64, mpsc::Sender<T>>>>;
+
 #[derive(Clone)]
 struct WebApp {
     token: Arc<String>,
@@ -253,9 +268,11 @@ struct WebApp {
     events: broadcast::Sender<WebEvent>,
     commands: mpsc::Sender<WorkerCommand>,
     view: Arc<Mutex<SharedView>>,
-    pending: Arc<Mutex<HashMap<u64, mpsc::Sender<PermissionReply>>>>,
+    pending: Pending<PermissionReply>,
     /// Questions sur le modèle en attente de réponse.
-    pending_models: Arc<Mutex<HashMap<u64, mpsc::Sender<ModelReply>>>>,
+    pending_models: Pending<ModelReply>,
+    /// Questions de l'agent en attente : `None` quand elles sont écartées.
+    pending_questions: Pending<Option<Vec<tools::UserAnswer>>>,
     /// Modèle choisi par l'utilisateur pendant un tour : il devient celui de
     /// la session à la fin du tour.
     chosen_model: Arc<Mutex<Option<String>>>,
@@ -624,7 +641,44 @@ fn web_ui(app: &WebApp, mode: PermissionMode) -> RuntimeUi {
             }) as tools::SubagentPrompter
         }),
         model_prompter: Some(Arc::new(WebModelPrompter { app: app.clone() })),
+        question_asker: Some(web_question_asker(app)),
     }
+}
+
+/// Pose les questions de l'agent dans la page et attend les réponses, sans
+/// limite de temps : seule l'interruption du tour y met fin.
+fn web_question_asker(app: &WebApp) -> tools::SharedQuestionAsker {
+    let app = app.clone();
+    Arc::new(move |questions: &[tools::UserQuestion]| {
+        let id = app.next_permission_id.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel();
+        app.pending_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, sender);
+        app.publish(WebEvent::Question {
+            id,
+            questions: questions.to_vec(),
+        });
+        let reply = loop {
+            match receiver.recv_timeout(Duration::from_millis(300)) {
+                Err(mpsc::RecvTimeoutError::Timeout)
+                    if !runtime::interrupt::interrupt_requested() => {}
+                other => break other,
+            }
+        };
+        app.pending_questions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id);
+        let answers = reply.ok().flatten();
+        app.publish(WebEvent::QuestionResolved {
+            id,
+            answers: answers.clone().unwrap_or_default(),
+            dismissed: answers.is_none(),
+        });
+        answers.ok_or_else(|| crate::questions::DISMISSED.to_string())
+    })
 }
 
 fn build_web_runtime(
@@ -1084,6 +1138,17 @@ struct TokenQuery {
 }
 
 #[derive(Deserialize)]
+struct QuestionBody {
+    id: u64,
+    /// Une réponse par question ; absent avec `dismissed`.
+    #[serde(default)]
+    answers: Vec<tools::UserAnswer>,
+    /// L'utilisateur ne souhaite pas répondre.
+    #[serde(default)]
+    dismissed: bool,
+}
+
+#[derive(Deserialize)]
 struct ModelQuestionBody {
     id: u64,
     /// `retry`, `switch` (avec `model`), `stop`, ou `hold` (l'utilisateur
@@ -1330,6 +1395,31 @@ async fn post_permission(
         .remove(&body.id)
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "demande déjà traitée ou expirée"))?;
     let _ = sender.send(reply);
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Réponses de l'utilisateur aux questions de l'agent.
+async fn post_question(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Json(body): Json<QuestionBody>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    let answers: Vec<tools::UserAnswer> = body
+        .answers
+        .into_iter()
+        .filter(|answer| !answer.answer.trim().is_empty())
+        .collect();
+    if !body.dismissed && answers.is_empty() {
+        return Err(api_error(StatusCode::BAD_REQUEST, "aucune réponse"));
+    }
+    let sender = app
+        .pending_questions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&body.id)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "question déjà traitée ou expirée"))?;
+    let _ = sender.send((!body.dismissed).then_some(answers));
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -1747,6 +1837,7 @@ fn router(app: WebApp) -> Router {
         )
         .route("/api/permission", post(post_permission))
         .route("/api/model-question", post(post_model_question))
+        .route("/api/question", post(post_question))
         .route("/api/model", post(post_model).get(get_model_info))
         .route("/api/permissions", post(post_permissions))
         .route("/api/new", post(post_new))
@@ -1792,6 +1883,7 @@ pub(crate) fn serve(options: ServeOptions) -> Result<(), Box<dyn std::error::Err
         view: Arc::new(Mutex::new(SharedView::default())),
         pending: Arc::new(Mutex::new(HashMap::new())),
         pending_models: Arc::new(Mutex::new(HashMap::new())),
+        pending_questions: Arc::new(Mutex::new(HashMap::new())),
         chosen_model: Arc::new(Mutex::new(None)),
         next_permission_id: Arc::new(AtomicU64::new(1)),
         page_viewers: Arc::new(AtomicU64::new(0)),
