@@ -1,0 +1,293 @@
+//! Avis d'autres modèles que celui qui travaille : relecture des
+//! modifications, diagnostic quand l'agent n'avance plus, second avis sur une
+//! décision difficile. Les modèles consultés répondent sans outils : ils ne
+//! voient que la question et le contexte qu'on leur donne.
+
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use api::{
+    ApiError, ContentBlockDelta, InputMessage, MessageRequest, OutputContentBlock, ProviderClient,
+    StreamEvent,
+};
+
+/// Réponse d'un modèle consulté.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Opinion {
+    pub model: String,
+    pub text: String,
+}
+
+/// Durée totale d'une consultation, tous modèles confondus.
+const TIMEOUT: Duration = Duration::from_secs(90);
+/// Délai accordé à un modèle pour donner un premier signe de vie ; au-delà,
+/// le suivant est consulté.
+const FIRST_SIGN: Duration = Duration::from_secs(20);
+/// Temps accordé à un modèle pour finir sa réponse.
+const PER_MODEL: Duration = Duration::from_secs(50);
+/// Longueur gardée de la cause d'un échec, dans le message final.
+const REASON_CHARS: usize = 90;
+/// Mise de côté d'un modèle muet ou en panne.
+const SET_ASIDE: Duration = Duration::from_secs(300);
+
+type Resolver = Box<dyn Fn() -> Vec<String> + Send + Sync>;
+
+fn resolver() -> &'static Mutex<Option<Resolver>> {
+    static RESOLVER: OnceLock<Mutex<Option<Resolver>>> = OnceLock::new();
+    RESOLVER.get_or_init(|| Mutex::new(None))
+}
+
+/// Indique comment trouver les modèles à consulter (réglage `advisorModels`,
+/// sinon les meilleurs modèles gratuits autres que celui en cours).
+pub fn set_resolver(resolve: impl Fn() -> Vec<String> + Send + Sync + 'static) {
+    *resolver()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(resolve));
+}
+
+/// Modèles à consulter, du préféré au moins préféré (vide : aucun).
+#[must_use]
+pub fn configured_models() -> Vec<String> {
+    resolver()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(|resolve| resolve())
+        .unwrap_or_default()
+}
+
+fn request(model: &str, system: &str, prompt: &str, max_tokens: u32) -> MessageRequest {
+    MessageRequest {
+        model: model.to_string(),
+        max_tokens: api::max_tokens_for_model(model).min(max_tokens),
+        messages: vec![InputMessage::user_text(prompt.to_string())],
+        system: Some(system.to_string()),
+        tools: None,
+        tool_choice: None,
+        stream: false,
+    }
+}
+
+/// Cause d'une erreur en quelques mots : « erreur 503 (Service overloaded) ».
+fn reason(error: &ApiError) -> String {
+    match error {
+        ApiError::Api {
+            status,
+            message: Some(message),
+            ..
+        } => format!("erreur {} ({message})", status.as_u16()),
+        ApiError::Api { status, .. } => format!("erreur {}", status.as_u16()),
+        ApiError::RetriesExhausted { last_error, .. } => reason(last_error),
+        other => other.to_string(),
+    }
+}
+
+/// Erreur d'un modèle consulté ; une panne qui lui est propre le met de côté.
+fn failure(model: &str, error: &ApiError) -> String {
+    if error.is_fallback_worthy() {
+        api::mark_model_unavailable(model, SET_ASIDE);
+    }
+    reason(error)
+}
+
+/// Texte de la réponse de `model`, lue en flux jusqu'à `deadline`.
+async fn answer(
+    model: &str,
+    request: &MessageRequest,
+    deadline: Instant,
+) -> Result<String, String> {
+    let started = Instant::now();
+    let client = ProviderClient::from_model(model).map_err(|error| failure(model, &error))?;
+    let opening = async {
+        let mut stream = client.stream_message(request).await?;
+        let first = stream.next_event().await?;
+        Ok::<_, ApiError>((stream, first))
+    };
+    let patience = FIRST_SIGN.min(deadline.saturating_duration_since(Instant::now()));
+    let Ok(opened) = tokio::time::timeout(patience, opening).await else {
+        api::mark_model_unavailable(model, SET_ASIDE);
+        return Err(format!("pas de réponse après {} s", patience.as_secs()));
+    };
+    let (mut stream, mut event) = opened.map_err(|error| failure(model, &error))?;
+
+    let mut text = String::new();
+    let reading = async {
+        while let Some(current) = event {
+            match current {
+                StreamEvent::ContentBlockStart(start) => {
+                    if let OutputContentBlock::Text { text: piece } = start.content_block {
+                        text.push_str(&piece);
+                    }
+                }
+                StreamEvent::ContentBlockDelta(delta) => {
+                    if let ContentBlockDelta::TextDelta { text: piece } = delta.delta {
+                        text.push_str(&piece);
+                    }
+                }
+                StreamEvent::MessageStop(_) => break,
+                _ => {}
+            }
+            event = stream.next_event().await?;
+        }
+        Ok::<_, ApiError>(())
+    };
+    let left = deadline.saturating_duration_since(Instant::now());
+    match tokio::time::timeout(left, reading).await {
+        Ok(Ok(())) => Ok(text.trim().to_string()),
+        Ok(Err(error)) => Err(failure(model, &error)),
+        Err(_) => Err(format!(
+            "réponse inachevée après {} s",
+            started.elapsed().as_secs()
+        )),
+    }
+}
+
+/// Le premier modèle de `models` qui répond donne son avis : ceux qui sont
+/// disponibles d'abord ; un modèle muet, en panne ou sans texte laisse la
+/// place au suivant. Lancé dans son propre fil : utilisable depuis n'importe où.
+pub fn ask(
+    models: &[String],
+    system: &str,
+    prompt: &str,
+    max_tokens: u32,
+) -> Result<Opinion, String> {
+    if models.is_empty() {
+        return Err("aucun autre modèle à consulter".to_string());
+    }
+    let (available, set_aside): (Vec<String>, Vec<String>) = models
+        .iter()
+        .cloned()
+        .partition(|model| api::model_available(model));
+    std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| error.to_string())?;
+                let deadline = Instant::now() + TIMEOUT;
+                // Ce que chaque modèle a répondu, pour le message final.
+                let mut failures = Vec::new();
+                for model in available.into_iter().chain(set_aside) {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        break;
+                    }
+                    let request = request(&model, system, prompt, max_tokens);
+                    let answered = runtime.block_on(runtime::interrupt::interruptible(answer(
+                        &model,
+                        &request,
+                        deadline.min(now + PER_MODEL),
+                    )));
+                    let reason = match answered {
+                        Ok(text) if !text.is_empty() => return Ok(Opinion { model, text }),
+                        // Tout son budget est parti en raisonnement.
+                        Ok(_) => "réponse sans texte".to_string(),
+                        Err(_) if runtime::interrupt::interrupt_requested() => {
+                            return Err("consultation interrompue".to_string());
+                        }
+                        Err(error) => error.to_string(),
+                    };
+                    let reason: String = reason.chars().take(REASON_CHARS).collect();
+                    failures.push(format!("{model} : {reason}"));
+                }
+                if failures.is_empty() {
+                    failures.push(format!("pas de réponse après {} s", TIMEOUT.as_secs()));
+                }
+                Err(failures.join(" ; "))
+            })
+            .join()
+            .unwrap_or_else(|_| Err("consultation interrompue".to_string()))
+    })
+}
+
+/// Chaque modèle répond de son côté, en même temps (second avis).
+#[must_use]
+pub fn ask_each(
+    models: &[String],
+    system: &str,
+    prompt: &str,
+    max_tokens: u32,
+) -> Vec<Result<Opinion, String>> {
+    std::thread::scope(|scope| {
+        let handles = models
+            .iter()
+            .map(|model| {
+                scope.spawn(move || {
+                    ask(std::slice::from_ref(model), system, prompt, max_tokens)
+                        .map_err(|error| format!("{model} : {error}"))
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err("consultation interrompue".to_string()))
+            })
+            .collect()
+    })
+}
+
+/// Consignes des modèles consultés par l'outil `Consult`.
+pub const CONSULT_SYSTEM: &str = "You are an experienced software engineer giving a second opinion to a coding agent. You see only the question and the context below, not the project. Answer the question directly: give your recommendation first, then the reasons and the main risk. If something essential is missing to answer well, say what in one sentence and answer under a stated assumption. Be concrete and concise (at most 250 words).";
+
+#[cfg(test)]
+mod tests {
+    use super::{ask, configured_models, reason, set_resolver};
+
+    #[test]
+    fn asking_nobody_is_an_error_and_the_resolver_lists_models() {
+        assert!(ask(&[], "s", "q", 100).is_err());
+        set_resolver(|| vec!["a/b:free".to_string(), "c/d:free".to_string()]);
+        assert_eq!(configured_models(), vec!["a/b:free", "c/d:free"]);
+    }
+
+    #[test]
+    fn a_failure_is_reported_in_a_few_words() {
+        let overloaded = api::ApiError::Api {
+            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            error_type: None,
+            message: Some("Service overloaded".to_string()),
+            body: r#"{"error":{"message":"Service overloaded","code":503}}"#.to_string(),
+            retryable: true,
+        };
+        assert_eq!(reason(&overloaded), "erreur 503 (Service overloaded)");
+        let exhausted = api::ApiError::RetriesExhausted {
+            attempts: 3,
+            last_error: Box::new(overloaded),
+        };
+        assert_eq!(reason(&exhausted), "erreur 503 (Service overloaded)");
+    }
+
+    /// Essai en direct (réseau et clé `OpenRouter`) : un vrai modèle diagnostique
+    /// une fin de session bloquée. `CLAW_LIVE_ADVISORS` liste les modèles.
+    /// `cargo test -p tools -- --ignored live_advisor --nocapture`
+    #[test]
+    #[ignore = "demande le réseau et une clé OpenRouter"]
+    fn live_advisor_diagnoses_a_stuck_session() {
+        let models: Vec<String> = std::env::var("CLAW_LIVE_ADVISORS")
+            .expect("CLAW_LIVE_ADVISORS")
+            .split(',')
+            .map(|model| model.trim().to_string())
+            .collect();
+        let tail = "User request: Dans commande.py, le total doit être arrondi une seule fois, à la fin.\n\
+            [tool call] edit_file commande.py: return round(sum(prix_ttc(prix, TVA) * quantite for prix, quantite in lignes), 2)\n\
+            [tool call] bash: python -m unittest -q\n\
+            [tool output] FAIL: test_total_arrondi\nAssertionError: 12.0 != 11.99\n\
+            [tool call] read_file tarifs.py\n\
+            [tool output] def prix_ttc(prix_ht, taux_tva):\n    return round(prix_ht * (1 + taux_tva), 2)\n\
+            [tool call] bash: python -m unittest -q\n\
+            [tool output] FAIL: test_total_arrondi\nAssertionError: 12.0 != 11.99";
+        let opinion = ask(
+            &models,
+            runtime::harness::UNBLOCK_SYSTEM,
+            &runtime::harness::unblock_prompt(tail),
+            3_000,
+        )
+        .expect("conseil");
+        println!("{} :\n{}", opinion.model, opinion.text);
+        assert!(opinion.text.contains("prix_ttc") || opinion.text.contains("tarifs"));
+    }
+}

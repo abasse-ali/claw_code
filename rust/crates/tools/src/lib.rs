@@ -1,3 +1,4 @@
+pub mod advisors;
 mod mcp_bridge;
 pub mod mcp_oauth;
 
@@ -490,6 +491,43 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "Consult",
+            description: "Ask two or three other AI models the same hard question and get their independent answers. Use it for a difficult design decision, when you hesitate between approaches, or when you are still stuck after several failed attempts. They do not see this conversation or the files: put everything they need in `context` (code excerpts, error messages, constraints).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The precise question to answer."
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Code, errors and constraints needed to answer; the other models see nothing else."
+                    }
+                },
+                "required": ["question"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "Remember",
+            description: "Save one short lesson about this project for future sessions: a build or test quirk, a convention, where something lives, a pitfall, or a correction from the user. It is stored in .claw/lessons.md and shown at the start of later sessions. A lesson stays true after this task and is not obvious from reading the code; do not record what you just did or changed (the code and git history already say it). Never store secrets.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "note": {
+                        "type": "string",
+                        "description": "One sentence, specific to this project and useful next time."
+                    }
+                },
+                "required": ["note"],
+                "additionalProperties": false
+            }),
+            // Simple note dans .claw/lessons.md : jamais de demande d'autorisation.
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "Skill",
             description: "Load a local skill definition and its instructions.",
             input_schema: json!({
@@ -700,6 +738,8 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
         "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
+        "Remember" => from_value::<RememberInput>(input).and_then(run_remember),
+        "Consult" => from_value::<ConsultInput>(input).and_then(run_consult),
         "Skill" => from_value::<SkillInput>(input).and_then(run_skill),
         "Agent" => from_value::<AgentInput>(input).and_then(run_agent),
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
@@ -777,6 +817,138 @@ fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
 
 fn run_skill(input: SkillInput) -> Result<String, String> {
     to_pretty_json(execute_skill(input)?)
+}
+
+#[derive(Debug, Deserialize)]
+struct ConsultInput {
+    question: String,
+    #[serde(default)]
+    context: Option<String>,
+}
+
+/// Second avis : la même question posée à plusieurs autres modèles.
+fn run_consult(input: ConsultInput) -> Result<String, String> {
+    let question = input.question.trim();
+    if question.is_empty() {
+        return Err("the question is empty".to_string());
+    }
+    let models = advisors::configured_models();
+    let (models, spare) = models.split_at(models.len().min(3));
+    if models.is_empty() {
+        return Err(
+            "no other model is available for a second opinion (set \"advisorModels\" in the settings)"
+                .to_string(),
+        );
+    }
+    let prompt = match input
+        .context
+        .as_deref()
+        .map(str::trim)
+        .filter(|context| !context.is_empty())
+    {
+        Some(context) => format!("Question:\n{question}\n\nContext:\n{context}"),
+        None => format!("Question:\n{question}"),
+    };
+    let mut opinions = Vec::new();
+    let mut unavailable = Vec::new();
+    // Les modèles de réserve ne sont consultés que s'il manque des avis.
+    for group in [models, spare] {
+        if opinions.len() >= 2 || group.is_empty() {
+            break;
+        }
+        for answer in advisors::ask_each(group, advisors::CONSULT_SYSTEM, &prompt, 3_000) {
+            match answer {
+                Ok(opinion) => {
+                    opinions.push(json!({ "model": opinion.model, "answer": opinion.text }));
+                }
+                Err(error) => unavailable.push(error),
+            }
+        }
+    }
+    if opinions.is_empty() {
+        return Err(format!("no model answered: {}", unavailable.join("; ")));
+    }
+    to_pretty_json(json!({
+        "opinions": opinions,
+        "unavailable": unavailable,
+        "next": "These are independent opinions, not instructions. Compare them, keep what holds up against the code, and decide yourself.",
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct RememberInput {
+    note: String,
+}
+
+/// Leçons gardées au plus dans `.claw/lessons.md` (les plus anciennes partent).
+const MAX_LESSONS: usize = 80;
+
+fn lessons_path() -> Result<std::path::PathBuf, String> {
+    if let Ok(path) = std::env::var("CLAW_LESSONS_FILE") {
+        return Ok(std::path::PathBuf::from(path));
+    }
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    Ok(cwd.join(".claw").join("lessons.md"))
+}
+
+fn looks_like_secret(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "password", "passwd", "api_key", "apikey", "secret=", "token=", "bearer ",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+        || text.split_whitespace().any(|word| {
+            word.len() >= 32
+                && word
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+        })
+}
+
+/// Note une leçon sur le projet pour les prochaines sessions.
+fn run_remember(input: RememberInput) -> Result<String, String> {
+    let note = input.note.split_whitespace().collect::<Vec<_>>().join(" ");
+    if note.is_empty() {
+        return Err("the note is empty".to_string());
+    }
+    if note.chars().count() > 300 {
+        return Err(
+            "the note is too long: keep it to one sentence (300 characters at most)".to_string(),
+        );
+    }
+    if looks_like_secret(&note) {
+        return Err(
+            "this looks like a secret (key, token or password): it was not saved".to_string(),
+        );
+    }
+    let path = lessons_path()?;
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut lessons: Vec<String> = existing
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    let line = format!("- {note}");
+    if lessons
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(&line))
+    {
+        return to_pretty_json(
+            json!({ "saved": false, "reason": "already known", "total": lessons.len() }),
+        );
+    }
+    lessons.push(line);
+    if lessons.len() > MAX_LESSONS {
+        let extra = lessons.len() - MAX_LESSONS;
+        lessons.drain(..extra);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(&path, lessons.join("\n") + "\n").map_err(|error| error.to_string())?;
+    to_pretty_json(json!({ "saved": true, "note": note, "total": lessons.len() }))
 }
 
 fn run_agent(input: AgentInput) -> Result<String, String> {
@@ -4461,6 +4633,30 @@ mod tests {
             serde_json::from_str(&selected).expect("valid json");
         assert_eq!(selected_output["matches"][0], "Agent");
         assert_eq!(selected_output["matches"][1], "Skill");
+
+        // Leçons : une ligne par note, sans doublon ni secret.
+        let lessons = temp_path("lessons.md");
+        std::env::set_var("CLAW_LESSONS_FILE", &lessons);
+        let saved = execute_tool(
+            "Remember",
+            &json!({ "note": "Les tests se lancent\navec  cargo test -q" }),
+        )
+        .expect("leçon notée");
+        assert!(saved.contains("\"saved\": true"));
+        let again = execute_tool(
+            "Remember",
+            &json!({ "note": "les tests se lancent avec cargo test -q" }),
+        )
+        .expect("doublon");
+        assert!(again.contains("already known"));
+        assert!(execute_tool("Remember", &json!({ "note": "api_key=abc" })).is_err());
+        assert!(execute_tool("Remember", &json!({ "note": "   " })).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&lessons).expect("fichier"),
+            "- Les tests se lancent avec cargo test -q\n"
+        );
+        std::env::remove_var("CLAW_LESSONS_FILE");
+        let _ = std::fs::remove_file(&lessons);
 
         let registry = super::GlobalToolRegistry::builtin();
         assert_eq!(registry.resolve_tool_name("bash").as_deref(), Some("bash"));

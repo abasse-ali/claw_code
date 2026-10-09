@@ -197,6 +197,8 @@ pub fn tool_label(name: &str) -> &str {
         "WebFetch" => "Page web",
         "WebSearch" => "Recherche web",
         "TodoWrite" => "Tâches",
+        "Remember" => "Mémoire",
+        "Consult" => "Second avis",
         "Agent" => "Sous-agent",
         "NotebookEdit" => "Notebook",
         "BashOutput" => "Sortie de tâche",
@@ -241,6 +243,8 @@ fn tool_argument(name: &str, input: &Value) -> Option<String> {
         "WebSearch" => str_field(input, &["query"]).map(ToOwned::to_owned),
         "Agent" => str_field(input, &["description", "subagent_type"]).map(ToOwned::to_owned),
         "Skill" => str_field(input, &["skill", "name"]).map(ToOwned::to_owned),
+        "Remember" => str_field(input, &["note"]).map(ToOwned::to_owned),
+        "Consult" => str_field(input, &["question"]).map(ToOwned::to_owned),
         "BashOutput" | "KillShell" => {
             str_field(input, &["bash_id", "shell_id", "id"]).map(ToOwned::to_owned)
         }
@@ -287,6 +291,7 @@ pub fn running_label(name: &str) -> String {
             "Recherche…".to_string()
         }
         "WebFetch" => "Lecture de la page…".to_string(),
+        "Consult" => "Second avis demandé à d'autres modèles…".to_string(),
         "Agent" => "Sous-agent au travail…".to_string(),
         _ => format!("{}…", tool_label(name)),
     }
@@ -387,6 +392,14 @@ fn render_result(name: &str, output: &str, is_error: bool, limits: &Limits) -> S
         "glob_search" | "Glob" => glob_result(&parsed, limits),
         "grep_search" | "Grep" => grep_result(&parsed, limits),
         "TodoWrite" => todo_result(&parsed),
+        "Remember" => vec![
+            if parsed.get("saved").and_then(Value::as_bool) == Some(true) {
+                "Noté pour les prochaines sessions".to_string()
+            } else {
+                format!("{DIM}Déjà noté{RESET}")
+            },
+        ],
+        "Consult" => consult_result(&parsed, limits),
         "WebFetch" if !limits.read_content => web_fetch_result(&parsed),
         _ => generic_result(&parsed, limits),
     };
@@ -794,6 +807,34 @@ fn todo_result(parsed: &Value) -> Vec<String> {
         .collect()
 }
 
+/// Un avis par modèle : son nom, puis le début de sa réponse (tout avec Ctrl+O).
+fn consult_result(parsed: &Value, limits: &Limits) -> Vec<String> {
+    let mut lines = Vec::new();
+    for opinion in parsed
+        .get("opinions")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        let model = str_field(opinion, &["model"]).unwrap_or("?");
+        let answer = str_field(opinion, &["answer"]).unwrap_or_default();
+        lines.push(format!("{BOLD}{model}{RESET}"));
+        let shown = if limits.read_content { limits.lines } else { 2 };
+        lines.extend(preview(answer, shown, ""));
+    }
+    let unavailable = parsed
+        .get("unavailable")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    if unavailable > 0 {
+        lines.push(format!("{DIM}{unavailable} modèle(s) sans réponse{RESET}"));
+    }
+    if lines.is_empty() {
+        lines.push(format!("{DIM}Aucun avis{RESET}"));
+    }
+    lines
+}
+
 fn web_fetch_result(parsed: &Value) -> Vec<String> {
     let bytes = parsed.get("bytes").and_then(Value::as_u64);
     let code = parsed.get("code").and_then(Value::as_u64);
@@ -921,6 +962,11 @@ pub fn print_call(name: &str, input: &str) {
         let _ = writeln!(out, "\n{}", tool_call_line(name, input));
         let _ = out.flush();
     }
+}
+
+/// Oublie les appels en attente (réponse interrompue puis relancée).
+pub fn discard_calls() {
+    pending_calls().clear();
 }
 
 /// Appels jamais exécutés (refusés par le mode ou un hook) : affichés quand même.

@@ -138,6 +138,16 @@ impl ApiError {
             | Self::BackoffOverflow { .. } => false,
         }
     }
+
+    /// Réponse arrivée coupée ou illisible (corps tronqué, JSON invalide).
+    #[must_use]
+    pub fn is_broken_response(&self) -> bool {
+        match self {
+            Self::Http(error) => error.is_body() || error.is_decode(),
+            Self::Json(_) | Self::InvalidSseFrame(_) => true,
+            _ => false,
+        }
+    }
 }
 
 fn api_status(error: &ApiError) -> Option<u16> {
@@ -353,6 +363,12 @@ impl ModelChain {
                 Ok(response) => return Ok((model.clone(), response)),
                 Err(error) if !is_last && error.is_fallback_worthy() => {
                     record_failure(model, &error);
+                    notify(&switch_notice(model, &error, &order[index + 1]));
+                    last_error = Some(error);
+                }
+                // Réponse coupée ou illisible : le modèle suivant peut répondre,
+                // sans mettre celui-ci de côté pour autant.
+                Err(error) if !is_last && error.is_broken_response() => {
                     notify(&switch_notice(model, &error, &order[index + 1]));
                     last_error = Some(error);
                 }

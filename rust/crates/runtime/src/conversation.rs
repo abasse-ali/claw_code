@@ -6,6 +6,7 @@ use crate::compact::{
     render_transcript_for_summary, CompactionConfig, CompactionResult, MODEL_SUMMARY_PROMPT,
 };
 use crate::config::RuntimeFeatureConfig;
+use crate::harness::{self, Aid, StallGuard, VerifySetting};
 use crate::hooks::{HookEvent, HookRunResult, HookRunner};
 use crate::interrupt::{clear_interrupt, interrupt_requested, INTERRUPTED_MESSAGE};
 use crate::permissions::{
@@ -50,6 +51,33 @@ pub trait ApiClient {
 
     /// Informe l'interface d'un événement du runtime (compaction automatique…).
     fn notify(&mut self, _notice: &str) {}
+
+    /// Demande l'avis d'un autre modèle (relecture des modifications, conseil
+    /// quand l'agent n'avance plus). `None` : aucun autre modèle disponible.
+    fn consult(
+        &mut self,
+        _purpose: ConsultPurpose,
+        _system: &str,
+        _prompt: &str,
+    ) -> Option<Consultation> {
+        None
+    }
+}
+
+/// Pourquoi le runtime consulte un autre modèle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsultPurpose {
+    /// Relire les modifications du tour.
+    Review,
+    /// Débloquer un agent qui échoue plusieurs fois de suite.
+    Unblock,
+}
+
+/// Réponse d'un modèle consulté.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Consultation {
+    pub model: String,
+    pub text: String,
 }
 
 /// Compaction automatique : dès que le contexte estimé dépasse `threshold_tokens`,
@@ -75,6 +103,10 @@ pub trait ToolExecutor {
             .map(|(name, input)| self.execute(name, input))
             .collect()
     }
+
+    /// Annonce un appel lancé par Claw lui-même (vérification imposée), pour
+    /// que l'interface l'affiche comme un appel du modèle.
+    fn announce(&mut self, _tool_name: &str, _input: &str) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +173,65 @@ pub struct ConversationRuntime<C, T> {
     auto_compaction: Option<AutoCompactionConfig>,
     checkpoint_turns: bool,
     subagent: bool,
+    verify: VerifySetting,
+    review: bool,
+}
+
+/// Aides au raisonnement, le temps d'un tour.
+// Des états indépendants les uns des autres, pas une machine à états.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Default)]
+struct TurnAids {
+    /// Des fichiers ont été modifiés depuis la dernière vérification.
+    dirty: bool,
+    /// Commandes réussies lancées par le modèle depuis sa dernière modification.
+    verified_commands: Vec<String>,
+    verify_rounds: usize,
+    /// Vérification refusée, impossible ou trop longue : on n'insiste pas.
+    verify_disabled: bool,
+    /// La dernière vérification a échoué (le travail n'est pas validé).
+    verify_failing: bool,
+    stall: StallGuard,
+    /// Contenu des fichiers avant leur première modification du tour.
+    originals: std::collections::BTreeMap<String, String>,
+    reviewed: bool,
+    /// Rappels déjà adressés au modèle pendant ce tour.
+    reminders: u32,
+    /// Un autre modèle a déjà été appelé à l'aide pendant ce tour.
+    advised: bool,
+    /// Une vérification (tests, compilation) a échoué pendant ce tour.
+    check_failed: bool,
+    /// Tests réécrits après un échec, déjà signalés.
+    guarded_tests: std::collections::BTreeSet<String>,
+}
+
+/// Sortie et statut d'un message de résultat d'outil.
+fn tool_result_parts(message: &ConversationMessage) -> Option<(&str, bool)> {
+    message.blocks.iter().find_map(|block| match block {
+        ContentBlock::ToolResult {
+            output, is_error, ..
+        } => Some((output.as_str(), *is_error)),
+        _ => None,
+    })
+}
+
+/// Ajoute une note de Claw à la suite d'un résultat d'outil (lue par le modèle).
+fn append_tool_output(message: &mut ConversationMessage, note: &str) {
+    for block in &mut message.blocks {
+        if let ContentBlock::ToolResult { output, .. } = block {
+            output.push_str("\n\n");
+            output.push_str(note);
+            return;
+        }
+    }
+}
+
+fn json_field(text: &str, key: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()?
+        .get(key)?
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 /// Relances maximales par un hook `Stop` au cours d'un même tour.
@@ -222,6 +313,8 @@ where
             auto_compaction: None,
             checkpoint_turns: false,
             subagent: false,
+            verify: feature_config.verify().clone(),
+            review: feature_config.review_enabled(),
         }
     }
 
@@ -271,6 +364,13 @@ where
             self.session.messages.truncate(report.message_index);
         }
         matches
+    }
+
+    /// Vérification imposée après modification (réglage `"verify"`).
+    #[must_use]
+    pub fn with_verify(mut self, verify: VerifySetting) -> Self {
+        self.verify = verify;
+        self
     }
 
     #[must_use]
@@ -383,7 +483,9 @@ where
         mut prompter: Option<&mut dyn PermissionPrompter>,
     ) -> Result<TurnSummary, RuntimeError> {
         clear_interrupt();
-        let mut user_message = self.user_message_with_hooks(user_input.into())?;
+        let user_input = user_input.into();
+        let request_text = user_input.clone();
+        let mut user_message = self.user_message_with_hooks(user_input)?;
         user_message
             .blocks
             .extend(images.into_iter().map(|image| ContentBlock::Image {
@@ -397,6 +499,7 @@ where
         let mut iterations = 0;
         let mut stop_continuations = 0;
         let mut empty_nudged = false;
+        let mut aids = TurnAids::default();
 
         loop {
             iterations += 1;
@@ -456,6 +559,20 @@ where
             assistant_messages.push(assistant_message);
 
             if pending_tool_uses.is_empty() {
+                // Le modèle dit avoir fini : Claw vérifie avant de le croire.
+                if let Some(feedback) = self.verification_gate(&mut aids, &mut prompter) {
+                    self.session
+                        .messages
+                        .push(ConversationMessage::user_text(feedback));
+                    continue;
+                }
+                // Puis un autre modèle relit les modifications.
+                if let Some(feedback) = self.review_gate(&mut aids, &request_text) {
+                    self.session
+                        .messages
+                        .push(ConversationMessage::user_text(feedback));
+                    continue;
+                }
                 if let Some(reason) = self.run_stop_hooks(stop_continuations, &assistant_messages) {
                     stop_continuations += 1;
                     self.session
@@ -468,7 +585,12 @@ where
                 break;
             }
 
-            if self.run_parallel_batch(&pending_tool_uses, &mut prompter, &mut tool_results) {
+            if self.run_parallel_batch(
+                &pending_tool_uses,
+                &mut prompter,
+                &mut tool_results,
+                &mut aids,
+            ) {
                 continue;
             }
             for (tool_use_id, tool_name, input) in pending_tool_uses {
@@ -485,14 +607,15 @@ where
                     tool_results.push(message);
                     continue;
                 }
-                let result_message = self.execute_tool_call(
+                let mut result_message = self.execute_tool_call(
                     tool_use_id,
-                    tool_name,
+                    tool_name.clone(),
                     &input,
                     prompter
                         .as_mut()
                         .map(|prompt| &mut **prompt as &mut dyn PermissionPrompter),
                 );
+                self.after_tool(&tool_name, &input, &mut result_message, &mut aids);
                 self.session.messages.push(result_message.clone());
                 tool_results.push(result_message);
                 // Plan approuvé (ExitPlanMode) : la suite du tour peut modifier.
@@ -555,6 +678,7 @@ where
         calls: &[(String, String, String)],
         prompter: &mut Option<&mut dyn PermissionPrompter>,
         tool_results: &mut Vec<ConversationMessage>,
+        aids: &mut TurnAids,
     ) -> bool {
         if calls.len() < 2
             || interrupt_requested()
@@ -638,11 +762,358 @@ where
                 is_error,
             ));
         }
-        for message in results.into_iter().flatten() {
+        for (mut message, (_, name, input)) in results
+            .into_iter()
+            .zip(calls)
+            .filter_map(|(message, call)| message.map(|message| (message, call)))
+        {
+            self.after_tool(name, input, &mut message, aids);
             self.session.messages.push(message.clone());
             tool_results.push(message);
         }
         true
+    }
+
+    /// Après un appel d'outil : contrôle de syntaxe du fichier écrit, suivi
+    /// des modifications à vérifier, détection de blocage. Les remarques sont
+    /// jointes au résultat que lira le modèle.
+    fn after_tool(
+        &mut self,
+        tool_name: &str,
+        input: &str,
+        message: &mut ConversationMessage,
+        aids: &mut TurnAids,
+    ) {
+        let Some((output, is_error)) = tool_result_parts(message) else {
+            return;
+        };
+        let output = output.to_string();
+        let mut notes = Vec::new();
+
+        if matches!(tool_name, "edit_file" | "write_file" | "NotebookEdit") && !is_error {
+            aids.dirty = true;
+            aids.verified_commands.clear();
+            let path = json_field(&output, "filePath").or_else(|| json_field(input, "path"));
+            if let Some(path) = &path {
+                if !aids.originals.contains_key(path) {
+                    aids.originals.insert(
+                        path.clone(),
+                        harness::original_content(&output).unwrap_or_default(),
+                    );
+                }
+            }
+            if let Some(path) = path.as_deref().filter(|_| aids.check_failed) {
+                if let Some(name) = self.rewritten_check(path, &output, aids) {
+                    self.api_client.notify(&format!(
+                        "Attention : {name} sert à vérifier le travail et a été modifié après un échec : relisez ce changement"
+                    ));
+                    notes.push(harness::test_guard_feedback(&name));
+                }
+            }
+            if let Some(path) = path.filter(|_| harness::enabled(Aid::Diagnostics)) {
+                if let Some(error) = harness::syntax_check(std::path::Path::new(&path)) {
+                    let name = std::path::Path::new(&path)
+                        .file_name()
+                        .map_or_else(|| path.clone(), |name| name.to_string_lossy().to_string());
+                    self.api_client.notify(&format!(
+                        "Erreur de syntaxe dans {name} : signalée au modèle"
+                    ));
+                    notes.push(harness::syntax_feedback(&path, &error));
+                }
+            }
+        }
+        if matches!(tool_name, "bash" | "PowerShell") && !is_error {
+            if let Some(command) = json_field(input, "command") {
+                if harness::read_bash_output(&output).passed {
+                    aids.verified_commands.push(command);
+                } else if harness::is_check_command(&command) {
+                    aids.check_failed = true;
+                }
+            }
+        }
+        if harness::enabled(Aid::StallGuard) {
+            if let Some(reminder) = aids.stall.observe(tool_name, input, &output, is_error) {
+                self.api_client.notify(&reminder.notice);
+                notes.push(reminder.to_model);
+                aids.reminders += 1;
+                // Deuxième rappel du tour : l'agent s'enlise, un autre modèle l'aide.
+                if aids.reminders == 2 && is_error {
+                    notes.extend(self.advice_when_stuck(aids, Some(&output)));
+                }
+            }
+        }
+        if !notes.is_empty() {
+            append_tool_output(message, &notes.join("\n\n"));
+        }
+    }
+
+    /// Nom du fichier si cette modification réécrit, après un échec, des lignes
+    /// d'un fichier qui sert à vérifier le travail (test, ou script nommé par
+    /// la commande de vérification). Signalé une fois par fichier.
+    fn rewritten_check(&self, path: &str, output: &str, aids: &mut TurnAids) -> Option<String> {
+        if !harness::enabled(Aid::TestGuard) || aids.guarded_tests.contains(path) {
+            return None;
+        }
+        // Ajouter des tests est normal ; seules les lignes retirées comptent.
+        if !harness::removes_existing_lines(output) {
+            return None;
+        }
+        let cwd = std::env::current_dir().ok()?;
+        let file = std::path::Path::new(path);
+        let name = file.file_name()?.to_string_lossy().to_string();
+        let checks_the_work = harness::is_test_file(file, &cwd)
+            || harness::verify_commands(&self.verify, &cwd)
+                .iter()
+                .any(|command| command.contains(&name));
+        if !checks_the_work {
+            return None;
+        }
+        aids.guarded_tests.insert(path.to_string());
+        Some(name)
+    }
+
+    /// Vérification imposée : quand le modèle a modifié des fichiers et dit
+    /// avoir fini, Claw lance la commande de vérification du projet. En cas
+    /// d'échec, la sortie est renvoyée au modèle et le tour continue (au plus
+    /// `MAX_VERIFY_ROUNDS` corrections). Renvoie ce message, ou `None` si le
+    /// tour peut se terminer.
+    fn verification_gate(
+        &mut self,
+        aids: &mut TurnAids,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> Option<String> {
+        if self.subagent
+            || !aids.dirty
+            || aids.verify_disabled
+            || interrupt_requested()
+            || !harness::enabled(Aid::Verify)
+        {
+            return None;
+        }
+        let cwd = std::env::current_dir().ok()?;
+        let commands = harness::verify_commands(&self.verify, &cwd);
+        aids.dirty = false;
+        for command in commands {
+            if aids
+                .verified_commands
+                .iter()
+                .any(|ran| harness::covers(ran, &command))
+            {
+                continue;
+            }
+            self.api_client.notify(&format!(
+                "Vérification automatique après modification : {command}"
+            ));
+            let input = serde_json::json!({
+                "command": command,
+                "timeout": harness::VERIFY_TIMEOUT_MS,
+                "description": "Vérification automatique de Claw",
+            })
+            .to_string();
+            self.tool_executor.announce("bash", &input);
+            let message = self.execute_tool_call(
+                format!("claw-verify-{}", aids.verify_rounds),
+                "bash".to_string(),
+                &input,
+                prompter
+                    .as_mut()
+                    .map(|prompt| &mut **prompt as &mut dyn PermissionPrompter),
+            );
+            let (output, is_error) = tool_result_parts(&message)?;
+            if is_error {
+                // Refusée par l'utilisateur ou impossible à lancer : on le dit,
+                // pour ne pas laisser croire que le travail a été vérifié.
+                aids.verify_disabled = true;
+                self.api_client.notify(&format!(
+                    "Vérification non lancée ({command} refusée ou impossible) : le travail n'est pas vérifié"
+                ));
+                return None;
+            }
+            let result = harness::read_bash_output(output);
+            if result.timed_out {
+                aids.verify_disabled = true;
+                self.api_client.notify(&format!(
+                    "Vérification trop longue ({command}) : choisissez une commande plus rapide avec \"verify\" dans .claw/settings.json"
+                ));
+                return None;
+            }
+            if !result.passed {
+                aids.verify_rounds += 1;
+                aids.verify_failing = true;
+                aids.check_failed = true;
+                if aids.verify_rounds > harness::MAX_VERIFY_ROUNDS {
+                    self.api_client.notify(&format!(
+                        "La vérification échoue encore après {} corrections ({command}) : le travail n'est pas validé",
+                        harness::MAX_VERIFY_ROUNDS
+                    ));
+                    return None;
+                }
+                // Même sans nouvelle modification, la vérification sera relancée.
+                aids.dirty = true;
+                aids.verified_commands.clear();
+                let mut feedback = harness::verify_feedback(&command, &result);
+                // Deuxième échec : un autre modèle donne son diagnostic.
+                if aids.verify_rounds == 2 {
+                    if let Some(advice) = self.advice_when_stuck(aids, Some(&result.excerpt)) {
+                        feedback.push_str("\n\n");
+                        feedback.push_str(&advice);
+                    }
+                }
+                return Some(feedback);
+            }
+        }
+        if aids.verify_rounds > 0 {
+            self.api_client
+                .notify("Vérification réussie après correction");
+        }
+        aids.verify_failing = false;
+        None
+    }
+
+    /// Fin de la session vue par un conseiller : la demande et les derniers
+    /// échanges (appels d'outils et sorties), les plus récents en dernier.
+    fn transcript_tail(&self, max_chars: usize) -> String {
+        let mut parts = Vec::new();
+        for message in self.session.messages.iter().rev().take(14) {
+            for block in message.blocks.iter().rev() {
+                let text = match block {
+                    ContentBlock::Text { text } => {
+                        let role = if message.role == crate::session::MessageRole::Assistant {
+                            "agent"
+                        } else {
+                            "user"
+                        };
+                        format!("[{role}] {}", text.chars().take(1_500).collect::<String>())
+                    }
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        format!(
+                            "[call {name}] {}",
+                            input.chars().take(600).collect::<String>()
+                        )
+                    }
+                    ContentBlock::ToolResult {
+                        tool_name,
+                        output,
+                        is_error,
+                        ..
+                    } => format!(
+                        "[{} of {tool_name}] {}",
+                        if *is_error { "error" } else { "result" },
+                        output.chars().take(1_500).collect::<String>()
+                    ),
+                    _ => continue,
+                };
+                parts.push(text);
+            }
+        }
+        let mut kept = Vec::new();
+        let mut used = 0;
+        for part in parts {
+            used += part.chars().count();
+            if used > max_chars {
+                break;
+            }
+            kept.push(part);
+        }
+        kept.reverse();
+        kept.join("\n\n")
+    }
+
+    /// L'agent n'avance plus : un autre modèle lit la fin de la session et
+    /// propose une cause et une prochaine étape (une fois par tour).
+    fn advice_when_stuck(&mut self, aids: &mut TurnAids, latest: Option<&str>) -> Option<String> {
+        if aids.advised || self.subagent || !harness::enabled(Aid::Council) {
+            return None;
+        }
+        aids.advised = true;
+        let mut tail = self.transcript_tail(8_000);
+        if let Some(latest) = latest {
+            tail.push_str("\n\n[latest failure]\n");
+            tail.push_str(&latest.chars().take(2_000).collect::<String>());
+        }
+        self.api_client
+            .notify("L'agent n'avance plus : Claw demande un diagnostic à un autre modèle");
+        let consultation = self.api_client.consult(
+            ConsultPurpose::Unblock,
+            harness::UNBLOCK_SYSTEM,
+            &harness::unblock_prompt(&tail),
+        )?;
+        if consultation.text.trim().is_empty() {
+            return None;
+        }
+        self.api_client.notify(&format!(
+            "Diagnostic de {} transmis à l'agent",
+            consultation.model
+        ));
+        Some(harness::unblock_feedback(&consultation.text))
+    }
+
+    /// Relecture imposée : quand le tour a modifié assez de code et que la
+    /// vérification passe, un autre modèle relit le diff. Ses remarques sont
+    /// renvoyées au modèle (une relecture par tour). `None` : rien à corriger.
+    fn review_gate(&mut self, aids: &mut TurnAids, request: &str) -> Option<String> {
+        if aids.reviewed
+            || aids.verify_failing
+            || aids.originals.is_empty()
+            || self.subagent
+            || !self.review
+            || interrupt_requested()
+            || !harness::enabled(Aid::Review)
+        {
+            return None;
+        }
+        aids.reviewed = true;
+        let mut diffs = Vec::new();
+        let mut changed_lines = 0;
+        for (path, original) in &aids.originals {
+            let Ok(current) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let shown = std::env::current_dir()
+                .ok()
+                .and_then(|cwd| {
+                    std::path::Path::new(path)
+                        .strip_prefix(cwd)
+                        .ok()
+                        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+                })
+                .unwrap_or_else(|| path.clone());
+            let (diff, changed) = harness::unified_diff(&shown, original, &current);
+            if changed > 0 {
+                changed_lines += changed;
+                diffs.push(diff);
+            }
+        }
+        if diffs.is_empty()
+            || (changed_lines < harness::REVIEW_MIN_CHANGED_LINES && diffs.len() < 2)
+        {
+            return None;
+        }
+        self.api_client
+            .notify("Relecture des modifications par un autre modèle…");
+        let consultation = self.api_client.consult(
+            ConsultPurpose::Review,
+            harness::REVIEW_SYSTEM,
+            &harness::review_prompt(request, &diffs),
+        )?;
+        match harness::review_findings(&consultation.text) {
+            None => {
+                self.api_client.notify(&format!(
+                    "Relecture par {} : rien à corriger",
+                    consultation.model
+                ));
+                None
+            }
+            Some(findings) => {
+                self.api_client.notify(&format!(
+                    "Relecture par {} : {} remarque(s) transmise(s) à l'agent",
+                    consultation.model,
+                    findings.lines().count()
+                ));
+                // Les corrections seront vérifiées à leur tour.
+                Some(harness::review_feedback(&findings))
+            }
+        }
     }
 
     /// Autorisation, hooks `PreToolUse`/`PostToolUse`, point de restauration
@@ -1045,6 +1516,7 @@ mod tests {
                 git_status: None,
                 git_diff: None,
                 instruction_files: Vec::new(),
+                ..ProjectContext::default()
             })
             .with_os("linux", "6.8")
             .build();
@@ -1695,5 +2167,397 @@ mod tests {
     #[cfg(not(windows))]
     fn shell_snippet(script: &str) -> String {
         script.to_string()
+    }
+
+    // --- Aides au raisonnement ------------------------------------------------
+
+    #[derive(Default)]
+    struct Observed {
+        /// Messages reçus à chaque appel du modèle (texte de débogage).
+        requests: Vec<String>,
+        notices: Vec<String>,
+        announced: Vec<String>,
+        /// Demandes faites à un autre modèle (relecture, conseil).
+        consults: Vec<(super::ConsultPurpose, String)>,
+    }
+
+    /// Modèle scripté : une réponse par appel.
+    struct StepsApiClient {
+        steps: std::collections::VecDeque<Vec<AssistantEvent>>,
+        observed: std::rc::Rc<std::cell::RefCell<Observed>>,
+        /// Réponses de l'autre modèle consulté, dans l'ordre.
+        advisor: std::collections::VecDeque<&'static str>,
+    }
+
+    impl ApiClient for StepsApiClient {
+        fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.observed
+                .borrow_mut()
+                .requests
+                .push(format!("{:?}", request.messages));
+            self.steps
+                .pop_front()
+                .ok_or_else(|| RuntimeError::new("plus de réponse scriptée"))
+        }
+
+        fn notify(&mut self, notice: &str) {
+            self.observed.borrow_mut().notices.push(notice.to_string());
+        }
+
+        fn consult(
+            &mut self,
+            purpose: super::ConsultPurpose,
+            _system: &str,
+            prompt: &str,
+        ) -> Option<super::Consultation> {
+            self.observed
+                .borrow_mut()
+                .consults
+                .push((purpose, prompt.to_string()));
+            self.advisor.pop_front().map(|text| super::Consultation {
+                model: "relecteur".to_string(),
+                text: text.to_string(),
+            })
+        }
+    }
+
+    fn tool_step(name: &str, input: &str) -> Vec<AssistantEvent> {
+        vec![
+            AssistantEvent::ToolUse {
+                id: format!("appel-{name}"),
+                name: name.to_string(),
+                input: input.to_string(),
+            },
+            AssistantEvent::MessageStop,
+        ]
+    }
+
+    fn text_step(text: &str) -> Vec<AssistantEvent> {
+        vec![
+            AssistantEvent::TextDelta(text.to_string()),
+            AssistantEvent::MessageStop,
+        ]
+    }
+
+    const WRITTEN: &str = r#"{"filePath":"notes.txt","content":"x"}"#;
+    const PASSING: &str = r#"{"stdout":"ok","stderr":""}"#;
+    const FAILING: &str =
+        r#"{"stdout":"","stderr":"assertion failed","returnCodeInterpretation":"exit_code:1"}"#;
+
+    /// Runtime d'essai, ce que le modèle a vu, et les commandes lancées.
+    type Aided = (
+        ConversationRuntime<StepsApiClient, StaticToolExecutor>,
+        std::rc::Rc<std::cell::RefCell<Observed>>,
+        std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    );
+
+    /// Runtime dont l'outil `bash` renvoie les sorties données, dans l'ordre.
+    fn aided_runtime(steps: Vec<Vec<AssistantEvent>>, bash_outputs: Vec<&'static str>) -> Aided {
+        aided_runtime_with(steps, bash_outputs, Vec::new(), WRITTEN.to_string())
+    }
+
+    /// Variante : réponses de l'autre modèle consulté et sortie de `write_file`.
+    fn aided_runtime_with(
+        steps: Vec<Vec<AssistantEvent>>,
+        bash_outputs: Vec<&'static str>,
+        advisor: Vec<&'static str>,
+        written: String,
+    ) -> Aided {
+        let observed = std::rc::Rc::new(std::cell::RefCell::new(Observed::default()));
+        let bash_calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = std::rc::Rc::clone(&bash_calls);
+        let mut outputs = std::collections::VecDeque::from(bash_outputs);
+        let executor = StaticToolExecutor::new()
+            .register("write_file", move |_| Ok(written.clone()))
+            .register("probe", |_| Err(super::ToolError::new("introuvable")))
+            .register("bash", move |input| {
+                recorded.borrow_mut().push(input.to_string());
+                Ok(outputs.pop_front().unwrap_or(PASSING).to_string())
+            });
+        let runtime = ConversationRuntime::new(
+            Session::new(),
+            StepsApiClient {
+                steps: steps.into(),
+                observed: std::rc::Rc::clone(&observed),
+                advisor: advisor.into(),
+            },
+            executor,
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["système".to_string()],
+        )
+        .with_verify(crate::harness::VerifySetting::Commands(vec![
+            "verifier".to_string()
+        ]));
+        (runtime, observed, bash_calls)
+    }
+
+    #[test]
+    fn a_failed_verification_sends_the_model_back_to_work() {
+        let (mut runtime, observed, bash_calls) = aided_runtime(
+            vec![
+                tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
+                text_step("C'est fait."),
+                text_step("Corrigé."),
+            ],
+            vec![FAILING, PASSING],
+        );
+        let summary = runtime.run_turn("écris le fichier", None).expect("tour");
+
+        // Deux vérifications : la première échoue, la seconde suit la correction.
+        assert_eq!(bash_calls.borrow().len(), 2);
+        assert!(bash_calls.borrow()[0].contains(r#""command":"verifier""#));
+        assert_eq!(summary.iterations, 3);
+        let observed = observed.borrow();
+        assert!(observed.requests[2].contains("Automatic verification after your changes failed"));
+        assert!(observed.requests[2].contains("assertion failed"));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice == "Vérification automatique après modification : verifier"));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice == "Vérification réussie après correction"));
+    }
+
+    #[test]
+    fn no_verification_without_changes_or_when_the_model_already_ran_it() {
+        // Aucun fichier modifié : rien à vérifier.
+        let (mut runtime, _, bash_calls) = aided_runtime(vec![text_step("Bonjour.")], vec![]);
+        runtime.run_turn("salut", None).expect("tour");
+        assert!(bash_calls.borrow().is_empty());
+
+        // Le modèle a lancé lui-même la vérification après sa modification.
+        let (mut runtime, observed, bash_calls) = aided_runtime(
+            vec![
+                tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
+                tool_step("bash", r#"{"command":"verifier"}"#),
+                text_step("Fait et vérifié."),
+            ],
+            vec![PASSING],
+        );
+        runtime.run_turn("écris le fichier", None).expect("tour");
+        assert_eq!(bash_calls.borrow().len(), 1);
+        assert!(observed.borrow().notices.is_empty());
+    }
+
+    #[test]
+    fn verification_gives_up_after_a_few_corrections_and_says_so() {
+        let (mut runtime, observed, bash_calls) = aided_runtime(
+            vec![
+                tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
+                text_step("Fait."),
+                text_step("Essai 1."),
+                text_step("Essai 2."),
+                text_step("Essai 3."),
+            ],
+            vec![FAILING, FAILING, FAILING, FAILING],
+        );
+        runtime.run_turn("écris le fichier", None).expect("tour");
+        assert_eq!(bash_calls.borrow().len(), 4);
+        assert!(observed
+            .borrow()
+            .notices
+            .iter()
+            .any(|notice| notice.contains("le travail n'est pas validé")));
+    }
+
+    #[test]
+    fn a_model_going_in_circles_gets_one_reminder() {
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                tool_step("probe", "{}"),
+                tool_step("probe", "{}"),
+                tool_step("probe", "{}"),
+                text_step("Je change d'approche."),
+            ],
+            vec![],
+        );
+        runtime.run_turn("cherche", None).expect("tour");
+        let observed = observed.borrow();
+        // Le rappel accompagne le troisième résultat, pas les deux premiers.
+        assert!(!observed.requests[2].contains("exact `probe` call"));
+        assert!(observed.requests[3].contains("exact `probe` call 3 times"));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("3 appels identiques à probe")));
+        assert!(observed.announced.is_empty());
+    }
+
+    /// Fichier réel de six lignes, « créé » par l'outil `write_file` du test.
+    fn written_file(name: &str) -> (std::path::PathBuf, String) {
+        let path = std::env::temp_dir().join(format!(
+            "claw-revue-{name}-{}.py",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        let content = "def total(prix):\n    somme = 0\n    for p in prix:\n        somme += p\n    return somme\n\n";
+        std::fs::write(&path, content).expect("fichier");
+        let lines: Vec<String> = content.lines().map(|line| format!("+{line}")).collect();
+        let output = serde_json::json!({
+            "filePath": path.to_string_lossy(),
+            "structuredPatch": [{ "oldStart": 1, "oldLines": 0, "newStart": 1, "newLines": lines.len(), "lines": lines }],
+        })
+        .to_string();
+        (path, output)
+    }
+
+    #[test]
+    fn another_model_reviews_the_changes_once() {
+        let (path, output) = written_file("remarques");
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                tool_step("write_file", r#"{"path":"total.py","content":"x"}"#),
+                text_step("C'est fait."),
+                text_step("Corrigé."),
+            ],
+            vec![PASSING],
+            vec!["total.py:2 - liste vide non gérée - renvoyer 0"],
+            output,
+        );
+        runtime.run_turn("écris total.py", None).expect("tour");
+        let observed = observed.borrow();
+        // Une seule relecture, avec la demande et le diff.
+        assert_eq!(observed.consults.len(), 1);
+        assert_eq!(observed.consults[0].0, super::ConsultPurpose::Review);
+        assert!(observed.consults[0].1.contains("écris total.py"));
+        assert!(observed.consults[0].1.contains("+def total(prix):"));
+        // Les remarques reviennent au modèle, qui reprend la main.
+        assert!(observed.requests[2].contains("Another model reviewed your changes"));
+        assert!(observed.requests[2].contains("liste vide non gérée"));
+        assert!(observed.notices.iter().any(
+            |notice| notice == "Relecture par relecteur : 1 remarque(s) transmise(s) à l'agent"
+        ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_approved_review_ends_the_turn_and_small_edits_are_not_reviewed() {
+        let (path, output) = written_file("approuve");
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                tool_step("write_file", r#"{"path":"total.py","content":"x"}"#),
+                text_step("C'est fait."),
+            ],
+            vec![PASSING],
+            vec!["LGTM"],
+            output,
+        );
+        let summary = runtime.run_turn("écris total.py", None).expect("tour");
+        assert_eq!(summary.iterations, 2);
+        assert!(observed
+            .borrow()
+            .notices
+            .iter()
+            .any(|notice| notice == "Relecture par relecteur : rien à corriger"));
+        let _ = std::fs::remove_file(path);
+
+        // Une modification d'une ligne : pas de relecture.
+        let small =
+            std::env::temp_dir().join(format!("claw-revue-petit-{}.py", std::process::id()));
+        std::fs::write(&small, "x = 1\n").expect("fichier");
+        let output = serde_json::json!({
+            "filePath": small.to_string_lossy(),
+            "structuredPatch": [{ "lines": ["-x = 0", "+x = 1"] }],
+        })
+        .to_string();
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                tool_step("write_file", r#"{"path":"petit.py","content":"x"}"#),
+                text_step("Fait."),
+            ],
+            vec![PASSING],
+            vec!["jamais demandé"],
+            output,
+        );
+        runtime.run_turn("change x", None).expect("tour");
+        assert!(observed.borrow().consults.is_empty());
+        let _ = std::fs::remove_file(small);
+    }
+
+    #[test]
+    fn a_second_failed_verification_brings_advice_from_another_model() {
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
+                text_step("Fait."),
+                text_step("Essai 1."),
+                text_step("Essai 2."),
+            ],
+            vec![FAILING, FAILING, PASSING],
+            vec!["La cause est dans devise.py, pas dans rapport.py."],
+            WRITTEN.to_string(),
+        );
+        runtime.run_turn("corrige", None).expect("tour");
+        let observed = observed.borrow();
+        assert_eq!(observed.consults.len(), 1);
+        assert_eq!(observed.consults[0].0, super::ConsultPurpose::Unblock);
+        assert!(observed.consults[0].1.contains("assertion failed"));
+        // Le conseil accompagne le deuxième échec, pas le premier.
+        assert!(!observed.requests[2].contains("Advice from another model"));
+        assert!(observed.requests[3].contains("Advice from another model"));
+        assert!(observed.requests[3].contains("La cause est dans devise.py"));
+    }
+
+    #[test]
+    fn rewriting_a_test_after_a_failed_check_is_flagged_once() {
+        let cwd = std::env::current_dir().expect("dossier");
+        let patched = |added: &str| {
+            serde_json::json!({
+                "filePath": cwd.join("test_total.py").to_string_lossy(),
+                "structuredPatch": [{ "lines": ["-    assert total([1, 2]) == 3", added] }],
+            })
+            .to_string()
+        };
+        let rewritten = patched("+    assert True");
+        let flagged = |notices: &[String]| {
+            notices
+                .iter()
+                .filter(|notice| notice.starts_with("Attention : test_total.py"))
+                .count()
+        };
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                tool_step("bash", r#"{"command":"python -m unittest"}"#),
+                tool_step("write_file", r#"{"path":"test_total.py","content":"x"}"#),
+                tool_step("write_file", r#"{"path":"test_total.py","content":"y"}"#),
+                text_step("Fait."),
+            ],
+            vec![FAILING],
+            Vec::new(),
+            rewritten.clone(),
+        );
+        runtime.run_turn("corrige total", None).expect("tour");
+        assert_eq!(flagged(&observed.borrow().notices), 1);
+        assert!(observed.borrow().requests[2].contains("rewriting it proves nothing"));
+
+        // Sans échec auparavant, modifier un test est un travail ordinaire.
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                tool_step("write_file", r#"{"path":"test_total.py","content":"x"}"#),
+                text_step("Fait."),
+            ],
+            vec![PASSING],
+            Vec::new(),
+            rewritten,
+        );
+        runtime.run_turn("mets à jour le test", None).expect("tour");
+        assert_eq!(flagged(&observed.borrow().notices), 0);
+
+        // Après un échec, ajouter un test sans toucher aux autres reste permis.
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                tool_step("bash", r#"{"command":"python -m unittest"}"#),
+                tool_step("write_file", r#"{"path":"test_total.py","content":"x"}"#),
+                text_step("Fait."),
+            ],
+            vec![FAILING],
+            Vec::new(),
+            patched("+    assert total([1, 2]) == 3"),
+        );
+        runtime.run_turn("ajoute un test", None).expect("tour");
+        assert_eq!(flagged(&observed.borrow().notices), 0);
     }
 }

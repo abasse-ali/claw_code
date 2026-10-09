@@ -1,0 +1,1 @@
+Des tests de panier.py échouent. Corrige panier.py pour qu'il respecte ses docstrings ; il est interdit de modifier test_panier.py.

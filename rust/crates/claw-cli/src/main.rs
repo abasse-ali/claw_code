@@ -1,6 +1,7 @@
 mod acp;
 mod approval;
 mod bench;
+mod bench_hard;
 mod clipboard;
 mod credits;
 mod doctor;
@@ -855,11 +856,78 @@ fn default_permission_mode() -> PermissionMode {
         })
 }
 
+/// Outils qui servent rarement : un petit modèle s'y égare (il lance `REPL`
+/// au lieu de `bash`, interroge `Config`…). Ils restent disponibles avec
+/// `--allowedTools`.
+const SELDOM_USED_TOOLS: &[&str] = &[
+    "REPL",
+    "Config",
+    "Sleep",
+    "SendUserMessage",
+    "StructuredOutput",
+    "ToolSearch",
+];
+
+/// Le projet contient des notebooks Jupyter (cherchés une fois, sur trois niveaux).
+fn project_has_notebooks() -> bool {
+    static FOUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FOUND.get_or_init(|| {
+        let Ok(root) = env::current_dir() else {
+            return false;
+        };
+        let mut pending = vec![(root, 0)];
+        while let Some((dir, depth)) = pending.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if path.is_dir() {
+                    if depth < 3
+                        && !name.starts_with('.')
+                        && name != "node_modules"
+                        && name != "target"
+                    {
+                        pending.push((path, depth + 1));
+                    }
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("ipynb"))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+}
+
+/// Outils proposés au modèle. Sans liste explicite, seuls ceux qui servent
+/// dans la situation : pas d'outil de notebook sans notebook, pas de suivi de
+/// tâche de fond sans tâche de fond, `PowerShell` seulement faute de shell POSIX.
 fn filter_tool_specs(
     tool_registry: &GlobalToolRegistry,
     allowed_tools: Option<&AllowedToolSet>,
 ) -> Vec<ToolDefinition> {
-    tool_registry.definitions(allowed_tools)
+    let mut definitions = tool_registry.definitions(allowed_tools);
+    if allowed_tools.is_some() || !runtime::harness::enabled(runtime::harness::Aid::ToolDiet) {
+        return definitions;
+    }
+    let background = !runtime::bash_tasks::list().is_empty();
+    let posix_shell = plugins::posix_shell_program().is_some();
+    definitions.retain(|definition| match definition.name.as_str() {
+        name if SELDOM_USED_TOOLS.contains(&name) => false,
+        "BashOutput" | "KillShell" => background,
+        "PowerShell" => !posix_shell,
+        "NotebookEdit" => project_has_notebooks(),
+        "Consult" => {
+            runtime::harness::enabled(runtime::harness::Aid::Council)
+                && !tools::advisors::configured_models().is_empty()
+        }
+        _ => true,
+    });
+    definitions
 }
 
 fn parse_system_prompt_args(args: &[String]) -> Result<CliAction, String> {
@@ -4375,6 +4443,25 @@ fn build_runtime_with_ui(
     let emit_output = emit_output && ui.is_none();
     let observer = ui.as_ref().map(|ui| Arc::clone(&ui.observer));
     let (feature_config, tool_registry) = build_runtime_plugin_state()?;
+    // Mode plan : le modèle de planification (`plannerModel`), s'il est réglé,
+    // réfléchit à la place du modèle de la session.
+    let planner = feature_config
+        .planner_model()
+        .filter(|_| {
+            permission_mode == PermissionMode::ReadOnly
+                && runtime::harness::enabled(runtime::harness::Aid::Planner)
+        })
+        .map(resolve_model_alias)
+        .filter(|planner| *planner != model);
+    let planner_notice = planner
+        .as_ref()
+        .map(|planner| format!("Mode plan : la réflexion est confiée à {planner} (plannerModel)"));
+    let model = planner.unwrap_or(model);
+    ACTIVE_MODEL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone_from(&model);
+    tools::advisors::set_resolver(|| models::advisor_models(&active_model()));
     let session_fallbacks = env::current_dir()
         .ok()
         .and_then(|cwd| ConfigLoader::default_for(&cwd).load().ok())
@@ -4414,7 +4501,8 @@ fn build_runtime_with_ui(
             tool_registry.clone(),
             progress_reporter,
         )?
-        .with_observer(observer.clone()),
+        .with_observer(observer.clone())
+        .with_start_notice(planner_notice),
         CliToolExecutor::new(allowed_tools.clone(), emit_output, tool_registry.clone())
             .with_observer(observer),
         policy,
@@ -4478,6 +4566,17 @@ fn expert_command_prompt(command: ExpertCommand, args: Option<&str>) -> Result<S
             };
             format!(
                 "/adr — Write an Architecture Decision Record about: {decision}\n\nBase it on our conversation and on the codebase. Store it in docs/adr/ (create the directory if needed) as NNNN-short-kebab-title.md, where NNNN is the next number after the existing records. Use the sections: Title, Status (Proposed), Date, Context, Decision, Alternatives considered (with their trade-offs), Consequences (positive and negative). Then create the file and show me its path."
+            )
+        }
+        ExpertCommand::Avis => {
+            let Some(question) = args else {
+                return Err(
+                    "Usage : /avis <question>  (ex. /avis faut-il un cache Redis ou en mémoire ?)"
+                        .to_string(),
+                );
+            };
+            format!(
+                "/avis — Get independent second opinions on this question: {question}\n\nFirst gather what is needed to answer well (read the relevant code). Then call the Consult tool with the question and, in `context`, everything the other models need: code excerpts, constraints, what was already tried. Finally compare the answers: where they agree, where they differ and who is right given the code, and give your own recommendation with its main risk."
             )
         }
         ExpertCommand::Fix => {
@@ -4919,6 +5018,8 @@ struct DefaultRuntimeClient {
     tool_registry: GlobalToolRegistry,
     progress_reporter: Option<InternalPromptProgressReporter>,
     observer: Option<SharedObserver>,
+    /// Avis à donner avant la première requête (modèle de planification).
+    start_notice: Option<String>,
 }
 
 impl DefaultRuntimeClient {
@@ -4965,11 +5066,17 @@ impl DefaultRuntimeClient {
             tool_registry,
             progress_reporter,
             observer: None,
+            start_notice: None,
         })
     }
 
     fn with_observer(mut self, observer: Option<SharedObserver>) -> Self {
         self.observer = observer;
+        self
+    }
+
+    fn with_start_notice(mut self, notice: Option<String>) -> Self {
+        self.start_notice = notice;
         self
     }
 }
@@ -5035,10 +5142,41 @@ impl ApiClient for DefaultRuntimeClient {
         }
     }
 
+    fn consult(
+        &mut self,
+        purpose: runtime::ConsultPurpose,
+        system: &str,
+        prompt: &str,
+    ) -> Option<runtime::Consultation> {
+        let models = tools::advisors::configured_models();
+        if models.is_empty() {
+            return None;
+        }
+        if self.emit_output {
+            live::show(match purpose {
+                runtime::ConsultPurpose::Review => "Relecture par un autre modèle…",
+                runtime::ConsultPurpose::Unblock => "Diagnostic par un autre modèle…",
+            });
+        }
+        match tools::advisors::ask(&models, system, prompt, 3_000) {
+            Ok(opinion) => Some(runtime::Consultation {
+                model: opinion.model,
+                text: opinion.text,
+            }),
+            Err(error) => {
+                self.notify(&format!("Aucun autre modèle n'a répondu ({error})"));
+                None
+            }
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         if let Some(progress_reporter) = &self.progress_reporter {
             progress_reporter.mark_model_phase();
+        }
+        if let Some(notice) = self.start_notice.take() {
+            self.notify(&notice);
         }
         let messages = convert_messages(&request.messages);
         let system =
@@ -5047,10 +5185,11 @@ impl ApiClient for DefaultRuntimeClient {
             .enable_tools
             .then(|| filter_tool_specs(&self.tool_registry, self.allowed_tools.as_ref()));
         let enable_tools = self.enable_tools;
+        let passback = runtime::harness::enabled(runtime::harness::Aid::ReasoningPassback);
         let build = move |model: &str| MessageRequest {
             model: model.to_string(),
             max_tokens: max_tokens_for_model(model),
-            messages: messages.clone(),
+            messages: messages_for_model(model, &messages, passback),
             system: system.clone(),
             tools: tools.clone(),
             tool_choice: enable_tools.then_some(ToolChoice::Auto),
@@ -5063,220 +5202,303 @@ impl ApiClient for DefaultRuntimeClient {
             live::show("Réflexion…");
         }
 
-        self.runtime.block_on(async {
-            let opened =
-                runtime::interrupt::interruptible(self.chain.open_stream(&build, &mut notify))
-                    .await?;
-            // Chaque étape de l'agent compte : l'affichage des crédits suit en direct.
-            credits::note_request(&opened.model);
-            let mut stream = opened.stream;
-            let mut first_event = opened.first_event;
-            let mut stdout = live::LiveStdout::new();
-            let mut sink = io::sink();
-            let out: &mut dyn Write = if emit { &mut stdout } else { &mut sink };
-            let renderer = TerminalRenderer::new();
-            let mut markdown_stream = MarkdownStreamState::default();
-            // Réponse préfixée `●`, raisonnement résumé en une ligne `∴`.
-            let mut answer = transcript::Prefixer::assistant();
-            let mut reasoning = transcript::ThinkingDisplay::new();
-            let mut events = Vec::new();
-            // Indexé par bloc : les modèles compatibles OpenAI émettent souvent
-            // plusieurs appels d'outils en parallèle dont les deltas s'entrelacent.
-            let mut pending_tools = PendingTools::new();
-            let mut saw_stop = false;
-            let mut signed_thinking = SignedThinking::new();
+        // Une connexion coupée pendant la réponse ne fait pas échouer le tour :
+        // la même requête est relancée.
+        let mut retries_left = BROKEN_STREAM_RETRIES;
+        loop {
+            let result: Result<Vec<AssistantEvent>, RuntimeError> = self.runtime.block_on(async {
+                let opened =
+                    runtime::interrupt::interruptible(self.chain.open_stream(&build, &mut notify))
+                        .await?;
+                // Chaque étape de l'agent compte : l'affichage des crédits suit en direct.
+                credits::note_request(&opened.model);
+                let mut stream = opened.stream;
+                let mut first_event = opened.first_event;
+                let mut stdout = live::LiveStdout::new();
+                let mut sink = io::sink();
+                let out: &mut dyn Write = if emit { &mut stdout } else { &mut sink };
+                let renderer = TerminalRenderer::new();
+                let mut markdown_stream = MarkdownStreamState::default();
+                // Réponse préfixée `●`, raisonnement résumé en une ligne `∴`.
+                let mut answer = transcript::Prefixer::assistant();
+                let mut reasoning = transcript::ThinkingDisplay::new();
+                let mut events = Vec::new();
+                // Indexé par bloc : les modèles compatibles OpenAI émettent souvent
+                // plusieurs appels d'outils en parallèle dont les deltas s'entrelacent.
+                let mut pending_tools = PendingTools::new();
+                let mut saw_stop = false;
+                let mut signed_thinking = SignedThinking::new();
 
-            loop {
-                let event = match first_event.take() {
-                    Some(event) => event,
-                    None => match runtime::interrupt::interruptible(stream.next_event()).await? {
+                loop {
+                    let event = match first_event.take() {
                         Some(event) => event,
-                        None => break,
-                    },
-                };
-                match event {
-                    ApiStreamEvent::MessageStart(start) => {
-                        for block in start.message.content {
+                        None => match runtime::interrupt::interruptible(stream.next_event()).await?
+                        {
+                            Some(event) => event,
+                            None => break,
+                        },
+                    };
+                    match event {
+                        ApiStreamEvent::MessageStart(start) => {
+                            for block in start.message.content {
+                                push_output_block(
+                                    block,
+                                    0,
+                                    out,
+                                    &mut events,
+                                    &mut pending_tools,
+                                    true,
+                                )?;
+                            }
+                        }
+                        ApiStreamEvent::ContentBlockStart(start) => {
+                            start_signed_thinking(
+                                &start.content_block,
+                                start.index,
+                                &mut signed_thinking,
+                            );
                             push_output_block(
-                                block,
-                                0,
+                                start.content_block,
+                                start.index,
                                 out,
                                 &mut events,
                                 &mut pending_tools,
                                 true,
                             )?;
                         }
-                    }
-                    ApiStreamEvent::ContentBlockStart(start) => {
-                        start_signed_thinking(
-                            &start.content_block,
-                            start.index,
-                            &mut signed_thinking,
-                        );
-                        push_output_block(
-                            start.content_block,
-                            start.index,
-                            out,
-                            &mut events,
-                            &mut pending_tools,
-                            true,
-                        )?;
-                    }
-                    ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
-                        ContentBlockDelta::TextDelta { text } => {
-                            if !text.is_empty() {
-                                reasoning
-                                    .close(out)
-                                    .map_err(|error| RuntimeError::new(error.to_string()))?;
-                                if let Some(progress_reporter) = &self.progress_reporter {
-                                    progress_reporter.mark_text_phase(&text);
-                                }
-                                // Un bloc complet : la ligne vide qui le sépare du
-                                // suivant est retirée par le rendu, on la remet.
-                                if let Some(rendered) = markdown_stream.push(&renderer, &text) {
-                                    answer
-                                        .write(out, &format!("{rendered}\n\n"))
+                        ApiStreamEvent::ContentBlockDelta(delta) => match delta.delta {
+                            ContentBlockDelta::TextDelta { text } => {
+                                if !text.is_empty() {
+                                    reasoning
+                                        .close(out)
                                         .map_err(|error| RuntimeError::new(error.to_string()))?;
+                                    if let Some(progress_reporter) = &self.progress_reporter {
+                                        progress_reporter.mark_text_phase(&text);
+                                    }
+                                    // Un bloc complet : la ligne vide qui le sépare du
+                                    // suivant est retirée par le rendu, on la remet.
+                                    if let Some(rendered) = markdown_stream.push(&renderer, &text) {
+                                        answer.write(out, &format!("{rendered}\n\n")).map_err(
+                                            |error| RuntimeError::new(error.to_string()),
+                                        )?;
+                                    }
+                                    if let Some(observer) = &self.observer {
+                                        observer.text_delta(&text);
+                                    }
+                                    events.push(AssistantEvent::TextDelta(text));
+                                }
+                            }
+                            ContentBlockDelta::InputJsonDelta { partial_json } => {
+                                if let Some((_, _, input)) = pending_tools.get_mut(&delta.index) {
+                                    input.push_str(&partial_json);
+                                }
+                            }
+                            ContentBlockDelta::ThinkingDelta { thinking } => {
+                                if let Some(entry) = signed_thinking.get_mut(&delta.index) {
+                                    entry.0.push_str(&thinking);
+                                }
+                                if emit {
+                                    transcript::record_thinking(&thinking);
+                                }
+                                reasoning
+                                    .push(out, &thinking)
+                                    .map_err(|error| RuntimeError::new(error.to_string()))?;
+                                if let Some(observer) = &self.observer {
+                                    observer.thinking_delta(&thinking);
+                                }
+                            }
+                            ContentBlockDelta::SignatureDelta { signature } => {
+                                if let Some(entry) = signed_thinking.get_mut(&delta.index) {
+                                    entry.1.push_str(&signature);
+                                }
+                            }
+                        },
+                        ApiStreamEvent::ContentBlockStop(stop) => {
+                            finish_signed_thinking(stop.index, &mut signed_thinking, &mut events);
+                            reasoning
+                                .close(out)
+                                .map_err(|error| RuntimeError::new(error.to_string()))?;
+                            if let Some(rendered) = markdown_stream.flush(&renderer) {
+                                answer
+                                    .write(out, &rendered)
+                                    .map_err(|error| RuntimeError::new(error.to_string()))?;
+                            }
+                            if let Some((id, name, input)) = pending_tools.remove(&stop.index) {
+                                // « Bash », « Read »… (noms de Claude Code) : nom du registre.
+                                let name =
+                                    self.tool_registry.resolve_tool_name(&name).unwrap_or(name);
+                                if let Some(progress_reporter) = &self.progress_reporter {
+                                    progress_reporter.mark_tool_phase(&name, &input);
+                                }
+                                // L'appel s'affiche juste avant son exécution (ou sa
+                                // demande d'autorisation), son résultat dessous.
+                                answer
+                                    .finish_line(out)
+                                    .map_err(|error| RuntimeError::new(error.to_string()))?;
+                                answer.reset();
+                                if emit {
+                                    transcript::queue_call(&name, &input);
                                 }
                                 if let Some(observer) = &self.observer {
-                                    observer.text_delta(&text);
+                                    observer.tool_call(&name, &input);
                                 }
-                                events.push(AssistantEvent::TextDelta(text));
+                                events.push(AssistantEvent::ToolUse { id, name, input });
                             }
                         }
-                        ContentBlockDelta::InputJsonDelta { partial_json } => {
-                            if let Some((_, _, input)) = pending_tools.get_mut(&delta.index) {
-                                input.push_str(&partial_json);
-                            }
+                        ApiStreamEvent::MessageDelta(delta) => {
+                            events.push(AssistantEvent::Usage(TokenUsage {
+                                input_tokens: delta.usage.input_tokens,
+                                output_tokens: delta.usage.output_tokens,
+                                cache_creation_input_tokens: 0,
+                                cache_read_input_tokens: 0,
+                            }));
                         }
-                        ContentBlockDelta::ThinkingDelta { thinking } => {
-                            if let Some(entry) = signed_thinking.get_mut(&delta.index) {
-                                entry.0.push_str(&thinking);
+                        ApiStreamEvent::MessageStop(_) => {
+                            saw_stop = true;
+                            if let Some(rendered) = markdown_stream.flush(&renderer) {
+                                answer
+                                    .write(out, &rendered)
+                                    .map_err(|error| RuntimeError::new(error.to_string()))?;
                             }
-                            if emit {
-                                transcript::record_thinking(&thinking);
-                            }
-                            reasoning
-                                .push(out, &thinking)
-                                .map_err(|error| RuntimeError::new(error.to_string()))?;
-                            if let Some(observer) = &self.observer {
-                                observer.thinking_delta(&thinking);
-                            }
+                            events.push(AssistantEvent::MessageStop);
                         }
-                        ContentBlockDelta::SignatureDelta { signature } => {
-                            if let Some(entry) = signed_thinking.get_mut(&delta.index) {
-                                entry.1.push_str(&signature);
-                            }
-                        }
-                    },
-                    ApiStreamEvent::ContentBlockStop(stop) => {
-                        finish_signed_thinking(stop.index, &mut signed_thinking, &mut events);
-                        reasoning
-                            .close(out)
-                            .map_err(|error| RuntimeError::new(error.to_string()))?;
-                        if let Some(rendered) = markdown_stream.flush(&renderer) {
-                            answer
-                                .write(out, &rendered)
-                                .map_err(|error| RuntimeError::new(error.to_string()))?;
-                        }
-                        if let Some((id, name, input)) = pending_tools.remove(&stop.index) {
-                            // « Bash », « Read »… (noms de Claude Code) : nom du registre.
-                            let name = self.tool_registry.resolve_tool_name(&name).unwrap_or(name);
-                            if let Some(progress_reporter) = &self.progress_reporter {
-                                progress_reporter.mark_tool_phase(&name, &input);
-                            }
-                            // L'appel s'affiche juste avant son exécution (ou sa
-                            // demande d'autorisation), son résultat dessous.
-                            answer
-                                .finish_line(out)
-                                .map_err(|error| RuntimeError::new(error.to_string()))?;
-                            answer.reset();
-                            if emit {
-                                transcript::queue_call(&name, &input);
-                            }
-                            if let Some(observer) = &self.observer {
-                                observer.tool_call(&name, &input);
-                            }
-                            events.push(AssistantEvent::ToolUse { id, name, input });
-                        }
-                    }
-                    ApiStreamEvent::MessageDelta(delta) => {
-                        events.push(AssistantEvent::Usage(TokenUsage {
-                            input_tokens: delta.usage.input_tokens,
-                            output_tokens: delta.usage.output_tokens,
-                            cache_creation_input_tokens: 0,
-                            cache_read_input_tokens: 0,
-                        }));
-                    }
-                    ApiStreamEvent::MessageStop(_) => {
-                        saw_stop = true;
-                        if let Some(rendered) = markdown_stream.flush(&renderer) {
-                            answer
-                                .write(out, &rendered)
-                                .map_err(|error| RuntimeError::new(error.to_string()))?;
-                        }
-                        events.push(AssistantEvent::MessageStop);
                     }
                 }
-            }
-            reasoning
-                .close(out)
-                .map_err(|error| RuntimeError::new(error.to_string()))?;
-            answer
-                .finish_line(out)
-                .map_err(|error| RuntimeError::new(error.to_string()))?;
+                reasoning
+                    .close(out)
+                    .map_err(|error| RuntimeError::new(error.to_string()))?;
+                answer
+                    .finish_line(out)
+                    .map_err(|error| RuntimeError::new(error.to_string()))?;
 
-            if !saw_stop
-                && events.iter().any(|event| {
-                    matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
-                        || matches!(event, AssistantEvent::ToolUse { .. })
-                })
-            {
-                events.push(AssistantEvent::MessageStop);
-            }
+                if !saw_stop
+                    && events.iter().any(|event| {
+                        matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
+                            || matches!(event, AssistantEvent::ToolUse { .. })
+                    })
+                {
+                    events.push(AssistantEvent::MessageStop);
+                }
 
-            if events
-                .iter()
-                .any(|event| matches!(event, AssistantEvent::MessageStop))
-            {
-                return Ok(events);
-            }
+                if events
+                    .iter()
+                    .any(|event| matches!(event, AssistantEvent::MessageStop))
+                {
+                    return Ok(events);
+                }
 
-            let build_complete = |model: &str| MessageRequest {
-                stream: false,
-                ..build(model)
-            };
-            let (_, response) =
-                runtime::interrupt::interruptible(self.chain.send(&build_complete, &mut notify))
-                    .await?;
-            let events = response_to_events(response, out)?
-                .into_iter()
-                .map(|event| match event {
-                    AssistantEvent::ToolUse { id, name, input } => AssistantEvent::ToolUse {
-                        id,
-                        name: self.tool_registry.resolve_tool_name(&name).unwrap_or(name),
-                        input,
-                    },
-                    other => other,
-                })
-                .collect::<Vec<_>>();
-            if let Some(observer) = &self.observer {
-                for event in &events {
-                    match event {
-                        AssistantEvent::TextDelta(text) => observer.text_delta(text),
-                        AssistantEvent::ToolUse { name, input, .. } => {
-                            observer.tool_call(name, input);
+                let build_complete = |model: &str| MessageRequest {
+                    stream: false,
+                    ..build(model)
+                };
+                let (_, response) = runtime::interrupt::interruptible(
+                    self.chain.send(&build_complete, &mut notify),
+                )
+                .await?;
+                let events = response_to_events(response, out)?
+                    .into_iter()
+                    .map(|event| match event {
+                        AssistantEvent::ToolUse { id, name, input } => AssistantEvent::ToolUse {
+                            id,
+                            name: self.tool_registry.resolve_tool_name(&name).unwrap_or(name),
+                            input,
+                        },
+                        other => other,
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(observer) = &self.observer {
+                    for event in &events {
+                        match event {
+                            AssistantEvent::TextDelta(text) => observer.text_delta(text),
+                            AssistantEvent::ToolUse { name, input, .. } => {
+                                observer.tool_call(name, input);
+                            }
+                            AssistantEvent::Thinking { thinking, .. } => {
+                                observer.thinking_delta(thinking);
+                            }
+                            AssistantEvent::Usage(_) | AssistantEvent::MessageStop => {}
                         }
-                        AssistantEvent::Thinking { thinking, .. } => {
-                            observer.thinking_delta(thinking);
-                        }
-                        AssistantEvent::Usage(_) | AssistantEvent::MessageStop => {}
                     }
                 }
+                Ok(events)
+            });
+            match result {
+                Err(error) if retries_left > 0 && is_broken_stream(&error.to_string()) => {
+                    retries_left -= 1;
+                    if emit {
+                        transcript::discard_calls();
+                    }
+                    notify("Connexion coupée pendant la réponse : nouvelle tentative");
+                    std::thread::sleep(Duration::from_millis(1_500));
+                    if emit {
+                        live::show("Réflexion…");
+                    }
+                }
+                other => return other,
             }
-            Ok(events)
-        })
+        }
     }
+}
+
+/// Messages envoyés à `model`. Le raisonnement gardé d'un modèle `OpenRouter`
+/// (non signé par Anthropic) n'est renvoyé qu'aux modèles compatibles `OpenAI` :
+/// l'API d'Anthropic le refuserait. Il est retiré aussi quand l'aide est coupée.
+fn messages_for_model(model: &str, messages: &[InputMessage], passback: bool) -> Vec<InputMessage> {
+    let anthropic = matches!(detect_provider_kind(model), ProviderKind::ClawApi);
+    if passback && !anthropic {
+        return messages.to_vec();
+    }
+    messages
+        .iter()
+        .filter_map(|message| {
+            let content = message
+                .content
+                .iter()
+                .filter(|block| {
+                    !matches!(block, InputContentBlock::Thinking { signature, .. }
+                        if api::is_passback_reasoning(signature))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            (!content.is_empty()).then(|| InputMessage {
+                role: message.role.clone(),
+                content,
+            })
+        })
+        .collect()
+}
+
+/// Modèle de la session en cours : les modèles consultés sont « les autres ».
+static ACTIVE_MODEL: Mutex<String> = Mutex::new(String::new());
+
+fn active_model() -> String {
+    ACTIVE_MODEL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// Relances après une connexion coupée en cours de réponse.
+const BROKEN_STREAM_RETRIES: u32 = 2;
+
+/// La réponse s'est interrompue côté réseau (et non par l'utilisateur ou par
+/// un refus du fournisseur) : la même requête peut être relancée.
+fn is_broken_stream(error: &str) -> bool {
+    if runtime::interrupt::is_interruption(error) {
+        return false;
+    }
+    let lower = error.to_ascii_lowercase();
+    [
+        "error decoding response body",
+        "connection reset",
+        "connection closed",
+        "forcibly closed",
+        "unexpected eof",
+        "incomplete message",
+        "broken pipe",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 /// Durée lisible : `8 s`, `2 min 05 s`.
@@ -5832,6 +6054,15 @@ impl ToolExecutor for CliToolExecutor {
                 self.report(name, input, result)
             })
             .collect()
+    }
+
+    fn announce(&mut self, tool_name: &str, input: &str) {
+        if self.emit_output {
+            transcript::queue_call(tool_name, input);
+        }
+        if let Some(observer) = &self.observer {
+            observer.tool_call(tool_name, input);
+        }
     }
 
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {

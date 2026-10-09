@@ -45,6 +45,7 @@ pub fn report(model: &str, version: &str) -> String {
     checks.extend(config_checks(model));
     checks.push(openrouter_check(model));
     checks.push(anthropic_check());
+    checks.push(advisors_check(model));
     checks.extend(local_server_checks());
     checks.push(tool_check("Git", "git", true));
     checks.push(shell_check());
@@ -175,6 +176,20 @@ fn openrouter_check(model: &str) -> Check {
             "OpenRouter",
             format!("clé refusée ou service injoignable : {error}"),
         ),
+    }
+}
+
+/// Modèles consultés pour la relecture, le diagnostic et le second avis.
+fn advisors_check(model: &str) -> Check {
+    let advisors = crate::models::advisor_models(model);
+    if advisors.is_empty() {
+        Check::new(
+            Level::Info,
+            "Autres avis",
+            "aucun autre modèle (relecture et second avis coupés ; réglez \"advisorModels\")",
+        )
+    } else {
+        Check::new(Level::Ok, "Autres avis", advisors.join(", "))
     }
 }
 

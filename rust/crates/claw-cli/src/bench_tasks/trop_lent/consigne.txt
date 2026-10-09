@@ -1,0 +1,1 @@
+Les deux fonctions de listes.py sont correctes mais beaucoup trop lentes sur de grandes listes (200 000 éléments). Rends-les rapides sans changer leurs résultats, doublons compris.

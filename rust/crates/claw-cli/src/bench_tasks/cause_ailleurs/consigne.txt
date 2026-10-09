@@ -1,0 +1,1 @@
+Le test du rapport échoue : le total en euros est faux d'un centime. Trouve la cause et corrige-la, sans modifier les tests.

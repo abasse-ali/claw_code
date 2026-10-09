@@ -53,6 +53,30 @@ pub struct ProjectContext {
     pub git_status: Option<String>,
     pub git_diff: Option<String>,
     pub instruction_files: Vec<ContextFile>,
+    /// Carte du projet (fichiers et symboles principaux).
+    pub repo_map: Option<String>,
+    /// Leçons notées par l'agent lors des sessions précédentes.
+    pub lessons: Option<String>,
+}
+
+/// Leçons du projet : `.claw/lessons.md`, écrites par l'outil `Remember`.
+pub const LESSONS_FILE: &str = "lessons.md";
+const MAX_LESSONS_CHARS: usize = 4_000;
+
+/// Les leçons les plus récentes (fin du fichier) dans la limite du budget.
+fn read_lessons(cwd: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(cwd.join(".claw").join(LESSONS_FILE)).ok()?;
+    let mut kept: Vec<&str> = Vec::new();
+    let mut used = 0;
+    for line in text.lines().rev().filter(|line| !line.trim().is_empty()) {
+        used += line.len() + 1;
+        if used > MAX_LESSONS_CHARS {
+            break;
+        }
+        kept.push(line);
+    }
+    kept.reverse();
+    (!kept.is_empty()).then(|| kept.join("\n"))
 }
 
 impl ProjectContext {
@@ -68,6 +92,8 @@ impl ProjectContext {
             git_status: None,
             git_diff: None,
             instruction_files,
+            repo_map: None,
+            lessons: None,
         })
     }
 
@@ -78,6 +104,12 @@ impl ProjectContext {
         let mut context = Self::discover(cwd, current_date)?;
         context.git_status = read_git_status(&context.cwd);
         context.git_diff = read_git_diff(&context.cwd);
+        if crate::harness::enabled(crate::harness::Aid::RepoMap) {
+            context.repo_map = crate::repo_map::build(&context.cwd);
+        }
+        if crate::harness::enabled(crate::harness::Aid::Lessons) {
+            context.lessons = read_lessons(&context.cwd);
+        }
         Ok(context)
     }
 }
@@ -161,6 +193,14 @@ impl SystemPromptBuilder {
             if !project_context.instruction_files.is_empty() {
                 sections.push(render_instruction_files(&project_context.instruction_files));
             }
+            if let Some(map) = &project_context.repo_map {
+                sections.push(map.clone());
+            }
+            if let Some(lessons) = &project_context.lessons {
+                sections.push(format!(
+                    "# Lessons from previous sessions\nNotes saved with the Remember tool during earlier sessions in this project. Rely on them unless the code now says otherwise.\n{lessons}"
+                ));
+            }
         }
         if let Some(config) = &self.config {
             sections.push(render_config_section(config));
@@ -189,6 +229,7 @@ impl SystemPromptBuilder {
         let mut lines = vec!["# Environment context".to_string()];
         lines.extend(prepend_bullets(vec![
             format!("Working directory: {cwd}"),
+            "File tools take paths relative to the working directory (for example `src/main.rs`). Never invent a root such as /workspace or /app: when unsure, list files with glob_search first.".to_string(),
             format!("Date: {date}"),
             format!(
                 "Platform: {} {}",
@@ -593,6 +634,7 @@ fn get_simple_doing_tasks_section() -> String {
         "Do not add speculative abstractions, compatibility shims, or unrelated cleanup.".to_string(),
         "Do not create files unless they are required to complete the task.".to_string(),
         "If an approach fails, diagnose the failure before switching tactics.".to_string(),
+        "When you learn something about this project that would have saved you time (a build or test quirk, a convention, where something lives, a pitfall), or when the user corrects you, save it in one line with the Remember tool so later sessions start with it. Do not use it as a log of what you just changed. Never save secrets, and skip what CLAW.md already says.".to_string(),
         "Be careful not to introduce security vulnerabilities such as command injection, XSS, or SQL injection.".to_string(),
         "Report outcomes faithfully: if verification fails or was not run, say so explicitly.".to_string(),
     ]);

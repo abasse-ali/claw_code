@@ -7,6 +7,7 @@ mod compact;
 mod config;
 mod conversation;
 mod file_ops;
+pub mod harness;
 mod hooks;
 pub mod interrupt;
 mod json;
@@ -19,6 +20,7 @@ mod paths;
 mod permissions;
 mod prompt;
 mod remote;
+pub mod repo_map;
 pub mod sandbox;
 pub use bash::stop_all_containers;
 mod session;
@@ -40,9 +42,9 @@ pub use config::{
     CLAW_SETTINGS_SCHEMA_NAME,
 };
 pub use conversation::{
-    ApiClient, ApiRequest, AssistantEvent, AutoCompactionConfig, ConversationRuntime, RuntimeError,
-    StaticToolExecutor, ToolError, ToolExecutor, TurnSummary, HOOK_CONTEXT_PREFIX,
-    STOP_HOOK_PREFIX,
+    ApiClient, ApiRequest, AssistantEvent, AutoCompactionConfig, ConsultPurpose, Consultation,
+    ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError, ToolExecutor, TurnSummary,
+    HOOK_CONTEXT_PREFIX, STOP_HOOK_PREFIX,
 };
 pub use file_ops::{
     edit_file, glob_search, grep_search, read_file, write_file, EditFileOutput, GlobSearchOutput,

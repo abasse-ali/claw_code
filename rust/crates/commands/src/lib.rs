@@ -78,6 +78,7 @@ pub enum ExpertCommand {
     Archi,
     Adr,
     Fix,
+    Avis,
 }
 
 impl ExpertCommand {
@@ -89,6 +90,7 @@ impl ExpertCommand {
             Self::Archi => "archi",
             Self::Adr => "adr",
             Self::Fix => "fix",
+            Self::Avis => "avis",
         }
     }
 
@@ -99,6 +101,7 @@ impl ExpertCommand {
             "archi" | "architecture" => Some(Self::Archi),
             "adr" => Some(Self::Adr),
             "fix" => Some(Self::Fix),
+            "avis" | "consult" => Some(Self::Avis),
             _ => None,
         }
     }
@@ -393,6 +396,14 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         aliases: &[],
         summary: "Lance les tests et corrige jusqu'à ce qu'ils passent",
         argument_hint: Some("[commande de test]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Engineering,
+    },
+    SlashCommandSpec {
+        name: "avis",
+        aliases: &["consult"],
+        summary: "Second avis : la question est posée à plusieurs autres modèles, puis comparée",
+        argument_hint: Some("<question>"),
         resume_supported: false,
         category: SlashCommandCategory::Engineering,
     },
@@ -2470,7 +2481,7 @@ mod tests {
         assert!(help.contains("alias : /plugins, /marketplace"));
         assert!(help.contains("/agents"));
         assert!(help.contains("/skills"));
-        assert_eq!(slash_command_specs().len(), 42);
+        assert_eq!(slash_command_specs().len(), 43);
         assert_eq!(resume_supported_slash_commands().len(), 13);
     }
 

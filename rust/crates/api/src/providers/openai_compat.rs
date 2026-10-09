@@ -30,6 +30,68 @@ const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(4);
 const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(70);
 const DEFAULT_MAX_RETRIES: u32 = 2;
 
+/// Raisonnement d'un modèle `OpenRouter`, gardé pour être renvoyé à l'étape
+/// suivante du même tour (le modèle reprend sa réflexion au lieu de repartir
+/// de zéro après chaque outil). Il voyage dans le champ `signature` du bloc
+/// de raisonnement : texte simple, ou `reasoning_details` tels que reçus.
+const REASONING_PLAIN: &str = "or-plain";
+const REASONING_DETAILS_PREFIX: &str = "or-details:";
+/// Bloc du flux qui porte le raisonnement.
+const THINKING_INDEX: u32 = 999;
+/// Raisonnement renvoyé au plus, en caractères (la fin : la conclusion).
+const MAX_PASSBACK_CHARS: usize = 8_000;
+
+/// Ce bloc de raisonnement vient d'un modèle `OpenRouter` (et non d'un
+/// raisonnement signé de Claude, à ne renvoyer qu'à l'API d'Anthropic).
+#[must_use]
+pub fn is_passback_reasoning(signature: &str) -> bool {
+    signature == REASONING_PLAIN || signature.starts_with(REASONING_DETAILS_PREFIX)
+}
+
+/// Fusionne un fragment de `reasoning_details` reçu dans le flux : les textes
+/// d'un même élément (même type, même index) se suivent, le reste est copié.
+fn merge_reasoning_detail(details: &mut Vec<Value>, fragment: Value) {
+    let key = |value: &Value| {
+        (
+            value
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            value.get("index").and_then(Value::as_u64),
+        )
+    };
+    let fragment_key = key(&fragment);
+    let Some(existing) = details
+        .iter_mut()
+        .find(|detail| key(detail) == fragment_key)
+        .and_then(Value::as_object_mut)
+    else {
+        details.push(fragment);
+        return;
+    };
+    let Value::Object(source) = fragment else {
+        return;
+    };
+    for (name, value) in source {
+        let appended = matches!(name.as_str(), "text" | "summary" | "data");
+        match (existing.get_mut(&name), value) {
+            (Some(Value::String(current)), Value::String(addition)) if appended => {
+                current.push_str(&addition);
+            }
+            (Some(current), value) if current.is_null() || !appended => {
+                if !value.is_null() {
+                    *current = value;
+                }
+            }
+            (None, value) => {
+                existing.insert(name, value);
+            }
+            _ => {}
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenAiCompatConfig {
     pub provider_name: &'static str,
@@ -223,7 +285,7 @@ impl OpenAiCompatClient {
         };
         let (response, text_mode) = self.send_negotiated(&request).await?;
         let request_id = request_id_from_headers(response.headers());
-        let payload = response.json::<ChatCompletionResponse>().await?;
+        let payload = parse_chat_completion(&response.bytes().await?)?;
         let known_tools: Vec<String> = request
             .tools
             .iter()
@@ -244,7 +306,9 @@ impl OpenAiCompatClient {
         let (response, text_mode) = self
             .send_negotiated(&request.clone().with_streaming())
             .await?;
-        let state = StreamState::new(request.model.clone()).with_tools(request, text_mode);
+        let state = StreamState::new(request.model.clone())
+            .with_tools(request, text_mode)
+            .with_reasoning_passback(self.provider_name == "OpenRouter");
         Ok(MessageStream {
             request_id: request_id_from_headers(response.headers()),
             response,
@@ -337,7 +401,11 @@ impl OpenAiCompatClient {
         for (name, value) in &self.extra_headers {
             builder = builder.header(name.as_str(), value.as_str());
         }
-        let mut payload = build_chat_completion_request_with(request, text_mode);
+        let mut payload = build_chat_completion_request_with(
+            request,
+            text_mode,
+            self.provider_name == "OpenRouter",
+        );
         if let Some(name) = &self.model_name {
             payload["model"] = Value::String(name.clone());
         }
@@ -474,6 +542,10 @@ struct StreamState {
     /// Outils natifs : début de réponse retenu tant qu'il peut être un appel
     /// écrit en JSON brut (`{"name": …}`) ; `None` une fois le texte libéré.
     held_text: Option<String>,
+    /// Le raisonnement est gardé pour être renvoyé à l'étape suivante.
+    keep_reasoning: bool,
+    thinking_started: bool,
+    reasoning_details: Vec<Value>,
 }
 
 impl StreamState {
@@ -492,7 +564,15 @@ impl StreamState {
             think_filter: ThinkTagFilter::default(),
             known_tools: Vec::new(),
             held_text: None,
+            keep_reasoning: false,
+            thinking_started: false,
+            reasoning_details: Vec::new(),
         }
+    }
+
+    fn with_reasoning_passback(mut self, keep: bool) -> Self {
+        self.keep_reasoning = keep;
+        self
     }
 
     /// Outils de la requête ; en mode natif, la réponse est retenue tant
@@ -512,13 +592,46 @@ impl StreamState {
     }
 
     /// Raisonnement du modèle, affiché à part (sauf `/think off`).
-    fn push_thinking(text: String, events: &mut Vec<StreamEvent>) {
+    fn push_thinking(&mut self, text: String, events: &mut Vec<StreamEvent>) {
         if text.is_empty() || reasoning::reasoning_effort() == Some(ReasoningEffort::Off) {
             return;
         }
+        if self.keep_reasoning && !self.thinking_started {
+            self.thinking_started = true;
+            events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                index: THINKING_INDEX,
+                content_block: OutputContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                },
+            }));
+        }
         events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
-            index: 999,
+            index: THINKING_INDEX,
             delta: ContentBlockDelta::ThinkingDelta { thinking: text },
+        }));
+    }
+
+    /// Fin du raisonnement gardé : sa « signature » dit comment le renvoyer.
+    fn finish_thinking(&mut self, events: &mut Vec<StreamEvent>) {
+        if !self.thinking_started {
+            return;
+        }
+        self.thinking_started = false;
+        let signature = if self.reasoning_details.is_empty() {
+            REASONING_PLAIN.to_string()
+        } else {
+            format!(
+                "{REASONING_DETAILS_PREFIX}{}",
+                Value::Array(std::mem::take(&mut self.reasoning_details))
+            )
+        };
+        events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+            index: THINKING_INDEX,
+            delta: ContentBlockDelta::SignatureDelta { signature },
+        }));
+        events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
+            index: THINKING_INDEX,
         }));
     }
 
@@ -623,28 +736,7 @@ impl StreamState {
         // OpenRouter signale les erreurs survenues en cours de flux dans un chunk
         // `{"error": {...}}` après l'en-tête 200 : on les remonte comme erreur d'API.
         if let Some(error) = chunk.error {
-            // Code HTTP du fournisseur s'il est donné (503 surcharge, 429 limite).
-            let status = error
-                .get("code")
-                .and_then(Value::as_u64)
-                .and_then(|code| u16::try_from(code).ok())
-                .and_then(|code| reqwest::StatusCode::from_u16(code).ok())
-                .filter(|status| status.is_client_error() || status.is_server_error())
-                .unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
-            let body = json!({ "error": error }).to_string();
-            return Err(ApiError::Api {
-                status,
-                error_type: error.get("code").map(|code| match code {
-                    Value::String(value) => value.clone(),
-                    other => other.to_string(),
-                }),
-                message: error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned),
-                body,
-                retryable: is_retryable_status(status),
-            });
+            return Err(error_in_body(&error));
         }
 
         let mut events = Vec::new();
@@ -680,15 +772,32 @@ impl StreamState {
         }
 
         for choice in chunk.choices {
+            let has_reasoning_text =
+                choice.delta.reasoning.is_some() || choice.delta.reasoning_content.is_some();
             for thought in [choice.delta.reasoning, choice.delta.reasoning_content]
                 .into_iter()
                 .flatten()
             {
-                Self::push_thinking(thought, &mut events);
+                self.push_thinking(thought, &mut events);
+            }
+            for detail in choice.delta.reasoning_details {
+                // Sans champ `reasoning`, le texte des détails sert à l'affichage.
+                if !has_reasoning_text {
+                    let text = detail
+                        .get("text")
+                        .or_else(|| detail.get("summary"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    self.push_thinking(text, &mut events);
+                }
+                if self.keep_reasoning {
+                    merge_reasoning_detail(&mut self.reasoning_details, detail);
+                }
             }
             if let Some(content) = choice.delta.content.filter(|value| !value.is_empty()) {
                 let (text, thought) = self.think_filter.push(&content);
-                Self::push_thinking(thought, &mut events);
+                self.push_thinking(thought, &mut events);
                 self.push_answer_text(text, &mut events);
             }
 
@@ -741,7 +850,8 @@ impl StreamState {
 
         let mut events = Vec::new();
         let (rest_text, rest_thought) = self.think_filter.finish();
-        Self::push_thinking(rest_thought, &mut events);
+        self.push_thinking(rest_thought, &mut events);
+        self.finish_thinking(&mut events);
         self.push_answer_text(rest_text, &mut events);
         if self.text_mode {
             self.finish_text_tools(&mut events);
@@ -936,6 +1046,9 @@ struct ChunkDelta {
     /// Raisonnement (`DeepSeek`, vLLM…).
     #[serde(default)]
     reasoning_content: Option<String>,
+    /// Raisonnement structuré d'`OpenRouter` (texte, résumé, bloc chiffré).
+    #[serde(default)]
+    reasoning_details: Vec<Value>,
     #[serde(default)]
     tool_calls: Vec<DeltaToolCall>,
 }
@@ -972,10 +1085,16 @@ struct ErrorBody {
 
 #[cfg(test)]
 fn build_chat_completion_request(request: &MessageRequest) -> Value {
-    build_chat_completion_request_with(request, false)
+    build_chat_completion_request_with(request, false, false)
 }
 
-fn build_chat_completion_request_with(request: &MessageRequest, text_mode: bool) -> Value {
+/// `passback` : renvoyer au modèle son raisonnement des étapes précédentes
+/// du tour en cours (`OpenRouter` seulement ; d'autres serveurs le refusent).
+fn build_chat_completion_request_with(
+    request: &MessageRequest,
+    text_mode: bool,
+    passback: bool,
+) -> Value {
     let text_mode = text_mode
         && request
             .tools
@@ -1000,8 +1119,18 @@ fn build_chat_completion_request_with(request: &MessageRequest, text_mode: bool)
     if text_mode {
         messages.extend(translate_messages_as_text(&request.messages));
     } else {
-        for message in &request.messages {
-            messages.extend(translate_message(message));
+        // Le tour en cours commence à la dernière vraie demande de l'utilisateur
+        // (un message `user` qui ne porte que des résultats d'outils n'en est pas une).
+        let turn_start = request.messages.iter().rposition(|message| {
+            message.role == "user"
+                && message
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, InputContentBlock::Text { .. }))
+        });
+        for (index, message) in request.messages.iter().enumerate() {
+            let with_reasoning = passback && turn_start.is_some_and(|start| index > start);
+            messages.extend(translate_message(message, with_reasoning));
         }
     }
 
@@ -1088,19 +1217,32 @@ fn translate_messages_as_text(messages: &[InputMessage]) -> Vec<Value> {
     translated
 }
 
-fn translate_message(message: &InputMessage) -> Vec<Value> {
+fn translate_message(message: &InputMessage, with_reasoning: bool) -> Vec<Value> {
     if message.role == "assistant" {
-        translate_assistant_message(message)
+        translate_assistant_message(message, with_reasoning)
     } else {
         translate_user_message(message)
     }
 }
 
-fn translate_assistant_message(message: &InputMessage) -> Vec<Value> {
+fn translate_assistant_message(message: &InputMessage, with_reasoning: bool) -> Vec<Value> {
     let mut text = String::new();
     let mut tool_calls = Vec::new();
+    let mut reasoning_text = String::new();
+    let mut reasoning_details = None;
     for block in &message.content {
         match block {
+            InputContentBlock::Thinking {
+                thinking,
+                signature,
+            } if with_reasoning && is_passback_reasoning(signature) => {
+                match signature.strip_prefix(REASONING_DETAILS_PREFIX) {
+                    Some(details) => {
+                        reasoning_details = serde_json::from_str::<Value>(details).ok();
+                    }
+                    None => reasoning_text.push_str(thinking),
+                }
+            }
             InputContentBlock::Text { text: value } => text.push_str(value),
             InputContentBlock::ToolUse { id, name, input } => tool_calls.push(json!({
                 "id": id,
@@ -1126,6 +1268,16 @@ fn translate_assistant_message(message: &InputMessage) -> Vec<Value> {
     // Plusieurs fournisseurs rejettent un tableau `tool_calls` vide.
     if !tool_calls.is_empty() {
         translated["tool_calls"] = Value::Array(tool_calls);
+    }
+    if let Some(details) = reasoning_details {
+        translated["reasoning_details"] = details;
+    } else if !reasoning_text.is_empty() {
+        let count = reasoning_text.chars().count();
+        let kept: String = reasoning_text
+            .chars()
+            .skip(count.saturating_sub(MAX_PASSBACK_CHARS))
+            .collect();
+        translated["reasoning"] = Value::String(kept);
     }
     vec![translated]
 }
@@ -1436,6 +1588,46 @@ const fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 408 | 409 | 429 | 500 | 502 | 503 | 504)
 }
 
+/// Erreur renvoyée dans le corps d'une réponse « 200 » (`{"error": {...}}`) :
+/// `OpenRouter` s'en sert quand le fournisseur du modèle est surchargé ou limité.
+fn error_in_body(error: &Value) -> ApiError {
+    // Code HTTP du fournisseur s'il est donné (503 surcharge, 429 limite).
+    let status = error
+        .get("code")
+        .and_then(Value::as_u64)
+        .and_then(|code| u16::try_from(code).ok())
+        .and_then(|code| reqwest::StatusCode::from_u16(code).ok())
+        .filter(|status| status.is_client_error() || status.is_server_error())
+        .unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
+    ApiError::Api {
+        status,
+        error_type: error.get("code").map(|code| match code {
+            Value::String(value) => value.clone(),
+            other => other.to_string(),
+        }),
+        message: error
+            .get("message")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        body: json!({ "error": error }).to_string(),
+        retryable: is_retryable_status(status),
+    }
+}
+
+/// Réponse sans streaming : une erreur placée dans le corps est rendue comme
+/// telle, au lieu d'un « corps illisible » qui ne dit rien.
+fn parse_chat_completion(body: &[u8]) -> Result<ChatCompletionResponse, ApiError> {
+    let value: Value = serde_json::from_slice(body)?;
+    let answered = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| !choices.is_empty());
+    match value.get("error") {
+        Some(error) if !answered && !error.is_null() => Err(error_in_body(error)),
+        _ => Ok(serde_json::from_value(value)?),
+    }
+}
+
 fn normalize_finish_reason(value: &str) -> String {
     match value {
         "stop" => "end_turn",
@@ -1456,6 +1648,183 @@ impl StringExt for String {
         } else {
             self
         }
+    }
+}
+
+#[cfg(test)]
+mod passback_tests {
+    use super::{
+        build_chat_completion_request_with, is_passback_reasoning, ChatCompletionChunk, StreamState,
+    };
+    use crate::types::{
+        ContentBlockDelta, InputContentBlock, InputMessage, MessageRequest, OutputContentBlock,
+        StreamEvent, ToolResultContentBlock,
+    };
+    use serde_json::json;
+
+    fn chunk(value: serde_json::Value) -> ChatCompletionChunk {
+        serde_json::from_value(value).expect("fragment")
+    }
+
+    fn signature_of(events: &[StreamEvent]) -> Option<String> {
+        events.iter().find_map(|event| match event {
+            StreamEvent::ContentBlockDelta(delta) => match &delta.delta {
+                ContentBlockDelta::SignatureDelta { signature } => Some(signature.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn an_error_sent_with_status_200_is_an_api_error_another_model_can_replace() {
+        let overloaded = br#"{"id":"gen-1","error":{"message":"Upstream error: Service temporarily overloaded","code":503,"metadata":{"error_type":"provider_overloaded"}}}"#;
+        let error = super::parse_chat_completion(overloaded).expect_err("erreur dans le corps");
+        match &error {
+            crate::error::ApiError::Api {
+                status, message, ..
+            } => {
+                assert_eq!(status.as_u16(), 503);
+                assert!(message
+                    .as_deref()
+                    .is_some_and(|text| text.contains("overloaded")));
+            }
+            other => panic!("erreur inattendue : {other}"),
+        }
+        assert!(error.is_fallback_worthy());
+
+        // Réponse normale, avec des champs inconnus et un `error` nul.
+        let answer = br#"{"id":"gen-2","model":"x/y","error":null,"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"OK","refusal":null}}],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#;
+        let parsed = super::parse_chat_completion(answer).expect("réponse");
+        assert_eq!(parsed.choices.len(), 1);
+
+        // Corps coupé : erreur de lecture, que la chaîne sait contourner.
+        let cut = super::parse_chat_completion(br#"{"id":"gen-3","choi"#).expect_err("coupé");
+        assert!(cut.is_broken_response() && !cut.is_fallback_worthy());
+    }
+
+    #[test]
+    fn openrouter_reasoning_is_kept_with_how_to_send_it_back() {
+        // Raisonnement en texte simple.
+        let mut state = StreamState::new("x/y".to_string()).with_reasoning_passback(true);
+        let mut events = state
+            .ingest_chunk(chunk(json!({
+                "id": "a", "model": "x/y",
+                "choices": [{ "index": 0, "delta": { "reasoning": "Je lis " }, "finish_reason": null }]
+            })))
+            .expect("flux");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::ContentBlockStart(start)
+                if start.index == 999 && matches!(start.content_block, OutputContentBlock::Thinking { .. })
+        )));
+        events = state.finish().expect("fin");
+        assert_eq!(signature_of(&events).as_deref(), Some("or-plain"));
+
+        // Détails structurés : fusionnés et renvoyés tels quels.
+        let mut state = StreamState::new("x/y".to_string()).with_reasoning_passback(true);
+        for (text, signature) in [("Je lis ", None), ("le fichier.", Some("sig"))] {
+            let mut detail = json!({ "type": "reasoning.text", "index": 0, "text": text });
+            if let Some(signature) = signature {
+                detail["signature"] = json!(signature);
+            }
+            state
+                .ingest_chunk(chunk(json!({
+                    "id": "a", "model": "x/y",
+                    "choices": [{ "index": 0, "delta": { "reasoning": text, "reasoning_details": [detail] }, "finish_reason": null }]
+                })))
+                .expect("flux");
+        }
+        let signature = signature_of(&state.finish().expect("fin")).expect("signature");
+        assert!(is_passback_reasoning(&signature));
+        let details: serde_json::Value =
+            serde_json::from_str(signature.trim_start_matches("or-details:")).expect("json");
+        assert_eq!(details[0]["text"], "Je lis le fichier.");
+        assert_eq!(details[0]["signature"], "sig");
+
+        // Autres serveurs : rien n'est gardé (pas de bloc, pas de signature).
+        let mut state = StreamState::new("ollama:q".to_string());
+        let events = state
+            .ingest_chunk(chunk(json!({
+                "id": "a", "model": "q",
+                "choices": [{ "index": 0, "delta": { "reasoning": "hm" }, "finish_reason": null }]
+            })))
+            .expect("flux");
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::ContentBlockStart(_))));
+        assert_eq!(signature_of(&state.finish().expect("fin")), None);
+        assert!(!is_passback_reasoning("EqQBCkgIAxgCIkD…"));
+    }
+
+    fn assistant(thinking: &str, signature: &str, tool_id: &str) -> InputMessage {
+        InputMessage {
+            role: "assistant".to_string(),
+            content: vec![
+                InputContentBlock::Thinking {
+                    thinking: thinking.to_string(),
+                    signature: signature.to_string(),
+                },
+                InputContentBlock::ToolUse {
+                    id: tool_id.to_string(),
+                    name: "read_file".to_string(),
+                    input: json!({ "path": "a.rs" }),
+                },
+            ],
+        }
+    }
+
+    fn tool_result(tool_id: &str) -> InputMessage {
+        InputMessage {
+            role: "user".to_string(),
+            content: vec![InputContentBlock::ToolResult {
+                tool_use_id: tool_id.to_string(),
+                content: vec![ToolResultContentBlock::Text {
+                    text: "contenu".to_string(),
+                }],
+                is_error: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn reasoning_goes_back_only_for_the_current_turn_and_only_when_asked() {
+        let request = MessageRequest {
+            model: "x/y".to_string(),
+            max_tokens: 100,
+            messages: vec![
+                InputMessage::user_text("ancienne demande"),
+                assistant("vieille réflexion", "or-plain", "t1"),
+                tool_result("t1"),
+                InputMessage::user_text("nouvelle demande"),
+                assistant("réflexion en cours", "or-plain", "t2"),
+                tool_result("t2"),
+                assistant(
+                    "",
+                    r#"or-details:[{"type":"reasoning.text","text":"suite","index":0}]"#,
+                    "t3",
+                ),
+                tool_result("t3"),
+            ],
+            system: None,
+            tools: None,
+            tool_choice: None,
+            stream: false,
+        };
+        let payload = build_chat_completion_request_with(&request, false, true);
+        let messages = payload["messages"].as_array().expect("messages");
+        let assistants: Vec<&serde_json::Value> = messages
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .collect();
+        // Tour précédent : rien. Tour en cours : texte, puis détails.
+        assert!(assistants[0].get("reasoning").is_none());
+        assert_eq!(assistants[1]["reasoning"], "réflexion en cours");
+        assert_eq!(assistants[2]["reasoning_details"][0]["text"], "suite");
+
+        // Serveur qui ne le prend pas en charge : aucun champ de raisonnement.
+        let plain = build_chat_completion_request_with(&request, false, false);
+        assert!(!plain.to_string().contains("reasoning"));
     }
 }
 

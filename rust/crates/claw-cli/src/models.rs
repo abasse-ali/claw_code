@@ -109,8 +109,19 @@ pub(crate) fn measurement_factor(result: Option<&crate::bench::BenchResult>) -> 
         None => Some(0.9),
         Some(result) if !result.compatible && !result.transient => None,
         Some(result) if !result.compatible => Some(0.75),
-        Some(result) if result.total == 0 => Some(0.95),
-        Some(result) => Some(0.4 + 0.6 * f64::from(result.passed) / f64::from(result.total)),
+        Some(result) => {
+            // Les tâches de raisonnement (tests cachés) comptent double.
+            let (hard_passed, hard_total) = result
+                .hard
+                .as_ref()
+                .map_or((0, 0), |hard| (hard.passed * 2, hard.total * 2));
+            let (passed, total) = (result.passed + hard_passed, result.total + hard_total);
+            if total == 0 {
+                Some(0.95)
+            } else {
+                Some(0.4 + 0.6 * f64::from(passed) / f64::from(total))
+            }
+        }
     }
 }
 
@@ -327,6 +338,59 @@ pub fn first_local_model() -> Option<String> {
                 .find(|model| !model.contains("embed"))
                 .map(|model| format!("{}:{model}", provider.name))
         })
+}
+
+/// Modèles consultés pour la relecture, le diagnostic et le second avis :
+/// ceux du réglage `advisorModels`, sinon les meilleurs modèles gratuits autres
+/// que `current` (il faut alors une clé `OpenRouter`). Gardé deux minutes.
+pub(crate) fn advisor_models(current: &str) -> Vec<String> {
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, String, Vec<String>)>> =
+        std::sync::Mutex::new(None);
+    // Les tests ne consultent personne.
+    if cfg!(test) {
+        return Vec::new();
+    }
+    let mut cache = CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, model, models)) = cache.as_ref() {
+        if model == current && at.elapsed() < Duration::from_secs(120) {
+            return models.clone();
+        }
+    }
+    let configured: Vec<String> = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| runtime::ConfigLoader::default_for(&cwd).load().ok())
+        .map(|config| {
+            config
+                .advisor_models()
+                .iter()
+                .map(|model| api::resolve_model_alias(model))
+                .collect()
+        })
+        .unwrap_or_default();
+    let has_key = std::env::var("OPENROUTER_API_KEY").is_ok_and(|key| !key.trim().is_empty());
+    let models = if !configured.is_empty() {
+        configured
+    } else if has_key {
+        catalog(false)
+            .map(|(catalog, _)| {
+                preferred_free_models(&catalog)
+                    .into_iter()
+                    .filter(|model| model != current)
+                    .take(4)
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    *cache = Some((
+        std::time::Instant::now(),
+        current.to_string(),
+        models.clone(),
+    ));
+    models
 }
 
 /// Serveurs locaux connus, leur adresse et leurs modèles (`claw doctor`).

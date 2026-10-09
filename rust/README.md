@@ -154,6 +154,7 @@ correction jusqu'au vert, jamais de test affaibli pour passer) et méthode d'arc
 | `/archi <sujet>` | Conception : 2-3 options, recommandation, diagrammes C4/séquence, feuille de route |
 | `/adr <décision>` | Rédige un ADR numéroté dans `docs/adr/` |
 | `/fix [commande]` | Lance les tests et corrige jusqu'à ce qu'ils passent |
+| `/avis <question>` | Second avis : la question est posée à plusieurs autres modèles, l'agent compare et tranche |
 
 L'outil `Agent` délègue à des sous-agents **synchrones** qui renvoient leur rapport :
 `architect`, `reviewer`, `auditor` (lecture seule), `tester` (corrige), `Explore`, `Plan`,
@@ -324,6 +325,56 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
 - Un appel écrit en JSON brut au lieu d'un appel natif (`{"name": "read_file", "arguments": …}`,
   fréquent avec Ollama) est reconnu s'il forme toute la réponse et nomme un outil proposé.
 
+### Aides au raisonnement
+
+Un grand modèle vérifie son travail de lui-même ; un petit modèle gratuit l'oublie, s'égare ou
+tourne en rond. Ces aides ne sont pas des consignes ajoutées au prompt : c'est **Claw qui les
+applique**, quel que soit le modèle.
+
+| Aide | Ce que fait Claw | Couper |
+|---|---|---|
+| Vérification imposée | Quand le modèle dit avoir fini après avoir modifié des fichiers, Claw lance la vérification du projet (`cargo check`, `go build`, `tsc`, tests Python… ou `"verify"`). En cas d'échec, la sortie repart au modèle, qui corrige (3 corrections au plus) ; si cela échoue encore, Claw l'annonce : « le travail n'est pas validé » | `CLAW_VERIFY=0` |
+| Syntaxe immédiate | Après chaque modification, contrôle de syntaxe du fichier (JSON, Python, JavaScript, Rust, Go, shell) ; l'erreur est jointe au résultat de l'outil | `CLAW_DIAGNOSTICS=0` |
+| Détection de blocage | Trois appels identiques sans effet, deux modifications ratées du même fichier, quatre échecs d'affilée, une vérification relancée alors que rien n'a changé, 40 appels dans un tour : Claw recadre le modèle | `CLAW_STALL_GUARD=0` |
+| Test réécrit | Un test (ou le script de vérification) modifié après un échec est signalé à l'utilisateur et au modèle : faire passer un contrôle en le réécrivant ne prouve rien | `CLAW_TEST_GUARD=0` |
+| Carte du projet | Fichiers et principaux symboles du projet, donnés au début de la session (6 000 caractères, `CLAW_REPO_MAP_CHARS`) | `CLAW_REPO_MAP=0` |
+| Chemins | Un chemin inventé (`/workspace/src/a.py`, `/c/…`, `/mnt/c/…`) est retrouvé s'il existe dans le projet ; sinon l'erreur donne le dossier de travail et les fichiers au nom proche | `CLAW_PATH_HELP=0` |
+| Outils utiles seulement | Les outils rarement utiles ne sont proposés que lorsqu'ils servent (`BashOutput` s'il y a une tâche de fond, `NotebookEdit` s'il y a un notebook…) | `CLAW_TOOL_DIET=0` |
+| Raisonnement conservé | Le raisonnement du modèle est renvoyé à l'étape suivante du même tour (OpenRouter), au lieu d'être perdu entre deux appels d'outils | `CLAW_REASONING_PASSBACK=0` |
+| Relecture | Avant de rendre la main, les modifications d'au moins 5 lignes sont relues par **un autre modèle** ; ses remarques repartent au modèle, une fois par tour | `CLAW_REVIEW=0` ou `"review": false` |
+| Conseil | Au deuxième échec de la vérification, ou au deuxième recadrage, un autre modèle lit la fin de la session et donne son diagnostic | `CLAW_COUNCIL=0` |
+| Second avis | L'outil `Consult` (et `/avis <question>`) pose la même question à plusieurs autres modèles ; l'agent compare et décide | `CLAW_COUNCIL=0` |
+| Leçons | L'outil `Remember` note une leçon utile au projet dans `.claw/lessons.md` (80 au plus), relue au début de chaque session | `CLAW_LESSONS=0` |
+| Modèle de planification | En mode plan, `"plannerModel"` réfléchit à la place du modèle de la session, qui exécute ensuite le plan approuvé | `CLAW_PLANNER=0` |
+
+`CLAW_HARNESS=0` les coupe toutes. Réglages dans `.claw/settings.json` ou `~/.claw/settings.json` :
+
+```json
+{
+  "verify": "cargo test --quiet",
+  "review": true,
+  "advisorModels": ["openai/gpt-5", "anthropic/claude-sonnet-4.5"],
+  "plannerModel": "anthropic/claude-sonnet-4.5"
+}
+```
+
+- `"verify"` : une commande, une liste de commandes, ou `false`. Sans réglage, Claw la déduit du
+  projet. Dans une session non interactive, la commande doit être autorisée par une règle
+  `permissions.allow` ; sinon Claw annonce « Vérification non lancée […] : le travail n'est pas
+  vérifié ».
+- `"advisorModels"` : modèles consultés pour la relecture, le conseil et le second avis, du
+  préféré au moins préféré. Sans réglage et avec une clé OpenRouter : les meilleurs modèles
+  gratuits autres que celui de la session (`claw doctor` les affiche, ligne « Autres avis »). Un
+  conseiller surchargé, muet pendant 20 s, trop long à finir (50 s) ou qui répond sans texte
+  laisse la place au suivant ; une consultation dure 90 s au plus.
+- `"plannerModel"` : un modèle fort pour réfléchir, un modèle gratuit pour exécuter. Claw l'annonce
+  au début du tour (« Mode plan : la réflexion est confiée à … »).
+
+Les avis des autres modèles ne sont jamais des ordres : ils reviennent au modèle de la session
+comme des remarques à confronter au code. Les diagnostics d'un serveur de langage (LSP) ne sont
+pas branchés : le contrôle de syntaxe après chaque modification et le vrai compilateur en fin de
+tour couvrent ce besoin sans diagnostics en retard.
+
 ### Trouver les meilleurs modèles gratuits compatibles : `claw models bench`
 
 Le classement de `/models` repose sur des signaux indirects (rang OpenRouter, spécialisation
@@ -348,6 +399,32 @@ mot-clé `"free"` de `fallbackModels` mettent les modèles mesurés en tête et 
 incompatibles. Chaque essai lance `claw prompt` dans un projet temporaire où `Bash(python:*)`
 est autorisé (sans règle `permissions.allow`, une tâche non interactive ne peut lancer aucune
 commande).
+
+**Tâches de raisonnement** : `claw models bench --difficile [modèle]` fait passer six tâches plus
+dures au modèle par défaut (ou à celui du filtre), vérifiées par des **tests cachés** que le
+modèle ne voit jamais : une cause située dans un autre fichier que celui du symptôme, les cas
+limites d'une spécification, corriger sans toucher aux tests, un réglage à faire suivre dans
+quatre fichiers, un code correct mais trop lent, un évaluateur d'expressions. Modifier un test
+interdit compte comme un échec. `--sans-aide` rejoue les mêmes tâches sans les aides au
+raisonnement (`CLAW_HARNESS=0`) pour comparer ; les deux scores sont gardés, et celui obtenu avec
+les aides compte double dans le classement des modèles. Une tâche que le modèle n'a pas pu
+traiter (surcharge, flux coupé) est réessayée une fois. Environ 80 requêtes par série, 10 minutes
+au plus par tâche.
+
+Mesure du 9 octobre 2026 avec `cohere/north-mini-code:free`, une passe par série :
+
+| Tâche | Sans aide | Avec les aides |
+|---|---|---|
+| Cause dans un autre fichier | réussie, 235 s | réussie, 129 s |
+| Cas limites d'une spécification | réussie, 202 s | échec (2 tests cachés) |
+| Corriger sans toucher aux tests | réussie, 212 s | réussie, 162 s |
+| Réglage à faire suivre dans quatre fichiers | réussie, 358 s | réussie, 128 s |
+| Correct mais trop lent | échec (test interdit modifié) | réussie, 199 s |
+| Priorités, parenthèses, moins unaire | réussie, 600 s (délai atteint) | réussie, 600 s (délai atteint) |
+| **Total** | **5/6, médiane 235 s** | **5/6, médiane 162 s** |
+
+Même taux de réussite, travail plus rapide avec les aides. Une seule passe ne suffit pas à
+départager deux scores voisins : rejouée seule, la tâche en échec avec les aides a réussi.
 
 Mesures sur un PC portable (i7-8750H, 16 Go, GTX 1050 4 Go, Ollama 0.40) : un modèle local de
 4 milliards de paramètres (`qwen3.5:4b`) réussit la plupart des tâches mais en 1 à 10 minutes
@@ -385,6 +462,7 @@ Claw lit aussi `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` 
   liste (`/bashes kill <id>`) ; elles s'arrêtent quand Claw se termine.
 - **Mode plan** : en `read-only`, l'agent soumet son plan avec l'outil `ExitPlanMode` ; si vous
   l'approuvez, la session passe en `workspace-write` et l'agent l'applique dans le même tour.
+  Avec `"plannerModel"`, c'est ce modèle qui prépare le plan (voir « Aides au raisonnement »).
 - **Reprise** : `claw --continue` (ou `-c`) reprend la dernière session du projet, `claw --resume`
   sans argument propose la liste des sessions récentes.
 

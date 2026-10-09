@@ -97,6 +97,13 @@ pub struct RuntimeFeatureConfig {
     small_model: Option<String>,
     providers: Vec<RuntimeProviderConfig>,
     sandbox: SandboxConfig,
+    verify: crate::harness::VerifySetting,
+    /// `"review": false` : pas de relecture automatique par un autre modèle.
+    review_disabled: bool,
+    /// Modèles consultés (relecture, conseil, second avis) : `advisorModels`.
+    advisor_models: Vec<String>,
+    /// Modèle du mode plan : `plannerModel`.
+    planner_model: Option<String>,
 }
 
 /// Serveur compatible `OpenAI` déclaré dans `providers` (utilisé avec le
@@ -374,6 +381,14 @@ impl ConfigLoader {
             small_model: parse_optional_string(&merged_value, "smallModel"),
             providers: parse_providers(&merged_value)?,
             sandbox: parse_optional_sandbox_config(&merged_value)?,
+            verify: parse_verify(&merged_value),
+            review_disabled: merged_value
+                .as_object()
+                .and_then(|object| object.get("review"))
+                .and_then(JsonValue::as_bool)
+                == Some(false),
+            advisor_models: parse_string_list(&merged_value, "advisorModels"),
+            planner_model: parse_optional_string(&merged_value, "plannerModel"),
         };
 
         Ok(RuntimeConfig {
@@ -498,6 +513,18 @@ impl RuntimeConfig {
     pub fn sandbox(&self) -> &SandboxConfig {
         &self.feature_config.sandbox
     }
+
+    /// Modèles consultés pour la relecture, le conseil et le second avis.
+    #[must_use]
+    pub fn advisor_models(&self) -> &[String] {
+        &self.feature_config.advisor_models
+    }
+
+    /// Modèle utilisé en mode plan, s'il est réglé (`plannerModel`).
+    #[must_use]
+    pub fn planner_model(&self) -> Option<&str> {
+        self.feature_config.planner_model.as_deref()
+    }
 }
 
 impl RuntimeFeatureConfig {
@@ -551,6 +578,30 @@ impl RuntimeFeatureConfig {
     #[must_use]
     pub fn sandbox(&self) -> &SandboxConfig {
         &self.sandbox
+    }
+
+    /// Vérification imposée après modification (`"verify"`).
+    #[must_use]
+    pub fn verify(&self) -> &crate::harness::VerifySetting {
+        &self.verify
+    }
+
+    /// Relecture automatique des modifications (`"review": false` la coupe).
+    #[must_use]
+    pub fn review_enabled(&self) -> bool {
+        !self.review_disabled
+    }
+
+    /// Modèles consultés pour la relecture, le conseil et le second avis.
+    #[must_use]
+    pub fn advisor_models(&self) -> &[String] {
+        &self.advisor_models
+    }
+
+    /// Modèle utilisé en mode plan, s'il est réglé.
+    #[must_use]
+    pub fn planner_model(&self) -> Option<&str> {
+        self.planner_model.as_deref()
     }
 }
 
@@ -836,6 +887,33 @@ fn parse_string_list(root: &JsonValue, key: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// `"verify"` : `false` coupe la vérification imposée, une commande ou une
+/// liste de commandes la remplace ; absent : déduite du projet.
+fn parse_verify(root: &JsonValue) -> crate::harness::VerifySetting {
+    use crate::harness::VerifySetting;
+    match root.as_object().and_then(|object| object.get("verify")) {
+        Some(JsonValue::Bool(false)) => VerifySetting::Off,
+        Some(JsonValue::String(command)) if !command.trim().is_empty() => {
+            VerifySetting::Commands(vec![command.trim().to_string()])
+        }
+        Some(JsonValue::Array(commands)) => {
+            let commands = commands
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .map(str::trim)
+                .filter(|command| !command.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            if commands.is_empty() {
+                VerifySetting::Off
+            } else {
+                VerifySetting::Commands(commands)
+            }
+        }
+        _ => VerifySetting::Auto,
+    }
 }
 
 fn parse_optional_string(root: &JsonValue, key: &str) -> Option<String> {

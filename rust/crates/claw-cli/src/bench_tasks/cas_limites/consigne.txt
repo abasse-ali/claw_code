@@ -1,0 +1,1 @@
+Implémente la fonction fusionner de intervalles.py en respectant toute sa docstring, y compris les cas limites qu'elle décrit.

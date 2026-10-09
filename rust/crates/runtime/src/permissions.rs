@@ -422,7 +422,7 @@ impl ShellCommand {
         let mut has_substitution = false;
         let mut in_single = false;
         let mut in_double = false;
-        let mut chars = command.chars().peekable();
+        let mut chars = command.char_indices().peekable();
 
         let mut push_segment = |current: &mut String, redirects_output: &mut bool| {
             let text = current.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -436,11 +436,11 @@ impl ShellCommand {
             *redirects_output = false;
         };
 
-        while let Some(ch) = chars.next() {
+        while let Some((index, ch)) = chars.next() {
             match ch {
                 '\\' if !in_single => {
                     current.push(ch);
-                    if let Some(next) = chars.next() {
+                    if let Some((_, next)) = chars.next() {
                         current.push(next);
                     }
                 }
@@ -456,12 +456,28 @@ impl ShellCommand {
                     has_substitution = true;
                     current.push(ch);
                 }
-                '$' if !in_single && matches!(chars.peek(), Some('(' | '{')) => {
+                '$' if !in_single && matches!(chars.peek(), Some((_, '(' | '{'))) => {
                     has_substitution = true;
                     current.push(ch);
                 }
                 '>' if !in_single && !in_double => {
-                    redirects_output = true;
+                    // `2>&1` (erreurs vers la sortie) et `> /dev/null` n'écrivent
+                    // dans aucun fichier.
+                    let rest = command[index + 1..].trim_start_matches('>').trim_start();
+                    let harmless = rest.starts_with("/dev/null")
+                        || rest
+                            .strip_prefix('&')
+                            .is_some_and(|fd| fd.starts_with(|digit: char| digit.is_ascii_digit()));
+                    if !harmless {
+                        redirects_output = true;
+                    }
+                    current.push(ch);
+                }
+                // `>&` et `&>` font partie d'une redirection, pas d'une séparation.
+                '&' if !in_single
+                    && !in_double
+                    && (current.ends_with('>') || matches!(chars.peek(), Some((_, '>')))) =>
+                {
                     current.push(ch);
                 }
                 ';' | '&' | '|' | '\n' if !in_single && !in_double => {
@@ -917,6 +933,34 @@ mod tests {
             policy.authorize("bash", &bash("cargo test `rm -rf /`"), None),
             PermissionOutcome::Deny { .. }
         ));
+    }
+
+    #[test]
+    fn stderr_redirections_do_not_split_or_taint_a_command() {
+        let parsed = super::ShellCommand::parse("python3 test_panier.py 2>&1");
+        assert_eq!(parsed.segments.len(), 1);
+        assert_eq!(parsed.segments[0].text, "python3 test_panier.py 2>&1");
+        assert!(!parsed.segments[0].redirects_output);
+
+        let quiet = super::ShellCommand::parse("ls missing 2>/dev/null && git status > /dev/null");
+        assert_eq!(quiet.segments.len(), 2);
+        assert!(quiet
+            .segments
+            .iter()
+            .all(|segment| !segment.redirects_output));
+
+        // Une vraie écriture dans un fichier reste repérée.
+        let written = super::ShellCommand::parse("echo x > notes.txt; make &> build.log");
+        assert_eq!(written.segments.len(), 2);
+        assert!(written
+            .segments
+            .iter()
+            .all(|segment| segment.redirects_output));
+
+        // Plusieurs lignes entre guillemets : une seule commande.
+        let script =
+            super::ShellCommand::parse("python3 -c \"\nimport os\nprint(os.getcwd())\n\" 2>&1");
+        assert_eq!(script.segments.len(), 1);
     }
 
     #[test]

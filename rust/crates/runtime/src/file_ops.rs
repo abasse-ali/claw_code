@@ -1,4 +1,5 @@
 use std::cmp::Reverse;
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -415,11 +416,12 @@ fn not_found_message(original: &str, old_string: &str) -> String {
     let mut message =
         "old_string not found in file (even ignoring whitespace and indentation)".to_string();
     if let Some((index, line, _)) = closest {
-        message.push_str(&format!(
+        let _ = write!(
+            message,
             ". Closest line {}: `{}`",
             index + 1,
             line.trim().chars().take(160).collect::<String>()
-        ));
+        );
     }
     message.push_str(". Re-read the file with read_file and copy the exact text.");
     message
@@ -687,21 +689,174 @@ fn display_path(path: &Path) -> String {
     }
 }
 
-fn normalize_path(path: &str) -> io::Result<PathBuf> {
-    let candidate = if Path::new(path).is_absolute() {
+/// Chemins écrits « à la Unix » par un modèle sous Windows : `/c/Users/x`,
+/// `/mnt/c/x`, `/cygdrive/c/x` (lecteur) et `/tmp/x` (dossier temporaire).
+fn translate_foreign_path(path: &str) -> Option<PathBuf> {
+    if !cfg!(windows) || !path.starts_with('/') {
+        return None;
+    }
+    let rest = path.trim_start_matches('/');
+    if let Some(tail) = rest
+        .strip_prefix("tmp/")
+        .or_else(|| (rest == "tmp").then_some(""))
+    {
+        return Some(std::env::temp_dir().join(tail));
+    }
+    let rest = rest
+        .strip_prefix("mnt/")
+        .or_else(|| rest.strip_prefix("cygdrive/"))
+        .unwrap_or(rest);
+    let (drive, tail) = rest.split_once('/').unwrap_or((rest, ""));
+    (drive.len() == 1 && drive.chars().all(|letter| letter.is_ascii_alphabetic())).then(|| {
+        PathBuf::from(format!(
+            "{}:\\{}",
+            drive.to_ascii_uppercase(),
+            tail.replace('/', "\\")
+        ))
+    })
+}
+
+/// Chemin demandé, rapporté au dossier de travail s'il est relatif.
+fn candidate_path(path: &str, root: &Path) -> PathBuf {
+    if let Some(translated) = translate_foreign_path(path) {
+        return translated;
+    }
+    if Path::new(path).is_absolute() {
         PathBuf::from(path)
     } else {
-        std::env::current_dir()?.join(path)
-    };
-    candidate.canonicalize()
+        root.join(path)
+    }
+}
+
+/// Un chemin commence par une racine inventée (`/workspace/src/a.py`) alors
+/// que le fichier existe dans le projet (`src/a.py`) : la plus longue fin du
+/// chemin qui existe sous `root`.
+fn recover_existing(path: &str, root: &Path) -> Option<PathBuf> {
+    let parts: Vec<&str> = path
+        .split(['/', '\\'])
+        .filter(|part| !part.is_empty() && *part != "." && *part != ".." && !part.ends_with(':'))
+        .collect();
+    (1..parts.len())
+        .map(|start| parts[start..].iter().collect::<PathBuf>())
+        .map(|suffix| root.join(suffix))
+        .find(|found| found.exists())
+}
+
+const SKIPPED_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "dist",
+    "build",
+    ".claw",
+];
+
+/// Fichiers du projet dont le nom ressemble à celui demandé (5 au plus).
+fn similar_files(path: &str, root: &Path) -> Vec<String> {
+    let wanted = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase();
+    let stem = wanted.split('.').next().unwrap_or(&wanted).to_string();
+    if stem.is_empty() {
+        return Vec::new();
+    }
+    let mut exact = Vec::new();
+    let mut close = Vec::new();
+    let mut pending = vec![(root.to_path_buf(), 0usize)];
+    let mut visited = 0usize;
+    while let Some((dir, depth)) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            visited += 1;
+            if visited > 5_000 {
+                break;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                if depth < 6 && !SKIPPED_DIRS.contains(&name.as_str()) {
+                    pending.push((entry_path, depth + 1));
+                }
+                continue;
+            }
+            let shown = entry_path
+                .strip_prefix(root)
+                .unwrap_or(&entry_path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let lower = name.to_ascii_lowercase();
+            if lower == wanted {
+                exact.push(shown);
+            } else if lower.contains(&stem) {
+                close.push(shown);
+            }
+        }
+    }
+    exact.sort();
+    close.sort();
+    exact.into_iter().chain(close).take(5).collect()
+}
+
+/// Erreur lisible par un modèle : où l'on est, comment écrire le chemin, et
+/// les fichiers qui portent un nom proche.
+fn missing_path_message(path: &str, root: &Path) -> String {
+    let mut message = format!(
+        "File not found: {path}\nThe working directory is {}. Use a path relative to it (for example `src/main.rs`), not an invented root.",
+        display_path(root)
+    );
+    let similar = similar_files(path, root);
+    if !similar.is_empty() {
+        let _ = write!(
+            message,
+            "\nFiles with a similar name: {}",
+            similar.join(", ")
+        );
+    }
+    message
+}
+
+fn normalize_path(path: &str) -> io::Result<PathBuf> {
+    let root = std::env::current_dir()?;
+    let candidate = candidate_path(path, &root);
+    match candidate.canonicalize() {
+        Ok(found) => Ok(found),
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                && crate::harness::enabled(crate::harness::Aid::PathHelp) =>
+        {
+            recover_existing(path, &root)
+                .and_then(|found| found.canonicalize().ok())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, missing_path_message(path, &root))
+                })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn normalize_path_allow_missing(path: &str) -> io::Result<PathBuf> {
-    let candidate = if Path::new(path).is_absolute() {
-        PathBuf::from(path)
-    } else {
-        std::env::current_dir()?.join(path)
-    };
+    let root = std::env::current_dir()?;
+    let mut candidate = candidate_path(path, &root);
+    // Racine inventée (`/workspace/nouveau.py`) : le fichier est créé dans le
+    // projet, pas à la racine du disque.
+    let invented_root = path.starts_with('/')
+        && translate_foreign_path(path).is_none()
+        && !candidate.parent().is_some_and(Path::exists);
+    if invented_root {
+        let mut parts = path.split('/').filter(|part| !part.is_empty());
+        let first = parts.next().unwrap_or_default();
+        let rest: PathBuf = parts.collect();
+        if !Path::new("/").join(first).exists() && rest.components().next().is_some() {
+            candidate = root.join(rest);
+        }
+    }
 
     if let Ok(canonical) = candidate.canonicalize() {
         return Ok(canonical);
@@ -737,6 +892,49 @@ mod tests {
             r"\\?\UNC\serveur\partage"
         );
         assert_eq!(super::display_path(Path::new("/home/a.rs")), "/home/a.rs");
+    }
+
+    #[test]
+    fn missing_paths_are_recovered_or_explained() {
+        let root = temp_path("chemins");
+        std::fs::create_dir_all(root.join("src")).expect("dossier");
+        std::fs::write(root.join("src").join("panier.py"), "x = 1\n").expect("fichier");
+        std::fs::write(root.join("test_panier.py"), "").expect("fichier");
+
+        // Racine inventée : la fin du chemin existe dans le projet.
+        let found = super::recover_existing("/workspace/app/src/panier.py", &root)
+            .expect("fichier retrouvé");
+        assert!(found.ends_with("src/panier.py") || found.ends_with("src\\panier.py"));
+        assert_eq!(super::recover_existing("/workspace/absent.py", &root), None);
+
+        // Sinon l'erreur dit où l'on est et propose les fichiers proches.
+        let message = super::missing_path_message("/workspace/panier.py", &root);
+        assert!(message.starts_with("File not found: /workspace/panier.py"));
+        assert!(message.contains("The working directory is"));
+        assert!(message.contains("src/panier.py"));
+        assert!(message.contains("test_panier.py"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unix_style_paths_are_translated_on_windows() {
+        if cfg!(windows) {
+            assert_eq!(
+                super::translate_foreign_path("/c/Users/moi/a.txt"),
+                Some(std::path::PathBuf::from(r"C:\Users\moi\a.txt"))
+            );
+            assert_eq!(
+                super::translate_foreign_path("/mnt/d/projet"),
+                Some(std::path::PathBuf::from(r"D:\projet"))
+            );
+            assert_eq!(
+                super::translate_foreign_path("/tmp/essai/a.txt"),
+                Some(std::env::temp_dir().join("essai/a.txt"))
+            );
+            assert_eq!(super::translate_foreign_path("/workspace/a.txt"), None);
+        } else {
+            assert_eq!(super::translate_foreign_path("/c/Users/moi/a.txt"), None);
+        }
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {

@@ -405,6 +405,9 @@ fn prepare_command(
 
     let mut prepared = plugins::posix_shell_command(command);
     prepared.current_dir(cwd);
+    if std::env::var_os("PYTHONIOENCODING").is_none() {
+        prepared.env("PYTHONIOENCODING", "utf-8");
+    }
     if sandbox_status.filesystem_active {
         prepared.env("HOME", cwd.join(".sandbox-home"));
         prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));
@@ -439,6 +442,9 @@ fn prepare_tokio_command(
 
     let mut prepared = TokioCommand::from(plugins::posix_shell_command(command));
     prepared.current_dir(cwd);
+    if std::env::var_os("PYTHONIOENCODING").is_none() {
+        prepared.env("PYTHONIOENCODING", "utf-8");
+    }
     if sandbox_status.filesystem_active {
         prepared.env("HOME", cwd.join(".sandbox-home"));
         prepared.env("TMPDIR", cwd.join(".sandbox-tmp"));

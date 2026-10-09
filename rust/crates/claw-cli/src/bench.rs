@@ -30,6 +30,8 @@ const DEFAULT_TASK_MODELS: usize = 4;
 const PROBE_REQUESTS: u64 = 3;
 const TASK_REQUESTS: u64 = 12;
 
+// Un booléen par option de la ligne de commande.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BenchOptions {
     /// Nombre de modèles compatibles qui passent les tâches.
@@ -42,6 +44,12 @@ pub struct BenchOptions {
     pub apply: bool,
     /// Ne tester que les modèles dont l'identifiant contient ce texte.
     pub filter: Option<String>,
+    /// Tâches de raisonnement à tests cachés (`--difficile`).
+    pub hard: bool,
+    /// Sans les aides de Claw, pour comparer (`--sans-aide`).
+    pub unassisted: bool,
+    /// `--max` a été donné (les tâches difficiles mesurent un modèle par défaut).
+    pub max_explicit: bool,
 }
 
 impl Default for BenchOptions {
@@ -52,12 +60,15 @@ impl Default for BenchOptions {
             include_local: false,
             apply: false,
             filter: None,
+            hard: false,
+            unassisted: false,
+            max_explicit: false,
         }
     }
 }
 
 pub const USAGE: &str =
-    "Usage : /models bench [--rapide] [--local] [--max N] [--appliquer] [filtre]";
+    "Usage : /models bench [--rapide] [--local] [--max N] [--appliquer] [--difficile [--sans-aide]] [filtre]";
 
 /// Options de `bench …` (le premier mot `bench` est facultatif).
 pub fn parse_options(args: &str) -> Result<BenchOptions, String> {
@@ -71,7 +82,13 @@ pub fn parse_options(args: &str) -> Result<BenchOptions, String> {
             "--rapide" | "--quick" => options.quick = true,
             "--local" | "--locaux" => options.include_local = true,
             "--appliquer" | "--apply" => options.apply = true,
+            "--difficile" | "--raisonnement" | "--hard" => options.hard = true,
+            "--sans-aide" | "--baseline" => {
+                options.hard = true;
+                options.unassisted = true;
+            }
             "--max" => {
+                options.max_explicit = true;
                 options.task_models = words
                     .next()
                     .and_then(|value| value.parse().ok())
@@ -110,9 +127,48 @@ pub struct BenchResult {
     /// Tâches non mesurées faute de disponibilité du modèle.
     #[serde(default)]
     pub skipped: u32,
+    /// Raisonnement : tâches à tests cachés, avec les aides de Claw.
+    #[serde(default)]
+    pub hard: Option<HardScore>,
+    /// Les mêmes tâches sans les aides (`--sans-aide`).
+    #[serde(default)]
+    pub hard_unassisted: Option<HardScore>,
+}
+
+/// Score aux tâches de raisonnement (`/models bench --difficile`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HardScore {
+    pub passed: u32,
+    pub total: u32,
+    #[serde(default)]
+    pub seconds: Vec<f64>,
+    /// Tâches ratées et leur cause.
+    #[serde(default)]
+    pub failed: Vec<String>,
+    #[serde(default)]
+    pub tested_at: u64,
 }
 
 impl BenchResult {
+    /// Modèle mesuré seulement sur les tâches de raisonnement.
+    #[must_use]
+    pub fn measured_only(model: &str) -> Self {
+        Self {
+            model: model.to_string(),
+            tested_at: super::models::unix_now(),
+            compatible: true,
+            reason: None,
+            probe_seconds: 0.0,
+            passed: 0,
+            total: 0,
+            task_seconds: Vec::new(),
+            transient: false,
+            skipped: 0,
+            hard: None,
+            hard_unassisted: None,
+        }
+    }
+
     /// Part des tâches réussies ; un modèle seulement sondé compte pour ½
     /// (compatible mais sans preuve), entre ceux qui réussissent et ceux qui échouent.
     #[must_use]
@@ -152,6 +208,10 @@ impl BenchResult {
             (0, _) => "✓ compatible (sonde)".to_string(),
             (total, Some(median)) => format!("{}/{total} tâches · {median:.0} s", self.passed),
             (total, None) => format!("{}/{total} tâches", self.passed),
+        };
+        let measured = match &self.hard {
+            Some(hard) => format!("{measured} · raisonnement {}/{}", hard.passed, hard.total),
+            None => measured,
         };
         if self.skipped > 0 {
             format!("{measured} · {} non mesurée(s) : {reason}", self.skipped)
@@ -209,7 +269,7 @@ pub fn recent_results() -> BTreeMap<String, BenchResult> {
         .collect()
 }
 
-fn save_results(new_results: &[BenchResult]) {
+pub(crate) fn save_results(new_results: &[BenchResult]) {
     let Some(path) = store_path() else {
         return;
     };
@@ -253,12 +313,12 @@ fn is_openrouter_free(model: &str) -> bool {
 // --- Exécution de claw dans un projet temporaire ---------------------------------
 
 #[derive(Debug, Default)]
-struct RunOutcome {
-    result: Option<String>,
-    error: Option<String>,
-    tools: Vec<String>,
-    seconds: f64,
-    timed_out: bool,
+pub(crate) struct RunOutcome {
+    pub result: Option<String>,
+    pub error: Option<String>,
+    pub tools: Vec<String>,
+    pub seconds: f64,
+    pub timed_out: bool,
 }
 
 /// Analyse la sortie `stream-json` de `claw prompt`.
@@ -306,12 +366,13 @@ fn parse_stream(lines: &[String]) -> (Option<String>, Option<String>, Vec<String
     (result, error, tools)
 }
 
-fn run_claw(
+pub(crate) fn run_claw(
     project: &Path,
     model: &str,
     mode: &str,
     prompt: &str,
     timeout: Duration,
+    envs: &[(&str, &str)],
 ) -> RunOutcome {
     let started = Instant::now();
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("claw"));
@@ -329,6 +390,7 @@ fn run_claw(
         .current_dir(project)
         // Mesurer ce modèle, pas ses remplaçants.
         .env("CLAW_FALLBACK", "0")
+        .envs(envs.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -377,9 +439,9 @@ fn run_claw(
 
 /// Cause d'un échec : lisible, et passagère (disponibilité) ou durable.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Failure {
-    reason: String,
-    transient: bool,
+pub(crate) struct Failure {
+    pub reason: String,
+    pub transient: bool,
 }
 
 impl Failure {
@@ -399,7 +461,7 @@ impl Failure {
 }
 
 /// Raison d'un échec à partir du message d'erreur de claw.
-fn classify_error(error: &str) -> Failure {
+pub(crate) fn classify_error(error: &str) -> Failure {
     let lower = error.to_ascii_lowercase();
     if lower.contains("only available on")
         || lower.contains(" 403 ")
@@ -421,6 +483,11 @@ fn classify_error(error: &str) -> Failure {
         Failure::passing("surchargé")
     } else if lower.contains(" 404") || lower.contains("no endpoints") {
         Failure::lasting("indisponible (404)")
+    } else if lower.contains("error decoding response body")
+        || lower.contains("unexpected eof")
+        || lower.contains("incomplete message")
+    {
+        Failure::passing("connexion coupée pendant la réponse")
     } else if lower.contains("connect") || lower.contains("error sending request") {
         Failure::passing("serveur injoignable")
     } else {
@@ -428,12 +495,12 @@ fn classify_error(error: &str) -> Failure {
     }
 }
 
-struct Project {
-    root: PathBuf,
+pub(crate) struct Project {
+    pub root: PathBuf,
 }
 
 impl Project {
-    fn create(label: &str, files: &[(&str, &str)]) -> Result<Self, String> {
+    pub(crate) fn create(label: &str, files: &[(&str, &str)]) -> Result<Self, String> {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_nanos());
@@ -489,6 +556,7 @@ fn probe(model: &str, timeout: Duration) -> (Result<(), Failure>, f64) {
         "read-only",
         "Lis le fichier sonde.txt avec l'outil read_file, puis réponds uniquement avec le code secret qu'il contient.",
         timeout,
+        &[],
     );
     let verdict = if outcome.timed_out {
         Err(Failure::lasting(format!(
@@ -585,7 +653,7 @@ const TASKS: &[Task] = &[
 /// Issue d'une tâche : réussie, ratée par le modèle, ou non mesurée (le
 /// modèle n'a pas pu travailler : surcharge, limite du fournisseur).
 #[derive(Debug, Clone, PartialEq)]
-enum TaskOutcome {
+pub(crate) enum TaskOutcome {
     Passed(f64),
     Failed(String),
     Unavailable(String),
@@ -602,6 +670,7 @@ fn run_task(task: &Task, model: &str, python: &Path, timeout: Duration) -> TaskO
         "workspace-write",
         task.prompt,
         timeout,
+        &[],
     );
     // Une erreur en cours de route n'empêche pas de vérifier le travail fait.
     match (task.check)(&project.root, python) {
@@ -621,13 +690,13 @@ fn run_task(task: &Task, model: &str, python: &Path, timeout: Duration) -> TaskO
 
 // --- Candidats et rapport -----------------------------------------------------------
 
-fn is_local_model(model: &str) -> bool {
+pub(crate) fn is_local_model(model: &str) -> bool {
     api::compat_providers()
         .iter()
         .any(|provider| provider.local && model.starts_with(&format!("{}:", provider.name)))
 }
 
-fn candidates(options: &BenchOptions) -> Result<Vec<String>, String> {
+pub(crate) fn candidates(options: &BenchOptions) -> Result<Vec<String>, String> {
     let mut models = Vec::new();
     let has_key = std::env::var("OPENROUTER_API_KEY").is_ok_and(|key| !key.trim().is_empty());
     if has_key {
@@ -665,7 +734,7 @@ fn candidates(options: &BenchOptions) -> Result<Vec<String>, String> {
     Ok(models)
 }
 
-fn find_python() -> Option<PathBuf> {
+pub(crate) fn find_python() -> Option<PathBuf> {
     ["python3", "python", "py"]
         .iter()
         .find_map(|name| runtime::find_executable(name))
@@ -675,6 +744,9 @@ fn find_python() -> Option<PathBuf> {
 #[allow(clippy::too_many_lines)]
 pub fn run(args: &str, progress: &mut dyn FnMut(&str)) -> Result<String, String> {
     let options = parse_options(args)?;
+    if options.hard {
+        return crate::bench_hard::run(&options, progress);
+    }
     let models = candidates(&options)?;
     let python = find_python();
     let run_tasks = !options.quick && python.is_some();
@@ -742,6 +814,8 @@ pub fn run(args: &str, progress: &mut dyn FnMut(&str)) -> Result<String, String>
             total: 0,
             task_seconds: Vec::new(),
             skipped: 0,
+            hard: None,
+            hard_unassisted: None,
         });
     }
 
@@ -930,6 +1004,8 @@ mod tests {
             task_seconds: seconds.to_vec(),
             transient: false,
             skipped: 0,
+            hard: None,
+            hard_unassisted: None,
         }
     }
 
@@ -944,6 +1020,11 @@ mod tests {
         assert!(options.quick && options.include_local && options.apply);
         assert_eq!(options.task_models, 2);
         assert_eq!(options.filter.as_deref(), Some("cohere"));
+        assert!(!options.hard && options.max_explicit);
+        let hard = parse_options("bench --difficile cohere").expect("difficile");
+        assert!(hard.hard && !hard.unassisted && !hard.max_explicit);
+        let baseline = parse_options("bench --sans-aide").expect("sans aide");
+        assert!(baseline.hard && baseline.unassisted);
         assert!(parse_options("bench --max zero").is_err());
         assert!(parse_options("bench --inconnue").is_err());
     }
