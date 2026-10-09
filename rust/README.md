@@ -87,6 +87,14 @@ sombre ou claire (thème du système, de VS Code ou choisi) :
   dernière lecture, **requêtes de Claw par modèle** aujourd'hui, et **rythme** (« à ce rythme,
   quota épuisé vers 18:05 », d'après la dernière heure). Sous 100 requêtes gratuites restantes
   (puis 20, puis 0) la pastille passe à l'orange et un message prévient, une fois par seuil ;
+- **proches de Claude** : la première catégorie du menu range les modèles gratuits du plus
+  proche au moins proche du dernier **Claude Opus** ou du dernier **Claude Fable** du catalogue
+  (au choix), avec un pourcentage et ce qui les rapproche ou les éloigne ; la fiche d'un modèle
+  détaille les neuf critères : appels d'outils, raisonnement, lecture d'images, contexte,
+  réponse maximale, orientation code et agents de sa description, rang en programmation chez
+  OpenRouter, spécialités en commun, mesures de Claw. C'est une ressemblance de profil, pas une
+  égalité d'intelligence : « Mesurer ce modèle » vérifie ses capacités réelles. Dans le terminal :
+  `/models claude`, qui propose aussi le plus proche comme `"escalationModel"` gratuit ;
 - **menu des modèles** : nom, identifiant réel et **spécialités** de chaque modèle gratuit, avec
   une **catégorie par spécialité** (Programmation, Images, Raisonnement, Apprentissage et
   recherche, Audio et vidéo, Long contexte, Traduction, Santé, Marketing… ; les catégories sans

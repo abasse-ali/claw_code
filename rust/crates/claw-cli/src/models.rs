@@ -493,6 +493,109 @@ pub fn providers_report(current_model: &str) -> String {
     lines.join("\n")
 }
 
+/// Modèles gratuits utilisables par l'agent (appels d'outils, pas un routeur,
+/// pas mesurés incompatibles).
+fn usable_free_models<'a>(
+    catalog: &'a ModelCatalog,
+    measured: &std::collections::BTreeMap<String, crate::bench::BenchResult>,
+) -> Vec<&'a api::OpenRouterModel> {
+    catalog
+        .models
+        .iter()
+        .filter(|model| {
+            model.is_free() && model.supports_tools && !model.id.starts_with("openrouter/")
+        })
+        .filter(|model| measurement_factor(measured.get(&model.id)).is_some())
+        .collect()
+}
+
+/// Modèles gratuits rangés du plus proche au moins proche de `reference`.
+fn closest_to<'a>(
+    reference: &api::OpenRouterModel,
+    models: &[&'a api::OpenRouterModel],
+    catalog: &ModelCatalog,
+    measured: &std::collections::BTreeMap<String, crate::bench::BenchResult>,
+) -> Vec<(&'a api::OpenRouterModel, crate::likeness::Likeness)> {
+    let mut ranked: Vec<_> = models
+        .iter()
+        .map(|model| {
+            let likeness =
+                crate::likeness::likeness(model, reference, catalog, measured.get(&model.id));
+            (*model, likeness)
+        })
+        .collect();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .percent
+            .cmp(&left.1.percent)
+            .then_with(|| left.0.id.cmp(&right.0.id))
+    });
+    ranked
+}
+
+/// `/models claude` : modèles gratuits les plus proches du dernier Opus et du
+/// dernier Fable, avec ce qui les rapproche et ce qui les en éloigne.
+fn claude_likeness_report() -> Result<String, String> {
+    let (catalog, warning) = catalog(false)?;
+    let measured = crate::bench::recent_results();
+    let references = crate::likeness::claude_references(&catalog);
+    if references.is_empty() {
+        return Ok(
+            "Aucun modèle Opus ou Fable dans le catalogue OpenRouter : /models refresh le relit."
+                .to_string(),
+        );
+    }
+    let models = usable_free_models(&catalog, &measured);
+    let mut lines = vec!["Modèles gratuits les plus proches de Claude".to_string()];
+    if let Some(warning) = warning {
+        lines.push(format!("  ▲ {warning}"));
+    }
+    let mut first_choice = None;
+    for reference in &references {
+        lines.push(String::new());
+        lines.push(format!(
+            "Proches de {} ({})",
+            crate::likeness::display_name(reference),
+            reference.id
+        ));
+        for (model, likeness) in closest_to(reference, &models, &catalog, &measured)
+            .into_iter()
+            .take(6)
+        {
+            first_choice.get_or_insert_with(|| model.id.clone());
+            lines.push(format!("  {:>3} %  {}", likeness.percent, model.id));
+            let matches = likeness.matches();
+            let gaps = likeness.gaps();
+            if !matches.is_empty() {
+                lines.push(format!("         ✓ {}", matches.join(", ").to_lowercase()));
+            }
+            if !gaps.is_empty() {
+                lines.push(format!("         ✗ {}", gaps.join(", ").to_lowercase()));
+            }
+        }
+    }
+    lines.extend([
+        String::new(),
+        "Ressemblance de profil sur neuf critères vérifiables (outils, raisonnement, images,"
+            .to_string(),
+        "contexte, réponse maximale, orientation code et agents, rang en programmation,"
+            .to_string(),
+        "spécialités, mesures de Claw), pas une égalité d'intelligence : les capacités réelles"
+            .to_string(),
+        "se vérifient avec /models bench <modèle>.".to_string(),
+    ]);
+    if let Some(choice) = first_choice {
+        lines.push(String::new());
+        lines.push("Suite".to_string());
+        lines.push(format!("  /model {choice}"));
+        lines.push(format!(
+            "  \"escalationModel\": \"{choice}\"   (dans .claw/settings.json : reprend un tour bloqué)"
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
 /// Rapport de `/models [refresh|local|<recherche>]`.
 pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, String> {
     let args = args.map(str::trim).filter(|value| !value.is_empty());
@@ -504,6 +607,9 @@ pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, 
     }
     if args.is_some_and(|args| args == "bench" || args.starts_with("bench ")) {
         return crate::bench::run(args.unwrap_or_default(), &mut |line| println!("{line}"));
+    }
+    if matches!(args, Some("claude" | "proches" | "opus" | "fable")) {
+        return claude_likeness_report();
     }
     let refresh = args == Some("refresh");
     let filter = args.filter(|_| !refresh).map(str::to_ascii_lowercase);
@@ -582,6 +688,7 @@ pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, 
             .to_string(),
         "  /models vision         modèles qui lisent les images (joindre : @capture.png)"
             .to_string(),
+        "  /models claude         gratuits les plus proches de Claude Opus et Fable".to_string(),
         "  /models <recherche>    filtrer (ex. /models poolside)".to_string(),
         "  /models bench          mesurer les modèles gratuits compatibles avec Claw sur de vraies"
             .to_string(),
@@ -797,6 +904,16 @@ pub fn model_info_json(id: &str) -> serde_json::Value {
             (Some(model), Some(catalog)) => specialties_json(&api::model_specialties(model, catalog)),
             _ => Vec::new(),
         },
+        // Ressemblance avec Claude Opus et Fable, critère par critère.
+        "likeness": match (entry, catalog.as_ref()) {
+            (Some(model), Some(catalog)) if !model.id.starts_with("anthropic/") => {
+                crate::likeness::claude_references(catalog)
+                    .into_iter()
+                    .map(|reference| crate::likeness::likeness(model, reference, catalog, result).json(true))
+                    .collect::<Vec<_>>()
+            }
+            _ => Vec::new(),
+        },
         "url": (compat.is_none() && id.contains('/')).then(|| format!("https://openrouter.ai/{id}")),
         "catalog_at": catalog.as_ref().map(|catalog| catalog.fetched_at),
     })
@@ -856,63 +973,14 @@ pub fn free_coding_models_json(refresh: bool) -> Result<serde_json::Value, Strin
     Ok(view)
 }
 
-/// Modèles gratuits utilisables, leurs spécialités et les catégories, pour un
-/// catalogue et des mesures donnés (sans accès réseau).
-fn models_view_json(
+/// Une catégorie par spécialité (autre que la programmation) : modèles
+/// gratuits rangés par rang chez `OpenRouter` puis par efficacité, et les
+/// payants les plus utilisés de la catégorie.
+fn specialty_categories(
+    usable: &[(&api::OpenRouterModel, f64, Vec<String>, Vec<api::Specialty>)],
     catalog: &ModelCatalog,
-    measured: &std::collections::BTreeMap<String, crate::bench::BenchResult>,
-) -> serde_json::Value {
-    // Du plus efficace au moins efficace, comme le choix automatique.
-    let mut usable: Vec<(&api::OpenRouterModel, f64, Vec<String>, Vec<api::Specialty>)> = catalog
-        .models
-        .iter()
-        .filter(|model| {
-            model.is_free() && model.supports_tools && !model.id.starts_with("openrouter/")
-        })
-        .filter_map(|model| {
-            let (score, reasons) = efficiency(&model.id, Some(catalog), measured.get(&model.id))?;
-            Some((
-                model,
-                score,
-                reasons,
-                api::model_specialties(model, catalog),
-            ))
-        })
-        .collect();
-    usable.sort_by(|left, right| right.1.total_cmp(&left.1));
-
-    let models = usable
-        .iter()
-        .map(|(model, score, reasons, specialties)| {
-            serde_json::json!({
-                "id": model.id,
-                "name": model.name,
-                "context": format_context(model.context_length),
-                "reasons": reasons,
-                "score": score.round(),
-                "measured": measured.get(&model.id).map(crate::bench::BenchResult::summary),
-                "available": api::model_available(&model.id),
-                "specialties": specialties_json(specialties),
-            })
-        })
-        .collect::<Vec<_>>();
-
-    // Une catégorie par spécialité : « Programmation » garde le classement du
-    // code, les autres rangent par rang chez OpenRouter puis par efficacité.
-    let mut categories = vec![
-        serde_json::json!({
-            "key": "programming",
-            "label": "Programmation",
-            "models": preferred_free_models(catalog),
-            "paid": paid_models_json("programming", catalog),
-        }),
-        serde_json::json!({
-            "key": "all",
-            "label": "Tous",
-            "models": usable.iter().map(|entry| entry.0.id.as_str()).collect::<Vec<_>>(),
-            "paid": [],
-        }),
-    ];
+) -> Vec<serde_json::Value> {
+    let mut categories = Vec::new();
     for (key, label) in api::SPECIALTIES
         .iter()
         .filter(|(key, _)| *key != "programming")
@@ -939,9 +1007,134 @@ fn models_view_json(
         }));
     }
 
+    categories
+}
+
+/// Catégorie « Proches de Claude » : modèles gratuits rangés du plus proche
+/// au moins proche de chaque référence (Opus, Fable). `None` sans référence.
+fn claude_category(
+    closest: &[(
+        &api::OpenRouterModel,
+        Vec<(&api::OpenRouterModel, crate::likeness::Likeness)>,
+    )],
+) -> Option<serde_json::Value> {
+    let (_, ranked) = closest.first()?;
+    // En tête : les gratuits les plus proches de Claude, pour chaque référence.
+    let by_reference: serde_json::Map<String, serde_json::Value> = closest
+        .iter()
+        .map(|(reference, ranked)| {
+            (
+                reference.id.clone(),
+                serde_json::json!(ranked
+                    .iter()
+                    .map(|(model, _)| model.id.as_str())
+                    .collect::<Vec<_>>()),
+            )
+        })
+        .collect();
+    Some(serde_json::json!({
+        "key": "claude",
+        "label": "Proches de Claude",
+        "models": ranked.iter().map(|(model, _)| model.id.as_str()).collect::<Vec<_>>(),
+        "by_reference": by_reference,
+        "paid": [],
+    }))
+}
+
+/// Modèles gratuits utilisables, leurs spécialités et les catégories, pour un
+/// catalogue et des mesures donnés (sans accès réseau).
+fn models_view_json(
+    catalog: &ModelCatalog,
+    measured: &std::collections::BTreeMap<String, crate::bench::BenchResult>,
+) -> serde_json::Value {
+    // Du plus efficace au moins efficace, comme le choix automatique.
+    let mut usable: Vec<(&api::OpenRouterModel, f64, Vec<String>, Vec<api::Specialty>)> = catalog
+        .models
+        .iter()
+        .filter(|model| {
+            model.is_free() && model.supports_tools && !model.id.starts_with("openrouter/")
+        })
+        .filter_map(|model| {
+            let (score, reasons) = efficiency(&model.id, Some(catalog), measured.get(&model.id))?;
+            Some((
+                model,
+                score,
+                reasons,
+                api::model_specialties(model, catalog),
+            ))
+        })
+        .collect();
+    usable.sort_by(|left, right| right.1.total_cmp(&left.1));
+
+    let references = crate::likeness::claude_references(catalog);
+    let candidates: Vec<&api::OpenRouterModel> = usable.iter().map(|entry| entry.0).collect();
+    let closest: Vec<(
+        &api::OpenRouterModel,
+        Vec<(&api::OpenRouterModel, crate::likeness::Likeness)>,
+    )> = references
+        .iter()
+        .map(|reference| {
+            (
+                *reference,
+                closest_to(reference, &candidates, catalog, measured),
+            )
+        })
+        .collect();
+    let likeness_of = |id: &str| -> Vec<serde_json::Value> {
+        closest
+            .iter()
+            .filter_map(|(_, ranked)| ranked.iter().find(|(model, _)| model.id == id))
+            .map(|(_, likeness)| likeness.json(false))
+            .collect()
+    };
+
+    let models = usable
+        .iter()
+        .map(|(model, score, reasons, specialties)| {
+            serde_json::json!({
+                "likeness": likeness_of(&model.id),
+                "id": model.id,
+                "name": model.name,
+                "context": format_context(model.context_length),
+                "reasons": reasons,
+                "score": score.round(),
+                "measured": measured.get(&model.id).map(crate::bench::BenchResult::summary),
+                "available": api::model_available(&model.id),
+                "specialties": specialties_json(specialties),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    // Une catégorie par spécialité : « Programmation » garde le classement du
+    // code, les autres rangent par rang chez OpenRouter puis par efficacité.
+    let mut categories: Vec<serde_json::Value> = claude_category(&closest).into_iter().collect();
+    categories.extend([
+        serde_json::json!({
+            "key": "programming",
+            "label": "Programmation",
+            "models": preferred_free_models(catalog),
+            "paid": paid_models_json("programming", catalog),
+        }),
+        serde_json::json!({
+            "key": "all",
+            "label": "Tous",
+            "models": usable.iter().map(|entry| entry.0.id.as_str()).collect::<Vec<_>>(),
+            "paid": [],
+        }),
+    ]);
+    categories.extend(specialty_categories(&usable, catalog));
+
     serde_json::json!({
         "models": models,
         "categories": categories,
+        // Modèles Claude servant de référence à la ressemblance.
+        "references": references
+            .iter()
+            .map(|reference| serde_json::json!({
+                "id": reference.id,
+                "name": crate::likeness::display_name(reference),
+            }))
+            .collect::<Vec<_>>(),
         // Heure (secondes Unix) du catalogue utilisé pour ce classement.
         "catalog_at": catalog.fetched_at,
     })

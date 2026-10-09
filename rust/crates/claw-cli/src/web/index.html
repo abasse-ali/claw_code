@@ -158,6 +158,13 @@
   .cat i { font-style: normal; font-size: 10.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
   .cat.on i { color: inherit; }
   .item .grow span.spec { font-size: 11px; margin-top: 1px; }
+  .item .likeness { font-size: 11.5px; font-weight: 650; color: var(--accent); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .menu .refs { display: flex; gap: 4px; padding: 0 10px 6px; flex-wrap: wrap; }
+  .menu .refs .cat { height: 22px; }
+  .dialog .like-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin: 10px 0 6px; font-size: 13.5px; font-weight: 600; }
+  .dialog .like-head b { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .dialog .meter { height: 5px; border-radius: 5px; background: var(--surface-3); overflow: hidden; margin-bottom: 6px; }
+  .dialog .meter i { display: block; height: 100%; background: var(--accent); border-radius: 5px; }
   .menu .confirm.pay { background: var(--warn-soft); }
   .menu .confirm.pay > span { white-space: normal; }
   .item .fresh { font-size: 10.5px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; color: var(--accent); flex: none; }
@@ -560,7 +567,9 @@
   // Heure du catalogue OpenRouter utilisé, et modèles apparus à la dernière recherche.
   let modelsCatalogAt = 0, newModelIds = new Set();
   // Catégories de modèles (une par spécialité) et celle affichée dans le menu.
-  let modelCategories = [], modelCategory = "programming";
+  let modelCategories = [], modelCategory = "claude";
+  // Modèles Claude de référence (Opus, Fable) et celui choisi pour comparer.
+  let modelReferences = [], likenessReference = "";
   // Les catégories sans modèle gratuit restent repliées tant qu'on ne les demande pas.
   let showPaidOnlyCategories = false;
   // Modèles épinglés en haut du menu (gardés par Claw, communs à toutes les fenêtres).
@@ -1494,6 +1503,30 @@
 
     if (info.description) body.append(el("div", "desc", info.description));
 
+    // Ressemblance avec Claude Opus et Fable, critère par critère.
+    if (info.likeness && info.likeness.length) {
+      const block = el("div", "usage");
+      block.append(el("div", "usage-title", "Ressemblance avec Claude"));
+      for (const like of info.likeness) {
+        const head = el("div", "like-head");
+        head.append(el("span", null, like.reference_name), el("b", null, like.percent + " %"));
+        const meter = el("div", "meter");
+        const fill = el("i");
+        fill.style.width = Math.max(2, Math.min(100, like.percent)) + "%";
+        meter.append(fill);
+        const list = el("dl", "rows");
+        list.style.margin = "0 0 4px";
+        for (const criterion of like.criteria || []) {
+          const dd = el("dd", null, String(criterion.earned).replace(".", ",") + " / " + criterion.max);
+          dd.append(el("small", null, criterion.detail));
+          list.append(el("dt", null, criterion.label), dd);
+        }
+        block.append(head, meter, list);
+      }
+      block.append(el("div", "note", "Ressemblance de profil sur des critères vérifiables, pas une égalité d'intelligence : « Mesurer ce modèle » vérifie ses capacités réelles."));
+      body.append(block);
+    }
+
     // Ses spécialités, chacune avec le fait qui la justifie.
     if (info.specialties && info.specialties.length) {
       const block = el("div", "usage");
@@ -1751,10 +1784,21 @@
         return row;
       };
       // Ce qui s'affiche à droite d'un modèle : nouveauté, mesure, coche.
-      const badges = (id) => {
+      // Ressemblance du modèle avec la référence choisie (Opus ou Fable).
+      const likenessOf = (id) => {
+        const model = known(id);
+        return ((model && model.likeness) || []).find((entry) => entry.reference === likenessReference);
+      };
+      const badges = (id, withLikeness) => {
         const model = known(id);
         const extra = el("span", "aside");
         if (newModelIds.has(id)) extra.append(el("span", "fresh", "nouveau"));
+        const like = withLikeness ? likenessOf(id) : null;
+        if (like) {
+          const badge = el("span", "likeness", like.percent + " %");
+          badge.title = "Ressemblance avec " + like.reference_name + " (profil, pas intelligence)";
+          extra.append(badge);
+        }
         if (model && model.measured) {
           const bad = model.measured.startsWith("✗") || model.measured.startsWith("‖");
           const badge = el("span", "measured" + (bad ? " bad" : ""), shortMeasure(model.measured));
@@ -1810,22 +1854,48 @@
         }
         // Une recherche porte sur tous les modèles gratuits, quelle que soit la catégorie.
         const category = modelCategories.find((entry) => entry.key === modelCategory) || modelCategories[0];
-        const ids = query || !category ? freeModels.map((model) => model.id) : category.models;
+        const claude = !query && category && category.key === "claude";
+        const ids = query || !category ? freeModels.map((model) => model.id)
+          : claude && category.by_reference && category.by_reference[likenessReference] ? category.by_reference[likenessReference]
+          : category.models;
         const models = ids.map(known).filter(Boolean).filter((model) => matches(model.id, query));
+        const reference = modelReferences.find((entry) => entry.id === likenessReference);
         const title = query ? "Modèles gratuits trouvés"
+          : claude ? "Gratuits, du plus proche au moins proche" + (reference ? " de " + reference.name : "")
           : !category || category.key === "programming" ? "Gratuits, du plus puissant au moins puissant"
           : category.key === "all" ? "Tous les modèles gratuits"
           : "Gratuits · " + category.label;
         if (models.length || (category && !query)) {
           list.append(el("div", "group", title));
+          if (claude && modelReferences.length > 1) {
+            const refs = el("div", "refs");
+            for (const entry of modelReferences) {
+              const chip = el("button", "cat" + (entry.id === likenessReference ? " on" : ""), entry.name);
+              chip.type = "button";
+              chip.title = "Comparer à " + entry.name + " (" + entry.id + ")";
+              chip.onclick = () => { likenessReference = entry.id; fill(); list.scrollTop = 0; };
+              refs.append(chip);
+            }
+            list.append(refs);
+          }
+          if (claude) list.append(el("div", "hint-line", "Ressemblance de profil (outils, raisonnement, images, contexte, code, mesures de Claw), pas une égalité d'intelligence."));
           if (modelsCatalogAt) list.append(el("div", "hint-line", "Catalogue OpenRouter lu " + relativeTime(modelsCatalogAt)));
         }
         if (!models.length && category && !query) list.append(el("div", "hint-line", "Aucun modèle gratuit dans cette catégorie."));
         for (const model of models) {
           // Nom du modèle, et dessous son identifiant réel ; sa puissance en info-bulle.
           const power = (model.reasons || []).concat(model.context ? ["contexte " + model.context] : []).join(" · ");
-          const row = modelRow(model.id, pick(model.id), badges(model.id));
+          const row = modelRow(model.id, pick(model.id), badges(model.id, claude));
           row.firstChild.title = power || model.id;
+          const like = claude ? likenessOf(model.id) : null;
+          if (like) {
+            // Ce qui rapproche le modèle de Claude, puis ce qui l'en éloigne.
+            const spec = row.querySelector(".spec") || el("span", "spec");
+            spec.textContent = (like.matches.length ? "✓ " + like.matches.join(", ").toLowerCase() : "")
+              + (like.gaps.length ? (like.matches.length ? " · " : "") + "✗ " + like.gaps.join(", ").toLowerCase() : "");
+            spec.title = spec.textContent;
+            if (!spec.parentNode) row.querySelector(".grow").append(spec);
+          }
           list.append(row);
         }
         if (!query && category && category.paid.length) {
@@ -2119,6 +2189,10 @@
       modelsCatalogAt = data.catalog_at || 0;
       favoriteModels = data.favorites || [];
       modelCategories = data.categories || [];
+      modelReferences = data.references || [];
+      if (!modelReferences.some((reference) => reference.id === likenessReference)) {
+        likenessReference = modelReferences.length ? modelReferences[0].id : "";
+      }
       warning = data.warning || "";
       // Modèles apparus depuis la liste précédente.
       newModelIds = new Set(fresh && known.size ? freeModels.filter((model) => !known.has(model.id)).map((model) => model.id) : []);

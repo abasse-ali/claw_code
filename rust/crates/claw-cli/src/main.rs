@@ -7,6 +7,7 @@ mod credits;
 mod doctor;
 mod init;
 mod input;
+mod likeness;
 mod live;
 mod mcp_cli;
 mod models;
