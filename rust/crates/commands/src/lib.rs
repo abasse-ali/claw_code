@@ -434,8 +434,8 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "session",
         aliases: &[],
-        summary: "Liste ou change les sessions locales gérées",
-        argument_hint: Some("[list|switch <id-session>]"),
+        summary: "Liste, change ou efface les sessions locales gérées",
+        argument_hint: Some("[list|switch <id>|delete <id>|clear]"),
         resume_supported: false,
         category: SlashCommandCategory::Session,
     },
@@ -2471,7 +2471,7 @@ mod tests {
         assert!(help.contains("/diff"));
         assert!(help.contains("/version"));
         assert!(help.contains("/export [fichier]"));
-        assert!(help.contains("/session [list|switch <id-session>]"));
+        assert!(help.contains("/session [list|switch <id>|delete <id>|clear]"));
         assert!(help.contains(
             "/plugin [list|install <chemin>|enable <nom>|disable <nom>|uninstall <id>|update <id>]"
         ));

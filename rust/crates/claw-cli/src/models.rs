@@ -664,9 +664,90 @@ pub fn cost_line(model: &str, usage: TokenUsage) -> Option<String> {
     estimated_cost(model, usage).map(|cost| format!("  Coût estimé      {cost}"))
 }
 
-/// Classement des modèles gratuits pour le code et quota, au format JSON de l'interface web.
-pub fn free_coding_models_json() -> Result<serde_json::Value, String> {
-    let (catalog, warning) = catalog(false)?;
+/// Prix d'un million de jetons, en dollars (`None` si inconnu).
+fn price_per_million(price_per_token: f64) -> Option<f64> {
+    (price_per_token >= 0.0).then_some(price_per_token * 1_000_000.0)
+}
+
+/// Fiche d'un modèle pour l'interface web : catalogue `OpenRouter` en cache
+/// (aucune requête réseau), puissance estimée, mesures de `/models bench`,
+/// disponibilité.
+pub fn model_info_json(id: &str) -> serde_json::Value {
+    let catalog = load_cached_catalog();
+    let measured = crate::bench::recent_results();
+    let result = measured.get(id);
+    let entry = catalog
+        .as_ref()
+        .and_then(|catalog| catalog.models.iter().find(|model| model.id == id));
+    let compat = api::split_compat_model(id);
+    let base_id = id.trim_end_matches(":free");
+    let rank = catalog.as_ref().and_then(|catalog| {
+        catalog
+            .programming_ranking
+            .iter()
+            .position(|ranked| ranked == id || ranked == base_id)
+            .map(|position| position + 1)
+    });
+    // Un modèle hors catalogue (local…) n'a pas de puissance estimée fiable.
+    let power = entry
+        .and_then(|_| efficiency(id, catalog.as_ref(), result))
+        .map(|(score, reasons)| (score.round(), reasons));
+    let provider = match (&compat, id.split_once('/')) {
+        (Some((provider, _)), _) if provider.local => {
+            format!("{} (sur cette machine)", provider.name)
+        }
+        (Some((provider, _)), _) => provider.name.clone(),
+        (None, Some((organization, _))) => format!("{organization} (via OpenRouter)"),
+        (None, None) => "accès direct".to_string(),
+    };
+    let hard = |score: Option<&crate::bench::HardScore>| {
+        score.map(|score| {
+            serde_json::json!({
+                "text": crate::bench_hard::score_text(score),
+                "failed": score.failed,
+                "tested_at": score.tested_at,
+            })
+        })
+    };
+    serde_json::json!({
+        "id": id,
+        "name": entry.map(|model| model.name.clone()),
+        "description": entry.map(|model| model.description.clone()).filter(|text| !text.is_empty()),
+        "provider": provider,
+        "local": compat.as_ref().is_some_and(|(provider, _)| provider.local),
+        "in_catalog": entry.is_some(),
+        "context_length": entry
+            .and_then(|model| model.context_length)
+            .or_else(|| compat.as_ref().and_then(|(provider, _)| provider.context_window)),
+        "max_output": entry.and_then(|model| model.max_completion_tokens).or_else(|| {
+            compat
+                .as_ref()
+                .and_then(|(provider, _)| provider.max_output_tokens.map(u64::from))
+        }),
+        "free": entry.map(api::OpenRouterModel::is_free),
+        "prompt_price": entry.and_then(|model| price_per_million(model.prompt_price)),
+        "completion_price": entry.and_then(|model| price_per_million(model.completion_price)),
+        "tools": entry.map(|model| model.supports_tools),
+        "images": entry.map(|model| model.supports_images),
+        "programming_rank": rank,
+        "score": power.as_ref().map(|(score, _)| *score),
+        "reasons": power.map(|(_, reasons)| reasons).unwrap_or_default(),
+        "measured": result.map(crate::bench::BenchResult::summary),
+        "measured_at": result.map(|result| result.tested_at),
+        "incompatible": result.is_some_and(|result| !result.compatible && !result.transient),
+        "hard": hard(result.and_then(|result| result.hard.as_ref())),
+        "hard_unassisted": hard(result.and_then(|result| result.hard_unassisted.as_ref())),
+        "available": api::model_available(id),
+        "url": (compat.is_none() && id.contains('/')).then(|| format!("https://openrouter.ai/{id}")),
+        "catalog_at": catalog.as_ref().map(|catalog| catalog.fetched_at),
+    })
+}
+
+/// Classement des modèles gratuits pour le code et quota, au format JSON de
+/// l'interface web. `refresh` relit le catalogue et le classement programmation
+/// chez `OpenRouter` au lieu du cache de 24 h (bouton « Rechercher »).
+pub fn free_coding_models_json(refresh: bool) -> Result<serde_json::Value, String> {
+    let (catalog, warning) = catalog(refresh)?;
     // Même ordre que le choix automatique : du plus efficace au moins efficace.
     let measured = crate::bench::recent_results();
     let models = preferred_free_models(&catalog)
@@ -682,6 +763,7 @@ pub fn free_coding_models_json() -> Result<serde_json::Value, String> {
                 "reasons": reasons,
                 "score": score.round(),
                 "measured": measured.get(&model.id).map(crate::bench::BenchResult::summary),
+                "available": api::model_available(&model.id),
             })
         })
         .collect::<Vec<_>>();
@@ -689,6 +771,8 @@ pub fn free_coding_models_json() -> Result<serde_json::Value, String> {
         "models": models,
         "quota": free_quota_line(),
         "warning": warning,
+        // Heure (secondes Unix) du catalogue utilisé pour ce classement.
+        "catalog_at": catalog.fetched_at,
     }))
 }
 
@@ -707,6 +791,28 @@ mod tests {
         assert_eq!(format_age(30), "à l'instant");
         assert_eq!(format_age(600), "il y a 10 min");
         assert_eq!(format_age(7_200), "il y a 2 h");
+    }
+
+    #[test]
+    fn model_info_describes_models_outside_the_catalog() {
+        let local = super::model_info_json("ollama:modele-de-test");
+        assert_eq!(local["local"], true);
+        assert_eq!(local["in_catalog"], false);
+        assert_eq!(local["provider"], "ollama (sur cette machine)");
+        assert!(local["url"].is_null() && local["score"].is_null());
+
+        let remote = super::model_info_json("acme/modele-inconnu-de-test:free");
+        assert_eq!(remote["local"], false);
+        assert_eq!(remote["provider"], "acme (via OpenRouter)");
+        assert_eq!(
+            remote["url"],
+            "https://openrouter.ai/acme/modele-inconnu-de-test:free"
+        );
+        assert!(remote["programming_rank"].is_null());
+
+        let per_million = super::price_per_million(0.000_002).expect("prix");
+        assert!((per_million - 2.0).abs() < 1e-9);
+        assert_eq!(super::price_per_million(-1.0), None);
     }
 
     #[test]

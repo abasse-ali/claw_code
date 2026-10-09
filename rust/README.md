@@ -80,7 +80,20 @@ sombre ou claire (thème du système, de VS Code ou choisi) :
 - **demandes de permission dans la page**, au clavier : `Entrée` autoriser, `A` toujours,
   `Échap` refuser (avec consigne facultative) ;
 - palette `Ctrl+K` (actions, modèles, modes, commandes), suggestions `/`, images collées,
-  glissées ou jointes, crédits OpenRouter en direct, modèle et mode en un clic, sessions ;
+  glissées ou jointes, modèle et mode en un clic ;
+- **crédits OpenRouter en direct** : solde et requêtes gratuites du jour sont les chiffres
+  d'OpenRouter lui-même (`GET /credits` et `GET /key`), décomptés à chaque requête de Claw puis
+  relus toutes les 20 s tant qu'une page est ouverte ; un clic ouvre le détail, avec l'heure de
+  la dernière lecture ;
+- **menu des modèles** : nom et identifiant réel de chaque modèle gratuit, du plus puissant au
+  moins puissant ; le bouton « Rechercher les modèles gratuits les plus puissants » relit le
+  catalogue et le classement programmation d'OpenRouter (sinon gardés 24 h) et signale les
+  nouveaux venus ; le petit bouton d'information à droite d'un modèle ouvre sa fiche
+  (fournisseur, contexte, réponse maximale, prix, rang, puissance estimée, mesures de
+  `/models bench`, disponibilité, lien vers OpenRouter) ;
+- **sessions** : nouvelle session, reprise d'une session précédente, effacement d'une session
+  (corbeille à droite) ou de toutes les précédentes, après confirmation ; la session en cours ne
+  s'efface pas ;
 - diagrammes Mermaid à la demande ; commandes `/review`, `/audit`, `/archi`, `/adr`, `/fix`,
   `/models`, `/credits`, `/mcp`, `/cost`, `/compact`…
 
@@ -465,6 +478,9 @@ Claw lit aussi `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` 
   Avec `"plannerModel"`, c'est ce modèle qui prépare le plan (voir « Aides au raisonnement »).
 - **Reprise** : `claw --continue` (ou `-c`) reprend la dernière session du projet, `claw --resume`
   sans argument propose la liste des sessions récentes.
+- **Ménage** : `/session delete <id>` efface une session enregistrée et ses points de
+  restauration ; `/session clear` efface toutes les précédentes (confirmation par
+  `/session clear oui`). Les sessions sont dans `.claw/sessions/` du projet.
 
 ### Terminal
 

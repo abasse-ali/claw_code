@@ -35,12 +35,12 @@ use tokio::sync::broadcast;
 
 use crate::{
     build_runtime_with_ui, build_system_prompt, create_managed_session_handle,
-    describe_permission_target, error_hint, expert_command_prompt, format_compact_report,
-    format_cost_report, format_model_report, format_permissions_report, list_managed_sessions,
-    models, normalize_permission_mode, open_browser, permission_mode_from_label,
-    persist_allow_rule, render_slash_command_help, resolve_model_alias, resolve_session_reference,
-    rule_is_session_only, AllowedToolSet, CliToolExecutor, DefaultRuntimeClient, RuntimeUi,
-    SessionHandle, TurnObserver,
+    delete_managed_session, delete_other_sessions, describe_permission_target, error_hint,
+    expert_command_prompt, format_compact_report, format_cost_report, format_model_report,
+    format_permissions_report, list_managed_sessions, models, normalize_permission_mode,
+    open_browser, permission_mode_from_label, persist_allow_rule, render_slash_command_help,
+    resolve_model_alias, resolve_session_reference, rule_is_session_only, AllowedToolSet,
+    CliToolExecutor, DefaultRuntimeClient, RuntimeUi, SessionHandle, TurnObserver,
 };
 
 const PAGE: &str = include_str!("web/index.html");
@@ -217,6 +217,15 @@ impl WebApp {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .status
             .busy
+    }
+
+    fn current_session_id(&self) -> String {
+        self.view
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .status
+            .session_id
+            .clone()
     }
 
     fn lock_pending(
@@ -1079,16 +1088,53 @@ async fn post_interrupt(State(app): State<WebApp>, headers: HeaderMap) -> ApiRes
     Ok(StatusCode::ACCEPTED.into_response())
 }
 
-async fn get_models(State(app): State<WebApp>, headers: HeaderMap) -> ApiResult {
+/// `?fresh=1` relit le catalogue chez `OpenRouter` (bouton « Rechercher »).
+#[derive(Deserialize)]
+struct ModelsQuery {
+    #[serde(default)]
+    fresh: Option<String>,
+}
+
+async fn get_models(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Query(query): Query<ModelsQuery>,
+) -> ApiResult {
     authorize(&app, &headers, None)?;
+    let fresh = query.fresh.as_deref() == Some("1");
     // Catalogue et quota passent par le réseau : hors du fil asynchrone.
-    let result = tokio::task::spawn_blocking(models::free_coding_models_json)
+    let result = tokio::task::spawn_blocking(move || models::free_coding_models_json(fresh))
         .await
         .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()))?;
     match result {
         Ok(value) => Ok(Json(value).into_response()),
         Err(error) => Err(api_error(StatusCode::BAD_GATEWAY, &error)),
     }
+}
+
+#[derive(Deserialize)]
+struct ModelInfoQuery {
+    id: String,
+}
+
+/// Fiche d'un modèle (bouton d'information du menu des modèles).
+async fn get_model_info(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Query(query): Query<ModelInfoQuery>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    let id = query.id.trim().to_string();
+    if id.is_empty() || id.len() > 200 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "identifiant de modèle invalide",
+        ));
+    }
+    let info = tokio::task::spawn_blocking(move || models::model_info_json(&id))
+        .await
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()))?;
+    Ok(Json(info).into_response())
 }
 
 /// Commandes personnalisées, pour les suggestions du champ de saisie.
@@ -1202,6 +1248,32 @@ async fn get_sessions(State(app): State<WebApp>, headers: HeaderMap) -> ApiResul
     Ok(Json(json!({ "sessions": sessions })).into_response())
 }
 
+/// Efface une session précédente (jamais celle en cours).
+async fn post_session_delete(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Json(body): Json<ValueBody>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    if body.value == app.current_session_id() {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "la session en cours ne peut pas être effacée",
+        ));
+    }
+    delete_managed_session(&body.value)
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, &error))?;
+    Ok(Json(json!({ "deleted": 1 })).into_response())
+}
+
+/// Efface toutes les sessions précédentes du projet ; celle en cours est gardée.
+async fn post_sessions_clear(State(app): State<WebApp>, headers: HeaderMap) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    let deleted = delete_other_sessions(&app.current_session_id())
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, &error))?;
+    Ok(Json(json!({ "deleted": deleted })).into_response())
+}
+
 fn router(app: WebApp) -> Router {
     Router::new()
         .route("/", get(index))
@@ -1211,13 +1283,15 @@ fn router(app: WebApp) -> Router {
             post(post_message).layer(DefaultBodyLimit::max(48 * 1024 * 1024)),
         )
         .route("/api/permission", post(post_permission))
-        .route("/api/model", post(post_model))
+        .route("/api/model", post(post_model).get(get_model_info))
         .route("/api/permissions", post(post_permissions))
         .route("/api/new", post(post_new))
         .route("/api/resume", post(post_resume))
         .route("/api/interrupt", post(post_interrupt))
         .route("/api/models", get(get_models))
         .route("/api/sessions", get(get_sessions))
+        .route("/api/sessions/delete", post(post_session_delete))
+        .route("/api/sessions/clear", post(post_sessions_clear))
         .route("/api/commands", get(get_commands))
         .route("/api/viewers", get(get_viewers))
         .route("/api/credits", get(get_credits))

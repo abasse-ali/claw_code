@@ -2667,8 +2667,45 @@ impl LiveCli {
                 );
                 Ok(true)
             }
+            Some("delete" | "effacer") => {
+                let Some(target) = target else {
+                    println!("Usage : /session delete <identifiant de session>");
+                    return Ok(false);
+                };
+                if target == self.session.id {
+                    println!("La session en cours ne peut pas être effacée (/clear la vide).");
+                    return Ok(false);
+                }
+                match delete_managed_session(target) {
+                    Ok(()) => println!("Session effacée\n  Session          {target}"),
+                    Err(error) => println!("{error}"),
+                }
+                Ok(false)
+            }
+            Some("clear" | "vider") => {
+                let others = list_managed_sessions()?
+                    .into_iter()
+                    .filter(|session| session.id != self.session.id)
+                    .count();
+                if others == 0 {
+                    println!("Aucune session précédente à effacer.");
+                    return Ok(false);
+                }
+                // Irréversible : un « oui » explicite est demandé.
+                if target != Some("oui") {
+                    println!(
+                        "{others} session(s) précédente(s) seront effacées, avec leurs points de restauration ; la session en cours est gardée.\nPour confirmer : /session clear oui"
+                    );
+                    return Ok(false);
+                }
+                match delete_other_sessions(&self.session.id) {
+                    Ok(deleted) => println!("Sessions effacées\n  Nombre           {deleted}"),
+                    Err(error) => println!("{error}"),
+                }
+                Ok(false)
+            }
             Some(other) => {
-                println!("Action /session inconnue « {other} ». Utilisez /session list ou /session switch <identifiant>.");
+                println!("Action /session inconnue « {other} ». Utilisez /session list, /session switch <identifiant>, /session delete <identifiant> ou /session clear.");
                 Ok(false)
             }
         }
@@ -3143,6 +3180,44 @@ fn list_managed_sessions() -> Result<Vec<ManagedSessionSummary>, Box<dyn std::er
     }
     sessions.sort_by(|left, right| right.modified_epoch_secs.cmp(&left.modified_epoch_secs));
     Ok(sessions)
+}
+
+/// Identifiant utilisable sans risque comme nom de fichier de session.
+fn is_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 80
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+}
+
+/// Efface une session enregistrée du projet et ses points de restauration.
+fn delete_managed_session(id: &str) -> Result<(), String> {
+    if !is_session_id(id) {
+        return Err(format!("identifiant de session invalide : {id}"));
+    }
+    let dir = sessions_dir().map_err(|error| error.to_string())?;
+    let path = dir.join(format!("{id}.json"));
+    if !path.is_file() {
+        return Err(format!("session introuvable : {id}"));
+    }
+    fs::remove_file(&path).map_err(|error| format!("effacement impossible : {error}"))?;
+    if let Some(claw_dir) = dir.parent() {
+        let _ = fs::remove_file(claw_dir.join("checkpoints").join(format!("{id}.json")));
+    }
+    Ok(())
+}
+
+/// Efface toutes les sessions enregistrées du projet sauf `keep` (celle en
+/// cours) ; renvoie leur nombre.
+fn delete_other_sessions(keep: &str) -> Result<usize, String> {
+    let sessions = list_managed_sessions().map_err(|error| error.to_string())?;
+    let mut deleted = 0;
+    for session in sessions.iter().filter(|session| session.id != keep) {
+        delete_managed_session(&session.id)?;
+        deleted += 1;
+    }
+    Ok(deleted)
 }
 
 /// Dernière session non vide du projet (`claw --continue`).
@@ -6618,7 +6693,7 @@ mod tests {
         assert!(help.contains("/diff"));
         assert!(help.contains("/version"));
         assert!(help.contains("/export [fichier]"));
-        assert!(help.contains("/session [list|switch <id-session>]"));
+        assert!(help.contains("/session [list|switch <id>|delete <id>|clear]"));
         assert!(help.contains("/plugin"));
         assert!(help.contains("/plugins, /marketplace"));
         assert!(help.contains("/agents"));
@@ -7332,5 +7407,25 @@ mod tests {
             AssistantEvent::TextDelta(text) if text == "Final answer"
         ));
         assert!(!String::from_utf8(out).expect("utf8").contains("step 1"));
+    }
+
+    #[test]
+    fn only_plain_session_ids_can_name_a_file_to_delete() {
+        assert!(super::is_session_id("session-1791500000000"));
+        assert!(super::is_session_id("ma_session-2"));
+        for unsafe_id in [
+            "",
+            "../secret",
+            "a/b",
+            "a\\b",
+            "session 1",
+            "session.json",
+            "C:x",
+        ] {
+            assert!(!super::is_session_id(unsafe_id), "{unsafe_id}");
+        }
+        assert!(!super::is_session_id(&"a".repeat(81)));
+        // Un identifiant refusé est rejeté avant tout accès au disque.
+        assert!(super::delete_managed_session("../secret").is_err());
     }
 }

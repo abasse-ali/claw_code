@@ -24,6 +24,8 @@ static SESSION_FREE: AtomicU64 = AtomicU64::new(0);
 static SESSION_PAID: AtomicU64 = AtomicU64::new(0);
 /// Change à chaque requête notée ou lecture faite : l'affichage se met à jour.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
+/// Heure (millisecondes Unix) de la dernière lecture réussie chez `OpenRouter`.
+static LAST_READ_MS: AtomicU64 = AtomicU64::new(0);
 
 fn is_free_model(model: &str) -> bool {
     model.ends_with(":free") || model == "openrouter/free"
@@ -81,6 +83,12 @@ pub fn account_status(fresh: bool) -> Option<Result<AccountStatus, String>> {
         let _ = FREE_SINCE_FETCH.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
             Some(count.saturating_sub(noted_before))
         });
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+            });
+        LAST_READ_MS.store(now, Ordering::SeqCst);
     }
     *cache = Some((Instant::now(), status.clone()));
     GENERATION.fetch_add(1, Ordering::SeqCst);
@@ -266,6 +274,8 @@ pub fn json(fresh: bool) -> serde_json::Value {
                 "session": { "free": session_free, "paid": session_paid },
                 // Requêtes décomptées en attendant la confirmation d'OpenRouter.
                 "pending": FREE_SINCE_FETCH.load(Ordering::SeqCst),
+                // Dernière lecture des chiffres chez OpenRouter (ms Unix).
+                "read_at": LAST_READ_MS.load(Ordering::SeqCst),
                 "text": short_line(&status),
             })
         }

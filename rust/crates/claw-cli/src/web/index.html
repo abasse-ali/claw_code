@@ -54,7 +54,7 @@
        seuls les contenus utiles à copier restent sélectionnables. */
     -webkit-user-select: none; user-select: none;
   }
-  .user, .md, .step-body, .card pre, .card .hint, .perm pre, .diff, .dialog .big, .dialog .rows, .dialog .link, input, textarea {
+  .user, .md, .step-body, .card pre, .card .hint, .perm pre, .diff, .dialog .big, .dialog .rows, .dialog .link, .dialog .name, .dialog .ident, .dialog .desc, input, textarea {
     -webkit-user-select: text; user-select: text;
   }
   button, .codehead, .copy { -webkit-user-select: none; user-select: none; }
@@ -127,6 +127,22 @@
   .item .lead { width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); flex: none; }
   .menu .custom { display: flex; gap: 6px; padding: 6px 2px 2px; border-top: 1px solid var(--border); margin-top: 6px; }
   .menu .custom input { flex: 1; height: 32px; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface-2); padding: 0 10px; outline: none; font-family: var(--mono); font-size: 12.5px; }
+  /* rangée de menu avec un petit bouton à droite (informations, effacer) */
+  .menu .row { display: flex; align-items: center; gap: 2px; }
+  .menu .row > .item { flex: 1; min-width: 0; }
+  .mini { flex: none; width: 28px; height: 28px; display: inline-grid; place-items: center; border-radius: 7px; color: var(--text-3); transition: background .15s, color .15s; }
+  .mini:hover { background: var(--surface-3); color: var(--text); }
+  .mini.danger:hover { background: var(--err-soft); color: var(--err); }
+  .menu .confirm { display: flex; align-items: center; gap: 6px; padding: 6px 6px 6px 10px; border-radius: var(--r-sm); background: var(--err-soft); font-size: 13px; }
+  .menu .confirm > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .menu .confirm .btn { height: 28px; padding: 0 10px; font-size: 12.5px; }
+  .menu .wide { width: calc(100% - 4px); margin: 0 2px 6px; justify-content: center; flex: none; }
+  .menu .wide > svg.i { color: var(--accent); }
+  .menu .foot { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 6px; }
+  .menu .foot .wide { margin-bottom: 0; }
+  .menu .hint-line { font-size: 11.5px; color: var(--text-3); padding: 0 10px 4px; }
+  .item .fresh { font-size: 10.5px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; color: var(--accent); flex: none; }
+  .item .aside { display: inline-flex; align-items: center; gap: 8px; flex: none; }
 
   /* ------------------------------------------------------------------ conversation */
   main#log { flex: 1; overflow-y: auto; scroll-behavior: auto; position: relative; }
@@ -309,6 +325,17 @@
   .dialog .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; align-items: center; margin-top: 16px; }
   .dialog .actions .note { margin-right: auto; }
   .dialog a.btn { text-decoration: none; }
+  .dialog a.btn:not(.primary) { color: var(--text); }
+  .dialog .name { font-size: 19px; font-weight: 700; letter-spacing: -.01em; line-height: 1.25; }
+  .dialog .ident { font-family: var(--mono); font-size: 12px; color: var(--text-3); margin-top: 3px; overflow-wrap: anywhere; }
+  .dialog .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
+  .chip { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 11px; font-size: 11.5px; font-weight: 600; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-2); white-space: nowrap; }
+  .chip.ok { color: var(--ok); }
+  .chip.warn { color: var(--warn); }
+  .chip.accent { color: var(--accent); border-color: var(--accent); }
+  .dialog .desc { margin-top: 12px; font-size: 13px; line-height: 1.5; color: var(--text-2); max-height: 126px; overflow: auto; }
+  .dialog .rows dd small { display: block; font-weight: 400; font-size: 12px; color: var(--text-3); }
+  .dialog .source { margin-top: 10px; }
 
   #toast { position: fixed; left: 50%; bottom: 120px; transform: translate(-50%, 8px); z-index: 50; padding: 9px 14px; border-radius: var(--r); background: var(--text); color: var(--bg); font-size: 13.5px; opacity: 0; transition: opacity .2s, transform .2s var(--ease); pointer-events: none; max-width: min(520px, 90vw); }
   #toast.show { opacity: .95; transform: translate(-50%, 0); }
@@ -449,6 +476,7 @@
     auto: '<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/>',
     cpu: '<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>',
     info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
+    trash: '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>',
     coins: '<circle cx="8" cy="8" r="6"/><path d="M18.09 10.37A6 6 0 1 1 10.34 18"/><path d="M7 6h1v4"/>',
     layers: '<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
     command: '<path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z"/>',
@@ -490,6 +518,8 @@
   // ---------------------------------------------------------------- état
   let status = {}, busySince = null, currentAssistant = null, thinkingStep = null, pendingTools = [];
   let pendingPermissions = 0, freeModels = [], customCommands = [], mermaidCount = 0, currentActivity = "";
+  // Heure du catalogue OpenRouter utilisé, et modèles apparus à la dernière recherche.
+  let modelsCatalogAt = 0, newModelIds = new Set();
 
   // ---------------------------------------------------------------- utilitaires
   const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) =>
@@ -1185,31 +1215,58 @@
     const minutes = Math.max(0, Math.round((next - now.getTime()) / 60000));
     return Math.floor(minutes / 60) + " h " + String(minutes % 60).padStart(2, "0");
   }
-  let creditsDialog = null;
-  function openCreditsDialog() {
+  // Fenêtre au centre de la page : fermée par Échap, la croix ou un clic à côté.
+  function openDialog(label) {
     closeMenu();
-    if ($("dialog-backdrop")) return;
+    const previous = $("dialog-backdrop");
+    if (previous && previous.closeDialog) previous.closeDialog();
     const backdrop = el("div");
     backdrop.id = "dialog-backdrop";
     const panel = el("div", "dialog");
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-modal", "true");
-    panel.setAttribute("aria-label", "Crédits OpenRouter");
+    panel.setAttribute("aria-label", label);
     backdrop.append(panel);
+    const dialog = { panel, onClose: null };
     const onKey = (event) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopPropagation();
-      close();
+      dialog.close();
     };
-    const close = () => {
-      creditsDialog = null;
+    dialog.close = () => {
+      if (dialog.onClose) dialog.onClose();
       document.removeEventListener("keydown", onKey, true);
       backdrop.remove();
       input.focus();
     };
+    // En-tête commun : icône, titre, croix.
+    dialog.head = (icon) => {
+      const head = el("div", "dialog-head");
+      head.innerHTML = svg(icon);
+      head.append(el("span", null, label));
+      const x = el("button", "icon-btn");
+      x.type = "button";
+      x.title = "Fermer (Échap)";
+      x.setAttribute("aria-label", "Fermer");
+      x.innerHTML = svg("x");
+      x.onclick = dialog.close;
+      head.append(el("span", "spacer"), x);
+      return head;
+    };
+    backdrop.closeDialog = dialog.close;
     document.addEventListener("keydown", onKey, true);
-    backdrop.onmousedown = (event) => { if (event.target === backdrop) close(); };
+    backdrop.onmousedown = (event) => { if (event.target === backdrop) dialog.close(); };
+    document.body.appendChild(backdrop);
+    return dialog;
+  }
+
+  let creditsDialog = null;
+  function openCreditsDialog() {
+    if (creditsDialog) return;
+    const dialog = openDialog("Crédits OpenRouter");
+    const panel = dialog.panel;
+    dialog.onClose = () => { creditsDialog = null; };
     const refresh = async (button) => {
       if (button) button.disabled = true;
       try { renderCredits(await api("/api/credits?fresh=1")); } catch (error) { toast(error.message); }
@@ -1217,17 +1274,7 @@
     };
     creditsDialog = (data) => {
       panel.textContent = "";
-      const head = el("div", "dialog-head");
-      head.innerHTML = svg("coins") + "<span>Crédits OpenRouter</span>";
-      const spacer = el("span", "spacer");
-      const x = el("button", "icon-btn");
-      x.type = "button";
-      x.title = "Fermer (Échap)";
-      x.setAttribute("aria-label", "Fermer");
-      x.innerHTML = svg("x");
-      x.onclick = close;
-      head.append(spacer, x);
-      panel.append(head);
+      panel.append(dialog.head("coins"));
 
       const low = typeof data.balance === "number" && data.balance < 1;
       const big = el("div", "big" + (low ? " low" : ""));
@@ -1263,8 +1310,12 @@
         panel.append(quota);
       }
 
+      // D'où viennent les chiffres, et quand ils ont été lus pour la dernière fois.
+      panel.append(el("div", "note source", "Chiffres fournis par OpenRouter et mis à jour sans intervention : à chaque requête de Claw, puis relus toutes les 20 s."));
+
       const actions = el("div", "actions");
-      actions.append(el("span", "note", "Mis à jour à " + new Date().toLocaleTimeString("fr-FR")));
+      const readAt = data.read_at ? new Date(data.read_at).toLocaleTimeString("fr-FR") : "";
+      actions.append(el("span", "note", readAt ? "Relu à " + readAt : "Lecture en cours…"));
       const again = el("button", "btn", "Actualiser");
       again.type = "button";
       again.onclick = () => refresh(again);
@@ -1276,8 +1327,92 @@
       panel.append(actions, el("div", "link", "openrouter.ai/settings/credits"));
     };
     creditsDialog(lastCredits || { available: true });
-    document.body.appendChild(backdrop);
     refresh(null);
+  }
+
+  // Fiche d'un modèle (petit bouton d'information du menu des modèles).
+  const tokenCount = (count) => typeof count !== "number" ? "—"
+    : count >= 1000000 ? String(Math.round(count / 100000) / 10).replace(".", ",") + (count >= 2000000 ? " millions" : " million") + " de jetons"
+    : count.toLocaleString("fr-FR") + " jetons";
+  async function openModelInfo(id) {
+    const dialog = openDialog("Informations sur le modèle");
+    const panel = dialog.panel;
+    const name = el("div", "name", modelName(id));
+    const body = el("div");
+    body.append(el("div", "note source", "Chargement…"));
+    panel.append(dialog.head("info"), name, el("div", "ident", id), body);
+    let info;
+    try {
+      info = await api("/api/model?id=" + encodeURIComponent(id));
+    } catch (error) {
+      body.textContent = "";
+      body.append(el("div", "note source", "Informations indisponibles : " + error.message));
+      return;
+    }
+    if (!panel.isConnected) return;
+    if (info.name) name.textContent = info.name.replace(/\s*\(free\)\s*$/i, "");
+    body.textContent = "";
+
+    const current = id === status.model;
+    const chips = el("div", "chips");
+    const chip = (text, kind) => chips.append(el("span", "chip" + (kind ? " " + kind : ""), text));
+    if (current) chip("Modèle actuel", "accent");
+    if (info.local) chip("Local, sans coût", "ok");
+    else if (info.free === true) chip("Gratuit", "ok");
+    else if (info.free === false) chip("Payant");
+    if (info.tools === true) chip("Appels d'outils");
+    else if (info.tools === false) chip("Sans appel d'outils natif", "warn");
+    if (info.images) chip("Lit les images");
+    if (info.incompatible) chip("Incompatible avec Claw (mesuré)", "warn");
+    if (info.available === false) chip("Mis de côté pour l'instant", "warn");
+    if (chips.children.length) body.append(chips);
+
+    if (info.description) body.append(el("div", "desc", info.description));
+
+    const rows = el("dl", "rows");
+    const row = (label, value, detail) => {
+      const dd = el("dd", null, value);
+      if (detail) dd.append(el("small", null, detail));
+      rows.append(el("dt", null, label), dd);
+    };
+    row("Fournisseur", info.provider || "—");
+    if (typeof info.context_length === "number") row("Contexte", tokenCount(info.context_length));
+    if (typeof info.max_output === "number") row("Réponse maximale", tokenCount(info.max_output));
+    if (info.local) row("Prix", "Aucun", "modèle servi par cette machine");
+    else if (info.free === true) row("Prix", "Gratuit", "compté dans les requêtes gratuites du jour");
+    else if (typeof info.prompt_price === "number" && typeof info.completion_price === "number") {
+      row("Prix", money(info.prompt_price) + " en entrée", money(info.completion_price) + " en sortie, par million de jetons");
+    }
+    if (info.in_catalog) row("Classement programmation", info.programming_rank ? "n° " + info.programming_rank + " chez OpenRouter" : "hors classement");
+    if (typeof info.score === "number") row("Puissance estimée pour le code", String(info.score), (info.reasons || []).join(" · "));
+    if (info.measured) row("Mesuré par Claw", info.measured, info.measured_at ? relativeTime(info.measured_at) : "");
+    else row("Mesuré par Claw", "pas encore", "/models bench le mesure sur de vraies tâches");
+    if (info.hard) row("Raisonnement (tests cachés)", info.hard.text, info.hard_unassisted ? "sans les aides de Claw : " + info.hard_unassisted.text : "");
+    row("Disponibilité", info.available === false ? "Mis de côté" : "Disponible", info.available === false ? "quota atteint ou panne récente, réessayé plus tard" : "");
+    body.append(rows);
+
+    if (!info.in_catalog && !info.local) {
+      body.append(el("div", "note source", "Ce modèle n'est pas dans le catalogue OpenRouter gardé en cache : la recherche des modèles gratuits l'actualise."));
+    }
+
+    if (info.catalog_at && info.in_catalog) {
+      body.append(el("div", "note source", "Données du catalogue OpenRouter, lu " + relativeTime(info.catalog_at) + "."));
+    }
+    const actions = el("div", "actions");
+    if (info.url) {
+      const link = el("a", "btn", "Voir sur OpenRouter");
+      link.href = info.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      actions.append(link);
+    }
+    if (!current) {
+      const use = el("button", "btn primary", "Utiliser ce modèle");
+      use.type = "button";
+      use.onclick = () => { dialog.close(); setModel(id); };
+      actions.append(use);
+    }
+    body.append(actions);
   }
 
   // ---------------------------------------------------------------- menus
@@ -1305,6 +1440,12 @@
     }
     if (rect.left + rect.width / 2 < window.innerWidth / 2) menu.style.left = Math.max(12, rect.left) + "px";
     else menu.style.right = Math.max(12, window.innerWidth - rect.right) + "px";
+    // Jamais hors de la fenêtre (écran étroit, panneau de VS Code).
+    const box = menu.getBoundingClientRect();
+    if (box.left < 12 || box.right > window.innerWidth - 12) {
+      menu.style.right = "auto";
+      menu.style.left = Math.max(12, Math.min(box.left, window.innerWidth - 12 - box.width)) + "px";
+    }
     openMenu = menu;
     const search = menu.querySelector("input.search");
     if (search) search.focus();
@@ -1332,38 +1473,91 @@
   async function setModel(value) {
     try { await api("/api/model", { value }); } catch (error) { toast(error.message); }
   }
+  // Petit bouton à droite d'une rangée de menu.
+  function miniButton(icon, title, onClick, kind) {
+    const button = el("button", "mini" + (kind ? " " + kind : ""));
+    button.type = "button";
+    button.title = title;
+    button.setAttribute("aria-label", title);
+    button.innerHTML = svg(icon);
+    button.onclick = (event) => { event.stopPropagation(); onClick(); };
+    return button;
+  }
+  const checkMark = () => { const check = el("span", "check"); check.innerHTML = svg("check"); return check; };
+  // Relit le catalogue et le classement programmation d'OpenRouter, puis
+  // reclasse les modèles gratuits pour le code, du plus puissant au moins puissant.
+  async function searchBestModels() {
+    try {
+      const warning = await loadModels(true);
+      if (warning) { toast(warning); return; }
+      const best = freeModels[0];
+      toast(freeModels.length + " modèle(s) gratuit(s) pour le code"
+        + (newModelIds.size ? " · " + newModelIds.size + " nouveau(x)" : "")
+        + (best ? " · le plus puissant : " + modelName(best.id) : ""));
+    } catch (error) {
+      toast("Recherche impossible : " + error.message);
+    }
+  }
   function openModelMenu() {
     showMenu($("model-btn"), (menu) => {
       const search = el("input", "search");
       search.placeholder = "Rechercher un modèle…";
+      const find = el("button", "btn wide");
+      find.type = "button";
+      find.title = "Relit le catalogue et le classement programmation d'OpenRouter, puis reclasse les modèles gratuits pour le code";
+      const findLabel = (busy) => {
+        find.innerHTML = svg(busy ? "search" : "spark");
+        find.append(el("span", null, busy ? "Recherche sur OpenRouter…" : "Rechercher les modèles gratuits les plus puissants"));
+      };
+      findLabel(false);
       const list = el("div", "list");
+      const modelRow = (id, onPick, extra) => {
+        const row = el("div", "row");
+        row.append(menuItem(modelName(id), id, onPick, extra, "mono"),
+          miniButton("info", "Informations sur ce modèle", () => openModelInfo(id)));
+        return row;
+      };
       const fill = () => {
         const query = search.value.trim().toLowerCase();
         list.textContent = "";
         const models = freeModels.filter((model) => !query || model.id.toLowerCase().includes(query) || (model.name || "").toLowerCase().includes(query));
         if (status.model && !freeModels.some((model) => model.id === status.model) && (!query || status.model.toLowerCase().includes(query))) {
           list.append(el("div", "group", "Actuel"));
-          const check = el("span", "check");
-          check.innerHTML = svg("check");
-          list.append(menuItem(modelName(status.model), status.model, () => {}, check, "mono"));
+          list.append(modelRow(status.model, () => {}, checkMark()));
         }
-        if (models.length) list.append(el("div", "group", "Gratuits, du plus puissant au moins puissant"));
+        if (models.length) {
+          list.append(el("div", "group", "Gratuits, du plus puissant au moins puissant"));
+          if (modelsCatalogAt) list.append(el("div", "hint-line", "Catalogue OpenRouter lu " + relativeTime(modelsCatalogAt)));
+        }
         for (const model of models) {
-          const extra = el("span");
+          const extra = el("span", "aside");
+          if (newModelIds.has(model.id)) extra.append(el("span", "fresh", "nouveau"));
           if (model.measured) {
             const bad = model.measured.startsWith("✗") || model.measured.startsWith("‖");
             const badge = el("span", "measured" + (bad ? " bad" : ""), shortMeasure(model.measured));
             badge.title = "Mesuré par /models bench : " + model.measured;
             extra.append(badge);
+          } else if (model.available === false) {
+            const badge = el("span", "measured bad", "mis de côté");
+            badge.title = "Quota atteint ou panne récente : réessayé plus tard";
+            extra.append(badge);
           }
-          if (model.id === status.model) { const check = el("span", "check"); check.innerHTML = svg("check"); extra.append(check); }
+          if (model.id === status.model) extra.append(checkMark());
           // Nom du modèle, et dessous son identifiant réel ; sa puissance en info-bulle.
           const power = (model.reasons || []).concat(model.context ? ["contexte " + model.context] : []).join(" · ");
-          const item = menuItem(modelName(model.id), model.id, () => setModel(model.id), extra, "mono");
-          item.title = power || model.id;
-          list.append(item);
+          const row = modelRow(model.id, () => setModel(model.id), extra);
+          row.firstChild.title = power || model.id;
+          list.append(row);
         }
         if (!list.children.length) list.append(el("div", "group", "Aucun modèle trouvé"));
+      };
+      find.onclick = async () => {
+        find.disabled = true;
+        findLabel(true);
+        await searchBestModels();
+        find.disabled = false;
+        findLabel(false);
+        fill();
       };
       search.oninput = fill;
       search.onkeydown = (event) => {
@@ -1378,7 +1572,7 @@
       go.onclick = useCustom;
       field.onkeydown = (event) => { if (event.key === "Enter") useCustom(); };
       custom.append(field, go);
-      menu.append(search, list, custom);
+      menu.append(search, find, list, custom);
       fill();
     });
   }
@@ -1399,7 +1593,8 @@
       menu.append(list);
     });
   }
-  // Bouton « Sessions » : nouvelle session, ou reprise d'une session précédente.
+  // Bouton « Sessions » : nouvelle session, reprise ou effacement d'une
+  // session précédente (celle en cours ne s'efface pas).
   async function openSessionsMenu() {
     showMenu($("sessions-btn"), (menu) => {
       const list = el("div", "list");
@@ -1408,25 +1603,67 @@
       lead.innerHTML = svg("plus");
       fresh.prepend(lead);
       const previous = el("div");
-      previous.append(el("div", "group", "Chargement…"));
       list.append(fresh, previous);
       menu.append(list);
-      api("/api/sessions").then((data) => {
+      // Demande de confirmation à la place de `target` : l'effacement est définitif.
+      const confirmBar = (target, question, label, action) => {
+        const bar = el("div", "confirm");
+        const yes = el("button", "btn danger", label);
+        yes.type = "button";
+        const no = el("button", "btn", "Annuler");
+        no.type = "button";
+        bar.append(el("span", null, question), yes, no);
+        bar.firstChild.title = question;
+        no.onclick = () => bar.replaceWith(target);
+        yes.onclick = async () => {
+          yes.disabled = no.disabled = true;
+          try { await action(); } catch (error) { toast(error.message); }
+          load();
+        };
+        target.replaceWith(bar);
+        yes.focus();
+      };
+      const render = (sessions) => {
         previous.textContent = "";
         previous.append(el("div", "group", "Sessions précédentes"));
-        if (!data.sessions.length) previous.append(el("div", "group", "Aucune session sauvegardée"));
-        for (const session of data.sessions) {
+        if (!sessions.length) previous.append(el("div", "group", "Aucune session sauvegardée"));
+        for (const session of sessions) {
           const current = session.id === status.session_id;
-          const extra = current ? (() => { const c = el("span", "check"); c.innerHTML = svg("check"); return c; })() : null;
           const title = session.preview || (session.messages ? "Session sans texte" : "Session vide");
           const item = menuItem(title, relativeTime(session.modified) + " · " + session.messages + " message(s)" + (current ? " · en cours" : ""), async () => {
             if (current) return;
             try { await api("/api/resume", { value: session.id }); } catch (error) { toast(error.message); }
-          }, extra);
+          }, current ? checkMark() : null);
           item.title = session.id;
-          previous.append(item);
+          const row = el("div", "row");
+          row.append(item);
+          if (!current) {
+            row.append(miniButton("trash", "Effacer cette session", () => confirmBar(row, "Effacer « " + title + " » ?", "Effacer",
+              () => api("/api/sessions/delete", { value: session.id })), "danger"));
+          }
+          previous.append(row);
         }
-      }).catch((error) => { previous.textContent = ""; previous.append(el("div", "group", "Erreur : " + error.message)); });
+        const others = sessions.filter((session) => session.id !== status.session_id).length;
+        if (others > 1) {
+          const foot = el("div", "foot");
+          const all = el("button", "btn wide danger");
+          all.type = "button";
+          all.innerHTML = svg("trash");
+          all.append(el("span", null, "Effacer les " + others + " sessions précédentes"));
+          all.onclick = () => confirmBar(all, "Effacer " + others + " sessions ? C'est définitif.", "Tout effacer", async () => {
+            const result = await api("/api/sessions/clear", {});
+            toast(result.deleted + " session(s) effacée(s)");
+          });
+          foot.append(all);
+          previous.append(foot);
+        }
+      };
+      const load = () => {
+        if (!previous.children.length) previous.append(el("div", "group", "Chargement…"));
+        api("/api/sessions").then((data) => render(data.sessions || []))
+          .catch((error) => { previous.textContent = ""; previous.append(el("div", "group", "Erreur : " + error.message)); });
+      };
+      load();
     });
   }
   document.addEventListener("mousedown", (event) => {
@@ -1452,6 +1689,8 @@
       ["Actions", "Nouvelle session", "Ctrl+Maj+O", () => newConversation()],
       ["Actions", "Sessions précédentes", "", () => openSessionsMenu()],
       ["Actions", "Crédits OpenRouter", "Solde, requêtes gratuites", () => openCreditsDialog()],
+      ["Actions", "Rechercher les modèles gratuits les plus puissants", "Relit le catalogue OpenRouter", () => searchBestModels()],
+      ["Actions", "Informations sur le modèle actuel", status.model || "", () => { if (status.model) openModelInfo(status.model); }],
       ["Actions", "Arrêter le tour en cours", "Échap", () => interruptTurn()],
       ["Actions", "Joindre une image", "", () => $("file-input").click()],
       ["Actions", "Changer de thème", "", () => cycleTheme()],
@@ -1542,14 +1781,24 @@
     updateTitle();
   }
 
-  async function loadModels() {
+  // `fresh` : relit le catalogue chez OpenRouter au lieu du cache de 24 h ;
+  // renvoie l'avertissement du serveur s'il n'a pas pu le relire.
+  async function loadModels(fresh) {
+    const known = new Set(freeModels.map((model) => model.id));
+    let warning = "";
     try {
-      const data = await api("/api/models");
+      const data = await api("/api/models" + (fresh ? "?fresh=1" : ""));
       freeModels = data.models || [];
+      modelsCatalogAt = data.catalog_at || 0;
+      warning = data.warning || "";
+      // Modèles apparus depuis la liste précédente.
+      newModelIds = new Set(fresh && known.size ? freeModels.filter((model) => !known.has(model.id)).map((model) => model.id) : []);
     } catch (error) {
+      if (fresh) throw error;
       freeModels = [];
     }
     renderModelButton();
+    return warning;
   }
   async function loadCustomCommands() {
     try {
