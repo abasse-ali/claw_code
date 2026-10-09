@@ -183,14 +183,22 @@ function get(port, path) {
   asking.subscribe((event) => askingEvents.push(event));
   await wait("abonnement", () => askingEvents.some((event) => event.type === "status"));
   await asking.send("Réponds bonjour malgré la panne");
-  await wait("question sur le modèle", () => askingEvents.some((event) => event.type === "model_question"), 160);
-  const question = askingEvents.find((event) => event.type === "model_question") || { suggestions: [] };
-  const retried = askingEvents.some((event) => event.type === "notice"
-    && event.text === "ollama:panne : le fournisseur ne répond pas (erreur 504). Nouvel essai avec le même modèle");
-  check("après une panne, le même modèle reprend puis Claw demande avant d'en changer",
-    retried && question.model === "ollama:panne" && question.stuck === false && question.reason === "le fournisseur ne répond pas (erreur 504)"
+  const questions = () => askingEvents.filter((event) => event.type === "model_question");
+  // Premier essai automatique : personne ne répond, le même modèle reprend seul après 3 s.
+  await wait("premier essai automatique", () => questions().length >= 1, 160);
+  await wait("deuxième essai automatique annoncé", () => questions().length >= 2, 160);
+  const [firstQuestion, question] = questions();
+  const autoResolved = askingEvents.find((event) => event.type === "model_question_resolved" && event.id === firstQuestion.id) || {};
+  const announced = askingEvents.some((event) => event.type === "notice"
+    && event.text === "ollama:panne : le fournisseur ne répond pas (erreur 504). Nouvel essai automatique dans 3 s (essai 1 sur 12)");
+  check("après une panne, le même modèle réessaie de lui-même, sans intervention",
+    announced && firstQuestion.model === "ollama:panne" && firstQuestion.auto_retry_secs === 3 && firstQuestion.attempt === 1 && firstQuestion.attempts === 12
+      && autoResolved.decision === "nouvel essai automatique" && question.auto_retry_secs === 10 && question.attempt === 2
       && question.suggestions.includes("ollama:mock") && !askingEvents.some((event) => event.type === "assistant_text"),
-    JSON.stringify(askingEvents.filter((event) => ["notice", "model_question", "error"].includes(event.type)).slice(-4)));
+    JSON.stringify(askingEvents.filter((event) => ["notice", "model_question", "model_question_resolved", "error"].includes(event.type)).slice(-5)));
+  // L'utilisateur ouvre le choix d'un modèle : l'essai automatique l'attend, puis il choisit.
+  await asking.request("POST", "/api/model-question", { id: question.id, decision: "hold" });
+  await new Promise((resolve) => setTimeout(resolve, 600));
   await asking.request("POST", "/api/model-question", { id: question.id, decision: "switch", model: "ollama:mock" });
   await wait("fin du tour avec le modèle choisi", () => askingEvents.some((event) => event.type === "turn_done"), 160);
   await wait("modèle de la session", () => {
@@ -198,13 +206,29 @@ function get(port, path) {
     return statuses.length > 0 && statuses[statuses.length - 1].status.model === "ollama:mock" && !statuses[statuses.length - 1].status.busy;
   });
   const lastStatus = askingEvents.filter((event) => event.type === "status" && event.status).pop() || { status: {} };
-  const resolved = askingEvents.find((event) => event.type === "model_question_resolved") || {};
+  const resolved = askingEvents.find((event) => event.type === "model_question_resolved" && event.id === question.id) || {};
   check("le modèle choisi prend la suite et devient celui de la session",
     askingEvents.filter((event) => event.type === "assistant_text").map((event) => event.text).join("").includes("Réponse du modèle factice")
       && resolved.decision === "modèle choisi : ollama:mock" && lastStatus.status.model === "ollama:mock"
       && !askingEvents.some((event) => event.type === "error"),
     JSON.stringify([resolved, lastStatus.status.model]));
   asking.stop();
+
+  // Panne passagère : le même modèle reprend seul et le tour se termine sans aucune intervention.
+  const flaky = new ClawServer({ clawPath: claw, cwd, model: "ollama:panne-une-fois", permissionMode: "read-only", env });
+  await flaky.start();
+  const flakyEvents = [];
+  flaky.subscribe((event) => flakyEvents.push(event));
+  await wait("abonnement", () => flakyEvents.some((event) => event.type === "status"));
+  await flaky.send("Réponds bonjour");
+  await wait("fin du tour après une panne passagère", () => flakyEvents.some((event) => event.type === "turn_done"), 160);
+  const flakyStatus = flakyEvents.filter((event) => event.type === "status" && event.status).pop() || { status: {} };
+  check("une panne passagère se résout seule : même modèle, aucune intervention",
+    flakyEvents.filter((event) => event.type === "model_question").length === 1
+      && flakyEvents.filter((event) => event.type === "assistant_text").map((event) => event.text).join("").includes("Réponse du modèle factice")
+      && flakyStatus.status.model === "ollama:panne-une-fois" && !flakyEvents.some((event) => event.type === "error"),
+    JSON.stringify(flakyEvents.filter((event) => ["notice", "model_question", "model_question_resolved", "error", "turn_done"].includes(event.type)).slice(-5)));
+  flaky.stop();
 
   // Avec "modelSwitch": "auto", la requête repart d'elle-même sur le modèle de secours.
   const fragile = new ClawServer({

@@ -17,6 +17,7 @@
 //
 // Un modèle dont le nom contient « panne » commence à réfléchir puis son
 // fournisseur lâche : erreur 504 envoyée dans le flux, comme le fait OpenRouter.
+// « panne-une-fois » ne lâche qu'à sa première requête, puis répond.
 "use strict";
 
 const fs = require("fs");
@@ -75,6 +76,8 @@ function lastDirective(messages) {
 }
 
 let directiveCalls = 0;
+// Modèles « panne-une-fois » déjà tombés en panne une fois.
+const failedOnce = new Set();
 
 function directiveReply(directive, messages) {
   if (!directive.answered) {
@@ -211,7 +214,10 @@ const server = http.createServer((request, response) => {
     if (String(body.model || "").endsWith(":free")) freeRequests += 1;
     const answer = reply(body);
     const model = body.model || "mock";
-    if (body.stream && String(model).includes("panne")) streamFailure(response, model);
+    const once = String(model).includes("panne-une-fois");
+    const fails = String(model).includes("panne") && !(once && failedOnce.has(model));
+    if (once) failedOnce.add(model);
+    if (body.stream && fails) streamFailure(response, model);
     else if (body.stream) streamReply(response, model, answer);
     else jsonReply(response, model, answer);
   });

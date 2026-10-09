@@ -10,6 +10,7 @@
 
 use std::io::IsTerminal;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use runtime::ConfigLoader;
 
@@ -25,6 +26,29 @@ pub(crate) struct ModelQuestion {
     pub stuck: bool,
     /// Autres modèles proposés, du plus recommandé au moins recommandé.
     pub suggestions: Vec<String>,
+    /// Sans réponse dans ce délai, le même modèle reprend de lui-même :
+    /// l'utilisateur n'a rien à faire. `None` : la question attend sa réponse.
+    pub auto_retry: Option<Duration>,
+    /// Numéro de l'essai automatique à venir, et nombre d'essais prévus.
+    pub attempt: Option<(u32, u32)>,
+}
+
+/// Délais avant chaque nouvel essai automatique du même modèle : rapprochés
+/// d'abord, puis toutes les deux minutes, une vingtaine de minutes en tout.
+const AUTO_RETRY_DELAYS: [u64; 12] = [3, 10, 30, 60, 120, 120, 120, 120, 120, 120, 120, 120];
+/// Sans réponse, l'agent qui n'avançait plus continue avec le même modèle.
+pub(crate) const STUCK_AUTO_CONTINUE: Duration = Duration::from_secs(60);
+
+/// Nombre d'essais automatiques avant que la question n'attende une réponse
+/// (un par délai ci-dessus).
+pub(crate) const AUTO_RETRIES: u32 = 12;
+
+/// Délai avant l'essai automatique numéro `done + 1` ; `None` quand ils sont épuisés.
+pub(crate) fn auto_retry_delay(done: u32) -> Option<Duration> {
+    usize::try_from(done)
+        .ok()
+        .and_then(|index| AUTO_RETRY_DELAYS.get(index))
+        .map(|seconds| Duration::from_secs(*seconds))
 }
 
 /// Réponse de l'utilisateur.
@@ -96,6 +120,21 @@ impl TerminalModelPrompter {
 
 impl ModelSwitchPrompter for TerminalModelPrompter {
     fn ask(&self, question: &ModelQuestion) -> ModelDecision {
+        // Essai automatique : pas de menu, le terminal attend le délai (Échap
+        // ou Ctrl+C arrête le tour) puis le même modèle reprend.
+        if let Some(delay) = question.auto_retry {
+            if question.stuck {
+                return ModelDecision::Retry;
+            }
+            let deadline = Instant::now() + delay;
+            while Instant::now() < deadline {
+                if runtime::interrupt::interrupt_requested() {
+                    return ModelDecision::Stop;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            return ModelDecision::Retry;
+        }
         let title = if question.stuck {
             "L'agent n'avance plus"
         } else {
@@ -131,7 +170,25 @@ impl ModelSwitchPrompter for TerminalModelPrompter {
 
 #[cfg(test)]
 mod tests {
-    use super::{asks, suggestions};
+    use super::{asks, auto_retry_delay, suggestions, AUTO_RETRIES};
+    use std::time::Duration;
+
+    #[test]
+    fn retries_alone_quickly_at_first_then_every_two_minutes() {
+        assert_eq!(auto_retry_delay(0), Some(Duration::from_secs(3)));
+        assert_eq!(auto_retry_delay(1), Some(Duration::from_secs(10)));
+        assert_eq!(
+            auto_retry_delay(AUTO_RETRIES - 1),
+            Some(Duration::from_secs(120))
+        );
+        // Une fois les essais épuisés, la question attend une réponse.
+        assert_eq!(auto_retry_delay(AUTO_RETRIES), None);
+        let total: u64 = (0..AUTO_RETRIES)
+            .filter_map(auto_retry_delay)
+            .map(|delay| delay.as_secs())
+            .sum();
+        assert!((15 * 60..=25 * 60).contains(&total), "{total} s");
+    }
 
     #[test]
     fn asks_by_default_and_lets_the_setting_turn_it_off() {

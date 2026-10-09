@@ -257,6 +257,29 @@ pub fn model_failure_reason(error: &str) -> Option<String> {
     }
 }
 
+/// L'échec lu dans le texte d'une erreur est passager : le même modèle peut
+/// répondre un peu plus tard (panne ou surcharge du fournisseur, limite par
+/// minute, réseau). Faux pour un quota du jour épuisé, une clé refusée ou un
+/// modèle introuvable : réessayer n'y changerait rien.
+#[must_use]
+pub fn failure_is_transient(error: &str) -> bool {
+    const MARKER: &str = "l'api a retourné ";
+    let lower = error.to_ascii_lowercase();
+    if let Some(position) = error.rfind(MARKER) {
+        let status: Option<u16> = error[position + MARKER.len()..]
+            .get(..3)
+            .and_then(|code| code.parse().ok());
+        return match status {
+            Some(429) => {
+                !(lower.contains("per-day") || lower.contains("per day") || lower.contains("daily"))
+            }
+            Some(408 | 409 | 500..=599) => true,
+            _ => false,
+        };
+    }
+    error.contains("erreur http :")
+}
+
 pub type ClientFactory = Box<dyn Fn(&str) -> Result<ProviderClient, ApiError> + Send>;
 
 /// Chaîne de modèles : le principal puis ses remplaçants.
@@ -482,7 +505,9 @@ mod tests {
 
     #[test]
     fn a_failure_in_the_middle_of_an_answer_hands_over_to_the_next_model() {
-        use super::{model_failure_reason, upstream_failure_status};
+        use super::{
+            failure_is_transient as transient, model_failure_reason, upstream_failure_status,
+        };
         assert_eq!(
             upstream_failure_status(
                 "l'api a retourné 504 Gateway Timeout (504) : Upstream idle timeout exceeded"
@@ -529,6 +554,21 @@ mod tests {
             None
         );
         assert_eq!(model_failure_reason("erreur json : EOF"), None);
+        // Passager (le même modèle peut réessayer) ou non.
+        assert!(transient(
+            "l'api a retourné 504 Gateway Timeout (504) : Upstream idle timeout exceeded"
+        ));
+        assert!(transient(
+            "l'api a retourné 429 Too Many Requests : rate limit per minute"
+        ));
+        assert!(transient("erreur http : connection reset"));
+        assert!(!transient(
+            "l'api a retourné 429 Too Many Requests : Rate limit exceeded: free-models-per-day"
+        ));
+        assert!(!transient("l'api a retourné 403 Forbidden : not available"));
+        assert!(!transient(
+            "identifiants OpenRouter manquants ; définissez OPENROUTER_API_KEY avant d'appeler l'API OpenRouter"
+        ));
         assert_eq!(
             upstream_failure_status("l'api a retourné 401 Unauthorized : User not found"),
             None

@@ -135,6 +135,15 @@ enum WebEvent {
         reason: String,
         stuck: bool,
         suggestions: Vec<String>,
+        /// Sans réponse dans ce délai (secondes), le même modèle reprend de
+        /// lui-même ; absent : la question attend sa réponse.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        auto_retry_secs: Option<u64>,
+        /// Essai automatique à venir et nombre d'essais prévus.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        attempts: Option<u32>,
     },
     ModelQuestionResolved {
         id: u64,
@@ -225,6 +234,8 @@ enum ModelReply {
     Retry,
     Switch(String),
     Stop,
+    /// L'utilisateur choisit un modèle : l'essai automatique attend sa réponse.
+    Hold,
 }
 
 enum WorkerCommand {
@@ -500,7 +511,7 @@ impl crate::model_switch::ModelSwitchPrompter for WebModelPrompter {
     ) -> crate::model_switch::ModelDecision {
         use crate::model_switch::ModelDecision;
         let id = self.app.next_permission_id.fetch_add(1, Ordering::Relaxed);
-        let (sender, receiver) = mpsc::channel();
+        let (sender, mut receiver) = mpsc::channel();
         self.app
             .pending_models
             .lock()
@@ -512,10 +523,29 @@ impl crate::model_switch::ModelSwitchPrompter for WebModelPrompter {
             reason: question.reason.clone(),
             stuck: question.stuck,
             suggestions: question.suggestions.clone(),
+            auto_retry_secs: question.auto_retry.map(|delay| delay.as_secs()),
+            attempt: question.attempt.map(|(attempt, _)| attempt),
+            attempts: question.attempt.map(|(_, attempts)| attempts),
         });
-        let deadline = std::time::Instant::now() + PERMISSION_TIMEOUT;
+        // Essai automatique : sans réponse dans le délai, le même modèle
+        // reprend. Si l'utilisateur ouvre le choix d'un modèle, on l'attend.
+        let mut automatic = question.auto_retry.is_some();
+        let mut deadline =
+            std::time::Instant::now() + question.auto_retry.unwrap_or(PERMISSION_TIMEOUT);
         let reply = loop {
-            match receiver.recv_timeout(Duration::from_millis(300)) {
+            match receiver.recv_timeout(Duration::from_millis(200)) {
+                Ok(ModelReply::Hold) => {
+                    automatic = false;
+                    deadline = std::time::Instant::now() + PERMISSION_TIMEOUT;
+                    // La réponse suivante arrive par le même canal.
+                    let (sender, next) = mpsc::channel();
+                    self.app
+                        .pending_models
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(id, sender);
+                    receiver = next;
+                }
                 Err(mpsc::RecvTimeoutError::Timeout)
                     if !runtime::interrupt::interrupt_requested()
                         && std::time::Instant::now() < deadline => {}
@@ -545,10 +575,18 @@ impl crate::model_switch::ModelSwitchPrompter for WebModelPrompter {
                 let label = format!("modèle choisi : {model}");
                 (ModelDecision::Switch(model), label)
             }
-            Ok(ModelReply::Stop) => (ModelDecision::Stop, "tour arrêté".to_string()),
+            Ok(ModelReply::Stop | ModelReply::Hold) => {
+                (ModelDecision::Stop, "tour arrêté".to_string())
+            }
             Err(_) if runtime::interrupt::interrupt_requested() => {
                 (ModelDecision::Stop, "tour interrompu".to_string())
             }
+            // Personne n'a répondu : c'était prévu, le même modèle reprend.
+            Err(_) if automatic && question.stuck => (
+                ModelDecision::Retry,
+                "sans réponse, le même modèle continue".to_string(),
+            ),
+            Err(_) if automatic => (ModelDecision::Retry, "nouvel essai automatique".to_string()),
             Err(_) => (
                 ModelDecision::Stop,
                 "pas de réponse : tour arrêté".to_string(),
@@ -1048,7 +1086,8 @@ struct TokenQuery {
 #[derive(Deserialize)]
 struct ModelQuestionBody {
     id: u64,
-    /// `retry`, `switch` (avec `model`) ou `stop`.
+    /// `retry`, `switch` (avec `model`), `stop`, ou `hold` (l'utilisateur
+    /// choisit un modèle : l'essai automatique l'attend).
     decision: String,
     #[serde(default)]
     model: Option<String>,
@@ -1304,6 +1343,7 @@ async fn post_model_question(
     let reply = match body.decision.as_str() {
         "retry" => ModelReply::Retry,
         "stop" => ModelReply::Stop,
+        "hold" => ModelReply::Hold,
         "switch" => {
             let model = body
                 .model

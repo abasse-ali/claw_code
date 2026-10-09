@@ -5672,6 +5672,9 @@ impl ApiClient for DefaultRuntimeClient {
                 reason: "deux essais n'ont pas suffi".to_string(),
                 stuck: true,
                 suggestions,
+                // Sans réponse, le même modèle continue.
+                auto_retry: Some(model_switch::STUCK_AUTO_CONTINUE),
+                attempt: None,
             };
             return match prompter.ask(&question) {
                 model_switch::ModelDecision::Switch(next) => {
@@ -5738,8 +5741,8 @@ impl ApiClient for DefaultRuntimeClient {
         // lâche en cours de réponse (504, surcharge), elle repart sur un autre modèle.
         let mut retries_left = BROKEN_STREAM_RETRIES;
         let mut switches_left = api::UPSTREAM_SWITCHES;
-        // Avant de poser la question, le même modèle reprend une fois de lui-même.
-        let mut same_model_retries = 1_u32;
+        // Essais automatiques du même modèle déjà faits pour cette requête.
+        let mut auto_retries = 0_u32;
         let answering = std::cell::RefCell::new(String::new());
         loop {
             answering.borrow_mut().clear();
@@ -5992,34 +5995,37 @@ impl ApiClient for DefaultRuntimeClient {
                     if emit {
                         transcript::discard_calls();
                     }
-                    // Panne en cours de réponse : un nouvel essai d'office.
-                    let started = !answering.borrow().is_empty();
-                    if started && same_model_retries > 0 {
-                        same_model_retries -= 1;
+                    // Échec passager : le même modèle réessaie de lui-même après un
+                    // délai, sans rien demander. L'utilisateur peut en profiter
+                    // pour changer de modèle ou arrêter, mais n'a rien à faire.
+                    let auto_retry = api::failure_is_transient(&error.to_string())
+                        .then(|| model_switch::auto_retry_delay(auto_retries))
+                        .flatten();
+                    if let Some(delay) = auto_retry {
+                        auto_retries += 1;
                         notify(&format!(
-                            "{model} : {reason}. Nouvel essai avec le même modèle"
+                            "{model} : {reason}. Nouvel essai automatique dans {} s (essai {auto_retries} sur {})",
+                            delay.as_secs(),
+                            model_switch::AUTO_RETRIES
                         ));
-                        std::thread::sleep(Duration::from_secs(2));
-                    } else {
-                        let question = model_switch::ModelQuestion {
-                            suggestions: self.model_suggestions(&model),
-                            model: model.clone(),
-                            reason,
-                            stuck: false,
-                        };
-                        match prompter.ask(&question) {
-                            model_switch::ModelDecision::Retry => {
-                                notify(&format!("Nouvel essai avec {model}"));
-                            }
-                            model_switch::ModelDecision::Switch(next) => {
-                                self.switch_to(&next);
-                                notify(&format!("{next} prend la suite, à votre demande"));
-                            }
-                            model_switch::ModelDecision::Stop => {
-                                return Err(RuntimeError::new(
-                                    runtime::interrupt::INTERRUPTED_MESSAGE,
-                                ));
-                            }
+                    }
+                    let question = model_switch::ModelQuestion {
+                        suggestions: self.model_suggestions(&model),
+                        model: model.clone(),
+                        reason,
+                        stuck: false,
+                        auto_retry,
+                        attempt: auto_retry.map(|_| (auto_retries, model_switch::AUTO_RETRIES)),
+                    };
+                    match prompter.ask(&question) {
+                        model_switch::ModelDecision::Retry => {}
+                        model_switch::ModelDecision::Switch(next) => {
+                            self.switch_to(&next);
+                            auto_retries = 0;
+                            notify(&format!("{next} prend la suite, à votre demande"));
+                        }
+                        model_switch::ModelDecision::Stop => {
+                            return Err(RuntimeError::new(runtime::interrupt::INTERRUPTED_MESSAGE));
                         }
                     }
                     if emit {

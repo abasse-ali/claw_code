@@ -1316,9 +1316,22 @@
     const name = modelName(question.model);
     what.innerHTML = svg("alert");
     what.append(question.stuck ? "L'agent n'avance plus avec " + name : name + " ne répond plus");
-    const detail = el("div", "detail", question.stuck
-      ? "Deux essais n'ont pas suffi. Le même modèle peut continuer, ou vous confiez la suite à un autre."
-      : "Raison : " + question.reason + ". Le même modèle peut réessayer, ou vous en choisissez un autre.");
+    // Essai automatique : sans réponse, le même modèle reprend tout seul.
+    const automatic = Boolean(question.retryAt);
+    const detail = el("div", "detail");
+    if (automatic) {
+      const count = el("b", "count", String(secondsLeft(question.retryAt)));
+      if (question.stuck) {
+        detail.append("Deux essais n'ont pas suffi. Sans réponse de votre part, le même modèle continue dans ", count, " s.");
+      } else {
+        const attempt = question.attempt ? " (essai " + question.attempt + " sur " + question.attempts + ")" : "";
+        detail.append("Raison : " + question.reason + ". Nouvel essai automatique dans ", count, " s" + attempt + ". Vous n'avez rien à faire.");
+      }
+    } else {
+      detail.textContent = question.stuck
+        ? "Deux essais n'ont pas suffi. Le même modèle peut continuer, ou vous confiez la suite à un autre."
+        : "Raison : " + question.reason + ". Les essais automatiques n'ont pas suffi : le même modèle peut réessayer, ou vous en choisissez un autre.";
+    }
     const answer = async (decision, model) => {
       for (const node of bar.querySelectorAll("button")) node.disabled = true;
       try {
@@ -1353,23 +1366,47 @@
       bar.append(what, el("div", "detail", "Quel modèle prend la suite ? Il devient le modèle de la session."), choices, other, actions);
       return;
     }
-    button(question.stuck ? "Continuer avec le même modèle" : "Réessayer avec le même modèle", "primary", () => answer("retry"));
-    button("Changer de modèle", "", () => { question.choosing = true; renderAsk(); });
+    button(question.stuck ? "Continuer avec le même modèle" : automatic ? "Réessayer maintenant" : "Réessayer avec le même modèle", "primary", () => answer("retry"));
+    button("Changer de modèle", "", () => {
+      // Le temps de choisir, l'essai automatique attend.
+      if (question.retryAt) {
+        question.retryAt = null;
+        api("/api/model-question", { id: question.id, decision: "hold" }).catch(() => {});
+      }
+      question.choosing = true;
+      renderAsk();
+    });
     button("Arrêter le tour", "danger", () => answer("stop"));
     bar.append(what, detail, actions);
   }
+  const secondsLeft = (until) => Math.max(0, Math.ceil((until - Date.now()) / 1000));
+  // Compte à rebours de l'essai automatique.
+  setInterval(() => {
+    const count = document.querySelector("#ask .count");
+    if (count && activeModelQuestion && activeModelQuestion.retryAt) count.textContent = String(secondsLeft(activeModelQuestion.retryAt));
+  }, 500);
   function addModelQuestion(event) {
     finishAssistant();
-    const card = el("div", "perm");
-    card.id = "mq-" + event.id;
-    const title = el("div", "card-title");
-    title.innerHTML = svg("alert");
-    title.append(event.stuck ? "L'agent n'avance plus" : "Le modèle ne répond plus");
-    card.append(title, el("pre", null, event.model + " : " + event.reason), el("div", "meta", "Votre réponse est attendue au-dessus de la zone de saisie."));
-    append(card);
-    activeModelQuestion = { id: event.id, model: event.model, reason: event.reason, stuck: !!event.stuck, suggestions: event.suggestions || [], choosing: false };
+    const automatic = typeof event.auto_retry_secs === "number";
+    // Un essai automatique ne laisse que son avis dans le fil ; la question
+    // qui attend une réponse y laisse une carte.
+    if (!automatic) {
+      const card = el("div", "perm");
+      card.id = "mq-" + event.id;
+      const title = el("div", "card-title");
+      title.innerHTML = svg("alert");
+      title.append(event.stuck ? "L'agent n'avance plus" : "Le modèle ne répond plus");
+      card.append(title, el("pre", null, event.model + " : " + event.reason), el("div", "meta", "Votre réponse est attendue au-dessus de la zone de saisie."));
+      append(card);
+    }
+    activeModelQuestion = {
+      id: event.id, model: event.model, reason: event.reason, stuck: !!event.stuck,
+      suggestions: event.suggestions || [], choosing: false,
+      retryAt: automatic ? Date.now() + event.auto_retry_secs * 1000 : null,
+      attempt: event.attempt || null, attempts: event.attempts || null,
+    };
     renderAsk();
-    scrollToBottom(true);
+    if (!automatic) scrollToBottom(true);
   }
   function resolveModelQuestion(id, decision) {
     const card = $("mq-" + id);
