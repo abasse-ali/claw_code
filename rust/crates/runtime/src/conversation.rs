@@ -193,6 +193,8 @@ pub struct ConversationRuntime<C, T> {
     subagent: bool,
     verify: VerifySetting,
     review: bool,
+    /// Langue des réponses réglée par l'utilisateur, rappelée dans les notes de Claw.
+    response_language: Option<String>,
 }
 
 /// Aides au raisonnement, le temps d'un tour.
@@ -341,6 +343,7 @@ where
             subagent: false,
             verify: feature_config.verify().clone(),
             review: feature_config.review_enabled(),
+            response_language: feature_config.response_language().map(ToOwned::to_owned),
         }
     }
 
@@ -613,9 +616,14 @@ where
                         stop_continuations += 1;
                         Some(format!("{STOP_HOOK_PREFIX} {reason}"))
                     });
-                let Some(feedback) = feedback else {
+                let Some(mut feedback) = feedback else {
                     break;
                 };
+                // La note de Claw est en anglais : la réponse, elle, reste dans la
+                // langue de l'utilisateur. Le texte d'un hook est laissé tel quel.
+                if !feedback.starts_with(STOP_HOOK_PREFIX) {
+                    feedback.push_str(&harness::language_note(self.response_language.as_deref()));
+                }
                 self.api_client.answer_superseded();
                 self.session
                     .messages
@@ -2693,6 +2701,9 @@ mod tests {
         assert!(observed.requests[2].contains("how to install, run or test the result"));
         // Deux réponses sans outil : la première est rendue provisoire par le contrôle.
         assert_eq!((observed.drafted, observed.superseded), (2, 1));
+        // La note de Claw est en anglais, mais rappelle de répondre dans la langue de l'utilisateur.
+        assert!(observed.requests[2]
+            .contains("in the language of their request, not in the language of this note"));
         assert_eq!(
             observed
                 .notices

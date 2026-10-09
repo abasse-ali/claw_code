@@ -627,6 +627,18 @@ pub const CHECKLIST_PROMPT: &str = "[Claw] Before you finish, check your work ag
 /// qui suivra est celle que l'utilisateur lira, elle doit répondre à sa demande.
 pub const FINAL_ANSWER_RULE: &str = "When this is dealt with, end with your final answer to the user's original request. The user reads only that last message and has not seen this note: it must stand on its own, cover everything they asked for (what you did, plus any explanation or instructions they requested, such as how to install, run or test the result), stay concise, and not refer to this note.";
 
+/// Rappel de langue ajouté aux notes de Claw : elles sont en anglais, et un
+/// modèle répond volontiers dans la langue de la dernière consigne lue.
+#[must_use]
+pub fn language_note(language: Option<&str>) -> String {
+    match language.map(str::trim).filter(|language| !language.is_empty()) {
+        Some(language) => format!(
+            " Write your reply to the user in {language}, as the system prompt requires: this note is in English, your answer must not be."
+        ),
+        None => " Write your reply to the user in the language of their request, not in the language of this note.".to_string(),
+    }
+}
+
 /// Préfixe des messages que Claw adresse au modèle à la place de
 /// l'utilisateur (contrôles, rappels) : ils ne sont pas des demandes de sa part.
 pub const CLAW_NOTE_PREFIX: &str = "[Claw]";
@@ -860,6 +872,22 @@ pub fn unblock_feedback(advice: &str) -> String {
         "[Claw] Advice from another model that read your recent attempts (a hypothesis to check, not an order):\n{}",
         advice.trim()
     )
+}
+
+#[cfg(test)]
+mod language_tests {
+    use super::language_note;
+
+    #[test]
+    fn notes_of_claw_remind_the_response_language() {
+        let configured = language_note(Some(" français "));
+        assert!(configured.contains("in français"));
+        assert!(configured.contains("this note is in English, your answer must not be"));
+        // Sans réglage : la langue de la demande de l'utilisateur.
+        for missing in [None, Some("  ")] {
+            assert!(language_note(missing).contains("in the language of their request"));
+        }
+    }
 }
 
 #[cfg(test)]

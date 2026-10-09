@@ -596,6 +596,12 @@ impl RuntimeFeatureConfig {
         &self.verify
     }
 
+    /// Langue des réponses (`"language"`), si elle est réglée.
+    #[must_use]
+    pub fn response_language(&self) -> Option<&str> {
+        self.language.as_deref()
+    }
+
     /// Relecture automatique des modifications (`"review": false` la coupe).
     #[must_use]
     pub fn review_enabled(&self) -> bool {

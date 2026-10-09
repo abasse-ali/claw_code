@@ -169,7 +169,14 @@ est retenu ; avec `OPENROUTER_API_KEY`, le quota gratuit du jour est affiché.
   500 000 jetons, et ce que sa description met en avant (code, raisonnement, recherche,
   documents). `/models` les rappelle après « aussi : ».
 - Sans modèle configuré et avec seulement une clé OpenRouter, l'agent démarre sur le premier
-  modèle de ce classement.
+  modèle de ce classement. `"model": "free"` (ou `--model free`, `/model free`) demande la même
+  chose explicitement : **le modèle gratuit le plus puissant du moment**, choisi à chaque
+  lancement, plutôt qu'un identifiant figé qui vieillit avec le catalogue.
+- Le quota gratuit d'OpenRouter (1 000 requêtes par jour après 10 $ de crédits achetés, 50
+  sinon ; 20 par minute) est compté **par compte**, sur la journée UTC : une nouvelle clé API
+  n'y change rien, OpenRouter l'écrit dans sa documentation. Pour continuer une fois le quota
+  atteint : un modèle local (`ollama:…`) ou un autre fournisseur qui a son propre quota gratuit
+  (`groq:`, `cerebras:`, `gemini:`, `mistral:`), chacun avec sa clé.
 - La limite de jetons de sortie suit le catalogue (sortie maximale et contexte du modèle) ;
   `/cost` indique le coût estimé (0 $ pour un modèle gratuit).
 - Chaque étape de l'agent consomme une requête du quota gratuit ; en cas de limite atteinte
@@ -720,7 +727,10 @@ conteneurs sont arrêtés à l'interruption, au délai dépassé et à la fin de
 ### Langue des réponses
 
 `"language": "français"` dans la config (par exemple `~/.claw/settings.json`) fixe la langue des
-réponses, y compris pour les commandes `/review`, `/audit`…
+réponses, y compris pour les commandes `/review`, `/audit`… Sans réglage, l'agent répond dans la
+langue où vous lui écrivez. Les notes que Claw adresse au modèle après un contrôle (vérification,
+exigences, relecture) sont en anglais : chacune rappelle donc de répondre dans votre langue, pour
+que la réponse finale ne bascule pas en anglais.
 
 **Ni tiret cadratin ni emoji en sortie.** Claw n'écrit jamais le tiret long (U+2014) : il met
 « - » à la place. Il n'écrit jamais d'emoji non plus : une coche ou une croix dessinée devient

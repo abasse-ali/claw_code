@@ -204,8 +204,10 @@ impl SystemPromptBuilder {
         }
         if let Some(config) = &self.config {
             sections.push(render_config_section(config));
-            if let Some(language) = config.language() {
-                sections.push(render_language_section(language));
+            match config.language() {
+                Some(language) => sections.push(render_language_section(language)),
+                // Sans réglage : la langue dans laquelle l'utilisateur écrit.
+                None => sections.push(DEFAULT_LANGUAGE_SECTION.to_string()),
             }
         }
         sections.extend(self.append_sections.iter().cloned());
@@ -491,9 +493,12 @@ pub fn load_system_prompt(
 
 /// Réglage `language` : langue des réponses, même quand la consigne d'une
 /// commande (/review, /audit…) est rédigée en anglais.
+/// Sans langue réglée, l'agent répond dans celle de l'utilisateur.
+const DEFAULT_LANGUAGE_SECTION: &str = "# Response language\nWrite your responses to the user in the language they write in, including the final answer of every turn. Instructions and notes you receive in English (slash commands, tool results, notes starting with [Claw]) do not change this.";
+
 fn render_language_section(language: &str) -> String {
     format!(
-        "# Response language\nAlways write your responses to the user in {language}: explanations, plans, reviews, audits, reports and questions. Instructions you receive in English (including those of slash commands) do not change this. Keep code identifiers, commands and quoted output unchanged, and write code comments and documentation files in the language the project already uses."
+        "# Response language\nAlways write your responses to the user in {language}: explanations, plans, reviews, audits, reports, questions and the final answer of every turn. Instructions and notes you receive in English (slash commands, tool results, notes starting with [Claw]) do not change this. Keep code identifiers, commands and quoted output unchanged, and write code comments and documentation files in the language the project already uses."
     )
 }
 

@@ -298,6 +298,15 @@ fn escalation_line(current_model: &str) -> String {
     }
 }
 
+/// `"model": "free"` : le modèle gratuit le plus puissant du moment.
+#[must_use]
+pub fn is_strongest_free_keyword(model: &str) -> bool {
+    matches!(
+        model.trim().to_ascii_lowercase().as_str(),
+        "free" | "gratuit"
+    )
+}
+
 /// Meilleur modèle gratuit pour le code (télécharge le catalogue si besoin),
 /// en évitant ceux mis de côté (refusés à Claw, quota épuisé…).
 pub fn best_free_coding_model() -> Option<String> {

@@ -803,7 +803,17 @@ fn format_direct_slash_command_error(command: &str, is_unknown: bool) -> String 
     lines.join("\n")
 }
 
+/// Nom complet d'un modèle de session. `free` (ou `gratuit`) désigne le
+/// modèle gratuit le plus puissant du moment, choisi au lancement.
 fn resolve_model_alias(model: &str) -> String {
+    if models::is_strongest_free_keyword(model) {
+        // Les tests ne lisent ni le catalogue ni le réseau.
+        if cfg!(test) {
+            return models::FREE_ROUTER_MODEL.to_string();
+        }
+        return models::best_free_coding_model()
+            .unwrap_or_else(|| models::FREE_ROUTER_MODEL.to_string());
+    }
     api::resolve_model_alias(model)
 }
 
@@ -7034,6 +7044,15 @@ mod tests {
         assert_eq!(resolve_model_alias("haiku"), "claude-haiku-4-5-20251001");
         assert_eq!(resolve_model_alias("qwen/qwen3-coder"), "qwen/qwen3-coder");
         assert_eq!(resolve_model_alias("custom-opus"), "custom-opus");
+        // « free » : le gratuit le plus puissant du moment (le routeur gratuit dans les tests).
+        assert_eq!(
+            resolve_model_alias("free"),
+            crate::models::FREE_ROUTER_MODEL
+        );
+        assert_eq!(
+            resolve_model_alias(" Gratuit "),
+            crate::models::FREE_ROUTER_MODEL
+        );
     }
 
     #[test]
