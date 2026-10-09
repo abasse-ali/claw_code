@@ -710,6 +710,14 @@ coupe cet import.
   Les autorisations s'affichent dans l'éditeur, les modes de permission y sont sélectionnables.
 - **Recherche web** : `CLAW_SEARXNG_URL` (SearXNG, libre et auto-hébergeable, format json activé),
   `BRAVE_API_KEY` ou `TAVILY_API_KEY` ; à défaut, la page de résultats de DuckDuckGo.
+- **Lecture d'une page web** (outil `WebFetch`) : le HTML devient un texte lisible (titres, listes,
+  code, liens), sans scripts, styles ni menus ; quand la page déclare son contenu principal
+  (`<main>`), seul celui-ci est lu. Une page de moins de 12 000 caractères est rendue entière.
+  Au-delà, Claw rend son début et les passages qui contiennent les mots de la question, sans les
+  adresses des liens, et le modèle lit la suite en donnant une position (`offset`). Aucun modèle
+  n'est appelé pour résumer : lire une page ne coûte pas de requête en plus. Limites : une page
+  construite par JavaScript dans le navigateur arrive vide (Claw n'exécute pas de JavaScript), et
+  les PDF et les images ne sont pas lus.
 
 ### Bac à sable des commandes
 

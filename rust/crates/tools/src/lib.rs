@@ -2,6 +2,7 @@ pub mod advisors;
 mod mcp_bridge;
 pub mod mcp_oauth;
 mod questions;
+mod web_page;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -432,12 +433,20 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "WebFetch",
             description:
-                "Fetch a URL, convert it into readable text, and answer a prompt about it.",
+                "Fetch a URL and return the text of the page (HTML is converted to Markdown). A long page returns its start and the passages that match `prompt`; pass `offset` to read it in order, part by part.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "url": { "type": "string", "format": "uri" },
-                    "prompt": { "type": "string" }
+                    "prompt": {
+                        "type": "string",
+                        "description": "What you are looking for in the page. Its words select the passages returned from a long page."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Position in the page text to read from, as given by a previous result."
+                    }
                 },
                 "required": ["url", "prompt"],
                 "additionalProperties": false
@@ -1224,7 +1233,22 @@ struct GlobSearchInputValue {
 #[derive(Debug, Deserialize)]
 struct WebFetchInput {
     url: String,
+    #[serde(default)]
     prompt: String,
+    #[serde(default, deserialize_with = "lenient_position")]
+    offset: Option<usize>,
+}
+
+/// Une position donnée par un modèle : un nombre, parfois écrit en texte.
+fn lenient_position<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<Value>::deserialize(deserializer)? {
+        Some(Value::Number(number)) => number.as_u64().and_then(|n| usize::try_from(n).ok()),
+        Some(Value::String(text)) => text.trim().parse().ok(),
+        _ => None,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -1610,7 +1634,8 @@ fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
     let client = build_http_client()?;
     let request_url = normalize_fetch_url(&input.url)?;
     let response = client
-        .get(request_url.clone())
+        .get(request_url)
+        .header(reqwest::header::ACCEPT, web_page::ACCEPT)
         .send()
         .map_err(|error| error.to_string())?;
 
@@ -1624,13 +1649,19 @@ fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let body = response.text().map_err(|error| error.to_string())?;
-    let bytes = body.len();
-    let normalized = normalize_fetched_content(&body, &content_type);
-    let result = summarize_web_fetch(&final_url, &input.prompt, &normalized, &body, &content_type);
+    let mut body = Vec::new();
+    let mut limited = std::io::Read::take(response, web_page::MAX_BYTES);
+    std::io::Read::read_to_end(&mut limited, &mut body).map_err(|error| error.to_string())?;
+    let fetched = web_page::Fetched {
+        url: &final_url,
+        status: &format!("{code} {code_text}"),
+        content_type: &content_type,
+        body: &body,
+    };
+    let result = web_page::render(&fetched, &input.prompt, input.offset);
 
     Ok(WebFetchOutput {
-        bytes,
+        bytes: body.len(),
         code,
         code_text,
         result,
@@ -1809,63 +1840,7 @@ fn build_search_url(query: &str) -> Result<reqwest::Url, String> {
     Ok(url)
 }
 
-fn normalize_fetched_content(body: &str, content_type: &str) -> String {
-    if content_type.contains("html") {
-        html_to_text(body)
-    } else {
-        body.trim().to_string()
-    }
-}
-
-fn summarize_web_fetch(
-    url: &str,
-    prompt: &str,
-    content: &str,
-    raw_body: &str,
-    content_type: &str,
-) -> String {
-    let lower_prompt = prompt.to_lowercase();
-    let compact = collapse_whitespace(content);
-
-    let detail = if lower_prompt.contains("title") {
-        extract_title(content, raw_body, content_type).map_or_else(
-            || preview_text(&compact, 600),
-            |title| format!("Title: {title}"),
-        )
-    } else if lower_prompt.contains("summary") || lower_prompt.contains("summarize") {
-        preview_text(&compact, 900)
-    } else {
-        let preview = preview_text(&compact, 900);
-        format!("Prompt: {prompt}\nContent preview:\n{preview}")
-    };
-
-    format!("Fetched {url}\n{detail}")
-}
-
-fn extract_title(content: &str, raw_body: &str, content_type: &str) -> Option<String> {
-    if content_type.contains("html") {
-        let lowered = raw_body.to_lowercase();
-        if let Some(start) = lowered.find("<title>") {
-            let after = start + "<title>".len();
-            if let Some(end_rel) = lowered[after..].find("</title>") {
-                let title =
-                    collapse_whitespace(&decode_html_entities(&raw_body[after..after + end_rel]));
-                if !title.is_empty() {
-                    return Some(title);
-                }
-            }
-        }
-    }
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-    None
-}
-
+/// Le texte d'un fragment HTML court : le titre d'un résultat de recherche.
 fn html_to_text(html: &str) -> String {
     let mut text = String::with_capacity(html.len());
     let mut in_tag = false;
@@ -1908,14 +1883,6 @@ fn decode_html_entities(input: &str) -> String {
 
 fn collapse_whitespace(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn preview_text(input: &str, max_chars: usize) -> String {
-    if input.chars().count() <= max_chars {
-        return input.to_string();
-    }
-    let shortened = input.chars().take(max_chars).collect::<String>();
-    format!("{}…", shortened.trim_end())
 }
 
 fn extract_search_hits(html: &str) -> Vec<SearchHit> {
@@ -4590,6 +4557,59 @@ mod tests {
         )
         .expect_err("invalid URL should fail");
         assert!(error.contains("relative URL without a base") || error.contains("invalid"));
+    }
+
+    #[test]
+    fn web_fetch_reads_a_long_page_by_passages_then_in_order() {
+        let server = TestServer::spawn(Arc::new(|request_line: &str| {
+            assert!(request_line.starts_with("GET /long "));
+            let mut body = String::from(
+                "<html><head><title>Tarifs</title><script>var x = '<p>piège</p>';</script></head><body><h1>Tarifs</h1>",
+            );
+            for section in 0..200 {
+                let text = if section == 150 {
+                    "Le plan Experiment est gratuit. "
+                } else {
+                    "Paragraphe ordinaire de remplissage. "
+                };
+                body += &format!("<h2>Section {section}</h2><p>{}</p>", text.repeat(4));
+            }
+            body += "</body></html>";
+            HttpResponse::html(200, "OK", &body)
+        }));
+        let fetch = |offset: serde_json::Value| {
+            let mut input = json!({
+                "url": format!("http://{}/long", server.addr()),
+                "prompt": "Is the Experiment plan free?"
+            });
+            if !offset.is_null() {
+                input["offset"] = offset;
+            }
+            let result = execute_tool("WebFetch", &input).expect("WebFetch should succeed");
+            let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+            output["result"].as_str().expect("result").to_string()
+        };
+
+        // Sans position : le passage cherché, loin dans la page, est rendu.
+        let passages = fetch(serde_json::Value::Null);
+        assert!(passages.contains("Title: Tarifs"));
+        assert!(passages.contains("the passages that match your prompt"));
+        assert!(passages.contains("## Section 150\n\nLe plan Experiment est gratuit."));
+        assert!(!passages.contains("piège"));
+
+        // Avec une position, même écrite en texte : lecture suivie.
+        let first = fetch(json!("0"));
+        assert!(first.contains("This is the part from 0 to "));
+        assert!(first.contains("# Tarifs\n\n## Section 0\n\nParagraphe ordinaire"));
+        let next: usize = first
+            .split("\"offset\": ")
+            .nth(1)
+            .and_then(|rest| rest.split('.').next())
+            .and_then(|number| number.parse().ok())
+            .expect("position de la suite");
+        let second = fetch(json!(next));
+        assert!(second.contains(&format!("This is the part from {next} to ")));
+        assert!(!second.contains("## Section 0\n"));
     }
 
     #[test]
