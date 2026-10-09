@@ -3001,7 +3001,7 @@ impl ApiClient for ProviderRuntimeClient {
             ))
             .ok()
             .map(|(_, response)| {
-                runtime::typography::without_em_dash(&api::response_text(&response)).into_owned()
+                runtime::typography::cleaned(&api::response_text(&response)).into_owned()
             })
             .filter(|summary| !summary.trim().is_empty())
     }
@@ -3059,8 +3059,8 @@ impl ApiClient for ProviderRuntimeClient {
                 let mut pending_tools: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
                 let mut saw_stop = false;
                 let mut signed_thinking = SignedThinking::new();
-                // Jamais de tiret cadratin dans ce qu'un sous-agent écrit.
-                let mut text_dashes = runtime::typography::DashFilter::default();
+                // Ni tiret cadratin ni emoji dans ce qu'un sous-agent écrit.
+                let mut text_dashes = runtime::typography::OutputFilter::default();
 
                 loop {
                     let event = match first_event.take() {
@@ -3339,7 +3339,7 @@ fn push_output_block(
 ) {
     match block {
         OutputContentBlock::Text { text } => {
-            let text = runtime::typography::without_em_dash(&text).into_owned();
+            let text = runtime::typography::cleaned(&text).into_owned();
             if !text.is_empty() {
                 events.push(AssistantEvent::TextDelta(text));
             }

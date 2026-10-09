@@ -5396,6 +5396,10 @@ trait TurnObserver: Send + Sync {
     fn tool_call(&self, name: &str, input: &str);
     fn tool_result(&self, name: &str, output: &str, is_error: bool);
     fn notice(&self, text: &str);
+    /// Le modèle vient de répondre sans appeler d'outil.
+    fn answer_drafted(&self) {}
+    /// Un contrôle de Claw le renvoie au travail : cette réponse est provisoire.
+    fn answer_superseded(&self) {}
 }
 
 type SharedObserver = Arc<dyn TurnObserver>;
@@ -5540,7 +5544,7 @@ impl ApiClient for DefaultRuntimeClient {
             .ok()
             .map(|(model, response)| {
                 credits::note_request(&model);
-                runtime::typography::without_em_dash(&api::response_text(&response)).into_owned()
+                runtime::typography::cleaned(&api::response_text(&response)).into_owned()
             })
             .filter(|summary| !summary.trim().is_empty())
     }
@@ -5551,6 +5555,18 @@ impl ApiClient for DefaultRuntimeClient {
         }
         if let Some(observer) = &self.observer {
             observer.notice(notice);
+        }
+    }
+
+    fn answer_drafted(&mut self) {
+        if let Some(observer) = &self.observer {
+            observer.answer_drafted();
+        }
+    }
+
+    fn answer_superseded(&mut self) {
+        if let Some(observer) = &self.observer {
+            observer.answer_superseded();
         }
     }
 
@@ -5664,10 +5680,10 @@ impl ApiClient for DefaultRuntimeClient {
                 let mut pending_tools = PendingTools::new();
                 let mut saw_stop = false;
                 let mut signed_thinking = SignedThinking::new();
-                // Jamais de tiret cadratin dans ce que Claw écrit ; la réflexion
+                // Ni tiret cadratin ni emoji dans ce que Claw écrit ; la réflexion
                 // signée, elle, est renvoyée telle quelle au fournisseur.
-                let mut text_dashes = runtime::typography::DashFilter::default();
-                let mut thinking_dashes = runtime::typography::DashFilter::default();
+                let mut text_dashes = runtime::typography::OutputFilter::default();
+                let mut thinking_dashes = runtime::typography::OutputFilter::default();
 
                 loop {
                     let event = match first_event.take() {
@@ -6352,7 +6368,7 @@ fn push_output_block(
 ) -> Result<(), RuntimeError> {
     match block {
         OutputContentBlock::Text { text } => {
-            let text = runtime::typography::without_em_dash(&text).into_owned();
+            let text = runtime::typography::cleaned(&text).into_owned();
             if !text.is_empty() {
                 let rendered = TerminalRenderer::new().markdown_to_ansi(&text);
                 let mut answer = transcript::Prefixer::assistant();

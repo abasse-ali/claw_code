@@ -414,7 +414,17 @@ applique**, quel que soit le modèle.
 | Modèle de planification | En mode plan, `"plannerModel"` réfléchit à la place du modèle de la session, qui exécute ensuite le plan approuvé | `CLAW_PLANNER=0` |
 | Escalade | Au deuxième échec de la vérification, ou au deuxième recadrage, **le modèle gratuit le plus puissant du moment** reprend la fin du tour ; le tour suivant repart avec le modèle habituel. Sans réglage à faire, et jamais vers un modèle payant | `CLAW_ESCALATION=0` |
 | Erreurs de l'éditeur | Avec l'extension VS Code : quand le tour a modifié des fichiers, Claw demande à l'éditeur les erreurs qu'il y voit (compilation, types, lint) et les renvoie au modèle, deux fois au plus par tour. L'outil `EditorDiagnostics` permet aussi au modèle de les lire quand il veut | `CLAW_EDITOR_DIAGNOSTICS=0` |
-| Contrôle des exigences | Quand le tour a modifié au moins 5 lignes et que la vérification passe, le modèle liste chaque exigence de la demande et de la documentation du code (cas limites compris), désigne le code et le test qui la couvrent, et corrige ce qui manque, avant la relecture. Une requête de plus par tour concerné | `CLAW_CHECKLIST=0` |
+| Contrôle des exigences | Quand le tour a modifié au moins 5 lignes et que la vérification passe, le modèle liste chaque exigence de la demande et de la documentation du code (cas limites compris), retrouve le code qui la couvre et la façon dont elle est vérifiée (un test existant, une commande lancée, ou le code lui-même), et corrige ce qui manque, avant la relecture. Il n'invente ni tests ni résultats. Une requête de plus par tour concerné | `CLAW_CHECKLIST=0` |
+
+**Une seule réponse finale.** Quand un contrôle renvoie le modèle au travail (vérification en
+échec, erreurs de l'éditeur, exigences, relecture), la réponse qu'il venait de donner n'était que
+provisoire. Claw lui demande alors de terminer par une réponse complète pour vous : ce qui a été
+fait, et tout ce que vous aviez demandé d'expliquer (comment installer, lancer ou tester), sans
+parler du contrôle que vous n'avez pas vu. Dans l'interface web et le panneau de VS Code, les
+réponses provisoires sont repliées (« Réponse provisoire, reprise après un contrôle de Claw »,
+un clic les affiche) : la dernière réponse du tour est celle à lire. Les messages que Claw
+adresse au modèle (« [Claw] … ») n'apparaissent pas comme des messages de votre part quand une
+session est reprise.
 
 `CLAW_HARNESS=0` les coupe toutes. Réglages dans `.claw/settings.json` ou `~/.claw/settings.json` :
 
@@ -684,12 +694,17 @@ conteneurs sont arrêtés à l'interruption, au délai dépassé et à la fin de
 `"language": "français"` dans la config (par exemple `~/.claw/settings.json`) fixe la langue des
 réponses, y compris pour les commandes `/review`, `/audit`…
 
-**Pas de tiret cadratin.** Claw n'écrit jamais le tiret long (U+2014) : il met « - » à la place.
-Le prompt système le demande au modèle (réponses, code, commentaires, documents, messages de
-commit), et un filtre le remplace de toute façon dans tout ce qu'un modèle écrit : réponses,
-réflexion affichée, sous-agents, avis d'un autre modèle, résumés de conversation (« mot, tiret
-long, mot » devient « mot - mot »). Les fichiers que vous faites lire à l'agent ne sont pas
-modifiés. Un test échoue si ce caractère revient dans les sources du projet.
+**Ni tiret cadratin ni emoji en sortie.** Claw n'écrit jamais le tiret long (U+2014) : il met
+« - » à la place. Il n'écrit jamais d'emoji non plus : une coche ou une croix dessinée devient
+« ✓ » ou « ✗ », une flèche dessinée devient « → », les autres pictogrammes (fusée, dossier,
+panneau d'attention, drapeau…) sont retirés avec l'espace qui les suivait. Le prompt système le
+demande au modèle (réponses, code, commentaires, documents, messages de commit), et un filtre
+l'applique de toute façon à tout ce qu'un modèle écrit en sortie : réponses, réflexion affichée,
+sous-agents, avis d'un autre modèle, résumés de conversation. Sont des emoji tous les caractères
+qu'Unicode classe `Extended_Pictographic` ou `Emoji_Presentation`. Les fichiers que l'agent lit
+ou écrit ne passent pas par ce filtre : pour eux, seule la consigne s'applique (demandez
+explicitement un emoji si votre page doit en contenir). Un test échoue si un tiret cadratin ou
+un emoji revient dans les sources du projet.
 
 La connexion OAuth est aussi disponible :
 

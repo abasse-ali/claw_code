@@ -126,6 +126,12 @@ enum WebEvent {
     Credits {
         credits: serde_json::Value,
     },
+    /// Le modèle vient de répondre sans appeler d'outil : sa réponse finale,
+    /// sauf si un contrôle de Claw le renvoie au travail.
+    AnswerDrafted,
+    /// Un contrôle de Claw renvoie le modèle au travail : la réponse qu'il
+    /// venait de donner est provisoire, la page la replie.
+    AnswerSuperseded,
     /// Demande à l'éditeur relié : quels problèmes voit-il dans ces fichiers
     /// (tous ceux de l'espace de travail si la liste est vide) ? Il répond
     /// par `POST /api/editor/diagnostics` avec le même identifiant.
@@ -341,6 +347,14 @@ impl TurnObserver for WebObserver {
         self.app.publish(WebEvent::Notice {
             text: text.to_string(),
         });
+    }
+
+    fn answer_drafted(&self) {
+        self.app.publish(WebEvent::AnswerDrafted);
+    }
+
+    fn answer_superseded(&self) {
+        self.app.publish(WebEvent::AnswerSuperseded);
     }
 }
 
@@ -838,8 +852,14 @@ impl Worker {
 fn transcript_from_messages(messages: &[ConversationMessage]) -> Vec<WebEvent> {
     let mut events = Vec::new();
     for message in messages {
+        // Réponse sans appel d'outil : finale, sauf contrôle de Claw ensuite.
+        let drafted = message.role == MessageRole::Assistant
+            && !message
+                .blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolUse { .. }));
         for block in &message.blocks {
-            events.push(match (block, message.role) {
+            let event = match (block, message.role) {
                 (ContentBlock::Text { text }, MessageRole::Assistant) => {
                     WebEvent::AssistantText { text: text.clone() }
                 }
@@ -850,7 +870,15 @@ fn transcript_from_messages(messages: &[ConversationMessage]) -> Vec<WebEvent> {
                     continue;
                 }
                 (ContentBlock::Text { text }, _) if text.starts_with(runtime::STOP_HOOK_PREFIX) => {
+                    events.push(WebEvent::AnswerSuperseded);
                     WebEvent::Info { text: text.clone() }
+                }
+                // Contrôle de Claw adressé au modèle : pas un message de
+                // l'utilisateur ; la réponse qui le précède était provisoire.
+                (ContentBlock::Text { text }, MessageRole::User)
+                    if text.starts_with(runtime::harness::CLAW_NOTE_PREFIX) =>
+                {
+                    WebEvent::AnswerSuperseded
                 }
                 (ContentBlock::Text { text }, _) => WebEvent::UserMessage {
                     text: text.clone(),
@@ -879,7 +907,11 @@ fn transcript_from_messages(messages: &[ConversationMessage]) -> Vec<WebEvent> {
                 (ContentBlock::Thinking { thinking, .. }, _) => WebEvent::Thinking {
                     text: thinking.clone(),
                 },
-            });
+            };
+            events.push(event);
+        }
+        if drafted {
+            events.push(WebEvent::AnswerDrafted);
         }
     }
     events
@@ -1809,6 +1841,56 @@ mod tests {
     fn truncates_long_tool_outputs() {
         assert_eq!(truncate_chars("court", 10), "court");
         assert!(truncate_chars(&"x".repeat(50), 10).ends_with("tronquée pour l'affichage)"));
+    }
+
+    #[test]
+    fn a_replayed_session_folds_answers_superseded_by_a_check_of_claw() {
+        use runtime::ContentBlock;
+        let text = |text: &str| ContentBlock::Text {
+            text: text.to_string(),
+        };
+        let events = transcript_from_messages(&[
+            ConversationMessage::user_text("écris le site"),
+            // Texte accompagné d'un appel d'outil : pas une réponse finale.
+            ConversationMessage::assistant(vec![
+                text("Je commence."),
+                ContentBlock::ToolUse {
+                    id: "t1".to_string(),
+                    name: "write_file".to_string(),
+                    input: "{}".to_string(),
+                },
+            ]),
+            ConversationMessage::tool_result("t1", "write_file", "ok", false),
+            ConversationMessage::assistant(vec![text("Projet terminé.")]),
+            ConversationMessage::user_text(
+                "[Claw] Before you finish, check your work against every requirement.",
+            ),
+            ConversationMessage::assistant(vec![text("Voici comment lancer le projet.")]),
+        ]);
+        let kinds: Vec<String> = events
+            .iter()
+            .map(|event| {
+                serde_json::to_value(event).expect("événement")["type"]
+                    .as_str()
+                    .expect("type")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "user_message",
+                "assistant_text",
+                "tool_call",
+                "tool_result",
+                "assistant_text",
+                "answer_drafted",
+                // Le contrôle de Claw n'est pas affiché comme un message de l'utilisateur.
+                "answer_superseded",
+                "assistant_text",
+                "answer_drafted",
+            ]
+        );
     }
 
     #[test]

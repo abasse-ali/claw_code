@@ -134,7 +134,7 @@ async fn answer(
     };
     let left = deadline.saturating_duration_since(Instant::now());
     match tokio::time::timeout(left, reading).await {
-        Ok(Ok(())) => Ok(runtime::typography::without_em_dash(text.trim()).into_owned()),
+        Ok(Ok(())) => Ok(runtime::typography::cleaned(text.trim()).into_owned()),
         Ok(Err(error)) => Err(failure(model, &error)),
         Err(_) => Err(format!(
             "réponse inachevée après {} s",

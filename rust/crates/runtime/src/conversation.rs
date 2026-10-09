@@ -71,6 +71,15 @@ pub trait ApiClient {
 
     /// Fin du tour : le modèle habituel reprend après une escalade.
     fn restore_model(&mut self) {}
+
+    /// Le modèle vient de répondre sans appeler d'outil : c'est sa réponse
+    /// finale, sauf si un contrôle de Claw le renvoie au travail.
+    fn answer_drafted(&mut self) {}
+
+    /// Un contrôle de Claw (vérification, exigences, relecture, hook) renvoie
+    /// le modèle au travail : la réponse qu'il venait de donner est provisoire,
+    /// celle qui suivra la remplace.
+    fn answer_superseded(&mut self) {}
 }
 
 /// Pourquoi le runtime consulte un autre modèle.
@@ -588,44 +597,30 @@ where
             assistant_messages.push(assistant_message);
 
             if pending_tool_uses.is_empty() {
-                // Le modèle dit avoir fini : Claw vérifie avant de le croire.
-                if let Some(feedback) = self.verification_gate(&mut aids, &mut prompter) {
-                    self.session
-                        .messages
-                        .push(ConversationMessage::user_text(feedback));
-                    continue;
-                }
-                // L'éditeur relié voit-il des erreurs dans les fichiers modifiés ?
-                if let Some(feedback) = self.editor_gate(&mut aids) {
-                    self.session
-                        .messages
-                        .push(ConversationMessage::user_text(feedback));
-                    continue;
-                }
-                // Le modèle confronte son travail à chaque exigence.
-                if let Some(feedback) = self.requirements_gate(&mut aids) {
-                    self.session
-                        .messages
-                        .push(ConversationMessage::user_text(feedback));
-                    continue;
-                }
-                // Puis un autre modèle relit les modifications.
-                if let Some(feedback) = self.review_gate(&mut aids, &request_text) {
-                    self.session
-                        .messages
-                        .push(ConversationMessage::user_text(feedback));
-                    continue;
-                }
-                if let Some(reason) = self.run_stop_hooks(stop_continuations, &assistant_messages) {
-                    stop_continuations += 1;
-                    self.session
-                        .messages
-                        .push(ConversationMessage::user_text(format!(
-                            "{STOP_HOOK_PREFIX} {reason}"
-                        )));
-                    continue;
-                }
-                break;
+                self.api_client.answer_drafted();
+                // Le modèle dit avoir fini : Claw vérifie avant de le croire
+                // (vérification, erreurs vues par l'éditeur relié, exigences,
+                // relecture par un autre modèle). Un contrôle qui le renvoie
+                // au travail rend sa réponse provisoire.
+                let feedback = self
+                    .verification_gate(&mut aids, &mut prompter)
+                    .or_else(|| self.editor_gate(&mut aids))
+                    .or_else(|| self.requirements_gate(&mut aids))
+                    .or_else(|| self.review_gate(&mut aids, &request_text))
+                    .or_else(|| {
+                        let reason =
+                            self.run_stop_hooks(stop_continuations, &assistant_messages)?;
+                        stop_continuations += 1;
+                        Some(format!("{STOP_HOOK_PREFIX} {reason}"))
+                    });
+                let Some(feedback) = feedback else {
+                    break;
+                };
+                self.api_client.answer_superseded();
+                self.session
+                    .messages
+                    .push(ConversationMessage::user_text(feedback));
+                continue;
             }
 
             if self.run_parallel_batch(
@@ -2321,6 +2316,10 @@ mod tests {
         /// Escalades demandées, et retours au modèle habituel.
         escalations: usize,
         restored: usize,
+        /// Réponses données sans appel d'outil, et celles qu'un contrôle a
+        /// rendues provisoires.
+        drafted: usize,
+        superseded: usize,
     }
 
     /// Modèle scripté : une réponse par appel.
@@ -2371,6 +2370,14 @@ mod tests {
 
         fn restore_model(&mut self) {
             self.observed.borrow_mut().restored += 1;
+        }
+
+        fn answer_drafted(&mut self) {
+            self.observed.borrow_mut().drafted += 1;
+        }
+
+        fn answer_superseded(&mut self) {
+            self.observed.borrow_mut().superseded += 1;
         }
     }
 
@@ -2678,6 +2685,14 @@ mod tests {
         assert_eq!(summary.iterations, 3);
         assert!(observed.requests[2].contains("check your work against every requirement"));
         assert!(observed.requests[2].contains("edge cases"));
+        // Le modèle n'invente pas de tests, et sa dernière réponse est pour l'utilisateur.
+        assert!(observed.requests[2]
+            .contains("never describe tests, commands or results that do not exist"));
+        assert!(observed.requests[2]
+            .contains("end with your final answer to the user's original request"));
+        assert!(observed.requests[2].contains("how to install, run or test the result"));
+        // Deux réponses sans outil : la première est rendue provisoire par le contrôle.
+        assert_eq!((observed.drafted, observed.superseded), (2, 1));
         assert_eq!(
             observed
                 .notices

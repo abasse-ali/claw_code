@@ -285,7 +285,7 @@ pub fn read_bash_output(output: &str) -> CommandResult {
 #[must_use]
 pub fn verify_feedback(command: &str, result: &CommandResult) -> String {
     format!(
-        "[Claw] Automatic verification after your changes failed.\n$ {command}\n{}\n\nFind the root cause and fix it. Never weaken, skip or delete a test to make it pass. When you are done, the verification runs again automatically.",
+        "[Claw] Automatic verification after your changes failed.\n$ {command}\n{}\n\nFind the root cause and fix it. Never weaken, skip or delete a test to make it pass. When you are done, the verification runs again automatically. {FINAL_ANSWER_RULE}",
         result.excerpt
     )
 }
@@ -621,7 +621,15 @@ pub fn test_guard_feedback(name: &str) -> String {
 
 /// Message adressé au modèle qui dit avoir fini un travail conséquent : il
 /// confronte son travail à chaque exigence avant de conclure (une fois par tour).
-pub const CHECKLIST_PROMPT: &str = "[Claw] Before you finish, check your work against every requirement. List each requirement from the user's request and from the docstrings, comments and specifications of the code you changed, one line each, including the edge cases they imply (empty or missing input, boundaries, invalid values, duplicates, ordering, large inputs). For each one, name the code that handles it and the test that proves it. If a requirement is not handled or not tested, fix it now: add the test, run it, correct the code. Do not weaken or delete existing tests. Then give your final answer.";
+pub const CHECKLIST_PROMPT: &str = "[Claw] Before you finish, check your work against every requirement. Go through each requirement of the user's request and of the docstrings, comments and specifications of the code you changed, including the edge cases they imply (empty or missing input, boundaries, invalid values, duplicates, ordering, large inputs). For each one, find the code that handles it and how it is verified: an existing test, a command you ran, or the code itself. If a requirement is not handled, fix it now with your tools. If the project has tests, add the missing test and run it; never describe tests, commands or results that do not exist. Do not weaken or delete existing tests. Report this check in at most one short line per requirement. Then end with your final answer to the user's original request. The user reads only that last message and has not seen this check: it must stand on its own, cover everything they asked for (what you did, plus any explanation or instructions they requested, such as how to install, run or test the result), stay concise, and not refer to this check.";
+
+/// Fin des messages que Claw renvoie au modèle après un contrôle : la réponse
+/// qui suivra est celle que l'utilisateur lira, elle doit répondre à sa demande.
+pub const FINAL_ANSWER_RULE: &str = "When this is dealt with, end with your final answer to the user's original request. The user reads only that last message and has not seen this note: it must stand on its own, cover everything they asked for (what you did, plus any explanation or instructions they requested, such as how to install, run or test the result), stay concise, and not refer to this note.";
+
+/// Préfixe des messages que Claw adresse au modèle à la place de
+/// l'utilisateur (contrôles, rappels) : ils ne sont pas des demandes de sa part.
+pub const CLAW_NOTE_PREFIX: &str = "[Claw]";
 
 /// Note adressée au modèle plus fort qui reprend le tour.
 #[must_use]
@@ -644,7 +652,7 @@ const MAX_EDITOR_PROBLEMS: usize = 30;
 #[must_use]
 pub fn editor_feedback(editor: &str, files: &[crate::editor::FileDiagnostics]) -> String {
     format!(
-        "[Claw] {editor} reports {} error(s) in the files you changed during this turn:\n\n{}\n\nFix the ones your changes caused or left behind, then give your final answer. If one of them was already there before your changes and is unrelated to the request, say so instead of fixing it.",
+        "[Claw] {editor} reports {} error(s) in the files you changed during this turn:\n\n{}\n\nFix the ones your changes caused or left behind. If one of them was already there before your changes and is unrelated to the request, say so instead of fixing it. {FINAL_ANSWER_RULE}",
         crate::editor::count(files),
         crate::editor::render(files, MAX_EDITOR_PROBLEMS)
     )
@@ -833,7 +841,7 @@ pub fn review_findings(answer: &str) -> Option<String> {
 #[must_use]
 pub fn review_feedback(findings: &str) -> String {
     format!(
-        "[Claw] Another model reviewed your changes and raised these points:\n{findings}\n\nCheck each point against the code and the user's request. Fix the ones that are real problems; ignore a point that is wrong and say why in one sentence. Do not rewrite what already works."
+        "[Claw] Another model reviewed your changes and raised these points:\n{findings}\n\nCheck each point against the code and the user's request. Fix the ones that are real problems; ignore a point that is wrong and say why in one sentence. Do not rewrite what already works. {FINAL_ANSWER_RULE}"
     )
 }
 

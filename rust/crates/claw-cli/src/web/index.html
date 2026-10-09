@@ -229,6 +229,14 @@
     content: ""; position: absolute; left: 8px; top: -7px; bottom: -7px; width: 1px; background: var(--border); }
   .col > .md::after { content: ""; position: absolute; left: 4px; top: .6em; width: 9px; height: 9px; border-radius: 50%; background: var(--text-3); }
   .tl-note { font-size: 12.5px; color: var(--text-2); line-height: 1.5; }
+  /* Réponse donnée avant un contrôle de Claw : repliée, celle qui suit la remplace. */
+  .md.provisional > :not(.provisional-head) { display: none; }
+  .md.provisional.open > :not(.provisional-head) { display: revert; opacity: .75; }
+  .md.provisional.open > .provisional-head { margin-bottom: 8px; }
+  .provisional-head { display: block; width: 100%; padding: 0; border: 0; background: none; text-align: left; font: inherit; font-size: 12.5px; color: var(--text-2); cursor: pointer; }
+  .provisional-head:hover { color: var(--text); }
+  .provisional-head::after { content: " · afficher"; color: var(--text-3); }
+  .md.provisional.open > .provisional-head::after { content: " · masquer"; }
   .col > .tl-note::after { content: ""; position: absolute; left: 5px; top: .45em; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--text-3); background: var(--bg); box-sizing: border-box; }
 
   /* étapes de l'agent (outils) */
@@ -590,6 +598,8 @@
 
   // ---------------------------------------------------------------- état
   let status = {}, busySince = null, currentAssistant = null, thinkingStep = null, pendingTools = [];
+  // Dernière réponse donnée sans appel d'outil (finale, sauf contrôle de Claw).
+  let draftAnswer = null;
   // Historique rejoué d'un coup à la connexion : les durées n'y ont pas de sens.
   let replaying = false;
   const elapsed = (started) => replaying ? "" : seconds(Date.now() - started);
@@ -928,6 +938,26 @@
     currentAssistant.node.innerHTML = renderMarkdown(currentAssistant.text);
     decorateDiagrams(currentAssistant.node);
     currentAssistant = null;
+  }
+  // Le modèle a répondu sans appeler d'outil : cette réponse est la bonne,
+  // sauf si un contrôle de Claw (vérification, exigences, relecture) le
+  // renvoie au travail. Elle est alors repliée : celle qui suit la remplace.
+  function markDraftAnswer() {
+    finishAssistant();
+    const last = logInner.lastElementChild;
+    draftAnswer = last && last.classList.contains("md") ? last : null;
+  }
+  function foldDraftAnswer() {
+    finishAssistant();
+    const node = draftAnswer;
+    draftAnswer = null;
+    if (!node || node.classList.contains("provisional")) return;
+    const head = el("button", "provisional-head", "Réponse provisoire, reprise après un contrôle de Claw");
+    head.type = "button";
+    head.setAttribute("aria-expanded", "false");
+    head.onclick = () => head.setAttribute("aria-expanded", String(node.classList.toggle("open")));
+    node.classList.add("provisional");
+    node.prepend(head);
   }
 
   // ---------------------------------------------------------------- étapes (outils)
@@ -1300,6 +1330,8 @@
       case "permission_resolved": resolvePermission(event.id, event.decision); break;
       case "info": finishAssistant(); addInfo(event.text); break;
       case "notice": finishAssistant(); addNote(event.text); break;
+      case "answer_drafted": markDraftAnswer(); break;
+      case "answer_superseded": foldDraftAnswer(); break;
       case "error": finishAssistant(); addError(event.message, event.hint); break;
       case "turn_done": finishAssistant(); if (benchPending) { benchPending = false; loadModels(); } break;
       case "status": applyStatus(event.status); break;
