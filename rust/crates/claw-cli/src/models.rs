@@ -92,12 +92,24 @@ pub(crate) fn catalog(refresh: bool) -> Result<(ModelCatalog, Option<String>), S
     }
 }
 
-/// Enregistre une fois les limites des modèles du cache (pour `max_tokens`).
+/// Enregistre une fois les limites des modèles du cache (pour `max_tokens`,
+/// le niveau de raisonnement). Un cache absent ou d'une version antérieure
+/// est rafraîchi en arrière-plan (lecture publique, sans clé ni quota) : ses
+/// nouveaux champs servent dès qu'il est arrivé.
 pub fn register_cached_limits() {
     static DONE: OnceLock<()> = OnceLock::new();
     DONE.get_or_init(|| {
-        if let Some(catalog) = load_cached_catalog() {
-            api::register_model_limits(&catalog);
+        let cached = load_cached_catalog();
+        if let Some(catalog) = &cached {
+            api::register_model_limits(catalog);
+        }
+        let outdated = cached
+            .as_ref()
+            .is_none_or(|catalog| catalog.version != api::CATALOG_VERSION);
+        if outdated && !cfg!(test) {
+            std::thread::spawn(|| {
+                let _ = catalog(false);
+            });
         }
     });
 }

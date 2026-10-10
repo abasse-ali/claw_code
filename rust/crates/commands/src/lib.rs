@@ -314,8 +314,8 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "think",
         aliases: &["reasoning"],
-        summary: "Règle le raisonnement du modèle (off, low, medium, high)",
-        argument_hint: Some("[off|low|medium|high]"),
+        summary: "Règle le raisonnement du modèle (off, low, medium, high, max)",
+        argument_hint: Some("[off|low|medium|high|max]"),
         resume_supported: false,
         category: SlashCommandCategory::Core,
     },

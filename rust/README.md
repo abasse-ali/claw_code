@@ -92,10 +92,14 @@ sombre ou claire (thème du système, de VS Code ou choisi) :
 - **frise des étapes de l'agent** : une ligne par outil (icône, cible, durée, `+3 −1` pour une
   modification), dépliable sur la sortie, le contenu lu ou la liste de tâches ; la barre
   d'activité au-dessus de la saisie dit ce que fait l'agent ;
-- **modifications en deux blocs, AVANT et APRÈS**, ouvertes d'emblée : les lignes retirées en
-  rouge, les lignes ajoutées en vert, le contexte en gris. Pour un fichier écrit en entier, AVANT
-  montre l'ancien contenu (ou « nouveau fichier ») et APRÈS le nouveau, coloré ; au-delà de
-  12 lignes, un bloc se replie (« Afficher les N lignes ») ;
+- **modifications en deux colonnes, AVANT et APRÈS**, ouvertes d'emblée et limitées aux
+  **seules lignes changées** : chaque ligne d'avant (en rouge) fait face à celle qui la remplace
+  (en vert), la partie changée de la ligne est surlignée, et « ⋯ » sépare deux passages
+  éloignés. Les numéros de ligne sont ceux du fichier : à l'arrivée du résultat, Claw compare le
+  fichier entier d'avant et d'après. Une réécriture complète d'un fichier existant ne montre aussi
+  que ses lignes changées ; un nouveau fichier s'affiche en entier, numéroté. Au-delà de
+  14 lignes, la vue se replie (« Afficher les N lignes changées »). En panneau étroit, l'après
+  passe sous l'avant ;
 - **flèche du haut dans la zone de saisie** : reprend vos demandes précédentes, de la plus récente
   à la plus ancienne (100 gardées d'une session à l'autre) ; la flèche du bas redescend jusqu'au
   brouillon en cours. Dans un texte de plusieurs lignes, les flèches déplacent le curseur tant
@@ -197,6 +201,14 @@ est retenu ; avec `OPENROUTER_API_KEY`, le quota gratuit du jour est affiché.
   atteint : un modèle local (`ollama:…`) ou un autre fournisseur qui a son propre quota gratuit
   (`gemini:`, `groq:`), chacun avec sa clé. Le plan gratuit de Mistral ne permet plus de créer
   de clé API (constaté le 10 octobre 2026) : `mistral:` demande un plan payant.
+- **La clé Google (`GEMINI_API_KEY`)** ne sert que si vous la mettez au travail : rien ne
+  l'utilise d'office. `/model gemini:<modèle>` pour une session ; ou, pour épargner le quota
+  d'OpenRouter, les tâches annexes sur celui de Google : `"advisorModels": ["gemini:<modèle>"]`
+  (relecture, conseil, second avis) et `"imageReader": "gemini:<modèle>"` (description
+  d'images). Avant cela, vérifiez dans Google AI Studio que le projet de la clé est en offre
+  gratuite : un projet dont la facturation est activée paie chaque requête. Les modèles gratuits
+  et leurs limites (par minute et par jour, par projet) s'y affichent ; en offre gratuite, Google
+  peut se servir des requêtes pour améliorer ses produits.
 - La limite de jetons de sortie suit le catalogue (sortie maximale et contexte du modèle) ;
   `/cost` indique le coût estimé (0 $ pour un modèle gratuit).
 - Chaque étape de l'agent consomme une requête du quota gratuit ; en cas de limite atteinte
@@ -515,12 +527,30 @@ obtenir toutes les erreurs d'un coup (vérificateur de types, compilation, tests
 découvrir une compilation à la fois ; vérifier le comportement et pas seulement que le code se
 charge ; n'affirmer dans la réponse finale que ce que les fichiers et les commandes montrent.
 Le raisonnement doit servir à décider (faits, hypothèses, preuves, décision), pas à raconter ce
-qui va suivre.
+qui va suivre. Avant la première modification, le modèle balise le terrain (ce que fait le code
+aujourd'hui, tout ce que le changement touche, l'ordre du travail, la preuve qu'il marchera) ;
+devant un problème subtil, il suit l'exécution réelle pas à pas avec les valeurs en jeu ; un
+travail de plus de deux étapes est découpé en tâches (`TodoWrite`), et une tâche ouverte veut
+dire que le travail n'est pas fini.
 
-**De la place pour réfléchir.** Sans réglage, un modèle OpenRouter qui sait raisonner reçoit
-l'effort `high`, et la limite de sortie suit son catalogue jusqu'à 65 536 jetons (32 768 avant) :
-le raisonnement compte dans cette limite, et un plafond trop bas coupait l'appel d'outil qui
-suivait une longue réflexion.
+**Des réponses approfondies.** Quand vous demandez d'expliquer, d'analyser, de comparer, de
+relire, de concevoir ou de conseiller, la réponse est le travail lui-même : chaque point appuyé
+sur le code lu (fichiers, fonctions, lignes), les mécanismes et leurs raisons, les options avec
+leurs compromis, les risques et cas limites, puis une recommandation claire. Le compte rendu
+d'un travail explique la cause de chaque problème (pourquoi, ce qu'il touchait, la preuve), et
+pourquoi telle solution plutôt qu'une autre quand le choix comptait. Une question simple garde
+une réponse directe.
+
+**Le plus haut niveau de réflexion de chaque modèle.** Sans réglage, un modèle OpenRouter qui
+sait raisonner reçoit l'effort `max` : OpenRouter le ramène au plus haut niveau que ce modèle
+accepte (`high` pour Nemotron 3 Ultra, `max` pour Inkling). Seule exception, un modèle qui ne
+raisonne que par budget de jetons reçoit `high` : avec `max`, 95 % de la place de sa réponse
+partirait en réflexion et ses appels d'outils seraient coupés. Si une réponse s'arrête quand
+même à la limite de sortie sans texte ni appel (la réflexion a tout pris), ce modèle descend d'un
+cran pour la suite de la session, et Claw le dit. La limite de sortie suit le catalogue jusqu'à
+65 536 jetons : le raisonnement compte dedans. Les niveaux acceptés par chaque modèle viennent
+du catalogue d'OpenRouter, rafraîchi en arrière-plan au démarrage quand le cache est d'une
+version antérieure (lecture publique, sans clé ni quota).
 
 **Une réponse finale en forme de compte rendu.** Le modèle termine par une seule réponse,
 écrite pour vous qui n'avez pas suivi ses étapes : le résultat d'abord, puis ce qui n'allait pas
@@ -696,9 +726,10 @@ coupe cet import.
   de la décrire. Les images restent dans la session et repartent telles quelles si vous revenez
   à un modèle qui les lit. `"imageReader"` (ou `CLAW_IMAGE_READER`) choisit le lecteur : un
   identifiant de modèle, ou `"off"` pour ne rien faire décrire.
-- **Raisonnement** : sans réglage, un modèle d'OpenRouter qui sait raisonner reçoit l'effort de
-  réflexion le plus poussé (`high`) : ses réponses sont plus lentes, mais plus réfléchies.
-  `/think off|low|medium|high` (ou `"reasoning"` dans la config,
+- **Raisonnement** : sans réglage, un modèle d'OpenRouter qui sait raisonner reçoit le plus haut
+  niveau de réflexion qu'il accepte (`max`, ou `high` s'il raisonne par budget) : ses réponses
+  sont plus lentes, mais plus réfléchies. `/think off|low|medium|high|max` (`max` : le plus haut
+  niveau que le modèle accepte ; ou `"reasoning"` dans la config,
   `CLAW_REASONING`) règle l'effort de réflexion des modèles qui raisonnent (DeepSeek-R1, Qwen3,
   GLM, série o d'OpenAI…) et des modèles Claude via l'API Anthropic (raisonnement étendu, blocs
   signés conservés et renvoyés avec les appels d'outils ; pas via OpenRouter). Le raisonnement

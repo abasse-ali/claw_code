@@ -2243,11 +2243,17 @@ mod tests {
         // gardées d'une session à l'autre.
         assert!(super::PAGE.contains(r#"recallPrompt(event.key === "ArrowUp" ? -1 : 1)"#));
         assert!(super::PAGE.contains(r#"store.set("claw-prompts", "#));
-        // Modification et écriture : un bloc avant, un bloc après.
-        assert!(super::PAGE.contains("beforeAfterView(value.old_string, value.new_string)"));
-        assert!(super::PAGE.contains("writeView(value.content, value.path)"));
-        assert!(super::PAGE.contains(r#"changeBlock("AVANT", "#));
-        assert!(super::PAGE.contains(r#"el("span", "io-k", "APRÈS")"#));
+        // Modification : deux colonnes, AVANT et APRÈS, sur les seules lignes
+        // changées, renumérotées d'après le fichier entier au résultat.
+        assert!(super::PAGE
+            .contains("showDiff(holder, diffGroups(value.old_string, value.new_string), false)"));
+        assert!(
+            super::PAGE.contains(r#"el("div", "sbs-h", "AVANT"), el("div", "sbs-h n", "APRÈS")"#)
+        );
+        assert!(super::PAGE.contains("refineDiff(entry, parseJson(output))"));
+        assert!(
+            super::PAGE.contains(r#"showContent(holder, value.content, value.path, "CONTENU")"#)
+        );
     }
 
     #[test]

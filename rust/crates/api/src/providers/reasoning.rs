@@ -2,15 +2,20 @@
 //! demandé (`/think`, `"reasoning"` dans la config, `CLAW_REASONING`) et
 //! séparation du raisonnement et de la réponse dans le flux.
 
+use std::collections::BTreeMap;
 use std::sync::RwLock;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Niveaux rangés du plus faible au plus fort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReasoningEffort {
     /// Rien n'est demandé et le raisonnement éventuel n'est pas affiché.
     Off,
     Low,
     Medium,
     High,
+    /// Le plus haut niveau que le modèle accepte : `OpenRouter` ramène un
+    /// niveau non accepté au plus proche qui l'est.
+    Max,
 }
 
 impl ReasoningEffort {
@@ -20,7 +25,8 @@ impl ReasoningEffort {
             "off" | "non" | "none" | "aucun" | "0" => Self::Off,
             "low" | "faible" | "bas" => Self::Low,
             "medium" | "moyen" | "normal" => Self::Medium,
-            "high" | "fort" | "élevé" | "eleve" | "max" | "ultrathink" => Self::High,
+            "high" | "fort" | "élevé" | "eleve" => Self::High,
+            "max" | "maximum" | "maximal" | "xhigh" | "ultrathink" => Self::Max,
             _ => return None,
         })
     }
@@ -32,6 +38,28 @@ impl ReasoningEffort {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::Max => "max",
+        }
+    }
+
+    /// Valeur du champ `reasoning_effort` des serveurs compatibles `OpenAI`
+    /// autres qu'`OpenRouter`, qui ne connaissent pas « max ».
+    #[must_use]
+    pub const fn openai_value(self) -> &'static str {
+        match self {
+            Self::Max => "high",
+            other => other.as_str(),
+        }
+    }
+
+    /// Un cran de moins ; `None` sous « low ».
+    #[must_use]
+    pub const fn lower(self) -> Option<Self> {
+        match self {
+            Self::Max => Some(Self::High),
+            Self::High => Some(Self::Medium),
+            Self::Medium => Some(Self::Low),
+            Self::Low | Self::Off => None,
         }
     }
 }
@@ -59,29 +87,90 @@ pub fn anthropic_thinking_budget() -> Option<u32> {
         ReasoningEffort::Off => None,
         ReasoningEffort::Low => Some(2_048),
         ReasoningEffort::Medium => Some(8_192),
-        ReasoningEffort::High => Some(24_576),
+        ReasoningEffort::High | ReasoningEffort::Max => Some(24_576),
     }
 }
 
 /// Niveau demandé à un modèle compatible `OpenAI`. Sans réglage, un modèle
-/// d'`OpenRouter` qui sait raisonner reçoit le niveau le plus poussé : mieux
-/// vaut une réponse réfléchie qu'une réponse rapide. Les autres serveurs ne
-/// reçoivent rien sans réglage, certains refusant ce paramètre.
+/// d'`OpenRouter` qui sait raisonner reçoit le plus haut niveau qui lui
+/// convient (`strongest`, tiré du catalogue) : mieux vaut une réponse
+/// réfléchie qu'une réponse rapide. Les autres serveurs ne reçoivent rien
+/// sans réglage, certains refusant ce paramètre. Un modèle dont la réflexion
+/// a déjà pris toute la place de la réponse reste un cran en dessous.
 #[must_use]
 pub fn effort_for_request(
     configured: Option<ReasoningEffort>,
     model: &str,
     openrouter: bool,
-    model_reasons: bool,
+    strongest: Option<ReasoningEffort>,
 ) -> Option<ReasoningEffort> {
     if !effort_applies_to(model) {
         return None;
     }
-    match configured {
-        Some(ReasoningEffort::Off) => None,
-        Some(effort) => Some(effort),
-        None => (openrouter && model_reasons).then_some(ReasoningEffort::High),
-    }
+    let effort = match configured {
+        Some(ReasoningEffort::Off) => return None,
+        Some(effort) => effort,
+        None if openrouter => strongest?,
+        None => return None,
+    };
+    Some(match effort_cap(model) {
+        Some(cap) if cap < effort => cap,
+        _ => effort,
+    })
+}
+
+// --- Réflexion qui prend toute la place ---------------------------------------------
+
+/// Dernier niveau envoyé à chaque modèle, et plafond appris pour la session.
+static SENT: RwLock<BTreeMap<String, ReasoningEffort>> = RwLock::new(BTreeMap::new());
+static CAPS: RwLock<BTreeMap<String, ReasoningEffort>> = RwLock::new(BTreeMap::new());
+static NOTICE: RwLock<Option<String>> = RwLock::new(None);
+
+fn effort_cap(model: &str) -> Option<ReasoningEffort> {
+    CAPS.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(model)
+        .copied()
+}
+
+/// Retient le niveau demandé à ce modèle pour la requête en cours.
+pub fn note_effort_sent(model: &str, effort: ReasoningEffort) {
+    SENT.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(model.to_string(), effort);
+}
+
+/// La réponse s'est arrêtée à la limite de sortie sans texte ni appel
+/// d'outil : la réflexion a tout pris. Ce modèle reçoit désormais un cran de
+/// moins (jusqu'à la fin de la session), et un avertissement attend d'être
+/// affiché. Renvoie le nouveau niveau.
+pub fn reasoning_exhausted(model: &str) -> Option<ReasoningEffort> {
+    let sent = SENT
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(model)
+        .copied()?;
+    let lower = sent.lower()?;
+    CAPS.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(model.to_string(), lower);
+    *NOTICE
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(format!(
+        "La réflexion de {model} a pris toute la place de sa réponse : niveau « {} » au lieu de « {} » pour la suite de la session",
+        lower.as_str(),
+        sent.as_str()
+    ));
+    Some(lower)
+}
+
+/// Avertissement en attente après un repli du niveau de raisonnement.
+#[must_use]
+pub fn take_reasoning_notice() -> Option<String> {
+    NOTICE
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
 }
 
 /// Les modèles Claude exigent qu'on leur renvoie leurs blocs de raisonnement
@@ -178,6 +267,12 @@ mod tests {
     #[test]
     fn parses_effort_levels_in_french_and_english() {
         assert_eq!(ReasoningEffort::parse("élevé"), Some(ReasoningEffort::High));
+        assert_eq!(ReasoningEffort::parse("max"), Some(ReasoningEffort::Max));
+        assert_eq!(
+            ReasoningEffort::parse("ultrathink"),
+            Some(ReasoningEffort::Max)
+        );
+        assert_eq!(ReasoningEffort::Max.openai_value(), "high");
         assert_eq!(
             ReasoningEffort::parse("medium"),
             Some(ReasoningEffort::Medium)
@@ -192,20 +287,22 @@ mod tests {
     fn reasoning_models_think_hard_unless_told_otherwise() {
         use super::effort_for_request;
         let model = "deepseek/deepseek-r1:free";
-        // Sans réglage : réflexion poussée pour un modèle OpenRouter qui raisonne.
+        let max = Some(ReasoningEffort::Max);
+        // Sans réglage : le plus haut niveau qui convient au modèle.
+        assert_eq!(effort_for_request(None, model, true, max), max);
         assert_eq!(
-            effort_for_request(None, model, true, true),
+            effort_for_request(None, model, true, Some(ReasoningEffort::High)),
             Some(ReasoningEffort::High)
         );
         // Modèle qui ne raisonne pas, ou autre serveur : rien n'est demandé.
-        assert_eq!(effort_for_request(None, model, true, false), None);
+        assert_eq!(effort_for_request(None, model, true, None), None);
         assert_eq!(
-            effort_for_request(None, "groq:llama-3.3-70b", false, true),
+            effort_for_request(None, "groq:llama-3.3-70b", false, max),
             None
         );
         // Le réglage de l'utilisateur prime, y compris pour couper.
         assert_eq!(
-            effort_for_request(Some(ReasoningEffort::Low), model, true, true),
+            effort_for_request(Some(ReasoningEffort::Low), model, true, max),
             Some(ReasoningEffort::Low)
         );
         assert_eq!(
@@ -213,18 +310,52 @@ mod tests {
                 Some(ReasoningEffort::Medium),
                 "groq:qwen-qwq-32b",
                 false,
-                false
+                None
             ),
             Some(ReasoningEffort::Medium)
         );
         assert_eq!(
-            effort_for_request(Some(ReasoningEffort::Off), model, true, true),
+            effort_for_request(Some(ReasoningEffort::Off), model, true, max),
             None
         );
         // Les modèles Claude gardent leur propre mécanisme.
         assert_eq!(
-            effort_for_request(None, "anthropic/claude-sonnet-4.5", true, true),
+            effort_for_request(None, "anthropic/claude-sonnet-4.5", true, max),
             None
+        );
+    }
+
+    #[test]
+    fn a_reasoning_that_fills_the_whole_reply_lowers_the_effort_one_notch() {
+        use super::{
+            effort_for_request, note_effort_sent, reasoning_exhausted, take_reasoning_notice,
+        };
+        let model = "vendor/long-thinker:free";
+        let max = Some(ReasoningEffort::Max);
+        // Rien d'envoyé à ce modèle : rien à abaisser.
+        assert_eq!(reasoning_exhausted("vendor/unknown:free"), None);
+        note_effort_sent(model, ReasoningEffort::Max);
+        assert_eq!(reasoning_exhausted(model), Some(ReasoningEffort::High));
+        let notice = take_reasoning_notice().expect("avertissement");
+        assert!(notice.contains("« high » au lieu de « max »"), "{notice}");
+        assert!(take_reasoning_notice().is_none());
+        // La suite de la session reste un cran en dessous, réglage compris.
+        assert_eq!(
+            effort_for_request(None, model, true, max),
+            Some(ReasoningEffort::High)
+        );
+        assert_eq!(
+            effort_for_request(max, model, true, max),
+            Some(ReasoningEffort::High)
+        );
+        assert_eq!(
+            effort_for_request(Some(ReasoningEffort::Low), model, true, max),
+            Some(ReasoningEffort::Low)
+        );
+        // Un autre modèle n'est pas concerné.
+        assert_eq!(
+            effort_for_request(None, "vendor/other:free", true, max),
+            max
         );
     }
 

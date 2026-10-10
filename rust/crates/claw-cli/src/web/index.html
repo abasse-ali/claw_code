@@ -24,6 +24,7 @@
     --warn: #f5b13d; --warn-soft: rgba(245, 177, 61, .12);
     --info: #6ea8ff; --info-soft: rgba(110, 168, 255, .12);
     --code-bg: #121316; --add-bg: rgba(60, 207, 122, .14); --del-bg: rgba(255, 93, 93, .14);
+    --add-strong: rgba(60, 207, 122, .36); --del-strong: rgba(255, 93, 93, .38);
     --shadow: 0 10px 40px rgba(0, 0, 0, .45), 0 2px 8px rgba(0, 0, 0, .3);
     --tk-kw: #ff9a66; --tk-str: #9ad37f; --tk-num: #f5c46b; --tk-com: #6f707a; --tk-fn: #8cb4ff;
   }
@@ -38,6 +39,7 @@
     --warn: #b45309; --warn-soft: rgba(217, 119, 6, .10);
     --info: #2563eb; --info-soft: rgba(37, 99, 235, .08);
     --code-bg: #f6f6f3; --add-bg: rgba(22, 163, 74, .11); --del-bg: rgba(220, 38, 38, .09);
+    --add-strong: rgba(22, 163, 74, .28); --del-strong: rgba(220, 38, 38, .24);
     --shadow: 0 12px 40px rgba(20, 20, 30, .14), 0 2px 6px rgba(20, 20, 30, .06);
     --tk-kw: #c2410c; --tk-str: #15803d; --tk-num: #a16207; --tk-com: #8d8d96; --tk-fn: #1d4ed8;
   }
@@ -273,14 +275,38 @@
   .step-body .io pre.io-v.err { color: var(--err); }
   .io-v .spin { margin: 2px 0; }
   .io-more { margin: 0 0 8px; font-size: 12px; color: var(--accent); justify-self: start; }
-  /* Modification : un bloc « avant », un bloc « après », lignes changées surlignées. */
-  .step-body .io .ba { margin: 0; padding: 8px 12px 8px 0; min-width: 0; font-family: var(--mono); font-size: 12.3px; line-height: 1.5; }
-  .step-body .io .ba div { white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 6px; border-radius: 3px; }
-  .step-body .io .ba .del { background: var(--del-bg); }
-  .step-body .io .ba .add { background: var(--add-bg); }
-  .step-body .io .ba .same { color: var(--text-2); }
-  .step-body .io .ba .none { color: var(--text-3); font-family: var(--font); padding: 0; }
-  .step-body .io .ba.clipped { max-height: 12.6em; overflow: hidden; mask-image: linear-gradient(#000 70%, transparent); }
+  /* Modification : deux colonnes, AVANT et APRÈS, sur les seules lignes changées ;
+     la partie changée d'une ligne est surlignée. En panneau étroit, l'après passe sous l'avant. */
+  .sbs { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--code-bg); overflow: hidden; font-family: var(--mono); font-size: 12.3px; line-height: 1.55; }
+  .sbs-h { padding: 6px 10px 5px; font-family: var(--font); font-size: 10.5px; font-weight: 650; letter-spacing: .07em; color: var(--text-3); border-bottom: 1px solid var(--border); }
+  .sbs-h.n, .sbs-c.n { border-left: 1px solid var(--border); }
+  .sbs-c { display: grid; grid-template-columns: auto minmax(0, 1fr); min-width: 0; }
+  .sbs-c.o { background: var(--del-bg); }
+  .sbs-c.n { background: var(--add-bg); }
+  .sbs-c.blank { background: none; }
+  .sbs-c .no { padding: 0 8px 0 10px; min-width: 4ch; text-align: right; color: var(--text-3); user-select: none; font-variant-numeric: tabular-nums; }
+  .sbs.nonum .sbs-c .no { min-width: 0; padding: 0 0 0 10px; visibility: hidden; }
+  .sbs-c .tx { padding-right: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .sbs-c mark { color: inherit; border-radius: 2px; }
+  .sbs-c.o mark { background: var(--del-strong); }
+  .sbs-c.n mark { background: var(--add-strong); }
+  .sbs-gap { grid-column: 1 / -1; padding: 0 10px; color: var(--text-3); font-family: var(--font); font-size: 11px; text-align: center; border-top: 1px dashed var(--border); border-bottom: 1px dashed var(--border); }
+  .sbs-gap.none { border: 0; padding: 6px 10px; text-align: left; }
+  .sbs.clipped { max-height: 17em; overflow: hidden; mask-image: linear-gradient(#000 72%, transparent); }
+  /* Contenu d'un fichier écrit : une seule colonne, numérotée. */
+  .sbs.full { grid-template-columns: auto minmax(0, 1fr); }
+  .sbs.full .sbs-h { grid-column: 1 / -1; }
+  .sbs.full pre { margin: 0; padding: 6px 10px 8px 0; border: 0; border-radius: 0; background: none; max-height: none; overflow: visible; white-space: pre; font-size: 12.3px; line-height: 1.55; }
+  .sbs.full pre.nums { padding-left: 10px; text-align: right; color: var(--text-3); user-select: none; }
+  .sbs.full .code { overflow-x: auto; }
+  .diff-holder { display: flex; flex-direction: column; gap: 4px; }
+  .diff-holder > .io-more { margin: 0; }
+  @media (max-width: 560px) {
+    .sbs:not(.full) { grid-template-columns: minmax(0, 1fr); }
+    .sbs:not(.full) .sbs-h { display: none; }
+    .sbs-c.blank { display: none; }
+    .sbs-c.n { border-left: 0; }
+  }
   .io-more:hover { text-decoration: underline; }
   .step-body .label { font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); }
   .step-body pre { margin: 0; padding: 10px 12px; background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-sm); font-size: 12.3px; line-height: 1.5; overflow: auto; max-height: 380px; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -1112,88 +1138,159 @@
         return ["tool", name, String(raw || "").replace(/\s+/g, " ").slice(0, 140)];
     }
   }
+  // Différence ligne à ligne. Le début et la fin communs sont mis à part :
+  // une modification touche d'ordinaire un court passage d'un long fichier.
   function lineDiff(oldText, newText) {
-    const a = String(oldText || "").split("\n"), b = String(newText || "").split("\n");
-    if (a.length * b.length > 250000) return a.map((t) => ["-", t]).concat(b.map((t) => ["+", t]));
-    const n = a.length, m = b.length, dp = [];
-    for (let i = 0; i <= n; i++) dp.push(new Uint32Array(m + 1));
-    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-    const out = [];
-    let i = 0, j = 0;
-    while (i < n && j < m) {
-      if (a[i] === b[j]) { out.push([" ", a[i]]); i++; j++; }
-      else if (dp[i + 1][j] >= dp[i][j + 1]) out.push(["-", a[i++]]);
-      else out.push(["+", b[j++]]);
+    const a = oldText === "" ? [] : String(oldText || "").split("\n");
+    const b = newText === "" ? [] : String(newText || "").split("\n");
+    let head = 0;
+    while (head < a.length && head < b.length && a[head] === b[head]) head++;
+    let tail = 0;
+    while (tail < a.length - head && tail < b.length - head && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
+    const out = a.slice(0, head).map((t) => [" ", t]);
+    const x = a.slice(head, a.length - tail), y = b.slice(head, b.length - tail);
+    if (x.length * y.length > 250000) {
+      for (const t of x) out.push(["-", t]);
+      for (const t of y) out.push(["+", t]);
+    } else {
+      const n = x.length, m = y.length, dp = [];
+      for (let i = 0; i <= n; i++) dp.push(new Uint32Array(m + 1));
+      for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) dp[i][j] = x[i] === y[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      let i = 0, j = 0;
+      while (i < n && j < m) {
+        if (x[i] === y[j]) { out.push([" ", x[i]]); i++; j++; }
+        else if (dp[i + 1][j] >= dp[i][j + 1]) out.push(["-", x[i++]]);
+        else out.push(["+", y[j++]]);
+      }
+      while (i < n) out.push(["-", x[i++]]);
+      while (j < m) out.push(["+", y[j++]]);
     }
-    while (i < n) out.push(["-", a[i++]]);
-    while (j < m) out.push(["+", b[j++]]);
+    for (const t of a.slice(a.length - tail)) out.push([" ", t]);
     return out;
   }
-  // Un bloc d'une modification : ses lignes ([classe, texte]), replié s'il est long.
-  function changeBlock(label, lines, empty) {
-    const row = el("div", "io-row");
-    const block = el("div", "io-v ba");
-    for (const [kind, text] of lines) block.appendChild(el("div", kind, text || " "));
-    if (!lines.length) block.appendChild(el("div", "none", empty || "(rien)"));
-    row.append(el("span", "io-k", label), block);
-    clipBlock(row, block, lines.length);
-    return { row, block };
-  }
-  function clipBlock(row, block, count) {
-    if (count <= 12) return;
-    block.classList.add("clipped");
-    const more = el("button", "io-more", "Afficher les " + count + " lignes");
-    more.type = "button";
-    more.onclick = () => { block.classList.remove("clipped"); more.remove(); };
-    row.append(el("span"), more);
-  }
-  // Modification : le texte d'avant et celui d'après, chacun dans son bloc,
-  // comme l'entrée et la sortie d'une commande.
-  function beforeAfterView(oldText, newText) {
-    const before = [], after = [];
-    let added = 0, removed = 0;
+  // Lignes changées seulement, par passage : chaque rangée met une ligne
+  // d'avant en face de celle qui la remplace (numéros comptés depuis 1).
+  function diffGroups(oldText, newText) {
+    const groups = [];
+    let group = null, removed = [], added = [], oldNo = 0, newNo = 0;
+    const flush = () => {
+      for (let k = 0; k < Math.max(removed.length, added.length); k++) group.push({ o: removed[k] || null, n: added[k] || null });
+      removed = []; added = [];
+    };
     for (const [kind, text] of lineDiff(oldText, newText)) {
-      if (kind === "-") { before.push(["del", text]); removed++; }
-      else if (kind === "+") { after.push(["add", text]); added++; }
-      else { before.push(["same", text]); after.push(["same", text]); }
+      if (kind === " ") {
+        if (group) { flush(); group = null; }
+        oldNo++; newNo++;
+        continue;
+      }
+      if (!group) { group = []; groups.push(group); }
+      if (kind === "-") removed.push({ no: ++oldNo, text });
+      else added.push({ no: ++newNo, text });
     }
-    const box = el("div", "io");
-    box.append(
-      changeBlock("AVANT", oldText ? before : [], "(rien : le texte est ajouté)").row,
-      changeBlock("APRÈS", newText ? after : [], "(rien : le texte est retiré)").row,
-    );
-    return { box, added: newText ? added : 0, removed: oldText ? removed : 0 };
+    if (group) flush();
+    return groups;
   }
-  // Écriture d'un fichier : son contenu d'après ; l'avant est connu au résultat.
-  function writeView(content, path) {
-    // Le retour à la ligne final ne fait pas une ligne de plus.
+  // Une ligne face à sa remplaçante : début et fin communs laissés tels
+  // quels, la partie changée surlignée (rien de plus si tout a changé).
+  function markChange(text, other) {
+    if (typeof other !== "string") return escapeHtml(text);
+    let start = 0;
+    while (start < text.length && start < other.length && text[start] === other[start]) start++;
+    let end = 0;
+    while (end < text.length - start && end < other.length - start && text[text.length - 1 - end] === other[other.length - 1 - end]) end++;
+    if (start === 0 && end === 0) return escapeHtml(text);
+    const middle = text.slice(start, text.length - end);
+    if (!middle) return escapeHtml(text);
+    return escapeHtml(text.slice(0, start)) + "<mark>" + escapeHtml(middle) + "</mark>" + escapeHtml(text.slice(text.length - end));
+  }
+  function diffCell(side, line, other) {
+    const cell = el("div", "sbs-c " + side + (line ? "" : " blank"));
+    if (!line) return cell;
+    const text = el("span", "tx");
+    text.innerHTML = markChange(line.text, other ? other.text : null) || " ";
+    cell.append(el("span", "no", String(line.no)), text);
+    return cell;
+  }
+  function changeCounts(groups) {
+    let added = 0, removed = 0;
+    for (const group of groups) for (const row of group) { if (row.o) removed++; if (row.n) added++; }
+    return { added, removed };
+  }
+  function changeSummary({ added, removed }) {
+    return '<span class="add">+' + added + '</span> <span class="del">−' + removed + "</span>";
+  }
+  // Repli au-delà de 14 rangées, comme la sortie d'une commande.
+  function foldLong(holder, box, rows, what) {
+    if (rows <= 14) return;
+    box.classList.add("clipped");
+    const more = el("button", "io-more", "Afficher les " + rows + " " + what);
+    more.type = "button";
+    more.onclick = () => { box.classList.remove("clipped"); more.remove(); };
+    holder.append(more);
+  }
+  // Modification en deux colonnes, AVANT et APRÈS, sur les seules lignes
+  // changées. Sans les fichiers entiers, les numéros de ligne restent inconnus.
+  function showDiff(holder, groups, numbered) {
+    holder.textContent = "";
+    const grid = el("div", "sbs" + (numbered ? "" : " nonum"));
+    grid.append(el("div", "sbs-h", "AVANT"), el("div", "sbs-h n", "APRÈS"));
+    let rows = 0;
+    groups.forEach((group, index) => {
+      if (index) grid.append(el("div", "sbs-gap", "⋯"));
+      for (const row of group) {
+        grid.append(diffCell("o", row.o, row.n), diffCell("n", row.n, row.o));
+        rows++;
+      }
+    });
+    if (!rows) grid.append(el("div", "sbs-gap none", "Aucune ligne changée"));
+    holder.append(grid);
+    foldLong(holder, grid, rows, "lignes changées");
+    return changeCounts(groups);
+  }
+  // Contenu d'un fichier écrit, numéroté, sur toute la largeur.
+  function showContent(holder, content, path, label) {
+    holder.textContent = "";
     const lines = String(content || "").replace(/\n$/, "").split("\n");
-    const box = el("div", "io");
-    const before = changeBlock("AVANT", [], "…");
-    const row = el("div", "io-row");
-    const pre = el("pre", "io-v");
-    pre.innerHTML = highlight(lines.slice(0, 400).join("\n") + (lines.length > 400 ? "\n…" : ""), String(path || "").split(".").pop());
-    row.append(el("span", "io-k", "APRÈS"), pre);
-    clipBlock(row, pre, lines.length);
-    box.append(before.row, row);
-    return { box, before: before.block, count: lines.length };
+    const shown = lines.slice(0, 400);
+    const box = el("div", "sbs full");
+    const nums = el("pre", "nums", shown.map((_, index) => index + 1).join("\n") + (lines.length > 400 ? "\n…" : ""));
+    const code = el("div", "code");
+    const pre = el("pre");
+    pre.innerHTML = highlight(shown.join("\n") + (lines.length > 400 ? "\n…" : ""), String(path || "").split(".").pop());
+    code.append(pre);
+    box.append(el("div", "sbs-h", label), nums, code);
+    holder.append(box);
+    foldLong(holder, box, lines.length, "lignes");
+    return lines.length;
   }
-  // L'avant d'une écriture, d'après son résultat : fichier nouveau, ou lignes
-  // remplacées (leur texte quand le résultat le porte encore, sinon leur nombre).
-  function fillWriteBefore(block, value, isError) {
-    block.textContent = "";
-    const say = (text) => block.appendChild(el("div", "none", text));
-    if (isError || !value || typeof value !== "object") return say("(fichier inchangé)");
-    if (value.type === "create") return say("(nouveau fichier)");
-    const hunks = Array.isArray(value.structuredPatch) ? value.structuredPatch : [];
-    const old = hunks.flatMap((hunk) => (hunk.lines || []).filter((line) => line[0] !== "+").map((line) => [line[0] === "-" ? "del" : "same", line.slice(1)]));
-    if (old.length) {
-      for (const [kind, text] of old.slice(0, 400)) block.appendChild(el("div", kind, text || " "));
-      clipBlock(block.parentElement, block, old.length);
-      return null;
+  // Au résultat, le correctif porte le fichier entier d'avant (lignes « - »)
+  // et d'après (lignes « + ») : la modification se redessine avec ses vrais
+  // numéros de ligne, et une écriture qui remplace un fichier devient un
+  // avant / après de ses seules lignes changées. Un résultat allégé (session
+  // reprise) laisse la vue tirée de l'appel.
+  function refineDiff(entry, value) {
+    if (!value || typeof value !== "object") return;
+    if (value.type === "create") {
+      if (entry.written) showContent(entry.diff, entry.written.content, entry.written.path, "NOUVEAU FICHIER");
+      return;
     }
-    const replaced = hunks.reduce((total, hunk) => total + (hunk.oldLines || 0), 0);
-    return say(replaced ? "(ancien contenu remplacé : " + replaced + " ligne" + (replaced > 1 ? "s" : "") + ")" : "(ancien contenu remplacé)");
+    const hunks = Array.isArray(value.structuredPatch) ? value.structuredPatch : [];
+    const groups = [];
+    for (const hunk of hunks) {
+      const lines = Array.isArray(hunk.lines) ? hunk.lines.map(String) : [];
+      if (!lines.length) continue;
+      const before = lines.filter((line) => line[0] !== "+").map((line) => line.slice(1)).join("\n");
+      const after = lines.filter((line) => line[0] !== "-").map((line) => line.slice(1)).join("\n");
+      for (const group of diffGroups(before, after)) {
+        for (const row of group) {
+          if (row.o) row.o.no += (hunk.oldStart || 1) - 1;
+          if (row.n) row.n.no += (hunk.newStart || 1) - 1;
+        }
+        groups.push(group);
+      }
+    }
+    if (!groups.length) return;
+    entry.summary = changeSummary(showDiff(entry.diff, groups, true));
   }
   function todoList(todos) {
     const box = el("div", "todos");
@@ -1230,14 +1327,17 @@
       parts.output = { row: output, pre: result };
       toggleStep(parts.step, true);
     } else if (name === "edit_file" && value && (value.old_string !== undefined || value.new_string !== undefined)) {
-      const { box, added, removed } = beforeAfterView(value.old_string, value.new_string);
-      parts.body.append(box);
-      parts.summary = '<span class="add">+' + added + '</span> <span class="del">−' + removed + "</span>";
+      const holder = el("div", "diff-holder");
+      parts.body.append(holder);
+      parts.diff = holder;
+      parts.summary = changeSummary(showDiff(holder, diffGroups(value.old_string, value.new_string), false));
       toggleStep(parts.step, true);
     } else if (name === "write_file" && value && value.content !== undefined) {
-      const { box, before, count } = writeView(value.content, value.path);
-      parts.body.append(box);
-      parts.before = before;
+      const holder = el("div", "diff-holder");
+      parts.body.append(holder);
+      parts.diff = holder;
+      parts.written = { content: value.content, path: value.path };
+      const count = showContent(holder, value.content, value.path, "CONTENU");
       parts.summary = count + " ligne" + (count > 1 ? "s" : "");
       toggleStep(parts.step, true);
     } else if (name === "TodoWrite" && value) {
@@ -1356,7 +1456,7 @@
       if (!pendingTools.length) setActivity("Réflexion…");
       return;
     }
-    if (entry.before) fillWriteBefore(entry.before, parseJson(output), isError);
+    if (entry.diff && !isError) refineDiff(entry, parseJson(output));
     const { box, summary } = resultView(output, isError);
     entry.body.append(box);
     if (note) entry.body.append(clawNote(note));

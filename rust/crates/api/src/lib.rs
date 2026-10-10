@@ -24,7 +24,9 @@ pub use providers::compat::{
     compat_providers, register_compat_providers, split_compat_model, CompatProvider,
 };
 pub use providers::openai_compat::{is_passback_reasoning, OpenAiCompatClient, OpenAiCompatConfig};
-pub use providers::reasoning::{reasoning_effort, set_reasoning_effort, ReasoningEffort};
+pub use providers::reasoning::{
+    reasoning_effort, set_reasoning_effort, take_reasoning_notice, ReasoningEffort,
+};
 pub use providers::{
     auto_compaction_threshold, context_window_for_model, detect_provider_kind,
     max_tokens_for_model, resolve_model_alias, ProviderKind,

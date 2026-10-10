@@ -36,12 +36,39 @@ pub struct OpenRouterModel {
     /// Sait raisonner avant de répondre (paramètre `reasoning`).
     #[serde(default)]
     pub supports_reasoning: bool,
+    /// Niveaux d'effort que le modèle accepte (`reasoning.supported_efforts`) ;
+    /// `None` dans un catalogue d'avant ce champ.
+    #[serde(default)]
+    pub reasoning_efforts: Option<Vec<String>>,
+    /// Le raisonnement se règle par un budget de jetons
+    /// (`reasoning.supports_max_tokens`).
+    #[serde(default)]
+    pub reasoning_budget: bool,
 }
 
 impl OpenRouterModel {
     #[must_use]
     pub fn is_free(&self) -> bool {
         self.prompt_price.abs() < f64::EPSILON && self.completion_price.abs() < f64::EPSILON
+    }
+
+    /// Plus haut niveau de raisonnement à demander à ce modèle. « max » :
+    /// `OpenRouter` le ramène au plus haut niveau que le modèle accepte. Un
+    /// modèle qui ne raisonne que par budget recevrait alors 95 % de la place
+    /// de sa réponse pour réfléchir, au détriment de ses appels d'outils : il
+    /// reçoit « high » (80 %), comme un modèle d'un catalogue trop ancien
+    /// pour le dire.
+    #[must_use]
+    pub fn strongest_effort(&self) -> Option<crate::ReasoningEffort> {
+        if !self.supports_reasoning {
+            return None;
+        }
+        Some(match &self.reasoning_efforts {
+            Some(efforts) if !efforts.is_empty() || !self.reasoning_budget => {
+                crate::ReasoningEffort::Max
+            }
+            _ => crate::ReasoningEffort::High,
+        })
     }
 }
 
@@ -63,7 +90,7 @@ pub struct ModelCatalog {
 }
 
 /// Version du format de [`ModelCatalog`] écrit par cette version de Claw.
-pub const CATALOG_VERSION: u32 = 2;
+pub const CATALOG_VERSION: u32 = 3;
 
 /// Catégories d'usage d'`OpenRouter` (`GET /models?category=…`) et leur nom.
 pub const OPENROUTER_CATEGORIES: &[(&str, &str)] = &[
@@ -153,6 +180,16 @@ struct RawModel {
     supported_parameters: Option<Vec<String>>,
     #[serde(default)]
     architecture: Option<RawArchitecture>,
+    #[serde(default)]
+    reasoning: Option<RawReasoning>,
+}
+
+#[derive(Default, Deserialize)]
+struct RawReasoning {
+    #[serde(default)]
+    supported_efforts: Option<Vec<String>>,
+    #[serde(default)]
+    supports_max_tokens: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -407,6 +444,17 @@ fn parse_model_list(body: &str) -> Result<Vec<OpenRouterModel>, ApiError> {
                 supports_audio: reads("audio"),
                 supports_video: reads("video"),
                 supports_reasoning: supports("reasoning") || supports("include_reasoning"),
+                reasoning_efforts: Some(
+                    raw.reasoning
+                        .as_ref()
+                        .and_then(|reasoning| reasoning.supported_efforts.clone())
+                        .unwrap_or_default(),
+                ),
+                reasoning_budget: raw
+                    .reasoning
+                    .as_ref()
+                    .and_then(|reasoning| reasoning.supports_max_tokens)
+                    .unwrap_or(false),
                 id: raw.id,
             }
         })
@@ -814,6 +862,8 @@ pub struct ModelLimits {
     /// Le modèle lit les images ; sinon `OpenRouter` refuse toute requête
     /// qui en contient.
     pub supports_images: bool,
+    /// Plus haut niveau de raisonnement à lui demander (`None` : il ne raisonne pas).
+    pub strongest_effort: Option<crate::ReasoningEffort>,
 }
 
 fn limits_registry() -> &'static RwLock<BTreeMap<String, ModelLimits>> {
@@ -836,6 +886,7 @@ pub fn register_model_limits(catalog: &ModelCatalog) {
                 completion_price: model.completion_price,
                 supports_reasoning: model.supports_reasoning,
                 supports_images: model.supports_images,
+                strongest_effort: model.strongest_effort(),
             },
         );
     }
@@ -979,6 +1030,52 @@ mod tests {
             Some(12.0)
         );
         assert_eq!(active_parameters_billions("no size", "plain/model"), None);
+    }
+
+    #[test]
+    fn each_reasoning_model_gets_the_strongest_effort_that_suits_it() {
+        use crate::ReasoningEffort::{High, Max};
+        // Formes relevées dans le catalogue public d'OpenRouter.
+        let models = parse_model_list(
+            r#"{"data":[
+                {"id":"tm/inkling:free","name":"Inkling","pricing":{"prompt":"0","completion":"0"},
+                 "supported_parameters":["tools","reasoning","reasoning_effort"],
+                 "reasoning":{"mandatory":false,"supported_efforts":["max","high","medium","low","minimal","none"],"default_effort":"high"}},
+                {"id":"nv/ultra:free","name":"Ultra","pricing":{"prompt":"0","completion":"0"},
+                 "supported_parameters":["tools","reasoning"],
+                 "reasoning":{"supports_max_tokens":true,"supported_efforts":["high","medium"]}},
+                {"id":"nv/nano:free","name":"Nano","pricing":{"prompt":"0","completion":"0"},
+                 "supported_parameters":["tools","reasoning"],
+                 "reasoning":{"supports_max_tokens":true}},
+                {"id":"pool/laguna:free","name":"Laguna","pricing":{"prompt":"0","completion":"0"},
+                 "supported_parameters":["tools","reasoning"],
+                 "reasoning":{"mandatory":false,"default_enabled":true}},
+                {"id":"pool/plain:free","name":"Plain","pricing":{"prompt":"0","completion":"0"},
+                 "supported_parameters":["tools"]}
+            ]}"#,
+        )
+        .expect("catalogue");
+        let strongest: Vec<_> = models
+            .iter()
+            .map(OpenRouterModel::strongest_effort)
+            .collect();
+        assert_eq!(
+            strongest,
+            [Some(Max), Some(Max), Some(High), Some(Max), None],
+            "max se ramène au plus haut niveau accepté ; un modèle à budget seul garde de la place pour répondre"
+        );
+        assert_eq!(
+            models[1].reasoning_efforts.as_deref().map(<[String]>::len),
+            Some(2)
+        );
+        assert!(models[2].reasoning_budget);
+        // Catalogue d'avant ces champs : niveau sûr.
+        let old: OpenRouterModel = serde_json::from_str(
+            r#"{"id":"a/b:free","name":"B","context_length":null,"max_completion_tokens":null,
+                "prompt_price":0.0,"completion_price":0.0,"supports_tools":true,"supports_reasoning":true}"#,
+        )
+        .expect("ancien cache");
+        assert_eq!(old.strongest_effort(), Some(High));
     }
 
     #[test]

@@ -63,23 +63,32 @@ async fn send_message_uses_openai_compatible_endpoint_and_auth() {
 }
 
 /// Sans réglage, un modèle `OpenRouter` qui sait raisonner reçoit l'effort le
-/// plus poussé et de la place pour raisonner puis répondre ; un modèle qui ne
-/// raisonne pas ne reçoit pas ce paramètre.
+/// plus poussé qui lui convient et de la place pour raisonner puis répondre ;
+/// un modèle qui ne raisonne pas ne reçoit pas ce paramètre.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn openrouter_reasoning_models_are_asked_to_think_hard_by_default() {
     let _lock = env_lock();
     let _max_tokens = ScopedEnvVar::set("CLAW_MAX_TOKENS", "");
+    let reasoning = |id: &str, efforts: Option<Vec<&str>>, budget: bool| api::OpenRouterModel {
+        id: id.to_string(),
+        context_length: Some(1_000_000),
+        max_completion_tokens: Some(65_536),
+        supports_tools: true,
+        supports_reasoning: true,
+        reasoning_efforts: efforts.map(|list| list.into_iter().map(str::to_string).collect()),
+        reasoning_budget: budget,
+        ..Default::default()
+    };
     api::register_model_limits(&api::ModelCatalog {
         models: vec![
-            api::OpenRouterModel {
-                id: "vendor/thinker:free".to_string(),
-                context_length: Some(1_000_000),
-                max_completion_tokens: Some(65_536),
-                supports_tools: true,
-                supports_reasoning: true,
-                ..Default::default()
-            },
+            reasoning(
+                "vendor/thinker:free",
+                Some(vec!["max", "high", "medium"]),
+                false,
+            ),
+            reasoning("vendor/budget:free", Some(Vec::new()), true),
+            reasoning("vendor/old-cache:free", None, false),
             api::OpenRouterModel {
                 id: "vendor/plain:free".to_string(),
                 context_length: Some(131_072),
@@ -89,6 +98,12 @@ async fn openrouter_reasoning_models_are_asked_to_think_hard_by_default() {
         ],
         ..Default::default()
     });
+    let models = [
+        "vendor/thinker:free",
+        "vendor/budget:free",
+        "vendor/old-cache:free",
+        "vendor/plain:free",
+    ];
     let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
     let body = concat!(
         "{\"id\":\"chatcmpl_or\",\"model\":\"vendor/thinker:free\",",
@@ -98,15 +113,15 @@ async fn openrouter_reasoning_models_are_asked_to_think_hard_by_default() {
     );
     let server = spawn_server(
         state.clone(),
-        vec![
-            http_response("200 OK", "application/json", body),
-            http_response("200 OK", "application/json", body),
-        ],
+        models
+            .iter()
+            .map(|_| http_response("200 OK", "application/json", body))
+            .collect(),
     )
     .await;
     let client = OpenAiCompatClient::new("or-test-key", OpenAiCompatConfig::openrouter())
         .with_base_url(server.base_url());
-    for model in ["vendor/thinker:free", "vendor/plain:free"] {
+    for model in models {
         let request = MessageRequest {
             model: model.to_string(),
             max_tokens: api::max_tokens_for_model(model),
@@ -116,12 +131,75 @@ async fn openrouter_reasoning_models_are_asked_to_think_hard_by_default() {
     }
 
     let captured = state.lock().await;
-    let thinker: serde_json::Value = serde_json::from_str(&captured[0].body).expect("json");
-    assert_eq!(thinker["reasoning"], json!({"effort": "high"}));
-    assert_eq!(thinker["max_tokens"], json!(65_536));
-    let plain: serde_json::Value = serde_json::from_str(&captured[1].body).expect("json");
+    let body = |index: usize| -> serde_json::Value {
+        serde_json::from_str(&captured[index].body).expect("json")
+    };
+    // « max » : OpenRouter le ramène au plus haut niveau que le modèle accepte.
+    assert_eq!(body(0)["reasoning"], json!({"effort": "max"}));
+    assert_eq!(body(0)["max_tokens"], json!(65_536));
+    // Raisonnement par budget seul, ou catalogue trop ancien pour le dire :
+    // « high » laisse de la place à la réponse.
+    assert_eq!(body(1)["reasoning"], json!({"effort": "high"}));
+    assert_eq!(body(2)["reasoning"], json!({"effort": "high"}));
+    let plain = body(3);
     assert!(plain.get("reasoning").is_none(), "{plain}");
     assert_eq!(plain["max_tokens"], json!(16_384));
+}
+
+/// Une réponse arrêtée à la limite de sortie avec du raisonnement seulement :
+/// la réflexion a tout pris, le modèle reçoit un cran de moins ensuite.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a_reasoning_that_fills_the_reply_lowers_the_next_effort() {
+    let _lock = env_lock();
+    api::register_model_limits(&api::ModelCatalog {
+        models: vec![api::OpenRouterModel {
+            id: "vendor/rambler:free".to_string(),
+            context_length: Some(1_000_000),
+            max_completion_tokens: Some(65_536),
+            supports_tools: true,
+            supports_reasoning: true,
+            reasoning_efforts: Some(vec!["max".to_string(), "high".to_string()]),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let exhausted = concat!(
+        "data: {\"id\":\"c1\",\"model\":\"vendor/rambler:free\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning\":\"Je pèse encore une option, puis une autre...\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"c1\",\"model\":\"vendor/rambler:free\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let answered = concat!(
+        "data: {\"id\":\"c2\",\"model\":\"vendor/rambler:free\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Fait.\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let server = spawn_server(
+        state.clone(),
+        vec![
+            http_response("200 OK", "text/event-stream", exhausted),
+            http_response("200 OK", "text/event-stream", answered),
+        ],
+    )
+    .await;
+    let client = OpenAiCompatClient::new("or-test-key", OpenAiCompatConfig::openrouter())
+        .with_base_url(server.base_url());
+    let request = MessageRequest {
+        model: "vendor/rambler:free".to_string(),
+        ..sample_request(true)
+    };
+    for _ in 0..2 {
+        let mut stream = client.stream_message(&request).await.expect("flux");
+        while stream.next_event().await.expect("événement").is_some() {}
+    }
+    let notice = api::take_reasoning_notice().expect("avertissement");
+    assert!(notice.contains("« high » au lieu de « max »"), "{notice}");
+
+    let captured = state.lock().await;
+    let first: serde_json::Value = serde_json::from_str(&captured[0].body).expect("json");
+    let second: serde_json::Value = serde_json::from_str(&captured[1].body).expect("json");
+    assert_eq!(first["reasoning"], json!({"effort": "max"}));
+    assert_eq!(second["reasoning"], json!({"effort": "high"}));
 }
 
 #[tokio::test]

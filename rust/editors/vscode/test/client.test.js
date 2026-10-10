@@ -343,8 +343,10 @@ function get(port, path) {
     id, name: id, description: "", context_length: 100000, max_completion_tokens: 8000,
     prompt_price: 0, completion_price: 0, supports_tools: true, supports_images: images,
   });
+  // `version` suit api::CATALOG_VERSION : un cache d'une autre version serait
+  // retéléchargé depuis le faux modèle, qui ne connaît pas ces modèles.
   fs.writeFileSync(path.join(imagesHome, "cache", "openrouter-models.json"), JSON.stringify({
-    version: 2,
+    version: 3,
     fetched_at: Math.floor(Date.now() / 1000),
     models: [catalogModel("mock/texte:free", false), catalogModel("mock/vision:free", true)],
     programming_ranking: [],

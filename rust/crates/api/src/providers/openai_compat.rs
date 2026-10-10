@@ -456,18 +456,19 @@ impl OpenAiCompatClient {
             }
         }
         let openrouter = self.provider_name == "OpenRouter";
-        let model_reasons = crate::openrouter::model_limits(&request.model)
-            .is_some_and(|limits| limits.supports_reasoning);
+        let strongest = crate::openrouter::model_limits(&request.model)
+            .and_then(|limits| limits.strongest_effort);
         if let Some(effort) = reasoning::effort_for_request(
             reasoning::reasoning_effort(),
             &request.model,
             openrouter,
-            model_reasons,
+            strongest,
         ) {
+            reasoning::note_effort_sent(&request.model, effort);
             if openrouter {
                 payload["reasoning"] = json!({ "effort": effort.as_str() });
             } else {
-                payload["reasoning_effort"] = Value::String(effort.as_str().to_string());
+                payload["reasoning_effort"] = Value::String(effort.openai_value().to_string());
             }
         }
         builder.json(&payload).send().await.map_err(ApiError::from)
@@ -609,6 +610,8 @@ struct StreamState {
     visible_text: bool,
     /// Des appels écrits dans le texte ont été convertis.
     text_calls: bool,
+    /// Du raisonnement a été reçu.
+    reasoned: bool,
 }
 
 /// Raisonnement gardé au plus pour y retrouver un appel écrit en XML (sa fin).
@@ -638,6 +641,7 @@ impl StreamState {
             reasoning_text: String::new(),
             visible_text: false,
             text_calls: false,
+            reasoned: false,
         }
     }
 
@@ -663,6 +667,7 @@ impl StreamState {
         if text.is_empty() {
             return;
         }
+        self.reasoned = true;
         self.reasoning_text.push_str(&text);
         if self.reasoning_text.len() > 2 * MAX_REASONING_KEPT {
             let mut cut = self.reasoning_text.len() - MAX_REASONING_KEPT;
@@ -977,6 +982,16 @@ impl StreamState {
             self.finish_held_text(&mut events);
         }
         self.salvage_reasoning_calls(&mut events);
+        // Arrêt à la limite de sortie avec du raisonnement seulement : la
+        // réflexion a tout pris, ce modèle réfléchira un cran moins fort.
+        if self.reasoned
+            && matches!(self.stop_reason.as_deref(), Some("length" | "max_tokens"))
+            && self.tool_calls.is_empty()
+            && !self.text_calls
+            && !self.visible_text
+        {
+            reasoning::reasoning_exhausted(&self.model);
+        }
         if self.text_started && !self.text_finished {
             self.text_finished = true;
             events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {

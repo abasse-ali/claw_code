@@ -6040,6 +6040,11 @@ impl ApiClient for DefaultRuntimeClient {
                 }
                 Ok(events)
             });
+            // Réflexion qui a pris toute la place de la réponse : le niveau de
+            // ce modèle vient de baisser d'un cran, l'utilisateur le voit.
+            if let Some(notice) = api::take_reasoning_notice() {
+                notify(&notice);
+            }
             match result {
                 Err(error) if retries_left > 0 && is_broken_stream(&error.to_string()) => {
                     retries_left -= 1;
@@ -6286,16 +6291,17 @@ fn render_background_tasks(args: Option<&str>) -> String {
 /// `/think [niveau]` : affiche ou change le niveau de raisonnement.
 fn apply_think_command(level: Option<&str>) -> String {
     let current = |effort: Option<api::ReasoningEffort>| {
-        effort.map_or("high d'office pour les modèles d'OpenRouter qui raisonnent, réglage du modèle ailleurs", |effort| match effort {
+        effort.map_or("le plus haut que chaque modèle d'OpenRouter accepte (high pour ceux qui raisonnent par budget), réglage du modèle ailleurs", |effort| match effort {
             api::ReasoningEffort::Off => "off (raisonnement masqué)",
             api::ReasoningEffort::Low => "low",
             api::ReasoningEffort::Medium => "medium",
             api::ReasoningEffort::High => "high",
+            api::ReasoningEffort::Max => "max (le plus haut niveau que le modèle accepte)",
         })
     };
     match level.map(str::trim).filter(|value| !value.is_empty()) {
         None => format!(
-            "Raisonnement\n  Niveau           {}\n  Changer          /think off|low|medium|high (ou \"reasoning\" dans .claw/settings.json)\n  Remarque         s'applique aux modèles qui raisonnent (DeepSeek-R1, Qwen3, GLM, o-series…) et aux modèles Claude via l'API Anthropic",
+            "Raisonnement\n  Niveau           {}\n  Changer          /think off|low|medium|high|max (ou \"reasoning\" dans .claw/settings.json)\n  Remarque         s'applique aux modèles qui raisonnent (DeepSeek-R1, Qwen3, GLM, o-series…) et aux modèles Claude via l'API Anthropic",
             current(api::reasoning_effort())
         ),
         Some(value) => match api::ReasoningEffort::parse(value) {
@@ -6303,7 +6309,7 @@ fn apply_think_command(level: Option<&str>) -> String {
                 api::set_reasoning_effort(Some(effort));
                 format!("Raisonnement : {}", current(Some(effort)))
             }
-            None => format!("Niveau inconnu « {value} » : off, low, medium ou high."),
+            None => format!("Niveau inconnu « {value} » : off, low, medium, high ou max."),
         },
     }
 }
