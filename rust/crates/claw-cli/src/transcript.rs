@@ -421,14 +421,20 @@ fn error_result(output: &str, limits: &Limits) -> String {
     result_block(&lines)
 }
 
-fn bash_result(parsed: &Value, limits: &Limits) -> Vec<String> {
-    if let Some(task) = str_field(parsed, &["backgroundTaskId"]) {
-        return vec![format!(
-            "Lancée en arrière-plan {DIM}({task} · /bashes){RESET}"
-        )];
+/// Sortie d'une commande sans les remarques que Claw y joint pour le modèle
+/// (lancement ou passage en arrière-plan, délai dépassé).
+fn without_claw_notes(text: &str) -> &str {
+    if text.starts_with("[Claw] ") || text.starts_with("Started in the background as ") {
+        return "";
     }
-    let stdout = str_field(parsed, &["stdout"]).unwrap_or_default();
-    let stderr = str_field(parsed, &["stderr"]).unwrap_or_default();
+    text.find("\n[Claw] ")
+        .map_or(text, |at| text[..at].trim_end())
+}
+
+fn bash_result(parsed: &Value, limits: &Limits) -> Vec<String> {
+    let task = str_field(parsed, &["backgroundTaskId"]);
+    let stdout = without_claw_notes(str_field(parsed, &["stdout"]).unwrap_or_default());
+    let stderr = without_claw_notes(str_field(parsed, &["stderr"]).unwrap_or_default());
     let mut lines = Vec::new();
     if !stdout.trim().is_empty() {
         lines.extend(preview(stdout, limits.lines, ""));
@@ -445,7 +451,16 @@ fn bash_result(parsed: &Value, limits: &Limits) -> Vec<String> {
         )),
         _ => {}
     }
-    if lines.is_empty() {
+    if let Some(task) = task {
+        // Lancée en arrière-plan, ou passée en arrière-plan après une
+        // première sortie (commande longue, serveur prêt, processus `&`).
+        let label = if lines.is_empty() {
+            "Lancée en arrière-plan"
+        } else {
+            "Continue en arrière-plan"
+        };
+        lines.push(format!("{label} {DIM}({task} · /bashes){RESET}"));
+    } else if lines.is_empty() {
         lines.push(format!("{DIM}(Aucune sortie){RESET}"));
     }
     lines

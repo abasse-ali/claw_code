@@ -1,13 +1,11 @@
 use std::env;
 use std::io;
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tokio::process::Command as TokioCommand;
-use tokio::runtime::Builder;
-use tokio::time::timeout;
 
+use crate::bash_tasks::Running;
 use crate::sandbox::{
     build_linux_sandbox_command, resolve_sandbox_status_for_request, FilesystemIsolationMode,
     SandboxConfig, SandboxStatus,
@@ -83,68 +81,296 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
     let cwd = env::current_dir()?;
     let sandbox_status = sandbox_status_for_input(&input, &cwd);
     // Un serveur ou une surveillance de fichiers ne rend jamais la main : lancé
-    // au premier plan, il bloquerait le tour. Il part d'office en arrière-plan.
-    let auto_background =
-        !input.run_in_background.unwrap_or(false) && starts_long_running(&input.command);
+    // au premier plan, il bloquerait le tour. Sauf avis contraire du modèle
+    // (`run_in_background: false`), il part d'office en arrière-plan.
+    let auto_background = input.run_in_background.is_none() && starts_long_running(&input.command);
+    let background = input.run_in_background == Some(true) || auto_background;
 
-    if input.run_in_background.unwrap_or(false) || auto_background {
-        // Sous Windows, le PID du shell MSYS permet d'arrêter tout le groupe.
-        let pid_file = cfg!(windows).then(shell_group_pid_file);
-        let wrapped = pid_file.as_deref().map_or_else(
-            || input.command.clone(),
-            |path| with_group_pid_capture(&input.command, path),
-        );
-        #[allow(unused_mut)]
-        let mut command = prepare_command(&wrapped, &cwd, &sandbox_status, false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
-        let container = take_last_container();
-        let task_id = crate::bash_tasks::spawn(command, &input.command, pid_file)?;
-        if let Some(name) = container {
-            crate::bash_tasks::set_container(&task_id, name);
-        }
-
-        let started = if auto_background {
-            format!(
-                "[Claw] This command starts a server or a watcher, which never exits on its own: it was started in the background as {task_id} instead of blocking. Read its output with BashOutput (bash_id: \"{task_id}\"), for example to check that it is listening, and stop it with KillShell."
-            )
-        } else {
-            format!(
-                "Started in the background as {task_id}. Read its output with BashOutput (bash_id: \"{task_id}\") and stop it with KillShell."
-            )
-        };
-        return Ok(BashCommandOutput {
-            stdout: started,
-            stderr: String::new(),
-            raw_output_path: None,
-            interrupted: false,
-            is_image: None,
-            background_task_id: Some(task_id),
-            backgrounded_by_user: Some(false),
-            assistant_auto_backgrounded: Some(auto_background),
-            dangerously_disable_sandbox: input.dangerously_disable_sandbox,
-            return_code_interpretation: None,
-            no_output_expected: Some(true),
-            structured_content: None,
-            persisted_output_path: None,
-            persisted_output_size: None,
-            sandbox_status: Some(sandbox_status),
-        });
+    // Sous Windows, le PID du shell MSYS permet d'arrêter tout le groupe.
+    let pid_file = cfg!(windows).then(shell_group_pid_file);
+    let wrapped = pid_file.as_deref().map_or_else(
+        || input.command.clone(),
+        |path| with_group_pid_capture(&input.command, path),
+    );
+    #[allow(unused_mut)]
+    let mut command = prepare_command(&wrapped, &cwd, &sandbox_status, true);
+    // Sous Unix, un groupe de processus dédié permet de tuer aussi les descendants.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
     }
-
-    let runtime = Builder::new_current_thread().enable_all().build()?;
-    let result = runtime.block_on(execute_bash_async(input, sandbox_status, cwd));
-    // Ne pas attendre les lectures de tubes encore ouvertes par un processus
-    // abandonné (délai dépassé ou interruption).
-    runtime.shutdown_background();
-    result
+    let container = take_last_container();
+    let running =
+        crate::bash_tasks::launch(command, &input.command, pid_file, container, !background)?;
+    let output = if background {
+        started_in_background(&running.detach(), auto_background)
+    } else {
+        run_in_foreground(running, explicit_timeout(input.timeout), Waits::DEFAULT)
+    };
+    Ok(BashCommandOutput {
+        dangerously_disable_sandbox: input.dangerously_disable_sandbox,
+        sandbox_status: Some(sandbox_status),
+        ..output
+    })
 }
 
-/// Délai d'une commande au premier plan quand le modèle n'en donne pas.
+/// Commande d'un autre outil (`PowerShell`), déjà préparée (programme,
+/// arguments, dossier) : mêmes règles que `bash` pour l'arrière-plan, la
+/// patience et le délai fixé par le modèle.
+pub fn run_tool_command(
+    command: Command,
+    display: &str,
+    timeout: Option<u64>,
+    run_in_background: Option<bool>,
+) -> io::Result<BashCommandOutput> {
+    let auto_background = run_in_background.is_none() && starts_long_running(display);
+    let background = run_in_background == Some(true) || auto_background;
+    let running = crate::bash_tasks::launch(command, display, None, None, !background)?;
+    Ok(if background {
+        started_in_background(&running.detach(), auto_background)
+    } else {
+        run_in_foreground(running, explicit_timeout(timeout), Waits::DEFAULT)
+    })
+}
+
+/// Patience accordée à une commande au premier plan quand le modèle ne fixe
+/// pas de délai : au-delà, elle continue en arrière-plan (rien n'est arrêté).
 pub const DEFAULT_TIMEOUT_MS: u64 = 5 * 60 * 1000;
+
+/// Délai demandé par le modèle, en millisecondes. Une valeur sous 1 000 vient
+/// d'un modèle qui pensait en secondes (`120` pour deux minutes) : elle est lue
+/// en secondes, au lieu d'arrêter la commande au bout de 120 millisecondes.
+/// Sans délai (ou 0), `DEFAULT_TIMEOUT_MS`.
+#[must_use]
+pub fn effective_timeout_ms(requested: Option<u64>) -> u64 {
+    match requested {
+        None | Some(0) => DEFAULT_TIMEOUT_MS,
+        Some(value) if value < 1_000 => value.saturating_mul(1_000),
+        Some(value) => value,
+    }
+}
+
+/// Délai fixé par le modèle (0 compte comme aucun), en millisecondes.
+fn explicit_timeout(requested: Option<u64>) -> Option<u64> {
+    requested
+        .filter(|value| *value > 0)
+        .map(|value| effective_timeout_ms(Some(value)))
+}
+
+/// Attentes d'une commande au premier plan.
+#[derive(Clone, Copy)]
+struct Waits {
+    /// Sans délai fixé : passage en arrière-plan au-delà.
+    patience: Duration,
+    /// Serveur annoncé prêt puis silencieux ce temps-là : il attend des
+    /// requêtes et ne finira pas, il passe en arrière-plan.
+    ready_idle: Duration,
+}
+
+impl Waits {
+    const DEFAULT: Self = Self {
+        patience: Duration::from_millis(DEFAULT_TIMEOUT_MS),
+        ready_idle: Duration::from_secs(8),
+    };
+}
+
+/// Le shell a fini mais un processus qu'il a lancé (`serveur &`) tient encore
+/// sa sortie : on attend ce temps-là avant de le laisser en arrière-plan.
+const LEFTOVER_GRACE: Duration = Duration::from_millis(1_500);
+const POLL: Duration = Duration::from_millis(20);
+
+/// Attend une commande au premier plan :
+/// - finie : son résultat ;
+/// - délai fixé par le modèle dépassé : arrêtée, avec la sortie déjà produite ;
+/// - sans délai fixé, toujours en cours au bout de la patience, ou serveur
+///   annoncé prêt puis silencieux : elle continue en arrière-plan ;
+/// - shell fini mais sortie tenue par un processus lancé avec `&` : ce
+///   processus continue en arrière-plan.
+fn run_in_foreground(
+    mut running: Running,
+    explicit_timeout: Option<u64>,
+    waits: Waits,
+) -> BashCommandOutput {
+    let limit = explicit_timeout.map_or(waits.patience, Duration::from_millis);
+    let started = Instant::now();
+    loop {
+        if crate::interrupt::interrupt_requested() {
+            running.kill();
+            let (stdout, stderr) = running.output_so_far();
+            return interrupted_output(stdout, stderr);
+        }
+        match running.try_wait() {
+            Ok(Some(status)) => {
+                // Les lecteurs reçoivent la fin de la sortie ; un processus
+                // lancé avec `&` peut la garder ouverte.
+                let grace = Instant::now() + LEFTOVER_GRACE;
+                while running.open_pipes() > 0 && Instant::now() < grace {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                if running.open_pipes() == 0 {
+                    running.finish();
+                    let (stdout, stderr) = running.output_so_far();
+                    return finished_output(stdout, stderr, status, None);
+                }
+                let (stdout, stderr, task_id) = running.into_background();
+                return finished_output(stdout, stderr, status, Some(task_id));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                running.kill();
+                let (stdout, stderr) = running.output_so_far();
+                let mut output = base_output(stdout, stderr);
+                append_note(&mut output.stderr, &format!("[Claw] {error}"));
+                output.return_code_interpretation = Some("exit_code:-1".to_string());
+                return output;
+            }
+        }
+        if started.elapsed() >= limit {
+            if explicit_timeout.is_some() {
+                running.kill();
+                let (stdout, stderr) = running.output_so_far();
+                return timed_out_output(stdout, stderr, limit);
+            }
+            let (stdout, stderr, task_id) = running.into_background();
+            return handed_off_output(stdout, stderr, &task_id, Some(limit));
+        }
+        if explicit_timeout.is_none() && running.ready_and_idle(waits.ready_idle) {
+            let (stdout, stderr, task_id) = running.into_background();
+            return handed_off_output(stdout, stderr, &task_id, None);
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+fn base_output(stdout: String, stderr: String) -> BashCommandOutput {
+    BashCommandOutput {
+        no_output_expected: Some(stdout.trim().is_empty() && stderr.trim().is_empty()),
+        stdout,
+        stderr,
+        raw_output_path: None,
+        interrupted: false,
+        is_image: None,
+        background_task_id: None,
+        backgrounded_by_user: None,
+        assistant_auto_backgrounded: None,
+        dangerously_disable_sandbox: None,
+        return_code_interpretation: None,
+        structured_content: None,
+        persisted_output_path: None,
+        persisted_output_size: None,
+        sandbox_status: None,
+    }
+}
+
+/// Ajoute une remarque à la suite d'une sortie.
+fn append_note(text: &mut String, note: &str) {
+    let kept = text.trim_end().len();
+    text.truncate(kept);
+    if !text.is_empty() {
+        text.push_str("\n\n");
+    }
+    text.push_str(note);
+}
+
+fn started_in_background(task_id: &str, auto_background: bool) -> BashCommandOutput {
+    let started = if auto_background {
+        format!(
+            "[Claw] This command starts a server or a watcher, which never exits on its own: it was started in the background as {task_id} instead of blocking. Read its output with BashOutput (bash_id: \"{task_id}\"), for example to check that it is listening, and stop it with KillShell."
+        )
+    } else {
+        format!(
+            "Started in the background as {task_id}. Read its output with BashOutput (bash_id: \"{task_id}\") and stop it with KillShell."
+        )
+    };
+    BashCommandOutput {
+        background_task_id: Some(task_id.to_string()),
+        backgrounded_by_user: Some(false),
+        assistant_auto_backgrounded: Some(auto_background),
+        no_output_expected: Some(true),
+        ..base_output(started, String::new())
+    }
+}
+
+/// Code de sortie lu par le harnais : rien pour un succès.
+fn exit_interpretation(status: ExitStatus) -> Option<String> {
+    match status.code() {
+        Some(0) => None,
+        Some(code) => Some(format!("exit_code:{code}")),
+        // Tuée par un signal (Unix) : ce n'est pas un succès.
+        None => Some("killed_by_signal".to_string()),
+    }
+}
+
+fn finished_output(
+    stdout: String,
+    stderr: String,
+    status: ExitStatus,
+    leftover: Option<String>,
+) -> BashCommandOutput {
+    let mut output = base_output(stdout, stderr);
+    output.return_code_interpretation = exit_interpretation(status);
+    if let Some(task_id) = leftover {
+        append_note(
+            &mut output.stdout,
+            &format!(
+                "[Claw] The command finished (its result is above), but a process it started still holds its output and keeps running in the background as {task_id}: for example a server launched with `&`. If you started it on purpose, read its output with BashOutput (bash_id: \"{task_id}\") and stop it with KillShell when you are done; otherwise ignore it."
+            ),
+        );
+        output.background_task_id = Some(task_id);
+        output.assistant_auto_backgrounded = Some(true);
+        output.no_output_expected = Some(false);
+    }
+    output
+}
+
+/// Toujours en cours : la commande continue en arrière-plan. `waited` : la
+/// patience écoulée ; `None` pour un serveur qui s'est annoncé prêt.
+fn handed_off_output(
+    stdout: String,
+    stderr: String,
+    task_id: &str,
+    waited: Option<Duration>,
+) -> BashCommandOutput {
+    let mut output = base_output(stdout, stderr);
+    let note = match waited {
+        Some(waited) => format!(
+            "[Claw] Still running after {} s, so it continues in the background as {task_id} (nothing was stopped). Wait for its end with BashOutput {{\"bash_id\": \"{task_id}\", \"block\": true}}, or stop it with KillShell.",
+            waited.as_secs()
+        ),
+        None => format!(
+            "[Claw] This command announced a server or a watcher that is ready, then went quiet: it keeps running, so it continues in the background as {task_id}. If it is a server or a watcher, read its output with BashOutput (bash_id: \"{task_id}\") and stop it with KillShell when you are done. If it is a test or build run that ends by itself, wait for its end with BashOutput {{\"bash_id\": \"{task_id}\", \"block\": true}}."
+        ),
+    };
+    append_note(&mut output.stdout, &note);
+    output.background_task_id = Some(task_id.to_string());
+    output.assistant_auto_backgrounded = Some(true);
+    output.no_output_expected = Some(false);
+    output
+}
+
+fn timed_out_output(stdout: String, stderr: String, limit: Duration) -> BashCommandOutput {
+    let seconds = limit.as_secs();
+    let mut output = base_output(stdout, stderr);
+    append_note(
+        &mut output.stderr,
+        &format!(
+            "La commande a dépassé le délai de {seconds} s : elle a été arrêtée.\n[Claw] The command did not finish within the {seconds} s timeout you set and was stopped (its output so far is above). For a server or a watcher, use run_in_background: true and follow it with BashOutput. For a long build, install or test run, run it again without a timeout: if it takes long, it continues in the background instead of being stopped."
+        ),
+    );
+    output.interrupted = true;
+    output.return_code_interpretation = Some("timeout".to_string());
+    output.no_output_expected = Some(false);
+    output
+}
+
+fn interrupted_output(stdout: String, stderr: String) -> BashCommandOutput {
+    let mut output = base_output(stdout, stderr);
+    append_note(&mut output.stderr, "Commande interrompue par l'utilisateur");
+    output.interrupted = true;
+    output.return_code_interpretation = Some("interrupted".to_string());
+    output
+}
 
 /// Commandes qui démarrent un serveur ou une surveillance de fichiers, après
 /// d'éventuels `VAR=valeur`, `npx`, `uv run`, `poetry run`… : elles ne rendent
@@ -205,51 +431,119 @@ const LONG_RUNNING: &[&str] = &[
     "tail -f",
 ];
 
-/// La commande démarre un serveur ou une surveillance (ou se termine par un
-/// `&` qui la détache tout en gardant sa sortie ouverte) : elle ne finira pas.
-fn starts_long_running(command: &str) -> bool {
-    let lower = command.to_ascii_lowercase();
-    let trimmed = lower.trim_end();
-    if trimmed.ends_with('&') && !trimmed.ends_with("&&") {
+/// La commande démarre au premier plan du shell un serveur ou une
+/// surveillance : elle ne finira pas d'elle-même. Le texte entre guillemets,
+/// un document en ligne (`<<`) et les commentaires ne comptent pas, ni un
+/// serveur que le shell détache lui-même (`serveur &` suivi d'autres
+/// commandes) : la commande se termine alors seule.
+#[must_use]
+pub fn starts_long_running(command: &str) -> bool {
+    if command.contains("<<") {
+        return false;
+    }
+    shell_segments(&command.to_ascii_lowercase())
+        .iter()
+        .any(|(segment, detached)| !detached && segment_is_long_running(segment))
+}
+
+/// Commandes simples d'une ligne de shell, séparées par `;`, `&&`, `||`, `|`,
+/// `&`, une fin de ligne ou des parenthèses. Le texte entre guillemets devient
+/// `_` (un mot, sans son contenu), les commentaires sont retirés. Chaque
+/// commande dit si le shell la détache lui-même (`&` simple après elle).
+fn shell_segments(command: &str) -> Vec<(String, bool)> {
+    let chars: Vec<char> = command.chars().collect();
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut index = 0;
+    let close = |current: &mut String, segments: &mut Vec<(String, bool)>, detached: bool| {
+        let segment = current.trim().to_string();
+        if !segment.is_empty() {
+            segments.push((segment, detached));
+        }
+        current.clear();
+    };
+    while index < chars.len() {
+        let ch = chars[index];
+        match ch {
+            '\'' | '"' => {
+                // Jusqu'au guillemet fermant (`\"` ne ferme pas entre guillemets doubles).
+                index += 1;
+                while index < chars.len() && chars[index] != ch {
+                    if ch == '"' && chars[index] == '\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                current.push('_');
+            }
+            '\\' => {
+                // Caractère protégé : jamais un séparateur.
+                index += 1;
+                current.push('_');
+            }
+            '#' if current.is_empty() || current.ends_with(char::is_whitespace) => {
+                while index + 1 < chars.len() && chars[index + 1] != '\n' {
+                    index += 1;
+                }
+            }
+            '&' if matches!(chars.get(index + 1), Some('>'))
+                || matches!(current.chars().last(), Some('>' | '<')) =>
+            {
+                // `&>`, `2>&1`, `>&2` : une redirection.
+                current.push(ch);
+            }
+            '&' if chars.get(index + 1) == Some(&'&') => {
+                close(&mut current, &mut segments, false);
+                index += 1;
+            }
+            '&' => close(&mut current, &mut segments, true),
+            '|' => {
+                close(&mut current, &mut segments, false);
+                if matches!(chars.get(index + 1), Some('|' | '&')) {
+                    index += 1;
+                }
+            }
+            ';' | '\n' | '(' | ')' => close(&mut current, &mut segments, false),
+            _ => current.push(ch),
+        }
+        index += 1;
+    }
+    close(&mut current, &mut segments, false);
+    segments
+}
+
+/// Une commande simple démarre-t-elle un serveur ou une surveillance ?
+fn segment_is_long_running(segment: &str) -> bool {
+    let mut words: Vec<&str> = segment
+        .split_whitespace()
+        .skip_while(|word| word.contains('=') && !word.starts_with('-'))
+        .collect();
+    let skip = match words.as_slice() {
+        // `timeout 10 npm run dev` : un essai borné, voulu par le modèle.
+        ["timeout", ..] => return false,
+        ["npx" | "bunx" | "exec" | "nohup", ..] => 1,
+        ["pnpm", "exec", ..] | ["poetry" | "uv" | "pipenv" | "pdm" | "hatch", "run", ..] => 2,
+        _ => 0,
+    };
+    words.drain(..skip);
+    // `vite build`, `next build` : une construction, qui se termine.
+    if words.get(1) == Some(&"build")
+        || words
+            .iter()
+            .any(|word| matches!(*word, "--help" | "-h" | "--version"))
+    {
+        return false;
+    }
+    if words.contains(&"--watch") || (words.first() == Some(&"tsc") && words.contains(&"-w")) {
         return true;
     }
-    lower
-        .split([';', '|', '&', '\n'])
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .any(|segment| {
-            let mut words: Vec<&str> = segment
-                .split_whitespace()
-                .skip_while(|word| word.contains('=') && !word.starts_with('-'))
-                .collect();
-            let skip = match words.as_slice() {
-                ["npx" | "bunx", ..] => 1,
-                ["pnpm", "exec", ..]
-                | ["poetry" | "uv" | "pipenv" | "pdm" | "hatch", "run", ..] => 2,
-                _ => 0,
-            };
-            words.drain(..skip);
-            // `vite build`, `next build` : une construction, qui se termine.
-            if words.get(1) == Some(&"build")
-                || words
-                    .iter()
-                    .any(|word| matches!(*word, "--help" | "-h" | "--version"))
-            {
-                return false;
-            }
-            if words.contains(&"--watch")
-                || (words.first() == Some(&"tsc") && words.contains(&"-w"))
-            {
-                return true;
-            }
-            let joined = words.join(" ");
-            LONG_RUNNING.iter().any(|pattern| {
-                joined == *pattern
-                    || joined
-                        .strip_prefix(pattern)
-                        .is_some_and(|rest| rest.starts_with(' '))
-            })
-        })
+    let joined = words.join(" ");
+    LONG_RUNNING.iter().any(|pattern| {
+        joined == *pattern
+            || joined
+                .strip_prefix(pattern)
+                .is_some_and(|rest| rest.starts_with(' '))
+    })
 }
 
 /// Sous Windows, `bash` est Git Bash : écrit hors guillemets, un chemin
@@ -466,130 +760,6 @@ pub(crate) fn kill_process_tree(pid: Option<u32>) {
         .status();
 }
 
-#[allow(clippy::too_many_lines)]
-async fn execute_bash_async(
-    input: BashCommandInput,
-    sandbox_status: SandboxStatus,
-    cwd: std::path::PathBuf,
-) -> io::Result<BashCommandOutput> {
-    // Sous Windows, le bash de Git (MSYS) peut détacher ses sous-processus de
-    // l'arbre Windows (fork + exec) : il note son PID MSYS pour qu'on puisse
-    // tuer tout son groupe de processus en cas d'interruption.
-    let group_pid_file = cfg!(windows).then(shell_group_pid_file);
-    let command_text = group_pid_file.as_deref().map_or_else(
-        || input.command.clone(),
-        |pid_file| with_group_pid_capture(&input.command, pid_file),
-    );
-    let mut command = prepare_tokio_command(&command_text, &cwd, &sandbox_status, true);
-    let container_name = take_last_container();
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    // Sous Unix, un groupe de processus dédié permet de tuer aussi les descendants.
-    #[cfg(unix)]
-    command.process_group(0);
-    let timeout_ms = input.timeout.unwrap_or(DEFAULT_TIMEOUT_MS);
-    let child = command.spawn()?;
-    let pid = child.id();
-
-    let output_result = {
-        let run = timeout(Duration::from_millis(timeout_ms), child.wait_with_output());
-        let outcome = tokio::select! {
-            outcome = run => Some(outcome),
-            () = crate::interrupt::wait_for_interrupt() => None,
-        };
-        if !matches!(outcome, Some(Ok(_))) {
-            if let Some(pid_file) = &group_pid_file {
-                kill_shell_group(pid_file);
-            }
-            kill_process_tree(pid);
-        }
-        if let Some(name) = &container_name {
-            stop_container(name);
-        }
-        if let Some(pid_file) = &group_pid_file {
-            let _ = std::fs::remove_file(pid_file);
-        }
-        match outcome {
-            None => {
-                return Ok(BashCommandOutput {
-                    stdout: String::new(),
-                    stderr: "Commande interrompue par l'utilisateur".to_string(),
-                    raw_output_path: None,
-                    interrupted: true,
-                    is_image: None,
-                    background_task_id: None,
-                    backgrounded_by_user: None,
-                    assistant_auto_backgrounded: None,
-                    dangerously_disable_sandbox: input.dangerously_disable_sandbox,
-                    return_code_interpretation: Some(String::from("interrupted")),
-                    no_output_expected: Some(true),
-                    structured_content: None,
-                    persisted_output_path: None,
-                    persisted_output_size: None,
-                    sandbox_status: Some(sandbox_status),
-                });
-            }
-            Some(Ok(result)) => (result?, false),
-            Some(Err(_)) => {
-                return Ok(BashCommandOutput {
-                    stdout: String::new(),
-                    stderr: format!(
-                        "La commande a dépassé le délai de {} s : elle a été arrêtée.\n[Claw] The command did not finish within {} s and was stopped. If it starts a server or a watcher, run it with run_in_background: true and follow it with BashOutput. If it is a long build or test run, run it again with a larger timeout (in milliseconds).",
-                        timeout_ms / 1000,
-                        timeout_ms / 1000
-                    ),
-                    raw_output_path: None,
-                    interrupted: true,
-                    is_image: None,
-                    background_task_id: None,
-                    backgrounded_by_user: None,
-                    assistant_auto_backgrounded: None,
-                    dangerously_disable_sandbox: input.dangerously_disable_sandbox,
-                    return_code_interpretation: Some(String::from("timeout")),
-                    no_output_expected: Some(true),
-                    structured_content: None,
-                    persisted_output_path: None,
-                    persisted_output_size: None,
-                    sandbox_status: Some(sandbox_status),
-                });
-            }
-        }
-    };
-
-    let (output, interrupted) = output_result;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
-    let return_code_interpretation = output.status.code().and_then(|code| {
-        if code == 0 {
-            None
-        } else {
-            Some(format!("exit_code:{code}"))
-        }
-    });
-
-    Ok(BashCommandOutput {
-        stdout,
-        stderr,
-        raw_output_path: None,
-        interrupted,
-        is_image: None,
-        background_task_id: None,
-        backgrounded_by_user: None,
-        assistant_auto_backgrounded: None,
-        dangerously_disable_sandbox: input.dangerously_disable_sandbox,
-        return_code_interpretation,
-        no_output_expected,
-        structured_content: None,
-        persisted_output_path: None,
-        persisted_output_size: None,
-        sandbox_status: Some(sandbox_status),
-    })
-}
-
 fn sandbox_status_for_input(input: &BashCommandInput, cwd: &std::path::Path) -> SandboxStatus {
     let config = ConfigLoader::default_for(cwd).load().map_or_else(
         |_| SandboxConfig::default(),
@@ -693,43 +863,10 @@ fn prepare_command(
     if std::env::var_os("PYTHONIOENCODING").is_none() {
         prepared.env("PYTHONIOENCODING", "utf-8");
     }
-    if sandbox_status.filesystem_active {
-        let (home, tmp) = crate::sandbox::sandbox_dirs(cwd);
-        prepared.env("HOME", home);
-        prepared.env("TMPDIR", tmp);
-    }
-    prepared
-}
-
-fn prepare_tokio_command(
-    command: &str,
-    cwd: &std::path::Path,
-    sandbox_status: &SandboxStatus,
-    create_dirs: bool,
-) -> TokioCommand {
-    if let Some(container) = &sandbox_status.container {
-        let (args, name) = container.run_args(command, cwd);
-        remember_container(&name, container);
-        let mut prepared = TokioCommand::new(&container.program);
-        prepared.args(args).current_dir(cwd);
-        return prepared;
-    }
-    if create_dirs {
-        prepare_sandbox_dirs(cwd);
-    }
-
-    if let Some(launcher) = build_linux_sandbox_command(command, cwd, sandbox_status) {
-        let mut prepared = TokioCommand::new(launcher.program);
-        prepared.args(launcher.args);
-        prepared.current_dir(cwd);
-        prepared.envs(launcher.env);
-        return prepared;
-    }
-
-    let mut prepared = TokioCommand::from(plugins::posix_shell_command(command));
-    prepared.current_dir(cwd);
-    if std::env::var_os("PYTHONIOENCODING").is_none() {
-        prepared.env("PYTHONIOENCODING", "utf-8");
+    // Python écrit au fil de l'eau : la sortie d'un serveur ou d'un script
+    // arrêté en route n'est pas perdue dans son tampon.
+    if std::env::var_os("PYTHONUNBUFFERED").is_none() {
+        prepared.env("PYTHONUNBUFFERED", "1");
     }
     if sandbox_status.filesystem_active {
         let (home, tmp) = crate::sandbox::sandbox_dirs(cwd);
@@ -747,6 +884,29 @@ fn prepare_sandbox_dirs(cwd: &std::path::Path) {
 mod tests {
     use super::{execute_bash, BashCommandInput};
     use crate::sandbox::FilesystemIsolationMode;
+
+    #[test]
+    fn shell_segments_ignore_quotes_comments_and_redirections() {
+        use super::shell_segments;
+        let segments = |command: &str| {
+            shell_segments(command)
+                .into_iter()
+                .map(|(segment, detached)| format!("{segment}{}", if detached { " &" } else { "" }))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            segments("cd app && npm run dev 2>&1 | tee log"),
+            ["cd app", "npm run dev 2>&1", "tee log"]
+        );
+        assert_eq!(
+            segments("echo \"a; b && c\" ; ls # x && y"),
+            ["echo _", "ls"]
+        );
+        assert_eq!(
+            segments("serve & sleep 1; find . -exec rm {} \\;"),
+            ["serve &", "sleep 1", "find . -exec rm {} _"]
+        );
+    }
 
     #[test]
     fn executes_simple_command() {
@@ -769,6 +929,16 @@ mod tests {
     }
 
     #[test]
+    fn a_timeout_written_in_seconds_is_read_in_seconds() {
+        use super::{effective_timeout_ms, DEFAULT_TIMEOUT_MS};
+        assert_eq!(effective_timeout_ms(None), DEFAULT_TIMEOUT_MS);
+        assert_eq!(effective_timeout_ms(Some(0)), DEFAULT_TIMEOUT_MS);
+        assert_eq!(effective_timeout_ms(Some(120)), 120_000);
+        assert_eq!(effective_timeout_ms(Some(1_000)), 1_000);
+        assert_eq!(effective_timeout_ms(Some(600_000)), 600_000);
+    }
+
+    #[test]
     fn servers_and_watchers_are_recognized_but_builds_are_not() {
         use super::starts_long_running;
         for command in [
@@ -783,7 +953,10 @@ mod tests {
             "jest --watch",
             "tsc -w",
             "npm run dev 2>&1",
-            "python app.py &",
+            "npm run dev 2>&1 | tee dev.log",
+            "(cd web && npm run dev)",
+            "nohup npm run dev",
+            "npm install; npm run dev # serveur de dev",
         ] {
             assert!(starts_long_running(command), "{command}");
         }
@@ -798,9 +971,153 @@ mod tests {
             "npm install && npm run lint",
             "uvicorn --help",
             "cd backend && pip install -r requirements.txt",
+            // Texte qui parle d'un serveur sans le lancer.
+            "git commit -m \"Front\nnpm run dev pour le voir\"",
+            "echo \"Build ok; serve -s dist pour tester\"",
+            "echo 'uvicorn app:app' > start.sh",
+            "cat > README.md <<'EOF'\nnpm install\nnpm run dev\nEOF",
+            "ls # npm run dev plus tard",
+            // Serveur détaché par le shell lui-même : la commande se termine.
+            "uvicorn app.main:app --port 8000 & PID=$!; sleep 3; curl -s localhost:8000/health; kill $PID",
+            "python app.py &",
+            "nohup npm run dev > dev.log 2>&1 &",
+            // Essai borné voulu par le modèle.
+            "timeout 10 npm run dev",
         ] {
             assert!(!starts_long_running(command), "{command}");
         }
+    }
+
+    /// Commande au premier plan, sans délai fixé ni avis sur l'arrière-plan.
+    fn foreground(command: &str, timeout: Option<u64>) -> BashCommandInput {
+        BashCommandInput {
+            command: command.to_string(),
+            timeout,
+            description: None,
+            run_in_background: None,
+            dangerously_disable_sandbox: Some(true),
+            namespace_restrictions: None,
+            isolate_network: None,
+            filesystem_mode: None,
+            allowed_mounts: None,
+        }
+    }
+
+    #[test]
+    fn a_process_left_running_with_an_ampersand_continues_in_the_background() {
+        let started = std::time::Instant::now();
+        let output = execute_bash(foreground("echo début; sleep 30 &", None)).expect("exécution");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(output.stdout.starts_with("début"), "{output:?}");
+        assert_eq!(output.return_code_interpretation, None, "{output:?}");
+        let task_id = output.background_task_id.expect("tâche de fond");
+        assert!(output.stdout.contains(&task_id));
+        let killed = crate::bash_tasks::kill(&task_id).expect("arrêt");
+        assert!(!killed.running, "{killed:?}");
+    }
+
+    #[test]
+    fn a_command_still_running_after_the_patience_continues_in_the_background() {
+        let launch = |command: &str| {
+            crate::bash_tasks::launch(
+                plugins::posix_shell_command(command),
+                command,
+                None,
+                None,
+                true,
+            )
+            .expect("lancement")
+        };
+        let waits = super::Waits {
+            patience: std::time::Duration::from_secs(1),
+            ready_idle: std::time::Duration::from_secs(60),
+        };
+        // Rien n'est arrêté : la suite se lit avec BashOutput.
+        let output =
+            super::run_in_foreground(launch("echo avant; sleep 4; echo après"), None, waits);
+        assert!(
+            output.stdout.contains("Still running after 1 s"),
+            "{output:?}"
+        );
+        assert!(!output.stdout.contains("après"), "{output:?}");
+        let task_id = output.background_task_id.expect("tâche de fond");
+        let rest = crate::bash_tasks::wait_for(&task_id, std::time::Duration::from_secs(60))
+            .expect("attente");
+        assert!(!rest.running, "{rest:?}");
+        assert_eq!(rest.exit_code, Some(0));
+        // Chaque ligne est rendue une fois, avant ou après le passage en
+        // arrière-plan (selon le temps que le shell met à démarrer) : rien
+        // n'est perdu ni répété.
+        let whole = format!("{}\n{}", output.stdout, rest.new_output);
+        assert_eq!(whole.matches("avant").count(), 1, "{whole}");
+        assert_eq!(whole.matches("après").count(), 1, "{whole}");
+        assert!(rest.new_output.contains("après"), "{rest:?}");
+
+        // Un serveur qui s'annonce prêt puis attend : en arrière-plan sans
+        // attendre la patience.
+        let waits = super::Waits {
+            patience: std::time::Duration::from_secs(60),
+            ready_idle: std::time::Duration::from_millis(500),
+        };
+        let started = std::time::Instant::now();
+        let output = super::run_in_foreground(
+            launch("echo 'Server listening on http://localhost:3999'; sleep 30"),
+            None,
+            waits,
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            output.stdout.contains("announced a server or a watcher"),
+            "{output:?}"
+        );
+        let task_id = output.background_task_id.expect("tâche de fond");
+        assert!(!crate::bash_tasks::kill(&task_id).expect("arrêt").running);
+    }
+
+    #[test]
+    fn a_timeout_set_by_the_model_stops_the_command_and_keeps_its_output() {
+        let started = std::time::Instant::now();
+        // Délai large devant le démarrage du shell, même sur une machine chargée.
+        let output =
+            execute_bash(foreground("echo partiel; sleep 60", Some(5_000))).expect("exécution");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(40),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(output.interrupted);
+        assert_eq!(
+            output.return_code_interpretation.as_deref(),
+            Some("timeout")
+        );
+        assert!(output.stdout.contains("partiel"), "{output:?}");
+        assert!(
+            output.stderr.contains("a dépassé le délai de 5 s"),
+            "{output:?}"
+        );
+        assert!(output.background_task_id.is_none());
+    }
+
+    #[test]
+    fn a_large_output_does_not_block_the_command() {
+        // Plus que ce que tient un tube : la sortie est lue pendant que la
+        // commande tourne.
+        let output = execute_bash(foreground(
+            "i=0; while [ $i -lt 4000 ]; do echo \"ligne $i de remplissage pour le tube\"; i=$((i+1)); done; echo fin >&2",
+            Some(120_000),
+        ))
+        .expect("exécution");
+        assert_eq!(output.return_code_interpretation, None, "{}", output.stderr);
+        assert_eq!(output.stdout.lines().count(), 4_000);
+        assert_eq!(output.stderr.trim(), "fin");
     }
 
     #[test]

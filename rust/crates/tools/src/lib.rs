@@ -334,9 +334,9 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             // Sous Windows, les modèles écrivent volontiers pour cmd : la
             // description de l'outil est lue plus sûrement que les consignes.
             description: if cfg!(windows) {
-                "Execute a shell command in the current workspace. On Windows this is Git Bash: POSIX syntax, paths with forward slashes (`src/main.py`, `D:/dir/file`), no cmd syntax. `timeout` is in milliseconds (default 5 minutes). Servers and watchers (npm run dev, uvicorn, flask run, vite, --watch...) never exit: start them with run_in_background (Claw does it automatically for the usual ones) and read them with BashOutput."
+                "Execute a shell command in the current workspace. On Windows this is Git Bash: POSIX syntax, paths with forward slashes (`src/main.py`, `D:/dir/file`), no cmd syntax. Without `timeout`, a command still running after 5 minutes continues in the background (nothing is stopped) and you follow it with BashOutput. With `timeout` (milliseconds; a value below 1000 is read as seconds), a command still running at that time is stopped and its output so far is returned. Servers and watchers (npm run dev, uvicorn, flask run, vite, --watch...) never exit: start them with run_in_background: true (Claw does it for the usual ones) and read them with BashOutput."
             } else {
-                "Execute a shell command in the current workspace. `timeout` is in milliseconds (default 5 minutes). Servers and watchers (npm run dev, uvicorn, flask run, vite, --watch...) never exit: start them with run_in_background (Claw does it automatically for the usual ones) and read them with BashOutput."
+                "Execute a shell command in the current workspace. Without `timeout`, a command still running after 5 minutes continues in the background (nothing is stopped) and you follow it with BashOutput. With `timeout` (milliseconds; a value below 1000 is read as seconds), a command still running at that time is stopped and its output so far is returned. Servers and watchers (npm run dev, uvicorn, flask run, vite, --watch...) never exit: start them with run_in_background: true (Claw does it for the usual ones) and read them with BashOutput."
             },
             input_schema: json!({
                 "type": "object",
@@ -399,7 +399,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "glob_search",
-            description: "Find files by glob pattern (for example `src/**/*.ts`), newest first, at most 100. Dependency, build and tool folders (node_modules, .git, target, .venv, venv, __pycache__, dist, build, .claw) are skipped unless the pattern or path names them.",
+            description: "Find files by glob pattern (for example `src/**/*.ts`), newest first, at most 100. Dependency, cache and tool folders (node_modules, .git, .venv, __pycache__...) and build output that git ignores (dist, build, target...) are skipped unless the pattern or path names them; when nothing is found, the result's `note` lists what was skipped.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -413,7 +413,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "grep_search",
-            description: "Search file contents with a regex (Rust syntax: escape `(`, `{`, `.` to match them literally). output_mode: `files_with_matches` (default), `content` (matching lines as path:line:text, with -A/-B/-C context lines) or `count`. `glob` filters files (`**/*.py`), `-i` ignores case. Dependency, build and tool folders (node_modules, .git, target, .venv, venv, __pycache__, dist, build, .claw) and files over 4 MB are skipped unless the path or glob names those folders.",
+            description: "Search file contents with a regex (Rust syntax: escape `(`, `{`, `.` to match them literally). output_mode: `files_with_matches` (default), `content` (matching lines as path:line:text, with -A/-B/-C context lines) or `count`. `glob` filters files (`**/*.py`), `-i` ignores case. Dependency, cache and tool folders (node_modules, .git, .venv, __pycache__...), build output that git ignores (dist, build, target...) and files over 4 MB are skipped unless the path or glob names those folders; a file given as `path` is always searched. The result's `note` says what was skipped when that matters.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -705,11 +705,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "BashOutput",
-            description: "Read the new output of a command started with run_in_background (bash_id from its result), and whether it is still running. Use it to follow dev servers, watchers or long builds.",
+            description: "Read the new output of a command running in the background (bash_id from its result), and whether it is still running. Use it to follow dev servers, watchers or long builds. With block: true it waits until the command ends (at most `timeout` milliseconds, default 5 minutes) before answering: use that for a build or an install, not for a server, which never ends.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "bash_id": { "type": "string" }
+                    "bash_id": { "type": "string" },
+                    "block": { "type": "boolean", "description": "Wait for the command to end before answering" },
+                    "timeout": { "type": "integer", "minimum": 1, "description": "Longest wait with block, in milliseconds (default 300000, at most 600000)" }
                 },
                 "required": ["bash_id"],
                 "additionalProperties": false
@@ -718,7 +720,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "KillShell",
-            description: "Stop a command started with run_in_background (and its child processes).",
+            description: "Stop a command running in the background (and its child processes): one started with run_in_background, or one that Claw moved there.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -818,7 +820,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "PowerShell",
-            description: "Execute a PowerShell command with optional timeout.",
+            description: "Execute a PowerShell command. Same rules as bash: without `timeout`, a command still running after 5 minutes continues in the background (follow it with BashOutput); with `timeout` (milliseconds), it is stopped at that time; servers and watchers go to the background.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1341,9 +1343,20 @@ struct SleepInput {
 
 #[derive(Debug, Deserialize)]
 struct BashOutputInput {
-    #[serde(alias = "shell_id", alias = "id")]
+    #[serde(alias = "shell_id", alias = "id", alias = "task_id")]
     bash_id: String,
+    /// Attendre la fin de la tâche avant de rendre sa sortie.
+    #[serde(default)]
+    block: Option<bool>,
+    /// Attente au plus, en millisecondes (sous 1 000 : en secondes).
+    #[serde(default)]
+    timeout: Option<u64>,
 }
+
+/// Attente par défaut de `BashOutput` avec `block`, et attente au plus : assez
+/// longues pour qu'une installation se suive en une ou deux requêtes.
+const BASH_OUTPUT_WAIT_MS: u64 = 300_000;
+const BASH_OUTPUT_MAX_WAIT_MS: u64 = 600_000;
 
 #[derive(Debug, Deserialize)]
 struct KillShellInput {
@@ -1361,16 +1374,33 @@ fn background_task_json(task: &runtime::bash_tasks::TaskOutput) -> Value {
         "bash_id": task.id,
         "command": task.command,
         "status": if task.running { "running" } else { "exited" },
-        "exitCode": task.exit_code,
+        // Tant qu'un processus tourne encore (lancé avec `&`), le code de
+        // sortie du shell ne dit rien de lui.
+        "exitCode": if task.running { None } else { task.exit_code },
         "elapsedSeconds": task.elapsed_secs,
         "newOutput": task.new_output,
         "outputTruncated": task.truncated,
+        // Arrêtée exprès : son code de sortie ne dit rien de son travail.
+        "killed": task.killed,
     })
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_bash_output(input: BashOutputInput) -> Result<String, String> {
-    let task = runtime::bash_tasks::read_output(input.bash_id.trim())?;
+    let id = input.bash_id.trim();
+    // Une seule requête pour suivre une longue installation jusqu'au bout,
+    // au lieu d'interroger la tâche en boucle.
+    let task = if input.block.unwrap_or(false) {
+        let wait = input
+            .timeout
+            .map_or(BASH_OUTPUT_WAIT_MS, |ms| {
+                runtime::effective_timeout_ms(Some(ms))
+            })
+            .min(BASH_OUTPUT_MAX_WAIT_MS);
+        runtime::bash_tasks::wait_for(id, Duration::from_millis(wait))?
+    } else {
+        runtime::bash_tasks::read_output(id)?
+    };
     to_pretty_json(background_task_json(&task))
 }
 
@@ -4251,8 +4281,24 @@ fn iso8601_timestamp() -> String {
 fn execute_powershell(input: PowerShellInput) -> std::io::Result<runtime::BashCommandOutput> {
     let _ = &input.description;
     let shell = detect_powershell_shell()?;
-    execute_shell_command(
-        shell,
+    let mut command = std::process::Command::new(shell);
+    command
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(&input.command);
+    // Python écrit en UTF-8 et au fil de l'eau, comme pour bash.
+    for (name, value) in [("PYTHONIOENCODING", "utf-8"), ("PYTHONUNBUFFERED", "1")] {
+        if std::env::var_os(name).is_none() {
+            command.env(name, value);
+        }
+    }
+    // Mêmes règles que bash : serveurs et surveillances en arrière-plan,
+    // commande longue qui y continue, délai fixé respecté. La sortie est lue
+    // au fil de l'eau (une grosse sortie ne bloque plus la commande), suivie
+    // par BashOutput et arrêtée par KillShell.
+    runtime::run_tool_command(
+        command,
         &input.command,
         input.timeout,
         input.run_in_background,
@@ -4274,138 +4320,6 @@ fn detect_powershell_shell() -> std::io::Result<&'static str> {
 
 fn command_exists(command: &str) -> bool {
     runtime::find_executable(command).is_some()
-}
-
-#[allow(clippy::too_many_lines)]
-fn execute_shell_command(
-    shell: &str,
-    command: &str,
-    timeout: Option<u64>,
-    run_in_background: Option<bool>,
-) -> std::io::Result<runtime::BashCommandOutput> {
-    if run_in_background.unwrap_or(false) {
-        let child = std::process::Command::new(shell)
-            .arg("-NoProfile")
-            .arg("-NonInteractive")
-            .arg("-Command")
-            .arg(command)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
-        return Ok(runtime::BashCommandOutput {
-            stdout: String::new(),
-            stderr: String::new(),
-            raw_output_path: None,
-            interrupted: false,
-            is_image: None,
-            background_task_id: Some(child.id().to_string()),
-            backgrounded_by_user: Some(true),
-            assistant_auto_backgrounded: Some(false),
-            dangerously_disable_sandbox: None,
-            return_code_interpretation: None,
-            no_output_expected: Some(true),
-            structured_content: None,
-            persisted_output_path: None,
-            persisted_output_size: None,
-            sandbox_status: None,
-        });
-    }
-
-    let mut process = std::process::Command::new(shell);
-    process
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg(command);
-    process
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    if let Some(timeout_ms) = timeout {
-        let mut child = process.spawn()?;
-        let started = Instant::now();
-        loop {
-            if let Some(status) = child.try_wait()? {
-                let output = child.wait_with_output()?;
-                return Ok(runtime::BashCommandOutput {
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                    raw_output_path: None,
-                    interrupted: false,
-                    is_image: None,
-                    background_task_id: None,
-                    backgrounded_by_user: None,
-                    assistant_auto_backgrounded: None,
-                    dangerously_disable_sandbox: None,
-                    return_code_interpretation: status
-                        .code()
-                        .filter(|code| *code != 0)
-                        .map(|code| format!("exit_code:{code}")),
-                    no_output_expected: Some(output.stdout.is_empty() && output.stderr.is_empty()),
-                    structured_content: None,
-                    persisted_output_path: None,
-                    persisted_output_size: None,
-                    sandbox_status: None,
-                });
-            }
-            if started.elapsed() >= Duration::from_millis(timeout_ms) {
-                let _ = child.kill();
-                let output = child.wait_with_output()?;
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                let stderr = if stderr.trim().is_empty() {
-                    format!("Command exceeded timeout of {timeout_ms} ms")
-                } else {
-                    format!(
-                        "{}
-Command exceeded timeout of {timeout_ms} ms",
-                        stderr.trim_end()
-                    )
-                };
-                return Ok(runtime::BashCommandOutput {
-                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                    stderr,
-                    raw_output_path: None,
-                    interrupted: true,
-                    is_image: None,
-                    background_task_id: None,
-                    backgrounded_by_user: None,
-                    assistant_auto_backgrounded: None,
-                    dangerously_disable_sandbox: None,
-                    return_code_interpretation: Some(String::from("timeout")),
-                    no_output_expected: Some(false),
-                    structured_content: None,
-                    persisted_output_path: None,
-                    persisted_output_size: None,
-                    sandbox_status: None,
-                });
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    let output = process.output()?;
-    Ok(runtime::BashCommandOutput {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        raw_output_path: None,
-        interrupted: false,
-        is_image: None,
-        background_task_id: None,
-        backgrounded_by_user: None,
-        assistant_auto_backgrounded: None,
-        dangerously_disable_sandbox: None,
-        return_code_interpretation: output
-            .status
-            .code()
-            .filter(|code| *code != 0)
-            .map(|code| format!("exit_code:{code}")),
-        no_output_expected: Some(output.stdout.is_empty() && output.stderr.is_empty()),
-        structured_content: None,
-        persisted_output_path: None,
-        persisted_output_size: None,
-        sandbox_status: None,
-    })
 }
 
 fn resolve_cell_index(
@@ -5722,7 +5636,7 @@ mod tests {
             .expect("stderr")
             .contains("oops"));
 
-        let timeout = execute_tool("bash", &json!({ "command": "sleep 1", "timeout": 10 }))
+        let timeout = execute_tool("bash", &json!({ "command": "sleep 3", "timeout": 1000 }))
             .expect("bash timeout should return output");
         let timeout_output: serde_json::Value = serde_json::from_str(&timeout).expect("json");
         assert_eq!(timeout_output["interrupted"], true);
@@ -5740,6 +5654,31 @@ mod tests {
         let background_output: serde_json::Value = serde_json::from_str(&background).expect("json");
         assert!(background_output["backgroundTaskId"].as_str().is_some());
         assert_eq!(background_output["noOutputExpected"], true);
+
+        // BashOutput avec block : une seule lecture attend la fin de la tâche.
+        let started = execute_tool(
+            "bash",
+            &json!({ "command": "sleep 1; echo fini; exit 4", "run_in_background": true }),
+        )
+        .expect("bash background should succeed");
+        let started: serde_json::Value = serde_json::from_str(&started).expect("json");
+        let task = started["backgroundTaskId"].as_str().expect("tâche");
+        let waited = execute_tool(
+            "BashOutput",
+            &json!({ "bash_id": task, "block": true, "timeout": 30_000 }),
+        )
+        .expect("BashOutput should succeed");
+        let waited: serde_json::Value = serde_json::from_str(&waited).expect("json");
+        assert_eq!(waited["status"], "exited", "{waited}");
+        assert_eq!(waited["exitCode"], 4, "{waited}");
+        assert_eq!(waited["killed"], false, "{waited}");
+        assert!(
+            waited["newOutput"]
+                .as_str()
+                .expect("sortie")
+                .contains("fini"),
+            "{waited}"
+        );
     }
 
     #[test]
@@ -6113,7 +6052,7 @@ printf 'pwsh:%s' "$1"
 
         let background_output: serde_json::Value = serde_json::from_str(&background).expect("json");
         assert!(background_output["backgroundTaskId"].as_str().is_some());
-        assert_eq!(background_output["backgroundedByUser"], true);
+        assert_eq!(background_output["backgroundedByUser"], false);
         assert_eq!(background_output["assistantAutoBackgrounded"], false);
     }
 
@@ -6164,6 +6103,13 @@ printf 'pwsh:%s' "$1"
 
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Sous Windows, la connexion acceptée hérite du mode
+                        // non bloquant de l'écoute : lue avant l'arrivée de
+                        // la requête, elle échouerait.
+                        stream.set_nonblocking(false).expect("blocking stream");
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(10)))
+                            .expect("read timeout");
                         let mut buffer = [0_u8; 4096];
                         let size = stream.read(&mut buffer).expect("read request");
                         let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
@@ -6198,7 +6144,12 @@ printf 'pwsh:%s' "$1"
                 let _ = tx.send(());
             }
             if let Some(handle) = self.handle.take() {
-                handle.join().expect("join test server");
+                let joined = handle.join();
+                // Pas de panique pendant une panique : elle arrêterait tout
+                // le binaire de tests au lieu de faire échouer ce seul test.
+                if !thread::panicking() {
+                    joined.expect("join test server");
+                }
             }
         }
     }

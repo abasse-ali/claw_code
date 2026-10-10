@@ -58,9 +58,36 @@ impl ApiError {
         }
     }
 
+    /// Quota du jour épuisé : `…PerDay…` dans le détail d'une erreur de Google,
+    /// `free-models-per-day` chez `OpenRouter`, « per day » ailleurs.
+    /// Réessayer avant sa remise à zéro ne sert à rien.
+    #[must_use]
+    pub fn is_daily_quota(&self) -> bool {
+        match self {
+            Self::Api {
+                status,
+                message,
+                body,
+                ..
+            } => {
+                let text = format!("{} {body}", message.as_deref().unwrap_or_default())
+                    .to_ascii_lowercase();
+                status.as_u16() == 429
+                    && (text.contains("perday")
+                        || text.contains("per-day")
+                        || text.contains("per day")
+                        || text.contains("daily"))
+            }
+            Self::RetriesExhausted { last_error, .. } => last_error.is_daily_quota(),
+            _ => false,
+        }
+    }
+
     /// Délai avant la remise à zéro d'une limite de débit, annoncée par le
     /// serveur (`X-RateLimit-Reset` en millisecondes dans le corps d'erreur
-    /// d'`OpenRouter`, ou `Retry-After` en secondes).
+    /// d'`OpenRouter`, ou `Retry-After` en secondes, ou le `retryDelay` de
+    /// Google). `None` pour un quota du jour de Google : le court `retryDelay`
+    /// qui l'accompagne ne vaut que pour la limite par minute.
     #[must_use]
     pub fn rate_limit_reset(&self) -> Option<Duration> {
         let body = match self {
@@ -90,14 +117,17 @@ impl ApiError {
                 return Some(Duration::from_secs(seconds));
             }
         }
-        google_retry_delay(&value)
+        if body.to_ascii_lowercase().contains("perday") {
+            return None;
+        }
+        announced_retry_delay(&value)
     }
 }
 
-/// Délai qu'annonce Google (API Gemini) dans une erreur 429 : `retryDelay`
-/// (« 37s ») dans les détails de l'erreur, sinon « retry in 12.5s » dans son
-/// message.
-fn google_retry_delay(value: &serde_json::Value) -> Option<Duration> {
+/// Délai qu'annonce le serveur dans une erreur 429 : `retryDelay` (« 37s »)
+/// dans les détails d'une erreur de Google, sinon « retry in 12.5s » (Google)
+/// ou « try again in 1m26.4s » (Groq) dans son message.
+fn announced_retry_delay(value: &serde_json::Value) -> Option<Duration> {
     fn find(value: &serde_json::Value) -> Option<&str> {
         match value {
             serde_json::Value::Object(fields) => fields
@@ -108,21 +138,51 @@ fn google_retry_delay(value: &serde_json::Value) -> Option<Duration> {
             _ => None,
         }
     }
-    fn seconds(text: &str) -> Option<Duration> {
-        let number: String = text
-            .trim()
-            .chars()
-            .take_while(|c| c.is_ascii_digit() || *c == '.')
-            .collect();
-        let seconds: f64 = number.parse().ok()?;
-        (seconds.is_finite() && seconds >= 0.0).then(|| Duration::from_secs_f64(seconds))
-    }
-    if let Some(delay) = find(value).and_then(seconds) {
+    if let Some(delay) = find(value).and_then(parse_wait) {
         return Some(delay);
     }
     let text = value.to_string().to_ascii_lowercase();
-    let at = text.find("retry in ")?;
-    seconds(&text[at + "retry in ".len()..])
+    ["retry in ", "try again in "].iter().find_map(|marker| {
+        let at = text.find(marker)?;
+        parse_wait(&text[at + marker.len()..])
+    })
+}
+
+/// Durée écrite par un serveur, unité comprise : « 37s », « 12.5s »,
+/// « 500ms », « 1m26.4s », « 2h » ; un nombre seul compte en secondes.
+fn parse_wait(text: &str) -> Option<Duration> {
+    let mut rest = text.trim_start();
+    let mut total = 0.0_f64;
+    let mut parsed = false;
+    loop {
+        let length = rest
+            .find(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+            .unwrap_or(rest.len());
+        let Ok(value) = rest[..length].parse::<f64>() else {
+            break;
+        };
+        rest = &rest[length..];
+        let (factor, unit) = if rest.starts_with("ms") {
+            (0.001, 2)
+        } else if rest.starts_with('h') {
+            (3_600.0, 1)
+        } else if rest.starts_with('m') {
+            (60.0, 1)
+        } else if rest.starts_with('s') {
+            (1.0, 1)
+        } else {
+            (1.0, 0)
+        };
+        total += value * factor;
+        parsed = true;
+        rest = &rest[unit..];
+        if unit == 0 {
+            break;
+        }
+    }
+    // Arrondi à la milliseconde : « 1m26.4s » vaut bien 86,4 s.
+    (parsed && total.is_finite() && (0.0..=1.0e7).contains(&total))
+        .then(|| Duration::from_secs_f64((total * 1_000.0).round() / 1_000.0))
 }
 
 impl Display for ApiError {
@@ -233,5 +293,38 @@ mod tests {
             rate_limited(r#"{"error":{"code":429}}"#).rate_limit_reset(),
             None
         );
+        // L'unité écrite compte : millisecondes, minutes, heures.
+        for (body, wait) in [
+            (r#"{"error":{"message":"retry in 500ms"}}"#, 0.5),
+            (
+                r#"{"error":{"message":"Please try again in 1m26.4s."}}"#,
+                86.4,
+            ),
+            (r#"{"error":{"message":"retry in 2h"}}"#, 7_200.0),
+            (r#"{"error":{"message":"retry in 30 seconds"}}"#, 30.0),
+        ] {
+            assert_eq!(
+                rate_limited(body).rate_limit_reset(),
+                Some(Duration::from_secs_f64(wait)),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_google_daily_quota_is_not_waited_for_like_a_minute_limit() {
+        // Quota du jour : Google joint aussi un court retryDelay, qui ne vaut
+        // que pour la limite par minute.
+        let daily = r#"[{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"47s"}]}}]"#;
+        assert!(rate_limited(daily).is_daily_quota());
+        assert_eq!(rate_limited(daily).rate_limit_reset(), None);
+        let minute = daily.replace("PerDay", "PerMinute");
+        assert!(!rate_limited(&minute).is_daily_quota());
+        assert_eq!(
+            rate_limited(&minute).rate_limit_reset(),
+            Some(Duration::from_secs(47))
+        );
+        let openrouter = r#"{"error":{"message":"Rate limit exceeded: free-models-per-day"}}"#;
+        assert!(rate_limited(openrouter).is_daily_quota());
     }
 }

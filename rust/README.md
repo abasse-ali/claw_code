@@ -211,10 +211,14 @@ est retenu ; avec `OPENROUTER_API_KEY`, le quota gratuit du jour est affiché.
   peut se servir des requêtes pour améliorer ses produits.
 - **Gemini 3 et ses signatures de réflexion** : chaque appel d'outil d'un modèle Gemini 3 arrive
   avec une signature que Google exige de retrouver dans la requête suivante (sans elle : erreur
-  400 dès la deuxième étape). Claw la garde et la renvoie avec son appel ; un appel sans signature
-  connue (session rechargée, appel écrit par un autre modèle de l'équipe) reçoit la valeur de
+  400 dès la deuxième étape). Claw la garde et la renvoie avec son appel, au seul serveur et au
+  seul modèle qui l'ont écrite : un autre fournisseur (Mistral, Groq…) refuserait ce champ, et un
+  autre modèle Gemini n'accepte pas la signature d'un autre. Un appel sans signature de ce modèle
+  (session rechargée, appel écrit par un autre modèle de l'équipe) reçoit la valeur de
   remplacement que Google documente. Sur une erreur 429 de Google, Claw attend le délai qu'il
-  annonce (`retryDelay`) ; un quota du jour épuisé n'est plus réessayé en boucle.
+  annonce (`retryDelay`, unité comprise). Un quota du jour épuisé (`…PerDay…`) n'est ni attendu
+  ni réessayé, même si Google y joint un court délai : le modèle est mis de côté jusqu'à minuit,
+  heure du Pacifique (9 h à Paris), l'heure où Google remet ses quotas à zéro.
 - **Choisir un modèle Gemini** : `/models gemini` liste les modèles de l'offre gratuite de Google
   que votre clé ouvre (une simple lecture du catalogue de Google, aucune génération), et la page
   les montre dans la catégorie **Google Gemini** du menu des modèles. Gratuits d'après la page
@@ -480,24 +484,51 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
 ### Fiabilité avec les petits modèles
 
 - **Serveurs et surveillances** : une commande qui ne rend jamais la main (`npm run dev`,
-  `uvicorn`, `flask run`, `vite`, `next dev`, `--watch`, ou une commande terminée par `&`) part
-  d'office en arrière-plan au lieu de bloquer le tour ; le modèle la suit avec `BashOutput` et
-  l'arrête avec `KillShell`. Toute autre commande a un délai de 5 minutes quand le modèle n'en
-  donne pas (avant : aucun), et le message de dépassement lui dit quoi faire.
+  `uvicorn`, `flask run`, `vite`, `next dev`, `--watch`) part d'office en arrière-plan au lieu de
+  bloquer le tour ; le modèle la suit avec `BashOutput` et l'arrête avec `KillShell`. Le texte
+  entre guillemets, un document en ligne (`<<`) et les commentaires ne comptent pas (écrire un
+  README qui cite `npm run dev` ne lance rien en arrière-plan), ni un serveur que la commande
+  détache elle-même pour l'essayer (`uvicorn app:app & sleep 3; curl …; kill $!`). Avec
+  `run_in_background: false`, le modèle garde la main.
+- **Commandes longues** : rien n'est tué par défaut. Sans délai fixé par le modèle, une commande
+  encore en cours au bout de 5 minutes (une installation, une compilation) **continue en
+  arrière-plan** avec sa sortie déjà reçue, et le modèle attend sa fin en une seule requête
+  (`BashOutput` avec `block: true`). Il en va de même, sans attendre, pour un serveur qui
+  s'annonce prêt (« Listening on… », « Running on http://… ») puis se tait, et pour un processus
+  laissé par `&` qui tient encore la sortie. Un délai fixé par le modèle est respecté : la
+  commande est arrêtée à l'échéance, et sa sortie déjà produite est rendue (avant : perdue). Un
+  délai sous 1 000 vient d'un modèle qui pensait en secondes (`120`) : il est lu en secondes.
+  La sortie est lue au fil de l'eau (Python écrit sans tampon), ce qui vaut aussi pour l'outil
+  PowerShell : une grosse sortie ne le bloque plus, et ses commandes en arrière-plan se lisent
+  et s'arrêtent comme celles de bash. Une commande partie en arrière-plan ne compte jamais comme
+  une vérification réussie.
 - **Code des erreurs** : quand une commande ou la vérification échoue en citant des emplacements
   du projet (trace Python, erreur Rust, TypeScript `fichier(ligne,colonne)`, Node, Go, pytest),
   Claw joint les lignes de code autour de chacun (trois au plus) : une relecture de moins, donc
-  une requête de moins. Les dépendances (`node_modules`, `.venv`…) ne sont pas montrées.
+  une requête de moins. Une trace Python est lue depuis la fin, où est le cadre qui lève
+  l'erreur. Les dépendances (`node_modules`, `.venv`…) et les adresses web ne sont pas montrées.
   `CLAW_ERROR_SITES=0` le coupe.
 - **Lecture** : `read_file` rend 2 000 lignes au plus quand le modèle ne précise pas `limit`, et
   dit à partir de quel `offset` lire la suite ; une ligne de plus de 2 000 caractères (code
-  minifié) est raccourcie ; un fichier hors UTF-8 (Windows-1252) se lit quand même ; un fichier
-  binaire est signalé comme tel au lieu d'une erreur d'encodage.
-- **Recherche** : `grep_search` et `glob_search` sautent `node_modules`, `.git`, `target`,
-  `.venv`, `venv`, `__pycache__`, `dist`, `build` et `.claw`, sauf si le chemin ou le motif les
-  nomme. Avant, une recherche lisait toutes les dépendances (des dizaines de milliers de fichiers
-  dans un projet Next.js) et `glob_search` les montrait en premier, ce qui égarait le modèle. Un
-  dossier illisible ne fait plus échouer la recherche ; un fichier de plus de 4 Mo n'est pas lu.
+  minifié) est raccourcie ; un fichier binaire est signalé comme tel au lieu d'une erreur
+  d'encodage.
+- **Codages** : un fichier en Windows-1252 (CSV d'Excel, anciens fichiers Windows ; l'euro,
+  l'apostrophe typographique et « œ » compris), en UTF-16 (écrit par `>` de PowerShell 5) ou en
+  UTF-8 abîmé par quelques octets se lit, se cherche (`grep_search`) et se modifie. `edit_file`
+  et `write_file` **gardent son codage** : un CSV d'Excel reste lisible par Excel. Un caractère
+  que ce codage ne peut pas stocker est refusé par `edit_file` avec un message qui le nomme ;
+  `write_file` passe alors le fichier en UTF-8 et le dit.
+- **Recherche** : `grep_search` et `glob_search` sautent les dépendances, environnements et
+  caches (`node_modules`, `.git`, `.venv`, `__pycache__`, `.next`, `.claw`…), sauf si le chemin
+  ou le motif les nomme. Un dossier `dist`, `build`, `target`, `out` ou `coverage` n'est sauté
+  que si c'est bien une sortie de build (ignoré par un `.gitignore`, ou marqué par Cargo) : un
+  paquet Go `internal/build` ou un script nommé `build` restent visibles. Avant, une recherche
+  lisait toutes les dépendances (des dizaines de milliers de fichiers dans un projet Next.js) et
+  `glob_search` les montrait en premier, ce qui égarait le modèle. Un dossier illisible ne fait
+  plus échouer la recherche. Un fichier de plus de 4 Mo trouvé en parcourant un dossier n'est
+  pas lu, mais celui que nomme `path` (un journal) l'est toujours. Quand quelque chose n'a pas
+  été cherché, le résultat le dit (`note`), pour qu'un résultat vide ne passe pas pour une
+  absence.
 - **Sorties bornées** : la sortie d'une commande gardée dans la session est limitée à
   30 000 caractères (le début et la fin, où sont les erreurs, avec la mention de ce qui manque),
   au lieu de repartir en entier avec chaque requête.

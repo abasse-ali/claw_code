@@ -21,22 +21,22 @@ const NAMES_PER_DIR: usize = 14;
 const SYMBOLS_PER_FILE: usize = 14;
 const SYMBOL_FILES: usize = 60;
 
+/// Dossiers qui ne sont jamais le code du projet : dépôt git, dépendances,
+/// environnements, caches, réglages d'éditeur. Les sorties de build (`target`,
+/// `dist`, `build`…) n'y sont pas : git les écarte déjà quand elles sont
+/// ignorées, et un dossier de ce nom peut être du vrai code.
 const SKIPPED_DIRS: &[&str] = &[
     ".git",
     "node_modules",
-    "target",
     ".venv",
     "venv",
     "__pycache__",
-    "dist",
-    "build",
     ".claw",
     ".idea",
     ".vscode",
     ".next",
     ".cache",
     "vendor",
-    "coverage",
 ];
 
 const SKIPPED_EXTENSIONS: &[&str] = &[
@@ -96,7 +96,12 @@ fn walk(root: &Path) -> Vec<String> {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
             if path.is_dir() {
-                if depth < 8 && !SKIPPED_DIRS.contains(&name.as_str()) {
+                // Hors dépôt git : les sorties de build sont reconnues à
+                // leur marque ou à un `.gitignore`, comme pour les recherches.
+                if depth < 8
+                    && !SKIPPED_DIRS.contains(&name.as_str())
+                    && !crate::file_ops::generated_dir(&path, &name, root)
+                {
                     pending.push((path, depth + 1));
                 }
             } else if let Ok(relative) = path.strip_prefix(root) {
@@ -546,6 +551,8 @@ mod tests {
         assert!(is_listed("src/main.rs"));
         assert!(!is_listed("assets/logo.png"));
         assert!(!is_listed("node_modules/x/index.js"));
+        // Un dossier `build` que git suit est du code (paquet Go, scripts).
+        assert!(is_listed("internal/build/builder.go"));
         assert!(!is_listed("Cargo.lock"));
 
         let root = std::env::temp_dir().join(format!("claw-map-{}", std::process::id()));

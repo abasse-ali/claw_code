@@ -1357,6 +1357,18 @@
     setActivity(verb + (target ? " · " + target : ""));
     scrollToBottom(false);
   }
+  // Sortie d'une commande sans les remarques que Claw y joint pour le modèle
+  // (lancement ou passage en arrière-plan, délai dépassé).
+  function commandText(text) {
+    text = String(text || "");
+    if (text.startsWith("[Claw] ") || text.startsWith("Started in the background as ")) return "";
+    const at = text.indexOf("\n[Claw] ");
+    return at < 0 ? text : text.slice(0, at).replace(/\s+$/, "");
+  }
+  // Lancée d'emblée en arrière-plan, ou passée en arrière-plan après une première sortie.
+  function backgroundLabel(task, shown) {
+    return (shown ? "Continue en arrière-plan (" : "Lancé en arrière-plan (") + task + ")";
+  }
   // L'essentiel du résultat (sortie de commande, contenu lu…) plutôt que le JSON brut.
   function resultView(output, isError) {
     const box = document.createDocumentFragment();
@@ -1364,11 +1376,12 @@
     let summary = "";
     if (value && typeof value === "object" && !Array.isArray(value)) {
       if ("stdout" in value || "stderr" in value) {
-        if (value.stdout) box.append(el("div", "label", "Sortie"), el("pre", null, value.stdout));
-        if (value.stderr) box.append(el("div", "label", "Erreurs"), el("pre", "stderr", value.stderr));
-        if (!value.stdout && !value.stderr) box.append(el("div", "note", "Aucune sortie"));
+        const stdout = commandText(value.stdout), stderr = commandText(value.stderr);
+        if (stdout) box.append(el("div", "label", "Sortie"), el("pre", null, stdout));
+        if (stderr) box.append(el("div", "label", "Erreurs"), el("pre", "stderr", stderr));
+        if (!stdout && !stderr && !value.backgroundTaskId) box.append(el("div", "note", "Aucune sortie"));
         if (value.returnCodeInterpretation) summary = value.returnCodeInterpretation.replace("exit_code:", "code ");
-        if (value.backgroundTaskId) box.append(el("div", "note", "Lancé en arrière-plan (" + value.backgroundTaskId + ")"));
+        if (value.backgroundTaskId) box.append(el("div", "note", backgroundLabel(value.backgroundTaskId, stdout || stderr)));
         return { box, summary };
       }
       if (value.file && typeof value.file.content === "string") {
@@ -1421,9 +1434,10 @@
     let summary = "";
     let failed = isError;
     if (value && typeof value === "object" && ("stdout" in value || "stderr" in value)) {
-      text = [value.stdout, value.stderr].filter(Boolean).join(value.stdout && value.stderr ? "\n" : "");
+      const stdout = commandText(value.stdout), stderr = commandText(value.stderr);
+      text = [stdout, stderr].filter(Boolean).join(stdout && stderr ? "\n" : "");
       if (value.returnCodeInterpretation) { summary = value.returnCodeInterpretation.replace("exit_code:", "code "); failed = true; }
-      if (value.backgroundTaskId) text = (text ? text + "\n" : "") + "Lancé en arrière-plan (" + value.backgroundTaskId + ")";
+      if (value.backgroundTaskId) text = (text ? text + "\n" : "") + backgroundLabel(value.backgroundTaskId, text);
     } else if (isError) {
       // Refusée, interrompue ou impossible à lancer : la commande n'a pas tourné.
       text = skipReason(output);

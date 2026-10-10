@@ -227,6 +227,10 @@ pub fn covers(model_command: &str, verify_command: &str) -> bool {
 pub struct CommandResult {
     pub passed: bool,
     pub timed_out: bool,
+    /// Une partie tourne encore en arrière-plan (serveur, commande longue,
+    /// processus lancé avec `&`) : son résultat n'est pas connu, elle ne
+    /// vérifie rien.
+    pub pending: bool,
     /// Début et fin de la sortie (là où sont les erreurs).
     pub excerpt: String,
 }
@@ -265,15 +269,21 @@ fn excerpt(text: &str) -> String {
 /// Lit le résultat JSON de l'outil `bash` (stdout, stderr, code de sortie).
 #[must_use]
 pub fn read_bash_output(output: &str) -> CommandResult {
-    let Ok(value) = serde_json::from_str::<Value>(output) else {
+    // Le JSON du résultat, suivi éventuellement de remarques de Claw.
+    let Some(Ok(value)) = serde_json::Deserializer::from_str(output)
+        .into_iter::<Value>()
+        .next()
+    else {
         return CommandResult {
             passed: false,
             timed_out: false,
+            pending: false,
             excerpt: excerpt(output),
         };
     };
     let text = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or_default();
     let status = text("returnCodeInterpretation");
+    let pending = !text("backgroundTaskId").is_empty();
     let mut combined = text("stdout").trim().to_string();
     let stderr = text("stderr").trim();
     if !stderr.is_empty() {
@@ -292,6 +302,7 @@ pub fn read_bash_output(output: &str) -> CommandResult {
     CommandResult {
         passed: status.is_empty(),
         timed_out: status == "timeout",
+        pending,
         excerpt: excerpt(&combined),
     }
 }
@@ -303,21 +314,6 @@ const ERROR_SITES: usize = 3;
 /// Lignes montrées avant et après la ligne citée.
 const ERROR_SITE_LINES: usize = 3;
 const ERROR_SITES_MAX_CHARS: usize = 3_000;
-/// Dossiers qui ne sont pas le code du projet (dépendances, sorties de build) :
-/// une trace qui y passe n'y montre rien d'utile à corriger.
-const FOREIGN_DIRS: &[&str] = &[
-    "node_modules",
-    "target",
-    ".venv",
-    "venv",
-    "site-packages",
-    "dist-packages",
-    ".git",
-    "__pycache__",
-    "dist",
-    "build",
-    ".next",
-];
 
 fn location_pattern() -> &'static regex::Regex {
     static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -330,9 +326,13 @@ fn location_pattern() -> &'static regex::Regex {
 }
 
 /// Emplacements `fichier:ligne` qu'une sortie cite (trace Python, erreur Rust,
-/// TypeScript `fichier(ligne,colonne)`, Node, Go, pytest…), dans l'ordre et
-/// sans doublon.
+/// TypeScript `fichier(ligne,colonne)`, Node, Go, pytest…), sans doublon, les
+/// plus utiles d'abord : dans l'ordre de la sortie (première erreur d'un
+/// compilateur, cadre le plus profond d'une pile Node), sauf pour une trace
+/// Python (« most recent call last »), lue depuis la fin, où est le cadre qui
+/// lève l'erreur.
 fn cited_sites(output: &str) -> Vec<(String, usize)> {
+    let mut seen = std::collections::HashSet::new();
     let mut sites: Vec<(String, usize)> = Vec::new();
     for found in location_pattern().captures_iter(output) {
         let (path, line) = match (found.name("py"), found.name("pyline")) {
@@ -345,16 +345,28 @@ fn cited_sites(output: &str) -> Vec<(String, usize)> {
                 _ => continue,
             },
         };
+        // Adresse web (`https://cdn.exemple.com/lib.js:8080`) : pas un fichier.
+        let before = found.get(0).map_or("", |whole| &output[..whole.start()]);
+        if path.contains("://") || before.ends_with("://") || before.ends_with(":/") {
+            continue;
+        }
         let Ok(line) = line.parse::<usize>() else {
             continue;
         };
         let site = (path.to_string(), line);
-        if line > 0 && !sites.contains(&site) {
+        if line > 0 && seen.insert(site.clone()) {
             sites.push(site);
         }
     }
+    if output.contains("most recent call last") {
+        sites.reverse();
+    }
     sites
 }
+
+/// Emplacements cités dont on cherche au plus le fichier : une sortie de
+/// milliers de lignes `fichier:ligne` ne coûte pas des milliers d'accès disque.
+const MAX_SITE_LOOKUPS: usize = 200;
 
 /// Fichier du projet que désigne un chemin cité (relatif au dossier de
 /// travail ou absolu dedans), hors dépendances et sorties de build.
@@ -373,10 +385,9 @@ fn project_file(root: &Path, cited: &str) -> Option<(std::path::PathBuf, String)
     };
     let full = full.canonicalize().ok()?;
     let relative = full.strip_prefix(root).ok()?.to_path_buf();
-    let foreign = relative
-        .components()
-        .any(|component| FOREIGN_DIRS.contains(&component.as_os_str().to_string_lossy().as_ref()));
-    if foreign || !full.is_file() {
+    // Dépendances, caches, sorties de build : une trace qui y passe n'y montre
+    // rien d'utile à corriger (un dossier `build` de vrai code est gardé).
+    if crate::file_ops::under_generated_dir(root, &relative) || !full.is_file() {
         return None;
     }
     let shown = relative.to_string_lossy().replace('\\', "/");
@@ -398,14 +409,14 @@ pub fn error_sites(output: &str, cwd: &Path) -> Option<String> {
     let root = cwd.canonicalize().ok()?;
     let mut blocks: Vec<String> = Vec::new();
     let mut used = 0;
-    for (cited, line) in cited_sites(&text) {
+    for (cited, line) in cited_sites(&text).into_iter().take(MAX_SITE_LOOKUPS) {
         if blocks.len() >= ERROR_SITES {
             break;
         }
         let Some((file, shown)) = project_file(&root, &cited) else {
             continue;
         };
-        let Ok(content) = std::fs::read_to_string(&file) else {
+        let Some(content) = crate::file_ops::read_any_text(&file) else {
             continue;
         };
         let lines: Vec<&str> = content.lines().collect();
@@ -1084,16 +1095,31 @@ mod error_site_tests {
     use super::{cited_sites, error_sites};
 
     #[test]
+    fn a_python_traceback_is_read_from_the_frame_that_raises() {
+        // Le bogue est dans le dernier cadre, pas dans manage.py.
+        let output = "Traceback (most recent call last):\n  File \"manage.py\", line 22, in <module>\n  File \"shop/views.py\", line 40, in show\n  File \"shop/pricing.py\", line 12, in price\nKeyError: 'eur'\n";
+        assert_eq!(
+            cited_sites(output),
+            [
+                ("shop/pricing.py".to_string(), 12),
+                ("shop/views.py".to_string(), 40),
+                ("manage.py".to_string(), 22),
+            ]
+        );
+    }
+
+    #[test]
     fn locations_are_read_from_the_usual_error_formats() {
-        let output = r#"Traceback (most recent call last):
-  File "app/main.py", line 12, in <module>
+        let output = r#"  File "app/main.py", line 12, in <module>
 error[E0425]: cannot find value `x` in this scope
  --> src/lib.rs:42:5
 src/page.ts(7,3): error TS2304: Cannot find name 'y'.
     at load (C:\proj\web\app.js:30:11)
 tests/test_total.py:9: AssertionError
 ./main.go:5:2: undefined: z
-Listening on http://localhost:3000 and 127.0.0.1:8000"#;
+src/lib.rs:42:5: déjà cité
+Listening on http://localhost:3000 and 127.0.0.1:8000
+GET https://cdn.example.com/lib.js:8080 failed, see http://docs.example.com/err.html:3"#;
         let sites = cited_sites(output);
         assert_eq!(
             sites,
@@ -1246,6 +1272,16 @@ mod tests {
         let slow =
             read_bash_output(r#"{"stdout":"","stderr":"","returnCodeInterpretation":"timeout"}"#);
         assert!(slow.timed_out && !slow.passed);
+
+        // Partie en arrière-plan : pas d'échec, mais rien de vérifié.
+        let background = read_bash_output(
+            r#"{"stdout":"[Claw] started","stderr":"","backgroundTaskId":"bash_1","returnCodeInterpretation":null}"#,
+        );
+        assert!(background.passed && background.pending);
+        assert!(!passed.pending);
+        // Un message de hook à la suite du JSON ne change pas l'issue.
+        let with_hook = read_bash_output("{\"stdout\":\"ok\",\"stderr\":\"\"}\n\nhook: formaté");
+        assert!(with_hook.passed && !with_hook.pending);
 
         assert!(covers(
             "cd app && cargo  check --quiet",

@@ -227,6 +227,9 @@ struct TurnAids {
     dirty: bool,
     /// Commandes réussies lancées par le modèle depuis sa dernière modification.
     verified_commands: Vec<String>,
+    /// Commandes parties en arrière-plan depuis la dernière modification, par
+    /// identifiant de tâche : leur fin, lue avec `BashOutput`, comptera.
+    background_commands: std::collections::BTreeMap<String, String>,
     verify_rounds: usize,
     /// Vérification refusée, impossible ou trop longue : on n'insiste pas.
     verify_disabled: bool,
@@ -348,6 +351,74 @@ fn lean_result(tool_name: &str, message: &mut ConversationMessage) {
     }
 }
 
+/// Issue connue d'une commande du modèle.
+struct CommandOutcome {
+    command: String,
+    passed: bool,
+    /// Ce qu'elle a écrit (résultat de `bash`, ou texte lu par `BashOutput`).
+    output: String,
+}
+
+/// Issue de la commande que ce résultat d'outil fait connaître, s'il y en a
+/// une : celle de `bash` ou `PowerShell` au premier plan, ou la fin, lue avec
+/// `BashOutput`, d'une commande passée en arrière-plan pendant ce tour. Une
+/// commande qui part en arrière-plan (serveur, commande encore en cours) n'a
+/// pas encore d'issue : elle est retenue, et ne vérifie rien d'ici là
+/// (`npx tsc && npm run dev` n'a pas montré le résultat de tsc).
+fn command_outcome(
+    tool_name: &str,
+    input: &str,
+    output: &str,
+    is_error: bool,
+    aids: &mut TurnAids,
+) -> Option<CommandOutcome> {
+    if is_error {
+        return None;
+    }
+    if matches!(tool_name, "bash" | "PowerShell") {
+        let command = json_field(input, "command")?;
+        let result = harness::read_bash_output(output);
+        if result.passed && result.pending {
+            // Seule une commande dont le shell tourne encore aura une issue ;
+            // un processus laissé par `&` n'en a pas.
+            if let Some(task) = json_field(output, "backgroundTaskId")
+                .filter(|task| crate::bash_tasks::shell_running(task))
+            {
+                aids.background_commands.insert(task, command);
+            }
+            return None;
+        }
+        return Some(CommandOutcome {
+            command,
+            passed: result.passed,
+            output: output.to_string(),
+        });
+    }
+    if tool_name != "BashOutput" {
+        return None;
+    }
+    let value = serde_json::Deserializer::from_str(output)
+        .into_iter::<serde_json::Value>()
+        .next()?
+        .ok()?;
+    let exited = value.get("status").and_then(serde_json::Value::as_str) == Some("exited");
+    let killed = value.get("killed").and_then(serde_json::Value::as_bool) == Some(true);
+    if !exited || killed {
+        return None;
+    }
+    let task = value.get("bash_id").and_then(serde_json::Value::as_str)?;
+    let command = aids.background_commands.remove(task)?;
+    Some(CommandOutcome {
+        command,
+        passed: value.get("exitCode").and_then(serde_json::Value::as_i64) == Some(0),
+        output: value
+            .get("newOutput")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
 /// Ajoute une note de Claw à la suite d'un résultat d'outil (lue par le modèle).
 fn append_tool_output(message: &mut ConversationMessage, note: &str) {
     for block in &mut message.blocks {
@@ -359,8 +430,12 @@ fn append_tool_output(message: &mut ConversationMessage, note: &str) {
     }
 }
 
+/// Champ texte du JSON qui ouvre `text` (un résultat d'outil peut être suivi
+/// d'un message de hook).
 fn json_field(text: &str, key: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(text)
+    serde_json::Deserializer::from_str(text)
+        .into_iter::<serde_json::Value>()
+        .next()?
         .ok()?
         .get(key)?
         .as_str()
@@ -1005,11 +1080,14 @@ where
         };
         let output = output.to_string();
         let mut notes = Vec::new();
+        // Issue d'une commande du modèle : celle de `bash`, ou la fin, lue avec
+        // `BashOutput`, d'une commande passée en arrière-plan pendant ce tour.
+        let command_outcome = command_outcome(tool_name, input, &output, is_error, aids);
         // Échecs à la suite (outil en erreur, commande qui échoue) : un agent
         // qui s'arrête là est renvoyé chercher une autre voie.
-        let command_failed = matches!(tool_name, "bash" | "PowerShell")
-            && !is_error
-            && !harness::read_bash_output(&output).passed;
+        let command_failed = command_outcome
+            .as_ref()
+            .is_some_and(|outcome| !outcome.passed);
         aids.failure_streak = if is_error || command_failed {
             aids.failure_streak + 1
         } else {
@@ -1022,6 +1100,8 @@ where
             aids.workflow_dirty = true;
             aids.feedback_pending = false;
             aids.verified_commands.clear();
+            // Une commande encore en cours a été lancée sur l'ancien code.
+            aids.background_commands.clear();
             let path = json_field(&output, "filePath").or_else(|| json_field(input, "path"));
             if let Some(path) = &path {
                 if !aids.originals.contains_key(path) {
@@ -1051,29 +1131,27 @@ where
                 }
             }
         }
-        if matches!(tool_name, "bash" | "PowerShell") && !is_error {
-            if let Some(command) = json_field(input, "command") {
-                if harness::read_bash_output(&output).passed {
-                    if harness::is_check_command(&command) {
-                        aids.check_failing = false;
+        if let Some(outcome) = command_outcome {
+            if outcome.passed {
+                if harness::is_check_command(&outcome.command) {
+                    aids.check_failing = false;
+                }
+                aids.verified_commands.push(outcome.command);
+            } else {
+                if harness::is_check_command(&outcome.command) {
+                    aids.check_failed = true;
+                    aids.check_failing = true;
+                }
+                // Le code des emplacements que l'erreur cite : une relecture de moins.
+                if harness::enabled(Aid::ErrorSites) {
+                    if let Ok(cwd) = std::env::current_dir() {
+                        notes.extend(harness::error_sites(&outcome.output, &cwd));
                     }
-                    aids.verified_commands.push(command);
-                } else {
-                    if harness::is_check_command(&command) {
-                        aids.check_failed = true;
-                        aids.check_failing = true;
-                    }
-                    // Le code des emplacements que l'erreur cite : une relecture de moins.
-                    if harness::enabled(Aid::ErrorSites) {
-                        if let Ok(cwd) = std::env::current_dir() {
-                            notes.extend(harness::error_sites(&output, &cwd));
-                        }
-                    }
-                    // Sous Windows : un chemin `dossier\fichier` écrit pour cmd.
-                    if tool_name == "bash" && harness::enabled(Aid::PathHelp) {
-                        let hint = crate::bash::windows_shell_hint(&command);
-                        notes.extend(hint.map(str::to_string));
-                    }
+                }
+                // Sous Windows : un chemin `dossier\fichier` écrit pour cmd.
+                if tool_name == "bash" && harness::enabled(Aid::PathHelp) {
+                    let hint = crate::bash::windows_shell_hint(&outcome.command);
+                    notes.extend(hint.map(str::to_string));
                 }
             }
         }
@@ -1151,9 +1229,12 @@ where
             self.api_client.notify(&format!(
                 "Vérification automatique après modification : {command}"
             ));
+            // Au premier plan et arrêtée au-delà du délai : son résultat
+            // décide de la suite du tour.
             let input = serde_json::json!({
                 "command": command,
                 "timeout": harness::VERIFY_TIMEOUT_MS,
+                "run_in_background": false,
                 "description": "Vérification automatique de Claw",
             })
             .to_string();
@@ -3033,6 +3114,9 @@ mod tests {
         let executor = StaticToolExecutor::new()
             .register("write_file", move |_| Ok(written.clone()))
             .register("probe", |_| Err(super::ToolError::new("introuvable")))
+            .register("BashOutput", |_| {
+                Ok(TASK_REPLY.with(|reply| reply.borrow().clone()))
+            })
             .register("bash", move |input| {
                 recorded.borrow_mut().push(input.to_string());
                 Ok(outputs.pop_front().unwrap_or(PASSING).to_string())
@@ -3082,6 +3166,86 @@ mod tests {
             .notices
             .iter()
             .any(|notice| notice == "Vérification réussie après correction"));
+    }
+
+    thread_local! {
+        /// Réponse de `BashOutput` dans `aided_runtime`.
+        static TASK_REPLY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+
+    #[test]
+    fn a_command_sent_to_the_background_verifies_nothing_until_its_end_is_read() {
+        // `verifier && npm run dev` part en arrière-plan : le résultat de la
+        // vérification n'a pas été montré, Claw la lance donc lui-même.
+        let (mut runtime, _, bash_calls) = aided_runtime(
+            vec![
+                tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
+                tool_step("bash", r#"{"command":"verifier && npm run dev"}"#),
+                text_step("C'est fait."),
+            ],
+            vec![
+                r#"{"stdout":"[Claw] This command starts a server","stderr":"","backgroundTaskId":"bash_inconnue"}"#,
+                PASSING,
+            ],
+        );
+        runtime.run_turn("écris le fichier", None).expect("tour");
+        {
+            let calls = bash_calls.borrow();
+            assert_eq!(calls.len(), 2, "{calls:?}");
+            assert!(calls[1].contains(r#""command":"verifier""#), "{calls:?}");
+            assert!(
+                calls[1].contains(r#""run_in_background":false"#),
+                "{calls:?}"
+            );
+        }
+
+        // La vérification, trop longue, continue en arrière-plan ; le modèle
+        // lit sa fin avec BashOutput : elle compte, Claw ne la relance pas.
+        let task =
+            crate::bash_tasks::spawn(plugins::posix_shell_command("sleep 20"), "verifier", None)
+                .expect("tâche de fond");
+        let handed_off: &'static str = Box::leak(
+            format!(
+                r#"{{"stdout":"[Claw] Still running after 300 s","stderr":"","backgroundTaskId":"{task}"}}"#
+            )
+            .into_boxed_str(),
+        );
+        TASK_REPLY.with(|reply| {
+            *reply.borrow_mut() = format!(
+                r#"{{"bash_id":"{task}","status":"exited","exitCode":0,"newOutput":"ok","killed":false}}"#
+            );
+        });
+        let (mut runtime, _, bash_calls) = aided_runtime(
+            vec![
+                tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
+                tool_step("bash", r#"{"command":"verifier"}"#),
+                tool_step("BashOutput", r#"{"bash_id":"x","block":true}"#),
+                text_step("C'est fait et vérifié."),
+            ],
+            vec![handed_off],
+        );
+        runtime.run_turn("écris le fichier", None).expect("tour");
+        assert_eq!(bash_calls.borrow().len(), 1, "{:?}", bash_calls.borrow());
+
+        // Elle se termine en échec : c'est un échec de vérification, comme au
+        // premier plan, et Claw relance la sienne après la correction.
+        TASK_REPLY.with(|reply| {
+            *reply.borrow_mut() = format!(
+                r#"{{"bash_id":"{task}","status":"exited","exitCode":1,"newOutput":"assertion failed","killed":false}}"#
+            );
+        });
+        let (mut runtime, _, bash_calls) = aided_runtime(
+            vec![
+                tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
+                tool_step("bash", r#"{"command":"verifier"}"#),
+                tool_step("BashOutput", r#"{"bash_id":"x","block":true}"#),
+                text_step("C'est fait."),
+            ],
+            vec![handed_off, PASSING],
+        );
+        runtime.run_turn("écris le fichier", None).expect("tour");
+        assert_eq!(bash_calls.borrow().len(), 2, "{:?}", bash_calls.borrow());
+        crate::bash_tasks::kill(&task).expect("arrêt");
     }
 
     #[test]

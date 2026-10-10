@@ -320,7 +320,9 @@ impl OpenAiCompatClient {
         let request_id = request_id_from_headers(response.headers());
         let payload = parse_chat_completion(&response.bytes().await?)?;
         let tools = request.tools.as_deref().unwrap_or_default();
-        let mut normalized = normalize_response(&request.model, payload, text_mode, tools)?;
+        let origin = self.extras_origin(&request.model);
+        let mut normalized =
+            normalize_response(&request.model, payload, text_mode, tools, &origin)?;
         if normalized.request_id.is_none() {
             normalized.request_id = request_id;
         }
@@ -336,7 +338,8 @@ impl OpenAiCompatClient {
             .await?;
         let state = StreamState::new(request.model.clone())
             .with_tools(request, text_mode)
-            .with_reasoning_passback(self.provider_name == "OpenRouter");
+            .with_reasoning_passback(self.provider_name == "OpenRouter")
+            .with_extras_origin(self.extras_origin(&request.model));
         Ok(MessageStream {
             request_id: request_id_from_headers(response.headers()),
             response,
@@ -414,6 +417,8 @@ impl OpenAiCompatClient {
             let delay = match retryable_error.rate_limit_reset() {
                 Some(reset) if reset <= MAX_RATE_LIMIT_WAIT => reset + Duration::from_millis(500),
                 Some(_) => break retryable_error,
+                // Quota du jour épuisé : réessayer tout de suite ne sert à rien.
+                None if retryable_error.is_daily_quota() => break retryable_error,
                 None => self.backoff_for_attempt(attempts)?,
             };
             tokio::time::sleep(delay).await;
@@ -423,6 +428,12 @@ impl OpenAiCompatClient {
             attempts,
             last_error: Box::new(last_error),
         })
+    }
+
+    /// Serveur et modèle qui répondent : ce qu'ils joignent à un appel d'outil
+    /// (signature de Gemini 3) ne repart que vers eux.
+    fn extras_origin(&self, model: &str) -> String {
+        format!("{} {model}", self.base_url)
     }
 
     async fn send_raw_request(
@@ -450,10 +461,12 @@ impl OpenAiCompatClient {
         if let Some(name) = &self.model_name {
             payload["model"] = Value::String(name.clone());
         }
-        // Gemini 3 : chaque appel d'outil repart avec sa signature de réflexion.
+        // Gemini 3 : chaque appel d'outil repart avec sa signature de réflexion,
+        // vers le seul serveur et le seul modèle qui l'ont produite.
         let sent_model = self.model_name.as_deref().unwrap_or(&request.model);
         attach_tool_call_extras(
             &mut payload,
+            &self.extras_origin(&request.model),
             is_google_endpoint(&self.base_url) && sent_model.contains("gemini-3"),
         );
         if !accepts_stream_options(&self.base_url) {
@@ -618,6 +631,8 @@ struct StreamState {
     text_calls: bool,
     /// Du raisonnement a été reçu.
     reasoned: bool,
+    /// Serveur et modèle de la réponse, auxquels reviennent les `extra_content`.
+    extras_origin: String,
 }
 
 /// Raisonnement gardé au plus pour y retrouver un appel écrit en XML (sa fin).
@@ -626,6 +641,7 @@ const MAX_REASONING_KEPT: usize = 400_000;
 impl StreamState {
     fn new(model: String) -> Self {
         Self {
+            extras_origin: model.clone(),
             model,
             message_started: false,
             text_started: false,
@@ -653,6 +669,11 @@ impl StreamState {
 
     fn with_reasoning_passback(mut self, keep: bool) -> Self {
         self.keep_reasoning = keep;
+        self
+    }
+
+    fn with_extras_origin(mut self, origin: String) -> Self {
+        self.extras_origin = origin;
         self
     }
 
@@ -932,7 +953,7 @@ impl StreamState {
 
             for tool_call in choice.delta.tool_calls {
                 let state = self.tool_calls.entry(tool_call.index).or_default();
-                state.apply(tool_call);
+                state.apply(tool_call, &self.extras_origin);
                 let block_index = state.block_index();
                 if !state.started {
                     if let Some(start_event) = state.start_event() {
@@ -1060,8 +1081,11 @@ struct ToolCallState {
 }
 
 impl ToolCallState {
-    fn apply(&mut self, tool_call: DeltaToolCall) {
+    /// Ajoute un morceau de l'appel. `origin` : serveur et modèle qui l'écrivent.
+    fn apply(&mut self, tool_call: DeltaToolCall, origin: &str) {
         self.openai_index = tool_call.index;
+        // L'identifiant ou la signature arrive dans ce morceau : à retenir.
+        let fresh = tool_call.id.is_some() || tool_call.extra_content.is_some();
         if let Some(id) = tool_call.id {
             self.id = Some(id);
         }
@@ -1074,8 +1098,10 @@ impl ToolCallState {
         if let Some(extra) = tool_call.extra_content.filter(|extra| !extra.is_null()) {
             self.extra = Some(extra);
         }
-        if let (Some(id), Some(extra)) = (&self.id, &self.extra) {
-            remember_tool_call_extra(id, extra);
+        if fresh {
+            if let (Some(id), Some(extra)) = (&self.id, &self.extra) {
+                remember_tool_call_extra(origin, id, extra);
+            }
         }
     }
 
@@ -1151,27 +1177,30 @@ struct ResponseToolCall {
 
 // --- Signatures de réflexion (Gemini 3) ------------------------------------------------
 
-/// `extra_content` reçu avec chaque appel d'outil, par identifiant d'appel :
-/// Gemini 3 y met sa « signature de réflexion » et refuse la requête suivante
-/// (erreur 400) quand l'appel lui revient sans elle. Elle est renvoyée telle
-/// quelle avec son appel ; un serveur qui n'en donne pas n'en reçoit pas.
-static TOOL_CALL_EXTRAS: Mutex<BTreeMap<String, Value>> = Mutex::new(BTreeMap::new());
+/// `extra_content` reçu avec chaque appel d'outil, par (serveur et modèle,
+/// identifiant d'appel) : Gemini 3 y met sa « signature de réflexion » et
+/// refuse la requête suivante (erreur 400) quand l'appel lui revient sans
+/// elle. Elle ne repart que vers le serveur et le modèle qui l'ont écrite :
+/// un autre serveur refuserait ce champ inconnu, et un autre modèle Gemini
+/// n'accepte pas la signature d'un autre.
+static TOOL_CALL_EXTRAS: Mutex<BTreeMap<(String, String), Value>> = Mutex::new(BTreeMap::new());
 const MAX_TOOL_CALL_EXTRAS: usize = 4_096;
 /// Valeur que Google documente quand la vraie signature manque (session
 /// rechargée, appel écrit par un autre modèle) : un dernier recours.
 const SKIP_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
 
-fn remember_tool_call_extra(id: &str, extra: &Value) {
+fn remember_tool_call_extra(origin: &str, id: &str, extra: &Value) {
     if id.is_empty() || extra.is_null() {
         return;
     }
+    let key = (origin.to_string(), id.to_string());
     let mut extras = TOOL_CALL_EXTRAS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if extras.len() >= MAX_TOOL_CALL_EXTRAS && !extras.contains_key(id) {
+    if extras.len() >= MAX_TOOL_CALL_EXTRAS && !extras.contains_key(&key) {
         extras.clear();
     }
-    extras.insert(id.to_string(), extra.clone());
+    extras.insert(key, extra.clone());
 }
 
 /// Serveur de Google (API Gemini, Vertex AI), qui valide les signatures.
@@ -1180,11 +1209,12 @@ fn is_google_endpoint(base_url: &str) -> bool {
         || base_url.contains("aiplatform.googleapis.com")
 }
 
-/// Rend à chaque appel d'outil de l'historique ce que son serveur y avait
-/// joint. Pour un modèle Gemini 3, un message d'appels sans aucune signature
-/// connue reçoit la valeur de remplacement sur son premier appel, le seul
-/// que Google vérifie.
-fn attach_tool_call_extras(payload: &mut Value, gemini3: bool) {
+/// Rend à chaque appel d'outil de l'historique ce que `origin` (le serveur et
+/// le modèle de cette requête) y avait joint ; les appels écrits ailleurs
+/// repartent sans rien. Pour un modèle Gemini 3, un message d'appels sans
+/// signature de ce modèle reçoit la valeur de remplacement sur son premier
+/// appel, le seul que Google vérifie.
+fn attach_tool_call_extras(payload: &mut Value, origin: &str, gemini3: bool) {
     let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
     };
@@ -1200,7 +1230,7 @@ fn attach_tool_call_extras(payload: &mut Value, gemini3: bool) {
             let extra = call
                 .get("id")
                 .and_then(Value::as_str)
-                .and_then(|id| extras.get(id))
+                .and_then(|id| extras.get(&(origin.to_string(), id.to_string())))
                 .cloned();
             if let Some(extra) = extra {
                 call["extra_content"] = extra;
@@ -1617,6 +1647,7 @@ fn normalize_response(
     response: ChatCompletionResponse,
     text_mode: bool,
     tools: &[ToolDefinition],
+    extras_origin: &str,
 ) -> Result<MessageResponse, ApiError> {
     let choice = response
         .choices
@@ -1668,7 +1699,7 @@ fn normalize_response(
     }
     for tool_call in choice.message.tool_calls {
         if let Some(extra) = &tool_call.extra_content {
-            remember_tool_call_extra(&tool_call.id, extra);
+            remember_tool_call_extra(extras_origin, &tool_call.id, extra);
         }
         content.push(OutputContentBlock::ToolUse {
             id: tool_call.id,
@@ -2330,18 +2361,31 @@ mod tests {
                 ["thought_signature"]
                 .clone()
         };
+        // Même serveur, même modèle : la signature repart avec son appel.
         let mut gemini = build_chat_completion_request(&request);
-        attach_tool_call_extras(&mut gemini, true);
+        attach_tool_call_extras(&mut gemini, "gemini:gemini-3.8-flash", true);
         assert_eq!(signature(&gemini, 1), "SIG_A");
         // Sans signature connue : la valeur de remplacement documentée par Google.
         assert_eq!(signature(&gemini, 2), "skip_thought_signature_validator");
-        // Un autre serveur reçoit seulement ce qu'il a lui-même donné.
+        // Un autre modèle Gemini 3 ne reçoit pas la signature d'un autre.
+        let mut other_gemini = build_chat_completion_request(&request);
+        attach_tool_call_extras(&mut other_gemini, "gemini:gemini-3.6-flash", true);
+        assert_eq!(
+            signature(&other_gemini, 1),
+            "skip_thought_signature_validator"
+        );
+        // Un autre serveur (Mistral, Groq…) ne reçoit aucun champ de Google :
+        // il refuserait la requête entière.
         let mut other = build_chat_completion_request(&request);
-        attach_tool_call_extras(&mut other, false);
-        assert_eq!(signature(&other, 1), "SIG_A");
-        assert!(other["messages"][2]["tool_calls"][0]
-            .get("extra_content")
-            .is_none());
+        attach_tool_call_extras(&mut other, "https://api.mistral.ai/v1 mistral:x", false);
+        for message in [1, 2] {
+            assert!(
+                other["messages"][message]["tool_calls"][0]
+                    .get("extra_content")
+                    .is_none(),
+                "{other}"
+            );
+        }
         assert!(is_google_endpoint(
             "https://generativelanguage.googleapis.com/v1beta/openai"
         ));

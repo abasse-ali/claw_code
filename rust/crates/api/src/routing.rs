@@ -32,6 +32,49 @@ fn now_epoch_secs() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
+/// Secondes jusqu'à minuit à Los Angeles, où Google remet ses quotas du jour
+/// à zéro : UTC-7 à l'heure d'été (du deuxième dimanche de mars au premier
+/// dimanche de novembre, à 2 h), UTC-8 sinon. Soit 9 h à Paris.
+fn secs_until_pacific_midnight(now: u64) -> u64 {
+    const DAY: i64 = 86_400;
+    let now = i64::try_from(now).unwrap_or(i64::MAX / 2);
+    let year = year_of_day(now.div_euclid(DAY));
+    let sunday_from = |day: i64| day + (7 - (day + 4).rem_euclid(7)) % 7;
+    let summer_start = (sunday_from(days_from_civil(year, 3, 1)) + 7) * DAY + 10 * 3_600;
+    let summer_end = sunday_from(days_from_civil(year, 11, 1)) * DAY + 9 * 3_600;
+    let offset = if (summer_start..summer_end).contains(&now) {
+        7
+    } else {
+        8
+    };
+    let local = now - offset * 3_600;
+    u64::try_from(DAY - local.rem_euclid(DAY)).unwrap_or(0)
+}
+
+/// Jours écoulés depuis le 1er janvier 1970 à une date du calendrier.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// Année d'un jour compté depuis le 1er janvier 1970.
+fn year_of_day(days: i64) -> i64 {
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    // Les mois sont comptés à partir de mars : janvier et février (10 et 11)
+    // appartiennent à l'année suivante.
+    let month_from_march = (5 * day_of_year + 2) / 153;
+    year_of_era + era * 400 + i64::from(month_from_march >= 10)
+}
+
 /// Fichier où garder les longues mises de côté : celles encore valides sont
 /// rechargées, les suivantes y sont enregistrées.
 pub fn set_cooldown_store(path: PathBuf) {
@@ -166,6 +209,9 @@ fn cooldown_for(error: &ApiError) -> Duration {
         reset.max(Duration::from_secs(30))
     } else if api_status(error) == Some(403) {
         Duration::from_secs(24 * 3_600)
+    } else if text.contains("perday") {
+        // Les quotas du jour de Google repartent à minuit, heure du Pacifique.
+        Duration::from_secs(secs_until_pacific_midnight(now_epoch_secs()) + 60)
     } else if text.contains("per-day") || text.contains("per day") || text.contains("daily") {
         // Les quotas du jour d'OpenRouter repartent à minuit UTC.
         Duration::from_secs(86_400 - now_epoch_secs() % 86_400 + 60)
@@ -202,6 +248,8 @@ fn retry_in_place_delay(error: &ApiError, attempt: u32) -> Option<Duration> {
     }
     match error.rate_limit_reset() {
         Some(reset) if reset <= Duration::from_secs(70) => Some(reset + Duration::from_millis(500)),
+        // Quota du jour épuisé : le même modèle ne répondra pas avant demain.
+        None if error.is_daily_quota() => None,
         None if status.as_u16() == 429 || status.is_server_error() => {
             Some(Duration::from_secs(2 * u64::from(attempt)))
         }
@@ -721,6 +769,34 @@ mod tests {
             ),
         );
         assert_eq!(super::retry_in_place_delay(&per_day, 1), None);
+    }
+
+    #[test]
+    fn a_google_daily_quota_waits_for_midnight_in_california() {
+        use super::{days_from_civil, secs_until_pacific_midnight};
+        let at = |year: i64, month: i64, day: i64, hour: i64| {
+            u64::try_from(days_from_civil(year, month, day) * 86_400 + hour * 3_600)
+                .expect("date après 1970")
+        };
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        // Été : midi UTC, 5 h à Los Angeles, minuit dans 19 h.
+        assert_eq!(secs_until_pacific_midnight(at(2026, 7, 1, 12)), 19 * 3_600);
+        // Hiver : midi UTC, 4 h à Los Angeles, minuit dans 20 h.
+        assert_eq!(secs_until_pacific_midnight(at(2026, 1, 15, 12)), 20 * 3_600);
+        // Passage à l'heure d'été le 8 mars 2026 à 10 h UTC.
+        assert_eq!(
+            secs_until_pacific_midnight(at(2026, 3, 8, 10) - 1),
+            22 * 3_600 + 1
+        );
+        assert_eq!(secs_until_pacific_midnight(at(2026, 3, 8, 10)), 21 * 3_600);
+        // Le quota du jour de Google, qui joint pourtant un court retryDelay :
+        // ni réessai sur place, ni mise de côté de 47 s.
+        let daily = api_error(
+            429,
+            r#"[{"error":{"code":429,"details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"47s"}]}}]"#,
+        );
+        assert_eq!(super::retry_in_place_delay(&daily, 1), None);
+        assert!(super::cooldown_for(&daily) > Duration::from_secs(60));
     }
 
     #[test]

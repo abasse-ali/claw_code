@@ -32,7 +32,10 @@ pub mod typography;
 mod usage;
 pub mod workflow;
 
-pub use bash::{execute_bash, BashCommandInput, BashCommandOutput};
+pub use bash::{
+    effective_timeout_ms, execute_bash, run_tool_command, starts_long_running, BashCommandInput,
+    BashCommandOutput,
+};
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use compact::{
     compact_session, compact_session_with, estimate_session_tokens, format_compact_summary,
