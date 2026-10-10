@@ -294,6 +294,56 @@ function get(port, path) {
     cutOrder);
   cut.stop();
 
+  // Appel d'outil que le fournisseur ne termine pas (le nom arrive, pas les
+  // arguments) : jamais exécuté, et jamais soumis à l'autorisation de l'utilisateur.
+  const startAsking = async (model) => {
+    const instance = new ClawServer({ clawPath: claw, cwd, model, permissionMode: "prompt", env });
+    await instance.start();
+    const seen = [];
+    instance.subscribe((event) => seen.push(event));
+    await wait("abonnement", () => seen.some((event) => event.type === "status"));
+    return { instance, seen };
+  };
+  const of = (seen, type) => seen.filter((event) => event.type === type);
+
+  const once = await startAsking("ollama:coupe-une-fois");
+  const onceFile = path.join(cwd, "notes", "coupe.txt");
+  await once.instance.send("Crée ce fichier [mock:write notes/coupe.txt=entier]");
+  await wait("demande d'autorisation du nouvel essai", () => of(once.seen, "permission").length > 0, 160);
+  const onceRequest = of(once.seen, "permission")[0] || { proposal: {} };
+  if (onceRequest.id !== undefined) await once.instance.request("POST", "/api/permission", { id: onceRequest.id, decision: "once" });
+  await wait("fin du tour après un appel coupé", () => of(once.seen, "turn_done").length > 0, 160);
+  check("un appel d'outil coupé est redemandé au modèle, et seul l'appel complet est soumis",
+    of(once.seen, "permission").length === 1 && (onceRequest.proposal || {}).after === "entier\n"
+      && of(once.seen, "reply_discarded").length === 1 && of(once.seen, "notice").some((event) => /coupée avant la fin d'un appel d'outil/.test(event.text))
+      && fs.existsSync(onceFile) && fs.readFileSync(onceFile, "utf8") === "entier\n" && of(once.seen, "error").length === 0,
+    JSON.stringify(once.seen.filter((event) => ["permission", "notice", "reply_discarded", "error", "tool_result"].includes(event.type)).slice(-6)).slice(0, 600));
+  once.instance.stop();
+
+  const always = await startAsking("ollama:coupe");
+  await always.instance.send("Crée ce fichier [mock:write notes/jamais.txt=rien]");
+  await wait("question sur le modèle", () => of(always.seen, "model_question").length > 0, 160);
+  const stuckQuestion = of(always.seen, "model_question")[0] || {};
+  if (stuckQuestion.id !== undefined) await always.instance.request("POST", "/api/model-question", { id: stuckQuestion.id, decision: "stop" });
+  await wait("fin du tour arrêté", () => of(always.seen, "turn_done").length > 0, 160);
+  check("des appels toujours coupés : deux nouveaux essais, puis la question à l'utilisateur, sans rien autoriser",
+    /s'arrêtent avant la fin des appels d'outils/.test(stuckQuestion.reason || "") && of(always.seen, "permission").length === 0
+      && of(always.seen, "notice").filter((event) => /coupée avant la fin d'un appel d'outil/.test(event.text)).length === 2
+      && !fs.existsSync(path.join(cwd, "notes", "jamais.txt")),
+    JSON.stringify([stuckQuestion, of(always.seen, "notice").map((event) => event.text), of(always.seen, "permission").length]).slice(0, 600));
+  always.instance.stop();
+
+  const limited = await startAsking("ollama:limite");
+  await limited.instance.send("Crée ce fichier [mock:write notes/limite.txt=contenu trop long pour la sortie]");
+  await wait("fin du tour après la limite de sortie", () => of(limited.seen, "turn_done").length > 0, 160);
+  const limitResult = of(limited.seen, "tool_result").pop() || {};
+  check("un appel coupé par la limite de sortie n'est ni autorisé ni exécuté, et le modèle apprend pourquoi",
+    limitResult.is_error === true && /reached the output limit before the arguments of `write_file`/.test(limitResult.output || "")
+      && of(limited.seen, "permission").length === 0 && of(limited.seen, "model_question").length === 0
+      && !fs.existsSync(path.join(cwd, "notes", "limite.txt")),
+    JSON.stringify([limitResult, of(limited.seen, "permission").length]).slice(0, 500));
+  limited.instance.stop();
+
   // Avec "modelSwitch": "auto", la requête repart d'elle-même sur le modèle de secours.
   const fragile = new ClawServer({
     clawPath: claw,

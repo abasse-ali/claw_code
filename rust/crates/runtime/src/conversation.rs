@@ -130,6 +130,13 @@ pub trait ToolExecutor {
     /// l'interface, qui l'a déjà affiché, peut le clore. `reason` est le
     /// résultat rendu au modèle.
     fn skipped(&mut self, _tool_name: &str, _input: &str, _reason: &str) {}
+
+    /// Ce qui rend l'appel inexécutable (argument obligatoire absent, JSON
+    /// invalide), dit au modèle. Rien n'est alors demandé à l'utilisateur :
+    /// on n'autorise pas un appel vide.
+    fn invalid_input(&mut self, _tool_name: &str, _input: &str) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -723,6 +730,39 @@ where
         Ok(user_message)
     }
 
+    /// Arguments, autorisation puis hook `PreToolUse` d'un appel d'un lot : les
+    /// messages du hook s'il peut être exécuté, sinon la raison rendue au modèle.
+    fn admit_tool_call(
+        &mut self,
+        name: &str,
+        input: &str,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> Result<Vec<String>, String> {
+        if let Some(problem) = self.tool_executor.invalid_input(name, input) {
+            return Err(problem);
+        }
+        let mut notifying = prompter.as_mut().map(|prompt| NotifyingPrompter {
+            hooks: &self.hook_runner,
+            inner: &mut **prompt,
+        });
+        let outcome = self.permission_policy.authorize(
+            name,
+            input,
+            notifying
+                .as_mut()
+                .map(|prompt| prompt as &mut dyn PermissionPrompter),
+        );
+        if let PermissionOutcome::Deny { reason } = outcome {
+            return Err(reason);
+        }
+        let pre = self.hook_runner.run_pre_tool_use(name, input);
+        if pre.is_denied() {
+            let fallback = format!("hook PreToolUse : outil `{name}` refusé");
+            return Err(format_hook_message(&pre, &fallback));
+        }
+        Ok(pre.messages().to_vec())
+    }
+
     /// Plusieurs appels sans effet (sous-agents, lectures, recherches) : les
     /// autorisations et hooks restent séquentiels, l'exécution est simultanée.
     /// Renvoie faux si le lot ne s'y prête pas (traitement appel par appel).
@@ -746,19 +786,12 @@ where
         let mut ready = Vec::new();
         let mut pre_messages = Vec::new();
         for (index, (id, name, input)) in calls.iter().enumerate() {
-            let mut notifying = prompter.as_mut().map(|prompt| NotifyingPrompter {
-                hooks: &self.hook_runner,
-                inner: &mut **prompt,
-            });
-            let outcome = self.permission_policy.authorize(
-                name,
-                input,
-                notifying
-                    .as_mut()
-                    .map(|prompt| prompt as &mut dyn PermissionPrompter),
-            );
-            match outcome {
-                PermissionOutcome::Deny { reason } => {
+            match self.admit_tool_call(name, input, prompter) {
+                Ok(messages) => {
+                    ready.push(index);
+                    pre_messages.push(messages);
+                }
+                Err(reason) => {
                     self.tool_executor.skipped(name, input, &reason);
                     results[index] = Some(ConversationMessage::tool_result(
                         id.clone(),
@@ -766,23 +799,6 @@ where
                         reason,
                         true,
                     ));
-                }
-                PermissionOutcome::Allow => {
-                    let pre = self.hook_runner.run_pre_tool_use(name, input);
-                    if pre.is_denied() {
-                        let fallback = format!("hook PreToolUse : outil `{name}` refusé");
-                        let reason = format_hook_message(&pre, &fallback);
-                        self.tool_executor.skipped(name, input, &reason);
-                        results[index] = Some(ConversationMessage::tool_result(
-                            id.clone(),
-                            name.clone(),
-                            reason,
-                            true,
-                        ));
-                    } else {
-                        ready.push(index);
-                        pre_messages.push(pre.messages().to_vec());
-                    }
                 }
             }
         }
@@ -1284,6 +1300,10 @@ where
         input: &str,
         prompter: Option<&mut dyn PermissionPrompter>,
     ) -> ConversationMessage {
+        if let Some(problem) = self.tool_executor.invalid_input(&tool_name, input) {
+            self.tool_executor.skipped(&tool_name, input, &problem);
+            return ConversationMessage::tool_result(tool_use_id, tool_name, problem, true);
+        }
         let mut notifying = prompter.map(|prompt| NotifyingPrompter {
             hooks: &self.hook_runner,
             inner: prompt,
@@ -1838,6 +1858,86 @@ mod tests {
         assert_eq!(
             *seen.lock().expect("journal"),
             ["écarté blocked (secret) : not now"]
+        );
+    }
+
+    #[test]
+    fn a_call_with_unusable_arguments_fails_without_asking_for_permission() {
+        struct NeverAsked;
+        impl PermissionPrompter for NeverAsked {
+            fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
+                panic!(
+                    "aucune autorisation ne se demande pour un appel vide : {}",
+                    request.tool_name
+                );
+            }
+        }
+
+        struct EmptyCall;
+        impl ApiClient for EmptyCall {
+            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                let answered = request
+                    .messages
+                    .iter()
+                    .any(|message| message.role == MessageRole::Tool);
+                Ok(if answered {
+                    vec![
+                        AssistantEvent::TextDelta("Entendu.".to_string()),
+                        AssistantEvent::MessageStop,
+                    ]
+                } else {
+                    vec![
+                        AssistantEvent::ToolUse {
+                            id: "tool-1".to_string(),
+                            name: "edit_file".to_string(),
+                            input: "{}".to_string(),
+                        },
+                        AssistantEvent::MessageStop,
+                    ]
+                })
+            }
+        }
+
+        /// Outil dont les arguments vides sont refusés avant toute exécution.
+        struct Strict(Vec<String>);
+        impl super::ToolExecutor for Strict {
+            fn execute(
+                &mut self,
+                tool_name: &str,
+                _input: &str,
+            ) -> Result<String, super::ToolError> {
+                self.0.push(format!("exécuté {tool_name}"));
+                Ok(String::new())
+            }
+
+            fn skipped(&mut self, tool_name: &str, _input: &str, reason: &str) {
+                self.0.push(format!("écarté {tool_name} : {reason}"));
+            }
+
+            fn invalid_input(&mut self, _tool_name: &str, input: &str) -> Option<String> {
+                (input == "{}").then(|| "arguments absents".to_string())
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            EmptyCall,
+            Strict(Vec::new()),
+            PermissionPolicy::new(PermissionMode::Prompt)
+                .with_tool_requirement("edit_file", PermissionMode::WorkspaceWrite),
+            vec!["system".to_string()],
+        );
+        let summary = runtime
+            .run_turn("modifie", Some(&mut NeverAsked))
+            .expect("le tour continue après un appel vide");
+
+        assert!(matches!(
+            &summary.tool_results[0].blocks[0],
+            ContentBlock::ToolResult { is_error: true, output, .. } if output.starts_with("arguments absents")
+        ));
+        assert_eq!(
+            runtime.tool_executor.0,
+            ["écarté edit_file : arguments absents"]
         );
     }
 

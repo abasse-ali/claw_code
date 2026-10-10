@@ -396,6 +396,13 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
   continue. `"modelSwitch": "auto"` (ou `CLAW_MODEL_SWITCH=auto`) rétablit la bascule sans
   question décrite ci-dessous ; elle s'applique aussi d'office quand personne n'est là pour
   répondre (`claw prompt` dans un script, action GitHub, sous-agents).
+- **Appel d'outil coupé** : il arrive qu'un fournisseur close la réponse juste après le nom de
+  l'outil, avant ses arguments. Claw ne prend pas cet appel vide pour un vrai : la réponse est
+  redemandée deux fois au même modèle, puis la barre vous propose de réessayer, de changer de
+  modèle ou d'arrêter. Si c'est la limite de sortie du modèle qui a coupé les arguments, rien
+  n'est exécuté et le modèle est invité à envoyer un appel plus petit. Dans tous les cas, un
+  appel sans ses arguments obligatoires (ou au JSON invalide) revient au modèle avec ce qu'il
+  manque, **sans vous demander d'autorisation** pour une modification vide.
 - **Bascule automatique** : si le modèle répond « quota atteint » (429), est indisponible ou si le
   serveur est arrêté, la requête part sur le modèle suivant : `"fallbackModels": ["groq:llama-3.3-70b-versatile", "ollama:qwen2.5-coder:7b"]`
   (ou `CLAW_FALLBACK_MODELS`, liste séparée par des virgules). Sans liste, un modèle gratuit

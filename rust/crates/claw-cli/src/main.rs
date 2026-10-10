@@ -15,6 +15,7 @@ mod models;
 mod questions;
 mod render;
 mod stream_json;
+mod tool_input;
 mod transcript;
 mod turn_keys;
 mod user_env;
@@ -5577,6 +5578,40 @@ impl DefaultRuntimeClient {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone_from(&next.to_string());
     }
+
+    /// Un appel d'outil sans arguments complets dans une réponse qui ne s'est
+    /// pas terminée sur un appel d'outil : elle a été coupée. Par la limite de
+    /// sortie, l'appel est marqué et le modèle apprendra quoi faire ; sinon
+    /// c'est une erreur, et la réponse est redemandée.
+    fn check_cut_calls(
+        tool_registry: &GlobalToolRegistry,
+        events: &mut [AssistantEvent],
+        stop_reason: Option<&str>,
+    ) -> Result<(), RuntimeError> {
+        if stop_reason == Some("tool_use") {
+            return Ok(());
+        }
+        let mut definitions = None;
+        for event in events {
+            let AssistantEvent::ToolUse { name, input, .. } = event else {
+                continue;
+            };
+            let required = definitions
+                .get_or_insert_with(|| tool_registry.definitions(None))
+                .iter()
+                .find(|definition| definition.name == *name)
+                .map(|definition| tool_input::required_arguments(&definition.input_schema))
+                .unwrap_or_default();
+            match tool_input::cut_call(stop_reason, input, &required) {
+                None => {}
+                Some(tool_input::Cut::OutputLimit) => *input = tool_input::output_limit_marker(),
+                Some(tool_input::Cut::Unfinished) => {
+                    return Err(RuntimeError::new(tool_input::unfinished_error(name, input)));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 // Anthropic garde son flux d'authentification (clé API ou OAuth sauvegardé) ;
@@ -5795,6 +5830,7 @@ impl ApiClient for DefaultRuntimeClient {
                 // plusieurs appels d'outils en parallèle dont les deltas s'entrelacent.
                 let mut pending_tools = PendingTools::new();
                 let mut saw_stop = false;
+                let mut stop_reason: Option<String> = None;
                 let mut signed_thinking = SignedThinking::new();
                 // Ni tiret cadratin ni emoji dans ce que Claw écrit ; la réflexion
                 // signée, elle, est renvoyée telle quelle au fournisseur.
@@ -5920,6 +5956,9 @@ impl ApiClient for DefaultRuntimeClient {
                             }
                         }
                         ApiStreamEvent::MessageDelta(delta) => {
+                            if delta.delta.stop_reason.is_some() {
+                                stop_reason.clone_from(&delta.delta.stop_reason);
+                            }
                             events.push(AssistantEvent::Usage(TokenUsage {
                                 input_tokens: delta.usage.input_tokens,
                                 output_tokens: delta.usage.output_tokens,
@@ -5944,6 +5983,7 @@ impl ApiClient for DefaultRuntimeClient {
                 answer
                     .finish_line(out)
                     .map_err(|error| RuntimeError::new(error.to_string()))?;
+                Self::check_cut_calls(&self.tool_registry, &mut events, stop_reason.as_deref())?;
 
                 if !saw_stop
                     && events.iter().any(|event| {
@@ -6006,7 +6046,13 @@ impl ApiClient for DefaultRuntimeClient {
                     if let Some(observer) = &self.observer {
                         observer.reply_discarded();
                     }
-                    notify("Connexion coupée pendant la réponse : nouvelle tentative");
+                    notify(
+                        if error.to_string().contains(tool_input::UNFINISHED_REPLY) {
+                            "Réponse du modèle coupée avant la fin d'un appel d'outil : nouvelle tentative"
+                        } else {
+                            "Connexion coupée pendant la réponse : nouvelle tentative"
+                        },
+                    );
                     std::thread::sleep(Duration::from_millis(1_500));
                     if emit {
                         live::show("Réflexion…");
@@ -6015,7 +6061,9 @@ impl ApiClient for DefaultRuntimeClient {
                 // Quelqu'un est là pour décider : le même modèle reprend, et
                 // Claw demande avant d'en changer.
                 Err(error) if self.model_prompter.is_some() => {
-                    let Some(reason) = api::model_failure_reason(&error.to_string()) else {
+                    let Some(reason) = api::model_failure_reason(&error.to_string())
+                        .or_else(|| tool_input::unfinished_reason(&error.to_string()))
+                    else {
                         return Err(error);
                     };
                     let Some(prompter) = self.model_prompter.clone() else {
@@ -6156,6 +6204,8 @@ fn is_broken_stream(error: &str) -> bool {
         "unexpected eof",
         "incomplete message",
         "broken pipe",
+        // Réponse close avant la fin d'un appel d'outil (`tool_input`).
+        tool_input::UNFINISHED_REPLY,
     ]
     .iter()
     .any(|needle| lower.contains(needle))
@@ -6732,6 +6782,18 @@ impl ToolExecutor for CliToolExecutor {
         if let Some(observer) = &self.observer {
             observer.tool_result(tool_name, reason, true);
         }
+    }
+
+    /// Arguments obligatoires absents, JSON invalide ou appel coupé : l'erreur
+    /// va au modèle sans qu'une autorisation soit demandée pour un appel vide.
+    fn invalid_input(&mut self, tool_name: &str, input: &str) -> Option<String> {
+        let required = self
+            .tool_registry
+            .definitions(None)
+            .iter()
+            .find(|definition| definition.name == tool_name)
+            .map(|definition| tool_input::required_arguments(&definition.input_schema))?;
+        tool_input::problem(tool_name, input, &required)
     }
 
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {

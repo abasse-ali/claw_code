@@ -1121,11 +1121,11 @@
       parts.body.append(io);
       parts.output = { row: output, pre: result };
       toggleStep(parts.step, true);
-    } else if (name === "edit_file" && value) {
+    } else if (name === "edit_file" && value && (value.old_string !== undefined || value.new_string !== undefined)) {
       const { box, added, removed } = diffView(value.old_string, value.new_string);
       parts.body.append(box);
       parts.summary = '<span class="add">+' + added + '</span> <span class="del">−' + removed + "</span>";
-    } else if (name === "write_file" && value) {
+    } else if (name === "write_file" && value && value.content !== undefined) {
       const lines = String(value.content || "").split("\n");
       const pre = el("pre");
       pre.innerHTML = highlight(lines.slice(0, 120).join("\n") + (lines.length > 120 ? "\n…" : ""), String(value.path || "").split(".").pop());

@@ -19,6 +19,9 @@
 // fournisseur lâche : erreur 504 envoyée dans le flux, comme le fait OpenRouter.
 // « panne-une-fois » ne lâche qu'à sa première requête, puis répond.
 // Avec « outil » dans le nom, la panne arrive après l'annonce d'un appel d'outil.
+// Un modèle « coupe » clôt sa réponse après le nom de l'outil, sans arguments
+// (« coupe-une-fois » : à son premier appel seulement) ; un modèle « limite »
+// l'arrête au milieu des arguments, limite de sortie atteinte.
 // Un modèle dont le nom contient « strict » refuse tout champ inconnu, comme
 // l'API de Mistral : une requête avec stream_options reçoit une erreur 422.
 "use strict";
@@ -171,6 +174,23 @@ function streamFailure(response, model, answer) {
   response.end("data: [DONE]\n\n");
 }
 
+/**
+ * Appel d'outil que le fournisseur ne termine pas : le nom arrive, puis la
+ * réponse se clôt. « stop » : aucun argument. « length » : arguments tronqués
+ * par la limite de sortie du modèle.
+ */
+function streamCut(response, model, answer, finishReason) {
+  response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+  const base = { id: "chatcmpl-mock", object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model };
+  const whole = answer.toolCall.arguments;
+  const sent = finishReason === "length" ? whole.slice(0, Math.ceil(whole.length / 2)) : "";
+  response.write(chunk({ ...base, choices: [{ index: 0, delta: { role: "assistant", reasoning: "Je prépare l'appel. " }, finish_reason: null }] }));
+  response.write(chunk({ ...base, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: answer.toolCall.id, type: "function", function: { name: answer.toolCall.name, arguments: sent } }] }, finish_reason: null }] }));
+  response.write(chunk({ ...base, choices: [{ index: 0, delta: {}, finish_reason: finishReason }] }));
+  response.write(chunk({ ...base, choices: [], usage: { prompt_tokens: 12, completion_tokens: 7, total_tokens: 19 } }));
+  response.end("data: [DONE]\n\n");
+}
+
 function jsonReply(response, model, answer) {
   const message = answer.toolCall
     ? { role: "assistant", content: null, tool_calls: [{ id: answer.toolCall.id, type: "function", function: { name: answer.toolCall.name, arguments: answer.toolCall.arguments } }] }
@@ -232,7 +252,14 @@ const server = http.createServer((request, response) => {
     const once = String(model).includes("panne-une-fois");
     const fails = String(model).includes("panne") && !(once && failedOnce.has(model));
     if (once) failedOnce.add(model);
+    // Appel d'outil non terminé : sans arguments (« coupe ») ou tronqué (« limite »).
+    const cutOnce = String(model).includes("coupe-une-fois");
+    let cut = null;
+    if (answer.toolCall && String(model).includes("limite")) cut = "length";
+    else if (answer.toolCall && String(model).includes("coupe") && !(cutOnce && failedOnce.has(model))) cut = "stop";
+    if (cut && cutOnce) failedOnce.add(model);
     if (body.stream && fails) streamFailure(response, model, answer);
+    else if (body.stream && cut) streamCut(response, model, answer, cut);
     else if (body.stream) streamReply(response, model, answer);
     else jsonReply(response, model, answer);
   });
