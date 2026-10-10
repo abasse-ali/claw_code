@@ -90,8 +90,16 @@ sombre ou claire (thème du système, de VS Code ou choisi) :
 - réponses en direct (seule la fin du message est re-rendue pendant le flux) avec Markdown,
   tableaux et code coloré avec bouton « Copier » ;
 - **frise des étapes de l'agent** : une ligne par outil (icône, cible, durée, `+3 −1` pour une
-  modification), dépliable sur le diff ligne à ligne, la sortie, le contenu lu ou la liste de
-  tâches ; la barre d'activité au-dessus de la saisie dit ce que fait l'agent ;
+  modification), dépliable sur la sortie, le contenu lu ou la liste de tâches ; la barre
+  d'activité au-dessus de la saisie dit ce que fait l'agent ;
+- **modifications en deux blocs, AVANT et APRÈS**, ouvertes d'emblée : les lignes retirées en
+  rouge, les lignes ajoutées en vert, le contexte en gris. Pour un fichier écrit en entier, AVANT
+  montre l'ancien contenu (ou « nouveau fichier ») et APRÈS le nouveau, coloré ; au-delà de
+  12 lignes, un bloc se replie (« Afficher les N lignes ») ;
+- **flèche du haut dans la zone de saisie** : reprend vos demandes précédentes, de la plus récente
+  à la plus ancienne (100 gardées d'une session à l'autre) ; la flèche du bas redescend jusqu'au
+  brouillon en cours. Dans un texte de plusieurs lignes, les flèches déplacent le curseur tant
+  qu'il n'est pas sur la première (ou la dernière) ligne ;
 - **une seule zone pour tout ce qui attend votre réponse**, épinglée au-dessus de la saisie et
   toujours visible : rien ne reste dans la conversation une fois répondu.
   - **Autorisations** : `Entrée` autoriser, `A` toujours, `Échap` refuser, ou « Refuser avec une
@@ -456,6 +464,17 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
   paramètre `tools` (et reste retenu), ou avec `"toolMode": "text"` / `CLAW_TOOL_MODE=text`.
 - Un appel écrit en JSON brut au lieu d'un appel natif (`{"name": "read_file", "arguments": …}`,
   fréquent avec Ollama) est reconnu s'il forme toute la réponse et nomme un outil proposé.
+- Un appel écrit à la manière de Claude (`<invoke name="edit_file"><parameter name="path">…`),
+  dans une balise quelconque (`<function_calls>`, `<dots_function_call>`…), devient un vrai appel
+  d'outil : dans la réponse, s'il la termine (le XML ne s'affiche pas), et dans le raisonnement
+  quand la réponse n'a ni texte ni appel (un modèle de la session de test y avait écrit sa
+  modification, perdue). Il doit nommer un outil proposé, être complet (un appel coupé par la
+  limite de sortie n'écrirait qu'un fichier tronqué) et ne pas être un exemple dans un bloc de
+  code. Un résultat que le modèle inventerait à la suite est écarté.
+- Une réponse faite seulement de raisonnement, sans texte ni appel d'outil, compte comme vide :
+  Claw relance le modèle une fois au lieu de terminer le tour sans rien dire.
+- Les descriptions de `edit_file` et `write_file` disent quand utiliser l'un ou l'autre : une
+  modification courte et exacte d'un fichier existant, ou le contenu complet d'un fichier.
 
 ### Aides au raisonnement
 
@@ -473,21 +492,35 @@ applique**, quel que soit le modèle.
 | Chemins | Un chemin inventé (`/workspace/src/a.py`, `/c/…`, `/mnt/c/…`) est retrouvé s'il existe dans le projet ; sinon l'erreur donne le dossier de travail et les fichiers au nom proche | `CLAW_PATH_HELP=0` |
 | Outils utiles seulement | Les outils rarement utiles ne sont proposés que lorsqu'ils servent (`BashOutput` s'il y a une tâche de fond, `NotebookEdit` s'il y a un notebook…) | `CLAW_TOOL_DIET=0` |
 | Raisonnement conservé | Le raisonnement du modèle est renvoyé à l'étape suivante du même tour (OpenRouter), au lieu d'être perdu entre deux appels d'outils | `CLAW_REASONING_PASSBACK=0` |
-| Relecture | Avant de rendre la main, les modifications d'au moins 5 lignes sont relues par **un autre modèle** ; ses remarques repartent au modèle, une fois par tour | `CLAW_REVIEW=0` ou `"review": false` |
+| Relecture | Avant de rendre la main, les modifications d'au moins 5 lignes sont relues par **un autre modèle**, avec la réponse que l'agent s'apprête à vous donner : le relecteur signale aussi ce qu'elle affirme sans que les modifications le montrent. Après un message court (« reprendre », « continue »), il reçoit aussi la demande que ce message poursuit. Ses remarques repartent au modèle, une fois par tour | `CLAW_REVIEW=0` ou `"review": false` |
 | Conseil | Au deuxième échec de la vérification, ou au deuxième recadrage, un autre modèle lit la fin de la session et donne son diagnostic | `CLAW_COUNCIL=0` |
 | Second avis | L'outil `Consult` (et `/avis <question>`) pose la même question à plusieurs autres modèles ; l'agent compare et décide | `CLAW_COUNCIL=0` |
 | Leçons | L'outil `Remember` note une leçon utile au projet dans `.claw/lessons.md` (80 au plus), relue au début de chaque session | `CLAW_LESSONS=0` |
 | Modèle de planification | En mode plan, `"plannerModel"` réfléchit à la place du modèle de la session, qui exécute ensuite le plan approuvé | `CLAW_PLANNER=0` |
 | Escalade | Au deuxième échec de la vérification, ou au deuxième recadrage, Claw vous propose de confier la suite à un autre modèle (le gratuit le plus puissant en premier) ; sans réponse en 60 s, le même modèle continue. Avec `"modelSwitch": "auto"` ou sans personne pour répondre, **le modèle gratuit le plus puissant du moment** reprend la fin du tour ; le tour suivant repart avec le modèle habituel. Sans réglage à faire, et jamais vers un modèle payant | `CLAW_ESCALATION=0` |
 | Erreurs de l'éditeur | Avec l'extension VS Code : quand le tour a modifié des fichiers, Claw demande à l'éditeur les erreurs qu'il y voit (compilation, types, lint) et les renvoie au modèle, deux fois au plus par tour. L'outil `EditorDiagnostics` permet aussi au modèle de les lire quand il veut | `CLAW_EDITOR_DIAGNOSTICS=0` |
-| Contrôle des exigences | Quand le tour a modifié au moins 5 lignes et que la vérification passe, le modèle liste chaque exigence de la demande et de la documentation du code (cas limites compris), retrouve le code qui la couvre et la façon dont elle est vérifiée (un test existant, une commande lancée, ou le code lui-même), et corrige ce qui manque, avant la relecture. Il n'invente ni tests ni résultats. Une requête de plus par tour concerné | `CLAW_CHECKLIST=0` |
+| Contrôle des exigences | Quand le tour a modifié au moins 5 lignes et que la vérification passe, le modèle liste chaque partie de la demande (chaque page, fonction, fichier ou explication demandée ; après « reprendre », la demande poursuivie) et chaque exigence de la documentation du code (cas limites compris), puis donne pour chacune sa preuve : le code qui la couvre et le test ou la commande qui montre qu'elle marche. Ce qui manque est fait tout de suite, pas annoncé ni laissé à l'utilisateur. Sa réponse finale ne peut affirmer que ce que ce contrôle a établi, et nomme ce qui n'est pas fait ou pas vérifié. Il n'invente ni tests ni résultats. Une requête de plus par tour concerné | `CLAW_CHECKLIST=0` |
 | Contexte allégé | Les résultats d'outils gardés dans la session ne répètent pas au modèle ce qu'il vient d'écrire (ancien et nouveau texte d'une modification, contenu d'un fichier écrit, état du bac à sable d'une commande) | `CLAW_LEAN_RESULTS=0` |
+| Persévérance | Le modèle veut s'arrêter juste après au moins deux échecs d'outils d'affilée (commande en erreur, modification ratée) : Claw le renvoie une fois chercher une autre voie (corriger la commande, un autre outil, une étape plus petite) au lieu de vous dire « lancez-le dans votre terminal ». Ce n'est qu'ensuite qu'il explique ce qui bloque et ce que vous devez faire. Un appel que vous avez refusé n'est jamais compté : l'agent n'insiste pas | `CLAW_PERSISTENCE=0` |
 
 **Méthode de réflexion.** Les consignes de Claw demandent au modèle de réfléchir avant d'agir :
-partir de ce qui est vraiment demandé, travailler sur des preuves (lire le code, lancer les
-tests) plutôt que de mémoire, trouver la cause d'un bogue avant de modifier quoi que ce soit et
-chercher le même défaut ailleurs, peser les conséquences de chaque changement, expliquer un
-résultat inattendu avant de réessayer, et relire son travail avant de conclure.
+partir de ce qui est vraiment demandé (chaque partie de la demande), travailler sur des preuves
+(lire le code, lancer les tests) plutôt que de mémoire, trouver la cause d'un bogue avant de
+modifier quoi que ce soit et chercher le même défaut ailleurs, peser les conséquences de chaque
+changement, expliquer un résultat inattendu avant de réessayer, et relire son travail avant de
+conclure. Elles tirent aussi les leçons d'une vraie session où le modèle avait été trop mou : un
+échec est une information et non une raison de vous rendre le travail ; faire au lieu d'annoncer
+(pas de tour qui se termine sur un plan ou une liste d'étapes qu'il pouvait mener lui-même) ;
+obtenir toutes les erreurs d'un coup (vérificateur de types, compilation, tests) au lieu de les
+découvrir une compilation à la fois ; vérifier le comportement et pas seulement que le code se
+charge ; n'affirmer dans la réponse finale que ce que les fichiers et les commandes montrent.
+Le raisonnement doit servir à décider (faits, hypothèses, preuves, décision), pas à raconter ce
+qui va suivre.
+
+**De la place pour réfléchir.** Sans réglage, un modèle OpenRouter qui sait raisonner reçoit
+l'effort `high`, et la limite de sortie suit son catalogue jusqu'à 65 536 jetons (32 768 avant) :
+le raisonnement compte dans cette limite, et un plafond trop bas coupait l'appel d'outil qui
+suivait une longue réflexion.
 
 **Une réponse finale en forme de compte rendu.** Le modèle termine par une seule réponse,
 écrite pour vous qui n'avez pas suivi ses étapes : le résultat d'abord, puis ce qui n'allait pas
@@ -495,8 +528,8 @@ et pourquoi, la solution apportée à chaque problème, ce qui a été vérifié
 été), et ce qu'il vous reste à faire. Une question simple reçoit une ou deux phrases, pas un
 rapport.
 
-**Une seule réponse finale.** Quand un contrôle renvoie le modèle au travail (vérification en
-échec, erreurs de l'éditeur, exigences, relecture), la réponse qu'il venait de donner n'était que
+**Une seule réponse finale.** Quand un contrôle renvoie le modèle au travail (abandon sur des
+échecs, vérification en échec, erreurs de l'éditeur, exigences, relecture), la réponse qu'il venait de donner n'était que
 provisoire. Claw lui demande alors de terminer par une réponse complète pour vous : ce qui a été
 fait, et tout ce que vous aviez demandé d'expliquer (comment installer, lancer ou tester), sans
 parler du contrôle que vous n'avez pas vu. Dans l'interface web et le panneau de VS Code, les

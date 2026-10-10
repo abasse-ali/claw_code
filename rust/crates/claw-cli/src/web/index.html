@@ -54,7 +54,7 @@
        seuls les contenus utiles à copier restent sélectionnables. */
     -webkit-user-select: none; user-select: none;
   }
-  .user, .md, .step-body, .card pre, .card .hint, .ask pre, .ask .question, .diff, .dialog .big, .dialog .rows, .dialog .link, .dialog .name, .dialog .ident, .dialog .desc, input, textarea {
+  .user, .md, .step-body, .card pre, .card .hint, .ask pre, .ask .question, .dialog .big, .dialog .rows, .dialog .link, .dialog .name, .dialog .ident, .dialog .desc, input, textarea {
     -webkit-user-select: text; user-select: text;
   }
   button, .codehead, .copy { -webkit-user-select: none; user-select: none; }
@@ -273,18 +273,20 @@
   .step-body .io pre.io-v.err { color: var(--err); }
   .io-v .spin { margin: 2px 0; }
   .io-more { margin: 0 0 8px; font-size: 12px; color: var(--accent); justify-self: start; }
+  /* Modification : un bloc « avant », un bloc « après », lignes changées surlignées. */
+  .step-body .io .ba { margin: 0; padding: 8px 12px 8px 0; min-width: 0; font-family: var(--mono); font-size: 12.3px; line-height: 1.5; }
+  .step-body .io .ba div { white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 6px; border-radius: 3px; }
+  .step-body .io .ba .del { background: var(--del-bg); }
+  .step-body .io .ba .add { background: var(--add-bg); }
+  .step-body .io .ba .same { color: var(--text-2); }
+  .step-body .io .ba .none { color: var(--text-3); font-family: var(--font); padding: 0; }
+  .step-body .io .ba.clipped { max-height: 12.6em; overflow: hidden; mask-image: linear-gradient(#000 70%, transparent); }
   .io-more:hover { text-decoration: underline; }
   .step-body .label { font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); }
   .step-body pre { margin: 0; padding: 10px 12px; background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-sm); font-size: 12.3px; line-height: 1.5; overflow: auto; max-height: 380px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .step-body pre.stderr { color: var(--err); }
   .step-body .note { font-size: 12.5px; color: var(--text-2); }
   .step-body .claw-note { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); white-space: pre-wrap; }
-  .diff { border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--code-bg); overflow: auto; max-height: 420px; font-family: var(--mono); font-size: 12.3px; line-height: 1.5; padding: 6px 0; }
-  .diff div { padding: 0 12px 0 28px; white-space: pre-wrap; overflow-wrap: anywhere; position: relative; }
-  .diff div::before { position: absolute; left: 10px; color: var(--text-3); }
-  .diff .add { background: var(--add-bg); } .diff .add::before { content: "+"; color: var(--ok); }
-  .diff .del { background: var(--del-bg); } .diff .del::before { content: "−"; color: var(--err); }
-  .diff .same { color: var(--text-2); }
   .todos { display: flex; flex-direction: column; gap: 4px; }
   .todo { display: flex; gap: 8px; align-items: flex-start; font-size: 13.5px; }
   .todo .box { width: 16px; height: 16px; border-radius: 5px; border: 1.5px solid var(--border-strong); flex: none; margin-top: 3px; display: grid; place-items: center; }
@@ -911,7 +913,50 @@
   }
 
   // ---------------------------------------------------------------- messages
+  // Demandes déjà envoyées, la plus récente en dernier : la flèche du haut
+  // dans la zone de saisie les reprend, comme dans un terminal.
+  let promptHistory = [];
+  try { promptHistory = JSON.parse(store.get("claw-prompts") || "[]").filter((item) => typeof item === "string"); } catch (_) { promptHistory = []; }
+  let historyAt = null, historyDraft = "";
+  function rememberPrompt(text) {
+    const prompt = String(text || "").trim();
+    if (!prompt) return;
+    promptHistory = promptHistory.filter((item) => item !== prompt).concat(prompt).slice(-100);
+    store.set("claw-prompts", JSON.stringify(promptHistory));
+  }
+  // direction -1 : demande plus ancienne ; +1 : plus récente, puis le brouillon.
+  // Renvoie vrai si la flèche a servi à cela (sinon elle déplace le curseur).
+  function recallPrompt(direction) {
+    const value = input.value, caret = input.selectionStart;
+    if (caret !== input.selectionEnd) return false;
+    if (direction < 0) {
+      // Depuis la première ligne seulement : ailleurs, la flèche remonte dans le texte.
+      if (value.slice(0, caret).includes("\n")) return false;
+      if (historyAt === null) {
+        if (!promptHistory.length) return false;
+        historyDraft = value;
+        historyAt = promptHistory.length;
+      }
+      if (historyAt === 0) return true;
+      historyAt -= 1;
+    } else {
+      if (historyAt === null || value.slice(caret).includes("\n")) return false;
+      historyAt += 1;
+    }
+    const back = historyAt >= promptHistory.length;
+    const next = back ? historyDraft : promptHistory[historyAt];
+    if (back) historyAt = null;
+    input.value = next;
+    hideSuggestions();
+    autoGrow();
+    // Curseur au début en remontant, à la fin en redescendant : la même
+    // flèche continue de parcourir les demandes.
+    const at = direction < 0 ? 0 : next.length;
+    input.setSelectionRange(at, at);
+    return true;
+  }
   function addUser(text, at) {
+    rememberPrompt(text);
     const node = el("div", "user", text);
     if (at) node.dataset.time = new Date(at).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
     if (text.length > 700) {
@@ -1084,14 +1129,71 @@
     while (j < m) out.push(["+", b[j++]]);
     return out;
   }
-  function diffView(oldText, newText) {
-    const box = el("div", "diff");
+  // Un bloc d'une modification : ses lignes ([classe, texte]), replié s'il est long.
+  function changeBlock(label, lines, empty) {
+    const row = el("div", "io-row");
+    const block = el("div", "io-v ba");
+    for (const [kind, text] of lines) block.appendChild(el("div", kind, text || " "));
+    if (!lines.length) block.appendChild(el("div", "none", empty || "(rien)"));
+    row.append(el("span", "io-k", label), block);
+    clipBlock(row, block, lines.length);
+    return { row, block };
+  }
+  function clipBlock(row, block, count) {
+    if (count <= 12) return;
+    block.classList.add("clipped");
+    const more = el("button", "io-more", "Afficher les " + count + " lignes");
+    more.type = "button";
+    more.onclick = () => { block.classList.remove("clipped"); more.remove(); };
+    row.append(el("span"), more);
+  }
+  // Modification : le texte d'avant et celui d'après, chacun dans son bloc,
+  // comme l'entrée et la sortie d'une commande.
+  function beforeAfterView(oldText, newText) {
+    const before = [], after = [];
     let added = 0, removed = 0;
     for (const [kind, text] of lineDiff(oldText, newText)) {
-      box.appendChild(el("div", kind === "+" ? "add" : kind === "-" ? "del" : "same", text || " "));
-      if (kind === "+") added++; else if (kind === "-") removed++;
+      if (kind === "-") { before.push(["del", text]); removed++; }
+      else if (kind === "+") { after.push(["add", text]); added++; }
+      else { before.push(["same", text]); after.push(["same", text]); }
     }
-    return { box, added, removed };
+    const box = el("div", "io");
+    box.append(
+      changeBlock("AVANT", oldText ? before : [], "(rien : le texte est ajouté)").row,
+      changeBlock("APRÈS", newText ? after : [], "(rien : le texte est retiré)").row,
+    );
+    return { box, added: newText ? added : 0, removed: oldText ? removed : 0 };
+  }
+  // Écriture d'un fichier : son contenu d'après ; l'avant est connu au résultat.
+  function writeView(content, path) {
+    // Le retour à la ligne final ne fait pas une ligne de plus.
+    const lines = String(content || "").replace(/\n$/, "").split("\n");
+    const box = el("div", "io");
+    const before = changeBlock("AVANT", [], "…");
+    const row = el("div", "io-row");
+    const pre = el("pre", "io-v");
+    pre.innerHTML = highlight(lines.slice(0, 400).join("\n") + (lines.length > 400 ? "\n…" : ""), String(path || "").split(".").pop());
+    row.append(el("span", "io-k", "APRÈS"), pre);
+    clipBlock(row, pre, lines.length);
+    box.append(before.row, row);
+    return { box, before: before.block, count: lines.length };
+  }
+  // L'avant d'une écriture, d'après son résultat : fichier nouveau, ou lignes
+  // remplacées (leur texte quand le résultat le porte encore, sinon leur nombre).
+  function fillWriteBefore(block, value, isError) {
+    block.textContent = "";
+    const say = (text) => block.appendChild(el("div", "none", text));
+    if (isError || !value || typeof value !== "object") return say("(fichier inchangé)");
+    if (value.type === "create") return say("(nouveau fichier)");
+    const hunks = Array.isArray(value.structuredPatch) ? value.structuredPatch : [];
+    const old = hunks.flatMap((hunk) => (hunk.lines || []).filter((line) => line[0] !== "+").map((line) => [line[0] === "-" ? "del" : "same", line.slice(1)]));
+    if (old.length) {
+      for (const [kind, text] of old.slice(0, 400)) block.appendChild(el("div", kind, text || " "));
+      clipBlock(block.parentElement, block, old.length);
+      return null;
+    }
+    const replaced = hunks.reduce((total, hunk) => total + (hunk.oldLines || 0), 0);
+    return say(replaced ? "(ancien contenu remplacé : " + replaced + " ligne" + (replaced > 1 ? "s" : "") + ")" : "(ancien contenu remplacé)");
   }
   function todoList(todos) {
     const box = el("div", "todos");
@@ -1128,15 +1230,16 @@
       parts.output = { row: output, pre: result };
       toggleStep(parts.step, true);
     } else if (name === "edit_file" && value && (value.old_string !== undefined || value.new_string !== undefined)) {
-      const { box, added, removed } = diffView(value.old_string, value.new_string);
+      const { box, added, removed } = beforeAfterView(value.old_string, value.new_string);
       parts.body.append(box);
       parts.summary = '<span class="add">+' + added + '</span> <span class="del">−' + removed + "</span>";
+      toggleStep(parts.step, true);
     } else if (name === "write_file" && value && value.content !== undefined) {
-      const lines = String(value.content || "").split("\n");
-      const pre = el("pre");
-      pre.innerHTML = highlight(lines.slice(0, 120).join("\n") + (lines.length > 120 ? "\n…" : ""), String(value.path || "").split(".").pop());
-      parts.body.append(pre);
-      parts.summary = lines.length + " ligne" + (lines.length > 1 ? "s" : "");
+      const { box, before, count } = writeView(value.content, value.path);
+      parts.body.append(box);
+      parts.before = before;
+      parts.summary = count + " ligne" + (count > 1 ? "s" : "");
+      toggleStep(parts.step, true);
     } else if (name === "TodoWrite" && value) {
       parts.body.append(todoList(value.todos));
     } else if (name !== "read_file") {
@@ -1253,6 +1356,7 @@
       if (!pendingTools.length) setActivity("Réflexion…");
       return;
     }
+    if (entry.before) fillWriteBefore(entry.before, parseJson(output), isError);
     const { box, summary } = resultView(output, isError);
     entry.body.append(box);
     if (note) entry.body.append(clawNote(note));
@@ -2700,6 +2804,8 @@
     try {
       const images = pendingImages.map(({ media_type, data }) => ({ media_type, data }));
       await api("/api/message", { text, images });
+      rememberPrompt(text);
+      historyAt = null;
       input.value = "";
       pendingImages = [];
       renderAttachments();
@@ -2821,7 +2927,8 @@
     input.focus();
     autoGrow();
   }
-  input.addEventListener("input", () => { suggestionIndex = -1; onInput(); });
+  // Une frappe fait du texte affiché le nouveau brouillon.
+  input.addEventListener("input", () => { suggestionIndex = -1; historyAt = null; onInput(); });
   input.addEventListener("keydown", (event) => {
     const box = $("suggestions");
     if (!box.hidden) {
@@ -2838,6 +2945,9 @@
         return;
       }
       if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); hideSuggestions(); return; }
+    }
+    if ((event.key === "ArrowUp" || event.key === "ArrowDown") && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing) {
+      if (recallPrompt(event.key === "ArrowUp" ? -1 : 1)) { event.preventDefault(); return; }
     }
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();

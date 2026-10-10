@@ -666,13 +666,17 @@ fn get_simple_doing_tasks_section() -> String {
 /// conséquences avant de modifier quoi que ce soit.
 fn get_reasoning_section() -> String {
     let items = prepend_bullets(vec![
-        "Take the time to think before you act. A correct result after careful reasoning is worth far more than a fast wrong one.".to_string(),
-        "Start from what is really asked: restate the goal to yourself, separate what the user wants from what you assume, and notice what the request implies without saying it.".to_string(),
+        "Take the time to think before you act. A correct result after careful reasoning is worth far more than a fast wrong one. Use your reasoning to decide, not to narrate what you are about to do: the facts you have, your hypotheses and the evidence for each, the decision, and what could go wrong.".to_string(),
+        "Start from what is really asked: list every part of the request (each feature, page, file, fix or explanation the user wants), separate what the user wants from what you assume, and notice what the request implies without saying it. When the user only asks you to continue, the request is the one they made earlier.".to_string(),
         "Work from evidence, not from memory: read the code that is involved, run it or its tests when you can, and check an API, a file or a behaviour you are unsure of instead of guessing.".to_string(),
         "For a bug, find the root cause before changing anything: reproduce or locate the failure, state the cause in one sentence, and make sure your fix removes that cause and not only its symptom. Then look for the same defect elsewhere in the project.".to_string(),
         "Before each change, weigh its consequences: who calls this code, which cases it must still handle (empty or missing input, boundaries, errors, concurrency), what else could break. Consider at least one alternative and choose on the merits.".to_string(),
         "When a result surprises you (an error, an unexpected output, a failed edit), stop and explain it before trying anything else. Never repeat unchanged an action that has just failed.".to_string(),
-        "Before you conclude, reread your own work as a reviewer would: does it do what was asked, in every case, and did you actually see it work?".to_string(),
+        "A failure is information, not a dead end: read the whole error, say what it tells you, then fix the command or take another way (another tool, a smaller step, a different approach). Never hand the work back to the user (\"run this in your own terminal\") while one of your tools can still do it; ask the user only for what you truly cannot do yourself, such as a secret, a decision or an action outside this machine.".to_string(),
+        "Do, do not announce: when you say you will do something, the same reply makes the tool call that does it. Never end your turn on a plan, a heading or a list of next steps that you could carry out yourself. A tool call that you only draft in your reasoning or describe in your reply is never executed.".to_string(),
+        "Collect all the errors at once: run the type checker, compiler, linter or test suite over the whole project and fix every error it reports before running it again, instead of discovering them one build at a time.".to_string(),
+        "Verify the behaviour, not only that it loads: exercise what you changed (run the test that covers it, call the endpoint, run the command with real input) and read the result. \"It builds\" or \"it imports\" only proves that it builds or imports.".to_string(),
+        "Before you conclude, reread your own work as a reviewer would: does it do every part of what was asked, in every case, and did you actually see it work? Your final answer may claim only what is in the files and what a command showed you; name plainly any part that is not done or not verified.".to_string(),
     ]);
     std::iter::once("# Thinking it through".to_string())
         .chain(items)

@@ -50,6 +50,8 @@ pub enum Aid {
     EditorDiagnostics,
     /// Résultats d'outils gardés sans ce que le modèle sait déjà (son texte, le diff).
     LeanResults,
+    /// Un agent qui s'arrête sur des échecs cherche d'abord une autre voie.
+    Persistence,
 }
 
 impl Aid {
@@ -71,6 +73,7 @@ impl Aid {
             Self::Checklist => "CLAW_CHECKLIST",
             Self::EditorDiagnostics => "CLAW_EDITOR_DIAGNOSTICS",
             Self::LeanResults => "CLAW_LEAN_RESULTS",
+            Self::Persistence => "CLAW_PERSISTENCE",
         }
     }
 }
@@ -626,11 +629,26 @@ pub fn test_guard_feedback(name: &str) -> String {
 
 /// Message adressé au modèle qui dit avoir fini un travail conséquent : il
 /// confronte son travail à chaque exigence avant de conclure (une fois par tour).
-pub const CHECKLIST_PROMPT: &str = "[Claw] Before you finish, check your work against every requirement. Go through each requirement of the user's request and of the docstrings, comments and specifications of the code you changed, including the edge cases they imply (empty or missing input, boundaries, invalid values, duplicates, ordering, large inputs). For each one, find the code that handles it and how it is verified: an existing test, a command you ran, or the code itself. If a requirement is not handled, fix it now with your tools. If the project has tests, add the missing test and run it; never describe tests, commands or results that do not exist. Do not weaken or delete existing tests. Report this check in at most one short line per requirement. Then end with your final answer to the user's original request. The user reads only that last message and has not seen this check: it must stand on its own, written as the report the system prompt describes under \"Final answer\" (the outcome first, what was wrong and why, what you changed, how it was verified, what is left for the user), cover everything they asked for, including any explanation or instructions they requested (such as how to install, run or test the result), stay concise, and not refer to this check.";
+pub const CHECKLIST_PROMPT: &str = "[Claw] Before you finish, check your work against every requirement. List each part of the user's request (when their last message only asks you to continue, the request it continues): every feature, page, file, fix or explanation they asked for, plus the requirements of the docstrings, comments and specifications of the code you changed, and the edge cases these imply (empty or missing input, boundaries, invalid values, duplicates, ordering, large inputs). For each one, find the evidence that it is done: the file and the code that handle it, and the test or command output from this session that shows it works. An intention, a plan or a file you did not check is not evidence. Whatever is missing or unverified, do it now with your tools, in this reply: do not announce it, do not leave it for later, do not ask the user to do it. If the project has tests, add the missing test and run it; never describe tests, commands or results that do not exist, and never weaken or delete an existing test. Then end with your final answer to the user's original request, written as the report the system prompt describes under \"Final answer\" (the outcome first, what was wrong and why, what you changed, how it was verified, what is left for the user). Its verification part gives one short line per requirement with its evidence; it claims only what this check established and names plainly any part that is not done or not verified. The user reads only that last message and has not seen this check: it must stand on its own, cover everything they asked for, including any explanation or instructions they requested (such as how to install, run or test the result), stay concise, and not refer to this check.";
 
 /// Fin des messages que Claw renvoie au modèle après un contrôle : la réponse
 /// qui suivra est celle que l'utilisateur lira, elle doit répondre à sa demande.
-pub const FINAL_ANSWER_RULE: &str = "When this is dealt with, end with your final answer to the user's original request. The user reads only that last message and has not seen this note: it must stand on its own, written as the report the system prompt describes under \"Final answer\" (the outcome first, what was wrong and why, what you changed, how it was verified, what is left for the user), cover everything they asked for, including any explanation or instructions they requested (such as how to install, run or test the result), stay concise, and not refer to this note.";
+pub const FINAL_ANSWER_RULE: &str = "When this is dealt with, end with your final answer to the user's original request. The user reads only that last message and has not seen this note: it must stand on its own, written as the report the system prompt describes under \"Final answer\" (the outcome first, what was wrong and why, what you changed, how it was verified, what is left for the user), cover everything they asked for, including any explanation or instructions they requested (such as how to install, run or test the result), claim only what the files and your command outputs show, stay concise, and not refer to this note.";
+
+// --- Persévérance ----------------------------------------------------------------------
+
+/// Échecs d'outils consécutifs à partir desquels un agent qui s'arrête est
+/// renvoyé chercher une autre voie (une fois par tour).
+pub const PERSISTENCE_FAILURES: u32 = 2;
+
+/// Message adressé au modèle qui s'arrête juste après des échecs d'outils :
+/// ne pas rendre la main à l'utilisateur tant qu'un outil peut encore servir.
+#[must_use]
+pub fn persistence_feedback(failures: u32) -> String {
+    format!(
+        "[Claw] Your last {failures} tool calls failed and you are about to stop. Do not hand the task back to the user while one of your tools can still do it. Say in one sentence what these failures tell you, then try a different way: fix the command, use another tool, take a smaller step or change approach. Only if nothing you can run would work, explain precisely what blocks you and what exactly the user must do. {FINAL_ANSWER_RULE}"
+    )
+}
 
 /// Rappel de langue ajouté aux notes de Claw : elles sont en anglais, et un
 /// modèle répond volontiers dans la langue de la dernière consigne lue.
@@ -823,20 +841,54 @@ pub fn unified_diff(path: &str, old: &str, new: &str) -> (String, usize) {
 }
 
 /// Consignes du relecteur (un autre modèle que celui qui a écrit le code).
-pub const REVIEW_SYSTEM: &str = "You are a strict, careful code reviewer. You are shown what a user asked for and the changes a coding agent made (unified diff). Report only real problems that must be fixed before the work can be accepted: a bug, an unhandled edge case that the request or the docstrings require, a part of the request that was not done, a test that was weakened, skipped or deleted, a security issue. Do not comment on style, naming or anything optional. Be concrete and brief. If the changes are acceptable, answer with exactly: LGTM. Otherwise answer with at most six lines, one problem per line, in the form `file:line - problem - what to change`.";
+pub const REVIEW_SYSTEM: &str = "You are a strict, careful code reviewer. You are shown what a user asked for, the changes a coding agent made during this turn (unified diff) and the final answer the agent is about to give the user. Report only real problems that must be fixed before the work can be accepted: a bug, an unhandled edge case that the request or the docstrings require, a part of the request that was not done, a claim in the agent's answer that the changes contradict or do not support (a feature, page, file, test or result it says exists but that is neither in the diff nor plausibly done in an earlier turn), a test that was weakened, skipped or deleted, a security issue. Do not comment on style, naming or anything optional. Be concrete and brief. If the changes are acceptable, answer with exactly: LGTM. Otherwise answer with at most six lines, one problem per line, in the form `file:line - problem - what to change`.";
 
-/// Demande de relecture : la demande de l'utilisateur, puis les diffs.
+/// Taille gardée de la réponse de l'agent et de la demande antérieure
+/// montrées au relecteur.
+const MAX_REVIEW_TEXT_CHARS: usize = 4_000;
+
+fn shortened(text: &str, limit: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    text.chars().take(limit).collect::<String>() + "\n… (shortened)"
+}
+
+/// Demande de relecture : la demande de l'utilisateur (avec celle qu'un
+/// message court comme « reprendre » poursuit), la réponse que l'agent
+/// s'apprête à donner, puis les diffs du tour.
 #[must_use]
-pub fn review_prompt(request: &str, diffs: &[String]) -> String {
+pub fn review_prompt(
+    request: &str,
+    earlier: Option<&str>,
+    answer: &str,
+    diffs: &[String],
+) -> String {
     let mut body = diffs.join("\n");
     if body.chars().count() > MAX_REVIEW_DIFF_CHARS {
         body =
             body.chars().take(MAX_REVIEW_DIFF_CHARS).collect::<String>() + "\n… (diff shortened)";
     }
-    format!(
-        "The user asked:\n{}\n\nChanges made by the agent:\n{body}",
-        request.trim()
-    )
+    let mut prompt = format!("The user asked:\n{}\n\n", request.trim());
+    if let Some(earlier) = earlier.map(str::trim).filter(|text| !text.is_empty()) {
+        let _ = write!(
+            prompt,
+            "Earlier request in this conversation, which the message above may continue:\n{}\n\n",
+            shortened(earlier, MAX_REVIEW_TEXT_CHARS)
+        );
+    }
+    let answer = answer.trim();
+    let _ = write!(
+        prompt,
+        "The agent's final answer to the user:\n{}\n\nChanges made by the agent during this turn (earlier turns may have changed other files):\n{body}",
+        if answer.is_empty() {
+            "(none yet)".to_string()
+        } else {
+            shortened(answer, MAX_REVIEW_TEXT_CHARS)
+        }
+    );
+    prompt
 }
 
 /// Remarques du relecteur, ou `None` s'il approuve (« LGTM »).

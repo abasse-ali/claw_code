@@ -232,6 +232,223 @@ fn lenient_json(text: &str) -> Option<Value> {
     serde_json::from_str(&text[start..=end]).ok()
 }
 
+const INVOKE_TAG: &str = "<invoke name=\"";
+const INVOKE_CLOSE: &str = "</invoke>";
+const PARAMETER_TAG: &str = "<parameter name=\"";
+const PARAMETER_CLOSE: &str = "</parameter>";
+
+/// Appels écrits à la manière de Claude, `<invoke name="outil"><parameter
+/// name="p">valeur</parameter></invoke>`, dans une balise d'enveloppe
+/// quelconque (`<function_calls>`, `<dots_function_call>`…) : certains modèles
+/// les écrivent dans leur texte, voire dans leur raisonnement, au lieu d'un
+/// appel natif. Retenus seulement s'ils terminent le texte, hors bloc de
+/// code, complets, et s'ils nomment des outils proposés. Renvoie la position
+/// où ils commencent (balise d'enveloppe comprise) et les appels.
+#[must_use]
+pub fn salvage_invoke_calls(
+    text: &str,
+    tools: &[ToolDefinition],
+) -> Option<(usize, Vec<(String, Value)>)> {
+    let mut from = 0;
+    while let Some(position) = invoke_outside_code(text, from) {
+        if let Some(calls) = invoke_run(&text[position..], tools) {
+            return Some((wrapper_start(&text[..position]), calls));
+        }
+        from = position + INVOKE_TAG.len();
+    }
+    None
+}
+
+/// Premier `<invoke name="` à partir de `from` qui n'est ni dans un bloc de
+/// code ni dans du code en ligne (un exemple n'est pas un appel).
+fn invoke_outside_code(text: &str, from: usize) -> Option<usize> {
+    let mut from = from;
+    loop {
+        let position = from + text.get(from..)?.find(INVOKE_TAG)?;
+        let before = &text[..position];
+        if before.matches("```").count().is_multiple_of(2) && !before.ends_with('`') {
+            return Some(position);
+        }
+        from = position + INVOKE_TAG.len();
+    }
+}
+
+/// Suite d'appels jusqu'à la fin du texte, séparés seulement par des blancs
+/// et des balises d'enveloppe.
+fn invoke_run(text: &str, tools: &[ToolDefinition]) -> Option<Vec<(String, Value)>> {
+    let mut calls = Vec::new();
+    let mut rest = text;
+    loop {
+        rest = skip_wrapper_tags(rest);
+        // Un modèle qui ne s'arrête pas invente ensuite le résultat : il est écarté.
+        let invented = ["<function_results", "<function_result", "<tool_result"]
+            .iter()
+            .any(|tag| rest.starts_with(tag));
+        if rest.is_empty() || (invented && !calls.is_empty()) {
+            return (!calls.is_empty()).then_some(calls);
+        }
+        let (name, after) = rest.strip_prefix(INVOKE_TAG)?.split_once("\">")?;
+        let tool = tools.iter().find(|tool| tool.name == name)?;
+        let end = after.find(INVOKE_CLOSE)?;
+        calls.push((
+            name.to_string(),
+            invoke_arguments(&after[..end], &tool.input_schema)?,
+        ));
+        rest = &after[end + INVOKE_CLOSE.len()..];
+    }
+}
+
+fn invoke_arguments(body: &str, schema: &Value) -> Option<Value> {
+    let mut arguments = serde_json::Map::new();
+    let mut rest = body.trim_start();
+    while !rest.is_empty() {
+        let (name, after) = rest.strip_prefix(PARAMETER_TAG)?.split_once("\">")?;
+        let end = after.find(PARAMETER_CLOSE)?;
+        arguments.insert(
+            name.to_string(),
+            parameter_value(schema, name, &after[..end]),
+        );
+        rest = after[end + PARAMETER_CLOSE.len()..].trim_start();
+    }
+    Some(Value::Object(arguments))
+}
+
+/// Valeur d'un paramètre écrit en texte. Le retour à la ligne qui suit la
+/// balise ouvrante et celui qui précède la balise fermante sont de la mise en
+/// forme ; le schéma de l'outil dit si la valeur se lit comme du JSON
+/// (nombre, booléen, liste, objet) ou reste du texte.
+fn parameter_value(schema: &Value, name: &str, raw: &str) -> Value {
+    let value = raw
+        .strip_prefix("\r\n")
+        .or_else(|| raw.strip_prefix('\n'))
+        .unwrap_or(raw);
+    let value = value
+        .strip_suffix("\r\n")
+        .or_else(|| value.strip_suffix('\n'))
+        .unwrap_or(value);
+    let kind = schema
+        .get("properties")
+        .and_then(|properties| properties.get(name))
+        .and_then(|property| property.get("type"));
+    let textual = match kind {
+        Some(Value::String(kind)) => kind == "string",
+        Some(Value::Array(kinds)) => kinds.iter().any(|kind| kind == "string"),
+        _ => false,
+    };
+    if textual {
+        return Value::String(value.to_string());
+    }
+    serde_json::from_str(value.trim()).unwrap_or_else(|_| Value::String(value.to_string()))
+}
+
+/// `<function_calls>`, `</dots_function_call>`… : balise sans attribut,
+/// ouvrante ou fermante, qui n'est ni celle d'un appel ou d'un paramètre,
+/// ni celle d'un résultat (que le modèle inventerait).
+fn is_wrapper_tag(tag: &str) -> bool {
+    let Some(inner) = tag.strip_prefix('<').and_then(|tag| tag.strip_suffix('>')) else {
+        return false;
+    };
+    let name = inner.strip_prefix('/').unwrap_or(inner);
+    name.chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.'))
+        && !matches!(name, "invoke" | "parameter")
+        && !name.starts_with("function_result")
+        && !name.starts_with("tool_result")
+}
+
+fn skip_wrapper_tags(text: &str) -> &str {
+    let mut rest = text;
+    loop {
+        rest = rest.trim_start();
+        match rest.find('>') {
+            Some(end) if is_wrapper_tag(&rest[..=end]) => rest = &rest[end + 1..],
+            _ => return rest,
+        }
+    }
+}
+
+/// Début de la balise d'enveloppe ouvrante qui termine `before` (blancs
+/// compris), sinon fin du texte qui précède les blancs.
+fn wrapper_start(before: &str) -> usize {
+    let trimmed = before.trim_end();
+    match trimmed.rfind('<') {
+        Some(open) if !trimmed[open..].starts_with("</") && is_wrapper_tag(&trimmed[open..]) => {
+            open
+        }
+        _ => trimmed.len(),
+    }
+}
+
+/// Fin de morceau gardée en réserve : un début d'appel coupé (`<invoke na`),
+/// une balise en cours d'écriture (`<function_ca`), ou une balise d'enveloppe
+/// complète qui peut précéder un appel.
+fn invoke_reserve(pending: &str) -> usize {
+    let partial = (1..INVOKE_TAG.len())
+        .rev()
+        .find(|length| pending.ends_with(&INVOKE_TAG[..*length]))
+        .unwrap_or(0);
+    let before = &pending[..pending.len() - partial];
+    if partial == 0 {
+        if let Some(open) = before.rfind('<') {
+            let tail = &before[open + 1..];
+            if tail
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.' | '/'))
+            {
+                return pending.len() - open;
+            }
+        }
+    }
+    let start = wrapper_start(before);
+    if start < before.trim_end().len() {
+        return pending.len() - start;
+    }
+    partial
+}
+
+/// Affichage en continu, en mode natif : le texte passe, sauf à partir d'un
+/// appel écrit en XML (`<invoke name="…">`) et de sa balise d'enveloppe,
+/// retenus jusqu'à la fin de la réponse, où l'on saura si c'était un appel.
+#[derive(Debug, Default)]
+pub struct InvokeFilter {
+    raw: String,
+    emitted: usize,
+    held_from: Option<usize>,
+}
+
+impl InvokeFilter {
+    /// Ajoute un morceau ; renvoie la partie affichable.
+    pub fn push(&mut self, delta: &str) -> String {
+        self.raw.push_str(delta);
+        if self.held_from.is_some() {
+            return String::new();
+        }
+        if let Some(position) = invoke_outside_code(&self.raw, self.emitted) {
+            let start = self.emitted + wrapper_start(&self.raw[self.emitted..position]);
+            let visible = self.raw[self.emitted..start].to_string();
+            self.held_from = Some(start);
+            self.emitted = self.raw.len();
+            return visible;
+        }
+        let pending = &self.raw[self.emitted..];
+        let cut = pending.len() - invoke_reserve(pending);
+        let visible = pending[..cut].to_string();
+        self.emitted += cut;
+        visible
+    }
+
+    /// Fin du flux : texte complet et position de ce qui n'a pas été affiché.
+    pub fn finish(&mut self) -> (String, usize) {
+        let held_from = self.held_from.take().unwrap_or(self.emitted);
+        self.emitted = 0;
+        (std::mem::take(&mut self.raw), held_from)
+    }
+}
+
 /// Filtre l'affichage en continu : le texte passe, sauf à partir d'un bloc
 /// `<tool_call>` (y compris un début de balise en fin de morceau).
 #[derive(Debug, Default)]
@@ -281,9 +498,110 @@ impl TextToolFilter {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_tool_calls, is_tools_unsupported_error, salvage_json_tool_calls, TextToolFilter,
+        extract_tool_calls, is_tools_unsupported_error, salvage_invoke_calls,
+        salvage_json_tool_calls, InvokeFilter, TextToolFilter,
     };
+    use crate::types::ToolDefinition;
     use serde_json::json;
+
+    fn invoke_tools() -> Vec<ToolDefinition> {
+        vec![
+            ToolDefinition {
+                name: "edit_file".to_string(),
+                description: None,
+                input_schema: json!({"type": "object", "properties": {
+                    "path": {"type": "string"},
+                    "new_string": {"type": "string"},
+                    "replace_all": {"type": "boolean"}
+                }}),
+            },
+            ToolDefinition {
+                name: "bash".to_string(),
+                description: None,
+                input_schema: json!({"type": "object", "properties": {
+                    "command": {"type": "string"},
+                    "timeout": {"type": "integer"}
+                }}),
+            },
+        ]
+    }
+
+    #[test]
+    fn salvages_claude_style_calls_written_in_text_or_reasoning() {
+        let tools = invoke_tools();
+        // Comme le modèle Dots dans sa réflexion : enveloppe qui lui est propre,
+        // valeurs entourées de retours à la ligne, booléen écrit en texte.
+        let reasoning = "<dots_function_call>\n<invoke name=\"edit_file\">\n<parameter name=\"new_string\">\n    return 0\n</parameter>\n<parameter name=\"path\">\nbackend/app/main.py\n</parameter>\n<parameter name=\"replace_all\">\ntrue\n</parameter>\n</invoke>\n</dots_function_call>";
+        let (start, calls) = salvage_invoke_calls(reasoning, &tools).expect("appel récupéré");
+        assert_eq!(start, 0);
+        assert_eq!(
+            calls,
+            vec![(
+                "edit_file".to_string(),
+                json!({"new_string": "    return 0", "path": "backend/app/main.py", "replace_all": true})
+            )]
+        );
+
+        // Texte avant, deux appels, entier lu comme un nombre, résultat inventé écarté.
+        let text = "Je vérifie.\n<function_calls>\n<invoke name=\"bash\"><parameter name=\"command\">ls</parameter><parameter name=\"timeout\">5000</parameter></invoke>\n<invoke name=\"bash\"><parameter name=\"command\">pwd</parameter></invoke>\n</function_calls>\n<function_results>src</function_results>\nIl y a src.";
+        let (start, calls) = salvage_invoke_calls(text, &tools).expect("deux appels");
+        assert_eq!(&text[..start], "Je vérifie.\n");
+        assert_eq!(
+            calls,
+            vec![
+                (
+                    "bash".to_string(),
+                    json!({"command": "ls", "timeout": 5000})
+                ),
+                ("bash".to_string(), json!({"command": "pwd"})),
+            ]
+        );
+    }
+
+    #[test]
+    fn examples_unknown_tools_and_unfinished_calls_are_not_salvaged() {
+        let tools = invoke_tools();
+        let fenced = "Le format est :\n```xml\n<invoke name=\"bash\"><parameter name=\"command\">rm -rf build</parameter></invoke>\n```";
+        assert!(salvage_invoke_calls(fenced, &tools).is_none());
+        let inline =
+            "Écrivez `<invoke name=\"bash\"><parameter name=\"command\">ls</parameter></invoke>`";
+        assert!(salvage_invoke_calls(inline, &tools).is_none());
+        let unknown = "<invoke name=\"rm_rf\"><parameter name=\"path\">/</parameter></invoke>";
+        assert!(salvage_invoke_calls(unknown, &tools).is_none());
+        // Coupé par la limite de sortie : un fichier tronqué ne doit pas être écrit.
+        let cut = "<invoke name=\"edit_file\"><parameter name=\"path\">a.py</parameter><parameter name=\"new_string\">def f(";
+        assert!(salvage_invoke_calls(cut, &tools).is_none());
+        // Suivi d'un texte : ce n'est pas la fin de la réponse, donc pas un appel.
+        let followed = "<invoke name=\"bash\"><parameter name=\"command\">ls</parameter></invoke>\nEnsuite je lirai le fichier.";
+        assert!(salvage_invoke_calls(followed, &tools).is_none());
+    }
+
+    #[test]
+    fn invoke_filter_holds_back_a_call_and_its_wrapper_even_when_split() {
+        let mut filter = InvokeFilter::default();
+        let mut shown = String::new();
+        for piece in [
+            "Je lis le fichier.\n<func",
+            "tion_calls>\n<inv",
+            "oke name=\"read_file\">",
+            "<parameter name=\"path\">a</parameter></invoke>\n</function_calls>",
+        ] {
+            shown.push_str(&filter.push(piece));
+        }
+        let (raw, held_from) = filter.finish();
+        assert_eq!(shown.trim_end(), "Je lis le fichier.");
+        assert!(raw[held_from..].starts_with("<function_calls>\n<invoke"));
+
+        // Du code ordinaire passe en entier, au plus un morceau plus tard.
+        let mut plain = InvokeFilter::default();
+        let mut shown = String::new();
+        for piece in ["let v: Vec<", "String> = Vec::new();", " if a < b {"] {
+            shown.push_str(&plain.push(piece));
+        }
+        let (raw, held_from) = plain.finish();
+        shown.push_str(&raw[held_from..]);
+        assert_eq!(shown, "let v: Vec<String> = Vec::new(); if a < b {");
+    }
 
     #[test]
     fn extracts_hermes_style_calls_and_keeps_visible_text() {

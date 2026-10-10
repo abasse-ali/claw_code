@@ -243,6 +243,53 @@ struct TurnAids {
     editor_dirty: bool,
     /// Renvois au modèle pour des erreurs signalées par l'éditeur.
     editor_rounds: usize,
+    /// Appels d'outils en échec depuis le dernier qui a réussi.
+    failure_streak: u32,
+    /// Un appel a été refusé (autorisation, hook) : l'agent ne doit pas insister.
+    refused: bool,
+    /// L'agent a déjà été renvoyé chercher une autre voie pendant ce tour.
+    persisted: bool,
+}
+
+/// Mots en dessous desquels un message de l'utilisateur peut n'être qu'une
+/// relance (« reprendre », « continue », « vas-y ») d'une demande antérieure.
+const CONTINUATION_MAX_WORDS: usize = 8;
+const MAX_EARLIER_REQUEST_CHARS: usize = 3_000;
+
+/// Demande qu'un message court poursuit peut-être : le dernier message de
+/// l'utilisateur assez long pour en être une (hors notes de Claw et hooks).
+/// `None` si le message du tour est assez long pour se suffire.
+fn earlier_request(messages: &[ConversationMessage], current: &str) -> Option<String> {
+    if current.split_whitespace().count() >= CONTINUATION_MAX_WORDS {
+        return None;
+    }
+    messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == crate::session::MessageRole::User)
+        .find_map(|message| {
+            let Some(ContentBlock::Text { text }) = message.blocks.first() else {
+                return None;
+            };
+            let text = text.trim();
+            let substantive = !text.starts_with(harness::CLAW_NOTE_PREFIX)
+                && !text.starts_with(STOP_HOOK_PREFIX)
+                && text.split_whitespace().count() >= CONTINUATION_MAX_WORDS;
+            substantive.then(|| text.chars().take(MAX_EARLIER_REQUEST_CHARS).collect())
+        })
+}
+
+/// Texte d'un message : ses blocs de texte, à la suite.
+fn message_text(message: &ConversationMessage) -> String {
+    message
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Sortie et statut d'un message de résultat d'outil.
@@ -308,7 +355,7 @@ pub const STOP_HOOK_PREFIX: &str = "[Hook Stop]";
 const EMPTY_RESPONSE_ERROR: &str = "le modèle n'a renvoyé aucun contenu";
 
 /// Relance unique après une réponse vide, au lieu d'échouer.
-const EMPTY_RESPONSE_NUDGE: &str = "[Claw] Ta dernière réponse était vide. Continue la tâche avec les outils si elle n'est pas finie ; sinon, réponds à l'utilisateur en résumant ce que tu as fait et le résultat des vérifications.";
+const EMPTY_RESPONSE_NUDGE: &str = "[Claw] Your last reply was empty: no text and no tool call. A tool call written only in your reasoning is never executed. If the task is not finished, continue it now by calling the tools; otherwise give the user your final answer, in their language: what you did and what the verification showed.";
 
 /// Demande l'avis des hooks `Notification` avant chaque demande d'autorisation.
 struct NotifyingPrompter<'a> {
@@ -561,6 +608,8 @@ where
     ) -> Result<TurnSummary, RuntimeError> {
         clear_interrupt();
         let request_text = user_input.clone();
+        // « reprendre » : la relecture doit connaître la demande poursuivie.
+        let earlier = earlier_request(&self.session.messages, &request_text);
         let mut user_message = self.user_message_with_hooks(user_input)?;
         user_message
             .blocks
@@ -637,14 +686,21 @@ where
             if pending_tool_uses.is_empty() {
                 self.api_client.answer_drafted();
                 // Le modèle dit avoir fini : Claw vérifie avant de le croire
-                // (vérification, erreurs vues par l'éditeur relié, exigences,
-                // relecture par un autre modèle). Un contrôle qui le renvoie
-                // au travail rend sa réponse provisoire.
+                // (pas d'abandon sur un échec, vérification, erreurs vues par
+                // l'éditeur relié, exigences, relecture par un autre modèle).
+                // Un contrôle qui le renvoie au travail rend sa réponse provisoire.
+                let answer = assistant_messages
+                    .last()
+                    .map(message_text)
+                    .unwrap_or_default();
                 let feedback = self
-                    .verification_gate(&mut aids, &mut prompter)
+                    .persistence_gate(&mut aids)
+                    .or_else(|| self.verification_gate(&mut aids, &mut prompter))
                     .or_else(|| self.editor_gate(&mut aids))
                     .or_else(|| self.requirements_gate(&mut aids))
-                    .or_else(|| self.review_gate(&mut aids, &request_text))
+                    .or_else(|| {
+                        self.review_gate(&mut aids, &request_text, earlier.as_deref(), &answer)
+                    })
                     .or_else(|| {
                         let reason =
                             self.run_stop_hooks(stop_continuations, &assistant_messages)?;
@@ -690,7 +746,7 @@ where
                     tool_results.push(message);
                     continue;
                 }
-                let mut result_message = self.execute_tool_call(
+                let (mut result_message, refused) = self.execute_tool_call(
                     tool_use_id,
                     tool_name.clone(),
                     &input,
@@ -698,6 +754,7 @@ where
                         .as_mut()
                         .map(|prompt| &mut **prompt as &mut dyn PermissionPrompter),
                 );
+                aids.refused |= refused;
                 self.after_tool(&tool_name, &input, &mut result_message, &mut aids);
                 lean_result(&tool_name, &mut result_message);
                 self.session.messages.push(result_message.clone());
@@ -755,15 +812,16 @@ where
     }
 
     /// Arguments, autorisation puis hook `PreToolUse` d'un appel d'un lot : les
-    /// messages du hook s'il peut être exécuté, sinon la raison rendue au modèle.
+    /// messages du hook s'il peut être exécuté, sinon la raison rendue au
+    /// modèle, et vrai si c'est un refus (autorisation ou hook).
     fn admit_tool_call(
         &mut self,
         name: &str,
         input: &str,
         prompter: &mut Option<&mut dyn PermissionPrompter>,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<String>, (String, bool)> {
         if let Some(problem) = self.tool_executor.invalid_input(name, input) {
-            return Err(problem);
+            return Err((problem, false));
         }
         let mut notifying = prompter.as_mut().map(|prompt| NotifyingPrompter {
             hooks: &self.hook_runner,
@@ -777,12 +835,12 @@ where
                 .map(|prompt| prompt as &mut dyn PermissionPrompter),
         );
         if let PermissionOutcome::Deny { reason } = outcome {
-            return Err(reason);
+            return Err((reason, true));
         }
         let pre = self.hook_runner.run_pre_tool_use(name, input);
         if pre.is_denied() {
             let fallback = format!("hook PreToolUse : outil `{name}` refusé");
-            return Err(format_hook_message(&pre, &fallback));
+            return Err((format_hook_message(&pre, &fallback), true));
         }
         Ok(pre.messages().to_vec())
     }
@@ -815,7 +873,8 @@ where
                     ready.push(index);
                     pre_messages.push(messages);
                 }
-                Err(reason) => {
+                Err((reason, refused)) => {
+                    aids.refused |= refused;
                     self.tool_executor.skipped(name, input, &reason);
                     results[index] = Some(ConversationMessage::tool_result(
                         id.clone(),
@@ -886,6 +945,16 @@ where
         };
         let output = output.to_string();
         let mut notes = Vec::new();
+        // Échecs à la suite (outil en erreur, commande qui échoue) : un agent
+        // qui s'arrête là est renvoyé chercher une autre voie.
+        let command_failed = matches!(tool_name, "bash" | "PowerShell")
+            && !is_error
+            && !harness::read_bash_output(&output).passed;
+        aids.failure_streak = if is_error || command_failed {
+            aids.failure_streak + 1
+        } else {
+            0
+        };
 
         if matches!(tool_name, "edit_file" | "write_file" | "NotebookEdit") && !is_error {
             aids.dirty = true;
@@ -1017,7 +1086,7 @@ where
             })
             .to_string();
             self.tool_executor.announce("bash", &input);
-            let message = self.execute_tool_call(
+            let (message, _) = self.execute_tool_call(
                 format!("claw-verify-{}", aids.verify_rounds),
                 "bash".to_string(),
                 &input,
@@ -1268,10 +1337,37 @@ where
         Some(harness::CHECKLIST_PROMPT.to_string())
     }
 
+    /// Persévérance : le modèle veut s'arrêter juste après plusieurs échecs
+    /// d'outils qui ne sont pas des refus ; il est renvoyé une fois chercher
+    /// une autre voie au lieu de rendre le travail à l'utilisateur.
+    fn persistence_gate(&mut self, aids: &mut TurnAids) -> Option<String> {
+        if aids.persisted
+            || aids.refused
+            || aids.failure_streak < harness::PERSISTENCE_FAILURES
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::Persistence)
+        {
+            return None;
+        }
+        aids.persisted = true;
+        self.api_client.notify(
+            "Les derniers essais ont échoué : Claw demande à l'agent de chercher une autre voie avant de conclure",
+        );
+        Some(harness::persistence_feedback(aids.failure_streak))
+    }
+
     /// Relecture imposée : quand le tour a modifié assez de code et que la
-    /// vérification passe, un autre modèle relit le diff. Ses remarques sont
-    /// renvoyées au modèle (une relecture par tour). `None` : rien à corriger.
-    fn review_gate(&mut self, aids: &mut TurnAids, request: &str) -> Option<String> {
+    /// vérification passe, un autre modèle relit le diff et la réponse que
+    /// l'agent s'apprête à donner. Ses remarques sont renvoyées au modèle
+    /// (une relecture par tour). `None` : rien à corriger.
+    fn review_gate(
+        &mut self,
+        aids: &mut TurnAids,
+        request: &str,
+        earlier: Option<&str>,
+        answer: &str,
+    ) -> Option<String> {
         if aids.reviewed
             || aids.verify_failing
             || aids.originals.is_empty()
@@ -1294,7 +1390,7 @@ where
         let consultation = self.api_client.consult(
             ConsultPurpose::Review,
             harness::REVIEW_SYSTEM,
-            &harness::review_prompt(request, &diffs),
+            &harness::review_prompt(request, earlier, answer, &diffs),
         )?;
         match harness::review_findings(&consultation.text) {
             None => {
@@ -1317,17 +1413,19 @@ where
     }
 
     /// Autorisation, hooks `PreToolUse`/`PostToolUse`, point de restauration
-    /// et exécution d'un appel d'outil ; renvoie le message de résultat.
+    /// et exécution d'un appel d'outil ; renvoie le message de résultat, et
+    /// vrai si l'appel a été refusé (autorisation ou hook).
     fn execute_tool_call(
         &mut self,
         tool_use_id: String,
         tool_name: String,
         input: &str,
         prompter: Option<&mut dyn PermissionPrompter>,
-    ) -> ConversationMessage {
+    ) -> (ConversationMessage, bool) {
         if let Some(problem) = self.tool_executor.invalid_input(&tool_name, input) {
             self.tool_executor.skipped(&tool_name, input, &problem);
-            return ConversationMessage::tool_result(tool_use_id, tool_name, problem, true);
+            let message = ConversationMessage::tool_result(tool_use_id, tool_name, problem, true);
+            return (message, false);
         }
         let mut notifying = prompter.map(|prompt| NotifyingPrompter {
             hooks: &self.hook_runner,
@@ -1347,7 +1445,9 @@ where
                     let deny_message = format!("hook PreToolUse : outil `{tool_name}` refusé");
                     let reason = format_hook_message(&pre_hook_result, &deny_message);
                     self.tool_executor.skipped(&tool_name, input, &reason);
-                    ConversationMessage::tool_result(tool_use_id, tool_name, reason, true)
+                    let message =
+                        ConversationMessage::tool_result(tool_use_id, tool_name, reason, true);
+                    (message, true)
                 } else {
                     crate::checkpoint::record_before_write(&tool_name, input);
                     let (mut output, mut is_error) =
@@ -1369,12 +1469,16 @@ where
                         post_hook_result.is_denied(),
                     );
 
-                    ConversationMessage::tool_result(tool_use_id, tool_name, output, is_error)
+                    let message =
+                        ConversationMessage::tool_result(tool_use_id, tool_name, output, is_error);
+                    (message, false)
                 }
             }
             PermissionOutcome::Deny { reason } => {
                 self.tool_executor.skipped(&tool_name, input, &reason);
-                ConversationMessage::tool_result(tool_use_id, tool_name, reason, true)
+                let message =
+                    ConversationMessage::tool_result(tool_use_id, tool_name, reason, true);
+                (message, true)
             }
         }
     }
@@ -1396,17 +1500,7 @@ where
         }
         let last_message = assistant_messages
             .last()
-            .map(|message| {
-                message
-                    .blocks
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
+            .map(message_text)
             .unwrap_or_default();
         let result = self.hook_runner.run_event(
             event,
@@ -1518,7 +1612,14 @@ fn build_assistant_message(
             "le flux du modèle s'est terminé sans fin de message (réponse incomplète)",
         ));
     }
-    if blocks.is_empty() {
+    // Un raisonnement seul, sans texte ni appel d'outil, ne fait ni ne dit
+    // rien : le tour se serait arrêté en silence.
+    let says_or_does = blocks.iter().any(|block| match block {
+        ContentBlock::Text { text } => !text.trim().is_empty(),
+        ContentBlock::ToolUse { .. } => true,
+        _ => false,
+    });
+    if !says_or_does {
         return Err(RuntimeError::new(EMPTY_RESPONSE_ERROR));
     }
 
@@ -1977,8 +2078,17 @@ mod tests {
             fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
                 self.calls += 1;
                 if self.calls == 1 {
-                    // Petit modèle : uniquement du raisonnement, rien d'affichable.
-                    return Ok(vec![AssistantEvent::MessageStop]);
+                    // Petit modèle : uniquement du raisonnement, rien d'affichable
+                    // (ni texte, ni appel d'outil qui serait exécuté).
+                    return Ok(vec![
+                        AssistantEvent::Thinking {
+                            thinking: "<invoke name=\"edit_file\">…</invoke>".to_string(),
+                            signature: String::new(),
+                            redacted: None,
+                        },
+                        AssistantEvent::TextDelta("\n  ".to_string()),
+                        AssistantEvent::MessageStop,
+                    ]);
                 }
                 let nudged = request.messages.iter().any(|message| {
                     message.blocks.iter().any(|block| {
@@ -2761,6 +2871,7 @@ mod tests {
                 tool_step("probe", "{}"),
                 tool_step("probe", "{}"),
                 text_step("Je change d'approche."),
+                text_step("La sonde n'existe pas ici : rien d'autre à essayer."),
             ],
             vec![],
         );
@@ -2774,6 +2885,146 @@ mod tests {
             .iter()
             .any(|notice| notice.contains("3 appels identiques à probe")));
         assert!(observed.announced.is_empty());
+        // S'arrêter sur ces échecs sans rien changer : renvoyé chercher une autre voie.
+        assert!(observed.requests[4].contains("Your last 3 tool calls failed"));
+    }
+
+    const COMMAND_FAILED: &str = r#"{"stdout":"","stderr":"npm: command not found","returnCodeInterpretation":"exit_code:127"}"#;
+
+    #[test]
+    fn an_agent_stopping_on_failures_is_sent_back_once_to_try_another_way() {
+        let (mut runtime, observed, bash_calls) = aided_runtime(
+            vec![
+                tool_step("bash", r#"{"command":"npm run dev"}"#),
+                tool_step("bash", r#"{"command":"npm start"}"#),
+                text_step("Lancez la commande dans votre propre terminal."),
+                tool_step("bash", r#"{"command":"ls node_modules/.bin"}"#),
+                tool_step("probe", "{}"),
+                text_step("npm est absent de cette machine : installez Node.js."),
+            ],
+            vec![COMMAND_FAILED, COMMAND_FAILED, COMMAND_FAILED],
+        );
+        let summary = runtime.run_turn("lance le serveur", None).expect("tour");
+        assert_eq!(bash_calls.borrow().len(), 3);
+        assert_eq!(summary.iterations, 6);
+        let observed = observed.borrow();
+        // Deux commandes en échec puis l'agent rend la main : il est renvoyé.
+        let note = &observed.requests[3];
+        assert!(note.contains("[Claw] Your last 2 tool calls failed and you are about to stop"));
+        assert!(note.contains("Do not hand the task back to the user"));
+        assert!(note.contains("end with your final answer"));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.starts_with("Les derniers essais ont échoué")));
+        // Une fois par tour : le second arrêt sur des échecs termine le tour
+        // (chaque requête reprend toute la conversation).
+        let last = observed.requests.last().expect("requêtes");
+        assert_eq!(
+            last.matches("tool calls failed and you are about to stop")
+                .count(),
+            1
+        );
+        assert_eq!((observed.drafted, observed.superseded), (2, 1));
+    }
+
+    #[test]
+    fn a_success_or_a_refusal_ends_the_failure_streak() {
+        // Un échec puis une commande qui réussit : rien à redire.
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                tool_step("probe", "{}"),
+                tool_step("bash", r#"{"command":"ls"}"#),
+                text_step("Voici le contenu du dossier."),
+            ],
+            vec![PASSING],
+        );
+        let summary = runtime.run_turn("liste", None).expect("tour");
+        assert_eq!(summary.iterations, 3);
+        assert!(!observed
+            .borrow()
+            .requests
+            .iter()
+            .any(|request| request.contains("tool calls failed")));
+
+        // L'utilisateur a refusé un appel : l'agent ne doit pas insister.
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
+                tool_step("probe", "{}"),
+                text_step("Je n'ai pas le droit d'écrire ce fichier."),
+            ],
+            vec![],
+        );
+        runtime.permission_policy = PermissionPolicy::new(PermissionMode::ReadOnly)
+            .with_tool_requirement("write_file", PermissionMode::WorkspaceWrite);
+        let summary = runtime.run_turn("écris le fichier", None).expect("tour");
+        assert_eq!(summary.iterations, 3);
+        assert!(!observed
+            .borrow()
+            .requests
+            .iter()
+            .any(|request| request.contains("tool calls failed")));
+    }
+
+    #[test]
+    fn a_short_follow_up_points_the_review_to_the_request_it_continues() {
+        use super::{earlier_request, ConversationMessage};
+        let request = "Ajoute une page frontend pour traduire une image depuis une URL";
+        let messages = vec![
+            ConversationMessage::user_text(request),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "Je commence.".to_string(),
+            }]),
+            ConversationMessage::user_text(
+                "[Claw] Your last reply was empty: no text and no tool call, continue the task now.",
+            ),
+        ];
+        // « reprendre » poursuit la demande précédente, pas la note de Claw.
+        assert_eq!(
+            earlier_request(&messages, "reprendre").as_deref(),
+            Some(request)
+        );
+        // Une vraie demande se suffit.
+        assert!(earlier_request(
+            &messages,
+            "Ajoute aussi un bouton pour effacer l'historique des traductions"
+        )
+        .is_none());
+        assert!(earlier_request(&[], "continue").is_none());
+    }
+
+    #[test]
+    fn the_review_sees_the_answer_and_the_continued_request() {
+        let (path, output) = written_file("reprise");
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                text_step("Je m'y mets."),
+                tool_step("write_file", r#"{"path":"total.py","content":"x"}"#),
+                text_step("Fait : l'onglet Depuis une URL est en place."),
+                text_step("Chaque exigence est couverte."),
+            ],
+            vec![PASSING],
+            vec!["LGTM"],
+            output,
+        );
+        runtime
+            .run_turn(
+                "Ajoute une page frontend pour traduire une image depuis une URL",
+                None,
+            )
+            .expect("premier tour");
+        runtime.run_turn("reprendre", None).expect("tour");
+        let observed = observed.borrow();
+        assert_eq!(observed.consults.len(), 1);
+        let prompt = &observed.consults[0].1;
+        assert!(prompt.contains("The user asked:\nreprendre"));
+        assert!(prompt.contains("which the message above may continue:\nAjoute une page frontend"));
+        assert!(
+            prompt.contains("The agent's final answer to the user:\nChaque exigence est couverte.")
+        );
+        assert!(prompt.contains("+def total(prix):"));
+        let _ = std::fs::remove_file(path);
     }
 
     /// Fichier réel de six lignes, « créé » par l'outil `write_file` du test.

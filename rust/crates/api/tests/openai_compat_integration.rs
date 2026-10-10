@@ -62,6 +62,68 @@ async fn send_message_uses_openai_compatible_endpoint_and_auth() {
     assert_eq!(body["tools"][0]["type"], json!("function"));
 }
 
+/// Sans réglage, un modèle `OpenRouter` qui sait raisonner reçoit l'effort le
+/// plus poussé et de la place pour raisonner puis répondre ; un modèle qui ne
+/// raisonne pas ne reçoit pas ce paramètre.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn openrouter_reasoning_models_are_asked_to_think_hard_by_default() {
+    let _lock = env_lock();
+    let _max_tokens = ScopedEnvVar::set("CLAW_MAX_TOKENS", "");
+    api::register_model_limits(&api::ModelCatalog {
+        models: vec![
+            api::OpenRouterModel {
+                id: "vendor/thinker:free".to_string(),
+                context_length: Some(1_000_000),
+                max_completion_tokens: Some(65_536),
+                supports_tools: true,
+                supports_reasoning: true,
+                ..Default::default()
+            },
+            api::OpenRouterModel {
+                id: "vendor/plain:free".to_string(),
+                context_length: Some(131_072),
+                supports_tools: true,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let body = concat!(
+        "{\"id\":\"chatcmpl_or\",\"model\":\"vendor/thinker:free\",",
+        "\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Fait.\",\"tool_calls\":[]},",
+        "\"finish_reason\":\"stop\"}],",
+        "\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":5}}"
+    );
+    let server = spawn_server(
+        state.clone(),
+        vec![
+            http_response("200 OK", "application/json", body),
+            http_response("200 OK", "application/json", body),
+        ],
+    )
+    .await;
+    let client = OpenAiCompatClient::new("or-test-key", OpenAiCompatConfig::openrouter())
+        .with_base_url(server.base_url());
+    for model in ["vendor/thinker:free", "vendor/plain:free"] {
+        let request = MessageRequest {
+            model: model.to_string(),
+            max_tokens: api::max_tokens_for_model(model),
+            ..sample_request(false)
+        };
+        client.send_message(&request).await.expect("réponse");
+    }
+
+    let captured = state.lock().await;
+    let thinker: serde_json::Value = serde_json::from_str(&captured[0].body).expect("json");
+    assert_eq!(thinker["reasoning"], json!({"effort": "high"}));
+    assert_eq!(thinker["max_tokens"], json!(65_536));
+    let plain: serde_json::Value = serde_json::from_str(&captured[1].body).expect("json");
+    assert!(plain.get("reasoning").is_none(), "{plain}");
+    assert_eq!(plain["max_tokens"], json!(16_384));
+}
+
 #[tokio::test]
 async fn send_message_accepts_full_chat_completions_endpoint_override() {
     let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));

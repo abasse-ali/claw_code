@@ -2238,6 +2238,19 @@ mod tests {
     }
 
     #[test]
+    fn the_page_recalls_earlier_prompts_and_shows_changes_before_and_after() {
+        // Flèche du haut dans la zone de saisie : les demandes précédentes,
+        // gardées d'une session à l'autre.
+        assert!(super::PAGE.contains(r#"recallPrompt(event.key === "ArrowUp" ? -1 : 1)"#));
+        assert!(super::PAGE.contains(r#"store.set("claw-prompts", "#));
+        // Modification et écriture : un bloc avant, un bloc après.
+        assert!(super::PAGE.contains("beforeAfterView(value.old_string, value.new_string)"));
+        assert!(super::PAGE.contains("writeView(value.content, value.path)"));
+        assert!(super::PAGE.contains(r#"changeBlock("AVANT", "#));
+        assert!(super::PAGE.contains(r#"el("span", "io-k", "APRÈS")"#));
+    }
+
+    #[test]
     fn rebuilds_transcript_from_saved_messages() {
         let events = transcript_from_messages(&[
             ConversationMessage::user_text("bonjour"),

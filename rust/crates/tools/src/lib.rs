@@ -369,7 +369,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_file",
-            description: "Write a text file in the workspace.",
+            description: "Create a text file in the workspace, or replace the whole content of one. `content` is the complete new content of the file. To change part of an existing file, use edit_file.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -383,7 +383,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "edit_file",
-            description: "Replace text in a workspace file.",
+            description: "Replace an exact piece of text in an existing workspace file. Read the file first. `old_string` is copied from the file with its exact indentation and must occur exactly once (add a few surrounding lines to make it unique), unless `replace_all` is true; `new_string` replaces it. Keep each edit small: the lines that change and a little context, never the whole file. To create a file or rewrite all of it, use write_file.",
             input_schema: json!({
                 "type": "object",
                 "properties": {

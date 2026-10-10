@@ -14,7 +14,7 @@ use crate::types::{
 };
 
 use super::reasoning::{self, ReasoningEffort, ThinkTagFilter};
-use super::text_tools::{self, TextToolFilter};
+use super::text_tools::{self, InvokeFilter, TextToolFilter};
 use super::{Provider, ProviderFuture};
 
 pub const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1";
@@ -319,13 +319,8 @@ impl OpenAiCompatClient {
         let (response, text_mode) = self.send_negotiated(&request).await?;
         let request_id = request_id_from_headers(response.headers());
         let payload = parse_chat_completion(&response.bytes().await?)?;
-        let known_tools: Vec<String> = request
-            .tools
-            .iter()
-            .flatten()
-            .map(|tool| tool.name.clone())
-            .collect();
-        let mut normalized = normalize_response(&request.model, payload, text_mode, &known_tools)?;
+        let tools = request.tools.as_deref().unwrap_or_default();
+        let mut normalized = normalize_response(&request.model, payload, text_mode, tools)?;
         if normalized.request_id.is_none() {
             normalized.request_id = request_id;
         }
@@ -604,7 +599,20 @@ struct StreamState {
     keep_reasoning: bool,
     thinking_started: bool,
     reasoning_details: Vec<Value>,
+    /// Outils de la requête, avec leurs schémas (appels écrits en XML).
+    tools: Vec<ToolDefinition>,
+    /// Outils natifs : texte retenu à partir d'un appel écrit en XML.
+    invoke_filter: InvokeFilter,
+    /// Raisonnement reçu, pour un appel que le modèle n'y aurait qu'écrit.
+    reasoning_text: String,
+    /// Du texte non blanc a été affiché.
+    visible_text: bool,
+    /// Des appels écrits dans le texte ont été convertis.
+    text_calls: bool,
 }
+
+/// Raisonnement gardé au plus pour y retrouver un appel écrit en XML (sa fin).
+const MAX_REASONING_KEPT: usize = 400_000;
 
 impl StreamState {
     fn new(model: String) -> Self {
@@ -625,6 +633,11 @@ impl StreamState {
             keep_reasoning: false,
             thinking_started: false,
             reasoning_details: Vec::new(),
+            tools: Vec::new(),
+            invoke_filter: InvokeFilter::default(),
+            reasoning_text: String::new(),
+            visible_text: false,
+            text_calls: false,
         }
     }
 
@@ -637,12 +650,8 @@ impl StreamState {
     /// qu'elle peut être un appel écrit en JSON.
     fn with_tools(mut self, request: &MessageRequest, text_mode: bool) -> Self {
         self.text_mode = text_mode;
-        self.known_tools = request
-            .tools
-            .iter()
-            .flatten()
-            .map(|tool| tool.name.clone())
-            .collect();
+        self.tools = request.tools.clone().unwrap_or_default();
+        self.known_tools = self.tools.iter().map(|tool| tool.name.clone()).collect();
         if !text_mode && !self.known_tools.is_empty() {
             self.held_text = Some(String::new());
         }
@@ -651,7 +660,18 @@ impl StreamState {
 
     /// Raisonnement du modèle, affiché à part (sauf `/think off`).
     fn push_thinking(&mut self, text: String, events: &mut Vec<StreamEvent>) {
-        if text.is_empty() || reasoning::reasoning_effort() == Some(ReasoningEffort::Off) {
+        if text.is_empty() {
+            return;
+        }
+        self.reasoning_text.push_str(&text);
+        if self.reasoning_text.len() > 2 * MAX_REASONING_KEPT {
+            let mut cut = self.reasoning_text.len() - MAX_REASONING_KEPT;
+            while !self.reasoning_text.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.reasoning_text.drain(..cut);
+        }
+        if reasoning::reasoning_effort() == Some(ReasoningEffort::Off) {
             return;
         }
         if self.keep_reasoning && !self.thinking_started {
@@ -693,18 +713,19 @@ impl StreamState {
         }));
     }
 
-    fn push_answer_text(&mut self, text: String, events: &mut Vec<StreamEvent>) {
+    fn push_answer_text(&mut self, text: &str, events: &mut Vec<StreamEvent>) {
         let visible = if self.text_mode {
-            self.text_filter.push(&text)
+            self.text_filter.push(text)
         } else if let Some(held) = self.held_text.as_mut() {
-            held.push_str(&text);
+            held.push_str(text);
             let start = held.trim_start();
             if start.is_empty() || start.starts_with('{') || start.starts_with('`') {
                 return;
             }
-            self.held_text.take().unwrap_or_default()
+            let released = self.held_text.take().unwrap_or_default();
+            self.invoke_filter.push(&released)
         } else {
-            text
+            self.invoke_filter.push(text)
         };
         self.push_text(visible, events);
     }
@@ -712,23 +733,56 @@ impl StreamState {
     /// Fin du flux en mode natif : la réponse retenue est un appel écrit en
     /// JSON (converti en appel d'outil) ou du texte ordinaire (affiché).
     fn finish_held_text(&mut self, events: &mut Vec<StreamEvent>) {
-        let Some(held) = self.held_text.take() else {
+        if let Some(held) = self.held_text.take() {
+            let calls = if self.tool_calls.is_empty() {
+                text_tools::salvage_json_tool_calls(&held, &self.known_tools)
+            } else {
+                None
+            };
+            if let Some(calls) = calls {
+                self.push_text_tool_calls(calls, events);
+                return;
+            }
+            let visible = self.invoke_filter.push(&held);
+            self.push_text(visible, events);
+        }
+        self.finish_invoke_text(events);
+    }
+
+    /// Fin du flux en mode natif : des appels écrits en XML à la fin de la
+    /// réponse deviennent des appels d'outils ; sinon le texte retenu s'affiche.
+    fn finish_invoke_text(&mut self, events: &mut Vec<StreamEvent>) {
+        let (raw, held_from) = self.invoke_filter.finish();
+        if self.tool_calls.is_empty() {
+            if let Some((start, calls)) = text_tools::salvage_invoke_calls(&raw, &self.tools) {
+                if let Some(before) = raw.get(held_from..start) {
+                    self.push_text(before.trim_end().to_string(), events);
+                }
+                self.push_text_tool_calls(calls, events);
+                return;
+            }
+        }
+        self.push_text(raw[held_from..].to_string(), events);
+    }
+
+    /// Réponse faite d'un raisonnement seul : un appel que le modèle y a
+    /// écrit en XML (sans appel natif ni texte) est l'appel qu'il voulait faire.
+    fn salvage_reasoning_calls(&mut self, events: &mut Vec<StreamEvent>) {
+        if !self.tool_calls.is_empty() || self.text_calls || self.visible_text {
             return;
-        };
-        let calls = if self.tool_calls.is_empty() {
-            text_tools::salvage_json_tool_calls(&held, &self.known_tools)
-        } else {
-            None
-        };
-        match calls {
-            Some(calls) => self.push_text_tool_calls(calls, events),
-            None => self.push_text(held, events),
+        }
+        let reasoning = std::mem::take(&mut self.reasoning_text);
+        if let Some((_, calls)) = text_tools::salvage_invoke_calls(&reasoning, &self.tools) {
+            self.push_text_tool_calls(calls, events);
         }
     }
 
     fn push_text(&mut self, text: String, events: &mut Vec<StreamEvent>) {
         if text.is_empty() {
             return;
+        }
+        if !text.trim().is_empty() {
+            self.visible_text = true;
         }
         if !self.text_started {
             self.text_started = true;
@@ -754,6 +808,11 @@ impl StreamState {
             calls =
                 text_tools::salvage_json_tool_calls(&raw, &self.known_tools).unwrap_or_default();
         }
+        if calls.is_empty() {
+            calls = text_tools::salvage_invoke_calls(&raw, &self.tools)
+                .map(|(_, calls)| calls)
+                .unwrap_or_default();
+        }
         if !calls.is_empty() {
             self.push_text_tool_calls(calls, events);
         }
@@ -761,6 +820,7 @@ impl StreamState {
 
     /// Appels d'outils trouvés dans le texte, ajoutés comme des appels natifs.
     fn push_text_tool_calls(&mut self, calls: Vec<(String, Value)>, events: &mut Vec<StreamEvent>) {
+        self.text_calls = true;
         if self.text_started && !self.text_finished {
             self.text_finished = true;
             events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
@@ -856,7 +916,7 @@ impl StreamState {
             if let Some(content) = choice.delta.content.filter(|value| !value.is_empty()) {
                 let (text, thought) = self.think_filter.push(&content);
                 self.push_thinking(thought, &mut events);
-                self.push_answer_text(text, &mut events);
+                self.push_answer_text(&text, &mut events);
             }
 
             for tool_call in choice.delta.tool_calls {
@@ -910,12 +970,13 @@ impl StreamState {
         let (rest_text, rest_thought) = self.think_filter.finish();
         self.push_thinking(rest_thought, &mut events);
         self.finish_thinking(&mut events);
-        self.push_answer_text(rest_text, &mut events);
+        self.push_answer_text(&rest_text, &mut events);
         if self.text_mode {
             self.finish_text_tools(&mut events);
         } else {
             self.finish_held_text(&mut events);
         }
+        self.salvage_reasoning_calls(&mut events);
         if self.text_started && !self.text_finished {
             self.text_finished = true;
             events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
@@ -1454,7 +1515,7 @@ fn normalize_response(
     model: &str,
     response: ChatCompletionResponse,
     text_mode: bool,
-    known_tools: &[String],
+    tools: &[ToolDefinition],
 ) -> Result<MessageResponse, ApiError> {
     let choice = response
         .choices
@@ -1463,6 +1524,7 @@ fn normalize_response(
         .ok_or(ApiError::InvalidSseFrame(
             "la réponse chat completion ne contient pas de choices",
         ))?;
+    let known_tools: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
     let mut content = Vec::new();
     let mut finish_reason = choice.finish_reason.clone();
     if let Some(text) = choice
@@ -1471,14 +1533,19 @@ fn normalize_response(
         .map(|text| reasoning::split_think_tags(&text).0)
         .filter(|value| !value.is_empty())
     {
-        let (visible, mut calls) = if text_mode {
+        let (mut visible, mut calls) = if text_mode {
             text_tools::extract_tool_calls(&text)
         } else {
             (text.clone(), Vec::new())
         };
-        // Appel écrit en JSON brut au lieu d'un appel natif.
+        // Appel écrit en JSON brut, ou en XML, au lieu d'un appel natif.
+        let mut keep_visible = text_mode;
         if calls.is_empty() && choice.message.tool_calls.is_empty() {
-            if let Some(salvaged) = text_tools::salvage_json_tool_calls(&text, known_tools) {
+            if let Some(salvaged) = text_tools::salvage_json_tool_calls(&text, &known_tools) {
+                calls = salvaged;
+            } else if let Some((start, salvaged)) = text_tools::salvage_invoke_calls(&text, tools) {
+                visible = text[..start].trim_end().to_string();
+                keep_visible = true;
                 calls = salvaged;
             }
         }
@@ -1486,7 +1553,7 @@ fn normalize_response(
             if !visible.is_empty() {
                 content.push(OutputContentBlock::Text { text: visible });
             }
-        } else if text_mode && !visible.is_empty() {
+        } else if keep_visible && !visible.is_empty() {
             content.push(OutputContentBlock::Text { text: visible });
         }
         for (offset, (name, input)) in calls.into_iter().enumerate() {
@@ -2194,6 +2261,128 @@ mod tests {
         assert_eq!(
             texts_and_tools(&other),
             ("{\"total\": 3}".to_string(), Vec::new())
+        );
+    }
+
+    /// Flux d'un modèle aux outils natifs : un `delta` par morceau.
+    fn stream_deltas(deltas: &[serde_json::Value]) -> Vec<crate::types::StreamEvent> {
+        let request = MessageRequest {
+            model: "x/y".to_string(),
+            max_tokens: 64,
+            messages: vec![InputMessage::user_text("Corrige le bug")],
+            system: None,
+            tools: Some(vec![ToolDefinition {
+                name: "edit_file".to_string(),
+                description: None,
+                input_schema: json!({"type": "object", "properties": {
+                    "path": {"type": "string"},
+                    "new_string": {"type": "string"}
+                }}),
+            }]),
+            tool_choice: None,
+            stream: true,
+        };
+        let mut state = StreamState::new("x/y".to_string()).with_tools(&request, false);
+        let mut events = Vec::new();
+        for delta in deltas {
+            let frame = format!(
+                "data: {}",
+                json!({"id": "c", "choices": [{"index": 0, "delta": delta}]})
+            );
+            let chunk = parse_sse_frame(&frame).expect("frame").expect("chunk");
+            events.extend(state.ingest_chunk(chunk).expect("morceau"));
+        }
+        events.extend(state.finish());
+        events
+    }
+
+    fn tool_inputs_and_stop(
+        events: &[crate::types::StreamEvent],
+    ) -> (Vec<serde_json::Value>, Option<String>) {
+        use crate::types::{ContentBlockDelta, StreamEvent};
+        let mut inputs = Vec::new();
+        let mut stop = None;
+        for event in events {
+            match event {
+                StreamEvent::ContentBlockDelta(delta) => {
+                    if let ContentBlockDelta::InputJsonDelta { partial_json } = &delta.delta {
+                        inputs.push(serde_json::from_str(partial_json).expect("arguments JSON"));
+                    }
+                }
+                StreamEvent::MessageDelta(delta) => stop.clone_from(&delta.delta.stop_reason),
+                _ => {}
+            }
+        }
+        (inputs, stop)
+    }
+
+    #[test]
+    fn a_call_written_in_xml_in_the_reply_becomes_a_tool_call() {
+        let events = stream_deltas(&[
+            json!({"content": "Je corrige.\n<function_"}),
+            json!({"content": "calls>\n<invoke name=\"edit_file\">\n<parameter name=\"path\">\na.py\n</parameter>\n"}),
+            json!({"content": "<parameter name=\"new_string\">x = 1</parameter>\n</invoke>\n</function_calls>"}),
+        ]);
+        let (text, tools) = texts_and_tools(&events);
+        assert_eq!(
+            text.trim_end(),
+            "Je corrige.",
+            "le XML ne doit pas s'afficher"
+        );
+        assert_eq!(tools, ["edit_file"]);
+        assert_eq!(
+            tool_inputs_and_stop(&events),
+            (
+                vec![json!({"path": "a.py", "new_string": "x = 1"})],
+                Some("tool_use".to_string())
+            )
+        );
+
+        // Un exemple dans un bloc de code reste du texte.
+        let example = stream_deltas(&[
+            json!({"content": "Format :\n```xml\n<invoke name=\"edit_file\"><parameter name=\"path\">a.py</parameter></invoke>\n```\nVoilà."}),
+        ]);
+        let (text, tools) = texts_and_tools(&example);
+        assert!(tools.is_empty());
+        assert!(text.contains("<invoke name=\"edit_file\">") && text.ends_with("Voilà."));
+
+        // Outil inconnu : le texte retenu est rendu à la fin.
+        let unknown = stream_deltas(&[
+            json!({"content": "Essai : <invoke name=\"rm_rf\">"}),
+            json!({"content": "<parameter name=\"path\">/</parameter></invoke>"}),
+        ]);
+        assert_eq!(
+            texts_and_tools(&unknown),
+            (
+                "Essai : <invoke name=\"rm_rf\"><parameter name=\"path\">/</parameter></invoke>"
+                    .to_string(),
+                Vec::new()
+            )
+        );
+    }
+
+    #[test]
+    fn a_call_written_only_in_the_reasoning_becomes_a_tool_call() {
+        // Comme le modèle Dots : tout l'appel dans la réflexion, rien d'autre.
+        let call = "<dots_function_call>\n<invoke name=\"edit_file\">\n<parameter name=\"new_string\">\nprint(1)\n</parameter>\n<parameter name=\"path\">\nmain.py\n</parameter>\n</invoke>\n</dots_function_call>";
+        let (head, tail) = call.split_at(40);
+        let events = stream_deltas(&[json!({"reasoning": head}), json!({"reasoning": tail})]);
+        let (text, tools) = texts_and_tools(&events);
+        assert!(text.is_empty());
+        assert_eq!(tools, ["edit_file"]);
+        assert_eq!(
+            tool_inputs_and_stop(&events).0,
+            vec![json!({"new_string": "print(1)", "path": "main.py"})]
+        );
+
+        // Avec une réponse écrite, le raisonnement n'était qu'une réflexion.
+        let events = stream_deltas(&[
+            json!({"reasoning": call}),
+            json!({"content": "Voici mon analyse."}),
+        ]);
+        assert_eq!(
+            texts_and_tools(&events),
+            ("Voici mon analyse.".to_string(), Vec::new())
         );
     }
 }

@@ -377,13 +377,15 @@ pub fn max_tokens_for_model(model: &str) -> u32 {
     if is_openrouter_model_id(&canonical) {
         // Les limites de sortie varient beaucoup selon les modèles OpenRouter, et
         // prompt + max_tokens ne doit pas dépasser la fenêtre de contexte : on suit
-        // le catalogue (voir `register_model_limits`) quand il est connu.
+        // le catalogue (voir `register_model_limits`) quand il est connu. Le
+        // raisonnement compte dans ces jetons : un plafond trop bas couperait
+        // l'appel d'outil qui suit une longue réflexion.
         crate::openrouter::model_limits(&canonical).map_or(16_384, |limits| {
             let by_output = limits.max_completion_tokens.unwrap_or(16_384);
             let by_context = limits
                 .context_length
                 .map_or(u64::MAX, |context| context / 4);
-            u32::try_from(by_output.min(by_context).clamp(1_024, 32_768)).unwrap_or(16_384)
+            u32::try_from(by_output.min(by_context).clamp(1_024, 65_536)).unwrap_or(16_384)
         })
     } else if canonical.contains("opus") {
         32_000
@@ -471,12 +473,22 @@ mod tests {
                     supports_images: false,
                     ..Default::default()
                 },
+                crate::openrouter::OpenRouterModel {
+                    id: "long/thinker:free".to_string(),
+                    context_length: Some(1_000_000),
+                    max_completion_tokens: Some(262_144),
+                    supports_tools: true,
+                    supports_reasoning: true,
+                    ..Default::default()
+                },
             ],
         };
         crate::openrouter::register_model_limits(&catalog);
         assert_eq!(max_tokens_for_model("small/out:free"), 8_192);
         assert_eq!(max_tokens_for_model("huge/ctx:free"), 16_384);
         assert_eq!(max_tokens_for_model("unknown/model"), 16_384);
+        // Un modèle qui raisonne longuement garde de la place pour sa réponse.
+        assert_eq!(max_tokens_for_model("long/thinker:free"), 65_536);
 
         assert_eq!(super::context_window_for_model("small/out:free"), 65_536);
         assert_eq!(
