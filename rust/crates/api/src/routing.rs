@@ -240,7 +240,7 @@ pub fn model_failure_reason(error: &str) -> Option<String> {
             401 => "clé refusée (erreur 401)".to_string(),
             402 => "crédits insuffisants (erreur 402)".to_string(),
             403 => "modèle refusé à cette clé (erreur 403)".to_string(),
-            404 => "modèle introuvable (erreur 404)".to_string(),
+            404 => not_found_reason(error).to_string(),
             429 => "quota ou limite de requêtes atteinte (erreur 429)".to_string(),
             408 | 409 | 500..=599 => format!("le fournisseur ne répond pas (erreur {status})"),
             _ => return None,
@@ -254,6 +254,23 @@ pub fn model_failure_reason(error: &str) -> Option<String> {
         Some("serveur injoignable ou délai dépassé".to_string())
     } else {
         None
+    }
+}
+
+/// Ce que veut dire une erreur 404. `OpenRouter` répond aussi 404 quand le
+/// modèle existe mais qu'aucun de ses fournisseurs n'accepte la requête.
+fn not_found_reason(error: &str) -> &'static str {
+    let lower = error.to_ascii_lowercase();
+    if !lower.contains("no endpoints found") {
+        "modèle introuvable (erreur 404)"
+    } else if lower.contains("image") {
+        "ce modèle ne lit pas les images, et la conversation en contient (erreur 404)"
+    } else if lower.contains("tool") {
+        "ce modèle n'accepte pas les appels d'outils (erreur 404)"
+    } else if lower.contains("data policy") {
+        "vos réglages de confidentialité OpenRouter écartent ce modèle (erreur 404)"
+    } else {
+        "aucun fournisseur de ce modèle n'accepte cette requête (erreur 404)"
     }
 }
 
@@ -501,6 +518,40 @@ mod tests {
             "les autres fournisseurs restent disponibles"
         );
         reset_model_cooldowns();
+    }
+
+    #[test]
+    fn a_404_from_openrouter_is_named_for_what_it_is() {
+        // OpenRouter répond 404 quand le modèle existe mais qu'aucun de ses
+        // fournisseurs n'accepte la requête : ce n'est pas « modèle introuvable ».
+        for (message, reason) in [
+            (
+                "No endpoints found that support image input",
+                "ce modèle ne lit pas les images, et la conversation en contient (erreur 404)",
+            ),
+            (
+                "No endpoints found that support tool use",
+                "ce modèle n'accepte pas les appels d'outils (erreur 404)",
+            ),
+            (
+                "No endpoints found matching your data policy",
+                "vos réglages de confidentialité OpenRouter écartent ce modèle (erreur 404)",
+            ),
+            (
+                "No endpoints found for acme/model",
+                "aucun fournisseur de ce modèle n'accepte cette requête (erreur 404)",
+            ),
+            (
+                "The model `acme/missing` does not exist",
+                "modèle introuvable (erreur 404)",
+            ),
+        ] {
+            assert_eq!(
+                super::model_failure_reason(&format!("l'api a retourné 404 Not Found : {message}"))
+                    .as_deref(),
+                Some(reason)
+            );
+        }
     }
 
     #[test]

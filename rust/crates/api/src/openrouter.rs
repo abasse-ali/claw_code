@@ -811,6 +811,9 @@ pub struct ModelLimits {
     pub completion_price: f64,
     /// Le modèle sait raisonner avant de répondre (paramètre `reasoning`).
     pub supports_reasoning: bool,
+    /// Le modèle lit les images ; sinon `OpenRouter` refuse toute requête
+    /// qui en contient.
+    pub supports_images: bool,
 }
 
 fn limits_registry() -> &'static RwLock<BTreeMap<String, ModelLimits>> {
@@ -832,6 +835,7 @@ pub fn register_model_limits(catalog: &ModelCatalog) {
                 prompt_price: model.prompt_price,
                 completion_price: model.completion_price,
                 supports_reasoning: model.supports_reasoning,
+                supports_images: model.supports_images,
             },
         );
     }

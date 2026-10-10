@@ -644,7 +644,11 @@ coupe cet import.
 
 - **Images** : `@capture.png` (ou un chemin d'image glissé dans le terminal) joint l'image à la
   demande ; dans l'interface web, collez ou glissez une capture. `/models vision` liste les modèles
-  gratuits qui lisent les images. Format png, jpg, gif ou webp, 5 Mo maximum.
+  gratuits qui lisent les images. Format png, jpg, gif ou webp, 5 Mo maximum. Un modèle
+  d'OpenRouter qui ne lit que du texte refuserait toute la requête (erreur 404) dès qu'une image
+  figure dans la conversation : Claw ne lui envoie donc pas les images, vous prévient, et dit au
+  modèle qu'une image manque. Elles restent dans la session et repartent si vous revenez à un
+  modèle qui les lit.
 - **Raisonnement** : sans réglage, un modèle d'OpenRouter qui sait raisonner reçoit l'effort de
   réflexion le plus poussé (`high`) : ses réponses sont plus lentes, mais plus réfléchies.
   `/think off|low|medium|high` (ou `"reasoning"` dans la config,
