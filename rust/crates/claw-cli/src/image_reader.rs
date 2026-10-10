@@ -171,16 +171,23 @@ pub(crate) fn replacement(source: &ImageSource) -> String {
 /// celles de la conversation qui ne l'ont pas encore été. `announce` reçoit ce
 /// qu'il faut dire à l'utilisateur, au fur et à mesure.
 pub(crate) fn prepare(model: &str, messages: &[InputMessage], announce: &mut dyn FnMut(&str)) {
-    if !model_cannot_read_images(model) {
+    if !model_cannot_read_images(model) || images(messages).is_empty() {
         return;
     }
     let Some(dir) = cache_dir() else {
         return;
     };
-    let readers = Reader::configured().models(model);
+    // Les lecteurs (réglages, catalogue) ne sont cherchés que s'il reste une
+    // image à décrire : la plupart des requêtes n'en ont pas besoin.
+    let found = std::cell::OnceCell::new();
+    let readers = || {
+        found
+            .get_or_init(|| Reader::configured().models(model))
+            .clone()
+    };
     prepare_with(model, messages, &dir, &readers, announce, |source| {
         tools::advisors::ask_about_image(
-            &readers,
+            &readers(),
             READER_SYSTEM,
             READER_PROMPT,
             source,
@@ -196,7 +203,7 @@ fn prepare_with(
     model: &str,
     messages: &[InputMessage],
     dir: &Path,
-    readers: &[String],
+    readers: &dyn Fn() -> Vec<String>,
     announce: &mut dyn FnMut(&str),
     describe: impl Fn(&ImageSource) -> Result<(String, String), String>,
 ) {
@@ -219,7 +226,9 @@ fn prepare_with(
     }
 
     let mut failure = None;
-    if !missing.is_empty() && !readers.is_empty() {
+    let had_missing = !missing.is_empty();
+    let readers = if had_missing { readers() } else { Vec::new() };
+    if had_missing && !readers.is_empty() {
         announce(&format!(
             "{model} ne lit pas les images : description de {} demandée à un modèle qui les lit ({})…",
             count(missing.len(), "image"),
@@ -279,10 +288,12 @@ fn prepare_with(
         );
     }
     if absent > 0 {
-        let why = match (&failure, readers.is_empty()) {
-            (Some(error), _) => error.clone(),
-            (None, true) => "aucun modèle gratuit qui lit les images n'est disponible".to_string(),
-            (None, false) => "un essai précédent a échoué".to_string(),
+        let why = match &failure {
+            Some(error) => error.clone(),
+            None if had_missing => {
+                "aucun modèle gratuit qui lit les images n'est disponible".to_string()
+            }
+            None => "un essai précédent a échoué".to_string(),
         };
         let (could, sent) = if absent == 1 {
             ("n'a pas pu lui être décrite", "ne lui est pas envoyée")
@@ -377,7 +388,7 @@ mod tests {
                 "acme/texte:free",
                 &messages,
                 &dir,
-                &readers,
+                &|| readers.clone(),
                 &mut |text: &str| notices.borrow_mut().push(text.to_string()),
                 |source| {
                     *asked.borrow_mut() += 1;
@@ -422,7 +433,7 @@ mod tests {
                 "acme/texte-2:free",
                 &messages,
                 &dir,
-                readers,
+                &|| readers.to_vec(),
                 &mut |text: &str| notices.borrow_mut().push(text.to_string()),
                 |_| {
                     *asked.borrow_mut() += 1;

@@ -572,6 +572,8 @@ pub enum SlashCommand {
 }
 
 impl SlashCommand {
+    // Une branche par commande : la longueur suit leur nombre.
+    #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn parse(input: &str) -> Option<Self> {
         let trimmed = input.trim();

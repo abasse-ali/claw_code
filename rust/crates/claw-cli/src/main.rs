@@ -16,7 +16,6 @@ mod models;
 mod questions;
 mod render;
 mod stream_json;
-mod tool_input;
 mod transcript;
 mod turn_keys;
 mod user_env;
@@ -61,6 +60,7 @@ use runtime::{
     UsageTracker,
 };
 use serde_json::json;
+use tools::input_check as tool_input;
 use tools::GlobalToolRegistry;
 
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
@@ -2543,6 +2543,15 @@ impl LiveCli {
     }
 
     fn print_status(&self) {
+        // Un fichier de réglages devenu invalide en cours de session ne doit
+        // pas faire tomber le terminal : l'erreur est affichée.
+        let context = match status_context(Some(&self.session.path)) {
+            Ok(context) => context,
+            Err(error) => {
+                eprintln!("État indisponible : {error}");
+                return;
+            }
+        };
         let cumulative = self.runtime.usage().cumulative_usage();
         let latest = self.runtime.usage().current_turn_usage();
         println!(
@@ -2557,7 +2566,7 @@ impl LiveCli {
                     estimated_tokens: self.runtime.estimated_tokens(),
                 },
                 self.permission_mode.as_str(),
-                &status_context(Some(&self.session.path)).expect("status context should load"),
+                &context,
             )
         );
     }
@@ -5589,29 +5598,17 @@ impl DefaultRuntimeClient {
         events: &mut [AssistantEvent],
         stop_reason: Option<&str>,
     ) -> Result<(), RuntimeError> {
-        if stop_reason == Some("tool_use") {
-            return Ok(());
-        }
-        let mut definitions = None;
-        for event in events {
-            let AssistantEvent::ToolUse { name, input, .. } = event else {
-                continue;
-            };
-            let required = definitions
-                .get_or_insert_with(|| tool_registry.definitions(None))
+        let definitions = std::cell::OnceCell::new();
+        let required_for = |name: &str| {
+            definitions
+                .get_or_init(|| tool_registry.definitions(None))
                 .iter()
-                .find(|definition| definition.name == *name)
+                .find(|definition| definition.name == name)
                 .map(|definition| tool_input::required_arguments(&definition.input_schema))
-                .unwrap_or_default();
-            match tool_input::cut_call(stop_reason, input, &required) {
-                None => {}
-                Some(tool_input::Cut::OutputLimit) => *input = tool_input::output_limit_marker(),
-                Some(tool_input::Cut::Unfinished) => {
-                    return Err(RuntimeError::new(tool_input::unfinished_error(name, input)));
-                }
-            }
-        }
-        Ok(())
+                .unwrap_or_default()
+        };
+        tool_input::check_cut_calls(events, stop_reason, required_for, true)
+            .map_err(RuntimeError::new)
     }
 }
 
@@ -5738,6 +5735,7 @@ impl ApiClient for DefaultRuntimeClient {
                 // Sans réponse, le même modèle continue.
                 auto_retry: Some(model_switch::STUCK_AUTO_CONTINUE),
                 attempt: None,
+                retry_useful: true,
             };
             return match prompter.ask(&question) {
                 model_switch::ModelDecision::Switch(next) => {
@@ -6102,6 +6100,8 @@ impl ApiClient for DefaultRuntimeClient {
                         stuck: false,
                         auto_retry,
                         attempt: auto_retry.map(|_| (auto_retries, model_switch::AUTO_RETRIES)),
+                        retry_useful: api::failure_is_transient(&error.to_string())
+                            || tool_input::unfinished_reason(&error.to_string()).is_some(),
                     };
                     match prompter.ask(&question) {
                         model_switch::ModelDecision::Retry => {}

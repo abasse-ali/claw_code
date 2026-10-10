@@ -136,6 +136,8 @@ impl ContainerSandbox {
     /// l'utilisateur et non à root : Docker reçoit son uid:gid, Podman sans
     /// privilèges garde son identité (`keep-id`). Docker Desktop (Windows,
     /// macOS) s'en charge lui-même.
+    // Seul Linux se sert de `self` : ailleurs le moteur s'en charge.
+    #[cfg_attr(not(target_os = "linux"), allow(clippy::unused_self))]
     fn user_args(&self) -> Vec<String> {
         #[cfg(target_os = "linux")]
         {
@@ -441,7 +443,7 @@ fn normalize_mounts(mounts: &[String], cwd: &Path) -> Vec<String> {
 }
 
 /// `unshare --user` peut être refusé même s'il est installé (Ubuntu 24.04 et
-/// AppArmor, conteneurs, runners de CI) : on l'essaie une fois avant de s'en
+/// `AppArmor`, conteneurs, runners de CI) : on l'essaie une fois avant de s'en
 /// servir, sinon les commandes s'exécutent sans isolation au lieu d'échouer.
 fn user_namespaces_allowed() -> bool {
     static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

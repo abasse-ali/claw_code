@@ -212,10 +212,11 @@ pub struct OpenAiCompatClient {
 impl OpenAiCompatClient {
     #[must_use]
     pub fn new(api_key: impl Into<String>, config: OpenAiCompatConfig) -> Self {
+        let base_url = read_base_url(config);
         Self {
-            http: super::http_client(),
+            http: super::http_client_for(&base_url),
             api_key: api_key.into(),
-            base_url: read_base_url(config),
+            base_url,
             model_name: None,
             provider_name: config.provider_name.to_string(),
             extra_headers: config.extra_headers(),
@@ -252,7 +253,7 @@ impl OpenAiCompatClient {
             )));
         }
         Ok(Self {
-            http: super::http_client(),
+            http: super::http_client_for(&provider.base_url),
             api_key,
             base_url: provider.base_url.clone(),
             model_name: Some(model_name.to_string()),
@@ -532,7 +533,7 @@ impl MessageStream {
             }
 
             if self.done {
-                self.pending.extend(self.state.finish()?);
+                self.pending.extend(self.state.finish());
                 if let Some(event) = self.pending.pop_front() {
                     return Ok(Some(event));
                 }
@@ -577,6 +578,8 @@ impl OpenAiSseParser {
     }
 }
 
+// Chaque booléen suit une étape distincte du flux (message, texte, réflexion, fin).
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 struct StreamState {
     model: String,
@@ -861,7 +864,7 @@ impl StreamState {
                 state.apply(tool_call);
                 let block_index = state.block_index();
                 if !state.started {
-                    if let Some(start_event) = state.start_event()? {
+                    if let Some(start_event) = state.start_event() {
                         state.started = true;
                         events.push(StreamEvent::ContentBlockStart(start_event));
                     } else {
@@ -897,9 +900,9 @@ impl StreamState {
         Ok(events)
     }
 
-    fn finish(&mut self) -> Result<Vec<StreamEvent>, ApiError> {
+    fn finish(&mut self) -> Vec<StreamEvent> {
         if self.finished {
-            return Ok(Vec::new());
+            return Vec::new();
         }
         self.finished = true;
 
@@ -922,7 +925,7 @@ impl StreamState {
 
         for state in self.tool_calls.values_mut() {
             if !state.started {
-                if let Some(start_event) = state.start_event()? {
+                if let Some(start_event) = state.start_event() {
                     state.started = true;
                     events.push(StreamEvent::ContentBlockStart(start_event));
                     if let Some(delta_event) = state.delta_event() {
@@ -957,7 +960,7 @@ impl StreamState {
             }));
             events.push(StreamEvent::MessageStop(MessageStopEvent {}));
         }
-        Ok(events)
+        events
     }
 }
 
@@ -990,22 +993,20 @@ impl ToolCallState {
         self.openai_index + 1
     }
 
-    fn start_event(&self) -> Result<Option<ContentBlockStartEvent>, ApiError> {
-        let Some(name) = self.name.clone() else {
-            return Ok(None);
-        };
+    fn start_event(&self) -> Option<ContentBlockStartEvent> {
+        let name = self.name.clone()?;
         let id = self
             .id
             .clone()
             .unwrap_or_else(|| format!("tool_call_{}", self.openai_index));
-        Ok(Some(ContentBlockStartEvent {
+        Some(ContentBlockStartEvent {
             index: self.block_index(),
             content_block: OutputContentBlock::ToolUse {
                 id,
                 name,
                 input: json!({}),
             },
-        }))
+        })
     }
 
     fn delta_event(&mut self) -> Option<ContentBlockDeltaEvent> {
@@ -1773,7 +1774,7 @@ mod passback_tests {
             StreamEvent::ContentBlockStart(start)
                 if start.index == 999 && matches!(start.content_block, OutputContentBlock::Thinking { .. })
         )));
-        events = state.finish().expect("fin");
+        events = state.finish();
         assert_eq!(signature_of(&events).as_deref(), Some("or-plain"));
 
         // Détails structurés : fusionnés et renvoyés tels quels.
@@ -1790,7 +1791,7 @@ mod passback_tests {
                 })))
                 .expect("flux");
         }
-        let signature = signature_of(&state.finish().expect("fin")).expect("signature");
+        let signature = signature_of(&state.finish()).expect("signature");
         assert!(is_passback_reasoning(&signature));
         let details: serde_json::Value =
             serde_json::from_str(signature.trim_start_matches("or-details:")).expect("json");
@@ -1808,7 +1809,7 @@ mod passback_tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event, StreamEvent::ContentBlockStart(_))));
-        assert_eq!(signature_of(&state.finish().expect("fin")), None);
+        assert_eq!(signature_of(&state.finish()), None);
         assert!(!is_passback_reasoning("EqQBCkgIAxgCIkD…"));
     }
 
@@ -2144,7 +2145,7 @@ mod tests {
             let chunk = parse_sse_frame(&frame).expect("frame").expect("chunk");
             events.extend(state.ingest_chunk(chunk).expect("morceau"));
         }
-        events.extend(state.finish().expect("fin"));
+        events.extend(state.finish());
         events
     }
 

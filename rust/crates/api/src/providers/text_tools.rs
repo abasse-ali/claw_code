@@ -6,6 +6,7 @@
 //! connu de Qwen, Mistral, Llama…), que l'on retransforme en appels d'outils.
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::sync::RwLock;
 
 use serde_json::{json, Value};
@@ -68,12 +69,13 @@ pub fn tool_protocol_prompt(tools: &[ToolDefinition]) -> String {
         "# Tool calling\nYou can call tools. To call one, write a block exactly like this (one block per call, valid JSON, nothing else inside):\n<tool_call>\n{\"name\": \"tool_name\", \"arguments\": {\"param\": \"value\"}}\n</tool_call>\nAfter your tool calls, stop writing and wait: the results come back in <tool_result> blocks. Never invent tool results. When the task is done, answer normally without any <tool_call> block.\n\n## Available tools\n",
     );
     for tool in tools {
-        prompt.push_str(&format!(
-            "- {}: {}\n  parameters: {}\n",
+        let _ = writeln!(
+            prompt,
+            "- {}: {}\n  parameters: {}",
             tool.name,
             tool.description.as_deref().unwrap_or("").replace('\n', " "),
             compact_schema(&tool.input_schema)
-        ));
+        );
     }
     prompt
 }
@@ -155,7 +157,7 @@ pub fn extract_tool_calls(text: &str) -> (String, Vec<(String, Value)>) {
 /// Appels écrits en JSON brut au lieu d'outils natifs (qwen2.5-coder sous
 /// Ollama répond `{"name": "read_file", "arguments": {…}}` en texte). Retenu
 /// seulement si toute la réponse est faite de tels objets (éventuellement dans
-/// un bloc ```json) et qu'ils nomment des outils proposés.
+/// un bloc de code `json`) et qu'ils nomment des outils proposés.
 #[must_use]
 pub fn salvage_json_tool_calls(text: &str, known_tools: &[String]) -> Option<Vec<(String, Value)>> {
     let mut body = text.trim();

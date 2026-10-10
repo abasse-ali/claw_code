@@ -119,7 +119,7 @@ impl ClawApiClient {
     #[must_use]
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            http: super::http_client(),
+            http: super::http_client_for(DEFAULT_BASE_URL),
             auth: AuthSource::ApiKey(api_key.into()),
             base_url: DEFAULT_BASE_URL.to_string(),
             max_retries: DEFAULT_MAX_RETRIES,
@@ -131,7 +131,7 @@ impl ClawApiClient {
     #[must_use]
     pub fn from_auth(auth: AuthSource) -> Self {
         Self {
-            http: super::http_client(),
+            http: super::http_client_for(DEFAULT_BASE_URL),
             auth,
             base_url: DEFAULT_BASE_URL.to_string(),
             max_retries: DEFAULT_MAX_RETRIES,

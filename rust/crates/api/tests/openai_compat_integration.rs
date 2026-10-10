@@ -195,6 +195,8 @@ async fn stream_message_normalizes_text_and_multiple_tool_calls() {
     assert!(request.body.contains("\"stream\":true"));
 }
 
+// Le verrou protège l'environnement du processus pendant tout l'essai.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn provider_client_dispatches_xai_requests_from_env() {
     let _lock = env_lock();

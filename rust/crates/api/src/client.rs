@@ -103,6 +103,8 @@ impl ProviderClient {
     }
 }
 
+// Un seul flux vit à la fois : inutile de l'allouer à part.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum MessageStream {
     ClawApi(claw_provider::MessageStream),

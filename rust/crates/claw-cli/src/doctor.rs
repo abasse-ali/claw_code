@@ -44,7 +44,7 @@ pub fn report(model: &str, version: &str) -> String {
     ];
     checks.extend(config_checks(model));
     checks.push(openrouter_check(model));
-    checks.push(anthropic_check());
+    checks.push(anthropic_check(model));
     checks.push(advisors_check(model));
     checks.extend(local_server_checks());
     checks.push(tool_check("Git", "git", true));
@@ -197,12 +197,23 @@ fn advisors_check(model: &str) -> Check {
     }
 }
 
-fn anthropic_check() -> Check {
+fn anthropic_check(model: &str) -> Check {
     let has_key = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
         .iter()
         .any(|name| env::var(name).is_ok_and(|value| !value.trim().is_empty()));
-    if has_key {
+    // Sans aucune clé ni serveur local, le modèle de départ est un modèle
+    // Claude : il ne peut pas répondre, et « Prêt » serait faux.
+    let needed = matches!(api::detect_provider_kind(model), api::ProviderKind::ClawApi);
+    if has_key || api::has_anthropic_credentials() {
         Check::new(Level::Ok, "Anthropic", "clé présente")
+    } else if needed {
+        Check::new(
+            Level::Fail,
+            "Anthropic",
+            format!(
+                "clé absente, et {model} est un modèle Claude servi par Anthropic : pour un modèle gratuit, définissez OPENROUTER_API_KEY (clé gratuite sur https://openrouter.ai/keys) ou lancez un serveur local (Ollama)"
+            ),
+        )
     } else {
         Check::new(Level::Info, "Anthropic", "pas de clé (facultatif)")
     }

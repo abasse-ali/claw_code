@@ -11,6 +11,7 @@
 //! sortie est insérée dans la demande).
 
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -90,13 +91,14 @@ fn run_inline_commands(text: &str, allowed: bool, cwd: &Path) -> String {
                     output.push_str(if stdout.is_empty() { &stderr } else { &stdout });
                 }
                 Err(error) => {
-                    output.push_str(&format!("(commande `{command}` impossible : {error})"));
+                    let _ = write!(output, "(commande `{command}` impossible : {error})");
                 }
             }
         } else {
-            output.push_str(&format!(
+            let _ = write!(
+                output,
                 "!`{command}` (non exécutée : ajoutez Bash à allowed-tools dans l'en-tête de la commande)"
-            ));
+            );
         }
         rest = &after[end + 1..];
     }

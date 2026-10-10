@@ -1,4 +1,5 @@
 pub mod advisors;
+pub mod input_check;
 mod mcp_bridge;
 pub mod mcp_oauth;
 mod questions;
@@ -136,7 +137,7 @@ impl GlobalToolRegistry {
 
     /// Nom d'un outil tel que le registre l'attend, quand le modèle l'appelle
     /// avec une autre casse ou sous son nom Claude Code (« Bash », « Read »,
-    /// « MultiEdit »…). `None` si l'outil est inconnu.
+    /// « `MultiEdit` »…). `None` si l'outil est inconnu.
     #[must_use]
     pub fn resolve_tool_name(&self, name: &str) -> Option<String> {
         let known = mvp_tool_specs()
@@ -330,7 +331,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "bash",
-            description: "Execute a shell command in the current workspace.",
+            // Sous Windows, les modèles écrivent volontiers pour cmd : la
+            // description de l'outil est lue plus sûrement que les consignes.
+            description: if cfg!(windows) {
+                "Execute a shell command in the current workspace. On Windows this is Git Bash: POSIX syntax, paths with forward slashes (`src/main.py`, `D:/dir/file`), no cmd syntax."
+            } else {
+                "Execute a shell command in the current workspace."
+            },
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -934,6 +941,7 @@ struct ConsultInput {
 }
 
 /// Second avis : la même question posée à plusieurs autres modèles.
+#[allow(clippy::needless_pass_by_value)]
 fn run_consult(input: ConsultInput) -> Result<String, String> {
     let question = input.question.trim();
     if question.is_empty() {
@@ -1108,6 +1116,7 @@ fn looks_like_secret(text: &str) -> bool {
 }
 
 /// Note une leçon sur le projet pour les prochaines sessions.
+#[allow(clippy::needless_pass_by_value)]
 fn run_remember(input: RememberInput) -> Result<String, String> {
     let note = input.note.split_whitespace().collect::<Vec<_>>().join(" ");
     if note.is_empty() {
@@ -1359,11 +1368,13 @@ fn background_task_json(task: &runtime::bash_tasks::TaskOutput) -> Value {
     })
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn run_bash_output(input: BashOutputInput) -> Result<String, String> {
     let task = runtime::bash_tasks::read_output(input.bash_id.trim())?;
     to_pretty_json(background_task_json(&task))
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn run_kill_shell(input: KillShellInput) -> Result<String, String> {
     let task = runtime::bash_tasks::kill(input.shell_id.trim())?;
     to_pretty_json(background_task_json(&task))
@@ -1371,6 +1382,8 @@ fn run_kill_shell(input: KillShellInput) -> Result<String, String> {
 
 /// Présente le plan à l'utilisateur (même invite que les autorisations) ; s'il
 /// l'approuve, la session passe en mode `workspace-write` pour la suite du tour.
+// Même signature que les autres outils de la table d'exécution.
+#[allow(clippy::needless_pass_by_value, clippy::unnecessary_wraps)]
 fn run_exit_plan_mode(input: ExitPlanModeInput) -> Result<String, String> {
     let current_mode = current_subagent_context()
         .map_or(PermissionMode::Prompt, |context| context.permission_mode);
@@ -3078,6 +3091,7 @@ impl ApiClient for ProviderRuntimeClient {
                 let mut events = Vec::new();
                 let mut pending_tools: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
                 let mut saw_stop = false;
+                let mut stop_reason: Option<String> = None;
                 let mut signed_thinking = SignedThinking::new();
                 // Ni tiret cadratin ni emoji dans ce qu'un sous-agent écrit.
                 let mut text_dashes = runtime::typography::OutputFilter::default();
@@ -3141,6 +3155,9 @@ impl ApiClient for ProviderRuntimeClient {
                             }
                         }
                         ApiStreamEvent::MessageDelta(delta) => {
+                            if delta.delta.stop_reason.is_some() {
+                                stop_reason.clone_from(&delta.delta.stop_reason);
+                            }
                             events.push(AssistantEvent::Usage(TokenUsage {
                                 input_tokens: delta.usage.input_tokens,
                                 output_tokens: delta.usage.output_tokens,
@@ -3154,6 +3171,15 @@ impl ApiClient for ProviderRuntimeClient {
                         }
                     }
                 }
+                // Appel d'outil coupé (réponse close avant ses arguments, ou
+                // limite de sortie) : il n'est pas exécuté tel quel, le
+                // sous-agent apprend pourquoi et le renvoie.
+                let _ = input_check::check_cut_calls(
+                    &mut events,
+                    stop_reason.as_deref(),
+                    required_arguments_of,
+                    false,
+                );
 
                 if !saw_stop
                     && events.iter().any(|event| {
@@ -3239,6 +3265,29 @@ impl ToolExecutor for SubagentToolExecutor {
         }
         execute_tool(tool_name, &value).map_err(ToolError::new)
     }
+
+    /// Arguments obligatoires absents, JSON invalide ou appel coupé : l'erreur
+    /// va au sous-agent sans rien exécuter.
+    fn invalid_input(&mut self, tool_name: &str, input: &str) -> Option<String> {
+        input_check::problem(tool_name, input, &required_arguments_of(tool_name))
+    }
+}
+
+/// Arguments obligatoires d'un outil intégré ou d'un outil MCP relié (aucun
+/// pour un outil inconnu : son exécution dira ce qui ne va pas).
+fn required_arguments_of(tool_name: &str) -> Vec<String> {
+    if tool_name.starts_with("mcp__") {
+        return connected_mcp_tools()
+            .into_iter()
+            .find(|tool| tool.name == tool_name)
+            .map(|tool| input_check::required_arguments(&tool.input_schema))
+            .unwrap_or_default();
+    }
+    mvp_tool_specs()
+        .into_iter()
+        .find(|spec| spec.name == tool_name)
+        .map(|spec| input_check::required_arguments(&spec.input_schema))
+        .unwrap_or_default()
 }
 
 fn tool_specs_for_allowed_tools(allowed_tools: Option<&BTreeSet<String>>) -> Vec<ToolSpec> {
@@ -4480,6 +4529,25 @@ mod tests {
     }
 
     #[test]
+    fn a_sub_agent_does_not_run_a_call_without_its_arguments() {
+        use runtime::ToolExecutor;
+        let mut executor = SubagentToolExecutor::new(BTreeSet::from(["edit_file".to_string()]));
+        let problem = executor
+            .invalid_input("edit_file", "{}")
+            .expect("appel sans arguments");
+        assert!(problem.contains("It needs: path, old_string, new_string"));
+        assert_eq!(
+            executor.invalid_input(
+                "edit_file",
+                r#"{"path":"a.py","old_string":"x","new_string":"y"}"#
+            ),
+            None
+        );
+        // Outil sans argument obligatoire, ou inconnu : rien à redire ici.
+        assert_eq!(executor.invalid_input("TodoRead", "{}"), None);
+    }
+
+    #[test]
     fn rejects_unknown_tool_names() {
         let error = execute_tool("nope", &json!({})).expect_err("tool should be rejected");
         assert!(error.contains("unsupported tool"));
@@ -4561,6 +4629,7 @@ mod tests {
 
     #[test]
     fn web_fetch_reads_a_long_page_by_passages_then_in_order() {
+        use std::fmt::Write as _;
         let server = TestServer::spawn(Arc::new(|request_line: &str| {
             assert!(request_line.starts_with("GET /long "));
             let mut body = String::from(
@@ -4572,7 +4641,7 @@ mod tests {
                 } else {
                     "Paragraphe ordinaire de remplissage. "
                 };
-                body += &format!("<h2>Section {section}</h2><p>{}</p>", text.repeat(4));
+                let _ = write!(body, "<h2>Section {section}</h2><p>{}</p>", text.repeat(4));
             }
             body += "</body></html>";
             HttpResponse::html(200, "OK", &body)

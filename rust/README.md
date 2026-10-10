@@ -58,7 +58,7 @@ de `.claw.json`. Le modèle choisi doit prendre en charge l'appel d'outils (*too
 | `CLAW_MODEL` | Modèle de départ (prioritaire sur `.claw.json`) |
 | `CLAW_PROVIDER` | Force le fournisseur : `anthropic`, `openrouter`, `openai`, `xai` |
 | `CLAW_MAX_TOKENS` | Plafond de jetons de sortie (défaut 16 384 pour OpenRouter) |
-| `CLAW_IDLE_TIMEOUT` | Secondes sans rien recevoir du serveur avant d'abandonner une requête à un modèle, qui est alors relancée (défaut 300 ; 0 : attendre sans limite) |
+| `CLAW_IDLE_TIMEOUT` | Secondes sans rien recevoir du serveur avant d'abandonner une requête à un modèle, qui est alors relancée. Défaut : 300 pour un serveur distant, aucune limite pour un serveur local (un modèle local peut rester muet plusieurs minutes sur une machine lente). 0 : attendre sans limite partout |
 
 **Windows : « clé manquante » alors que la clé est définie.** Un programme garde l'environnement
 reçu à son démarrage : VS Code ouvert par le clic droit « Ouvrir avec Code », un terminal resté
@@ -107,6 +107,11 @@ sombre ou claire (thème du système, de VS Code ou choisi) :
 - **défilement** : le fil suit les nouveaux messages tant que vous ne remontez pas. Dès que vous
   faites défiler vers le haut, plus rien ne vous ramène en bas, même pendant que l'agent écrit ;
   « Derniers messages » y retourne ;
+- **pied de page** : la taille du contexte (ce que le modèle relit à chaque requête), le total
+  échangé depuis le début de la session restant au survol ;
+- **réponses** : un lien vers un fichier du projet s'affiche par son nom (chemin au survol), les
+  tableaux défilent en panneau étroit au lieu de couper les mots, et une remarque que Claw a
+  adressée au modèle apparaît à part, sous le résultat de l'outil, et non dans sa sortie ;
 - palette `Ctrl+K` (actions, modèles, modes, commandes), suggestions `/`, images collées,
   glissées ou jointes, modèle et mode en un clic ;
 - **crédits OpenRouter en direct** : solde et requêtes gratuites du jour sont les chiffres
@@ -397,7 +402,8 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
   Pendant ce temps, une barre au-dessus de la zone de saisie affiche le compte à rebours et
   propose, si vous le souhaitez, de réessayer tout de suite, de **changer de modèle** (vous le
   choisissez parmi les secours configurés et le gratuit le plus puissant, ou vous tapez un
-  identifiant ; il devient le modèle de la session) ou d'arrêter le tour. La question n'attend
+  identifiant ; il devient le modèle de la session) ou d'arrêter le tour. Quand réessayer ne
+  changerait rien, la barre le dit et propose d'abord de changer de modèle. La question n'attend
   votre réponse que si les essais automatiques sont épuisés, ou si réessayer ne servirait à rien
   (quota du jour épuisé, clé refusée, modèle introuvable). Quand l'agent n'avance plus (voir
   « Escalade »), la même barre propose un autre modèle ; sans réponse en 60 s, le même modèle
@@ -410,7 +416,8 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
   modèle ou d'arrêter. Si c'est la limite de sortie du modèle qui a coupé les arguments, rien
   n'est exécuté et le modèle est invité à envoyer un appel plus petit. Dans tous les cas, un
   appel sans ses arguments obligatoires (ou au JSON invalide) revient au modèle avec ce qu'il
-  manque, **sans vous demander d'autorisation** pour une modification vide.
+  manque, **sans vous demander d'autorisation** pour une modification vide. Les sous-agents
+  ont le même contrôle.
 - **Bascule automatique** : si le modèle répond « quota atteint » (429), est indisponible ou si le
   serveur est arrêté, la requête part sur le modèle suivant : `"fallbackModels": ["groq:llama-3.3-70b-versatile", "ollama:qwen2.5-coder:7b"]`
   (ou `CLAW_FALLBACK_MODELS`, liste séparée par des virgules). Sans liste, un modèle gratuit

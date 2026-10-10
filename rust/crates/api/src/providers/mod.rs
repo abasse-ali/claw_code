@@ -301,21 +301,40 @@ const MAX_AUTO_COMPACTION_THRESHOLD: u64 = 120_000;
 /// laissait Claw attendre indéfiniment.
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
 
-/// Client HTTP des requêtes aux modèles : délai de connexion, et délai
-/// d'inactivité remis à zéro à chaque morceau reçu (`CLAW_IDLE_TIMEOUT`, en
-/// secondes ; 0 pour attendre sans limite).
+/// Client HTTP des requêtes aux modèles servis à `base_url` : délai de
+/// connexion, et délai d'inactivité remis à zéro à chaque morceau reçu
+/// (`CLAW_IDLE_TIMEOUT`, en secondes ; 0 pour attendre sans limite). Sans
+/// réglage, un serveur local n'a pas de délai d'inactivité : sur une machine
+/// lente, un modèle local peut mettre plusieurs minutes à lire une longue
+/// demande avant d'écrire son premier mot.
 #[must_use]
-pub(crate) fn http_client() -> reqwest::Client {
+pub(crate) fn http_client_for(base_url: &str) -> reqwest::Client {
     let idle = std::env::var("CLAW_IDLE_TIMEOUT")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS);
+        .unwrap_or(if is_local_server(base_url) {
+            0
+        } else {
+            DEFAULT_IDLE_TIMEOUT_SECS
+        });
     let mut builder =
         reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20));
     if idle > 0 {
         builder = builder.read_timeout(std::time::Duration::from_secs(idle));
     }
     builder.build().unwrap_or_default()
+}
+
+/// Le serveur tourne sur cette machine (Ollama, LM Studio, llama.cpp).
+fn is_local_server(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url).is_ok_and(|url| {
+        url.host_str().is_some_and(|host| {
+            matches!(
+                host.trim_matches(['[', ']']),
+                "localhost" | "127.0.0.1" | "::1" | "0.0.0.0"
+            )
+        })
+    })
 }
 
 /// Seuil de compaction automatique (en jetons) : trois quarts de la fenêtre,
@@ -398,6 +417,26 @@ mod tests {
         assert_eq!(max_tokens_for_model("opus"), 32_000);
         assert_eq!(max_tokens_for_model("grok-3"), 64_000);
         assert_eq!(max_tokens_for_model("qwen/qwen3-coder"), 16_384);
+    }
+
+    #[test]
+    fn only_remote_servers_get_the_default_idle_timeout() {
+        // Un modèle local peut rester muet plusieurs minutes sur une machine lente.
+        for local in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:1234/v1",
+            "http://[::1]:8080/v1",
+        ] {
+            assert!(super::is_local_server(local), "{local}");
+        }
+        for remote in [
+            "https://openrouter.ai/api/v1",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "http://192.168.1.20:11434/v1",
+            "pas une adresse",
+        ] {
+            assert!(!super::is_local_server(remote), "{remote}");
+        }
     }
 
     #[test]

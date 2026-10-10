@@ -1,6 +1,7 @@
 //! Pièces jointes d'une demande : `@capture.png`, `@"C:\mes images\maquette.jpg"`
 //! ou un chemin d'image collé tel quel (glisser-déposer dans le terminal).
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 /// Taille maximale d'une image (limite courante des API de modèles).
@@ -83,7 +84,7 @@ pub fn extract_image_attachments(
                     let name = path
                         .file_name()
                         .map_or_else(|| token.clone(), |name| name.to_string_lossy().to_string());
-                    text.push_str(&format!("[image : {name}]"));
+                    let _ = write!(text, "[image : {name}]");
                     images.push(image);
                 }
                 Err(error) => {

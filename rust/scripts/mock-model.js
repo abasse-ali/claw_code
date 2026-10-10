@@ -19,6 +19,7 @@
 // fournisseur lâche : erreur 504 envoyée dans le flux, comme le fait OpenRouter.
 // « panne-une-fois » ne lâche qu'à sa première requête, puis répond.
 // Avec « outil » dans le nom, la panne arrive après l'annonce d'un appel d'outil.
+// Un modèle « introuvable » reçoit l'erreur 404 d'OpenRouter « No endpoints found ».
 // Un modèle « fige-une-fois » commence sa première réponse puis n'envoie plus rien.
 // Un modèle « coupe » clôt sa réponse après le nom de l'outil, sans arguments
 // (« coupe-une-fois » : à son premier appel seulement) ; un modèle « limite »
@@ -253,6 +254,12 @@ const server = http.createServer((request, response) => {
     if (String(body.model || "").includes("strict") && body.stream_options !== undefined) {
       response.writeHead(422, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ detail: [{ type: "extra_forbidden", loc: ["body", "stream_options"], msg: "Extra inputs are not permitted" }] }));
+      return;
+    }
+    // « introuvable » : aucun fournisseur n'accepte la requête, comme le dit OpenRouter.
+    if (String(body.model || "").includes("introuvable")) {
+      response.writeHead(404, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "No endpoints found that support tool use.", code: 404 } }));
       return;
     }
     const answer = reply(body);

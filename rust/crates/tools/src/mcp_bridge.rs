@@ -394,14 +394,14 @@ fn split_prompt_arguments(text: &str) -> Vec<String> {
     for c in text.chars() {
         match (quote, c) {
             (Some(open), c) if c == open => quote = None,
-            (Some(_), c) => current.push(c),
             (None, '"' | '\'') => quote = Some(c),
             (None, c) if c.is_whitespace() => {
                 if !current.is_empty() {
                     parts.push(std::mem::take(&mut current));
                 }
             }
-            (None, c) => current.push(c),
+            // Dans une chaîne, ou caractère ordinaire hors chaîne.
+            (Some(_) | None, c) => current.push(c),
         }
     }
     if !current.is_empty() {
@@ -585,6 +585,9 @@ pub fn shutdown_mcp() {
 }
 
 impl McpBridge {
+    // Démarrage de chaque serveur, découverte de ses outils, ressources et
+    // commandes : une seule séquence, plus lisible d'un tenant.
+    #[allow(clippy::too_many_lines)]
     fn start(
         servers: &BTreeMap<String, ScopedMcpServerConfig>,
         signature: String,

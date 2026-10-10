@@ -208,9 +208,12 @@
   .md :not(pre) > code { font-size: 12.8px; background: var(--surface-2); border: 1px solid var(--border); padding: 1px 5px; border-radius: 5px; }
   .md blockquote { margin: 10px 0; padding: 2px 14px; border-left: 3px solid var(--accent); color: var(--text-2); }
   .md hr { border: 0; border-top: 1px solid var(--border); margin: 18px 0; }
-  .md table { border-collapse: separate; border-spacing: 0; margin: 10px 0; display: block; overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-sm); font-size: 13.5px; }
+  .md .tablewrap { margin: 10px 0; overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-sm); }
+  .md table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 13.5px; overflow-wrap: normal; }
   .md th, .md td { padding: 7px 12px; text-align: left; border-bottom: 1px solid var(--border); }
-  .md th { background: var(--surface-2); font-weight: 600; }
+  .md th { background: var(--surface-2); font-weight: 600; white-space: nowrap; }
+  .md td code { white-space: nowrap; }
+  .md .filelink { border-bottom: 1px dotted var(--text-3); cursor: help; }
   .md tr:last-child td { border-bottom: 0; }
 
   .codeblock { margin: 10px 0; border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; background: var(--code-bg); }
@@ -275,6 +278,7 @@
   .step-body pre { margin: 0; padding: 10px 12px; background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--r-sm); font-size: 12.3px; line-height: 1.5; overflow: auto; max-height: 380px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .step-body pre.stderr { color: var(--err); }
   .step-body .note { font-size: 12.5px; color: var(--text-2); }
+  .step-body .claw-note { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); white-space: pre-wrap; }
   .diff { border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--code-bg); overflow: auto; max-height: 420px; font-family: var(--mono); font-size: 12.3px; line-height: 1.5; padding: 6px 0; }
   .diff div { padding: 0 12px 0 28px; white-space: pre-wrap; overflow-wrap: anywhere; position: relative; }
   .diff div::before { position: absolute; left: 10px; color: var(--text-3); }
@@ -303,7 +307,7 @@
 
   .turn-end { align-self: flex-start; font-size: 12px; color: var(--text-3); display: inline-flex; gap: 6px; align-items: center; margin-top: -4px; }
 
-  #to-bottom { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 4; height: 32px; padding: 0 12px; border-radius: 999px;
+  #to-bottom { position: absolute; left: 50%; bottom: calc(100% + 10px); transform: translateX(-50%); z-index: 4; height: 32px; padding: 0 12px; border-radius: 999px;
     background: var(--surface); border: 1px solid var(--border-strong); box-shadow: var(--shadow); font-size: 12.5px; display: inline-flex; align-items: center; gap: 6px; }
 
   /* ------------------------------------------------------------------ zone de saisie */
@@ -764,16 +768,18 @@
       .replace(/`([^`\n]+)`/g, (_, code) => { codes.push(code); return "\uE000" + (codes.length - 1) + "\uE001"; })
       .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
       .replace(/(^|[^*\w])\*([^*\s][^*\n]*?)\*(?!\w)/g, "$1<em>$2</em>")
-      .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+      .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+      // Lien vers un fichier du projet : son libellé, le chemin au survol.
+      .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, '<span class="filelink" title="$2">$1</span>');
     return text.replace(/\uE000(\d+)\uE001/g, (_, index) => "<code>" + codes[Number(index)] + "</code>");
   }
   const isListLine = (line) => /^\s*([-*+]|\d+[.)])\s+/.test(line);
   const isBlockStart = (line) => /^\s*```/.test(line) || /^#{1,6}\s/.test(line) || /^\s*>/.test(line) || isListLine(line);
   function renderTable(rows) {
     const cells = (row) => row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => renderInline(escapeHtml(c.trim())));
-    let html = "<table><thead><tr>" + cells(rows[0]).map((c) => "<th>" + c + "</th>").join("") + "</tr></thead><tbody>";
+    let html = '<div class="tablewrap"><table><thead><tr>' + cells(rows[0]).map((c) => "<th>" + c + "</th>").join("") + "</tr></thead><tbody>";
     for (const row of rows.slice(2)) html += "<tr>" + cells(row).map((c) => "<td>" + c + "</td>").join("") + "</tr>";
-    return html + "</tbody></table>";
+    return html + "</tbody></table></div>";
   }
   function codeBlock(code, lang) {
     if (lang === "mermaid") {
@@ -1219,14 +1225,28 @@
     }
     return { summary, failed };
   }
-  function attachToolResult(name, output, isError) {
+  // Un résultat gardé dans la session porte parfois, à sa suite, une remarque
+  // que Claw adresse au modèle (« [Claw] … ») : elle n'est pas la sortie de l'outil.
+  function splitClawNote(output) {
+    const text = String(output || "");
+    const cut = text.indexOf("\n\n[Claw] ");
+    return cut < 0 ? [text, ""] : [text.slice(0, cut), text.slice(cut + 9).trim()];
+  }
+  function clawNote(note) {
+    const node = el("div", "note claw-note");
+    node.append(el("b", null, "Remarque de Claw au modèle : "), note);
+    return node;
+  }
+  function attachToolResult(name, rawOutput, isError) {
     let index = pendingTools.findIndex((tool) => tool.name === name);
     if (index < 0 && pendingTools.length) index = 0;
     if (index < 0) { addToolCall(name, "{}"); index = pendingTools.length - 1; }
     const entry = pendingTools.splice(index, 1)[0];
+    const [output, note] = splitClawNote(rawOutput);
     if (entry.output) {
       // Un code de sortie non nul est un échec, même si l'outil a répondu.
       const { summary, failed } = fillCommandOutput(entry, output, isError);
+      if (note) entry.body.append(clawNote(note));
       entry.step.classList.remove("running");
       entry.step.classList.add(failed ? "error" : "ok");
       entry.meta.innerHTML = [summary, elapsed(entry.started)].filter(Boolean).join(" · ");
@@ -1235,6 +1255,7 @@
     }
     const { box, summary } = resultView(output, isError);
     entry.body.append(box);
+    if (note) entry.body.append(clawNote(note));
     entry.step.classList.remove("running");
     entry.step.classList.add(isError ? "error" : "ok");
     if (isError) entry.ic.innerHTML = svg("x");
@@ -1254,10 +1275,21 @@
   // ne seront jamais exécutés. Leurs étapes disparaissent, sinon le résultat du
   // nouvel appel irait à l'ancienne étape et la nouvelle resterait « en cours ».
   function dropPendingTools() {
-    for (const entry of pendingTools.splice(0)) {
-      const group = entry.step.parentElement;
-      entry.step.remove();
+    const removeStep = (step) => {
+      const group = step.parentElement;
+      step.remove();
       if (group && !group.children.length) group.remove();
+    };
+    for (const entry of pendingTools.splice(0)) removeStep(entry.step);
+    // Le début de texte de la réponse abandonnée : la nouvelle le redira.
+    if (currentAssistant) {
+      if (currentAssistant.frame) cancelAnimationFrame(currentAssistant.frame);
+      currentAssistant.node.remove();
+      currentAssistant = null;
+    }
+    if (thinkingStep) {
+      removeStep(thinkingStep.step);
+      thinkingStep = null;
     }
   }
 
@@ -1486,6 +1518,8 @@
           return;
         }
         const waiting = Boolean(ask.retryAt);
+        // Clé refusée, modèle introuvable, crédits épuisés : le même essai échouerait.
+        const useless = event.retry_useful === false && !event.stuck && !waiting;
         const detail = el("div", "detail");
         if (waiting) {
           const count = el("b", "count", String(secondsLeft(ask.retryAt)));
@@ -1495,13 +1529,16 @@
             const attempt = event.attempt ? " (essai " + event.attempt + " sur " + event.attempts + ")" : "";
             detail.append("Raison : " + event.reason + ". Nouvel essai automatique dans ", count, " s" + attempt + ". Vous n'avez rien à faire.");
           }
+        } else if (useless) {
+          detail.textContent = "Raison : " + event.reason + ". Réessayer tel quel ne changerait rien : choisissez un autre modèle, ou arrêtez le tour.";
         } else {
           detail.textContent = event.stuck
             ? "Deux essais n'ont pas suffi. Le même modèle peut continuer, ou vous confiez la suite à un autre."
             : "Raison : " + event.reason + ". Le même modèle peut réessayer, ou vous en choisissez un autre.";
         }
-        askButton(actions, event.stuck ? "Continuer avec le même modèle" : waiting ? "Réessayer maintenant" : "Réessayer avec le même modèle", "primary", () => ask.answer("retry"));
-        askButton(actions, "Changer de modèle", "", () => {
+        const retry = () => askButton(actions, event.stuck ? "Continuer avec le même modèle" : waiting ? "Réessayer maintenant" : useless ? "Réessayer quand même" : "Réessayer avec le même modèle", useless ? "" : "primary", () => ask.answer("retry"));
+        if (!useless) retry();
+        askButton(actions, "Changer de modèle", useless ? "primary" : "", () => {
           // Le temps de choisir, l'essai automatique attend.
           if (ask.retryAt) {
             ask.retryAt = null;
@@ -1510,6 +1547,7 @@
           ask.choosing = true;
           renderAsk();
         });
+        if (useless) retry();
         askButton(actions, "Arrêter le tour", "danger", () => ask.answer("stop"));
         bar.append(what, detail, actions);
       },
@@ -2596,7 +2634,13 @@
     sendBtn.innerHTML = svg(next.busy ? "stop" : "arrowUp");
     sendBtn.title = next.busy ? "Arrêter (Échap) - un message tapé partira à la fin du tour" : "Envoyer (Entrée)";
     const tokens = (next.input_tokens || 0) + (next.output_tokens || 0);
-    $("usage").textContent = tokens ? tokens.toLocaleString("fr-FR") + " jetons" + (next.cost ? " · " + next.cost : "") : "";
+    const context = next.context_tokens || 0;
+    $("usage").textContent = tokens
+      ? (context ? "contexte : " + context.toLocaleString("fr-FR") + " jetons" : tokens.toLocaleString("fr-FR") + " jetons") + (next.cost ? " · " + next.cost : "")
+      : "";
+    $("usage").title = tokens
+      ? "Contexte : ce que le modèle relit à chaque requête (estimation). Depuis le début de la session : " + tokens.toLocaleString("fr-FR") + " jetons échangés, chaque requête renvoyant tout le contexte."
+      : "";
     if (wasBusy && !next.busy) {
       const took = busySince ? Date.now() - busySince : 0;
       busySince = null;

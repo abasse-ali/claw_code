@@ -100,8 +100,8 @@ pub fn model_available(model: &str) -> bool {
     with_cooldown(|map| {
         let now = Instant::now();
         map.retain(|_, until| *until > now);
-        !map.contains_key(model)
-            && !(is_openrouter_free(model) && map.contains_key(OPENROUTER_FREE_KEY))
+        !(map.contains_key(model)
+            || is_openrouter_free(model) && map.contains_key(OPENROUTER_FREE_KEY))
     })
 }
 
@@ -202,11 +202,11 @@ fn retry_in_place_delay(error: &ApiError, attempt: u32) -> Option<Duration> {
     }
     match error.rate_limit_reset() {
         Some(reset) if reset <= Duration::from_secs(70) => Some(reset + Duration::from_millis(500)),
-        Some(_) => None,
         None if status.as_u16() == 429 || status.is_server_error() => {
             Some(Duration::from_secs(2 * u64::from(attempt)))
         }
-        None => None,
+        // Remise à zéro lointaine, ou erreur qui n'annonce aucun délai.
+        Some(_) | None => None,
     }
 }
 

@@ -294,6 +294,24 @@ function get(port, path) {
     cutOrder);
   cut.stop();
 
+  // Échec que réessayer ne changerait pas (erreur 404 d'OpenRouter) : la
+  // question le dit, pour que la page propose d'abord de changer de modèle.
+  const refused = new ClawServer({ clawPath: claw, cwd, model: "ollama:introuvable", permissionMode: "read-only", env });
+  await refused.start();
+  const refusedEvents = [];
+  refused.subscribe((event) => refusedEvents.push(event));
+  await wait("abonnement", () => refusedEvents.some((event) => event.type === "status"));
+  await refused.send("Réponds bonjour");
+  await wait("question sur le modèle refusé", () => refusedEvents.some((event) => event.type === "model_question"), 160);
+  const refusedQuestion = refusedEvents.find((event) => event.type === "model_question") || {};
+  if (refusedQuestion.id !== undefined) await refused.request("POST", "/api/model-question", { id: refusedQuestion.id, decision: "stop" });
+  await wait("fin du tour arrêté", () => refusedEvents.some((event) => event.type === "turn_done"), 160);
+  check("une erreur 404 d'OpenRouter est nommée, et la question dit que réessayer ne servirait à rien",
+    refusedQuestion.retry_useful === false && refusedQuestion.auto_retry_secs === undefined
+      && refusedQuestion.reason === "ce modèle n'accepte pas les appels d'outils (erreur 404)",
+    JSON.stringify(refusedQuestion));
+  refused.stop();
+
   // Fournisseur qui se fige au milieu d'une réponse : après le délai
   // d'inactivité, la requête est abandonnée puis relancée, sans intervention.
   const frozen = new ClawServer({

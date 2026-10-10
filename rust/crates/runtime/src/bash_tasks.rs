@@ -149,7 +149,7 @@ pub fn read_output(id: &str) -> Result<TaskOutput, String> {
             .iter()
             .position(|task| task.id == id || task.child.id().to_string() == id)
         else {
-            return Err(unknown_task(id, tasks_ids(tasks)));
+            return Err(unknown_task(id, &tasks_ids(tasks)));
         };
         let task = &mut tasks[index];
         refresh(task);
@@ -189,7 +189,7 @@ fn tasks_ids(tasks: &[BackgroundTask]) -> String {
         .join(", ")
 }
 
-fn unknown_task(id: &str, known: String) -> String {
+fn unknown_task(id: &str, known: &str) -> String {
     if known.is_empty() {
         format!("unknown background task `{id}` (no background task is running)")
     } else {
@@ -204,7 +204,7 @@ pub fn kill(id: &str) -> Result<TaskOutput, String> {
             .iter()
             .position(|task| task.id == id || task.child.id().to_string() == id)
         else {
-            return Err(unknown_task(id, tasks_ids(tasks)));
+            return Err(unknown_task(id, &tasks_ids(tasks)));
         };
         let task = &mut tasks[index];
         stop(task);

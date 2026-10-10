@@ -31,6 +31,9 @@ pub(crate) struct ModelQuestion {
     pub auto_retry: Option<Duration>,
     /// Numéro de l'essai automatique à venir, et nombre d'essais prévus.
     pub attempt: Option<(u32, u32)>,
+    /// Faux quand le même essai échouerait de la même façon (clé refusée,
+    /// modèle introuvable, quota du jour épuisé).
+    pub retry_useful: bool,
 }
 
 /// Délais avant chaque nouvel essai automatique du même modèle : rapprochés

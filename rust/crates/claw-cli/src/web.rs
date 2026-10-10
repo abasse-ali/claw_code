@@ -147,6 +147,9 @@ enum WebEvent {
         attempt: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         attempts: Option<u32>,
+        /// Faux quand le même essai échouerait de la même façon (clé refusée,
+        /// modèle introuvable) : la page propose d'abord de changer de modèle.
+        retry_useful: bool,
     },
     ModelQuestionResolved {
         id: u64,
@@ -233,6 +236,8 @@ struct StatusView {
     cwd: String,
     input_tokens: u64,
     output_tokens: u64,
+    /// Taille estimée de ce que le modèle relit à chaque requête.
+    context_tokens: u64,
     cost: Option<String>,
 }
 
@@ -559,6 +564,7 @@ impl crate::model_switch::ModelSwitchPrompter for WebModelPrompter {
             auto_retry_secs: question.auto_retry.map(|delay| delay.as_secs()),
             attempt: question.attempt.map(|(attempt, _)| attempt),
             attempts: question.attempt.map(|(_, attempts)| attempts),
+            retry_useful: question.retry_useful,
         });
         // Essai automatique : sans réponse dans le délai, le même modèle
         // reprend. Si l'utilisateur ouvre le choix d'un modèle, on l'attend.
@@ -758,6 +764,7 @@ impl Worker {
                 .unwrap_or_default(),
             input_tokens: u64::from(usage.input_tokens),
             output_tokens: u64::from(usage.output_tokens),
+            context_tokens: u64::try_from(self.runtime.estimated_tokens()).unwrap_or(u64::MAX),
             cost: models::estimated_cost(&self.model, usage),
         }
     }

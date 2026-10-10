@@ -352,6 +352,8 @@ where
         )
     }
 
+    // La configuration est donnée entière par l'appelant, qui n'en garde rien.
+    #[allow(clippy::needless_pass_by_value)]
     #[must_use]
     pub fn new_with_features(
         session: Session,
@@ -1964,6 +1966,8 @@ mod tests {
         );
     }
 
+    // Le second faux modèle est déclaré là où le scénario s'en sert.
+    #[allow(clippy::items_after_statements)]
     #[test]
     fn an_empty_reply_is_followed_up_once_instead_of_failing() {
         struct EmptyThenText {

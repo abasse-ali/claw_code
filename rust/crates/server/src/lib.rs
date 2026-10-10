@@ -136,7 +136,6 @@ pub struct SendMessageRequest {
     pub message: String,
 }
 
-#[must_use]
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/sessions", post(create_session).get(list_sessions))
@@ -250,7 +249,8 @@ async fn stream_session_events(
                         yield Ok::<Event, Infallible>(sse_event);
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                // Des événements ont été perdus : la lecture reprend aux suivants.
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -262,8 +262,9 @@ async fn stream_session_events(
 fn unix_timestamp_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("l'horloge système devrait être postérieure à l'epoch")
-        .as_millis() as u64
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 fn not_found(message: String) -> ApiError {
