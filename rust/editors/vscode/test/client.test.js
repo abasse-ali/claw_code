@@ -390,6 +390,59 @@ function get(port, path) {
     String(requestsTo("mock/vision:free").length));
   blind.stop();
 
+  // Mode équipe : comprendre va au modèle le plus proche de Claude, écrire le
+  // code au spécialiste du code ; chacun reçoit son rôle et la conversation.
+  const teamHome = path.join(root, "claw-home-equipe");
+  fs.mkdirSync(path.join(teamHome, "cache"), { recursive: true });
+  const teamModel = (id, extra) => ({
+    id, name: id, description: "", context_length: 131072, max_completion_tokens: 16384,
+    prompt_price: 0, completion_price: 0, supports_tools: true, supports_images: false, ...extra,
+  });
+  fs.writeFileSync(path.join(teamHome, "cache", "openrouter-models.json"), JSON.stringify({
+    version: 3,
+    fetched_at: Math.floor(Date.now() / 1000),
+    models: [
+      teamModel("anthropic/claude-fable-5", { prompt_price: 0.000005, completion_price: 0.000025, supports_reasoning: true, supports_images: true, context_length: 1000000,
+        description: "Frontier model for coding, agents and long-running tasks with extended reasoning." }),
+      teamModel("mock/penseur:free", { supports_reasoning: true, supports_images: true, context_length: 1000000,
+        description: "Reasoning model for coding, agents and long-running tasks." }),
+      teamModel("mock/codeur:free", { description: "A coding model for software engineering." }),
+      teamModel("mock/base:free", { description: "Small chat model." }),
+    ],
+    programming_ranking: ["mock/codeur"],
+    category_rankings: {},
+  }));
+  const team = new ClawServer({
+    clawPath: claw,
+    cwd,
+    model: "mock/base:free",
+    permissionMode: "danger-full-access",
+    env: { ...env, CLAW_CONFIG_HOME: teamHome, OPENROUTER_BASE_URL: mock.baseUrl, OPENROUTER_API_KEY: "sk-or-test-factice", CLAW_TEAM: "1" },
+  });
+  await team.start();
+  const teamEvents = [];
+  team.subscribe((event) => teamEvents.push(event));
+  await wait("abonnement", () => teamEvents.some((event) => event.type === "status"));
+  const teamLogStart = fs.readFileSync(logPath, "utf8").split("\n").filter(Boolean).length;
+  const teamDone = teamEvents.filter((event) => event.type === "turn_done").length;
+  await team.send("Crée la note de l'équipe [mock:write notes/equipe.txt=relais]");
+  await wait("fin du tour en équipe", () => teamEvents.filter((event) => event.type === "turn_done").length > teamDone, 160);
+  const teamRequests = fs.readFileSync(logPath, "utf8").split("\n").filter(Boolean).slice(teamLogStart).map((line) => JSON.parse(line));
+  const teamSystem = (request) => ((request.messages || []).find((message) => message.role === "system") || {}).content || "";
+  const teamNotices = teamEvents.filter((event) => event.type === "notice").map((event) => event.text);
+  check("mode équipe : comprendre au plus proche de Claude, écrire le code au spécialiste, avec leur rôle",
+    teamRequests.length === 2
+      && teamRequests[0].model === "mock/penseur:free" && teamRequests[1].model === "mock/codeur:free"
+      && String(teamSystem(teamRequests[0])).includes("Your role for this step: understand and prepare")
+      && String(teamSystem(teamRequests[1])).includes("Your role for this step: write the code")
+      && JSON.stringify(teamRequests[1].messages).includes("relais")
+      && fs.existsSync(path.join(cwd, "notes", "equipe.txt"))
+      && teamNotices.some((text) => text.startsWith("Équipe : « comprendre et préparer » confié à mock/penseur:free"))
+      && teamNotices.some((text) => text.startsWith("Équipe : « écrire le code » confié à mock/codeur:free"))
+      && teamEvents.some((event) => event.type === "status" && event.status.team === true),
+    JSON.stringify([teamRequests.map((request) => request.model), teamNotices]).slice(0, 700));
+  team.stop();
+
   // Appel d'outil que le fournisseur ne termine pas (le nom arrive, pas les
   // arguments) : jamais exécuté, et jamais soumis à l'autorisation de l'utilisateur.
   const startAsking = async (model) => {

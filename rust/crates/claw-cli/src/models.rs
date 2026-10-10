@@ -670,6 +670,385 @@ pub fn providers_report(current_model: &str) -> String {
     lines.join("\n")
 }
 
+// --- Google Gemini --------------------------------------------------------------------
+
+/// Modèles Gemini de l'offre gratuite de Google (« Free of charge » sur la page
+/// des tarifs, relevée le 10 octobre 2026), du plus récent au plus ancien.
+/// Gemini 3.1 Pro Preview n'y figure pas : il est payant. Ils ne sont gratuits
+/// que si la facturation n'est pas activée sur le projet de la clé.
+pub(crate) const GEMINI_FREE_TIER: &[(&str, &str)] = &[
+    ("gemini-3.8-flash", "Gemini 3.8 Flash"),
+    ("gemini-3.6-flash", "Gemini 3.6 Flash"),
+    ("gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite"),
+    ("gemini-3.1-flash-lite", "Gemini 3.1 Flash-Lite"),
+    ("gemini-2.5-pro", "Gemini 2.5 Pro"),
+    ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+    ("gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite"),
+];
+
+fn has_gemini_key() -> bool {
+    env::var("GEMINI_API_KEY").is_ok_and(|key| !key.trim().is_empty())
+}
+
+/// Modèles Gemini gratuits pour le menu de la page (aucune requête) : vides
+/// sans clé `GEMINI_API_KEY`.
+fn gemini_models_json() -> Vec<serde_json::Value> {
+    if !has_gemini_key() {
+        return Vec::new();
+    }
+    GEMINI_FREE_TIER
+        .iter()
+        .map(|(id, name)| {
+            serde_json::json!({
+                "id": format!("gemini:{id}"),
+                "name": format!("Google: {name}"),
+                "context": "1M",
+                "reasons": ["offre gratuite de Google, clé GEMINI_API_KEY"],
+                "score": 0,
+                "measured": null,
+                "available": true,
+                "likeness": [],
+                "specialties": [
+                    { "key": "reasoning", "label": "Raisonnement", "detail": "modèle qui réfléchit avant de répondre" },
+                    { "key": "vision", "label": "Images", "detail": "lit les images" },
+                    { "key": "long_context", "label": "Long contexte", "detail": "contexte d'un million de jetons" },
+                ],
+            })
+        })
+        .collect()
+}
+
+/// Ajoute les modèles Gemini gratuits au menu des modèles : une catégorie
+/// « Google Gemini » juste après la première, et dans « Tous ».
+fn add_gemini_to_view(view: &mut serde_json::Value) {
+    let entries = gemini_models_json();
+    if entries.is_empty() {
+        return;
+    }
+    let ids: Vec<serde_json::Value> = entries.iter().map(|entry| entry["id"].clone()).collect();
+    if let Some(models) = view["models"].as_array_mut() {
+        models.extend(entries);
+    }
+    if let Some(categories) = view["categories"].as_array_mut() {
+        for category in categories.iter_mut() {
+            if category["key"] == "all" {
+                if let Some(models) = category["models"].as_array_mut() {
+                    models.extend(ids.iter().cloned());
+                }
+            }
+        }
+        let at = categories.len().min(1);
+        categories.insert(
+            at,
+            serde_json::json!({
+                "key": "gemini",
+                "label": "Google Gemini",
+                "models": ids,
+                "paid": [],
+            }),
+        );
+    }
+}
+
+/// `/models gemini` : les modèles Gemini gratuits ouverts à la clé, et comment
+/// s'en servir.
+fn gemini_report(current_model: &str) -> String {
+    let mut lines = vec!["Google Gemini (préfixe gemini:)".to_string()];
+    if !has_gemini_key() {
+        lines.extend([
+            "  Clé              absente : créez-la sur https://aistudio.google.com/apikey".to_string(),
+            "  Enregistrer      [Environment]::SetEnvironmentVariable(\"GEMINI_API_KEY\", (Read-Host \"Clé Gemini\"), \"User\")".to_string(),
+            "                   puis rouvrez le terminal (ou VS Code) : Claw la lit au démarrage".to_string(),
+        ]);
+        return lines.join("\n");
+    }
+    // Les modèles que la clé ouvre vraiment (lecture du catalogue de Google,
+    // aucune génération) ; sans réponse, la liste de l'offre gratuite.
+    let offered: Option<Vec<String>> = api::compat_providers()
+        .into_iter()
+        .find(|provider| provider.name == "gemini")
+        .and_then(|provider| provider_models(&provider, Duration::from_secs(8)).ok())
+        .map(|models| {
+            models
+                .into_iter()
+                .map(|model| model.trim_start_matches("models/").to_string())
+                .collect()
+        });
+    lines.push(match &offered {
+        Some(models) => format!("  Clé              présente · {} modèles ouverts à cette clé", models.len()),
+        None => "  Clé              présente · liste de Google injoignable, voici l'offre gratuite connue".to_string(),
+    });
+    lines.push(String::new());
+    lines.push("  Gratuits (offre gratuite de Google, du plus récent au plus ancien)".to_string());
+    for (id, name) in GEMINI_FREE_TIER {
+        if offered
+            .as_ref()
+            .is_some_and(|models| !models.iter().any(|model| model == id))
+        {
+            continue;
+        }
+        let full = format!("gemini:{id}");
+        let marker = if full == current_model {
+            "  ● actuel"
+        } else {
+            ""
+        };
+        lines.push(format!("    {full:<32} {name}{marker}"));
+    }
+    lines.extend([
+        String::new(),
+        "  Choisir          /model gemini:gemini-3.8-flash (ou le menu des modèles de la page, catégorie « Google Gemini »)".to_string(),
+        "  Dans l'équipe    \"teamModels\": {\"vision\": \"gemini:gemini-3.8-flash\"} dans .claw/settings.json".to_string(),
+        "  Gratuit si       la facturation n'est pas activée sur le projet de la clé (AI Studio, Facturation) ; sinon chaque requête est payante".to_string(),
+        "  Limites          par projet, visibles sur https://aistudio.google.com/rate-limit ; en offre gratuite, Google peut se servir des requêtes pour améliorer ses produits".to_string(),
+        "  Payant           gemini-3.1-pro-preview et les autres modèles absents de cette liste".to_string(),
+    ]);
+    lines.join("\n")
+}
+
+// --- Mode équipe ---------------------------------------------------------------------
+
+/// Modèle choisi par le mode équipe pour une étape, et pourquoi.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TeamPick {
+    pub model: String,
+    pub why: String,
+}
+
+/// Ce que l'étape demande en plus de son rôle.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct TeamNeeds<'a> {
+    /// La demande en cours contient des images.
+    pub images: bool,
+    /// Taille estimée de la conversation : le modèle doit pouvoir la lire.
+    pub context_tokens: u64,
+    /// Modèle à éviter : le relecteur n'est pas celui qui a écrit le code.
+    pub avoid: Option<&'a str>,
+}
+
+/// Modèle le plus fort pour ce rôle : celui de `teamModels` s'il le précise
+/// (`"vision"` quand la demande contient des images), sinon le meilleur modèle
+/// gratuit disponible d'après le catalogue d'`OpenRouter` en cache (aucune
+/// requête). `None` : le modèle de la session garde la main.
+pub(crate) fn team_pick(role: runtime::team::Role, needs: &TeamNeeds) -> Option<TeamPick> {
+    let overrides = env::current_dir()
+        .ok()
+        .and_then(|cwd| ConfigLoader::default_for(&cwd).load().ok())
+        .map(|config| config.team_models().clone())
+        .unwrap_or_default();
+    let configured = |key: &str| {
+        overrides.get(key).map(|model| TeamPick {
+            model: api::resolve_model_alias(model),
+            why: format!("teamModels.{key}"),
+        })
+    };
+    if needs.images {
+        if let Some(pick) = configured("vision") {
+            return Some(pick);
+        }
+    }
+    if let Some(pick) = configured(role.key()) {
+        return Some(pick).filter(|pick| Some(pick.model.as_str()) != needs.avoid);
+    }
+    let has_key = env::var("OPENROUTER_API_KEY").is_ok_and(|key| !key.trim().is_empty());
+    if !has_key {
+        return None;
+    }
+    let catalog = load_cached_catalog()?;
+    team_pick_in(
+        &catalog,
+        &crate::bench::recent_results(),
+        role,
+        needs,
+        api::model_available,
+    )
+}
+
+/// Choix du mode équipe dans un catalogue donné, parmi les modèles gratuits
+/// qui appellent des outils, disponibles, assez grands pour la conversation,
+/// et qui lisent les images quand il y en a.
+fn team_pick_in(
+    catalog: &ModelCatalog,
+    measured: &std::collections::BTreeMap<String, crate::bench::BenchResult>,
+    role: runtime::team::Role,
+    needs: &TeamNeeds,
+    available: impl Fn(&str) -> bool,
+) -> Option<TeamPick> {
+    use runtime::team::Role;
+    let candidates: Vec<&api::OpenRouterModel> = usable_free_models(catalog, measured)
+        .into_iter()
+        .filter(|model| available(&model.id) && Some(model.id.as_str()) != needs.avoid)
+        .filter(|model| !needs.images || model.supports_images)
+        .filter(|model| {
+            model
+                .context_length
+                .is_none_or(|context| context >= needs.context_tokens.saturating_mul(5) / 4)
+        })
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let vision = if needs.images { ", lit les images" } else { "" };
+    // Le classement du code d'abord ; sinon (aucun des modèles qui conviennent
+    // n'y figure, par exemple pour lire une image) le plus efficace d'entre eux.
+    let by_efficiency = || {
+        scored_free_models(catalog, measured)
+            .into_iter()
+            .map(|(_, id)| id)
+            .find(|id| candidates.iter().any(|model| &model.id == id))
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .filter_map(|model| {
+                        efficiency(&model.id, Some(catalog), measured.get(&model.id))
+                            .map(|(score, _)| (score, model.id.clone()))
+                    })
+                    .max_by(|left, right| left.0.total_cmp(&right.0))
+                    .map(|(_, id)| id)
+            })
+    };
+    match role {
+        Role::Code => by_efficiency().map(|model| TeamPick {
+            model,
+            why: format!("le plus efficace pour le code{vision}"),
+        }),
+        // Comprendre, déboguer, relire : le profil le plus proche de Claude
+        // (raisonnement, outils, contexte, code, mesures de Claw), Fable d'abord.
+        Role::Plan | Role::Debug | Role::Review => {
+            let references = crate::likeness::claude_references(catalog);
+            let reference = references
+                .iter()
+                .find(|reference| reference.id.contains("fable"))
+                .or_else(|| references.first());
+            match reference {
+                Some(reference) => closest_to(reference, &candidates, catalog, measured)
+                    .into_iter()
+                    .next()
+                    .map(|(model, likeness)| TeamPick {
+                        model: model.id.clone(),
+                        why: format!(
+                            "le plus proche de {} ({} %){vision}",
+                            likeness.reference_name, likeness.percent
+                        ),
+                    }),
+                None => by_efficiency().map(|model| TeamPick {
+                    model,
+                    why: format!("le plus puissant disponible{vision}"),
+                }),
+            }
+        }
+        // Sujet spécialisé : le mieux classé de la catégorie chez OpenRouter,
+        // sinon un modèle dont c'est la spécialité ; sinon personne.
+        Role::Topic(category) => {
+            let label = role.label();
+            if let Some((rank, model)) = candidates
+                .iter()
+                .filter_map(|model| {
+                    api::category_rank(&model.id, category, catalog).map(|rank| (rank, model))
+                })
+                .min_by_key(|(rank, _)| *rank)
+            {
+                return Some(TeamPick {
+                    model: model.id.clone(),
+                    why: format!("n°{rank} de la catégorie {label} chez OpenRouter{vision}"),
+                });
+            }
+            candidates
+                .iter()
+                .filter(|model| {
+                    api::model_specialties(model, catalog)
+                        .iter()
+                        .any(|specialty| specialty.key == category)
+                })
+                .filter_map(|model| {
+                    efficiency(&model.id, Some(catalog), measured.get(&model.id))
+                        .map(|(score, _)| (score, model))
+                })
+                .max_by(|left, right| left.0.total_cmp(&right.0))
+                .map(|(_, model)| TeamPick {
+                    model: model.id.clone(),
+                    why: format!("spécialité {label} d'après sa description{vision}"),
+                })
+        }
+    }
+}
+
+/// `/equipe` : l'état du mode équipe et qui ferait quoi maintenant.
+pub fn team_report(current_model: &str) -> String {
+    use runtime::team::Role;
+    let state = if runtime::team::team() {
+        "activé : chaque étape va au modèle gratuit le plus fort pour elle"
+    } else {
+        "désactivé (/equipe pour l'activer)"
+    };
+    let mut lines = vec![
+        "Mode équipe".to_string(),
+        format!("  État             {state}"),
+        format!("  Sans meilleur    {current_model} (modèle de la session) garde la main"),
+        String::new(),
+    ];
+    let line = |label: &str, pick: Option<TeamPick>| match pick {
+        Some(pick) => format!("  {label:<16} {} ({})", pick.model, pick.why),
+        None => format!("  {label:<16} {current_model} (modèle de la session)"),
+    };
+    let code = team_pick(Role::Code, &TeamNeeds::default());
+    lines.push(line(
+        "Comprendre",
+        team_pick(Role::Plan, &TeamNeeds::default()),
+    ));
+    lines.push(line("Écrire le code", code.clone()));
+    lines.push(line(
+        "Déboguer",
+        team_pick(Role::Debug, &TeamNeeds::default()),
+    ));
+    let avoid = code.as_ref().map(|pick| pick.model.as_str());
+    lines.push(line(
+        "Relire",
+        team_pick(
+            Role::Review,
+            &TeamNeeds {
+                avoid,
+                ..TeamNeeds::default()
+            },
+        ),
+    ));
+    lines.push(line(
+        "Images",
+        team_pick(
+            Role::Code,
+            &TeamNeeds {
+                images: true,
+                ..TeamNeeds::default()
+            },
+        ),
+    ));
+    for category in [
+        "translation",
+        "legal",
+        "finance",
+        "health",
+        "science",
+        "academia",
+        "marketing",
+    ] {
+        let role = Role::Topic(category);
+        if let Some(pick) = team_pick(role, &TeamNeeds::default()) {
+            let mut label = role.label().to_string();
+            if let Some(first) = label.get(..1) {
+                label = first.to_uppercase() + &label[1..];
+            }
+            lines.push(format!("  {label:<16} {} ({})", pick.model, pick.why));
+        }
+    }
+    lines.extend([
+        String::new(),
+        "  Relais           chaque modèle reçoit toute la conversation et son rôle : il reprend le travail des autres là où il en est".to_string(),
+        "  Imposer          \"teamModels\": {\"code\": \"…\", \"plan\": \"…\", \"debug\": \"…\", \"review\": \"…\", \"vision\": \"…\", \"translation\": \"…\"}".to_string(),
+        "  Couper           /equipe off · pour chaque session : \"team\": true".to_string(),
+    ]);
+    lines.join("\n")
+}
+
 /// Modèles gratuits utilisables par l'agent (appels d'outils, pas un routeur,
 /// pas mesurés incompatibles).
 fn usable_free_models<'a>(
@@ -954,6 +1333,9 @@ pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, 
     }
     if matches!(args, Some("claude" | "proches" | "opus" | "fable")) {
         return claude_likeness_report();
+    }
+    if matches!(args, Some("gemini" | "google")) {
+        return Ok(gemini_report(current_model));
     }
     let refresh = args == Some("refresh");
     let filter = args.filter(|_| !refresh).map(str::to_ascii_lowercase);
@@ -1283,6 +1665,7 @@ fn paid_models_json(category: &str, catalog: &ModelCatalog) -> Vec<serde_json::V
 pub fn free_coding_models_json(refresh: bool) -> Result<serde_json::Value, String> {
     let (catalog, warning) = catalog(refresh)?;
     let mut view = models_view_json(&catalog, &crate::bench::recent_results());
+    add_gemini_to_view(&mut view);
     view["quota"] = serde_json::json!(free_quota_line());
     view["warning"] = serde_json::json!(warning);
     view["favorites"] = serde_json::json!(favorite_models());
@@ -1936,5 +2319,175 @@ mod tests {
             Some("ollama:qwen2.5-coder:7b")
         );
         assert!(!chain.iter().any(|model| model == "free"), "{chain:?}");
+    }
+
+    /// Catalogue d'essai : une référence Claude, un spécialiste du code, un
+    /// modèle qui raisonne et lit les images, un traducteur, un petit modèle.
+    fn team_catalog() -> api::ModelCatalog {
+        let model = |id: &str, description: &str| OpenRouterModel {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: description.to_string(),
+            context_length: Some(131_072),
+            max_completion_tokens: Some(16_384),
+            supports_tools: true,
+            ..OpenRouterModel::default()
+        };
+        let claude = OpenRouterModel {
+            prompt_price: 0.000_005,
+            completion_price: 0.000_025,
+            supports_reasoning: true,
+            supports_images: true,
+            context_length: Some(1_000_000),
+            max_completion_tokens: Some(128_000),
+            ..model(
+                "anthropic/claude-fable-5",
+                "Frontier model for coding, agents and long-running tasks with extended reasoning.",
+            )
+        };
+        let thinker = OpenRouterModel {
+            supports_reasoning: true,
+            supports_images: true,
+            context_length: Some(1_000_000),
+            max_completion_tokens: Some(65_536),
+            ..model(
+                "lab/penseur:free",
+                "Reasoning model for coding, agents and long-running tasks.",
+            )
+        };
+        api::ModelCatalog {
+            models: vec![
+                claude,
+                thinker,
+                model(
+                    "lab/codeur:free",
+                    "A coding model for software engineering.",
+                ),
+                model("lab/polyglotte:free", "Multilingual chat model."),
+                model("lab/petit:free", "Small chat model."),
+            ],
+            programming_ranking: vec!["lab/codeur".to_string()],
+            category_rankings: std::collections::BTreeMap::from([(
+                "translation".to_string(),
+                vec!["lab/polyglotte".to_string()],
+            )]),
+            ..api::ModelCatalog::default()
+        }
+    }
+
+    #[test]
+    fn free_gemini_models_join_the_menu_only_with_a_key() {
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("GEMINI_API_KEY", value),
+                    None => std::env::remove_var("GEMINI_API_KEY"),
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("GEMINI_API_KEY"));
+        let view = || {
+            serde_json::json!({
+                "models": [{ "id": "lab/codeur:free" }],
+                "categories": [
+                    { "key": "claude", "models": [] },
+                    { "key": "all", "models": ["lab/codeur:free"] },
+                ],
+            })
+        };
+        std::env::remove_var("GEMINI_API_KEY");
+        let mut without = view();
+        super::add_gemini_to_view(&mut without);
+        assert_eq!(without, view());
+
+        std::env::set_var("GEMINI_API_KEY", "cle-factice");
+        let mut with = view();
+        super::add_gemini_to_view(&mut with);
+        assert_eq!(with["categories"][1]["key"], "gemini");
+        assert_eq!(with["categories"][1]["label"], "Google Gemini");
+        let ids = with["categories"][1]["models"]
+            .as_array()
+            .expect("liste")
+            .clone();
+        assert_eq!(ids.len(), super::GEMINI_FREE_TIER.len());
+        assert_eq!(ids[0], "gemini:gemini-3.8-flash");
+        // Jamais le Pro payant.
+        assert!(!ids.iter().any(|id| id == "gemini:gemini-3.1-pro-preview"));
+        assert!(with["categories"][2]["models"]
+            .as_array()
+            .is_some_and(|all| all.contains(&serde_json::json!("gemini:gemini-2.5-pro"))));
+        assert_eq!(with["models"].as_array().map(Vec::len), Some(1 + ids.len()));
+    }
+
+    #[test]
+    fn the_team_gives_each_role_to_the_strongest_free_model_for_it() {
+        use super::{team_pick_in, TeamNeeds};
+        use runtime::team::Role;
+        let catalog = team_catalog();
+        let measured = std::collections::BTreeMap::new();
+        let all = |_: &str| true;
+        let pick = |role, needs: &TeamNeeds| {
+            team_pick_in(&catalog, &measured, role, needs, all).map(|pick| (pick.model, pick.why))
+        };
+        let plain = TeamNeeds::default();
+        let code = pick(Role::Code, &plain).expect("codeur");
+        assert_eq!(code.0, "lab/codeur:free");
+        assert!(
+            code.1.starts_with("le plus efficace pour le code"),
+            "{}",
+            code.1
+        );
+        let planner = pick(Role::Plan, &plain).expect("penseur");
+        assert_eq!(planner.0, "lab/penseur:free");
+        assert!(planner.1.contains("le plus proche de"), "{}", planner.1);
+        assert_eq!(
+            pick(Role::Debug, &plain).map(|pick| pick.0).as_deref(),
+            Some("lab/penseur:free")
+        );
+        // Le relecteur n'est pas celui qui a écrit.
+        let review = pick(
+            Role::Review,
+            &TeamNeeds {
+                avoid: Some("lab/penseur:free"),
+                ..TeamNeeds::default()
+            },
+        )
+        .expect("relecteur");
+        assert_ne!(review.0, "lab/penseur:free");
+        // Une image : seul un modèle qui la lit, même pour écrire le code.
+        let images = TeamNeeds {
+            images: true,
+            ..TeamNeeds::default()
+        };
+        let seeing = pick(Role::Code, &images).expect("lecteur d'images");
+        assert_eq!(seeing.0, "lab/penseur:free");
+        assert!(seeing.1.ends_with("lit les images"), "{}", seeing.1);
+        // Une longue conversation : seul un modèle qui la contient.
+        let long = TeamNeeds {
+            context_tokens: 400_000,
+            ..TeamNeeds::default()
+        };
+        assert_eq!(
+            pick(Role::Code, &long).map(|pick| pick.0).as_deref(),
+            Some("lab/penseur:free")
+        );
+        // Sujet : le mieux classé de la catégorie ; sans spécialiste, personne.
+        let translation = pick(Role::Topic("translation"), &plain).expect("traducteur");
+        assert_eq!(translation.0, "lab/polyglotte:free");
+        assert!(
+            translation.1.contains("n°1 de la catégorie traduction"),
+            "{}",
+            translation.1
+        );
+        assert_eq!(pick(Role::Topic("legal"), &plain), None);
+        // Un modèle mis de côté (quota, panne) laisse la place au suivant.
+        let without_coder = team_pick_in(&catalog, &measured, Role::Code, &plain, |id: &str| {
+            id != "lab/codeur:free"
+        })
+        .expect("autre codeur");
+        assert_ne!(without_coder.model, "lab/codeur:free");
+        // Jamais un modèle payant.
+        assert!(!["anthropic/claude-fable-5"].contains(&code.0.as_str()));
     }
 }

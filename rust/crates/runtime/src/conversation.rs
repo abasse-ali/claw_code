@@ -80,6 +80,15 @@ pub trait ApiClient {
     /// le modèle au travail : la réponse qu'il venait de donner est provisoire,
     /// celle qui suivra la remplace.
     fn answer_superseded(&mut self) {}
+
+    /// Mode équipe : rôle de la prochaine requête (le client choisit le modèle
+    /// le plus fort pour ce rôle).
+    fn plan_step(&mut self, _step: crate::team::Step) {}
+
+    /// Mode équipe : modèle d'un sous-agent lancé par Claw dans ce rôle.
+    fn team_model(&mut self, _role: crate::team::Role) -> Option<String> {
+        None
+    }
 }
 
 /// Pourquoi le runtime consulte un autre modèle.
@@ -258,6 +267,13 @@ struct TurnAids {
     /// Une vérification indépendante a déjà eu lieu pendant ce tour.
     workflow_checked: bool,
     workflow_runs: usize,
+    /// Mode équipe pour ce tour, et sujet spécialisé de la demande.
+    team: bool,
+    topic: Option<&'static str>,
+    /// La dernière commande de vérification (tests, compilation) a échoué.
+    check_failing: bool,
+    /// Une remarque d'un contrôle de Claw attend sa correction.
+    feedback_pending: bool,
 }
 
 /// Mots en dessous desquels un message de l'utilisateur peut n'être qu'une
@@ -633,8 +649,11 @@ where
         let mut iterations = 0;
         let mut stop_continuations = 0;
         let mut empty_nudged = false;
+        let team = !self.subagent && crate::team::team();
         let mut aids = TurnAids {
             ultracode: !self.subagent && crate::workflow::active_for(&request_text),
+            team,
+            topic: team.then(|| crate::team::topic_of(&request_text)).flatten(),
             ..TurnAids::default()
         };
         // Ultracode : un agent au contexte vierge étudie la demande avant le
@@ -655,6 +674,18 @@ where
 
             if interrupt_requested() {
                 return Err(RuntimeError::new(INTERRUPTED_MESSAGE));
+            }
+            // Mode équipe : le rôle de cette étape, d'après l'état du travail.
+            if aids.team {
+                let troubled = aids.verify_failing
+                    || aids.check_failing
+                    || aids.feedback_pending
+                    || aids.failure_streak >= harness::PERSISTENCE_FAILURES;
+                self.api_client.plan_step(crate::team::step_for(
+                    aids.topic,
+                    troubled,
+                    !aids.originals.is_empty(),
+                ));
             }
             self.auto_compact(false);
             let request = ApiRequest {
@@ -744,6 +775,7 @@ where
                     feedback.push_str(&harness::language_note(self.response_language.as_deref()));
                 }
                 self.api_client.answer_superseded();
+                aids.feedback_pending = true;
                 self.session
                     .messages
                     .push(ConversationMessage::user_text(feedback));
@@ -988,6 +1020,7 @@ where
             aids.dirty = true;
             aids.editor_dirty = true;
             aids.workflow_dirty = true;
+            aids.feedback_pending = false;
             aids.verified_commands.clear();
             let path = json_field(&output, "filePath").or_else(|| json_field(input, "path"));
             if let Some(path) = &path {
@@ -1021,10 +1054,14 @@ where
         if matches!(tool_name, "bash" | "PowerShell") && !is_error {
             if let Some(command) = json_field(input, "command") {
                 if harness::read_bash_output(&output).passed {
+                    if harness::is_check_command(&command) {
+                        aids.check_failing = false;
+                    }
                     aids.verified_commands.push(command);
                 } else {
                     if harness::is_check_command(&command) {
                         aids.check_failed = true;
+                        aids.check_failing = true;
                     }
                     // Sous Windows : un chemin `dossier\fichier` écrit pour cmd.
                     if tool_name == "bash" && harness::enabled(Aid::PathHelp) {
@@ -1377,7 +1414,18 @@ where
         prompt: &str,
         prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> Result<String, String> {
-        let input = crate::workflow::agent_input(subagent_type, description, prompt);
+        let role = if subagent_type == "Verification" {
+            crate::team::Role::Review
+        } else {
+            crate::team::Role::Plan
+        };
+        let model = if crate::team::team() {
+            self.api_client.team_model(role)
+        } else {
+            None
+        };
+        let input =
+            crate::workflow::agent_input(subagent_type, description, prompt, model.as_deref());
         self.tool_executor.announce("Agent", &input);
         let (message, _) = self.execute_tool_call(
             id,
@@ -2854,6 +2902,8 @@ mod tests {
         /// rendues provisoires.
         drafted: usize,
         superseded: usize,
+        /// Rôles annoncés au client en mode équipe, dans l'ordre.
+        team_steps: Vec<String>,
     }
 
     /// Modèle scripté : une réponse par appel.
@@ -2912,6 +2962,13 @@ mod tests {
 
         fn answer_superseded(&mut self) {
             self.observed.borrow_mut().superseded += 1;
+        }
+
+        fn plan_step(&mut self, step: crate::team::Step) {
+            self.observed
+                .borrow_mut()
+                .team_steps
+                .push(step.role.key().to_string());
         }
     }
 
@@ -3380,6 +3437,45 @@ mod tests {
             .iter()
             .any(|notice| notice.contains("pas rendu de verdict lisible")));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn in_team_mode_each_step_is_announced_with_the_role_the_work_needs() {
+        struct Off;
+        impl Drop for Off {
+            fn drop(&mut self) {
+                crate::team::set_team(false);
+            }
+        }
+        let _off = Off;
+        crate::team::set_team(true);
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
+                text_step("Fait."),
+                text_step("Corrigé."),
+            ],
+            vec![FAILING, PASSING],
+        );
+        runtime
+            .run_turn("écris le fichier de notes", None)
+            .expect("tour");
+        // Comprendre, puis écrire le code, puis déboguer après la vérification en échec.
+        assert_eq!(observed.borrow().team_steps, ["plan", "code", "debug"]);
+
+        // Une demande hors programmation va au spécialiste du sujet.
+        let (mut runtime, observed, _) =
+            aided_runtime(vec![text_step("Hello, how are you?")], vec![]);
+        runtime
+            .run_turn("Traduis en anglais : bonjour, comment vas-tu ?", None)
+            .expect("tour");
+        assert_eq!(observed.borrow().team_steps, ["translation"]);
+
+        // Mode coupé : aucun rôle annoncé.
+        crate::team::set_team(false);
+        let (mut runtime, observed, _) = aided_runtime(vec![text_step("Bonjour.")], vec![]);
+        runtime.run_turn("salut", None).expect("tour");
+        assert!(observed.borrow().team_steps.is_empty());
     }
 
     #[test]

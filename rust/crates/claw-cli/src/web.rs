@@ -241,6 +241,8 @@ struct StatusView {
     cost: Option<String>,
     /// Déroulé ultracode actif pour la session.
     ultracode: bool,
+    /// Mode équipe actif pour la session.
+    team: bool,
 }
 
 #[derive(Default)]
@@ -769,6 +771,7 @@ impl Worker {
             context_tokens: u64::try_from(self.runtime.estimated_tokens()).unwrap_or(u64::MAX),
             cost: models::estimated_cost(&self.model, usage),
             ultracode: runtime::workflow::ultracode(),
+            team: runtime::team::team(),
         }
     }
 
@@ -968,6 +971,10 @@ impl Worker {
                 // `/think ultracode` : l'interrupteur de la page suit.
                 self.publish_status(false);
             }
+            Some(SlashCommand::Team { args }) => {
+                self.info(crate::apply_team_command(args.as_deref(), &self.model));
+                self.publish_status(false);
+            }
             Some(SlashCommand::Bashes { args }) => {
                 self.info(crate::render_background_tasks(args.as_deref()));
             }
@@ -998,7 +1005,7 @@ impl Worker {
                 self.info(report);
             }
             Some(SlashCommand::Help) => self.info(format!(
-                "{}\n\nDans l'interface web : /review /audit /archi /adr /fix /undo /checkpoints /hooks /think /bashes /models /mcp /model /permissions /cost /compact /clear.\nLes autres commandes s'utilisent dans le terminal.\n\n{}",
+                "{}\n\nDans l'interface web : /review /audit /archi /adr /fix /undo /checkpoints /hooks /think /equipe /bashes /models /mcp /model /permissions /cost /compact /clear.\nLes autres commandes s'utilisent dans le terminal.\n\n{}",
                 render_slash_command_help(),
                 commands::render_custom_commands_help(
                     &std::env::current_dir().unwrap_or_default()
@@ -1631,6 +1638,29 @@ async fn post_ultracode(
     Ok(Json(json!({ "ultracode": runtime::workflow::ultracode(), "text": text })).into_response())
 }
 
+#[derive(Deserialize)]
+struct TeamBody {
+    on: bool,
+}
+
+/// Interrupteur « Équipe » de la page : mode équipe pour la session (comme
+/// `/equipe`), pris en compte dès l'étape suivante.
+async fn post_team(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Json(body): Json<TeamBody>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    if body.on && !runtime::harness::enabled(runtime::harness::Aid::Team) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "le mode équipe est coupé par CLAW_TEAM=0 ou CLAW_HARNESS=0",
+        ));
+    }
+    runtime::team::set_team(body.on);
+    Ok(Json(json!({ "team": runtime::team::team() })).into_response())
+}
+
 /// `?fresh=1` relit le catalogue chez `OpenRouter` (bouton « Rechercher »).
 #[derive(Deserialize)]
 struct ModelsQuery {
@@ -1899,6 +1929,7 @@ fn router(app: WebApp) -> Router {
         .route("/api/resume", post(post_resume))
         .route("/api/interrupt", post(post_interrupt))
         .route("/api/ultracode", post(post_ultracode))
+        .route("/api/team", post(post_team))
         .route("/api/models", get(get_models))
         .route("/api/sessions", get(get_sessions))
         .route("/api/sessions/delete", post(post_session_delete))
@@ -2307,6 +2338,13 @@ mod tests {
         assert!(super::PAGE.contains(r#"id="ultracode-btn""#));
         assert!(super::PAGE.contains(r#"api("/api/ultracode", { on: !status.ultracode })"#));
         assert!(super::PAGE.contains(r#"typeof value.result === "string" && "agentId" in value"#));
+    }
+
+    #[test]
+    fn the_page_has_a_team_switch_and_explains_the_gemini_category() {
+        assert!(super::PAGE.contains(r#"id="team-btn""#));
+        assert!(super::PAGE.contains(r#"api("/api/team", { on: !status.team })"#));
+        assert!(super::PAGE.contains(r#"category.key === "gemini""#));
     }
 
     #[test]

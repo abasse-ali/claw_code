@@ -27,6 +27,7 @@ pub mod repo_map;
 pub mod sandbox;
 pub use bash::stop_all_containers;
 mod session;
+pub mod team;
 pub mod typography;
 mod usage;
 pub mod workflow;

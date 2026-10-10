@@ -225,15 +225,24 @@ pub fn verify_feedback(report: &str, changed_files: bool) -> String {
     )
 }
 
-/// Arguments de l'outil `Agent` pour une étape du déroulé.
+/// Arguments de l'outil `Agent` pour une étape du déroulé ; `model` : celui
+/// que le mode équipe choisit pour ce rôle.
 #[must_use]
-pub fn agent_input(subagent_type: &str, description: &str, prompt: &str) -> String {
-    json!({
+pub fn agent_input(
+    subagent_type: &str,
+    description: &str,
+    prompt: &str,
+    model: Option<&str>,
+) -> String {
+    let mut input = json!({
         "description": description,
         "prompt": prompt,
         "subagent_type": subagent_type,
-    })
-    .to_string()
+    });
+    if let Some(model) = model {
+        input["model"] = Value::String(model.to_string());
+    }
+    input.to_string()
 }
 
 /// Rapport final d'un sous-agent, lu dans le résultat de l'outil `Agent`.

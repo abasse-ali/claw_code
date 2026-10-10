@@ -54,6 +54,8 @@ pub enum Aid {
     Persistence,
     /// Déroulé ultracode (dossier préparé, vérificateur indépendant), quand il est demandé.
     Ultracode,
+    /// Mode équipe : chaque étape confiée au modèle le plus fort pour elle, quand il est demandé.
+    Team,
 }
 
 impl Aid {
@@ -77,6 +79,7 @@ impl Aid {
             Self::LeanResults => "CLAW_LEAN_RESULTS",
             Self::Persistence => "CLAW_PERSISTENCE",
             Self::Ultracode => "CLAW_ULTRACODE",
+            Self::Team => "CLAW_TEAM",
         }
     }
 }

@@ -320,6 +320,14 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         category: SlashCommandCategory::Core,
     },
     SlashCommandSpec {
+        name: "equipe",
+        aliases: &["team"],
+        summary: "Mode équipe : chaque étape confiée au modèle gratuit le plus fort pour elle",
+        argument_hint: Some("[off]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
         name: "hooks",
         aliases: &[],
         summary: "Liste les hooks configurés (PreToolUse, Stop, SessionStart…)",
@@ -513,6 +521,9 @@ pub enum SlashCommand {
     Think {
         level: Option<String>,
     },
+    Team {
+        args: Option<String>,
+    },
     Bashes {
         args: Option<String>,
     },
@@ -625,6 +636,9 @@ impl SlashCommand {
             "mcp" => Self::Mcp,
             "think" | "reasoning" | "effort" => Self::Think {
                 level: remainder_after_command(trimmed, command),
+            },
+            "equipe" | "équipe" | "team" => Self::Team {
+                args: remainder_after_command(trimmed, command),
             },
             "bashes" | "tasks" => Self::Bashes {
                 args: remainder_after_command(trimmed, command),
@@ -2163,6 +2177,7 @@ pub fn handle_slash_command(
         | SlashCommand::Checkpoints
         | SlashCommand::Hooks
         | SlashCommand::Think { .. }
+        | SlashCommand::Team { .. }
         | SlashCommand::Bashes { .. }
         | SlashCommand::Models { .. }
         | SlashCommand::Credits
@@ -2591,7 +2606,8 @@ mod tests {
         assert!(help.contains("/agents"));
         assert!(help.contains("/skills"));
         assert!(help.contains("/context"));
-        assert_eq!(slash_command_specs().len(), 44);
+        assert!(help.contains("/equipe [off]"));
+        assert_eq!(slash_command_specs().len(), 45);
         assert_eq!(resume_supported_slash_commands().len(), 13);
     }
 

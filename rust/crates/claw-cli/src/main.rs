@@ -233,6 +233,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     init_reasoning_effort(startup_config.as_ref());
     init_ultracode(startup_config.as_ref());
+    init_team(startup_config.as_ref());
     let args: Vec<String> = env::args().skip(1).collect();
     match parse_args(&args)? {
         CliAction::DumpManifests => dump_manifests(),
@@ -1718,6 +1719,7 @@ fn run_resume_command(
         | SlashCommand::Checkpoints
         | SlashCommand::Hooks
         | SlashCommand::Think { .. }
+        | SlashCommand::Team { .. }
         | SlashCommand::Bashes { .. }
         | SlashCommand::Models { .. }
         | SlashCommand::Credits
@@ -2413,6 +2415,13 @@ impl LiveCli {
             }
             SlashCommand::Think { level } => {
                 println!("{}", apply_think_command(level.as_deref()));
+                false
+            }
+            SlashCommand::Team { args } => {
+                println!(
+                    "{}",
+                    apply_team_command(args.as_deref(), self.model.as_str())
+                );
                 false
             }
             SlashCommand::Bashes { args } => {
@@ -5486,6 +5495,16 @@ struct DefaultRuntimeClient {
     model_prompter: Option<model_switch::SharedModelPrompter>,
     /// Modèles de secours configurés, proposés quand la question se pose.
     candidates: Vec<String>,
+    /// Mode équipe : rôle annoncé pour la prochaine requête.
+    team_step: Option<runtime::team::Step>,
+    /// Chaîne de la session, mise de côté pendant qu'un autre membre de
+    /// l'équipe travaille ; elle revient à la fin du tour.
+    team_base: Option<api::ModelChain>,
+    /// Modèle de la requête précédente du tour : le raisonnement n'est
+    /// renvoyé qu'au modèle qui l'a écrit.
+    team_last: Option<String>,
+    /// Modèle qui a écrit le code pendant ce tour : le relecteur en prend un autre.
+    team_coder: Option<String>,
 }
 
 impl DefaultRuntimeClient {
@@ -5537,6 +5556,10 @@ impl DefaultRuntimeClient {
             saved_chain: None,
             model_prompter: None,
             candidates: Vec::new(),
+            team_step: None,
+            team_base: None,
+            team_last: None,
+            team_coder: None,
         })
     }
 
@@ -5584,10 +5607,64 @@ impl DefaultRuntimeClient {
             self.candidates.insert(0, previous);
         }
         self.chain = api::ModelChain::new(vec![next.to_string()], cli_client_factory());
+        // Le choix de l'utilisateur devient le modèle de la session.
+        self.team_base = None;
         ACTIVE_MODEL
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone_from(&next.to_string());
+    }
+
+    /// Mode équipe : confie l'étape au modèle le plus fort pour son rôle, et
+    /// renvoie la consigne de relais à ajouter au prompt système. Pendant une
+    /// escalade, le modèle fort garde la main.
+    fn apply_team_step(
+        &mut self,
+        step: runtime::team::Step,
+        messages: &[ConversationMessage],
+    ) -> Option<String> {
+        if self.saved_chain.is_some() {
+            return None;
+        }
+        let base_chain = self.team_base.as_ref().unwrap_or(&self.chain);
+        let base = base_chain.primary().to_string();
+        let base_models = base_chain.models().to_vec();
+        let needs = models::TeamNeeds {
+            images: images_in_current_request(messages),
+            context_tokens: conversation_tokens(messages),
+            avoid: None,
+        };
+        let (target, why) = models::team_pick(step.role, &needs).map_or_else(
+            || (base.clone(), "modèle de la session".to_string()),
+            |pick| (pick.model, pick.why),
+        );
+        if target != self.chain.primary() {
+            if target == base {
+                if let Some(chain) = self.team_base.take() {
+                    self.chain = chain;
+                }
+            } else {
+                let mut chain_models = vec![target.clone()];
+                // Seul, sans personne pour décider : la chaîne de la session
+                // sert de secours. Sinon Claw demande, comme toujours.
+                if self.model_prompter.is_none() {
+                    chain_models.extend(base_models.into_iter().filter(|model| *model != target));
+                }
+                let chain = api::ModelChain::new(chain_models, cli_client_factory());
+                let previous = std::mem::replace(&mut self.chain, chain);
+                if self.team_base.is_none() {
+                    self.team_base = Some(previous);
+                }
+            }
+            self.notify(&format!(
+                "Équipe : « {} » confié à {target} ({why})",
+                step.role.label()
+            ));
+        }
+        if step.role == runtime::team::Role::Code {
+            self.team_coder = Some(target.clone());
+        }
+        Some(runtime::team::role_section(step.role, &target))
     }
 
     /// Un appel d'outil sans arguments complets dans une réponse qui ne s'est
@@ -5764,6 +5841,29 @@ impl ApiClient for DefaultRuntimeClient {
         if let Some(chain) = self.saved_chain.take() {
             self.chain = chain;
         }
+        // Mode équipe : le modèle de la session reprend à la fin du tour.
+        if let Some(chain) = self.team_base.take() {
+            self.chain = chain;
+        }
+        self.team_step = None;
+        self.team_last = None;
+        self.team_coder = None;
+    }
+
+    fn plan_step(&mut self, step: runtime::team::Step) {
+        self.team_step = Some(step);
+    }
+
+    fn team_model(&mut self, role: runtime::team::Role) -> Option<String> {
+        let avoid = self
+            .team_coder
+            .as_deref()
+            .filter(|_| role == runtime::team::Role::Review);
+        let needs = models::TeamNeeds {
+            avoid,
+            ..models::TeamNeeds::default()
+        };
+        models::team_pick(role, &needs).map(|pick| pick.model)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -5774,15 +5874,30 @@ impl ApiClient for DefaultRuntimeClient {
         if let Some(notice) = self.start_notice.take() {
             self.notify(&notice);
         }
+        // Mode équipe : le membre le plus fort pour cette étape, et son rôle.
+        let role_note = self
+            .team_step
+            .take()
+            .and_then(|step| self.apply_team_step(step, &request.messages));
         let messages = convert_messages(&request.messages);
-        let system =
+        let mut system =
             (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n"));
+        if let Some(note) = role_note {
+            system = Some(match system {
+                Some(prompt) => format!("{prompt}\n\n{note}"),
+                None => note,
+            });
+        }
         let tools = self
             .enable_tools
             .then(|| filter_tool_specs(&self.tool_registry, self.allowed_tools.as_ref()));
         let enable_tools = self.enable_tools;
-        let passback = runtime::harness::enabled(runtime::harness::Aid::ReasoningPassback);
         let primary = self.chain.primary().to_string();
+        // Le raisonnement d'un modèle ne va pas à un autre (changement de
+        // membre de l'équipe, escalade) : il n'est renvoyé qu'à son auteur.
+        let passback = runtime::harness::enabled(runtime::harness::Aid::ReasoningPassback)
+            && self.team_last.as_deref().is_none_or(|last| last == primary);
+        self.team_last = Some(primary.clone());
         image_reader::prepare(&primary, &messages, &mut |notice| self.notify(notice));
         let build = move |model: &str| MessageRequest {
             model: model.to_string(),
@@ -6163,6 +6278,42 @@ impl ApiClient for DefaultRuntimeClient {
 /// Messages envoyés à `model`. Le raisonnement gardé d'un modèle `OpenRouter`
 /// (non signé par Anthropic) n'est renvoyé qu'aux modèles compatibles `OpenAI` :
 /// l'API d'Anthropic le refuserait. Il est retiré aussi quand l'aide est coupée.
+/// La demande en cours (depuis le dernier message de l'utilisateur) contient des images.
+fn images_in_current_request(messages: &[ConversationMessage]) -> bool {
+    let start = messages
+        .iter()
+        .rposition(|message| {
+            message.role == MessageRole::User
+                && message
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::Text { .. }))
+        })
+        .unwrap_or(0);
+    messages[start..].iter().any(|message| {
+        message
+            .blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Image { .. }))
+    })
+}
+
+/// Taille de la conversation en jetons, à quatre caractères par jeton.
+fn conversation_tokens(messages: &[ConversationMessage]) -> u64 {
+    let characters: usize = messages
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .map(|block| match block {
+            ContentBlock::Text { text } => text.len(),
+            ContentBlock::ToolUse { input, .. } => input.len(),
+            ContentBlock::ToolResult { output, .. } => output.len(),
+            ContentBlock::Thinking { thinking, .. } => thinking.len(),
+            ContentBlock::Image { .. } => 0,
+        })
+        .sum();
+    u64::try_from(characters / 4).unwrap_or(u64::MAX)
+}
+
 fn messages_for_model(model: &str, messages: &[InputMessage], passback: bool) -> Vec<InputMessage> {
     let anthropic = matches!(detect_provider_kind(model), ProviderKind::ClawApi);
     let blind = image_reader::model_cannot_read_images(model);
@@ -6344,6 +6495,40 @@ fn apply_ultracode_command(switch: Option<&str>) -> String {
         Some(other) => format!(
             "« {other} » : /think ultracode pour l'activer, /think ultracode off pour le couper."
         ),
+    }
+}
+
+/// `/equipe [off]` : mode équipe pour la session, et qui ferait quoi.
+fn apply_team_command(args: Option<&str>, current_model: &str) -> String {
+    let switch = args.map(str::trim).map(str::to_lowercase);
+    match switch.as_deref() {
+        None | Some("" | "on" | "oui" | "activer" | "1") => {
+            if !runtime::harness::enabled(runtime::harness::Aid::Team) {
+                return "Le mode équipe est coupé par CLAW_TEAM=0 ou CLAW_HARNESS=0.".to_string();
+            }
+            runtime::team::set_team(true);
+            models::team_report(current_model)
+        }
+        Some("off" | "non" | "désactiver" | "desactiver" | "0") => {
+            runtime::team::set_team(false);
+            format!("Mode équipe désactivé : {current_model} fait tout le travail.")
+        }
+        Some("statut" | "etat" | "état" | "status") => models::team_report(current_model),
+        Some(other) => format!("« {other} » : /equipe pour l'activer, /equipe off pour le couper."),
+    }
+}
+
+/// Mode équipe au démarrage : `CLAW_TEAM`, sinon `"team"` dans la config.
+fn init_team(config: Option<&runtime::RuntimeConfig>) {
+    let from_env = env::var("CLAW_TEAM").ok().and_then(|value| {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "on" | "oui" | "yes" => Some(true),
+            "0" | "false" | "off" | "non" | "no" => Some(false),
+            _ => None,
+        }
+    });
+    if let Some(on) = from_env.or_else(|| config.and_then(runtime::RuntimeConfig::team)) {
+        runtime::team::set_team(on);
     }
 }
 
@@ -8295,6 +8480,34 @@ mod tests {
         // Un identifiant refusé est rejeté avant tout accès au disque.
         assert!(super::delete_managed_session("../secret").is_err());
         assert!(super::rename_managed_session("../secret", "x").is_err());
+    }
+
+    #[test]
+    fn the_team_command_turns_the_mode_on_and_off() {
+        struct Off;
+        impl Drop for Off {
+            fn drop(&mut self) {
+                runtime::team::set_team(false);
+            }
+        }
+        let _off = Off;
+        let on = super::apply_team_command(None, "vendor/base:free");
+        assert!(
+            on.starts_with("Mode équipe\n  État             activé"),
+            "{on}"
+        );
+        assert!(
+            on.contains("vendor/base:free (modèle de la session)"),
+            "{on}"
+        );
+        assert!(runtime::team::team());
+        let off = super::apply_team_command(Some("off"), "vendor/base:free");
+        assert_eq!(
+            off,
+            "Mode équipe désactivé : vendor/base:free fait tout le travail."
+        );
+        assert!(!runtime::team::team());
+        assert!(super::apply_team_command(Some("peut-être"), "x").contains("/equipe off"));
     }
 
     #[test]

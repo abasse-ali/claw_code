@@ -112,6 +112,10 @@ pub struct RuntimeFeatureConfig {
     image_reader: Option<String>,
     /// `"ultracode": true` : déroulé ultracode dès le début de chaque session.
     ultracode: Option<bool>,
+    /// `"team": true` : mode équipe dès le début de chaque session.
+    team: Option<bool>,
+    /// `"teamModels": {"code": "…", "vision": "…"}` : modèle imposé par rôle.
+    team_models: BTreeMap<String, String>,
 }
 
 /// Serveur compatible `OpenAI` déclaré dans `providers` (utilisé avec le
@@ -403,6 +407,24 @@ impl ConfigLoader {
                 .as_object()
                 .and_then(|object| object.get("ultracode"))
                 .and_then(JsonValue::as_bool),
+            team: merged_value
+                .as_object()
+                .and_then(|object| object.get("team"))
+                .and_then(JsonValue::as_bool),
+            team_models: merged_value
+                .as_object()
+                .and_then(|object| object.get("teamModels"))
+                .and_then(JsonValue::as_object)
+                .map(|roles| {
+                    roles
+                        .iter()
+                        .filter_map(|(role, model)| {
+                            let model = model.as_str()?.trim();
+                            (!model.is_empty()).then(|| (role.clone(), model.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         };
 
         Ok(RuntimeConfig {
@@ -556,6 +578,18 @@ impl RuntimeConfig {
     #[must_use]
     pub fn ultracode(&self) -> Option<bool> {
         self.feature_config.ultracode
+    }
+
+    /// Mode équipe au début de chaque session (`"team": true`).
+    #[must_use]
+    pub fn team(&self) -> Option<bool> {
+        self.feature_config.team
+    }
+
+    /// Modèles imposés par rôle du mode équipe (`teamModels`).
+    #[must_use]
+    pub fn team_models(&self) -> &BTreeMap<String, String> {
+        &self.feature_config.team_models
     }
 }
 

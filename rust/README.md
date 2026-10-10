@@ -209,6 +209,13 @@ est retenu ; avec `OPENROUTER_API_KEY`, le quota gratuit du jour est affiché.
   gratuite : un projet dont la facturation est activée paie chaque requête. Les modèles gratuits
   et leurs limites (par minute et par jour, par projet) s'y affichent ; en offre gratuite, Google
   peut se servir des requêtes pour améliorer ses produits.
+- **Choisir un modèle Gemini** : `/models gemini` liste les modèles de l'offre gratuite de Google
+  que votre clé ouvre (une simple lecture du catalogue de Google, aucune génération), et la page
+  les montre dans la catégorie **Google Gemini** du menu des modèles. Gratuits d'après la page
+  des tarifs de Google (relevée le 10 octobre 2026) : `gemini-3.8-flash`, `gemini-3.6-flash`,
+  `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, `gemini-2.5-pro`, `gemini-2.5-flash`,
+  `gemini-2.5-flash-lite`. `gemini-3.1-pro-preview` est payant et n'est pas proposé. Exemple :
+  `/model gemini:gemini-3.8-flash`.
 - La limite de jetons de sortie suit le catalogue (sortie maximale et contexte du modèle) ;
   `/cost` indique le coût estimé (0 $ pour un modèle gratuit).
 - Chaque étape de l'agent consomme une requête du quota gratuit ; en cas de limite atteinte
@@ -514,6 +521,46 @@ applique**, quel que soit le modèle.
 | Contrôle des exigences | Quand le tour a modifié au moins 5 lignes et que la vérification passe, le modèle liste chaque partie de la demande (chaque page, fonction, fichier ou explication demandée ; après « reprendre », la demande poursuivie) et chaque exigence de la documentation du code (cas limites compris), puis donne pour chacune sa preuve : le code qui la couvre et le test ou la commande qui montre qu'elle marche. Ce qui manque est fait tout de suite, pas annoncé ni laissé à l'utilisateur. Sa réponse finale ne peut affirmer que ce que ce contrôle a établi, et nomme ce qui n'est pas fait ou pas vérifié. Il n'invente ni tests ni résultats. Une requête de plus par tour concerné | `CLAW_CHECKLIST=0` |
 | Contexte allégé | Les résultats d'outils gardés dans la session ne répètent pas au modèle ce qu'il vient d'écrire (ancien et nouveau texte d'une modification, contenu d'un fichier écrit, état du bac à sable d'une commande) | `CLAW_LEAN_RESULTS=0` |
 | Persévérance | Le modèle veut s'arrêter juste après au moins deux échecs d'outils d'affilée (commande en erreur, modification ratée) : Claw le renvoie une fois chercher une autre voie (corriger la commande, un autre outil, une étape plus petite) au lieu de vous dire « lancez-le dans votre terminal ». Ce n'est qu'ensuite qu'il explique ce qui bloque et ce que vous devez faire. Un appel que vous avez refusé n'est jamais compté : l'agent n'insiste pas | `CLAW_PERSISTENCE=0` |
+
+**Mode équipe : le bon modèle pour chaque étape.** Au lieu d'un seul modèle pour tout, Claw
+confie chaque étape du travail au modèle gratuit le plus fort pour elle, et change de modèle
+de lui-même selon l'avancement et le sujet :
+
+| Étape | Quand | Modèle choisi |
+|---|---|---|
+| Comprendre et préparer | début du tour, aucun fichier encore modifié | le plus proche de Claude (Fable d'abord) : raisonnement, outils, contexte, code, mesures de Claw |
+| Écrire le code | des fichiers ont été modifiés | le plus efficace pour le code (classement du code et mesures de `claw models bench`) |
+| Déboguer | une vérification ou une commande de test a échoué, deux outils de suite en échec, ou une remarque d'un contrôle de Claw attend sa correction | le plus proche de Claude |
+| Relire (vérificateur ultracode) | à la fin, avec ultracode | le plus proche de Claude, mais jamais celui qui a écrit le code |
+| Images | la demande contient une image | seulement un modèle qui lit les images |
+| Sujet spécialisé | une demande hors programmation sur la traduction, le droit, la finance, la santé, les sciences, les études ou le marketing | le mieux classé de la catégorie chez OpenRouter, sinon un modèle dont c'est la spécialité |
+
+Une longue conversation ne va qu'à un modèle dont le contexte la contient ; un modèle mis de côté
+(quota, panne) laisse la place au suivant. Les choix viennent du catalogue en cache : aucune
+requête de plus. Sans meilleur choix, le modèle de la session garde la main, et il reprend à la
+fin de chaque tour.
+
+Pour que chacun sache ce qu'il a à faire, chaque modèle reçoit toute la conversation (demande,
+plan, liste de tâches, résultats des outils) et une consigne de relais : il est un membre de
+l'équipe, il reprend le travail des autres là où il en est, sans refaire ce qui est fait, et voici
+son rôle pour cette étape. Le raisonnement d'un modèle n'est renvoyé qu'à lui. Chaque changement
+s'affiche (« Équipe : « écrire le code » confié à … (le plus efficace pour le code) »). Quand
+quelqu'un est là pour répondre, un modèle de l'équipe qui tombe en panne fait poser la question
+habituelle (réessayer, changer de modèle) au lieu de passer seul à un autre.
+
+`/equipe` l'active et montre qui fait quoi en ce moment ; `/equipe off` le coupe ; l'interrupteur
+**Équipe** de la page et du panneau VS Code fait de même ; `"team": true` ou `CLAW_TEAM=1` pour
+chaque session. `"teamModels"` impose un modèle par rôle (`plan`, `code`, `debug`, `review`,
+`vision`, ou une catégorie comme `translation`), par exemple un modèle Gemini gratuit pour les
+images :
+
+```json
+{ "team": true, "teamModels": { "vision": "gemini:gemini-3.8-flash" } }
+```
+
+Avec ultracode, l'agent d'exploration prend le modèle « comprendre » et le vérificateur celui
+« relire ». Le mode équipe ne change pas le nombre de requêtes ; il les répartit. Son effet réel
+sur la qualité n'a pas encore été mesuré sur de vrais modèles.
 
 **Ultracode : le déroulé le plus poussé.** Inspiré du réglage du même nom de Claude Code, mais
 tenu par Claw lui-même plutôt que confié au modèle : un modèle gratuit s'organise mal, s'arrête
