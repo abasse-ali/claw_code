@@ -249,6 +249,15 @@ struct TurnAids {
     refused: bool,
     /// L'agent a déjà été renvoyé chercher une autre voie pendant ce tour.
     persisted: bool,
+    /// Déroulé ultracode pour ce tour (session ou mot-clé du message).
+    ultracode: bool,
+    /// Dossier préparé par l'agent d'exploration (ultracode).
+    brief: Option<String>,
+    /// Des fichiers ont été modifiés depuis la dernière vérification indépendante.
+    workflow_dirty: bool,
+    /// Une vérification indépendante a déjà eu lieu pendant ce tour.
+    workflow_checked: bool,
+    workflow_runs: usize,
 }
 
 /// Mots en dessous desquels un message de l'utilisateur peut n'être qu'une
@@ -624,7 +633,17 @@ where
         let mut iterations = 0;
         let mut stop_continuations = 0;
         let mut empty_nudged = false;
-        let mut aids = TurnAids::default();
+        let mut aids = TurnAids {
+            ultracode: !self.subagent && crate::workflow::active_for(&request_text),
+            ..TurnAids::default()
+        };
+        // Ultracode : un agent au contexte vierge étudie la demande avant le
+        // travail ; à la fin, un vérificateur indépendant remplace le contrôle
+        // des exigences que le modèle faisait sur son propre travail.
+        aids.checklisted = aids.ultracode;
+        if aids.ultracode {
+            self.explore_stage(&request_text, earlier.as_deref(), &mut aids, &mut prompter);
+        }
 
         loop {
             iterations += 1;
@@ -697,6 +716,15 @@ where
                     .persistence_gate(&mut aids)
                     .or_else(|| self.verification_gate(&mut aids, &mut prompter))
                     .or_else(|| self.editor_gate(&mut aids))
+                    .or_else(|| {
+                        self.workflow_gate(
+                            &mut aids,
+                            &request_text,
+                            earlier.as_deref(),
+                            &answer,
+                            &mut prompter,
+                        )
+                    })
                     .or_else(|| self.requirements_gate(&mut aids))
                     .or_else(|| {
                         self.review_gate(&mut aids, &request_text, earlier.as_deref(), &answer)
@@ -959,6 +987,7 @@ where
         if matches!(tool_name, "edit_file" | "write_file" | "NotebookEdit") && !is_error {
             aids.dirty = true;
             aids.editor_dirty = true;
+            aids.workflow_dirty = true;
             aids.verified_commands.clear();
             let path = json_field(&output, "filePath").or_else(|| json_field(input, "path"));
             if let Some(path) = &path {
@@ -1335,6 +1364,171 @@ where
         self.api_client
             .notify("Claw fait confronter le travail à chaque exigence avant de conclure");
         Some(harness::CHECKLIST_PROMPT.to_string())
+    }
+
+    /// Une étape du déroulé ultracode : un sous-agent lancé par Claw avec
+    /// l'outil `Agent` (même affichage et mêmes autorisations qu'un appel du
+    /// modèle). Renvoie son rapport, ou la raison de l'échec.
+    fn run_workflow_agent(
+        &mut self,
+        id: String,
+        subagent_type: &str,
+        description: &str,
+        prompt: &str,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> Result<String, String> {
+        let input = crate::workflow::agent_input(subagent_type, description, prompt);
+        self.tool_executor.announce("Agent", &input);
+        let (message, _) = self.execute_tool_call(
+            id,
+            "Agent".to_string(),
+            &input,
+            prompter
+                .as_mut()
+                .map(|prompt| &mut **prompt as &mut dyn PermissionPrompter),
+        );
+        let (output, is_error) =
+            tool_result_parts(&message).ok_or_else(|| "aucun résultat".to_string())?;
+        if is_error {
+            return Err(output.chars().take(300).collect());
+        }
+        crate::workflow::agent_report(output).ok_or_else(|| "rapport vide".to_string())
+    }
+
+    /// Ultracode, avant le travail : un agent d'exploration, au contexte
+    /// vierge et en lecture seule, étudie la demande et le code. Son dossier
+    /// (exigences, code concerné, risques, plan vérifiable) est joint à la
+    /// demande. Une relance (« reprendre ») garde le dossier déjà joint.
+    fn explore_stage(
+        &mut self,
+        request: &str,
+        earlier: Option<&str>,
+        aids: &mut TurnAids,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) {
+        if !crate::workflow::substantive(request) || interrupt_requested() {
+            return;
+        }
+        self.api_client.notify(
+            "Ultracode : un agent au contexte vierge étudie la demande et le code avant le travail",
+        );
+        let prompt = crate::workflow::explore_prompt(request, earlier);
+        match self.run_workflow_agent(
+            "claw-ultracode-explore".to_string(),
+            "Explore",
+            "Ultracode : comprendre la demande",
+            &prompt,
+            prompter,
+        ) {
+            Ok(report) => {
+                if let Some(message) = self.session.messages.last_mut() {
+                    message.blocks.push(ContentBlock::Text {
+                        text: crate::workflow::brief_block(&report),
+                    });
+                }
+                aids.brief = Some(report);
+                self.api_client
+                    .notify("Ultracode : dossier préparé, transmis à l'agent");
+            }
+            Err(reason) => self.api_client.notify(&format!(
+                "Ultracode : l'étude préalable n'a pas abouti ({reason}) : le travail commence sans dossier"
+            )),
+        }
+    }
+
+    /// Ultracode, quand l'agent dit avoir fini : un vérificateur indépendant,
+    /// au contexte vierge, qui n'a pas écrit le code, contrôle chaque exigence
+    /// (lecture du code, tests, cas limites, affirmations de la réponse) et
+    /// rend un verdict. Ses objections repartent à l'agent ; après une
+    /// correction, il vérifie de nouveau (`MAX_VERIFY_RUNS` fois au plus).
+    /// Sans modification de fichier, il contre-vérifie une fois la réponse.
+    fn workflow_gate(
+        &mut self,
+        aids: &mut TurnAids,
+        request: &str,
+        earlier: Option<&str>,
+        answer: &str,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> Option<String> {
+        if !aids.ultracode
+            || aids.verify_failing
+            || self.subagent
+            || interrupt_requested()
+            || aids.workflow_runs >= crate::workflow::MAX_VERIFY_RUNS
+        {
+            return None;
+        }
+        let changed = !aids.originals.is_empty();
+        let due = if changed {
+            aids.workflow_dirty
+        } else {
+            !aids.workflow_checked
+                && crate::workflow::substantive(request)
+                && answer.chars().count() >= crate::workflow::FACT_CHECK_MIN_CHARS
+        };
+        if !due {
+            return None;
+        }
+        aids.workflow_runs += 1;
+        aids.workflow_dirty = false;
+        aids.workflow_checked = true;
+        let prompt = if changed {
+            let (diffs, _) = Self::turn_diffs(aids);
+            crate::workflow::verify_prompt(request, earlier, aids.brief.as_deref(), &diffs, answer)
+        } else {
+            crate::workflow::fact_check_prompt(request, earlier, aids.brief.as_deref(), answer)
+        };
+        self.api_client.notify(if changed {
+            "Ultracode : un vérificateur indépendant contrôle chaque exigence et lance les tests"
+        } else {
+            "Ultracode : un vérificateur indépendant contre-vérifie la réponse dans le code"
+        });
+        let report = match self.run_workflow_agent(
+            format!("claw-ultracode-verify-{}", aids.workflow_runs),
+            "Verification",
+            "Ultracode : vérifier le travail",
+            &prompt,
+            prompter,
+        ) {
+            Ok(report) => report,
+            Err(reason) => {
+                self.api_client.notify(&format!(
+                    "Ultracode : la vérification indépendante n'a pas abouti ({reason}) : l'agent confronte lui-même son travail aux exigences"
+                ));
+                // Sans vérificateur, le contrôle des exigences par le modèle
+                // reprend sa place (il suit dans la chaîne des contrôles).
+                aids.checklisted = false;
+                return None;
+            }
+        };
+        match crate::workflow::verdict(&report) {
+            crate::workflow::Verdict::Pass => {
+                self.api_client
+                    .notify("Ultracode : la vérification indépendante n'a rien trouvé à redire");
+                None
+            }
+            crate::workflow::Verdict::Unclear => {
+                self.api_client.notify(
+                    "Ultracode : le vérificateur n'a pas rendu de verdict lisible : l'agent confronte lui-même son travail aux exigences",
+                );
+                aids.checklisted = false;
+                None
+            }
+            crate::workflow::Verdict::Fail
+                if aids.workflow_runs >= crate::workflow::MAX_VERIFY_RUNS =>
+            {
+                self.api_client.notify(
+                    "Ultracode : le vérificateur signale encore des problèmes après plusieurs corrections : le travail n'est pas validé",
+                );
+                None
+            }
+            crate::workflow::Verdict::Fail => {
+                self.api_client.notify(
+                    "Ultracode : le vérificateur signale des problèmes, transmis à l'agent",
+                );
+                Some(crate::workflow::verify_feedback(&report, changed))
+            }
+        }
     }
 
     /// Persévérance : le modèle veut s'arrêter juste après plusieurs échecs
@@ -3025,6 +3219,198 @@ mod tests {
         );
         assert!(prompt.contains("+def total(prix):"));
         let _ = std::fs::remove_file(path);
+    }
+
+    /// Runtime d'essai, ce que le modèle a vu, et les arguments de chaque
+    /// appel de l'outil `Agent`.
+    type Ultracoded = (
+        ConversationRuntime<StepsApiClient, StaticToolExecutor>,
+        std::rc::Rc<std::cell::RefCell<Observed>>,
+        std::rc::Rc<std::cell::RefCell<Vec<serde_json::Value>>>,
+    );
+
+    /// Runtime d'essai dont l'outil `Agent` renvoie les rapports donnés, dans
+    /// l'ordre, et note les arguments de chaque appel.
+    fn ultracode_runtime(
+        steps: Vec<Vec<AssistantEvent>>,
+        reports: Vec<&'static str>,
+        written: String,
+    ) -> Ultracoded {
+        let (mut runtime, observed, _) = aided_runtime_with(steps, vec![], vec![], written);
+        let agents = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = std::rc::Rc::clone(&agents);
+        let mut reports = std::collections::VecDeque::from(reports);
+        runtime.tool_executor =
+            std::mem::take(&mut runtime.tool_executor).register("Agent", move |input| {
+                recorded
+                    .borrow_mut()
+                    .push(serde_json::from_str(input).expect("arguments JSON"));
+                Ok(serde_json::json!({
+                    "agentId": "a1",
+                    "status": "completed",
+                    "result": reports.pop_front().unwrap_or("VERDICT: PASS"),
+                })
+                .to_string())
+            });
+        (runtime, observed, agents)
+    }
+
+    #[test]
+    fn ultracode_prepares_a_brief_then_an_independent_verifier_sends_problems_back() {
+        let (path, output) = written_file("ultracode");
+        let (mut runtime, observed, agents) = ultracode_runtime(
+            vec![
+                tool_step("write_file", r#"{"path":"total.py","content":"x"}"#),
+                text_step("Fait : total.py additionne les prix."),
+                tool_step("write_file", r#"{"path":"total.py","content":"y"}"#),
+                text_step("Corrigé : la liste vide renvoie 0."),
+            ],
+            vec![
+                "R1 écrire total.py qui additionne les prix",
+                "R1 FAIL - total.py:2 - la liste vide n'est pas traitée\nVERDICT: FAIL",
+                "R1 PASS - total.py:2 - vérifié avec une liste vide\nVERDICT: PASS",
+            ],
+            output,
+        );
+        let summary = runtime
+            .run_turn("ultracode: écris total.py qui additionne les prix", None)
+            .expect("tour");
+        assert_eq!(summary.iterations, 4);
+        let agents = agents.borrow();
+        assert_eq!(agents.len(), 3, "étude, vérification, revérification");
+        // Étude préalable : agent en lecture seule, avec la demande.
+        assert_eq!(agents[0]["subagent_type"], "Explore");
+        assert!(agents[0]["prompt"]
+            .as_str()
+            .is_some_and(|prompt| prompt.contains("écris total.py qui additionne les prix")));
+        // Vérification : le dossier, le diff du tour et la réponse de l'agent.
+        assert_eq!(agents[1]["subagent_type"], "Verification");
+        let verify = agents[1]["prompt"].as_str().expect("mission");
+        assert!(verify.contains("R1 écrire total.py qui additionne les prix"));
+        assert!(verify.contains("+def total(prix):"));
+        assert!(verify.contains("Fait : total.py additionne les prix."));
+        let observed = observed.borrow();
+        // Le modèle travaille avec le dossier sous les yeux…
+        assert!(observed.requests[0].contains("[Ultracode] Preparation brief"));
+        assert!(observed.requests[0].contains("R1 écrire total.py"));
+        // … reçoit les objections du vérificateur…
+        assert!(observed.requests[2].contains("[Claw] Ultracode: an independent verifier"));
+        assert!(observed.requests[2].contains("la liste vide n'est pas traitée"));
+        // … et le vérificateur remplace son propre contrôle des exigences.
+        assert!(!observed
+            .requests
+            .iter()
+            .any(|request| request.contains("check your work against every requirement")));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice
+                == "Ultracode : la vérification indépendante n'a rien trouvé à redire"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn without_ultracode_or_for_a_short_follow_up_no_agent_is_started() {
+        let (mut runtime, _, agents) = ultracode_runtime(
+            vec![text_step("Bonjour, que puis-je faire ?")],
+            vec![],
+            WRITTEN.to_string(),
+        );
+        runtime
+            .run_turn("écris total.py qui additionne les prix", None)
+            .expect("tour");
+        assert!(agents.borrow().is_empty());
+
+        // Le mot-clé seul dans une relance : rien à étudier ni à contre-vérifier.
+        let (mut runtime, _, agents) =
+            ultracode_runtime(vec![text_step("Je reprends.")], vec![], WRITTEN.to_string());
+        runtime.run_turn("ultracode vas-y", None).expect("tour");
+        assert!(agents.borrow().is_empty());
+    }
+
+    #[test]
+    fn an_analysis_answer_is_fact_checked_once_in_ultracode() {
+        let long_answer = "Le module de paiement calcule les taxes dans taxes.py. ".repeat(14);
+        let (mut runtime, observed, agents) = ultracode_runtime(
+            vec![
+                text_step(&long_answer),
+                text_step("Réponse corrigée : le calcul est dans facture.py."),
+            ],
+            vec![
+                "R1 expliquer le calcul des taxes",
+                "FAIL - taxes.py n'existe pas, le calcul est dans facture.py:40\nVERDICT: FAIL",
+            ],
+            WRITTEN.to_string(),
+        );
+        let summary = runtime
+            .run_turn(
+                "ultracode: explique comment le module de paiement calcule les taxes",
+                None,
+            )
+            .expect("tour");
+        assert_eq!(summary.iterations, 2);
+        let agents = agents.borrow();
+        assert_eq!(agents.len(), 2, "étude puis une seule contre-vérification");
+        assert!(agents[1]["prompt"]
+            .as_str()
+            .is_some_and(|prompt| prompt.contains("without changing any file")));
+        assert!(observed.borrow().requests[1].contains("Correct your answer"));
+    }
+
+    #[test]
+    fn without_a_readable_verdict_the_model_checks_its_own_work_again() {
+        let (path, output) = written_file("sans-verdict");
+        let (mut runtime, observed, agents) = ultracode_runtime(
+            vec![
+                tool_step("write_file", r#"{"path":"total.py","content":"x"}"#),
+                text_step("Fait."),
+                text_step("Chaque exigence est couverte."),
+            ],
+            vec!["R1 écrire total.py", "Tout me semble correct."],
+            output,
+        );
+        runtime
+            .run_turn("ultracode: écris total.py qui additionne les prix", None)
+            .expect("tour");
+        assert_eq!(agents.borrow().len(), 2);
+        let observed = observed.borrow();
+        assert!(observed.requests[2].contains("check your work against every requirement"));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("pas rendu de verdict lisible")));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_session_setting_turns_ultracode_on_until_it_is_turned_off() {
+        struct Off;
+        impl Drop for Off {
+            fn drop(&mut self) {
+                crate::workflow::set_ultracode(false);
+            }
+        }
+        let _off = Off;
+        crate::workflow::set_ultracode(true);
+        let (mut runtime, _, agents) = ultracode_runtime(
+            vec![text_step("Voici le plan.")],
+            vec!["R1 un plan"],
+            WRITTEN.to_string(),
+        );
+        runtime
+            .run_turn("propose un plan pour la page de connexion", None)
+            .expect("tour");
+        assert_eq!(agents.borrow().len(), 1, "étude préalable sans le mot-clé");
+        crate::workflow::set_ultracode(false);
+        let (mut runtime, _, agents) = ultracode_runtime(
+            vec![text_step("Voici le plan.")],
+            vec![],
+            WRITTEN.to_string(),
+        );
+        runtime
+            .run_turn("propose un plan pour la page de connexion", None)
+            .expect("tour");
+        assert!(agents.borrow().is_empty());
     }
 
     /// Fichier réel de six lignes, « créé » par l'outil `write_file` du test.

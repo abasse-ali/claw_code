@@ -313,9 +313,9 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "think",
-        aliases: &["reasoning"],
-        summary: "Règle le raisonnement du modèle (off, low, medium, high, max)",
-        argument_hint: Some("[off|low|medium|high|max]"),
+        aliases: &["reasoning", "effort"],
+        summary: "Règle le raisonnement du modèle (off, low, medium, high, max) et le déroulé ultracode",
+        argument_hint: Some("[off|low|medium|high|max|ultracode [off]]"),
         resume_supported: false,
         category: SlashCommandCategory::Core,
     },
@@ -623,8 +623,8 @@ impl SlashCommand {
             },
             "debug-tool-call" => Self::DebugToolCall,
             "mcp" => Self::Mcp,
-            "think" | "reasoning" => Self::Think {
-                level: parts.next().map(ToOwned::to_owned),
+            "think" | "reasoning" | "effort" => Self::Think {
+                level: remainder_after_command(trimmed, command),
             },
             "bashes" | "tasks" => Self::Bashes {
                 args: remainder_after_command(trimmed, command),
@@ -2454,6 +2454,19 @@ mod tests {
         assert_eq!(
             SlashCommand::parse("/model"),
             Some(SlashCommand::Model { model: None })
+        );
+        // `/think ultracode off` garde ses deux mots ; `/effort` comme dans Claude Code.
+        assert_eq!(
+            SlashCommand::parse("/think ultracode off"),
+            Some(SlashCommand::Think {
+                level: Some("ultracode off".to_string()),
+            })
+        );
+        assert_eq!(
+            SlashCommand::parse("/effort max"),
+            Some(SlashCommand::Think {
+                level: Some("max".to_string()),
+            })
         );
         assert_eq!(
             SlashCommand::parse("/permissions read-only"),

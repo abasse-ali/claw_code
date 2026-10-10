@@ -515,6 +515,42 @@ applique**, quel que soit le modèle.
 | Contexte allégé | Les résultats d'outils gardés dans la session ne répètent pas au modèle ce qu'il vient d'écrire (ancien et nouveau texte d'une modification, contenu d'un fichier écrit, état du bac à sable d'une commande) | `CLAW_LEAN_RESULTS=0` |
 | Persévérance | Le modèle veut s'arrêter juste après au moins deux échecs d'outils d'affilée (commande en erreur, modification ratée) : Claw le renvoie une fois chercher une autre voie (corriger la commande, un autre outil, une étape plus petite) au lieu de vous dire « lancez-le dans votre terminal ». Ce n'est qu'ensuite qu'il explique ce qui bloque et ce que vous devez faire. Un appel que vous avez refusé n'est jamais compté : l'agent n'insiste pas | `CLAW_PERSISTENCE=0` |
 
+**Ultracode : le déroulé le plus poussé.** Inspiré du réglage du même nom de Claude Code, mais
+tenu par Claw lui-même plutôt que confié au modèle : un modèle gratuit s'organise mal, s'arrête
+trop tôt et juge son propre travail avec indulgence. Pour chaque demande conséquente :
+
+1. **Avant le travail**, un agent d'exploration au contexte vierge, en lecture seule, étudie la
+   demande et le code et rédige un dossier : exigences numérotées (y compris ce que la demande
+   implique sans le dire), code concerné avec ses lignes, commandes de build et de test du
+   projet, risques, plan dont chaque étape dit comment la vérifier. Le dossier est joint à la
+   demande ; l'agent principal travaille avec.
+2. **Après le travail**, un vérificateur indépendant, qui n'a pas écrit le code et ne voit pas la
+   conversation, reçoit la demande, le dossier, le diff du tour et la réponse que l'agent
+   s'apprête à donner. Il relit le code de chaque exigence, lance les tests et le vérificateur
+   de types, essaie les cas limites, confronte chaque affirmation de la réponse aux fichiers, et
+   termine par `VERDICT: PASS` ou `VERDICT: FAIL`. Ses objections repartent à l'agent, puis il
+   vérifie de nouveau (trois vérifications au plus par tour). Sans modification de fichier
+   (explication, analyse, conseil), il contre-vérifie une fois la réponse dans le code.
+3. Le vérificateur remplace le contrôle des exigences que le modèle faisait sur son propre
+   travail ; la vérification du projet, la relecture par un autre modèle et la persévérance
+   restent actives.
+
+Les deux agents apparaissent comme deux étapes « Sous-agent » dans la page, leur rapport lisible
+dans la carte. Ils suivent vos autorisations : le vérificateur peut lancer des commandes, le mode
+choisi s'applique. Coût : une à trois dizaines de requêtes de plus par demande conséquente, et
+plus de temps ; une relance de moins de quatre mots (« reprendre », « vas-y ») n'est pas étudiée
+de nouveau. Pour l'activer :
+
+- pour la session : `/think ultracode` (ou `/effort ultracode`, comme dans Claude Code), ou
+  l'interrupteur **Ultracode** à côté du choix du modèle dans la page et le panneau VS Code ; il
+  pousse aussi le raisonnement à `max`. `/think ultracode off` le coupe ;
+- pour un seul message : écrivez le mot `ultracode` dedans (« ultracode: corrige la connexion ») ;
+- pour chaque session : `"ultracode": true` dans `.claw/settings.json`, ou `CLAW_ULTRACODE=1`.
+  `CLAW_ULTRACODE=0` (ou `CLAW_HARNESS=0`) l'interdit, et `claw models bench` s'en passe.
+
+Le vérificateur tourne sur le modèle de la session ; `"agents": {"Verification": {"model": "…"}}`
+le confie à un autre modèle gratuit, pour un regard vraiment différent.
+
 **Méthode de réflexion.** Les consignes de Claw demandent au modèle de réfléchir avant d'agir :
 partir de ce qui est vraiment demandé (chaque partie de la demande), travailler sur des preuves
 (lire le code, lancer les tests) plutôt que de mémoire, trouver la cause d'un bogue avant de
@@ -576,7 +612,8 @@ session est reprise.
   "review": true,
   "advisorModels": ["nvidia/nemotron-3-ultra-550b-a55b:free", "cohere/north-mini-code:free"],
   "plannerModel": "nvidia/nemotron-3-ultra-550b-a55b:free",
-  "escalationModel": "free"
+  "escalationModel": "free",
+  "ultracode": true
 }
 ```
 

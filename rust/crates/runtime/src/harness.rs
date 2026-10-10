@@ -52,6 +52,8 @@ pub enum Aid {
     LeanResults,
     /// Un agent qui s'arrête sur des échecs cherche d'abord une autre voie.
     Persistence,
+    /// Déroulé ultracode (dossier préparé, vérificateur indépendant), quand il est demandé.
+    Ultracode,
 }
 
 impl Aid {
@@ -74,6 +76,7 @@ impl Aid {
             Self::EditorDiagnostics => "CLAW_EDITOR_DIAGNOSTICS",
             Self::LeanResults => "CLAW_LEAN_RESULTS",
             Self::Persistence => "CLAW_PERSISTENCE",
+            Self::Ultracode => "CLAW_ULTRACODE",
         }
     }
 }

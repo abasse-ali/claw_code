@@ -387,6 +387,10 @@
   .model-pick .names { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
   .model-pick .names b { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .model-pick .names > span { font-family: var(--mono); font-size: 11px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Interrupteur ultracode : allumé, il prend la couleur d'accent. */
+  .uc-pill { height: 28px; padding: 0 10px; margin-left: 4px; border-radius: 999px; border: 1px solid var(--border); font-size: 12px; font-weight: 600; color: var(--text-3); white-space: nowrap; transition: color .15s, border-color .15s, background .15s; }
+  .uc-pill:hover { color: var(--text); border-color: var(--border-strong); }
+  .uc-pill[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
   .tools .hint { font-size: 11.5px; color: var(--text-3); margin-left: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .send { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--accent); color: var(--on-accent); transition: background .15s, transform .1s; }
   .send:hover:not(:disabled) { background: var(--accent-2); }
@@ -465,7 +469,8 @@
   /* ------------------------------------------------------------------ petits écrans, panneau VS Code */
   @media (max-width: 720px) {
     .project span, .pill .sub, .pill .tag, .tools .hint, .hide-narrow, #sessions-btn .label { display: none; }
-    .model-pick { max-width: calc(100vw - 190px); }
+    .model-pick { max-width: calc(100vw - 232px); }
+    .uc-pill { padding: 0 8px; margin-left: 0; font-size: 11.5px; }
     .pill { max-width: 150px; padding: 0 9px; }
     header.top { gap: 6px; padding: 0 10px; }
     .col { padding: 18px 14px 24px; }
@@ -512,6 +517,7 @@
         <button class="icon-btn" id="attach-btn" type="button" title="Joindre une image (ou coller / glisser)" aria-label="Joindre une image"></button>
         <button class="icon-btn" id="slash-btn" type="button" title="Commandes" aria-label="Commandes"></button>
         <button class="model-pick" id="model-btn" type="button" aria-haspopup="true" title="Changer de modèle (Ctrl+K)"></button>
+        <button class="uc-pill" id="ultracode-btn" type="button" aria-pressed="false">Ultracode</button>
         <span class="hint"><kbd>Entrée</kbd> envoyer · <kbd>Maj</kbd>+<kbd>Entrée</kbd> ligne · <kbd>Ctrl</kbd>+<kbd>K</kbd> actions</span>
         <div class="spacer"></div>
         <button class="send" id="send" type="button" title="Envoyer (Entrée)" aria-label="Envoyer"></button>
@@ -1374,6 +1380,13 @@
       }
       if (value.filePath && (value.structuredPatch || value.content !== undefined)) {
         box.append(el("div", "note", (value.type === "create" ? "Fichier créé : " : "Fichier modifié : ") + displayPath(value.filePath)));
+        return { box, summary: "" };
+      }
+      // Rapport d'un sous-agent (étude, vérification ultracode…) : son texte.
+      if (typeof value.result === "string" && "agentId" in value) {
+        const report = el("div", "md");
+        report.innerHTML = renderMarkdown(value.result);
+        box.append(report);
         return { box, summary: "" };
       }
       if (Array.isArray(value.answers)) {
@@ -2832,6 +2845,7 @@
     if (emptyProject) emptyProject.textContent = basename(next.cwd) || "ce projet";
     if (modelChanged) renderModelButton();
     renderModeButton();
+    renderUltracode();
     if (next.busy && !busySince) { busySince = Date.now(); setActivity("Claw réfléchit…"); }
     $("activity").hidden = !next.busy || !$("ask").hidden;
     sendBtn.classList.toggle("stop", !!next.busy);
@@ -3063,6 +3077,26 @@
     onInput();
   });
   $("model-btn").addEventListener("click", openModelMenu);
+  // Ultracode : avant le travail, un agent au contexte vierge étudie la
+  // demande ; après, un vérificateur indépendant contrôle le résultat.
+  function renderUltracode() {
+    const button = $("ultracode-btn");
+    const on = !!status.ultracode;
+    button.setAttribute("aria-pressed", String(on));
+    button.title = on
+      ? "Ultracode activé : chaque demande conséquente est étudiée par un agent au contexte vierge, puis vérifiée par un vérificateur indépendant (plus de requêtes). Cliquer pour couper."
+      : "Ultracode : faire étudier chaque demande par un agent au contexte vierge avant le travail, puis faire vérifier le résultat par un vérificateur indépendant (plus de requêtes, plus lent). Pour un seul message, écrivez « ultracode » dedans.";
+  }
+  $("ultracode-btn").addEventListener("click", async () => {
+    try {
+      const answer = await api("/api/ultracode", { on: !status.ultracode });
+      status.ultracode = !!(answer && answer.ultracode);
+      renderUltracode();
+      toast(status.ultracode ? "Ultracode activé pour la session" : "Ultracode désactivé");
+    } catch (error) {
+      toast("Ultracode : " + error.message);
+    }
+  });
   $("mode-btn").addEventListener("click", openModeMenu);
   $("sessions-btn").addEventListener("click", openSessionsMenu);
   $("credits").addEventListener("click", openCreditsDialog);

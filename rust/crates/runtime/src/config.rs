@@ -110,6 +110,8 @@ pub struct RuntimeFeatureConfig {
     /// Modèle qui décrit les images à un modèle qui n'en lit pas :
     /// `imageReader` (`"off"` pour ne rien décrire).
     image_reader: Option<String>,
+    /// `"ultracode": true` : déroulé ultracode dès le début de chaque session.
+    ultracode: Option<bool>,
 }
 
 /// Serveur compatible `OpenAI` déclaré dans `providers` (utilisé avec le
@@ -397,6 +399,10 @@ impl ConfigLoader {
             planner_model: parse_optional_string(&merged_value, "plannerModel"),
             escalation_model: parse_optional_string(&merged_value, "escalationModel"),
             image_reader: parse_optional_string(&merged_value, "imageReader"),
+            ultracode: merged_value
+                .as_object()
+                .and_then(|object| object.get("ultracode"))
+                .and_then(JsonValue::as_bool),
         };
 
         Ok(RuntimeConfig {
@@ -544,6 +550,12 @@ impl RuntimeConfig {
     #[must_use]
     pub fn image_reader(&self) -> Option<&str> {
         self.feature_config.image_reader.as_deref()
+    }
+
+    /// Déroulé ultracode au début de chaque session (`"ultracode": true`).
+    #[must_use]
+    pub fn ultracode(&self) -> Option<bool> {
+        self.feature_config.ultracode
     }
 }
 

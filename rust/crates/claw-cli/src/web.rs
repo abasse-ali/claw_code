@@ -239,6 +239,8 @@ struct StatusView {
     /// Taille estimée de ce que le modèle relit à chaque requête.
     context_tokens: u64,
     cost: Option<String>,
+    /// Déroulé ultracode actif pour la session.
+    ultracode: bool,
 }
 
 #[derive(Default)]
@@ -766,6 +768,7 @@ impl Worker {
             output_tokens: u64::from(usage.output_tokens),
             context_tokens: u64::try_from(self.runtime.estimated_tokens()).unwrap_or(u64::MAX),
             cost: models::estimated_cost(&self.model, usage),
+            ultracode: runtime::workflow::ultracode(),
         }
     }
 
@@ -962,6 +965,8 @@ impl Worker {
             }
             Some(SlashCommand::Think { level }) => {
                 self.info(crate::apply_think_command(level.as_deref()));
+                // `/think ultracode` : l'interrupteur de la page suit.
+                self.publish_status(false);
             }
             Some(SlashCommand::Bashes { args }) => {
                 self.info(crate::render_background_tasks(args.as_deref()));
@@ -1091,6 +1096,16 @@ fn transcript_from_messages(messages: &[ConversationMessage]) -> Vec<WebEvent> {
             let event = match (block, message.role) {
                 (ContentBlock::Text { text }, MessageRole::Assistant) => {
                     WebEvent::AssistantText { text: text.clone() }
+                }
+                // Dossier ultracode joint à la demande : pour le modèle, la
+                // page le signale d'une ligne.
+                (ContentBlock::Text { text }, _)
+                    if text.starts_with(runtime::workflow::BRIEF_PREFIX) =>
+                {
+                    WebEvent::Notice {
+                        text: "Ultracode : dossier préparé par un agent au contexte vierge"
+                            .to_string(),
+                    }
                 }
                 // Contexte ajouté par les hooks : destiné au modèle seulement.
                 (ContentBlock::Text { text }, _)
@@ -1599,6 +1614,23 @@ async fn post_interrupt(State(app): State<WebApp>, headers: HeaderMap) -> ApiRes
     Ok(StatusCode::ACCEPTED.into_response())
 }
 
+#[derive(Deserialize)]
+struct UltracodeBody {
+    on: bool,
+}
+
+/// Interrupteur « Ultracode » de la page : déroulé pour la session (comme
+/// `/think ultracode`), pris en compte dès la demande suivante.
+async fn post_ultracode(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Json(body): Json<UltracodeBody>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    let text = crate::apply_ultracode_command(Some(if body.on { "on" } else { "off" }));
+    Ok(Json(json!({ "ultracode": runtime::workflow::ultracode(), "text": text })).into_response())
+}
+
 /// `?fresh=1` relit le catalogue chez `OpenRouter` (bouton « Rechercher »).
 #[derive(Deserialize)]
 struct ModelsQuery {
@@ -1866,6 +1898,7 @@ fn router(app: WebApp) -> Router {
         .route("/api/new", post(post_new))
         .route("/api/resume", post(post_resume))
         .route("/api/interrupt", post(post_interrupt))
+        .route("/api/ultracode", post(post_ultracode))
         .route("/api/models", get(get_models))
         .route("/api/sessions", get(get_sessions))
         .route("/api/sessions/delete", post(post_session_delete))
@@ -2254,6 +2287,26 @@ mod tests {
         assert!(
             super::PAGE.contains(r#"showContent(holder, value.content, value.path, "CONTENU")"#)
         );
+    }
+
+    #[test]
+    fn the_ultracode_brief_is_not_replayed_as_a_user_message() {
+        let mut request = ConversationMessage::user_text("ajoute la page de traduction");
+        request.blocks.push(runtime::ContentBlock::Text {
+            text: runtime::workflow::brief_block("R1 la page"),
+        });
+        let events = transcript_from_messages(&[request]);
+        assert_eq!(events.len(), 2);
+        assert!(
+            matches!(&events[0], WebEvent::UserMessage { text, .. } if text == "ajoute la page de traduction")
+        );
+        assert!(
+            matches!(&events[1], WebEvent::Notice { text } if text.starts_with("Ultracode : dossier"))
+        );
+        // L'interrupteur de la page, et le rapport d'un sous-agent lisible.
+        assert!(super::PAGE.contains(r#"id="ultracode-btn""#));
+        assert!(super::PAGE.contains(r#"api("/api/ultracode", { on: !status.ultracode })"#));
+        assert!(super::PAGE.contains(r#"typeof value.result === "string" && "agentId" in value"#));
     }
 
     #[test]

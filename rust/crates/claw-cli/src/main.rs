@@ -232,6 +232,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     init_reasoning_effort(startup_config.as_ref());
+    init_ultracode(startup_config.as_ref());
     let args: Vec<String> = env::args().skip(1).collect();
     match parse_args(&args)? {
         CliAction::DumpManifests => dump_manifests(),
@@ -6299,11 +6300,19 @@ fn apply_think_command(level: Option<&str>) -> String {
             api::ReasoningEffort::Max => "max (le plus haut niveau que le modèle accepte)",
         })
     };
+    let ultracode = if runtime::workflow::ultracode() {
+        "activé : chaque demande conséquente est étudiée par un agent au contexte vierge avant le travail, puis contrôlée par un vérificateur indépendant (plus de requêtes, plus lent)"
+    } else {
+        "désactivé (/think ultracode pour la session, ou le mot « ultracode » dans un message pour ce seul message)"
+    };
     match level.map(str::trim).filter(|value| !value.is_empty()) {
         None => format!(
-            "Raisonnement\n  Niveau           {}\n  Changer          /think off|low|medium|high|max (ou \"reasoning\" dans .claw/settings.json)\n  Remarque         s'applique aux modèles qui raisonnent (DeepSeek-R1, Qwen3, GLM, o-series…) et aux modèles Claude via l'API Anthropic",
+            "Raisonnement\n  Niveau           {}\n  Ultracode        {ultracode}\n  Changer          /think off|low|medium|high|max, /think ultracode [off] (ou \"reasoning\" et \"ultracode\" dans .claw/settings.json)\n  Remarque         s'applique aux modèles qui raisonnent (DeepSeek-R1, Qwen3, GLM, o-series…) et aux modèles Claude via l'API Anthropic",
             current(api::reasoning_effort())
         ),
+        Some(value) if value.split_whitespace().next().is_some_and(|word| word.eq_ignore_ascii_case("ultracode")) => {
+            apply_ultracode_command(value.split_whitespace().nth(1))
+        }
         Some(value) => match api::ReasoningEffort::parse(value) {
             Some(effort) => {
                 api::set_reasoning_effort(Some(effort));
@@ -6315,6 +6324,43 @@ fn apply_think_command(level: Option<&str>) -> String {
 }
 
 /// Niveau de raisonnement au démarrage : `CLAW_REASONING`, sinon la config.
+/// `/think ultracode [on|off]` : déroulé ultracode pour la session. L'activer
+/// pousse aussi le raisonnement au plus haut niveau que le modèle accepte.
+fn apply_ultracode_command(switch: Option<&str>) -> String {
+    let switch = switch.map(str::to_lowercase);
+    match switch.as_deref() {
+        None | Some("on" | "oui" | "activer" | "1") => {
+            if !runtime::harness::enabled(runtime::harness::Aid::Ultracode) {
+                return "Ultracode est coupé par CLAW_ULTRACODE=0 ou CLAW_HARNESS=0.".to_string();
+            }
+            runtime::workflow::set_ultracode(true);
+            api::set_reasoning_effort(Some(api::ReasoningEffort::Max));
+            "Ultracode activé pour la session\n  Avant le travail  un agent au contexte vierge étudie la demande et le code et prépare un dossier : exigences, code concerné, risques, plan vérifiable\n  Après le travail  un vérificateur indépendant contrôle chaque exigence, lance les tests et renvoie ses objections à l'agent\n  Raisonnement      max (le plus haut niveau que le modèle accepte)\n  Coût              une à trois dizaines de requêtes de plus par demande conséquente\n  Couper            /think ultracode off".to_string()
+        }
+        Some("off" | "non" | "désactiver" | "desactiver" | "0") => {
+            runtime::workflow::set_ultracode(false);
+            "Ultracode désactivé : retour au travail courant (le niveau de raisonnement ne change pas).".to_string()
+        }
+        Some(other) => format!(
+            "« {other} » : /think ultracode pour l'activer, /think ultracode off pour le couper."
+        ),
+    }
+}
+
+/// Ultracode au démarrage : `CLAW_ULTRACODE`, sinon `"ultracode"` dans la config.
+fn init_ultracode(config: Option<&runtime::RuntimeConfig>) {
+    let from_env = env::var("CLAW_ULTRACODE").ok().and_then(|value| {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "on" | "oui" | "yes" => Some(true),
+            "0" | "false" | "off" | "non" | "no" => Some(false),
+            _ => None,
+        }
+    });
+    if let Some(on) = from_env.or_else(|| config.and_then(runtime::RuntimeConfig::ultracode)) {
+        runtime::workflow::set_ultracode(on);
+    }
+}
+
 fn init_reasoning_effort(config: Option<&runtime::RuntimeConfig>) {
     let configured = env::var("CLAW_REASONING")
         .ok()
@@ -8249,6 +8295,34 @@ mod tests {
         // Un identifiant refusé est rejeté avant tout accès au disque.
         assert!(super::delete_managed_session("../secret").is_err());
         assert!(super::rename_managed_session("../secret", "x").is_err());
+    }
+
+    #[test]
+    fn think_ultracode_turns_the_workflow_on_and_off_for_the_session() {
+        struct Restore(Option<api::ReasoningEffort>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                runtime::workflow::set_ultracode(false);
+                api::set_reasoning_effort(self.0);
+            }
+        }
+        let _restore = Restore(api::reasoning_effort());
+        let on = super::apply_think_command(Some("ultracode"));
+        assert!(on.starts_with("Ultracode activé pour la session"), "{on}");
+        assert!(runtime::workflow::ultracode());
+        assert_eq!(api::reasoning_effort(), Some(api::ReasoningEffort::Max));
+        assert!(super::apply_think_command(None).contains("Ultracode        activé"));
+        let off = super::apply_think_command(Some("ULTRACODE off"));
+        assert!(off.starts_with("Ultracode désactivé"), "{off}");
+        assert!(!runtime::workflow::ultracode());
+        assert!(super::apply_think_command(Some("ultracode peut-être"))
+            .contains("/think ultracode off"));
+        // « ultrathink » reste un niveau de raisonnement, pas le déroulé.
+        assert_eq!(
+            super::apply_think_command(Some("ultrathink")),
+            "Raisonnement : max (le plus haut niveau que le modèle accepte)"
+        );
+        assert!(!runtime::workflow::ultracode());
     }
 
     #[test]

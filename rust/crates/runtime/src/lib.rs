@@ -29,6 +29,7 @@ pub use bash::stop_all_containers;
 mod session;
 pub mod typography;
 mod usage;
+pub mod workflow;
 
 pub use bash::{execute_bash, BashCommandInput, BashCommandOutput};
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};

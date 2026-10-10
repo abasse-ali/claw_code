@@ -588,7 +588,8 @@ fn replay_history(session_id: &str, session: &Session) {
                     "content": { "type": "text", "text": text },
                 }),
                 (ContentBlock::Text { text }, MessageRole::User)
-                    if !text.starts_with(runtime::HOOK_CONTEXT_PREFIX) =>
+                    if !text.starts_with(runtime::HOOK_CONTEXT_PREFIX)
+                        && !text.starts_with(runtime::workflow::BRIEF_PREFIX) =>
                 {
                     json!({
                         "sessionUpdate": "user_message_chunk",
