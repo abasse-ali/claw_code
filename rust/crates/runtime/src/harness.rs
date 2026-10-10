@@ -56,6 +56,8 @@ pub enum Aid {
     Ultracode,
     /// Mode équipe : chaque étape confiée au modèle le plus fort pour elle, quand il est demandé.
     Team,
+    /// Code des emplacements cités par une commande ou une vérification en échec.
+    ErrorSites,
 }
 
 impl Aid {
@@ -80,6 +82,7 @@ impl Aid {
             Self::Persistence => "CLAW_PERSISTENCE",
             Self::Ultracode => "CLAW_ULTRACODE",
             Self::Team => "CLAW_TEAM",
+            Self::ErrorSites => "CLAW_ERROR_SITES",
         }
     }
 }
@@ -291,6 +294,145 @@ pub fn read_bash_output(output: &str) -> CommandResult {
         timed_out: status == "timeout",
         excerpt: excerpt(&combined),
     }
+}
+
+// --- Code cité par une erreur ---------------------------------------------------------
+
+/// Emplacements montrés au plus pour une sortie en échec.
+const ERROR_SITES: usize = 3;
+/// Lignes montrées avant et après la ligne citée.
+const ERROR_SITE_LINES: usize = 3;
+const ERROR_SITES_MAX_CHARS: usize = 3_000;
+/// Dossiers qui ne sont pas le code du projet (dépendances, sorties de build) :
+/// une trace qui y passe n'y montre rien d'utile à corriger.
+const FOREIGN_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    ".venv",
+    "venv",
+    "site-packages",
+    "dist-packages",
+    ".git",
+    "__pycache__",
+    "dist",
+    "build",
+    ".next",
+];
+
+fn location_pattern() -> &'static regex::Regex {
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    PATTERN.get_or_init(|| {
+        regex::Regex::new(
+            r#"File "(?P<py>[^"]+)", line (?P<pyline>\d+)|(?P<path>(?:[A-Za-z]:)?[\w.\-/\\]*[\w\-]\.[A-Za-z][A-Za-z0-9]{0,5})(?::(?P<line>\d+)|\((?P<tsline>\d+),\d+\))"#,
+        )
+        .expect("motif valide")
+    })
+}
+
+/// Emplacements `fichier:ligne` qu'une sortie cite (trace Python, erreur Rust,
+/// TypeScript `fichier(ligne,colonne)`, Node, Go, pytest…), dans l'ordre et
+/// sans doublon.
+fn cited_sites(output: &str) -> Vec<(String, usize)> {
+    let mut sites: Vec<(String, usize)> = Vec::new();
+    for found in location_pattern().captures_iter(output) {
+        let (path, line) = match (found.name("py"), found.name("pyline")) {
+            (Some(path), Some(line)) => (path.as_str(), line.as_str()),
+            _ => match (
+                found.name("path"),
+                found.name("line").or_else(|| found.name("tsline")),
+            ) {
+                (Some(path), Some(line)) => (path.as_str(), line.as_str()),
+                _ => continue,
+            },
+        };
+        let Ok(line) = line.parse::<usize>() else {
+            continue;
+        };
+        let site = (path.to_string(), line);
+        if line > 0 && !sites.contains(&site) {
+            sites.push(site);
+        }
+    }
+    sites
+}
+
+/// Fichier du projet que désigne un chemin cité (relatif au dossier de
+/// travail ou absolu dedans), hors dépendances et sorties de build.
+fn project_file(root: &Path, cited: &str) -> Option<(std::path::PathBuf, String)> {
+    // `//hôte/…` (reste d'une adresse web) : un chemin réseau sous Windows, que
+    // l'on ne va pas chercher sur le réseau.
+    if cited.starts_with("//") || cited.starts_with(r"\\") {
+        return None;
+    }
+    let cited = cited.trim_start_matches("./");
+    let path = Path::new(cited);
+    let full = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    let full = full.canonicalize().ok()?;
+    let relative = full.strip_prefix(root).ok()?.to_path_buf();
+    let foreign = relative
+        .components()
+        .any(|component| FOREIGN_DIRS.contains(&component.as_os_str().to_string_lossy().as_ref()));
+    if foreign || !full.is_file() {
+        return None;
+    }
+    let shown = relative.to_string_lossy().replace('\\', "/");
+    Some((full, shown))
+}
+
+/// Le code autour des emplacements du projet qu'une sortie en échec cite
+/// (`output` : le résultat JSON de l'outil `bash`, ou du texte brut). Le
+/// modèle voit les lignes en cause sans dépenser une requête pour les relire.
+#[must_use]
+pub fn error_sites(output: &str, cwd: &Path) -> Option<String> {
+    let text = serde_json::from_str::<Value>(output).map_or_else(
+        |_| output.to_string(),
+        |value| {
+            let field = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or_default();
+            format!("{}\n{}", field("stdout"), field("stderr"))
+        },
+    );
+    let root = cwd.canonicalize().ok()?;
+    let mut blocks: Vec<String> = Vec::new();
+    let mut used = 0;
+    for (cited, line) in cited_sites(&text) {
+        if blocks.len() >= ERROR_SITES {
+            break;
+        }
+        let Some((file, shown)) = project_file(&root, &cited) else {
+            continue;
+        };
+        let Ok(content) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        if line > lines.len() {
+            continue;
+        }
+        let start = line.saturating_sub(ERROR_SITE_LINES + 1);
+        let end = (line + ERROR_SITE_LINES).min(lines.len());
+        let mut block = format!("{shown}:{line}\n");
+        for (offset, code) in lines[start..end].iter().enumerate() {
+            let number = start + offset + 1;
+            let marker = if number == line { '>' } else { ' ' };
+            let code: String = code.chars().take(200).collect();
+            let _ = writeln!(block, "{marker}{number:>5} | {code}");
+        }
+        used += block.len();
+        if used > ERROR_SITES_MAX_CHARS {
+            break;
+        }
+        blocks.push(block);
+    }
+    (!blocks.is_empty()).then(|| {
+        format!(
+            "[Claw] Current code at the project locations this output points to (no need to read them again):\n{}",
+            blocks.join("\n")
+        )
+    })
 }
 
 /// Message renvoyé au modèle quand la vérification échoue.
@@ -935,6 +1077,80 @@ pub fn unblock_feedback(advice: &str) -> String {
         "[Claw] Advice from another model that read your recent attempts (a hypothesis to check, not an order):\n{}",
         advice.trim()
     )
+}
+
+#[cfg(test)]
+mod error_site_tests {
+    use super::{cited_sites, error_sites};
+
+    #[test]
+    fn locations_are_read_from_the_usual_error_formats() {
+        let output = r#"Traceback (most recent call last):
+  File "app/main.py", line 12, in <module>
+error[E0425]: cannot find value `x` in this scope
+ --> src/lib.rs:42:5
+src/page.ts(7,3): error TS2304: Cannot find name 'y'.
+    at load (C:\proj\web\app.js:30:11)
+tests/test_total.py:9: AssertionError
+./main.go:5:2: undefined: z
+Listening on http://localhost:3000 and 127.0.0.1:8000"#;
+        let sites = cited_sites(output);
+        assert_eq!(
+            sites,
+            [
+                ("app/main.py".to_string(), 12),
+                ("src/lib.rs".to_string(), 42),
+                ("src/page.ts".to_string(), 7),
+                (r"C:\proj\web\app.js".to_string(), 30),
+                ("tests/test_total.py".to_string(), 9),
+                ("./main.go".to_string(), 5),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_cited_project_code_is_shown_and_dependencies_are_skipped() {
+        let root = std::env::temp_dir().join(format!(
+            "claw-sites-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        std::fs::create_dir_all(root.join("app")).expect("dossier");
+        std::fs::create_dir_all(root.join(".venv").join("lib")).expect("dépendances");
+        let code = (1..=20)
+            .map(|n| format!("ligne {n}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        std::fs::write(root.join("app").join("main.py"), &code).expect("fichier");
+        std::fs::write(root.join(".venv").join("lib").join("dep.py"), &code).expect("dépendance");
+        let bash = serde_json::json!({
+            "stdout": "",
+            "stderr": "  File \".venv/lib/dep.py\", line 3, in f\n  File \"app/main.py\", line 10, in g\nNameError: name 'x' is not defined\n  File \"app/absent.py\", line 2\n",
+            "returnCodeInterpretation": "exit_code:1",
+        })
+        .to_string();
+        let sites = error_sites(&bash, &root).expect("emplacement du projet");
+        assert!(sites.starts_with("[Claw] Current code at the project locations"));
+        assert!(sites.contains("app/main.py:10\n"), "{sites}");
+        assert!(sites.contains(">   10 | ligne 10"), "{sites}");
+        assert!(
+            sites.contains("     7 | ligne 7") && sites.contains("    13 | ligne 13"),
+            "{sites}"
+        );
+        assert!(
+            !sites.contains("dep.py"),
+            "les dépendances ne sont pas montrées : {sites}"
+        );
+        // Rien d'utile : pas de note.
+        assert_eq!(error_sites("tout va bien", &root), None);
+        // Une adresse web n'est pas un chemin réseau à aller chercher.
+        assert_eq!(
+            error_sites("GET https://cdn.example.com/lib.js:8080 failed", &root),
+            None
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[cfg(test)]

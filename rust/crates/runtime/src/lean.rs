@@ -81,16 +81,42 @@ fn lean_write(fields: &Map<String, Value>) -> Option<Map<String, Value>> {
     Some(lean)
 }
 
-/// Sortie d'une commande : ce qu'elle a écrit et comment elle s'est terminée.
-/// L'état du bac à sable n'est gardé que s'il isole vraiment la commande.
+/// Au-delà, la sortie d'une commande est raccourcie dans la session : son
+/// début et sa fin (où sont presque toujours les erreurs) sont gardés. Sinon
+/// un `npm install` bavard repartirait en entier avec chaque requête.
+const MAX_COMMAND_OUTPUT_CHARS: usize = 30_000;
+const KEPT_HEAD_CHARS: usize = 8_000;
+const KEPT_TAIL_CHARS: usize = 20_000;
+
+fn bounded(text: &str) -> Value {
+    let count = text.chars().count();
+    if count <= MAX_COMMAND_OUTPUT_CHARS {
+        return Value::String(text.to_string());
+    }
+    let head: String = text.chars().take(KEPT_HEAD_CHARS).collect();
+    let tail: String = text.chars().skip(count - KEPT_TAIL_CHARS).collect();
+    Value::String(format!(
+        "{head}\n… [{} characters omitted: run the command again with grep, head or tail to see that part] …\n{tail}",
+        count - KEPT_HEAD_CHARS - KEPT_TAIL_CHARS
+    ))
+}
+
+/// Sortie d'une commande : ce qu'elle a écrit (bornée) et comment elle s'est
+/// terminée. L'état du bac à sable n'est gardé que s'il isole vraiment la commande.
 fn lean_command(fields: &Map<String, Value>) -> Option<Map<String, Value>> {
     if !fields.contains_key("stdout") && !fields.contains_key("stderr") {
         return None;
     }
     let mut lean = Map::new();
     for (key, value) in fields {
+        if matches!(key.as_str(), "stdout" | "stderr") {
+            lean.insert(
+                key.clone(),
+                value.as_str().map_or_else(|| value.clone(), bounded),
+            );
+            continue;
+        }
         let kept = match key.as_str() {
-            "stdout" | "stderr" => true,
             "sandboxStatus" => ["namespace_active", "network_active", "in_container"]
                 .iter()
                 .any(|flag| value.get(flag) == Some(&json!(true))),
@@ -115,6 +141,30 @@ mod tests {
             .next()
             .expect("un résultat")
             .expect("JSON valide")
+    }
+
+    #[test]
+    fn a_huge_command_output_keeps_its_start_and_its_end() {
+        let log = (0..6_000)
+            .map(|n| format!("ligne {n:05}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        let full =
+            json!({ "stdout": log, "stderr": "", "returnCodeInterpretation": "exit_code:1" });
+        let lean = lean_tool_output("bash", &full.to_string()).expect("raccourcie");
+        let stdout = parsed(&lean)["stdout"]
+            .as_str()
+            .expect("stdout")
+            .to_string();
+        assert!(
+            stdout.chars().count() < 28_300,
+            "{}",
+            stdout.chars().count()
+        );
+        assert!(stdout.starts_with("ligne 00000"));
+        assert!(stdout.trim_end().ends_with("ligne 05999"));
+        assert!(stdout.contains("characters omitted: run the command again with grep"));
+        assert_eq!(parsed(&lean)["returnCodeInterpretation"], "exit_code:1");
     }
 
     #[test]

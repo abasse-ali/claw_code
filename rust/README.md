@@ -209,6 +209,12 @@ est retenu ; avec `OPENROUTER_API_KEY`, le quota gratuit du jour est affiché.
   gratuite : un projet dont la facturation est activée paie chaque requête. Les modèles gratuits
   et leurs limites (par minute et par jour, par projet) s'y affichent ; en offre gratuite, Google
   peut se servir des requêtes pour améliorer ses produits.
+- **Gemini 3 et ses signatures de réflexion** : chaque appel d'outil d'un modèle Gemini 3 arrive
+  avec une signature que Google exige de retrouver dans la requête suivante (sans elle : erreur
+  400 dès la deuxième étape). Claw la garde et la renvoie avec son appel ; un appel sans signature
+  connue (session rechargée, appel écrit par un autre modèle de l'équipe) reçoit la valeur de
+  remplacement que Google documente. Sur une erreur 429 de Google, Claw attend le délai qu'il
+  annonce (`retryDelay`) ; un quota du jour épuisé n'est plus réessayé en boucle.
 - **Choisir un modèle Gemini** : `/models gemini` liste les modèles de l'offre gratuite de Google
   que votre clé ouvre (une simple lecture du catalogue de Google, aucune génération), et la page
   les montre dans la catégorie **Google Gemini** du menu des modèles. Gratuits d'après la page
@@ -473,6 +479,30 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
 
 ### Fiabilité avec les petits modèles
 
+- **Serveurs et surveillances** : une commande qui ne rend jamais la main (`npm run dev`,
+  `uvicorn`, `flask run`, `vite`, `next dev`, `--watch`, ou une commande terminée par `&`) part
+  d'office en arrière-plan au lieu de bloquer le tour ; le modèle la suit avec `BashOutput` et
+  l'arrête avec `KillShell`. Toute autre commande a un délai de 5 minutes quand le modèle n'en
+  donne pas (avant : aucun), et le message de dépassement lui dit quoi faire.
+- **Code des erreurs** : quand une commande ou la vérification échoue en citant des emplacements
+  du projet (trace Python, erreur Rust, TypeScript `fichier(ligne,colonne)`, Node, Go, pytest),
+  Claw joint les lignes de code autour de chacun (trois au plus) : une relecture de moins, donc
+  une requête de moins. Les dépendances (`node_modules`, `.venv`…) ne sont pas montrées.
+  `CLAW_ERROR_SITES=0` le coupe.
+- **Lecture** : `read_file` rend 2 000 lignes au plus quand le modèle ne précise pas `limit`, et
+  dit à partir de quel `offset` lire la suite ; une ligne de plus de 2 000 caractères (code
+  minifié) est raccourcie ; un fichier hors UTF-8 (Windows-1252) se lit quand même ; un fichier
+  binaire est signalé comme tel au lieu d'une erreur d'encodage.
+- **Recherche** : `grep_search` et `glob_search` sautent `node_modules`, `.git`, `target`,
+  `.venv`, `venv`, `__pycache__`, `dist`, `build` et `.claw`, sauf si le chemin ou le motif les
+  nomme. Avant, une recherche lisait toutes les dépendances (des dizaines de milliers de fichiers
+  dans un projet Next.js) et `glob_search` les montrait en premier, ce qui égarait le modèle. Un
+  dossier illisible ne fait plus échouer la recherche ; un fichier de plus de 4 Mo n'est pas lu.
+- **Sorties bornées** : la sortie d'une commande gardée dans la session est limitée à
+  30 000 caractères (le début et la fin, où sont les erreurs, avec la mention de ce qui manque),
+  au lieu de repartir en entier avec chaque requête.
+- **Requêtes regroupées** : la consigne demande au modèle de réunir dans une même réponse les
+  lectures et recherches indépendantes (chaque réponse coûte une requête du quota).
 - `edit_file` tolère les différences de fins de ligne (CRLF), d'espaces de fin et d'indentation
   (le nouveau texte est réindenté), refuse une occurrence ambiguë et indique la ligne la plus
   proche quand le texte est introuvable.

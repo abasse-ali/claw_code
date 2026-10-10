@@ -1063,6 +1063,12 @@ where
                         aids.check_failed = true;
                         aids.check_failing = true;
                     }
+                    // Le code des emplacements que l'erreur cite : une relecture de moins.
+                    if harness::enabled(Aid::ErrorSites) {
+                        if let Ok(cwd) = std::env::current_dir() {
+                            notes.extend(harness::error_sites(&output, &cwd));
+                        }
+                    }
                     // Sous Windows : un chemin `dossier\fichier` écrit pour cmd.
                     if tool_name == "bash" && harness::enabled(Aid::PathHelp) {
                         let hint = crate::bash::windows_shell_hint(&command);
@@ -1193,6 +1199,12 @@ where
                 aids.dirty = true;
                 aids.verified_commands.clear();
                 let mut feedback = harness::verify_feedback(&command, &result);
+                if harness::enabled(Aid::ErrorSites) {
+                    if let Some(sites) = harness::error_sites(output, &cwd) {
+                        feedback.push_str("\n\n");
+                        feedback.push_str(&sites);
+                    }
+                }
                 // Deuxième échec : un autre modèle donne son diagnostic.
                 if aids.verify_rounds == 2 {
                     if let Some(advice) = self.advice_when_stuck(aids, Some(&result.excerpt)) {

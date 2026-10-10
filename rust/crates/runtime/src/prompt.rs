@@ -649,6 +649,7 @@ fn get_simple_doing_tasks_section() -> String {
         "Read relevant code before changing it and keep changes tightly scoped to the request.".to_string(),
         "Do not add speculative abstractions, compatibility shims, or unrelated cleanup.".to_string(),
         "Do not create files unless they are required to complete the task.".to_string(),
+        "Each reply you send costs one request of a limited daily quota: when you need several independent things (files to read, searches, commands that do not depend on each other), ask for all of them in the same reply as parallel tool calls instead of one per reply.".to_string(),
         "If an approach fails, diagnose the failure before switching tactics.".to_string(),
         "When you learn something about this project that would have saved you time (a build or test quirk, a convention, where something lives, a pitfall), or when the user corrects you, save it in one line with the Remember tool so later sessions start with it. Do not use it as a log of what you just changed. Never save secrets, and skip what CLAW.md already says.".to_string(),
         "Be careful not to introduce security vulnerabilities such as command injection, XSS, or SQL injection.".to_string(),

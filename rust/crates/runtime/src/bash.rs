@@ -82,8 +82,12 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
     };
     let cwd = env::current_dir()?;
     let sandbox_status = sandbox_status_for_input(&input, &cwd);
+    // Un serveur ou une surveillance de fichiers ne rend jamais la main : lancé
+    // au premier plan, il bloquerait le tour. Il part d'office en arrière-plan.
+    let auto_background =
+        !input.run_in_background.unwrap_or(false) && starts_long_running(&input.command);
 
-    if input.run_in_background.unwrap_or(false) {
+    if input.run_in_background.unwrap_or(false) || auto_background {
         // Sous Windows, le PID du shell MSYS permet d'arrêter tout le groupe.
         let pid_file = cfg!(windows).then(shell_group_pid_file);
         let wrapped = pid_file.as_deref().map_or_else(
@@ -103,17 +107,24 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
             crate::bash_tasks::set_container(&task_id, name);
         }
 
-        return Ok(BashCommandOutput {
-            stdout: format!(
+        let started = if auto_background {
+            format!(
+                "[Claw] This command starts a server or a watcher, which never exits on its own: it was started in the background as {task_id} instead of blocking. Read its output with BashOutput (bash_id: \"{task_id}\"), for example to check that it is listening, and stop it with KillShell."
+            )
+        } else {
+            format!(
                 "Started in the background as {task_id}. Read its output with BashOutput (bash_id: \"{task_id}\") and stop it with KillShell."
-            ),
+            )
+        };
+        return Ok(BashCommandOutput {
+            stdout: started,
             stderr: String::new(),
             raw_output_path: None,
             interrupted: false,
             is_image: None,
             background_task_id: Some(task_id),
             backgrounded_by_user: Some(false),
-            assistant_auto_backgrounded: Some(false),
+            assistant_auto_backgrounded: Some(auto_background),
             dangerously_disable_sandbox: input.dangerously_disable_sandbox,
             return_code_interpretation: None,
             no_output_expected: Some(true),
@@ -130,6 +141,115 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
     // abandonné (délai dépassé ou interruption).
     runtime.shutdown_background();
     result
+}
+
+/// Délai d'une commande au premier plan quand le modèle n'en donne pas.
+pub const DEFAULT_TIMEOUT_MS: u64 = 5 * 60 * 1000;
+
+/// Commandes qui démarrent un serveur ou une surveillance de fichiers, après
+/// d'éventuels `VAR=valeur`, `npx`, `uv run`, `poetry run`… : elles ne rendent
+/// jamais la main d'elles-mêmes.
+const LONG_RUNNING: &[&str] = &[
+    "npm run dev",
+    "npm run start",
+    "npm start",
+    "npm run serve",
+    "npm run watch",
+    "npm run preview",
+    "yarn dev",
+    "yarn start",
+    "yarn serve",
+    "yarn watch",
+    "pnpm dev",
+    "pnpm start",
+    "pnpm run dev",
+    "pnpm run start",
+    "bun dev",
+    "bun run dev",
+    "next dev",
+    "next start",
+    "nuxt dev",
+    "ng serve",
+    "vite",
+    "webpack serve",
+    "webpack-dev-server",
+    "nodemon",
+    "http-server",
+    "live-server",
+    "serve",
+    "uvicorn",
+    "gunicorn",
+    "hypercorn",
+    "daphne",
+    "flask run",
+    "fastapi dev",
+    "fastapi run",
+    "streamlit run",
+    "jupyter notebook",
+    "jupyter lab",
+    "python manage.py runserver",
+    "python3 manage.py runserver",
+    "python -m http.server",
+    "python3 -m http.server",
+    "python -m uvicorn",
+    "python3 -m uvicorn",
+    "python -m flask run",
+    "python3 -m flask run",
+    "rails server",
+    "rails s",
+    "php artisan serve",
+    "hugo server",
+    "mkdocs serve",
+    "jekyll serve",
+    "cargo watch",
+    "tail -f",
+];
+
+/// La commande démarre un serveur ou une surveillance (ou se termine par un
+/// `&` qui la détache tout en gardant sa sortie ouverte) : elle ne finira pas.
+fn starts_long_running(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    let trimmed = lower.trim_end();
+    if trimmed.ends_with('&') && !trimmed.ends_with("&&") {
+        return true;
+    }
+    lower
+        .split([';', '|', '&', '\n'])
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .any(|segment| {
+            let mut words: Vec<&str> = segment
+                .split_whitespace()
+                .skip_while(|word| word.contains('=') && !word.starts_with('-'))
+                .collect();
+            let skip = match words.as_slice() {
+                ["npx" | "bunx", ..] => 1,
+                ["pnpm", "exec", ..]
+                | ["poetry" | "uv" | "pipenv" | "pdm" | "hatch", "run", ..] => 2,
+                _ => 0,
+            };
+            words.drain(..skip);
+            // `vite build`, `next build` : une construction, qui se termine.
+            if words.get(1) == Some(&"build")
+                || words
+                    .iter()
+                    .any(|word| matches!(*word, "--help" | "-h" | "--version"))
+            {
+                return false;
+            }
+            if words.contains(&"--watch")
+                || (words.first() == Some(&"tsc") && words.contains(&"-w"))
+            {
+                return true;
+            }
+            let joined = words.join(" ");
+            LONG_RUNNING.iter().any(|pattern| {
+                joined == *pattern
+                    || joined
+                        .strip_prefix(pattern)
+                        .is_some_and(|rest| rest.starts_with(' '))
+            })
+        })
 }
 
 /// Sous Windows, `bash` est Git Bash : écrit hors guillemets, un chemin
@@ -370,7 +490,7 @@ async fn execute_bash_async(
     // Sous Unix, un groupe de processus dédié permet de tuer aussi les descendants.
     #[cfg(unix)]
     command.process_group(0);
-    let timeout_ms = input.timeout.unwrap_or(u64::MAX / 4);
+    let timeout_ms = input.timeout.unwrap_or(DEFAULT_TIMEOUT_MS);
     let child = command.spawn()?;
     let pid = child.id();
 
@@ -417,7 +537,9 @@ async fn execute_bash_async(
                 return Ok(BashCommandOutput {
                     stdout: String::new(),
                     stderr: format!(
-                        "La commande a dépassé le délai d'expiration de {timeout_ms} ms"
+                        "La commande a dépassé le délai de {} s : elle a été arrêtée.\n[Claw] The command did not finish within {} s and was stopped. If it starts a server or a watcher, run it with run_in_background: true and follow it with BashOutput. If it is a long build or test run, run it again with a larger timeout (in milliseconds).",
+                        timeout_ms / 1000,
+                        timeout_ms / 1000
                     ),
                     raw_output_path: None,
                     interrupted: true,
@@ -644,6 +766,41 @@ mod tests {
         assert_eq!(output.stdout, "hello");
         assert!(!output.interrupted);
         assert!(output.sandbox_status.is_some());
+    }
+
+    #[test]
+    fn servers_and_watchers_are_recognized_but_builds_are_not() {
+        use super::starts_long_running;
+        for command in [
+            "npm run dev",
+            "cd frontend && npm run dev",
+            "PORT=3001 npm start",
+            "uvicorn app.main:app --reload --port 8000",
+            "python -m uvicorn app.main:app",
+            "uv run fastapi dev main.py",
+            "npx vite --port 5173",
+            "flask run",
+            "jest --watch",
+            "tsc -w",
+            "npm run dev 2>&1",
+            "python app.py &",
+        ] {
+            assert!(starts_long_running(command), "{command}");
+        }
+        for command in [
+            "npm run build",
+            "npx vite build",
+            "next build",
+            "npm test",
+            "cargo test",
+            "python -m pytest",
+            "grep -rn \"npm run dev\" README.md",
+            "npm install && npm run lint",
+            "uvicorn --help",
+            "cd backend && pip install -r requirements.txt",
+        ] {
+            assert!(!starts_long_running(command), "{command}");
+        }
     }
 
     #[test]

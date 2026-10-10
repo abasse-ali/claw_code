@@ -450,6 +450,12 @@ impl OpenAiCompatClient {
         if let Some(name) = &self.model_name {
             payload["model"] = Value::String(name.clone());
         }
+        // Gemini 3 : chaque appel d'outil repart avec sa signature de réflexion.
+        let sent_model = self.model_name.as_deref().unwrap_or(&request.model);
+        attach_tool_call_extras(
+            &mut payload,
+            is_google_endpoint(&self.base_url) && sent_model.contains("gemini-3"),
+        );
         if !accepts_stream_options(&self.base_url) {
             if let Some(fields) = payload.as_object_mut() {
                 fields.remove("stream_options");
@@ -1049,6 +1055,8 @@ struct ToolCallState {
     emitted_len: usize,
     started: bool,
     stopped: bool,
+    /// Ce que le serveur joint à l'appel (la signature de réflexion de Gemini 3).
+    extra: Option<Value>,
 }
 
 impl ToolCallState {
@@ -1062,6 +1070,12 @@ impl ToolCallState {
         }
         if let Some(arguments) = tool_call.function.arguments {
             self.arguments.push_str(&arguments);
+        }
+        if let Some(extra) = tool_call.extra_content.filter(|extra| !extra.is_null()) {
+            self.extra = Some(extra);
+        }
+        if let (Some(id), Some(extra)) = (&self.id, &self.extra) {
+            remember_tool_call_extra(id, extra);
         }
     }
 
@@ -1131,6 +1145,75 @@ struct ChatMessage {
 struct ResponseToolCall {
     id: String,
     function: ResponseToolFunction,
+    #[serde(default)]
+    extra_content: Option<Value>,
+}
+
+// --- Signatures de réflexion (Gemini 3) ------------------------------------------------
+
+/// `extra_content` reçu avec chaque appel d'outil, par identifiant d'appel :
+/// Gemini 3 y met sa « signature de réflexion » et refuse la requête suivante
+/// (erreur 400) quand l'appel lui revient sans elle. Elle est renvoyée telle
+/// quelle avec son appel ; un serveur qui n'en donne pas n'en reçoit pas.
+static TOOL_CALL_EXTRAS: Mutex<BTreeMap<String, Value>> = Mutex::new(BTreeMap::new());
+const MAX_TOOL_CALL_EXTRAS: usize = 4_096;
+/// Valeur que Google documente quand la vraie signature manque (session
+/// rechargée, appel écrit par un autre modèle) : un dernier recours.
+const SKIP_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
+
+fn remember_tool_call_extra(id: &str, extra: &Value) {
+    if id.is_empty() || extra.is_null() {
+        return;
+    }
+    let mut extras = TOOL_CALL_EXTRAS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if extras.len() >= MAX_TOOL_CALL_EXTRAS && !extras.contains_key(id) {
+        extras.clear();
+    }
+    extras.insert(id.to_string(), extra.clone());
+}
+
+/// Serveur de Google (API Gemini, Vertex AI), qui valide les signatures.
+fn is_google_endpoint(base_url: &str) -> bool {
+    base_url.contains("generativelanguage.googleapis.com")
+        || base_url.contains("aiplatform.googleapis.com")
+}
+
+/// Rend à chaque appel d'outil de l'historique ce que son serveur y avait
+/// joint. Pour un modèle Gemini 3, un message d'appels sans aucune signature
+/// connue reçoit la valeur de remplacement sur son premier appel, le seul
+/// que Google vérifie.
+fn attach_tool_call_extras(payload: &mut Value, gemini3: bool) {
+    let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let extras = TOOL_CALL_EXTRAS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for message in messages.iter_mut() {
+        let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let mut signed = false;
+        for call in calls.iter_mut() {
+            let extra = call
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| extras.get(id))
+                .cloned();
+            if let Some(extra) = extra {
+                call["extra_content"] = extra;
+                signed = true;
+            }
+        }
+        if gemini3 && !signed {
+            if let Some(first) = calls.first_mut() {
+                first["extra_content"] =
+                    json!({ "google": { "thought_signature": SKIP_THOUGHT_SIGNATURE } });
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1193,6 +1276,9 @@ struct DeltaToolCall {
     id: Option<String>,
     #[serde(default)]
     function: DeltaFunction,
+    /// Gemini 3 : `{"google": {"thought_signature": …}}`.
+    #[serde(default)]
+    extra_content: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1581,6 +1667,9 @@ fn normalize_response(
         }
     }
     for tool_call in choice.message.tool_calls {
+        if let Some(extra) = &tool_call.extra_content {
+            remember_tool_call_extra(&tool_call.id, extra);
+        }
         content.push(OutputContentBlock::ToolUse {
             id: tool_call.id,
             name: tool_call.function.name,
@@ -2200,6 +2289,63 @@ mod tests {
             .expect_err("limite");
         let wait = error.rate_limit_reset().expect("délai annoncé");
         assert!(wait.as_secs() >= 10 && wait.as_secs() <= 12, "{wait:?}");
+    }
+
+    #[test]
+    fn gemini_thought_signatures_go_back_with_their_tool_calls() {
+        use super::{attach_tool_call_extras, is_google_endpoint};
+        // Gemini 3 joint sa signature au premier morceau de l'appel.
+        let mut state = StreamState::new("gemini:gemini-3.8-flash".to_string());
+        for frame in [
+            r#"data: {"id":"g","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"function-call-signe-1","type":"function","function":{"name":"read_file","arguments":""},"extra_content":{"google":{"thought_signature":"SIG_A"}}}]}}]}"#,
+            r#"data: {"id":"g","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\"a.py\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        ] {
+            let chunk = parse_sse_frame(frame).expect("frame").expect("chunk");
+            state.ingest_chunk(chunk).expect("morceau");
+        }
+        state.finish();
+        let call = |id: &str| InputMessage {
+            role: "assistant".to_string(),
+            content: vec![InputContentBlock::ToolUse {
+                id: id.to_string(),
+                name: "read_file".to_string(),
+                input: json!({"path": "a.py"}),
+            }],
+        };
+        let request = MessageRequest {
+            model: "gemini:gemini-3.8-flash".to_string(),
+            max_tokens: 64,
+            messages: vec![
+                InputMessage::user_text("lis a.py"),
+                call("function-call-signe-1"),
+                call("appel-d-un-autre-modele"),
+            ],
+            system: None,
+            tools: None,
+            tool_choice: None,
+            stream: true,
+        };
+        let signature = |payload: &serde_json::Value, message: usize| {
+            payload["messages"][message]["tool_calls"][0]["extra_content"]["google"]
+                ["thought_signature"]
+                .clone()
+        };
+        let mut gemini = build_chat_completion_request(&request);
+        attach_tool_call_extras(&mut gemini, true);
+        assert_eq!(signature(&gemini, 1), "SIG_A");
+        // Sans signature connue : la valeur de remplacement documentée par Google.
+        assert_eq!(signature(&gemini, 2), "skip_thought_signature_validator");
+        // Un autre serveur reçoit seulement ce qu'il a lui-même donné.
+        let mut other = build_chat_completion_request(&request);
+        attach_tool_call_extras(&mut other, false);
+        assert_eq!(signature(&other, 1), "SIG_A");
+        assert!(other["messages"][2]["tool_calls"][0]
+            .get("extra_content")
+            .is_none());
+        assert!(is_google_endpoint(
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        ));
+        assert!(!is_google_endpoint("https://openrouter.ai/api/v1"));
     }
 
     /// Flux d'une réponse en texte découpée en morceaux, outils natifs proposés.

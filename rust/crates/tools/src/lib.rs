@@ -334,9 +334,9 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             // Sous Windows, les modèles écrivent volontiers pour cmd : la
             // description de l'outil est lue plus sûrement que les consignes.
             description: if cfg!(windows) {
-                "Execute a shell command in the current workspace. On Windows this is Git Bash: POSIX syntax, paths with forward slashes (`src/main.py`, `D:/dir/file`), no cmd syntax."
+                "Execute a shell command in the current workspace. On Windows this is Git Bash: POSIX syntax, paths with forward slashes (`src/main.py`, `D:/dir/file`), no cmd syntax. `timeout` is in milliseconds (default 5 minutes). Servers and watchers (npm run dev, uvicorn, flask run, vite, --watch...) never exit: start them with run_in_background (Claw does it automatically for the usual ones) and read them with BashOutput."
             } else {
-                "Execute a shell command in the current workspace."
+                "Execute a shell command in the current workspace. `timeout` is in milliseconds (default 5 minutes). Servers and watchers (npm run dev, uvicorn, flask run, vite, --watch...) never exit: start them with run_in_background (Claw does it automatically for the usual ones) and read them with BashOutput."
             },
             input_schema: json!({
                 "type": "object",
@@ -354,7 +354,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_file",
-            description: "Read a text file from the workspace.",
+            description: "Read a text file from the workspace: up to 2000 lines starting at `offset` (0-based line index, default 0); `limit` sets how many lines. Very long lines are shortened. When the file goes on, the result's `note` says which offset reads the rest.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -399,7 +399,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "glob_search",
-            description: "Find files by glob pattern.",
+            description: "Find files by glob pattern (for example `src/**/*.ts`), newest first, at most 100. Dependency, build and tool folders (node_modules, .git, target, .venv, venv, __pycache__, dist, build, .claw) are skipped unless the pattern or path names them.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -413,7 +413,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "grep_search",
-            description: "Search file contents with a regex pattern.",
+            description: "Search file contents with a regex (Rust syntax: escape `(`, `{`, `.` to match them literally). output_mode: `files_with_matches` (default), `content` (matching lines as path:line:text, with -A/-B/-C context lines) or `count`. `glob` filters files (`**/*.py`), `-i` ignores case. Dependency, build and tool folders (node_modules, .git, target, .venv, venv, __pycache__, dist, build, .claw) and files over 4 MB are skipped unless the path or glob names those folders.",
             input_schema: json!({
                 "type": "object",
                 "properties": {

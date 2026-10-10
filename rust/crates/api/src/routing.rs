@@ -288,7 +288,11 @@ pub fn failure_is_transient(error: &str) -> bool {
             .and_then(|code| code.parse().ok());
         return match status {
             Some(429) => {
-                !(lower.contains("per-day") || lower.contains("per day") || lower.contains("daily"))
+                // « PerDay » : quota du jour de Google (…RequestsPerDayPerProject…).
+                !(lower.contains("per-day")
+                    || lower.contains("per day")
+                    || lower.contains("perday")
+                    || lower.contains("daily"))
             }
             Some(408 | 409 | 500..=599) => true,
             _ => false,

@@ -21,6 +21,9 @@ pub struct TextFilePayload {
     pub start_line: usize,
     #[serde(rename = "totalLines")]
     pub total_lines: usize,
+    /// Le fichier continue au-delà de ce qui est montré : comment lire la suite.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,19 +136,65 @@ pub struct GrepSearchOutput {
     pub applied_offset: Option<usize>,
 }
 
+/// Lignes lues quand le modèle ne donne pas de limite : de quoi comprendre un
+/// fichier sans remplir le contexte de toutes les requêtes suivantes.
+pub const DEFAULT_READ_LINES: usize = 2_000;
+/// Au-delà, une ligne (code minifié, données sur une ligne) est raccourcie.
+const MAX_READ_LINE_CHARS: usize = 2_000;
+
+fn shorten_line(line: &str) -> String {
+    let count = line.chars().count();
+    if count <= MAX_READ_LINE_CHARS {
+        return line.to_string();
+    }
+    let kept: String = line.chars().take(MAX_READ_LINE_CHARS).collect();
+    format!("{kept} … (line shortened: {count} characters)")
+}
+
 pub fn read_file(
     path: &str,
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> io::Result<ReadFileOutput> {
     let absolute_path = normalize_path(path)?;
-    let content = fs::read_to_string(&absolute_path)?;
+    let bytes = fs::read(&absolute_path)?;
+    // Image, archive, exécutable : rien de lisible comme texte.
+    if bytes.iter().take(8_192).any(|byte| *byte == 0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is a binary file ({} bytes), not text: read_file cannot show it",
+                display_path(&absolute_path),
+                bytes.len()
+            ),
+        ));
+    }
+    // Hors UTF-8 (Windows-1252, Latin-1, fréquents sous Windows) : chaque
+    // octet devient le caractère Latin-1 correspondant.
+    let content = String::from_utf8(bytes).unwrap_or_else(|error| {
+        error
+            .into_bytes()
+            .iter()
+            .map(|&byte| char::from(byte))
+            .collect()
+    });
     let lines: Vec<&str> = content.lines().collect();
     let start_index = offset.unwrap_or(0).min(lines.len());
-    let end_index = limit.map_or(lines.len(), |limit| {
-        start_index.saturating_add(limit).min(lines.len())
+    let end_index = start_index
+        .saturating_add(limit.unwrap_or(DEFAULT_READ_LINES))
+        .min(lines.len());
+    let selected = lines[start_index..end_index]
+        .iter()
+        .map(|line| shorten_line(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let note = (end_index < lines.len()).then(|| {
+        format!(
+            "Showing lines {}-{end_index} of {}. Call read_file again with offset {end_index} to read on, or use grep_search to find the part you need.",
+            start_index + 1,
+            lines.len()
+        )
     });
-    let selected = lines[start_index..end_index].join("\n");
 
     Ok(ReadFileOutput {
         kind: String::from("text"),
@@ -155,6 +204,7 @@ pub fn read_file(
             num_lines: end_index.saturating_sub(start_index),
             start_line: start_index.saturating_add(1),
             total_lines: lines.len(),
+            note,
         },
     })
 }
@@ -505,10 +555,27 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
     let mut matches = Vec::new();
     let entries = glob::glob(&search_pattern)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+    // Dépendances et sorties de build écartées : récentes après une
+    // installation, elles passeraient avant les fichiers du projet.
+    let include_skipped = names_skipped_dir(pattern) || path.is_some_and(names_skipped_dir);
+    let base_shown = PathBuf::from(display_path(&base_dir));
     for entry in entries.flatten() {
-        if entry.is_file() {
-            matches.push(entry);
+        if !entry.is_file() {
+            continue;
         }
+        if !include_skipped {
+            let relative = entry
+                .strip_prefix(&base_shown)
+                .or_else(|_| entry.strip_prefix(&base_dir))
+                .unwrap_or(&entry);
+            if relative
+                .components()
+                .any(|component| skipped_dir_name(&component.as_os_str().to_string_lossy()))
+            {
+                continue;
+            }
+        }
+        matches.push(entry);
     }
 
     matches.sort_by_key(|path| {
@@ -564,8 +631,14 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
     let mut content_lines = Vec::new();
     let mut total_matches = 0usize;
 
-    for file_path in collect_search_files(&base_path)? {
+    let include_skipped = input.path.as_deref().is_some_and(names_skipped_dir)
+        || input.glob.as_deref().is_some_and(names_skipped_dir);
+    for file_path in collect_search_files(&base_path, include_skipped) {
         if !matches_optional_filters(&file_path, glob_filter.as_ref(), file_type) {
+            continue;
+        }
+        // Fichier généré ou paquet minifié : trop gros pour servir au modèle.
+        if fs::metadata(&file_path).is_ok_and(|metadata| metadata.len() > MAX_GREP_FILE_BYTES) {
             continue;
         }
 
@@ -642,19 +715,37 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
     })
 }
 
-fn collect_search_files(base_path: &Path) -> io::Result<Vec<PathBuf>> {
-    if base_path.is_file() {
-        return Ok(vec![base_path.to_path_buf()]);
-    }
+/// Au-delà, un fichier n'est pas lu par une recherche de contenu.
+const MAX_GREP_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
-    let mut files = Vec::new();
-    for entry in WalkDir::new(base_path) {
-        let entry = entry.map_err(|error| io::Error::other(error.to_string()))?;
-        if entry.file_type().is_file() {
-            files.push(entry.path().to_path_buf());
-        }
+/// Fichiers où chercher. Les dossiers de dépendances, de build et d'outils
+/// sont sautés (sauf `include_skipped`) ; un dossier illisible est ignoré au
+/// lieu de faire échouer toute la recherche.
+fn collect_search_files(base_path: &Path, include_skipped: bool) -> Vec<PathBuf> {
+    if base_path.is_file() {
+        return vec![base_path.to_path_buf()];
     }
-    Ok(files)
+    WalkDir::new(base_path)
+        .into_iter()
+        .filter_entry(|entry| {
+            include_skipped
+                || entry.depth() == 0
+                || !(entry.file_type().is_dir()
+                    && skipped_dir_name(&entry.file_name().to_string_lossy()))
+        })
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.path().to_path_buf())
+        .collect()
+}
+
+fn skipped_dir_name(name: &str) -> bool {
+    SKIPPED_DIRS.contains(&name)
+}
+
+/// Le chemin ou le motif nomme un de ces dossiers : le modèle les vise exprès.
+fn names_skipped_dir(text: &str) -> bool {
+    text.split(['/', '\\']).any(skipped_dir_name)
 }
 
 fn matches_optional_filters(
@@ -1053,6 +1144,48 @@ mod tests {
         let read_output = read_file(path.to_string_lossy().as_ref(), Some(1), Some(1))
             .expect("read should succeed");
         assert_eq!(read_output.file.content, "two");
+        assert!(read_output.file.note.is_some(), "une ligne reste après");
+    }
+
+    #[test]
+    fn long_odd_or_binary_files_are_read_sensibly() {
+        // Long fichier : 2 000 lignes, puis la façon de lire la suite.
+        let long = temp_path("long.txt");
+        let content = (1..=2_500)
+            .map(|n| format!("ligne {n}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        std::fs::write(&long, content).expect("long");
+        let read = read_file(long.to_string_lossy().as_ref(), None, None).expect("lecture");
+        assert_eq!(read.file.num_lines, 2_000);
+        assert_eq!(read.file.total_lines, 2_500);
+        assert!(read
+            .file
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains("offset 2000")));
+        // Ligne minifiée : raccourcie.
+        let minified = temp_path("min.js");
+        std::fs::write(&minified, "x".repeat(5_000)).expect("min");
+        let read = read_file(minified.to_string_lossy().as_ref(), None, None).expect("min");
+        assert!(read
+            .file
+            .content
+            .ends_with("(line shortened: 5000 characters)"));
+        assert!(read.file.note.is_none());
+        // Windows-1252 : « café » lisible.
+        let latin = temp_path("latin.txt");
+        std::fs::write(&latin, [b'c', b'a', b'f', 0xE9]).expect("latin");
+        let read = read_file(latin.to_string_lossy().as_ref(), None, None).expect("latin");
+        assert_eq!(read.file.content, "café");
+        // Binaire : un message clair, pas une erreur d'encodage.
+        let binary = temp_path("image.png");
+        std::fs::write(&binary, [0x89, b'P', b'N', b'G', 0, 0, 0, 13]).expect("png");
+        let error = read_file(binary.to_string_lossy().as_ref(), None, None).expect_err("binaire");
+        assert!(
+            error.to_string().contains("is a binary file (8 bytes)"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1098,5 +1231,48 @@ mod tests {
         })
         .expect("grep should succeed");
         assert!(grep_output.content.unwrap_or_default().contains("hello"));
+    }
+
+    #[test]
+    fn searches_skip_dependencies_unless_asked_for() {
+        let dir = temp_path("search-skip");
+        let source = dir.join("src");
+        let dependency = dir.join("node_modules").join("lib");
+        std::fs::create_dir_all(&source).expect("src");
+        std::fs::create_dir_all(&dependency).expect("node_modules");
+        std::fs::write(source.join("app.js"), "const marker = 1;\n").expect("source");
+        std::fs::write(dependency.join("index.js"), "const marker = 2;\n").expect("dep");
+        let base = dir.to_string_lossy().into_owned();
+        let grep = |path: &str| {
+            grep_search(&GrepSearchInput {
+                pattern: String::from("marker"),
+                path: Some(path.to_string()),
+                glob: None,
+                output_mode: None,
+                before: None,
+                after: None,
+                context_short: None,
+                context: None,
+                line_numbers: None,
+                case_insensitive: None,
+                file_type: None,
+                head_limit: None,
+                offset: None,
+                multiline: None,
+            })
+            .expect("grep")
+        };
+        let found = grep(&base);
+        assert_eq!(found.num_files, 1, "{:?}", found.filenames);
+        assert!(found.filenames[0].ends_with("app.js"));
+        // Le modèle vise le dossier de dépendances : il y cherche.
+        let inside = grep(&dependency.to_string_lossy());
+        assert_eq!(inside.num_files, 1);
+
+        let globbed = glob_search("**/*.js", Some(&base)).expect("glob");
+        assert_eq!(globbed.num_files, 1, "{:?}", globbed.filenames);
+        let explicit = glob_search("node_modules/**/*.js", Some(&base)).expect("glob explicite");
+        assert_eq!(explicit.num_files, 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
