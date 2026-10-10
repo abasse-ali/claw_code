@@ -125,6 +125,11 @@ pub trait ToolExecutor {
     /// Annonce un appel lancé par Claw lui-même (vérification imposée), pour
     /// que l'interface l'affiche comme un appel du modèle.
     fn announce(&mut self, _tool_name: &str, _input: &str) {}
+
+    /// L'appel n'a pas été exécuté (autorisation refusée, hook, interruption) :
+    /// l'interface, qui l'a déjà affiché, peut le clore. `reason` est le
+    /// résultat rendu au modèle.
+    fn skipped(&mut self, _tool_name: &str, _input: &str, _reason: &str) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -643,6 +648,8 @@ where
                 // Après une interruption, chaque appel restant reçoit un résultat :
                 // un appel d'outil sans résultat rendrait la conversation invalide.
                 if interrupt_requested() {
+                    self.tool_executor
+                        .skipped(&tool_name, &input, INTERRUPTED_MESSAGE);
                     let message = ConversationMessage::tool_result(
                         tool_use_id,
                         tool_name,
@@ -752,6 +759,7 @@ where
             );
             match outcome {
                 PermissionOutcome::Deny { reason } => {
+                    self.tool_executor.skipped(name, input, &reason);
                     results[index] = Some(ConversationMessage::tool_result(
                         id.clone(),
                         name.clone(),
@@ -763,10 +771,12 @@ where
                     let pre = self.hook_runner.run_pre_tool_use(name, input);
                     if pre.is_denied() {
                         let fallback = format!("hook PreToolUse : outil `{name}` refusé");
+                        let reason = format_hook_message(&pre, &fallback);
+                        self.tool_executor.skipped(name, input, &reason);
                         results[index] = Some(ConversationMessage::tool_result(
                             id.clone(),
                             name.clone(),
-                            format_hook_message(&pre, &fallback),
+                            reason,
                             true,
                         ));
                     } else {
@@ -873,8 +883,15 @@ where
             if let Some(command) = json_field(input, "command") {
                 if harness::read_bash_output(&output).passed {
                     aids.verified_commands.push(command);
-                } else if harness::is_check_command(&command) {
-                    aids.check_failed = true;
+                } else {
+                    if harness::is_check_command(&command) {
+                        aids.check_failed = true;
+                    }
+                    // Sous Windows : un chemin `dossier\fichier` écrit pour cmd.
+                    if tool_name == "bash" && harness::enabled(Aid::PathHelp) {
+                        let hint = crate::bash::windows_shell_hint(&command);
+                        notes.extend(hint.map(str::to_string));
+                    }
                 }
             }
         }
@@ -1283,12 +1300,9 @@ where
                 let pre_hook_result = self.hook_runner.run_pre_tool_use(&tool_name, input);
                 if pre_hook_result.is_denied() {
                     let deny_message = format!("hook PreToolUse : outil `{tool_name}` refusé");
-                    ConversationMessage::tool_result(
-                        tool_use_id,
-                        tool_name,
-                        format_hook_message(&pre_hook_result, &deny_message),
-                        true,
-                    )
+                    let reason = format_hook_message(&pre_hook_result, &deny_message);
+                    self.tool_executor.skipped(&tool_name, input, &reason);
+                    ConversationMessage::tool_result(tool_use_id, tool_name, reason, true)
                 } else {
                     crate::checkpoint::record_before_write(&tool_name, input);
                     let (mut output, mut is_error) =
@@ -1314,6 +1328,7 @@ where
                 }
             }
             PermissionOutcome::Deny { reason } => {
+                self.tool_executor.skipped(&tool_name, input, &reason);
                 ConversationMessage::tool_result(tool_use_id, tool_name, reason, true)
             }
         }
@@ -1744,6 +1759,86 @@ mod tests {
             &summary.tool_results[0].blocks[0],
             ContentBlock::ToolResult { is_error: true, output, .. } if output == "not now"
         ));
+    }
+
+    #[test]
+    fn a_refused_tool_call_is_reported_to_the_interface_as_skipped() {
+        use std::sync::{Arc, Mutex};
+
+        struct RejectPrompter;
+        impl PermissionPrompter for RejectPrompter {
+            fn decide(&mut self, _request: &PermissionRequest) -> PermissionPromptDecision {
+                PermissionPromptDecision::Deny {
+                    reason: "not now".to_string(),
+                }
+            }
+        }
+
+        struct OneCall;
+        impl ApiClient for OneCall {
+            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                let answered = request
+                    .messages
+                    .iter()
+                    .any(|message| message.role == MessageRole::Tool);
+                Ok(if answered {
+                    vec![
+                        AssistantEvent::TextDelta("Entendu.".to_string()),
+                        AssistantEvent::MessageStop,
+                    ]
+                } else {
+                    vec![
+                        AssistantEvent::ToolUse {
+                            id: "tool-1".to_string(),
+                            name: "blocked".to_string(),
+                            input: "secret".to_string(),
+                        },
+                        AssistantEvent::MessageStop,
+                    ]
+                })
+            }
+        }
+
+        /// Ce que l'interface apprend de chaque appel.
+        struct Recorder(Arc<Mutex<Vec<String>>>);
+        impl super::ToolExecutor for Recorder {
+            fn execute(
+                &mut self,
+                tool_name: &str,
+                _input: &str,
+            ) -> Result<String, super::ToolError> {
+                self.0
+                    .lock()
+                    .expect("journal")
+                    .push(format!("exécuté {tool_name}"));
+                Ok(String::new())
+            }
+
+            fn skipped(&mut self, tool_name: &str, input: &str, reason: &str) {
+                self.0
+                    .lock()
+                    .expect("journal")
+                    .push(format!("écarté {tool_name} ({input}) : {reason}"));
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            OneCall,
+            Recorder(Arc::clone(&seen)),
+            PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+            vec!["system".to_string()],
+        );
+        runtime
+            .run_turn("use the tool", Some(&mut RejectPrompter))
+            .expect("le tour continue après un refus");
+
+        // Sans ce signal, la page afficherait l'appel « en cours » pour toujours.
+        assert_eq!(
+            *seen.lock().expect("journal"),
+            ["écarté blocked (secret) : not now"]
+        );
     }
 
     #[test]

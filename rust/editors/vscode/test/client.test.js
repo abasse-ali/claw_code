@@ -187,6 +187,21 @@ function get(port, path) {
       && path.resolve(turnChanges.files[0].path) === path.resolve(target),
     JSON.stringify(turnChanges));
 
+  // Demande refusée : l'appel reçoit quand même un résultat. Sans lui, la page
+  // et l'éditeur le montraient « en cours » indéfiniment.
+  const refusedFile = path.join(cwd, "notes", "refuse.txt");
+  const isRefusedRequest = (event) => event.type === "permission" && event.proposal && /refuse\.txt$/.test(event.proposal.path || "");
+  const resultsBefore = count("tool_result");
+  await turn("Crée ce fichier [mock:write notes/refuse.txt=non]", async () => {
+    await wait("demande de permission à refuser", () => events.some(isRefusedRequest));
+    const request = events.find(isRefusedRequest);
+    if (request) await server.request("POST", "/api/permission", { id: request.id, decision: "deny" });
+  });
+  const refusal = events.filter((event) => event.type === "tool_result").slice(resultsBefore).pop() || {};
+  check("un appel refusé reçoit un résultat d'erreur et n'écrit rien",
+    refusal.is_error === true && refusal.name === "write_file" && /a refusé l'outil/.test(refusal.output || "") && !fs.existsSync(refusedFile),
+    JSON.stringify(refusal));
+
   // Après une modification, les erreurs que l'éditeur voit dans le fichier repartent au modèle.
   await server.request("POST", "/api/permissions", { value: "workspace-write" });
   asked.length = 0;
@@ -260,6 +275,24 @@ function get(port, path) {
       && flakyStatus.status.model === "ollama:panne-une-fois" && !flakyEvents.some((event) => event.type === "error"),
     JSON.stringify(flakyEvents.filter((event) => ["notice", "model_question", "model_question_resolved", "error", "turn_done"].includes(event.type)).slice(-5)));
   flaky.stop();
+
+  // Panne après l'annonce d'un appel d'outil : la réponse est redemandée, et
+  // l'appel annoncé par la réponse abandonnée ne reste pas affiché « en cours ».
+  const cut = new ClawServer({ clawPath: claw, cwd, model: "ollama:panne-une-fois-outil", permissionMode: "read-only", env });
+  await cut.start();
+  const cutEvents = [];
+  cut.subscribe((event) => cutEvents.push(event));
+  await wait("abonnement", () => cutEvents.some((event) => event.type === "status"));
+  await cut.send('Cherche [mock:tool glob_search={"pattern":"notes/*.txt"}]');
+  await wait("fin du tour après une réponse coupée", () => cutEvents.some((event) => event.type === "turn_done"), 160);
+  const cutOrder = cutEvents
+    .filter((event) => ["tool_call", "reply_discarded", "tool_result"].includes(event.type))
+    .map((event) => event.type)
+    .join(" ");
+  check("une réponse coupée après un appel d'outil retire cet appel avant le nouvel essai",
+    cutOrder === "tool_call reply_discarded tool_call tool_result" && !cutEvents.some((event) => event.type === "error"),
+    cutOrder);
+  cut.stop();
 
   // Avec "modelSwitch": "auto", la requête repart d'elle-même sur le modèle de secours.
   const fragile = new ClawServer({

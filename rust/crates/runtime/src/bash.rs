@@ -71,6 +71,15 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
             plugins::missing_shell_message(),
         ));
     }
+    // Sous Windows, la commande est adaptée à Git Bash (chemins `D:\…`).
+    let input = if cfg!(windows) {
+        BashCommandInput {
+            command: adapt_windows_command(&input.command),
+            ..input
+        }
+    } else {
+        input
+    };
     let cwd = env::current_dir()?;
     let sandbox_status = sandbox_status_for_input(&input, &cwd);
 
@@ -121,6 +130,160 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
     // abandonné (délai dépassé ou interruption).
     runtime.shutdown_background();
     result
+}
+
+/// Sous Windows, `bash` est Git Bash : écrit hors guillemets, un chemin
+/// `D:\dossier\fichier` y perd ses barres obliques inverses, et le `cd /d` de
+/// cmd y est une erreur. La commande est réécrite comme elle était voulue :
+/// `D:/dossier/fichier`, `cd` sans `/d`. Un document en ligne (`<<`) porte du
+/// texte à garder tel quel : la commande n'est alors pas touchée.
+fn adapt_windows_command(command: &str) -> String {
+    if command.contains("<<") {
+        return command.to_string();
+    }
+    let chars: Vec<char> = command.chars().collect();
+    let mut out = String::with_capacity(command.len());
+    let mut quote = None;
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if let Some(open) = quote {
+            if ch == open {
+                quote = None;
+            } else if ch == '\\' && open == '"' {
+                // `\"` ne ferme pas une chaîne entre guillemets doubles.
+                if let Some(next) = chars.get(index + 1) {
+                    out.push(ch);
+                    out.push(*next);
+                    index += 2;
+                    continue;
+                }
+            }
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        let word_start = out
+            .chars()
+            .next_back()
+            .is_none_or(|last| last.is_whitespace() || "=;&|<>(".contains(last));
+        if word_start {
+            if let Some(path) = cd_drive_switch(&chars, index) {
+                out.push_str("cd ");
+                index = path;
+                continue;
+            }
+            if is_drive_path(&chars, index) {
+                index = push_drive_path(&chars, index, &mut out);
+                continue;
+            }
+        }
+        if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+        } else if ch == '\\' {
+            // Caractère protégé : il ne commence ni chaîne ni chemin.
+            if let Some(next) = chars.get(index + 1) {
+                out.push(ch);
+                out.push(*next);
+                index += 2;
+                continue;
+            }
+        }
+        out.push(ch);
+        index += 1;
+    }
+    out
+}
+
+/// `cd /d chemin` à `index` : la position du chemin, s'il y en a bien un.
+fn cd_drive_switch(chars: &[char], index: usize) -> Option<usize> {
+    let blanks = |from: usize| {
+        let count = chars[from..]
+            .iter()
+            .take_while(|ch| matches!(ch, ' ' | '\t'))
+            .count();
+        (count > 0).then_some(from + count)
+    };
+    if chars.get(index..index + 2)? != ['c', 'd'] {
+        return None;
+    }
+    let switch = blanks(index + 2)?;
+    if !matches!(chars.get(switch..switch + 2)?, ['/', 'd' | 'D']) {
+        return None;
+    }
+    let path = blanks(switch + 2)?;
+    chars
+        .get(path)
+        .is_some_and(|ch| !"\n;&|)".contains(*ch))
+        .then_some(path)
+}
+
+fn is_drive_path(chars: &[char], index: usize) -> bool {
+    matches!(
+        chars.get(index..index + 3),
+        Some([drive, ':', '\\']) if drive.is_ascii_alphabetic()
+    )
+}
+
+/// Écrit avec des barres obliques le chemin `D:\…` qui commence à `index` et
+/// renvoie la position qui le suit. `\ ` (espace protégé) et `\\` sont gardés.
+fn push_drive_path(chars: &[char], mut index: usize, out: &mut String) -> usize {
+    while let Some(ch) = chars
+        .get(index)
+        .copied()
+        .filter(|ch| !(ch.is_whitespace() || ";&|<>()\"'".contains(*ch)))
+    {
+        index += 1;
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.get(index).copied() {
+            Some(next) if next.is_whitespace() || next == '\\' => {
+                out.push('\\');
+                out.push(next);
+                index += 1;
+            }
+            _ => out.push('/'),
+        }
+    }
+    index
+}
+
+const WINDOWS_SHELL_HINT: &str = "[Claw] The `bash` tool runs Git Bash (POSIX syntax): outside quotes a backslash is an escape character, so `dir\\file` is read as `dirfile`. Write paths with forward slashes (`dir/file`); cmd syntax does not work here.";
+
+/// Remarque jointe au résultat d'une commande en échec sous Windows quand elle
+/// porte, hors guillemets, une barre oblique inverse devant une lettre ou un
+/// chiffre : un chemin relatif écrit pour cmd (`dossier\fichier`).
+pub(crate) fn windows_shell_hint(command: &str) -> Option<&'static str> {
+    (cfg!(windows) && has_bare_backslash_path(&adapt_windows_command(command)))
+        .then_some(WINDOWS_SHELL_HINT)
+}
+
+fn has_bare_backslash_path(command: &str) -> bool {
+    if command.contains("<<") {
+        return false;
+    }
+    let mut quote = None;
+    let mut chars = command.chars();
+    while let Some(ch) = chars.next() {
+        if let Some(open) = quote {
+            if ch == open {
+                quote = None;
+            } else if ch == '\\' && open == '"' {
+                chars.next();
+            }
+        } else if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+        } else if ch == '\\'
+            && chars
+                .next()
+                .is_some_and(|next| next.is_ascii_alphanumeric())
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn shell_group_pid_file() -> std::path::PathBuf {
@@ -549,5 +712,114 @@ mod group_capture_tests {
                 "\ncargo test"
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod windows_command_tests {
+    use super::{adapt_windows_command, has_bare_backslash_path};
+
+    #[test]
+    fn drive_paths_get_forward_slashes_outside_quotes() {
+        // La commande d'un modèle sous Windows : bash lisait `D:Mes_Projets…`.
+        assert_eq!(
+            adapt_windows_command(
+                r#"cd D:\Mes_Projets\test_claw\backend && python -c "from app.main import app; print('OK')""#
+            ),
+            r#"cd D:/Mes_Projets/test_claw/backend && python -c "from app.main import app; print('OK')""#
+        );
+        assert_eq!(
+            adapt_windows_command(r#"grep "a\.b" C:\src\x.txt > C:\out\r.txt"#),
+            r#"grep "a\.b" C:/src/x.txt > C:/out/r.txt"#
+        );
+        assert_eq!(
+            adapt_windows_command(r"OUT=C:\tools\bin ./run; ls (D:\a\b)"),
+            "OUT=C:/tools/bin ./run; ls (D:/a/b)"
+        );
+        // Espace protégé gardé, séparateurs convertis.
+        assert_eq!(
+            adapt_windows_command(r"cat D:\Mes\ Docs\note.txt"),
+            r"cat D:/Mes\ Docs/note.txt"
+        );
+    }
+
+    #[test]
+    fn cd_with_the_cmd_drive_switch_loses_it() {
+        assert_eq!(
+            adapt_windows_command(r"cd /d D:\Mes_Projets\test_claw\backend && python x.py"),
+            "cd D:/Mes_Projets/test_claw/backend && python x.py"
+        );
+        assert_eq!(
+            adapt_windows_command("ls && cd /D backend"),
+            "ls && cd backend"
+        );
+        // `/d` seul est le lecteur D: de Git Bash.
+        for kept in ["cd /d", "cd /d && ls", "cd /dev", "abcd /d x"] {
+            assert_eq!(adapt_windows_command(kept), kept);
+        }
+    }
+
+    #[test]
+    fn quoted_text_escapes_and_here_documents_are_left_alone() {
+        for kept in [
+            r#"type "C:\Program Files\x\y.txt""#,
+            r"echo 'D:\a\b' 'cd /d C:\x'",
+            r#"echo "il dit \"cd /d C:\x\" ici""#,
+            r"printf 'a\nb'; ls foo\ bar; grep foo\|bar x",
+            r"python C:\\src\\run.py",
+            r"echo \C:\a",
+            "cat > note.txt <<EOF\nChemin : D:\\a\\b\nEOF",
+            "curl http://hote/c:/x",
+        ] {
+            assert_eq!(adapt_windows_command(kept), kept);
+        }
+    }
+
+    #[test]
+    fn relative_backslash_paths_are_spotted_for_the_hint() {
+        assert!(has_bare_backslash_path(r"python backend\app\main.py"));
+        assert!(has_bare_backslash_path(r"cd backend && type app\main.py"));
+        for fine in [
+            r#"python "backend\app\main.py""#,
+            r"echo 'a\b'",
+            r"grep foo\|bar x; find . -name \*.py; ls foo\ bar",
+            "python backend/app/main.py",
+            "cat <<EOF\na\\b\nEOF",
+        ] {
+            assert!(!has_bare_backslash_path(fine), "{fine}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_path_in_a_command_runs_in_git_bash() {
+        use super::{execute_bash, BashCommandInput};
+        let dir = std::env::temp_dir().join(format!("claw-chemin-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sous dossier")).expect("dossier d'essai");
+        let windows_path = dir.to_string_lossy().replace('/', "\\");
+        let run = |command: String| {
+            execute_bash(BashCommandInput {
+                command,
+                timeout: Some(20_000),
+                description: None,
+                run_in_background: Some(false),
+                dangerously_disable_sandbox: Some(true),
+                namespace_restrictions: None,
+                isolate_network: None,
+                filesystem_mode: None,
+                allowed_mounts: None,
+            })
+            .expect("la commande devrait se lancer")
+        };
+        let plain = run(format!("cd {windows_path} && ls"));
+        assert_eq!(plain.stdout.trim(), "sous dossier", "{}", plain.stderr);
+        let with_switch = run(format!("cd /d {windows_path} && ls"));
+        assert_eq!(
+            with_switch.stdout.trim(),
+            "sous dossier",
+            "{}",
+            with_switch.stderr
+        );
+        std::fs::remove_dir_all(&dir).expect("nettoyage");
     }
 }

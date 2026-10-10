@@ -69,7 +69,12 @@ présente n'est jamais remplacée, et aucune valeur n'est affichée. `claw docto
 (« clé lue dans les variables du compte Windows ») ; `CLAW_NO_USER_ENV=1` coupe cette reprise.
 
 Sous Windows, l'outil `bash` et les hooks utilisent le bash de Git for Windows,
-détecté automatiquement ; `CLAW_SHELL` permet d'indiquer un autre `bash.exe`.
+détecté automatiquement ; `CLAW_SHELL` permet d'indiquer un autre `bash.exe`. Les modèles y
+écrivent volontiers des commandes pour cmd, que bash ne comprend pas. Claw le leur dit dans ses
+consignes et rattrape les cas courants : un chemin `D:\dossier\fichier` écrit hors guillemets
+devient `D:/dossier/fichier`, `cd /d chemin` devient `cd chemin`, et une commande qui échoue
+avec un chemin relatif en barres obliques inverses (`dossier\fichier`) revient au modèle avec un
+rappel de la syntaxe (`CLAW_PATH_HELP=0` coupe ce rappel).
 
 ### Interface web : `claw serve`
 

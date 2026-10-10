@@ -18,6 +18,7 @@
 // Un modèle dont le nom contient « panne » commence à réfléchir puis son
 // fournisseur lâche : erreur 504 envoyée dans le flux, comme le fait OpenRouter.
 // « panne-une-fois » ne lâche qu'à sa première requête, puis répond.
+// Avec « outil » dans le nom, la panne arrive après l'annonce d'un appel d'outil.
 // Un modèle dont le nom contient « strict » refuse tout champ inconnu, comme
 // l'API de Mistral : une requête avec stream_options reçoit une erreur 422.
 "use strict";
@@ -154,11 +155,18 @@ function streamReply(response, model, answer) {
   response.end("data: [DONE]\n\n");
 }
 
-/** Réponse commencée puis abandonnée par le fournisseur (erreur dans le flux). */
-function streamFailure(response, model) {
+/**
+ * Réponse commencée puis abandonnée par le fournisseur (erreur dans le flux).
+ * Modèle « …outil » : la panne arrive après l'annonce d'un appel d'outil.
+ */
+function streamFailure(response, model, answer) {
   response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
   const base = { id: "chatcmpl-mock", object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model };
   response.write(chunk({ ...base, choices: [{ index: 0, delta: { role: "assistant", reasoning: "Je commence à réfléchir. " }, finish_reason: null }] }));
+  if (String(model).includes("outil") && answer.toolCall) {
+    response.write(chunk({ ...base, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: answer.toolCall.id, type: "function", function: { name: answer.toolCall.name, arguments: answer.toolCall.arguments } }] }, finish_reason: null }] }));
+    response.write(chunk({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] }));
+  }
   response.write(chunk({ error: { code: 504, message: "Upstream idle timeout exceeded" } }));
   response.end("data: [DONE]\n\n");
 }
@@ -224,7 +232,7 @@ const server = http.createServer((request, response) => {
     const once = String(model).includes("panne-une-fois");
     const fails = String(model).includes("panne") && !(once && failedOnce.has(model));
     if (once) failedOnce.add(model);
-    if (body.stream && fails) streamFailure(response, model);
+    if (body.stream && fails) streamFailure(response, model, answer);
     else if (body.stream) streamReply(response, model, answer);
     else jsonReply(response, model, answer);
   });

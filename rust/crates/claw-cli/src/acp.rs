@@ -217,6 +217,25 @@ impl TurnObserver for AcpObserver {
             "content": { "type": "text", "text": format!("▲ {text}\n") },
         }));
     }
+
+    /// Les appels annoncés par une réponse abandonnée ne seront pas exécutés.
+    fn reply_discarded(&self) {
+        let open: Vec<String> = self
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .open
+            .drain(..)
+            .map(|(id, _, _)| id)
+            .collect();
+        for id in open {
+            self.update(json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": id,
+                "status": "failed",
+            }));
+        }
+    }
 }
 
 /// Demande d'autorisation affichée par l'éditeur (`session/request_permission`).

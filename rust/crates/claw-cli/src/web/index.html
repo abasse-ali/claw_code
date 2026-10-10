@@ -1177,8 +1177,18 @@
       }
     }
     box.append(el("div", "label", isError ? "Erreur" : "Résultat"),
-      el("pre", isError ? "stderr" : null, value ? JSON.stringify(value, null, 2) : (output || "(vide)")));
+      el("pre", isError ? "stderr" : null, value ? JSON.stringify(value, null, 2) : (skipReason(output) || "(vide)")));
     return { box, summary: "" };
+  }
+  // Motif d'un appel non exécuté, tel que Claw le rend au modèle, redit pour
+  // qui lit la page.
+  function skipReason(output) {
+    const text = String(output || "");
+    const feedback = text.match(/^l'utilisateur a refusé l'outil '[^']*' avec cette consigne : ([\s\S]*)$/);
+    if (feedback) return "Refusé, avec cette consigne : " + feedback[1];
+    if (text.startsWith("l'utilisateur a refusé l'outil")) return "Refusé : rien n'a été exécuté.";
+    if (text === "tour interrompu par l'utilisateur") return "Interrompu avant d'être exécuté.";
+    return text;
   }
   // Sortie d'une commande dans sa carte : les 6 premières lignes, le reste sur demande.
   function fillCommandOutput(entry, output, isError) {
@@ -1190,6 +1200,10 @@
       text = [value.stdout, value.stderr].filter(Boolean).join(value.stdout && value.stderr ? "\n" : "");
       if (value.returnCodeInterpretation) { summary = value.returnCodeInterpretation.replace("exit_code:", "code "); failed = true; }
       if (value.backgroundTaskId) text = (text ? text + "\n" : "") + "Lancé en arrière-plan (" + value.backgroundTaskId + ")";
+    } else if (isError) {
+      // Refusée, interrompue ou impossible à lancer : la commande n'a pas tourné.
+      text = skipReason(output);
+      summary = "non exécutée";
     }
     const pre = entry.output.pre;
     pre.textContent = text.trim() ? text.replace(/\s+$/, "") : "(aucune sortie)";
@@ -1227,6 +1241,23 @@
     entry.meta.innerHTML = parts.join(" · ");
     if (isError) toggleStep(entry.step, true);
     if (!pendingTools.length) setActivity("Réflexion…");
+  }
+  // Fin du tour : un appel resté sans résultat ne tourne plus, quoi qu'il lui
+  // soit arrivé. Aucune étape ne reste affichée « en cours ».
+  function closePendingTools() {
+    while (pendingTools.length) {
+      attachToolResult(pendingTools[0].name, "Non exécuté : le tour s'est terminé avant.", true);
+    }
+  }
+  // Réponse abandonnée puis redemandée au modèle : les appels qu'elle annonçait
+  // ne seront jamais exécutés. Leurs étapes disparaissent, sinon le résultat du
+  // nouvel appel irait à l'ancienne étape et la nouvelle resterait « en cours ».
+  function dropPendingTools() {
+    for (const entry of pendingTools.splice(0)) {
+      const group = entry.step.parentElement;
+      entry.step.remove();
+      if (group && !group.children.length) group.remove();
+    }
   }
 
   // ---------------------------------------------------------------- demandes épinglées
@@ -1565,8 +1596,9 @@
       case "notice": finishAssistant(); addNote(event.text); break;
       case "answer_drafted": markDraftAnswer(); break;
       case "answer_superseded": foldDraftAnswer(); break;
+      case "reply_discarded": dropPendingTools(); break;
       case "error": finishAssistant(); addError(event.message, event.hint); break;
-      case "turn_done": finishAssistant(); if (benchPending) { benchPending = false; loadModels(); } break;
+      case "turn_done": finishAssistant(); closePendingTools(); if (benchPending) { benchPending = false; loadModels(); } break;
       case "status": applyStatus(event.status); break;
       case "credits": renderCredits(event.credits); break;
       case "reset": resetLog(); break;
@@ -2885,6 +2917,8 @@
       try {
         for (const event of data.transcript) render(event);
         finishAssistant();
+        // Tour déjà fini : plus aucun appel ne tourne.
+        if (!data.status.busy) closePendingTools();
       } finally {
         replaying = false;
       }

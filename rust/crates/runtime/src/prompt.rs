@@ -39,6 +39,8 @@ pub const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDA
 pub const FRONTIER_MODEL_NAME: &str = "Opus 4.6";
 const MAX_INSTRUCTION_FILE_CHARS: usize = 4_000;
 const MAX_TOTAL_INSTRUCTION_CHARS: usize = 12_000;
+/// Ce que le modèle doit savoir de l'outil `bash` sous Windows.
+const WINDOWS_SHELL_NOTE: &str = "Shell: the `bash` tool runs Git Bash (POSIX syntax) and starts in the working directory. Write paths with forward slashes (`backend/app/main.py`, `D:/dir/file`): outside quotes a backslash is an escape character. cmd syntax (`cd /d`, `dir`, `%VAR%`) does not work.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextFile {
@@ -229,7 +231,7 @@ impl SystemPromptBuilder {
             |context| context.current_date.clone(),
         );
         let mut lines = vec!["# Environment context".to_string()];
-        lines.extend(prepend_bullets(vec![
+        let mut items = vec![
             format!("Working directory: {cwd}"),
             "File tools take paths relative to the working directory (for example `src/main.rs`). Never invent a root such as /workspace or /app: when unsure, list files with glob_search first.".to_string(),
             format!("Date: {date}"),
@@ -238,7 +240,12 @@ impl SystemPromptBuilder {
                 self.os_name.as_deref().unwrap_or("unknown"),
                 self.os_version.as_deref().unwrap_or("unknown")
             ),
-        ]));
+        ];
+        // Sous Windows, les modèles écrivent volontiers des commandes pour cmd.
+        if cfg!(windows) && plugins::posix_shell_program().is_some() {
+            items.push(WINDOWS_SHELL_NOTE.to_string());
+        }
+        lines.extend(prepend_bullets(items));
         lines.join("\n")
     }
 }

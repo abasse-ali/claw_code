@@ -5430,6 +5430,9 @@ trait TurnObserver: Send + Sync {
     fn answer_drafted(&self) {}
     /// Un contrôle de Claw le renvoie au travail : cette réponse est provisoire.
     fn answer_superseded(&self) {}
+    /// La réponse en cours est abandonnée (flux coupé) et va être redemandée :
+    /// les appels d'outils qu'elle annonçait ne seront pas exécutés.
+    fn reply_discarded(&self) {}
 }
 
 type SharedObserver = Arc<dyn TurnObserver>;
@@ -6000,6 +6003,9 @@ impl ApiClient for DefaultRuntimeClient {
                     if emit {
                         transcript::discard_calls();
                     }
+                    if let Some(observer) = &self.observer {
+                        observer.reply_discarded();
+                    }
                     notify("Connexion coupée pendant la réponse : nouvelle tentative");
                     std::thread::sleep(Duration::from_millis(1_500));
                     if emit {
@@ -6018,6 +6024,9 @@ impl ApiClient for DefaultRuntimeClient {
                     let model = self.chain.primary().to_string();
                     if emit {
                         transcript::discard_calls();
+                    }
+                    if let Some(observer) = &self.observer {
+                        observer.reply_discarded();
                     }
                     // Échec passager : le même modèle réessaie de lui-même après un
                     // délai, sans rien demander. L'utilisateur peut en profiter
@@ -6065,6 +6074,9 @@ impl ApiClient for DefaultRuntimeClient {
                     };
                     if emit {
                         transcript::discard_calls();
+                    }
+                    if let Some(observer) = &self.observer {
+                        observer.reply_discarded();
                     }
                     if let Some(next) = self.chain.switch_after_failure(&failed) {
                         switches_left -= 1;
@@ -6711,6 +6723,14 @@ impl ToolExecutor for CliToolExecutor {
         }
         if let Some(observer) = &self.observer {
             observer.tool_call(tool_name, input);
+        }
+    }
+
+    /// Appel refusé ou interrompu avant son exécution : sans ce résultat, la
+    /// page web et les éditeurs l'afficheraient « en cours » indéfiniment.
+    fn skipped(&mut self, tool_name: &str, _input: &str, reason: &str) {
+        if let Some(observer) = &self.observer {
+            observer.tool_result(tool_name, reason, true);
         }
     }
 
