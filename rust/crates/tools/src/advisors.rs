@@ -152,6 +152,40 @@ pub fn ask(
     prompt: &str,
     max_tokens: u32,
 ) -> Result<Opinion, String> {
+    ask_with(models, |model| request(model, system, prompt, max_tokens))
+}
+
+/// La même consultation à propos d'une image : le premier modèle de `models`
+/// qui répond la décrit. Tous doivent savoir lire les images.
+pub fn ask_about_image(
+    models: &[String],
+    system: &str,
+    prompt: &str,
+    image: &api::ImageSource,
+    max_tokens: u32,
+) -> Result<Opinion, String> {
+    ask_with(models, |model| MessageRequest {
+        messages: vec![InputMessage {
+            role: "user".to_string(),
+            content: vec![
+                api::InputContentBlock::Image {
+                    source: image.clone(),
+                },
+                api::InputContentBlock::Text {
+                    text: prompt.to_string(),
+                },
+            ],
+        }],
+        ..request(model, system, "", max_tokens)
+    })
+}
+
+/// Consulte les modèles l'un après l'autre avec la requête que `build` leur
+/// prépare, jusqu'à la première réponse.
+fn ask_with(
+    models: &[String],
+    build: impl Fn(&str) -> MessageRequest + Send,
+) -> Result<Opinion, String> {
     if models.is_empty() {
         return Err("aucun autre modèle à consulter".to_string());
     }
@@ -174,7 +208,7 @@ pub fn ask(
                     if now >= deadline {
                         break;
                     }
-                    let request = request(&model, system, prompt, max_tokens);
+                    let request = build(&model);
                     let answered = runtime.block_on(runtime::interrupt::interruptible(answer(
                         &model,
                         &request,

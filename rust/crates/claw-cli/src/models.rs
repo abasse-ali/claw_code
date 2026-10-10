@@ -298,6 +298,47 @@ fn escalation_line(current_model: &str) -> String {
     }
 }
 
+/// Modèles gratuits qui lisent les images, du plus puissant au moins
+/// puissant, ceux qui sont disponibles d'abord : lus dans le catalogue en
+/// cache (aucune requête). `current` et les routeurs d'`OpenRouter` sont écartés.
+pub(crate) fn free_image_readers(current: &str) -> Vec<String> {
+    load_cached_catalog().map_or_else(Vec::new, |catalog| {
+        image_readers_in(&catalog, current, api::model_available)
+    })
+}
+
+fn image_readers_in(
+    catalog: &ModelCatalog,
+    current: &str,
+    available: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut readers: Vec<(bool, f64, String)> = catalog
+        .models
+        .iter()
+        .filter(|model| {
+            model.is_free()
+                && model.supports_images
+                && model.id != current
+                && !model.id.starts_with("openrouter/")
+        })
+        .map(|model| {
+            (
+                available(&model.id),
+                api::model_power(model, catalog).0,
+                model.id.clone(),
+            )
+        })
+        .collect();
+    readers.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then(right.1.total_cmp(&left.1))
+            .then(left.2.cmp(&right.2))
+    });
+    readers.into_iter().map(|(_, _, id)| id).collect()
+}
+
 /// `"model": "free"` : le modèle gratuit le plus puissant du moment.
 #[must_use]
 pub fn is_strongest_free_keyword(model: &str) -> bool {
@@ -1463,6 +1504,25 @@ mod tests {
         let per_million = super::price_per_million(0.000_002).expect("prix");
         assert!((per_million - 2.0).abs() < 1e-9);
         assert_eq!(super::price_per_million(-1.0), None);
+    }
+
+    #[test]
+    fn image_readers_are_free_models_that_read_images() {
+        let catalog = specialty_catalog();
+        // Ni le routeur d'OpenRouter, ni un modèle payant, ni un modèle sans vision.
+        let readers = super::image_readers_in(&catalog, "pool/coder:free", |_| true);
+        assert_eq!(readers.len(), 2, "{readers:?}");
+        assert!(readers.contains(&"lab/vue:free".to_string()));
+        assert!(readers.contains(&"lab/muet:free".to_string()));
+        // Le modèle de la session n'est pas son propre lecteur.
+        assert_eq!(
+            super::image_readers_in(&catalog, "lab/vue:free", |_| true),
+            ["lab/muet:free"]
+        );
+        // Un modèle mis de côté (quota, panne) passe après ceux qui répondent.
+        let first = readers[0].clone();
+        let reordered = super::image_readers_in(&catalog, "pool/coder:free", |id| id != first);
+        assert_eq!(reordered.last(), Some(&first));
     }
 
     /// Catalogue fictif : deux modèles gratuits utilisables, un sans outils, le

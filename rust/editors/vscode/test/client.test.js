@@ -316,6 +316,60 @@ function get(port, path) {
     JSON.stringify(frozenEvents.filter((event) => ["notice", "error", "model_question", "turn_done"].includes(event.type)).slice(-4)).slice(0, 500));
   frozen.stop();
 
+  // Lecteur d'images : le modèle de la session ne lit que du texte, un modèle
+  // gratuit qui lit les images décrit la capture, une seule fois, et le modèle
+  // de la session reçoit cette description à la place de l'image.
+  const imagesHome = path.join(root, "claw-home-images");
+  fs.mkdirSync(path.join(imagesHome, "cache"), { recursive: true });
+  const catalogModel = (id, images) => ({
+    id, name: id, description: "", context_length: 100000, max_completion_tokens: 8000,
+    prompt_price: 0, completion_price: 0, supports_tools: true, supports_images: images,
+  });
+  fs.writeFileSync(path.join(imagesHome, "cache", "openrouter-models.json"), JSON.stringify({
+    version: 2,
+    fetched_at: Math.floor(Date.now() / 1000),
+    models: [catalogModel("mock/texte:free", false), catalogModel("mock/vision:free", true)],
+    programming_ranking: [],
+  }));
+  const blind = new ClawServer({
+    clawPath: claw,
+    cwd,
+    model: "mock/texte:free",
+    permissionMode: "read-only",
+    env: { ...env, CLAW_CONFIG_HOME: imagesHome, OPENROUTER_BASE_URL: mock.baseUrl, OPENROUTER_API_KEY: "sk-or-test-factice" },
+  });
+  await blind.start();
+  const blindEvents = [];
+  blind.subscribe((event) => blindEvents.push(event));
+  await wait("abonnement", () => blindEvents.some((event) => event.type === "status"));
+  const requestsTo = (model) => fs.readFileSync(logPath, "utf8").split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line)).filter((request) => request.model === model);
+  const blindTurn = async (text, images) => {
+    const done = blindEvents.filter((event) => event.type === "turn_done").length;
+    await blind.send(text, images);
+    await wait(`fin du tour « ${text} »`, () => blindEvents.filter((event) => event.type === "turn_done").length > done, 160);
+  };
+  const pixel = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+  await blindTurn("Que montre cette capture ?", [{ media_type: "image/png", data: pixel }]);
+  const toReader = requestsTo("mock/vision:free");
+  const toBlind = JSON.stringify((requestsTo("mock/texte:free").pop() || {}).messages || []);
+  const described = fs.existsSync(path.join(cwd, ".claw", "image-descriptions"))
+    ? fs.readdirSync(path.join(cwd, ".claw", "image-descriptions")).length
+    : 0;
+  check("une image est décrite par un modèle qui les lit, et le modèle de la session reçoit la description",
+    toReader.length === 1 && JSON.stringify(toReader[0].messages).includes("image_url")
+      && !toBlind.includes("image_url") && toBlind.includes("Image described by mock/vision:free")
+      && toBlind.includes("Réponse du modèle factice") && described === 1
+      && blindEvents.some((event) => event.type === "notice" && /ne lit pas les images : il reçoit à la place la description de 1 image par mock\/vision:free/.test(event.text))
+      && !blindEvents.some((event) => event.type === "error"),
+    JSON.stringify([toReader.length, described, toBlind.slice(0, 300), blindEvents.filter((event) => ["notice", "error"].includes(event.type)).map((event) => event.text || event.message)]).slice(0, 900));
+  await blindTurn("Et maintenant ?");
+  check("la description d'une image n'est demandée qu'une fois",
+    requestsTo("mock/vision:free").length === 1
+      && JSON.stringify((requestsTo("mock/texte:free").pop() || {}).messages || []).includes("Image described by mock/vision:free"),
+    String(requestsTo("mock/vision:free").length));
+  blind.stop();
+
   // Appel d'outil que le fournisseur ne termine pas (le nom arrive, pas les
   // arguments) : jamais exécuté, et jamais soumis à l'autorisation de l'utilisateur.
   const startAsking = async (model) => {

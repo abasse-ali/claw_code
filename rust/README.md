@@ -644,11 +644,18 @@ coupe cet import.
 
 - **Images** : `@capture.png` (ou un chemin d'image glissé dans le terminal) joint l'image à la
   demande ; dans l'interface web, collez ou glissez une capture. `/models vision` liste les modèles
-  gratuits qui lisent les images. Format png, jpg, gif ou webp, 5 Mo maximum. Un modèle
-  d'OpenRouter qui ne lit que du texte refuserait toute la requête (erreur 404) dès qu'une image
-  figure dans la conversation : Claw ne lui envoie donc pas les images, vous prévient, et dit au
-  modèle qu'une image manque. Elles restent dans la session et repartent si vous revenez à un
-  modèle qui les lit.
+  gratuits qui lisent les images. Format png, jpg, gif ou webp, 5 Mo maximum.
+- **Lecteur d'images** : un modèle d'OpenRouter qui ne lit que du texte refuserait toute la
+  requête (erreur 404) dès qu'une image figure dans la conversation. Claw ne lui envoie donc pas
+  l'image : il la fait décrire par le modèle gratuit le plus puissant qui lit les images (type
+  d'image, disposition, et tout le texte visible recopié mot pour mot : erreurs, code, valeurs),
+  et donne cette description au modèle de la session, qui sait qu'elle vient d'un autre modèle.
+  Chaque image n'est décrite qu'une fois (une requête gratuite), la description étant gardée
+  dans `.claw/image-descriptions/` ; vous êtes prévenu du modèle qui l'a lue. Si aucun modèle
+  n'a pu la décrire, le modèle de la session apprend qu'une image manque et peut vous demander
+  de la décrire. Les images restent dans la session et repartent telles quelles si vous revenez
+  à un modèle qui les lit. `"imageReader"` (ou `CLAW_IMAGE_READER`) choisit le lecteur : un
+  identifiant de modèle, ou `"off"` pour ne rien faire décrire.
 - **Raisonnement** : sans réglage, un modèle d'OpenRouter qui sait raisonner reçoit l'effort de
   réflexion le plus poussé (`high`) : ses réponses sont plus lentes, mais plus réfléchies.
   `/think off|low|medium|high` (ou `"reasoning"` dans la config,

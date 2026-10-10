@@ -5,6 +5,7 @@ mod bench_hard;
 mod clipboard;
 mod credits;
 mod doctor;
+mod image_reader;
 mod init;
 mod input;
 mod likeness;
@@ -5782,9 +5783,8 @@ impl ApiClient for DefaultRuntimeClient {
             .then(|| filter_tool_specs(&self.tool_registry, self.allowed_tools.as_ref()));
         let enable_tools = self.enable_tools;
         let passback = runtime::harness::enabled(runtime::harness::Aid::ReasoningPassback);
-        if let Some(notice) = images_withheld_notice(self.chain.primary(), &messages) {
-            self.notify(&notice);
-        }
+        let primary = self.chain.primary().to_string();
+        image_reader::prepare(&primary, &messages, &mut |notice| self.notify(notice));
         let build = move |model: &str| MessageRequest {
             model: model.to_string(),
             max_tokens: max_tokens_for_model(model),
@@ -6159,7 +6159,7 @@ impl ApiClient for DefaultRuntimeClient {
 /// l'API d'Anthropic le refuserait. Il est retiré aussi quand l'aide est coupée.
 fn messages_for_model(model: &str, messages: &[InputMessage], passback: bool) -> Vec<InputMessage> {
     let anthropic = matches!(detect_provider_kind(model), ProviderKind::ClawApi);
-    let blind = model_cannot_read_images(model);
+    let blind = image_reader::model_cannot_read_images(model);
     // Le raisonnement renvoyé sert à la suite d'appels d'outils en cours. Celui
     // des tours précédents ne sert plus : dans une vraie session, il occupait
     // un sixième du contexte.
@@ -6190,9 +6190,10 @@ fn messages_for_model(model: &str, messages: &[InputMessage], passback: bool) ->
                             if api::is_passback_reasoning(signature))
                 })
                 .map(|block| match block {
-                    // Sinon OpenRouter refuse toute la requête (erreur 404).
-                    InputContentBlock::Image { .. } if blind => InputContentBlock::Text {
-                        text: IMAGE_NOT_SENT.to_string(),
+                    // Sinon OpenRouter refuse toute la requête (erreur 404) : le
+                    // modèle reçoit la description de l'image à sa place.
+                    InputContentBlock::Image { source } if blind => InputContentBlock::Text {
+                        text: image_reader::replacement(source),
                     },
                     other => other.clone(),
                 })
@@ -6203,50 +6204,6 @@ fn messages_for_model(model: &str, messages: &[InputMessage], passback: bool) ->
             })
         })
         .collect()
-}
-
-/// Mis à la place d'une image de la conversation pour un modèle qui n'en lit pas.
-const IMAGE_NOT_SENT: &str =
-    "[Image not sent: the current model cannot read images. Ask the user to describe it if you need its content.]";
-
-/// Le catalogue dit que ce modèle ne lit pas les images. Faux pour un modèle
-/// inconnu du catalogue (serveur local, autre fournisseur) : on ne sait pas.
-fn model_cannot_read_images(model: &str) -> bool {
-    api::model_limits(&resolve_model_alias(model)).is_some_and(|limits| !limits.supports_images)
-}
-
-/// Nombre d'images de la conversation.
-fn count_images(messages: &[InputMessage]) -> usize {
-    messages
-        .iter()
-        .flat_map(|message| &message.content)
-        .filter(|block| matches!(block, InputContentBlock::Image { .. }))
-        .count()
-}
-
-/// Dernier modèle pour lequel l'absence d'images a été signalée, avec leur nombre.
-static IMAGES_WITHHELD: Mutex<(String, usize)> = Mutex::new((String::new(), 0));
-
-/// Prévient, une fois par modèle et par nombre d'images, que les images de
-/// la conversation ne partent pas vers un modèle qui n'en lit pas.
-fn images_withheld_notice(model: &str, messages: &[InputMessage]) -> Option<String> {
-    let images = count_images(messages);
-    if images == 0 || !model_cannot_read_images(model) {
-        return None;
-    }
-    let mut last = IMAGES_WITHHELD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if *last == (model.to_string(), images) {
-        return None;
-    }
-    *last = (model.to_string(), images);
-    Some(format!(
-        "{model} ne lit pas les images : {} de la conversation ne lui {} pas envoyée{}. Pour qu'elles soient lues, choisissez un modèle qui les lit (/models vision).",
-        if images == 1 { "celle".to_string() } else { format!("les {images}") },
-        if images == 1 { "est" } else { "sont" },
-        if images == 1 { "" } else { "s" },
-    ))
 }
 
 /// Modèle de la session en cours : les modèles consultés sont « les autres ».
@@ -7156,9 +7113,15 @@ mod tests {
                 },
             ],
         }];
-        let images = |sent: &[InputMessage]| super::count_images(sent);
+        let images = |sent: &[InputMessage]| {
+            sent.iter()
+                .flat_map(|message| &message.content)
+                .filter(|block| matches!(block, InputContentBlock::Image { .. }))
+                .count()
+        };
         // OpenRouter refuse (404) toute requête avec une image pour un modèle
-        // qui ne lit que du texte : l'image est remplacée par une mention.
+        // qui ne lit que du texte : l'image est remplacée par sa description,
+        // ou par une mention quand personne ne l'a décrite.
         let blind = super::messages_for_model("essai/texte-seul:free", &messages, true);
         assert_eq!(images(&blind), 0);
         assert!(matches!(
@@ -7177,20 +7140,6 @@ mod tests {
         assert_eq!(
             images(&super::messages_for_model("ollama:llava", &messages, true)),
             1
-        );
-
-        // L'utilisateur est prévenu une fois, pas à chaque requête.
-        let notice = super::images_withheld_notice("essai/texte-seul:free", &messages)
-            .expect("avertissement");
-        assert!(notice
-            .contains("ne lit pas les images : celle de la conversation ne lui est pas envoyée."));
-        assert_eq!(
-            super::images_withheld_notice("essai/texte-seul:free", &messages),
-            None
-        );
-        assert_eq!(
-            super::images_withheld_notice("essai/vision:free", &messages),
-            None
         );
     }
     use super::{

@@ -107,6 +107,9 @@ pub struct RuntimeFeatureConfig {
     /// Modèle plus fort qui reprend un tour où l'agent n'avance plus :
     /// `escalationModel`.
     escalation_model: Option<String>,
+    /// Modèle qui décrit les images à un modèle qui n'en lit pas :
+    /// `imageReader` (`"off"` pour ne rien décrire).
+    image_reader: Option<String>,
 }
 
 /// Serveur compatible `OpenAI` déclaré dans `providers` (utilisé avec le
@@ -393,6 +396,7 @@ impl ConfigLoader {
             advisor_models: parse_string_list(&merged_value, "advisorModels"),
             planner_model: parse_optional_string(&merged_value, "plannerModel"),
             escalation_model: parse_optional_string(&merged_value, "escalationModel"),
+            image_reader: parse_optional_string(&merged_value, "imageReader"),
         };
 
         Ok(RuntimeConfig {
@@ -534,6 +538,12 @@ impl RuntimeConfig {
     #[must_use]
     pub fn escalation_model(&self) -> Option<&str> {
         self.feature_config.escalation_model.as_deref()
+    }
+
+    /// Modèle qui décrit les images à un modèle qui n'en lit pas (`imageReader`).
+    #[must_use]
+    pub fn image_reader(&self) -> Option<&str> {
+        self.feature_config.image_reader.as_deref()
     }
 }
 
