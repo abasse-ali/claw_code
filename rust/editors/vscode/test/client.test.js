@@ -165,6 +165,32 @@ function get(port, path) {
       && received.includes("Français, Anglais") && received.includes('"name":"AskUserQuestion"'),
     JSON.stringify([questionEvent, questionResolved]).slice(0, 500));
 
+  // Questions écrites dans la réponse (petits modèles) : Claw renvoie le modèle
+  // les poser avec le menu à choix, et la proposition reste affichée.
+  const beforeWritten = events.length;
+  let writtenQuestion = { questions: [] };
+  await turn("Propose puis attends ma validation [mock:questions]", async () => {
+    await wait("questions reposées avec le menu", () => events.slice(beforeWritten).some((event) => event.type === "question"));
+    writtenQuestion = events.slice(beforeWritten).find((event) => event.type === "question") || writtenQuestion;
+    if (writtenQuestion.id !== undefined) {
+      await server.request("POST", "/api/question", {
+        id: writtenQuestion.id,
+        answers: [
+          { question: "Cette architecture te convient-elle ?", answer: "Oui (Recommandé)" },
+          { question: "Veux-tu que j'ajoute des tests ?", answer: "Plus tard" },
+        ],
+      });
+    }
+  });
+  received = fs.readFileSync(logPath, "utf8");
+  const writtenEvents = events.slice(beforeWritten);
+  check("des questions écrites dans la réponse sont reposées avec le menu à choix, sans replier la proposition",
+    writtenQuestion.questions.length === 2 && writtenQuestion.questions[0].header === "Validation"
+      && received.includes("Call the AskUserQuestion tool now") && received.includes("Plus tard")
+      && !writtenEvents.some((event) => event.type === "answer_superseded")
+      && writtenEvents.some((event) => event.type === "notice" && String(event.text || event.message || "").includes("menu à choix")),
+    JSON.stringify(writtenEvents.filter((event) => ["question", "notice", "answer_superseded"].includes(event.type))).slice(0, 500));
+
   // Demande de permission : la modification proposée accompagne la demande, rien n'est écrit avant l'accord.
   await server.request("POST", "/api/permissions", { value: "prompt" });
   const target = path.join(cwd, "notes", "essai.txt");

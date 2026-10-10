@@ -5760,6 +5760,10 @@ impl ApiClient for DefaultRuntimeClient {
         }
     }
 
+    fn can_ask_user(&self) -> bool {
+        self.enable_tools && tools::question_asker_available()
+    }
+
     fn answer_superseded(&mut self) {
         if let Some(observer) = &self.observer {
             observer.answer_superseded();

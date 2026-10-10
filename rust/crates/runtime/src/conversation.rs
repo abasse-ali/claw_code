@@ -81,6 +81,12 @@ pub trait ApiClient {
     /// celle qui suivra la remplace.
     fn answer_superseded(&mut self) {}
 
+    /// Quelqu'un peut répondre aux questions de l'agent (menu à choix de
+    /// l'outil `AskUserQuestion`) : faux dans un script ou pour un sous-agent.
+    fn can_ask_user(&self) -> bool {
+        false
+    }
+
     /// Mode équipe : rôle de la prochaine requête (le client choisit le modèle
     /// le plus fort pour ce rôle).
     fn plan_step(&mut self, _step: crate::team::Step) {}
@@ -261,6 +267,9 @@ struct TurnAids {
     refused: bool,
     /// L'agent a déjà été renvoyé chercher une autre voie pendant ce tour.
     persisted: bool,
+    /// L'agent a posé ses questions avec le menu à choix pendant ce tour, ou
+    /// Claw le lui a déjà demandé.
+    asked: bool,
     /// Déroulé ultracode pour ce tour (session ou mot-clé du message).
     ultracode: bool,
     /// Dossier préparé par l'agent d'exploration (ultracode).
@@ -818,6 +827,8 @@ where
                     .last()
                     .map(message_text)
                     .unwrap_or_default();
+                // Questions écrites en fin de réponse : à poser avec le menu à choix.
+                let mut asking = false;
                 let feedback = self
                     .persistence_gate(&mut aids)
                     .or_else(|| self.verification_gate(&mut aids, &mut prompter))
@@ -836,6 +847,10 @@ where
                         self.review_gate(&mut aids, &request_text, earlier.as_deref(), &answer)
                     })
                     .or_else(|| {
+                        asking = self.questions_gate(&mut aids, &answer);
+                        asking.then(|| harness::QUESTIONS_FEEDBACK.to_string())
+                    })
+                    .or_else(|| {
                         let reason =
                             self.run_stop_hooks(stop_continuations, &assistant_messages)?;
                         stop_continuations += 1;
@@ -849,8 +864,12 @@ where
                 if !feedback.starts_with(STOP_HOOK_PREFIX) {
                     feedback.push_str(&harness::language_note(self.response_language.as_deref()));
                 }
-                self.api_client.answer_superseded();
-                aids.feedback_pending = true;
+                // La réponse qui précède des questions reste la réponse : elle
+                // n'est ni provisoire ni le signe d'un travail à reprendre.
+                if !asking {
+                    self.api_client.answer_superseded();
+                    aids.feedback_pending = true;
+                }
                 self.session
                     .messages
                     .push(ConversationMessage::user_text(feedback));
@@ -1080,6 +1099,8 @@ where
         };
         let output = output.to_string();
         let mut notes = Vec::new();
+        // Questions déjà posées avec le menu : rien à redemander en fin de tour.
+        aids.asked |= tool_name == "AskUserQuestion";
         // Issue d'une commande du modèle : celle de `bash`, ou la fin, lue avec
         // `BashOutput`, d'une commande passée en arrière-plan pendant ce tour.
         let command_outcome = command_outcome(tool_name, input, &output, is_error, aids);
@@ -1670,6 +1691,27 @@ where
                 Some(crate::workflow::verify_feedback(&report, changed))
             }
         }
+    }
+
+    /// Questions à l'utilisateur : la réponse finale se termine par des
+    /// questions écrites en texte alors que quelqu'un peut y répondre d'un
+    /// clic. Le modèle est renvoyé une fois les poser avec `AskUserQuestion`,
+    /// puis le tour continue avec les réponses, comme dans Claude Code.
+    fn questions_gate(&mut self, aids: &mut TurnAids, answer: &str) -> bool {
+        if aids.asked
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::Questions)
+            || !self.api_client.can_ask_user()
+            || !harness::ends_with_questions(answer)
+        {
+            return false;
+        }
+        aids.asked = true;
+        self.api_client.notify(
+            "L'agent a écrit ses questions dans sa réponse : Claw lui demande de les poser avec le menu à choix",
+        );
+        true
     }
 
     /// Persévérance : le modèle veut s'arrêter juste après plusieurs échecs
@@ -3057,6 +3099,10 @@ mod tests {
             self.observed.borrow_mut().superseded += 1;
         }
 
+        fn can_ask_user(&self) -> bool {
+            CAN_ASK.with(std::cell::Cell::get)
+        }
+
         fn plan_step(&mut self, step: crate::team::Step) {
             self.observed
                 .borrow_mut()
@@ -3117,6 +3163,9 @@ mod tests {
             .register("BashOutput", |_| {
                 Ok(TASK_REPLY.with(|reply| reply.borrow().clone()))
             })
+            .register("AskUserQuestion", |_| {
+                Ok(r#"{"answers":[{"question":"Continuer ?","answer":"Oui"}]}"#.to_string())
+            })
             .register("bash", move |input| {
                 recorded.borrow_mut().push(input.to_string());
                 Ok(outputs.pop_front().unwrap_or(PASSING).to_string())
@@ -3166,6 +3215,61 @@ mod tests {
             .notices
             .iter()
             .any(|notice| notice == "Vérification réussie après correction"));
+    }
+
+    thread_local! {
+        /// Quelqu'un peut répondre aux questions de l'agent.
+        static CAN_ASK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    const ASKING: &str = "Voici l'architecture proposée.\n\nCette architecture te convient-elle ?\nVeux-tu que j'ajoute des tests ?";
+
+    #[test]
+    fn questions_written_in_the_answer_are_asked_again_with_the_menu() {
+        // Quelqu'un peut répondre : le modèle est renvoyé poser ses questions
+        // avec l'outil, puis continue avec les réponses.
+        CAN_ASK.with(|flag| flag.set(true));
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                text_step(ASKING),
+                tool_step(
+                    "AskUserQuestion",
+                    r#"{"questions":[{"question":"Continuer ?","options":[{"label":"Oui"},{"label":"Non"}]}]}"#,
+                ),
+                text_step("Très bien, je commence."),
+            ],
+            vec![],
+        );
+        let summary = runtime
+            .run_turn("propose puis attends", None)
+            .expect("tour");
+        assert_eq!(summary.iterations, 3);
+        {
+            let observed = observed.borrow();
+            assert!(observed.requests[1].contains("Call the AskUserQuestion tool now"));
+            // La proposition reste la réponse : elle n'est pas repliée.
+            assert_eq!(observed.superseded, 0);
+            assert!(observed
+                .notices
+                .iter()
+                .any(|notice| notice.contains("menu à choix")));
+        }
+
+        // Une seule relance par tour, même si le modèle récrit ses questions.
+        let (mut runtime, _, _) = aided_runtime(vec![text_step(ASKING), text_step(ASKING)], vec![]);
+        let summary = runtime
+            .run_turn("propose puis attends", None)
+            .expect("tour");
+        assert_eq!(summary.iterations, 2);
+
+        // Personne pour répondre (script, sous-agent) : rien n'est demandé.
+        CAN_ASK.with(|flag| flag.set(false));
+        let (mut runtime, observed, _) = aided_runtime(vec![text_step(ASKING)], vec![]);
+        let summary = runtime
+            .run_turn("propose puis attends", None)
+            .expect("tour");
+        assert_eq!(summary.iterations, 1);
+        assert!(observed.borrow().notices.is_empty());
     }
 
     thread_local! {

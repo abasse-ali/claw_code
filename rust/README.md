@@ -114,7 +114,11 @@ sombre ou claire (thème du système, de VS Code ou choisi) :
     suite ; plusieurs réponses peuvent être cochées quand la question le permet ; un champ
     « Autre réponse » accepte ce que vous tapez ; « Ne pas répondre » laisse l'agent décider.
     Dans le terminal, les mêmes questions s'affichent en menus. L'outil n'est proposé au modèle
-    que si quelqu'un peut répondre.
+    que si quelqu'un peut répondre. Un petit modèle écrit volontiers ses questions à la fin de
+    sa réponse au lieu d'appeler l'outil : quand une réponse se termine par au moins deux
+    questions, Claw le renvoie une fois les poser avec le menu, puis le tour continue avec vos
+    réponses. La proposition qu'il venait d'écrire reste affichée. Cela coûte une requête de
+    plus ; `CLAW_QUESTIONS=0` le coupe.
   - **Modèle qui ne répond plus** : compte à rebours de l'essai automatique, changement de modèle.
 - **défilement** : le fil suit les nouveaux messages tant que vous ne remontez pas. Dès que vous
   faites défiler vers le haut, plus rien ne vous ramène en bas, même pendant que l'agent écrit ;

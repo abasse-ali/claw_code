@@ -58,6 +58,8 @@ pub enum Aid {
     Team,
     /// Code des emplacements cités par une commande ou une vérification en échec.
     ErrorSites,
+    /// Questions écrites en fin de réponse reposées avec le menu à choix.
+    Questions,
 }
 
 impl Aid {
@@ -83,6 +85,7 @@ impl Aid {
             Self::Ultracode => "CLAW_ULTRACODE",
             Self::Team => "CLAW_TEAM",
             Self::ErrorSites => "CLAW_ERROR_SITES",
+            Self::Questions => "CLAW_QUESTIONS",
         }
     }
 }
@@ -809,6 +812,62 @@ pub fn persistence_feedback(failures: u32) -> String {
     )
 }
 
+/// Lignes de la fin d'une réponse où chercher des questions à l'utilisateur.
+const QUESTION_TAIL_LINES: usize = 12;
+/// Questions à partir desquelles la réponse attend vraiment l'utilisateur :
+/// une seule en fin de réponse est souvent une simple offre de politesse.
+const QUESTIONS_TO_ASK: usize = 2;
+
+/// La réponse se termine par des questions posées à l'utilisateur (validation
+/// d'une proposition, choix entre des options) : au moins deux lignes de
+/// question parmi les dernières lignes de texte, hors blocs de code et
+/// tableaux.
+#[must_use]
+pub fn ends_with_questions(answer: &str) -> bool {
+    let mut in_code = false;
+    let mut prose: Vec<&str> = Vec::new();
+    for line in answer.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_code = !in_code;
+            continue;
+        }
+        if !in_code && !trimmed.is_empty() && !trimmed.starts_with('|') {
+            prose.push(trimmed);
+        }
+    }
+    let tail = &prose[prose.len().saturating_sub(QUESTION_TAIL_LINES)..];
+    tail.iter().filter(|line| is_question_line(line)).count() >= QUESTIONS_TO_ASK
+}
+
+/// Une ligne de texte qui pose une question : un « ? » en fin de phrase (suivi
+/// de rien, d'un blanc ou d'une marque de mise en forme), après de vrais mots.
+/// Le « ? » d'une adresse web ou d'un morceau de code ne compte pas.
+fn is_question_line(line: &str) -> bool {
+    let mut in_code = false;
+    let mut letters = 0;
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '`' {
+            in_code = !in_code;
+        } else if !in_code && ch.is_alphabetic() {
+            letters += 1;
+        } else if !in_code && ch == '?' && letters >= 6 {
+            let closes = chars
+                .peek()
+                .is_none_or(|next| next.is_whitespace() || "*_)\"»]".contains(*next));
+            if closes {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Message adressé au modèle qui a écrit ses questions dans sa réponse alors
+/// que l'utilisateur peut y répondre d'un clic.
+pub const QUESTIONS_FEEDBACK: &str = "[Claw] Your reply ends with questions for the user, written as text. The user has read your reply: do not repeat it. Call the AskUserQuestion tool now with those questions (at most 4, each with 2 to 4 short concrete options, the one you recommend first), so the user answers with one click. When the answers come back, continue the task with them.";
+
 /// Rappel de langue ajouté aux notes de Claw : elles sont en anglais, et un
 /// modèle répond volontiers dans la langue de la dernière consigne lue.
 #[must_use]
@@ -1176,6 +1235,39 @@ GET https://cdn.example.com/lib.js:8080 failed, see http://docs.example.com/err.
             None
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod question_tests {
+    use super::ends_with_questions;
+
+    #[test]
+    fn questions_closing_an_answer_are_recognized() {
+        // La fin d'une vraie session : une validation demandée en texte.
+        let asked = "## Architecture\n\n```\nbackend/\n```\n\n## Validation Requise\n\nAvant de continuer, confirme-moi :\n1. **Cette architecture te convient-elle ?** (Elle est déjà codée)\n2. **Veux-tu que je corrige les points d'attention ci-dessus** (police CJK, tests, streaming) ?\n3. **As-tu les clés API** (DeepL / OpenAI / Anthropic) pour tester ?\n\n> Veux-tu que je lance un test de build ou que je corrige d'abord les points critiques ?";
+        assert!(ends_with_questions(asked));
+        assert!(ends_with_questions(
+            "Two ways to do it.\n\nWhich database do you prefer?\nShould I add tests as well?"
+        ));
+        for plain in [
+            // Travail fini, une simple offre en conclusion.
+            "C'est corrigé et les tests passent.\n\nVeux-tu que je regarde autre chose ?",
+            "Terminé. Lancez `npm run dev` puis ouvrez http://localhost:3000/?page=2 et http://localhost:3000/?page=3.",
+            // Des « ? » dans du code ou un tableau ne sont pas des questions.
+            "Voici le code :\n\n```ts\nconst a = b ? c : d;\nconst e = f ? g : h;\n```\n\nTout est en place.",
+            "| Question | Réponse |\n|---|---|\n| Pourquoi ce choix ? | Vitesse |\n| Et la mémoire ? | Stable |\n\nRien d'autre à signaler.",
+            "Utilisez `a ? b : c` et `x ?? y` selon le cas.",
+            "",
+        ] {
+            assert!(!ends_with_questions(plain), "{plain}");
+        }
+        // Des questions au début, suivies d'une longue réponse : pas une attente.
+        let answered = format!(
+            "Pourquoi ce bogue ? Que faire ?\n\n{}",
+            "Une ligne d'explication.\n".repeat(14)
+        );
+        assert!(!ends_with_questions(&answered));
     }
 }
 

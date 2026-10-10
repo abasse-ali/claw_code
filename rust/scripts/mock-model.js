@@ -14,6 +14,8 @@
 // Un message de l'utilisateur peut aussi piloter le modèle, le temps de son tour :
 //   [mock:write chemin=contenu]         demande write_file
 //   [mock:tool Nom={"argument": 1}]     appelle cet outil, puis cite son résultat
+//   [mock:questions]                    écrit ses questions en texte, puis les pose
+//                                       avec AskUserQuestion quand Claw le lui demande
 //
 // Un modèle dont le nom contient « panne » commence à réfléchir puis son
 // fournisseur lâche : erreur 504 envoyée dans le flux, comme le fait OpenRouter.
@@ -100,8 +102,41 @@ function directiveReply(directive, messages) {
   return { text: `Résultat de l'outil : ${messageText(result).slice(0, 400)}` };
 }
 
+/**
+ * « [mock:questions] » : le modèle écrit d'abord ses questions dans sa réponse,
+ * comme le font les petits modèles. Renvoyé par Claw vers l'outil, il les pose
+ * avec AskUserQuestion, puis conclut avec les réponses reçues.
+ */
+function questionsReply(messages) {
+  let asked = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === "user" && messageText(messages[index]).includes("[mock:questions]")) {
+      asked = index;
+      break;
+    }
+  }
+  if (asked < 0) return null;
+  const later = messages.slice(asked + 1);
+  // Une demande plus récente de l'utilisateur : cette consigne ne vaut plus.
+  if (later.some((message) => message.role === "user" && !messageText(message).startsWith("[Claw]"))) return null;
+  const result = [...later].reverse().find((message) => message.role === "tool");
+  if (result) return { text: `Réponses reçues : ${messageText(result).slice(0, 300)}` };
+  if (later.some((message) => message.role === "user" && messageText(message).includes("Call the AskUserQuestion tool now"))) {
+    const args = {
+      questions: [
+        { question: "Cette architecture te convient-elle ?", header: "Validation", options: [{ label: "Oui (Recommandé)" }, { label: "Non" }] },
+        { question: "Veux-tu que j'ajoute des tests ?", header: "Tests", options: [{ label: "Oui" }, { label: "Plus tard" }] },
+      ],
+    };
+    return { toolCall: { id: "call_mock_questions", name: "AskUserQuestion", arguments: JSON.stringify(args) } };
+  }
+  return { text: "Voici l'architecture proposée.\n\nCette architecture te convient-elle ?\nVeux-tu que j'ajoute des tests ?" };
+}
+
 function reply(body) {
   const messages = body.messages || [];
+  const questions = questionsReply(messages);
+  if (questions) return questions;
   const directive = lastDirective(messages);
   if (directive) return directiveReply(directive, messages);
   const hasToolResult = messages.some((message) => message.role === "tool");
