@@ -183,8 +183,10 @@ impl SystemPromptBuilder {
         }
         sections.push(get_simple_system_section());
         sections.push(get_simple_doing_tasks_section());
+        sections.push(get_reasoning_section());
         sections.push(get_engineering_workflow_section());
         sections.push(get_verification_section());
+        sections.push(get_final_answer_section());
         sections.push(get_architecture_section());
         sections.push(get_delegation_section());
         sections.push(get_actions_section());
@@ -652,13 +654,48 @@ fn get_simple_doing_tasks_section() -> String {
         "Be careful not to introduce security vulnerabilities such as command injection, XSS, or SQL injection.".to_string(),
         "Report outcomes faithfully: if verification fails or was not run, say so explicitly.".to_string(),
         "When you need the user to choose between options, to answer questions or to validate a proposal before you continue, and the AskUserQuestion tool is available, call it instead of writing the questions in your reply: the user then answers with one click. Present what you propose first (briefly), then ask.".to_string(),
-        "End a task with one final answer written for the user: what you did and where, how to run or check the result when that applies, and anything they asked you to explain or must do next. Keep it short: no file contents, no restating of the request, no second or third report.".to_string(),
     ]);
 
     std::iter::once("# Doing tasks".to_string())
         .chain(items)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Méthode de réflexion : comprendre, chercher la cause, peser les
+/// conséquences avant de modifier quoi que ce soit.
+fn get_reasoning_section() -> String {
+    let items = prepend_bullets(vec![
+        "Take the time to think before you act. A correct result after careful reasoning is worth far more than a fast wrong one.".to_string(),
+        "Start from what is really asked: restate the goal to yourself, separate what the user wants from what you assume, and notice what the request implies without saying it.".to_string(),
+        "Work from evidence, not from memory: read the code that is involved, run it or its tests when you can, and check an API, a file or a behaviour you are unsure of instead of guessing.".to_string(),
+        "For a bug, find the root cause before changing anything: reproduce or locate the failure, state the cause in one sentence, and make sure your fix removes that cause and not only its symptom. Then look for the same defect elsewhere in the project.".to_string(),
+        "Before each change, weigh its consequences: who calls this code, which cases it must still handle (empty or missing input, boundaries, errors, concurrency), what else could break. Consider at least one alternative and choose on the merits.".to_string(),
+        "When a result surprises you (an error, an unexpected output, a failed edit), stop and explain it before trying anything else. Never repeat unchanged an action that has just failed.".to_string(),
+        "Before you conclude, reread your own work as a reviewer would: does it do what was asked, in every case, and did you actually see it work?".to_string(),
+    ]);
+    std::iter::once("# Thinking it through".to_string())
+        .chain(items)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Forme de la réponse finale : un compte rendu que l'utilisateur lit seul.
+fn get_final_answer_section() -> String {
+    let items = prepend_bullets(vec![
+        "Start with the outcome in one or two sentences: what now works, what you found, or what blocks you.".to_string(),
+        "What was wrong: when you fixed or investigated something, name each problem and its cause in one or two sentences, in the words the user would use.".to_string(),
+        "What you did: the solution applied to each problem and the files concerned. Group this by problem, not by file and not in the order you worked.".to_string(),
+        "Verification: the commands you ran and what they showed, in a line or two. Say plainly what you did not or could not verify.".to_string(),
+        "What is left: what the user has to do next (the exact command to run), decisions that wait for them, known limits. Leave this part out when there is nothing.".to_string(),
+    ]);
+    [
+        "# Final answer".to_string(),
+        "End every task with one final answer written for the user, who reads only that message and did not follow your steps. Write it as a short report in plain language:".to_string(),
+        items.join("\n"),
+        "Scale it to the work: one or two sentences for a simple question or a small change; the parts above, each under a short bold label written in the user's language, when several problems were handled. No file contents, no restating of the request, no narration of your steps, no second or third report.".to_string(),
+    ]
+    .join("\n")
 }
 
 fn get_actions_section() -> String {
@@ -713,7 +750,22 @@ mod tests {
     fn system_prompt_forbids_emoji_and_asks_for_one_final_answer() {
         let prompt = SystemPromptBuilder::new().render();
         assert!(prompt.contains("Never use emoji or pictographic icons"));
-        assert!(prompt.contains("End a task with one final answer written for the user"));
+        // La réponse finale est un compte rendu : résultat, cause, solution,
+        // vérification, suite.
+        assert!(prompt
+            .contains("# Final answer\nEnd every task with one final answer written for the user"));
+        for part in [
+            "Start with the outcome",
+            "What was wrong:",
+            "What you did:",
+            "Verification:",
+            "What is left:",
+        ] {
+            assert!(prompt.contains(part), "partie absente : {part}");
+        }
+        // Une méthode de réflexion précède les consignes de travail.
+        assert!(prompt.contains("# Thinking it through\n - Take the time to think before you act."));
+        assert!(prompt.contains("find the root cause before changing anything"));
         // La consigne elle-même n'en contient pas.
         assert!(!prompt.chars().any(crate::typography::is_emoji));
     }

@@ -294,6 +294,28 @@ function get(port, path) {
     cutOrder);
   cut.stop();
 
+  // Fournisseur qui se fige au milieu d'une réponse : après le délai
+  // d'inactivité, la requête est abandonnée puis relancée, sans intervention.
+  const frozen = new ClawServer({
+    clawPath: claw,
+    cwd,
+    model: "ollama:fige-une-fois",
+    permissionMode: "read-only",
+    env: { ...env, CLAW_IDLE_TIMEOUT: "2" },
+  });
+  await frozen.start();
+  const frozenEvents = [];
+  frozen.subscribe((event) => frozenEvents.push(event));
+  await wait("abonnement", () => frozenEvents.some((event) => event.type === "status"));
+  await frozen.send("Réponds bonjour");
+  await wait("fin du tour après une réponse figée", () => frozenEvents.some((event) => event.type === "turn_done"), 160);
+  check("un fournisseur qui se fige ne bloque plus le tour : requête abandonnée puis relancée",
+    frozenEvents.filter((event) => event.type === "assistant_text").map((event) => event.text).join("").includes("Réponse du modèle factice")
+      && frozenEvents.some((event) => event.type === "notice" && /nouvelle tentative|Nouvel essai/.test(event.text))
+      && !frozenEvents.some((event) => event.type === "error"),
+    JSON.stringify(frozenEvents.filter((event) => ["notice", "error", "model_question", "turn_done"].includes(event.type)).slice(-4)).slice(0, 500));
+  frozen.stop();
+
   // Appel d'outil que le fournisseur ne termine pas (le nom arrive, pas les
   // arguments) : jamais exécuté, et jamais soumis à l'autorisation de l'utilisateur.
   const startAsking = async (model) => {

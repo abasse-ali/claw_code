@@ -14,6 +14,7 @@ mod hooks;
 pub mod interrupt;
 mod json;
 pub mod json_repair;
+mod lean;
 mod mcp;
 mod mcp_client;
 mod mcp_stdio;

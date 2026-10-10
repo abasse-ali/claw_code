@@ -213,7 +213,7 @@ impl OpenAiCompatClient {
     #[must_use]
     pub fn new(api_key: impl Into<String>, config: OpenAiCompatConfig) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: super::http_client(),
             api_key: api_key.into(),
             base_url: read_base_url(config),
             model_name: None,
@@ -252,7 +252,7 @@ impl OpenAiCompatClient {
             )));
         }
         Ok(Self {
-            http: reqwest::Client::new(),
+            http: super::http_client(),
             api_key,
             base_url: provider.base_url.clone(),
             model_name: Some(model_name.to_string()),
@@ -459,11 +459,16 @@ impl OpenAiCompatClient {
                 fields.remove("stream_options");
             }
         }
-        if let Some(effort) = reasoning::reasoning_effort()
-            .filter(|effort| *effort != ReasoningEffort::Off)
-            .filter(|_| reasoning::effort_applies_to(&request.model))
-        {
-            if self.provider_name == "OpenRouter" {
+        let openrouter = self.provider_name == "OpenRouter";
+        let model_reasons = crate::openrouter::model_limits(&request.model)
+            .is_some_and(|limits| limits.supports_reasoning);
+        if let Some(effort) = reasoning::effort_for_request(
+            reasoning::reasoning_effort(),
+            &request.model,
+            openrouter,
+            model_reasons,
+        ) {
+            if openrouter {
                 payload["reasoning"] = json!({ "effort": effort.as_str() });
             } else {
                 payload["reasoning_effort"] = Value::String(effort.as_str().to_string());

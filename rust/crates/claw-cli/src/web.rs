@@ -46,6 +46,9 @@ use crate::{
 
 const PAGE: &str = include_str!("web/index.html");
 const MAX_TOOL_OUTPUT_CHARS: usize = 20_000;
+/// Début du résultat rendu au modèle quand personne ne répond à une demande
+/// d'autorisation (la page l'affiche comme « sans réponse »).
+const NO_ANSWER: &str = "aucune réponse de l'utilisateur";
 const PERMISSION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const BROADCAST_CAPACITY: usize = 1_024;
 
@@ -508,9 +511,14 @@ impl PermissionPrompter for WebPrompter {
                 },
                 "annulé (tour interrompu)".to_string(),
             ),
+            // Sans cette consigne, un modèle redemandait la même autorisation
+            // plusieurs fois de suite, un quart d'heure d'attente à chaque fois.
             Err(_) => (
                 PermissionPromptDecision::Deny {
-                    reason: "aucune réponse dans l'interface web".to_string(),
+                    reason: format!(
+                        "{NO_ANSWER} à la demande d'autorisation de l'outil '{}' : il est sans doute absent. Ne redemandez pas cette autorisation ; terminez ce qui peut l'être sans cet outil et dites dans votre réponse finale ce qui attend son accord",
+                        request.tool_name
+                    ),
                 },
                 "refusé (pas de réponse)".to_string(),
             ),

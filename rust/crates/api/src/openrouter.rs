@@ -809,6 +809,8 @@ pub struct ModelLimits {
     pub max_completion_tokens: Option<u64>,
     pub prompt_price: f64,
     pub completion_price: f64,
+    /// Le modèle sait raisonner avant de répondre (paramètre `reasoning`).
+    pub supports_reasoning: bool,
 }
 
 fn limits_registry() -> &'static RwLock<BTreeMap<String, ModelLimits>> {
@@ -829,6 +831,7 @@ pub fn register_model_limits(catalog: &ModelCatalog) {
                 max_completion_tokens: model.max_completion_tokens,
                 prompt_price: model.prompt_price,
                 completion_price: model.completion_price,
+                supports_reasoning: model.supports_reasoning,
             },
         );
     }

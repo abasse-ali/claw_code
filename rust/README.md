@@ -58,6 +58,7 @@ de `.claw.json`. Le modèle choisi doit prendre en charge l'appel d'outils (*too
 | `CLAW_MODEL` | Modèle de départ (prioritaire sur `.claw.json`) |
 | `CLAW_PROVIDER` | Force le fournisseur : `anthropic`, `openrouter`, `openai`, `xai` |
 | `CLAW_MAX_TOKENS` | Plafond de jetons de sortie (défaut 16 384 pour OpenRouter) |
+| `CLAW_IDLE_TIMEOUT` | Secondes sans rien recevoir du serveur avant d'abandonner une requête à un modèle, qui est alors relancée (défaut 300 ; 0 : attendre sans limite) |
 
 **Windows : « clé manquante » alors que la clé est définie.** Un programme garde l'environnement
 reçu à son démarrage : VS Code ouvert par le clic droit « Ouvrir avec Code », un terminal resté
@@ -305,9 +306,16 @@ forme `mcp__<serveur>__<outil>` et sont aussi disponibles pour les sous-agents.
 
 ### Sessions longues, interruption et annulation
 
-- **Compaction automatique** : à l'approche de la fenêtre de contexte du modèle, les anciens
-  messages sont résumés par le modèle (les plus récents sont gardés tels quels). Seuil réglable
-  avec `CLAW_AUTO_COMPACT_TOKENS`, désactivation avec `CLAW_AUTO_COMPACT=0`.
+- **Compaction automatique** : à l'approche de la fenêtre de contexte du modèle, et au plus tard
+  vers 120 000 jetons même si sa fenêtre est plus grande, les anciens messages sont résumés par
+  le modèle (les plus récents sont gardés tels quels). Seuil réglable avec
+  `CLAW_AUTO_COMPACT_TOKENS`, désactivation avec `CLAW_AUTO_COMPACT=0`.
+- **Contexte allégé** : la page et le terminal affichent le résultat complet de chaque outil,
+  mais la session ne garde pour le modèle que ce qu'il ne sait pas déjà. Après une modification :
+  le fichier et les lignes touchées, sans l'ancien ni le nouveau texte qu'il vient d'écrire ;
+  après une écriture : le fichier et son nombre de lignes ; après une commande : sa sortie et son
+  code de retour. Le raisonnement du modèle ne lui est renvoyé que pour le tour en cours. Dans
+  une vraie session, ces redites occupaient plus de la moitié du contexte.
 - **Interrompre un tour** : `Ctrl+C` dans le terminal (un second `Ctrl+C` dans les 2 s quitte),
   bouton « Arrêter » ou touche `Échap` dans l'interface web. Les commandes shell en cours sont
   arrêtées avec leurs sous-processus.
@@ -466,6 +474,19 @@ applique**, quel que soit le modèle.
 | Escalade | Au deuxième échec de la vérification, ou au deuxième recadrage, Claw vous propose de confier la suite à un autre modèle (le gratuit le plus puissant en premier) ; sans réponse en 60 s, le même modèle continue. Avec `"modelSwitch": "auto"` ou sans personne pour répondre, **le modèle gratuit le plus puissant du moment** reprend la fin du tour ; le tour suivant repart avec le modèle habituel. Sans réglage à faire, et jamais vers un modèle payant | `CLAW_ESCALATION=0` |
 | Erreurs de l'éditeur | Avec l'extension VS Code : quand le tour a modifié des fichiers, Claw demande à l'éditeur les erreurs qu'il y voit (compilation, types, lint) et les renvoie au modèle, deux fois au plus par tour. L'outil `EditorDiagnostics` permet aussi au modèle de les lire quand il veut | `CLAW_EDITOR_DIAGNOSTICS=0` |
 | Contrôle des exigences | Quand le tour a modifié au moins 5 lignes et que la vérification passe, le modèle liste chaque exigence de la demande et de la documentation du code (cas limites compris), retrouve le code qui la couvre et la façon dont elle est vérifiée (un test existant, une commande lancée, ou le code lui-même), et corrige ce qui manque, avant la relecture. Il n'invente ni tests ni résultats. Une requête de plus par tour concerné | `CLAW_CHECKLIST=0` |
+| Contexte allégé | Les résultats d'outils gardés dans la session ne répètent pas au modèle ce qu'il vient d'écrire (ancien et nouveau texte d'une modification, contenu d'un fichier écrit, état du bac à sable d'une commande) | `CLAW_LEAN_RESULTS=0` |
+
+**Méthode de réflexion.** Les consignes de Claw demandent au modèle de réfléchir avant d'agir :
+partir de ce qui est vraiment demandé, travailler sur des preuves (lire le code, lancer les
+tests) plutôt que de mémoire, trouver la cause d'un bogue avant de modifier quoi que ce soit et
+chercher le même défaut ailleurs, peser les conséquences de chaque changement, expliquer un
+résultat inattendu avant de réessayer, et relire son travail avant de conclure.
+
+**Une réponse finale en forme de compte rendu.** Le modèle termine par une seule réponse,
+écrite pour vous qui n'avez pas suivi ses étapes : le résultat d'abord, puis ce qui n'allait pas
+et pourquoi, la solution apportée à chaque problème, ce qui a été vérifié (et ce qui ne l'a pas
+été), et ce qu'il vous reste à faire. Une question simple reçoit une ou deux phrases, pas un
+rapport.
 
 **Une seule réponse finale.** Quand un contrôle renvoie le modèle au travail (vérification en
 échec, erreurs de l'éditeur, exigences, relecture), la réponse qu'il venait de donner n'était que
@@ -624,7 +645,9 @@ coupe cet import.
 - **Images** : `@capture.png` (ou un chemin d'image glissé dans le terminal) joint l'image à la
   demande ; dans l'interface web, collez ou glissez une capture. `/models vision` liste les modèles
   gratuits qui lisent les images. Format png, jpg, gif ou webp, 5 Mo maximum.
-- **Raisonnement** : `/think off|low|medium|high` (ou `"reasoning"` dans la config,
+- **Raisonnement** : sans réglage, un modèle d'OpenRouter qui sait raisonner reçoit l'effort de
+  réflexion le plus poussé (`high`) : ses réponses sont plus lentes, mais plus réfléchies.
+  `/think off|low|medium|high` (ou `"reasoning"` dans la config,
   `CLAW_REASONING`) règle l'effort de réflexion des modèles qui raisonnent (DeepSeek-R1, Qwen3,
   GLM, série o d'OpenAI…) et des modèles Claude via l'API Anthropic (raisonnement étendu, blocs
   signés conservés et renvoyés avec les appels d'outils ; pas via OpenRouter). Le raisonnement

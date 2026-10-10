@@ -63,6 +63,27 @@ pub fn anthropic_thinking_budget() -> Option<u32> {
     }
 }
 
+/// Niveau demandé à un modèle compatible `OpenAI`. Sans réglage, un modèle
+/// d'`OpenRouter` qui sait raisonner reçoit le niveau le plus poussé : mieux
+/// vaut une réponse réfléchie qu'une réponse rapide. Les autres serveurs ne
+/// reçoivent rien sans réglage, certains refusant ce paramètre.
+#[must_use]
+pub fn effort_for_request(
+    configured: Option<ReasoningEffort>,
+    model: &str,
+    openrouter: bool,
+    model_reasons: bool,
+) -> Option<ReasoningEffort> {
+    if !effort_applies_to(model) {
+        return None;
+    }
+    match configured {
+        Some(ReasoningEffort::Off) => None,
+        Some(effort) => Some(effort),
+        None => (openrouter && model_reasons).then_some(ReasoningEffort::High),
+    }
+}
+
 /// Les modèles Claude exigent qu'on leur renvoie leurs blocs de raisonnement
 /// avec les appels d'outils, ce que les sessions ne conservent pas : on ne
 /// leur demande donc pas de raisonnement étendu.
@@ -165,6 +186,46 @@ mod tests {
         assert_eq!(ReasoningEffort::parse("bof"), None);
         assert!(!super::effort_applies_to("anthropic/claude-sonnet-4.5"));
         assert!(super::effort_applies_to("deepseek/deepseek-r1:free"));
+    }
+
+    #[test]
+    fn reasoning_models_think_hard_unless_told_otherwise() {
+        use super::effort_for_request;
+        let model = "deepseek/deepseek-r1:free";
+        // Sans réglage : réflexion poussée pour un modèle OpenRouter qui raisonne.
+        assert_eq!(
+            effort_for_request(None, model, true, true),
+            Some(ReasoningEffort::High)
+        );
+        // Modèle qui ne raisonne pas, ou autre serveur : rien n'est demandé.
+        assert_eq!(effort_for_request(None, model, true, false), None);
+        assert_eq!(
+            effort_for_request(None, "groq:llama-3.3-70b", false, true),
+            None
+        );
+        // Le réglage de l'utilisateur prime, y compris pour couper.
+        assert_eq!(
+            effort_for_request(Some(ReasoningEffort::Low), model, true, true),
+            Some(ReasoningEffort::Low)
+        );
+        assert_eq!(
+            effort_for_request(
+                Some(ReasoningEffort::Medium),
+                "groq:qwen-qwq-32b",
+                false,
+                false
+            ),
+            Some(ReasoningEffort::Medium)
+        );
+        assert_eq!(
+            effort_for_request(Some(ReasoningEffort::Off), model, true, true),
+            None
+        );
+        // Les modèles Claude gardent leur propre mécanisme.
+        assert_eq!(
+            effort_for_request(None, "anthropic/claude-sonnet-4.5", true, true),
+            None
+        );
     }
 
     #[test]

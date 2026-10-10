@@ -6010,7 +6010,8 @@ impl ApiClient for DefaultRuntimeClient {
                 )
                 .await?;
                 credits::note_request(&model);
-                let events = response_to_events(response, out)?
+                let stop_reason = response.stop_reason.clone();
+                let mut events = response_to_events(response, out)?
                     .into_iter()
                     .map(|event| match event {
                         AssistantEvent::ToolUse { id, name, input } => AssistantEvent::ToolUse {
@@ -6021,6 +6022,7 @@ impl ApiClient for DefaultRuntimeClient {
                         other => other,
                     })
                     .collect::<Vec<_>>();
+                Self::check_cut_calls(&self.tool_registry, &mut events, stop_reason.as_deref())?;
                 if let Some(observer) = &self.observer {
                     for event in &events {
                         match event {
@@ -6154,18 +6156,34 @@ impl ApiClient for DefaultRuntimeClient {
 /// l'API d'Anthropic le refuserait. Il est retiré aussi quand l'aide est coupée.
 fn messages_for_model(model: &str, messages: &[InputMessage], passback: bool) -> Vec<InputMessage> {
     let anthropic = matches!(detect_provider_kind(model), ProviderKind::ClawApi);
-    if passback && !anthropic {
-        return messages.to_vec();
-    }
+    // Le raisonnement renvoyé sert à la suite d'appels d'outils en cours. Celui
+    // des tours précédents ne sert plus : dans une vraie session, il occupait
+    // un sixième du contexte.
+    let kept_from = if passback && !anthropic {
+        messages
+            .iter()
+            .rposition(|message| {
+                message.role == "user"
+                    && message
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, InputContentBlock::Text { .. }))
+            })
+            .unwrap_or(0)
+    } else {
+        messages.len()
+    };
     messages
         .iter()
-        .filter_map(|message| {
+        .enumerate()
+        .filter_map(|(index, message)| {
             let content = message
                 .content
                 .iter()
                 .filter(|block| {
-                    !matches!(block, InputContentBlock::Thinking { signature, .. }
-                        if api::is_passback_reasoning(signature))
+                    index >= kept_from
+                        || !matches!(block, InputContentBlock::Thinking { signature, .. }
+                            if api::is_passback_reasoning(signature))
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -6257,7 +6275,7 @@ fn render_background_tasks(args: Option<&str>) -> String {
 /// `/think [niveau]` : affiche ou change le niveau de raisonnement.
 fn apply_think_command(level: Option<&str>) -> String {
     let current = |effort: Option<api::ReasoningEffort>| {
-        effort.map_or("réglage du modèle", |effort| match effort {
+        effort.map_or("high d'office pour les modèles d'OpenRouter qui raisonnent, réglage du modèle ailleurs", |effort| match effort {
             api::ReasoningEffort::Off => "off (raisonnement masqué)",
             api::ReasoningEffort::Low => "low",
             api::ReasoningEffort::Medium => "medium",
@@ -7000,6 +7018,63 @@ mod tests {
         describe_permission_target, expert_command_prompt, parse_permission_answer,
         persist_allow_rule, ExpertCommand, PermissionAnswer,
     };
+
+    #[test]
+    fn kept_reasoning_goes_back_only_with_the_current_turn() {
+        use api::{InputContentBlock, InputMessage};
+        let thinking = |text: &str| InputContentBlock::Thinking {
+            thinking: text.to_string(),
+            signature: "or-plain".to_string(),
+        };
+        let message = |role: &str, content: Vec<InputContentBlock>| InputMessage {
+            role: role.to_string(),
+            content,
+        };
+        let text = |text: &str| InputContentBlock::Text {
+            text: text.to_string(),
+        };
+        let messages = vec![
+            message("user", vec![text("première demande")]),
+            message("assistant", vec![thinking("ancien"), text("fait")]),
+            message("user", vec![text("deuxième demande")]),
+            message(
+                "assistant",
+                vec![
+                    thinking("en cours"),
+                    InputContentBlock::ToolUse {
+                        id: "appel-1".to_string(),
+                        name: "read_file".to_string(),
+                        input: serde_json::json!({ "path": "a.py" }),
+                    },
+                ],
+            ),
+            message(
+                "user",
+                vec![InputContentBlock::ToolResult {
+                    tool_use_id: "appel-1".to_string(),
+                    content: Vec::new(),
+                    is_error: false,
+                }],
+            ),
+        ];
+        let thoughts = |sent: &[InputMessage]| {
+            sent.iter()
+                .flat_map(|message| &message.content)
+                .filter_map(|block| match block {
+                    InputContentBlock::Thinking { thinking, .. } => Some(thinking.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        // Le raisonnement du tour en cours accompagne ses appels d'outils ;
+        // celui des tours finis ne repart plus à chaque requête.
+        let sent = super::messages_for_model("qwen/qwen3-coder:free", &messages, true);
+        assert_eq!(thoughts(&sent), ["en cours"]);
+        assert_eq!(sent.len(), messages.len());
+        // Aide coupée : aucun raisonnement renvoyé.
+        let plain = super::messages_for_model("qwen/qwen3-coder:free", &messages, false);
+        assert!(thoughts(&plain).is_empty());
+    }
     use super::{
         describe_tool_progress, filter_tool_specs, format_compact_report, format_cost_report,
         format_internal_prompt_progress_line, format_model_report, format_model_switch_report,

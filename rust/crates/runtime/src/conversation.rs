@@ -255,6 +255,27 @@ fn tool_result_parts(message: &ConversationMessage) -> Option<(&str, bool)> {
     })
 }
 
+/// Retire du résultat gardé dans la session ce que le modèle sait déjà (son
+/// propre texte, le diff, l'état du bac à sable) : l'interface a reçu le
+/// résultat complet à l'exécution.
+fn lean_result(tool_name: &str, message: &mut ConversationMessage) {
+    if !harness::enabled(Aid::LeanResults) {
+        return;
+    }
+    for block in &mut message.blocks {
+        if let ContentBlock::ToolResult {
+            output,
+            is_error: false,
+            ..
+        } = block
+        {
+            if let Some(lean) = crate::lean::lean_tool_output(tool_name, output) {
+                *output = lean;
+            }
+        }
+    }
+}
+
 /// Ajoute une note de Claw à la suite d'un résultat d'outil (lue par le modèle).
 fn append_tool_output(message: &mut ConversationMessage, note: &str) {
     for block in &mut message.blocks {
@@ -676,6 +697,7 @@ where
                         .map(|prompt| &mut **prompt as &mut dyn PermissionPrompter),
                 );
                 self.after_tool(&tool_name, &input, &mut result_message, &mut aids);
+                lean_result(&tool_name, &mut result_message);
                 self.session.messages.push(result_message.clone());
                 tool_results.push(result_message);
                 // Plan approuvé (ExitPlanMode) : la suite du tour peut modifier.
@@ -840,6 +862,7 @@ where
             .filter_map(|(message, call)| message.map(|message| (message, call)))
         {
             self.after_tool(name, input, &mut message, aids);
+            lean_result(name, &mut message);
             self.session.messages.push(message.clone());
             tool_results.push(message);
         }

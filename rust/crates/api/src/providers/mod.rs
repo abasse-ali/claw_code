@@ -291,7 +291,32 @@ pub fn context_window_for_model(model: &str) -> u64 {
     }
 }
 
-const MAX_AUTO_COMPACTION_THRESHOLD: u64 = 180_000;
+/// Au-delà, la conversation est résumée même si la fenêtre du modèle est plus
+/// grande : une requête de 200 000 jetons est lente, et les modèles suivent
+/// moins bien un contexte aussi long. `CLAW_AUTO_COMPACT_TOKENS` le remplace.
+const MAX_AUTO_COMPACTION_THRESHOLD: u64 = 120_000;
+
+/// Délai sans rien recevoir du serveur au-delà duquel une requête à un modèle
+/// est abandonnée (puis relancée) : sans lui, un fournisseur qui se fige
+/// laissait Claw attendre indéfiniment.
+const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
+
+/// Client HTTP des requêtes aux modèles : délai de connexion, et délai
+/// d'inactivité remis à zéro à chaque morceau reçu (`CLAW_IDLE_TIMEOUT`, en
+/// secondes ; 0 pour attendre sans limite).
+#[must_use]
+pub(crate) fn http_client() -> reqwest::Client {
+    let idle = std::env::var("CLAW_IDLE_TIMEOUT")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS);
+    let mut builder =
+        reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20));
+    if idle > 0 {
+        builder = builder.read_timeout(std::time::Duration::from_secs(idle));
+    }
+    builder.build().unwrap_or_default()
+}
 
 /// Seuil de compaction automatique (en jetons) : trois quarts de la fenêtre,
 /// moins la sortie et les définitions d'outils, plafonné pour garder des
@@ -421,7 +446,8 @@ mod tests {
         );
         // 65 536 × ¾ − (8 192 + 8 000) = 32 960
         assert_eq!(super::auto_compaction_threshold("small/out:free"), 32_960);
-        assert_eq!(super::auto_compaction_threshold("huge/ctx:free"), 180_000);
+        // Fenêtre d'un million de jetons : le plafond s'applique quand même.
+        assert_eq!(super::auto_compaction_threshold("huge/ctx:free"), 120_000);
     }
 
     #[test]

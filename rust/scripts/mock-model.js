@@ -19,6 +19,7 @@
 // fournisseur lâche : erreur 504 envoyée dans le flux, comme le fait OpenRouter.
 // « panne-une-fois » ne lâche qu'à sa première requête, puis répond.
 // Avec « outil » dans le nom, la panne arrive après l'annonce d'un appel d'outil.
+// Un modèle « fige-une-fois » commence sa première réponse puis n'envoie plus rien.
 // Un modèle « coupe » clôt sa réponse après le nom de l'outil, sans arguments
 // (« coupe-une-fois » : à son premier appel seulement) ; un modèle « limite »
 // l'arrête au milieu des arguments, limite de sortie atteinte.
@@ -191,6 +192,13 @@ function streamCut(response, model, answer, finishReason) {
   response.end("data: [DONE]\n\n");
 }
 
+/** Fournisseur qui se fige : la réponse commence, puis plus rien n'arrive. */
+function streamStall(response, model) {
+  response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+  const base = { id: "chatcmpl-mock", object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model };
+  response.write(chunk({ ...base, choices: [{ index: 0, delta: { role: "assistant", reasoning: "Je commence, puis je me fige. " }, finish_reason: null }] }));
+}
+
 function jsonReply(response, model, answer) {
   const message = answer.toolCall
     ? { role: "assistant", content: null, tool_calls: [{ id: answer.toolCall.id, type: "function", function: { name: answer.toolCall.name, arguments: answer.toolCall.arguments } }] }
@@ -258,6 +266,12 @@ const server = http.createServer((request, response) => {
     if (answer.toolCall && String(model).includes("limite")) cut = "length";
     else if (answer.toolCall && String(model).includes("coupe") && !(cutOnce && failedOnce.has(model))) cut = "stop";
     if (cut && cutOnce) failedOnce.add(model);
+    // « fige-une-fois » : la première réponse commence puis reste muette.
+    if (body.stream && String(model).includes("fige-une-fois") && !failedOnce.has(model)) {
+      failedOnce.add(model);
+      streamStall(response, model);
+      return;
+    }
     if (body.stream && fails) streamFailure(response, model, answer);
     else if (body.stream && cut) streamCut(response, model, answer, cut);
     else if (body.stream) streamReply(response, model, answer);

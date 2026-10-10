@@ -48,6 +48,8 @@ pub enum Aid {
     Checklist,
     /// Erreurs vues par l'éditeur relié (VS Code) dans les fichiers modifiés.
     EditorDiagnostics,
+    /// Résultats d'outils gardés sans ce que le modèle sait déjà (son texte, le diff).
+    LeanResults,
 }
 
 impl Aid {
@@ -68,6 +70,7 @@ impl Aid {
             Self::Escalation => "CLAW_ESCALATION",
             Self::Checklist => "CLAW_CHECKLIST",
             Self::EditorDiagnostics => "CLAW_EDITOR_DIAGNOSTICS",
+            Self::LeanResults => "CLAW_LEAN_RESULTS",
         }
     }
 }
@@ -411,9 +414,11 @@ impl StallGuard {
                         .map(ToOwned::to_owned)
                 })
                 .unwrap_or_default();
+            // Sans chemin, ce n'est pas un texte introuvable mais un appel
+            // incomplet, que son message d'erreur explique déjà.
             let misses = self.edit_misses.entry(path.clone()).or_insert(0);
-            *misses += 1;
-            if *misses == 2 {
+            *misses += u32::from(!path.is_empty());
+            if *misses == 2 && !path.is_empty() {
                 return Some(Reminder {
                     to_model: format!(
                         "[Claw] This is the second failed edit of `{path}`. Do not guess the text again: read the file with read_file and copy the exact lines you want to replace (indentation included), or replace a smaller, unique fragment."
@@ -621,11 +626,11 @@ pub fn test_guard_feedback(name: &str) -> String {
 
 /// Message adressé au modèle qui dit avoir fini un travail conséquent : il
 /// confronte son travail à chaque exigence avant de conclure (une fois par tour).
-pub const CHECKLIST_PROMPT: &str = "[Claw] Before you finish, check your work against every requirement. Go through each requirement of the user's request and of the docstrings, comments and specifications of the code you changed, including the edge cases they imply (empty or missing input, boundaries, invalid values, duplicates, ordering, large inputs). For each one, find the code that handles it and how it is verified: an existing test, a command you ran, or the code itself. If a requirement is not handled, fix it now with your tools. If the project has tests, add the missing test and run it; never describe tests, commands or results that do not exist. Do not weaken or delete existing tests. Report this check in at most one short line per requirement. Then end with your final answer to the user's original request. The user reads only that last message and has not seen this check: it must stand on its own, cover everything they asked for (what you did, plus any explanation or instructions they requested, such as how to install, run or test the result), stay concise, and not refer to this check.";
+pub const CHECKLIST_PROMPT: &str = "[Claw] Before you finish, check your work against every requirement. Go through each requirement of the user's request and of the docstrings, comments and specifications of the code you changed, including the edge cases they imply (empty or missing input, boundaries, invalid values, duplicates, ordering, large inputs). For each one, find the code that handles it and how it is verified: an existing test, a command you ran, or the code itself. If a requirement is not handled, fix it now with your tools. If the project has tests, add the missing test and run it; never describe tests, commands or results that do not exist. Do not weaken or delete existing tests. Report this check in at most one short line per requirement. Then end with your final answer to the user's original request. The user reads only that last message and has not seen this check: it must stand on its own, written as the report the system prompt describes under \"Final answer\" (the outcome first, what was wrong and why, what you changed, how it was verified, what is left for the user), cover everything they asked for, including any explanation or instructions they requested (such as how to install, run or test the result), stay concise, and not refer to this check.";
 
 /// Fin des messages que Claw renvoie au modèle après un contrôle : la réponse
 /// qui suivra est celle que l'utilisateur lira, elle doit répondre à sa demande.
-pub const FINAL_ANSWER_RULE: &str = "When this is dealt with, end with your final answer to the user's original request. The user reads only that last message and has not seen this note: it must stand on its own, cover everything they asked for (what you did, plus any explanation or instructions they requested, such as how to install, run or test the result), stay concise, and not refer to this note.";
+pub const FINAL_ANSWER_RULE: &str = "When this is dealt with, end with your final answer to the user's original request. The user reads only that last message and has not seen this note: it must stand on its own, written as the report the system prompt describes under \"Final answer\" (the outcome first, what was wrong and why, what you changed, how it was verified, what is left for the user), cover everything they asked for, including any explanation or instructions they requested (such as how to install, run or test the result), stay concise, and not refer to this note.";
 
 /// Rappel de langue ajouté aux notes de Claw : elles sont en anglais, et un
 /// modèle répond volontiers dans la langue de la dernière consigne lue.
