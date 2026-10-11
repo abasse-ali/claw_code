@@ -187,6 +187,21 @@ T1-01 est laissé tel quel : la demande de preuves coûte une requête mais a re
 réponse du petit modèle mieux étayée, et l'utilisateur préfère la profondeur à la vitesse.
 T1-02 est mineur (la consigne demande déjà de finir par le compte rendu).
 
+État le 12 octobre 2026 à 02 h : le code du lot T1 est écrit dans l'arbre de travail, pas
+encore commité (`git status` : `harness.rs`, `conversation.rs`, `prompt.rs`, `README.md`) ;
+clippy à zéro et tests du runtime au vert. T1-06 n'est fait qu'à moitié (règles de permission
+retirées du prompt ; le tiret long d'une description de compétence reste). Reste à faire,
+dans l'ordre : vérification complète (voir `suivi-intelligence.md`), corrections de la
+relecture par deux agents (constats dans le dossier temporaire de la session, à refaire si
+elle est perdue), `cargo build -p claw-cli`, puis les six essais ci-dessous, le tableau des
+essais, l'état de chaque constat, et le commit « Lot T1 ».
+
+Ce que fait le lot : `Aid::DataGuard` (`is_data_file`, `data_guard_feedback`,
+`rewritten_data`), guide de débogage et demande de preuves complétés (`DEBUGGER_STEPS`,
+`PROBLEM_EVIDENCE_PROMPT`), `Aid::FileView` (`view_after_edit`, `drop_older_file_views`),
+`Aid::BatchCalls` (`BATCH_NOTE` après trois appels isolés), `store_python_hint`, contexte Git
+limité au dossier de travail et plafonné (`read_git_status`, `read_git_diff`).
+
 Après le lot : relancer les six essais (`run.py <scénario> --label lotT1`, puis avec
 `--model cohere/north-mini-code:free`) et comparer scores et requêtes à la série propre.
 Ensuite : des scénarios plus durs (plusieurs fichiers, tâche longue) et un troisième modèle.
