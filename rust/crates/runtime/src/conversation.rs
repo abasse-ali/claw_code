@@ -87,6 +87,17 @@ pub trait ApiClient {
         false
     }
 
+    /// Défauts que montrent les images jointes à la demande, d'après le
+    /// lecteur d'images : (numéro de l'image, défaut en une ligne). Le client
+    /// peut les faire décrire à ce moment. Vide quand le modèle lit lui-même
+    /// les images : rien n'est décrit.
+    fn image_defects(
+        &mut self,
+        _images: &[crate::attachments::ImageAttachment],
+    ) -> Vec<(usize, String)> {
+        Vec::new()
+    }
+
     /// Mode équipe : rôle de la prochaine requête (le client choisit le modèle
     /// le plus fort pour ce rôle).
     fn plan_step(&mut self, _step: crate::team::Step) {}
@@ -270,9 +281,15 @@ struct TurnAids {
     /// L'agent a posé ses questions avec le menu à choix pendant ce tour, ou
     /// Claw le lui a déjà demandé.
     asked: bool,
-    /// L'utilisateur a signalé un problème : méthode de débogage jointe à sa
-    /// demande, preuves demandées avant de conclure.
-    problem_report: bool,
+    /// Ce que dit le message de l'utilisateur (problème signalé, images à
+    /// trier) : méthode jointe à sa demande, preuves demandées avant de conclure.
+    report: harness::Report,
+    /// Le lecteur d'images a vu un défaut dans une image de la demande.
+    saw_defects: bool,
+    /// Réponses renvoyées pendant ce tour pour des titres sans contenu.
+    empty_title_rounds: usize,
+    /// L'utilisateur a appris qu'une demande d'autorisation est restée sans réponse.
+    away_noticed: bool,
     /// Les preuves ont déjà été demandées pendant ce tour.
     evidence_asked: bool,
     /// Les commandes conseillées sans avoir été lancées ont déjà été signalées.
@@ -481,6 +498,11 @@ struct NotifyingPrompter<'a> {
 
 impl PermissionPrompter for NotifyingPrompter<'_> {
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
+        // Une demande de ce tour est restée sans réponse : l'utilisateur est
+        // absent, et chaque nouvelle demande l'attendrait encore longtemps.
+        if crate::permissions::user_away() {
+            return crate::permissions::not_asked(&request.tool_name);
+        }
         self.hooks.notify_in_background(
             "permission_prompt",
             &format!(
@@ -488,7 +510,12 @@ impl PermissionPrompter for NotifyingPrompter<'_> {
                 request.tool_name
             ),
         );
-        self.inner.decide(request)
+        let decision = self.inner.decide(request);
+        if matches!(&decision, PermissionPromptDecision::Deny { reason } if crate::permissions::is_not_run(reason))
+        {
+            crate::permissions::set_user_away(true);
+        }
+        decision
     }
 }
 
@@ -723,27 +750,49 @@ where
         mut prompter: Option<&mut dyn PermissionPrompter>,
     ) -> Result<TurnSummary, RuntimeError> {
         clear_interrupt();
+        // L'utilisateur vient d'écrire : il est là, ses autorisations lui
+        // seront de nouveau demandées.
+        if !self.subagent {
+            crate::permissions::set_user_away(false);
+        }
         let request_text = user_input.clone();
         // « reprendre » : la relecture doit connaître la demande poursuivie.
         let earlier = earlier_request(&self.session.messages, &request_text);
         let mut user_message = self.user_message_with_hooks(user_input)?;
         let image_count = images.len();
+        let guided = !self.subagent && harness::enabled(Aid::ProblemGuide);
+        // Défauts que le lecteur d'images voit dans les captures jointes (un
+        // modèle qui lit lui-même les images n'en fait rien décrire).
+        let defects = if guided && image_count > 0 {
+            self.api_client.image_defects(&images)
+        } else {
+            Vec::new()
+        };
         user_message
             .blocks
             .extend(images.into_iter().map(|image| ContentBlock::Image {
                 media_type: image.media_type,
                 data: image.data,
             }));
-        // L'utilisateur signale un problème : la méthode de débogage est jointe
-        // à sa demande, pour le modèle (symptômes de chaque image, reproduire,
-        // cause prouvée, disparition observée).
-        let problem_report = !self.subagent
-            && harness::enabled(Aid::ProblemGuide)
-            && harness::reports_a_problem(&request_text, image_count);
-        if problem_report {
-            user_message.blocks.push(ContentBlock::Text {
-                text: harness::problem_guide(image_count),
-            });
+        // Selon ce que dit l'utilisateur, une méthode jointe à sa demande, pour
+        // le modèle : débogage d'un problème signalé (symptômes de chaque
+        // image, reproduire, cause prouvée, disparition observée), tri
+        // d'images envoyées sans plainte écrite, lecture de chaque image.
+        let report = if guided {
+            harness::read_report(&request_text, image_count, defects.len())
+        } else {
+            harness::Report::None
+        };
+        let guide = match report {
+            harness::Report::Problem => Some(harness::problem_guide(image_count, &defects)),
+            harness::Report::Images => Some(harness::triage_guide(image_count, &defects)),
+            harness::Report::None if guided && image_count > 0 => {
+                Some(harness::image_guide(image_count))
+            }
+            harness::Report::None => None,
+        };
+        if let Some(text) = guide {
+            user_message.blocks.push(ContentBlock::Text { text });
         }
         self.session.messages.push(user_message);
 
@@ -757,7 +806,8 @@ where
             ultracode: !self.subagent && crate::workflow::active_for(&request_text),
             team,
             topic: team.then(|| crate::team::topic_of(&request_text)).flatten(),
-            problem_report,
+            report,
+            saw_defects: !defects.is_empty(),
             ..TurnAids::default()
         };
         // Ultracode : un agent au contexte vierge étudie la demande avant le
@@ -850,7 +900,8 @@ where
                 // Questions écrites en fin de réponse : à poser avec le menu à choix.
                 let mut asking = false;
                 let feedback = self
-                    .persistence_gate(&mut aids)
+                    .empty_titles_gate(&mut aids, &answer)
+                    .or_else(|| self.persistence_gate(&mut aids))
                     .or_else(|| self.verification_gate(&mut aids, &mut prompter))
                     .or_else(|| self.editor_gate(&mut aids))
                     .or_else(|| {
@@ -863,7 +914,9 @@ where
                         )
                     })
                     .or_else(|| self.evidence_gate(&mut aids))
-                    .or_else(|| self.requirements_gate(&mut aids))
+                    .or_else(|| {
+                        self.requirements_gate(&mut aids, &request_text, earlier.as_deref())
+                    })
                     .or_else(|| {
                         self.review_gate(&mut aids, &request_text, earlier.as_deref(), &answer)
                     })
@@ -931,7 +984,7 @@ where
                         .map(|prompt| &mut **prompt as &mut dyn PermissionPrompter),
                 );
                 aids.refused |= refused;
-                self.after_tool(&tool_name, &input, &mut result_message, &mut aids);
+                self.after_tool(&tool_name, &input, &mut result_message, refused, &mut aids);
                 lean_result(&tool_name, &mut result_message);
                 self.session.messages.push(result_message.clone());
                 tool_results.push(result_message);
@@ -1041,6 +1094,7 @@ where
         }
         // 1. Autorisations et hooks PreToolUse, dans l'ordre.
         let mut results: Vec<Option<ConversationMessage>> = vec![None; calls.len()];
+        let mut refused_calls = vec![false; calls.len()];
         let mut ready = Vec::new();
         let mut pre_messages = Vec::new();
         for (index, (id, name, input)) in calls.iter().enumerate() {
@@ -1051,6 +1105,7 @@ where
                 }
                 Err((reason, refused)) => {
                     aids.refused |= refused;
+                    refused_calls[index] = refused;
                     self.tool_executor.skipped(name, input, &reason);
                     results[index] = Some(ConversationMessage::tool_result(
                         id.clone(),
@@ -1093,12 +1148,15 @@ where
                 is_error,
             ));
         }
-        for (mut message, (_, name, input)) in results
+        for ((mut message, refused), (_, name, input)) in results
             .into_iter()
+            .zip(refused_calls)
             .zip(calls)
-            .filter_map(|(message, call)| message.map(|message| (message, call)))
+            .filter_map(|((message, refused), call)| {
+                message.map(|message| ((message, refused), call))
+            })
         {
-            self.after_tool(name, input, &mut message, aids);
+            self.after_tool(name, input, &mut message, refused, aids);
             lean_result(name, &mut message);
             self.session.messages.push(message.clone());
             tool_results.push(message);
@@ -1108,18 +1166,26 @@ where
 
     /// Après un appel d'outil : contrôle de syntaxe du fichier écrit, suivi
     /// des modifications à vérifier, détection de blocage. Les remarques sont
-    /// jointes au résultat que lira le modèle.
+    /// jointes au résultat que lira le modèle. `refused` : l'appel n'a pas
+    /// tourné (refus, demande d'autorisation sans réponse, hook).
     fn after_tool(
         &mut self,
         tool_name: &str,
         input: &str,
         message: &mut ConversationMessage,
+        refused: bool,
         aids: &mut TurnAids,
     ) {
         let Some((output, is_error)) = tool_result_parts(message) else {
             return;
         };
         let output = output.to_string();
+        // Ni l'échec d'un outil ni le résultat d'une commande : rien ne dit
+        // que le modèle tourne en rond.
+        if refused {
+            self.note_not_run(&output, aids);
+            return;
+        }
         let mut notes = Vec::new();
         // Questions déjà posées avec le menu : rien à redemander en fin de tour.
         aids.asked |= tool_name == "AskUserQuestion";
@@ -1218,6 +1284,18 @@ where
         }
         if !notes.is_empty() {
             append_tool_output(message, &notes.join("\n\n"));
+        }
+    }
+
+    /// Un appel n'a pas tourné faute de réponse à la demande d'autorisation :
+    /// l'utilisateur apprend, une fois par tour, que les suivantes ne lui
+    /// seront pas posées.
+    fn note_not_run(&mut self, output: &str, aids: &mut TurnAids) {
+        if crate::permissions::is_not_run(output) && !aids.away_noticed {
+            aids.away_noticed = true;
+            self.api_client.notify(
+                "Demande d'autorisation restée sans réponse : les suivantes de ce tour sont refusées sans vous être posées ; l'agent termine ce qui n'en demande pas",
+            );
         }
     }
 
@@ -1340,12 +1418,15 @@ where
             );
             let (output, is_error) = tool_result_parts(&message)?;
             if is_error {
-                // Refusée par l'utilisateur ou impossible à lancer : on le dit,
-                // pour ne pas laisser croire que le travail a été vérifié.
+                // Refusée par l'utilisateur, sans réponse ou impossible à
+                // lancer : on le dit, pour ne pas laisser croire que le
+                // travail a été vérifié.
                 aids.verify_disabled = true;
-                self.api_client.notify(&format!(
-                    "Vérification non lancée ({command} refusée ou impossible) : le travail n'est pas vérifié"
-                ));
+                self.api_client.notify(&if crate::permissions::is_not_run(output) {
+                    format!("Vérification non lancée ({command}) : elle attend votre autorisation, restée sans réponse ; le travail n'est pas vérifié")
+                } else {
+                    format!("Vérification non lancée ({command} refusée ou impossible) : le travail n'est pas vérifié")
+                });
                 return None;
             }
             let result = harness::read_bash_output(output);
@@ -1561,7 +1642,12 @@ where
     /// la vérification passe, le modèle confronte son travail à chaque
     /// exigence de la demande et du code (cas limites compris) avant de
     /// conclure. Une fois par tour.
-    fn requirements_gate(&mut self, aids: &mut TurnAids) -> Option<String> {
+    fn requirements_gate(
+        &mut self,
+        aids: &mut TurnAids,
+        request: &str,
+        earlier: Option<&str>,
+    ) -> Option<String> {
         if aids.checklisted
             || aids.verify_failing
             || aids.originals.is_empty()
@@ -1580,7 +1666,11 @@ where
         aids.checklisted = true;
         self.api_client
             .notify("Claw fait confronter le travail à chaque exigence avant de conclure");
-        Some(harness::CHECKLIST_PROMPT.to_string())
+        Some(harness::checklist_prompt(
+            request,
+            earlier,
+            crate::permissions::user_away(),
+        ))
     }
 
     /// Une étape du déroulé ultracode : un sous-agent lancé par Claw avec
@@ -1765,7 +1855,15 @@ where
     /// le contrôle général des exigences ; le vérificateur ultracode s'en
     /// charge quand il est actif.
     fn evidence_gate(&mut self, aids: &mut TurnAids) -> Option<String> {
-        if !aids.problem_report
+        let due = match aids.report {
+            harness::Report::Problem => true,
+            // Des images sans plainte écrite : les preuves ne sont demandées
+            // que si le modèle y a vu un problème (il a modifié des fichiers)
+            // ou si le lecteur d'images en a vu un.
+            harness::Report::Images => aids.saw_defects || !aids.originals.is_empty(),
+            harness::Report::None => false,
+        };
+        if !due
             || aids.evidence_asked
             || aids.ultracode
             || aids.verify_failing
@@ -1779,11 +1877,17 @@ where
         self.api_client.notify(
             "Problème signalé : Claw demande à l'agent ce qu'il a observé de sa cause et de sa disparition avant de conclure",
         );
-        Some(format!(
-            "{} {}",
-            harness::PROBLEM_EVIDENCE_PROMPT,
-            harness::FINAL_ANSWER_RULE
-        ))
+        let prompt = if aids.report == harness::Report::Problem {
+            harness::PROBLEM_EVIDENCE_PROMPT
+        } else {
+            harness::IMAGES_EVIDENCE_PROMPT
+        };
+        let away = if crate::permissions::user_away() {
+            format!(" {}", harness::AWAY_NOTE)
+        } else {
+            String::new()
+        };
+        Some(format!("{prompt}{away} {}", harness::FINAL_ANSWER_RULE))
     }
 
     /// Commandes conseillées sans avoir été lancées : la réponse dit à
@@ -1794,6 +1898,7 @@ where
         if aids.commands_checked
             || self.subagent
             || interrupt_requested()
+            || crate::permissions::user_away()
             || !harness::enabled(Aid::TriedCommands)
         {
             return None;
@@ -1842,6 +1947,28 @@ where
             "L'agent a écrit ses questions dans sa réponse : Claw lui demande de les poser avec le menu à choix",
         );
         true
+    }
+
+    /// Titres sans contenu : la réponse annonce un travail par des titres
+    /// (`### 2a. Composant URLInput`) sans rien dessous et sans avoir appelé
+    /// d'outil. Le modèle est renvoyé le faire, deux fois au plus par tour,
+    /// avant tout autre contrôle.
+    fn empty_titles_gate(&mut self, aids: &mut TurnAids, answer: &str) -> Option<String> {
+        if aids.empty_title_rounds >= harness::MAX_EMPTY_TITLE_ROUNDS
+            || interrupt_requested()
+            || !harness::enabled(Aid::EmptyTitles)
+        {
+            return None;
+        }
+        let (titles, ends_on_one) = harness::empty_titles(answer);
+        if !ends_on_one && titles.len() < 2 {
+            return None;
+        }
+        aids.empty_title_rounds += 1;
+        self.api_client.notify(
+            "La réponse s'arrête sur des titres sans contenu : Claw renvoie l'agent faire le travail annoncé",
+        );
+        Some(harness::empty_titles_feedback(&titles))
     }
 
     /// Persévérance : le modèle veut s'arrêter juste après plusieurs échecs
@@ -3247,6 +3374,13 @@ mod tests {
             CAN_ASK.with(std::cell::Cell::get)
         }
 
+        fn image_defects(
+            &mut self,
+            _images: &[crate::attachments::ImageAttachment],
+        ) -> Vec<(usize, String)> {
+            DEFECTS.with(|defects| defects.borrow().clone())
+        }
+
         fn plan_step(&mut self, step: crate::team::Step) {
             self.observed
                 .borrow_mut()
@@ -3364,6 +3498,9 @@ mod tests {
     thread_local! {
         /// Quelqu'un peut répondre aux questions de l'agent.
         static CAN_ASK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        /// Défauts que le lecteur d'images voit dans les images de la demande.
+        static DEFECTS: std::cell::RefCell<Vec<(usize, String)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
     }
 
     #[test]
@@ -3403,6 +3540,164 @@ mod tests {
         let summary = runtime.run_turn("explique ce fichier", None).expect("tour");
         assert_eq!(summary.iterations, 1);
         assert!(!observed.borrow().requests[0].contains("[Claw guide]"));
+    }
+
+    fn capture() -> crate::attachments::ImageAttachment {
+        crate::attachments::ImageAttachment {
+            media_type: "image/png".to_string(),
+            data: "AAAA".to_string(),
+            path: std::path::PathBuf::from("capture.png"),
+        }
+    }
+
+    #[test]
+    fn images_sent_without_a_complaint_are_sorted_before_any_debugging() {
+        // Un constat bref avec une capture : le modèle trie d'abord, et rien
+        // n'est demandé de plus quand il n'a rien modifié.
+        let (mut runtime, observed, _) =
+            aided_runtime(vec![text_step("C'est le résultat attendu.")], vec![]);
+        let summary = runtime
+            .run_turn_with_images("c'est la même chose", vec![capture()], None)
+            .expect("tour");
+        assert_eq!(summary.iterations, 1);
+        {
+            let observed = observed.borrow();
+            assert!(observed.requests[0].contains("First decide what they mean"));
+            assert!(
+                !observed.requests[0].contains("The user is telling you that something is wrong")
+            );
+        }
+
+        // Un long cahier des charges avec une capture où le lecteur voit un
+        // défaut : la capture montre le résultat cassé, pas une maquette.
+        DEFECTS.with(|defects| {
+            *defects.borrow_mut() = vec![(1, "the comparison area is empty".to_string())];
+        });
+        let spec = format!(
+            "{} et la page de comparaison",
+            "voici le cahier des charges complet ".repeat(12)
+        );
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                text_step("Tout est fait, le projet est prêt."),
+                text_step("La zone vide venait du rendu ; corrigé et observé."),
+            ],
+            vec![],
+        );
+        let summary = runtime
+            .run_turn_with_images(&spec, vec![capture()], None)
+            .expect("tour");
+        DEFECTS.with(|defects| defects.borrow_mut().clear());
+        assert_eq!(summary.iterations, 2);
+        {
+            let observed = observed.borrow();
+            assert!(observed.requests[0].contains(
+                "The image reader saw a defect in image 1: the comparison area is empty."
+            ));
+            assert!(observed.requests[1].contains("look again at each image they sent"));
+        }
+
+        // Une demande ordinaire avec une image : chaque image est lue.
+        let (mut runtime, observed, _) = aided_runtime(vec![text_step("Voilà.")], vec![]);
+        let summary = runtime
+            .run_turn_with_images(
+                "fais une interface comme sur l'image",
+                vec![capture()],
+                None,
+            )
+            .expect("tour");
+        assert_eq!(summary.iterations, 1);
+        assert!(observed.borrow().requests[0]
+            .contains("Before you plan, write in one line what each one shows"));
+    }
+
+    #[test]
+    fn a_reply_that_stops_on_empty_titles_is_sent_back_to_do_the_work() {
+        const TITLES: &str =
+            "Maintenant, la page :\n\n### 2a. Composant URLInput\n\n### 2b. Page /url";
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![text_step(TITLES), text_step(TITLES), text_step(TITLES)],
+            vec![],
+        );
+        let summary = runtime
+            .run_turn("ajoute la page pour l'URL", None)
+            .expect("tour");
+        // Renvoyé deux fois au plus, puis la réponse part telle quelle.
+        assert_eq!(summary.iterations, 3);
+        let observed = observed.borrow();
+        assert!(observed.requests[1].contains(
+            r#"Your reply has section titles with nothing under them: \"2a. Composant URLInput\", \"2b. Page /url\""#
+        ));
+        assert_eq!(observed.superseded, 2);
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("titres sans contenu")));
+    }
+
+    #[test]
+    fn a_permission_request_left_unanswered_is_not_asked_again_in_the_turn() {
+        struct Away(usize);
+        impl PermissionPrompter for Away {
+            fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
+                self.0 += 1;
+                crate::permissions::unanswered_permission(&request.tool_name)
+            }
+        }
+        let (mut runtime, observed, bash_calls) = aided_runtime(
+            vec![
+                tool_step("bash", r#"{"command":"npm test"}"#),
+                tool_step("bash", r#"{"command":"npm test"}"#),
+                tool_step("bash", r#"{"command":"npm run build"}"#),
+                tool_step("bash", r#"{"command":"npm run lint"}"#),
+                tool_step("bash", r#"{"command":"npm run dev"}"#),
+                text_step("Les vérifications attendent votre accord."),
+                tool_step("bash", r#"{"command":"npm test"}"#),
+                text_step("Toujours sans réponse."),
+            ],
+            vec![],
+        );
+        // Un mode où bash demande l'autorisation.
+        runtime
+            .permission_policy
+            .set_active_mode(PermissionMode::WorkspaceWrite);
+        let mut away = Away(0);
+        let summary = runtime
+            .run_turn("vérifie le projet", Some(&mut away))
+            .expect("tour");
+        // Une seule demande : les suivantes n'ont pas attendu un utilisateur absent.
+        assert_eq!(away.0, 1);
+        assert!(bash_calls.borrow().is_empty());
+        assert_eq!(summary.iterations, 6);
+        assert!(crate::permissions::user_away());
+        {
+            let observed = observed.borrow();
+            // Le modèle apprend que la commande n'a pas tourné, sans être bloquée.
+            assert!(observed.requests[1]
+                .contains("[Claw] Not run: nobody answered the permission request for `bash`"));
+            assert!(observed.requests[1].contains("It is not hanging"));
+            assert!(observed.requests[2].contains("so the request for `bash` was not asked"));
+            // Des appels qui n'ont pas tourné ne sont pas des échecs.
+            assert!(!observed
+                .requests
+                .iter()
+                .any(|request| request.contains("tool calls in a row have failed")));
+            assert_eq!(
+                observed
+                    .notices
+                    .iter()
+                    .filter(|notice| notice.contains("restée sans réponse"))
+                    .count(),
+                1
+            );
+        }
+
+        // L'utilisateur écrit de nouveau : il est là, l'autorisation lui est demandée.
+        runtime
+            .run_turn("vas-y, je suis là", Some(&mut away))
+            .expect("tour");
+        assert_eq!(away.0, 2);
+        crate::permissions::set_user_away(false);
     }
 
     #[test]
@@ -4046,8 +4341,10 @@ mod tests {
         assert_eq!(observed.consults[0].0, super::ConsultPurpose::Review);
         assert!(observed.consults[0].1.contains("écris total.py"));
         assert!(observed.consults[0].1.contains("+def total(prix):"));
-        // Le modèle confronte d'abord son travail aux exigences…
+        // Le modèle confronte d'abord son travail aux exigences, la demande
+        // citée mot pour mot…
         assert!(observed.requests[2].contains("check your work against every requirement"));
+        assert!(observed.requests[2].contains(r"word for word:\n<<<\nécris total.py\n>>>"));
         // … puis les remarques du relecteur lui reviennent.
         assert!(observed.requests[3].contains("Another model reviewed your changes"));
         assert!(observed.requests[3].contains("liste vide non gérée"));

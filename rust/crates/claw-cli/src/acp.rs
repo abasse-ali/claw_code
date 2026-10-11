@@ -288,7 +288,9 @@ impl PermissionPrompter for AcpPrompter {
             .and_then(|outcome| outcome.get("optionId"))
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
-        // Refus : l'outil ne s'exécutera pas, l'éditeur doit voir l'appel clos.
+        // Refus ou pas de réponse : l'outil ne s'exécutera pas, l'éditeur doit
+        // voir l'appel clos.
+        let unanswered = reply.is_none() && !runtime::interrupt::interrupt_requested();
         if !matches!(selected.as_deref(), Some("allow_once" | "allow_always")) {
             let mut calls = self
                 .calls
@@ -306,7 +308,7 @@ impl PermissionPrompter for AcpPrompter {
                         "sessionUpdate": "tool_call_update",
                         "toolCallId": call_id,
                         "status": "failed",
-                        "content": [{ "type": "content", "content": { "type": "text", "text": "Refusé par l'utilisateur." } }],
+                        "content": [{ "type": "content", "content": { "type": "text", "text": if unanswered { "Pas de réponse : rien n'a été exécuté." } else { "Refusé par l'utilisateur." } } }],
                     },
                 }),
             );
@@ -327,6 +329,9 @@ impl PermissionPrompter for AcpPrompter {
             Some(_) => PermissionPromptDecision::Deny {
                 reason: "refusé dans l'éditeur".to_string(),
             },
+            // Personne n'a répondu dans le délai : l'appel n'a pas tourné,
+            // et les demandes suivantes du tour ne seront pas posées.
+            None if unanswered => runtime::unanswered_permission(&request.tool_name),
             None => PermissionPromptDecision::Deny {
                 reason: "demande d'autorisation annulée".to_string(),
             },

@@ -90,9 +90,9 @@ pub use oauth::{
 };
 pub use paths::{find_executable, home_dir};
 pub use permissions::{
-    request_mode_switch, PermissionMode, PermissionOutcome, PermissionPolicy,
-    PermissionPromptDecision, PermissionPrompter, PermissionRequest, PermissionRule,
-    PermissionRules,
+    is_not_run, request_mode_switch, unanswered_permission, user_away, PermissionMode,
+    PermissionOutcome, PermissionPolicy, PermissionPromptDecision, PermissionPrompter,
+    PermissionRequest, PermissionRule, PermissionRules, NOT_RUN_PREFIX,
 };
 pub use prompt::{
     current_date_iso, load_system_prompt, prepend_bullets, ContextFile, ProjectContext,

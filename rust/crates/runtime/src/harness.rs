@@ -65,6 +65,8 @@ pub enum Aid {
     ProblemGuide,
     /// Commandes conseillées à l'utilisateur sans avoir été lancées.
     TriedCommands,
+    /// Réponse arrêtée sur des titres sans contenu : le travail annoncé est à faire.
+    EmptyTitles,
 }
 
 impl Aid {
@@ -93,6 +95,7 @@ impl Aid {
             Self::Questions => "CLAW_QUESTIONS",
             Self::ProblemGuide => "CLAW_PROBLEM_GUIDE",
             Self::TriedCommands => "CLAW_TRIED_COMMANDS",
+            Self::EmptyTitles => "CLAW_EMPTY_TITLES",
         }
     }
 }
@@ -161,11 +164,20 @@ pub fn verify_commands_for(
     for file in changed {
         let file = Path::new(file);
         let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
-        let folder = file
+        let candidates: Vec<&Path> = file
             .ancestors()
             .skip(1)
             .take_while(|dir| dir.starts_with(&root) && *dir != root)
-            .find(|dir| !detect_verify_commands(dir).is_empty());
+            .filter(|dir| !detect_verify_commands(dir).is_empty())
+            .collect();
+        // Le plus proche, hors d'un dossier de tests : `backend/tests/conftest.py`
+        // ne fait pas de `tests/` le projet (lancés de là, les tests ne
+        // trouvent plus `app`), le projet est `backend/`.
+        let folder = candidates
+            .iter()
+            .find(|dir| !in_tests_dir(dir, &root))
+            .or_else(|| candidates.first())
+            .copied();
         if let Some(folder) = folder {
             if !folders.iter().any(|known| known == folder) {
                 folders.push(folder.to_path_buf());
@@ -208,6 +220,21 @@ pub fn verify_commands_for(
                 .map(move |command| format!("{place} && {command}"))
         })
         .collect()
+}
+
+/// `dir` est dans un dossier de tests du projet (`tests/`, `__tests__/`...).
+fn in_tests_dir(dir: &Path, root: &Path) -> bool {
+    dir.strip_prefix(root).is_ok_and(|relative| {
+        relative.components().any(|part| {
+            matches!(
+                part.as_os_str()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "tests" | "test" | "__tests__" | "spec" | "specs"
+            )
+        })
+    })
 }
 
 fn python_program() -> &'static str {
@@ -1026,6 +1053,40 @@ pub fn test_guard_feedback(name: &str) -> String {
 /// confronte son travail à chaque exigence avant de conclure (une fois par tour).
 pub const CHECKLIST_PROMPT: &str = "[Claw] Before you finish, check your work against every requirement. List each part of the user's request (when their last message only asks you to continue, the request it continues): every feature, page, file, fix or explanation they asked for, plus the requirements of the docstrings, comments and specifications of the code you changed, and the edge cases these imply (empty or missing input, boundaries, invalid values, duplicates, ordering, large inputs). For each one, find the evidence that it is done: the file and the code that handle it, and the test or command output from this session that shows it works. An intention, a plan or a file you did not check is not evidence. Whatever is missing or unverified, do it now with your tools, in this reply: do not announce it, do not leave it for later, do not ask the user to do it. If the project has tests, add the missing test and run it; never describe tests, commands or results that do not exist, and never weaken or delete an existing test. Then end with your final answer to the user's original request, written as the report the system prompt describes under \"Final answer\" (the outcome first, what was wrong and why, what you changed, how it was verified, what is left for the user). Its verification part gives one short line per requirement with its evidence; it claims only what this check established and names plainly any part that is not done or not verified. The user reads only that last message and has not seen this check: it must stand on its own, cover everything they asked for, including any explanation or instructions they requested (such as how to install, run or test the result), be complete without padding, and not refer to this check.";
 
+/// Demande citée au plus dans le contrôle des exigences.
+const CHECKLIST_REQUEST_MAX_CHARS: usize = 4_000;
+
+/// Ajouté aux contrôles quand une demande d'autorisation de ce tour est restée
+/// sans réponse : le modèle ne peut plus lancer ce qui en demande une.
+pub const AWAY_NOTE: &str = "The user is not answering permission requests right now: check with read-only tools only (read, search), and list in your answer what is left unverified and which calls wait for their approval.";
+
+/// Contrôle des exigences, avec la demande à contrôler citée mot pour mot.
+/// Sans elle, un petit modèle qui ne la voit plus (trente messages plus haut,
+/// après un « reprendre ») contrôle ce qu'il croit avoir fait, pas ce qui est
+/// demandé. `earlier` : la demande qu'un message court peut poursuivre.
+#[must_use]
+pub fn checklist_prompt(request: &str, earlier: Option<&str>, away: bool) -> String {
+    let quoted = match earlier.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(earlier) => format!(
+            "Their last message: \"{}\". If it only asks you to continue, check against the request it continues, word for word:\n<<<\n{}\n>>>\nOtherwise check against their last message.",
+            shortened(request, CHECKLIST_REQUEST_MAX_CHARS),
+            shortened(earlier, CHECKLIST_REQUEST_MAX_CHARS)
+        ),
+        None => format!(
+            "The request to check against, word for word:\n<<<\n{}\n>>>",
+            shortened(request, CHECKLIST_REQUEST_MAX_CHARS)
+        ),
+    };
+    let mut prompt = format!(
+        "{CHECKLIST_PROMPT}\n\n{quoted}\nGo through it line by line: one line of your check per sentence or bullet of this request, even for a part you believe is already done (then quote the file and line that show it)."
+    );
+    if away {
+        prompt.push(' ');
+        prompt.push_str(AWAY_NOTE);
+    }
+    prompt
+}
+
 /// Fin des messages que Claw renvoie au modèle après un contrôle : la réponse
 /// qui suivra est celle que l'utilisateur lira, elle doit répondre à sa demande.
 pub const FINAL_ANSWER_RULE: &str = "When this is dealt with, end with your final answer to the user's original request. The user reads only that last message and has not seen this note: it must stand on its own, written as the report the system prompt describes under \"Final answer\" (the outcome first, what was wrong and why, what you changed, how it was verified, what is left for the user), cover everything they asked for, including any explanation or instructions they requested (such as how to install, run or test the result), claim only what the files and your command outputs show, be complete without padding, and not refer to this note.";
@@ -1042,6 +1103,99 @@ pub const PERSISTENCE_FAILURES: u32 = 2;
 pub fn persistence_feedback(failures: u32) -> String {
     format!(
         "[Claw] Your last {failures} tool calls failed and you are about to stop. Do not hand the task back to the user while one of your tools can still do it. Say in one sentence what these failures tell you, then try a different way: fix the command, use another tool, take a smaller step or change approach. Only if nothing you can run would work, explain precisely what blocks you and what exactly the user must do. {FINAL_ANSWER_RULE}"
+    )
+}
+
+// --- Titres sans contenu --------------------------------------------------------------
+
+/// Renvois au plus, par tour, pour une réponse arrêtée sur des titres vides.
+pub const MAX_EMPTY_TITLE_ROUNDS: usize = 2;
+/// Titres cités au plus dans la remarque.
+const EMPTY_TITLES_SHOWN: usize = 6;
+
+/// Niveau et texte d'un titre Markdown (`### Titre`) ; `None` pour une autre
+/// ligne. Le texte peut être vide (`##` seul).
+fn markdown_title(line: &str) -> Option<(usize, &str)> {
+    let trimmed = line.trim_start();
+    // Indenté de quatre espaces ou plus : du code, pas un titre.
+    if line.len() - trimmed.len() > 3 {
+        return None;
+    }
+    let level = trimmed.chars().take_while(|ch| *ch == '#').count();
+    if !(1..=6).contains(&level) {
+        return None;
+    }
+    let rest = &trimmed[level..];
+    if !rest.is_empty() && !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    Some((level, rest.trim().trim_end_matches('#').trim_end()))
+}
+
+/// Ligne de séparation (`---`, `***`, `___`).
+fn is_rule(line: &str) -> bool {
+    let marks: Vec<char> = line.chars().filter(|ch| !ch.is_whitespace()).collect();
+    marks.len() >= 3
+        && ['-', '*', '_']
+            .iter()
+            .any(|mark| marks.iter().all(|ch| ch == mark))
+}
+
+/// Titres de la réponse qui n'ont rien dessous (ni texte, ni liste, ni code)
+/// avant le titre suivant de même niveau ou plus haut, hors blocs de code ;
+/// et vrai si la réponse s'arrête sur un titre. Un titre suivi de ses
+/// sous-titres n'est vide que si eux-mêmes le sont.
+#[must_use]
+pub fn empty_titles(answer: &str) -> (Vec<String>, bool) {
+    // Dans l'ordre : un titre (niveau, texte), ou du contenu (`None`).
+    let mut items: Vec<Option<(usize, &str)>> = Vec::new();
+    let mut in_code = false;
+    for line in answer.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_code = !in_code;
+            items.push(None);
+            continue;
+        }
+        if in_code {
+            items.push(None);
+            continue;
+        }
+        if trimmed.is_empty() || is_rule(trimmed) {
+            continue;
+        }
+        match markdown_title(line) {
+            Some((_, "")) => {}
+            title => items.push(title),
+        }
+    }
+    let empty = items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            let (level, text) = (*item)?;
+            let has_content = items[index + 1..]
+                .iter()
+                .take_while(|next| !matches!(next, Some((next_level, _)) if *next_level <= level))
+                .any(Option::is_none);
+            (!has_content).then(|| text.to_string())
+        })
+        .collect();
+    (empty, matches!(items.last(), Some(Some(_))))
+}
+
+/// Message adressé au modèle dont la réponse annonce un travail par des
+/// titres sans contenu, sans avoir appelé d'outil.
+#[must_use]
+pub fn empty_titles_feedback(titles: &[String]) -> String {
+    let shown: Vec<String> = titles
+        .iter()
+        .take(EMPTY_TITLES_SHOWN)
+        .map(|title| format!("\"{title}\""))
+        .collect();
+    format!(
+        "[Claw] Your reply has section titles with nothing under them: {}. A title does nothing by itself: you called no tool, so the work these titles announce does not exist yet. Do it now with your tools, starting with the first title (one tool call per file to create or change). Do not write these titles again before the work is done; if a title was only meant to introduce some text, write that text under it.",
+        shown.join(", ")
     )
 }
 
@@ -1223,33 +1377,65 @@ const REQUEST_VERBS: &[&str] = &[
     "design",
 ];
 
-/// L'utilisateur signale que quelque chose ne va pas (résultat faux, erreur,
-/// capture d'écran d'un défaut) : un message bref avec une tournure de
-/// plainte ou des images, ou un long message qui porte une sortie d'erreur.
+/// Ce que dit le message de l'utilisateur, pour la méthode à y joindre.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Report {
+    /// Une demande ordinaire.
+    #[default]
+    None,
+    /// Il dit que quelque chose ne va pas, ou colle une sortie d'erreur.
+    Problem,
+    /// Des images sans plainte écrite (message bref, ou défaut vu par le
+    /// lecteur d'images) : défaut à corriger, résultat accepté ou modèle à
+    /// suivre, le modèle trie d'abord.
+    Images,
+}
+
+/// Ce que dit le message de l'utilisateur : un message bref avec une
+/// tournure de plainte, ou un long message qui porte une sortie d'erreur,
+/// signale un problème ; des images envoyées avec un message bref, ou dans
+/// lesquelles le lecteur d'images a vu un défaut (`defects`), sont à trier.
 #[must_use]
-pub fn reports_a_problem(text: &str, images: usize) -> bool {
+pub fn read_report(text: &str, images: usize, defects: usize) -> Report {
     let lower = text.to_lowercase();
     let words: Vec<&str> = lower.split_whitespace().collect();
+    let seen = if images > 0 && defects > 0 {
+        Report::Images
+    } else {
+        Report::None
+    };
     let Some(first) = words.first() else {
         // Des images sans un mot : « regarde ».
-        return images > 0;
+        return if images > 0 {
+            Report::Images
+        } else {
+            Report::None
+        };
     };
     if words.len() > REPORT_MAX_WORDS {
-        return ERROR_DUMP_MARKS.iter().any(|mark| lower.contains(mark));
+        return if ERROR_DUMP_MARKS.iter().any(|mark| lower.contains(mark)) {
+            Report::Problem
+        } else {
+            seen
+        };
     }
     let first = first.trim_matches(|ch: char| !ch.is_alphanumeric());
     if REQUEST_VERBS.contains(&first) {
-        return false;
+        seen
+    } else if PROBLEM_WORDS.iter().any(|word| lower.contains(word)) {
+        Report::Problem
+    } else if images > 0 && words.len() <= REPORT_WITH_IMAGE_MAX_WORDS {
+        Report::Images
+    } else {
+        seen
     }
-    PROBLEM_WORDS.iter().any(|word| lower.contains(word))
-        || (images > 0 && words.len() <= REPORT_WITH_IMAGE_MAX_WORDS)
 }
 
 /// Méthode de débogage jointe au message d'un utilisateur qui signale un
 /// problème : un petit modèle saute sinon à une cause supposée, ne regarde
 /// qu'une image sur deux et annonce « résolu » sans avoir rien observé.
 #[must_use]
-pub fn problem_guide(images: usize) -> String {
+pub fn problem_guide(images: usize, defects: &[(usize, String)]) -> String {
     let pictures = match images {
         0 => String::new(),
         1 => " Their message has 1 image: read all of it.".to_string(),
@@ -1258,13 +1444,73 @@ pub fn problem_guide(images: usize) -> String {
         ),
     };
     format!(
-        "{GUIDE_PREFIX} The user is telling you that something is wrong.{pictures} Work as a debugger, in this order:\n1. Symptoms: list every distinct problem in their message and in each image, one line each, quoting what is shown. Drop none of them, and start with the one that makes the result useless to them.\n2. Reproduce: observe each symptom yourself with your tools, the way the user gets it (same entry point, same kind of input), before you change anything. A request that answers 200 or tests that pass do not show that what the user sees is right: look at the result itself (the page as the browser shows it, with the ViewPage tool when you have it; the produced file or image; the text).\n3. Cause: find it from evidence (logs, outputs, the code path that produces the symptom). Do not fix a guess; when several causes are possible, run the check that tells them apart.\n4. Fix the cause, then observe again that each symptom is gone.\nIn your answer, say for each symptom what you observed after the fix. If you could not observe one (for example what a browser displays), do not call it solved: say what you changed, what you could not check and exactly what the user should look at. Do not ask the user to investigate for you while one of your tools can still do it."
+        "{GUIDE_PREFIX} The user is telling you that something is wrong.{pictures}{} Work as a debugger, in this order:\n{DEBUGGER_STEPS}",
+        seen_defects(defects)
+    )
+}
+
+/// La méthode du débogueur : symptômes, reproduction, cause prouvée,
+/// disparition observée, et ce que la réponse en dit.
+const DEBUGGER_STEPS: &str = "1. Symptoms: list every distinct problem in their message and in each image, one line each, quoting what is shown. Drop none of them, and start with the one that makes the result useless to them.\n2. Reproduce: observe each symptom yourself with your tools, the way the user gets it (same entry point, same kind of input), before you change anything. A request that answers 200 or tests that pass do not show that what the user sees is right: look at the result itself (the page as the browser shows it, with the ViewPage tool when you have it; the produced file or image; the text).\n3. Cause: find it from evidence (logs, outputs, the code path that produces the symptom). Do not fix a guess; when several causes are possible, run the check that tells them apart.\n4. Fix the cause, then observe again that each symptom is gone.\nIn your answer, say for each symptom what you observed after the fix. If you could not observe one (for example what a browser displays), do not call it solved: say what you changed, what you could not check and exactly what the user should look at. Do not ask the user to investigate for you while one of your tools can still do it.";
+
+/// Ce que le lecteur d'images a vu (« image 2: zone de comparaison vide »).
+fn seen_defects(defects: &[(usize, String)]) -> String {
+    if defects.is_empty() {
+        return String::new();
+    }
+    let seen: Vec<String> = defects
+        .iter()
+        .map(|(number, line)| format!("image {number}: {line}"))
+        .collect();
+    format!(" The image reader saw a defect in {}.", seen.join("; "))
+}
+
+/// « 1 image », « 3 images ».
+fn images_count(images: usize) -> String {
+    if images == 1 {
+        "1 image".to_string()
+    } else {
+        format!("{images} images")
+    }
+}
+
+/// Méthode jointe à des images envoyées sans plainte écrite (message bref,
+/// ou défaut vu par le lecteur d'images) : le modèle décide d'abord ce
+/// qu'elles disent. Un constat (« c'est la même chose ») n'est pas une
+/// plainte, et un petit modèle « corrige » sinon ce qui marche.
+#[must_use]
+pub fn triage_guide(images: usize, defects: &[(usize, String)]) -> String {
+    let every = if images > 1 {
+        format!(" Each one can show something different: go through all {images}.")
+    } else {
+        String::new()
+    };
+    format!(
+        "{GUIDE_PREFIX} The user sent {} with their message.{every}{} First decide what they mean: say in one line what each image shows and whether it reports a problem, shows a result they accept, or is a design to follow. Only if it reports a problem, work as a debugger, in this order:\n{DEBUGGER_STEPS}",
+        images_count(images),
+        seen_defects(defects)
+    )
+}
+
+/// Images jointes à une demande ordinaire (cahier des charges, maquette) :
+/// chacune est lue, et une capture de l'application telle qu'elle tourne est
+/// prise pour ce qu'elle est, l'état actuel, pas un modèle à copier.
+#[must_use]
+pub fn image_guide(images: usize) -> String {
+    format!(
+        "{GUIDE_PREFIX} This message has {}. Before you plan, write in one line what each one shows. If one shows the application as it runs today, list what looks wrong or unfinished in it: it is evidence of its current behaviour, not a design to copy.",
+        images_count(images)
     )
 }
 
 /// Message renvoyé au modèle qui conclut après un signalement de problème :
 /// chaque symptôme doit avoir sa cause observée et sa disparition observée.
 pub const PROBLEM_EVIDENCE_PROMPT: &str = "[Claw] Before this answer goes to the user: they reported a problem. Go back to their message and to each image it carries, and list every symptom. For each one, name the observation you made in this turn, with your tools, that shows its cause, and the one that shows it is gone after your change. A guess (\"probably\", \"likely\") is not a cause; a passing test or a 200 response is not the symptom gone. Where an observation is missing, make it now: read the code that produces the symptom, run it the way the user does, read the logs and the result itself. If something truly cannot be observed with your tools, say so in your answer instead of calling it solved, and never hand the investigation to the user while one of your tools can still do it.";
+
+/// Message renvoyé au modèle qui conclut après des images envoyées sans
+/// plainte écrite, quand il a modifié des fichiers ou que le lecteur d'images
+/// y a vu un défaut.
+pub const IMAGES_EVIDENCE_PROMPT: &str = "[Claw] Before this answer goes to the user: look again at each image they sent. For each problem an image shows, name the observation you made in this turn, with your tools, that shows its cause, and the one that shows it is gone after your change; where one is missing, make it now. If an image shows no problem (a design to follow, a result they accept), say so in one line in your answer. Never call solved what you did not observe.";
 
 // --- Outil appelé comme une commande ---------------------------------------------------
 
@@ -1818,8 +2064,9 @@ GET https://cdn.example.com/lib.js:8080 failed, see http://docs.example.com/err.
 #[cfg(test)]
 mod guide_tests {
     use super::{
-        problem_guide, reports_a_problem, tool_named_in_command, untried_commands,
-        untried_feedback, GUIDE_PREFIX,
+        checklist_prompt, empty_titles, empty_titles_feedback, image_guide, problem_guide,
+        read_report, tool_named_in_command, triage_guide, untried_commands, untried_feedback,
+        Report, GUIDE_PREFIX,
     };
 
     #[test]
@@ -1827,22 +2074,33 @@ mod guide_tests {
         // Messages d'une vraie session, avec ou sans captures d'écran.
         for (text, images) in [
             ("c'est n'importe quoi", 2),
-            ("voilà avec la premiere option", 2),
             ("çaa reste hors ligne", 0),
             ("ça ne marche pas", 0),
             ("le bouton n'affiche rien", 0),
             ("corrige le bug du panier", 0),
             ("it still fails on empty input", 0),
-            ("", 1),
+            ("c'est toujours le même", 1),
         ] {
-            assert!(reports_a_problem(text, images), "{text}");
+            assert_eq!(read_report(text, images, 0), Report::Problem, "{text}");
         }
         // Une sortie d'erreur collée dans un long message.
         let dump = format!(
             "{}\nTraceback (most recent call last):\n  File \"a.py\", line 3",
             "ligne de journal sans intérêt ".repeat(20)
         );
-        assert!(reports_a_problem(&dump, 0));
+        assert_eq!(read_report(&dump, 0, 0), Report::Problem);
+        // Des images sans plainte écrite : à trier, ce n'est pas forcément un
+        // problème (« c'est la même chose » montrait un résultat accepté).
+        for (text, images) in [
+            ("voilà avec la premiere option", 2),
+            (
+                "c'est la même chose, http://localhost:3000 et http://localhost:8000",
+                1,
+            ),
+            ("", 1),
+        ] {
+            assert_eq!(read_report(text, images, 0), Report::Images, "{text}");
+        }
         for (text, images) in [
             ("comment le lancé ?", 0),
             ("ajoute une page d'erreur 404", 0),
@@ -1851,20 +2109,103 @@ mod guide_tests {
             ("merci, c'est parfait", 0),
             ("", 0),
         ] {
-            assert!(!reports_a_problem(text, images), "{text}");
+            assert_eq!(read_report(text, images, 0), Report::None, "{text}");
         }
-        // Une longue demande de travail qui parle d'erreurs n'est pas un signalement.
+        // Une longue demande de travail qui parle d'erreurs n'est pas un signalement...
         let request = format!(
             "{} gère les erreurs de saisie",
             "décris le besoin ".repeat(30)
         );
-        assert!(!reports_a_problem(&request, 1));
+        assert_eq!(read_report(&request, 1, 0), Report::None);
+        // ... sauf si le lecteur d'images voit un défaut dans la capture jointe :
+        // un cahier des charges envoyé avec une capture du résultat cassé.
+        assert_eq!(read_report(&request, 1, 1), Report::Images);
+        assert_eq!(
+            read_report("fais une interface comme sur l'image", 1, 1),
+            Report::Images
+        );
 
-        let guide = problem_guide(2);
+        let guide = problem_guide(2, &[]);
         assert!(guide.starts_with(GUIDE_PREFIX));
         assert!(!guide.starts_with(super::CLAW_NOTE_PREFIX));
         assert!(guide.contains("go through all 2"));
-        assert!(!problem_guide(0).contains("Their message has"));
+        assert!(guide.contains("2. Reproduce: observe each symptom yourself"));
+        assert!(!problem_guide(0, &[]).contains("Their message has"));
+        let seen = [(2, "the comparison area is empty".to_string())];
+        assert!(problem_guide(2, &seen)
+            .contains("The image reader saw a defect in image 2: the comparison area is empty."));
+
+        // Tri : la méthode n'est suivie que si les images signalent un problème.
+        let triage = triage_guide(1, &seen);
+        assert!(triage.starts_with(GUIDE_PREFIX));
+        assert!(triage.contains("The user sent 1 image with their message."));
+        assert!(triage.contains("First decide what they mean"));
+        assert!(triage.contains("image 2: the comparison area is empty"));
+        assert!(triage.contains("4. Fix the cause"));
+        assert!(!triage.contains("The user is telling you that something is wrong"));
+        let images = image_guide(3);
+        assert!(images.starts_with(GUIDE_PREFIX));
+        assert!(images.contains("This message has 3 images."));
+        assert!(images.contains("not a design to copy"));
+    }
+
+    #[test]
+    fn a_reply_made_of_empty_titles_is_told_from_a_report() {
+        // La réponse 115 d'une vraie session : le travail annoncé, rien dessous.
+        let announced = "Maintenant, page frontend dédiée pour l'URL :\n\n### 2. Frontend : page dédiée pour l'URL\n\n#### 2a. Composant URLInput\n\n#### 2b. Page /url\n\n#### 2c. Mise à jour de l'API frontend\n\n#### 2d. Lien depuis la page d'accueil";
+        let (titles, ends_on_one) = empty_titles(announced);
+        assert!(ends_on_one);
+        assert_eq!(
+            titles,
+            [
+                "2. Frontend : page dédiée pour l'URL",
+                "2a. Composant URLInput",
+                "2b. Page /url",
+                "2c. Mise à jour de l'API frontend",
+                "2d. Lien depuis la page d'accueil",
+            ]
+        );
+        let feedback = empty_titles_feedback(&titles);
+        assert!(feedback.starts_with(
+            "[Claw] Your reply has section titles with nothing under them: \"2. Frontend"
+        ));
+        assert!(feedback.contains("you called no tool"));
+
+        // Un rapport : un titre suivi de sous-titres remplis n'est pas vide.
+        let report = "# Résultat\n## Ce qui a changé\n### backend\n- `app/main.py` : route ajoutée\n### frontend\nAucun changement.\n---\n## Vérification\n```bash\n# lancé\n## encore un commentaire\nnpm test\n```";
+        assert_eq!(empty_titles(report), (Vec::<String>::new(), false));
+        // Un seul titre vide au milieu d'un rapport : rien à signaler.
+        let (titles, ends_on_one) = empty_titles("## Fait\n### a\n### b\ntexte");
+        assert_eq!((titles.len(), ends_on_one), (1, false));
+        // Des commentaires dans un bloc de code ne sont pas des titres.
+        assert_eq!(
+            empty_titles("Lancez :\n```powershell\n# Dans le terminal\n# Puis\n```")
+                .0
+                .len(),
+            0
+        );
+        // `#include` ou `#1` ne sont pas des titres.
+        assert_eq!(empty_titles("#include <stdio.h>\n#1 priorité").0.len(), 0);
+    }
+
+    #[test]
+    fn the_checklist_quotes_the_request_to_check() {
+        let prompt = checklist_prompt("ajoute la traduction par URL", None, false);
+        assert!(prompt.contains("check your work against every requirement"));
+        assert!(prompt.contains("word for word:\n<<<\najoute la traduction par URL\n>>>"));
+        assert!(prompt.contains("one line of your check per sentence or bullet"));
+        assert!(!prompt.contains("not answering permission requests"));
+        // « reprendre » : la demande poursuivie est citée.
+        let prompt = checklist_prompt(
+            "reprendre",
+            Some("dans la langue traduite, c'est que le français ; et une page pour l'URL"),
+            true,
+        );
+        assert!(prompt.contains("Their last message: \"reprendre\""));
+        assert!(prompt.contains(
+            "<<<\ndans la langue traduite, c'est que le français ; et une page pour l'URL\n>>>"
+        ));
+        assert!(prompt.contains("not answering permission requests"));
     }
 
     #[test]
@@ -2066,6 +2407,29 @@ mod tests {
             &changed(&backend.join("app").join("main.py")),
         );
         assert_eq!(backend_checks.len(), 1, "{backend_checks:?}");
+        // Un test modifié : le projet reste `backend/`, une seule fois, même
+        // avec un fichier du code à côté.
+        fs::write(
+            backend.join("tests").join("test_api.py"),
+            "def test_ok():\n    pass\n",
+        )
+        .expect("test");
+        let both = [
+            backend
+                .join("tests")
+                .join("test_api.py")
+                .to_string_lossy()
+                .into_owned(),
+            backend
+                .join("app")
+                .join("main.py")
+                .to_string_lossy()
+                .into_owned(),
+        ];
+        assert_eq!(
+            verify_commands_for(&VerifySetting::Auto, &root, &both),
+            backend_checks
+        );
         assert!(
             backend_checks[0].starts_with("cd backend && "),
             "{backend_checks:?}"

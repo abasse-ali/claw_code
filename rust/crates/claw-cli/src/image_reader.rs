@@ -17,7 +17,10 @@ const IMAGE_NOT_SENT: &str =
 
 const READER_SYSTEM: &str = "You describe images for a software engineering assistant that cannot see them. Be exact and complete, and never guess at what is not visible.";
 
-const READER_PROMPT: &str = "Describe this image so that someone who cannot see it can work from your description alone.\n- Transcribe every visible piece of text exactly: error messages, code, commands, file names, labels, values, titles. Keep the line breaks of code and logs.\n- Say what kind of image it is (screenshot of an editor, a terminal, a web page or an application, a diagram, a photo) and describe its layout: which windows, panels or sections it has and what each one contains.\n- Point out what stands out: errors, warnings, selected or highlighted elements, anything that looks wrong, stuck or unfinished.\n- For a diagram or a chart, give its elements, how they relate and the numbers shown.\nWrite plain text, without any preamble.";
+const READER_PROMPT: &str = "Describe this image so that someone who cannot see it can work from your description alone.\n- Transcribe every visible piece of text exactly: error messages, code, commands, file names, labels, values, titles. Keep the line breaks of code and logs.\n- Say what kind of image it is (screenshot of an editor, a terminal, a web page or an application, a diagram, a photo) and describe its layout: which windows, panels or sections it has and what each one contains.\n- Point out what stands out: errors, warnings, selected or highlighted elements, anything that looks wrong, stuck or unfinished.\n- For a diagram or a chart, give its elements, how they relate and the numbers shown.\nWrite plain text, without any preamble.\nEnd with one last line, exactly one of these two:\nVERDICT: DEFECT - <what looks broken, stuck, empty or wrong, in a few words>\nwhen the image shows an application, a web page, a terminal or a document with an error, a failure, an empty or stuck area or a wrong result;\nVERDICT: OK\notherwise (a design, a mockup, a diagram, or a screen that looks right).";
+
+/// Début de la dernière ligne d'une description : le verdict du lecteur.
+const VERDICT: &str = "VERDICT:";
 
 /// Jetons accordés à une description.
 const DESCRIPTION_TOKENS: u32 = 2_500;
@@ -169,13 +172,95 @@ pub(crate) fn replacement(source: &ImageSource, number: usize, total: usize) -> 
         "Image described".to_string()
     };
     match descriptions().get(&image_key(source)) {
-        Some(description) => format!(
-            "[{place} by {} because the current model cannot read images. The description may miss a detail: ask the user when one matters.]\n{}",
-            description.model, description.text
-        ),
+        Some(description) => {
+            let (defect, body) = split_verdict(&description.text);
+            // Une capture du résultat cassé avait été prise pour une maquette.
+            let warning = defect.map_or_else(String::new, |line| {
+                format!("[Claw] The image reader saw a defect in this image: {line}. Treat it as evidence of a problem to fix, not as a design to copy.\n")
+            });
+            format!(
+                "{warning}[{place} by {} because the current model cannot read images. The description may miss a detail: ask the user when one matters.]\n{body}",
+                description.model
+            )
+        }
         None if total > 1 => format!("[Image {number} of {total}] {IMAGE_NOT_SENT}"),
         None => IMAGE_NOT_SENT.to_string(),
     }
+}
+
+/// `text` commence par `prefix`, sans tenir compte de la casse.
+fn strip_prefix_ignoring_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    text.get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &text[prefix.len()..])
+}
+
+/// Le défaut que le lecteur a vu (sa dernière ligne, `VERDICT: DEFECT - ...`),
+/// et la description sans sa ligne de verdict. Une description faite avant
+/// les verdicts n'en a pas : aucun défaut connu, texte entier.
+fn split_verdict(text: &str) -> (Option<String>, &str) {
+    let trimmed = text.trim_end();
+    let (body, last) = match trimmed.rfind('\n') {
+        Some(at) => (trimmed[..at].trim_end(), &trimmed[at + 1..]),
+        None => ("", trimmed),
+    };
+    // Le lecteur met parfois le verdict en gras ou entre guillemets.
+    let last = last
+        .trim()
+        .trim_matches(|ch: char| matches!(ch, '*' | '`' | '"' | '_'))
+        .trim();
+    let Some(verdict) = strip_prefix_ignoring_case(last, VERDICT) else {
+        return (None, text);
+    };
+    let defect = strip_prefix_ignoring_case(verdict.trim(), "DEFECT").map(|rest| {
+        let line = rest
+            .trim_start_matches(|ch: char| {
+                ch.is_whitespace() || matches!(ch, '-' | ':' | '\u{2013}' | '\u{2014}')
+            })
+            .trim();
+        if line.is_empty() {
+            "something looks broken or unfinished".to_string()
+        } else {
+            line.to_string()
+        }
+    });
+    (defect, body)
+}
+
+/// Défaut que le lecteur d'images a vu dans cette image, si elle est décrite.
+pub(crate) fn defect(source: &ImageSource) -> Option<String> {
+    let descriptions = descriptions();
+    split_verdict(&descriptions.get(&image_key(source))?.text).0
+}
+
+/// Au début d'un tour, pour `model` qui ne lit pas les images : fait décrire
+/// celles de la demande qui ne l'ont pas encore été, pour savoir tout de
+/// suite si elles montrent un défaut. L'état est annoncé à la requête
+/// suivante, par `prepare`, qui n'a alors plus rien à demander.
+pub(crate) fn describe(model: &str, sources: &[ImageSource], announce: &mut dyn FnMut(&str)) {
+    if !model_cannot_read_images(model) || sources.is_empty() {
+        return;
+    }
+    let Some(dir) = cache_dir() else {
+        return;
+    };
+    let found = std::cell::OnceCell::new();
+    let readers = || {
+        found
+            .get_or_init(|| Reader::configured().models(model))
+            .clone()
+    };
+    let images: Vec<&ImageSource> = sources.iter().collect();
+    describe_missing(model, &images, &dir, &readers, announce, |source| {
+        tools::advisors::ask_about_image(
+            &readers(),
+            READER_SYSTEM,
+            READER_PROMPT,
+            source,
+            DESCRIPTION_TOKENS,
+        )
+        .map(|opinion| (opinion.model, opinion.text))
+    });
 }
 
 /// Avant une requête à `model` : s'il ne lit pas les images, fait décrire
@@ -222,9 +307,23 @@ fn prepare_with(
     if images.is_empty() {
         return;
     }
-    // Descriptions déjà faites, dans ce processus ou lors d'une session passée.
+    let (had_missing, failure) = describe_missing(model, &images, dir, readers, announce, describe);
+    announce_state(model, &images, had_missing, failure.as_deref(), announce);
+}
+
+/// Descriptions déjà faites (dans ce processus ou lors d'une session passée),
+/// puis celles qui manquent, demandées aux lecteurs. Renvoie s'il en
+/// manquait, et l'erreur du dernier essai raté.
+fn describe_missing(
+    model: &str,
+    images: &[&ImageSource],
+    dir: &Path,
+    readers: &dyn Fn() -> Vec<String>,
+    announce: &mut dyn FnMut(&str),
+    describe: impl Fn(&ImageSource) -> Result<(String, String), String>,
+) -> (bool, Option<String>) {
     let mut missing = Vec::new();
-    for source in &images {
+    for source in images {
         let key = image_key(source);
         if descriptions().contains_key(&key) {
             continue;
@@ -268,7 +367,18 @@ fn prepare_with(
             }
         }
     }
+    (had_missing, failure)
+}
 
+/// Ce que reçoit le modèle à la place des images, dit à l'utilisateur quand
+/// cela change.
+fn announce_state(
+    model: &str,
+    images: &[&ImageSource],
+    had_missing: bool,
+    failure: Option<&str>,
+    announce: &mut dyn FnMut(&str),
+) {
     let described = images
         .iter()
         .filter(|source| descriptions().contains_key(&image_key(source)))
@@ -299,8 +409,8 @@ fn prepare_with(
         );
     }
     if absent > 0 {
-        let why = match &failure {
-            Some(error) => error.clone(),
+        let why = match failure {
+            Some(error) => error.to_string(),
             None if had_missing => {
                 "aucun modèle gratuit qui lit les images n'est disponible".to_string()
             }
@@ -329,7 +439,10 @@ fn count(number: usize, noun: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{image_key, load, prepare_with, replacement, save, Description, Reader};
+    use super::{
+        defect, descriptions, image_key, load, prepare_with, replacement, save, split_verdict,
+        Description, Reader,
+    };
     use api::{ImageSource, InputContentBlock, InputMessage};
     use std::cell::RefCell;
 
@@ -435,6 +548,50 @@ mod tests {
         assert_eq!(*asked.borrow(), 2);
         assert_eq!(notices.borrow().len(), 2);
         std::fs::remove_dir_all(&dir).expect("nettoyage");
+    }
+
+    #[test]
+    fn the_reader_verdict_tells_a_defect_from_a_design() {
+        let (defect_line, body) = split_verdict(
+            "A web page.\nThe comparison area is grey.\nVERDICT: DEFECT - the comparison area is empty",
+        );
+        assert_eq!(defect_line.as_deref(), Some("the comparison area is empty"));
+        assert_eq!(body, "A web page.\nThe comparison area is grey.");
+        // En gras, avec un tiret long, ou sans détail.
+        assert_eq!(
+            split_verdict("Texte\n**Verdict: defect \u{2014} page blanche**")
+                .0
+                .as_deref(),
+            Some("page blanche")
+        );
+        assert_eq!(
+            split_verdict("Texte\nVERDICT: DEFECT").0.as_deref(),
+            Some("something looks broken or unfinished")
+        );
+        // Une maquette, ou une description faite avant les verdicts.
+        assert_eq!(split_verdict("A mockup.\nVERDICT: OK"), (None, "A mockup."));
+        assert_eq!(
+            split_verdict("Un terminal.\nAucune erreur."),
+            (None, "Un terminal.\nAucune erreur.")
+        );
+
+        // Le modèle qui ne lit pas les images apprend le défaut avant tout.
+        let broken = image("essai-verdict-casse");
+        descriptions().insert(
+            image_key(&broken),
+            Description {
+                model: "acme/vision:free".to_string(),
+                text: "Capture de l'application.\nVERDICT: DEFECT - zone de comparaison vide"
+                    .to_string(),
+            },
+        );
+        assert_eq!(defect(&broken).as_deref(), Some("zone de comparaison vide"));
+        let shown = replacement(&broken, 1, 1);
+        assert!(shown.starts_with(
+            "[Claw] The image reader saw a defect in this image: zone de comparaison vide. Treat it as evidence of a problem to fix, not as a design to copy.\n[Image described by acme/vision:free"
+        ));
+        assert!(shown.ends_with("]\nCapture de l'application."), "{shown}");
+        assert_eq!(defect(&image("essai-verdict-inconnue")), None);
     }
 
     #[test]

@@ -5792,6 +5792,31 @@ impl ApiClient for DefaultRuntimeClient {
         self.enable_tools && tools::question_asker_available()
     }
 
+    /// Images de la demande décrites dès le début du tour, pour un modèle qui
+    /// ne les lit pas (elles l'auraient été à la première requête) : le
+    /// défaut qu'elles montrent décide de la méthode jointe à la demande.
+    fn image_defects(
+        &mut self,
+        images: &[runtime::attachments::ImageAttachment],
+    ) -> Vec<(usize, String)> {
+        let primary = self.chain.primary().to_string();
+        if !image_reader::model_cannot_read_images(&primary) {
+            return Vec::new();
+        }
+        let sources: Vec<api::ImageSource> = images
+            .iter()
+            .map(|image| api::ImageSource::base64(image.media_type.clone(), image.data.clone()))
+            .collect();
+        image_reader::describe(&primary, &sources, &mut |notice| self.notify(notice));
+        sources
+            .iter()
+            .enumerate()
+            .filter_map(|(index, source)| {
+                image_reader::defect(source).map(|line| (index + 1, line))
+            })
+            .collect()
+    }
+
     fn answer_superseded(&mut self) {
         if let Some(observer) = &self.observer {
             observer.answer_superseded();

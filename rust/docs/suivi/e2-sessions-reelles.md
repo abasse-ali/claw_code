@@ -75,7 +75,14 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
   Aujourd'hui encore : la persévérance s'efface (`aids.refused`), pas `requirements_gate`.
   Quand l'utilisateur n'a pas répondu dans le tour, ce contrôle devrait ajouter
   `The user is not answering permission requests right now: check with read-only tools only and list what is left unverified.`
-- État : à vérifier
+- État : corrigé (lot 2). (1) `after_tool` reçoit `refused` : un appel qui n'a pas tourné ne
+  touche plus ni `failure_streak` ni `StallGuard`. (2) Après une demande sans réponse,
+  `NotifyingPrompter` refuse aussitôt les suivantes du tour (`not_asked`, `permissions.rs`),
+  sous-agents et vérification imposée compris ; l'utilisateur en est averti une fois ; tout
+  redevient normal quand il écrit. (3) Texte en anglais, préfixé `[Claw] Not run:`, qui dit que
+  l'appel n'a pas tourné et n'est pas bloqué (`unanswered_permission`), pour la page web et
+  l'éditeur (ACP). (4) Le contrôle des exigences et la demande de preuves ajoutent
+  `AWAY_NOTE` ; le contrôle des commandes conseillées ne part pas.
 
 ## E2-02 La réponse finale annonce un onglet qui n'existe dans aucun fichier
 - Gravité : haute
@@ -130,7 +137,9 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
   `The request to check against, word for word:\n<<<\n{request}\n>>>\nGo through it line by line: one line of your check per sentence or bullet of this request, even for a part you believe is already done (then quote the file and line that show it).`
   Aucune requête de plus. Une partie jugée « déjà faite » doit recevoir sa preuve, ce qui
   aurait fait relire la liste des langues.
-- État : à vérifier
+- État : corrigé (lot 2). `checklist_prompt` (`harness.rs`) finit le contrôle par la demande
+  mot pour mot (et, après un message court, la demande qu'il poursuit) et demande une ligne par
+  phrase ou puce de la demande, preuve à l'appui pour ce qui semble déjà fait.
 
 ## E2-04 La vérification imposée ne trouve rien quand le projet est dans des sous-dossiers
 - Gravité : haute
@@ -205,7 +214,13 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
   `[Claw guide] This message has {n} image(s). Before you plan, write what each image shows and what looks wrong or unfinished in it. A screenshot of the running application is evidence of its current behaviour.`
   Se répète : en S3 le modèle n'avait lu qu'une image sur deux (traité par f637bf7 pour les
   signalements brefs seulement).
-- État : à vérifier
+- État : corrigé (lot 2). Le lecteur d'images finit par `VERDICT: DEFECT - ...` ou
+  `VERDICT: OK`. Les images de la demande sont décrites dès le début du tour
+  (`ApiClient::image_defects`, sans requête de plus : elles l'auraient été à la première
+  requête) ; un défaut fait trier le message (`Report::Images`) quelle que soit sa longueur, le
+  remplacement de l'image commence par `[Claw] The image reader saw a defect in this image`, et
+  les preuves sont demandées en fin de tour (`IMAGES_EVIDENCE_PROMPT`). Un modèle qui lit
+  lui-même les images reçoit `image_guide` avec toute demande qui porte des images.
 
 ## E2-06 Le résumé de compaction est une réponse à l'utilisateur, pas un résumé
 - Gravité : haute
@@ -296,7 +311,9 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
   119 sont signalées (cinq titres vides chacune). Il faut sauter les blocs de code : dans un
   bloc `powershell`, deux commentaires `#` qui se suivent ressemblent à deux titres (cas de
   la réponse 19).
-- État : à vérifier
+- État : corrigé (lot 2). `empty_titles` (titre sans rien dessous avant le titre suivant de même
+  niveau ou plus haut, blocs de code sautés) et `empty_titles_gate`, premier de la chaîne des
+  contrôles, deux renvois au plus par tour ; aide `CLAW_EMPTY_TITLES`.
 
 ## E2-09 edit_file : guillemets échappés deux fois, et deux textes identiques
 - Gravité : moyenne
@@ -496,7 +513,9 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
   `[Claw guide] The user sent {n} image(s) with a short message. First decide what they mean: say in one line what each image shows and whether it reports a problem, shows a result they accept, or asks a question. Only if it reports a problem, work as a debugger, in this order: ...`
   et ne demander les preuves en fin de tour que si le modèle a classé le message comme un
   problème ou a modifié des fichiers. Aucune requête de plus, une de moins sur un constat.
-- État : à vérifier
+- État : corrigé (lot 2). `read_report` rend `Report::Images` pour des images sans plainte
+  écrite ; `triage_guide` fait d'abord décider ce qu'elles disent, et les preuves ne sont
+  demandées que si des fichiers ont été modifiés ou si le lecteur a vu un défaut.
 
 ## Relevés sans constat : défauts de ces sessions déjà traités dans le code actuel
 

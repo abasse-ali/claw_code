@@ -58,6 +58,58 @@ pub enum PermissionOutcome {
     Deny { reason: String },
 }
 
+// --- Demandes restées sans réponse ---------------------------------------------------
+
+/// Début du résultat rendu au modèle pour un appel qui n'a pas tourné faute
+/// de réponse à la demande d'autorisation : ce n'est ni un refus de
+/// l'utilisateur ni un échec de l'outil.
+pub const NOT_RUN_PREFIX: &str = "[Claw] Not run:";
+
+/// Une demande d'autorisation du tour en cours est restée sans réponse.
+static USER_AWAY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Décision d'une demande d'autorisation restée sans réponse (délai dépassé).
+/// Le modèle doit comprendre que l'appel n'a pas tourné et qu'il n'est pas
+/// bloqué : sans cela, un modèle a relancé quatre fois la même commande en la
+/// croyant « suspendue », puis a rendu le travail à l'utilisateur.
+#[must_use]
+pub fn unanswered_permission(tool_name: &str) -> PermissionPromptDecision {
+    PermissionPromptDecision::Deny {
+        reason: format!(
+            "{NOT_RUN_PREFIX} nobody answered the permission request for `{tool_name}`, so this call did not run. It is not hanging and nothing is wrong with it: the user seems to be away. Do not ask for this permission again and do not retry the call another way. Finish what needs no permission, then say in your final answer exactly which call is waiting for the user's approval."
+        ),
+    }
+}
+
+/// Demande suivante pendant que l'utilisateur ne répond pas : elle ne lui est
+/// pas posée (chacune l'attendrait aussi longtemps que la première).
+#[must_use]
+pub(crate) fn not_asked(tool_name: &str) -> PermissionPromptDecision {
+    PermissionPromptDecision::Deny {
+        reason: format!(
+            "{NOT_RUN_PREFIX} an earlier permission request of this turn is still unanswered (the user seems to be away), so the request for `{tool_name}` was not asked. Finish what needs no permission, then say in your final answer which calls are waiting for the user's approval."
+        ),
+    }
+}
+
+/// Le résultat dit qu'un appel n'a pas tourné faute de réponse.
+#[must_use]
+pub fn is_not_run(reason: &str) -> bool {
+    reason.starts_with(NOT_RUN_PREFIX)
+}
+
+/// L'utilisateur n'a pas répondu à une demande d'autorisation de ce tour.
+#[must_use]
+pub fn user_away() -> bool {
+    USER_AWAY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Retenu au premier silence, oublié au début du tour suivant (l'utilisateur
+/// vient d'écrire).
+pub(crate) fn set_user_away(away: bool) {
+    USER_AWAY.store(away, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Règle de permission au format de Claude Code : `Outil` ou `Outil(spécificateur)`.
 ///
 /// - `Bash(cargo test:*)` : commandes commençant par `cargo test` ; `Bash(git status)` : exacte.

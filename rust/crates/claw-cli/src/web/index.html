@@ -1424,7 +1424,8 @@
     const feedback = text.match(/^l'utilisateur a refusé l'outil '[^']*' avec cette consigne : ([\s\S]*)$/);
     if (feedback) return "Refusé, avec cette consigne : " + feedback[1];
     if (text.startsWith("l'utilisateur a refusé l'outil")) return "Refusé : rien n'a été exécuté.";
-    if (text.startsWith("aucune réponse de l'utilisateur")) return "Demande d'autorisation restée sans réponse : rien n'a été exécuté.";
+    if (text.startsWith("aucune réponse de l'utilisateur") || text.startsWith("[Claw] Not run: nobody answered")) return "Demande d'autorisation restée sans réponse : rien n'a été exécuté.";
+    if (text.startsWith("[Claw] Not run:")) return "Non demandé : une demande d'autorisation de ce tour est restée sans réponse ; rien n'a été exécuté.";
     if (text === "tour interrompu par l'utilisateur") return "Interrompu avant d'être exécuté.";
     return text;
   }
