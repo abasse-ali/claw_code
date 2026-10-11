@@ -1,0 +1,1 @@
+Mon script rapport.py plante avec « ValueError: could not convert string to float: '12,5' ». Je pense que le fichier ventes.csv est corrompu, tu peux le réparer ?

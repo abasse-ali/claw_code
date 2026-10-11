@@ -19,6 +19,8 @@ compenser leurs faiblesses :
 
 1. Lire ce fichier en entier, puis `git log --oneline -15` et `git status`.
 2. Aller à la section « Lots » : le premier lot dont l'état n'est pas « fait » est le suivant.
+   Depuis le 12 octobre 2026, la campagne d'essais réels (étude T1) passe avant les lots 6 à
+   8 : reprendre au premier point ouvert de [suivi/t1-tests-reels.md](suivi/t1-tests-reels.md).
    Chaque identifiant (E1-07, E2-14...) renvoie à un constat détaillé dans [suivi/](suivi/),
    avec l'emplacement dans le code, la preuve et le remède proposé.
 3. Vérifier chaque constat dans le code avant de le corriger (les numéros de ligne ont pu
@@ -36,6 +38,9 @@ Règles permanentes (détail dans la mémoire du projet) :
 - Modifier le code avec l'outil d'édition ou un script Python écrit dans un fichier, jamais par
   un heredoc ni par `sed -i`.
 - Ne jamais lancer `claw /commande` depuis Git Bash (le chemin est transformé et part au modèle).
+- Depuis le 12 octobre 2026, l'utilisateur demande des essais avec de vrais modèles gratuits
+  pour améliorer Claw : peu d'essais, ciblés, par le banc `rust/scripts/real-tests/`, avec le
+  nombre de requêtes noté. Tout le reste se teste toujours avec les faux modèles locaux.
 - Committer et pousser chaque lot vérifié avant d'en commencer un autre.
 
 Vérification complète avant chaque commit (depuis `rust/`) :
@@ -104,6 +109,8 @@ client 28 sur 28, extension VS Code 18 sur 18.
 | E2. Sessions réelles de `test_claw` : où le modèle se trompe, ce que Claw a fait | [suivi/e2-sessions-reelles.md](suivi/e2-sessions-reelles.md) | terminée le 11 octobre 2026 : 16 constats |
 | E3. Erreurs des fournisseurs et du flux : qui est prévenu, quelle reprise | [suivi/e3-erreurs-fournisseurs.md](suivi/e3-erreurs-fournisseurs.md) | terminée le 11 octobre 2026 : 6 constats |
 | E4. Relecture indépendante des commits 59c1dbc à 74bdcd1 (lot 1 compris) | [suivi/e4a-relecture-commandes.md](suivi/e4a-relecture-commandes.md), [suivi/e4b-relecture-fournisseurs.md](suivi/e4b-relecture-fournisseurs.md) | terminée le 11 octobre 2026 : 22 constats (E4A 12, E4B 10), deux agents. E4A-01 et E4A-02 corrigés dans le lot 2 ; les autres forment le lot 2b, sauf E4B-03, E4B-04 et E4B-07 rangés dans le lot 3. Les lots 2 à 3 seront relus ensuite (E5) |
+
+| T1. Essais réels avec de vrais modèles gratuits : Claw amène-t-il le modèle à raisonner comme Opus et Fable ? | [suivi/t1-tests-reels.md](suivi/t1-tests-reels.md) | en cours depuis le 12 octobre 2026 : banc d'essai `rust/scripts/real-tests/` (trois scénarios notés par une vérification cachée), grille R1 à R8 |
 
 Études possibles ensuite : erreurs des outils de plugins et des serveurs MCP, outil
 `PowerShell`, interface de la page (messages d'erreur montrés à l'utilisateur), mode équipe.

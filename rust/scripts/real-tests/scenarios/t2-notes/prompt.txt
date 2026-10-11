@@ -1,0 +1,1 @@
+Ajoute une commande `chercher` à notes.py : elle affiche les notes qui contiennent un mot donné, sans tenir compte des majuscules ni des accents (chercher « ecole » doit trouver « École du soir »), chacune avec son numéro. Si aucune note ne correspond, elle le dit. Ajoute les tests.
