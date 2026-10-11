@@ -4328,7 +4328,7 @@ fn execute_powershell(input: PowerShellInput) -> std::io::Result<runtime::BashCo
         .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-Command")
-        .arg(&input.command);
+        .arg(powershell_script(&input.command));
     // Python écrit en UTF-8 et au fil de l'eau, comme pour bash.
     for (name, value) in [("PYTHONIOENCODING", "utf-8"), ("PYTHONUNBUFFERED", "1")] {
         if std::env::var_os(name).is_none() {
@@ -4345,6 +4345,21 @@ fn execute_powershell(input: PowerShellInput) -> std::io::Result<runtime::BashCo
         input.timeout,
         input.run_in_background,
     )
+}
+
+/// Début de chaque commande `PowerShell` : la sortie en UTF-8. Windows
+/// `PowerShell` 5.1 écrit sinon dans le tube avec le code page de la console
+/// (ibm850 sur un Windows français), et chaque lettre accentuée arrive abîmée.
+const POWERSHELL_UTF8: &str = "try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}; $OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n";
+
+/// La commande du modèle, prête pour `PowerShell`. Un `2>&1` final est retiré :
+/// sous `PowerShell` 5.1, il change chaque ligne d'erreur d'un programme en
+/// erreur de `PowerShell`, et une compilation réussie qui écrit un
+/// avertissement sort en échec ; Claw garde déjà stderr à part.
+fn powershell_script(command: &str) -> String {
+    let trimmed = command.trim_end();
+    let command = trimmed.strip_suffix("2>&1").map_or(trimmed, str::trim_end);
+    format!("{POWERSHELL_UTF8}{command}")
 }
 
 fn detect_powershell_shell() -> std::io::Result<&'static str> {
@@ -4639,6 +4654,14 @@ mod tests {
 
     /// Avec un vrai navigateur (`CLAW_TEST_BROWSER=1`) : la page rend son état
     /// après exécution du JavaScript, et sa console.
+    #[test]
+    fn a_powershell_command_writes_utf8_and_keeps_its_exit_code() {
+        let script = super::powershell_script("cd frontend; npm run build 2>&1  ");
+        assert!(script.starts_with(super::POWERSHELL_UTF8));
+        assert!(script.ends_with("cd frontend; npm run build"), "{script}");
+        assert!(super::powershell_script("Get-ChildItem").ends_with("\nGet-ChildItem"));
+    }
+
     #[test]
     fn view_page_shows_what_the_browser_displays_and_its_console() {
         if std::env::var_os("CLAW_TEST_BROWSER").is_none() || !super::page_viewer_available() {

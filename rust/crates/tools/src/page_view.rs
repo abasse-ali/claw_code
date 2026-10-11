@@ -167,11 +167,14 @@ fn looks_like_an_error(text: &str) -> bool {
 
 /// Attend la fin du navigateur ; l'arrête au-delà de `limit` ou sur une
 /// interruption de l'utilisateur.
-fn wait_for(child: &mut std::process::Child, limit: Duration) -> Result<(), String> {
+fn wait_for(
+    child: &mut std::process::Child,
+    limit: Duration,
+) -> Result<std::process::ExitStatus, String> {
     let deadline = Instant::now() + limit;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => return Ok(()),
+            Ok(Some(status)) => return Ok(status),
             Ok(None) => {}
             Err(error) => return Err(error.to_string()),
         }
@@ -187,15 +190,28 @@ fn wait_for(child: &mut std::process::Child, limit: Duration) -> Result<(), Stri
     }
 }
 
-/// Fait rendre `url` par le navigateur : le DOM après exécution du
-/// JavaScript, et le journal du navigateur (`None` s'il n'a pas pu être lu).
-fn render(browser: &Path, url: &str, wait_ms: u64) -> Result<(String, Option<String>), String> {
+/// Ce que le navigateur a rendu.
+struct Rendered {
+    /// Le DOM après exécution du JavaScript.
+    dom: String,
+    /// Le journal du navigateur, `None` s'il n'a pas pu être lu.
+    log: Option<String>,
+    /// Code de sortie du navigateur, quand il en a rendu un.
+    exit_code: Option<i32>,
+    /// Fin de ce que le navigateur a écrit sur sa sortie d'erreur.
+    errors: String,
+}
+
+/// Fait rendre `url` par le navigateur.
+fn render(browser: &Path, url: &str, wait_ms: u64) -> Result<Rendered, String> {
     let profile = profile_dir();
     std::fs::create_dir_all(&profile).map_err(|error| error.to_string())?;
     let dom_path = profile.join("page.html");
     let log_path = profile.join("console.log");
+    let errors_path = profile.join("browser-errors.txt");
     let outcome = (|| {
         let dom_file = std::fs::File::create(&dom_path).map_err(|error| error.to_string())?;
+        let errors_file = std::fs::File::create(&errors_path).map_err(|error| error.to_string())?;
         let mut child = Command::new(browser)
             .arg("--headless=new")
             .arg("--disable-gpu")
@@ -211,16 +227,24 @@ fn render(browser: &Path, url: &str, wait_ms: u64) -> Result<(String, Option<Str
             .arg(url)
             .stdin(Stdio::null())
             .stdout(Stdio::from(dom_file))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(errors_file))
             .spawn()
             .map_err(|error| format!("could not start the browser: {error}"))?;
-        wait_for(&mut child, Duration::from_millis(wait_ms) + BROWSER_MARGIN)?;
+        let status = wait_for(&mut child, Duration::from_millis(wait_ms) + BROWSER_MARGIN)?;
         let dom = std::fs::read(&dom_path).map_err(|error| error.to_string())?;
         let log = std::fs::read(&log_path).ok();
-        Ok((
-            String::from_utf8_lossy(&dom).into_owned(),
-            log.map(|log| String::from_utf8_lossy(&log).into_owned()),
-        ))
+        let errors = std::fs::read(&errors_path).unwrap_or_default();
+        let errors = String::from_utf8_lossy(&errors);
+        let tail: Vec<&str> = errors
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        Ok(Rendered {
+            dom: String::from_utf8_lossy(&dom).into_owned(),
+            log: log.map(|log| String::from_utf8_lossy(&log).into_owned()),
+            exit_code: status.code(),
+            errors: tail[tail.len().saturating_sub(4)..].join(" | "),
+        })
     })();
     // Le navigateur peut tenir ses fichiers un instant après sa fin.
     if std::fs::remove_dir_all(&profile).is_err() {
@@ -245,11 +269,32 @@ pub(crate) fn view_page(input: &ViewPageInput) -> Result<Value, String> {
         .wait_ms
         .unwrap_or(DEFAULT_WAIT_MS)
         .clamp(200, MAX_WAIT_MS);
-    let (dom, log) = render(&browser, url, wait_ms)?;
+    let Rendered {
+        dom,
+        log,
+        exit_code,
+        errors,
+    } = render(&browser, url, wait_ms)?;
     // Sans journal (absent ou vide), les erreurs de la console sont inconnues :
     // dire « aucune » enverrait le modèle chercher ailleurs.
     let log = log.filter(|log| !log.trim().is_empty());
     let console = log.as_deref().map(console_messages).unwrap_or_default();
+    // Le navigateur s'est arrêté en échec sans rien rendre : le serveur
+    // n'y est pour rien (navigateur lancé en root sans --no-sandbox, bloqué
+    // par une stratégie de l'entreprise, profil illisible).
+    if dom.trim().is_empty() && exit_code.is_some_and(|code| code != 0) {
+        let code = exit_code.unwrap_or_default();
+        let root_hint = if errors.contains("--no-sandbox") {
+            " It refuses to run as root without --no-sandbox, which Claw does not add on its own: run Claw as a normal user, or tell the user."
+        } else {
+            ""
+        };
+        return Err(format!(
+            "the browser ({}) exited with code {code} before showing the page; the server is not the cause.{root_hint} What it wrote: {}",
+            browser.display(),
+            if errors.is_empty() { "nothing" } else { errors.as_str() }
+        ));
+    }
     if dom.trim().is_empty() {
         return Err(format!(
             "the browser returned no page for {url}: is the server running and the address right? (a connection that is refused gives an empty page)"

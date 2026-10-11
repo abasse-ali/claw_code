@@ -98,8 +98,18 @@ fn resolve_posix_shell() -> Option<PathBuf> {
     if cfg!(windows) {
         find_windows_bash()
     } else {
-        Some(PathBuf::from("sh"))
+        // bash quand il est installé : les modèles écrivent sa syntaxe (`&>`,
+        // `|&`, `[[ ]]`, `pipefail`), que dash, le `sh` de Debian et d'Ubuntu,
+        // lit autrement (`cmd &> f` y lance `cmd` en arrière-plan).
+        Some(find_in_paths("bash", std::env::var_os("PATH")).unwrap_or_else(|| PathBuf::from("sh")))
     }
+}
+
+/// Premier fichier `name` des dossiers de `paths` (au format de PATH).
+fn find_in_paths(name: &str, paths: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    std::env::split_paths(&paths?)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
 }
 
 fn find_windows_bash() -> Option<PathBuf> {
@@ -148,8 +158,20 @@ fn is_wsl_launcher_dir(dir: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_wsl_launcher_dir, posix_shell_command, posix_shell_program};
+    use super::{find_in_paths, is_wsl_launcher_dir, posix_shell_command, posix_shell_program};
     use std::path::Path;
+
+    #[test]
+    fn a_program_is_found_in_the_path_folders() {
+        let dir = std::env::temp_dir().join(format!("claw-shell-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        std::fs::write(dir.join("bash"), "").expect("fichier");
+        let paths = Some(dir.clone().into_os_string());
+        assert_eq!(find_in_paths("bash", paths.clone()), Some(dir.join("bash")));
+        assert_eq!(find_in_paths("absent", paths), None);
+        assert_eq!(find_in_paths("bash", None), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn skips_wsl_launcher_directories() {

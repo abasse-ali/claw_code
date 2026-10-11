@@ -156,18 +156,22 @@ pub fn verify_commands_for(
         VerifySetting::Auto => {}
     }
     let at_root = detect_verify_commands(root);
-    if !at_root.is_empty() {
+    if changed.is_empty() && !at_root.is_empty() {
         return at_root;
     }
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let mut folders: Vec<std::path::PathBuf> = Vec::new();
+    // Une racine qui a sa vérification ne la donne pas à un sous-projet
+    // modifié (`frontend/` à côté d'une API Python) : chaque fichier est
+    // vérifié par le dossier le plus proche qui en a une, la racine comprise.
+    let mut root_checked = false;
     for file in changed {
         let file = Path::new(file);
         let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
         let candidates: Vec<&Path> = file
             .ancestors()
             .skip(1)
-            .take_while(|dir| dir.starts_with(&root) && *dir != root)
+            .take_while(|dir| dir.starts_with(&root))
             .filter(|dir| !detect_verify_commands(dir).is_empty())
             .collect();
         // Le plus proche, hors d'un dossier de tests : `backend/tests/conftest.py`
@@ -178,7 +182,9 @@ pub fn verify_commands_for(
             .find(|dir| !in_tests_dir(dir, &root))
             .or_else(|| candidates.first())
             .copied();
-        if let Some(folder) = folder {
+        if folder == Some(root.as_path()) {
+            root_checked = true;
+        } else if let Some(folder) = folder {
             if !folders.iter().any(|known| known == folder) {
                 folders.push(folder.to_path_buf());
             }
@@ -202,24 +208,23 @@ pub fn verify_commands_for(
         found.sort();
         folders = found;
     }
-    folders
-        .iter()
-        .flat_map(|folder| {
-            let relative = folder
-                .strip_prefix(&root)
-                .unwrap_or(folder)
-                .to_string_lossy()
-                .replace('\\', "/");
-            let place = if relative.contains(' ') {
-                format!("cd \"{relative}\"")
-            } else {
-                format!("cd {relative}")
-            };
-            detect_verify_commands(folder)
-                .into_iter()
-                .map(move |command| format!("{place} && {command}"))
-        })
-        .collect()
+    let mut commands = if root_checked { at_root } else { Vec::new() };
+    commands.extend(folders.iter().flat_map(|folder| {
+        let relative = folder
+            .strip_prefix(&root)
+            .unwrap_or(folder)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let place = if relative.contains(' ') {
+            format!("cd \"{relative}\"")
+        } else {
+            format!("cd {relative}")
+        };
+        detect_verify_commands(folder)
+            .into_iter()
+            .map(move |command| format!("{place} && {command}"))
+    }));
+    commands
 }
 
 /// `dir` est dans un dossier de tests du projet (`tests/`, `__tests__/`...).
@@ -255,13 +260,27 @@ fn has_test_files(dir: &Path) -> bool {
     })
 }
 
+/// Le dossier, ou l'un de ses sous-dossiers directs, porte des fichiers de test.
+fn holds_tests(dir: &Path) -> bool {
+    has_test_files(dir)
+        || std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.path().is_dir() && has_test_files(&entry.path()))
+        })
+}
+
 fn python_verify(root: &Path) -> Option<String> {
     let python = python_program();
-    // pytest réglé pour ce projet, ou nommé parmi ses dépendances alors qu'il
-    // a un dossier de tests (`conftest.py` y est souvent rangé).
-    let has_tests = ["tests", "test"]
+    let in_test_dirs = ["tests", "test"]
         .iter()
-        .any(|dir| has_test_files(&root.join(dir)) || root.join(dir).join("conftest.py").is_file());
+        .any(|dir| holds_tests(&root.join(dir)));
+    // Sans fichier de test, pytest ne trouve rien et sort en échec (code 5) :
+    // le modèle serait renvoyé « corriger » un travail sain.
+    if !in_test_dirs && !has_test_files(root) {
+        return None;
+    }
+    // pytest réglé pour ce projet, ou nommé parmi ses dépendances.
     let pytest_configured = ["pytest.ini", "conftest.py"]
         .iter()
         .any(|name| root.join(name).is_file())
@@ -274,18 +293,17 @@ fn python_verify(root: &Path) -> Option<String> {
                         || text.contains("[tool:pytest]")
                 })
             })
-        || (has_tests
-            && [
-                "pyproject.toml",
-                "requirements.txt",
-                "requirements-dev.txt",
-                "setup.cfg",
-            ]
-            .iter()
-            .any(|name| {
-                std::fs::read_to_string(root.join(name))
-                    .is_ok_and(|text| text.to_ascii_lowercase().contains("pytest"))
-            }));
+        || [
+            "pyproject.toml",
+            "requirements.txt",
+            "requirements-dev.txt",
+            "setup.cfg",
+        ]
+        .iter()
+        .any(|name| {
+            std::fs::read_to_string(root.join(name))
+                .is_ok_and(|text| text.to_ascii_lowercase().contains("pytest"))
+        });
     if pytest_configured {
         return Some(format!("{python} -m pytest -q -x"));
     }
@@ -294,7 +312,7 @@ fn python_verify(root: &Path) -> Option<String> {
     }
     ["tests", "test"]
         .iter()
-        .find(|dir| has_test_files(&root.join(dir)))
+        .find(|dir| holds_tests(&root.join(dir)))
         .map(|dir| format!("{python} -m unittest discover -s {dir} -q"))
 }
 
@@ -443,6 +461,107 @@ pub fn check_tool_is_missing(output: &str) -> bool {
     lower.contains("no module named pytest")
         || lower.contains("no module named 'pytest'")
         || (lower.contains("command not found") && lower.contains("(exit code 127)"))
+}
+
+/// La vérification n'a rien vérifié : elle n'a trouvé aucun test (pytest
+/// sort alors avec le code 5, jest sans `--passWithNoTests` en échec).
+#[must_use]
+pub fn no_tests_ran(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    [
+        "no tests ran",
+        "collected 0 items",
+        "no tests found",
+        "no tests were found",
+    ]
+    .iter()
+    .any(|mark| lower.contains(mark))
+}
+
+/// Extensions des fichiers de code dont un changement par une commande se
+/// vérifie (un journal ou une base de données écrits par un serveur ne
+/// comptent pas).
+const CODE_EXTENSIONS: &[&str] = &[
+    "rs", "py", "js", "jsx", "mjs", "cjs", "ts", "tsx", "go", "java", "kt", "c", "h", "cc", "cpp",
+    "hpp", "cs", "rb", "php", "swift", "vue", "svelte", "css", "scss", "html", "sh", "toml",
+    "json", "yaml", "yml",
+];
+
+/// État des fichiers de code que `git status` signale, avec leur date et leur
+/// taille : ce qu'une commande change ensuite (`sed -i`, `cat > f <<EOF`, un
+/// script Python) se voit en comparant deux états.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectSnapshot(
+    std::collections::BTreeMap<String, Option<(std::time::SystemTime, u64)>>,
+);
+
+/// L'état des fichiers de code du dépôt git de `root` ; `None` hors d'un
+/// dépôt (ou sans git). Dépendances, caches et sorties de build sont écartés.
+#[must_use]
+pub fn project_snapshot(root: &Path) -> Option<ProjectSnapshot> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain=v1", "-uall", "-z"])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut files = std::collections::BTreeMap::new();
+    let mut entries = output.stdout.split(|byte| *byte == 0);
+    while let Some(entry) = entries.next() {
+        let entry = String::from_utf8_lossy(entry);
+        let Some(path) = entry.get(3..).filter(|path| !path.is_empty()) else {
+            continue;
+        };
+        // Un renommage porte ensuite l'ancien chemin.
+        if entry.starts_with('R') || entry.starts_with('C') {
+            entries.next();
+        }
+        let relative = Path::new(path);
+        let code = relative
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                CODE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+            });
+        if !code || crate::file_ops::under_generated_dir(root, relative) {
+            continue;
+        }
+        let state = std::fs::metadata(root.join(relative))
+            .ok()
+            .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
+        files.insert(path.to_string(), state);
+    }
+    Some(ProjectSnapshot(files))
+}
+
+/// Fichiers de code ajoutés, modifiés, supprimés ou rétablis depuis `before`
+/// (chemins sous `root`).
+#[must_use]
+pub fn changed_since(before: &ProjectSnapshot, root: &Path) -> Vec<String> {
+    let Some(now) = project_snapshot(root) else {
+        return Vec::new();
+    };
+    let mut changed: Vec<String> = now
+        .0
+        .iter()
+        .filter(|(path, state)| before.0.get(*path) != Some(state))
+        .map(|(path, _)| path.clone())
+        .chain(
+            before
+                .0
+                .keys()
+                .filter(|path| !now.0.contains_key(*path))
+                .cloned(),
+        )
+        .map(|path| root.join(path).to_string_lossy().into_owned())
+        .collect();
+    changed.sort();
+    changed.dedup();
+    changed
 }
 
 /// Lit le résultat JSON de l'outil `bash` (stdout, stderr, code de sortie).
@@ -2364,6 +2483,11 @@ mod tests {
 
         let pytest = temp_dir("pytest");
         fs::write(pytest.join("conftest.py"), "").expect("fichier");
+        // Réglé pour pytest mais sans aucun test : rien à lancer, pytest
+        // sortirait en échec sans rien vérifier.
+        assert!(detect_verify_commands(&pytest).is_empty());
+        fs::create_dir_all(pytest.join("tests").join("unit")).expect("dossier");
+        fs::write(pytest.join("tests").join("unit").join("test_api.py"), "").expect("fichier");
         assert!(detect_verify_commands(&pytest)[0].ends_with("-m pytest -q -x"));
 
         let node = temp_dir("node");
@@ -2408,6 +2532,11 @@ mod tests {
         )
         .expect("pyproject");
         fs::write(backend.join("tests").join("conftest.py"), "").expect("conftest");
+        fs::write(
+            backend.join("tests").join("test_api.py"),
+            "def test_ok():\n    pass\n",
+        )
+        .expect("test");
         fs::write(backend.join("app").join("main.py"), "x = 1\n").expect("main");
         fs::create_dir_all(frontend.join("node_modules").join(".bin")).expect("frontend");
         fs::create_dir_all(frontend.join("src")).expect("src");
@@ -2439,11 +2568,6 @@ mod tests {
         assert_eq!(backend_checks.len(), 1, "{backend_checks:?}");
         // Un test modifié : le projet reste `backend/`, une seule fois, même
         // avec un fichier du code à côté.
-        fs::write(
-            backend.join("tests").join("test_api.py"),
-            "def test_ok():\n    pass\n",
-        )
-        .expect("test");
         let both = [
             backend
                 .join("tests")
@@ -2500,6 +2624,93 @@ mod tests {
             error_sites("./src/page.tsx:1:8", &root, "npm run build"),
             None
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn files_changed_by_a_command_are_seen_in_git() {
+        use super::{changed_since, project_snapshot};
+        let root = temp_dir("instantane-git");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .is_ok_and(|output| output.status.success())
+        };
+        if !git(&["init", "-q"]) {
+            // Pas de git sur cette machine : rien à observer.
+            let _ = fs::remove_dir_all(root);
+            return;
+        }
+        fs::write(root.join("main.py"), "x = 1\n").expect("main");
+        fs::write(root.join("notes.log"), "début\n").expect("journal");
+        let before = project_snapshot(&root).expect("dépôt git");
+        assert!(changed_since(&before, &root).is_empty());
+        // Une commande change le code, un serveur écrit son journal.
+        fs::write(root.join("main.py"), "x = 22\n").expect("main");
+        fs::write(root.join("notes.log"), "suite\n").expect("journal");
+        fs::create_dir_all(root.join("node_modules").join("pkg")).expect("dépendance");
+        fs::write(root.join("node_modules").join("pkg").join("index.js"), "").expect("js");
+        let changed = changed_since(&before, &root);
+        assert_eq!(changed.len(), 1, "{changed:?}");
+        assert!(changed[0].ends_with("main.py"), "{changed:?}");
+        // Hors d'un dépôt : rien.
+        let elsewhere = temp_dir("sans-git");
+        assert_eq!(project_snapshot(&elsewhere.join("absent")), None);
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(elsewhere);
+    }
+
+    #[test]
+    fn a_changed_subproject_is_verified_even_when_the_root_has_a_check() {
+        // Une API Python à la racine, l'interface dans `frontend/`.
+        let root = temp_dir("racine-et-frontend");
+        fs::write(root.join("pytest.ini"), "[pytest]\n").expect("pytest");
+        fs::create_dir_all(root.join("tests")).expect("tests");
+        fs::write(root.join("tests").join("test_api.py"), "").expect("test");
+        fs::create_dir_all(root.join("app")).expect("app");
+        fs::write(root.join("app").join("main.py"), "x = 1\n").expect("main");
+        let frontend = root.join("frontend");
+        fs::create_dir_all(frontend.join("node_modules").join(".bin")).expect("frontend");
+        fs::create_dir_all(frontend.join("src")).expect("src");
+        fs::write(frontend.join("tsconfig.json"), "{}").expect("tsconfig");
+        fs::write(frontend.join("package.json"), "{}").expect("package");
+        fs::write(frontend.join("node_modules").join(".bin").join("tsc"), "").expect("tsc");
+        fs::write(frontend.join("src").join("App.tsx"), "export {}\n").expect("app");
+
+        let path = |file: &Path| file.to_string_lossy().into_owned();
+        let at_root = detect_verify_commands(&root);
+        assert_eq!(at_root.len(), 1, "{at_root:?}");
+        // Seul le frontend a changé : sa vérification, pas celle de la racine.
+        assert_eq!(
+            verify_commands_for(
+                &VerifySetting::Auto,
+                &root,
+                &[path(&frontend.join("src").join("App.tsx"))]
+            ),
+            vec!["cd frontend && npx tsc --noEmit"]
+        );
+        // Seule l'API a changé : la vérification de la racine.
+        assert_eq!(
+            verify_commands_for(
+                &VerifySetting::Auto,
+                &root,
+                &[path(&root.join("app").join("main.py"))]
+            ),
+            at_root
+        );
+        // Les deux : les deux vérifications.
+        let both = verify_commands_for(
+            &VerifySetting::Auto,
+            &root,
+            &[
+                path(&root.join("app").join("main.py")),
+                path(&frontend.join("src").join("App.tsx")),
+            ],
+        );
+        assert_eq!(both.len(), 2, "{both:?}");
+        assert_eq!(both[0], at_root[0]);
         let _ = fs::remove_dir_all(root);
     }
 

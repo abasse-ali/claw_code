@@ -135,10 +135,7 @@ impl Running {
 
     /// Arrête la commande et ses sous-processus (délai dépassé, interruption).
     pub(crate) fn kill(&mut self) {
-        if let Some(pid_file) = &self.pid_file {
-            crate::bash::kill_shell_group(pid_file);
-        }
-        crate::bash::kill_process_tree(Some(self.child.id()));
+        crate::bash::kill_command(self.child.id(), self.pid_file.as_deref());
         let _ = self.child.kill();
         let _ = self.child.wait();
         self.finish();
@@ -450,12 +447,9 @@ fn stop(task: &mut BackgroundTask) {
         crate::bash::stop_container(&name);
     }
     if task.running() {
-        // Le groupe du shell, y compris un processus lancé avec `&` après la
-        // fin du shell ; puis le shell lui-même s'il tourne encore.
-        if let Some(pid_file) = &task.pid_file {
-            crate::bash::kill_shell_group(pid_file);
-        }
-        crate::bash::kill_process_tree(Some(task.child.id()));
+        // Le shell et tout ce qu'il a lancé, y compris un processus lancé
+        // avec `&` après la fin du shell.
+        crate::bash::kill_command(task.child.id(), task.pid_file.as_deref());
         let _ = task.child.kill();
         let _ = task.child.wait();
         task.killed = true;

@@ -235,7 +235,7 @@ routing.rs, main.rs), lecture et recherche de fichiers (file_ops.rs), outil View
   serveur. Pour le cas root, le dire tel quel (« le navigateur refuse de tourner en root ») ;
   ajouter `--no-sandbox` seulement si l'utilisateur l'accepte, puisque ViewPage ouvre aussi
   des pages hors du projet.
-- Etat : a verifier
+- Etat : corrigé (lot 2b, seconde partie) : code de sortie et fin de la sortie d'erreur du navigateur gardés ; DOM vide avec un code non nul, le message le dit sans accuser le serveur (cas root et `--no-sandbox` nommé).
 
 ## E4B-10 Un serveur vLLM sans appel d'outils automatique fait echouer chaque tour au lieu du mode texte
 - Gravite : basse
@@ -260,5 +260,5 @@ routing.rs, main.rs), lecture et recherche de fichiers (file_ops.rs), outil View
   « --enable-auto-tool-choice » (bascule et memoire du mode texte, deja en place), avec un cas
   de test ; dans l'aide d'erreur, citer `"toolMode": "text"` pour une erreur 400 qui parle
   d'outils.
-- Etat : a verifier
+- Etat : corrigé (lot 2b, seconde partie) : `tool choice requires` et `--enable-auto-tool-choice` font basculer en mode texte.
 

@@ -56,6 +56,9 @@ pub fn is_tools_unsupported_error(message: &str) -> bool {
         "tool use is not supported",
         "function calling is not",
         "requires --jinja",
+        // vLLM lancé sans `--enable-auto-tool-choice --tool-call-parser`.
+        "tool choice requires",
+        "--enable-auto-tool-choice",
         "does not support function",
     ]
     .iter()
@@ -661,6 +664,9 @@ mod tests {
         ));
         assert!(is_tools_unsupported_error(
             "No endpoints found that support tool use"
+        ));
+        assert!(is_tools_unsupported_error(
+            "\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set"
         ));
         assert!(!is_tools_unsupported_error("rate limit exceeded"));
     }

@@ -310,6 +310,11 @@ struct TurnAids {
     check_failing: bool,
     /// Une remarque d'un contrôle de Claw attend sa correction.
     feedback_pending: bool,
+    /// État des fichiers de code du dépôt au début du tour, puis après chaque
+    /// vérification : ce qu'une commande change ensuite se vérifie aussi.
+    snapshot: Option<harness::ProjectSnapshot>,
+    /// Fichiers changés par une commande pendant le tour.
+    command_changes: Vec<String>,
 }
 
 /// Mots en dessous desquels un message de l'utilisateur peut n'être qu'une
@@ -808,6 +813,12 @@ where
             topic: team.then(|| crate::team::topic_of(&request_text)).flatten(),
             report,
             saw_defects: !defects.is_empty(),
+            snapshot: (!self.subagent
+                && harness::enabled(Aid::Verify)
+                && self.verify != harness::VerifySetting::Off)
+                .then(|| std::env::current_dir().ok())
+                .flatten()
+                .and_then(|cwd| harness::project_snapshot(&cwd)),
             ..TurnAids::default()
         };
         // Ultracode : un agent au contexte vierge étudie la demande avant le
@@ -1350,6 +1361,10 @@ where
             format!(
                 "Vérification impossible ({command}) : l'outil de test n'est pas installé ; le travail n'est pas vérifié"
             )
+        } else if !result.passed && harness::no_tests_ran(&result.excerpt) {
+            format!(
+                "Vérification sans objet ({command}) : aucun test n'a été trouvé ; le travail n'est pas vérifié"
+            )
         } else if result.timed_out {
             format!(
                 "Vérification trop longue ({command}) : choisissez une commande plus rapide avec \"verify\" dans .claw/settings.json"
@@ -1373,17 +1388,60 @@ where
         prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> Option<String> {
         if self.subagent
-            || !aids.dirty
             || aids.verify_disabled
             || interrupt_requested()
             || !harness::enabled(Aid::Verify)
         {
             return None;
         }
+        let by_commands = Self::changed_by_commands(aids);
+        if !aids.dirty && !by_commands {
+            return None;
+        }
+        let feedback = self.run_verification(aids, prompter);
+        // Ce que la vérification elle-même a écrit n'est pas un changement du
+        // modèle : l'état de référence est repris après elle.
+        if aids.snapshot.is_some() {
+            aids.snapshot = std::env::current_dir()
+                .ok()
+                .and_then(|cwd| harness::project_snapshot(&cwd));
+        }
+        feedback
+    }
+
+    /// Des fichiers de code ont changé par une commande (`sed -i`, `cat > f
+    /// <<EOF`, un script) depuis le début du tour ou la dernière
+    /// vérification : ils se vérifient comme après `edit_file`. Sans cela, le
+    /// modèle qui contourne un `edit_file` raté finit sans vérification.
+    fn changed_by_commands(aids: &mut TurnAids) -> bool {
+        let (Some(before), Ok(cwd)) = (aids.snapshot.as_ref(), std::env::current_dir()) else {
+            return false;
+        };
+        let changed = harness::changed_since(before, &cwd);
+        if changed.is_empty() {
+            return false;
+        }
+        aids.command_changes.extend(changed);
+        aids.command_changes.sort();
+        aids.command_changes.dedup();
+        true
+    }
+
+    /// Lance la vérification du projet (voir `verification_gate`).
+    fn run_verification(
+        &mut self,
+        aids: &mut TurnAids,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> Option<String> {
         let cwd = std::env::current_dir().ok()?;
         // Les fichiers modifiés du tour disent où vérifier quand le projet est
         // rangé en sous-dossiers (`backend/`, `frontend/`).
-        let changed: Vec<String> = aids.originals.keys().cloned().collect();
+        let changed: Vec<String> = aids
+            .originals
+            .keys()
+            .chain(&aids.command_changes)
+            .cloned()
+            .collect();
         let commands = harness::verify_commands_for(&self.verify, &cwd, &changed);
         aids.dirty = false;
         if commands.is_empty() && self.verify == harness::VerifySetting::Auto {

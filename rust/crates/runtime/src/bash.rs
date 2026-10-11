@@ -160,6 +160,10 @@ fn explicit_timeout(requested: Option<u64>) -> Option<u64> {
         .map(|value| effective_timeout_ms(Some(value)))
 }
 
+/// Délai fixé par le modèle à partir duquel un serveur annoncé prêt passe
+/// quand même en arrière-plan ; en dessous, le modèle voulait un essai borné.
+const READY_HANDOFF_MIN_TIMEOUT_MS: u64 = 20_000;
+
 /// Attentes d'une commande au premier plan.
 #[derive(Clone, Copy)]
 struct Waits {
@@ -237,7 +241,12 @@ fn run_in_foreground(
             let (stdout, stderr, task_id) = running.into_background();
             return handed_off_output(stdout, stderr, &task_id, Some(limit));
         }
-        if explicit_timeout.is_none() && running.ready_and_idle(waits.ready_idle) {
+        // Un délai long n'est pas un essai borné : un serveur prêt et
+        // silencieux passe en arrière-plan au lieu de bloquer le tour jusqu'au
+        // bout du délai, puis d'être tué.
+        if explicit_timeout.is_none_or(|limit| limit >= READY_HANDOFF_MIN_TIMEOUT_MS)
+            && running.ready_and_idle(waits.ready_idle)
+        {
             let (stdout, stderr, task_id) = running.into_background();
             return handed_off_output(stdout, stderr, &task_id, None);
         }
@@ -1062,15 +1071,67 @@ fn with_group_pid_capture(command: &str, pid_file: &std::path::Path) -> String {
     format!("printf '%s' \"$$\" > '{path}'\n{command}")
 }
 
+/// Arrête une commande lancée par `bash` et tout ce qu'elle a lancé :
+/// d'abord l'arbre des processus Windows (`taskkill /T`), tant qu'il est
+/// intact ; tué en premier, le shell laisserait ses petits-enfants natifs
+/// (node.exe de vite sous npm, le serveur d'`uvicorn --reload`) hors de
+/// portée, et le port pris. Puis le groupe MSYS du shell, qui garde les
+/// processus lancés avec `&` après la fin du shell ; l'arbre de chacun de
+/// ses processus Windows n'est cherché que si celui du shell n'a pas pu être
+/// arrêté (le shell avait déjà fini).
+pub(crate) fn kill_command(child_pid: u32, pid_file: Option<&std::path::Path>) {
+    let tree_stopped = kill_process_tree(Some(child_pid));
+    if let Some(pid_file) = pid_file {
+        kill_shell_group(pid_file, !tree_stopped);
+    }
+}
+
+/// PID Windows des processus du groupe MSYS `group`, lus dans la sortie de
+/// `ps` (colonnes PID, PPID, PGID, WINPID, après une lettre d'état éventuelle).
+fn group_windows_pids(listing: &str, group: &str) -> Vec<u32> {
+    listing
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let mut fields: Vec<&str> = line.split_whitespace().collect();
+            if fields
+                .first()
+                .is_some_and(|field| !field.chars().all(|ch| ch.is_ascii_digit()))
+            {
+                fields.remove(0);
+            }
+            if fields.get(2) != Some(&group) {
+                return None;
+            }
+            fields.get(3)?.parse().ok()
+        })
+        .collect()
+}
+
 /// Tue tout le groupe de processus MSYS du shell (suivi par Cygwin même quand
-/// la parenté Windows est rompue).
-pub(crate) fn kill_shell_group(pid_file: &std::path::Path) {
+/// la parenté Windows est rompue). `with_native_trees` : sous Windows,
+/// arrêter aussi l'arbre de chaque processus Windows du groupe.
+pub(crate) fn kill_shell_group(pid_file: &std::path::Path, with_native_trees: bool) {
     let Ok(pid) = std::fs::read_to_string(pid_file) else {
         return;
     };
     let pid = pid.trim();
     if pid.is_empty() || !pid.chars().all(|ch| ch.is_ascii_digit()) {
         return;
+    }
+    // Sous Windows, le groupe ne connaît que les programmes lancés par le
+    // shell : ceux qu'ils ont lancés à leur tour n'en font pas partie. Leur
+    // arbre Windows part de chaque membre du groupe, arrêté avant eux.
+    if cfg!(windows) && with_native_trees {
+        if let Ok(listing) = plugins::posix_shell_command("ps")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+        {
+            for winpid in group_windows_pids(&String::from_utf8_lossy(&listing.stdout), pid) {
+                kill_process_tree(Some(winpid));
+            }
+        }
     }
     let _ = plugins::posix_shell_command(&format!(
         "kill -KILL -- -{pid} 2>/dev/null; kill -KILL {pid} 2>/dev/null; true"
@@ -1082,10 +1143,11 @@ pub(crate) fn kill_shell_group(pid_file: &std::path::Path) {
 }
 
 /// Tue la commande et tous ses descendants : sous Windows, tuer `bash.exe` ne
-/// tue pas `sleep.exe` ou `cargo.exe` qu'il a lancés.
-pub(crate) fn kill_process_tree(pid: Option<u32>) {
+/// tue pas `sleep.exe` ou `cargo.exe` qu'il a lancés. Vrai si l'arbre a été
+/// trouvé et arrêté.
+pub(crate) fn kill_process_tree(pid: Option<u32>) -> bool {
     let Some(pid) = pid else {
-        return;
+        return false;
     };
     #[cfg(windows)]
     let mut killer = {
@@ -1099,11 +1161,12 @@ pub(crate) fn kill_process_tree(pid: Option<u32>) {
         command.args(["-KILL", &format!("-{pid}")]);
         command
     };
-    let _ = killer
+    killer
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn sandbox_status_for_input(input: &BashCommandInput, cwd: &std::path::Path) -> SandboxStatus {
@@ -1377,6 +1440,18 @@ mod tests {
     }
 
     #[test]
+    fn the_windows_processes_of_a_shell_group_are_read_from_ps() {
+        use super::group_windows_pids;
+        let listing = "      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND
+     1609       1    1609      22460  ?         197609 21:03:52 /usr/bin/bash
+S    1700    1609    1609      12345  pty0      197609 21:04:00 /c/Program Files/nodejs/node
+     1800       1    1800      33333  ?         197609 21:05:00 /usr/bin/ps
+I    1900    1700    1609      44444  ?         197609 21:06:00 /usr/bin/sleep";
+        assert_eq!(group_windows_pids(listing, "1609"), [22460, 12345, 44444]);
+        assert!(group_windows_pids(listing, "4242").is_empty());
+    }
+
+    #[test]
     fn shell_segments_ignore_quotes_comments_and_redirections() {
         use super::shell_segments;
         let segments = |command: &str| {
@@ -1509,6 +1584,110 @@ mod tests {
         assert!(output.stdout.contains(&task_id));
         let killed = crate::bash_tasks::kill(&task_id).expect("arrêt");
         assert!(!killed.running, "{killed:?}");
+    }
+
+    /// Sous Windows : arrêter une tâche arrête aussi le petit-enfant natif
+    /// d'un programme qu'elle a lancé (npm puis vite, `uvicorn --reload`),
+    /// que la commande tourne en arrière-plan ou ait été laissée par `&`.
+    #[cfg(windows)]
+    #[test]
+    fn stopping_a_task_also_stops_its_native_grandchildren() {
+        // Sans vrai Python, rien à essayer : l'alias de la boutique Windows
+        // n'en est un que si son paquet est installé (sinon il ouvrirait la
+        // boutique).
+        let installed = |path: &std::path::Path| {
+            !path
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .contains("windowsapps")
+                || path
+                    .parent()
+                    .and_then(|dir| std::fs::read_dir(dir).ok())
+                    .is_some_and(|entries| {
+                        entries.flatten().any(|entry| {
+                            entry
+                                .file_name()
+                                .to_string_lossy()
+                                .starts_with("PythonSoftwareFoundation.Python.")
+                        })
+                    })
+        };
+        let Some(python) = crate::paths::find_executable("python").filter(|path| installed(path))
+        else {
+            return;
+        };
+        let slashes = |path: &std::path::Path| path.to_string_lossy().replace('\\', "/");
+        let alive = |pid: u32| {
+            std::process::Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+                .output()
+                .is_ok_and(|listing| {
+                    String::from_utf8_lossy(&listing.stdout).contains(&format!(" {pid} "))
+                })
+        };
+        let dir = std::env::temp_dir().join(format!("claw-arbre-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let marker = dir.join("petit-enfant.pid");
+        let grandchild = dir.join("petit_enfant.py");
+        let parent = dir.join("parent.py");
+        std::fs::write(
+            &grandchild,
+            format!(
+                "import os, time\nopen(r\"{}\", \"w\").write(str(os.getpid()))\ntime.sleep(60)\n",
+                marker.display()
+            ),
+        )
+        .expect("script");
+        std::fs::write(
+            &parent,
+            format!(
+                "import subprocess, sys, time\nsubprocess.Popen([sys.executable, r\"{}\"])\ntime.sleep(60)\n",
+                grandchild.display()
+            ),
+        )
+        .expect("script");
+        let run = format!("'{}' '{}'", slashes(&python), slashes(&parent));
+        for (label, input) in [
+            (
+                "en arrière-plan",
+                BashCommandInput {
+                    run_in_background: Some(true),
+                    ..foreground(&run, None)
+                },
+            ),
+            ("laissée par &", foreground(&format!("{run} &"), None)),
+        ] {
+            let _ = std::fs::remove_file(&marker);
+            let output = execute_bash(input).expect("lancement");
+            let task_id = output.background_task_id.expect("tâche de fond");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            let pid = loop {
+                if let Some(pid) = std::fs::read_to_string(&marker)
+                    .ok()
+                    .and_then(|text| text.trim().parse::<u32>().ok())
+                {
+                    break pid;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{label} : le petit-enfant n'a pas démarré"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            };
+            crate::bash_tasks::kill(&task_id).expect("arrêt");
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let survived = alive(pid);
+            if survived {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/F"])
+                    .output();
+            }
+            assert!(
+                !survived,
+                "{label} : le petit-enfant {pid} a survécu à sa tâche"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
