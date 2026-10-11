@@ -163,7 +163,13 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
   trouvé alors que des fichiers de code ont changé, le dire à l'utilisateur (« aucune
   vérification connue pour ce projet : réglez "verify" ») au lieu de se taire. Aucune requête
   de plus quand la vérification passe.
-- État : à vérifier
+- État : corrigé (lot 1). `verify_commands_for` (`harness.rs`) part des fichiers modifiés du
+  tour quand la racine ne donne rien : la vérification du dossier le plus proche qui porte un
+  manifeste, lancée depuis lui (`cd frontend && npx tsc --noEmit`). `python_verify` reconnaît
+  pytest nommé dans `pyproject.toml` ou `requirements*.txt` quand `tests/` existe, et
+  `conftest.py` rangé dans `tests/`. Sans vérification connue, l'utilisateur en est averti une
+  fois par lancement. pytest absent (« No module named pytest ») arrête la vérification avec
+  une notice, au lieu de renvoyer le modèle corriger un travail qui n'est pas en cause.
 
 ## E2-05 Une capture d'écran d'un défaut prise pour une maquette
 - Gravité : haute
@@ -372,7 +378,11 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
   écrire « stop using tools » ; dire ce qui manque :
   `[Claw] This command already passed and nothing has changed since, so running it again proves nothing new. If a requirement is still unverified, exercise the behaviour itself (start the server and request the page, call the function with a real input).`
   Aucune requête de plus.
-- État : à vérifier
+- État : corrigé (lot 1). `is_check_command` juge le programme et ses premiers arguments,
+  commande simple par commande simple (`segment_is_check`, lanceurs `npx`, `uv run`... compris),
+  jamais un mot d'un chemin. La remarque « déjà réussie » ne dit plus d'arrêter les outils :
+  « running it again proves nothing new. If something is still unverified, exercise the
+  behaviour itself (...). Otherwise give your final answer now. »
 
 ## E2-12 glob_search parcourt les dépendances avant de les écarter : 47 secondes pour 44 fichiers
 - Gravité : moyenne
@@ -438,7 +448,12 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
   `npm ERR!`, `error[E`, `No module named`), avec la note
   `[Claw] This command ends with "| tail -20": its exit code is tail's, not the build's. The output says "Failed to compile", so Claw counts it as failed.`
   Aucune requête de plus.
-- État : à vérifier
+- État : corrigé (lot 1), remède (1). Un tube dont les maillons suivants ne font que couper la
+  sortie (`tail`, `head`, `tee`, `cat`, `less`, `more`), ou une vérification suivie d'outils de
+  texte (`grep`, `sed`, `awk`, `sort`...), est lancé avec `pipefail` (`hides_exit_code`,
+  `bash.rs`) : le code de sortie est celui du programme. Le code 141 d'un programme coupé par
+  `head` ne compte pas comme un échec. Le secours (2) n'est pas fait : il ne servirait qu'à un
+  shell sans `pipefail` ou à l'outil `PowerShell`.
 
 ## E2-15 « Code des erreurs » ne trouve pas un fichier cité depuis un sous-dossier
 - Gravité : moyenne
@@ -456,7 +471,10 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
   `outcome.command`, déjà connu dans `after_tool`), puis, en dernier recours, contre le seul
   fichier du projet dont le chemin se termine par le chemin cité (s'il y en a un seul).
   Aucune requête de plus, une relecture de moins par erreur.
-- État : à vérifier
+- État : corrigé (lot 1) pour le dossier de la commande : `command_dir` lit le `cd` en tête de
+  la commande et `project_file` résout le chemin cité depuis la racine puis depuis ce dossier.
+  Le dernier recours (le seul fichier du projet dont le chemin finit par le chemin cité) n'est
+  pas fait.
 
 ## E2-16 Un message bref avec image n'est pas toujours une plainte, le guide l'affirme pourtant
 - Gravité : basse

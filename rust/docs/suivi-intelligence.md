@@ -84,9 +84,11 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 | f637bf7 | Signalement d'un problème : méthode de débogage jointe, preuves demandées, images numérotées, commandes conseillées essayées, outil écrit comme une commande |
 | 5260b7a | Outil `ViewPage` : texte affiché et console d'une page, dans un navigateur sans fenêtre |
 | bf47311 | Ce fichier de suivi |
+| 059aa2e | Études E1, E2 et E3 : 48 constats, plan en huit lots |
+| (commit « Lot 1 ») | Lot 1 : code de sortie derrière `\| tail`, vérification juste, projet en sous-dossiers, reprises de l'API, conseils d'erreur |
 
-État des tests au commit 5260b7a : 581 tests Rust, analyse statique à zéro sous Windows et
-Linux, client 28 sur 28, extension VS Code 18 sur 18.
+État des tests au lot 1 : 587 tests Rust, analyse statique à zéro sous Windows et Linux,
+client 28 sur 28, extension VS Code 18 sur 18.
 
 ## Études
 
@@ -107,7 +109,7 @@ sessions réelles.
 
 | Lot | Contenu | État |
 |---|---|---|
-| 1. Ce que Claw croit d'une commande | E2-14 (échec caché par `\| tail`), E2-11 (le mot `test` dans un chemin), E2-04 (vérification d'un projet en sous-dossiers), E2-15 (code des erreurs depuis un sous-dossier), E3-01, E3-02, E3-03 (reprises du client de l'API), E3-04 (contexte trop long), E3-06 (conseils d'erreur) | en cours le 11 octobre 2026 |
+| 1. Ce que Claw croit d'une commande | E2-14 (échec caché par `\| tail`), E2-11 (le mot `test` dans un chemin), E2-04 (vérification d'un projet en sous-dossiers), E2-15 (code des erreurs depuis un sous-dossier), E3-01, E3-02, E3-03 (reprises du client de l'API), E3-04 (contexte trop long), E3-06 (conseils d'erreur) | fait le 11 octobre 2026 (restent hors du lot : E2-14 secours (2), E2-15 dernier recours) |
 | 2. Contrôles de fin de tour | E2-03 (le contrôle des exigences cite la demande), E2-08 (réponse faite de titres vides), E2-05 et E2-16 (images : défaut ou maquette, tri avant le guide), E2-01 (demande d'autorisation sans réponse) | à faire |
 | 3. Fichiers et recherche | E1-19 (contenu abrégé écrit tel quel), E1-05 (dossier lu comme un fichier), E1-06 (motif non valide), E1-07 (filtres de `grep_search`), E1-10 et E2-12 (`glob_search`), E1-18 et E2-09 (`edit_file`), E1-21 (valeurs hors bornes), E1-22 (chemin introuvable) | à faire |
 | 4. Arguments et outils inconnus | E1-01, E1-04, E1-11 (mise en forme des arguments d'après le schéma), E1-02 (outil inconnu), E1-03 (noms d'outils dans les sous-agents) | à faire |
@@ -139,4 +141,9 @@ Hors lots :
   Claw : 2028cdd, f637bf7, 5260b7a.
 - Ce fichier de suivi est créé. Études E1 et E2 menées par deux agents (26 et 16 constats,
   écrits au fil de l'eau), étude E3 par la session principale (6 constats).
-- Lot 1 commencé.
+- Lot 1 fait. Ce que Claw croyait d'une commande était souvent faux : une compilation en
+  échec derrière `| tail` passait pour réussie, `cd D:\...\test_claw` faisait de toute commande
+  une vérification, un projet rangé en `backend/` et `frontend/` n'était jamais vérifié, et le
+  code des erreurs citées depuis `frontend/` n'était pas trouvé. Côté fournisseurs : paramètre
+  ou schéma refusé repris sans arrêter le tour, identifiants Mistral, contexte trop long mieux
+  reconnu, conseil par code d'erreur.

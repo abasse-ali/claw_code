@@ -194,6 +194,256 @@ fn is_stream_options_error(error: &ApiError) -> bool {
         && error.to_string().contains("stream_options")
 }
 
+// --- Paramètres et schémas refusés par un serveur ----------------------------------------
+
+/// Paramètres facultatifs de la requête qu'un serveur peut refuser. Quand une
+/// erreur 400 ou 422 en nomme un, la requête repart sans lui et le refus est
+/// retenu pour ce serveur et ce modèle : un tour ne s'arrête pas pour un
+/// réglage dont le modèle se passe (`stream_options` a sa propre mémoire, par
+/// serveur).
+const OPTIONAL_FIELDS: &[&str] = &[
+    "reasoning_effort",
+    "reasoning",
+    "parallel_tool_calls",
+    "tool_choice",
+];
+/// Refus successifs acceptés pour une même requête avant de rendre l'erreur.
+const MAX_REFUSALS: usize = 4;
+
+fn refused_fields() -> &'static Mutex<BTreeMap<String, BTreeSet<&'static str>>> {
+    static REFUSED: OnceLock<Mutex<BTreeMap<String, BTreeSet<&'static str>>>> = OnceLock::new();
+    REFUSED.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Paramètres que ce serveur et ce modèle (`origin`) ont déjà refusés.
+fn fields_refused_by(origin: &str) -> BTreeSet<&'static str> {
+    refused_fields()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(origin)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn remember_refused_field(origin: &str, field: &'static str) {
+    refused_fields()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(origin.to_string())
+        .or_default()
+        .insert(field);
+}
+
+/// Texte d'une erreur 400 ou 422 du serveur (message et corps), en minuscules.
+fn refusal_text(error: &ApiError) -> Option<String> {
+    match error {
+        ApiError::Api {
+            status,
+            message,
+            body,
+            ..
+        } if matches!(status.as_u16(), 400 | 422) => {
+            Some(format!("{} {body}", message.as_deref().unwrap_or_default()).to_ascii_lowercase())
+        }
+        _ => None,
+    }
+}
+
+/// `text` nomme `field` comme un mot entier (`reasoning` n'est pas nommé par
+/// `reasoning_effort`).
+fn names_field(text: &str, field: &str) -> bool {
+    let word = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+    text.match_indices(field).any(|(at, _)| {
+        !text[..at].chars().next_back().is_some_and(word)
+            && !text[at + field.len()..].chars().next().is_some_and(word)
+    })
+}
+
+/// Paramètre facultatif que cette erreur refuse, parmi ceux encore envoyés à
+/// `origin`.
+fn refused_optional_field(error: &ApiError, origin: &str) -> Option<&'static str> {
+    let text = refusal_text(error)?;
+    let already = fields_refused_by(origin);
+    OPTIONAL_FIELDS
+        .iter()
+        .copied()
+        .find(|field| !already.contains(field) && names_field(&text, field))
+}
+
+/// Serveurs qui ont refusé les schémas d'outils tels quels : ils reçoivent
+/// des schémas réduits à l'essentiel.
+fn plain_schema_servers() -> &'static Mutex<BTreeSet<String>> {
+    static SERVERS: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+    SERVERS.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+fn wants_plain_schemas(base_url: &str) -> bool {
+    plain_schema_servers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(base_url)
+}
+
+fn remember_plain_schemas(base_url: &str) {
+    plain_schema_servers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(base_url.to_string());
+}
+
+/// Mots d'une erreur qui vise le schéma JSON d'un outil (mot-clé inconnu du
+/// serveur, comme le fait l'API de Google).
+const SCHEMA_REFUSAL_MARKS: &[&str] = &[
+    "additionalproperties",
+    "additional_properties",
+    "minitems",
+    "min_items",
+    "maxitems",
+    "max_items",
+    "minlength",
+    "maxlength",
+    "exclusiveminimum",
+    "json schema",
+    "invalid schema",
+    "schema is invalid",
+    "function_declarations",
+    "unknown name",
+];
+
+/// L'erreur vient du schéma d'un outil : la requête peut repartir avec des
+/// schémas réduits.
+fn is_schema_refusal(error: &ApiError) -> bool {
+    refusal_text(error)
+        .is_some_and(|text| SCHEMA_REFUSAL_MARKS.iter().any(|mark| text.contains(mark)))
+}
+
+/// Mots-clés de schéma JSON que tous les serveurs ne connaissent pas. Le
+/// modèle s'en passe : ils ne font que préciser des contraintes que Claw
+/// vérifie lui-même à l'exécution de l'outil.
+const SCHEMA_EXTRAS: &[&str] = &[
+    "additionalProperties",
+    "format",
+    "minItems",
+    "maxItems",
+    "minLength",
+    "maxLength",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "default",
+    "pattern",
+    "title",
+    "examples",
+    "const",
+    "$schema",
+];
+
+/// Nom de propriété accepté partout : il commence par une lettre ou un `_`.
+/// `-A` devient `A` (les outils de Claw acceptent ces noms).
+fn plain_property_name(name: &str) -> String {
+    let trimmed = name.trim_start_matches(|ch: char| !(ch.is_ascii_alphabetic() || ch == '_'));
+    if trimmed.is_empty() {
+        name.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Réduit un schéma JSON à ce que tout serveur accepte : types, propriétés,
+/// éléments, valeurs permises, descriptions. Les noms des propriétés (qui
+/// peuvent s'appeler « pattern » ou « format ») sont gardés.
+fn plain_schema(schema: &mut Value) {
+    let Some(fields) = schema.as_object_mut() else {
+        return;
+    };
+    for extra in SCHEMA_EXTRAS {
+        fields.remove(*extra);
+    }
+    if let Some(Value::Object(properties)) = fields.get_mut("properties") {
+        let renamed: serde_json::Map<String, Value> = std::mem::take(properties)
+            .into_iter()
+            .map(|(name, mut property)| {
+                plain_schema(&mut property);
+                (plain_property_name(&name), property)
+            })
+            .collect();
+        *properties = renamed;
+    }
+    if let Some(Value::Array(required)) = fields.get_mut("required") {
+        for name in required.iter_mut() {
+            if let Some(text) = name.as_str() {
+                *name = Value::String(plain_property_name(text));
+            }
+        }
+    }
+    if let Some(items) = fields.get_mut("items") {
+        plain_schema(items);
+    }
+    for key in ["anyOf", "oneOf", "allOf"] {
+        if let Some(Value::Array(variants)) = fields.get_mut(key) {
+            variants.iter_mut().for_each(plain_schema);
+        }
+    }
+}
+
+/// Schémas réduits pour tous les outils de la requête.
+fn plain_tool_schemas(payload: &mut Value) {
+    let Some(tools) = payload.get_mut("tools").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for tool in tools {
+        if let Some(parameters) = tool.pointer_mut("/function/parameters") {
+            plain_schema(parameters);
+        }
+    }
+}
+
+// --- Identifiants d'appels d'outils pour Mistral -------------------------------------------
+
+/// L'API de Mistral n'accepte que des identifiants d'appel de neuf lettres ou
+/// chiffres. Ceux d'un autre fournisseur (session commencée ailleurs, mode
+/// équipe) sont remplacés par une empreinte de ce format, la même pour
+/// l'appel et pour son résultat.
+fn mistral_call_id(id: &str) -> String {
+    const ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    if id.len() == 9 && id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return id.to_string();
+    }
+    // FNV-1a sur 64 bits, écrit en base 62 sur neuf caractères.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in id.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let mut short = String::with_capacity(9);
+    for _ in 0..9 {
+        let digit = usize::try_from(hash % 62).unwrap_or(0);
+        short.push(char::from(ALPHABET[digit]));
+        hash /= 62;
+    }
+    short
+}
+
+fn mistral_call_ids(payload: &mut Value) {
+    let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages {
+        if let Some(Value::String(id)) = message.get_mut("tool_call_id") {
+            *id = mistral_call_id(id);
+        }
+        let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for call in calls {
+            if let Some(Value::String(id)) = call.get_mut("id") {
+                *id = mistral_call_id(id);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatClient {
     http: reqwest::Client,
@@ -361,18 +611,34 @@ impl OpenAiCompatClient {
             .as_ref()
             .is_some_and(|tools| !tools.is_empty());
         let text_mode = has_tools && text_tools::text_tools_enabled(&request.model);
-        let first = match self.send_with_retry(request, text_mode).await {
-            // Serveur strict : il ne connaît pas `stream_options`. On le
-            // retient et la même requête repart sans ce champ.
-            Err(error)
-                if request.stream
-                    && accepts_stream_options(&self.base_url)
-                    && is_stream_options_error(&error) =>
+        let origin = self.extras_origin(&request.model);
+        let mut refusals = 0;
+        // Un serveur strict refuse ce qu'il ne connaît pas : un champ de la
+        // requête, un paramètre de raisonnement, un mot-clé du schéma d'un
+        // outil. Chaque refus est retenu et la même requête repart sans ce
+        // qui gêne, au lieu d'arrêter le tour.
+        let first = loop {
+            let error = match self.send_with_retry(request, text_mode).await {
+                Err(error) if refusals < MAX_REFUSALS => error,
+                other => break other,
+            };
+            if request.stream
+                && accepts_stream_options(&self.base_url)
+                && is_stream_options_error(&error)
             {
                 remember_stream_options_refusal(&self.base_url);
-                self.send_with_retry(request, text_mode).await
+            } else if let Some(field) = refused_optional_field(&error, &origin) {
+                remember_refused_field(&origin, field);
+            } else if has_tools
+                && !text_mode
+                && !wants_plain_schemas(&self.base_url)
+                && is_schema_refusal(&error)
+            {
+                remember_plain_schemas(&self.base_url);
+            } else {
+                break Err(error);
             }
-            other => other,
+            refusals += 1;
         };
         match first {
             Ok(response) => Ok((response, text_mode)),
@@ -489,6 +755,19 @@ impl OpenAiCompatClient {
             } else {
                 payload["reasoning_effort"] = Value::String(effort.openai_value().to_string());
             }
+        }
+        // Ce que ce serveur a déjà refusé ne lui est plus envoyé.
+        let refused = fields_refused_by(&self.extras_origin(&request.model));
+        if let Some(fields) = payload.as_object_mut() {
+            for field in refused {
+                fields.remove(field);
+            }
+        }
+        if wants_plain_schemas(&self.base_url) {
+            plain_tool_schemas(&mut payload);
+        }
+        if self.base_url.contains("api.mistral.ai") {
+            mistral_call_ids(&mut payload);
         }
         builder.json(&payload).send().await.map_err(ApiError::from)
     }
@@ -2100,6 +2379,148 @@ mod tests {
     };
     use serde_json::json;
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn a_refused_optional_parameter_is_dropped_and_remembered() {
+        use super::{
+            fields_refused_by, names_field, refused_optional_field, remember_refused_field,
+        };
+        let refusal = |status: u16, body: &str| ApiError::Api {
+            status: reqwest::StatusCode::from_u16(status).expect("statut"),
+            error_type: None,
+            message: None,
+            body: body.to_string(),
+            retryable: false,
+        };
+        let origin = "https://api.exemple.test/v1 exemple:modele-refus";
+        // Le serveur nomme le paramètre qu'il ne connaît pas.
+        let unsupported = refusal(
+            400,
+            r#"{"error":{"message":"`reasoning_effort` is not supported with this model","type":"invalid_request_error"}}"#,
+        );
+        assert_eq!(
+            refused_optional_field(&unsupported, origin),
+            Some("reasoning_effort")
+        );
+        // « reasoning » seul n'est pas nommé par « reasoning_effort ».
+        assert!(names_field("unknown field reasoning here", "reasoning"));
+        assert!(!names_field(
+            "`reasoning_effort` is not supported",
+            "reasoning"
+        ));
+        // Une fois retenu, il n'est plus envoyé, ni redemandé.
+        remember_refused_field(origin, "reasoning_effort");
+        assert!(fields_refused_by(origin).contains("reasoning_effort"));
+        assert_eq!(refused_optional_field(&unsupported, origin), None);
+        // Une autre erreur, ou un autre statut : rien à retirer.
+        assert_eq!(
+            refused_optional_field(&refusal(400, "context length exceeded"), origin),
+            None
+        );
+        assert_eq!(
+            refused_optional_field(&refusal(500, "tool_choice"), origin),
+            None
+        );
+        assert_eq!(
+            refused_optional_field(
+                &refusal(
+                    422,
+                    r#"{"detail":[{"loc":["body","tool_choice"],"msg":"Extra inputs are not permitted"}]}"#
+                ),
+                origin
+            ),
+            Some("tool_choice")
+        );
+    }
+
+    #[test]
+    fn refused_tool_schemas_are_sent_again_in_a_plain_form() {
+        use super::{is_schema_refusal, plain_schema};
+        let refusal = |body: &str| ApiError::Api {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            error_type: None,
+            message: None,
+            body: body.to_string(),
+            retryable: false,
+        };
+        // L'erreur de l'API de Google pour un mot-clé qu'elle ne connaît pas.
+        assert!(is_schema_refusal(&refusal(
+            r#"[{"error":{"code":400,"message":"Invalid JSON payload received. Unknown name \"additionalProperties\" at 'tools[0].function_declarations[0].parameters': Cannot find field.","status":"INVALID_ARGUMENT"}}]"#
+        )));
+        assert!(!is_schema_refusal(&refusal("model not found")));
+
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "minLength": 1 },
+                "format": { "type": "string", "format": "uri" },
+                "-A": { "type": "integer", "minimum": 0 },
+                "items": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": { "label": { "type": "string", "default": "x" } },
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["pattern", "-A"],
+            "additionalProperties": false
+        });
+        plain_schema(&mut schema);
+        assert_eq!(
+            schema,
+            json!({
+                "type": "object",
+                "properties": {
+                    // Les propriétés nommées comme un mot-clé sont gardées.
+                    "pattern": { "type": "string" },
+                    "format": { "type": "string" },
+                    "A": { "type": "integer" },
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": { "label": { "type": "string" } }
+                        }
+                    }
+                },
+                "required": ["pattern", "A"]
+            })
+        );
+    }
+
+    #[test]
+    fn tool_call_ids_take_the_form_mistral_accepts() {
+        use super::{mistral_call_id, mistral_call_ids};
+        // Un identifiant de Mistral est gardé ; celui d'un autre fournisseur
+        // devient une empreinte de neuf lettres ou chiffres, toujours la même.
+        assert_eq!(mistral_call_id("aB3dE6gH9"), "aB3dE6gH9");
+        let short = mistral_call_id("call-47d07cf6-be75-4b8a-993f-e3494f7eda73");
+        assert_eq!(short.len(), 9);
+        assert!(short.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+        assert_eq!(
+            short,
+            mistral_call_id("call-47d07cf6-be75-4b8a-993f-e3494f7eda73")
+        );
+        assert_ne!(
+            short,
+            mistral_call_id("call-db1fdcbc-53a9-4d50-8ba7-cdffbf6d620b")
+        );
+
+        let mut payload = json!({
+            "messages": [
+                { "role": "user", "content": "lis a.py" },
+                { "role": "assistant", "tool_calls": [{ "id": "call-1", "type": "function", "function": { "name": "read_file", "arguments": "{}" } }] },
+                { "role": "tool", "tool_call_id": "call-1", "content": "ok" }
+            ]
+        });
+        mistral_call_ids(&mut payload);
+        let call = payload["messages"][1]["tool_calls"][0]["id"].clone();
+        assert_eq!(call, payload["messages"][2]["tool_call_id"]);
+        assert_eq!(call.as_str().map(str::len), Some(9));
+    }
 
     #[test]
     fn strict_servers_do_not_get_stream_options() {

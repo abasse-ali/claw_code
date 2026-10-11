@@ -132,11 +132,82 @@ pub const MAX_VERIFY_ROUNDS: usize = 3;
 /// Commandes de vérification du projet situé dans `root`.
 #[must_use]
 pub fn verify_commands(setting: &VerifySetting, root: &Path) -> Vec<String> {
+    verify_commands_for(setting, root, &[])
+}
+
+/// Commandes de vérification du projet, connaissant les fichiers modifiés
+/// pendant le tour. Quand la racine ne porte aucun manifeste (projet rangé en
+/// `backend/` et `frontend/`), la vérification est celle du dossier le plus
+/// proche de chaque fichier modifié qui en porte un, lancée depuis ce dossier
+/// (`cd frontend && npx tsc --noEmit`). Sans fichier connu, celle des
+/// sous-dossiers directs de la racine.
+#[must_use]
+pub fn verify_commands_for(
+    setting: &VerifySetting,
+    root: &Path,
+    changed: &[String],
+) -> Vec<String> {
     match setting {
-        VerifySetting::Off => Vec::new(),
-        VerifySetting::Commands(commands) => commands.clone(),
-        VerifySetting::Auto => detect_verify_commands(root),
+        VerifySetting::Off => return Vec::new(),
+        VerifySetting::Commands(commands) => return commands.clone(),
+        VerifySetting::Auto => {}
     }
+    let at_root = detect_verify_commands(root);
+    if !at_root.is_empty() {
+        return at_root;
+    }
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut folders: Vec<std::path::PathBuf> = Vec::new();
+    for file in changed {
+        let file = Path::new(file);
+        let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+        let folder = file
+            .ancestors()
+            .skip(1)
+            .take_while(|dir| dir.starts_with(&root) && *dir != root)
+            .find(|dir| !detect_verify_commands(dir).is_empty());
+        if let Some(folder) = folder {
+            if !folders.iter().any(|known| known == folder) {
+                folders.push(folder.to_path_buf());
+            }
+        }
+    }
+    if changed.is_empty() {
+        let mut found: Vec<_> = std::fs::read_dir(&root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned());
+                path.is_dir()
+                    && name.is_some_and(|name| !crate::file_ops::generated_dir(path, &name, &root))
+                    && !detect_verify_commands(path).is_empty()
+            })
+            .collect();
+        found.sort();
+        folders = found;
+    }
+    folders
+        .iter()
+        .flat_map(|folder| {
+            let relative = folder
+                .strip_prefix(&root)
+                .unwrap_or(folder)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let place = if relative.contains(' ') {
+                format!("cd \"{relative}\"")
+            } else {
+                format!("cd {relative}")
+            };
+            detect_verify_commands(folder)
+                .into_iter()
+                .map(move |command| format!("{place} && {command}"))
+        })
+        .collect()
 }
 
 fn python_program() -> &'static str {
@@ -159,6 +230,11 @@ fn has_test_files(dir: &Path) -> bool {
 
 fn python_verify(root: &Path) -> Option<String> {
     let python = python_program();
+    // pytest réglé pour ce projet, ou nommé parmi ses dépendances alors qu'il
+    // a un dossier de tests (`conftest.py` y est souvent rangé).
+    let has_tests = ["tests", "test"]
+        .iter()
+        .any(|dir| has_test_files(&root.join(dir)) || root.join(dir).join("conftest.py").is_file());
     let pytest_configured = ["pytest.ini", "conftest.py"]
         .iter()
         .any(|name| root.join(name).is_file())
@@ -170,7 +246,19 @@ fn python_verify(root: &Path) -> Option<String> {
                         || text.contains("[pytest]")
                         || text.contains("[tool:pytest]")
                 })
-            });
+            })
+        || (has_tests
+            && [
+                "pyproject.toml",
+                "requirements.txt",
+                "requirements-dev.txt",
+                "setup.cfg",
+            ]
+            .iter()
+            .any(|name| {
+                std::fs::read_to_string(root.join(name))
+                    .is_ok_and(|text| text.to_ascii_lowercase().contains("pytest"))
+            }));
     if pytest_configured {
         return Some(format!("{python} -m pytest -q -x"));
     }
@@ -225,11 +313,27 @@ fn squeeze(command: &str) -> String {
 }
 
 /// Le modèle a déjà lancé cette vérification lui-même (commande identique, ou
-/// qui la contient : « cd app && cargo check --quiet »).
+/// qui la contient : « cd app && cargo check --quiet »). Pour une vérification
+/// lancée depuis un sous-dossier (`cd frontend && npx tsc --noEmit`), il
+/// suffit que sa commande contienne la vérification et nomme ce dossier, quel
+/// que soit le chemin qu'il a écrit pour s'y rendre.
 #[must_use]
 pub fn covers(model_command: &str, verify_command: &str) -> bool {
     let (ran, wanted) = (squeeze(model_command), squeeze(verify_command));
-    !wanted.is_empty() && ran.contains(&wanted)
+    if wanted.is_empty() {
+        return false;
+    }
+    if ran.contains(&wanted) {
+        return true;
+    }
+    wanted
+        .strip_prefix("cd ")
+        .and_then(|rest| rest.split_once(" && "))
+        .is_some_and(|(folder, check)| {
+            let folder = folder.trim_matches('"');
+            let name = folder.rsplit('/').next().unwrap_or(folder);
+            ran.contains(check) && ran.replace('\\', "/").contains(name)
+        })
 }
 
 /// Issue d'une commande lancée par l'outil `bash`.
@@ -274,6 +378,17 @@ fn excerpt(text: &str) -> String {
     } else {
         joined
     }
+}
+
+/// La vérification a échoué parce que son outil n'est pas installé (pytest
+/// absent de l'environnement, commande introuvable) : rien à corriger dans le
+/// travail.
+#[must_use]
+pub fn check_tool_is_missing(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    lower.contains("no module named pytest")
+        || lower.contains("no module named 'pytest'")
+        || (lower.contains("command not found") && lower.contains("(exit code 127)"))
 }
 
 /// Lit le résultat JSON de l'outil `bash` (stdout, stderr, code de sortie).
@@ -380,7 +495,11 @@ const MAX_SITE_LOOKUPS: usize = 200;
 
 /// Fichier du projet que désigne un chemin cité (relatif au dossier de
 /// travail ou absolu dedans), hors dépendances et sorties de build.
-fn project_file(root: &Path, cited: &str) -> Option<(std::path::PathBuf, String)> {
+fn project_file(
+    root: &Path,
+    cited: &str,
+    command_dir: Option<&Path>,
+) -> Option<(std::path::PathBuf, String)> {
     // `//hôte/…` (reste d'une adresse web) : un chemin réseau sous Windows, que
     // l'on ne va pas chercher sur le réseau.
     if cited.starts_with("//") || cited.starts_with(r"\\") {
@@ -388,12 +507,15 @@ fn project_file(root: &Path, cited: &str) -> Option<(std::path::PathBuf, String)
     }
     let cited = cited.trim_start_matches("./");
     let path = Path::new(cited);
+    // Un chemin relatif part du dossier de travail, ou du dossier où la
+    // commande s'est placée (`cd frontend && npm run build` cite `src/app.tsx`).
     let full = if path.is_absolute() {
-        path.to_path_buf()
+        path.canonicalize().ok()?
     } else {
-        root.join(path)
+        std::iter::once(root)
+            .chain(command_dir)
+            .find_map(|base| base.join(path).canonicalize().ok())?
     };
-    let full = full.canonicalize().ok()?;
     let relative = full.strip_prefix(root).ok()?.to_path_buf();
     // Dépendances, caches, sorties de build : une trace qui y passe n'y montre
     // rien d'utile à corriger (un dossier `build` de vrai code est gardé).
@@ -404,11 +526,37 @@ fn project_file(root: &Path, cited: &str) -> Option<(std::path::PathBuf, String)
     Some((full, shown))
 }
 
+/// Dossier où une commande se place d'abord (`cd frontend && …`, `cd /d
+/// D:\projet\backend && …`), s'il est dans le projet.
+fn command_dir(command: &str, root: &Path) -> Option<std::path::PathBuf> {
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = PATTERN.get_or_init(|| {
+        regex::Regex::new(r#"^\s*cd\s+(?:/[dD]\s+)?(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))"#)
+            .expect("motif valide")
+    });
+    let found = pattern.captures(command)?;
+    let folder = found
+        .get(1)
+        .or_else(|| found.get(2))
+        .or_else(|| found.get(3))?
+        .as_str();
+    let folder = Path::new(folder);
+    let full = if folder.is_absolute() {
+        folder.to_path_buf()
+    } else {
+        root.join(folder)
+    };
+    let full = full.canonicalize().ok()?;
+    (full.starts_with(root) && full != root).then_some(full)
+}
+
 /// Le code autour des emplacements du projet qu'une sortie en échec cite
-/// (`output` : le résultat JSON de l'outil `bash`, ou du texte brut). Le
-/// modèle voit les lignes en cause sans dépenser une requête pour les relire.
+/// (`output` : le résultat JSON de l'outil `bash`, ou du texte brut ;
+/// `command` : la commande lancée, pour les chemins cités depuis le dossier
+/// où elle s'est placée). Le modèle voit les lignes en cause sans dépenser une
+/// requête pour les relire.
 #[must_use]
-pub fn error_sites(output: &str, cwd: &Path) -> Option<String> {
+pub fn error_sites(output: &str, cwd: &Path, command: &str) -> Option<String> {
     let text = serde_json::from_str::<Value>(output).map_or_else(
         |_| output.to_string(),
         |value| {
@@ -417,13 +565,14 @@ pub fn error_sites(output: &str, cwd: &Path) -> Option<String> {
         },
     );
     let root = cwd.canonicalize().ok()?;
+    let placed = command_dir(command, &root);
     let mut blocks: Vec<String> = Vec::new();
     let mut used = 0;
     for (cited, line) in cited_sites(&text).into_iter().take(MAX_SITE_LOOKUPS) {
         if blocks.len() >= ERROR_SITES {
             break;
         }
-        let Some((file, shown)) = project_file(&root, &cited) else {
+        let Some((file, shown)) = project_file(&root, &cited, placed.as_deref()) else {
             continue;
         };
         let Some(content) = crate::file_ops::read_any_text(&file) else {
@@ -493,15 +642,92 @@ const FAILURE_LIMIT: u32 = 4;
 /// Appels d'outils dans un tour avant de demander au modèle de faire le point.
 const TOOL_BUDGET: u32 = 40;
 
-/// La commande est une vérification (tests, compilation, analyse).
+/// La commande est une vérification (tests, compilation, analyse). Jugée sur
+/// le programme lancé et ses premiers arguments, commande simple par commande
+/// simple : un mot comme « test » dans un chemin (`cd D:\test_claw\backend`)
+/// ou dans un nom de fichier ne fait pas d'une commande une vérification.
 #[must_use]
 pub fn is_check_command(command: &str) -> bool {
-    let lower = command.to_ascii_lowercase();
+    crate::bash::shell_segments(&command.to_ascii_lowercase())
+        .iter()
+        .any(|(segment, _)| segment_is_check(segment))
+}
+
+/// Mots d'un script ou d'une cible qui en font une vérification (`npm run
+/// test:unit`, `make check`).
+fn names_a_check(word: &str) -> bool {
     [
-        "test", "check", "build", "lint", "tsc", "compile", "clippy", "vet", "mypy", "ruff",
+        "test", "check", "build", "lint", "tsc", "type", "compile", "verify", "vet", "clippy",
     ]
     .iter()
-    .any(|word| lower.contains(word))
+    .any(|check| word.contains(check))
+}
+
+fn segment_is_check(segment: &str) -> bool {
+    let mut words = command_words(segment);
+    // Lanceurs : la vérification est le programme qu'ils lancent.
+    loop {
+        let skip = match words.as_slice() {
+            [first, ..]
+                if matches!(first.as_str(), "npx" | "bunx" | "time" | "nice" | "winpty") =>
+            {
+                1
+            }
+            [first, second, ..]
+                if (matches!(first.as_str(), "uv" | "poetry" | "pipenv" | "pdm" | "hatch")
+                    && second == "run")
+                    || (matches!(first.as_str(), "pnpm" | "bundle") && second == "exec") =>
+            {
+                2
+            }
+            _ => break,
+        };
+        words.drain(..skip);
+    }
+    let Some(program) = words.first() else {
+        return false;
+    };
+    // `./gradlew`, `node_modules/.bin/tsc`, `pytest.exe` : le nom seul.
+    let program = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let program = [".exe", ".cmd", ".bat", ".sh"]
+        .iter()
+        .find_map(|suffix| program.strip_suffix(suffix))
+        .unwrap_or(program);
+    let argument = |index: usize| words.get(index).map_or("", String::as_str);
+    match program {
+        "pytest" | "py.test" | "tox" | "nox" | "tsc" | "eslint" | "jest" | "vitest" | "mocha"
+        | "mypy" | "ruff" | "flake8" | "pylint" | "pyright" | "phpunit" | "rspec" | "ctest"
+        | "playwright" | "cypress" => true,
+        "python" => matches!(
+            argument(1),
+            "pytest"
+                | "unittest"
+                | "mypy"
+                | "ruff"
+                | "flake8"
+                | "pylint"
+                | "compileall"
+                | "py_compile"
+                | "tox"
+        ),
+        "cargo" => matches!(
+            argument(1),
+            "test" | "check" | "build" | "clippy" | "nextest" | "bench"
+        ),
+        "go" => matches!(argument(1), "test" | "build" | "vet"),
+        "dotnet" => matches!(argument(1), "test" | "build"),
+        "npm" | "pnpm" | "yarn" | "bun" => names_a_check(if argument(1) == "run" {
+            argument(2)
+        } else {
+            argument(1)
+        }),
+        // `make` seul construit ; avec une cible, c'est elle qui décide.
+        "make" => words.len() == 1 || words[1..].iter().any(|word| names_a_check(word)),
+        "mvn" | "gradle" | "gradlew" | "rake" | "rails" | "php" | "deno" | "cmake" => {
+            words[1..].iter().any(|word| names_a_check(word))
+        }
+        _ => false,
+    }
 }
 
 fn fingerprint(text: &str) -> u64 {
@@ -617,7 +843,7 @@ impl StallGuard {
             if *passes == 2 {
                 return Some(Reminder {
                     to_model: format!(
-                        "[Claw] `{command}` already succeeded and nothing has changed since. Checking again adds nothing. If the task is complete, stop using tools and give your final answer now."
+                        "[Claw] `{command}` already succeeded and nothing has changed since: running it again proves nothing new. If something is still unverified, exercise the behaviour itself (start the server and request the page, call the function with a real input, open the produced file). Otherwise give your final answer now."
                     ),
                     notice: "Claw recadre le modèle : vérification déjà réussie, inutile de la relancer"
                         .to_string(),
@@ -1566,7 +1792,7 @@ GET https://cdn.example.com/lib.js:8080 failed, see http://docs.example.com/err.
             "returnCodeInterpretation": "exit_code:1",
         })
         .to_string();
-        let sites = error_sites(&bash, &root).expect("emplacement du projet");
+        let sites = error_sites(&bash, &root, "python app/main.py").expect("emplacement du projet");
         assert!(sites.starts_with("[Claw] Current code at the project locations"));
         assert!(sites.contains("app/main.py:10\n"), "{sites}");
         assert!(sites.contains(">   10 | ligne 10"), "{sites}");
@@ -1579,10 +1805,10 @@ GET https://cdn.example.com/lib.js:8080 failed, see http://docs.example.com/err.
             "les dépendances ne sont pas montrées : {sites}"
         );
         // Rien d'utile : pas de note.
-        assert_eq!(error_sites("tout va bien", &root), None);
+        assert_eq!(error_sites("tout va bien", &root, ""), None);
         // Une adresse web n'est pas un chemin réseau à aller chercher.
         assert_eq!(
-            error_sites("GET https://cdn.example.com/lib.js:8080 failed", &root),
+            error_sites("GET https://cdn.example.com/lib.js:8080 failed", &root, ""),
             None
         );
         let _ = std::fs::remove_dir_all(root);
@@ -1737,10 +1963,12 @@ mod language_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        covers, detect_verify_commands, original_content, read_bash_output, review_findings,
-        syntax_check, unified_diff, verify_commands, verify_feedback, StallGuard, VerifySetting,
+        check_tool_is_missing, covers, detect_verify_commands, error_sites, is_check_command,
+        original_content, read_bash_output, review_findings, syntax_check, unified_diff,
+        verify_commands, verify_commands_for, verify_feedback, StallGuard, VerifySetting,
     };
     use std::fs;
+    use std::path::Path;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -1791,6 +2019,136 @@ mod tests {
         for dir in [rust, python, pytest, node, empty] {
             let _ = fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn a_project_split_in_subfolders_is_verified_where_the_files_changed() {
+        // La disposition d'un vrai projet : rien à la racine, `backend/` avec
+        // pytest nommé dans pyproject.toml et ses tests dans `tests/`,
+        // `frontend/` avec TypeScript installé.
+        let root = temp_dir("monorepo");
+        let backend = root.join("backend");
+        let frontend = root.join("frontend");
+        fs::create_dir_all(backend.join("tests")).expect("backend");
+        fs::create_dir_all(backend.join("app")).expect("app");
+        fs::write(
+            backend.join("pyproject.toml"),
+            "[project]\ndependencies = [\"pytest==8.2.0\"]\n",
+        )
+        .expect("pyproject");
+        fs::write(backend.join("tests").join("conftest.py"), "").expect("conftest");
+        fs::write(backend.join("app").join("main.py"), "x = 1\n").expect("main");
+        fs::create_dir_all(frontend.join("node_modules").join(".bin")).expect("frontend");
+        fs::create_dir_all(frontend.join("src")).expect("src");
+        fs::write(
+            frontend.join("package.json"),
+            r#"{"scripts":{"build":"next build"}}"#,
+        )
+        .expect("package");
+        fs::write(frontend.join("tsconfig.json"), "{}").expect("tsconfig");
+        fs::write(frontend.join("node_modules").join(".bin").join("tsc"), "").expect("tsc");
+        fs::write(frontend.join("src").join("page.tsx"), "export {}\n").expect("page");
+
+        assert!(detect_verify_commands(&root).is_empty());
+        let changed = |file: &Path| vec![file.to_string_lossy().into_owned()];
+        // Un fichier du frontend modifié : sa vérification, depuis son dossier.
+        assert_eq!(
+            verify_commands_for(
+                &VerifySetting::Auto,
+                &root,
+                &changed(&frontend.join("src").join("page.tsx"))
+            ),
+            vec!["cd frontend && npx tsc --noEmit"]
+        );
+        let backend_checks = verify_commands_for(
+            &VerifySetting::Auto,
+            &root,
+            &changed(&backend.join("app").join("main.py")),
+        );
+        assert_eq!(backend_checks.len(), 1, "{backend_checks:?}");
+        assert!(
+            backend_checks[0].starts_with("cd backend && "),
+            "{backend_checks:?}"
+        );
+        assert!(
+            backend_checks[0].ends_with("-m pytest -q -x"),
+            "{backend_checks:?}"
+        );
+        // Sans fichier connu : les sous-dossiers qui portent un manifeste.
+        assert_eq!(
+            verify_commands_for(&VerifySetting::Auto, &root, &[]).len(),
+            2
+        );
+
+        // Le modèle a lancé lui-même cette vérification, avec son propre chemin.
+        assert!(covers(
+            r"cd D:\Mes_Projets\test_claw\frontend && npx tsc --noEmit",
+            "cd frontend && npx tsc --noEmit"
+        ));
+        assert!(!covers(
+            "cd backend && npx tsc --noEmit",
+            "cd frontend && npx tsc --noEmit"
+        ));
+        assert!(!covers(
+            "cd frontend && npm run lint",
+            "cd frontend && npx tsc --noEmit"
+        ));
+
+        // Une erreur cite un chemin depuis le dossier où la commande s'est placée.
+        let sites = error_sites(
+            "./src/page.tsx:1:8\nType error: something",
+            &root,
+            "cd frontend && npm run build 2>&1 | tail -20",
+        )
+        .expect("emplacement trouvé depuis frontend");
+        assert!(sites.contains("frontend/src/page.tsx:1"), "{sites}");
+        assert_eq!(
+            error_sites("./src/page.tsx:1:8", &root, "npm run build"),
+            None
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_check_is_told_by_its_program_not_by_a_word_in_a_path() {
+        for check in [
+            "cargo test",
+            "cd rust && cargo clippy --all-targets",
+            "npm test",
+            "npm run test:unit -- --watch=false",
+            "pnpm run typecheck",
+            "npx tsc --noEmit",
+            "python -m pytest tests/ -v",
+            "python3 -m unittest discover",
+            "pytest -q",
+            "uv run pytest",
+            "go vet ./...",
+            "make",
+            "make check",
+            "./gradlew build",
+            "node_modules/.bin/eslint src",
+            "cd frontend && npm run build 2>&1 | tail -20",
+        ] {
+            assert!(is_check_command(check), "{check}");
+        }
+        for other in [
+            // Le mot « test » est dans le chemin, pas dans la commande.
+            r#"cd D:\Mes_Projets\test_claw\backend && python -c "from app.main import app; print('ok')""#,
+            "cat tests/test_api.py",
+            "ls build",
+            "git status",
+            "python build_docs.py",
+            "npm run dev",
+            "npm install",
+            "curl http://localhost:8000/api/v1/health",
+            "echo \"cargo test\"",
+        ] {
+            assert!(!is_check_command(other), "{other}");
+        }
+        assert!(check_tool_is_missing(
+            "C:\\Python313\\python.exe: No module named pytest"
+        ));
+        assert!(!check_tool_is_missing("assert 1 == 2"));
     }
 
     #[test]

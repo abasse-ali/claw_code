@@ -86,11 +86,18 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
     let auto_background = input.run_in_background.is_none() && starts_long_running(&input.command);
     let background = input.run_in_background == Some(true) || auto_background;
 
+    // `programme | tail` : le code de sortie doit rester celui du programme.
+    let hidden_exit = hides_exit_code(&input.command);
+    let script = if hidden_exit.is_some() {
+        format!("{PIPEFAIL}{}", input.command)
+    } else {
+        input.command.clone()
+    };
     // Sous Windows, le PID du shell MSYS permet d'arrêter tout le groupe.
     let pid_file = cfg!(windows).then(shell_group_pid_file);
     let wrapped = pid_file.as_deref().map_or_else(
-        || input.command.clone(),
-        |path| with_group_pid_capture(&input.command, path),
+        || script.clone(),
+        |path| with_group_pid_capture(&script, path),
     );
     #[allow(unused_mut)]
     let mut command = prepare_command(&wrapped, &cwd, &sandbox_status, true);
@@ -103,11 +110,18 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
     let container = take_last_container();
     let running =
         crate::bash_tasks::launch(command, &input.command, pid_file, container, !background)?;
-    let output = if background {
+    let mut output = if background {
         started_in_background(&running.detach(), auto_background)
     } else {
         run_in_foreground(running, explicit_timeout(input.timeout), Waits::DEFAULT)
     };
+    // `programme | head` : le programme coupé par `head` s'arrête sur SIGPIPE
+    // (141), ce qui n'est pas un échec.
+    if hidden_exit == Some(true)
+        && output.return_code_interpretation.as_deref() == Some("exit_code:141")
+    {
+        output.return_code_interpretation = None;
+    }
     Ok(BashCommandOutput {
         dangerously_disable_sandbox: input.dangerously_disable_sandbox,
         sandbox_status: Some(sandbox_status),
@@ -451,14 +465,33 @@ pub fn starts_long_running(command: &str) -> bool {
 /// `_` (un mot, sans son contenu), les commentaires sont retirés. Chaque
 /// commande dit si le shell la détache lui-même (`&` simple après elle).
 pub(crate) fn shell_segments(command: &str) -> Vec<(String, bool)> {
+    shell_pieces(command)
+        .into_iter()
+        .map(|(segment, closed_by)| (segment, closed_by == Closed::Detached))
+        .collect()
+}
+
+/// Ce qui ferme une commande simple dans une ligne de shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Closed {
+    /// `|` ou `|&` : sa sortie va à la commande suivante.
+    Pipe,
+    /// `&` simple : le shell la détache.
+    Detached,
+    /// `;`, `&&`, `||`, fin de ligne, parenthèse, fin de la commande.
+    Sequence,
+}
+
+/// Les commandes simples d'une ligne de shell, chacune avec ce qui la ferme.
+pub(crate) fn shell_pieces(command: &str) -> Vec<(String, Closed)> {
     let chars: Vec<char> = command.chars().collect();
     let mut segments = Vec::new();
     let mut current = String::new();
     let mut index = 0;
-    let close = |current: &mut String, segments: &mut Vec<(String, bool)>, detached: bool| {
+    let close = |current: &mut String, segments: &mut Vec<(String, Closed)>, closed: Closed| {
         let segment = current.trim().to_string();
         if !segment.is_empty() {
-            segments.push((segment, detached));
+            segments.push((segment, closed));
         }
         current.clear();
     };
@@ -493,24 +526,79 @@ pub(crate) fn shell_segments(command: &str) -> Vec<(String, bool)> {
                 current.push(ch);
             }
             '&' if chars.get(index + 1) == Some(&'&') => {
-                close(&mut current, &mut segments, false);
+                close(&mut current, &mut segments, Closed::Sequence);
                 index += 1;
             }
-            '&' => close(&mut current, &mut segments, true),
+            '&' => close(&mut current, &mut segments, Closed::Detached),
+            '|' if chars.get(index + 1) == Some(&'|') => {
+                close(&mut current, &mut segments, Closed::Sequence);
+                index += 1;
+            }
             '|' => {
-                close(&mut current, &mut segments, false);
-                if matches!(chars.get(index + 1), Some('|' | '&')) {
+                close(&mut current, &mut segments, Closed::Pipe);
+                if chars.get(index + 1) == Some(&'&') {
                     index += 1;
                 }
             }
-            ';' | '\n' | '(' | ')' => close(&mut current, &mut segments, false),
+            ';' | '\n' | '(' | ')' => close(&mut current, &mut segments, Closed::Sequence),
             _ => current.push(ch),
         }
         index += 1;
     }
-    close(&mut current, &mut segments, false);
+    close(&mut current, &mut segments, Closed::Sequence);
     segments
 }
+
+/// Filtres qui ne font que couper ou recopier une sortie.
+const OUTPUT_FILTERS: &[&str] = &["tail", "head", "tee", "cat", "less", "more"];
+/// Outils de texte derrière lesquels un modèle range la sortie d'une
+/// vérification (`pytest … | grep -E "passed|failed"`).
+const TEXT_TOOLS: &[&str] = &[
+    "grep", "egrep", "findstr", "sed", "awk", "sort", "uniq", "cut",
+];
+
+/// Premier mot d'une commande simple, après ses variables d'environnement.
+fn program_of(segment: &str) -> &str {
+    segment
+        .split_whitespace()
+        .find(|word| !word.contains('=') || word.starts_with('-'))
+        .unwrap_or_default()
+}
+
+/// Le dernier tube de la commande range la sortie d'un programme derrière un
+/// filtre (`npm run build 2>&1 | tail -20`) : sans précaution, le code de
+/// sortie est celui du filtre, et une compilation en échec passe pour réussie.
+/// Vrai quand tous les maillons après le premier ne font que couper la sortie,
+/// ou que le premier est une vérification et les suivants des outils de texte.
+/// `head` : le filtre peut couper le programme avant sa fin.
+pub(crate) fn hides_exit_code(command: &str) -> Option<bool> {
+    if command.contains("<<") {
+        return None;
+    }
+    let pieces = shell_pieces(&command.to_ascii_lowercase());
+    // Le dernier tube : les commandes fermées par `|` puis celle qui le termine.
+    let end = pieces.len();
+    let start = (0..end.saturating_sub(1))
+        .rev()
+        .take_while(|index| pieces[*index].1 == Closed::Pipe)
+        .last()?;
+    let stages: Vec<&str> = pieces[start..end]
+        .iter()
+        .map(|(segment, _)| program_of(segment))
+        .collect();
+    let (first, filters) = stages.split_first()?;
+    let cutting = filters.iter().all(|name| OUTPUT_FILTERS.contains(name));
+    let checking = crate::harness::is_check_command(&pieces[start].0)
+        && filters
+            .iter()
+            .all(|name| OUTPUT_FILTERS.contains(name) || TEXT_TOOLS.contains(name));
+    (!first.is_empty() && (cutting || checking)).then(|| filters.contains(&"head"))
+}
+
+/// Préfixe qui fait rendre à un tube le code de sortie du programme en échec.
+/// Essayé d'abord dans un sous-shell : un `sh` qui ne connaît pas `pipefail`
+/// (dash) continuerait sinon sur une erreur.
+const PIPEFAIL: &str = "(set -o pipefail) 2>/dev/null && set -o pipefail\n";
 
 /// Une commande simple démarre-t-elle un serveur ou une surveillance ?
 fn segment_is_long_running(segment: &str) -> bool {
@@ -884,6 +972,57 @@ fn prepare_sandbox_dirs(cwd: &std::path::Path) {
 mod tests {
     use super::{execute_bash, BashCommandInput};
     use crate::sandbox::FilesystemIsolationMode;
+
+    #[test]
+    fn a_filter_at_the_end_of_a_pipe_does_not_hide_a_failure() {
+        use super::hides_exit_code;
+        // Reconnu : un programme derrière un filtre qui coupe sa sortie.
+        assert_eq!(
+            hides_exit_code("npm run build 2>&1 | tail -20"),
+            Some(false)
+        );
+        assert_eq!(
+            hides_exit_code("cd frontend && npm run build 2>&1 | tail -20"),
+            Some(false)
+        );
+        assert_eq!(
+            hides_exit_code("python -m pytest tests/ -v --tb=short 2>&1 | head -100"),
+            Some(true)
+        );
+        // Une vérification rangée derrière grep.
+        assert_eq!(
+            hides_exit_code(
+                "cd backend && python -m pytest tests/ -v 2>&1 | grep -E \"(PASSED|FAILED)\""
+            ),
+            Some(false)
+        );
+        // Laissé tel quel : le dernier programme décide (grep sans résultat,
+        // comptage), ou il n'y a pas de tube.
+        for kept in [
+            "grep -rn foo src | wc -l",
+            "ls | grep test",
+            "cat a.txt | python script.py",
+            "npm run build",
+            "npm run build || echo raté",
+            "cat > a.txt <<EOF\nun | tail\nEOF",
+        ] {
+            assert_eq!(hides_exit_code(kept), None, "{kept}");
+        }
+
+        let run = |command: &str| {
+            execute_bash(foreground(command, Some(60_000)))
+                .expect("exécution")
+                .return_code_interpretation
+        };
+        // Le programme échoue derrière `tail` : son code de sortie est rendu.
+        assert_eq!(
+            run("(echo compilation; exit 3) 2>&1 | tail -5").as_deref(),
+            Some("exit_code:3")
+        );
+        assert_eq!(run("echo tout va bien | tail -5"), None);
+        // Coupé par `head` avant sa fin : pas un échec.
+        assert_eq!(run("yes | head -3"), None);
+    }
 
     #[test]
     fn shell_segments_ignore_quotes_comments_and_redirections() {

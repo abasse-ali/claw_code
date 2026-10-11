@@ -190,9 +190,18 @@ fn render_cli_error(problem: &str) -> String {
     lines.join("\n")
 }
 
-/// Conseil adapté aux erreurs fréquentes avec `OpenRouter` et les modèles gratuits.
+/// Code HTTP d'une erreur du fournisseur (« l'api a retourné 400 … »).
+fn returned_status(problem: &str) -> Option<u16> {
+    const MARKER: &str = "l'api a retourné ";
+    let after = &problem[problem.rfind(MARKER)? + MARKER.len()..];
+    after.get(..3)?.parse().ok()
+}
+
+/// Conseil adapté à l'erreur : chaque famille de cause dit quoi essayer (dans
+/// le terminal comme dans la page).
 fn error_hint(problem: &str) -> &'static str {
     let lower = problem.to_ascii_lowercase();
+    let status = returned_status(problem);
     if lower.contains("429") || lower.contains("rate limit") {
         "limite de requêtes atteinte : les modèles gratuits sont limités par minute et par jour (quota : /models) ; réessayez plus tard ou changez de modèle (/model)"
     } else if lower.contains("data policy") {
@@ -203,12 +212,29 @@ fn error_hint(problem: &str) -> &'static str {
         "vérifiez la clé OPENROUTER_API_KEY (ou ANTHROPIC_API_KEY pour un modèle Claude direct)"
     } else if lower.contains("image") && (lower.contains("support") || lower.contains("modalit")) {
         "ce modèle ne lit pas les images : choisissez un modèle multimodal (/models vision)"
+    } else if status == Some(402) {
+        "crédits insuffisants : ce modèle est payant, ou le solde du compte est épuisé ; choisissez un modèle gratuit avec /models"
+    } else if status == Some(403) {
+        "ce modèle est refusé à votre clé : choisissez-en un autre avec /models"
+    } else if status == Some(404) {
+        "modèle introuvable chez ce fournisseur : vérifiez son identifiant avec /models"
+    } else if status == Some(413)
+        || lower.contains("context length")
+        || lower.contains("too many tokens")
+        || lower.contains("maximum number of tokens")
+        || lower.contains("request too large")
+    {
+        "la conversation dépasse ce que ce modèle accepte : résumez-la avec /compact, ou repartez d'une session neuve"
     } else if api::upstream_failure_status(problem).is_some() {
         "le fournisseur du modèle a cessé de répondre (surcharge ou délai dépassé) et aucun autre modèle n'a pris le relais : renvoyez la demande, ou changez de modèle (/model)"
+    } else if matches!(status, Some(400 | 422)) {
+        "le fournisseur a refusé la requête telle qu'elle est écrite : essayez un autre modèle (/model), ou /compact si la conversation est longue ; si l'erreur revient avec tous les modèles, signalez-la"
+    } else if lower.contains("erreur http") {
+        "le serveur du modèle est injoignable : vérifiez la connexion, ou qu'Ollama est lancé pour un modèle local"
     } else if lower.contains("identifiants") && lower.contains("manquants") {
         "aucune clé API trouvée : définissez OPENROUTER_API_KEY (clé gratuite sur https://openrouter.ai/keys) puis relancez claw"
     } else {
-        "claw --help"
+        "renvoyez la demande ; si l'erreur revient, changez de modèle (/model) ou lancez `claw doctor`"
     }
 }
 
@@ -7913,7 +7939,22 @@ mod tests {
             super::error_hint("No endpoints found matching your data policy")
                 .contains("confidentialité")
         );
-        assert_eq!(super::error_hint("autre chose"), "claw --help");
+        assert!(super::error_hint("autre chose").contains("claw doctor"));
+        // Chaque famille d'erreur du fournisseur dit quoi essayer.
+        for (problem, advice) in [
+            ("l'api a retourné 402 Payment Required : credits", "modèle gratuit"),
+            ("l'api a retourné 403 Forbidden : not allowed", "refusé à votre clé"),
+            ("l'api a retourné 404 Not Found : model x", "introuvable"),
+            ("l'api a retourné 413 Payload Too Large : Request too large for model", "/compact"),
+            (
+                "l'api a retourné 400 Bad Request : The input token count exceeds the maximum number of tokens allowed",
+                "/compact",
+            ),
+            ("l'api a retourné 400 Bad Request : invalid tool schema", "refusé la requête"),
+            ("erreur http : connection refused", "injoignable"),
+        ] {
+            assert!(super::error_hint(problem).contains(advice), "{problem}");
+        }
     }
 
     #[test]

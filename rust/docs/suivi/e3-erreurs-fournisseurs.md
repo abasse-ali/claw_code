@@ -24,7 +24,7 @@ toute la sortie ramenée d'un cran.
 - Remède : une erreur 400 ou 422 qui nomme `reasoning_effort`, `reasoning`,
   `parallel_tool_calls` ou `tool_choice` fait repartir la même requête sans ce champ ; le refus
   est retenu pour ce serveur et ce modèle. Au plus quatre refus par requête.
-- État : corrigé (commit du 11 octobre 2026, étude E3)
+- État : corrigé (lot 1)
 
 ## E3-02 Un schéma d'outil refusé arrête le tour
 - Gravité : haute
@@ -37,7 +37,7 @@ toute la sortie ramenée d'un cran.
   l'essentiel (types, propriétés, éléments, valeurs permises, descriptions), et ce serveur les
   reçoit ainsi jusqu'à la fin. Une propriété dont le nom ne commence pas par une lettre (`-A`
   de `grep_search`) est renommée (`A`).
-- État : corrigé côté envoi (même commit). Reste à faire accepter par `grep_search` les noms
+- État : corrigé côté envoi (lot 1). Reste à faire accepter par `grep_search` les noms
   `A`, `B`, `C`, `n`, `i` (voir A10 du suivi). Non vérifié sur le vrai Gemini (A8).
 
 ## E3-03 Identifiants d'appels d'un autre fournisseur refusés par Mistral
@@ -48,7 +48,7 @@ toute la sortie ramenée d'un cran.
 - Défaut : après un changement de modèle vers Mistral, chaque requête est refusée.
 - Remède : pour `api.mistral.ai`, chaque identifiant qui n'a pas cette forme est remplacé par
   une empreinte de neuf caractères, la même pour l'appel et pour son résultat.
-- État : corrigé (même commit). La contrainte vient de l'expérience de l'API, elle ne figure
+- État : corrigé (lot 1). La contrainte vient de l'expérience de l'API, elle ne figure
   pas dans la spécification fournie : non vérifié sur le vrai serveur.
 
 ## E3-04 Contexte trop long : plusieurs formulations ne sont pas reconnues
@@ -61,7 +61,9 @@ toute la sortie ramenée d'un cran.
   « reduce the length of the messages » (Cerebras), « token limit ». Le tour s'arrête alors
   qu'une compaction suffirait.
 - Remède : élargir la reconnaissance, y compris le statut 413.
-- État : à faire (après la fin des études E1 et E2, qui lisent ce fichier)
+- État : corrigé (lot 1). Sont aussi reconnus « maximum number of tokens », « request too
+  large », « reduce the length », « token limit », « input is too long » et le statut 413 : la
+  conversation est compactée et la requête repart une fois.
 
 ## E3-05 Une réponse en texte coupée par la limite de sortie est rendue telle quelle
 - Gravité : moyenne
@@ -82,4 +84,7 @@ toute la sortie ramenée d'un cran.
 - Défaut : une requête refusée pour son contenu ne dit pas quoi essayer.
 - Remède : un conseil par famille (requête refusée par le fournisseur : changer de modèle ou
   réduire la conversation avec `/compact` ; crédits insuffisants ; modèle introuvable).
-- État : à faire
+- État : corrigé (lot 1). `error_hint` lit le code HTTP (`returned_status`) et donne un conseil
+  pour 402, 403, 404, 413 et le contexte trop long, 400 et 422, le serveur injoignable ; par
+  défaut « renvoyez la demande ; si l'erreur revient, changez de modèle (/model) ou lancez
+  `claw doctor` ».

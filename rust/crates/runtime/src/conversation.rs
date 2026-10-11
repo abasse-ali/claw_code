@@ -1188,7 +1188,11 @@ where
                 // Le code des emplacements que l'erreur cite : une relecture de moins.
                 if harness::enabled(Aid::ErrorSites) {
                     if let Ok(cwd) = std::env::current_dir() {
-                        notes.extend(harness::error_sites(&outcome.output, &cwd));
+                        notes.extend(harness::error_sites(
+                            &outcome.output,
+                            &cwd,
+                            &outcome.command,
+                        ));
                     }
                 }
                 // Sous Windows : un chemin `dossier\fichier` écrit pour cmd.
@@ -1242,6 +1246,42 @@ where
         Some(name)
     }
 
+    /// Aucune vérification n'est connue pour ce projet : l'utilisateur
+    /// l'apprend une fois par lancement, au lieu de croire son travail vérifié.
+    fn say_once_that_nothing_verifies(&mut self) {
+        static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            self.api_client.notify(
+                "Aucune vérification automatique connue pour ce projet : les modifications ne sont pas vérifiées par Claw. Réglez \"verify\" dans .claw/settings.json (par exemple [\"npm test\"])",
+            );
+        }
+    }
+
+    /// La vérification n'a rien dit du travail : son outil n'est pas installé
+    /// (ce n'est pas un défaut du travail, le modèle n'a rien à « corriger »),
+    /// ou elle a dépassé son délai. Claw le dit et n'insiste plus de ce tour.
+    fn verification_says_nothing(
+        &mut self,
+        aids: &mut TurnAids,
+        command: &str,
+        result: &harness::CommandResult,
+    ) -> bool {
+        let notice = if !result.passed && harness::check_tool_is_missing(&result.excerpt) {
+            format!(
+                "Vérification impossible ({command}) : l'outil de test n'est pas installé ; le travail n'est pas vérifié"
+            )
+        } else if result.timed_out {
+            format!(
+                "Vérification trop longue ({command}) : choisissez une commande plus rapide avec \"verify\" dans .claw/settings.json"
+            )
+        } else {
+            return false;
+        };
+        aids.verify_disabled = true;
+        self.api_client.notify(&notice);
+        true
+    }
+
     /// Vérification imposée : quand le modèle a modifié des fichiers et dit
     /// avoir fini, Claw lance la commande de vérification du projet. En cas
     /// d'échec, la sortie est renvoyée au modèle et le tour continue (au plus
@@ -1261,8 +1301,14 @@ where
             return None;
         }
         let cwd = std::env::current_dir().ok()?;
-        let commands = harness::verify_commands(&self.verify, &cwd);
+        // Les fichiers modifiés du tour disent où vérifier quand le projet est
+        // rangé en sous-dossiers (`backend/`, `frontend/`).
+        let changed: Vec<String> = aids.originals.keys().cloned().collect();
+        let commands = harness::verify_commands_for(&self.verify, &cwd, &changed);
         aids.dirty = false;
+        if commands.is_empty() && self.verify == harness::VerifySetting::Auto {
+            self.say_once_that_nothing_verifies();
+        }
         for command in commands {
             if aids
                 .verified_commands
@@ -1303,11 +1349,7 @@ where
                 return None;
             }
             let result = harness::read_bash_output(output);
-            if result.timed_out {
-                aids.verify_disabled = true;
-                self.api_client.notify(&format!(
-                    "Vérification trop longue ({command}) : choisissez une commande plus rapide avec \"verify\" dans .claw/settings.json"
-                ));
+            if self.verification_says_nothing(aids, &command, &result) {
                 return None;
             }
             if !result.passed {
@@ -1326,7 +1368,7 @@ where
                 aids.verified_commands.clear();
                 let mut feedback = harness::verify_feedback(&command, &result);
                 if harness::enabled(Aid::ErrorSites) {
-                    if let Some(sites) = harness::error_sites(output, &cwd) {
+                    if let Some(sites) = harness::error_sites(output, &cwd, &command) {
                         feedback.push_str("\n\n");
                         feedback.push_str(&sites);
                     }
@@ -2121,14 +2163,28 @@ fn truncate_tool_outputs(session: &mut Session, max_chars: usize) -> usize {
     truncated
 }
 
-/// Erreurs d'API signalant un dépassement de la fenêtre de contexte.
+/// Erreurs d'API signalant un dépassement de la fenêtre de contexte, dans
+/// les formulations des différents fournisseurs : `OpenRouter` et `OpenAI`
+/// (« maximum context length »), Anthropic (« prompt is too long »), Google
+/// (« exceeds the maximum number of tokens »), Groq (413, « Request too
+/// large »), Cerebras (« reduce the length of the messages »).
 fn is_context_overflow(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     (lower.contains("context")
         && (lower.contains("length") || lower.contains("window") || lower.contains("too long")))
-        || lower.contains("prompt is too long")
-        || lower.contains("maximum context")
-        || lower.contains("too many tokens")
+        || [
+            "prompt is too long",
+            "maximum context",
+            "too many tokens",
+            "maximum number of tokens",
+            "request too large",
+            "reduce the length",
+            "token limit",
+            "input is too long",
+            "l'api a retourné 413",
+        ]
+        .iter()
+        .any(|mark| lower.contains(mark))
 }
 
 fn format_hook_message(result: &HookRunResult, fallback: &str) -> String {
