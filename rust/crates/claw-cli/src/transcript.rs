@@ -195,6 +195,7 @@ pub fn tool_label(name: &str) -> &str {
         "glob_search" | "Glob" => "Fichiers",
         "grep_search" | "Grep" => "Recherche",
         "WebFetch" => "Page web",
+        "ViewPage" => "Page vue dans le navigateur",
         "WebSearch" => "Recherche web",
         "TodoWrite" => "Tâches",
         "Remember" => "Mémoire",
@@ -239,7 +240,7 @@ fn tool_argument(name: &str, input: &Value) -> Option<String> {
                 }
             })
         }
-        "WebFetch" => str_field(input, &["url"]).map(ToOwned::to_owned),
+        "WebFetch" | "ViewPage" => str_field(input, &["url"]).map(ToOwned::to_owned),
         "WebSearch" => str_field(input, &["query"]).map(ToOwned::to_owned),
         "Agent" => str_field(input, &["description", "subagent_type"]).map(ToOwned::to_owned),
         "Skill" => str_field(input, &["skill", "name"]).map(ToOwned::to_owned),
@@ -291,6 +292,7 @@ pub fn running_label(name: &str) -> String {
             "Recherche…".to_string()
         }
         "WebFetch" => "Lecture de la page…".to_string(),
+        "ViewPage" => "Ouverture de la page dans le navigateur…".to_string(),
         "Consult" => "Second avis demandé à d'autres modèles…".to_string(),
         "Agent" => "Sous-agent au travail…".to_string(),
         _ => format!("{}…", tool_label(name)),

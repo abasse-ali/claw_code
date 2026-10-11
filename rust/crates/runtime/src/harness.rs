@@ -1032,7 +1032,7 @@ pub fn problem_guide(images: usize) -> String {
         ),
     };
     format!(
-        "{GUIDE_PREFIX} The user is telling you that something is wrong.{pictures} Work as a debugger, in this order:\n1. Symptoms: list every distinct problem in their message and in each image, one line each, quoting what is shown. Drop none of them, and start with the one that makes the result useless to them.\n2. Reproduce: observe each symptom yourself with your tools, the way the user gets it (same entry point, same kind of input), before you change anything. A request that answers 200 or tests that pass do not show that what the user sees is right: look at the result itself (the page, the produced file or image, the text).\n3. Cause: find it from evidence (logs, outputs, the code path that produces the symptom). Do not fix a guess; when several causes are possible, run the check that tells them apart.\n4. Fix the cause, then observe again that each symptom is gone.\nIn your answer, say for each symptom what you observed after the fix. If you could not observe one (for example what a browser displays), do not call it solved: say what you changed, what you could not check and exactly what the user should look at. Do not ask the user to investigate for you while one of your tools can still do it."
+        "{GUIDE_PREFIX} The user is telling you that something is wrong.{pictures} Work as a debugger, in this order:\n1. Symptoms: list every distinct problem in their message and in each image, one line each, quoting what is shown. Drop none of them, and start with the one that makes the result useless to them.\n2. Reproduce: observe each symptom yourself with your tools, the way the user gets it (same entry point, same kind of input), before you change anything. A request that answers 200 or tests that pass do not show that what the user sees is right: look at the result itself (the page as the browser shows it, with the ViewPage tool when you have it; the produced file or image; the text).\n3. Cause: find it from evidence (logs, outputs, the code path that produces the symptom). Do not fix a guess; when several causes are possible, run the check that tells them apart.\n4. Fix the cause, then observe again that each symptom is gone.\nIn your answer, say for each symptom what you observed after the fix. If you could not observe one (for example what a browser displays), do not call it solved: say what you changed, what you could not check and exactly what the user should look at. Do not ask the user to investigate for you while one of your tools can still do it."
     )
 }
 
@@ -1054,6 +1054,7 @@ const TOOL_NAMES: &[&str] = &[
     "TodoWrite",
     "AskUserQuestion",
     "WebFetch",
+    "ViewPage",
     "WebSearch",
     "FindSymbol",
     "Remember",

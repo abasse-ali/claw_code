@@ -11,6 +11,14 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+mod page_view;
+
+/// Un navigateur est installé : l'outil `ViewPage` peut montrer une page.
+#[must_use]
+pub fn page_viewer_available() -> bool {
+    page_view::find_browser().is_some()
+}
+
 use mcp_bridge::connected_mcp_tools;
 pub use mcp_bridge::{
     call_mcp_tool, ensure_mcp_started, mcp_prompt_commands, mcp_prompt_invocation,
@@ -461,6 +469,26 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "ViewPage",
+            description:
+                "Open a web page in a headless browser and return what a user would see: the text displayed after the page's JavaScript ran, and what the page wrote to the console (errors, exceptions, failed requests). Use it to check a page you built or changed, and to investigate a display problem the user reports: a 200 response or a successful build does not show that the page works. For a local project, start its server first (in the background), then give its http://localhost address. It shows the page as it loads: it does not click or type.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "An http or https address, for example http://localhost:3000/" },
+                    "wait_ms": {
+                        "type": "integer",
+                        "minimum": 200,
+                        "maximum": 15000,
+                        "description": "Time given to the page to load and run its scripts, in milliseconds (default 3000)."
+                    }
+                },
+                "required": ["url"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "WebSearch",
             description: "Search the web for current information and return cited results.",
             input_schema: json!({
@@ -846,6 +874,9 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "glob_search" => from_value::<GlobSearchInputValue>(input).and_then(run_glob_search),
         "grep_search" => from_value::<GrepSearchInput>(input).and_then(run_grep_search),
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
+        "ViewPage" => from_value::<page_view::ViewPageInput>(input)
+            .and_then(|input| page_view::view_page(&input))
+            .and_then(to_pretty_json),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
         "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
         "Remember" => from_value::<RememberInput>(input).and_then(run_remember),
@@ -2539,6 +2570,7 @@ pub const PARALLEL_SAFE_TOOLS: &[&str] = &[
     "FindSymbol",
     "EditorDiagnostics",
     "WebFetch",
+    "ViewPage",
     "WebSearch",
     "BashOutput",
 ];
@@ -2822,6 +2854,7 @@ const READ_ONLY_ROLE_TOOLS: &[&str] = &[
     "grep_search",
     "FindSymbol",
     "WebFetch",
+    "ViewPage",
     "WebSearch",
     "ToolSearch",
     "Skill",
@@ -2838,6 +2871,7 @@ const TESTER_TOOLS: &[&str] = &[
     "glob_search",
     "grep_search",
     "FindSymbol",
+    "ViewPage",
     "TodoWrite",
     "ToolSearch",
     "NotebookEdit",
@@ -2880,6 +2914,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "grep_search",
             "FindSymbol",
             "WebFetch",
+            "ViewPage",
             "WebSearch",
             "ToolSearch",
             "TodoWrite",
@@ -2916,6 +2951,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "glob_search",
             "grep_search",
             "WebFetch",
+            "ViewPage",
             "WebSearch",
             "TodoWrite",
             "Skill",
@@ -4593,6 +4629,54 @@ mod tests {
         let second = fetch(json!(next));
         assert!(second.contains(&format!("This is the part from {next} to ")));
         assert!(!second.contains("## Section 0\n"));
+    }
+
+    /// Avec un vrai navigateur (`CLAW_TEST_BROWSER=1`) : la page rend son état
+    /// après exécution du JavaScript, et sa console.
+    #[test]
+    fn view_page_shows_what_the_browser_displays_and_its_console() {
+        if std::env::var_os("CLAW_TEST_BROWSER").is_none() || !super::page_viewer_available() {
+            return;
+        }
+        // Une page qui se dit « Hors ligne » parce que son API ne répond pas,
+        // et dont un script lève une exception : ce qu'un curl ne montre pas.
+        let server = TestServer::spawn(Arc::new(|_request_line: &str| {
+            HttpResponse::html(
+                200,
+                "OK",
+                r#"<!doctype html><html><head><meta charset="utf-8"><title>Essai de page</title></head>
+<body><h1>Manga Translator</h1><p id="etat">chargement</p>
+<script>
+fetch("http://127.0.0.1:9/api/v1/health").then(function () {
+  document.getElementById("etat").textContent = "En ligne";
+}).catch(function (e) {
+  document.getElementById("etat").textContent = "Hors ligne";
+  console.error("health en echec : " + e.message);
+});
+setTimeout(function () { nexistepas(); }, 100);
+</script></body></html>"#,
+            )
+        }));
+        let result = execute_tool(
+            "ViewPage",
+            &json!({ "url": format!("http://{}/", server.addr()) }),
+        )
+        .expect("ViewPage should succeed");
+        let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        assert_eq!(output["title"], "Essai de page", "{output}");
+        let text = output["text"].as_str().expect("texte");
+        assert!(
+            text.contains("Manga Translator") && text.contains("Hors ligne"),
+            "{output}"
+        );
+        assert!(!text.contains("chargement"), "{output}");
+        let console = output["console"].to_string();
+        assert!(console.contains("health en echec"), "{output}");
+        assert!(console.contains("nexistepas is not defined"), "{output}");
+        assert!(
+            output["consoleErrors"].as_u64().unwrap_or(0) >= 2,
+            "{output}"
+        );
     }
 
     #[test]

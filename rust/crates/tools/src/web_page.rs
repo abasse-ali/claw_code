@@ -112,6 +112,12 @@ struct Page {
     linked: bool,
 }
 
+/// Titre et texte d'un document HTML déjà rendu par un navigateur (`ViewPage`).
+pub(crate) fn rendered_text(html: &str, url: &str) -> (Option<String>, String) {
+    let page = read_page(html, "text/html", url, false);
+    (page.title, page.text)
+}
+
 /// `links` : écrire les liens avec leur adresse, `[libellé](adresse)`.
 fn read_page(body: &str, content_type: &str, url: &str, links: bool) -> Page {
     if !is_html(body, content_type) {

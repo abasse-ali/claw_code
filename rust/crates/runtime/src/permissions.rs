@@ -393,7 +393,7 @@ impl ToolTarget {
             "glob_search" | "grep_search" => {
                 Self::Path(field("path").unwrap_or_else(|| ".".to_string()))
             }
-            "WebFetch" => field("url").map_or(Self::Other, Self::Url),
+            "WebFetch" | "ViewPage" => field("url").map_or(Self::Other, Self::Url),
             _ => Self::Other,
         }
     }

@@ -1132,6 +1132,7 @@
       case "glob_search": return ["search", "Fichiers", v.pattern || ""];
       case "grep_search": return ["search", "Recherche", (v.pattern || "") + (v.path ? "  · " + displayPath(v.path) : "")];
       case "WebFetch": return ["globe", "Page web", v.url || ""];
+      case "ViewPage": return ["globe", "Page vue dans le navigateur", v.url || ""];
       case "WebSearch": return ["globe", "Recherche web", v.query || ""];
       case "Agent": return ["bot", "Sous-agent", (v.subagent_type || "général") + " · " + (v.description || "")];
       case "TodoWrite": return ["list", "Tâches", (v.todos || []).filter((t) => t.status === "completed").length + "/" + (v.todos || []).length + " terminées"];

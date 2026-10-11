@@ -987,8 +987,18 @@ coupe cet import.
   Au-delà, Claw rend son début et les passages qui contiennent les mots de la question, sans les
   adresses des liens, et le modèle lit la suite en donnant une position (`offset`). Aucun modèle
   n'est appelé pour résumer : lire une page ne coûte pas de requête en plus. Limites : une page
-  construite par JavaScript dans le navigateur arrive vide (Claw n'exécute pas de JavaScript), et
-  les PDF et les images ne sont pas lus.
+  construite par JavaScript dans le navigateur arrive vide (`WebFetch` n'exécute pas de
+  JavaScript), et les PDF et les images ne sont pas lus.
+- **Voir une page comme dans le navigateur** (outil `ViewPage`) : un modèle ne voit pas le
+  navigateur. Il prenait une réponse 200 pour une page qui marche, supposait la cause d'un défaut
+  d'affichage, et vous renvoyait vers la touche F12. `ViewPage` ouvre l'adresse dans Edge, Chrome
+  ou Chromium, sans fenêtre et avec un profil temporaire, puis rend le texte affiché une fois le
+  JavaScript exécuté (un badge « Hors ligne », un message d'erreur, une zone restée vide) et ce
+  que la page a écrit dans la console : erreurs, exceptions avec leur fichier et leur ligne,
+  requêtes en échec, refus CORS. Pour un projet local, le modèle lance d'abord le serveur en
+  arrière-plan puis donne son adresse `http://localhost`. Limites : l'outil montre la page telle
+  qu'elle se charge, sans cliquer ni saisir, et ne rend pas d'image. Il n'est proposé au modèle
+  que si un navigateur est installé ; `CLAW_BROWSER` désigne l'exécutable à utiliser.
 
 ### Bac à sable des commandes
 

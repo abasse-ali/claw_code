@@ -948,6 +948,8 @@ fn filter_tool_specs(
     definitions.retain(|definition| match definition.name.as_str() {
         name if SELDOM_USED_TOOLS.contains(&name) => false,
         "BashOutput" | "KillShell" => background,
+        // Sans navigateur installé, l'outil ne pourrait rien montrer.
+        "ViewPage" => tools::page_viewer_available(),
         "PowerShell" => !posix_shell,
         "NotebookEdit" => project_has_notebooks(),
         "Consult" => {
@@ -5380,7 +5382,7 @@ fn describe_permission_target(tool_name: &str, input: &str) -> String {
             field("path").map(|path| format!("Fichier          {path}"))
         }
         "NotebookEdit" => field("notebook_path").map(|path| format!("Notebook         {path}")),
-        "WebFetch" => field("url").map(|url| format!("URL              {url}")),
+        "WebFetch" | "ViewPage" => field("url").map(|url| format!("URL              {url}")),
         "Agent" => {
             field("description").map(|description| format!("Sous-agent       {description}"))
         }

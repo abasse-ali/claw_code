@@ -99,7 +99,7 @@ fn tool_kind(name: &str) -> &'static str {
         "write_file" | "edit_file" | "NotebookEdit" => "edit",
         "bash" | "PowerShell" | "REPL" | "KillShell" => "execute",
         "glob_search" | "grep_search" | "ToolSearch" => "search",
-        "WebFetch" | "WebSearch" => "fetch",
+        "WebFetch" | "WebSearch" | "ViewPage" => "fetch",
         "Agent" | "ExitPlanMode" | "TodoWrite" => "think",
         _ => "other",
     }
