@@ -40,7 +40,7 @@ pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use compact::{
     compact_session, compact_session_with, estimate_session_tokens, format_compact_summary,
     get_compact_continuation_message, render_transcript_for_summary, should_compact,
-    CompactionConfig, CompactionResult, MODEL_SUMMARY_PROMPT,
+    CompactionConfig, CompactionResult, MODEL_SUMMARY_PROMPT, SUMMARY_RETRY_NOTE,
 };
 pub use config::{
     ConfigEntry, ConfigError, ConfigLoader, ConfigSource, HookCommandConfig, McpConfigCollection,
@@ -51,9 +51,9 @@ pub use config::{
     CLAW_SETTINGS_SCHEMA_NAME,
 };
 pub use conversation::{
-    ApiClient, ApiRequest, AssistantEvent, AutoCompactionConfig, ConsultPurpose, Consultation,
-    ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError, ToolExecutor, TurnSummary,
-    HOOK_CONTEXT_PREFIX, STOP_HOOK_PREFIX,
+    cut_reply_continued, ApiClient, ApiRequest, AssistantEvent, AutoCompactionConfig,
+    ConsultPurpose, Consultation, ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError,
+    ToolExecutor, TurnSummary, HOOK_CONTEXT_PREFIX, STOP_HOOK_PREFIX,
 };
 pub use file_ops::{
     edit_file, glob_search, grep_search, preview_edit, preview_write, read_file, write_file,

@@ -3,7 +3,8 @@ use std::fmt::{Display, Formatter};
 
 use crate::compact::{
     compact_session, compact_session_with, estimate_message_tokens, estimate_session_tokens,
-    render_transcript_for_summary, CompactionConfig, CompactionResult, MODEL_SUMMARY_PROMPT,
+    render_transcript_for_summary, summary_is_usable, CompactionConfig, CompactionResult,
+    MODEL_SUMMARY_PROMPT, SUMMARY_RETRY_NOTE,
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::harness::{self, Aid, StallGuard, VerifySetting};
@@ -80,6 +81,12 @@ pub trait ApiClient {
     /// le modèle au travail : la réponse qu'il venait de donner est provisoire,
     /// celle qui suivra la remplace.
     fn answer_superseded(&mut self) {}
+
+    /// La dernière réponse s'est arrêtée sur la limite de sortie du modèle au
+    /// milieu de son texte, sans appel d'outil : le runtime en demande la suite.
+    fn reply_cut_by_output_limit(&mut self) -> bool {
+        false
+    }
 
     /// Quelqu'un peut répondre aux questions de l'agent (menu à choix de
     /// l'outil `AskUserQuestion`) : faux dans un script ou pour un sous-agent.
@@ -348,7 +355,16 @@ fn earlier_request(messages: &[ConversationMessage], current: &str) -> Option<St
             let substantive = !text.starts_with(harness::CLAW_NOTE_PREFIX)
                 && !text.starts_with(STOP_HOOK_PREFIX)
                 && text.split_whitespace().count() >= CONTINUATION_MAX_WORDS;
-            substantive.then(|| text.chars().take(MAX_EARLIER_REQUEST_CHARS).collect())
+            substantive.then(|| crate::compact::clip_request(text, MAX_EARLIER_REQUEST_CHARS))
+        })
+        // Demande passée dans un résumé de compaction : Claw l'y a notée mot
+        // pour mot.
+        .or_else(|| {
+            crate::compact::recorded_requests(messages)
+                .into_iter()
+                .rev()
+                .find(|text| text.split_whitespace().count() >= CONTINUATION_MAX_WORDS)
+                .map(|text| crate::compact::clip_request(&text, MAX_EARLIER_REQUEST_CHARS))
         })
 }
 
@@ -392,6 +408,23 @@ fn lean_result(tool_name: &str, message: &mut ConversationMessage) {
             if let Some(lean) = crate::lean::lean_tool_output(tool_name, output) {
                 *output = lean;
             }
+        }
+    }
+}
+
+/// Allège les résultats d'outils déjà enregistrés dans la session, comme
+/// `lean_result` le fait pour chaque nouveau résultat.
+fn lean_stored_results(session: &mut Session) {
+    if !harness::enabled(Aid::LeanResults) {
+        return;
+    }
+    for message in &mut session.messages {
+        let tool_name = message.blocks.iter().find_map(|block| match block {
+            ContentBlock::ToolResult { tool_name, .. } => Some(tool_name.clone()),
+            _ => None,
+        });
+        if let Some(tool_name) = tool_name {
+            lean_result(&tool_name, message);
         }
     }
 }
@@ -502,6 +535,31 @@ const EMPTY_RESPONSE_ERROR: &str = "le modèle n'a renvoyé aucun contenu";
 /// Relance unique après une réponse vide, au lieu d'échouer.
 const EMPTY_RESPONSE_NUDGE: &str = "[Claw] Your last reply was empty: no text and no tool call. A tool call written only in your reasoning is never executed. If the task is not finished, continue it now by calling the tools; otherwise give the user your final answer, in their language: what you did and what the verification showed.";
 
+/// Relance d'une réponse en texte arrêtée par la limite de sortie du modèle.
+const CUT_REPLY_NUDGE: &str = "[Claw] Your reply was cut off by the output limit. Continue exactly where you stopped, without repeating anything you already wrote.";
+
+/// Suites demandées au plus pour une même réponse coupée.
+const MAX_CUT_CONTINUATIONS: usize = 2;
+
+/// Le dernier message est la relance d'une réponse coupée, juste après elle.
+fn after_cut_nudge(messages: &[ConversationMessage]) -> bool {
+    let [.., cut, nudge] = messages else {
+        return false;
+    };
+    cut.role == crate::session::MessageRole::Assistant
+        && matches!(
+            nudge.blocks.first(),
+            Some(ContentBlock::Text { text }) if text == CUT_REPLY_NUDGE
+        )
+}
+
+/// Ces messages demandent la suite d'une réponse coupée par la limite de
+/// sortie : le texte déjà écrit, pour que l'affichage y raccorde la suite.
+#[must_use]
+pub fn cut_reply_continued(messages: &[ConversationMessage]) -> Option<String> {
+    after_cut_nudge(messages).then(|| message_text(&messages[messages.len() - 2]))
+}
+
 /// Demande l'avis des hooks `Notification` avant chaque demande d'autorisation.
 struct NotifyingPrompter<'a> {
     hooks: &'a HookRunner,
@@ -565,6 +623,11 @@ where
         system_prompt: Vec<String>,
         feature_config: RuntimeFeatureConfig,
     ) -> Self {
+        let mut session = session;
+        // Session enregistrée avant l'allègement des résultats (ou pendant
+        // qu'il était coupé) : ses anciens résultats d'outils repartiraient en
+        // entier avec chaque requête.
+        lean_stored_results(&mut session);
         let usage_tracker = UsageTracker::from_session(&session);
         Self {
             session,
@@ -701,13 +764,29 @@ where
         self.notify_hook_feedback(HookEvent::PreCompact, &pre_compact);
         let before = self.estimated_context_tokens();
         let client = &mut self.api_client;
+        let mut asked = false;
         let result = compact_session_with(&self.session, compaction, |messages| {
+            let transcript = render_transcript_for_summary(messages);
+            let first = client.summarize(MODEL_SUMMARY_PROMPT, &transcript)?;
+            asked = true;
+            if summary_is_usable(&first, messages) {
+                return Some(first);
+            }
+            // Le modèle a continué la conversation au lieu de la résumer : une
+            // seconde demande, plus nette ; à défaut, le résumé de Claw.
             client.summarize(
                 MODEL_SUMMARY_PROMPT,
-                &render_transcript_for_summary(messages),
+                &format!("{transcript}\n\n{SUMMARY_RETRY_NOTE}"),
             )
         });
         let summarized = result.removed_message_count;
+        // Le texte du modèle n'était pas un résumé : celui de Claw l'a
+        // remplacé, l'utilisateur le sait.
+        let by_claw = if asked && summarized > 0 && !result.model_summary {
+            " par Claw (le texte du modèle n'était pas un résumé)"
+        } else {
+            ""
+        };
         if summarized > 0 {
             self.session = result.compacted_session;
         }
@@ -727,10 +806,68 @@ where
             String::new()
         };
         let notice = format!(
-            "Contexte compacté automatiquement : {summarized} message(s) résumé(s){truncated_note}, ~{before} → ~{after} jetons"
+            "Contexte compacté automatiquement : {summarized} message(s) résumé(s){by_claw}{truncated_note}, ~{before} → ~{after} jetons"
         );
         self.api_client.notify(&notice);
         true
+    }
+
+    /// La suite d'une réponse coupée par la limite de sortie complète cette
+    /// réponse : la relance de Claw est retirée et les deux parties ne font
+    /// plus qu'un message, celui que l'utilisateur et les contrôles lisent.
+    fn join_cut_reply(
+        &mut self,
+        continuation: ConversationMessage,
+        assistant_messages: &mut Vec<ConversationMessage>,
+    ) -> ConversationMessage {
+        if !after_cut_nudge(&self.session.messages) {
+            return continuation;
+        }
+        self.session.messages.pop();
+        let Some(mut joined) = self.session.messages.pop() else {
+            return continuation;
+        };
+        assistant_messages.pop();
+        for block in continuation.blocks {
+            match block {
+                // Le raisonnement de la suite n'est pas gardé : il ne porte
+                // que sur la fin d'une réponse déjà commencée.
+                ContentBlock::Thinking { .. } => {}
+                // Le texte rejoint le dernier texte de la partie coupée, même
+                // quand un raisonnement le suit (modèles d'OpenRouter) : une
+                // seule réponse, sans saut de ligne ajouté à la coupure.
+                ContentBlock::Text { text: more } => {
+                    let last_text = joined
+                        .blocks
+                        .iter_mut()
+                        .rev()
+                        .find_map(|block| match block {
+                            ContentBlock::Text { text } => Some(text),
+                            _ => None,
+                        });
+                    match last_text {
+                        Some(text) => text.push_str(&more),
+                        None => joined.blocks.push(ContentBlock::Text { text: more }),
+                    }
+                }
+                other => joined.blocks.push(other),
+            }
+        }
+        // Les jetons des deux requêtes restent comptés.
+        joined.usage = match (joined.usage, continuation.usage) {
+            (Some(cut), Some(more)) => Some(TokenUsage {
+                input_tokens: cut.input_tokens.saturating_add(more.input_tokens),
+                output_tokens: cut.output_tokens.saturating_add(more.output_tokens),
+                cache_creation_input_tokens: cut
+                    .cache_creation_input_tokens
+                    .saturating_add(more.cache_creation_input_tokens),
+                cache_read_input_tokens: cut
+                    .cache_read_input_tokens
+                    .saturating_add(more.cache_read_input_tokens),
+            }),
+            (cut, more) => more.or(cut),
+        };
+        joined
     }
 
     pub fn run_turn(
@@ -813,6 +950,7 @@ where
         let mut iterations = 0;
         let mut stop_continuations = 0;
         let mut empty_nudged = false;
+        let mut cut_continuations = 0;
         let team = !self.subagent && crate::team::team();
         let mut aids = TurnAids {
             ultracode: !self.subagent && crate::workflow::active_for(&request_text),
@@ -879,6 +1017,22 @@ where
             };
             let (assistant_message, usage) = match build_assistant_message(events) {
                 Ok(built) => built,
+                // Suite d'une réponse coupée restée vide (souvent tout le
+                // budget pris par le raisonnement) : la même demande repart une
+                // fois, puis la réponse coupée est rendue telle quelle.
+                Err(error)
+                    if error.to_string() == EMPTY_RESPONSE_ERROR
+                        && after_cut_nudge(&self.session.messages) =>
+                {
+                    if !empty_nudged {
+                        empty_nudged = true;
+                        continue;
+                    }
+                    self.api_client.notify(
+                        "La suite de la réponse coupée n'est pas venue : elle est rendue telle quelle",
+                    );
+                    (ConversationMessage::assistant(Vec::new()), None)
+                }
                 Err(error) if error.to_string() == EMPTY_RESPONSE_ERROR && !empty_nudged => {
                     empty_nudged = true;
                     self.session
@@ -891,6 +1045,8 @@ where
             if let Some(usage) = usage {
                 self.usage_tracker.record(usage);
             }
+            // Suite d'une réponse coupée : elle complète le message coupé.
+            let assistant_message = self.join_cut_reply(assistant_message, &mut assistant_messages);
             let pending_tool_uses = assistant_message
                 .blocks
                 .iter()
@@ -906,7 +1062,32 @@ where
             assistant_messages.push(assistant_message);
 
             if pending_tool_uses.is_empty() {
+                // Réponse en texte arrêtée par la limite de sortie : Claw en
+                // demande la suite (deux fois au plus pour une même réponse,
+                // jamais au-delà des étapes permises) au lieu de rendre un
+                // texte tronqué.
+                let cut = self.api_client.reply_cut_by_output_limit()
+                    && harness::enabled(Aid::CutReplies);
+                if cut
+                    && cut_continuations < MAX_CUT_CONTINUATIONS
+                    && iterations < self.max_iterations
+                {
+                    cut_continuations += 1;
+                    self.api_client.notify(
+                        "Réponse coupée par la limite de sortie du modèle : Claw demande la suite",
+                    );
+                    self.session
+                        .messages
+                        .push(ConversationMessage::user_text(CUT_REPLY_NUDGE));
+                    continue;
+                }
+                cut_continuations = 0;
                 self.api_client.answer_drafted();
+                if cut {
+                    self.api_client.notify(
+                        "Réponse encore coupée par la limite de sortie du modèle : elle est rendue telle quelle",
+                    );
+                }
                 // Le modèle dit avoir fini : Claw vérifie avant de le croire
                 // (pas d'abandon sur un échec, vérification, erreurs vues par
                 // l'éditeur relié, exigences, relecture par un autre modèle).
@@ -969,6 +1150,9 @@ where
                 continue;
             }
 
+            // Une réponse qui appelle des outils est finie : la prochaine
+            // réponse coupée a de nouveau droit à ses suites.
+            cut_continuations = 0;
             if self.run_parallel_batch(
                 &pending_tool_uses,
                 &mut prompter,
@@ -3214,9 +3398,14 @@ mod tests {
         calls: usize,
         fail_first_with_overflow: bool,
         summaries: Vec<String>,
+        /// Réponses aux demandes de résumé, avant `MODEL_SUMMARY`.
+        summary_replies: std::collections::VecDeque<&'static str>,
         notices: Vec<String>,
         message_counts: Vec<usize>,
     }
+
+    /// Résumé rendu par le modèle factice : il porte les rubriques demandées.
+    const MODEL_SUMMARY: &str = "RÉSUMÉ-MODÈLE\n1. Demandes : refactoriser le module api.\n2. Décisions : aucune.\n6. Prochaine étape : continuer.";
 
     impl ApiClient for CompactingApi {
         fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -3236,7 +3425,12 @@ mod tests {
         fn summarize(&mut self, system_prompt: &str, transcript: &str) -> Option<String> {
             assert!(system_prompt.contains("compacting"));
             self.summaries.push(transcript.to_string());
-            Some("RÉSUMÉ-MODÈLE : l'utilisateur veut refactoriser le module api.".to_string())
+            Some(
+                self.summary_replies
+                    .pop_front()
+                    .unwrap_or(MODEL_SUMMARY)
+                    .to_string(),
+            )
         }
 
         fn notify(&mut self, notice: &str) {
@@ -3284,6 +3478,7 @@ mod tests {
                 calls: 0,
                 fail_first_with_overflow: fail_first,
                 summaries: Vec::new(),
+                summary_replies: std::collections::VecDeque::new(),
                 notices: Vec::new(),
                 message_counts: Vec::new(),
             },
@@ -3315,6 +3510,98 @@ mod tests {
         assert!(runtime.api_client.summaries[0].contains("demande 0"));
         assert!(runtime.api_client.notices[0].starts_with("Contexte compacté automatiquement"));
         assert!(runtime.api_client.message_counts[0] < 31);
+    }
+
+    #[test]
+    fn a_summary_that_continues_the_conversation_is_asked_again_then_replaced() {
+        let config = Some(super::AutoCompactionConfig {
+            threshold_tokens: 1_000,
+            preserve_recent_messages: 4,
+        });
+        // Le modèle continue la conversation au lieu de la résumer : Claw
+        // redemande une fois, plus nettement.
+        let mut runtime = compacting_runtime(long_session(10), false).with_auto_compaction(config);
+        runtime
+            .api_client
+            .summary_replies
+            .push_back("L'installation est en cours. Une fois terminée : uvicorn app.main:app");
+        runtime
+            .run_turn("continue", None)
+            .expect("turn should succeed");
+        assert_eq!(runtime.api_client.summaries.len(), 2);
+        assert!(runtime.api_client.summaries[0].ends_with("6. Next step.]"));
+        assert!(runtime.api_client.summaries[1].ends_with(crate::compact::SUMMARY_RETRY_NOTE));
+        assert!(matches!(
+            &runtime.session().messages[0].blocks[0],
+            ContentBlock::Text { text } if text.contains("RÉSUMÉ-MODÈLE")
+                && !text.contains("installation")
+                && text.contains("- demande 0 ")
+        ));
+
+        // Deux fois de suite : le résumé de Claw, avec les demandes mot pour mot.
+        let mut runtime = compacting_runtime(long_session(10), false).with_auto_compaction(config);
+        runtime
+            .api_client
+            .summary_replies
+            .extend(["Je continue le travail.", "Voici la suite."]);
+        runtime
+            .run_turn("continue", None)
+            .expect("turn should succeed");
+        assert_eq!(runtime.api_client.summaries.len(), 2);
+        assert!(matches!(
+            &runtime.session().messages[0].blocks[0],
+            ContentBlock::Text { text } if text.contains("Conversation summary")
+                && text.contains("[Recorded by Claw, exact]")
+                && text.contains("- demande 0 ")
+                && !text.contains("Je continue")
+        ));
+    }
+
+    #[test]
+    fn results_stored_before_leaning_are_leaned_when_the_session_is_opened() {
+        // Session enregistrée avant l'allègement : l'ancien et le nouveau
+        // texte, et le fichier entier, repartaient avec chaque requête.
+        let fat = serde_json::json!({
+            "filePath": "page.tsx",
+            "oldString": "a",
+            "newString": "b",
+            "originalFile": "x".repeat(5_000),
+            "structuredPatch": [{
+                "oldStart": 3, "oldLines": 1, "newStart": 3, "newLines": 1,
+                "lines": ["-a", "+b"]
+            }]
+        })
+        .to_string();
+        let mut session = Session::new();
+        session
+            .messages
+            .push(crate::session::ConversationMessage::user_text("change a"));
+        session
+            .messages
+            .push(crate::session::ConversationMessage::assistant(vec![
+                ContentBlock::ToolUse {
+                    id: "t1".to_string(),
+                    name: "edit_file".to_string(),
+                    input: "{}".to_string(),
+                },
+            ]));
+        session
+            .messages
+            .push(crate::session::ConversationMessage::tool_result(
+                "t1",
+                "edit_file",
+                fat,
+                false,
+            ));
+        let runtime = compacting_runtime(session, false);
+        let ContentBlock::ToolResult { output, .. } = &runtime.session().messages[2].blocks[0]
+        else {
+            panic!("résultat d'outil attendu");
+        };
+        assert!(output.len() < 400, "{output}");
+        assert!(output.contains("page.tsx"));
+        assert!(output.contains("\"newStart\": 3"), "{output}");
+        assert!(!output.contains("originalFile"));
     }
 
     #[test]
@@ -3436,6 +3723,14 @@ mod tests {
 
         fn answer_superseded(&mut self) {
             self.observed.borrow_mut().superseded += 1;
+        }
+
+        fn reply_cut_by_output_limit(&mut self) -> bool {
+            CUT_REPLIES.with(|cut| {
+                let left = cut.get();
+                cut.set(left.saturating_sub(1));
+                left > 0
+            })
         }
 
         fn can_ask_user(&self) -> bool {
@@ -3569,6 +3864,167 @@ mod tests {
         /// Défauts que le lecteur d'images voit dans les images de la demande.
         static DEFECTS: std::cell::RefCell<Vec<(usize, String)>> =
             const { std::cell::RefCell::new(Vec::new()) };
+        /// Réponses en texte suivantes arrêtées par la limite de sortie.
+        static CUT_REPLIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn a_reply_cut_by_the_output_limit_is_continued_and_joined() {
+        CUT_REPLIES.with(|cut| cut.set(1));
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                text_step("Voici le plan : d'abord la base, ensuite l'inter"),
+                text_step("face, enfin les tests."),
+            ],
+            vec![],
+        );
+        let summary = runtime.run_turn("explique le plan", None).expect("tour");
+        CUT_REPLIES.with(|cut| cut.set(0));
+        let observed = observed.borrow();
+        // La suite est demandée une fois, et l'utilisateur le sait.
+        assert_eq!(observed.requests.len(), 2);
+        assert!(observed.requests[1].contains("cut off by the output limit"));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("Claw demande la suite")));
+        assert_eq!(observed.drafted, 1);
+        // Une seule réponse, entière, sans la relance de Claw.
+        assert_eq!(summary.assistant_messages.len(), 1);
+        let messages = &runtime.session().messages;
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            super::message_text(&messages[1]),
+            "Voici le plan : d'abord la base, ensuite l'interface, enfin les tests."
+        );
+    }
+
+    #[test]
+    fn a_continuation_joins_the_text_even_after_a_reasoning_block() {
+        use crate::session::ConversationMessage;
+        // Modèles d'OpenRouter : le raisonnement arrive après le texte.
+        CUT_REPLIES.with(|cut| cut.set(1));
+        let (mut runtime, _observed, _) = aided_runtime(
+            vec![
+                vec![
+                    AssistantEvent::TextDelta("La page d'accueil affiche l'inter".to_string()),
+                    AssistantEvent::Thinking {
+                        thinking: "je réfléchis".to_string(),
+                        signature: String::new(),
+                        redacted: None,
+                    },
+                    AssistantEvent::MessageStop,
+                ],
+                text_step("face complète."),
+            ],
+            vec![],
+        );
+        runtime.run_turn("décris la page", None).expect("tour");
+        CUT_REPLIES.with(|cut| cut.set(0));
+        let message = &runtime.session().messages[1];
+        assert_eq!(
+            super::message_text(message),
+            "La page d'accueil affiche l'interface complète."
+        );
+        assert_eq!(message.blocks.len(), 2);
+        // L'affichage sait raccorder une suite à ce qui est déjà écrit.
+        let asking = vec![
+            ConversationMessage::user_text("décris la page"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "La page".to_string(),
+            }]),
+            ConversationMessage::user_text(super::CUT_REPLY_NUDGE),
+        ];
+        assert_eq!(
+            super::cut_reply_continued(&asking).as_deref(),
+            Some("La page")
+        );
+        assert_eq!(super::cut_reply_continued(&asking[..2]), None);
+    }
+
+    #[test]
+    fn an_empty_continuation_is_asked_again_then_the_cut_reply_is_kept() {
+        // Suite vide, puis suite : elle rejoint la réponse coupée, sans la
+        // relance des réponses vides.
+        CUT_REPLIES.with(|cut| cut.set(1));
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                text_step("Voici le début"),
+                vec![AssistantEvent::MessageStop],
+                text_step(" et la fin."),
+            ],
+            vec![],
+        );
+        runtime.run_turn("raconte", None).expect("tour");
+        CUT_REPLIES.with(|cut| cut.set(0));
+        assert_eq!(
+            super::message_text(&runtime.session().messages[1]),
+            "Voici le début et la fin."
+        );
+        {
+            let observed = observed.borrow();
+            assert_eq!(observed.requests.len(), 3);
+            assert!(!observed.requests[2].contains("Your last reply was empty"));
+        }
+
+        // Deux suites vides : la réponse coupée est rendue telle quelle, et le
+        // tour ne finit pas en erreur.
+        CUT_REPLIES.with(|cut| cut.set(1));
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                text_step("Voici le début"),
+                vec![AssistantEvent::MessageStop],
+                vec![AssistantEvent::MessageStop],
+            ],
+            vec![],
+        );
+        runtime.run_turn("raconte", None).expect("tour");
+        CUT_REPLIES.with(|cut| cut.set(0));
+        assert_eq!(runtime.session().messages.len(), 2);
+        assert_eq!(
+            super::message_text(&runtime.session().messages[1]),
+            "Voici le début"
+        );
+        assert!(observed
+            .borrow()
+            .notices
+            .iter()
+            .any(|notice| notice.contains("n'est pas venue")));
+    }
+
+    #[test]
+    fn no_continuation_is_asked_at_the_last_allowed_step() {
+        // Sous-agent à sa dernière étape : sa réponse, même coupée, est rendue.
+        CUT_REPLIES.with(|cut| cut.set(1));
+        let (runtime, observed, _) = aided_runtime(vec![text_step("Rapport : tout est")], vec![]);
+        let mut runtime = runtime.with_max_iterations(1);
+        let summary = runtime.run_turn("fais le rapport", None).expect("tour");
+        CUT_REPLIES.with(|cut| cut.set(0));
+        assert_eq!(observed.borrow().requests.len(), 1);
+        assert_eq!(summary.assistant_messages.len(), 1);
+    }
+
+    #[test]
+    fn a_reply_still_cut_after_two_continuations_is_given_as_it_is() {
+        CUT_REPLIES.with(|cut| cut.set(5));
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![text_step("un"), text_step(" deux"), text_step(" trois")],
+            vec![],
+        );
+        runtime
+            .run_turn("compte jusqu'à trois", None)
+            .expect("tour");
+        CUT_REPLIES.with(|cut| cut.set(0));
+        let observed = observed.borrow();
+        assert_eq!(observed.requests.len(), 3);
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("telle quelle")));
+        assert_eq!(
+            super::message_text(&runtime.session().messages[1]),
+            "un deux trois"
+        );
     }
 
     #[test]
@@ -4103,6 +4559,40 @@ mod tests {
         )
         .is_none());
         assert!(earlier_request(&[], "continue").is_none());
+    }
+
+    #[test]
+    fn after_a_compaction_a_short_follow_up_finds_the_request_claw_recorded() {
+        use super::{earlier_request, ConversationMessage};
+        let request = "Traduis les mangas du japonais vers le français, en trois étapes";
+        let session = crate::session::Session {
+            version: 1,
+            messages: vec![
+                ConversationMessage::user_text(request),
+                ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "Je commence par le backend.".to_string(),
+                }]),
+                ConversationMessage::user_text("ok"),
+                ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "Le backend est prêt.".to_string(),
+                }]),
+            ],
+        };
+        let compacted = crate::compact::compact_session(
+            &session,
+            crate::compact::CompactionConfig {
+                preserve_recent_messages: 2,
+                max_estimated_tokens: 1,
+            },
+        )
+        .compacted_session;
+        // La demande d'origine n'est plus dans les messages, mais Claw l'a
+        // notée mot pour mot sous le résumé.
+        assert_eq!(compacted.messages.len(), 3);
+        assert_eq!(
+            earlier_request(&compacted.messages, "continue").as_deref(),
+            Some(request)
+        );
     }
 
     #[test]

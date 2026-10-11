@@ -77,6 +77,20 @@ pub fn output_limit_marker() -> String {
     json!({ CUT_BY_OUTPUT_LIMIT: true }).to_string()
 }
 
+/// La réponse s'est arrêtée sur la limite de sortie au milieu de son texte,
+/// sans appel d'outil (un appel coupé est traité par `check_cut_calls`) : le
+/// runtime en demandera la suite.
+#[must_use]
+pub fn reply_cut_by_output_limit(stop_reason: Option<&str>, events: &[AssistantEvent]) -> bool {
+    matches!(stop_reason, Some("length" | "max_tokens"))
+        && !events
+            .iter()
+            .any(|event| matches!(event, AssistantEvent::ToolUse { .. }))
+        && events.iter().any(
+            |event| matches!(event, AssistantEvent::TextDelta(text) if !text.trim().is_empty()),
+        )
+}
+
 /// Ces arguments sont exactement la marque `key` posée par Claw (et non un
 /// texte qui la citerait, comme le code de Claw lui-même).
 fn is_marker(input: &str, key: &str) -> bool {
@@ -642,6 +656,36 @@ mod tests {
             Ok(())
         );
         assert_eq!(input(&events), "{}");
+    }
+
+    #[test]
+    fn a_text_reply_stopped_by_the_output_limit_is_seen_as_cut() {
+        use super::reply_cut_by_output_limit;
+        use runtime::AssistantEvent;
+        let text = vec![
+            AssistantEvent::TextDelta("Voici la".to_string()),
+            AssistantEvent::MessageStop,
+        ];
+        assert!(reply_cut_by_output_limit(Some("length"), &text));
+        assert!(reply_cut_by_output_limit(Some("max_tokens"), &text));
+        assert!(!reply_cut_by_output_limit(Some("end_turn"), &text));
+        assert!(!reply_cut_by_output_limit(None, &text));
+        // Un appel d'outil coupé a son propre traitement.
+        let with_call = vec![
+            AssistantEvent::TextDelta("Je lance la commande".to_string()),
+            AssistantEvent::ToolUse {
+                id: "1".to_string(),
+                name: "bash".to_string(),
+                input: "{}".to_string(),
+            },
+        ];
+        assert!(!reply_cut_by_output_limit(Some("length"), &with_call));
+        // Rien d'écrit (le raisonnement a tout pris) : ce n'est pas une
+        // réponse coupée, c'est une réponse vide.
+        assert!(!reply_cut_by_output_limit(
+            Some("length"),
+            &[AssistantEvent::MessageStop]
+        ));
     }
 
     #[test]

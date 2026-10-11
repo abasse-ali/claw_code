@@ -90,9 +90,10 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 | 4358a70 | Code de sortie fidèle tube par tube, vérification du modèle comptée seulement si rien ne masque son échec, noms d'arguments réduits rendus à l'outil, règles `WebFetch` pour `ViewPage`, page entière et journal illisible pour `ViewPage`, aide d'erreur sur le code HTTP |
 | fbc5369 | Serveurs arrêtés avec leurs petits-enfants sous Windows, serveur prêt malgré un délai long, bash sous Linux, pytest sans test, sous-projet à côté d'une racine vérifiable, code changé par une commande vérifié, `PowerShell` 5.1, navigateur qui refuse de démarrer, vLLM |
 | 9ef1956 | Lot 3 : contenu abrégé refusé, dossier listé, `grep_search` et `glob_search` qui réparent et disent, `edit_file` qui joint ce qu'il faut pour réussir, BOM et CRLF gardés, chemin introuvable expliqué |
-| (commit « Lot 4 ») | Lot 4 : arguments mis à la forme de l'outil et dits au modèle, outil inconnu expliqué, noms d'outils dans les sous-agents, `TodoWrite` tolérant |
+| 595bb90 | Lot 4 : arguments mis à la forme de l'outil et dits au modèle, outil inconnu expliqué, noms d'outils dans les sous-agents, `TodoWrite` tolérant |
+| (commit « Lot 5 ») | Lot 5 : résumé de compaction contrôlé et demandes notées mot pour mot par Claw, anciens résultats d'outils allégés à la réouverture, réponse coupée par la limite de sortie continuée et raccordée à l'affichage |
 
-État des tests au lot 4 : 609 tests Rust, analyse statique à zéro sous Windows et Linux,
+État des tests au lot 5 : 624 tests Rust, analyse statique à zéro sous Windows et Linux,
 client 28 sur 28, extension VS Code 18 sur 18.
 
 ## Études
@@ -119,7 +120,7 @@ sessions réelles.
 | 2b. Corrections de la relecture E4 | Première partie : E4A-04 (`\|\| echo` après une vérification la fait compter faite), E4A-06 (`pipefail` tube par tube), E4B-01 (noms d'arguments réduits rendus à l'outil, avec A10), E4B-02 (aide d'erreur sur le code HTTP), E4B-05 (règle `WebFetch` qui couvre `ViewPage`), E4B-06 et E4B-08 (`ViewPage` : page entière, journal illisible). Seconde partie : E4A-03 (arrêt des serveurs sous Windows), E4A-07 (serveur prêt malgré un délai long), E4A-09 (bash plutôt que dash sous Linux), E4A-10 (pytest sans test), E4A-11 (`PowerShell` 5.1), E4A-12 (sous-projet à côté d'une racine vérifiable), E4B-09 (navigateur qui refuse de démarrer), E4B-10 (vLLM). Puis E4A-05 (serveur lancé avec `&` et sa sortie dans un fichier) et E4A-08 (code modifié par une commande) | fait le 11 octobre 2026, sauf E4A-05 (renvoyé au lot 7) |
 | 3. Fichiers et recherche | E1-19 (contenu abrégé écrit tel quel), E1-05 (dossier lu comme un fichier), E1-06 (motif non valide), E1-07 (filtres de `grep_search`), E1-10 et E2-12 (`glob_search`), E1-18 et E2-09 (`edit_file`), E1-21 (valeurs hors bornes), E1-22 (chemin introuvable), E4B-03 (`multiline` de `grep_search`), E4B-04 (BOM et CRLF gardés par `write_file`), E4B-07 (`glob_search` dans un dossier `[v2]` ou sur un partage réseau) | fait le 11 octobre 2026 ; restent de E1-18 le texte d'avant une modification du même tour et la recherche dans d'autres fichiers, de E1-21 `Sleep` et `REPL` |
 | 4. Arguments et outils inconnus | E1-01, E1-04, E1-11 (mise en forme des arguments d'après le schéma), E1-02 (outil inconnu), E1-03 (noms d'outils dans les sous-agents) | fait le 11 octobre 2026 |
-| 5. Mémoire de la session | E2-06 (résumé de compaction qui n'en est pas un), E2-07 (résultats non allégés d'une session reprise), E3-05 (réponse coupée par la limite de sortie) | à faire |
+| 5. Mémoire de la session | E2-06 (résumé de compaction qui n'en est pas un), E2-07 (résultats non allégés d'une session reprise), E3-05 (réponse coupée par la limite de sortie) | fait le 12 octobre 2026 |
 | 6. Appels mal formés et sous-agents | E1-08 (bloc d'appel jeté en mode texte), E1-09 (réparation du JSON), E1-12 et E1-13 (sous-agents), E1-17 (lecture seule), E1-15 et E1-16 (web) | à faire |
 | 7. Impact et cohérence de la réponse | E2-10 (réglage remplacé sans chercher qui en dépend), E2-02 (réponse qui cite ce qui n'existe pas), E2-13 (commande qui écrase un fichier), A4 (adresse locale où rien n'écoute), E4A-05 (serveur lancé avec `&` et sa sortie dans un fichier : à suivre comme une tâche, à arrêter à la fin de Claw) | à faire |
 | 8. Le reste | E1-14, E1-20, E1-23 à E1-26 | à faire |
@@ -176,3 +177,26 @@ Hors lots :
 - Processus de test laissés par les sessions des 8 et 9 octobre (faux serveurs `mock_*.py`,
   proxy, boucle d'attente) : leur arrêt a été refusé par le contrôle des autorisations ; à
   arrêter par l'utilisateur ou avec son accord (voir la mémoire du projet).
+
+### 12 octobre 2026
+
+- Lot 5 fait. Un résumé de compaction qui continue la conversation (cas réel de S1) est
+  redemandé une fois avec une consigne plus nette, puis remplacé par le résumé de Claw ; après
+  chaque résumé, Claw note lui-même les demandes de l'utilisateur mot pour mot (la première
+  toujours, puis les plus récentes, 8 000 caractères ; une longue demande garde son début et
+  sa fin) et les fichiers modifiés, repris d'une compaction à l'autre ; « continue » retrouve la
+  demande poursuivie après une compaction. Les résultats d'outils d'une session enregistrée
+  avant l'allègement sont allégés à sa réouverture. Une réponse en texte coupée par la limite
+  de sortie est continuée (deux fois au plus par réponse), ne forme qu'un message, et
+  l'affichage (page, panneau VS Code, terminal) raccorde la suite. Une session rouverte dans
+  la page n'affiche plus son résumé comme un message de l'utilisateur.
+- Relecture contradictoire du lot par deux agents avant le commit (méthode de l'étude E4 :
+  lecture seule, constats écrits au fil de l'eau) : 15 constats, 8 sur la compaction et 7 sur
+  la réponse coupée, tous corrigés et couverts par un test. Les plus sérieux : des faits placés
+  dans les balises du résumé, qu'une demande citant `</summary>` abîmait ; une suite jointe
+  après un bloc de raisonnement (modèles d'OpenRouter), qui coupait la réponse d'un saut de
+  ligne ; une suite vide qui pouvait faire échouer le tour.
+- Les 38 processus de test des 8 et 9 octobre (serveurs `mock_*.py`, `log_proxy.py`, boucle
+  d'attente et leurs `bash`) sont arrêtés, à la demande de l'utilisateur ; son `uvicorn` reste.
+- Nouvelle demande de l'utilisateur : tester Claw avec de vrais modèles gratuits et l'améliorer
+  pour qu'il guide les modèles à raisonner comme Opus et Fable. Campagne T ci-dessous.

@@ -532,6 +532,23 @@ impl MarkdownStreamState {
     }
 }
 
+/// La ligne qui ouvre le bloc de code resté ouvert à la fin de `markdown`
+/// (réponse coupée au milieu d'un bloc), ou `None`.
+#[must_use]
+pub fn open_code_fence(markdown: &str) -> Option<String> {
+    let mut open: Option<&str> = None;
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            open = match open {
+                Some(_) => None,
+                None => Some(trimmed.trim_end()),
+            };
+        }
+    }
+    open.map(str::to_string)
+}
+
 fn apply_code_block_background(line: &str) -> String {
     let trimmed = line.trim_end_matches('\n');
     let trailing_newline = if trimmed.len() == line.len() {
@@ -624,6 +641,22 @@ mod tests {
 
         assert!(plain_text.contains("[Claw](https://example.com/docs)"));
         assert!(markdown_output.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn finds_the_code_block_left_open_by_a_cut_reply() {
+        assert_eq!(
+            super::open_code_fence("Lancez :\n```bash\nnpm run d").as_deref(),
+            Some("```bash")
+        );
+        assert_eq!(super::open_code_fence("```js\nx\n```\nFin."), None);
+        assert_eq!(super::open_code_fence("Texte seul."), None);
+        // Rouvert pour la suite, le bloc garde ses lignes jusqu'à sa fin.
+        let renderer = TerminalRenderer::new();
+        let mut state = MarkdownStreamState::default();
+        assert_eq!(state.push(&renderer, "```bash\n"), None);
+        assert_eq!(state.push(&renderer, "ev\n# commentaire\n"), None);
+        assert!(state.push(&renderer, "```\n\nLancez-le.\n").is_some());
     }
 
     #[test]

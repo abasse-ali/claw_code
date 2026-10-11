@@ -652,6 +652,9 @@
   let status = {}, busySince = null, currentAssistant = null, thinkingStep = null, pendingTools = [];
   // Dernière réponse donnée sans appel d'outil (finale, sauf contrôle de Claw).
   let draftAnswer = null;
+  // Dernier bloc de réponse terminé, et suite annoncée d'une réponse coupée
+  // par la limite de sortie : elle reprend ce bloc au lieu d'en ouvrir un.
+  let lastAnswer = null, continueAnswer = false;
   // Historique rejoué d'un coup à la connexion : les durées n'y ont pas de sens.
   let replaying = false;
   const elapsed = (started) => replaying ? "" : seconds(Date.now() - started);
@@ -1011,12 +1014,20 @@
   // (le bloc en train de s'écrire) est re-rendue à chaque image.
   function appendAssistant(text) {
     if (!currentAssistant) {
-      const node = el("div", "md");
       const stable = el("div"), tail = el("div");
       stable.style.display = tail.style.display = "contents";
-      node.append(stable, tail);
-      append(node);
-      currentAssistant = { node, stable, tail, text: "", stableEnd: 0, frame: 0 };
+      if (continueAnswer && lastAnswer && lastAnswer.node.isConnected) {
+        // Suite d'une réponse coupée : même bloc, Markdown d'un seul tenant
+        // (un bloc de code ouvert reste ouvert).
+        lastAnswer.node.replaceChildren(stable, tail);
+        currentAssistant = { node: lastAnswer.node, stable, tail, text: lastAnswer.text, stableEnd: 0, frame: 0 };
+      } else {
+        const node = el("div", "md");
+        node.append(stable, tail);
+        append(node);
+        currentAssistant = { node, stable, tail, text: "", stableEnd: 0, frame: 0 };
+      }
+      continueAnswer = false;
       setActivity("Rédaction de la réponse…");
     }
     currentAssistant.text += text;
@@ -1041,14 +1052,18 @@
     if (currentAssistant.frame) cancelAnimationFrame(currentAssistant.frame);
     currentAssistant.node.innerHTML = renderMarkdown(currentAssistant.text);
     decorateDiagrams(currentAssistant.node);
+    lastAnswer = { node: currentAssistant.node, text: currentAssistant.text };
     currentAssistant = null;
   }
   // Le modèle a répondu sans appeler d'outil : cette réponse est la bonne,
   // sauf si un contrôle de Claw (vérification, exigences, relecture) le
   // renvoie au travail. Elle est alors repliée : celle qui suit la remplace.
   function markDraftAnswer() {
+    // La réponse en cours d'écriture d'abord : une suite raccordée n'est pas
+    // forcément le dernier élément du fil.
+    const open = currentAssistant ? currentAssistant.node : null;
     finishAssistant();
-    const last = logInner.lastElementChild;
+    const last = open || logInner.lastElementChild;
     draftAnswer = last && last.classList.contains("md") ? last : null;
   }
   function foldDraftAnswer() {
@@ -1824,6 +1839,8 @@
     pendingTools = [];
     asks.length = 0;
     draftAnswer = null;
+    lastAnswer = null;
+    continueAnswer = false;
     renderAsk();
     logInner.textContent = "";
     const empty = el("div", "empty");
@@ -1870,6 +1887,7 @@
       case "answer_drafted": markDraftAnswer(); break;
       case "answer_superseded": foldDraftAnswer(); break;
       case "reply_discarded": dropPendingTools(); break;
+      case "reply_continues": continueAnswer = true; break;
       case "error": finishAssistant(); addError(event.message, event.hint); break;
       case "turn_done": finishAssistant(); closePendingTools(); if (benchPending) { benchPending = false; loadModels(); } break;
       case "status": applyStatus(event.status); break;

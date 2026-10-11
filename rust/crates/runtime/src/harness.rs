@@ -70,6 +70,8 @@ pub enum Aid {
     /// Contenu abrégé (« ... rest of the code unchanged ... ») refusé avant
     /// d'écraser un fichier.
     PlaceholderGuard,
+    /// Réponse en texte coupée par la limite de sortie : la suite est demandée.
+    CutReplies,
 }
 
 impl Aid {
@@ -100,6 +102,7 @@ impl Aid {
             Self::TriedCommands => "CLAW_TRIED_COMMANDS",
             Self::EmptyTitles => "CLAW_EMPTY_TITLES",
             Self::PlaceholderGuard => "CLAW_PLACEHOLDER_GUARD",
+            Self::CutReplies => "CLAW_CUT_REPLIES",
         }
     }
 }

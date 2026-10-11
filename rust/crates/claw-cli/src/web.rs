@@ -176,6 +176,9 @@ enum WebEvent {
     /// modèle : les appels d'outils qu'elle annonçait ne seront pas exécutés,
     /// la page retire leurs étapes.
     ReplyDiscarded,
+    /// La réponse qui vient continue la précédente, coupée par la limite de
+    /// sortie du modèle : la page la raccorde au même bloc.
+    ReplyContinues,
     /// Demande à l'éditeur relié : quels problèmes voit-il dans ces fichiers
     /// (tous ceux de l'espace de travail si la liste est vide) ? Il répond
     /// par `POST /api/editor/diagnostics` avec le même identifiant.
@@ -428,6 +431,10 @@ impl TurnObserver for WebObserver {
 
     fn reply_discarded(&self) {
         self.app.publish(WebEvent::ReplyDiscarded);
+    }
+
+    fn reply_continues(&self) {
+        self.app.publish(WebEvent::ReplyContinues);
     }
 }
 
@@ -1100,6 +1107,11 @@ fn transcript_from_messages(messages: &[ConversationMessage]) -> Vec<WebEvent> {
                 (ContentBlock::Text { text }, MessageRole::Assistant) => {
                     WebEvent::AssistantText { text: text.clone() }
                 }
+                // Résumé d'une compaction : il remplace le début de la
+                // conversation pour le modèle ; la page le signale d'une ligne.
+                (ContentBlock::Text { .. }, MessageRole::System) => WebEvent::Notice {
+                    text: "Début de la conversation résumé pour le modèle (compaction)".to_string(),
+                },
                 // Dossier ultracode joint à la demande : pour le modèle, la
                 // page le signale d'une ligne.
                 (ContentBlock::Text { text }, _)
@@ -2264,6 +2276,34 @@ mod tests {
                 "answer_drafted",
             ]
         );
+    }
+
+    #[test]
+    fn a_compaction_summary_is_not_shown_as_a_user_message() {
+        use runtime::{ContentBlock, MessageRole};
+        let summary = runtime::get_compact_continuation_message(
+            "<summary>\nTravail fait.\n</summary>",
+            true,
+            true,
+        );
+        let events = transcript_from_messages(&[
+            ConversationMessage {
+                role: MessageRole::System,
+                blocks: vec![ContentBlock::Text { text: summary }],
+                usage: None,
+            },
+            ConversationMessage::user_text("continue"),
+        ]);
+        let kinds: Vec<String> = events
+            .iter()
+            .map(|event| {
+                serde_json::to_value(event).expect("événement")["type"]
+                    .as_str()
+                    .expect("type")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(kinds, ["notice", "user_message"]);
     }
 
     #[test]

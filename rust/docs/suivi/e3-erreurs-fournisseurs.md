@@ -74,7 +74,13 @@ toute la sortie ramenée d'un cran.
   sur un texte incomplet.
 - Remède : quand la réponse sans appel d'outil s'arrête sur la limite de sortie, Claw demande
   la suite (« continue exactly where you stopped »), une ou deux fois au plus, et le dit.
-- État : à faire
+- État : corrigé (lot 5). `input_check::reply_cut_by_output_limit` (texte, aucun appel d'outil,
+  arrêt `length` ou `max_tokens`) est relevé par le client du terminal et celui des
+  sous-agents ; le runtime envoie `CUT_REPLY_NUDGE` deux fois au plus par réponse (jamais à la
+  dernière étape permise), le signale à l'utilisateur, et `join_cut_reply` joint la suite au
+  dernier texte de la réponse coupée, en un seul message ; une suite vide est redemandée une
+  fois, puis la réponse coupée est rendue telle quelle. L'affichage raccorde la suite
+  (`reply_continues` pour la page, `open_code_fence` pour le terminal). Aide `CLAW_CUT_REPLIES`.
 
 ## E3-06 Les erreurs 400, 413 et 422 arrivent à l'utilisateur avec le conseil « claw --help »
 - Gravité : basse

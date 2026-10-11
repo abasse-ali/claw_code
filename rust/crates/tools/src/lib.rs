@@ -3131,6 +3131,9 @@ struct ProviderRuntimeClient {
     runtime: tokio::runtime::Runtime,
     chain: api::ModelChain,
     allowed_tools: BTreeSet<String>,
+    /// La dernière réponse s'est arrêtée sur la limite de sortie au milieu de
+    /// son texte : le runtime en demandera la suite.
+    reply_cut: bool,
 }
 
 impl ProviderRuntimeClient {
@@ -3149,6 +3152,7 @@ impl ProviderRuntimeClient {
             runtime: tokio::runtime::Runtime::new().map_err(|error| error.to_string())?,
             chain: api::ModelChain::new(models, Box::new(ProviderClient::from_model)),
             allowed_tools,
+            reply_cut: false,
         })
     }
 }
@@ -3197,6 +3201,10 @@ impl ApiClient for ProviderRuntimeClient {
             .filter(|summary| !summary.trim().is_empty())
     }
 
+    fn reply_cut_by_output_limit(&mut self) -> bool {
+        std::mem::take(&mut self.reply_cut)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         let tools = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
@@ -3237,7 +3245,9 @@ impl ApiClient for ProviderRuntimeClient {
         // surcharge), la requête repart sur un autre modèle de la chaîne.
         let mut switches_left = api::UPSTREAM_SWITCHES;
         let answering = std::cell::RefCell::new(String::new());
+        let cut = std::cell::Cell::new(false);
         loop {
+            cut.set(false);
             let result: Result<Vec<AssistantEvent>, RuntimeError> = self.runtime.block_on(async {
                 let opened =
                     runtime::interrupt::interruptible(self.chain.open_stream(&build, &mut notify))
@@ -3349,6 +3359,10 @@ impl ApiClient for ProviderRuntimeClient {
                     }
                 }
                 input_check::restore_names_in(&mut events, schema_of);
+                cut.set(input_check::reply_cut_by_output_limit(
+                    stop_reason.as_deref(),
+                    &events,
+                ));
 
                 if !saw_stop
                     && events.iter().any(|event| {
@@ -3375,9 +3389,16 @@ impl ApiClient for ProviderRuntimeClient {
                 )
                 .await?;
                 note_model_request(&model);
-                Ok(response_to_events(response))
+                let stop_reason = response.stop_reason.clone();
+                let events = response_to_events(response);
+                cut.set(input_check::reply_cut_by_output_limit(
+                    stop_reason.as_deref(),
+                    &events,
+                ));
+                Ok(events)
             });
             let Err(error) = result else {
+                self.reply_cut = cut.get();
                 return result;
             };
             let failed = answering.borrow().clone();

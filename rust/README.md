@@ -354,14 +354,19 @@ forme `mcp__<serveur>__<outil>` et sont aussi disponibles pour les sous-agents.
 
 - **Compaction automatique** : à l'approche de la fenêtre de contexte du modèle, et au plus tard
   vers 120 000 jetons même si sa fenêtre est plus grande, les anciens messages sont résumés par
-  le modèle (les plus récents sont gardés tels quels). Seuil réglable avec
-  `CLAW_AUTO_COMPACT_TOKENS`, désactivation avec `CLAW_AUTO_COMPACT=0`.
+  le modèle (les plus récents sont gardés tels quels). Un texte qui n'a rien d'un résumé (le
+  modèle a continué la conversation au lieu de la résumer) est redemandé une fois, puis
+  remplacé par le résumé de Claw. Sous chaque résumé, Claw note lui-même vos demandes mot pour
+  mot (la première et les plus récentes) et les fichiers modifiés : elles survivent aux
+  compactions successives, et un « continue » retrouve la demande qu'il poursuit. Seuil réglable
+  avec `CLAW_AUTO_COMPACT_TOKENS`, désactivation avec `CLAW_AUTO_COMPACT=0`.
 - **Contexte allégé** : la page et le terminal affichent le résultat complet de chaque outil,
   mais la session ne garde pour le modèle que ce qu'il ne sait pas déjà. Après une modification :
   le fichier et les lignes touchées, sans l'ancien ni le nouveau texte qu'il vient d'écrire ;
   après une écriture : le fichier et son nombre de lignes ; après une commande : sa sortie et son
   code de retour. Le raisonnement du modèle ne lui est renvoyé que pour le tour en cours. Dans
-  une vraie session, ces redites occupaient plus de la moitié du contexte.
+  une vraie session, ces redites occupaient plus de la moitié du contexte. Une session
+  enregistrée avant cet allègement (ou pendant qu'il était coupé) est allégée à sa réouverture.
 - **Interrompre un tour** : `Ctrl+C` dans le terminal (un second `Ctrl+C` dans les 2 s quitte),
   bouton « Arrêter » ou touche `Échap` dans l'interface web. Les commandes shell en cours sont
   arrêtées avec leurs sous-processus.
@@ -588,6 +593,9 @@ applique**, quel que soit le modèle.
 | Persévérance | Le modèle veut s'arrêter juste après au moins deux échecs d'outils d'affilée (commande en erreur, modification ratée) : Claw le renvoie une fois chercher une autre voie (corriger la commande, un autre outil, une étape plus petite) au lieu de vous dire « lancez-le dans votre terminal ». Ce n'est qu'ensuite qu'il explique ce qui bloque et ce que vous devez faire. Un appel que vous avez refusé n'est jamais compté : l'agent n'insiste pas | `CLAW_PERSISTENCE=0` |
 | Signalement d'un problème | Vous dites que quelque chose ne va pas (« ça ne marche pas », « c'est n'importe quoi », une capture d'écran avec quelques mots, une erreur collée) : Claw joint à votre message, pour le modèle seulement, une méthode de débogage. Lister chaque symptôme du message et de chaque image, le reproduire comme vous l'obtenez, trouver la cause par des observations et non par une supposition, corriger, puis constater que le symptôme a disparu. Avant que la réponse parte, Claw demande au modèle ce qu'il a observé de la cause et de sa disparition : sans observation, il doit la faire ou dire que ce n'est pas vérifié, au lieu d'écrire « résolu ». Une requête de plus par signalement | `CLAW_PROBLEM_GUIDE=0` |
 | Commandes essayées | La réponse vous dit de lancer des commandes (blocs de code d'un terminal) que le modèle n'a lancées à aucun moment de la session : Claw le renvoie une fois les essayer (un serveur part en arrière-plan, il l'interroge), corriger sa réponse d'après ce qu'il voit, ou dire lesquelles ne sont pas testées. Les exemples à compléter, `git`, `docker`, `curl` et les installations du système ne sont pas demandés | `CLAW_TRIED_COMMANDS=0` |
+| Titres sans contenu | La réponse, sans appel d'outil, s'arrête sur des titres sans rien dessous (« ### 2. Frontend », « #### 2a. Composant URLInput »...) : le travail annoncé n'existe pas. Claw renvoie le modèle le faire, un appel d'outil par fichier, deux fois au plus par tour. Les blocs de code sont ignorés (un commentaire `#` n'est pas un titre) | `CLAW_EMPTY_TITLES=0` |
+| Contenu abrégé | Un fichier réécrit avec « ... rest of the code unchanged ... » à la place de ses lignes est refusé quand il fondrait de plus de moitié (sinon il est écrit, avec une note au modèle) ; une modification qui remplace des lignes par une telle mention est refusée. Le modèle apprend quoi envoyer à la place | `CLAW_PLACEHOLDER_GUARD=0` |
+| Réponse coupée | Une réponse en texte arrêtée par la limite de sortie du modèle au milieu d'une phrase : Claw demande la suite, deux fois au plus pour une même réponse, et la joint à la réponse au lieu de vous rendre un texte tronqué. Une ligne vous le signale | `CLAW_CUT_REPLIES=0` |
 
 **Mode équipe : le bon modèle pour chaque étape.** Au lieu d'un seul modèle pour tout, Claw
 confie chaque étape du travail au modèle gratuit le plus fort pour elle, et change de modèle

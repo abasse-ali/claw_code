@@ -255,7 +255,16 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
   (3) Refuser un résumé qui ne porte aucun de ces titres ou ne nomme aucun des fichiers
   modifiés : une nouvelle tentative (une requête de plus), puis le résumé local complété
   par (1).
-- État : à vérifier
+- État : corrigé (lot 5). (2) `SUMMARY_END_REMINDER` termine la conversation à résumer ;
+  (3) `summary_is_usable` lit le texte tel qu'il sera gardé (sans balises, raisonnement ni
+  faits recopiés) et demande au moins trois rubriques en titre, chacune en début de mot
+  (blocs de code sautés), et, si des fichiers ont été modifiés, le nom de l'un d'eux ; sinon
+  une seconde demande avec `SUMMARY_RETRY_NOTE`, puis le résumé local, et l'avis de compaction
+  le dit ; (1) `claw_facts` et `render_facts` placent après tout résumé, hors de ses balises,
+  les demandes mot pour mot (la première, puis les plus récentes, 8 000 caractères ; une longue
+  demande garde son début et sa fin, `clip_request` ; une demande renvoyée compte à sa dernière
+  place) et les fichiers écrits ou modifiés ; ces faits, aux marques reconnues par lignes
+  entières, sont relus à la compaction suivante (`recorded_facts`) et par `earlier_request`.
 
 ## E2-07 Une session reprise garde ses anciens résultats d'outils non allégés
 - Gravité : moyenne
@@ -277,7 +286,9 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
   `lean_result` à chaque résultat d'outil déjà enregistré. Pour S1 : environ 178 000
   caractères en moins, de l'ordre de 45 000 jetons sur 118 000, à chaque requête. Aucune
   requête de plus, et le résumé de compaction arrive plus tard.
-- État : à vérifier
+- État : corrigé (lot 5). `lean_stored_results` allège chaque résultat déjà enregistré à la
+  création du runtime (`new_with_features`), comme `lean_result` le fait pour un nouveau
+  résultat ; sans effet quand `CLAW_LEAN_RESULTS=0`.
 
 ## E2-08 Réponse faite de titres vides : le travail est annoncé, aucun outil n'est appelé
 - Gravité : haute

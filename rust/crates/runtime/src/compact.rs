@@ -26,6 +26,8 @@ pub struct CompactionResult {
     pub formatted_summary: String,
     pub compacted_session: Session,
     pub removed_message_count: usize,
+    /// Le résumé est celui du modèle (sinon c'est celui de Claw).
+    pub model_summary: bool,
 }
 
 #[must_use]
@@ -67,9 +69,26 @@ pub fn get_compact_continuation_message(
     suppress_follow_up_questions: bool,
     recent_messages_preserved: bool,
 ) -> String {
+    compact_continuation(
+        summary,
+        "",
+        suppress_follow_up_questions,
+        recent_messages_preserved,
+    )
+}
+
+/// Message qui ouvre la session compactée : le résumé mis en forme, puis les
+/// faits notés par Claw, tels quels (ni balises ni lignes vides retouchées
+/// dans les demandes citées), puis les consignes de reprise.
+fn compact_continuation(
+    summary: &str,
+    facts: &str,
+    suppress_follow_up_questions: bool,
+    recent_messages_preserved: bool,
+) -> String {
     let mut base = format!(
         "{COMPACT_CONTINUATION_PREAMBLE}{}",
-        format_compact_summary(summary)
+        with_facts(&format_compact_summary(summary), facts)
     );
 
     if recent_messages_preserved {
@@ -113,6 +132,7 @@ pub fn compact_session_with(
             formatted_summary: String::new(),
             compacted_session: session.clone(),
             removed_message_count: 0,
+            model_summary: false,
         };
     }
 
@@ -135,16 +155,29 @@ pub fn compact_session_with(
             formatted_summary: String::new(),
             compacted_session: session.clone(),
             removed_message_count: 0,
+            model_summary: false,
         };
     }
     let removed = &session.messages[compacted_prefix_len..keep_from];
     let preserved = session.messages[keep_from..].to_vec();
-    let summary = match summarize(&session.messages[..keep_from]) {
-        Some(text) if !text.trim().is_empty() => format!("<summary>\n{}\n</summary>", text.trim()),
-        _ => merge_compact_summaries(existing_summary.as_deref(), &summarize_messages(removed)),
+    // Ce que Claw sait lui-même, mot pour mot : les demandes de l'utilisateur
+    // (celles d'une compaction précédente comprises) et les fichiers modifiés.
+    // Le résumé ne les perd ainsi jamais, même rédigé par un petit modèle.
+    let facts = render_facts(&claw_facts(existing_summary.as_deref(), removed));
+    // Un texte qui n'a rien d'un résumé (le modèle a continué la conversation
+    // au lieu de la résumer) est écarté : le résumé de Claw le remplace.
+    let model_summary = summarize(&session.messages[..keep_from])
+        .map(|text| clean_model_summary(&text))
+        .filter(|text| summary_is_usable(text, removed));
+    let summarized_by_model = model_summary.is_some();
+    let summary = if let Some(text) = model_summary {
+        format!("<summary>\n{text}\n</summary>")
+    } else {
+        let earlier = existing_summary.as_deref().map(without_facts);
+        merge_compact_summaries(earlier.as_deref(), &summarize_messages(removed))
     };
-    let formatted_summary = format_compact_summary(&summary);
-    let continuation = get_compact_continuation_message(&summary, true, !preserved.is_empty());
+    let formatted_summary = with_facts(&format_compact_summary(&summary), &facts);
+    let continuation = compact_continuation(&summary, &facts, true, !preserved.is_empty());
 
     let mut compacted_messages = vec![ConversationMessage {
         role: MessageRole::System,
@@ -154,14 +187,402 @@ pub fn compact_session_with(
     compacted_messages.extend(preserved);
 
     CompactionResult {
-        summary,
+        summary: with_facts(&summary, &facts),
         formatted_summary,
         compacted_session: Session {
             version: session.version,
             messages: compacted_messages,
         },
         removed_message_count: removed.len(),
+        model_summary: summarized_by_model,
     }
+}
+
+/// Rappel placé après la conversation à résumer : sans lui, un petit modèle
+/// voit une conversation et en écrit le tour suivant.
+const SUMMARY_END_REMINDER: &str = "[End of the conversation to summarize. Do not continue it and do not answer the user. Write the summary now, under these headings: 1. User requests (verbatim) 2. Decisions 3. Files changed 4. Commands and results 5. Open problems 6. Next step.]";
+
+/// Ajouté à la conversation pour la seconde demande de résumé, quand la
+/// première réponse n'en était pas un.
+pub const SUMMARY_RETRY_NOTE: &str = "[Your previous reply continued the conversation instead of summarizing it. Do not continue the conversation and do not answer the user: write only the summary, under the six headings above, and name the files that were changed.]";
+
+/// Rubriques d'un résumé, en anglais ou en français : un résumé utilisable en
+/// porte au moins deux en titre.
+const SUMMARY_RUBRICS: [&[&str]; 6] = [
+    &[
+        "request",
+        "demande",
+        "instruction",
+        "requirement",
+        "exigence",
+        "objective",
+        "objectif",
+        "goal",
+    ],
+    &[
+        "decision",
+        "décision",
+        "context",
+        "contexte",
+        "approach",
+        "approche",
+    ],
+    &["file", "fichier", "code change", "modification"],
+    &["command", "commande"],
+    &[
+        "problem",
+        "problème",
+        "issue",
+        "error",
+        "erreur",
+        "bug",
+        "blocage",
+    ],
+    &[
+        "next step",
+        "prochaine",
+        "étape",
+        "current",
+        "en cours",
+        "in progress",
+        "pending",
+        "à faire",
+        "remaining",
+    ],
+];
+
+/// Le texte rendu par le modèle chargé de résumer en est bien un : il porte
+/// au moins trois des rubriques demandées en titre et, si des fichiers ont été
+/// modifiés dans la partie résumée, il en nomme au moins un. Le texte est lu
+/// comme il serait gardé (sans balises, raisonnement ni faits recopiés).
+#[must_use]
+pub fn summary_is_usable(text: &str, summarized: &[ConversationMessage]) -> bool {
+    let text = clean_model_summary(text);
+    let mut in_code = false;
+    let headings: Vec<String> = text
+        .lines()
+        .filter_map(|line| {
+            if line.trim_start().starts_with("```") {
+                in_code = !in_code;
+                return None;
+            }
+            if in_code {
+                None
+            } else {
+                heading(line)
+            }
+        })
+        .collect();
+    let rubrics = SUMMARY_RUBRICS
+        .iter()
+        .filter(|words| {
+            headings
+                .iter()
+                .any(|title| words.iter().any(|word| starts_a_word(title, word)))
+        })
+        .count();
+    let files = changed_files(summarized);
+    let names_a_file = files.is_empty()
+        || files.iter().any(|file| {
+            let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+            !name.is_empty() && text.contains(name)
+        });
+    rubrics >= 3 && names_a_file
+}
+
+/// `word` commence un mot de `title` : « file » dans « files », pas dans
+/// « profile » ; « command » pas dans « recommandation ».
+fn starts_a_word(title: &str, word: &str) -> bool {
+    title.match_indices(word).any(|(at, _)| {
+        title[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|before| !before.is_alphanumeric())
+    })
+}
+
+/// Le texte du modèle sans ce qui n'est pas son résumé : balises, raisonnement
+/// (`<analysis>`), faits de Claw qu'il aurait recopiés.
+fn clean_model_summary(text: &str) -> String {
+    let text = strip_tag_block(text, "analysis");
+    without_facts(&text.replace("<summary>", "").replace("</summary>", ""))
+        .trim()
+        .to_string()
+}
+
+/// Le titre que porte cette ligne, en minuscules, si elle en a l'air : titre
+/// Markdown ou texte en gras, ou quelques mots numérotés ou suivis de
+/// deux-points.
+fn heading(line: &str) -> Option<String> {
+    let line = line.trim();
+    let title = line.split_once(':').map_or(line, |(title, _)| title);
+    let words = title
+        .split_whitespace()
+        .filter(|word| word.chars().any(char::is_alphabetic))
+        .count();
+    let unnumbered =
+        line.trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '.' | ')' | '-' | ' '));
+    let marked = line.starts_with('#') || unnumbered.starts_with("**");
+    let numbered = unnumbered.len() < line.len() && line.starts_with(|c: char| c.is_ascii_digit());
+    let titled = (marked && (1..=12).contains(&words))
+        || ((numbered || line.contains(':')) && (1..=6).contains(&words));
+    titled.then(|| title.to_lowercase())
+}
+
+/// Outils qui écrivent un fichier.
+const WRITING_TOOLS: [&str; 3] = ["write_file", "edit_file", "NotebookEdit"];
+
+/// Les fichiers écrits ou modifiés par les appels réussis de ces messages,
+/// dans l'ordre des appels.
+fn changed_files(messages: &[ConversationMessage]) -> Vec<String> {
+    let succeeded: Vec<&str> = messages
+        .iter()
+        .flat_map(|message| &message.blocks)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                is_error: false,
+                ..
+            } => Some(tool_use_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    messages
+        .iter()
+        .flat_map(|message| &message.blocks)
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, name, input }
+                if WRITING_TOOLS.contains(&name.as_str()) && succeeded.contains(&id.as_str()) =>
+            {
+                let value: serde_json::Value = serde_json::from_str(input).ok()?;
+                ["path", "file_path", "filePath", "notebook_path"]
+                    .iter()
+                    .find_map(|key| value.get(*key)?.as_str())
+                    .map(str::to_string)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Début et fin des faits que Claw note lui-même sous un résumé, et leurs
+/// rubriques.
+const FACTS_START: &str = "[Recorded by Claw, exact]";
+const FACTS_END: &str = "[End of what Claw recorded]";
+const FACTS_REQUESTS: &str = "User requests, word for word, oldest first:";
+const FACTS_FILES: &str = "Files written or edited:";
+/// Mis à la place des demandes du milieu quand elles ne tiennent plus.
+const OMITTED_REQUESTS: &str = "(… older requests left out for space …)";
+/// Place des demandes de l'utilisateur dans ces faits, en caractères ; celle
+/// de la première (la demande d'origine), puis de chacune des autres.
+const FACTS_REQUESTS_LIMIT: usize = 8_000;
+const FACTS_FIRST_REQUEST_LIMIT: usize = 5_000;
+const FACTS_REQUEST_LIMIT: usize = 2_000;
+/// Fichiers cités au plus (les plus récents).
+const FACTS_FILES_LIMIT: usize = 40;
+
+/// Ce que Claw sait lui-même de la partie résumée d'une conversation.
+#[derive(Debug, Default)]
+struct Facts {
+    requests: Vec<String>,
+    files: Vec<String>,
+}
+
+/// Les faits de Claw pour cette compaction : ceux de la compaction
+/// précédente, puis ceux des messages retirés.
+fn claw_facts(earlier_summary: Option<&str>, removed: &[ConversationMessage]) -> Facts {
+    let mut facts = earlier_summary.map(recorded_facts).unwrap_or_default();
+    facts.requests.extend(user_requests(removed));
+    facts.files.extend(changed_files(removed));
+    Facts {
+        requests: kept_requests(facts.requests),
+        files: kept_files(facts.files),
+    }
+}
+
+/// Message de l'utilisateur écrit par Claw (remarque, relance d'un hook
+/// `Stop`) : ce n'est pas une demande. Les guides, le contexte des hooks et le
+/// dossier ultracode suivent le texte de l'utilisateur, ils ne l'ouvrent pas.
+fn written_by_claw(text: &str) -> bool {
+    text.starts_with(crate::harness::CLAW_NOTE_PREFIX)
+        || text.starts_with(crate::conversation::STOP_HOOK_PREFIX)
+}
+
+/// Les demandes de l'utilisateur dans ces messages, mot pour mot : le premier
+/// texte de chacun de ses messages.
+fn user_requests(messages: &[ConversationMessage]) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .filter_map(|message| match message.blocks.first() {
+            Some(ContentBlock::Text { text }) => Some(text.trim()),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty() && !written_by_claw(text))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Les demandes qui tiennent dans la place prévue : la première (la demande
+/// d'origine), puis les plus récentes, chacune une fois à sa dernière place
+/// (une demande renvoyée est la plus récente) ; celles du milieu sont
+/// signalées comme omises.
+fn kept_requests(requests: Vec<String>) -> Vec<String> {
+    let Some((first, rest)) = requests.split_first() else {
+        return requests;
+    };
+    let mut unique: Vec<&String> = Vec::new();
+    for request in rest {
+        unique.retain(|known| *known != request);
+        unique.push(request);
+    }
+    let first = clip_request(first, FACTS_FIRST_REQUEST_LIMIT);
+    let mut room = FACTS_REQUESTS_LIMIT.saturating_sub(first.chars().count());
+    let mut recent = Vec::new();
+    for request in unique.iter().rev() {
+        let request = clip_request(request, FACTS_REQUEST_LIMIT);
+        let size = request.chars().count();
+        if size > room {
+            break;
+        }
+        room -= size;
+        recent.push(request);
+    }
+    let mut kept = vec![first];
+    if recent.len() < unique.len() {
+        kept.push(OMITTED_REQUESTS.to_string());
+    }
+    kept.extend(recent.into_iter().rev());
+    kept
+}
+
+/// Une demande trop longue garde son début et sa fin : la consigne de
+/// l'utilisateur y est presque toujours, autour de la sortie d'une commande
+/// ou d'un fichier joint.
+#[must_use]
+pub fn clip_request(text: &str, limit: usize) -> String {
+    let count = text.chars().count();
+    if count <= limit {
+        return text.to_string();
+    }
+    let head = limit / 3;
+    let tail = limit - head;
+    let start: String = text.chars().take(head).collect();
+    let end: String = text.chars().skip(count - tail).collect();
+    format!(
+        "{start}\n[… {} characters omitted …]\n{end}",
+        count - head - tail
+    )
+}
+
+/// Les fichiers, chacun une fois, du moins récent au plus récent ; les plus
+/// récents quand il y en a trop.
+fn kept_files(files: Vec<String>) -> Vec<String> {
+    let mut unique: Vec<String> = Vec::new();
+    for file in files {
+        unique.retain(|known| known != &file);
+        unique.push(file);
+    }
+    let excess = unique.len().saturating_sub(FACTS_FILES_LIMIT);
+    unique.split_off(excess)
+}
+
+/// Les faits tels qu'ils sont placés sous le résumé (vide s'il n'y a rien à
+/// noter). Une demande sur plusieurs lignes garde ses lignes, en retrait.
+fn render_facts(facts: &Facts) -> String {
+    if facts.requests.is_empty() && facts.files.is_empty() {
+        return String::new();
+    }
+    let mut lines = vec![FACTS_START.to_string()];
+    if !facts.requests.is_empty() {
+        lines.push(FACTS_REQUESTS.to_string());
+        for request in &facts.requests {
+            let mut parts = request.lines();
+            lines.push(format!("- {}", parts.next().unwrap_or_default()));
+            lines.extend(parts.map(|line| format!("  {line}")));
+        }
+    }
+    if !facts.files.is_empty() {
+        lines.push(FACTS_FILES.to_string());
+        lines.extend(facts.files.iter().map(|file| format!("- {file}")));
+    }
+    lines.push(FACTS_END.to_string());
+    lines.join("\n")
+}
+
+/// Les faits que Claw a placés sous un résumé précédent (son dernier bloc).
+/// Ses marques sont des lignes entières : une ligne d'une demande citée
+/// commence toujours par « - » ou par un retrait, elle ne peut pas les imiter.
+fn recorded_facts(summary: &str) -> Facts {
+    let mut facts = Facts::default();
+    let lines: Vec<&str> = summary.lines().collect();
+    let Some(start) = lines.iter().rposition(|line| *line == FACTS_START) else {
+        return facts;
+    };
+    let mut in_files = false;
+    for &line in &lines[start + 1..] {
+        if line == FACTS_END {
+            break;
+        }
+        if line == FACTS_REQUESTS || line == FACTS_FILES {
+            in_files = line == FACTS_FILES;
+        } else if let Some(item) = line.strip_prefix("- ") {
+            let list = if in_files {
+                &mut facts.files
+            } else {
+                &mut facts.requests
+            };
+            list.push(item.to_string());
+        } else if !in_files {
+            if let Some(request) = facts.requests.last_mut() {
+                request.push('\n');
+                request.push_str(line.strip_prefix("  ").unwrap_or(line));
+            }
+        }
+    }
+    facts
+}
+
+/// Le texte sans les faits de Claw (lignes entières de marque à marque) : un
+/// modèle les recopie parfois dans son résumé, et ceux d'une compaction
+/// précédente sont repris à part.
+fn without_facts(text: &str) -> String {
+    let mut kept = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        if inside {
+            inside = line != FACTS_END;
+        } else if line == FACTS_START {
+            inside = true;
+        } else {
+            kept.push(line);
+        }
+    }
+    kept.join("\n")
+}
+
+/// Le texte suivi des faits notés par Claw, hors des balises du résumé : ce
+/// qu'une demande citée contient ne dérange pas sa mise en forme.
+fn with_facts(text: &str, facts: &str) -> String {
+    if facts.is_empty() {
+        text.to_string()
+    } else {
+        format!("{}\n\n{facts}", text.trim_end())
+    }
+}
+
+/// Les demandes de l'utilisateur que Claw a notées mot pour mot dans le
+/// résumé qui ouvre une session compactée, les plus anciennes d'abord.
+#[must_use]
+pub fn recorded_requests(messages: &[ConversationMessage]) -> Vec<String> {
+    messages
+        .first()
+        .and_then(extract_existing_compacted_summary)
+        .map(|summary| recorded_facts(&summary).requests)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|request| request != OMITTED_REQUESTS)
+        .collect()
 }
 
 /// Recule le point de coupe pour que la partie conservée ne commence pas par un
@@ -218,7 +639,7 @@ pub fn render_transcript_for_summary(messages: &[ConversationMessage]) -> String
         }
     }
     if transcript.len() <= TRANSCRIPT_TOTAL_LIMIT {
-        return transcript;
+        return format!("{transcript}{SUMMARY_END_REMINDER}");
     }
     let head_end = floor_char_boundary(&transcript, TRANSCRIPT_HEAD_KEPT);
     let tail_start = floor_char_boundary(
@@ -226,7 +647,7 @@ pub fn render_transcript_for_summary(messages: &[ConversationMessage]) -> String
         transcript.len() - (TRANSCRIPT_TOTAL_LIMIT - TRANSCRIPT_HEAD_KEPT),
     );
     format!(
-        "{}\n\n[… middle of the conversation omitted …]\n\n{}",
+        "{}\n\n[… middle of the conversation omitted …]\n\n{}{SUMMARY_END_REMINDER}",
         &transcript[..head_end],
         &transcript[tail_start..]
     )
@@ -565,11 +986,13 @@ fn extract_existing_compacted_summary(message: &ConversationMessage) -> Option<S
 
     let text = first_text_block(message)?;
     let summary = text.strip_prefix(COMPACT_CONTINUATION_PREAMBLE)?;
+    // Ces consignes terminent le message : une demande citée plus haut qui
+    // les contiendrait ne coupe pas le résumé.
     let summary = summary
-        .split_once(&format!("\n\n{COMPACT_RECENT_MESSAGES_NOTE}"))
+        .rsplit_once(&format!("\n\n{COMPACT_RECENT_MESSAGES_NOTE}"))
         .map_or(summary, |(value, _)| value);
     let summary = summary
-        .split_once(&format!("\n{COMPACT_DIRECT_RESUME_INSTRUCTION}"))
+        .rsplit_once(&format!("\n{COMPACT_DIRECT_RESUME_INSTRUCTION}"))
         .map_or(summary, |(value, _)| value);
     Some(summary.trim().to_string())
 }
@@ -625,6 +1048,187 @@ mod tests {
         get_compact_continuation_message, infer_pending_work, should_compact, CompactionConfig,
     };
     use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+
+    #[test]
+    fn a_summary_that_is_not_one_is_replaced_and_claw_adds_the_facts() {
+        use super::{compact_session_with, render_transcript_for_summary, summary_is_usable};
+        let session = Session {
+            version: 1,
+            messages: vec![
+                ConversationMessage::user_text(
+                    "Traduis les mangas du japonais vers le français,\nen trois étapes",
+                ),
+                ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+                    id: "t1".to_string(),
+                    name: "write_file".to_string(),
+                    input: r#"{"path":"backend/app/main.py","content":"x"}"#.to_string(),
+                }]),
+                ConversationMessage::tool_result("t1", "write_file", "ok", false),
+                ConversationMessage::user_text("[Claw] note de Claw, à ne pas garder"),
+                ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "recent ".repeat(300),
+                }]),
+                ConversationMessage::user_text("et maintenant ?"),
+            ],
+        };
+        let config = CompactionConfig {
+            preserve_recent_messages: 2,
+            max_estimated_tokens: 1,
+        };
+        // La conversation à résumer finit par la consigne de résumer.
+        let transcript = render_transcript_for_summary(&session.messages);
+        assert!(transcript.ends_with("5. Open problems 6. Next step.]"));
+        // Le modèle a continué la conversation (session réelle) : son texte
+        // est écarté, le résumé de Claw le remplace.
+        let reply = "L'installation est en cours. Une fois terminée :\n```powershell\n# Dans le même terminal backend\nuvicorn app.main:app --reload\n```\n**Résultat :**\n- Frontend: http://localhost:3000";
+        assert!(!summary_is_usable(reply, &session.messages));
+        let result = compact_session_with(&session, config, |_| Some(reply.to_string()));
+        assert!(
+            !result.summary.contains("installation est en cours"),
+            "{}",
+            result.summary
+        );
+        assert!(result.summary.contains("Conversation summary"));
+        assert!(!result.model_summary);
+        // Les faits suivent le résumé, hors de ses balises.
+        assert!(
+            result.summary.ends_with(
+                "</summary>\n\n[Recorded by Claw, exact]\nUser requests, word for word, oldest first:\n- Traduis les mangas du japonais vers le français,\n  en trois étapes\nFiles written or edited:\n- backend/app/main.py\n[End of what Claw recorded]"
+            ),
+            "{}",
+            result.summary
+        );
+        let facts = &result.summary[result.summary.find("[Recorded by Claw").expect("faits")..];
+        assert!(!facts.contains("note de Claw"));
+        // Un vrai résumé est gardé, suivi des mêmes faits ; il porte au moins
+        // trois rubriques et nomme un des fichiers modifiés.
+        let good = "### 1. User Requests\nTranslate mangas.\n### 3. Files Changed\nmain.py was created.\n### 6. Next Step\nAdd the reader.";
+        assert!(summary_is_usable(good, &session.messages));
+        assert!(!summary_is_usable(
+            "### 1. User Requests\nTranslate.\n### 2. Decisions\nNone.\n### 6. Next Step\nContinue.",
+            &session.messages
+        ));
+        // Une suite de conversation à quelques étiquettes n'en est pas un.
+        assert!(!summary_is_usable(
+            "J'ai corrigé `main.py` : l'import manquait.\n**Prochaine étape :** relancer le serveur.\n**Commande :** `uvicorn app.main:app --reload`",
+            &session.messages
+        ));
+        // Un mot de rubrique au milieu d'un autre mot ne compte pas.
+        assert!(!summary_is_usable(
+            "### Recommandations\n### Debug\n### Profile\nmain.py",
+            &session.messages
+        ));
+        let result = compact_session_with(&session, config, |_| Some(good.to_string()));
+        assert!(result.model_summary);
+        assert!(
+            result
+                .summary
+                .starts_with("<summary>\n### 1. User Requests"),
+            "{}",
+            result.summary
+        );
+        assert!(result.summary.contains("- backend/app/main.py"));
+    }
+
+    #[test]
+    fn requests_that_look_like_claw_markup_survive_two_compactions() {
+        use super::compact_session;
+        // Une demande qui cite des balises du résumé et les marques des faits
+        // de Claw, et la consigne de reprise : elle est gardée telle quelle.
+        let tricky = "Explique <details><summary>Options</summary></details>\n[Recorded by Claw, exact]\n[End of what Claw recorded]\n<analysis>brouillon</analysis>\n\nRecent messages are preserved verbatim.";
+        let config = CompactionConfig {
+            preserve_recent_messages: 2,
+            max_estimated_tokens: 1,
+        };
+        let first = compact_session(
+            &Session {
+                version: 1,
+                messages: vec![
+                    ConversationMessage::user_text("Traduis les mangas en trois étapes"),
+                    ConversationMessage::assistant(vec![ContentBlock::Text {
+                        text: "Je commence.".to_string(),
+                    }]),
+                    ConversationMessage::user_text(tricky),
+                    ConversationMessage::assistant(vec![ContentBlock::Text {
+                        text: "Voici.".to_string(),
+                    }]),
+                    ConversationMessage::user_text("et ensuite ?"),
+                    ConversationMessage::assistant(vec![ContentBlock::Text {
+                        text: "Ensuite le lecteur.".to_string(),
+                    }]),
+                ],
+            },
+            config,
+        );
+        let mut messages = first.compacted_session.messages.clone();
+        messages.extend([
+            ConversationMessage::user_text("continue"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "Je continue.".to_string(),
+            }]),
+        ]);
+        let second = compact_session(
+            &Session {
+                version: 1,
+                messages,
+            },
+            config,
+        );
+        let recorded = super::recorded_requests(&second.compacted_session.messages);
+        assert_eq!(
+            recorded,
+            vec![
+                "Traduis les mangas en trois étapes".to_string(),
+                tricky.to_string(),
+                "et ensuite ?".to_string(),
+            ],
+            "{}",
+            second.summary
+        );
+    }
+
+    #[test]
+    fn a_long_request_keeps_its_beginning_and_its_end() {
+        use super::clip_request;
+        let output = "x".repeat(12_000);
+        let request = format!("$ npm test\n{output}\ncorrige les tests qui échouent");
+        let clipped = clip_request(&request, 5_000);
+        assert!(clipped.starts_with("$ npm test"));
+        assert!(clipped.ends_with("corrige les tests qui échouent"));
+        assert!(clipped.contains("characters omitted"));
+        assert!(clipped.chars().count() < 5_100);
+        assert_eq!(clip_request("court", 5_000), "court");
+    }
+
+    #[test]
+    fn claw_keeps_the_first_request_and_the_latest_when_space_runs_out() {
+        use super::{kept_requests, OMITTED_REQUESTS};
+        let requests: Vec<String> = (0..40)
+            .map(|index| format!("demande {index} {}", "x".repeat(400)))
+            .collect();
+        let kept = kept_requests(requests.clone());
+        assert_eq!(kept[0], requests[0]);
+        assert_eq!(kept[1], OMITTED_REQUESTS);
+        assert_eq!(kept.last(), requests.last());
+        let size: usize = kept.iter().map(|request| request.chars().count()).sum();
+        assert!(size <= 8_100, "{size}");
+        // Une demande répétée n'est notée qu'une fois, à sa dernière place :
+        // c'est la plus récente.
+        let kept = kept_requests(vec![
+            "fais X".to_string(),
+            "continue".to_string(),
+            "fais Y".to_string(),
+            "continue".to_string(),
+        ]);
+        assert_eq!(
+            kept,
+            vec![
+                "fais X".to_string(),
+                "fais Y".to_string(),
+                "continue".to_string()
+            ]
+        );
+    }
 
     #[test]
     fn formats_compact_summary_like_upstream() {
@@ -761,6 +1365,19 @@ mod tests {
             &second.compacted_session.messages[1].blocks[0],
             ContentBlock::Text { text } if text.contains("Please add regression tests for compaction.")
         ));
+        // Les demandes de la première compaction restent mot pour mot dans
+        // les faits de Claw, avant celles de la seconde, une seule fois.
+        assert!(
+            second.summary.contains(
+                "- Investigate rust/crates/runtime/src/compact.rs\n- Also update rust/crates/runtime/src/conversation.rs"
+            ),
+            "{}",
+            second.summary
+        );
+        assert_eq!(
+            second.summary.matches("[Recorded by Claw, exact]").count(),
+            1
+        );
     }
 
     #[test]

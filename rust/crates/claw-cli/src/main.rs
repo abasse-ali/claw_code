@@ -5491,6 +5491,9 @@ trait TurnObserver: Send + Sync {
     /// La réponse en cours est abandonnée (flux coupé) et va être redemandée :
     /// les appels d'outils qu'elle annonçait ne seront pas exécutés.
     fn reply_discarded(&self) {}
+    /// La réponse qui vient continue la précédente, coupée par la limite de
+    /// sortie : l'interface l'y raccorde.
+    fn reply_continues(&self) {}
 }
 
 type SharedObserver = Arc<dyn TurnObserver>;
@@ -5542,6 +5545,9 @@ struct DefaultRuntimeClient {
     team_last: Option<String>,
     /// Modèle qui a écrit le code pendant ce tour : le relecteur en prend un autre.
     team_coder: Option<String>,
+    /// La dernière réponse s'est arrêtée sur la limite de sortie au milieu de
+    /// son texte : le runtime en demandera la suite.
+    reply_cut: bool,
 }
 
 impl DefaultRuntimeClient {
@@ -5597,6 +5603,7 @@ impl DefaultRuntimeClient {
             team_base: None,
             team_last: None,
             team_coder: None,
+            reply_cut: false,
         })
     }
 
@@ -5768,8 +5775,14 @@ fn resolve_cli_auth_source() -> Result<AuthSource, Box<dyn std::error::Error>> {
 impl ApiClient for DefaultRuntimeClient {
     fn summarize(&mut self, system_prompt: &str, transcript: &str) -> Option<String> {
         if self.emit_output {
+            // Seconde demande : le texte rendu n'était pas un résumé.
+            let line = if transcript.ends_with(runtime::SUMMARY_RETRY_NOTE) {
+                "\n⟳ Le texte rendu n'était pas un résumé : nouvelle demande au modèle…"
+            } else {
+                "\n⟳ Contexte presque plein : résumé de la conversation en cours…"
+            };
             live::suspend(|| {
-                println!("\n⟳ Contexte presque plein : résumé de la conversation en cours…");
+                println!("{line}");
             });
         }
         let emit = self.emit_output;
@@ -5805,6 +5818,10 @@ impl ApiClient for DefaultRuntimeClient {
         if let Some(observer) = &self.observer {
             observer.answer_drafted();
         }
+    }
+
+    fn reply_cut_by_output_limit(&mut self) -> bool {
+        std::mem::take(&mut self.reply_cut)
     }
 
     fn can_ask_user(&self) -> bool {
@@ -5999,8 +6016,19 @@ impl ApiClient for DefaultRuntimeClient {
         // Essais automatiques du même modèle déjà faits pour cette requête.
         let mut auto_retries = 0_u32;
         let answering = std::cell::RefCell::new(String::new());
+        // Réponse en texte arrêtée par la limite de sortie (voir
+        // `reply_cut_by_output_limit`).
+        let cut = std::cell::Cell::new(false);
+        // Suite d'une réponse coupée : l'affichage la raccorde à ce qui est
+        // déjà écrit, et un bloc de code resté ouvert le reste pour la suite.
+        let continued = runtime::cut_reply_continued(&request.messages);
+        let open_fence = continued.as_deref().and_then(render::open_code_fence);
         loop {
             answering.borrow_mut().clear();
+            cut.set(false);
+            if let (Some(_), Some(observer)) = (&continued, &self.observer) {
+                observer.reply_continues();
+            }
             let result: Result<Vec<AssistantEvent>, RuntimeError> = self.runtime.block_on(async {
                 let opened =
                     runtime::interrupt::interruptible(self.chain.open_stream(&build, &mut notify))
@@ -6015,6 +6043,10 @@ impl ApiClient for DefaultRuntimeClient {
                 let out: &mut dyn Write = if emit { &mut stdout } else { &mut sink };
                 let renderer = TerminalRenderer::new();
                 let mut markdown_stream = MarkdownStreamState::default();
+                if let Some(fence) = &open_fence {
+                    // Rouvert sans être réaffiché : la suite est du code.
+                    let _ = markdown_stream.push(&renderer, &format!("{fence}\n"));
+                }
                 // Réponse préfixée `●`, raisonnement résumé en une ligne `∴`.
                 let mut answer = transcript::Prefixer::assistant();
                 let mut reasoning = transcript::ThinkingDisplay::new();
@@ -6177,6 +6209,10 @@ impl ApiClient for DefaultRuntimeClient {
                     .finish_line(out)
                     .map_err(|error| RuntimeError::new(error.to_string()))?;
                 Self::check_cut_calls(&self.tool_registry, &mut events, stop_reason.as_deref())?;
+                cut.set(tool_input::reply_cut_by_output_limit(
+                    stop_reason.as_deref(),
+                    &events,
+                ));
 
                 if !saw_stop
                     && events.iter().any(|event| {
@@ -6216,6 +6252,10 @@ impl ApiClient for DefaultRuntimeClient {
                     })
                     .collect::<Vec<_>>();
                 Self::check_cut_calls(&self.tool_registry, &mut events, stop_reason.as_deref())?;
+                cut.set(tool_input::reply_cut_by_output_limit(
+                    stop_reason.as_deref(),
+                    &events,
+                ));
                 if let Some(observer) = &self.observer {
                     for event in &events {
                         match event {
@@ -6345,7 +6385,10 @@ impl ApiClient for DefaultRuntimeClient {
                         live::show("Réflexion…");
                     }
                 }
-                Ok(events) => return Ok(events),
+                Ok(events) => {
+                    self.reply_cut = cut.get();
+                    return Ok(events);
+                }
             }
         }
     }
