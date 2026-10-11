@@ -158,28 +158,7 @@ impl GlobalToolRegistry {
             )
             .chain(self.mcp_tools.iter().map(|tool| tool.name.clone()))
             .collect::<Vec<_>>();
-        if known.iter().any(|candidate| candidate == name) {
-            return Some(name.to_string());
-        }
-        let claude = canonical_agent_tool_name(name);
-        if known.contains(&claude) {
-            return Some(claude);
-        }
-        let normalized = normalize_tool_name(name);
-        let short = match normalized.as_str() {
-            "read" => "read_file",
-            "write" => "write_file",
-            "edit" | "multiedit" | "multi_edit" => "edit_file",
-            "glob" => "glob_search",
-            "grep" => "grep_search",
-            _ => "",
-        };
-        if !short.is_empty() {
-            return Some(short.to_string());
-        }
-        known
-            .into_iter()
-            .find(|candidate| normalize_tool_name(candidate) == normalized)
+        resolve_name_among(name, &known)
     }
 
     pub fn normalize_allowed_tools(
@@ -913,7 +892,16 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
 }
 
 fn from_value<T: for<'de> Deserialize<'de>>(input: &Value) -> Result<T, String> {
-    serde_json::from_value(input.clone()).map_err(|error| error.to_string())
+    serde_json::from_value(input.clone()).map_err(|error| {
+        let error = error.to_string();
+        // Les erreurs de lecture tolérante portent déjà leur conseil.
+        if error.starts_with("[Claw]") {
+            return error;
+        }
+        format!(
+            "[Claw] The arguments do not fit the tool, so nothing was executed: {error}. Check each argument's type against the tool's schema (numbers and true/false without quotes, lists in square brackets), then send the call again."
+        )
+    })
 }
 
 fn run_bash(input: BashCommandInput) -> Result<String, String> {
@@ -1308,7 +1296,100 @@ struct WebSearchInput {
 
 #[derive(Debug, Deserialize)]
 struct TodoWriteInput {
+    #[serde(deserialize_with = "tolerant_todos")]
     todos: Vec<TodoItem>,
+}
+
+/// Forme d'une tâche, rappelée au modèle quand une tâche reste illisible.
+const TODO_SHAPE: &str = "Each task is {\"content\": \"Fix the login test\", \"activeForm\": \"Fixing the login test\", \"status\": \"pending\" | \"in_progress\" | \"completed\"}.";
+
+/// La liste de tâches telle qu'un modèle l'écrit : envoyée comme texte JSON,
+/// faite de textes seuls, avec des clés voisines (`task`, `title`, `state`),
+/// des statuts d'autres outils (`done`, `in-progress`) ou sans `activeForm`.
+fn tolerant_todos<'de, D>(deserializer: D) -> Result<Vec<TodoItem>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    todos_from_value(&value).map_err(serde::de::Error::custom)
+}
+
+fn todos_from_value(value: &Value) -> Result<Vec<TodoItem>, String> {
+    let items = match value {
+        Value::String(text) => match serde_json::from_str::<Value>(text) {
+            Ok(Value::Array(items)) => items,
+            _ => vec![value.clone()],
+        },
+        Value::Array(items) => items.clone(),
+        Value::Object(_) => vec![value.clone()],
+        _ => {
+            return Err(format!(
+                "[Claw] TodoWrite was not executed: \"todos\" must be a list of tasks. {TODO_SHAPE}"
+            ))
+        }
+    };
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| todo_from_value(index + 1, item))
+        .collect()
+}
+
+fn todo_from_value(number: usize, item: &Value) -> Result<TodoItem, String> {
+    let field = |keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            item.get(*key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+        })
+    };
+    let content = match item {
+        Value::String(text) if !text.trim().is_empty() => Some(text.trim().to_string()),
+        _ => field(&["content", "task", "title", "text", "description", "name"]),
+    };
+    let Some(content) = content else {
+        return Err(format!(
+            "[Claw] TodoWrite was not executed: task {number} has no \"content\". {TODO_SHAPE}"
+        ));
+    };
+    let active_form =
+        field(&["activeForm", "active_form", "activeform"]).unwrap_or_else(|| content.clone());
+    let status = match field(&["status", "state"]) {
+        None => TodoStatus::Pending,
+        Some(status) => todo_status(&status).ok_or_else(|| {
+            format!(
+                "[Claw] TodoWrite was not executed: task {number} has the status \"{status}\", which is not one of pending, in_progress, completed. {TODO_SHAPE}"
+            )
+        })?,
+    };
+    Ok(TodoItem {
+        content,
+        active_form,
+        status,
+    })
+}
+
+/// Statut d'une tâche, synonymes d'autres outils compris.
+fn todo_status(status: &str) -> Option<TodoStatus> {
+    match status
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '-'], "_")
+        .as_str()
+    {
+        "pending" | "todo" | "open" | "not_started" | "notstarted" | "new" | "planned" => {
+            Some(TodoStatus::Pending)
+        }
+        "in_progress" | "inprogress" | "doing" | "active" | "started" | "working" | "current" => {
+            Some(TodoStatus::InProgress)
+        }
+        "completed" | "complete" | "done" | "finished" | "closed" | "resolved" => {
+            Some(TodoStatus::Completed)
+        }
+        _ => None,
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -2117,14 +2198,13 @@ fn dedupe_hits(hits: &mut Vec<SearchHit>) {
 fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, String> {
     validate_todos(&input.todos)?;
     let store_path = todo_store_path()?;
-    let old_todos = if store_path.exists() {
-        serde_json::from_str::<Vec<TodoItem>>(
-            &std::fs::read_to_string(&store_path).map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?
-    } else {
-        Vec::new()
-    };
+    // Liste précédente illisible (écriture interrompue, ancienne forme) : on
+    // repart d'une liste vide, au lieu de bloquer l'outil pour ce projet.
+    let old_todos = std::fs::read_to_string(&store_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| todos_from_value(&value).ok())
+        .unwrap_or_default();
 
     let all_done = input
         .todos
@@ -2139,11 +2219,15 @@ fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, String> 
     if let Some(parent) = store_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
+    // Écrite à côté puis renommée : une écriture interrompue ne laisse pas un
+    // fichier vide.
+    let staged = store_path.with_extension("json.tmp");
     std::fs::write(
-        &store_path,
+        &staged,
         serde_json::to_string_pretty(&persisted).map_err(|error| error.to_string())?,
     )
     .map_err(|error| error.to_string())?;
+    std::fs::rename(&staged, &store_path).map_err(|error| error.to_string())?;
 
     let verification_nudge_needed = (all_done
         && input.todos.len() >= 3
@@ -2176,7 +2260,9 @@ fn execute_skill(input: SkillInput) -> Result<SkillOutput, String> {
 
 fn validate_todos(todos: &[TodoItem]) -> Result<(), String> {
     if todos.is_empty() {
-        return Err(String::from("todos must not be empty"));
+        return Err(String::from(
+            "[Claw] The list was not changed: an empty list is not accepted. To close the list, send every task again with \"status\": \"completed\".",
+        ));
     }
     // Autorise plusieurs éléments in_progress pour les workflows parallèles
     if todos.iter().any(|todo| todo.content.trim().is_empty()) {
@@ -3252,6 +3338,16 @@ impl ApiClient for ProviderRuntimeClient {
                     required_arguments_of,
                     false,
                 );
+                // `Read`, `Bash`, `todowrite` : les noms d'autres agents, comme
+                // pour l'agent principal.
+                let known = known_tool_names();
+                for event in &mut events {
+                    if let AssistantEvent::ToolUse { name, .. } = event {
+                        if let Some(resolved) = resolve_name_among(name, &known) {
+                            *name = resolved;
+                        }
+                    }
+                }
                 input_check::restore_names_in(&mut events, schema_of);
 
                 if !saw_stop
@@ -3322,8 +3418,10 @@ impl SubagentToolExecutor {
 impl ToolExecutor for SubagentToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         if !self.allowed_tools.contains(tool_name) {
+            let allowed: Vec<&str> = self.allowed_tools.iter().map(String::as_str).collect();
             return Err(ToolError::new(format!(
-                "tool `{tool_name}` is not enabled for this sub-agent"
+                "[Claw] \"{tool_name}\" is not available to this sub-agent, so nothing was executed. Tools you can call here: {}. If the task needs a tool that is not listed, say so in your final report instead of retrying.",
+                allowed.join(", ")
             )));
         }
         if let Some(label) = &self.progress_label {
@@ -3342,12 +3440,127 @@ impl ToolExecutor for SubagentToolExecutor {
     /// Arguments obligatoires absents, JSON invalide ou appel coupé : l'erreur
     /// va au sous-agent sans rien exécuter.
     fn invalid_input(&mut self, tool_name: &str, input: &str) -> Option<String> {
-        input_check::problem(tool_name, input, &required_arguments_of(tool_name))
+        let schema = schema_of(tool_name)?;
+        let known: Vec<String> = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .map(|properties| properties.keys().cloned().collect())
+            .unwrap_or_default();
+        input_check::problem(
+            tool_name,
+            input,
+            &input_check::required_arguments(&schema),
+            &known,
+        )
+    }
+
+    fn argument_note(&mut self, tool_name: &str, input: &str) -> Option<String> {
+        input_check::take_argument_note(tool_name, input)
     }
 }
 
 /// Arguments obligatoires d'un outil intégré ou d'un outil MCP relié (aucun
 /// pour un outil inconnu : son exécution dira ce qui ne va pas).
+/// Le nom d'un outil parmi `known`, écrit comme d'autres agents l'écrivent
+/// (`Read`, `Bash`, `todowrite`, `grep`).
+fn resolve_name_among(name: &str, known: &[String]) -> Option<String> {
+    if known.iter().any(|candidate| candidate == name) {
+        return Some(name.to_string());
+    }
+    let claude = canonical_agent_tool_name(name);
+    if known.contains(&claude) {
+        return Some(claude);
+    }
+    let normalized = normalize_tool_name(name);
+    let short = match normalized.as_str() {
+        "read" => "read_file",
+        "write" => "write_file",
+        "edit" | "multiedit" | "multi_edit" => "edit_file",
+        "glob" => "glob_search",
+        "grep" => "grep_search",
+        _ => "",
+    };
+    if !short.is_empty() {
+        return Some(short.to_string());
+    }
+    known
+        .iter()
+        .find(|candidate| normalize_tool_name(candidate) == normalized)
+        .cloned()
+}
+
+/// Noms d'outils d'autres agents et l'outil de Claw qui fait ce travail.
+const TOOL_SYNONYMS: &[(&str, &str)] = &[
+    ("run_terminal_cmd", "bash"),
+    ("execute_command", "bash"),
+    ("run_command", "bash"),
+    ("shell", "bash"),
+    ("terminal", "bash"),
+    ("list_dir", "glob_search"),
+    ("list_directory", "glob_search"),
+    ("list_files", "glob_search"),
+    ("ls", "glob_search"),
+    ("find_files", "glob_search"),
+    ("str_replace_editor", "edit_file"),
+    ("str_replace", "edit_file"),
+    ("replace_in_file", "edit_file"),
+    ("apply_diff", "edit_file"),
+    ("create_file", "write_file"),
+    ("write_to_file", "write_file"),
+    ("search_files", "grep_search"),
+    ("codebase_search", "grep_search"),
+    ("search", "grep_search"),
+    ("rg", "grep_search"),
+    ("cat", "read_file"),
+    ("view", "read_file"),
+    ("open_file", "read_file"),
+    ("view_file", "read_file"),
+];
+
+/// Un outil appelé qui n'existe pas : les plus proches (synonymes d'autres
+/// agents, puis noms voisins) et la liste des outils, au lieu d'une question
+/// d'autorisation pour un outil impossible.
+#[must_use]
+pub fn unknown_tool_message(name: &str, known: &[String]) -> String {
+    let lower = name.to_ascii_lowercase();
+    let mut closest: Vec<String> = TOOL_SYNONYMS
+        .iter()
+        .filter(|(other, _)| *other == lower)
+        .map(|(_, tool)| (*tool).to_string())
+        .filter(|tool| known.contains(tool))
+        .collect();
+    if closest.is_empty() {
+        let normalized = normalize_tool_name(name);
+        closest = known
+            .iter()
+            .filter(|candidate| {
+                let candidate = normalize_tool_name(candidate);
+                candidate.contains(&normalized) || normalized.contains(&candidate)
+            })
+            .take(3)
+            .cloned()
+            .collect();
+    }
+    let closest = if closest.is_empty() {
+        String::new()
+    } else {
+        format!(" Closest: {}.", closest.join(", "))
+    };
+    format!(
+        "[Claw] There is no tool named \"{name}\", so nothing was executed.{closest} Tools you can call: {}.",
+        known.join(", ")
+    )
+}
+
+/// Outils intégrés et outils MCP reliés.
+fn known_tool_names() -> Vec<String> {
+    mvp_tool_specs()
+        .iter()
+        .map(|spec| spec.name.to_string())
+        .chain(connected_mcp_tools().into_iter().map(|tool| tool.name))
+        .collect()
+}
+
 fn required_arguments_of(tool_name: &str) -> Vec<String> {
     schema_of(tool_name)
         .map(|schema| input_check::required_arguments(&schema))
@@ -4939,7 +5152,38 @@ setTimeout(function () { nexistepas(); }, 100);
 
         let empty = execute_tool("TodoWrite", &json!({ "todos": [] }))
             .expect_err("empty todos should fail");
-        assert!(empty.contains("todos must not be empty"));
+        assert!(empty.contains("an empty list is not accepted"), "{empty}");
+        assert!(empty.contains("\"status\": \"completed\""), "{empty}");
+
+        // Une liste écrite librement : envoyée comme texte, clés voisines,
+        // statut d'un autre outil, texte seul sans activeForm.
+        let loose = execute_tool(
+            "TodoWrite",
+            &json!({ "todos": "[{\"task\": \"Lire le code\", \"state\": \"done\"}, \"Ecrire le test\"]" }),
+        )
+        .expect("liste lue");
+        let loose: serde_json::Value = serde_json::from_str(&loose).expect("json");
+        assert_eq!(loose["newTodos"][0]["content"], "Lire le code");
+        assert_eq!(loose["newTodos"][0]["status"], "completed");
+        assert_eq!(loose["newTodos"][1]["activeForm"], "Ecrire le test");
+        assert_eq!(loose["newTodos"][1]["status"], "pending");
+        // Un fichier de suivi abîmé ne bloque plus l'outil.
+        std::fs::write(&path, "").expect("fichier vide");
+        execute_tool(
+            "TodoWrite",
+            &json!({ "todos": [{ "content": "A", "status": "pending" }] }),
+        )
+        .expect("repart d'une liste vide");
+        // Un statut inconnu : la tâche est nommée, la forme rappelée.
+        let unknown = execute_tool(
+            "TodoWrite",
+            &json!({ "todos": [{ "content": "A", "status": "blocked" }] }),
+        )
+        .expect_err("statut inconnu");
+        assert!(
+            unknown.contains("task 1 has the status \"blocked\""),
+            "{unknown}"
+        );
 
         // Plusieurs éléments in_progress sont désormais autorisés pour les workflows parallèles
         let _multi_active = execute_tool(
@@ -4962,7 +5206,10 @@ setTimeout(function () { nexistepas(); }, 100);
             }),
         )
         .expect_err("blank content should fail");
-        assert!(blank_content.contains("todo content must not be empty"));
+        assert!(
+            blank_content.contains("task 1 has no \"content\""),
+            "{blank_content}"
+        );
 
         let nudge = execute_tool(
             "TodoWrite",

@@ -46,7 +46,7 @@ traitement conseillé.
   un message qui nomme l'argument, par exemple avec `serde_path_to_error` ou en comparant au
   schéma :
   `[Claw] read_file was not executed: argument "offset" must be a whole number (for example 50), but a text value "abc" was sent. Send the call again with "offset" as a number, or leave it out.`
-- État : à vérifier
+- État : corrigé (lot 4) : normalize_arguments convertit d'après le schéma ce qui est sans ambiguïté (nombre ou booléen en texte, nombre à virgule entier, liste ou objet reçus comme texte JSON, texte seul pour une liste de textes, valeur sous le minimum) et le dit avec le résultat ; une erreur de type restante dit que rien n'a tourné et quoi vérifier.
 
 ## E1-02 Outil qui n'existe pas : traité comme une question d'autorisation, puis « unsupported tool »
 - Gravité : haute
@@ -76,7 +76,7 @@ traitement conseillé.
   `codebase_search`, `rg` vers `grep_search` ; `cat`, `view`, `open_file` vers `read_file`).
   Quand les arguments se traduisent un pour un (voir E1-04), Claw peut exécuter directement
   l'outil équivalent et le dire en tête du résultat. Aucune requête de plus.
-- État : à vérifier
+- État : corrigé (lot 4) : un outil absent du registre reçoit, sans demande d'autorisation, unknown_tool_message (synonymes d'autres agents, noms voisins, liste des outils).
 
 ## E1-03 Sous-agents : les noms « Read », « Bash », « Grep » ne sont pas reconnus, et le refus ne dit pas quels outils sont permis
 - Gravité : moyenne
@@ -96,7 +96,7 @@ traitement conseillé.
   hors de la liste, la donner :
   `[Claw] "write_file" is not available to this sub-agent, so nothing was executed. Tools you can call here: bash, read_file, glob_search, grep_search, FindSymbol, WebFetch. If the task needs a tool that is not listed, say so in your final report instead of retrying.`
   Aucune requête de plus.
-- État : à vérifier
+- État : corrigé (lot 4) : les sous-agents résolvent les noms comme l'agent principal (resolve_name_among), et un outil hors de leur liste reçoit la liste des outils permis.
 
 ## E1-04 Nom d'argument voisin : « appelé sans ses arguments », ou argument ignoré en silence
 - Gravité : haute
@@ -130,7 +130,7 @@ traitement conseillé.
   Et quand un obligatoire manque alors que des inconnus ont été reçus, le message les cite :
   `[Claw] edit_file was not executed: required argument "path" is missing. You sent "target", which edit_file does not know. It accepts: path, old_string, new_string, replace_all.`
   Aucune requête de plus.
-- État : à vérifier
+- État : corrigé (lot 4) : synonymes d'arguments (file_path, old_str, cmd, include...), start_line et end_line, cwd de bash ; les arguments inconnus restants sont nommés avec le résultat, et un obligatoire manquant cite ceux qui ont été envoyés sous un autre nom.
 
 ## E1-05 Lire, modifier ou écrire un dossier : l'erreur brute du système (« Accès refusé. (os error 5) »)
 - Gravité : haute
@@ -351,7 +351,7 @@ traitement conseillé.
   Si une tâche reste illisible :
   `[Claw] TodoWrite was not executed: task 3 has no "content". Each task is {"content": "Fix the login test", "activeForm": "Fixing the login test", "status": "pending" | "in_progress" | "completed"}.`
   Aucune requête de plus.
-- État : à vérifier
+- État : corrigé (lot 4) : TodoWrite lit la liste avec tolérance (texte JSON, textes seuls, clés et statuts voisins, activeForm absent), repart d'une liste vide si le fichier est illisible, écrit par fichier temporaire, et dit quoi faire pour une liste vide ou une tâche illisible.
 
 ## E1-12 Sous-agent qui échoue ou atteint ses 32 étapes : tout son travail est perdu, et le parent reçoit une phrase
 - Gravité : haute

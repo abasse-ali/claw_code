@@ -89,9 +89,10 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 | dfecc27 | Lot 2 : titres vides, images triées, demande citée au contrôle des exigences, demandes d'autorisation sans réponse ; E4A-01 et E4A-02 corrigés |
 | 4358a70 | Code de sortie fidèle tube par tube, vérification du modèle comptée seulement si rien ne masque son échec, noms d'arguments réduits rendus à l'outil, règles `WebFetch` pour `ViewPage`, page entière et journal illisible pour `ViewPage`, aide d'erreur sur le code HTTP |
 | fbc5369 | Serveurs arrêtés avec leurs petits-enfants sous Windows, serveur prêt malgré un délai long, bash sous Linux, pytest sans test, sous-projet à côté d'une racine vérifiable, code changé par une commande vérifié, `PowerShell` 5.1, navigateur qui refuse de démarrer, vLLM |
-| (commit « Lot 3 ») | Lot 3 : contenu abrégé refusé, dossier listé, `grep_search` et `glob_search` qui réparent et disent, `edit_file` qui joint ce qu'il faut pour réussir, BOM et CRLF gardés, chemin introuvable expliqué |
+| 9ef1956 | Lot 3 : contenu abrégé refusé, dossier listé, `grep_search` et `glob_search` qui réparent et disent, `edit_file` qui joint ce qu'il faut pour réussir, BOM et CRLF gardés, chemin introuvable expliqué |
+| (commit « Lot 4 ») | Lot 4 : arguments mis à la forme de l'outil et dits au modèle, outil inconnu expliqué, noms d'outils dans les sous-agents, `TodoWrite` tolérant |
 
-État des tests au lot 3 : 608 tests Rust, analyse statique à zéro sous Windows et Linux,
+État des tests au lot 4 : 609 tests Rust, analyse statique à zéro sous Windows et Linux,
 client 28 sur 28, extension VS Code 18 sur 18.
 
 ## Études
@@ -117,7 +118,7 @@ sessions réelles.
 | 2. Contrôles de fin de tour | E2-03 (le contrôle des exigences cite la demande), E2-08 (réponse faite de titres vides), E2-05 et E2-16 (images : défaut ou maquette, tri avant le guide), E2-01 (demande d'autorisation sans réponse) | fait le 11 octobre 2026 |
 | 2b. Corrections de la relecture E4 | Première partie : E4A-04 (`\|\| echo` après une vérification la fait compter faite), E4A-06 (`pipefail` tube par tube), E4B-01 (noms d'arguments réduits rendus à l'outil, avec A10), E4B-02 (aide d'erreur sur le code HTTP), E4B-05 (règle `WebFetch` qui couvre `ViewPage`), E4B-06 et E4B-08 (`ViewPage` : page entière, journal illisible). Seconde partie : E4A-03 (arrêt des serveurs sous Windows), E4A-07 (serveur prêt malgré un délai long), E4A-09 (bash plutôt que dash sous Linux), E4A-10 (pytest sans test), E4A-11 (`PowerShell` 5.1), E4A-12 (sous-projet à côté d'une racine vérifiable), E4B-09 (navigateur qui refuse de démarrer), E4B-10 (vLLM). Puis E4A-05 (serveur lancé avec `&` et sa sortie dans un fichier) et E4A-08 (code modifié par une commande) | fait le 11 octobre 2026, sauf E4A-05 (renvoyé au lot 7) |
 | 3. Fichiers et recherche | E1-19 (contenu abrégé écrit tel quel), E1-05 (dossier lu comme un fichier), E1-06 (motif non valide), E1-07 (filtres de `grep_search`), E1-10 et E2-12 (`glob_search`), E1-18 et E2-09 (`edit_file`), E1-21 (valeurs hors bornes), E1-22 (chemin introuvable), E4B-03 (`multiline` de `grep_search`), E4B-04 (BOM et CRLF gardés par `write_file`), E4B-07 (`glob_search` dans un dossier `[v2]` ou sur un partage réseau) | fait le 11 octobre 2026 ; restent de E1-18 le texte d'avant une modification du même tour et la recherche dans d'autres fichiers, de E1-21 `Sleep` et `REPL` |
-| 4. Arguments et outils inconnus | E1-01, E1-04, E1-11 (mise en forme des arguments d'après le schéma), E1-02 (outil inconnu), E1-03 (noms d'outils dans les sous-agents) | à faire |
+| 4. Arguments et outils inconnus | E1-01, E1-04, E1-11 (mise en forme des arguments d'après le schéma), E1-02 (outil inconnu), E1-03 (noms d'outils dans les sous-agents) | fait le 11 octobre 2026 |
 | 5. Mémoire de la session | E2-06 (résumé de compaction qui n'en est pas un), E2-07 (résultats non allégés d'une session reprise), E3-05 (réponse coupée par la limite de sortie) | à faire |
 | 6. Appels mal formés et sous-agents | E1-08 (bloc d'appel jeté en mode texte), E1-09 (réparation du JSON), E1-12 et E1-13 (sous-agents), E1-17 (lecture seule), E1-15 et E1-16 (web) | à faire |
 | 7. Impact et cohérence de la réponse | E2-10 (réglage remplacé sans chercher qui en dépend), E2-02 (réponse qui cite ce qui n'existe pas), E2-13 (commande qui écrase un fichier), A4 (adresse locale où rien n'écoute), E4A-05 (serveur lancé avec `&` et sa sortie dans un fichier : à suivre comme une tâche, à arrêter à la fin de Claw) | à faire |
@@ -169,3 +170,9 @@ Hors lots :
 - Lot 3 fait : les outils de fichiers réparent ce qu'un petit modèle abîme (motif, filtres,
   guillemets échappés, `**.ts`) et le disent ; un contenu abrégé ne détruit plus un fichier ;
   un échec d'`edit_file` porte les vraies lignes du fichier, pour réussir sans relire.
+- Lot 4 fait : un appel aux arguments mal nommés ou mal typés est réparé avant l'autorisation
+  quand c'est sans ambiguïté, et le modèle l'apprend avec le résultat ; un outil inconnu reçoit
+  les outils proches au lieu d'une demande d'autorisation ; `TodoWrite` ne se bloque plus.
+- Processus de test laissés par les sessions des 8 et 9 octobre (faux serveurs `mock_*.py`,
+  proxy, boucle d'attente) : leur arrêt a été refusé par le contrôle des autorisations ; à
+  arrêter par l'utilisateur ou avec son accord (voir la mémoire du projet).

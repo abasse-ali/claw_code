@@ -163,6 +163,13 @@ pub trait ToolExecutor {
     fn invalid_input(&mut self, _tool_name: &str, _input: &str) -> Option<String> {
         None
     }
+
+    /// Ce que la mise en forme des arguments de cet appel a changé ou ignoré
+    /// (nom d'un autre agent traduit, nombre écrit en texte), à dire au modèle
+    /// avec le résultat : il ne refera pas la même faute.
+    fn argument_note(&mut self, _tool_name: &str, _input: &str) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1198,6 +1205,7 @@ where
             return;
         }
         let mut notes = Vec::new();
+        notes.extend(self.tool_executor.argument_note(tool_name, input));
         // Questions déjà posées avec le menu : rien à redemander en fin de tour.
         aids.asked |= tool_name == "AskUserQuestion";
         // Issue d'une commande du modèle : celle de `bash`, ou la fin, lue avec

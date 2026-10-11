@@ -7139,13 +7139,34 @@ impl ToolExecutor for CliToolExecutor {
     /// Arguments obligatoires absents, JSON invalide ou appel coupé : l'erreur
     /// va au modèle sans qu'une autorisation soit demandée pour un appel vide.
     fn invalid_input(&mut self, tool_name: &str, input: &str) -> Option<String> {
-        let required = self
-            .tool_registry
-            .definitions(None)
+        let definitions = self.tool_registry.definitions(None);
+        // Un outil qui n'existe pas : dit tel quel, sans demander d'autorisation.
+        let Some(definition) = definitions
             .iter()
             .find(|definition| definition.name == tool_name)
-            .map(|definition| tool_input::required_arguments(&definition.input_schema))?;
-        tool_input::problem(tool_name, input, &required)
+        else {
+            let known: Vec<String> = definitions
+                .iter()
+                .map(|definition| definition.name.clone())
+                .collect();
+            return Some(tools::unknown_tool_message(tool_name, &known));
+        };
+        let known: Vec<String> = definition
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .map(|properties| properties.keys().cloned().collect())
+            .unwrap_or_default();
+        tool_input::problem(
+            tool_name,
+            input,
+            &tool_input::required_arguments(&definition.input_schema),
+            &known,
+        )
+    }
+
+    fn argument_note(&mut self, tool_name: &str, input: &str) -> Option<String> {
+        tool_input::take_argument_note(tool_name, input)
     }
 
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
