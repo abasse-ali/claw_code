@@ -270,6 +270,13 @@ struct TurnAids {
     /// L'agent a posé ses questions avec le menu à choix pendant ce tour, ou
     /// Claw le lui a déjà demandé.
     asked: bool,
+    /// L'utilisateur a signalé un problème : méthode de débogage jointe à sa
+    /// demande, preuves demandées avant de conclure.
+    problem_report: bool,
+    /// Les preuves ont déjà été demandées pendant ce tour.
+    evidence_asked: bool,
+    /// Les commandes conseillées sans avoir été lancées ont déjà été signalées.
+    commands_checked: bool,
     /// Déroulé ultracode pour ce tour (session ou mot-clé du message).
     ultracode: bool,
     /// Dossier préparé par l'agent d'exploration (ultracode).
@@ -720,12 +727,24 @@ where
         // « reprendre » : la relecture doit connaître la demande poursuivie.
         let earlier = earlier_request(&self.session.messages, &request_text);
         let mut user_message = self.user_message_with_hooks(user_input)?;
+        let image_count = images.len();
         user_message
             .blocks
             .extend(images.into_iter().map(|image| ContentBlock::Image {
                 media_type: image.media_type,
                 data: image.data,
             }));
+        // L'utilisateur signale un problème : la méthode de débogage est jointe
+        // à sa demande, pour le modèle (symptômes de chaque image, reproduire,
+        // cause prouvée, disparition observée).
+        let problem_report = !self.subagent
+            && harness::enabled(Aid::ProblemGuide)
+            && harness::reports_a_problem(&request_text, image_count);
+        if problem_report {
+            user_message.blocks.push(ContentBlock::Text {
+                text: harness::problem_guide(image_count),
+            });
+        }
         self.session.messages.push(user_message);
 
         let mut assistant_messages = Vec::new();
@@ -738,6 +757,7 @@ where
             ultracode: !self.subagent && crate::workflow::active_for(&request_text),
             team,
             topic: team.then(|| crate::team::topic_of(&request_text)).flatten(),
+            problem_report,
             ..TurnAids::default()
         };
         // Ultracode : un agent au contexte vierge étudie la demande avant le
@@ -842,10 +862,12 @@ where
                             &mut prompter,
                         )
                     })
+                    .or_else(|| self.evidence_gate(&mut aids))
                     .or_else(|| self.requirements_gate(&mut aids))
                     .or_else(|| {
                         self.review_gate(&mut aids, &request_text, earlier.as_deref(), &answer)
                     })
+                    .or_else(|| self.instructions_gate(&mut aids, &answer))
                     .or_else(|| {
                         asking = self.questions_gate(&mut aids, &answer);
                         asking.then(|| harness::QUESTIONS_FEEDBACK.to_string())
@@ -1174,6 +1196,8 @@ where
                     let hint = crate::bash::windows_shell_hint(&outcome.command);
                     notes.extend(hint.map(str::to_string));
                 }
+                // Un outil de Claw écrit comme une commande (`KillShell bash_4`).
+                notes.extend(harness::tool_named_in_command(&outcome.command));
             }
         }
         if harness::enabled(Aid::StallGuard) {
@@ -1691,6 +1715,70 @@ where
                 Some(crate::workflow::verify_feedback(&report, changed))
             }
         }
+    }
+
+    /// Signalement d'un problème : avant que la réponse parte, le modèle doit
+    /// nommer, pour chaque symptôme, l'observation qui montre sa cause et celle
+    /// qui montre sa disparition (une fois par tour). Remplace, pour ce tour,
+    /// le contrôle général des exigences ; le vérificateur ultracode s'en
+    /// charge quand il est actif.
+    fn evidence_gate(&mut self, aids: &mut TurnAids) -> Option<String> {
+        if !aids.problem_report
+            || aids.evidence_asked
+            || aids.ultracode
+            || aids.verify_failing
+            || self.subagent
+            || interrupt_requested()
+        {
+            return None;
+        }
+        aids.evidence_asked = true;
+        aids.checklisted = true;
+        self.api_client.notify(
+            "Problème signalé : Claw demande à l'agent ce qu'il a observé de sa cause et de sa disparition avant de conclure",
+        );
+        Some(format!(
+            "{} {}",
+            harness::PROBLEM_EVIDENCE_PROMPT,
+            harness::FINAL_ANSWER_RULE
+        ))
+    }
+
+    /// Commandes conseillées sans avoir été lancées : la réponse dit à
+    /// l'utilisateur de lancer des commandes (blocs de code d'un shell) que le
+    /// modèle n'a lancées à aucun moment de la session. Il est renvoyé une
+    /// fois les essayer, ou les dire non testées.
+    fn instructions_gate(&mut self, aids: &mut TurnAids, answer: &str) -> Option<String> {
+        if aids.commands_checked
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::TriedCommands)
+        {
+            return None;
+        }
+        let executed: Vec<String> = self
+            .session
+            .messages
+            .iter()
+            .flat_map(|message| &message.blocks)
+            .filter_map(|block| match block {
+                ContentBlock::ToolUse { name, input, .. }
+                    if matches!(name.as_str(), "bash" | "PowerShell") =>
+                {
+                    json_field(input, "command")
+                }
+                _ => None,
+            })
+            .collect();
+        let untried = harness::untried_commands(answer, &executed);
+        if untried.is_empty() {
+            return None;
+        }
+        aids.commands_checked = true;
+        self.api_client.notify(
+            "La réponse conseille des commandes jamais lancées : Claw demande à l'agent de les essayer",
+        );
+        Some(harness::untried_feedback(&untried))
     }
 
     /// Questions à l'utilisateur : la réponse finale se termine par des
@@ -2488,7 +2576,7 @@ mod tests {
             vec!["system".to_string()],
         );
         let summary = runtime
-            .run_turn("corrige le bug", None)
+            .run_turn("ajoute un titre", None)
             .expect("une réponse vide ne doit pas faire échouer le tour");
         assert_eq!(runtime.api_client.calls, 2);
         assert!(matches!(
@@ -3220,6 +3308,79 @@ mod tests {
     thread_local! {
         /// Quelqu'un peut répondre aux questions de l'agent.
         static CAN_ASK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    #[test]
+    fn a_problem_report_gets_a_debugging_guide_and_evidence_is_asked_before_the_answer() {
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                text_step("Problème résolu : c'était probablement le CSS."),
+                text_step("Je n'ai pas pu observer la page ; voici ce que j'ai changé."),
+            ],
+            vec![],
+        );
+        let summary = runtime
+            .run_turn("c'est n'importe quoi", None)
+            .expect("tour");
+        assert_eq!(summary.iterations, 2);
+        {
+            let observed = observed.borrow();
+            // La méthode accompagne la demande dès la première requête.
+            assert!(observed.requests[0].contains("[Claw guide] The user is telling you"));
+            assert!(observed.requests[0].contains("Reproduce: observe each symptom yourself"));
+            // « Résolu » sans observation : les preuves sont demandées, une fois.
+            assert!(observed.requests[1].contains("name the observation you made in this turn"));
+            assert_eq!(observed.superseded, 1);
+        }
+        // Le guide est pour le modèle : il suit le texte de l'utilisateur dans
+        // le même message, sans le remplacer.
+        let first = &runtime.session().messages[0];
+        assert!(
+            matches!(&first.blocks[0], ContentBlock::Text { text } if text == "c'est n'importe quoi")
+        );
+        assert!(
+            matches!(&first.blocks[1], ContentBlock::Text { text } if text.starts_with(crate::harness::GUIDE_PREFIX))
+        );
+
+        // Une demande ordinaire : ni guide ni demande de preuves.
+        let (mut runtime, observed, _) = aided_runtime(vec![text_step("Voilà.")], vec![]);
+        let summary = runtime.run_turn("explique ce fichier", None).expect("tour");
+        assert_eq!(summary.iterations, 1);
+        assert!(!observed.borrow().requests[0].contains("[Claw guide]"));
+    }
+
+    #[test]
+    fn commands_advised_without_being_run_send_the_model_back_to_try_them() {
+        const ADVICE: &str = "Pour lancer :\n\n```bash\nnpm run dev\n```";
+        let (mut runtime, observed, bash_calls) = aided_runtime(
+            vec![
+                text_step(ADVICE),
+                tool_step("bash", r#"{"command":"npm run dev"}"#),
+                text_step(ADVICE),
+            ],
+            vec![],
+        );
+        let summary = runtime.run_turn("comment le lancer ?", None).expect("tour");
+        assert_eq!(summary.iterations, 3);
+        assert_eq!(bash_calls.borrow().len(), 1);
+        let observed = observed.borrow();
+        assert!(observed.requests[1]
+            .contains("commands that you have not run in this session: `npm run dev`"));
+        // Une fois lancée, la même commande n'est plus signalée.
+        assert_eq!(observed.superseded, 1);
+    }
+
+    #[test]
+    fn a_tool_written_as_a_command_is_pointed_out_to_the_model() {
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                tool_step("bash", r#"{"command":"KillShell bash_4"}"#),
+                text_step("Serveur arrêté."),
+            ],
+            vec![COMMAND_FAILED],
+        );
+        runtime.run_turn("arrête le serveur", None).expect("tour");
+        assert!(observed.borrow().requests[1].contains("`KillShell` is one of your tools"));
     }
 
     const ASKING: &str = "Voici l'architecture proposée.\n\nCette architecture te convient-elle ?\nVeux-tu que j'ajoute des tests ?";

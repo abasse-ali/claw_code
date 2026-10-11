@@ -157,12 +157,23 @@ fn images(messages: &[InputMessage]) -> Vec<&ImageSource> {
 
 /// Ce qui prend la place d'une image dans la requête à un modèle qui n'en lit
 /// pas : sa description si elle est connue, sinon la mention qu'elle manque.
-pub(crate) fn replacement(source: &ImageSource) -> String {
+/// `number` sur `total` : sa place parmi les images du message. Quand il y
+/// en a plusieurs, chacune est numérotée : deux longues descriptions à la
+/// suite se lisent sinon comme une seule image, et la première est oubliée.
+pub(crate) fn replacement(source: &ImageSource, number: usize, total: usize) -> String {
+    let place = if total > 1 {
+        format!(
+            "Image {number} of {total} in this message (each image can show something different: take all {total} into account), described"
+        )
+    } else {
+        "Image described".to_string()
+    };
     match descriptions().get(&image_key(source)) {
         Some(description) => format!(
-            "[Image described by {} because the current model cannot read images. The description may miss a detail: ask the user when one matters.]\n{}",
+            "[{place} by {} because the current model cannot read images. The description may miss a detail: ask the user when one matters.]\n{}",
             description.model, description.text
         ),
+        None if total > 1 => format!("[Image {number} of {total}] {IMAGE_NOT_SENT}"),
         None => IMAGE_NOT_SENT.to_string(),
     }
 }
@@ -410,8 +421,14 @@ mod tests {
             ]
         );
         assert_eq!(
-            replacement(&first),
+            replacement(&first, 1, 1),
             "[Image described by acme/vision:free because the current model cannot read images. The description may miss a detail: ask the user when one matters.]\nCapture essai-lecteur-1"
+        );
+        // Plusieurs images dans un message : chacune porte son numéro.
+        assert!(
+            replacement(&first, 2, 3).starts_with("[Image 2 of 3 in this message (each image can show something different: take all 3 into account), described by acme/vision:free"),
+            "{}",
+            replacement(&first, 2, 3)
         );
         // Requête suivante : rien n'est redemandé, rien n'est redit.
         run();
@@ -448,7 +465,7 @@ mod tests {
             notices.borrow().last().map(String::as_str),
 Some("acme/texte-2:free ne lit pas les images : 1 image n'a pas pu lui être décrite (erreur 429) et ne lui est pas envoyée. Un modèle qui lit les images y aurait accès (/models vision).")
         );
-        assert!(replacement(&lost).starts_with("[Image not sent"));
+        assert!(replacement(&lost, 1, 1).starts_with("[Image not sent"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

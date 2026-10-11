@@ -589,6 +589,7 @@ fn replay_history(session_id: &str, session: &Session) {
                 }),
                 (ContentBlock::Text { text }, MessageRole::User)
                     if !text.starts_with(runtime::HOOK_CONTEXT_PREFIX)
+                        && !text.starts_with(runtime::harness::GUIDE_PREFIX)
                         && !text.starts_with(runtime::workflow::BRIEF_PREFIX) =>
                 {
                     json!({

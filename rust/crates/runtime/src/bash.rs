@@ -450,7 +450,7 @@ pub fn starts_long_running(command: &str) -> bool {
 /// `&`, une fin de ligne ou des parenthèses. Le texte entre guillemets devient
 /// `_` (un mot, sans son contenu), les commentaires sont retirés. Chaque
 /// commande dit si le shell la détache lui-même (`&` simple après elle).
-fn shell_segments(command: &str) -> Vec<(String, bool)> {
+pub(crate) fn shell_segments(command: &str) -> Vec<(String, bool)> {
     let chars: Vec<char> = command.chars().collect();
     let mut segments = Vec::new();
     let mut current = String::new();

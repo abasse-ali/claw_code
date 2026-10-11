@@ -654,6 +654,7 @@ fn get_simple_doing_tasks_section() -> String {
         "When you learn something about this project that would have saved you time (a build or test quirk, a convention, where something lives, a pitfall), or when the user corrects you, save it in one line with the Remember tool so later sessions start with it. Do not use it as a log of what you just changed. Never save secrets, and skip what CLAW.md already says.".to_string(),
         "Be careful not to introduce security vulnerabilities such as command injection, XSS, or SQL injection.".to_string(),
         "Report outcomes faithfully: if verification fails or was not run, say so explicitly.".to_string(),
+        "Judge the result itself, not only that the program runs: open what it produces (the page, the file, the image, the response body) and compare it with what the user asked for. A 200 status, a passing test or a clean exit says nothing about a wrong output; a result that is useless to the user is a defect to fix, not a \"known limitation\".".to_string(),
         "When you need the user to choose between options, to answer questions or to validate a proposal before you continue, and the AskUserQuestion tool is available, call it instead of writing the questions in your reply: the user then answers with one click. Present what you propose first (briefly), then ask.".to_string(),
     ]);
 

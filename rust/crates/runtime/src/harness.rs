@@ -60,6 +60,11 @@ pub enum Aid {
     ErrorSites,
     /// Questions écrites en fin de réponse reposées avec le menu à choix.
     Questions,
+    /// Méthode de débogage jointe à un signalement de problème, et preuves
+    /// demandées avant de le dire résolu.
+    ProblemGuide,
+    /// Commandes conseillées à l'utilisateur sans avoir été lancées.
+    TriedCommands,
 }
 
 impl Aid {
@@ -86,6 +91,8 @@ impl Aid {
             Self::Team => "CLAW_TEAM",
             Self::ErrorSites => "CLAW_ERROR_SITES",
             Self::Questions => "CLAW_QUESTIONS",
+            Self::ProblemGuide => "CLAW_PROBLEM_GUIDE",
+            Self::TriedCommands => "CLAW_TRIED_COMMANDS",
         }
     }
 }
@@ -783,7 +790,7 @@ pub fn removes_existing_lines(tool_output: &str) -> bool {
 #[must_use]
 pub fn test_guard_feedback(name: &str) -> String {
     format!(
-        "[Claw] You changed existing lines of `{name}`, which is used to check the work, after a failing check. A check describes the expected behavior: making it pass by rewriting it proves nothing. Fix the code instead and restore the check, unless the user asked you to change it or the check itself is wrong; in that case say so explicitly in your final answer, with the reason."
+        "[Claw] You changed existing lines of `{name}`, which is used to check the work, after a failing check. A check describes the expected behavior: making it pass by rewriting it proves nothing. Fix the code instead and restore the check, unless the user asked you to change it or the check itself is wrong; in that case say so explicitly in your final answer, with the reason. If the failing check exposed a real defect in the code, fix that defect: do not point the check at something else to get around it."
     )
 }
 
@@ -883,6 +890,349 @@ pub fn language_note(language: Option<&str>) -> String {
 /// Préfixe des messages que Claw adresse au modèle à la place de
 /// l'utilisateur (contrôles, rappels) : ils ne sont pas des demandes de sa part.
 pub const CLAW_NOTE_PREFIX: &str = "[Claw]";
+
+// --- Signalement d'un problème ---------------------------------------------------------
+
+/// Préfixe du guide que Claw joint au message de l'utilisateur, pour le
+/// modèle seulement (les interfaces ne le montrent pas).
+pub const GUIDE_PREFIX: &str = "[Claw guide]";
+
+/// Au-delà, un message n'est plus un signalement bref : ses mots ne suffisent
+/// pas à le reconnaître (une demande de fonctionnalité parle aussi d'erreurs).
+const REPORT_MAX_WORDS: usize = 40;
+/// Message bref accompagné d'images : presque toujours « regarde ce que ça donne ».
+const REPORT_WITH_IMAGE_MAX_WORDS: usize = 25;
+
+/// Tournures d'un utilisateur qui dit que quelque chose ne va pas.
+const PROBLEM_WORDS: &[&str] = &[
+    "marche pas",
+    "marche plus",
+    "fonctionne pas",
+    "fonctionne plus",
+    "n'importe quoi",
+    "nimporte quoi",
+    "bug",
+    "bogue",
+    "erreur",
+    "error",
+    "cassé",
+    "plante",
+    "crash",
+    "affiche pas",
+    "affiche rien",
+    "affiche plus",
+    "charge pas",
+    "toujours pas",
+    "toujours le",
+    "toujours la",
+    "problème",
+    "probleme",
+    "pas normal",
+    "incorrect",
+    "faux",
+    "mauvais",
+    "hors ligne",
+    "répond pas",
+    "repond pas",
+    "bloqué",
+    "échoue",
+    "echoue",
+    "ne va pas",
+    "pas bon",
+    "pas ça",
+    "pas ca",
+    "doesn't work",
+    "does not work",
+    "doesnt work",
+    "not working",
+    "broken",
+    "wrong",
+    "fails",
+    "failing",
+    "failed",
+    "still ",
+    "stuck",
+    "blank",
+    "nothing happens",
+];
+
+/// Marques d'une sortie d'erreur collée dans un long message.
+const ERROR_DUMP_MARKS: &[&str] = &[
+    "traceback (most recent call last)",
+    "error:",
+    "erreur :",
+    "exception",
+    "npm err!",
+    "panicked at",
+    "segmentation fault",
+];
+
+/// Verbes par lesquels commence une demande de travail, pas un signalement
+/// (« ajoute une page d'erreur », « fais une interface comme sur l'image »).
+const REQUEST_VERBS: &[&str] = &[
+    "ajoute",
+    "ajouter",
+    "crée",
+    "créer",
+    "cree",
+    "creer",
+    "implémente",
+    "implemente",
+    "génère",
+    "genere",
+    "écris",
+    "ecris",
+    "fais",
+    "reproduis",
+    "construis",
+    "développe",
+    "developpe",
+    "add",
+    "create",
+    "implement",
+    "build",
+    "make",
+    "write",
+    "generate",
+    "design",
+];
+
+/// L'utilisateur signale que quelque chose ne va pas (résultat faux, erreur,
+/// capture d'écran d'un défaut) : un message bref avec une tournure de
+/// plainte ou des images, ou un long message qui porte une sortie d'erreur.
+#[must_use]
+pub fn reports_a_problem(text: &str, images: usize) -> bool {
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    let Some(first) = words.first() else {
+        // Des images sans un mot : « regarde ».
+        return images > 0;
+    };
+    if words.len() > REPORT_MAX_WORDS {
+        return ERROR_DUMP_MARKS.iter().any(|mark| lower.contains(mark));
+    }
+    let first = first.trim_matches(|ch: char| !ch.is_alphanumeric());
+    if REQUEST_VERBS.contains(&first) {
+        return false;
+    }
+    PROBLEM_WORDS.iter().any(|word| lower.contains(word))
+        || (images > 0 && words.len() <= REPORT_WITH_IMAGE_MAX_WORDS)
+}
+
+/// Méthode de débogage jointe au message d'un utilisateur qui signale un
+/// problème : un petit modèle saute sinon à une cause supposée, ne regarde
+/// qu'une image sur deux et annonce « résolu » sans avoir rien observé.
+#[must_use]
+pub fn problem_guide(images: usize) -> String {
+    let pictures = match images {
+        0 => String::new(),
+        1 => " Their message has 1 image: read all of it.".to_string(),
+        count => format!(
+            " Their message has {count} images: each one can show a different problem, so go through all {count}."
+        ),
+    };
+    format!(
+        "{GUIDE_PREFIX} The user is telling you that something is wrong.{pictures} Work as a debugger, in this order:\n1. Symptoms: list every distinct problem in their message and in each image, one line each, quoting what is shown. Drop none of them, and start with the one that makes the result useless to them.\n2. Reproduce: observe each symptom yourself with your tools, the way the user gets it (same entry point, same kind of input), before you change anything. A request that answers 200 or tests that pass do not show that what the user sees is right: look at the result itself (the page, the produced file or image, the text).\n3. Cause: find it from evidence (logs, outputs, the code path that produces the symptom). Do not fix a guess; when several causes are possible, run the check that tells them apart.\n4. Fix the cause, then observe again that each symptom is gone.\nIn your answer, say for each symptom what you observed after the fix. If you could not observe one (for example what a browser displays), do not call it solved: say what you changed, what you could not check and exactly what the user should look at. Do not ask the user to investigate for you while one of your tools can still do it."
+    )
+}
+
+/// Message renvoyé au modèle qui conclut après un signalement de problème :
+/// chaque symptôme doit avoir sa cause observée et sa disparition observée.
+pub const PROBLEM_EVIDENCE_PROMPT: &str = "[Claw] Before this answer goes to the user: they reported a problem. Go back to their message and to each image it carries, and list every symptom. For each one, name the observation you made in this turn, with your tools, that shows its cause, and the one that shows it is gone after your change. A guess (\"probably\", \"likely\") is not a cause; a passing test or a 200 response is not the symptom gone. Where an observation is missing, make it now: read the code that produces the symptom, run it the way the user does, read the logs and the result itself. If something truly cannot be observed with your tools, say so in your answer instead of calling it solved, and never hand the investigation to the user while one of your tools can still do it.";
+
+// --- Outil appelé comme une commande ---------------------------------------------------
+
+/// Outils de Claw qu'un modèle écrit parfois comme une commande du shell.
+const TOOL_NAMES: &[&str] = &[
+    "KillShell",
+    "BashOutput",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "glob_search",
+    "grep_search",
+    "TodoWrite",
+    "AskUserQuestion",
+    "WebFetch",
+    "WebSearch",
+    "FindSymbol",
+    "Remember",
+    "Consult",
+    "Skill",
+    "Agent",
+];
+
+/// La commande commence par le nom d'un outil de Claw (`KillShell bash_4`) :
+/// remarque qui renvoie le modèle vers l'appel d'outil.
+#[must_use]
+pub fn tool_named_in_command(command: &str) -> Option<String> {
+    let lower = command.to_ascii_lowercase();
+    let segments = crate::bash::shell_segments(&lower);
+    let name = TOOL_NAMES.iter().find(|name| {
+        let name = name.to_ascii_lowercase();
+        segments
+            .iter()
+            .any(|(segment, _)| segment.split_whitespace().next() == Some(name.as_str()))
+    })?;
+    Some(format!(
+        "[Claw] `{name}` is one of your tools, not a shell command: bash cannot run it. Call it as a tool (a tool call named {name} with its JSON arguments)."
+    ))
+}
+
+// --- Commandes conseillées sans avoir été lancées --------------------------------------
+
+/// Commandes montrées au plus dans la remarque.
+const UNTRIED_SHOWN: usize = 6;
+/// Blocs de code dont les lignes sont des commandes.
+const SHELL_LANGUAGES: &[&str] = &[
+    "bash",
+    "sh",
+    "shell",
+    "zsh",
+    "console",
+    "terminal",
+    "powershell",
+    "pwsh",
+    "ps1",
+    "cmd",
+    "bat",
+];
+/// Commandes qu'on ne demande pas d'essayer : navigation, affichage, exemples
+/// de requêtes, installations du système, actions lourdes ou sans retour.
+const NOT_DEMANDED: &[&str] = &[
+    "cd",
+    "ls",
+    "dir",
+    "cat",
+    "echo",
+    "export",
+    "set",
+    "source",
+    "curl",
+    "wget",
+    "docker",
+    "docker-compose",
+    "podman",
+    "git",
+    "sudo",
+    "rm",
+    "mkdir",
+    "cp",
+    "mv",
+    "code",
+    "open",
+    "start",
+    "xdg-open",
+    "apt",
+    "apt-get",
+    "brew",
+    "winget",
+    "choco",
+    "scoop",
+    "ssh",
+    "scp",
+    "kill",
+    "taskkill",
+];
+
+/// Mots significatifs d'une commande simple : sans variables d'environnement
+/// ni options, `python3` et `py` ramenés à `python`.
+fn command_words(segment: &str) -> Vec<String> {
+    segment
+        .split_whitespace()
+        .skip_while(|word| word.contains('=') && !word.starts_with('-'))
+        .filter(|word| !word.starts_with('-') && *word != "_")
+        .map(|word| match word {
+            "python3" | "py" => "python".to_string(),
+            other => other.to_string(),
+        })
+        .collect()
+}
+
+/// Commandes que la réponse dit à l'utilisateur de lancer (blocs de code
+/// d'un shell) et que le modèle n'a lancées à aucun moment de la session :
+/// leurs trois premiers mots significatifs ne commencent aucune commande
+/// exécutée. Les exemples à compléter et les commandes de `NOT_DEMANDED` ne
+/// comptent pas.
+#[must_use]
+pub fn untried_commands(answer: &str, executed: &[String]) -> Vec<String> {
+    let ran: Vec<Vec<String>> = executed
+        .iter()
+        .flat_map(|command| crate::bash::shell_segments(&command.to_ascii_lowercase()))
+        .map(|(segment, _)| command_words(&segment))
+        .collect();
+    let mut untried: Vec<String> = Vec::new();
+    let mut in_shell = false;
+    let mut in_code = false;
+    let mut pending = String::new();
+    for line in answer.lines() {
+        let trimmed = line.trim();
+        if let Some(language) = trimmed.strip_prefix("```") {
+            in_shell = !in_code
+                && SHELL_LANGUAGES.contains(&language.trim().to_ascii_lowercase().as_str());
+            in_code = !in_code;
+            pending.clear();
+            continue;
+        }
+        if !in_shell || trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//")
+        {
+            continue;
+        }
+        // Commande sur plusieurs lignes (`\\` de bash, accent grave de PowerShell).
+        if let Some(start) = trimmed
+            .strip_suffix('\\')
+            .or_else(|| trimmed.strip_suffix('`'))
+        {
+            pending.push_str(start);
+            pending.push(' ');
+            continue;
+        }
+        let shown = format!("{pending}{trimmed}");
+        pending.clear();
+        let shown = shown
+            .trim_start_matches("$ ")
+            .trim_start_matches("> ")
+            .trim()
+            .to_string();
+        // Exemple à compléter par l'utilisateur : rien à essayer tel quel.
+        let lower = shown.to_ascii_lowercase();
+        if ["<", "votre", "your", "xxx", "..."]
+            .iter()
+            .any(|mark| lower.contains(mark))
+        {
+            continue;
+        }
+        for (segment, _) in crate::bash::shell_segments(&lower) {
+            let words = command_words(&segment);
+            let Some(program) = words.first() else {
+                continue;
+            };
+            if NOT_DEMANDED.contains(&program.as_str()) {
+                continue;
+            }
+            let key = &words[..words.len().min(3)];
+            let tried = ran.iter().any(|ran| ran.starts_with(key));
+            if !tried && !untried.contains(&segment) {
+                untried.push(segment);
+            }
+        }
+    }
+    untried
+}
+
+/// Message renvoyé au modèle qui conseille des commandes jamais lancées.
+#[must_use]
+pub fn untried_feedback(commands: &[String]) -> String {
+    let shown = commands
+        .iter()
+        .take(UNTRIED_SHOWN)
+        .map(|command| format!("`{command}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "[Claw] Your answer tells the user to run commands that you have not run in this session: {shown}. Instructions you never tried are often wrong (a script that does not exist, a port, a mode the configuration forbids). Check them now: read the files that define them (package.json scripts, configuration, entry point) and run each one that is safe to try here (a server starts in the background: then request it and read its output). Correct your answer from what you observe, and mark plainly as not tested any command you could not run. {FINAL_ANSWER_RULE}"
+    )
+}
 
 /// Note adressée au modèle plus fort qui reprend le tour.
 #[must_use]
@@ -1235,6 +1585,102 @@ GET https://cdn.example.com/lib.js:8080 failed, see http://docs.example.com/err.
             None
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod guide_tests {
+    use super::{
+        problem_guide, reports_a_problem, tool_named_in_command, untried_commands,
+        untried_feedback, GUIDE_PREFIX,
+    };
+
+    #[test]
+    fn problem_reports_are_told_apart_from_requests() {
+        // Messages d'une vraie session, avec ou sans captures d'écran.
+        for (text, images) in [
+            ("c'est n'importe quoi", 2),
+            ("voilà avec la premiere option", 2),
+            ("çaa reste hors ligne", 0),
+            ("ça ne marche pas", 0),
+            ("le bouton n'affiche rien", 0),
+            ("corrige le bug du panier", 0),
+            ("it still fails on empty input", 0),
+            ("", 1),
+        ] {
+            assert!(reports_a_problem(text, images), "{text}");
+        }
+        // Une sortie d'erreur collée dans un long message.
+        let dump = format!(
+            "{}\nTraceback (most recent call last):\n  File \"a.py\", line 3",
+            "ligne de journal sans intérêt ".repeat(20)
+        );
+        assert!(reports_a_problem(&dump, 0));
+        for (text, images) in [
+            ("comment le lancé ?", 0),
+            ("ajoute une page d'erreur 404", 0),
+            ("fais une interface comme sur l'image", 1),
+            ("continue", 0),
+            ("merci, c'est parfait", 0),
+            ("", 0),
+        ] {
+            assert!(!reports_a_problem(text, images), "{text}");
+        }
+        // Une longue demande de travail qui parle d'erreurs n'est pas un signalement.
+        let request = format!(
+            "{} gère les erreurs de saisie",
+            "décris le besoin ".repeat(30)
+        );
+        assert!(!reports_a_problem(&request, 1));
+
+        let guide = problem_guide(2);
+        assert!(guide.starts_with(GUIDE_PREFIX));
+        assert!(!guide.starts_with(super::CLAW_NOTE_PREFIX));
+        assert!(guide.contains("go through all 2"));
+        assert!(!problem_guide(0).contains("Their message has"));
+    }
+
+    #[test]
+    fn a_tool_written_as_a_shell_command_is_pointed_out() {
+        let hint = tool_named_in_command("KillShell bash_4").expect("remarque");
+        assert!(hint.contains("`KillShell` is one of your tools"));
+        assert!(tool_named_in_command("cd app && bashoutput bash_2").is_some());
+        for fine in [
+            "ls",
+            "grep -rn read_file src",
+            "echo \"KillShell bash_4\"",
+            "killall node",
+        ] {
+            assert!(tool_named_in_command(fine).is_none(), "{fine}");
+        }
+    }
+
+    #[test]
+    fn commands_given_to_the_user_but_never_run_are_found() {
+        // La réponse « comment le lancer ? » d'une vraie session.
+        let answer = "## Lancement\n\n```bash\ncd backend\n# Installer les dépendances\npip install -r requirements.txt\n\n# Démarrer le serveur (port 8000)\npython -m uvicorn app.main:app --reload --port 8000\n```\n\n```bash\ncd frontend\nnpm install\nnpm run dev\n# ou pour build production:\nnpm run build && npm start\n```\n\n```bash\ndocker-compose up --build\ncurl -X POST http://localhost:8000/api/v1/translate \\\n  -F \"file=@votre_image.png\"\npython3 -m pytest tests/ -v\n```\n\nVoici aussi du code :\n\n```ts\nnpm run inconnu\n```";
+        let executed = vec![
+            "cd backend && python -m pytest tests/ -v --tb=short 2>&1".to_string(),
+            "cd backend && python -m uvicorn app.main:app --port 8000 --log-level info 2>&1 &\nsleep 3".to_string(),
+            "cd backend && pip install pytest pytest-asyncio 2>&1".to_string(),
+            "cd frontend && npm run build 2>&1".to_string(),
+        ];
+        assert_eq!(
+            untried_commands(answer, &executed),
+            [
+                "pip install -r requirements.txt",
+                "npm install",
+                "npm run dev",
+                "npm start",
+            ]
+        );
+        // Tout a été lancé, ou rien n'est conseillé : rien à dire.
+        assert!(untried_commands("```bash\nnpm run build\n```", &executed).is_empty());
+        assert!(
+            untried_commands("Lancez `npm run dev` puis ouvrez la page.", &executed).is_empty()
+        );
+        let feedback = untried_feedback(&["npm run dev".to_string(), "npm start".to_string()]);
+        assert!(feedback.contains("`npm run dev`, `npm start`"));
     }
 }
 

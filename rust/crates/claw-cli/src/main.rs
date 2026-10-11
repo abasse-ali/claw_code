@@ -6342,6 +6342,13 @@ fn messages_for_model(model: &str, messages: &[InputMessage], passback: bool) ->
         .iter()
         .enumerate()
         .filter_map(|(index, message)| {
+            // Images du message, numérotées quand il y en a plusieurs.
+            let image_total = message
+                .content
+                .iter()
+                .filter(|block| matches!(block, InputContentBlock::Image { .. }))
+                .count();
+            let mut image_number = 0;
             let content = message
                 .content
                 .iter()
@@ -6353,9 +6360,12 @@ fn messages_for_model(model: &str, messages: &[InputMessage], passback: bool) ->
                 .map(|block| match block {
                     // Sinon OpenRouter refuse toute la requête (erreur 404) : le
                     // modèle reçoit la description de l'image à sa place.
-                    InputContentBlock::Image { source } if blind => InputContentBlock::Text {
-                        text: image_reader::replacement(source),
-                    },
+                    InputContentBlock::Image { source } if blind => {
+                        image_number += 1;
+                        InputContentBlock::Text {
+                            text: image_reader::replacement(source, image_number, image_total),
+                        }
+                    }
                     other => other.clone(),
                 })
                 .collect::<Vec<_>>();

@@ -586,6 +586,8 @@ applique**, quel que soit le modèle.
 | Contrôle des exigences | Quand le tour a modifié au moins 5 lignes et que la vérification passe, le modèle liste chaque partie de la demande (chaque page, fonction, fichier ou explication demandée ; après « reprendre », la demande poursuivie) et chaque exigence de la documentation du code (cas limites compris), puis donne pour chacune sa preuve : le code qui la couvre et le test ou la commande qui montre qu'elle marche. Ce qui manque est fait tout de suite, pas annoncé ni laissé à l'utilisateur. Sa réponse finale ne peut affirmer que ce que ce contrôle a établi, et nomme ce qui n'est pas fait ou pas vérifié. Il n'invente ni tests ni résultats. Une requête de plus par tour concerné | `CLAW_CHECKLIST=0` |
 | Contexte allégé | Les résultats d'outils gardés dans la session ne répètent pas au modèle ce qu'il vient d'écrire (ancien et nouveau texte d'une modification, contenu d'un fichier écrit, état du bac à sable d'une commande) | `CLAW_LEAN_RESULTS=0` |
 | Persévérance | Le modèle veut s'arrêter juste après au moins deux échecs d'outils d'affilée (commande en erreur, modification ratée) : Claw le renvoie une fois chercher une autre voie (corriger la commande, un autre outil, une étape plus petite) au lieu de vous dire « lancez-le dans votre terminal ». Ce n'est qu'ensuite qu'il explique ce qui bloque et ce que vous devez faire. Un appel que vous avez refusé n'est jamais compté : l'agent n'insiste pas | `CLAW_PERSISTENCE=0` |
+| Signalement d'un problème | Vous dites que quelque chose ne va pas (« ça ne marche pas », « c'est n'importe quoi », une capture d'écran avec quelques mots, une erreur collée) : Claw joint à votre message, pour le modèle seulement, une méthode de débogage. Lister chaque symptôme du message et de chaque image, le reproduire comme vous l'obtenez, trouver la cause par des observations et non par une supposition, corriger, puis constater que le symptôme a disparu. Avant que la réponse parte, Claw demande au modèle ce qu'il a observé de la cause et de sa disparition : sans observation, il doit la faire ou dire que ce n'est pas vérifié, au lieu d'écrire « résolu ». Une requête de plus par signalement | `CLAW_PROBLEM_GUIDE=0` |
+| Commandes essayées | La réponse vous dit de lancer des commandes (blocs de code d'un terminal) que le modèle n'a lancées à aucun moment de la session : Claw le renvoie une fois les essayer (un serveur part en arrière-plan, il l'interroge), corriger sa réponse d'après ce qu'il voit, ou dire lesquelles ne sont pas testées. Les exemples à compléter, `git`, `docker`, `curl` et les installations du système ne sont pas demandés | `CLAW_TRIED_COMMANDS=0` |
 
 **Mode équipe : le bon modèle pour chaque étape.** Au lieu d'un seul modèle pour tout, Claw
 confie chaque étape du travail au modèle gratuit le plus fort pour elle, et change de modèle
@@ -869,6 +871,9 @@ coupe cet import.
   l'image : il la fait décrire par le modèle gratuit le plus puissant qui lit les images (type
   d'image, disposition, et tout le texte visible recopié mot pour mot : erreurs, code, valeurs),
   et donne cette description au modèle de la session, qui sait qu'elle vient d'un autre modèle.
+  Quand un message porte plusieurs images, chaque description est numérotée (« Image 1 of 2 ») :
+  deux longues descriptions à la suite se lisaient comme une seule image, et la première était
+  oubliée.
   Chaque image n'est décrite qu'une fois (une requête gratuite), la description étant gardée
   dans `.claw/image-descriptions/` ; vous êtes prévenu du modèle qui l'a lue. Si aucun modèle
   n'a pu la décrire, le modèle de la session apprend qu'une image manque et peut vous demander

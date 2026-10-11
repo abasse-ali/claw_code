@@ -1114,9 +1114,11 @@ fn transcript_from_messages(messages: &[ConversationMessage]) -> Vec<WebEvent> {
                             .to_string(),
                     }
                 }
-                // Contexte ajouté par les hooks : destiné au modèle seulement.
+                // Contexte ajouté par les hooks, guide de Claw joint à la
+                // demande : destinés au modèle seulement.
                 (ContentBlock::Text { text }, _)
-                    if text.starts_with(runtime::HOOK_CONTEXT_PREFIX) =>
+                    if text.starts_with(runtime::HOOK_CONTEXT_PREFIX)
+                        || text.starts_with(runtime::harness::GUIDE_PREFIX) =>
                 {
                     continue;
                 }
