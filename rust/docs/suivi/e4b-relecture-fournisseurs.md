@@ -83,7 +83,7 @@ routing.rs, main.rs), lecture et recherche de fichiers (file_ops.rs), outil View
   convertir chaque debut et fin de correspondance en numeros de ligne (compter les `\n` avant
   l'octet) pour `files_with_matches` et `content` (afficher toutes les lignes couvertes, avec le
   contexte). Ajouter un test avec un motif `a\\n\\s*b` sur deux lignes, dans les trois modes.
-- Etat : a verifier
+- Etat : corrigé (lot 3) : avec multiline, le motif est cherché dans tout le texte et chaque correspondance donne les lignes qu'elle couvre (lines_covered), dans les trois modes.
 
 ## E4B-04 write_file retire la marque UTF-8 (BOM) et les fins de ligne CRLF d'un fichier existant
 - Gravite : moyenne
@@ -109,7 +109,7 @@ routing.rs, main.rs), lecture et recherche de fichiers (file_ops.rs), outil View
   de ligne, ou une majorite) et que `content` n'a que des LF, convertir `\n` en `\r\n` avant
   l'encodage ; dire au modele dans `encoding_note` ce qui a ete garde. Ajouter un test (fichier
   BOM + CRLF reecrit par write_file : memes trois premiers octets, aucune ligne en LF seul).
-- Etat : a verifier
+- Etat : corrigé (lot 3) : keep_file_conventions garde la marque UTF-8 et les fins de ligne CRLF du fichier remplacé, et le dit.
 
 ## E4B-05 Les regles de permission ecrites pour WebFetch ne couvrent pas ViewPage
 - Gravite : moyenne
@@ -185,7 +185,7 @@ routing.rs, main.rs), lecture et recherche de fichiers (file_ops.rs), outil View
   `glob::Pattern::escape` (E1-10). Mieux : parcourir la base avec WalkDir et comparer le chemin
   relatif au motif (remede de E2-12), ce qui supprime les deux causes. Test : base
   `\\?\UNC\...` simulee par une fonction de conversion testee a part.
-- Etat : a verifier
+- Etat : corrigé (lot 3) : la base n'est plus collée au motif (parcours puis comparaison du chemin relatif), un dossier [v2] ou un partage réseau ne cachent plus rien.
 
 ## E4B-08 ViewPage annonce une console sans erreur quand il n'a pas pu lire le journal
 - Gravite : basse

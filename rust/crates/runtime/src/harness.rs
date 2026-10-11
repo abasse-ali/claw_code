@@ -67,6 +67,9 @@ pub enum Aid {
     TriedCommands,
     /// Réponse arrêtée sur des titres sans contenu : le travail annoncé est à faire.
     EmptyTitles,
+    /// Contenu abrégé (« ... rest of the code unchanged ... ») refusé avant
+    /// d'écraser un fichier.
+    PlaceholderGuard,
 }
 
 impl Aid {
@@ -96,6 +99,7 @@ impl Aid {
             Self::ProblemGuide => "CLAW_PROBLEM_GUIDE",
             Self::TriedCommands => "CLAW_TRIED_COMMANDS",
             Self::EmptyTitles => "CLAW_EMPTY_TITLES",
+            Self::PlaceholderGuard => "CLAW_PLACEHOLDER_GUARD",
         }
     }
 }

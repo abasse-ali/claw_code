@@ -66,6 +66,9 @@ pub struct WriteFileOutput {
         default
     )]
     pub encoding_note: Option<String>,
+    /// Ce que le modèle doit savoir de ce qu'il a écrit (ligne d'élision).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -362,18 +365,32 @@ pub fn read_file(
     limit: Option<usize>,
 ) -> io::Result<ReadFileOutput> {
     let absolute_path = normalize_path(path)?;
+    if absolute_path.is_dir() {
+        return Ok(directory_listing(&absolute_path));
+    }
     let (content, encoding) = read_text(&absolute_path)?;
     let lines: Vec<&str> = content.lines().collect();
+    let mut notes = Vec::new();
+    // « 0 » veut souvent dire « sans limite » : la limite par défaut, dite.
+    let limit = match limit {
+        Some(0) => {
+            notes.push(format!(
+                "\"limit\": 0 was read as the default ({DEFAULT_READ_LINES} lines)."
+            ));
+            DEFAULT_READ_LINES
+        }
+        other => other.unwrap_or(DEFAULT_READ_LINES),
+    };
     let start_index = offset.unwrap_or(0).min(lines.len());
-    let end_index = start_index
-        .saturating_add(limit.unwrap_or(DEFAULT_READ_LINES))
-        .min(lines.len());
+    let end_index = start_index.saturating_add(limit).min(lines.len());
     let selected = lines[start_index..end_index]
         .iter()
         .map(|line| shorten_line(line))
         .collect::<Vec<_>>()
         .join("\n");
-    let mut notes = Vec::new();
+    if content.is_empty() {
+        notes.push("This file exists and is empty (0 bytes).".to_string());
+    }
     if end_index < lines.len() {
         notes.push(format!(
             "Showing lines {}-{end_index} of {}. Call read_file again with offset {end_index} to read on, or use grep_search to find the part you need.",
@@ -405,15 +422,29 @@ pub fn read_file(
 
 pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
     let absolute_path = normalize_path_allow_missing(path)?;
+    if absolute_path.is_dir() {
+        return Err(not_a_file(path, "write_file"));
+    }
     // Fichier existant : son texte (pour le diff) et son codage, qui est gardé
     // (un CSV d'Excel en Windows-1252 le reste).
     let original = read_text(&absolute_path).ok();
+    let note = placeholder_check(
+        &absolute_path,
+        content,
+        original.as_ref().map(|(text, _)| text.as_str()),
+    )?;
     if let Some(parent) = absolute_path.parent() {
         fs::create_dir_all(parent)?;
     }
     let encoding = original
         .as_ref()
         .map_or(TextEncoding::Utf8, |(_, encoding)| *encoding);
+    // La marque UTF-8 (BOM) et les fins de ligne CRLF du fichier restent : un
+    // script PowerShell 5.1 sans BOM est lu en Windows-1252 (accents abîmés),
+    // un `.bat` en LF casse `goto`.
+    let (kept_content, kept) =
+        keep_file_conventions(content, original.as_ref().map(|(text, _)| text.as_str()));
+    let content = kept_content.as_str();
     let (bytes, encoding_note) = match encode_text(content, encoding) {
         // Codage d'origine gardé : dit au modèle quand ce n'est pas de l'UTF-8.
         Ok(bytes) => (
@@ -435,6 +466,10 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
     };
     fs::write(&absolute_path, bytes)?;
     let original_file = original.map(|(text, _)| text);
+    let encoding_note = match (encoding_note, kept) {
+        (Some(note), Some(kept)) => Some(format!("{note} {kept}")),
+        (note, kept) => note.or(kept),
+    };
 
     Ok(WriteFileOutput {
         kind: if original_file.is_some() {
@@ -448,7 +483,196 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
         original_file,
         git_diff: None,
         encoding_note,
+        note,
     })
+}
+
+/// Le contenu à écrire avec la marque UTF-8 (BOM) et les fins de ligne CRLF
+/// du fichier qu'il remplace, et ce qui a été gardé.
+fn keep_file_conventions(content: &str, original: Option<&str>) -> (String, Option<String>) {
+    let Some(original) = original else {
+        return (content.to_string(), None);
+    };
+    let mut kept = Vec::new();
+    let mut text = content.to_string();
+    let crlf = original.matches("\r\n").count();
+    if crlf > 0 && crlf * 2 >= original.matches('\n').count() && !text.contains("\r\n") {
+        text = text.replace('\n', "\r\n");
+        kept.push("CRLF line endings");
+    }
+    if original.starts_with('\u{feff}') && !text.starts_with('\u{feff}') {
+        text.insert(0, '\u{feff}');
+        kept.push("UTF-8 byte order mark");
+    }
+    let note = (!kept.is_empty()).then(|| format!("The file's {} kept.", kept.join(" and ")));
+    (text, note)
+}
+
+/// Ligne d'élision qu'un modèle met à la place du code qu'il ne recopie pas
+/// (`# ... rest of the code remains unchanged`, `// ... existing code ...`) :
+/// un commentaire qui commence par des points de suspension et parle du reste,
+/// ou une tournure sans équivoque.
+fn is_elision_line(line: &str) -> bool {
+    const CLEAR: &[&str] = &[
+        "rest of the code",
+        "rest of the file",
+        "rest of code",
+        "existing code",
+        "remains unchanged",
+        "remain unchanged",
+        "code unchanged",
+        "omitted for brevity",
+        "code omitted",
+        "le reste du code",
+        "le reste du fichier",
+        "code existant",
+        "reste inchang",
+        "reste identique",
+    ];
+    const ABOUT_THE_REST: &[&str] = &[
+        "rest",
+        "remaining",
+        "existing",
+        "unchanged",
+        "same as",
+        "omitted",
+        "previous",
+        "other",
+        "as before",
+        "reste",
+        "inchang",
+        "existant",
+        "identique",
+        "autres",
+    ];
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 120 {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    let marker = ["{/*", "<!--", "/*", "//", "#", "*", "--", ";", "'"]
+        .iter()
+        .find_map(|start| lower.strip_prefix(start))
+        .map(str::trim_start);
+    // Sans marque de commentaire, seule une ligne qui commence par des points
+    // de suspension compte (`...` seul est du Python valide).
+    let (body, commented) = match marker {
+        Some(body) => (body, true),
+        None if lower.starts_with("...") || lower.starts_with('\u{2026}') => {
+            (lower.as_str(), false)
+        }
+        None => return false,
+    };
+    let elided = body.starts_with("...") || body.starts_with('\u{2026}');
+    CLEAR.iter().any(|phrase| body.contains(phrase))
+        || (elided && ABOUT_THE_REST.iter().any(|word| body.contains(word)))
+        || (commented
+            && elided
+            && body
+                .trim_matches(|ch: char| {
+                    ch == '.' || ch == '\u{2026}' || ch == '*' || ch == '/' || ch.is_whitespace()
+                })
+                .is_empty())
+}
+
+/// Première ligne d'élision du texte : son numéro (à partir de 1) et son texte.
+fn elision_in(text: &str) -> Option<(usize, String)> {
+    text.lines()
+        .enumerate()
+        .find(|(_, line)| is_elision_line(line))
+        .map(|(index, line)| (index + 1, line.trim().to_string()))
+}
+
+/// Contenu abrégé : écrit tel quel, il remplacerait du code par un
+/// commentaire, sans erreur ni avertissement (le contrôle de syntaxe ne voit
+/// rien). Refusé quand le fichier existant fond de plus de moitié ; sinon
+/// écrit, avec une note. `None` : rien à signaler.
+fn placeholder_check(
+    path: &Path,
+    content: &str,
+    original: Option<&str>,
+) -> io::Result<Option<String>> {
+    if !crate::harness::enabled(crate::harness::Aid::PlaceholderGuard) {
+        return Ok(None);
+    }
+    let Some((line, text)) = elision_in(content) else {
+        return Ok(None);
+    };
+    // La ligne était déjà dans le fichier : le modèle ne l'a pas inventée.
+    if original.is_some_and(|original| original.lines().any(|kept| kept.trim() == text)) {
+        return Ok(None);
+    }
+    let name = path.file_name().map_or_else(
+        || display_path(path),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let before = original.map_or(0, |original| original.lines().count());
+    let after = content.lines().count();
+    if before >= 10 && after * 2 < before {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "[Claw] write_file was not executed: line {line} of your content is a placeholder (\"{text}\"), not code, and {name} would shrink from {before} to {after} lines. write_file replaces the whole file with exactly what you send. To change part of {name}, use edit_file with the lines that change; to rewrite it, send every line."
+            ),
+        ));
+    }
+    Ok(Some(format!(
+        "Line {line} of what was written is a placeholder (\"{text}\"), not code: write_file wrote it as is. If it stands for code you meant to keep, that code is not in the file: write it out."
+    )))
+}
+
+/// Erreur d'un outil d'écriture qui a reçu un dossier.
+fn not_a_file(path: &str, tool: &str) -> io::Error {
+    let shown = path.trim_end_matches(['/', '\\']);
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "[Claw] \"{shown}\" is a directory: {tool} needs the path of a file inside it, for example {shown}/<file name>."
+        ),
+    )
+}
+
+/// Ce qu'un dossier contient, rendu par `read_file` à qui le lit comme un
+/// fichier : l'erreur du système (« Accès refusé » sous Windows) ferait
+/// croire à un problème de droits.
+fn directory_listing(dir: &Path) -> ReadFileOutput {
+    const SHOWN: usize = 200;
+    let mut entries: Vec<(bool, String)> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| {
+            let is_dir = entry.path().is_dir();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            (!is_dir, if is_dir { format!("{name}/") } else { name })
+        })
+        .collect();
+    entries.sort();
+    let total = entries.len();
+    let shown: Vec<String> = entries
+        .into_iter()
+        .take(SHOWN)
+        .map(|(_, name)| name)
+        .collect();
+    let more = if total > SHOWN {
+        format!(", the first {SHOWN} shown")
+    } else {
+        String::new()
+    };
+    ReadFileOutput {
+        kind: String::from("text"),
+        file: TextFilePayload {
+            file_path: display_path(dir),
+            num_lines: shown.len(),
+            content: shown.join("\n"),
+            start_line: 1,
+            total_lines: total,
+            note: Some(format!(
+                "{} is a directory, not a file, so here is what it contains ({total} entries{more}; folders end with /). Call read_file on one of these files, or glob_search to look deeper.",
+                display_path(dir)
+            )),
+        },
+    }
 }
 
 pub fn edit_file(
@@ -457,19 +681,51 @@ pub fn edit_file(
     new_string: &str,
     replace_all: bool,
 ) -> io::Result<EditFileOutput> {
-    let absolute_path = normalize_path(path)?;
-    let (original_file, encoding) = read_text(&absolute_path)?;
-    if old_string == new_string {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "old_string and new_string must differ",
-        ));
-    }
+    // `old_string` vide sur un fichier absent ou vide : créé avec
+    // `new_string`, comme write_file le ferait.
     if old_string.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "old_string must not be empty (use write_file to create or overwrite a file)",
-        ));
+        return create_by_edit(path, new_string, replace_all);
+    }
+    let absolute_path = normalize_path(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{error}\nTo create this file, call write_file with its full content."),
+            )
+        } else {
+            error
+        }
+    })?;
+    if absolute_path.is_dir() {
+        return Err(not_a_file(path, "edit_file"));
+    }
+    let (original_file, encoding) = read_text(&absolute_path)?;
+    // Une ligne d'élision qui prend la place de lignes de code : le code
+    // remplacé serait perdu.
+    if crate::harness::enabled(crate::harness::Aid::PlaceholderGuard) {
+        if let Some((line, text)) = elision_in(new_string)
+            .filter(|(_, text)| !old_string.lines().any(|kept| kept.trim() == text))
+        {
+            let (removed, added) = (old_string.lines().count(), new_string.lines().count());
+            if added < removed {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "[Claw] edit_file was not executed: line {line} of new_string is a placeholder (\"{text}\"), not code, so the {removed} lines of old_string would be replaced by it and lost. new_string must hold the exact new text. Put only the lines that change in old_string and new_string."
+                    ),
+                ));
+            }
+        }
+    }
+    if old_string == new_string {
+        let message = match original_file.find(old_string) {
+            Some(at) => format!(
+                "[Claw] edit_file changed nothing: old_string and new_string are identical, and this text is already in the file at line {}. If that is the result you wanted, go on; otherwise put the changed text in new_string.",
+                line_index(&original_file, at) + 1
+            ),
+            None => "[Claw] edit_file changed nothing: old_string and new_string are identical. Put the changed text in new_string.".to_string(),
+        };
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, message));
     }
     let (updated, mut match_note) = apply_edit(&original_file, old_string, new_string, replace_all)
         .map_err(|message| io::Error::new(io::ErrorKind::NotFound, message))?;
@@ -506,6 +762,43 @@ pub fn edit_file(
         git_diff: None,
         match_note,
     })
+}
+
+/// `edit_file` sans `old_string` : un fichier absent ou vide est créé avec
+/// `new_string` ; un fichier qui a déjà du contenu reçoit une erreur qui dit
+/// quoi faire.
+fn create_by_edit(path: &str, new_string: &str, replace_all: bool) -> io::Result<EditFileOutput> {
+    let target = normalize_path_allow_missing(path)?;
+    if target.is_dir() {
+        return Err(not_a_file(path, "edit_file"));
+    }
+    let empty = fs::metadata(&target).map_or(true, |meta| meta.len() == 0);
+    if !empty {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "[Claw] edit_file changed nothing: old_string is empty but the file already has content. To change it, put the exact lines to replace in old_string; to rewrite it whole, use write_file.",
+        ));
+    }
+    let written = write_file(path, new_string)?;
+    Ok(EditFileOutput {
+        file_path: written.file_path,
+        old_string: String::new(),
+        new_string: new_string.to_owned(),
+        original_file: String::new(),
+        structured_patch: written.structured_patch,
+        user_modified: false,
+        replace_all,
+        git_diff: None,
+        match_note: Some(
+            "The file did not exist or was empty: it was created with new_string, as write_file would."
+                .to_string(),
+        ),
+    })
+}
+
+/// Numéro de ligne (à partir de 0) de l'octet `at` du texte.
+fn line_index(text: &str, at: usize) -> usize {
+    text[..at.min(text.len())].matches('\n').count()
 }
 
 /// Ce que donnerait une écriture ou une modification, sans toucher au fichier :
@@ -557,10 +850,73 @@ fn apply_edit(
     new_string: &str,
     replace_all: bool,
 ) -> Result<(String, Option<String>), String> {
+    match apply_edit_strictly(original, old_string, new_string, replace_all) {
+        Ok(applied) => return Ok(applied),
+        Err(Some(ambiguous)) => return Err(ambiguous),
+        Err(None) => {}
+    }
+    // Ce qu'un modèle abîme en recopiant : un `\"` pour `"`, un `\n` écrit en
+    // deux caractères, une espace insécable. Essayé, et dit.
+    for (old, new, note) in loose_variants(old_string, new_string) {
+        match apply_edit_strictly(original, &old, &new, replace_all) {
+            Ok((updated, inner)) => {
+                let note =
+                    inner.map_or_else(|| note.to_string(), |inner| format!("{note}; {inner}"));
+                return Ok((updated, Some(note)));
+            }
+            Err(Some(ambiguous)) => return Err(ambiguous),
+            Err(None) => {}
+        }
+    }
+    Err(not_found_message(original, old_string))
+}
+
+/// Variantes de `old_string` (et `new_string`) à essayer quand le texte n'est
+/// pas dans le fichier, chacune avec la note qui la dit.
+fn loose_variants(old_string: &str, new_string: &str) -> Vec<(String, String, &'static str)> {
+    let mut variants = Vec::new();
+    if old_string.contains("\\\"") || old_string.contains("\\'") {
+        let unescape = |text: &str| text.replace("\\\"", "\"").replace("\\'", "'");
+        variants.push((
+            unescape(old_string),
+            unescape(new_string),
+            "an extra backslash before quotes was removed (\\\" read as \")",
+        ));
+    }
+    if !old_string.contains('\n') && (old_string.contains("\\n") || old_string.contains("\\t")) {
+        let real = |text: &str| text.replace("\\n", "\n").replace("\\t", "\t");
+        variants.push((
+            real(old_string),
+            real(new_string),
+            "\\n and \\t written as two characters were read as a line break and a tab",
+        ));
+    }
+    if old_string.contains('\u{a0}') {
+        variants.push((
+            old_string.replace('\u{a0}', " "),
+            new_string.to_string(),
+            "non-breaking spaces were read as spaces",
+        ));
+    }
+    variants
+}
+
+/// Recherche exacte, puis CRLF, espaces de fin et indentation. `Err(None)` :
+/// introuvable ; `Err(Some(message))` : plusieurs occurrences.
+fn apply_edit_strictly(
+    original: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+) -> Result<(String, Option<String>), Option<String>> {
     let count = original.matches(old_string).count();
     if count > 0 {
         if count > 1 && !replace_all {
-            return Err(ambiguous_message(count));
+            let starts: Vec<usize> = original
+                .match_indices(old_string)
+                .map(|(at, _)| line_index(original, at))
+                .collect();
+            return Err(Some(ambiguous_message(original, &starts)));
         }
         let updated = if replace_all {
             original.replace(old_string, new_string)
@@ -577,7 +933,11 @@ fn apply_edit(
         let count = original.matches(old_crlf.as_str()).count();
         if count > 0 {
             if count > 1 && !replace_all {
-                return Err(ambiguous_message(count));
+                let starts: Vec<usize> = original
+                    .match_indices(old_crlf.as_str())
+                    .map(|(at, _)| line_index(original, at))
+                    .collect();
+                return Err(Some(ambiguous_message(original, &starts)));
             }
             let updated = if replace_all {
                 original.replace(&old_crlf, &new_crlf)
@@ -586,7 +946,7 @@ fn apply_edit(
             };
             return Ok((
                 updated,
-                Some("fins de ligne CRLF du fichier conservées".to_string()),
+                Some("the file's CRLF line endings were kept".to_string()),
             ));
         }
     }
@@ -594,26 +954,45 @@ fn apply_edit(
     for (level, note) in [
         (
             MatchLevel::TrailingWhitespace,
-            "espaces de fin de ligne ignorés",
+            "trailing spaces were ignored",
         ),
         (
             MatchLevel::Indentation,
-            "indentation ajustée à celle du fichier",
+            "the indentation was adjusted to the file's",
         ),
     ] {
-        if let Some(result) = line_match(original, old_string, new_string, replace_all, level)? {
-            return Ok((
-                result,
-                Some(format!("correspondance approximative : {note}")),
-            ));
+        if let Some(result) =
+            line_match(original, old_string, new_string, replace_all, level).map_err(Some)?
+        {
+            return Ok((result, Some(format!("approximate match: {note}"))));
         }
     }
-    Err(not_found_message(original, old_string))
+    Err(None)
 }
 
-fn ambiguous_message(count: usize) -> String {
+/// Plusieurs occurrences : leurs lignes, et la ligne qui précède chacune,
+/// pour que le modèle choisisse sans relire le fichier.
+fn ambiguous_message(original: &str, starts: &[usize]) -> String {
+    let lines: Vec<&str> = original.lines().collect();
+    let count = starts.len();
+    let numbers: Vec<String> = starts.iter().map(|start| (start + 1).to_string()).collect();
+    let before: Vec<String> = starts
+        .iter()
+        .take(6)
+        .map(
+            |start| match start.checked_sub(1).and_then(|index| lines.get(index)) {
+                Some(line) => format!(
+                    "{start} \"{}\"",
+                    line.trim().chars().take(80).collect::<String>()
+                ),
+                None => format!("{} (start of the file)", start + 1),
+            },
+        )
+        .collect();
     format!(
-        "old_string appears {count} times in the file: add surrounding lines to make it unique, or set replace_all to true"
+        "[Claw] edit_file changed nothing: old_string appears {count} times, at lines {}. Line before each: {}. Add that line to old_string to pick one, or set replace_all to true to change all {count}.",
+        numbers.join(", "),
+        before.join(", ")
     )
 }
 
@@ -678,7 +1057,7 @@ fn line_match(
         return Ok(None);
     }
     if starts.len() > 1 && !replace_all {
-        return Err(ambiguous_message(starts.len()));
+        return Err(ambiguous_message(original, &starts));
     }
     let new_lines: Vec<&str> = new_string
         .trim_end_matches(['\n', '\r'])
@@ -728,31 +1107,42 @@ fn reindent(new_lines: &[&str], old_first: &str, file_first: &str) -> Vec<String
         .collect()
 }
 
-/// Message d'échec utile au modèle : ligne du fichier la plus proche de la
-/// première ligne cherchée.
+/// Texte introuvable : les lignes réelles du fichier autour de la plus
+/// proche de la première ligne cherchée, numérotées, pour que le modèle
+/// recopie sans relire le fichier (souvent, il recopiait un texte que sa
+/// propre modification précédente avait déjà changé).
 fn not_found_message(original: &str, old_string: &str) -> String {
     let first = old_string
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or_default();
-    let closest = original
-        .lines()
+    let lines: Vec<&str> = original.lines().collect();
+    let closest = lines
+        .iter()
         .enumerate()
-        .map(|(index, line)| (index, line, similarity(line.trim(), first)))
-        .filter(|(_, _, score)| *score > 0.5)
-        .max_by(|left, right| left.2.total_cmp(&right.2));
-    let mut message =
-        "old_string not found in file (even ignoring whitespace and indentation)".to_string();
-    if let Some((index, line, _)) = closest {
+        .map(|(index, line)| (index, similarity(line.trim(), first)))
+        .filter(|(_, score)| *score > 0.5)
+        .max_by(|left, right| left.1.total_cmp(&right.1));
+    let Some((index, _)) = closest else {
+        return "[Claw] edit_file changed nothing: old_string is not in the file, and no line looks like its first line. Check that this is the right file, then read it with read_file.".to_string();
+    };
+    let start = index.saturating_sub(3);
+    let end = (index + old_string.lines().count().max(1) + 3)
+        .min(lines.len())
+        .min(start + 40);
+    let mut message = format!(
+        "[Claw] edit_file changed nothing: old_string is not in the file (even ignoring whitespace and indentation). The closest place is lines {} to {end}, shown below exactly as they are now; copy old_string from them (without the line numbers):",
+        start + 1
+    );
+    for (offset, line) in lines[start..end].iter().enumerate() {
         let _ = write!(
             message,
-            ". Closest line {}: `{}`",
-            index + 1,
-            line.trim().chars().take(160).collect::<String>()
+            "\n{:>5}| {}",
+            start + offset + 1,
+            line.chars().take(300).collect::<String>()
         );
     }
-    message.push_str(". Re-read the file with read_file and copy the exact text.");
     message
 }
 
@@ -781,61 +1171,64 @@ fn similarity(left: &str, right: &str) -> f64 {
 }
 
 pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOutput> {
+    const SHOWN: usize = 100;
     let started = Instant::now();
     let base_dir = path
         .map(normalize_path)
         .transpose()?
         .unwrap_or(std::env::current_dir()?);
-    let search_pattern = if Path::new(pattern).is_absolute() {
-        pattern.to_owned()
-    } else {
-        display_path(&base_dir.join(pattern))
+    let mut notes = Vec::new();
+    let pattern = relative_glob(pattern, &base_dir);
+    let patterns = compile_glob(&pattern, &mut notes)?;
+    // Dépendances, caches et sorties de build écartés pendant le parcours
+    // (jamais ouverts) : récents après une installation, ils passeraient
+    // avant les fichiers du projet, et les parcourir prenait des dizaines de
+    // secondes.
+    let include_skipped = names_skipped_dir(&pattern) || path.is_some_and(names_skipped_dir);
+    let (files, skipped) = collect_search_files(&base_dir, include_skipped);
+    let relative = |file: &Path| {
+        file.strip_prefix(&base_dir)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .replace('\\', "/")
     };
-
-    let mut matches = Vec::new();
-    let entries = glob::glob(&search_pattern)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
-    // Dépendances, caches et sorties de build écartés : récents après une
-    // installation, ils passeraient avant les fichiers du projet.
-    let include_skipped = names_skipped_dir(pattern) || path.is_some_and(names_skipped_dir);
-    let base_shown = PathBuf::from(display_path(&base_dir));
-    let mut verdicts: std::collections::HashMap<PathBuf, bool> = std::collections::HashMap::new();
-    let mut skipped = std::collections::BTreeSet::new();
-    for entry in entries.flatten() {
-        if !entry.is_file() {
-            continue;
-        }
-        if !include_skipped {
-            let (base, relative) = entry
-                .strip_prefix(&base_shown)
-                .map(|relative| (base_shown.as_path(), relative))
-                .or_else(|_| {
-                    entry
-                        .strip_prefix(&base_dir)
-                        .map(|relative| (base_dir.as_path(), relative))
-                })
-                .unwrap_or((Path::new(""), entry.as_path()));
-            // Les dossiers entre la base et le fichier, pas le nom du fichier
-            // (un script nommé `build` est du code).
-            let mut dir = base.to_path_buf();
-            let mut hidden = None;
-            for component in relative.parent().into_iter().flat_map(Path::components) {
-                dir.push(component);
-                let name = component.as_os_str().to_string_lossy().into_owned();
-                let generated = *verdicts
-                    .entry(dir.clone())
-                    .or_insert_with(|| generated_dir(&dir, &name, base));
-                if generated {
-                    hidden = Some(name);
-                    break;
-                }
-            }
-            if let Some(name) = hidden {
-                skipped.insert(name);
-                continue;
+    let options = glob::MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: true,
+        require_literal_leading_dot: false,
+    };
+    let select = |patterns: &[Pattern]| -> Vec<PathBuf> {
+        files
+            .iter()
+            .filter(|file| {
+                let shown = relative(file);
+                patterns
+                    .iter()
+                    .any(|glob| glob.matches_with(&shown, options))
+            })
+            .cloned()
+            .collect()
+    };
+    let mut matches = select(&patterns);
+    // Rien au premier niveau : un dossier nommé tel quel est listé, un motif
+    // sans `**` est cherché dans les sous-dossiers.
+    if matches.is_empty() && !pattern.contains("**") {
+        let named = pattern.trim_end_matches('/');
+        let wider = if !named.is_empty() && base_dir.join(named).is_dir() {
+            format!("{named}/**/*")
+        } else {
+            format!("**/{pattern}")
+        };
+        if let Ok(wider_patterns) = compile_glob(&wider, &mut Vec::new()) {
+            let found = select(&wider_patterns);
+            if !found.is_empty() {
+                notes.push(format!(
+                    "Nothing matches \"{pattern}\" at the top of the search, so \"{wider}\" was searched instead: {} file(s).",
+                    found.len()
+                ));
+                matches = found;
             }
         }
-        matches.push(entry);
     }
 
     matches.sort_by_key(|path| {
@@ -844,25 +1237,85 @@ pub fn glob_search(pattern: &str, path: Option<&str>) -> io::Result<GlobSearchOu
             .ok()
             .map(Reverse)
     });
-
-    let truncated = matches.len() > 100;
+    let total = matches.len();
+    let truncated = total > SHOWN;
     let filenames = matches
         .into_iter()
-        .take(100)
+        .take(SHOWN)
         .map(|path| display_path(&path))
         .collect::<Vec<_>>();
-
-    let skipped: Vec<String> = skipped.into_iter().collect();
+    if filenames.is_empty() {
+        notes.push(format!(
+            "No file matches \"{pattern}\" under {} ({} files looked at). Check the pattern (\"**/*.ts\" searches every folder, \"src/*.ts\" only src), or list what exists with \"**/*\".",
+            display_path(&base_dir),
+            files.len()
+        ));
+        notes.extend(search_note(&skipped, 0));
+    } else if truncated {
+        notes.push(format!(
+            "Showing the {SHOWN} most recently changed of {total} matching files: narrow the pattern or give a path."
+        ));
+    }
     Ok(GlobSearchOutput {
         duration_ms: started.elapsed().as_millis(),
         num_files: filenames.len(),
-        note: filenames
-            .is_empty()
-            .then(|| search_note(&skipped, 0))
-            .flatten(),
+        note: (!notes.is_empty()).then(|| notes.join(" ")),
         filenames,
         truncated,
     })
+}
+
+/// Le motif de `glob_search`, relatif au dossier de la recherche et écrit
+/// avec des `/` : un motif absolu qui part de ce dossier en est retiré, un
+/// `./` de tête aussi.
+fn relative_glob(pattern: &str, base: &Path) -> String {
+    let pattern = pattern.trim().replace('\\', "/");
+    let base_shown = display_path(base).replace('\\', "/");
+    let pattern = pattern
+        .strip_prefix(&format!("{base_shown}/"))
+        .map(str::to_string)
+        .unwrap_or(pattern);
+    pattern.trim_start_matches("./").to_string()
+}
+
+/// Motifs à comparer aux chemins, accolades développées (`*.{ts,tsx}`). Les
+/// fautes courantes sont réparées et dites (`**.ts` devient `**/*.ts`) ; un
+/// motif encore invalide reçoit une erreur qui montre la bonne forme.
+fn compile_glob(pattern: &str, notes: &mut Vec<String>) -> io::Result<Vec<Pattern>> {
+    let repaired = repair_double_star(pattern);
+    if repaired != pattern {
+        notes.push(format!("\"{pattern}\" was read as \"{repaired}\"."));
+    }
+    expand_braces(&repaired)
+        .iter()
+        .map(|glob| {
+            Pattern::new(glob).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "[Claw] \"{pattern}\" is not a valid glob ({}). Examples: \"**/*.py\" (every folder), \"src/*.ts\", \"*.{{ts,tsx}}\".",
+                        error.msg
+                    ),
+                )
+            })
+        })
+        .collect()
+}
+
+/// `**` doit être seul entre deux `/` : `**.ts` devient `**/*.ts`,
+/// `src/**test*.py` devient `src/**/*test*.py`.
+fn repair_double_star(pattern: &str) -> String {
+    pattern
+        .split('/')
+        .map(|part| {
+            if part.contains("**") && part != "**" {
+                format!("**/{}", part.replace("**", "*"))
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
@@ -873,23 +1326,12 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
         .transpose()?
         .unwrap_or(std::env::current_dir()?);
 
-    let regex = RegexBuilder::new(&input.pattern)
-        .case_insensitive(input.case_insensitive.unwrap_or(false))
-        .dot_matches_new_line(input.multiline.unwrap_or(false))
-        .build()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
-
-    let glob_filter = input
-        .glob
-        .as_deref()
-        .map(Pattern::new)
-        .transpose()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
-    let file_type = input.file_type.as_deref();
-    let output_mode = input
-        .output_mode
-        .clone()
-        .unwrap_or_else(|| String::from("files_with_matches"));
+    let mut notes: Vec<String> = Vec::new();
+    let regex = search_regex(input, &mut notes)?;
+    let globs = glob_filters(input.glob.as_deref())?;
+    let types = input.file_type.as_deref().map(file_type_extensions);
+    let output_mode = output_mode(input.output_mode.as_deref(), &mut notes);
+    let multiline = input.multiline.unwrap_or(false);
     let context = input.context.or(input.context_short).unwrap_or(0);
 
     let mut filenames = Vec::new();
@@ -902,10 +1344,13 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
     let named_file = base_path.is_file();
     let (files, skipped_dirs) = collect_search_files(&base_path, include_skipped);
     let mut large_files = 0usize;
+    let (mut searched, mut filtered_out) = (0usize, 0usize);
     for file_path in files {
-        if !matches_optional_filters(&file_path, glob_filter.as_ref(), file_type) {
+        if !matches_optional_filters(&file_path, &base_path, &globs, types.as_deref()) {
+            filtered_out += 1;
             continue;
         }
+        searched += 1;
         let Some(file_contents) = searchable_text(&file_path, named_file, &mut large_files) else {
             continue;
         };
@@ -920,9 +1365,7 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
         }
 
         let lines: Vec<&str> = file_contents.lines().collect();
-        let matched_lines: Vec<usize> = (0..lines.len())
-            .filter(|&index| regex.is_match(lines[index]))
-            .collect();
+        let matched_lines = matched_lines(&regex, &file_contents, &lines, multiline);
         if matched_lines.is_empty() {
             continue;
         }
@@ -949,11 +1392,18 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
     } else {
         Vec::new()
     };
-    let note = search_note(&skipped_dirs, large_files);
-    let (filenames, applied_limit, applied_offset) =
-        apply_limit(filenames, input.head_limit, input.offset);
+    // Des filtres ont écarté tout ce qui a été trouvé : le dire, sinon le
+    // modèle conclut que ce qu'il cherche n'existe pas.
+    if searched == 0 && filtered_out > 0 {
+        notes.push(filtered_out_note(filtered_out, &base_path, input));
+    }
+    notes.extend(search_note(&skipped_dirs, large_files));
+    let note = (!notes.is_empty()).then(|| notes.join(" "));
     if output_mode == "content" {
+        // `head_limit` et `offset` découpent les lignes rendues, pas la liste
+        // des fichiers, qui reste celle de tous les fichiers trouvés.
         let (lines, limit, offset) = apply_limit(content_lines, input.head_limit, input.offset);
+        let (filenames, _, _) = apply_limit(filenames, None, None);
         return Ok(GrepSearchOutput {
             mode: Some(output_mode),
             num_files: filenames.len(),
@@ -967,6 +1417,8 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
         });
     }
 
+    let (filenames, applied_limit, applied_offset) =
+        apply_limit(filenames, input.head_limit, input.offset);
     Ok(GrepSearchOutput {
         num_matches: (output_mode == "count").then_some(total_matches),
         mode: Some(output_mode),
@@ -1215,25 +1667,236 @@ fn names_skipped_dir(text: &str) -> bool {
     })
 }
 
+/// L'expression de la recherche. Un motif qui n'en est pas une (`print(`,
+/// `items[`, `${name}`) est cherché comme texte, et la note le dit ; les
+/// tournures que le moteur ne connaît pas (regards avant ou arrière,
+/// références arrière) ont une erreur qui dit quoi faire.
+fn search_regex(input: &GrepSearchInput, notes: &mut Vec<String>) -> io::Result<regex::Regex> {
+    let build = |pattern: &str| {
+        RegexBuilder::new(pattern)
+            .case_insensitive(input.case_insensitive.unwrap_or(false))
+            .dot_matches_new_line(input.multiline.unwrap_or(false))
+            .multi_line(true)
+            .build()
+    };
+    let error = match build(&input.pattern) {
+        Ok(regex) => return Ok(regex),
+        Err(error) => error,
+    };
+    let pattern = &input.pattern;
+    let backreference = pattern
+        .as_bytes()
+        .windows(2)
+        .any(|pair| pair[0] == b'\\' && pair[1].is_ascii_digit() && pair[1] != b'0');
+    if ["(?=", "(?!", "(?<=", "(?<!"]
+        .iter()
+        .any(|form| pattern.contains(form))
+        || backreference
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "[Claw] grep_search does not support look-ahead, look-behind or backreferences. Search for the simpler part of the pattern here, or run grep -P in bash.",
+        ));
+    }
+    let message = error.to_string();
+    let reason = message
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix("error: "))
+        .unwrap_or("syntax error")
+        .to_string();
+    notes.push(format!(
+        "\"{pattern}\" is not a valid regular expression ({reason}), so it was searched as plain text. To use a regex, escape special characters with a backslash."
+    ));
+    build(&regex::escape(pattern))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))
+}
+
+/// Mode de sortie demandé ; les synonymes courants sont lus (`lines` vaut
+/// `content`), et la note dit comment.
+fn output_mode(requested: Option<&str>, notes: &mut Vec<String>) -> String {
+    let Some(requested) = requested.map(str::trim).filter(|mode| !mode.is_empty()) else {
+        return String::from("files_with_matches");
+    };
+    let mode = match requested.to_ascii_lowercase().as_str() {
+        "content" | "contents" | "lines" | "line" | "matches" | "text" => "content",
+        "count" | "counts" => "count",
+        "files_with_matches" | "files" | "files_only" | "filenames" | "paths" | "names" => {
+            "files_with_matches"
+        }
+        _ => {
+            notes.push(format!(
+                "output_mode \"{requested}\" is unknown, so the file names are listed. The modes are content, files_with_matches and count."
+            ));
+            return String::from("files_with_matches");
+        }
+    };
+    if mode != requested {
+        notes.push(format!(
+            "output_mode \"{requested}\" was read as \"{mode}\"."
+        ));
+    }
+    mode.to_string()
+}
+
+/// Extensions que désigne `type` : le nom d'un langage (celui de ripgrep,
+/// que les modèles connaissent) ou une extension, avec ou sans point.
+fn file_type_extensions(file_type: &str) -> Vec<String> {
+    let name = file_type
+        .trim()
+        .trim_start_matches("*.")
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    let known: &[&str] = match name.as_str() {
+        "python" | "py" => &["py", "pyi"],
+        "rust" | "rs" => &["rs"],
+        "typescript" | "ts" => &["ts", "tsx", "mts", "cts"],
+        "javascript" | "js" => &["js", "jsx", "mjs", "cjs"],
+        "markdown" | "md" => &["md", "markdown"],
+        "yaml" | "yml" => &["yml", "yaml"],
+        "cpp" | "c++" | "cxx" => &["cpp", "cc", "cxx", "hpp", "hh", "h"],
+        "c" => &["c", "h"],
+        "shell" | "sh" | "bash" => &["sh", "bash"],
+        "golang" | "go" => &["go"],
+        "kotlin" | "kt" => &["kt", "kts"],
+        "csharp" | "c#" | "cs" => &["cs"],
+        "ruby" | "rb" => &["rb"],
+        "html" | "htm" => &["html", "htm"],
+        "css" => &["css", "scss", "sass", "less"],
+        _ => return vec![name],
+    };
+    known.iter().map(ToString::to_string).collect()
+}
+
+/// Motifs du filtre `glob`, accolades développées (`*.{ts,tsx}` donne `*.ts`
+/// et `*.tsx`, que le paquet `glob` ne connaît pas).
+fn glob_filters(glob: Option<&str>) -> io::Result<Vec<Pattern>> {
+    let Some(glob) = glob.map(str::trim).filter(|glob| !glob.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    expand_braces(glob)
+        .iter()
+        .map(|pattern| {
+            Pattern::new(pattern).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "[Claw] \"{glob}\" is not a valid glob ({error}). Examples: \"*.py\", \"src/**/*.ts\", \"*.{{ts,tsx}}\"."
+                    ),
+                )
+            })
+        })
+        .collect()
+}
+
+/// `a{b,c}d` donne `abd` et `acd` ; au plus 64 motifs.
+fn expand_braces(pattern: &str) -> Vec<String> {
+    let mut expanded = vec![pattern.to_string()];
+    while let Some(index) = expanded.iter().position(|item| {
+        item.find('{')
+            .is_some_and(|open| item[open..].contains('}'))
+    }) {
+        if expanded.len() > 64 {
+            break;
+        }
+        let item = expanded.remove(index);
+        let open = item.find('{').unwrap_or_default();
+        let close = open + item[open..].find('}').unwrap_or_default();
+        let (head, tail) = (&item[..open], &item[close + 1..]);
+        for (offset, alternative) in item[open + 1..close].split(',').enumerate() {
+            expanded.insert(index + offset, format!("{head}{alternative}{tail}"));
+        }
+    }
+    expanded
+}
+
+/// Lignes (à partir de 0) où le motif se trouve.
+fn matched_lines(
+    regex: &regex::Regex,
+    contents: &str,
+    lines: &[&str],
+    multiline: bool,
+) -> Vec<usize> {
+    if multiline {
+        lines_covered(regex, contents, lines.len())
+    } else {
+        (0..lines.len())
+            .filter(|&index| regex.is_match(lines[index]))
+            .collect()
+    }
+}
+
+/// Note d'une recherche dont les filtres ont écarté tous les fichiers trouvés.
+fn filtered_out_note(filtered_out: usize, base: &Path, input: &GrepSearchInput) -> String {
+    format!(
+        "No file was searched: {filtered_out} file(s) were found under {} but none passed the filter {}. Give type as a language or an extension (python, rs, ts), glob relative to the search path (src/**/*.ts, *.{{ts,tsx}}), or drop the filter.",
+        display_path(base),
+        describe_filters(input)
+    )
+}
+
+/// Les filtres de la recherche, pour la note qui dit qu'ils ont tout écarté.
+fn describe_filters(input: &GrepSearchInput) -> String {
+    let mut filters = Vec::new();
+    if let Some(file_type) = &input.file_type {
+        filters.push(format!("type \"{file_type}\""));
+    }
+    if let Some(glob) = &input.glob {
+        filters.push(format!("glob \"{glob}\""));
+    }
+    filters.join(" and ")
+}
+
+/// Lignes (à partir de 0) que couvrent les correspondances d'un motif sur
+/// plusieurs lignes (`multiline`), cherché dans tout le texte.
+fn lines_covered(regex: &regex::Regex, text: &str, line_count: usize) -> Vec<usize> {
+    let newlines: Vec<usize> = text.match_indices('\n').map(|(at, _)| at).collect();
+    let line_of = |at: usize| newlines.partition_point(|newline| *newline < at);
+    let mut covered = std::collections::BTreeSet::new();
+    for found in regex.find_iter(text) {
+        let last = found.end().saturating_sub(1).max(found.start());
+        covered.extend(line_of(found.start())..=line_of(last));
+    }
+    covered
+        .into_iter()
+        .filter(|line| *line < line_count)
+        .collect()
+}
+
+/// Le fichier passe les filtres `glob` (comparé au chemin sous la base de la
+/// recherche, avec des `/`, et au nom du fichier) et `type`.
 fn matches_optional_filters(
     path: &Path,
-    glob_filter: Option<&Pattern>,
-    file_type: Option<&str>,
+    base: &Path,
+    globs: &[Pattern],
+    types: Option<&[String]>,
 ) -> bool {
-    if let Some(glob_filter) = glob_filter {
-        let path_string = path.to_string_lossy();
-        if !glob_filter.matches(&path_string) && !glob_filter.matches_path(path) {
+    if !globs.is_empty() {
+        let relative = path
+            .strip_prefix(base)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let absolute = path.to_string_lossy().replace('\\', "/");
+        if !globs
+            .iter()
+            .any(|glob| glob.matches(&relative) || glob.matches(&name) || glob.matches(&absolute))
+        {
             return false;
         }
     }
-
-    if let Some(file_type) = file_type {
-        let extension = path.extension().and_then(|extension| extension.to_str());
-        if extension != Some(file_type) {
+    if let Some(types) = types {
+        let extension = path
+            .extension()
+            .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
+        if !extension.is_some_and(|extension| types.contains(&extension)) {
             return false;
         }
     }
-
     true
 }
 
@@ -1392,10 +2055,62 @@ fn similar_files(path: &str, root: &Path) -> Vec<String> {
 /// Erreur lisible par un modèle : où l'on est, comment écrire le chemin, et
 /// les fichiers qui portent un nom proche.
 fn missing_path_message(path: &str, root: &Path) -> String {
-    let mut message = format!(
-        "File not found: {path}\nThe working directory is {}. Use a path relative to it (for example `src/main.rs`), not an invented root.",
-        display_path(root)
-    );
+    let candidate = candidate_path(path, root);
+    // Le plus long début du chemin qui existe, s'il est dans le projet : le
+    // modèle voit quel segment est faux et ce qu'il y a à sa place.
+    let existing = candidate
+        .ancestors()
+        .skip(1)
+        .find(|dir| dir.is_dir())
+        .filter(|dir| dir.starts_with(root));
+    let mut message = format!("Not found: {path}");
+    match existing {
+        Some(dir) => {
+            let shown = dir
+                .strip_prefix(root)
+                .ok()
+                .filter(|relative| relative.components().next().is_some())
+                .map_or_else(
+                    || format!("the working directory ({})", display_path(root)),
+                    |relative| relative.to_string_lossy().replace('\\', "/"),
+                );
+            let missing = candidate
+                .strip_prefix(dir)
+                .ok()
+                .and_then(|rest| rest.components().next())
+                .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let mut entries: Vec<(bool, String)> = fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| {
+                    let is_dir = entry.path().is_dir();
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    (!is_dir, if is_dir { format!("{name}/") } else { name })
+                })
+                .collect();
+            entries.sort();
+            let listed: Vec<String> = entries
+                .iter()
+                .take(15)
+                .map(|(_, name)| name.clone())
+                .collect();
+            let more = if entries.len() > 15 { ", ..." } else { "" };
+            let _ = write!(
+                message,
+                "\n{shown} has nothing named \"{missing}\". It contains: {}{more}",
+                listed.join(", ")
+            );
+        }
+        None => {
+            let _ = write!(
+                message,
+                "\nThe working directory is {}. Use a path relative to it (for example `src/main.rs`), not an invented root.",
+                display_path(root)
+            );
+        }
+    }
     let similar = similar_files(path, root);
     if !similar.is_empty() {
         let _ = write!(
@@ -1494,11 +2209,90 @@ mod tests {
 
         // Sinon l'erreur dit où l'on est et propose les fichiers proches.
         let message = super::missing_path_message("/workspace/panier.py", &root);
-        assert!(message.starts_with("File not found: /workspace/panier.py"));
+        assert!(message.starts_with("Not found: /workspace/panier.py"));
         assert!(message.contains("The working directory is"));
         assert!(message.contains("src/panier.py"));
         assert!(message.contains("test_panier.py"));
+        // Un dossier mal écrit au milieu : ce qui existe, et ce qu'il contient.
+        let message = super::missing_path_message("src/paniers/panier.py", &root);
+        assert!(
+            message.contains("src has nothing named \"paniers\". It contains: panier.py"),
+            "{message}"
+        );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn edit_file_failures_carry_what_the_model_needs() {
+        let path = temp_path("echecs-edit.py");
+        let name = path.to_string_lossy().into_owned();
+        std::fs::write(
+            &path,
+            "def load(path):\n    return open(path)\n\ndef save(path):\n    return open(path)\n\nprint(\"ok\")\n",
+        )
+        .expect("fichier");
+        // Plusieurs occurrences : leurs lignes et la ligne d'avant.
+        let error = edit_file(&name, "    return open(path)\n", "    return None\n", false)
+            .expect_err("ambigu")
+            .to_string();
+        assert!(error.contains("appears 2 times, at lines 2, 5"), "{error}");
+        assert!(error.contains("1 \"def load(path):\""), "{error}");
+        // Introuvable : les vraies lignes autour de la plus proche, numérotées.
+        let error = edit_file(
+            &name,
+            "def save(chemin):\n",
+            "def save(path, mode):\n",
+            false,
+        )
+        .expect_err("introuvable")
+        .to_string();
+        assert!(error.contains("The closest place is lines"), "{error}");
+        assert!(error.contains("    4| def save(path):"), "{error}");
+        // Guillemets échappés deux fois : réessayé, et dit.
+        let fixed = edit_file(&name, "print(\\\"ok\\\")", "print(\\\"fini\\\")", false)
+            .expect("échappement en trop retiré");
+        assert!(fixed
+            .match_note
+            .unwrap_or_default()
+            .contains("extra backslash"));
+        assert!(std::fs::read_to_string(&path)
+            .expect("lu")
+            .contains("print(\"fini\")"));
+        // Textes identiques : la ligne où le texte est déjà.
+        let error = edit_file(&name, "def load(path):", "def load(path):", false)
+            .expect_err("identiques")
+            .to_string();
+        assert!(error.contains("already in the file at line 1"), "{error}");
+        // `old_string` vide sur un fichier absent : créé.
+        let created = temp_path("cree-par-edit.py");
+        let made = edit_file(&created.to_string_lossy(), "", "x = 1\n", false).expect("créé");
+        assert!(made
+            .match_note
+            .unwrap_or_default()
+            .contains("it was created"));
+        assert_eq!(std::fs::read_to_string(&created).expect("lu"), "x = 1\n");
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(created);
+    }
+
+    #[test]
+    fn write_file_keeps_the_byte_order_mark_and_crlf_of_the_file() {
+        let path = temp_path("deploy.ps1");
+        std::fs::write(
+            &path,
+            b"\xEF\xBB\xBFWrite-Host \"Op\xC3\xA9ration\"\r\nexit 0\r\n",
+        )
+        .expect("script");
+        let written =
+            write_file(&path.to_string_lossy(), "Write-Host \"Fini\"\nexit 0\n").expect("écrit");
+        let bytes = std::fs::read(&path).expect("lu");
+        assert!(bytes.starts_with(b"\xEF\xBB\xBF"), "{bytes:?}");
+        assert_eq!(&bytes[3..], b"Write-Host \"Fini\"\r\nexit 0\r\n");
+        assert!(written
+            .encoding_note
+            .unwrap_or_default()
+            .contains("CRLF line endings and UTF-8 byte order mark kept"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -1528,6 +2322,238 @@ mod tests {
             .expect("time should move forward")
             .as_nanos();
         std::env::temp_dir().join(format!("claw-native-{name}-{unique}"))
+    }
+
+    fn grep_with(args: serde_json::Value) -> std::io::Result<super::GrepSearchOutput> {
+        grep_search(&serde_json::from_value(args).expect("arguments de grep_search"))
+    }
+
+    #[test]
+    fn grep_search_repairs_the_pattern_and_the_filters_and_says_so() {
+        use serde_json::json;
+        let dir = temp_path("grep-reprises");
+        std::fs::create_dir_all(dir.join("src").join("ui")).expect("dossier");
+        std::fs::write(dir.join("src").join("app.py"), "print(total)\nitems[0]\n").expect("py");
+        std::fs::write(
+            dir.join("src").join("ui").join("page.tsx"),
+            "export const page = 1\n",
+        )
+        .expect("tsx");
+        std::fs::write(
+            dir.join("src").join("ui").join("util.ts"),
+            "export const util = 2\n",
+        )
+        .expect("ts");
+        let base = dir.to_string_lossy().into_owned();
+        let note = |found: &super::GrepSearchOutput| found.note.clone().unwrap_or_default();
+
+        // Un motif qui n'est pas une expression régulière : cherché comme texte.
+        let found = grep_with(json!({"pattern": "print(", "path": base, "output_mode": "content"}))
+            .expect("grep");
+        assert_eq!(found.num_files, 1);
+        assert!(found
+            .content
+            .clone()
+            .unwrap_or_default()
+            .contains("print(total)"));
+        assert!(
+            note(&found).contains("searched as plain text"),
+            "{}",
+            note(&found)
+        );
+        // Regard avant : une erreur qui dit quoi faire.
+        let error = grep_with(json!({"pattern": "foo(?=bar)", "path": base}))
+            .expect_err("non pris en charge");
+        assert!(error.to_string().contains("look-ahead"), "{error}");
+
+        // `type` en nom de langage, `glob` relatif et à accolades.
+        for (args, expected) in [
+            (
+                json!({"pattern": "print", "path": base, "type": "python"}),
+                1,
+            ),
+            (json!({"pattern": "print", "path": base, "type": ".py"}), 1),
+            (
+                json!({"pattern": "export", "path": base, "type": "typescript"}),
+                2,
+            ),
+            (
+                json!({"pattern": "export", "path": base, "glob": "src/ui/*.ts"}),
+                1,
+            ),
+            (
+                json!({"pattern": "export", "path": base, "glob": "*.{ts,tsx}"}),
+                2,
+            ),
+        ] {
+            assert_eq!(
+                grep_with(args.clone()).expect("grep").num_files,
+                expected,
+                "{args}"
+            );
+        }
+        // Un synonyme du mode de sortie, lu et dit.
+        let lines = grep_with(json!({"pattern": "export", "path": base, "output_mode": "lines"}))
+            .expect("grep");
+        assert_eq!(lines.mode.as_deref(), Some("content"));
+        assert!(
+            note(&lines).contains("was read as \"content\""),
+            "{}",
+            note(&lines)
+        );
+        // Un filtre qui écarte tout : dit.
+        let empty =
+            grep_with(json!({"pattern": "export", "path": base, "type": "golang"})).expect("grep");
+        assert_eq!(empty.num_files, 0);
+        assert!(
+            note(&empty).contains("none passed the filter type \"golang\""),
+            "{}",
+            note(&empty)
+        );
+        // Un motif sur plusieurs lignes, dans les trois modes.
+        for mode in ["content", "files_with_matches", "count"] {
+            let found = grep_with(json!({
+                "pattern": "print\\(total\\)\\s*\\nitems",
+                "path": base,
+                "multiline": true,
+                "output_mode": mode,
+            }))
+            .expect("grep");
+            assert_eq!(found.num_files, 1, "{mode}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_abridged_rewrite_does_not_destroy_the_file() {
+        let path = temp_path("abrege.py");
+        let original = (1..=40)
+            .map(|n| format!("def f{n}():\n    return {n}\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        std::fs::write(&path, &original).expect("original");
+        let name = path.to_string_lossy().into_owned();
+        // Réécrit en abrégé : refusé, le fichier reste entier.
+        let abridged = "def f1():\n    return 1\n# ... rest of the code remains unchanged\n";
+        let error = write_file(&name, abridged).expect_err("refusé");
+        assert!(
+            error
+                .to_string()
+                .contains("line 3 of your content is a placeholder"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("lu"), original);
+        // Un nouveau fichier avec une élision : écrit, avec une note.
+        let fresh = temp_path("nouveau.js");
+        let written = write_file(
+            &fresh.to_string_lossy(),
+            "const a = 1;\n// ... existing code ...\n",
+        )
+        .expect("écrit");
+        assert!(written.note.unwrap_or_default().contains("placeholder"));
+        // edit_file qui remplace du code par une élision : refusé.
+        let error = edit_file(
+            &name,
+            "def f2():\n    return 2\ndef f3():\n    return 3\n",
+            "# ...\n",
+            false,
+        )
+        .expect_err("refusé");
+        assert!(
+            error.to_string().contains("edit_file was not executed"),
+            "{error}"
+        );
+        // Ce qui n'est pas une élision passe.
+        assert!(!super::is_elision_line("# Load existing config..."));
+        assert!(!super::is_elision_line("    ..."));
+        assert!(super::is_elision_line("    // ... existing code ..."));
+        assert!(super::is_elision_line(
+            "<!-- ... reste du code inchangé -->"
+        ));
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(fresh);
+    }
+
+    #[test]
+    fn a_directory_is_listed_instead_of_failing() {
+        let dir = temp_path("dossier-lu");
+        std::fs::create_dir_all(dir.join("components")).expect("dossier");
+        std::fs::write(dir.join("App.tsx"), "export {}\n").expect("fichier");
+        let listing = read_file(&dir.to_string_lossy(), None, None).expect("liste");
+        assert_eq!(listing.file.content, "components/\nApp.tsx");
+        assert!(listing
+            .file
+            .note
+            .unwrap_or_default()
+            .contains("is a directory, not a file"));
+        let error = write_file(&dir.to_string_lossy(), "x").expect_err("dossier");
+        assert!(
+            error
+                .to_string()
+                .contains("is a directory: write_file needs the path of a file inside it"),
+            "{error}"
+        );
+        // `limit: 0` et fichier vide.
+        let empty = dir.join("vide.txt");
+        std::fs::write(&empty, "").expect("vide");
+        let read = read_file(&empty.to_string_lossy(), None, Some(0)).expect("lu");
+        let note = read.file.note.unwrap_or_default();
+        assert!(
+            note.contains("\"limit\": 0 was read as the default"),
+            "{note}"
+        );
+        assert!(note.contains("exists and is empty"), "{note}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn glob_search_walks_the_tree_and_repairs_common_patterns() {
+        // Un `[` dans le dossier de base (projet rangé dans « Site [v2] ») :
+        // le motif ne le lit plus comme une classe de caractères.
+        let dir = temp_path("glob-reprises [v2]");
+        for (file, text) in [
+            ("src/app.ts", "a"),
+            ("src/ui/page.tsx", "b"),
+            ("src/ui/style.css", "c"),
+            ("node_modules/pkg/index.ts", "d"),
+            ("README.md", "e"),
+        ] {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().expect("dossier")).expect("dossier");
+            std::fs::write(path, text).expect("fichier");
+        }
+        let base = dir.to_string_lossy().into_owned();
+        let glob = |pattern: &str| glob_search(pattern, Some(&base)).expect("glob");
+        let note = |found: &super::GlobSearchOutput| found.note.clone().unwrap_or_default();
+
+        // `*.ts` ne trouve rien au premier niveau : cherché dans les sous-dossiers.
+        let found = glob("*.ts");
+        assert_eq!(found.num_files, 1, "{:?}", found.filenames);
+        assert!(
+            note(&found).contains("\"**/*.ts\" was searched instead"),
+            "{}",
+            note(&found)
+        );
+        // Accolades, chemin relatif, `**` collé, dossier nommé tel quel.
+        assert_eq!(glob("**/*.{ts,tsx}").num_files, 2);
+        assert_eq!(glob("src/ui/*.tsx").num_files, 1);
+        let css = glob("**.css");
+        assert_eq!(css.num_files, 1);
+        assert!(
+            note(&css).contains("was read as \"**/*.css\""),
+            "{}",
+            note(&css)
+        );
+        assert_eq!(glob("src").num_files, 3);
+        // Rien : la note dit ce qui a été parcouru.
+        let empty = glob("**/*.vue");
+        assert_eq!(empty.num_files, 0);
+        assert!(
+            note(&empty).contains("No file matches \"**/*.vue\""),
+            "{}",
+            note(&empty)
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1578,7 +2604,7 @@ mod tests {
             "c\nb\nc\n"
         );
 
-        // Introuvable : la ligne la plus proche est indiquée.
+        // Introuvable : les vraies lignes autour de la plus proche, numérotées.
         let error = apply_edit(
             "fn compute_total(items: &[u32]) -> u32 {\n",
             "fn compute_totals(items: &[u32]) -> u64 {",
@@ -1586,7 +2612,11 @@ mod tests {
             false,
         )
         .expect_err("missing");
-        assert!(error.contains("Closest line 1"), "{error}");
+        assert!(
+            error.contains("The closest place is lines 1 to 1"),
+            "{error}"
+        );
+        assert!(error.contains("    1| fn compute_total(items"), "{error}");
     }
 
     #[test]
@@ -1706,13 +2736,13 @@ mod tests {
             .is_some_and(|note| note.contains("Windows-1252")));
         assert_eq!(std::fs::read(&csv).expect("cp1252"), b"prix;5 \x80\r\n");
         let output = write_file(&path, "prix \u{2192} 5\n").expect("conversion");
-        assert!(output
-            .encoding_note
-            .as_deref()
-            .is_some_and(|note| note.contains("now UTF-8")));
+        let note = output.encoding_note.unwrap_or_default();
+        assert!(note.contains("now UTF-8"), "{note}");
+        // Le fichier était en CRLF : il le reste.
+        assert!(note.contains("CRLF line endings kept"), "{note}");
         assert_eq!(
             std::fs::read_to_string(&csv).expect("utf8"),
-            "prix \u{2192} 5\n"
+            "prix \u{2192} 5\r\n"
         );
         // UTF-16 : réécrit en UTF-16, avec sa marque d'ordre.
         let utf16 = temp_path("notes16.txt");

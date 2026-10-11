@@ -151,7 +151,7 @@ traitement conseillé.
   Dans `edit_file` et `write_file`, une erreur qui nomme le chemin :
   `[Claw] "src/utils" is a directory: write_file needs the path of a file inside it, for example src/utils/helpers.py.`
   Aucune requête de plus.
-- État : à vérifier
+- État : corrigé (lot 3) : read_file liste un dossier (200 entrées au plus, dossiers marqués d'un /) au lieu de l'erreur du système ; write_file et edit_file sur un dossier disent qu'il faut un fichier dedans.
 
 ## E1-06 grep_search : un motif qui n'est pas une expression régulière valide rend l'erreur brute du moteur
 - Gravité : haute
@@ -173,7 +173,7 @@ traitement conseillé.
   la recherche littérale n'a pas de sens : rendre une erreur qui dit quoi faire :
   `[Claw] grep_search does not support look-ahead, look-behind or backreferences. Search for the simpler part of the pattern here, or run grep -P in bash.`
   Aucune requête de plus.
-- État : à vérifier
+- État : corrigé (lot 3) : un motif invalide est cherché comme texte, et la note le dit ; regards avant, arrière et références arrière reçoivent une erreur qui dit quoi faire.
 
 ## E1-07 grep_search : trois filtres qui rendent « rien trouvé » sans rien dire
 - Gravité : haute
@@ -207,7 +207,7 @@ traitement conseillé.
   4. Dans tous les cas, quand un filtre a écarté tous les fichiers parcourus, le dire :
      `[Claw] No file was searched: 214 files were found under src but none passed the filter type "golang". Use a file extension (go), or drop the filter.`
   Aucune requête de plus.
-- État : à vérifier
+- État : corrigé (lot 3) : type lu comme langage ou extension, glob comparé au chemin sous la base et au nom, accolades développées, synonymes de output_mode lus et dits (et enum dans le schéma), note quand les filtres ont tout écarté.
 
 ## E1-08 Mode texte : un bloc `<tool_call>` au JSON invalide ou coupé est jeté sans rien dire
 - Gravité : haute
@@ -313,7 +313,7 @@ traitement conseillé.
      `[Claw] No file matches "**/*.vue" under D:/projet (1 240 files looked at). Check the extension, or list what exists with "**/*".`
   6. `truncated` : ajouter `Showing the 100 most recent of 2 316 matching files: narrow the pattern or give a path.`
   Aucune requête de plus.
-- État : à vérifier
+- État : corrigé (lot 3) : glob_search parcourt la base comme grep_search et compare le chemin relatif ; accolades, ** collé réparé, motif sans ** puis dossier nommé tels quels cherchés plus largement, note quand rien ne correspond (fichiers parcourus) ou quand la liste est coupée.
 
 ## E1-11 TodoWrite : erreurs brutes de serde sur chaque tâche, et un fichier de suivi illisible bloque l'outil pour toujours
 - Gravité : haute
@@ -569,7 +569,7 @@ traitement conseillé.
      `new_string` et le dire (`Created app.py with new_string, as write_file would`). Fichier
      existant non vide : garder l'erreur actuelle.
   Aucune requête de plus ; chaque cas en économise une.
-- État : à vérifier
+- État : corrigé (lot 3) : occurrences multiples avec leurs lignes et la ligne d'avant, texte introuvable avec les vraies lignes autour de la plus proche (numérotées), textes identiques avec la ligne où le texte est déjà, old_string vide sur un fichier absent ou vide : fichier créé. Tolérances ajoutées : guillemets échappés, \n en deux caractères, espace insécable. Pas fait : texte d'avant une modification du même tour, recherche du texte dans d'autres fichiers.
 
 ## E1-19 write_file et edit_file : un contenu abrégé (« ... rest of the code unchanged ... ») est écrit tel quel
 - Gravité : haute
@@ -593,7 +593,7 @@ traitement conseillé.
   `[Claw] write_file was not executed: line 14 of your content is a placeholder ("# ... rest of the code remains unchanged"), not code, and the file would shrink from 412 to 58 lines. write_file replaces the whole file with exactly what you send. To change part of app.py, use edit_file with the lines that change; to rewrite it, send every line.`
   Sans la condition (b), écrire mais joindre un avertissement. Coupé par
   `CLAW_PLACEHOLDER_GUARD=0`.
-- État : à vérifier
+- État : corrigé (lot 3) : is_elision_line et placeholder_check ; write_file refusé quand le fichier fondrait de plus de moitié, sinon écrit avec une note ; edit_file refusé quand une élision remplace des lignes. Aide CLAW_PLACEHOLDER_GUARD.
 
 ## E1-20 bash : sans shell POSIX le modèle reçoit une consigne d'installation, et une commande introuvable ne reçoit aucune aide
 - Gravité : moyenne
@@ -659,7 +659,7 @@ traitement conseillé.
   4. `REPL` : passer par `runtime::run_tool_command`, comme `PowerShell`, pour appliquer le
      délai et l'interruption.
   Aucune requête de plus.
-- État : à vérifier
+- État : en partie (lot 3) : limit 0 lu comme la limite par défaut, fichier vide dit. Restent Sleep (plafond, interruption) et REPL (délai).
 
 ## E1-22 Chemin introuvable : le message suppose une « racine inventée », ne propose aucun dossier et ne dit pas comment créer
 - Gravité : moyenne
@@ -687,7 +687,7 @@ traitement conseillé.
      dire `Folder not found`.
   4. Autres erreurs : nommer le chemin et la cause (`"a<b.txt" is not a valid file name on
      Windows: remove < > : " | ? *`).
-- État : à vérifier
+- État : corrigé (lot 3) : le message dit jusqu'où le chemin existe et ce que contient le dernier dossier trouvé ; la phrase sur la racine inventée seulement hors du projet ; edit_file ajoute comment créer le fichier.
 
 ## E1-23 BashOutput et KillShell : identifiant voisin refusé, et tâche perdue après un redémarrage sans explication
 - Gravité : basse

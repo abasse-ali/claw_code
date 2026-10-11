@@ -428,14 +428,20 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "pattern": { "type": "string" },
                     "path": { "type": "string" },
                     "glob": { "type": "string" },
-                    "output_mode": { "type": "string" },
+                    "output_mode": {
+                        "type": "string",
+                        "enum": ["content", "files_with_matches", "count"]
+                    },
                     "-B": { "type": "integer", "minimum": 0 },
                     "-A": { "type": "integer", "minimum": 0 },
                     "-C": { "type": "integer", "minimum": 0 },
                     "context": { "type": "integer", "minimum": 0 },
                     "-n": { "type": "boolean" },
                     "-i": { "type": "boolean" },
-                    "type": { "type": "string" },
+                    "type": {
+                        "type": "string",
+                        "description": "File type: a language (python, rust, typescript...) or an extension (py, rs, ts)"
+                    },
                     "head_limit": { "type": "integer", "minimum": 1 },
                     "offset": { "type": "integer", "minimum": 0 },
                     "multiline": { "type": "boolean" }
@@ -5795,6 +5801,7 @@ setTimeout(function () { nexistepas(); }, 100);
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn file_tools_cover_read_write_and_edit_behaviors() {
         let _guard = env_lock()
             .lock()
@@ -5894,14 +5901,20 @@ setTimeout(function () { nexistepas(); }, 100);
             &json!({ "path": "nested/demo.txt", "old_string": "omega", "new_string": "omega" }),
         )
         .expect_err("identical old/new should fail");
-        assert!(edit_same.contains("must differ"));
+        assert!(
+            edit_same.contains("old_string and new_string are identical"),
+            "{edit_same}"
+        );
 
         let edit_missing = execute_tool(
             "edit_file",
             &json!({ "path": "nested/demo.txt", "old_string": "missing", "new_string": "omega" }),
         )
         .expect_err("missing substring should fail");
-        assert!(edit_missing.contains("old_string not found"));
+        assert!(
+            edit_missing.contains("old_string is not in the file"),
+            "{edit_missing}"
+        );
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
         let _ = fs::remove_dir_all(root);
@@ -5953,7 +5966,9 @@ setTimeout(function () { nexistepas(); }, 100);
         .expect("grep content should succeed");
         let grep_content_output: serde_json::Value =
             serde_json::from_str(&grep_content).expect("json");
-        assert_eq!(grep_content_output["numFiles"], 0);
+        // `head_limit` et `offset` découpent les lignes, pas la liste des
+        // fichiers (A6).
+        assert_eq!(grep_content_output["numFiles"], 1);
         assert!(grep_content_output["appliedLimit"].is_null());
         assert_eq!(grep_content_output["appliedOffset"], 1);
         assert!(grep_content_output["content"]
@@ -5969,12 +5984,16 @@ setTimeout(function () { nexistepas(); }, 100);
         let grep_count_output: serde_json::Value = serde_json::from_str(&grep_count).expect("json");
         assert_eq!(grep_count_output["numMatches"], 3);
 
-        let grep_error = execute_tool(
+        // Un motif qui n'est pas une expression régulière : cherché comme texte.
+        let grep_plain = execute_tool(
             "grep_search",
             &json!({ "pattern": "(alpha", "path": "nested" }),
         )
-        .expect_err("invalid regex should fail");
-        assert!(!grep_error.is_empty());
+        .expect("motif cherché comme texte");
+        assert!(
+            grep_plain.contains("searched as plain text"),
+            "{grep_plain}"
+        );
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
         let _ = fs::remove_dir_all(root);

@@ -338,7 +338,7 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
   la barre dans `old_string` et dans `new_string` ; si l'occurrence est alors unique, faire la
   modification et le dire dans `matchNote` (« échappement en trop retiré »). Ne pas le faire
   si le fichier porte lui-même `\"` à cet endroit. Deux requêtes de moins à chaque fois.
-- État : à vérifier
+- État : corrigé (lot 3) : guillemets échappés deux fois retirés et dits (matchNote) ; textes identiques : la ligne où le texte est déjà.
 
 ## E2-10 Un réglage remplacé sans chercher ce qui en dépend
 - Gravité : haute
@@ -415,7 +415,7 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
   `grep_search` (les dossiers générés ne sont jamais ouverts, sauf si le motif ou le chemin
   les nomme), puis comparer chaque chemin relatif au motif avec `glob::Pattern`. Aucun
   changement pour le modèle, sinon la durée.
-- État : à vérifier
+- État : corrigé (lot 3) : glob_search parcourt avec WalkDir et coupe les dossiers générés pendant le parcours.
 
 ## E2-13 La réponse dit à l'utilisateur d'écraser un fichier qui existe
 - Gravité : basse
