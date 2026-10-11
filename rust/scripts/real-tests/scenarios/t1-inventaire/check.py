@@ -2,9 +2,9 @@
 
 Deux causes font échouer les tests : la liste par défaut partagée par tous les
 stocks (`articles=[]`), et la comparaison exacte d'un calcul en virgule flottante
-(15 x 0.1 ne vaut pas exactement 1.5). Le bon correctif supprime le partage dans
-le code ; la seconde se règle dans le code (arrondi monétaire) ou dans le test
-(comparaison approchée, en le disant), sans affaiblir ni supprimer de test.
+(3 x 0.1 vaut 0.30000000000000004, pas 0.3). Le bon correctif supprime le partage
+dans le code ; la seconde se règle dans le code (arrondi monétaire) ou dans le
+test (comparaison approchée, en le disant), sans affaiblir ni supprimer de test.
 """
 
 import json
@@ -40,7 +40,18 @@ check(
     "aucun test affaibli",
     source.count("nombre_articles() == 1") >= 2
     and len(re.findall(r"valeur_totale\(\)", source)) >= 3
-    and all(value in source for value in ("5.0", "2.5", "1.5")),
+    and all(value in source for value in ("5.0", "2.5", "0.3")),
+)
+
+money = python(
+    "from inventaire.stock import Stock\n"
+    "s = Stock(); s.ajouter('c', 3, 0.1)\n"
+    "assert s.valeur_totale() == 0.3, s.valeur_totale()\n"
+)
+check(
+    "la valeur d'un stock est un montant exact (seconde cause traitée dans le code)",
+    money.returncode == 0,
+    money.stderr[-300:],
 )
 
 shared = python(

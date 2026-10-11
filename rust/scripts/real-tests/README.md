@@ -14,13 +14,20 @@ python run.py t2-notes --model poolside/laguna-s-2.1:free --label laguna
 
 Chaque essai :
 
-- copie `scenarios/<nom>/project` dans `rust/target/real-tests/<date>-<nom>-<label>/project` ;
+- copie `scenarios/<nom>/project` dans `<essais>/<date>-<nom>-<label>/project` et en fait un
+  dépôt Git à lui (un commit initial) ;
 - lance `claw` sur cette copie, sans interaction, en mode `danger-full-access` (la copie seule
   est en jeu) et avec `CLAW_FALLBACK=0`, pour rester sur un seul modèle ;
 - note les requêtes gratuites consommées (`claw credits` avant et après), les appels
   d'outils, les remarques de Claw et la réponse finale ;
 - lance `check.py` et écrit `result.json` ; une ligne résume l'essai dans
-  `rust/target/real-tests/results.jsonl`.
+  `<essais>/results.jsonl`.
+
+`<essais>` est hors du dépôt : `CLAW_REAL_TESTS_DIR`, sinon `%LOCALAPPDATA%\claw-real-tests`
+(`~/.cache/claw-real-tests` ailleurs). Dans le dépôt, Claw donnerait au modèle l'état et le
+diff Git du dépôt entier (le 12 octobre, un petit modèle y a lu les pièges d'un scénario), et
+les `CLAW.md`, `CLAUDE.md` ou `AGENTS.md` des dossiers parents : `run.py` refuse un dossier
+d'essais qui en a au-dessus de lui.
 
 Règles : modèles gratuits seulement ; peu d'essais, ciblés (chaque étape de l'agent coûte une
 requête du quota gratuit) ; les vraies clés sont lues par Claw et ne sont jamais affichées.

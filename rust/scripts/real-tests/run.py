@@ -4,11 +4,16 @@ Usage :
     python run.py SCENARIO [--model MODELE] [--label TEXTE] [--timeout SECONDES] [--claw CHEMIN]
     python run.py --list
 
-Copie le projet du scénario dans rust/target/real-tests/<date>-<scenario>-<label>/project,
-lance Claw dessus sans interaction (mode danger-full-access dans cette copie, bascule de
-modèle coupée), puis la vérification cachée du scénario (check.py, jamais copiée dans le
-projet). Le détail va dans result.json à côté du projet, et une ligne dans
-rust/target/real-tests/results.jsonl.
+Copie le projet du scénario dans <essais>/<date>-<scenario>-<label>/project, en fait un
+dépôt Git à lui (un commit initial), lance Claw dessus sans interaction (mode
+danger-full-access dans cette copie, bascule de modèle coupée), puis la vérification
+cachée du scénario (check.py, jamais copiée dans le projet). Le détail va dans
+result.json à côté du projet, et une ligne dans <essais>/results.jsonl.
+
+<essais> est hors de ce dépôt : CLAW_REAL_TESTS_DIR, sinon %LOCALAPPDATA%\\claw-real-tests
+(~/.cache/claw-real-tests ailleurs). Dans le dépôt, Claw donnerait au modèle l'état et le
+diff Git du dépôt entier, et les fichiers d'instructions des dossiers parents : le modèle y
+lirait les pièges des scénarios.
 
 Chaque étape de l'agent consomme une requête du quota gratuit : peu d'essais, ciblés, et
 toujours des modèles gratuits.
@@ -28,7 +33,36 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SCENARIOS = HERE / "scenarios"
 RUST = HERE.parent.parent
-RUNS = RUST / "target" / "real-tests"
+
+
+def runs_dir():
+    if os.environ.get("CLAW_REAL_TESTS_DIR"):
+        return Path(os.environ["CLAW_REAL_TESTS_DIR"])
+    if os.environ.get("LOCALAPPDATA"):
+        return Path(os.environ["LOCALAPPDATA"]) / "claw-real-tests"
+    return Path.home() / ".cache" / "claw-real-tests"
+
+
+RUNS = runs_dir()
+# Ce que Claw lit dans les dossiers parents d'un projet : rien de tout cela ne doit
+# exister au-dessus des essais, sinon le modèle verrait autre chose que le scénario.
+ANCESTOR_FILES = ("CLAW.md", "CLAW.local.md", "CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".git")
+
+
+def contaminated_ancestors(folder):
+    found = []
+    for parent in [folder, *folder.parents]:
+        for name in ANCESTOR_FILES:
+            if (parent / name).exists():
+                found.append(str(parent / name))
+    return found
+
+
+def make_repository(project):
+    """Le projet copié devient un dépôt Git propre (état et diff vides au départ)."""
+    git = ["git", "-c", "user.name=claw-bench", "-c", "user.email=bench@localhost"]
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "projet de départ"]):
+        subprocess.run(git + args, cwd=project, capture_output=True, check=True)
 
 
 def claw_binary(explicit):
@@ -126,11 +160,18 @@ def main():
     claw = claw_binary(args.claw)
     env = real_env()
 
+    RUNS.mkdir(parents=True, exist_ok=True)
+    leaks = contaminated_ancestors(RUNS)
+    if leaks:
+        sys.exit("dossier d'essais exposé (le modèle lirait ceci) : " + ", ".join(leaks)
+                 + "\nchoisissez un autre dossier avec CLAW_REAL_TESTS_DIR")
+
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     run_id = "-".join(part for part in (stamp, args.scenario, args.label) if part)
     run_dir = RUNS / run_id
     project = run_dir / "project"
     shutil.copytree(scenario / "project", project)
+    make_repository(project)
     prompt = (scenario / "prompt.txt").read_text(encoding="utf-8").strip()
 
     before = free_requests_left(claw, env)
@@ -186,7 +227,6 @@ def main():
         "answer": answer,
     }
     (run_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    RUNS.mkdir(parents=True, exist_ok=True)
     summary = {key: result[key] for key in ("run", "scenario", "model", "label", "seconds", "exit_code",
                                             "timed_out", "free_requests_used", "requests", "tool_calls",
                                             "score", "max") if key in result}

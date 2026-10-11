@@ -19,5 +19,5 @@ def test_ajouter_deux_fois_le_meme_article():
 def test_retirer():
     stock = Stock()
     stock.ajouter("clou", 20, 0.1)
-    stock.retirer("clou", 5)
-    assert stock.valeur_totale() == 1.5
+    stock.retirer("clou", 17)
+    assert stock.valeur_totale() == 0.3
