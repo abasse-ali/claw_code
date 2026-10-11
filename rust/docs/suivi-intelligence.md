@@ -17,11 +17,13 @@ compenser leurs faiblesses :
 
 ## Reprendre le chantier dans une nouvelle session
 
-1. Lire ce fichier en entier, puis `git log --oneline -15`.
-2. Lire les constats en attente dans [suivi/](suivi/) : un fichier par étude, écrit au fil de
-   l'eau par les agents. Un constat n'est corrigé qu'après vérification dans le code.
-3. Prendre le premier élément « à faire » du tableau ci-dessous, le traiter, le vérifier, le
-   committer, puis mettre ce fichier à jour dans le même commit.
+1. Lire ce fichier en entier, puis `git log --oneline -15` et `git status`.
+2. Aller à la section « Lots » : le premier lot dont l'état n'est pas « fait » est le suivant.
+   Chaque identifiant (E1-07, E2-14...) renvoie à un constat détaillé dans [suivi/](suivi/),
+   avec l'emplacement dans le code, la preuve et le remède proposé.
+3. Vérifier chaque constat dans le code avant de le corriger (les numéros de ligne ont pu
+   bouger), écrire le test, corriger, lancer la vérification complète, committer, pousser, puis
+   mettre à jour ce fichier et l'état du constat dans son fichier d'étude, dans le même commit.
 
 Règles permanentes (détail dans la mémoire du projet) :
 
@@ -49,14 +51,26 @@ CLAW_NO_USER_ENV=1 node test/run-vscode.js ../../target/debug/claw.exe
 ```
 
 S'y ajoutent la vérification Linux (`cargo clippy --target x86_64-unknown-linux-gnu` avec les
-faux compilateurs C, voir la mémoire) et le contrôle des tirets longs.
+faux compilateurs C, voir la mémoire) et le contrôle des tirets longs. `CLAW_TEST_BROWSER=1`
+active l'essai de `ViewPage` avec le vrai navigateur.
+
+Outil pour lire une vraie session sans appeler de modèle :
+
+```bash
+python rust/scripts/session-trace.py SESSION.json --out trace.txt           # une ligne par bloc
+python rust/scripts/session-trace.py SESSION.json --out blocs.txt --full 12 13
+python rust/scripts/session-trace.py SESSION.json --out notes.txt --notes   # remarques de Claw
+```
+
+Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw\sessions`.
 
 ## Méthode en mode Ultracode
 
 - Petits lots : deux agents au plus par étude, sur un périmètre étroit. Deux études à cinq puis
   deux agents ont été perdues parce que la session s'est arrêtée avant leur rapport.
 - Chaque agent écrit ses constats dans son fichier de [suivi/](suivi/) dès qu'ils sont confirmés.
-  Si la session s'arrête, ce qui est écrit reste.
+  Si la session s'arrête, ce qui est écrit reste. Cette méthode a marché le 11 octobre 2026 :
+  deux agents, 42 constats, rien de perdu.
 - Les agents lisent, ils ne modifient pas le code et ne lancent pas `cargo`.
 - La session principale vérifie chaque constat, corrige, teste, committe, et met ce fichier à jour.
 
@@ -69,35 +83,49 @@ faux compilateurs C, voir la mémoire) et le contrôle des tirets longs.
 | 2028cdd | Questions écrites en fin de réponse reposées avec le menu à choix |
 | f637bf7 | Signalement d'un problème : méthode de débogage jointe, preuves demandées, images numérotées, commandes conseillées essayées, outil écrit comme une commande |
 | 5260b7a | Outil `ViewPage` : texte affiché et console d'une page, dans un navigateur sans fenêtre |
+| bf47311 | Ce fichier de suivi |
 
-État des tests au dernier commit : 581 tests Rust, analyse statique à zéro sous Windows et
+État des tests au commit 5260b7a : 581 tests Rust, analyse statique à zéro sous Windows et
 Linux, client 28 sur 28, extension VS Code 18 sur 18.
 
 ## Études
 
 | Étude | Fichier de constats | État |
 |---|---|---|
-| E1. Erreurs rendues au modèle par les outils : chaque message dit-il quoi faire ? | [suivi/e1-erreurs-outils.md](suivi/e1-erreurs-outils.md) | lancée le 11 octobre 2026 |
-| E2. Sessions réelles de `test_claw` : où le modèle se trompe, ce que Claw a fait | [suivi/e2-sessions-reelles.md](suivi/e2-sessions-reelles.md) | lancée le 11 octobre 2026 |
-| E3. Erreurs des fournisseurs et du flux : qui est prévenu, quelle reprise | [suivi/e3-erreurs-fournisseurs.md](suivi/e3-erreurs-fournisseurs.md) | à faire par la session principale |
-| E4. Relecture indépendante des commits 59c1dbc à 5260b7a | à créer | à faire (deux tentatives interrompues) |
+| E1. Erreurs rendues au modèle par les outils : chaque message dit-il quoi faire ? | [suivi/e1-erreurs-outils.md](suivi/e1-erreurs-outils.md) | terminée le 11 octobre 2026 : 26 constats |
+| E2. Sessions réelles de `test_claw` : où le modèle se trompe, ce que Claw a fait | [suivi/e2-sessions-reelles.md](suivi/e2-sessions-reelles.md) | terminée le 11 octobre 2026 : 16 constats |
+| E3. Erreurs des fournisseurs et du flux : qui est prévenu, quelle reprise | [suivi/e3-erreurs-fournisseurs.md](suivi/e3-erreurs-fournisseurs.md) | terminée le 11 octobre 2026 : 6 constats |
+| E4. Relecture indépendante des commits 59c1dbc à 5260b7a et des lots ci-dessous | à créer | à faire (deux tentatives interrompues) |
 
-## À faire
+Études possibles ensuite : erreurs des outils de plugins et des serveurs MCP, outil
+`PowerShell`, interface de la page (messages d'erreur montrés à l'utilisateur), mode équipe.
 
-Les identifiants servent à s'y retrouver d'une session à l'autre. « Preuve » dit d'où vient le
-besoin.
+## Lots
 
-| Id | Sujet | Preuve | État |
-|---|---|---|---|
-| A1 | Corriger les constats confirmés de E1 | étude E1 | en attente de l'étude |
-| A2 | Corriger les constats confirmés de E2 | étude E2 | en attente de l'étude |
-| A3 | Étude E3 puis corrections | à faire | à faire |
-| A4 | Adresse locale donnée à l'utilisateur alors que rien n'écoute sur ce port : le dire au modèle avant que la réponse parte | session du 11 octobre : serveur arrêté par le modèle, puis « ouvrez http://localhost:8000 » | à faire |
-| A5 | `ViewPage` : cliquer, saisir, déposer un fichier (protocole DevTools, client WebSocket à écrire) | session du 11 octobre : le défaut n'apparaît qu'après l'envoi d'une image | à faire |
-| A6 | `grep_search` en mode `content` : `head_limit` et `offset` s'appliquent aussi à la liste des fichiers | relecture du 11 octobre | à faire |
-| A7 | Relecture indépendante E4 | deux tentatives interrompues | à faire |
-| A8 | Vérifier Gemini en conditions réelles (signatures renvoyées, schéma des outils) | demande une requête de génération : accord de l'utilisateur requis | bloqué par l'accord |
-| A9 | Mesurer l'effet des contrôles sur de vrais modèles gratuits | demande de vraies requêtes : accord de l'utilisateur requis | bloqué par l'accord |
+Chaque lot est un commit. L'ordre suit le gain pour un petit modèle et la fréquence dans les
+sessions réelles.
+
+| Lot | Contenu | État |
+|---|---|---|
+| 1. Ce que Claw croit d'une commande | E2-14 (échec caché par `\| tail`), E2-11 (le mot `test` dans un chemin), E2-04 (vérification d'un projet en sous-dossiers), E2-15 (code des erreurs depuis un sous-dossier), E3-01, E3-02, E3-03 (reprises du client de l'API), E3-04 (contexte trop long), E3-06 (conseils d'erreur) | en cours le 11 octobre 2026 |
+| 2. Contrôles de fin de tour | E2-03 (le contrôle des exigences cite la demande), E2-08 (réponse faite de titres vides), E2-05 et E2-16 (images : défaut ou maquette, tri avant le guide), E2-01 (demande d'autorisation sans réponse) | à faire |
+| 3. Fichiers et recherche | E1-19 (contenu abrégé écrit tel quel), E1-05 (dossier lu comme un fichier), E1-06 (motif non valide), E1-07 (filtres de `grep_search`), E1-10 et E2-12 (`glob_search`), E1-18 et E2-09 (`edit_file`), E1-21 (valeurs hors bornes), E1-22 (chemin introuvable) | à faire |
+| 4. Arguments et outils inconnus | E1-01, E1-04, E1-11 (mise en forme des arguments d'après le schéma), E1-02 (outil inconnu), E1-03 (noms d'outils dans les sous-agents) | à faire |
+| 5. Mémoire de la session | E2-06 (résumé de compaction qui n'en est pas un), E2-07 (résultats non allégés d'une session reprise), E3-05 (réponse coupée par la limite de sortie) | à faire |
+| 6. Appels mal formés et sous-agents | E1-08 (bloc d'appel jeté en mode texte), E1-09 (réparation du JSON), E1-12 et E1-13 (sous-agents), E1-17 (lecture seule), E1-15 et E1-16 (web) | à faire |
+| 7. Impact et cohérence de la réponse | E2-10 (réglage remplacé sans chercher qui en dépend), E2-02 (réponse qui cite ce qui n'existe pas), E2-13 (commande qui écrase un fichier), A4 (adresse locale où rien n'écoute) | à faire |
+| 8. Le reste | E1-14, E1-20, E1-23 à E1-26 | à faire |
+
+Hors lots :
+
+| Id | Sujet | État |
+|---|---|---|
+| A5 | `ViewPage` : cliquer, saisir, déposer un fichier (protocole DevTools, client WebSocket à écrire) | à faire |
+| A6 | `grep_search` en mode `content` : `head_limit` et `offset` s'appliquent aussi à la liste des fichiers | à faire, avec le lot 3 |
+| A7 | Relecture indépendante (étude E4) | à faire après les lots 1 à 3 |
+| A8 | Vérifier Gemini en conditions réelles (signatures renvoyées, schéma des outils) | bloqué : demande une requête de génération, accord de l'utilisateur requis |
+| A9 | Mesurer l'effet des contrôles sur de vrais modèles gratuits | bloqué : demande de vraies requêtes, accord de l'utilisateur requis |
+| A10 | `grep_search` accepte aussi les noms `A`, `B`, `C`, `n`, `i` (schémas réduits de E3-02) | à faire, avec le lot 4 |
 
 ## Journal
 
@@ -109,4 +137,6 @@ besoin.
   lu qu'une image sur deux, a corrigé une cause supposée, a annoncé « résolu » sans rien
   observer, a réécrit quatre tests et a conseillé des commandes jamais lancées. Réponses de
   Claw : 2028cdd, f637bf7, 5260b7a.
-- Ce fichier de suivi est créé, les études E1 et E2 sont lancées.
+- Ce fichier de suivi est créé. Études E1 et E2 menées par deux agents (26 et 16 constats,
+  écrits au fil de l'eau), étude E3 par la session principale (6 constats).
+- Lot 1 commencé.
