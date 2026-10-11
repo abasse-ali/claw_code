@@ -23,8 +23,10 @@ Chaque essai :
 - lance `check.py` et écrit `result.json` ; une ligne résume l'essai dans
   `<essais>/results.jsonl`.
 
-`<essais>` est hors du dépôt : `CLAW_REAL_TESTS_DIR`, sinon `%LOCALAPPDATA%\claw-real-tests`
-(`~/.cache/claw-real-tests` ailleurs). Dans le dépôt, Claw donnerait au modèle l'état et le
+`<essais>` est hors du dépôt : `CLAW_REAL_TESTS_DIR`, sinon le dossier `claw-real-tests` à côté
+du dépôt (`D:\Mes_Projets\claw-real-tests`). Pas dans `%LOCALAPPDATA%` : le Python du
+Microsoft Store y écrit dans un dossier virtuel que Git et Claw ne voient pas. Dans le dépôt,
+Claw donnerait au modèle l'état et le
 diff Git du dépôt entier (le 12 octobre, un petit modèle y a lu les pièges d'un scénario), et
 les `CLAW.md`, `CLAUDE.md` ou `AGENTS.md` des dossiers parents : `run.py` refuse un dossier
 d'essais qui en a au-dessus de lui.

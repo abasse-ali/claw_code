@@ -7,8 +7,8 @@ réfléchissent. Fais toujours en sorte qu'on puisse reprendre sur une autre ses
 ## Méthode
 
 - Banc d'essai : `rust/scripts/real-tests/` (voir son README). Trois scénarios, chacun avec
-  une vérification cachée qui note le résultat ; les essais tournent dans
-  `rust/target/real-tests/` (hors du suivi Git), une ligne par essai dans `results.jsonl`.
+  une vérification cachée qui note le résultat ; les essais tournent hors du dépôt, dans
+  `D:\Mes_Projets\claw-real-tests`, une ligne par essai dans `results.jsonl`.
 - Modèle : le réglage de l'utilisateur (`free`, le gratuit le plus puissant du moment), sans
   bascule (`CLAW_FALLBACK=0`). D'autres modèles gratuits ensuite, pour vérifier que les
   améliorations ne dépendent pas d'un seul modèle.
@@ -53,9 +53,23 @@ plutôt que par une longue consigne :
 Les essais du 12 octobre avant 01:15 tournaient dans `rust/target/real-tests/`, donc dans le
 dépôt : les trois premiers sont sans doute propres (aucune modification non commitée ne
 parlait des pièges), les suivants non. Depuis, `run.py` fait tourner les essais hors du dépôt
-(`%LOCALAPPDATA%\claw-real-tests`), chaque projet dans son propre dépôt Git, et refuse un
-dossier qui a des instructions ou un dépôt au-dessus de lui. Tous les essais sont à refaire
-dans ces conditions.
+(`D:\Mes_Projets\claw-real-tests`, à côté du dépôt ; pas `%LOCALAPPDATA%`, que le Python du
+Microsoft Store virtualise), chaque projet dans son propre dépôt Git, et refuse un dossier qui
+a des instructions ou un dépôt au-dessus de lui. Tous les essais sont à refaire dans ces
+conditions.
+
+Série propre (hors du dépôt), Claw au commit 695d03d :
+
+| Date | Scénario | Modèle | Étiquette | Score | Requêtes | Durée | Remarques |
+|---|---|---|---|---|---|---|---|
+| 12/10 01:16 | t1-inventaire | free = nemotron-3-ultra-550b | clean | 6/6 | 8 | 117 s | deux causes trouvées et prouvées, arrondi monétaire dans le code |
+| 12/10 01:18 | t2-notes | free = nemotron-3-ultra-550b | clean | 8/8 | 20 | 181 s | 3 relectures de `notes.py` après ses propres modifications, 7 essais en ligne de commande un par requête (T1-09, T1-10) |
+| 12/10 01:21 | t3-rapport | free = nemotron-3-ultra-550b | clean | 3/4 | 6 | 27 s | code corrigé, données intactes ; espaces insécables oubliées ; ne dit pas que le fichier n'était pas corrompu (T1-03, T1-04) |
+| 12/10 01:21 | t1-inventaire | cohere/north-mini-code | north | 6/6 | 20 | 113 s | a d'abord affaibli le test (`math.isclose`) ; la remarque « test réécrit après un échec » l'a fait revenir au code : aide efficace. 5 relectures, 4 micro-essais (T1-09, T1-10) |
+| 12/10 01:23 | t2-notes | cohere/north-mini-code | north | 8/8 | 36 | 231 s | 13 lectures de `notes.py` (par tranches, après chaque modification), 6 requêtes perdues dans `/tmp` avec le Python du Microsoft Store (T1-07), 6 essais un par requête |
+| 12/10 01:27 | t3-rapport | cohere/north-mini-code | north | 1/4 | 9 | 33 s | a réécrit `ventes.csv` en entier, de mémoire, sans reproduire ni toucher au script (T1-08) |
+
+Total de la série : 99 requêtes gratuites.
 
 ## Constats
 
@@ -107,6 +121,72 @@ dans ces conditions.
   `git diff` pour le détail).
 - État : à faire
 
+### T1-06 Le prompt système recopie les règles de permission de l'utilisateur
+- Preuve : `claw system-prompt` : la section « Runtime config » recopie le JSON fusionné des
+  réglages, dont la liste `permissions.allow` (ici 1,5 Ko de commandes `perl` et `PowerShell`
+  venues de `~/.claude/settings.json`). Le modèle n'en fait rien : c'est Claw qui applique
+  ces règles. La description d'une compétence externe y porte aussi un tiret long, que le
+  même prompt interdit d'écrire.
+- Remède : ne pas rendre la clé `permissions` (ni les secrets éventuels) dans le prompt ;
+  passer les descriptions de compétences par le filtre typographique.
+- État : à faire
+
+### T1-07 Le Python du Microsoft Store ne voit pas `/tmp` de Git Bash
+- Preuve : t2 north, messages 34 à 46 : `mkdir /tmp/x && cp notes.py /tmp/x && cd /tmp/x &&
+  python notes_test.py` échoue (`can't open file 'C:\\Users\\HP\\AppData\\Local\\Temp\\...'`).
+  Le Python installé par le Microsoft Store a sa propre vue de `AppData` : il ne voit pas ce
+  que Git Bash y écrit (et ce qu'il y écrit n'est pas vu des autres). Six requêtes perdues.
+- Remède : quand une commande échoue ainsi (chemin sous `AppData\\Local\\Temp` introuvable
+  pour un `python` de `WindowsApps`), le dire au modèle : travailler dans le dossier du
+  projet, pas dans `/tmp`.
+- État : à faire
+
+### T1-08 Un petit modèle « répare » les données de l'utilisateur au lieu du code qui les lit
+- Preuve : t3 north, message 4 : sans avoir reproduit l'erreur, `write_file ventes.csv` avec
+  le fichier entier réécrit de mémoire (« 12,5 » devient « 12.5 », « 1 250,00 » devient
+  « 1250.00 », et « 80 » devient « 80.00 » sans raison). Le script n'est pas touché : le
+  prochain export plantera de nouveau. Après la demande de preuves, il restaure le fichier,
+  reproduit l'erreur, puis refait la même réécriture (messages 10 à 16).
+- Défaut : l'hypothèse de l'utilisateur est prise pour une consigne (R1) ; des données valides
+  dans leur format sont modifiées (R4) ; sur un vrai fichier, une réécriture de mémoire peut
+  perdre des lignes.
+- Remède : (1) une garde, sur le modèle de celle des tests réécrits : quand des lignes
+  existantes d'un fichier de données sont remplacées, la remarque dit qu'un programme qui ne
+  sait pas lire des données ne prouve pas qu'elles sont fausses, de restaurer le fichier et de
+  corriger le lecteur si les valeurs sont valides dans leur format, sinon de dire exactement
+  quelles lignes ont changé et pourquoi ; (2) le guide de débogage le dit avant (T1-03).
+- État : à faire
+
+### T1-09 Le modèle relit un fichier après chacune de ses propres modifications
+- Preuve : t2 north : 13 lectures de `notes.py` (60 lignes) pour 5 modifications, dont trois
+  tranches de 30 lignes d'affilée ; t1 north : 5 relectures ; t2 clean (nemotron) : 3. Chaque
+  relecture coûte une requête et remet le fichier dans le contexte.
+- Cause : le résultat allégé d'une modification ne montre plus rien du fichier ; le modèle ne
+  sait plus quel est le texte exact à citer pour sa modification suivante.
+- Remède : le résultat d'une modification réussie porte le fichier tel qu'il est maintenant
+  s'il est petit, sinon les lignes autour du changement, avec « inutile de le relire ».
+- État : à faire
+
+### T1-10 Des vérifications indépendantes lancées une par requête
+- Preuve : t2 clean, messages 20 à 28 et 34 à 38 : sept commandes `python notes.py chercher
+  ...` chacune dans sa requête ; t2 north, messages 50 à 60 : six ; t1 north, messages 24 à
+  31 : quatre `python -c "print(...)"`. Le prompt système demande déjà de regrouper ; les
+  modèles le font au début du tour, plus ensuite.
+- Remède : après trois réponses de suite faites d'un seul appel en lecture ou d'une seule
+  commande réussie, une remarque jointe au résultat : regrouper les essais indépendants dans
+  une commande ou dans une même réponse.
+- État : à faire
+
 ## Améliorations
 
-(à compléter : ce qui a été changé dans Claw, et l'effet mesuré sur les mêmes scénarios)
+Lot T1 (en cours le 12 octobre 2026), dans cet ordre : T1-08 (garde des données), T1-03 et
+T1-04 (guide de débogage : hypothèse de l'utilisateur, essai au-delà de l'exemple), T1-05
+(contexte Git borné), T1-09 (fichier montré après une modification), T1-10 (essais
+regroupés), T1-07 (`/tmp` et Python du Store), T1-06 (réglages recopiés dans le prompt).
+T1-01 est laissé tel quel : la demande de preuves coûte une requête mais a rendu la seconde
+réponse du petit modèle mieux étayée, et l'utilisateur préfère la profondeur à la vitesse.
+T1-02 est mineur (la consigne demande déjà de finir par le compte rendu).
+
+Après le lot : relancer les six essais (`run.py <scénario> --label lotT1`, puis avec
+`--model cohere/north-mini-code:free`) et comparer scores et requêtes à la série propre.
+Ensuite : des scénarios plus durs (plusieurs fichiers, tâche longue) et un troisième modèle.

@@ -10,8 +10,8 @@ danger-full-access dans cette copie, bascule de modèle coupée), puis la vérif
 cachée du scénario (check.py, jamais copiée dans le projet). Le détail va dans
 result.json à côté du projet, et une ligne dans <essais>/results.jsonl.
 
-<essais> est hors de ce dépôt : CLAW_REAL_TESTS_DIR, sinon %LOCALAPPDATA%\\claw-real-tests
-(~/.cache/claw-real-tests ailleurs). Dans le dépôt, Claw donnerait au modèle l'état et le
+<essais> est hors de ce dépôt : CLAW_REAL_TESTS_DIR, sinon le dossier claw-real-tests à
+côté du dépôt (D:\\Mes_Projets\\claw-real-tests). Dans le dépôt, Claw donnerait au modèle l'état et le
 diff Git du dépôt entier, et les fichiers d'instructions des dossiers parents : le modèle y
 lirait les pièges des scénarios.
 
@@ -36,11 +36,11 @@ RUST = HERE.parent.parent
 
 
 def runs_dir():
+    """Hors du dépôt, à côté de lui. Pas dans %LOCALAPPDATA% : le Python du Microsoft
+    Store y écrit dans un dossier virtuel que Git et Claw ne voient pas."""
     if os.environ.get("CLAW_REAL_TESTS_DIR"):
         return Path(os.environ["CLAW_REAL_TESTS_DIR"])
-    if os.environ.get("LOCALAPPDATA"):
-        return Path(os.environ["LOCALAPPDATA"]) / "claw-real-tests"
-    return Path.home() / ".cache" / "claw-real-tests"
+    return RUST.parent.parent / "claw-real-tests"
 
 
 RUNS = runs_dir()
