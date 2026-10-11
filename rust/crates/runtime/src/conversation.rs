@@ -1242,7 +1242,9 @@ where
         }
         if let Some(outcome) = command_outcome {
             if outcome.passed {
-                if harness::is_check_command(&outcome.command) {
+                if harness::is_check_command(&outcome.command)
+                    && harness::exit_reflects_check(&outcome.command)
+                {
                     aids.check_failing = false;
                 }
                 aids.verified_commands.push(outcome.command);

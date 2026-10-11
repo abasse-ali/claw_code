@@ -65,7 +65,9 @@ fn usual_locations() -> Vec<PathBuf> {
 }
 
 /// Navigateur de la famille Chromium à utiliser : `CLAW_BROWSER`, sinon le
-/// premier trouvé (cherché une fois par lancement de Claw).
+/// premier trouvé (cherché une fois par lancement de Claw). Un navigateur
+/// installé en snap a son propre `/tmp`, où son journal reste hors de portée :
+/// un autre lui est préféré.
 pub(crate) fn find_browser() -> Option<PathBuf> {
     static FOUND: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     FOUND
@@ -75,10 +77,16 @@ pub(crate) fn find_browser() -> Option<PathBuf> {
                 let chosen = PathBuf::from(chosen);
                 return chosen.is_file().then_some(chosen);
             }
-            BROWSER_NAMES
+            let found: Vec<PathBuf> = BROWSER_NAMES
                 .iter()
-                .find_map(|name| runtime::find_executable(name))
-                .or_else(|| usual_locations().into_iter().find(|path| path.is_file()))
+                .filter_map(|name| runtime::find_executable(name))
+                .chain(usual_locations().into_iter().filter(|path| path.is_file()))
+                .collect();
+            found
+                .iter()
+                .find(|path| !path.starts_with("/snap/"))
+                .or_else(|| found.first())
+                .cloned()
         })
         .clone()
 }
@@ -180,8 +188,8 @@ fn wait_for(child: &mut std::process::Child, limit: Duration) -> Result<(), Stri
 }
 
 /// Fait rendre `url` par le navigateur : le DOM après exécution du
-/// JavaScript, et le journal du navigateur.
-fn render(browser: &Path, url: &str, wait_ms: u64) -> Result<(String, String), String> {
+/// JavaScript, et le journal du navigateur (`None` s'il n'a pas pu être lu).
+fn render(browser: &Path, url: &str, wait_ms: u64) -> Result<(String, Option<String>), String> {
     let profile = profile_dir();
     std::fs::create_dir_all(&profile).map_err(|error| error.to_string())?;
     let dom_path = profile.join("page.html");
@@ -208,10 +216,10 @@ fn render(browser: &Path, url: &str, wait_ms: u64) -> Result<(String, String), S
             .map_err(|error| format!("could not start the browser: {error}"))?;
         wait_for(&mut child, Duration::from_millis(wait_ms) + BROWSER_MARGIN)?;
         let dom = std::fs::read(&dom_path).map_err(|error| error.to_string())?;
-        let log = std::fs::read(&log_path).unwrap_or_default();
+        let log = std::fs::read(&log_path).ok();
         Ok((
             String::from_utf8_lossy(&dom).into_owned(),
-            String::from_utf8_lossy(&log).into_owned(),
+            log.map(|log| String::from_utf8_lossy(&log).into_owned()),
         ))
     })();
     // Le navigateur peut tenir ses fichiers un instant après sa fin.
@@ -238,14 +246,17 @@ pub(crate) fn view_page(input: &ViewPageInput) -> Result<Value, String> {
         .unwrap_or(DEFAULT_WAIT_MS)
         .clamp(200, MAX_WAIT_MS);
     let (dom, log) = render(&browser, url, wait_ms)?;
-    let console = console_messages(&log);
+    // Sans journal (absent ou vide), les erreurs de la console sont inconnues :
+    // dire « aucune » enverrait le modèle chercher ailleurs.
+    let log = log.filter(|log| !log.trim().is_empty());
+    let console = log.as_deref().map(console_messages).unwrap_or_default();
     if dom.trim().is_empty() {
         return Err(format!(
             "the browser returned no page for {url}: is the server running and the address right? (a connection that is refused gives an empty page)"
         ));
     }
 
-    let (title, text) = crate::web_page::rendered_text(&dom, url);
+    let (title, text) = crate::web_page::rendered_text(&dom);
     let total = text.chars().count();
     let shown: String = text.chars().take(MAX_TEXT_CHARS).collect();
     let errors = console
@@ -277,6 +288,18 @@ pub(crate) fn view_page(input: &ViewPageInput) -> Result<Value, String> {
                 .to_string(),
         );
     }
+    // Erreurs de la console inconnues quand le journal manque.
+    let console_errors = if log.is_some() {
+        json!(errors)
+    } else {
+        Value::Null
+    };
+    if log.is_none() {
+        notes.push(
+            "The browser's console log could not be read: console errors are unknown, not absent."
+                .to_string(),
+        );
+    }
     if console.len() > MAX_CONSOLE_MESSAGES {
         notes.push(format!(
             "The console has {} messages: only the first {MAX_CONSOLE_MESSAGES} are shown.",
@@ -288,7 +311,7 @@ pub(crate) fn view_page(input: &ViewPageInput) -> Result<Value, String> {
         "title": title,
         "text": shown,
         "console": listed,
-        "consoleErrors": errors,
+        "consoleErrors": console_errors,
         "note": notes.join(" "),
     }))
 }

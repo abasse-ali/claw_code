@@ -340,7 +340,8 @@ const SCHEMA_EXTRAS: &[&str] = &[
 ];
 
 /// Nom de propriété accepté partout : il commence par une lettre ou un `_`.
-/// `-A` devient `A` (les outils de Claw acceptent ces noms).
+/// `-A` devient `A` ; Claw rend leur vrai nom aux arguments reçus
+/// (`restore_property_names` des outils).
 fn plain_property_name(name: &str) -> String {
     let trimmed = name.trim_start_matches(|ch: char| !(ch.is_ascii_alphabetic() || ch == '_'));
     if trimmed.is_empty() {
@@ -360,20 +361,36 @@ fn plain_schema(schema: &mut Value) {
     for extra in SCHEMA_EXTRAS {
         fields.remove(*extra);
     }
+    // Noms à réduire : jamais vers un nom déjà pris (`@type` à côté de
+    // `type` garde le sien, sinon l'un effacerait l'autre).
+    let mut shortened_names: BTreeMap<String, String> = BTreeMap::new();
     if let Some(Value::Object(properties)) = fields.get_mut("properties") {
+        let names: Vec<String> = properties.keys().cloned().collect();
+        for name in &names {
+            let plain = plain_property_name(name);
+            if plain != *name
+                && !names.contains(&plain)
+                && !shortened_names.values().any(|taken| *taken == plain)
+            {
+                shortened_names.insert(name.clone(), plain);
+            }
+        }
         let renamed: serde_json::Map<String, Value> = std::mem::take(properties)
             .into_iter()
             .map(|(name, mut property)| {
                 plain_schema(&mut property);
-                (plain_property_name(&name), property)
+                (
+                    shortened_names.get(&name).cloned().unwrap_or(name),
+                    property,
+                )
             })
             .collect();
         *properties = renamed;
     }
     if let Some(Value::Array(required)) = fields.get_mut("required") {
         for name in required.iter_mut() {
-            if let Some(text) = name.as_str() {
-                *name = Value::String(plain_property_name(text));
+            if let Some(plain) = name.as_str().and_then(|text| shortened_names.get(text)) {
+                *name = Value::String(plain.clone());
             }
         }
     }

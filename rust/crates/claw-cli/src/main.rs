@@ -202,13 +202,22 @@ fn returned_status(problem: &str) -> Option<u16> {
 fn error_hint(problem: &str) -> &'static str {
     let lower = problem.to_ascii_lowercase();
     let status = returned_status(problem);
-    if lower.contains("429") || lower.contains("rate limit") {
+    // Le code HTTP, pas un nombre du message : « 140129 tokens » contient
+    // « 401 », « 142900 tokens » contient « 429 ».
+    if status == Some(429)
+        || lower.contains("rate limit")
+        || lower.contains("too many requests")
+        || lower.contains("resource_exhausted")
+    {
         "limite de requêtes atteinte : les modèles gratuits sont limités par minute et par jour (quota : /models) ; réessayez plus tard ou changez de modèle (/model)"
     } else if lower.contains("data policy") {
         "autorisez les modèles gratuits dans vos paramètres de confidentialité OpenRouter (Settings > Privacy)"
     } else if lower.contains("no endpoints found") || lower.contains("tool use") {
         "ce modèle ne prend peut-être pas en charge l'appel d'outils : choisissez-en un avec /models"
-    } else if lower.contains("401") || lower.contains("user not found") {
+    } else if status == Some(401)
+        || lower.contains("user not found")
+        || lower.contains("unauthorized")
+    {
         "vérifiez la clé OPENROUTER_API_KEY (ou ANTHROPIC_API_KEY pour un modèle Claude direct)"
     } else if lower.contains("image") && (lower.contains("support") || lower.contains("modalit")) {
         "ce modèle ne lit pas les images : choisissez un modèle multimodal (/models vision)"
@@ -5714,7 +5723,17 @@ impl DefaultRuntimeClient {
                 .unwrap_or_default()
         };
         tool_input::check_cut_calls(events, stop_reason, required_for, true)
-            .map_err(RuntimeError::new)
+            .map_err(RuntimeError::new)?;
+        // Noms d'arguments réduits par un serveur qui refuse les schémas tels
+        // quels : l'outil reçoit les siens.
+        tool_input::restore_names_in(events, |name| {
+            definitions
+                .get_or_init(|| tool_registry.definitions(None))
+                .iter()
+                .find(|definition| definition.name == name)
+                .map(|definition| definition.input_schema.clone())
+        });
+        Ok(())
     }
 }
 
@@ -7980,6 +7999,14 @@ mod tests {
         ] {
             assert!(super::error_hint(problem).contains(advice), "{problem}");
         }
+        // Un nombre du message n'est pas un code d'erreur.
+        let context = "l'api a retourné 400 Bad Request : {\"error\":{\"message\":\"This endpoint's maximum context length is 131072 tokens. However, you requested about 140129 tokens (140129 of text input)\",\"code\":400}}";
+        assert!(super::error_hint(context).contains("/compact"), "{context}");
+        let context = context.replace("140129", "142900");
+        assert!(
+            super::error_hint(&context).contains("/compact"),
+            "{context}"
+        );
     }
 
     #[test]

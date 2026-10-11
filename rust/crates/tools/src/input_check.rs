@@ -117,6 +117,66 @@ pub fn check_cut_calls(
     Ok(())
 }
 
+/// Nom de propriété tel qu'un schéma réduit l'envoie (`-A` devient `A`,
+/// `$filter` devient `filter`) : sans ce qui précède sa première lettre ou son
+/// premier `_`.
+fn plain_name(name: &str) -> &str {
+    let trimmed = name.trim_start_matches(|ch: char| !(ch.is_ascii_alphabetic() || ch == '_'));
+    if trimmed.is_empty() {
+        name
+    } else {
+        trimmed
+    }
+}
+
+/// Les arguments d'un appel avec les noms de propriétés du schéma de l'outil.
+/// Un serveur qui refuse les schémas tels quels reçoit des noms réduits
+/// (`-i`, `-A`, `$filter` deviennent `i`, `A`, `filter`), et le modèle les
+/// renvoie ainsi : sans cela, l'outil ignorerait l'option sans rien dire.
+/// `None` quand il n'y a rien à changer.
+#[must_use]
+pub fn restore_property_names(input: &str, schema: &Value) -> Option<String> {
+    let properties = schema.get("properties")?.as_object()?;
+    let mut value: Value = serde_json::from_str(input.trim()).ok()?;
+    let arguments = value.as_object_mut()?;
+    let unknown: Vec<String> = arguments
+        .keys()
+        .filter(|key| !properties.contains_key(*key))
+        .cloned()
+        .collect();
+    let mut changed = false;
+    for key in unknown {
+        let mut originals = properties
+            .keys()
+            .filter(|name| *name != &key && plain_name(name) == key);
+        let (Some(original), None) = (originals.next(), originals.next()) else {
+            continue;
+        };
+        if arguments.contains_key(original) {
+            continue;
+        }
+        if let Some(argument) = arguments.remove(&key) {
+            arguments.insert(original.clone(), argument);
+            changed = true;
+        }
+    }
+    changed.then(|| value.to_string())
+}
+
+/// Rend aux arguments de chaque appel de la réponse les noms de propriétés de
+/// son outil (`schema_for` : le schéma d'un outil, s'il est connu).
+pub fn restore_names_in(events: &mut [AssistantEvent], schema_for: impl Fn(&str) -> Option<Value>) {
+    for event in events {
+        if let AssistantEvent::ToolUse { name, input, .. } = event {
+            if let Some(restored) =
+                schema_for(name).and_then(|schema| restore_property_names(input, &schema))
+            {
+                *input = restored;
+            }
+        }
+    }
+}
+
 /// Erreur d'une réponse close avant la fin d'un appel d'outil : la réponse
 /// est redemandée au modèle (voir `is_broken_stream`).
 #[must_use]
@@ -306,6 +366,34 @@ mod tests {
             Ok(())
         );
         assert_eq!(input(&events), "{}");
+    }
+
+    #[test]
+    fn reduced_property_names_get_their_real_name_back() {
+        use super::restore_property_names;
+        let schema = json!({
+            "type": "object",
+            "properties": { "pattern": {}, "-i": {}, "-A": {}, "$filter": {}, "@type": {}, "type": {} }
+        });
+        // Le modèle a reçu `i`, `A`, `filter` à la place de `-i`, `-A`, `$filter`.
+        let restored =
+            restore_property_names(r#"{"pattern":"todo","i":true,"A":2,"filter":"x"}"#, &schema)
+                .expect("noms rendus");
+        let restored: serde_json::Value = serde_json::from_str(&restored).expect("JSON");
+        assert_eq!(
+            restored,
+            json!({ "pattern": "todo", "-i": true, "-A": 2, "$filter": "x" })
+        );
+        // Un nom connu reste tel quel ; deux noms possibles, rien n'est deviné.
+        assert_eq!(
+            restore_property_names(r#"{"pattern":"todo","type":"rs"}"#, &schema),
+            None
+        );
+        assert_eq!(
+            restore_property_names(r#"{"pattern":"x","-i":true}"#, &schema),
+            None
+        );
+        assert_eq!(restore_property_names("pas du json", &schema), None);
     }
 
     #[test]

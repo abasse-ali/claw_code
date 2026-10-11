@@ -37,7 +37,7 @@ routing.rs, main.rs), lecture et recherche de fichiers (file_ops.rs), outil View
   les outils de Claw, ajouter aussi `alias` aux champs de `GrepSearchInput`
   (`#[serde(rename = "-A", alias = "A")]`, idem `B`, `C`, `n`, `i`). Test : grep_search execute
   avec `{"i": true}` et `{"A": 1}`.
-- Etat : a verifier
+- Etat : corrigé (lot 2b) : `restore_property_names` rend leurs vrais noms aux arguments reçus (agent et sous-agents), `plain_schema` ne réduit plus un nom vers un nom déjà pris, `grep_search` accepte aussi `A`, `B`, `C`, `n`, `i` (A10).
 
 ## E4B-02 L'aide d'erreur lit « 429 » ou « 401 » dans n'importe quel nombre du message
 - Gravite : basse
@@ -61,7 +61,7 @@ routing.rs, main.rs), lecture et recherche de fichiers (file_ops.rs), outil View
   `contains("rate limit")`) et `lower.contains("401")` par `status == Some(401)` ; placer le
   test du contexte (413, « context length »...) avant les tests de quota et de cle. Ajouter un
   cas de test avec « you requested about 140129 tokens ».
-- Etat : a verifier
+- Etat : corrigé (lot 2b) : `error_hint` lit le code HTTP (`returned_status`) pour 429 et 401.
 
 ## E4B-03 grep_search ne trouve jamais un motif sur plusieurs lignes, meme avec multiline
 - Gravite : moyenne
@@ -132,7 +132,7 @@ routing.rs, main.rs), lecture et recherche de fichiers (file_ops.rs), outil View
   (`"webfetch" => &["WebFetch", "ViewPage"]`, comme « Read » couvre la recherche) ; dans
   `suggest_rule`, ecrire le nom de l'outil appele. Ajouter un test : `ask: ["WebFetch"]` fait
   demander ViewPage ; `deny: ["WebFetch(domain:x)"]` refuse `ViewPage http://x/`.
-- Etat : a verifier
+- Etat : corrigé (lot 2b) : une règle `WebFetch` couvre aussi `ViewPage` (`covers_tool`).
 
 ## E4B-06 ViewPage ne rend que le contenu de `<main>` : bandeaux d'erreur, en-tete et menus disparaissent
 - Gravite : moyenne
@@ -158,7 +158,7 @@ routing.rs, main.rs), lecture et recherche de fichiers (file_ops.rs), outil View
   sans passer par `main_content`, sans retirer `nav`/`footer`, et en gardant le texte des
   `option` et des `textarea`. Garder la coupe a 6 000 caracteres de page_view.rs. Ajouter au
   test reel un bandeau hors de `<main>` qui doit apparaitre dans `text`.
-- Etat : a verifier
+- Etat : corrigé (lot 2b) : `rendered_text` lit toute la page, en-tête, menus et pied compris. Restent les choix d'un `<select>` et le texte d'un `<textarea>`.
 
 ## E4B-07 glob_search avec `path` sur un lecteur reseau ne rend jamais aucun fichier
 - Gravite : moyenne
@@ -209,7 +209,7 @@ routing.rs, main.rs), lecture et recherche de fichiers (file_ops.rs), outil View
   navigateur a bien rendu une page), rendre `"consoleErrors": null` et ajouter la note « the
   browser's console log could not be read: console errors are unknown, not absent ». Dans
   `find_browser`, preferer un navigateur hors de `/snap/` quand il y en a un.
-- Etat : a verifier
+- Etat : corrigé (lot 2b) : journal absent ou vide, `consoleErrors` vaut `null` et une note dit que les erreurs sont inconnues ; un navigateur hors de `/snap/` est préféré.
 
 ## E4B-09 ViewPage accuse le serveur quand c'est le navigateur qui refuse de demarrer
 - Gravite : basse

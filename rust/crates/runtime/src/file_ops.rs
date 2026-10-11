@@ -111,16 +111,18 @@ pub struct GrepSearchInput {
     pub glob: Option<String>,
     #[serde(rename = "output_mode")]
     pub output_mode: Option<String>,
-    #[serde(rename = "-B")]
+    // Les noms sans tiret sont ceux d'un schéma réduit (serveur qui refuse
+    // les schémas tels quels).
+    #[serde(rename = "-B", alias = "B")]
     pub before: Option<usize>,
-    #[serde(rename = "-A")]
+    #[serde(rename = "-A", alias = "A")]
     pub after: Option<usize>,
-    #[serde(rename = "-C")]
+    #[serde(rename = "-C", alias = "C")]
     pub context_short: Option<usize>,
     pub context: Option<usize>,
-    #[serde(rename = "-n")]
+    #[serde(rename = "-n", alias = "n")]
     pub line_numbers: Option<bool>,
-    #[serde(rename = "-i")]
+    #[serde(rename = "-i", alias = "i")]
     pub case_insensitive: Option<bool>,
     #[serde(rename = "type")]
     pub file_type: Option<String>,

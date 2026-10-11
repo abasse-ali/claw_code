@@ -350,7 +350,13 @@ pub fn covers(model_command: &str, verify_command: &str) -> bool {
     if wanted.is_empty() {
         return false;
     }
-    if ran.contains(&wanted) {
+    // Lancée, et son code de sortie est celui de la commande : après
+    // `npx tsc --noEmit || echo "erreurs"`, rien n'est vérifié.
+    let decided = |check: &str| {
+        ran.match_indices(check)
+            .any(|(at, _)| crate::bash::exit_decided_at(&ran, at + check.len()))
+    };
+    if decided(&wanted) {
         return true;
     }
     wanted
@@ -359,8 +365,29 @@ pub fn covers(model_command: &str, verify_command: &str) -> bool {
         .is_some_and(|(folder, check)| {
             let folder = folder.trim_matches('"');
             let name = folder.rsplit('/').next().unwrap_or(folder);
-            ran.contains(check) && ran.replace('\\', "/").contains(name)
+            ran.replace('\\', "/").contains(name) && decided(check)
         })
+}
+
+/// La dernière vérification de la commande décide de son code de sortie :
+/// rien après elle ne masque son échec (`|| echo`, `; echo`, `| wc -l`).
+#[must_use]
+pub fn exit_reflects_check(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    let operators = crate::bash::shell_operators(&lower);
+    let mut start = 0;
+    let mut check_end = None;
+    for range in operators
+        .iter()
+        .map(|(range, _)| range.clone())
+        .chain(std::iter::once(lower.len()..lower.len()))
+    {
+        if segment_is_check(lower[start..range.start].trim()) {
+            check_end = Some(range.start);
+        }
+        start = range.end;
+    }
+    check_end.is_some_and(|end| crate::bash::exit_decided_at(&lower, end))
 }
 
 /// Issue d'une commande lancée par l'outil `bash`.
@@ -864,7 +891,9 @@ impl StallGuard {
 
         // La même vérification réussit de nouveau alors que rien n'a changé :
         // le travail est fait, inutile de continuer à vérifier.
-        if let Some(command) = command.filter(|command| !failed && is_check_command(command)) {
+        if let Some(command) = command
+            .filter(|command| !failed && is_check_command(command) && exit_reflects_check(command))
+        {
             let passes = self.passed_checks.entry(command.clone()).or_insert(0);
             *passes += 1;
             if *passes == 2 {
@@ -2304,9 +2333,10 @@ mod language_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_tool_is_missing, covers, detect_verify_commands, error_sites, is_check_command,
-        original_content, read_bash_output, review_findings, syntax_check, unified_diff,
-        verify_commands, verify_commands_for, verify_feedback, StallGuard, VerifySetting,
+        check_tool_is_missing, covers, detect_verify_commands, error_sites, exit_reflects_check,
+        is_check_command, original_content, read_bash_output, review_findings, syntax_check,
+        unified_diff, verify_commands, verify_commands_for, verify_feedback, StallGuard,
+        VerifySetting,
     };
     use std::fs;
     use std::path::Path;
@@ -2471,6 +2501,42 @@ mod tests {
             None
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_check_counts_only_when_its_exit_code_is_the_command_s() {
+        let wanted = "npx tsc --noEmit";
+        for ran in [
+            "npx tsc --noEmit",
+            "cd frontend && npx tsc --noEmit",
+            "npx tsc --noEmit 2>&1 | head -50",
+            "npx tsc --noEmit && echo OK",
+            "npx tsc --noEmit;",
+            "npx tsc --noEmit && npm test",
+        ] {
+            assert!(covers(ran, wanted), "{ran}");
+            assert!(exit_reflects_check(ran), "{ran}");
+        }
+        // Une vérification suivie d'une autre que `| wc -l` masque : la
+        // première est faite, la commande ne dit rien de la seconde.
+        assert!(covers("npx tsc --noEmit && npm test | wc -l", wanted));
+        assert!(!exit_reflects_check("npx tsc --noEmit && npm test | wc -l"));
+        for ran in [
+            "npx tsc --noEmit || echo \"Erreurs de type\"",
+            "npx tsc --noEmit && echo OK || echo KO",
+            "npx tsc --noEmit; echo \"exit=$?\"",
+            "npx tsc --noEmit 2>&1 | wc -l",
+            "npx tsc --noEmit || true",
+            "npx tsc --noEmit &",
+        ] {
+            assert!(!covers(ran, wanted), "{ran}");
+            assert!(!exit_reflects_check(ran), "{ran}");
+        }
+        assert!(!covers(
+            "cd frontend && npx tsc --noEmit || true",
+            "cd frontend && npx tsc --noEmit"
+        ));
+        assert!(!exit_reflects_check("ls -la"));
     }
 
     #[test]

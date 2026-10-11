@@ -3246,6 +3246,7 @@ impl ApiClient for ProviderRuntimeClient {
                     required_arguments_of,
                     false,
                 );
+                input_check::restore_names_in(&mut events, schema_of);
 
                 if !saw_stop
                     && events.iter().any(|event| {
@@ -3342,18 +3343,23 @@ impl ToolExecutor for SubagentToolExecutor {
 /// Arguments obligatoires d'un outil intégré ou d'un outil MCP relié (aucun
 /// pour un outil inconnu : son exécution dira ce qui ne va pas).
 fn required_arguments_of(tool_name: &str) -> Vec<String> {
+    schema_of(tool_name)
+        .map(|schema| input_check::required_arguments(&schema))
+        .unwrap_or_default()
+}
+
+/// Schéma des arguments d'un outil intégré ou d'un outil MCP relié.
+fn schema_of(tool_name: &str) -> Option<Value> {
     if tool_name.starts_with("mcp__") {
         return connected_mcp_tools()
             .into_iter()
             .find(|tool| tool.name == tool_name)
-            .map(|tool| input_check::required_arguments(&tool.input_schema))
-            .unwrap_or_default();
+            .map(|tool| tool.input_schema);
     }
     mvp_tool_specs()
         .into_iter()
         .find(|spec| spec.name == tool_name)
-        .map(|spec| input_check::required_arguments(&spec.input_schema))
-        .unwrap_or_default()
+        .map(|spec| spec.input_schema)
 }
 
 fn tool_specs_for_allowed_tools(allowed_tools: Option<&BTreeSet<String>>) -> Vec<ToolSpec> {

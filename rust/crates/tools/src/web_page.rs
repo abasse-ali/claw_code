@@ -112,10 +112,12 @@ struct Page {
     linked: bool,
 }
 
-/// Titre et texte d'un document HTML déjà rendu par un navigateur (`ViewPage`).
-pub(crate) fn rendered_text(html: &str, url: &str) -> (Option<String>, String) {
-    let page = read_page(html, "text/html", url, false);
-    (page.title, page.text)
+/// Titre et texte d'un document HTML déjà rendu par un navigateur
+/// (`ViewPage`) : toute la page, comme l'utilisateur la voit, en-tête, menus
+/// et pied de page compris. Un bandeau d'erreur ou un « Bonjour undefined »
+/// est souvent hors de `<main>`, que lit `WebFetch`.
+pub(crate) fn rendered_text(html: &str) -> (Option<String>, String) {
+    (html_title(html), html_to_markdown(html, "", false))
 }
 
 /// `links` : écrire les liens avec leur adresse, `[libellé](adresse)`.

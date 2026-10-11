@@ -87,11 +87,7 @@ pub fn execute_bash(input: BashCommandInput) -> io::Result<BashCommandOutput> {
     let background = input.run_in_background == Some(true) || auto_background;
 
     // `programme | tail` : le code de sortie doit rester celui du programme.
-    let script = match exit_fix(&input.command) {
-        Some(ExitFix::Pipefail) => format!("{PIPEFAIL}{}", input.command),
-        Some(ExitFix::Drain(drained)) => format!("{PIPEFAIL}{drained}"),
-        None => input.command.clone(),
-    };
+    let script = with_faithful_exit_codes(&input.command).unwrap_or_else(|| input.command.clone());
     // Sous Windows, le PID du shell MSYS permet d'arrêter tout le groupe.
     let pid_file = cfg!(windows).then(shell_group_pid_file);
     let wrapped = pid_file.as_deref().map_or_else(
@@ -557,68 +553,29 @@ fn program_of(segment: &str) -> &str {
         .unwrap_or_default()
 }
 
-/// Ce que Claw change à une commande dont le dernier tube range la sortie
-/// d'un programme derrière un filtre.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ExitFix {
-    /// `set -o pipefail` : le code de sortie est celui du programme.
-    Pipefail,
-    /// Une vérification suivie de filtres : `pipefail`, et le reste de sa
-    /// sortie lu et jeté (`| { head -100` puis `cat >/dev/null; }`), pour
-    /// qu'elle finisse toujours et rende son vrai code. Coupée par `head`,
-    /// une vérification en Python ou un test Rust (qui ignorent SIGPIPE)
-    /// sortirait en échec alors que tout passe. Porte la commande réécrite.
-    Drain(String),
+/// Opérateur d'une ligne de shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Op {
+    /// `|` ou `|&`.
+    Pipe,
+    /// `&&`.
+    And,
+    /// `||`.
+    Or,
+    /// `;` ou fin de ligne.
+    Then,
+    /// `(`.
+    Open,
+    /// `)`.
+    Close,
+    /// `&` simple : ce qui précède est détaché.
+    Detached,
 }
 
-/// Le dernier tube de la commande range la sortie d'un programme derrière un
-/// filtre (`npm run build 2>&1 | tail -20`) : sans précaution, le code de
-/// sortie est celui du filtre, et une compilation en échec passe pour réussie.
-/// Corrigé quand tous les maillons après le premier ne font que couper ou
-/// recopier la sortie, ou que le premier est une vérification et les suivants
-/// des outils de texte. Un autre programme coupé par `head` est laissé tel
-/// quel : il peut ne jamais finir (`yes | head`), et son échec d'écriture
-/// n'en serait pas un.
-pub(crate) fn exit_fix(command: &str) -> Option<ExitFix> {
-    if command.contains("<<") {
-        return None;
-    }
-    let pieces = shell_pieces(&command.to_ascii_lowercase());
-    // Le dernier tube : les commandes fermées par `|` puis celle qui le termine.
-    let end = pieces.len();
-    let start = (0..end.saturating_sub(1))
-        .rev()
-        .take_while(|index| pieces[*index].1 == Closed::Pipe)
-        .last()?;
-    let stages: Vec<&str> = pieces[start..end]
-        .iter()
-        .map(|(segment, _)| program_of(segment))
-        .collect();
-    let (first, filters) = stages.split_first()?;
-    if first.is_empty() {
-        return None;
-    }
-    let cutting = filters.iter().all(|name| OUTPUT_FILTERS.contains(name));
-    let checking = crate::harness::is_check_command(&pieces[start].0)
-        && filters
-            .iter()
-            .all(|name| OUTPUT_FILTERS.contains(name) || TEXT_TOOLS.contains(name));
-    if checking {
-        if let Some(std::ops::Range { start, end }) = final_filters(command) {
-            return Some(ExitFix::Drain(format!(
-                "{} {{ {}\ncat >/dev/null; }}",
-                &command[..start],
-                command[start..end].trim()
-            )));
-        }
-    }
-    ((cutting || checking) && !filters.contains(&"head")).then_some(ExitFix::Pipefail)
-}
-
-/// Opérateurs d'une ligne de shell, hors guillemets et commentaires : leur
-/// place dans `command` (octets) et ce qu'ils ferment. Même lecture que
-/// `shell_pieces`.
-fn shell_operators(command: &str) -> Vec<(std::ops::Range<usize>, Closed)> {
+/// Opérateurs d'une ligne de shell, hors guillemets, commentaires et
+/// substitutions (`$(…)`, `` `…` ``), avec leur place dans `command` (octets).
+/// Même lecture que `shell_pieces`.
+pub(crate) fn shell_operators(command: &str) -> Vec<(std::ops::Range<usize>, Op)> {
     let chars: Vec<(usize, char)> = command.char_indices().collect();
     let after = |index: usize| chars.get(index + 1).map_or(command.len(), |(at, _)| *at);
     let mut operators = Vec::new();
@@ -629,16 +586,36 @@ fn shell_operators(command: &str) -> Vec<(std::ops::Range<usize>, Closed)> {
         let next = chars.get(index + 1).map(|(_, next)| *next);
         let previous = index.checked_sub(1).map(|before| chars[before].1);
         match ch {
-            '\'' | '"' => {
+            '\'' | '"' => index = closing_quote(&chars, index),
+            '\\' => index += 1,
+            // Substitution : son contenu ne sépare pas les commandes d'ici.
+            '$' if next == Some('(') => {
+                let mut depth = 0;
                 index += 1;
-                while index < chars.len() && chars[index].1 != ch {
-                    if ch == '"' && chars[index].1 == '\\' {
+                while index < chars.len() {
+                    match chars[index].1 {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        '\'' | '"' => index = closing_quote(&chars, index),
+                        _ => {}
+                    }
+                    index += 1;
+                }
+            }
+            '`' => {
+                index += 1;
+                while index < chars.len() && chars[index].1 != '`' {
+                    if chars[index].1 == '\\' {
                         index += 1;
                     }
                     index += 1;
                 }
             }
-            '\\' => index += 1,
             '#' if word_start => {
                 while index + 1 < chars.len() && chars[index + 1].1 != '\n' {
                     index += 1;
@@ -646,20 +623,22 @@ fn shell_operators(command: &str) -> Vec<(std::ops::Range<usize>, Closed)> {
             }
             '&' if next == Some('>') || matches!(previous, Some('>' | '<')) => {}
             '&' if next == Some('&') => {
-                operators.push((at..after(index + 1), Closed::Sequence));
+                operators.push((at..after(index + 1), Op::And));
                 index += 1;
             }
-            '&' => operators.push((at..after(index), Closed::Detached)),
+            '&' => operators.push((at..after(index), Op::Detached)),
             '|' if next == Some('|') => {
-                operators.push((at..after(index + 1), Closed::Sequence));
+                operators.push((at..after(index + 1), Op::Or));
                 index += 1;
             }
             '|' if next == Some('&') => {
-                operators.push((at..after(index + 1), Closed::Pipe));
+                operators.push((at..after(index + 1), Op::Pipe));
                 index += 1;
             }
-            '|' => operators.push((at..after(index), Closed::Pipe)),
-            ';' | '\n' | '(' | ')' => operators.push((at..after(index), Closed::Sequence)),
+            '|' => operators.push((at..after(index), Op::Pipe)),
+            ';' | '\n' => operators.push((at..after(index), Op::Then)),
+            '(' => operators.push((at..after(index), Op::Open)),
+            ')' => operators.push((at..after(index), Op::Close)),
             _ => {}
         }
         word_start = ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '(' | ')');
@@ -668,31 +647,216 @@ fn shell_operators(command: &str) -> Vec<(std::ops::Range<usize>, Closed)> {
     operators
 }
 
-/// Place (octets) des filtres du dernier tube, quand ce tube finit la
-/// commande (au plus un `;` et des blancs après lui) et que son premier
-/// maillon est une commande simple : tout ce qui suit le premier `|`.
-fn final_filters(command: &str) -> Option<std::ops::Range<usize>> {
-    let end = command.trim_end().trim_end_matches(';').trim_end().len();
-    let operators = shell_operators(&command[..end]);
-    let opened_at = operators
-        .iter()
-        .rposition(|(_, closed)| *closed != Closed::Pipe)
-        .map_or(0, |index| index + 1);
-    let (first_pipe, _) = operators.get(opened_at)?;
-    let stage_start = opened_at
-        .checked_sub(1)
-        .map_or(0, |index| operators[index].0.end);
-    // `(cd x && pytest) | head` : le premier maillon n'est pas une commande simple.
-    if command[stage_start..first_pipe.start].trim().is_empty() {
-        return None;
+/// Indice du guillemet qui ferme celui d'indice `open` (`\"` ne ferme pas
+/// entre guillemets doubles), ou du dernier caractère.
+fn closing_quote(chars: &[(usize, char)], open: usize) -> usize {
+    let quote = chars[open].1;
+    let mut index = open + 1;
+    while index < chars.len() && chars[index].1 != quote {
+        if quote == '"' && chars[index].1 == '\\' {
+            index += 1;
+        }
+        index += 1;
     }
-    Some(first_pipe.end..end)
+    index.min(chars.len().saturating_sub(1))
 }
 
-/// Préfixe qui fait rendre à un tube le code de sortie du programme en échec.
-/// Essayé d'abord dans un sous-shell : un `sh` qui ne connaît pas `pipefail`
-/// (dash) continuerait sinon sur une erreur.
-const PIPEFAIL: &str = "(set -o pipefail) 2>/dev/null && set -o pipefail\n";
+/// Mots qui ouvrent une construction du shell : un tube qui commence par l'un
+/// d'eux n'est pas une commande simple, Claw ne le réécrit pas.
+const SHELL_KEYWORDS: &[&str] = &[
+    "{", "}", "if", "then", "else", "elif", "fi", "while", "until", "do", "done", "for", "case",
+    "esac", "function", "select", "time", "coproc", "!", "[[",
+];
+
+/// Début d'un tube réécrit : `pipefail` dans un sous-shell, essayé d'abord à
+/// part (un `sh` qui ne le connaît pas, comme dash, s'arrêterait sinon).
+const PIPEFAIL_GROUP: &str = "( (set -o pipefail) 2>/dev/null && set -o pipefail; ";
+
+/// Les tubes de la commande qui rangent la sortie d'un programme derrière des
+/// filtres (`npm run build 2>&1 | tail -20`), réécrits pour que leur code de
+/// sortie soit celui du programme : sans précaution c'est celui du filtre, et
+/// une compilation en échec passe pour réussie. Chaque tube a son `pipefail`
+/// dans un sous-shell : posé pour tout le script, il changerait le sens des
+/// autres tubes (`git log | head -5 && …` s'arrêterait sur le code 141 de git).
+///
+/// - Une vérification suivie de filtres (`tail`, `head`, `grep`…) : le reste
+///   de sa sortie est lu et jeté (`| { head -100` puis `cat >/dev/null; }`),
+///   pour qu'elle finisse toujours et rende son vrai code. Coupée par `head`,
+///   une vérification en Python ou un test Rust (qui ignorent SIGPIPE)
+///   sortirait en échec alors que tout passe.
+/// - Un autre programme suivi de filtres qui lisent tout (`tail`, `tee`) :
+///   `pipefail` seul. Derrière `head`, rien ne change : il peut ne jamais
+///   finir (`yes | head`), et son échec d'écriture n'en serait pas un.
+///
+/// `None` : rien à réécrire.
+pub(crate) fn with_faithful_exit_codes(command: &str) -> Option<String> {
+    if command.contains("<<") {
+        return None;
+    }
+    let operators = shell_operators(command);
+    let mut rewrites: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    let mut index = 0;
+    while index < operators.len() {
+        if operators[index].1 != Op::Pipe {
+            index += 1;
+            continue;
+        }
+        // Un tube : ses `|` à la suite, de `index` à `last`.
+        let mut last = index;
+        while operators
+            .get(last + 1)
+            .is_some_and(|(_, op)| *op == Op::Pipe)
+        {
+            last += 1;
+        }
+        rewrites.extend(faithful_pipeline(command, &operators, index, last));
+        index = last + 1;
+    }
+    if rewrites.is_empty() {
+        return None;
+    }
+    let mut rewritten = command.to_string();
+    for (range, text) in rewrites.into_iter().rev() {
+        rewritten.replace_range(range, &text);
+    }
+    Some(rewritten)
+}
+
+/// Le tube dont les `|` sont les opérateurs `first` à `last`, réécrit, et la
+/// place (octets) du texte qu'il remplace.
+fn faithful_pipeline(
+    command: &str,
+    operators: &[(std::ops::Range<usize>, Op)],
+    first: usize,
+    last: usize,
+) -> Option<(std::ops::Range<usize>, String)> {
+    let before = first.checked_sub(1).map(|index| &operators[index]);
+    let after = operators.get(last + 1);
+    // Un tube détaché (`npm run dev | tee log &`) tourne en arrière-plan.
+    if after.is_some_and(|(_, op)| *op == Op::Detached) {
+        return None;
+    }
+    let first_pipe = &operators[first].0;
+    let mut start = before.map_or(0, |(range, _)| range.end);
+    let end = after.map_or(command.len(), |(range, _)| range.start);
+    let lead = command[start..first_pipe.start].trim();
+    // `(cd app && npm run build) 2>&1 | tail` : le premier maillon est un
+    // sous-shell, le tube commence à sa parenthèse.
+    let subshell = before.is_some_and(|(_, op)| *op == Op::Close);
+    if subshell {
+        if !(lead.is_empty() || starts_with_redirection(lead)) {
+            return None;
+        }
+        start = matching_open(operators, first - 1)?;
+    }
+    let producer = command[start..first_pipe.start].to_ascii_lowercase();
+    let program = program_of(producer.trim()).to_string();
+    if !subshell && (program.is_empty() || SHELL_KEYWORDS.contains(&program.as_str())) {
+        return None;
+    }
+    let filters: Vec<String> = (first..=last)
+        .map(|index| {
+            let stage_end = if index < last {
+                operators[index + 1].0.start
+            } else {
+                end
+            };
+            program_of(command[operators[index].0.end..stage_end].trim()).to_ascii_lowercase()
+        })
+        .collect();
+    let is_filter = |name: &String| OUTPUT_FILTERS.contains(&name.as_str());
+    let is_text_tool = |name: &String| TEXT_TOOLS.contains(&name.as_str());
+    let checking = crate::harness::is_check_command(&producer)
+        && filters
+            .iter()
+            .all(|name| is_filter(name) || is_text_tool(name));
+    let text = if checking {
+        format!(
+            "{PIPEFAIL_GROUP}{} {{ {}\ncat >/dev/null; }} )",
+            command[start..first_pipe.end].trim_start(),
+            command[first_pipe.end..end].trim()
+        )
+    } else if filters.iter().all(is_filter) && !filters.iter().any(|name| name == "head") {
+        format!("{PIPEFAIL_GROUP}{}\n)", command[start..end].trim())
+    } else {
+        return None;
+    };
+    // Les blancs autour du tube restent ; après une parenthèse, un espace
+    // évite `((`, qui ouvrirait un calcul.
+    let whole = &command[start..end];
+    let from = start + (whole.len() - whole.trim_start().len());
+    let to = end - (whole.len() - whole.trim_end().len());
+    let pad = if command[..from].ends_with('(') {
+        " "
+    } else {
+        ""
+    };
+    Some((from..to, format!("{pad}{text}")))
+}
+
+/// `2>&1 | …`, `> log | …` : le texte commence par une redirection.
+fn starts_with_redirection(text: &str) -> bool {
+    let rest = text.trim_start_matches(|ch: char| ch.is_ascii_digit());
+    rest.starts_with(['>', '<']) || rest.starts_with("&>")
+}
+
+/// Début (octet) de la parenthèse qui ouvre celle d'indice `close`.
+fn matching_open(operators: &[(std::ops::Range<usize>, Op)], close: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    for index in (0..=close).rev() {
+        match operators[index].1 {
+            Op::Close => depth += 1,
+            Op::Open => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(operators[index].0.start);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Le code de sortie de `command` est celui de ce qui finit à l'octet `from`
+/// (une vérification) : après, son tube ne porte que des filtres de sa sortie
+/// (rendus fidèles par `with_faithful_exit_codes`), et la suite n'est liée que
+/// par `&&`. Un `|| echo`, un `; echo "exit=$?"`, un `&` ou un `| wc -l` le
+/// masquent : la commande réussit même quand la vérification échoue.
+pub(crate) fn exit_decided_at(command: &str, from: usize) -> bool {
+    let operators = shell_operators(command);
+    let following: Vec<&(std::ops::Range<usize>, Op)> = operators
+        .iter()
+        .filter(|(range, _)| range.start >= from)
+        .collect();
+    // Les `|` qui suivent la vérification sont ceux de son tube, jusqu'au
+    // premier `&&` ; ceux des commandes suivantes ne changent rien.
+    let mut own_pipeline = true;
+    for (position, (range, op)) in following.iter().enumerate() {
+        let masks = match op {
+            Op::And => {
+                own_pipeline = false;
+                false
+            }
+            Op::Pipe if own_pipeline => {
+                let stage_end = following
+                    .get(position + 1)
+                    .map_or(command.len(), |(next, _)| next.start);
+                let program = program_of(command[range.end..stage_end].trim()).to_ascii_lowercase();
+                !(OUTPUT_FILTERS.contains(&program.as_str())
+                    || TEXT_TOOLS.contains(&program.as_str()))
+            }
+            // `;` ou fin de ligne : seulement s'il ne reste rien après.
+            Op::Then => !command[range.end..].trim().is_empty(),
+            Op::Or | Op::Detached => true,
+            Op::Pipe | Op::Open | Op::Close => false,
+        };
+        if masks {
+            return false;
+        }
+    }
+    true
+}
 
 /// Une commande simple démarre-t-elle un serveur ou une surveillance ?
 fn segment_is_long_running(segment: &str) -> bool {
@@ -1069,41 +1233,99 @@ mod tests {
 
     #[test]
     fn a_filter_at_the_end_of_a_pipe_does_not_hide_a_failure() {
-        use super::{exit_fix, ExitFix};
-        let drained = |command: &str| Some(ExitFix::Drain(command.to_string()));
-        // Une vérification derrière un filtre : elle finit toujours, et son
+        use super::{with_faithful_exit_codes, PIPEFAIL_GROUP};
+        let drained = |before: &str, check: &str, filters: &str, after: &str| {
+            Some(format!(
+                "{before}{PIPEFAIL_GROUP}{check} {{ {filters}\ncat >/dev/null; }} ){after}"
+            ))
+        };
+        let piped = |before: &str, pipeline: &str, after: &str| {
+            Some(format!("{before}{PIPEFAIL_GROUP}{pipeline}\n){after}"))
+        };
+        // Une vérification derrière des filtres : elle finit toujours, et son
         // code de sortie est le sien.
         assert_eq!(
-            exit_fix("cd frontend && npm run build 2>&1 | tail -20"),
-            drained("cd frontend && npm run build 2>&1 | { tail -20\ncat >/dev/null; }")
+            with_faithful_exit_codes("cd frontend && npm run build 2>&1 | tail -20"),
+            drained("cd frontend && ", "npm run build 2>&1 |", "tail -20", "")
         );
         assert_eq!(
-            exit_fix("python -m pytest tests/ -v --tb=short 2>&1 | head -100"),
-            drained("python -m pytest tests/ -v --tb=short 2>&1 | { head -100\ncat >/dev/null; }")
+            with_faithful_exit_codes("python -m pytest tests/ -v --tb=short 2>&1 | head -100"),
+            drained(
+                "",
+                "python -m pytest tests/ -v --tb=short 2>&1 |",
+                "head -100",
+                ""
+            )
         );
         assert_eq!(
-            exit_fix(
+            with_faithful_exit_codes(
                 "cd backend && python -m pytest tests/ -v 2>&1 | grep -E \"(PASSED|FAILED)\" | head -5"
             ),
-            drained("cd backend && python -m pytest tests/ -v 2>&1 | { grep -E \"(PASSED|FAILED)\" | head -5\ncat >/dev/null; }")
+            drained(
+                "cd backend && ",
+                "python -m pytest tests/ -v 2>&1 |",
+                "grep -E \"(PASSED|FAILED)\" | head -5",
+                ""
+            )
         );
-        // Commentaire, `;` final, tube de stderr.
+        // Commentaire, `;` final, tube de stderr, sous-shell, substitution.
         assert_eq!(
-            exit_fix("pytest -q | head -5 # le début"),
-            drained("pytest -q | { head -5 # le début\ncat >/dev/null; }")
+            with_faithful_exit_codes("pytest -q | head -5 # le début"),
+            drained("", "pytest -q |", "head -5 # le début", "")
         );
         assert_eq!(
-            exit_fix("cargo test |& tail -3;"),
-            drained("cargo test |& { tail -3\ncat >/dev/null; }")
+            with_faithful_exit_codes("cargo test |& tail -3;"),
+            drained("", "cargo test |&", "tail -3", ";")
+        );
+        assert_eq!(
+            with_faithful_exit_codes("(cd frontend && npm run build) 2>&1 | tail -20"),
+            drained("", "(cd frontend && npm run build) 2>&1 |", "tail -20", "")
+        );
+        assert_eq!(
+            with_faithful_exit_codes("cd $(git rev-parse --show-toplevel) && cargo test | tail -5"),
+            drained(
+                "cd $(git rev-parse --show-toplevel) && ",
+                "cargo test |",
+                "tail -5",
+                ""
+            )
+        );
+        // Chaque tube a son pipefail : un filtre suivi de `&&` ne masque plus
+        // l'échec, et `git log | head` n'arrête plus la suite.
+        assert_eq!(
+            with_faithful_exit_codes(
+                "cd frontend && npm run build 2>&1 | tail -20 && echo \"Build OK\""
+            ),
+            drained(
+                "cd frontend && ",
+                "npm run build 2>&1 |",
+                "tail -20",
+                " && echo \"Build OK\""
+            )
+        );
+        assert_eq!(
+            with_faithful_exit_codes(
+                "git log --oneline | head -5 && npm run build 2>&1 | head -40"
+            ),
+            drained(
+                "git log --oneline | head -5 && ",
+                "npm run build 2>&1 |",
+                "head -40",
+                ""
+            )
         );
         // Un autre programme derrière un filtre qui lit tout : pipefail seul.
         assert_eq!(
-            exit_fix("python script.py 2>&1 | tail -5"),
-            Some(ExitFix::Pipefail)
+            with_faithful_exit_codes("python script.py 2>&1 | tail -5"),
+            piped("", "python script.py 2>&1 | tail -5", "")
+        );
+        assert_eq!(
+            with_faithful_exit_codes("(echo a; exit 3) 2>&1 | tail -5"),
+            piped("", "(echo a; exit 3) 2>&1 | tail -5", "")
         );
         // Laissé tel quel : le dernier programme décide (grep sans résultat,
-        // comptage), il n'y a pas de tube, ou `head` peut couper un programme
-        // qui ne finirait jamais.
+        // comptage), il n'y a pas de tube, `head` peut couper un programme
+        // qui ne finirait jamais, ou ce n'est pas une commande simple.
         for kept in [
             "grep -rn foo src | wc -l",
             "ls | grep test",
@@ -1113,16 +1335,20 @@ mod tests {
             "cat > a.txt <<EOF\nun | tail\nEOF",
             "yes | head -3",
             "python script.py | head -20",
-            "(cd app && pytest) | head -5",
+            "npm run dev 2>&1 | tee dev.log &",
+            "{ npm test | tail -5; }",
+            "if npm test | tail -5; then echo ok; fi",
+            "f() { npm test | tail -5; }",
         ] {
-            assert_eq!(exit_fix(kept), None, "{kept}");
+            assert_eq!(with_faithful_exit_codes(kept), None, "{kept}");
         }
+    }
 
-        let run = |command: &str| {
-            execute_bash(foreground(command, Some(60_000)))
-                .expect("exécution")
-                .return_code_interpretation
-        };
+    #[test]
+    fn a_rewritten_pipe_gives_the_exit_code_of_its_program() {
+        let execute =
+            |command: &str| execute_bash(foreground(command, Some(60_000))).expect("exécution");
+        let run = |command: &str| execute(command).return_code_interpretation;
         // Le programme échoue derrière `tail` : son code de sortie est rendu.
         assert_eq!(
             run("(echo compilation; exit 3) 2>&1 | tail -5").as_deref(),
@@ -1132,13 +1358,22 @@ mod tests {
         assert_eq!(run("yes | head -3"), None);
         // Une vérification qui ignore SIGPIPE (comme Python ou un test Rust)
         // écrit bien plus que `head` n'en garde : elle finit, et réussit.
-        let pytest = "pytest() { trap '' PIPE; i=0; while [ $i -lt 8000 ]; do echo \"test_$i PASSED\" || return 1; i=$((i+1)); done; }; pytest | head -5";
+        let pytest = "pytest() { trap '' PIPE; for i in {1..8000}; do echo \"test_$i PASSED\" || return 1; done; }; pytest | head -5";
         assert_eq!(run(pytest), None);
-        // La même en échec : son code de sortie est rendu.
+        // La même en échec : son code de sortie est rendu, et `&&` ne lance
+        // pas la suite.
+        let failing = execute(
+            "pytest() { echo \"test_1 FAILED\"; return 1; }; pytest | head -5 && echo \"Tests OK\"",
+        );
         assert_eq!(
-            run("pytest() { echo \"test_1 FAILED\"; return 1; }; pytest | head -5").as_deref(),
+            failing.return_code_interpretation.as_deref(),
             Some("exit_code:1")
         );
+        assert!(!failing.stdout.contains("Tests OK"), "{}", failing.stdout);
+        // Un `head` plus haut dans la commande n'arrête plus la vérification.
+        let later = execute("pytest() { echo verifie; }; yes | head -2 && pytest | head -5");
+        assert_eq!(later.return_code_interpretation, None);
+        assert!(later.stdout.contains("verifie"), "{}", later.stdout);
     }
 
     #[test]

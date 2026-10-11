@@ -161,6 +161,9 @@ impl PermissionRule {
             "glob" => &["glob_search"],
             "grep" => &["grep_search"],
             "agent" | "task" => &["Agent"],
+            // ViewPage charge aussi une page du web : une règle qui limite
+            // WebFetch le limite aussi.
+            "webfetch" => &["WebFetch", "ViewPage"],
             _ => {
                 return self.tool.eq_ignore_ascii_case(tool_name)
                     || (self.tool.starts_with("mcp__")
@@ -1060,6 +1063,28 @@ mod tests {
             prompter.seen[0].suggested_rule.as_deref(),
             Some("WebFetch(domain:docs.rs)")
         );
+        // ViewPage charge aussi une page : la règle le concerne.
+        policy.authorize(
+            "ViewPage",
+            &json!({ "url": "http://localhost:3000/" }).to_string(),
+            Some(&mut prompter),
+        );
+        assert_eq!(prompter.seen.len(), 2);
+        assert_eq!(prompter.seen[1].tool_name, "ViewPage");
+        let mut policy = self::policy(
+            PermissionMode::DangerFullAccess,
+            &[],
+            &["WebFetch(domain:intranet.local)"],
+            &[],
+        );
+        assert!(matches!(
+            policy.authorize(
+                "ViewPage",
+                &json!({ "url": "http://intranet.local/rapport" }).to_string(),
+                None
+            ),
+            PermissionOutcome::Deny { .. }
+        ));
     }
 
     #[test]
