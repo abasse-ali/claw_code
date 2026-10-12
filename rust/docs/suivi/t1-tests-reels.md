@@ -91,6 +91,7 @@ Scénario t4 (tâche longue, plusieurs modules), Claw au commit fcbbb34 :
 | 12/10 08:02 | t4-bibliotheque | cohere/north-mini-code | t4b-north | 8/12 | 35 | 349 s | Claw avec T1-14 à T1-16 ; terminé normalement, la dérive du premier essai ne s'est pas reproduite ; relit quatre fichiers juste avant de les modifier (T1-17) ; prête le livre d'office au premier de la file au lieu de le mettre de côté, et son contrôle des exigences ne le voit pas (T1-18) ; la relecture par un autre modèle n'a vraisemblablement pas abouti (T1-20) ; trois remarques de regroupement reçues, sans effet |
 | 12/10 08:28 | t4-bibliotheque | free = nemotron-3-ultra-550b | t4c | 9/12 | 30 | 455 s | même Claw ; une seule mise à jour de la liste envoyée seule (contre sept) : après la remarque, les cinq suivantes partent avec une modification (T1-14) ; après les remarques des 6e et 9e réponses isolées, il enchaîne deux puis quatre commandes par appel, toujours un appel par réponse (T1-15) ; a mal lu la même phrase que le petit modèle : prêt d'office au premier de la file (T1-18) |
 | 12/10 12:34 | t4-bibliotheque | free = nemotron-3-ultra-550b | t4d | 12/12 | 29 | 779 s | Claw au commit 806bf81 ; bonne lecture de « mis de côté » dès son plan (deux essais sur trois pour ce modèle) ; la relecture aboutit (dots, les deux étapes suivies) et trouve un vrai défaut, l'emprunteur qui peut réserver son propre livre : corrigé avec un test, 12/12 au lieu de 11/12 ; liste de tâches toujours jointe à la modification suivante ; la vérification automatique de Claw lance `unittest`, qui ne trouve pas les tests pytest (T1-22) |
+| 12/10 16:40 | t4-bibliotheque | poolside/laguna-s-2.1 (troisième modèle) | t4-laguna | 12/12 | 16 | 1 053 s | Claw au commit d70da68 ; bonne lecture de « mis de côté » ; deux fois moins de requêtes que le plus puissant ; une limite du fournisseur, attendue une fois (T1-25, vu en réel) ; la relecture (dots) relève une faute dans un message du guichet |
 
 Rejeux sur le travail enregistré de t4c (`review_replay.py`, `checklist_replay.py` : le
 contrôle des exigences renvoyé au point exact où Claw l'avait envoyé, message 61 ; une à deux
@@ -180,6 +181,10 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
 - Remède : à préciser après les essais avec des modèles plus petits.
 - État : corrigé (lot T1) pour la consigne : l'étape 4 du guide demande un essai du correctif sur
   une entrée que l'exemple ne contient pas, par une commande ou un test. Effet à mesurer.
+- Mesure (12 octobre, reprise de 16 h 22, voir T1-26) : sans effet sur t3 tant que le rappel
+  restait général (« thousands separators (space or non-breaking space) ») ; 4/4 dès qu'il
+  nomme le piège précis : `replace(" ", "")` ne retire pas U+00A0 ni U+202F, essayer
+  « 1\u00a0250,00 ». Corrigé.
 
 ### T1-05 Le prompt système porte l'état et le diff Git de tout le dépôt, sans limite de taille
 - Preuve : `prompt.rs`, `read_git_status` et `read_git_diff` (`git status --short --branch`,
@@ -532,6 +537,20 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   `--output-format json` n'imprimait rien : il rend maintenant `{"error", "model", "notices"}`,
   pour qu'un script sache ce qui est arrivé (vérifié avec le faux modèle « introuvable »).
 
+### T1-26 Les cas limites n'arrivent qu'au contrôle des exigences, que les petites corrections n'atteignent pas
+- Preuve : t3 (CSV « corrompu ») : la correction fait deux ou trois lignes, le contrôle des
+  exigences (cinq lignes au moins) n'arrive jamais, et pour un problème signalé c'est la
+  demande de preuves qui le remplace. Les cas limites du CSV (espaces insécables d'Excel)
+  n'étaient donc jamais rappelés ; aucun essai de t3 ne les traitait (T1-04).
+- État : corrigé (reprise du 12 octobre, 16 h 22) : aide `CLAW_EDGE_CASES`. Les cas limites du
+  genre de fonctionnalité sont joints à la demande dès le début du tour (`edge_case_guide`,
+  bloc de guide masqué à la relecture d'une session), et rappelés, chacun à prouver, au
+  contrôle des exigences comme à la demande de preuves d'un problème (`edge_case_check`).
+- Mesures sur t3 (modèle le plus puissant, une fois chacune) : guide au début seul, 3/4, le
+  modèle ne s'en sert pas ; avec le rappel dans la demande de preuves, 3/4, il n'en dit pas un
+  mot ; avec un rappel qui nomme le piège précis (ci-dessus), 4/4. Ce qui fait agir le modèle :
+  le piège concret et l'essai à faire, pas la catégorie.
+
 ## Améliorations
 
 Lot T1 (en cours le 12 octobre 2026), dans cet ordre : T1-08 (garde des données), T1-03 et
@@ -549,14 +568,16 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 12 octobre, 15 h 55) : (1) t4 avec le troisième modèle
-(laguna ; t5 : 12/12) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
+Suite, dans l'ordre (mise à jour du 12 octobre, 18 h 30) : (1) écrire chaque cas limite de
+`FEATURE_EDGE_CASES` sous la forme qui a marché (le piège précis et l'essai à faire), puis
+mesurer sur t1 (montants) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
 sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par
 une commande ; (5) T1-04, les espaces insécables oubliées sur t3 ; (6) refaire chaque mesure
-deux ou trois fois avant de conclure. T1-12 à T1-17 et T1-19 à T1-25 sont faits, T1-18 en
-partie.
+deux ou trois fois avant de conclure. T1-03 à T1-10, T1-12 à T1-17 et T1-19 à T1-26 sont
+faits, T1-18 en partie, T1-11 à faire. Le troisième modèle gratuit (laguna) fait 12/12 sur t4
+et t5 avec le moins de requêtes (16 et 26), mais son fournisseur le limite souvent.
 
 Mesure faite (tableau plus haut). Pour la refaire : `run.py <scénario> --label <nom>`, puis avec
 `--model cohere/north-mini-code:free`) et comparer scores et requêtes à la série propre.

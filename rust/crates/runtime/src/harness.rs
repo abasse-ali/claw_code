@@ -83,6 +83,9 @@ pub enum Aid {
     KeptAnswer,
     /// Fichier relu sans avoir changé : une seule copie gardée, et dit au modèle.
     RepeatedReads,
+    /// Ce qu'un ingénieur vérifie d'office pour le genre de fonctionnalité
+    /// demandé : joint à la demande, puis rappelé au contrôle des exigences.
+    EdgeCases,
 }
 
 impl Aid {
@@ -119,6 +122,7 @@ impl Aid {
             Self::BatchCalls => "CLAW_BATCH_CALLS",
             Self::KeptAnswer => "CLAW_KEPT_ANSWER",
             Self::RepeatedReads => "CLAW_REPEATED_READS",
+            Self::EdgeCases => "CLAW_EDGE_CASES",
         }
     }
 }
@@ -1753,7 +1757,7 @@ const FEATURE_EDGE_CASES: &[(&[&str], &str)] = &[
     ),
     (
         &["csv", "excel", "tableur", "xlsx", "spreadsheet"],
-        "CSV and Excel files from French users: `;` as separator, decimal comma, thousands separators (space or non-breaking space), UTF-8 with or without BOM, or cp1252, and quoted fields that contain the separator. Keep the user's file as it is and fix the code that reads it.",
+        "CSV and Excel files from French users: `;` as separator, decimal comma, and thousands separators that are a plain space or, from Excel, a non-breaking space (U+00A0 or U+202F) that `replace(\" \", \"\")` does not remove: test a value such as \"1\\u00a0250,00\" (Python notation); also UTF-8 with or without BOM, or cp1252, and quoted fields that contain the separator. Keep the user's file as it is and fix the code that reads it.",
     ),
     (
         &["pagination", "paginer", "pagine", "par page", "page suivante", "paginate", "per page"],
@@ -1779,6 +1783,44 @@ const FEATURE_EDGE_CASES: &[(&[&str], &str)] = &[
 
 /// Au plus, les genres de fonctionnalité rappelés dans un même contrôle.
 const MAX_FEATURE_EDGE_CASES: usize = 4;
+
+/// Fin d'un contrôle de fin de tour (exigences, preuves d'un problème) : les
+/// cas limites du genre de fonctionnalité que nomme la demande, chacun à
+/// prouver. Vide si la demande n'en nomme aucun. Le guide du début de tour ne
+/// suffit pas : sur t3, il est arrivé au modèle, qui l'a laissé de côté.
+#[must_use]
+pub fn edge_case_check(request: &str, earlier: Option<&str>) -> String {
+    if !enabled(Aid::EdgeCases) {
+        return String::new();
+    }
+    // Le genre de fonctionnalité se lit dans la demande poursuivie aussi.
+    let cases = feature_edge_cases(&format!("{request}\n{}", earlier.unwrap_or_default()));
+    if cases.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nWhat experienced engineers always check for this kind of feature. For each line that applies to this request, show the test or the command of this session that covers it, or add it now:\n- {}",
+        cases.join("\n- ")
+    )
+}
+
+/// Guide joint à la demande quand elle nomme un genre de fonctionnalité : ses
+/// cas limites, dès le départ (une correction de deux lignes n'atteint pas le
+/// contrôle des exigences, et un travail bien fait d'emblée coûte moins de
+/// requêtes qu'une reprise). `earlier` : la demande qu'un message court poursuit.
+#[must_use]
+pub fn edge_case_guide(request: &str, earlier: Option<&str>) -> Option<String> {
+    if !enabled(Aid::EdgeCases) {
+        return None;
+    }
+    let cases = feature_edge_cases(&format!("{request}\n{}", earlier.unwrap_or_default()));
+    (!cases.is_empty()).then(|| {
+        format!(
+            "{GUIDE_PREFIX} What experienced engineers always check for this kind of work. Keep each line that applies in mind from the start, and cover it with a test or a command:\n- {}",
+            cases.join("\n- ")
+        )
+    })
+}
 
 /// Les cas limites des genres de fonctionnalité que nomme la demande.
 #[must_use]
@@ -1816,16 +1858,7 @@ pub fn checklist_prompt(request: &str, earlier: Option<&str>, away: bool) -> Str
     let mut prompt = format!(
         "{CHECKLIST_PROMPT}\n\n{quoted}\nGo through it line by line: one line of your check per sentence or bullet of this request, even for a part you believe is already done (then quote the file and line that show it). Read each sentence again as it is written, not as you remember it: say what the user must be able to observe (who can do what, when, and what is refused), and make sure your code does exactly that, not a close variant. An action that the request leaves to a person (\"the manager can then approve it\", \"only the owner can then confirm\") stays theirs to do: your code must not do it for them automatically, and the scenario that shows it is that person doing it, after the step that allows it."
     );
-    // Le genre de fonctionnalité se lit dans la demande poursuivie aussi.
-    let named = format!("{request}\n{}", earlier.unwrap_or_default());
-    let cases = feature_edge_cases(&named);
-    if !cases.is_empty() {
-        prompt.push_str("\n\nWhat experienced engineers always check for this kind of feature. For each line that applies to this request, show the test or the command of this session that covers it, or add it now:");
-        for case in cases {
-            prompt.push_str("\n- ");
-            prompt.push_str(case);
-        }
-    }
+    prompt.push_str(&edge_case_check(request, earlier));
     if away {
         prompt.push(' ');
         prompt.push_str(AWAY_NOTE);
@@ -3045,6 +3078,20 @@ mod guide_tests {
             "<<<\ndans la langue traduite, c'est que le français ; et une page pour l'URL\n>>>"
         ));
         assert!(prompt.contains("not answering permission requests"));
+    }
+
+    #[test]
+    fn a_request_that_names_a_kind_of_feature_gets_its_edge_cases_from_the_start() {
+        let guide = super::edge_case_guide(
+            "Je pense que le fichier ventes.csv est corrompu, tu peux le réparer ?",
+            None,
+        )
+        .expect("guide");
+        assert!(guide.starts_with(super::GUIDE_PREFIX));
+        assert!(guide.contains("non-breaking space"));
+        // « continue » : le genre se lit dans la demande poursuivie.
+        assert!(super::edge_case_guide("continue", Some("ajoute un filtre par prix")).is_some());
+        assert_eq!(super::edge_case_guide("explique ce module", None), None);
     }
 
     #[test]

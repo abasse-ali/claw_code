@@ -122,9 +122,11 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | 9c29c4a | Sans personne pour décider, une limite passagère du fournisseur est réessayée après une pause au lieu d'arrêter le tour (T1-25) ; cas « amont-limite » du faux modèle |
 
-| (commit « T1-25, suite ») | Attente sans témoin allongée à une dizaine de minutes ; un tour en échec en mode JSON rend son erreur et ses notices ; t5 avec laguna : 12/12 |
+| d70da68 | Attente sans témoin allongée à une dizaine de minutes ; un tour en échec en mode JSON rend son erreur et ses notices ; t5 avec laguna : 12/12 |
 
-État des tests après la suite de T1-25 : 649 tests Rust, analyse statique à zéro sous Windows et
+| (commit « T1-26 ») | Cas limites joints dès le début du tour et rappelés dans la demande de preuves (T1-26) ; piège précis des espaces insécables : t3 fait 4/4 pour la première fois (T1-04) ; t4 avec laguna : 12/12 en 16 requêtes |
+
+État des tests après T1-26 : 652 (un test de temps, `waiting_for_a_task_returns_once_it_is_done`, a échoué une fois sous forte charge de la machine, puis passé seul trois fois et dans la suite) tests Rust, analyse statique à zéro sous Windows et
 Linux, client 28 sur 28, extension VS Code 18 sur 18 (lancée à T1-16 ; rien de l'interface n'a
 changé depuis).
 
@@ -277,3 +279,8 @@ Hors lots :
   personne pour décider, Claw abandonnait au lieu d'attendre un peu (T1-25, corrigé). Refait :
   12/12, mais une limite plus longue a fini le tour en erreur ; l'attente est allongée et la
   sortie JSON garde l'erreur et les notices.
+- Reprise de 16 h 22 : laguna fait aussi 12/12 sur t4, en 16 requêtes. Les cas limites sont
+  maintenant joints dès le début du tour et rappelés dans la demande de preuves des problèmes
+  signalés (T1-26). Sur t3, ni l'un ni l'autre ne suffisait tant que le rappel restait
+  général ; nommer le piège précis (`replace(" ", "")` ne retire pas l'espace insécable d'Excel,
+  essayer « 1\u00a0250,00 ») donne 4/4 pour la première fois (T1-04).

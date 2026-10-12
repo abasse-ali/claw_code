@@ -1177,6 +1177,12 @@ where
         if let Some(text) = guide {
             user_message.blocks.push(ContentBlock::Text { text });
         }
+        // Ce qu'un ingénieur vérifie d'office pour ce genre de fonctionnalité.
+        if !self.subagent {
+            if let Some(text) = harness::edge_case_guide(&request_text, earlier.as_deref()) {
+                user_message.blocks.push(ContentBlock::Text { text });
+            }
+        }
         self.session.messages.push(user_message);
 
         let mut assistant_messages = Vec::new();
@@ -1383,7 +1389,7 @@ where
                             &mut prompter,
                         )
                     })
-                    .or_else(|| self.evidence_gate(&mut aids))
+                    .or_else(|| self.evidence_gate(&mut aids, &request_text, earlier.as_deref()))
                     .or_else(|| {
                         self.requirements_gate(&mut aids, &request_text, earlier.as_deref())
                     })
@@ -2540,7 +2546,12 @@ where
     /// qui montre sa disparition (une fois par tour). Remplace, pour ce tour,
     /// le contrôle général des exigences ; le vérificateur ultracode s'en
     /// charge quand il est actif.
-    fn evidence_gate(&mut self, aids: &mut TurnAids) -> Option<String> {
+    fn evidence_gate(
+        &mut self,
+        aids: &mut TurnAids,
+        request: &str,
+        earlier: Option<&str>,
+    ) -> Option<String> {
         let due = match aids.report {
             harness::Report::Problem => true,
             // Des images sans plainte écrite : les preuves ne sont demandées
@@ -2573,7 +2584,12 @@ where
         } else {
             String::new()
         };
-        Some(format!("{prompt}{away} {}", harness::FINAL_ANSWER_RULE))
+        // Les cas limites du genre de fonctionnalité en cause, à prouver aussi.
+        let edges = harness::edge_case_check(request, earlier);
+        Some(format!(
+            "{prompt}{away}{edges}\n\n{}",
+            harness::FINAL_ANSWER_RULE
+        ))
     }
 
     /// Commandes conseillées sans avoir été lancées : la réponse dit à
@@ -4588,6 +4604,24 @@ mod tests {
         assert!(!observed.borrow().requests[0].contains("[Claw guide]"));
     }
 
+    #[test]
+    fn the_evidence_of_a_reported_problem_covers_the_edge_cases_of_its_kind() {
+        // Essai réel t3 : le guide du début de tour est arrivé, et l'espace
+        // insécable des exports Excel est restée oubliée.
+        let (mut runtime, observed, _) =
+            aided_runtime(vec![text_step("Corrigé."), text_step("Vérifié.")], vec![]);
+        runtime
+            .run_turn(
+                "Mon script plante sur '12,5' ; je pense que ventes.csv est corrompu",
+                None,
+            )
+            .expect("tour");
+        let observed = observed.borrow();
+        assert!(observed.requests[1].contains("name the observation you made in this turn"));
+        assert!(observed.requests[1].contains("What experienced engineers always check"));
+        assert!(observed.requests[1].contains("non-breaking space"));
+    }
+
     fn capture() -> crate::attachments::ImageAttachment {
         crate::attachments::ImageAttachment {
             media_type: "image/png".to_string(),
@@ -5461,6 +5495,22 @@ mod tests {
         // Les remarques du second relecteur reviennent à l'agent.
         assert!(observed.requests[3].contains("liste vide non gérée"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn the_edge_cases_of_the_requested_feature_come_with_the_request() {
+        // Essais réels t5 : faits d'emblée, ils évitent une reprise au contrôle.
+        let (mut runtime, observed, _) = aided_runtime(vec![text_step("Fait.")], vec![]);
+        runtime
+            .run_turn("Ajoute une recherche dans la liste des recettes", None)
+            .expect("tour");
+        let (mut other, plain, _) = aided_runtime(vec![text_step("Voilà.")], vec![]);
+        other.run_turn("explique ce module", None).expect("tour");
+        assert!(observed.borrow().requests[0].contains(
+            "[Claw guide] What experienced engineers always check for this kind of work"
+        ));
+        assert!(observed.borrow().requests[0].contains("ignore case and accents"));
+        assert!(!plain.borrow().requests[0].contains("What experienced engineers"));
     }
 
     #[test]
