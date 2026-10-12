@@ -455,7 +455,10 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
   « Escalade »), la même barre propose un autre modèle ; sans réponse en 60 s, le même modèle
   continue. `"modelSwitch": "auto"` (ou `CLAW_MODEL_SWITCH=auto`) rétablit la bascule sans
   question décrite ci-dessous ; elle s'applique aussi d'office quand personne n'est là pour
-  répondre (`claw prompt` dans un script, action GitHub, sous-agents).
+  répondre (`claw prompt` dans un script, action GitHub, sous-agents). Sans personne pour
+  répondre et sans autre modèle à essayer, un échec passager (modèle gratuit limité un moment
+  par son fournisseur, surcharge) n'arrête plus le tour : le même modèle est réessayé après
+  10 s, 30 s, 1 min puis 2 min, moins de quatre minutes en tout, avec une notice à chaque fois.
 - **Appel d'outil coupé** : il arrive qu'un fournisseur close la réponse juste après le nom de
   l'outil, avant ses arguments. Claw ne prend pas cet appel vide pour un vrai : la réponse est
   redemandée deux fois au même modèle, puis la barre vous propose de réessayer, de changer de

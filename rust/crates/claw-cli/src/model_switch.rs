@@ -46,6 +46,34 @@ pub(crate) const STUCK_AUTO_CONTINUE: Duration = Duration::from_secs(60);
 /// (un par délai ci-dessus).
 pub(crate) const AUTO_RETRIES: u32 = 12;
 
+/// Sans personne pour décider : délais avant chaque nouvel essai d'un modèle
+/// limité passagèrement par son fournisseur, moins de quatre minutes en tout
+/// (un script ne doit pas attendre vingt minutes). Essai réel du 12 octobre :
+/// « laguna est temporairement limité en amont, réessayez bientôt », et le tour
+/// s'arrêtait après trois essais en quatre secondes.
+const UNATTENDED_RETRY_DELAYS: [u64; 4] = [10, 30, 60, 120];
+pub(crate) const UNATTENDED_RETRIES: u32 = 4;
+
+/// Délai avant le nouvel essai numéro `done + 1` sans personne pour décider.
+pub(crate) fn unattended_retry_delay(done: u32) -> Option<Duration> {
+    usize::try_from(done)
+        .ok()
+        .and_then(|index| UNATTENDED_RETRY_DELAYS.get(index))
+        .map(|seconds| Duration::from_secs(*seconds))
+}
+
+/// Attend `delay` ; faux si l'utilisateur interrompt le tour entre-temps.
+pub(crate) fn pause(delay: Duration) -> bool {
+    let until = Instant::now() + delay;
+    while Instant::now() < until {
+        if runtime::interrupt::interrupt_requested() {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(200).min(until - Instant::now()));
+    }
+    true
+}
+
 /// Délai avant l'essai automatique numéro `done + 1` ; `None` quand ils sont épuisés.
 pub(crate) fn auto_retry_delay(done: u32) -> Option<Duration> {
     usize::try_from(done)
@@ -191,6 +219,19 @@ mod tests {
             .map(|delay| delay.as_secs())
             .sum();
         assert!((15 * 60..=25 * 60).contains(&total), "{total} s");
+    }
+
+    #[test]
+    fn without_anyone_to_decide_a_passing_limit_is_waited_out_for_minutes_only() {
+        use super::{pause, unattended_retry_delay, UNATTENDED_RETRIES};
+        assert_eq!(unattended_retry_delay(0), Some(Duration::from_secs(10)));
+        assert_eq!(unattended_retry_delay(UNATTENDED_RETRIES), None);
+        let total: u64 = (0..UNATTENDED_RETRIES)
+            .filter_map(unattended_retry_delay)
+            .map(|delay| delay.as_secs())
+            .sum();
+        assert!(total < 4 * 60, "{total} s");
+        assert!(pause(Duration::from_millis(10)));
     }
 
     #[test]

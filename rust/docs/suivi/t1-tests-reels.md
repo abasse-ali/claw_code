@@ -111,6 +111,7 @@ Scénario t5 (projet web : serveur Python, API JSON, page), Claw au commit 806bf
 | 12/10 13:12 | t5-recettes-web | cohere/north-mini-code | t5-north | - | - | - | interrompu à la deuxième minute par l'arrêt de la session de travail, sans note ; sa session, enregistrée au fil du tour, garde 49 messages lisibles : première confirmation réelle de T1-16 |
 | 12/10 14:44 | t5-recettes-web | free = nemotron-3-ultra-550b | t5b | 12/12 | 29 | 676 s | Claw au commit f2eac48 (T1-24) : au contrôle des exigences, il vérifie les cas limites de la recherche et corrige accents, espaces et décodage de l'URL, avec des tests ; deux relecteurs répondent « VERDICT LGTM » sans analyse (le second par T1-23) |
 | 12/10 14:56 | t5-recettes-web | cohere/north-mini-code | t5-north2 | 10/12 | 49 | 604 s | même Claw ; accents, espaces et décodage justes ; un ingrédient doit égaler le mot cherché (« pomme » ne trouve pas « pommes de terre ») et plusieurs mots ne trouvent rien ; 16 lectures de fichiers, 6 retirées du contexte et 2 remarques (T1-17) ; la relecture (nemotron-ultra) relève deux affirmations fausses de sa réponse (un test qui n'existe pas, un compte de tests) |
+| 12/10 15:20 | t5-recettes-web | poolside/laguna-s-2.1 (troisième modèle) | t5-laguna | non noté | 3 | 144 s | bonne lecture de tout le projet, plan clair, une modification ; puis « laguna est temporairement limité en amont, réessayez bientôt » (429) : trois essais en 4 s et le tour s'arrête (T1-25). La session, enregistrée au fil du tour, garde ses 14 messages |
 
 Les essais de t5 ont été notés une seconde fois après une correction de la vérification
 cachée : tous les points de la recherche dépendaient du premier (`?q=pomme` exact), si bien
@@ -512,6 +513,19 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   12/12 contre 9/12) ; avec le petit modèle, 10/12 (accents, espaces et décodage justes). À
   essayer sur un autre genre de fonctionnalité.
 
+### T1-25 Sans personne pour décider, une limite passagère du fournisseur arrête le tour
+- Preuve : t5-laguna, `stderr.txt` : « l'api a échoué après 3 tentatives : 429 ... is
+  temporarily rate-limited upstream. Please retry shortly ». En mode interactif, Claw réessaie
+  seul après 3 s, 10 s, 30 s... (essais automatiques de la question de changement de modèle) ;
+  sans personne pour répondre (`claw prompt`, script, action GitHub, banc) et sans modèle de
+  secours, le tour s'arrêtait après les trois essais rapprochés du client de l'API.
+- État : corrigé (reprise du 12 octobre, 11 h 22, suite) : dans ce cas, un échec passager
+  (`failure_is_transient` : 429 hors quota du jour, 408, 409, 5xx) est réessayé après 10 s,
+  30 s, 1 min puis 2 min (`unattended_retry_delay`, moins de quatre minutes), avec une notice à
+  chaque fois ; l'attente s'interrompt avec le tour (`model_switch::pause`). Le faux modèle a un
+  cas « amont-limite » (429 aux quatre premières requêtes) : avant, le tour échouait en 4 s ;
+  après, il aboutit en 16 s avec une notice.
+
 ## Améliorations
 
 Lot T1 (en cours le 12 octobre 2026), dans cet ordre : T1-08 (garde des données), T1-03 et
@@ -529,13 +543,13 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 12 octobre, 15 h 15) : (1) un troisième modèle gratuit
-sur t4 et t5 ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
+Suite, dans l'ordre (mise à jour du 12 octobre, 15 h 30) : (1) refaire t5 avec le troisième
+modèle (laguna), arrêté la première fois par une limite du fournisseur (T1-25), puis t4 ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
 sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par
 une commande ; (5) T1-04, les espaces insécables oubliées sur t3 ; (6) refaire chaque mesure
-deux ou trois fois avant de conclure. T1-12 à T1-17 et T1-19 à T1-24 sont faits, T1-18 en
+deux ou trois fois avant de conclure. T1-12 à T1-17 et T1-19 à T1-25 sont faits, T1-18 en
 partie.
 
 Mesure faite (tableau plus haut). Pour la refaire : `run.py <scénario> --label <nom>`, puis avec

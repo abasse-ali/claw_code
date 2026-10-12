@@ -6491,7 +6491,35 @@ impl ApiClient for DefaultRuntimeClient {
                     let Some(status) = api::upstream_failure_status(&error.to_string())
                         .filter(|_| switches_left > 0 && !failed.is_empty())
                     else {
-                        return Err(error);
+                        // Personne pour décider (script, action GitHub, banc
+                        // d'essais) et rien d'autre à essayer : un échec
+                        // passager du fournisseur (modèle gratuit limité en
+                        // amont, surcharge) se réessaie après une pause au
+                        // lieu d'arrêter le tour.
+                        let delay =
+                            model_switch::unattended_retry_delay(auto_retries).filter(|_| {
+                                self.model_prompter.is_none()
+                                    && api::failure_is_transient(&error.to_string())
+                            });
+                        let Some(delay) = delay else {
+                            return Err(error);
+                        };
+                        auto_retries += 1;
+                        let model = self.chain.primary().to_string();
+                        let reason = api::model_failure_reason(&error.to_string())
+                            .unwrap_or_else(|| "échec passager du fournisseur".to_string());
+                        notify(&format!(
+                            "{model} : {reason}. Nouvel essai automatique dans {} s (essai {auto_retries} sur {})",
+                            delay.as_secs(),
+                            model_switch::UNATTENDED_RETRIES
+                        ));
+                        if !model_switch::pause(delay) {
+                            return Err(RuntimeError::new(runtime::interrupt::INTERRUPTED_MESSAGE));
+                        }
+                        if emit {
+                            live::show("Réflexion…");
+                        }
+                        continue;
                     };
                     if emit {
                         transcript::discard_calls();

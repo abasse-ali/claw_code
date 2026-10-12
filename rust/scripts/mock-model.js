@@ -22,6 +22,8 @@
 // « panne-une-fois » ne lâche qu'à sa première requête, puis répond.
 // Avec « outil » dans le nom, la panne arrive après l'annonce d'un appel d'outil.
 // Un modèle « introuvable » reçoit l'erreur 404 d'OpenRouter « No endpoints found ».
+// Un modèle « amont-limite » reçoit l'erreur 429 d'une limite passagère du
+// fournisseur à ses quatre premières requêtes, puis répond.
 // Un modèle « fige-une-fois » commence sa première réponse puis n'envoie plus rien.
 // Un modèle « coupe » clôt sa réponse après le nom de l'outil, sans arguments
 // (« coupe-une-fois » : à son premier appel seulement) ; un modèle « limite »
@@ -88,6 +90,8 @@ function lastDirective(messages) {
 let directiveCalls = 0;
 // Modèles « panne-une-fois » déjà tombés en panne une fois.
 const failedOnce = new Set();
+// Requêtes déjà refusées (429) par modèle « amont-limite ».
+const rateLimited = new Map();
 
 function directiveReply(directive, messages) {
   if (!directive.answered) {
@@ -290,6 +294,17 @@ const server = http.createServer((request, response) => {
       response.writeHead(422, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ detail: [{ type: "extra_forbidden", loc: ["body", "stream_options"], msg: "Extra inputs are not permitted" }] }));
       return;
+    }
+    // « amont-limite » : le fournisseur gratuit limite le modèle (429) aux quatre
+    // premières requêtes, comme OpenRouter quand son pool partagé est plein.
+    if (String(body.model || "").includes("amont-limite")) {
+      const done = (rateLimited.get(body.model) || 0) + 1;
+      rateLimited.set(body.model, done);
+      if (done <= 4) {
+        response.writeHead(429, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: { message: "Provider returned error", code: 429, metadata: { raw: `${body.model} is temporarily rate-limited upstream. Please retry shortly.` } } }));
+        return;
+      }
     }
     // « introuvable » : aucun fournisseur n'accepte la requête, comme le dit OpenRouter.
     if (String(body.model || "").includes("introuvable")) {
