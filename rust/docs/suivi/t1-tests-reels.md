@@ -6,8 +6,9 @@ réfléchissent. Fais toujours en sorte qu'on puisse reprendre sur une autre ses
 
 ## Méthode
 
-- Banc d'essai : `rust/scripts/real-tests/` (voir son README). Six scénarios (t1 à t6, dont
-  un projet web et des dates), chacun avec une vérification cachée qui note le résultat ; les essais tournent hors du dépôt, dans
+- Banc d'essai : `rust/scripts/real-tests/` (voir son README). Sept scénarios (t1 à t7, dont
+  un projet web, des dates et des places limitées), chacun avec une vérification cachée qui
+  note le résultat ; les essais tournent hors du dépôt, dans
   `D:\Mes_Projets\claw-real-tests`, une ligne par essai dans `results.jsonl`.
 - Modèle : le réglage de l'utilisateur (`free`, le gratuit le plus puissant du moment), sans
   bascule (`CLAW_FALLBACK=0`). D'autres modèles gratuits ensuite, pour vérifier que les
@@ -653,6 +654,19 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   `[mock:steps ...]`) : `rm` puis `git checkout` sont vus, la copie gardée est la dernière
   version du modèle. Pas encore vu dans un essai réel.
 
+### T1-30 Des mots qui ne disent pas le genre : « inscription » à un atelier
+- Preuve : la demande du scénario t7, écrite d'abord comme on la dirait (« Ajoute les
+  inscriptions aux ateliers [...] tant qu'il reste des places [...] Une même personne ne doit
+  pas être inscrite deux fois »), déclenchait les comptes et les mots de passe (le mot
+  « inscription ») et la ligne de commande, et ni les places ni les doublons.
+- État : corrigé (reprise du 12 octobre, 21 h 22, suite). « inscription » seule ne vaut plus
+  un compte (« page d'inscription », « formulaire d'inscription », « inscription des
+  utilisateurs » oui) ; places : « reste des places », « nombre de places », « places
+  limitées », « liste d'attente »... ; doublons : « deux fois ». La demande de t7 donne
+  maintenant soldes et places, doublons, ligne de commande. Mesure non indépendante pour la
+  reconnaissance (mots choisis après avoir vu la demande) ; l'effet des lignes elles-mêmes se
+  mesure sur t7 avec et sans l'aide (`CLAW_EDGE_CASES=0`).
+
 ## Améliorations
 
 Lot T1 (en cours le 12 octobre 2026), dans cet ordre : T1-08 (garde des données), T1-03 et
@@ -670,13 +684,15 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 13 octobre, 0 h) : (1) après la remise à zéro du
-quota gratuit (2 h) : t6 avec laguna, et de nouveau avec le petit modèle (T1-29 fait) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
+Suite, dans l'ordre (mise à jour du 13 octobre, 0 h 15) : (1) après la remise à zéro du
+quota gratuit (2 h) : t7 avec et sans l'aide des cas limites (`CLAW_EDGE_CASES=0 python
+run.py t7-ateliers --label t7-sans`, puis `--label t7-avec`), t6 avec laguna, et de nouveau
+avec le petit modèle (T1-29 fait) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
 sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par
 une commande ; (5) T1-04, les espaces insécables oubliées sur t3 ; (6) refaire chaque mesure
-deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-29 sont faits, T1-18 en
+deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-30 sont faits, T1-18 en
 partie. Le troisième modèle gratuit (laguna) fait 12/12 sur t4
 et t5 avec le moins de requêtes (16 et 26), mais son fournisseur le limite souvent.
 

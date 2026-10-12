@@ -136,9 +136,11 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | 866bc7e | Les essais d'une ligne partent ensemble (contrôle et guide) ; t6 refait à 12/12, t5 rejoué à 12/12 ; le petit modèle sur t6, arrêté, perd ses modifications par une commande (T1-29, ouvert) |
 
-| (commit « T1-29 ») | Une commande qui supprime un fichier que le modèle avait modifié, ou le ramène à son état du début du tour, est signalée ; sa dernière version est gardée sous `.claw/kept/` (T1-29) |
+| 5795efe | Une commande qui supprime un fichier que le modèle avait modifié, ou le ramène à son état du début du tour, est signalée ; sa dernière version est gardée sous `.claw/kept/` (T1-29) |
 
-État des tests après T1-29 : 660 tests Rust (le test de temps
+| (commit « t7 et T1-30 ») | Scénario t7-ateliers (places limitées, doublons, données en JSON ; projet intact 1/12, référence 12/12) ; « inscription » à un atelier ne déclenche plus les comptes, les places et les doublons sont reconnus (T1-30) |
+
+État des tests après T1-30 : 661 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
 il passe seul), analyse statique à zéro sous Windows et
 Linux, client 28 sur 28, extension VS Code 18 sur 18 (lancée à T1-16 ; rien de l'interface n'a
@@ -314,4 +316,6 @@ Hors lots :
   il avait perdu deux fois ses modifications en supprimant puis restaurant `conges.py` par des
   commandes (T1-29). Corrigé ensuite : Claw garde la dernière version d'un fichier que le
   modèle avait modifié quand une commande le supprime ou le ramène en arrière, et le lui dit
-  avec la commande qui le remet en place.
+  avec la commande qui le remet en place. Nouveau scénario t7 (ateliers à places limitées),
+  préparé pour mesurer les genres nouveaux avec et sans l'aide ; sa demande, écrite comme on
+  la dirait, montrait des mots-clés qui se trompaient de genre (T1-30, corrigé).

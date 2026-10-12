@@ -1,0 +1,1 @@
+Ajoute les inscriptions aux ateliers : `python ateliers.py inscrire ATELIER PERSONNE` inscrit une personne tant qu'il reste des places, et `liste` montre aussi les inscrits de chaque atelier. Une même personne ne doit pas être inscrite deux fois au même atelier. Ajoute les tests.

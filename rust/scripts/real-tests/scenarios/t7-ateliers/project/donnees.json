@@ -1,0 +1,13 @@
+{
+  "ateliers": {
+    "Poterie": {
+      "places": 2
+    },
+    "Couture": {
+      "places": 8
+    },
+    "Théâtre": {
+      "places": 12
+    }
+  }
+}

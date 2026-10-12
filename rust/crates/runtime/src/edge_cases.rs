@@ -112,9 +112,10 @@ const FEATURE_EDGE_CASES: &[(&[&str], &str)] = &[
             "connexion utilisateur", "connexion des utilisateurs", "connexion au compte",
             "utilisateur connecte", "utilisateurs connectes", "compte utilisateur",
             "comptes utilisateurs", "creer un compte", "creation de compte", "creation d'un compte",
-            "s'inscrire", "inscription", "authentif", "authentica", "login", "password", "sign in",
-            "sign-in", "sign up", "sign-up", "signup", "user account", "jwt", "oauth", "bcrypt",
-            "argon2",
+            "page d'inscription", "formulaire d'inscription", "inscription des utilisateurs",
+            "inscription d'un utilisateur", "authentif", "authentica", "login", "password",
+            "sign in", "sign-in", "sign up", "sign-up", "signup", "user account", "jwt", "oauth",
+            "bcrypt", "argon2",
         ],
         "Accounts and passwords: hash the passwords users choose with a slow salted hash (bcrypt or argon2 if installed, else `hashlib.scrypt` with a salt from `secrets.token_bytes(16)`), never a plain SHA, and never store or log them in clear; the passwords the program itself sends (database, SMTP, API keys) come from the environment, never from the code; give the same error for an unknown user and a wrong password; compare tokens with `hmac.compare_digest`; make sessions expire. Try a wrong password and an unknown user (the same message) and an expired session (refused).",
     ),
@@ -136,14 +137,16 @@ const FEATURE_EDGE_CASES: &[(&[&str], &str)] = &[
             "solde", "stock ", "stocks ", "rupture de stock", "inventaire", "inventory", "quota",
             "budget", "conge ", "conges ", "rtt ", "reliquat", "cagnotte", "portefeuille",
             "porte-monnaie", "points de fidelite", "places disponibles", "places restantes",
-            "debiter", "account balance", "leave balance", "balances", "allowance", "wallet",
-            "overdraft", "reservation", "reserver", "booking", "emprunt",
+            "reste des places", "restent des places", "nombre de places", "places limitees",
+            "capacite maximale", "liste d'attente", "file d'attente", "debiter", "account balance",
+            "leave balance", "balances", "allowance", "wallet", "overdraft", "reservation",
+            "reserver", "booking", "emprunt",
         ],
         "Balances, stocks, quotas and bookings: check before you subtract (`balance -= days` then a save lets a balance of 2 reach -3): unless the request allows going below zero, refuse a request larger than what is left, with a message saying what is left and a failure status, and leave the balance and the saved file unchanged; refuse a zero or negative quantity first (subtracting -4 adds 4, which a reversed date range counted as -4 days does); one person cannot book or queue twice for the same item, nor reserve what they already hold; a cancellation gives back exactly once. Try exactly what is left (accepted, leaves 0), one more (refused, balance and file unchanged), 0 and -1 (refused) and the same booking twice (refused the second time), then reread the saved file.",
     ),
     (
         &[
-            "doublon", "dedoublon", "en double", "duplicate", "dedup", "existe deja",
+            "doublon", "dedoublon", "en double", "deux fois", "duplicate", "dedup", "existe deja",
             "deja existant", "already exists", "unicite",
         ],
         "Duplicates and unique keys: compare names and e-mails after `strip()`, `casefold()` and `unicodedata.normalize(\"NFC\", ...)`, or \"Zoé\", \" zoé \" and a decomposed \"zoé\" count as three people; enforce uniqueness where the data is written, since two requests or a double click can both pass an earlier check; running an import twice must not double the data; `set()` loses the order, `dict.fromkeys` keeps it. Try \"Zoé\" then \" zoé \" (one person), a double submit (one record) and the same import run twice (no new rows).",
@@ -355,6 +358,24 @@ mod tests {
         assert_eq!(
             kinds("Ajoute les réservations à la bibliothèque (`python biblio.py reserver MEMBRE LIVRE`)"),
             ["Balances, stocks, quotas and bookings", "Command-line scripts"]
+        );
+    }
+
+    #[test]
+    fn signing_up_for_a_workshop_is_not_creating_an_account() {
+        // Scénario t7, écrit comme on le dirait : des places qui restent et pas
+        // deux fois la même personne, pas des comptes ni des mots de passe.
+        assert_eq!(
+            kinds("Ajoute les inscriptions aux ateliers : `python ateliers.py inscrire ATELIER PERSONNE` inscrit une personne tant qu'il reste des places. Une même personne ne doit pas être inscrite deux fois."),
+            [
+                "Balances, stocks, quotas and bookings",
+                "Duplicates and unique keys",
+                "Command-line scripts"
+            ]
+        );
+        assert_eq!(
+            kinds("Ajoute la page d'inscription des utilisateurs"),
+            ["Accounts and passwords", "Web page code"]
         );
     }
 
