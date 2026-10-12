@@ -278,7 +278,16 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   (`project_snapshot`) ne suit que les extensions de code.
 - Remède : suivre aussi les fichiers de données dans l'instantané, sans déclencher pour eux
   la vérification du code.
-- État : à faire
+- État : corrigé (reprise du 12 octobre, 16 h 22, suite) : `DataSnapshot` note au début du tour
+  les fichiers de données du dépôt (suivis ou nouveaux, 200 au plus) avec leur date et leur
+  taille, et le contenu de départ de ceux qui ne sont pas dans leur état du dernier commit (Git
+  garde les autres). Après chaque commande du modèle, un fichier changé est comparé à son
+  état de départ : des lignes remplacées ou retirées déclenchent la garde des données, une
+  fois par fichier, avec la commande en cause (`command_data_guard_feedback`). Un fichier
+  seulement complété ne compte pas ; les modifications du modèle par `edit_file` et ce
+  qu'écrit la vérification de Claw ne sont pas attribués à une commande. Vérifié de bout en
+  bout avec le faux modèle (`printf ... > ventes.csv` dans un dépôt Git : notice et remarque
+  avec la ligne d'origine).
 
 ### T1-12 Après `/undo`, la page réaffiche la vue du fichier en entier
 - Preuve : relecture du lot T1. Dans le fil rejoué, la vue jointe au résultat de la dernière
@@ -580,14 +589,14 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 12 octobre, 19 h) : (1) T1-11, les données réécrites par
-une commande ; (2) un scénario pour un autre genre de fonctionnalité (dates ou montants) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
+Suite, dans l'ordre (mise à jour du 12 octobre, 20 h 30) : (1) un scénario pour un autre
+genre de fonctionnalité (dates ou montants) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
 sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par
 une commande ; (5) T1-04, les espaces insécables oubliées sur t3 ; (6) refaire chaque mesure
-deux ou trois fois avant de conclure. T1-03 à T1-10, T1-12 à T1-17 et T1-19 à T1-27 sont
-faits, T1-18 en partie, T1-11 à faire. Le troisième modèle gratuit (laguna) fait 12/12 sur t4
+deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-27 sont faits, T1-18 en
+partie. Le troisième modèle gratuit (laguna) fait 12/12 sur t4
 et t5 avec le moins de requêtes (16 et 26), mais son fournisseur le limite souvent.
 
 Mesure faite (tableau plus haut). Pour la refaire : `run.py <scénario> --label <nom>`, puis avec

@@ -373,6 +373,9 @@ struct TurnAids {
     command_changes: Vec<String>,
     /// Fichiers de données dont des lignes ont été réécrites, déjà signalés.
     guarded_data: std::collections::BTreeSet<String>,
+    /// Fichiers de données du dépôt au début du tour, pour voir ce qu'une
+    /// commande du modèle en réécrit.
+    data_snapshot: Option<harness::DataSnapshot>,
     /// Appels d'outils de la réponse en cours.
     calls_in_reply: usize,
     /// Réponses d'un seul appel d'observation, à la suite.
@@ -1209,6 +1212,10 @@ where
                 .then(|| std::env::current_dir().ok())
                 .flatten()
                 .and_then(|cwd| harness::project_snapshot(&cwd)),
+            data_snapshot: (!self.subagent && harness::enabled(Aid::DataGuard))
+                .then(|| std::env::current_dir().ok())
+                .flatten()
+                .and_then(|cwd| harness::DataSnapshot::take(&cwd)),
             ..TurnAids::default()
         };
         // Ultracode : un agent au contexte vierge étudie la demande avant le
@@ -1721,6 +1728,9 @@ where
             // Une commande ou un autre outil a pu changer des fichiers.
             self.drop_stale_file_views();
         }
+        if matches!(tool_name, "bash" | "PowerShell") && !is_error {
+            self.data_rewritten_by_command(input, aids, &mut notes);
+        }
         if let Some(outcome) = command_outcome {
             if outcome.passed {
                 if harness::is_check_command(&outcome.command)
@@ -1774,6 +1784,34 @@ where
         }
     }
 
+    /// Une commande du modèle a réécrit des lignes d'un fichier de données qui
+    /// existait au début du tour (essai réel t3 : le CSV « réparé » de mémoire) :
+    /// même garde que pour `edit_file`, une fois par fichier.
+    fn data_rewritten_by_command(
+        &mut self,
+        input: &str,
+        aids: &mut TurnAids,
+        notes: &mut Vec<String>,
+    ) {
+        let (Some(snapshot), Ok(cwd)) = (aids.data_snapshot.as_mut(), std::env::current_dir())
+        else {
+            return;
+        };
+        let command = json_field(input, "command").unwrap_or_default();
+        for (path, replaced) in snapshot.rewritten(&cwd) {
+            if !aids.guarded_data.insert(path.clone()) {
+                continue;
+            }
+            let shown = harness::shown_path(&path);
+            self.api_client.notify(&format!(
+                "Attention : une commande a modifié ou retiré des lignes de {shown}, un fichier de données : relisez ce changement"
+            ));
+            notes.push(harness::command_data_guard_feedback(
+                &shown, &replaced, &command,
+            ));
+        }
+    }
+
     /// Suites d'une modification de fichier réussie : état du tour, garde des
     /// tests et des données réécrits, fichier montré tel qu'il est, syntaxe.
     fn after_file_change(
@@ -1792,6 +1830,12 @@ where
         // Une commande encore en cours a été lancée sur l'ancien code.
         aids.background_commands.clear();
         let path = json_field(output, "filePath").or_else(|| json_field(input, "path"));
+        // Une modification du modèle, contrôlée ci-dessous : pas celle d'une commande.
+        if let (Some(path), Some(snapshot), Ok(cwd)) =
+            (&path, aids.data_snapshot.as_mut(), std::env::current_dir())
+        {
+            snapshot.refresh(&cwd, path);
+        }
         if let Some(path) = &path {
             if !aids.originals.contains_key(path) {
                 aids.originals.insert(
@@ -2037,6 +2081,9 @@ where
             aids.snapshot = std::env::current_dir()
                 .ok()
                 .and_then(|cwd| harness::project_snapshot(&cwd));
+        }
+        if let (Some(snapshot), Ok(cwd)) = (aids.data_snapshot.as_mut(), std::env::current_dir()) {
+            snapshot.refresh_all(&cwd);
         }
         feedback
     }

@@ -126,9 +126,11 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | f744320 | Cas limites joints dès le début du tour et rappelés dans la demande de preuves (T1-26) ; piège précis des espaces insécables : t3 fait 4/4 pour la première fois (T1-04) ; t4 avec laguna : 12/12 en 16 requêtes |
 
-| (commit « T1-27 ») | Chaque cas limite nomme son piège précis et l'essai à faire (T1-27) : au rejeu de t5, 12/12 en 14 requêtes au lieu de 22 |
+| b2ebf80 | Chaque cas limite nomme son piège précis et l'essai à faire (T1-27) : au rejeu de t5, 12/12 en 14 requêtes au lieu de 22 |
 
-État des tests après T1-27 : 652 tests Rust (le test de temps
+| (commit « T1-11 ») | Un fichier de données réécrit par une commande du modèle est vu par la garde des données (T1-11) |
+
+État des tests après T1-11 : 653 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
 il passe seul), analyse statique à zéro sous Windows et
 Linux, client 28 sur 28, extension VS Code 18 sur 18 (lancée à T1-16 ; rien de l'interface n'a

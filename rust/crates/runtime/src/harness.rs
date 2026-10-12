@@ -1349,6 +1349,172 @@ pub fn is_data_file(path: &Path) -> bool {
         })
 }
 
+/// Fichiers de données du dépôt Git au début du tour : date et taille, et
+/// contenu d'origine de ceux qui n'étaient pas dans leur état du dernier
+/// commit (les autres se relisent dans Git). Sert à voir ce qu'une commande du
+/// modèle (`sed -i`, un script Python, `cat > f`) réécrit, comme `edit_file`.
+#[derive(Debug, Default)]
+pub struct DataSnapshot {
+    files: std::collections::BTreeMap<String, (FileState, Option<String>)>,
+}
+
+type FileState = Option<(std::time::SystemTime, u64)>;
+
+/// Fichiers de données suivis au plus, et taille au-delà de laquelle un
+/// fichier n'est pas comparé ligne à ligne.
+const MAX_DATA_FILES_WATCHED: usize = 200;
+const MAX_DATA_FILE_BYTES: u64 = 2_000_000;
+
+fn file_state(path: &Path) -> FileState {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|meta| Some((meta.modified().ok()?, meta.len())))
+}
+
+fn git_output(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+impl DataSnapshot {
+    /// Les fichiers de données de `root` (suivis par Git, ou nouveaux mais pas
+    /// ignorés) ; `None` hors d'un dépôt.
+    #[must_use]
+    pub fn take(root: &Path) -> Option<Self> {
+        let listed = git_output(
+            root,
+            &[
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ],
+        )?;
+        let changed = git_output(root, &["diff", "--name-only", "-z", "HEAD"]).unwrap_or_default();
+        let committed = git_output(root, &["ls-files", "-z", "--cached"]).unwrap_or_default();
+        let split = |bytes: &[u8]| {
+            bytes
+                .split(|byte| *byte == 0)
+                .filter(|path| !path.is_empty())
+                .map(|path| String::from_utf8_lossy(path).into_owned())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let (changed, committed) = (split(&changed), split(&committed));
+        let mut files = std::collections::BTreeMap::new();
+        for path in split(&listed) {
+            let full = root.join(&path);
+            if files.len() >= MAX_DATA_FILES_WATCHED
+                || !is_data_file(&full)
+                || crate::file_ops::under_generated_dir(root, Path::new(&path))
+            {
+                continue;
+            }
+            let state = file_state(&full);
+            // Pas dans son état du dernier commit : le contenu de départ est
+            // gardé, Git ne le connaît pas.
+            let original = (changed.contains(&path) || !committed.contains(&path))
+                .then(|| {
+                    state
+                        .filter(|(_, size)| *size <= MAX_DATA_FILE_BYTES)
+                        .and_then(|_| std::fs::read_to_string(&full).ok())
+                })
+                .flatten();
+            files.insert(path, (state, original));
+        }
+        Some(Self { files })
+    }
+
+    /// Fichiers de données changés depuis l'instantané, avec les lignes
+    /// d'origine remplacées ou retirées (chemin complet, lignes). Un fichier
+    /// complété sans rien perdre ne compte pas. L'instantané est mis à jour.
+    pub fn rewritten(&mut self, root: &Path) -> Vec<(String, Vec<String>)> {
+        let mut found = Vec::new();
+        for (path, (state, original)) in &mut self.files {
+            let full = root.join(path.as_str());
+            let now = file_state(&full);
+            if now == *state {
+                continue;
+            }
+            *state = now;
+            let before = match original {
+                Some(text) => text.clone(),
+                None => match git_output(root, &["show", &format!("HEAD:{path}")]) {
+                    Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                    None => continue,
+                },
+            };
+            if before.len() as u64 > MAX_DATA_FILE_BYTES {
+                continue;
+            }
+            let after = std::fs::read_to_string(&full).unwrap_or_default();
+            let removed = removed_lines(&before, &after);
+            if !removed.is_empty() {
+                found.push((full.to_string_lossy().into_owned(), removed));
+            }
+        }
+        found
+    }
+
+    /// Le modèle a lui-même modifié ce fichier (`edit_file`, contrôlé à part) :
+    /// sa nouvelle date n'est pas le fait d'une commande.
+    pub fn refresh(&mut self, root: &Path, path: &str) {
+        let full = Path::new(path);
+        let relative = full.strip_prefix(root).unwrap_or(full);
+        let key = relative.to_string_lossy().replace('\\', "/");
+        if let Some((state, _)) = self.files.get_mut(&key) {
+            *state = file_state(&root.join(&key));
+        }
+    }
+
+    /// Après la vérification de Claw : ce qu'elle a écrit n'est pas du modèle.
+    pub fn refresh_all(&mut self, root: &Path) {
+        for (path, (state, _)) in &mut self.files {
+            *state = file_state(&root.join(path.as_str()));
+        }
+    }
+}
+
+/// Lignes non vides de `before` absentes de `after` (avec leur nombre).
+fn removed_lines(before: &str, after: &str) -> Vec<String> {
+    let mut left: HashMap<&str, usize> = HashMap::new();
+    for line in after.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        *left.entry(line).or_insert(0) += 1;
+    }
+    before
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| match left.get_mut(line) {
+            Some(count) if *count > 0 => {
+                *count -= 1;
+                false
+            }
+            _ => true,
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// La même garde quand c'est une commande du modèle qui a réécrit le fichier.
+#[must_use]
+pub fn command_data_guard_feedback(path: &str, replaced: &[String], command: &str) -> String {
+    data_guard_feedback(path, replaced).replacen(
+        "You replaced or removed existing lines of",
+        &format!(
+            "Your command `{}` replaced or removed existing lines of",
+            shortened(command, 120)
+        ),
+        1,
+    )
+}
+
 /// Texte joint au résultat de l'outil quand des lignes existantes d'un fichier
 /// de données sont remplacées : un petit modèle « répare » sinon les données de
 /// l'utilisateur au lieu du code qui ne sait pas les lire.
@@ -3409,6 +3575,57 @@ mod tests {
             error_sites("./src/page.tsx:1:8", &root, "npm run build"),
             None
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn data_rewritten_by_a_command_is_seen_against_its_original() {
+        use super::DataSnapshot;
+        let root = temp_dir("donnees-commande");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .is_ok_and(|output| output.status.success())
+        };
+        if !git(&["init", "-q"]) {
+            let _ = fs::remove_dir_all(root);
+            return;
+        }
+        fs::write(root.join("ventes.csv"), "date;montant\n2026-09-02;12,5\n").expect("csv");
+        fs::write(root.join("brouillon.csv"), "a;b\n1;2\n").expect("csv");
+        fs::write(root.join("main.py"), "x = 1\n").expect("main");
+        git(&["add", "ventes.csv", "main.py"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "départ",
+        ]);
+        let mut snapshot = DataSnapshot::take(&root).expect("dépôt git");
+        assert!(snapshot.rewritten(&root).is_empty());
+        // Essai réel t3 : le CSV « réparé » de mémoire, ici par une commande.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(root.join("ventes.csv"), "date;montant\n2026-09-02;12.5\n").expect("csv");
+        let found = snapshot.rewritten(&root);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].0.ends_with("ventes.csv"));
+        assert_eq!(found[0].1, vec!["2026-09-02;12,5".to_string()]);
+        // Déjà vu : rien de plus tant que le fichier ne change pas.
+        assert!(snapshot.rewritten(&root).is_empty());
+        // Un fichier nouveau (pas encore commité) : comparé à son contenu de départ.
+        fs::write(root.join("brouillon.csv"), "a;b\n1;2\n3;4\n").expect("csv");
+        assert!(
+            snapshot.rewritten(&root).is_empty(),
+            "une ligne ajoutée ne retire rien"
+        );
+        fs::write(root.join("brouillon.csv"), "a;b\n").expect("csv");
+        assert_eq!(snapshot.rewritten(&root)[0].1, vec!["1;2".to_string()]);
         let _ = fs::remove_dir_all(root);
     }
 
