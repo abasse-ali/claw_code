@@ -128,7 +128,9 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | b2ebf80 | Chaque cas limite nomme son piège précis et l'essai à faire (T1-27) : au rejeu de t5, 12/12 en 14 requêtes au lieu de 22 |
 
-| (commit « T1-11 ») | Un fichier de données réécrit par une commande du modèle est vu par la garde des données (T1-11) |
+| 5414b81 | Un fichier de données réécrit par une commande du modèle est vu par la garde des données (T1-11) |
+
+| (commit « scénario t6 ») | Scénario t6-conges (dates) : projet intact 1/12, référence 12/12 ; premier essai du plus puissant : 10/12 |
 
 État des tests après T1-11 : 653 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
@@ -289,4 +291,7 @@ Hors lots :
   maintenant joints dès le début du tour et rappelés dans la demande de preuves des problèmes
   signalés (T1-26). Sur t3, ni l'un ni l'autre ne suffisait tant que le rappel restait
   général ; nommer le piège précis (`replace(" ", "")` ne retire pas l'espace insécable d'Excel,
-  essayer « 1\u00a0250,00 ») donne 4/4 pour la première fois (T1-04).
+  essayer « 1\u00a0250,00 ») donne 4/4 pour la première fois (T1-04). Chaque cas limite a
+  pris cette forme (T1-27) ; T1-11 est corrigé (garde des données après une commande).
+  Nouveau scénario t6 (dates) : 10/12 au premier essai, le modèle laisse passer une période
+  à l'envers et un solde négatif.

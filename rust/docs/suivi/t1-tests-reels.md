@@ -6,8 +6,8 @@ réfléchissent. Fais toujours en sorte qu'on puisse reprendre sur une autre ses
 
 ## Méthode
 
-- Banc d'essai : `rust/scripts/real-tests/` (voir son README). Cinq scénarios (t1 à t5, dont
-  un projet web), chacun avec une vérification cachée qui note le résultat ; les essais tournent hors du dépôt, dans
+- Banc d'essai : `rust/scripts/real-tests/` (voir son README). Six scénarios (t1 à t6, dont
+  un projet web et des dates), chacun avec une vérification cachée qui note le résultat ; les essais tournent hors du dépôt, dans
   `D:\Mes_Projets\claw-real-tests`, une ligne par essai dans `results.jsonl`.
 - Modèle : le réglage de l'utilisateur (`free`, le gratuit le plus puissant du moment), sans
   bascule (`CLAW_FALLBACK=0`). D'autres modèles gratuits ensuite, pour vérifier que les
@@ -114,6 +114,13 @@ Scénario t5 (projet web : serveur Python, API JSON, page), Claw au commit 806bf
 | 12/10 14:56 | t5-recettes-web | cohere/north-mini-code | t5-north2 | 10/12 | 49 | 604 s | même Claw ; accents, espaces et décodage justes ; un ingrédient doit égaler le mot cherché (« pomme » ne trouve pas « pommes de terre ») et plusieurs mots ne trouvent rien ; 16 lectures de fichiers, 6 retirées du contexte et 2 remarques (T1-17) ; la relecture (nemotron-ultra) relève deux affirmations fausses de sa réponse (un test qui n'existe pas, un compte de tests) |
 | 12/10 15:20 | t5-recettes-web | poolside/laguna-s-2.1 (troisième modèle) | t5-laguna | non noté | 3 | 144 s | bonne lecture de tout le projet, plan clair, une modification ; puis « laguna est temporairement limité en amont, réessayez bientôt » (429) : trois essais en 4 s et le tour s'arrête (T1-25). La session, enregistrée au fil du tour, garde ses 14 messages |
 | 12/10 15:31 | t5-recettes-web | poolside/laguna-s-2.1 | t5-laguna2 | 12/12 | 26 | 1 124 s | Claw au commit 9c29c4a (T1-25) : le travail est complet, et au contrôle des exigences il ajoute l'insensibilité aux accents (T1-24) ; puis une limite du fournisseur dure plus que les quatre minutes d'attente prévues et le tour finit en erreur, sans JSON ni notices (suite de T1-25) |
+
+Scénario t6 (dates : jours ouvrés d'un congé, dates à la française, fériés, solde ; projet
+intact 1/12, solution de référence 12/12), Claw au commit 5414b81 :
+
+| Date | Scénario | Modèle | Étiquette | Score | Requêtes | Durée | Remarques |
+|---|---|---|---|---|---|---|---|
+| 12/10 20:46 | t6-conges | free = nemotron-3-ultra-550b | t6 | 10/12 | 19 | 446 s | dates à la française, bornes comprises, week-ends, fériés (un samedi compté une fois) et année bissextile justes ; une période dont la fin précède le début est comptée au lieu d'être refusée, et un solde peut devenir négatif (Bilal à -3) ; la relecture (dots) ne voit rien |
 
 Les essais de t5 ont été notés une seconde fois après une correction de la vérification
 cachée : tous les points de la recherche dépendaient du premier (`?q=pomme` exact), si bien
@@ -589,8 +596,11 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 12 octobre, 20 h 30) : (1) un scénario pour un autre
-genre de fonctionnalité (dates ou montants) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
+Suite, dans l'ordre (mise à jour du 12 octobre, 21 h) : (1) t6 : les deux règles manquées
+(période à l'envers, solde qui passe sous zéro) sont des vérifications d'expert générales ;
+les ajouter aux cas limites (dates ; soldes, stocks et quotas), puis mesurer par rejeu du
+contrôle de t6 en le disant non indépendant (règles écrites après avoir vu l'erreur), et
+refaire t6 avec le petit modèle et laguna ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
 sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par

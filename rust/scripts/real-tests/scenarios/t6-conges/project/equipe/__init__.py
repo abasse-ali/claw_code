@@ -1,0 +1,1 @@
+"""Congés de l'équipe."""

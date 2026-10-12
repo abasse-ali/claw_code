@@ -1,0 +1,1 @@
+Les congés se comptent en jours ouvrés. Ajoute `python conges.py jours DEBUT FIN`, qui affiche le nombre de jours ouvrés entre deux dates (sans les samedis, les dimanches ni les jours fériés de feries.txt), et fais que `poser` retire ces jours ouvrés du solde de la personne. Dans l'équipe, tout le monde écrit les dates comme en France. Ajoute les tests.
