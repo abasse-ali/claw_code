@@ -122,6 +122,8 @@ intact 1/12, solution de référence 12/12), Claw au commit 5414b81 :
 |---|---|---|---|---|---|---|---|
 | 12/10 20:26 | t6-conges | free = nemotron-3-ultra-550b | t6 | 10/12 | 19 | 446 s | dates à la française, bornes comprises, week-ends, fériés (un samedi compté une fois) et année bissextile justes ; une période dont la fin précède le début est comptée au lieu d'être refusée, et un solde peut devenir négatif (Bilal à -3) ; la relecture (dots) ne voit rien |
 | 12/10 22:28 | t6-conges | free = nemotron-3-ultra-550b | t6-t28 | 12/12 | 32 | 664 s | Claw avec la table des cas limites revue (T1-28) : la période à l'envers est refusée, un solde insuffisant aussi, avec ce qui reste ; la relecture (laguna) reprend les cas limites dans son étape 1 et trouve l'aide `--help` manquante |
+| 12/10 22:50 | t6-conges | free = nemotron-3-ultra-550b | t6-t28c | 12/12 | 32 | 482 s | avec la consigne de regrouper les essais d'une ligne au contrôle : après le contrôle, quatre commandes groupées au lieu d'une par essai ; avant lui, cinq essais isolés venus du guide du début de tour (la consigne y a été ajoutée ensuite) et cinq mises à jour seules de la liste de tâches malgré trois remarques (T1-14) |
+| 12/10 23:04 | t6-conges | north-mini-code (petit modèle) | t6-north | arrêté, 2/12 en l'état | 81 | 659 s | arrêté pour garder une réserve de requêtes gratuites (38 jusqu'à 2 h) ; une trentaine de requêtes perdues à l'édition : il croit voir un bloc en double, `edit_file` refuse (le bloc n'existe pas), il supprime `conges.py` par une commande, le restaure avec `git checkout` et perd ses modifications, deux fois (T1-29) ; ses essais partent ensuite un par requête |
 
 Rejeux du contrôle des exigences de t6 (message 35). Mesure non indépendante : les lignes des
 dates et des soldes ont été écrites après avoir vu les deux erreurs de t6.
@@ -150,6 +152,7 @@ Rejeux du contrôle des exigences de t5 (message 37) :
 | 12/10 14:37 | avec les cas limites d'une recherche (T1-24) | free | 12/12, 22 requêtes : décodeur standard (`parse_qs`), espaces retirés, accents et majuscules ignorés, plusieurs mots, tests ajoutés ; il lance aussi le serveur pour essayer l'API (aide des commandes non essayées) et l'arrête |
 | 12/10 15:10 | relecture de t5b avec le rappel final de la forme (T1-23, suite) | dots (imposé) | écrit les deux étapes puis approuve, quand il avait répondu « VERDICT LGTM » nu pendant l'essai |
 | 12/10 18:47 | contrôle des exigences, cas limites sous forme de pièges précis (T1-27) | free | 12/12 en 14 requêtes, contre 22 avec la forme générale |
+| 12/10 22:58 | table revue, résultat attendu des essais (T1-28), banc de rejeu corrigé | free | 12/12 en 21 requêtes : la ligne de recherche réécrite ne fait rien perdre |
 
 La session de cet essai a pu être lue pendant qu'il tournait : elle s'écrit maintenant à
 chaque étape (T1-16).
@@ -626,6 +629,19 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
 - Reste : mesurer les genres nouveaux sur des scénarios à eux (seuls soldes et ligne de
   commande ont servi, sur t6) ; faire partir les essais d'une ligne en une seule commande.
 
+### T1-29 Une commande du modèle efface les modifications qu'il venait de faire
+- Preuve : t6 avec le petit modèle (essai arrêté à 81 requêtes). Après un `edit_file` refusé
+  (le bloc qu'il croyait en double n'existait pas ; Claw lui montrait les lignes réelles), il
+  passe par le shell : `sed -n '1,83p' conges.py > conges_fixed.py && ... && rm tail.txt
+  conges.py conges_fixed.py` supprime `conges.py` ; il le restaure par `git checkout
+  conges.py`, qui ramène la version d'origine : ses modifications du tour sont perdues et il
+  recommence. Deux fois dans le même essai, une trentaine de requêtes en tout.
+- Remède proposé : Claw garde la dernière version de chaque fichier que le modèle a modifié
+  avec ses outils pendant le tour. Après une commande, si l'un d'eux a disparu ou est revenu à
+  son état du début du tour, Claw le dit au modèle et lui donne de quoi le restaurer (une copie
+  gardée sous `.claw/`), sans le faire à sa place : une suppression peut être voulue.
+- État : ouvert.
+
 ## Améliorations
 
 Lot T1 (en cours le 12 octobre 2026), dans cet ordre : T1-08 (garde des données), T1-03 et
@@ -643,10 +659,9 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 12 octobre, 23 h) : (1) t6 avec le petit modèle et
-laguna ; rejouer le contrôle de t5 pour vérifier que la ligne de recherche réécrite garde
-12/12 ; faire partir les essais d'une ligne en une seule commande (T1-28 coûte des
-requêtes) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
+Suite, dans l'ordre (mise à jour du 12 octobre, 23 h 30) : (1) T1-29, la garde des
+fichiers que le modèle est en train de modifier ; puis t6 avec laguna et de nouveau avec le
+petit modèle, après la remise à zéro du quota gratuit (2 h) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
 sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par

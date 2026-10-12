@@ -132,7 +132,9 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | f1250cb | Scénario t6-conges (dates) : projet intact 1/12, référence 12/12 ; premier essai du plus puissant : 10/12 |
 
-| (commit « T1-28 ») | Table des cas limites revue : faits vérifiés, mots-clés sans faux amis, quatorze genres nouveaux, résultat attendu de chaque essai, cas limites donnés au relecteur (T1-28) ; t6 passe de 10/12 à 12/12 (rejeu du contrôle et essai complet) |
+| 002c275 | Table des cas limites revue : faits vérifiés, mots-clés sans faux amis, quatorze genres nouveaux, résultat attendu de chaque essai, cas limites donnés au relecteur (T1-28) ; t6 passe de 10/12 à 12/12 (rejeu du contrôle et essai complet) |
+
+| (commit « T1-28, suite ») | Les essais d'une ligne partent ensemble (contrôle et guide) ; t6 refait à 12/12, t5 rejoué à 12/12 ; le petit modèle sur t6, arrêté, perd ses modifications par une commande (T1-29, ouvert) |
 
 État des tests après T1-28 : 657 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
@@ -304,4 +306,8 @@ Hors lots :
   code. Avec le résultat attendu de chaque essai entre parenthèses, et la consigne qu'un autre
   résultat veut dire un code faux, même voulu, t6 fait 12/12 au rejeu comme à l'essai complet,
   mais en plus de requêtes. Le banc de rejeu réécrit maintenant les chemins de l'essai
-  d'origine.
+  d'origine. Ensuite : t6 refait 12/12 avec la consigne de regrouper les essais (les essais
+  du contrôle partent groupés, ceux du guide pas encore : consigne ajoutée au guide), t5
+  rejoué 12/12. Le petit modèle sur t6 a été arrêté à 81 requêtes pour garder une réserve :
+  il avait perdu deux fois ses modifications en supprimant puis restaurant `conges.py` par des
+  commandes (T1-29, ouvert).

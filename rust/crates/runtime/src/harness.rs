@@ -1920,7 +1920,7 @@ pub fn edge_case_check(request: &str, earlier: Option<&str>) -> String {
         return String::new();
     }
     format!(
-        "\n\nWhat experienced engineers always check for this kind of feature. For each line that applies to this request, show the test or the command of this session that covers it, or add it now. The expected result of each try is in parentheses: a different result means your code is wrong, even if you chose that behavior on purpose (unless the user's request asks for it): fix the code and its tests, and say what you changed:\n- {}",
+        "\n\nWhat experienced engineers always check for this kind of feature. For each line that applies to this request, show the test or the command of this session that covers it, or add it now. The expected result of each try is in parentheses: a different result means your code is wrong, even if you chose that behavior on purpose (unless the user's request asks for it): fix the code and its tests, and say what you changed. Run the tries of a line together, in the project's tests when it has some or in one command (`python app.py a; echo $?; python app.py b; echo $?`), not one request per try:\n- {}",
         cases.join("\n- ")
     )
 }
@@ -1937,7 +1937,7 @@ pub fn edge_case_guide(request: &str, earlier: Option<&str>) -> Option<String> {
     let cases = feature_edge_cases(&format!("{request}\n{}", earlier.unwrap_or_default()));
     (!cases.is_empty()).then(|| {
         format!(
-            "{GUIDE_PREFIX} What experienced engineers always check for this kind of work. Keep each line that applies in mind from the start, and cover it with a test or a command; the expected result of each try is in parentheses:\n- {}",
+            "{GUIDE_PREFIX} What experienced engineers always check for this kind of work. Keep each line that applies in mind from the start, and cover it with a test or a command; the expected result of each try is in parentheses. Run the tries of a line together, in the project's tests or in one command, not one request per try:\n- {}",
             cases.join("\n- ")
         )
     })
@@ -3194,6 +3194,8 @@ mod guide_tests {
         // (« 5 (échange auto) ») ; le résultat attendu de chaque essai le dément.
         assert!(search.contains("a different result means your code is wrong"));
         assert!(search.contains("\"oeufs\" (finds \"Œufs\")"));
+        // Le même rejeu : un essai par requête, quarante requêtes.
+        assert!(search.contains("not one request per try"));
         assert!(!prompt.contains("not answering permission requests"));
         // « reprendre » : la demande poursuivie est citée.
         let prompt = checklist_prompt(
@@ -3217,6 +3219,8 @@ mod guide_tests {
         .expect("guide");
         assert!(guide.starts_with(super::GUIDE_PREFIX));
         assert!(guide.contains("non-breaking space"));
+        // Essai réel t6 : cinq essais du guide, une requête chacun.
+        assert!(guide.contains("not one request per try"));
         // « continue » : le genre se lit dans la demande poursuivie.
         assert!(super::edge_case_guide("continue", Some("ajoute un filtre par prix")).is_some());
         assert_eq!(super::edge_case_guide("explique ce module", None), None);
