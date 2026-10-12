@@ -112,11 +112,13 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 | e3740fb, 83bb46a | Campagne T1 : mesure du lot T1 (34/36 contre 32/36, 74 requêtes contre 99), constat T1-13 |
 | fcbbb34 | Compte rendu gardé quand la réponse à un contrôle n'en est qu'un accusé de réception (T1-13) ; vue de fichier repliée dans la page (T1-12) |
 | a138b69, 83fb196 | Campagne T1 : scénario t4 (tâche longue sur plusieurs modules), essais, constats T1-14 à T1-16 |
-| (commit « T1-14 à T1-17 ») | Session enregistrée à chaque étape d'un tour, écriture atomique (T1-16) ; liste de tâches envoyée seule signalée et son résultat allégé (T1-14) ; remarque de regroupement plus tôt, redite, avec l'exemple des commandes du modèle (T1-15) ; fichier relu à l'identique gardé une fois et dit (T1-17) ; constats T1-18 et T1-19 |
+| 93d40ae | Session enregistrée à chaque étape d'un tour, écriture atomique (T1-16) ; liste de tâches envoyée seule signalée et son résultat allégé (T1-14) ; remarque de regroupement plus tôt, redite, avec l'exemple des commandes du modèle (T1-15) ; fichier relu à l'identique gardé une fois et dit (T1-17) ; constats T1-18 et T1-19 |
 
-État des tests après T1-17 : 639 tests Rust, analyse statique à zéro sous Windows et Linux,
-client 28 sur 28, extension VS Code 18 sur 18 (lancée avant T1-17, qui ne touche pas à
-l'interface).
+| (commit « T1-18 à T1-21 ») | Budget de requêtes par tour (T1-19) ; relecture qui aboutit sur un vrai diff : place, temps, raisonnement plafonné, seconde demande, échec expliqué (T1-20) ; relecture qui repart des phrases de la demande et règle de lecture dans le contrôle des exigences (T1-18, en partie) ; notices dans la sortie JSON (T1-21) ; `claw review-replay` |
+
+État des tests après T1-21 : 645 tests Rust, analyse statique à zéro sous Windows et
+Linux, client 28 sur 28, extension VS Code 18 sur 18 (lancée à T1-16 ; rien de l'interface n'a
+changé depuis).
 
 ## Études
 
@@ -241,3 +243,12 @@ Hors lots :
   modèle, lu pendant qu'il tournait : 34 requêtes, 8/12. Il a mal lu une phrase de la demande
   et ni son contrôle ni la relecture ne l'ont vu (T1-18) ; rien ne borne les requêtes d'un
   tour (T1-19). Ces deux points sont les suivants.
+- Reprise de 11 h 22 : budget de 100 requêtes par tour (T1-19) et notices dans la sortie JSON
+  (T1-21). En rejouant la relecture sur un essai enregistré (une requête, sans outil), on
+  découvre qu'elle n'aboutissait jamais sur un vrai diff : les relecteurs gratuits raisonnent
+  27 000 à 33 000 caractères et n'avaient pas la place de répondre (T1-20, corrigé). Une fois
+  aboutie, elle approuve pourtant le travail qui a mal lu la demande ; une lecture indépendante
+  par un autre modèle reprend la même erreur. Trois modèles sur quatre lisent « mis de côté
+  pour le premier de la file : lui seul peut alors l'emprunter » comme un prêt d'office : la
+  règle ajoutée au contrôle des exigences (une action laissée à une personne n'est pas faite
+  automatiquement) reste à mesurer sur un essai réel (T1-18).

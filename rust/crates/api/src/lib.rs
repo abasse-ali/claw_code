@@ -25,7 +25,8 @@ pub use providers::compat::{
 };
 pub use providers::openai_compat::{is_passback_reasoning, OpenAiCompatClient, OpenAiCompatConfig};
 pub use providers::reasoning::{
-    reasoning_effort, set_reasoning_effort, take_reasoning_notice, ReasoningEffort,
+    cap_thread_reasoning, reasoning_effort, set_reasoning_effort, take_reasoning_notice,
+    ReasoningEffort,
 };
 pub use providers::{
     auto_compaction_threshold, context_window_for_model, detect_provider_kind,

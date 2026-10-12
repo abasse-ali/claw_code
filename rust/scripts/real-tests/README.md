@@ -19,9 +19,18 @@ Chaque essai :
 - lance `claw` sur cette copie, sans interaction, en mode `danger-full-access` (la copie seule
   est en jeu) et avec `CLAW_FALLBACK=0`, pour rester sur un seul modèle ;
 - note les requêtes gratuites consommées (`claw credits` avant et après), les appels
-  d'outils, les remarques de Claw et la réponse finale ;
+  d'outils, les remarques de Claw au modèle, ses notices (vérification, relecture faite,
+  approuvée ou en échec, limite de requêtes) et la réponse finale ;
+- garde chaque réponse du relecteur, approbation comprise (`reviews.jsonl`, par
+  `CLAW_REVIEW_LOG`) ;
 - lance `check.py` et écrit `result.json` ; une ligne résume l'essai dans
   `<essais>/results.jsonl`.
+
+`python review_replay.py <essai> [--model M] [--baseline COMMIT]` rejoue la relecture par un
+autre modèle sur le travail d'un essai déjà fait (demande, diff du projet, réponse finale) : une
+requête, aucun outil. Avec `--baseline`, ce sont les consignes de relecture de ce commit, pour
+comparer deux formulations sur le même travail. Le résultat s'ajoute à
+`<essai>/review-replay.jsonl`.
 
 `<essais>` est hors du dépôt : `CLAW_REAL_TESTS_DIR`, sinon le dossier `claw-real-tests` à côté
 du dépôt (`D:\Mes_Projets\claw-real-tests`). Pas dans `%LOCALAPPDATA%` : le Python du
@@ -41,3 +50,4 @@ Les constats et les scores sont consignés dans `rust/docs/suivi/t1-tests-reels.
 | `t2-notes` | une fonctionnalité avec des exigences implicites (numéro d'origine, accents dans le mot cherché, appel sans mot, aide du module) |
 | `t3-rapport` | l'utilisateur croit son fichier corrompu : vérifier l'hypothèse, corriger le code, garder les données intactes |
 | `t4-bibliotheque` | tâche plus longue sur plusieurs modules : ajouter les réservations (file d'attente, livre mis de côté au retour, persistance, ligne de commande) ; 12 points, dont cinq exigences que la demande ne dit pas |
+| `t5-recettes-web` | projet web sans dépendance (serveur Python, API JSON, page HTML et JavaScript) : une recherche dans l'API et un champ qui filtre la page pendant qu'on tape ; la vérification lance le serveur comme l'utilisateur et l'interroge ; 12 points, dont sept exigences que la demande ne dit pas (accents et majuscules, plusieurs mots, recherche vide, aucune correspondance, tri, encodage de l'URL) |

@@ -295,6 +295,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", models::models_report(args.as_deref(), &current)?);
         }
         CliAction::Credits => println!("{}", credits::report(true)),
+        CliAction::ReviewReplay { model, raw, files } => review_replay(model, raw, &files)?,
         CliAction::Doctor { model } => println!(
             "{}",
             doctor::report(&model.unwrap_or_else(default_model), &version_summary())
@@ -408,6 +409,14 @@ enum CliAction {
     Credits,
     Doctor {
         model: Option<String>,
+    },
+    /// `claw review-replay DEMANDE DIFF RÉPONSE` (banc d'essais réels) : la
+    /// relecture que Claw ferait de ce travail, sans outil. `raw` : les deux
+    /// fichiers sont les consignes et la demande au relecteur, tels quels.
+    ReviewReplay {
+        model: Option<String>,
+        raw: bool,
+        files: Vec<PathBuf>,
     },
     Serve {
         host: String,
@@ -675,6 +684,20 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             model,
         }),
         "credits" | "solde" => Ok(CliAction::Credits),
+        "review-replay" => {
+            let raw = rest.get(1).map(String::as_str) == Some("--raw");
+            let files: Vec<PathBuf> = rest[1 + usize::from(raw)..]
+                .iter()
+                .map(PathBuf::from)
+                .collect();
+            if files.len() != if raw { 2 } else { 3 } {
+                return Err(
+                    "usage : claw review-replay DEMANDE DIFF RÉPONSE, ou claw review-replay --raw CONSIGNES DEMANDE"
+                        .to_string(),
+                );
+            }
+            Ok(CliAction::ReviewReplay { model, raw, files })
+        }
         "doctor" | "diagnostic" => Ok(CliAction::Doctor { model }),
         "system-prompt" => parse_system_prompt_args(&rest[1..]),
         "login" => Ok(CliAction::Login),
@@ -994,6 +1017,47 @@ fn filter_tool_specs(
         _ => true,
     });
     definitions
+}
+
+/// Rejoue la relecture par un autre modèle sur un travail enregistré : une
+/// requête, aucun outil. Sert au banc d'essais réels à comparer deux
+/// formulations de la relecture sur le même travail. `model` : le modèle qui
+/// a fait le travail ; le relecteur est choisi comme pendant un tour.
+fn review_replay(
+    model: Option<String>,
+    raw: bool,
+    files: &[PathBuf],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let read = |index: usize| fs::read_to_string(&files[index]);
+    let (system, prompt) = if raw {
+        (read(0)?, read(1)?)
+    } else {
+        (
+            runtime::harness::REVIEW_SYSTEM.to_string(),
+            runtime::harness::review_prompt(read(0)?.trim(), None, &read(2)?, &[read(1)?]),
+        )
+    };
+    let worker = resolve_model_alias(&model.unwrap_or_else(default_model));
+    tools::set_request_observer(credits::note_request);
+    let reviewers = models::advisor_models(&worker);
+    let started = Instant::now();
+    let opinion = tools::advisors::ask_within(
+        &reviewers,
+        &system,
+        &prompt,
+        tools::advisors::REVIEW_MAX_TOKENS,
+        tools::advisors::Patience::REVIEW,
+    )?;
+    println!(
+        "{}",
+        json!({
+            "reviewer": opinion.model,
+            "seconds": started.elapsed().as_secs(),
+            "answer": opinion.text,
+            "findings": runtime::harness::review_findings(&opinion.text),
+        })
+    );
+    Ok(())
 }
 
 fn parse_system_prompt_args(args: &[String]) -> Result<CliAction, String> {
@@ -2367,7 +2431,10 @@ impl LiveCli {
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
         let (text, images) = take_image_attachments(input);
         runtime.autosave_to(&self.session.path);
-        let summary = runtime.run_turn_with_images(text, images, Some(&mut permission_prompter))?;
+        start_collecting_notices();
+        let result = runtime.run_turn_with_images(text, images, Some(&mut permission_prompter));
+        let notices = take_notices();
+        let summary = result?;
         self.runtime = runtime;
         self.persist_session()?;
         println!(
@@ -2376,6 +2443,7 @@ impl LiveCli {
                 "message": final_assistant_text(&summary),
                 "model": self.model,
                 "iterations": summary.iterations,
+                "notices": notices,
                 "tool_uses": collect_tool_uses(&summary),
                 "tool_results": collect_tool_results(&summary),
                 "usage": {
@@ -5817,6 +5885,7 @@ impl ApiClient for DefaultRuntimeClient {
         if let Some(observer) = &self.observer {
             observer.notice(notice);
         }
+        collect_notice(notice);
     }
 
     fn answer_drafted(&mut self) {
@@ -5886,7 +5955,20 @@ impl ApiClient for DefaultRuntimeClient {
                 runtime::ConsultPurpose::Unblock => "Diagnostic par un autre modèle…",
             });
         }
-        match tools::advisors::ask(&models, system, prompt, 3_000) {
+        // La relecture clôt le tour : elle a le temps et la place de finir.
+        let opinion = match purpose {
+            runtime::ConsultPurpose::Review => tools::advisors::ask_within(
+                &models,
+                system,
+                prompt,
+                tools::advisors::REVIEW_MAX_TOKENS,
+                tools::advisors::Patience::REVIEW,
+            ),
+            runtime::ConsultPurpose::Unblock => {
+                tools::advisors::ask(&models, system, prompt, 3_000)
+            }
+        };
+        match opinion {
             Ok(opinion) => Some(runtime::Consultation {
                 model: opinion.model,
                 text: opinion.text,
@@ -6722,6 +6804,37 @@ fn notify_fallback(emit: bool, observer: Option<&SharedObserver>, text: &str) {
     if let Some(observer) = observer {
         observer.notice(text);
     }
+    collect_notice(text);
+}
+
+/// Notices de Claw pendant un tour sans affichage (`--output-format json`) :
+/// rendues avec le résultat. Sans elles, rien ne disait par exemple si la
+/// relecture par un autre modèle avait eu lieu, approuvé ou échoué.
+static JSON_NOTICES: Mutex<Option<Vec<String>>> = Mutex::new(None);
+
+fn start_collecting_notices() {
+    *JSON_NOTICES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Vec::new());
+}
+
+/// Notices gardées depuis `start_collecting_notices` ; la collecte s'arrête.
+fn take_notices() -> Vec<String> {
+    JSON_NOTICES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .unwrap_or_default()
+}
+
+fn collect_notice(text: &str) {
+    if let Some(notices) = JSON_NOTICES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+    {
+        notices.push(text.to_string());
+    }
 }
 
 fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
@@ -7427,6 +7540,21 @@ mod tests {
         describe_permission_target, expert_command_prompt, parse_permission_answer,
         persist_allow_rule, ExpertCommand, PermissionAnswer,
     };
+
+    #[test]
+    fn notices_of_a_json_turn_are_kept_for_its_result() {
+        // Essais réels : la sortie JSON ne disait pas si la relecture avait
+        // eu lieu, approuvé ou échoué.
+        super::start_collecting_notices();
+        super::notify_fallback(false, None, "Relecture par relecteur : rien à corriger");
+        assert_eq!(
+            super::take_notices(),
+            vec!["Relecture par relecteur : rien à corriger".to_string()]
+        );
+        // Hors d'un tour en JSON, rien n'est gardé.
+        super::notify_fallback(false, None, "affichée ailleurs");
+        assert!(super::take_notices().is_empty());
+    }
 
     #[test]
     fn kept_reasoning_goes_back_only_with_the_current_turn() {

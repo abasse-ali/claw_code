@@ -202,6 +202,61 @@ async fn a_reasoning_that_fills_the_reply_lowers_the_next_effort() {
     assert_eq!(second["reasoning"], json!({"effort": "high"}));
 }
 
+/// Consultation d'un autre modèle : le fil qui la fait plafonne le
+/// raisonnement, pour que la réponse tienne dans son budget de sortie.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn a_consulting_thread_caps_the_reasoning_it_asks_for() {
+    let _lock = env_lock();
+    api::register_model_limits(&api::ModelCatalog {
+        models: vec![api::OpenRouterModel {
+            id: "vendor/reviewer:free".to_string(),
+            context_length: Some(1_000_000),
+            max_completion_tokens: Some(65_536),
+            supports_tools: true,
+            supports_reasoning: true,
+            reasoning_efforts: Some(vec![
+                "max".to_string(),
+                "high".to_string(),
+                "medium".to_string(),
+            ]),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let body = concat!(
+        "{\"id\":\"chatcmpl_or\",\"model\":\"vendor/reviewer:free\",",
+        "\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"LGTM\",\"tool_calls\":[]},",
+        "\"finish_reason\":\"stop\"}],",
+        "\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":5}}"
+    );
+    let server = spawn_server(
+        state.clone(),
+        (0..2)
+            .map(|_| http_response("200 OK", "application/json", body))
+            .collect(),
+    )
+    .await;
+    let client = OpenAiCompatClient::new("or-test-key", OpenAiCompatConfig::openrouter())
+        .with_base_url(server.base_url());
+    let request = MessageRequest {
+        model: "vendor/reviewer:free".to_string(),
+        ..sample_request(false)
+    };
+    api::cap_thread_reasoning(Some(api::ReasoningEffort::Medium));
+    client.send_message(&request).await.expect("réponse");
+    api::cap_thread_reasoning(None);
+    client.send_message(&request).await.expect("réponse");
+
+    let captured = state.lock().await;
+    let body = |index: usize| -> serde_json::Value {
+        serde_json::from_str(&captured[index].body).expect("json")
+    };
+    assert_eq!(body(0)["reasoning"], json!({"effort": "medium"}));
+    assert_eq!(body(1)["reasoning"], json!({"effort": "max"}));
+}
+
 #[tokio::test]
 async fn send_message_accepts_full_chat_completions_endpoint_override() {
     let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));

@@ -1,0 +1,1 @@
+Ajoute une recherche au carnet de recettes : un champ en haut de la page filtre la liste pendant qu'on tape, sur le nom ou sur un ingrédient. L'API doit accepter `GET /api/recettes?q=texte` et ne renvoyer que les recettes qui correspondent. Ajoute les tests.

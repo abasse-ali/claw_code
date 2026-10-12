@@ -25,6 +25,43 @@ const TIMEOUT: Duration = Duration::from_secs(90);
 const FIRST_SIGN: Duration = Duration::from_secs(20);
 /// Temps accordé à un modèle pour finir sa réponse.
 const PER_MODEL: Duration = Duration::from_secs(50);
+
+/// Temps laissé à une consultation : à chaque modèle pour finir sa réponse,
+/// et en tout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Patience {
+    pub per_model: Duration,
+    pub total: Duration,
+}
+
+impl Patience {
+    /// Un conseil attendu pendant le travail : l'agent ne patiente pas longtemps.
+    pub const SHORT: Self = Self {
+        per_model: PER_MODEL,
+        total: TIMEOUT,
+    };
+    /// La relecture de fin de tour : un modèle gratuit qui raisonne avant
+    /// d'écrire dépasse souvent 50 s sur un vrai diff. Dans les essais réels,
+    /// les trois relecteurs échouaient ainsi (réponse inachevée, ou sans
+    /// texte) et le travail partait sans avoir été relu.
+    pub const REVIEW: Self = Self {
+        per_model: Duration::from_secs(240),
+        total: Duration::from_secs(360),
+    };
+}
+
+/// Jetons de sortie d'une relecture, raisonnement compris. Sur le diff d'une
+/// tâche de cinq fichiers, deux relecteurs gratuits ont raisonné 27 000 et
+/// 33 000 caractères (environ 8 000 jetons) sans avoir fini : ces modèles ne
+/// connaissent pas de niveaux d'effort, seule la place de sortie les borne.
+pub const REVIEW_MAX_TOKENS: u32 = 20_000;
+
+/// Plus haut niveau de raisonnement demandé à un modèle consulté. Claw demande
+/// d'ordinaire le plus haut qu'il accepte ; dans le petit budget de sortie
+/// d'une consultation, ce raisonnement prenait toute la place, et la relecture
+/// d'un vrai diff revenait vide chez les trois relecteurs (essais réels t4).
+/// Les consignes de relecture font écrire le raisonnement dans la réponse.
+const CONSULT_EFFORT: api::ReasoningEffort = api::ReasoningEffort::Medium;
 /// Longueur gardée de la cause d'un échec, dans le message final.
 const REASON_CHARS: usize = 90;
 /// Mise de côté d'un modèle muet ou en panne.
@@ -90,12 +127,31 @@ fn failure(model: &str, error: &ApiError) -> String {
     reason(error)
 }
 
-/// Texte de la réponse de `model`, lue en flux jusqu'à `deadline`.
-async fn answer(
-    model: &str,
-    request: &MessageRequest,
-    deadline: Instant,
-) -> Result<String, String> {
+/// Réponse d'un modèle consulté : son texte et, pour dire pourquoi une
+/// réponse est vide, ce qui est venu à la place.
+struct Reply {
+    text: String,
+    /// Caractères de raisonnement reçus.
+    thought: usize,
+    /// Raison de l'arrêt donnée par le fournisseur.
+    stop: Option<String>,
+}
+
+/// Pourquoi une réponse est arrivée sans texte, en quelques mots.
+fn empty_reply_reason(reply: &Reply) -> String {
+    let stop = reply.stop.as_deref().unwrap_or("inconnu");
+    if reply.thought > 0 {
+        format!(
+            "réponse sans texte après {} caractères de raisonnement (arrêt : {stop})",
+            reply.thought
+        )
+    } else {
+        format!("réponse vide (arrêt : {stop})")
+    }
+}
+
+/// Réponse de `model`, lue en flux jusqu'à `deadline`.
+async fn answer(model: &str, request: &MessageRequest, deadline: Instant) -> Result<Reply, String> {
     let started = Instant::now();
     let client = ProviderClient::from_model(model).map_err(|error| failure(model, &error))?;
     let opening = async {
@@ -112,6 +168,8 @@ async fn answer(
     crate::note_model_request(model);
 
     let mut text = String::new();
+    let mut thought = 0;
+    let mut stop = None;
     let reading = async {
         while let Some(current) = event {
             match current {
@@ -120,11 +178,14 @@ async fn answer(
                         text.push_str(&piece);
                     }
                 }
-                StreamEvent::ContentBlockDelta(delta) => {
-                    if let ContentBlockDelta::TextDelta { text: piece } = delta.delta {
-                        text.push_str(&piece);
+                StreamEvent::ContentBlockDelta(delta) => match delta.delta {
+                    ContentBlockDelta::TextDelta { text: piece } => text.push_str(&piece),
+                    ContentBlockDelta::ThinkingDelta { thinking } => {
+                        thought += thinking.chars().count();
                     }
-                }
+                    _ => {}
+                },
+                StreamEvent::MessageDelta(delta) => stop = delta.delta.stop_reason,
                 StreamEvent::MessageStop(_) => break,
                 _ => {}
             }
@@ -134,7 +195,11 @@ async fn answer(
     };
     let left = deadline.saturating_duration_since(Instant::now());
     match tokio::time::timeout(left, reading).await {
-        Ok(Ok(())) => Ok(runtime::typography::cleaned(text.trim()).into_owned()),
+        Ok(Ok(())) => Ok(Reply {
+            text: runtime::typography::cleaned(text.trim()).into_owned(),
+            thought,
+            stop,
+        }),
         Ok(Err(error)) => Err(failure(model, &error)),
         Err(_) => Err(format!(
             "réponse inachevée après {} s",
@@ -152,7 +217,20 @@ pub fn ask(
     prompt: &str,
     max_tokens: u32,
 ) -> Result<Opinion, String> {
-    ask_with(models, |model| request(model, system, prompt, max_tokens))
+    ask_within(models, system, prompt, max_tokens, Patience::SHORT)
+}
+
+/// Comme [`ask`], avec le temps que cette consultation peut prendre.
+pub fn ask_within(
+    models: &[String],
+    system: &str,
+    prompt: &str,
+    max_tokens: u32,
+    patience: Patience,
+) -> Result<Opinion, String> {
+    ask_with(models, patience, |model| {
+        request(model, system, prompt, max_tokens)
+    })
 }
 
 /// La même consultation à propos d'une image : le premier modèle de `models`
@@ -164,7 +242,7 @@ pub fn ask_about_image(
     image: &api::ImageSource,
     max_tokens: u32,
 ) -> Result<Opinion, String> {
-    ask_with(models, |model| MessageRequest {
+    ask_with(models, Patience::SHORT, |model| MessageRequest {
         messages: vec![InputMessage {
             role: "user".to_string(),
             content: vec![
@@ -184,6 +262,7 @@ pub fn ask_about_image(
 /// prépare, jusqu'à la première réponse.
 fn ask_with(
     models: &[String],
+    patience: Patience,
     build: impl Fn(&str) -> MessageRequest + Send,
 ) -> Result<Opinion, String> {
     if models.is_empty() {
@@ -196,38 +275,61 @@ fn ask_with(
     std::thread::scope(|scope| {
         scope
             .spawn(move || {
+                api::cap_thread_reasoning(Some(CONSULT_EFFORT));
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .map_err(|error| error.to_string())?;
-                let deadline = Instant::now() + TIMEOUT;
+                let deadline = Instant::now() + patience.total;
                 // Ce que chaque modèle a répondu, pour le message final.
                 let mut failures = Vec::new();
                 for model in available.into_iter().chain(set_aside) {
-                    let now = Instant::now();
-                    if now >= deadline {
+                    let mut asked_again = false;
+                    let reason =
+                        loop {
+                            let now = Instant::now();
+                            if now >= deadline {
+                                break None;
+                            }
+                            let request = build(&model);
+                            let answered = runtime.block_on(runtime::interrupt::interruptible(
+                                answer(&model, &request, deadline.min(now + patience.per_model)),
+                            ));
+                            match answered {
+                                Ok(reply) if !reply.text.is_empty() => {
+                                    return Ok(Opinion {
+                                        model,
+                                        text: reply.text,
+                                    })
+                                }
+                                Ok(reply) => {
+                                    // Tout son budget est parti en raisonnement : le
+                                    // flux lui a retiré un cran (`reasoning_exhausted`),
+                                    // il est consulté une seconde fois.
+                                    let lowered = api::take_reasoning_notice().is_some();
+                                    if lowered && !asked_again {
+                                        asked_again = true;
+                                        continue;
+                                    }
+                                    break Some(empty_reply_reason(&reply));
+                                }
+                                Err(_) if runtime::interrupt::interrupt_requested() => {
+                                    return Err("consultation interrompue".to_string());
+                                }
+                                Err(error) => break Some(error.to_string()),
+                            }
+                        };
+                    let Some(reason) = reason else {
                         break;
-                    }
-                    let request = build(&model);
-                    let answered = runtime.block_on(runtime::interrupt::interruptible(answer(
-                        &model,
-                        &request,
-                        deadline.min(now + PER_MODEL),
-                    )));
-                    let reason = match answered {
-                        Ok(text) if !text.is_empty() => return Ok(Opinion { model, text }),
-                        // Tout son budget est parti en raisonnement.
-                        Ok(_) => "réponse sans texte".to_string(),
-                        Err(_) if runtime::interrupt::interrupt_requested() => {
-                            return Err("consultation interrompue".to_string());
-                        }
-                        Err(error) => error.to_string(),
                     };
                     let reason: String = reason.chars().take(REASON_CHARS).collect();
                     failures.push(format!("{model} : {reason}"));
                 }
                 if failures.is_empty() {
-                    failures.push(format!("pas de réponse après {} s", TIMEOUT.as_secs()));
+                    failures.push(format!(
+                        "pas de réponse après {} s",
+                        patience.total.as_secs()
+                    ));
                 }
                 Err(failures.join(" ; "))
             })
@@ -270,7 +372,24 @@ pub const CONSULT_SYSTEM: &str = "You are an experienced software engineer givin
 
 #[cfg(test)]
 mod tests {
-    use super::{ask, configured_models, reason, set_resolver};
+    use super::{ask, configured_models, empty_reply_reason, reason, set_resolver, Reply};
+
+    #[test]
+    fn an_empty_reply_says_what_came_instead() {
+        let reply = |thought: usize, stop: Option<&str>| Reply {
+            text: String::new(),
+            thought,
+            stop: stop.map(str::to_string),
+        };
+        assert_eq!(
+            empty_reply_reason(&reply(31_200, Some("length"))),
+            "réponse sans texte après 31200 caractères de raisonnement (arrêt : length)"
+        );
+        assert_eq!(
+            empty_reply_reason(&reply(0, None)),
+            "réponse vide (arrêt : inconnu)"
+        );
+    }
 
     #[test]
     fn asking_nobody_is_an_error_and_the_resolver_lists_models() {

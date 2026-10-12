@@ -116,6 +116,9 @@ pub struct RuntimeFeatureConfig {
     team: Option<bool>,
     /// `"teamModels": {"code": "…", "vision": "…"}` : modèle imposé par rôle.
     team_models: BTreeMap<String, String>,
+    /// `"turnRequestLimit": 100` : requêtes au modèle dans un même tour avant
+    /// que Claw lui fasse conclure (0 : sans limite).
+    turn_request_limit: Option<usize>,
 }
 
 /// Serveur compatible `OpenAI` déclaré dans `providers` (utilisé avec le
@@ -425,6 +428,11 @@ impl ConfigLoader {
                         .collect()
                 })
                 .unwrap_or_default(),
+            turn_request_limit: merged_value
+                .as_object()
+                .and_then(|object| object.get("turnRequestLimit"))
+                .and_then(JsonValue::as_i64)
+                .and_then(|limit| usize::try_from(limit).ok()),
         };
 
         Ok(RuntimeConfig {
@@ -662,6 +670,13 @@ impl RuntimeFeatureConfig {
     #[must_use]
     pub fn review_enabled(&self) -> bool {
         !self.review_disabled
+    }
+
+    /// Requêtes au modèle par tour avant que Claw lui fasse conclure
+    /// (`"turnRequestLimit"`, 0 : sans limite), si c'est réglé.
+    #[must_use]
+    pub fn turn_request_limit(&self) -> Option<usize> {
+        self.turn_request_limit
     }
 
     /// Modèles consultés pour la relecture, le conseil et le second avis.
@@ -1716,6 +1731,18 @@ mod tests {
             Some(FilesystemIsolationMode::AllowList)
         );
         assert_eq!(loaded.sandbox().allowed_mounts, vec!["logs", "tmp/cache"]);
+        assert_eq!(loaded.feature_config().turn_request_limit(), None);
+
+        // Budget de requêtes d'un tour : un nombre, zéro pour ne pas borner.
+        fs::write(
+            cwd.join(".claw").join("settings.local.json"),
+            r#"{"turnRequestLimit": 40}"#,
+        )
+        .expect("écriture des paramètres locaux");
+        let loaded = ConfigLoader::new(&cwd, &home)
+            .load()
+            .expect("la config devrait se charger");
+        assert_eq!(loaded.feature_config().turn_request_limit(), Some(40));
 
         fs::remove_dir_all(root).expect("nettoyage du répertoire temp");
     }

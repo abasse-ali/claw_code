@@ -2,6 +2,7 @@
 //! demandé (`/think`, `"reasoning"` dans la config, `CLAW_REASONING`) et
 //! séparation du raisonnement et de la réponse dans le flux.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::RwLock;
 
@@ -80,6 +81,20 @@ pub fn reasoning_effort() -> Option<ReasoningEffort> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+thread_local! {
+    /// Plafond du niveau des requêtes faites par ce fil.
+    static THREAD_CAP: Cell<Option<ReasoningEffort>> = const { Cell::new(None) };
+}
+
+/// Plafonne le niveau de raisonnement des requêtes que ce fil fera ensuite
+/// (`None` : pas de plafond). Sert aux consultations d'autres modèles
+/// (relecture, conseil), dont la réponse doit tenir dans un petit budget de
+/// sortie : au plus haut niveau, le raisonnement le prenait tout, et la
+/// réponse arrivait vide.
+pub fn cap_thread_reasoning(cap: Option<ReasoningEffort>) {
+    THREAD_CAP.with(|current| current.set(cap));
+}
+
 /// Budget de raisonnement étendu des modèles Claude (API Anthropic).
 #[must_use]
 pub fn anthropic_thinking_budget() -> Option<u32> {
@@ -112,6 +127,11 @@ pub fn effort_for_request(
         Some(effort) => effort,
         None if openrouter => strongest?,
         None => return None,
+    };
+    let effort = match THREAD_CAP.with(Cell::get) {
+        Some(ReasoningEffort::Off) => return None,
+        Some(cap) if cap < effort => cap,
+        _ => effort,
     };
     Some(match effort_cap(model) {
         Some(cap) if cap < effort => cap,
@@ -323,6 +343,34 @@ mod tests {
             effort_for_request(None, "anthropic/claude-sonnet-4.5", true, max),
             None
         );
+    }
+
+    #[test]
+    fn a_thread_cap_lowers_the_effort_of_its_own_requests_only() {
+        use super::{cap_thread_reasoning, effort_for_request};
+        let model = "vendor/deep-thinker:free";
+        let max = Some(ReasoningEffort::Max);
+        cap_thread_reasoning(Some(ReasoningEffort::Medium));
+        assert_eq!(
+            effort_for_request(None, model, true, max),
+            Some(ReasoningEffort::Medium)
+        );
+        // Un niveau plus bas, demandé par l'utilisateur, reste le sien.
+        assert_eq!(
+            effort_for_request(Some(ReasoningEffort::Low), model, true, max),
+            Some(ReasoningEffort::Low)
+        );
+        // Un modèle qui ne raisonne pas ne reçoit toujours rien.
+        assert_eq!(effort_for_request(None, model, true, None), None);
+        // Un autre fil n'est pas plafonné.
+        let elsewhere = std::thread::spawn(move || effort_for_request(None, model, true, max))
+            .join()
+            .expect("fil");
+        assert_eq!(elsewhere, max);
+        cap_thread_reasoning(Some(ReasoningEffort::Off));
+        assert_eq!(effort_for_request(None, model, true, max), None);
+        cap_thread_reasoning(None);
+        assert_eq!(effort_for_request(None, model, true, max), max);
     }
 
     #[test]

@@ -6,8 +6,8 @@ réfléchissent. Fais toujours en sorte qu'on puisse reprendre sur une autre ses
 
 ## Méthode
 
-- Banc d'essai : `rust/scripts/real-tests/` (voir son README). Trois scénarios, chacun avec
-  une vérification cachée qui note le résultat ; les essais tournent hors du dépôt, dans
+- Banc d'essai : `rust/scripts/real-tests/` (voir son README). Cinq scénarios (t1 à t5, dont
+  un projet web), chacun avec une vérification cachée qui note le résultat ; les essais tournent hors du dépôt, dans
   `D:\Mes_Projets\claw-real-tests`, une ligne par essai dans `results.jsonl`.
 - Modèle : le réglage de l'utilisateur (`free`, le gratuit le plus puissant du moment), sans
   bascule (`CLAW_FALLBACK=0`). D'autres modèles gratuits ensuite, pour vérifier que les
@@ -88,7 +88,8 @@ Scénario t4 (tâche longue, plusieurs modules), Claw au commit fcbbb34 :
 |---|---|---|---|---|---|---|---|
 | 12/10 07:00 | t4-bibliotheque | free = nemotron-3-ultra-550b | t4 | 12/12 | 31 | 379 s | liste de tâches tenue, tout est fait ; 7 requêtes pour la seule mise à jour de la liste (T1-14), 14 commandes une par requête (T1-15) |
 | 12/10 07:06 | t4-bibliotheque | cohere/north-mini-code | t4-north | 8/12 | 250 | 1 500 s | arrêté par la limite de 25 minutes ; le livre n'est pas mis de côté au retour ; plus aucun fichier modifié après la 6e minute, donc environ 200 requêtes sans effet (T1-17) ; aucune trace : la session n'est enregistrée qu'en fin de tour (T1-16) |
-| 12/10 08:02 | t4-bibliotheque | cohere/north-mini-code | t4b-north | 8/12 | 35 | 349 s | Claw avec T1-14 à T1-16 ; terminé normalement, la dérive du premier essai ne s'est pas reproduite ; relit quatre fichiers juste avant de les modifier (T1-17) ; prête le livre d'office au premier de la file au lieu de le mettre de côté, et ni son contrôle des exigences ni la relecture par un autre modèle ne le voient (T1-18) ; trois remarques de regroupement reçues, sans effet |
+| 12/10 08:02 | t4-bibliotheque | cohere/north-mini-code | t4b-north | 8/12 | 35 | 349 s | Claw avec T1-14 à T1-16 ; terminé normalement, la dérive du premier essai ne s'est pas reproduite ; relit quatre fichiers juste avant de les modifier (T1-17) ; prête le livre d'office au premier de la file au lieu de le mettre de côté, et son contrôle des exigences ne le voit pas (T1-18) ; la relecture par un autre modèle n'a vraisemblablement pas abouti (T1-20) ; trois remarques de regroupement reçues, sans effet |
+| 12/10 08:28 | t4-bibliotheque | free = nemotron-3-ultra-550b | t4c | 9/12 | 30 | 455 s | même Claw ; une seule mise à jour de la liste envoyée seule (contre sept) : après la remarque, les cinq suivantes partent avec une modification (T1-14) ; après les remarques des 6e et 9e réponses isolées, il enchaîne deux puis quatre commandes par appel, toujours un appel par réponse (T1-15) ; a mal lu la même phrase que le petit modèle : prêt d'office au premier de la file (T1-18) |
 
 La session de cet essai a pu être lue pendant qu'il tournait : elle s'écrit maintenant à
 chaque étape (T1-16).
@@ -277,6 +278,9 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   prompt et la description de l'outil le demandent d'avance. Le résultat gardé dans la session
   ne répète plus l'ancienne et la nouvelle liste (`lean_todos` : nombre de tâches, faites, en
   cours) : sept mises à jour répétaient 15 000 caractères à chaque requête suivante.
+- Mesure (t4c, le plus puissant) : une liste envoyée seule au début (remarque reçue), puis les
+  cinq mises à jour suivantes jointes à une modification ou à une commande ; la dernière,
+  seule, ferme la liste (pas de remarque). Deux réponses de liste seule contre sept.
 
 ### T1-15 La remarque de regroupement arrive tard et une seule fois
 - Preuve : t4 (free), réponses 15 à 26 : douze commandes `python biblio.py ...` une par
@@ -293,7 +297,10 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   commun écrit une fois, rien si une commande ne s'enchaîne pas).
 - Mesure (t4b-north) : les trois remarques sont arrivées aux réponses isolées 3, 6 et 9, avec
   l'exemple tiré de ses commandes ; le petit modèle a continué une commande par réponse (onze
-  d'affilée). Sur lui, la remarque ne change rien. Effet sur le plus puissant : à mesurer.
+  d'affilée). Sur lui, la remarque ne change rien.
+- Mesure (t4c, le plus puissant) : après la remarque de la 6e réponse isolée, il enchaîne
+  deux commandes par appel (`rendre L1 && etat`), après celle de la 9e, quatre ; mais il garde
+  un appel par réponse : 14 commandes en 14 requêtes, comme au premier essai. Effet partiel.
 
 ### T1-16 Un tour interrompu ne laisse aucune trace : la session n'est enregistrée qu'à la fin
 - Preuve : t4 (north), arrêté après 25 minutes : le fichier de session fait 27 octets.
@@ -330,7 +337,8 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   alors l'emprunter ». Le modèle fait prêter le livre d'office au premier de la file (message
   38 : « la logique s'attend à ce que après rendre L1, le livre soit attribué à Bilal »),
   l'essaie ainsi (messages 36 à 45), et son contrôle des exigences (message 69) le confirme
-  avec la même lecture. La relecture par un autre modèle (une requête) n'a rien signalé.
+  avec la même lecture. La relecture par un autre modèle n'a rien renvoyé : elle n'a
+  vraisemblablement pas abouti (T1-20). Même erreur dans t4c, avec le plus puissant.
   Quatre points perdus sur douze, dont un pour une exigence implicite (réserver le livre qu'on
   a déjà ; réserver un livre disponible est accepté aussi).
 - Défaut : celui qui a mal lu une phrase se relit avec la même lecture ; le relecteur reçoit
@@ -343,7 +351,24 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   raisonnable ; (2) le contrôle des exigences demande la même chose à l'agent : citer la
   phrase, dire ce que l'utilisateur observerait au mot près, l'essayer ; (3) garder la réponse
   du relecteur dans un journal.
-- État : à faire
+- État : en partie corrigé (reprise du 12 octobre, 11 h 22) : (1) `REVIEW_SYSTEM` fait d'abord
+  traduire chaque phrase de la demande en comportement observable, puis suivre le code pour
+  chacun ; la réponse de l'agent vient après le diff, comme des affirmations à vérifier ; seul
+  le verdict (après `VERDICT`) repart à l'agent, et une approbation en fin de réponse est
+  reconnue ; (2) le contrôle des exigences fait relire chaque phrase telle qu'elle est écrite,
+  dire ce que l'utilisateur doit observer, et ne pas faire automatiquement une action que la
+  demande laisse à une personne (« the manager can then approve it ») ; (3) `CLAW_REVIEW_LOG`
+  garde chaque réponse du relecteur (le banc les met dans `result.json`), et `claw
+  review-replay` avec `review_replay.py` rejoue une relecture sur un essai enregistré.
+- Mesures : rejouée sur t4c avec ses moyens corrigés (T1-20), la relecture aboutit (laguna,
+  8 s) mais sans les étapes demandées : « VERDICT / LGTM », le prêt d'office approuvé. Une
+  lecture indépendante de la demande par un autre modèle, sans le code, a été essayée sous
+  deux formes (deux requêtes, dots) : en critères, elle garde la bonne lecture (« set aside for
+  the first member in the reservation queue, and only that member may borrow it next ») mais
+  reste abstraite ; en scénarios, elle reprend l'erreur (« rendre L ; the book is assigned to
+  M2 ») puis se contredit (« emprunter M2 L ; the borrow succeeds »). Trois modèles sur quatre
+  lisent cette phrase ainsi : un second lecteur ne corrige pas sûrement une lecture par défaut
+  partagée, la consultation n'est pas retenue. L'effet de (2) reste à mesurer sur un essai réel.
 
 ### T1-19 Rien ne borne le nombre de requêtes d'un tour
 - Preuve : t4-north (07:06) : 250 requêtes en 25 minutes, plus aucun fichier modifié après
@@ -360,7 +385,40 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   l'utilisateur vont jusqu'à 35). Arrivé là, Claw demande au modèle de conclure (ce qui est
   fait et vérifié, ce qui reste), n'exécute plus d'outil et rend la main ; l'utilisateur dit
   « continue » pour poursuivre.
-- État : à faire
+- État : corrigé (reprise du 12 octobre, 11 h 22) : 100 requêtes par tour (les tours de t4
+  en font 30 à 35), réglage `turnRequestLimit`, variable `CLAW_TURN_REQUESTS`, 0 pour ne pas
+  borner. Au-delà : notice à l'utilisateur, note au modèle (`turn_limit_note`), qui conclut
+  sans outil ; un appel demandé quand même ne tourne pas et reçoit son résultat
+  (`turn_limit_refusal`) ; ni contrôle ni relecture ne relancent alors le travail, un hook
+  `Stop` non plus. Vérifié de bout en bout sur `claw.exe` avec le faux modèle (limite à 1 :
+  deux requêtes, la notice dans la sortie JSON).
+
+### T1-20 La relecture par un autre modèle n'aboutit pas sur un vrai diff
+- Preuve : relecture rejouée sur le travail de t4c avec les consignes et les moyens de ce
+  matin (`review_replay.py --baseline 93d40ae`) : `laguna` « réponse inachevée après 50 s »,
+  `dots` « réponse sans texte », `ling` « réponse inachevée après 2 s » (plus de temps). Une
+  consultation avait 3 000 jetons de sortie, 50 s par modèle et 90 s en tout, et Claw demande
+  aux modèles qui raisonnent leur plus haut niveau d'effort. Avec 8 000 jetons et le niveau
+  « medium » : `laguna` 27 664 caractères de raisonnement, `dots` 33 457, arrêtés sur la
+  limite sans un mot de réponse. Ces modèles n'ont pas de niveaux d'effort dans le catalogue :
+  seule la place de sortie les borne. Sur t1 (petit diff), la relecture aboutissait (T1-13).
+- Défaut : sur une tâche de plusieurs fichiers, le travail partait sans relecture, sans que
+  rien le dise dans les modes sans affichage (T1-21), pour une à trois requêtes perdues.
+- État : corrigé (même reprise) : la relecture a 20 000 jetons de sortie
+  (`REVIEW_MAX_TOKENS`), 240 s par relecteur et 360 s en tout (`Patience::REVIEW`) ; les
+  consultations plafonnent le raisonnement à « medium » (`cap_thread_reasoning`, propre au fil
+  de la consultation) ; un relecteur dont la réponse est partie tout entière en raisonnement
+  est consulté une seconde fois quand son niveau a pu baisser ; un échec dit ce qui est arrivé
+  (`empty_reply_reason` : « réponse sans texte après 27664 caractères de raisonnement (arrêt :
+  length) »). Rejouée ainsi, la relecture de t4c a abouti (laguna, 8 s cette fois).
+
+### T1-21 Sans affichage, les notices de Claw sont perdues
+- Preuve : `output.json` des essais de t4 (`--output-format json`) : aucune notice, ni de la
+  vérification, ni de la relecture (faite, approuvée ou en échec) ; `stderr.txt` vide. On ne
+  pouvait pas savoir si la relecture avait eu lieu.
+- État : corrigé (même reprise) : la sortie JSON porte `notices`, tout ce que Claw a signalé
+  pendant le tour (`start_collecting_notices`, `take_notices`) ; le banc les garde dans
+  `result.json` avec les réponses du relecteur (`reviews`).
 
 ## Améliorations
 
@@ -379,12 +437,13 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 12 octobre, 8 h 30) : (1) T1-19, le budget de requêtes
-par tour ; (2) T1-18, la relecture qui repart des phrases de la demande ; (3) mesurer T1-14,
-T1-15 et T1-17 sur t4 avec les deux modèles ; (4) un scénario de projet web comme ceux de
-l'utilisateur et un troisième modèle gratuit ; (5) T1-11, les données réécrites par une
-commande ; (6) T1-04, les espaces insécables oubliées sur t3 ; (7) refaire chaque mesure deux
-ou trois fois avant de conclure. T1-12 à T1-17 sont faits.
+Suite, dans l'ordre (mise à jour du 12 octobre, 12 h 30) : (1) mesurer sur t4, avec le plus
+puissant puis le petit modèle, la règle de lecture du contrôle des exigences (T1-18) et la
+relecture qui aboutit (T1-20) ; (2) faire tourner le scénario web t5-recettes-web (écrit le
+12 octobre : projet intact 1/12, solution de référence 12/12) avec les deux modèles, puis un
+troisième modèle gratuit ; (3) T1-11, les données réécrites par une commande ; (4) T1-04, les
+espaces insécables oubliées sur t3 ; (5) refaire chaque mesure deux ou trois fois avant de
+conclure. T1-12 à T1-17 et T1-19 à T1-21 sont faits, T1-18 en partie.
 
 Mesure faite (tableau plus haut). Pour la refaire : `run.py <scénario> --label <nom>`, puis avec
 `--model cohere/north-mini-code:free`) et comparer scores et requêtes à la série propre.

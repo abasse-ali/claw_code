@@ -1,0 +1,11 @@
+[
+  {"id": "r1", "nom": "Tarte aux pommes", "ingredients": ["pommes", "pâte brisée", "sucre", "beurre"]},
+  {"id": "r2", "nom": "Gratin dauphinois", "ingredients": ["pommes de terre", "crème", "lait", "ail", "muscade"]},
+  {"id": "r3", "nom": "Crème brûlée", "ingredients": ["crème", "jaunes d'œufs", "sucre", "vanille"]},
+  {"id": "r4", "nom": "Salade niçoise", "ingredients": ["tomates", "thon", "olives", "œufs", "haricots verts"]},
+  {"id": "r5", "nom": "Soupe à l'oignon", "ingredients": ["oignons", "bouillon", "pain", "gruyère"]},
+  {"id": "r6", "nom": "Ratatouille", "ingredients": ["courgettes", "aubergines", "tomates", "poivrons", "oignons"]},
+  {"id": "r7", "nom": "Quiche lorraine", "ingredients": ["pâte brisée", "lardons", "crème", "œufs", "lait"]},
+  {"id": "r8", "nom": "Clafoutis aux cerises", "ingredients": ["cerises", "farine", "lait", "sucre", "œufs"]},
+  {"id": "r9", "nom": "Pâtes à la carbonara", "ingredients": ["spaghettis", "lardons", "jaunes d'œufs", "parmesan"]}
+]

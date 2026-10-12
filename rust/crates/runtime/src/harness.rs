@@ -1519,6 +1519,31 @@ pub fn batch_note(streak: u32, recent: &[(String, String)]) -> String {
     }
 }
 
+// --- Budget de requêtes d'un tour --------------------------------------------------------
+
+/// Requêtes au modèle dans un même tour avant que Claw lui fasse conclure
+/// (réglage `turnRequestLimit`, variable `CLAW_TURN_REQUESTS` ; 0 : sans
+/// limite). Les tours réels observés vont jusqu'à 35 requêtes ; un modèle qui
+/// tournait en rond en a dépensé 250 en 25 minutes, sur un quota gratuit de
+/// 1 000 par jour.
+pub const TURN_REQUEST_LIMIT: usize = 100;
+
+/// Message adressé au modèle quand le tour atteint son budget de requêtes.
+#[must_use]
+pub fn turn_limit_note(limit: usize) -> String {
+    format!(
+        "[Claw] This turn has used {limit} requests, the limit for one turn: the user's daily quota of requests is limited. Stop working now and do not call any tool (a call made in your next reply will not run). Give your final answer: what is done and verified, what is done but not verified, what remains to do, and the exact next step. The user can then ask you to continue."
+    )
+}
+
+/// Résultat d'un appel d'outil demandé après ce message : il n'a pas tourné.
+#[must_use]
+pub fn turn_limit_refusal(limit: usize) -> String {
+    format!(
+        "[Claw] Not run: this turn reached its limit of {limit} requests. The user can ask you to continue."
+    )
+}
+
 // --- Fichier relu sans avoir changé ------------------------------------------------------
 
 /// Remarques par tour, au plus, pour un fichier relu à l'identique.
@@ -1640,7 +1665,7 @@ pub fn checklist_prompt(request: &str, earlier: Option<&str>, away: bool) -> Str
         ),
     };
     let mut prompt = format!(
-        "{CHECKLIST_PROMPT}\n\n{quoted}\nGo through it line by line: one line of your check per sentence or bullet of this request, even for a part you believe is already done (then quote the file and line that show it)."
+        "{CHECKLIST_PROMPT}\n\n{quoted}\nGo through it line by line: one line of your check per sentence or bullet of this request, even for a part you believe is already done (then quote the file and line that show it). Read each sentence again as it is written, not as you remember it: say what the user must be able to observe (who can do what, when, and what is refused), and make sure your code does exactly that, not a close variant. An action that the request leaves to a person (\"the manager can then approve it\", \"only the owner can then confirm\") stays theirs to do: your code must not do it for them automatically, and the scenario that shows it is that person doing it, after the step that allows it."
     );
     if away {
         prompt.push(' ');
@@ -2443,8 +2468,12 @@ pub fn unified_diff(path: &str, old: &str, new: &str) -> (String, usize) {
     (out, changed_lines)
 }
 
-/// Consignes du relecteur (un autre modèle que celui qui a écrit le code).
-pub const REVIEW_SYSTEM: &str = "You are a strict, careful code reviewer. You are shown what a user asked for, the changes a coding agent made during this turn (unified diff) and the final answer the agent is about to give the user. Report only real problems that must be fixed before the work can be accepted: a bug, an unhandled edge case that the request or the docstrings require, a part of the request that was not done, a claim in the agent's answer that the changes contradict or do not support (a feature, page, file, test or result it says exists but that is neither in the diff nor plausibly done in an earlier turn), a test that was weakened, skipped or deleted, a security issue. Do not comment on style, naming or anything optional. Be concrete and brief. If the changes are acceptable, answer with exactly: LGTM. Otherwise answer with at most six lines, one problem per line, in the form `file:line - problem - what to change`.";
+/// Consignes du relecteur (un autre modèle que celui qui a écrit le code). Il
+/// repart des phrases de la demande avant de lire le diff : dans un essai
+/// réel, une exigence mal lue par l'agent (« mis de côté pour le premier de la
+/// file » devenu « prêté d'office au premier ») avait passé la relecture, qui
+/// jugeait le diff d'après la description que l'agent en donnait.
+pub const REVIEW_SYSTEM: &str = "You are a strict, careful code reviewer. You are shown what a user asked for, the changes a coding agent made during this turn (unified diff) and the final answer the agent is about to give the user. The agent may have misread the request: judge the changes against the user's own words, never against the agent's description of them.\n\nStep 1. Before you look at the diff, go through the user's request sentence by sentence. For each sentence, write one short line: what the user must be able to observe once it is done exactly as written (who can do what, when, with which result, and what must be refused). Add one line for each case the request or the docstrings clearly imply without saying it (the opposite case, an invalid, duplicate or already existing input).\n\nStep 2. For each line of step 1, find the code in the diff that makes it true and follow it with a concrete example. A requirement that the code handles differently from the written words is a problem, even when the agent's variant looks reasonable.\n\nReport only real problems that must be fixed before the work can be accepted: a requirement of step 1 that is not met or is met differently, a bug, a claim in the agent's answer that the changes contradict or do not support (a feature, page, file, test or result it says exists but that is neither in the diff nor plausibly done in an earlier turn), a test that was weakened, skipped or deleted, a security issue. Do not comment on style, naming or anything optional. Be concrete and brief: one line per requirement in each step.\n\nFinish with a line containing only the word VERDICT, followed by either the single line LGTM, or at most six lines, one problem per line, in the form `file:line - problem - what to change`.";
 
 /// Taille gardée de la réponse de l'agent et de la demande antérieure
 /// montrées au relecteur.
@@ -2481,10 +2510,12 @@ pub fn review_prompt(
             shortened(earlier, MAX_REVIEW_TEXT_CHARS)
         );
     }
+    // La réponse de l'agent vient en dernier : elle décrit les changements à
+    // sa façon, et le relecteur doit les avoir jugés d'après la demande.
     let answer = answer.trim();
     let _ = write!(
         prompt,
-        "The agent's final answer to the user:\n{}\n\nChanges made by the agent during this turn (earlier turns may have changed other files):\n{body}",
+        "Changes made by the agent during this turn (earlier turns may have changed other files):\n{body}\n\nWhat the agent is about to tell the user (claims to check against the changes, not a description to trust).\nThe agent's final answer to the user:\n{}",
         if answer.is_empty() {
             "(none yet)".to_string()
         } else {
@@ -2494,16 +2525,53 @@ pub fn review_prompt(
     prompt
 }
 
-/// Remarques du relecteur, ou `None` s'il approuve (« LGTM »).
+/// Ce que le relecteur conclut : ce qui suit la dernière ligne `VERDICT` de
+/// sa réponse. Sans elle (modèle qui n'a pas suivi la forme demandée), toute
+/// la réponse.
+fn review_verdict(answer: &str) -> &str {
+    // Même longueur en octets : seules les lettres ASCII changent.
+    match answer.to_ascii_uppercase().rfind("VERDICT") {
+        Some(at) => answer[at + "VERDICT".len()..].trim_start_matches(|character: char| {
+            character.is_whitespace() || matches!(character, ':' | '*' | '#' | '`')
+        }),
+        None => answer,
+    }
+}
+
+/// Journal des relectures, pour savoir ce qu'un relecteur a répondu, surtout
+/// quand il approuve : une ligne JSON par relecture dans le fichier que nomme
+/// `CLAW_REVIEW_LOG`. Sans cette variable, rien n'est écrit.
+pub fn log_review(model: &str, answer: &str) {
+    let Ok(path) = std::env::var("CLAW_REVIEW_LOG") else {
+        return;
+    };
+    let line = serde_json::json!({ "model": model, "answer": answer }).to_string() + "\n";
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = std::io::Write::write_all(&mut file, line.as_bytes());
+    }
+}
+
+/// Remarques du relecteur, ou `None` s'il approuve (« LGTM »). Seul son
+/// verdict repart à l'agent, pas le raisonnement qui le précède.
 #[must_use]
 pub fn review_findings(answer: &str) -> Option<String> {
-    let text = answer.trim();
+    let text = review_verdict(answer).trim();
     let head: String = text
         .chars()
         .take(24)
         .collect::<String>()
         .to_ascii_uppercase();
-    if text.is_empty() || head.contains("LGTM") {
+    // Sans ligne `VERDICT`, une approbation peut clore un raisonnement.
+    let closing = text.lines().last().unwrap_or_default().trim();
+    let approved = head.contains("LGTM")
+        || closing
+            .trim_matches(|character: char| !character.is_ascii_alphabetic())
+            .eq_ignore_ascii_case("LGTM");
+    if text.is_empty() || approved {
         return None;
     }
     Some(text.lines().take(12).collect::<Vec<_>>().join("\n"))
@@ -2756,6 +2824,10 @@ mod guide_tests {
         assert!(prompt.contains("check your work against every requirement"));
         assert!(prompt.contains("word for word:\n<<<\najoute la traduction par URL\n>>>"));
         assert!(prompt.contains("one line of your check per sentence or bullet"));
+        // Essais réels t4 : « mis de côté pour le premier de la file : lui
+        // seul peut alors l'emprunter » devenait un prêt d'office.
+        assert!(prompt.contains("Read each sentence again as it is written"));
+        assert!(prompt.contains("must not do it for them automatically"));
         assert!(!prompt.contains("not answering permission requests"));
         // « reprendre » : la demande poursuivie est citée.
         let prompt = checklist_prompt(
@@ -3444,6 +3516,30 @@ mod tests {
         assert_eq!(
             review_findings("a.py:3 - division by zero - guard the empty list").as_deref(),
             Some("a.py:3 - division by zero - guard the empty list")
+        );
+        // Raisonnement en deux étapes, puis le verdict : lui seul compte.
+        let reasoned = "Step 1.\n- returning a book sets it aside for the first in line\nStep 2.\n- services.py lends it at once: differs\n\nVERDICT\nservices.py:31 - the book is lent to the first in line instead of being set aside - keep it available for that member only";
+        assert_eq!(
+            review_findings(reasoned).as_deref(),
+            Some("services.py:31 - the book is lent to the first in line instead of being set aside - keep it available for that member only")
+        );
+        assert_eq!(
+            review_findings("Step 1.\n- one requirement\nStep 2.\n- met\n\nVERDICT\nLGTM"),
+            None
+        );
+        assert_eq!(review_findings("Step 2.\n- met\n**Verdict:** LGTM"), None);
+        assert_eq!(review_findings("Step 2.\n- met\nVERDICT"), None);
+        // Verdict oublié : une approbation en dernière ligne en est une.
+        assert_eq!(review_findings("Step 1.\n- one requirement\n\nLGTM."), None);
+        // Dans la demande au relecteur, la réponse de l'agent vient après le diff.
+        let prompt =
+            super::review_prompt("ajoute x", None, "Fait.", &["--- a/x\n+++ b/x".to_string()]);
+        assert!(prompt.starts_with("The user asked:\najoute x"));
+        assert!(
+            prompt.find("--- a/x").expect("diff")
+                < prompt
+                    .find("The agent's final answer to the user:\nFait.")
+                    .expect("réponse")
         );
     }
 

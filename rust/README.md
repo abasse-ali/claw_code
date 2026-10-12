@@ -581,7 +581,7 @@ applique**, quel que soit le modèle.
 | Chemins | Un chemin inventé (`/workspace/src/a.py`, `/c/…`, `/mnt/c/…`) est retrouvé s'il existe dans le projet ; sinon l'erreur donne le dossier de travail et les fichiers au nom proche | `CLAW_PATH_HELP=0` |
 | Outils utiles seulement | Les outils rarement utiles ne sont proposés que lorsqu'ils servent (`BashOutput` s'il y a une tâche de fond, `NotebookEdit` s'il y a un notebook…) | `CLAW_TOOL_DIET=0` |
 | Raisonnement conservé | Le raisonnement du modèle est renvoyé à l'étape suivante du même tour (OpenRouter), au lieu d'être perdu entre deux appels d'outils | `CLAW_REASONING_PASSBACK=0` |
-| Relecture | Avant de rendre la main, les modifications d'au moins 5 lignes sont relues par **un autre modèle**, avec la réponse que l'agent s'apprête à vous donner : le relecteur signale aussi ce qu'elle affirme sans que les modifications le montrent. Après un message court (« reprendre », « continue »), il reçoit aussi la demande que ce message poursuit. Ses remarques repartent au modèle, une fois par tour | `CLAW_REVIEW=0` ou `"review": false` |
+| Relecture | Avant de rendre la main, les modifications d'au moins 5 lignes sont relues par **un autre modèle**, avec la réponse que l'agent s'apprête à vous donner : le relecteur traduit d'abord chaque phrase de votre demande en comportement observable, puis cherche où le code fait autre chose, et signale aussi ce que la réponse affirme sans que les modifications le montrent. Après un message court (« reprendre », « continue »), il reçoit aussi la demande que ce message poursuit. Ses remarques repartent au modèle, une fois par tour. Les modèles gratuits raisonnent longtemps sur un vrai diff : la relecture peut prendre jusqu'à 4 minutes par relecteur et 6 en tout ; un relecteur dont la réponse est partie tout entière en raisonnement est consulté une seconde fois, et un échec dit ce qui est arrivé (« réponse sans texte après 27 664 caractères de raisonnement »). `CLAW_REVIEW_LOG=fichier` garde chaque réponse du relecteur, approbation comprise | `CLAW_REVIEW=0` ou `"review": false` |
 | Conseil | Au deuxième échec de la vérification, ou au deuxième recadrage, un autre modèle lit la fin de la session et donne son diagnostic | `CLAW_COUNCIL=0` |
 | Second avis | L'outil `Consult` (et `/avis <question>`) pose la même question à plusieurs autres modèles ; l'agent compare et décide | `CLAW_COUNCIL=0` |
 | Leçons | L'outil `Remember` note une leçon utile au projet dans `.claw/lessons.md` (80 au plus), relue au début de chaque session | `CLAW_LESSONS=0` |
@@ -740,7 +740,8 @@ session est reprise.
   "advisorModels": ["nvidia/nemotron-3-ultra-550b-a55b:free", "cohere/north-mini-code:free"],
   "plannerModel": "nvidia/nemotron-3-ultra-550b-a55b:free",
   "escalationModel": "free",
-  "ultracode": true
+  "ultracode": true,
+  "turnRequestLimit": 100
 }
 ```
 
@@ -755,6 +756,13 @@ session est reprise.
   laisse la place au suivant ; une consultation dure 90 s au plus.
 - `"plannerModel"` : un modèle fort pour réfléchir, un modèle gratuit pour exécuter. Claw l'annonce
   au début du tour (« Mode plan : la réflexion est confiée à … »).
+- `"turnRequestLimit"` (ou `CLAW_TURN_REQUESTS`) : le nombre de requêtes au modèle qu'un même tour
+  peut faire, 100 sans réglage, `0` pour ne pas borner. Arrivé là, Claw vous prévient, demande à
+  l'agent de dire ce qui est fait, ce qui est vérifié et ce qui reste, n'exécute plus aucun outil
+  et vous rend la main : écrivez « continue » pour poursuivre, avec un budget entier. Un modèle
+  qui tourne en rond ne peut plus dépenser en un seul tour le quota gratuit de la journée (vu
+  dans un essai réel : 250 requêtes en 25 minutes, sans plus rien modifier après la sixième).
+  Les aides coupées par `CLAW_HARNESS=0` n'y changent rien : c'est une limite, pas une aide.
 - `"escalationModel"` (ou `CLAW_ESCALATION_MODEL`) : qui reprend un tour bloqué. Sans réglage, ou
   avec `"free"` : **le modèle gratuit le plus puissant** du classement de `/models` (taille, rang
   en programmation, spécialisation, mesures de `/models bench`), choisi au moment du blocage
@@ -972,6 +980,12 @@ coupe cet import.
   `tool_result`, `result` avec usage et coût). `--input-format stream-json` lit les tours sur
   l'entrée standard (`{"type":"user","message":{"content":"…"}}`), pour piloter Claw depuis un
   script. Sans terminal, une demande d'autorisation est refusée et signalée en JSON.
+- `--output-format json` : un seul objet JSON à la fin du tour (réponse, itérations, appels et
+  résultats d'outils, usage), avec `notices` : ce que Claw a signalé pendant le tour
+  (vérification, relecture faite, approuvée ou en échec, limite de requêtes atteinte...).
+- `claw review-replay DEMANDE DIFF RÉPONSE` rejoue la relecture par un autre modèle sur un
+  travail enregistré (trois fichiers texte), sans outil : une requête. Le banc d'essais réels
+  s'en sert pour comparer deux formulations de la relecture sur le même travail.
 - **GitHub** : l'action `.github/actions/claw` et un exemple de workflow « `@claw` dans un
   commentaire » sont décrits dans [`docs/github-action.md`](docs/github-action.md).
 - **VS Code** : l'extension `editors/vscode` (paquet `claw-code-0.3.0.vsix`, à installer avec

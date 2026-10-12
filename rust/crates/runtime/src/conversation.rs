@@ -258,6 +258,18 @@ pub struct ConversationRuntime<C, T> {
     file_views: BTreeMap<String, FileStamp>,
     /// Fichier où la session s'enregistre à chaque étape d'un tour.
     autosave: Option<std::path::PathBuf>,
+    /// Requêtes au modèle par tour avant que Claw lui fasse conclure (0 : sans limite).
+    turn_request_limit: usize,
+}
+
+/// Budget de requêtes d'un tour : variable `CLAW_TURN_REQUESTS`, sinon réglage
+/// `turnRequestLimit`, sinon `harness::TURN_REQUEST_LIMIT`.
+fn turn_request_limit(config: &RuntimeFeatureConfig) -> usize {
+    std::env::var("CLAW_TURN_REQUESTS")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .or(config.turn_request_limit())
+        .unwrap_or(harness::TURN_REQUEST_LIMIT)
 }
 
 /// Fichier, taille et date de modification au moment d'une vue.
@@ -772,7 +784,16 @@ where
             response_language: feature_config.response_language().map(ToOwned::to_owned),
             file_views: BTreeMap::new(),
             autosave: None,
+            turn_request_limit: turn_request_limit(&feature_config),
         }
+    }
+
+    /// Requêtes au modèle par tour avant que Claw lui fasse conclure (0 :
+    /// sans limite).
+    #[must_use]
+    pub fn with_turn_request_limit(mut self, limit: usize) -> Self {
+        self.turn_request_limit = limit;
+        self
     }
 
     /// Enregistre la session dans `path` à chaque étape des tours suivants :
@@ -1153,6 +1174,8 @@ where
         let mut stop_continuations = 0;
         let mut empty_nudged = false;
         let mut cut_continuations = 0;
+        // Le budget de requêtes du tour est atteint : le modèle conclut.
+        let mut wrapping_up = false;
         // Réponse qu'un contrôle vient de rendre provisoire, tant que le
         // modèle n'a rien changé depuis.
         let mut superseded_draft: Option<String> = None;
@@ -1189,6 +1212,21 @@ where
 
             if interrupt_requested() {
                 return Err(RuntimeError::new(INTERRUPTED_MESSAGE));
+            }
+            // Budget de requêtes du tour atteint : le modèle conclut et rend
+            // la main, au lieu de dépenser le quota du jour en un seul tour.
+            let limit = self.turn_request_limit;
+            if !wrapping_up && limit > 0 && iterations > limit {
+                wrapping_up = true;
+                let plural = if limit > 1 { "s" } else { "" };
+                self.api_client.notify(&format!(
+                    "Ce tour a utilisé {limit} requête{plural}, la limite d'un tour (réglage `turnRequestLimit`) : Claw demande à l'agent de conclure. Écrivez « continue » pour poursuivre"
+                ));
+                let mut note = harness::turn_limit_note(limit);
+                note.push_str(&harness::language_note(self.response_language.as_deref()));
+                self.session
+                    .messages
+                    .push(ConversationMessage::user_text(note));
             }
             // Mode équipe : le rôle de cette étape, d'après l'état du travail.
             if aids.team {
@@ -1278,6 +1316,7 @@ where
                 if cut
                     && cut_continuations < MAX_CUT_CONTINUATIONS
                     && iterations < self.max_iterations
+                    && !wrapping_up
                 {
                     cut_continuations += 1;
                     self.api_client.notify(
@@ -1302,6 +1341,12 @@ where
                     self.api_client.notify(
                         "Réponse encore coupée par la limite de sortie du modèle : elle est rendue telle quelle",
                     );
+                }
+                // Budget du tour atteint : la conclusion part telle quelle,
+                // aucun contrôle ne renvoie le modèle au travail.
+                if wrapping_up {
+                    self.run_stop_hooks(stop_continuations, true, &assistant_messages);
+                    break;
                 }
                 // Le modèle dit avoir fini : Claw vérifie avant de le croire
                 // (pas d'abandon sur un échec, vérification, erreurs vues par
@@ -1341,7 +1386,7 @@ where
                     })
                     .or_else(|| {
                         let reason =
-                            self.run_stop_hooks(stop_continuations, &assistant_messages)?;
+                            self.run_stop_hooks(stop_continuations, false, &assistant_messages)?;
                         stop_continuations += 1;
                         Some(format!("{STOP_HOOK_PREFIX} {reason}"))
                     });
@@ -1373,6 +1418,26 @@ where
             // Le modèle retravaille : sa prochaine réponse sera un nouveau
             // compte rendu, l'ancien n'est plus à garder.
             superseded_draft = None;
+            // Encore des outils alors que le budget du tour est atteint : rien
+            // ne tourne, chaque appel reçoit son résultat et le tour s'arrête.
+            if wrapping_up {
+                let reason = harness::turn_limit_refusal(self.turn_request_limit);
+                for (tool_use_id, tool_name, input) in pending_tool_uses {
+                    self.tool_executor.skipped(&tool_name, &input, &reason);
+                    let message = ConversationMessage::tool_result(
+                        tool_use_id,
+                        tool_name,
+                        reason.clone(),
+                        true,
+                    );
+                    self.session.messages.push(message.clone());
+                    tool_results.push(message);
+                }
+                self.api_client.notify(
+                    "L'agent n'a pas conclu : le tour s'arrête là, sans autre appel d'outil",
+                );
+                break;
+            }
             self.autosave(&pending_tool_uses);
             if self.run_parallel_batch(
                 &pending_tool_uses,
@@ -2636,6 +2701,7 @@ where
             harness::REVIEW_SYSTEM,
             &harness::review_prompt(request, earlier, answer, &diffs),
         )?;
+        harness::log_review(&consultation.model, &consultation.text);
         match harness::review_findings(&consultation.text) {
             None => {
                 self.api_client.notify(&format!(
@@ -2732,6 +2798,7 @@ where
     fn run_stop_hooks(
         &mut self,
         continuations: usize,
+        final_stop: bool,
         assistant_messages: &[ConversationMessage],
     ) -> Option<String> {
         let event = if self.subagent {
@@ -2760,6 +2827,13 @@ where
             return None;
         }
         let reason = result.reason("le hook demande de continuer");
+        if final_stop {
+            self.api_client.notify(&format!(
+                "hook {} : limite de requêtes du tour atteinte, l'agent s'arrête ({reason})",
+                event.as_str()
+            ));
+            return None;
+        }
         if continuations >= MAX_STOP_HOOK_CONTINUATIONS {
             self.api_client.notify(&format!(
                 "hook {} : {MAX_STOP_HOOK_CONTINUATIONS} relances déjà faites, l'agent s'arrête ({reason})",
@@ -5729,6 +5803,81 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn a_turn_that_reaches_its_request_limit_is_asked_to_conclude() {
+        // Essai réel t4 (petit modèle) : 250 requêtes en 25 minutes, plus
+        // aucun fichier modifié après la sixième minute, et rien pour l'arrêter.
+        let (runtime, observed, bash_calls) = aided_runtime(
+            vec![
+                tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
+                tool_step("bash", r#"{"command":"python essai.py 1"}"#),
+                tool_step("bash", r#"{"command":"python essai.py 2"}"#),
+                text_step(
+                    "Bilan : le fichier est écrit, deux essais faits, rien d'autre de vérifié.",
+                ),
+                text_step("Ne doit pas être demandé."),
+            ],
+            vec![PASSING, PASSING],
+        );
+        let mut runtime = runtime.with_turn_request_limit(3);
+        let summary = runtime.run_turn("écris et essaie", None).expect("tour");
+        // Trois requêtes de travail, une pour conclure : la vérification
+        // automatique (fichier modifié) ne renvoie pas le modèle au travail.
+        assert_eq!(summary.iterations, 4);
+        assert_eq!(bash_calls.borrow().len(), 2);
+        let observed = observed.borrow();
+        assert_eq!(observed.requests.len(), 4);
+        assert!(!observed.requests[2].contains("the limit for one turn"));
+        assert!(observed.requests[3].contains("[Claw] This turn has used 3 requests"));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("la limite d'un tour")));
+        // Le tour suivant repart avec un budget entier.
+        drop(observed);
+        runtime.run_turn("continue", None).expect("tour suivant");
+    }
+
+    #[test]
+    fn tool_calls_made_after_the_request_limit_do_not_run() {
+        let (runtime, observed, bash_calls) = aided_runtime(
+            vec![
+                tool_step("bash", r#"{"command":"python essai.py 1"}"#),
+                tool_step("bash", r#"{"command":"python essai.py 2"}"#),
+                tool_step("bash", r#"{"command":"python essai.py 3"}"#),
+                text_step("Ne doit pas être demandé."),
+            ],
+            vec![PASSING, PASSING],
+        );
+        let mut runtime = runtime.with_turn_request_limit(2);
+        let summary = runtime.run_turn("essaie", None).expect("tour");
+        assert_eq!(summary.iterations, 3);
+        // Le troisième appel, fait après la limite, n'a pas tourné.
+        assert_eq!(bash_calls.borrow().len(), 2);
+        let last = summary.tool_results.last().expect("résultat");
+        assert!(super::tool_result_parts(last)
+            .expect("sortie")
+            .0
+            .contains("Not run: this turn reached its limit of 2 requests"));
+        assert_eq!(observed.borrow().requests.len(), 3);
+        // Chaque appel a son résultat : la session reste valide pour la suite.
+        let calls = runtime
+            .session()
+            .messages
+            .iter()
+            .flat_map(|message| &message.blocks)
+            .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))
+            .count();
+        let results = runtime
+            .session()
+            .messages
+            .iter()
+            .flat_map(|message| &message.blocks)
+            .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
+            .count();
+        assert_eq!(calls, results);
     }
 
     #[test]

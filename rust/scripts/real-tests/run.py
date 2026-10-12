@@ -173,6 +173,9 @@ def main():
     shutil.copytree(scenario / "project", project)
     make_repository(project)
     prompt = (scenario / "prompt.txt").read_text(encoding="utf-8").strip()
+    # Ce que le relecteur (un autre modèle) a répondu, approbation comprise.
+    reviews = run_dir / "reviews.jsonl"
+    env["CLAW_REVIEW_LOG"] = str(reviews)
 
     before = free_requests_left(claw, env)
     command = [str(claw), "--permission-mode", "danger-full-access", "--output-format", "json"]
@@ -207,8 +210,10 @@ def main():
         verdict = {"score": 0, "max": 0, "error": (check.stdout + check.stderr)[-2000:]}
 
     try:
-        answer = json.loads(stdout.decode("utf-8", errors="replace")).get("message", "")
+        output = json.loads(stdout.decode("utf-8", errors="replace"))
+        answer = output.get("message", "")
     except json.JSONDecodeError:
+        output = {}
         answer = stdout.decode("utf-8", errors="replace")[-4000:]
 
     result = {
@@ -225,6 +230,11 @@ def main():
         "max": verdict.get("max"),
         "checks": verdict.get("checks", verdict.get("error")),
         "answer": answer,
+        # Notices de Claw (vérification, relecture, limites) et réponses du relecteur.
+        "notices": output.get("notices", []),
+        "reviews": [
+            json.loads(line) for line in reviews.read_text(encoding="utf-8").splitlines() if line.strip()
+        ] if reviews.exists() else [],
     }
     (run_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     summary = {key: result[key] for key in ("run", "scenario", "model", "label", "seconds", "exit_code",
