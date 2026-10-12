@@ -71,6 +71,29 @@ Série propre (hors du dépôt), Claw au commit 695d03d :
 
 Total de la série : 99 requêtes gratuites.
 
+Série de mesure après le lot T1 (Claw au commit a89ce3b), mêmes conditions :
+
+| Date | Scénario | Modèle | Étiquette | Score | Requêtes | Durée | Remarques |
+|---|---|---|---|---|---|---|---|
+| 12/10 02:20 | t1-inventaire | free = nemotron-3-ultra-550b | lotT1 | 6/6 | 10 | 123 s | seconde cause réglée dans le test (`pytest.approx`), dit et justifié après la garde des tests ; relecture par un autre modèle déclenchée (plus de lignes changées) ; réponse finale réduite à un accusé de réception (T1-13) |
+| 12/10 02:22 | t2-notes | free = nemotron-3-ultra-550b | lotT1 | 8/8 | 10 | 123 s | 4 modifications sans aucune relecture, 3 commandes d'essai au lieu de 9 (remarque de regroupement reçue) |
+| 12/10 02:24 | t3-rapport | free = nemotron-3-ultra-550b | lotT1 | 3/4 | 7 | 151 s | la réponse dit « le fichier n'est pas corrompu, votre hypothèse était incorrecte » et « ventes.csv n'a pas été modifié » ; correctif essayé sur cinq valeurs hors de l'exemple ; espaces insécables toujours oubliées |
+| 12/10 02:27 | t1-inventaire | cohere/north-mini-code | lotT1-north | 6/6 | 18 | 137 s | 3 lectures au lieu de 7 |
+| 12/10 02:29 | t2-notes | cohere/north-mini-code | lotT1-north | 8/8 | 19 | 141 s | 4 lectures de `notes.py` au lieu de 13 ; pas de détour par `/tmp` cette fois |
+| 12/10 02:31 | t3-rapport | cohere/north-mini-code | lotT1-north | 3/4 | 10 | 46 s | `ventes.csv` intact, script corrigé, hypothèse de l'utilisateur démentie dans la réponse |
+
+Comparaison avec la série propre : scores 34/36 contre 32/36 ; 74 requêtes contre 99 (t2 :
+10 contre 20 pour le plus puissant, 19 contre 36 pour le petit modèle). Le premier essai
+t1 a d'abord été noté 5/6 par une vérification trop stricte, corrigée depuis (e3740fb).
+
+Limites de cette mesure : un seul essai par configuration, avec des modèles qui ne répondent
+pas deux fois pareil ; les écarts d'une ou deux requêtes ne prouvent rien. Sont nets et
+expliqués par les traces : la fin des relectures après modification, le regroupement des
+essais, et sur t3 l'hypothèse de l'utilisateur vérifiée puis démentie. La garde des données
+ne s'est déclenchée dans aucun essai (le petit modèle n'a pas tenté de réécrire le CSV : le
+guide complété a suffi) : elle n'est donc prouvée que par ses tests unitaires. Le conseil
+sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
+
 ## Constats
 
 ### T1-01 La vérification des preuves coûte une requête quand la session montre déjà l'avant et l'après
@@ -244,6 +267,12 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Après le lot : relancer les six essais (`run.py <scénario> --label lotT1`, puis avec
+Suite, dans l'ordre : (1) T1-13, la réponse finale réduite à un accusé de réception ;
+(2) T1-11 et T1-12 ; (3) T1-04, les espaces insécables que les deux modèles oublient encore
+sur t3 ; (4) des scénarios plus durs (plusieurs fichiers, tâche longue, projet web comme
+ceux de l'utilisateur) et un troisième modèle gratuit, les trois scénarios actuels étant
+presque tous réussis ; (5) refaire chaque mesure deux ou trois fois avant de conclure.
+
+Mesure faite (tableau plus haut). Pour la refaire : `run.py <scénario> --label <nom>`, puis avec
 `--model cohere/north-mini-code:free`) et comparer scores et requêtes à la série propre.
 Ensuite : des scénarios plus durs (plusieurs fichiers, tâche longue) et un troisième modèle.
