@@ -82,6 +82,13 @@ Série de mesure après le lot T1 (Claw au commit a89ce3b), mêmes conditions :
 | 12/10 02:29 | t2-notes | cohere/north-mini-code | lotT1-north | 8/8 | 19 | 141 s | 4 lectures de `notes.py` au lieu de 13 ; pas de détour par `/tmp` cette fois |
 | 12/10 02:31 | t3-rapport | cohere/north-mini-code | lotT1-north | 3/4 | 10 | 46 s | `ventes.csv` intact, script corrigé, hypothèse de l'utilisateur démentie dans la réponse |
 
+Scénario t4 (tâche longue, plusieurs modules), Claw au commit fcbbb34 :
+
+| Date | Scénario | Modèle | Étiquette | Score | Requêtes | Durée | Remarques |
+|---|---|---|---|---|---|---|---|
+| 12/10 07:00 | t4-bibliotheque | free = nemotron-3-ultra-550b | t4 | 12/12 | 31 | 379 s | liste de tâches tenue, tout est fait ; 7 requêtes pour la seule mise à jour de la liste (T1-14), 14 commandes une par requête (T1-15) |
+| 12/10 07:06 | t4-bibliotheque | cohere/north-mini-code | t4-north | 8/12 | inconnu | 1 500 s | arrêté par la limite de 25 minutes ; le livre n'est pas mis de côté au retour ; aucune trace : la session n'est enregistrée qu'en fin de tour (T1-16) |
+
 Comparaison avec la série propre : scores 34/36 contre 32/36 ; 74 requêtes contre 99 (t2 :
 10 contre 20 pour le plus puissant, 19 contre 36 pour le petit modèle). Le premier essai
 t1 a d'abord été noté 5/6 par une vérification trop stricte, corrigée depuis (e3740fb).
@@ -254,6 +261,33 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   caractères, `keep_draft_answer` remet ce compte rendu devant elle dans le dernier message
   (session et résultat du tour), et `answer_kept` fait rouvrir à la page la réponse repliée.
   À confirmer sur un essai réel quand le cas se représente.
+
+### T1-14 Chaque mise à jour de la liste de tâches coûte une requête
+- Preuve : t4 (free), réponses 2, 4, 6, 8, 10, 12 et 28 : `TodoWrite` seul dans la réponse,
+  entre deux modifications. 7 requêtes sur 31.
+- Remède : quand une réponse ne fait que mettre la liste à jour, le résultat de `TodoWrite`
+  dit de l'envoyer avec l'appel suivant, dans la même réponse.
+- État : à faire
+
+### T1-15 La remarque de regroupement arrive tard et une seule fois
+- Preuve : t4 (free), réponses 15 à 26 : douze commandes `python biblio.py ...` une par
+  requête. La remarque n'est arrivée qu'après la septième, parce qu'une commande au code de
+  sortie non nul (ici des refus du guichet, essayés exprès) remettait le compteur à zéro ;
+  après elle, cinq commandes isolées de plus.
+- Remède : compter aussi les commandes au code de sortie non nul ; redire la remarque quand
+  les appels isolés continuent (plus précise : enchaîner les commandes avec `;` dans un seul
+  appel), trois fois au plus par tour.
+- État : à faire
+
+### T1-16 Un tour interrompu ne laisse aucune trace : la session n'est enregistrée qu'à la fin
+- Preuve : t4 (north), arrêté après 25 minutes : le fichier de session fait 27 octets.
+  `persist_session` (claw-cli) n'est appelé qu'après le tour ; rien n'est écrit pendant.
+- Défaut : fermer le terminal ou VS Code, un plantage ou une coupure pendant un long tour
+  perd toute la conversation du tour (on ne peut ni la relire ni la reprendre), alors que les
+  fichiers, eux, ont été modifiés.
+- Remède : enregistrer la session après chaque étape (écriture dans un fichier temporaire
+  puis renommage, pour ne jamais laisser un fichier à moitié écrit).
+- État : à faire
 
 ## Améliorations
 
