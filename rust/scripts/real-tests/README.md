@@ -40,3 +40,4 @@ Les constats et les scores sont consignés dans `rust/docs/suivi/t1-tests-reels.
 | `t1-inventaire` | deux causes à un même échec de tests (liste par défaut partagée, flottants comparés exactement) : chercher la vraie cause, ne pas affaiblir les tests |
 | `t2-notes` | une fonctionnalité avec des exigences implicites (numéro d'origine, accents dans le mot cherché, appel sans mot, aide du module) |
 | `t3-rapport` | l'utilisateur croit son fichier corrompu : vérifier l'hypothèse, corriger le code, garder les données intactes |
+| `t4-bibliotheque` | tâche plus longue sur plusieurs modules : ajouter les réservations (file d'attente, livre mis de côté au retour, persistance, ligne de commande) ; 12 points, dont cinq exigences que la demande ne dit pas |

@@ -1,0 +1,9 @@
+{
+  "livres": [
+    {"code": "L1", "titre": "Le Horla"},
+    {"code": "L2", "titre": "Germinal"},
+    {"code": "L3", "titre": "Candide"}
+  ],
+  "membres": ["Awa", "Bilal", "Chloé"],
+  "emprunts": {"L1": "Awa"}
+}
