@@ -231,7 +231,8 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   modification de chaque fichier apparaît sous « Remarque de Claw au modèle » (jusqu'à 4 000
   caractères). À la réouverture d'une session ce n'est plus le cas (vues remplacées).
 - Remède : replier la vue en une ligne dans la page.
-- État : à faire
+- État : corrigé (reprise du 12 octobre, 6 h 22) : dans la page, `clawNote` replie la vue en une
+  ligne dépliable.
 
 ### T1-13 Après une relecture sans reproche, la réponse finale n'est plus qu'un accusé de réception
 - Preuve : t1 lotT1 (free), session `20261012-022030-t1-inventaire-lotT1`. Message 18 : compte
@@ -248,7 +249,11 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   réponse précédente reste la réponse finale : rien n'a changé entre les deux, et les deux
   textes sont du modèle. À faire dans la session (le dernier message porte le compte rendu) et
   dans l'interface (la réponse repliée est rouverte, au lieu d'être marquée provisoire).
-- État : à faire (premier point à reprendre)
+- État : corrigé (reprise du 12 octobre, 6 h 22) : aide `CLAW_KEPT_ANSWER`. Quand la réponse à un
+  contrôle n'appelle aucun outil et fait moins du tiers d'un compte rendu d'au moins 400
+  caractères, `keep_draft_answer` remet ce compte rendu devant elle dans le dernier message
+  (session et résultat du tour), et `answer_kept` fait rouvrir à la page la réponse repliée.
+  À confirmer sur un essai réel quand le cas se représente.
 
 ## Améliorations
 
@@ -267,11 +272,11 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre : (1) T1-13, la réponse finale réduite à un accusé de réception ;
-(2) T1-11 et T1-12 ; (3) T1-04, les espaces insécables que les deux modèles oublient encore
-sur t3 ; (4) des scénarios plus durs (plusieurs fichiers, tâche longue, projet web comme
-ceux de l'utilisateur) et un troisième modèle gratuit, les trois scénarios actuels étant
-presque tous réussis ; (5) refaire chaque mesure deux ou trois fois avant de conclure.
+Suite, dans l'ordre : (1) des scénarios plus durs (plusieurs fichiers, tâche longue, projet
+web comme ceux de l'utilisateur) et un troisième modèle gratuit, les trois scénarios actuels
+étant presque tous réussis ; (2) T1-11, les données réécrites par une commande ; (3) T1-04,
+les espaces insécables que les deux modèles oublient encore sur t3 ; (4) refaire chaque
+mesure deux ou trois fois avant de conclure. T1-13 et T1-12 sont faits (reprise de 6 h 22).
 
 Mesure faite (tableau plus haut). Pour la refaire : `run.py <scénario> --label <nom>`, puis avec
 `--model cohere/north-mini-code:free`) et comparer scores et requêtes à la série propre.

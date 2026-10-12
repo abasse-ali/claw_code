@@ -655,6 +655,9 @@
   // Dernier bloc de réponse terminé, et suite annoncée d'une réponse coupée
   // par la limite de sortie : elle reprend ce bloc au lieu d'en ouvrir un.
   let lastAnswer = null, continueAnswer = false;
+  // Dernière réponse repliée comme provisoire, et compte rendu rouvert parce
+  // que la réponse qui a suivi le contrôle n'en était qu'un accusé de réception.
+  let foldedAnswer = null, keptAnswer = null;
   // Historique rejoué d'un coup à la connexion : les durées n'y ont pas de sens.
   let replaying = false;
   const elapsed = (started) => replaying ? "" : seconds(Date.now() - started);
@@ -1066,10 +1069,7 @@
     const last = open || logInner.lastElementChild;
     draftAnswer = last && last.classList.contains("md") ? last : null;
   }
-  function foldDraftAnswer() {
-    finishAssistant();
-    const node = draftAnswer;
-    draftAnswer = null;
+  function foldAnswer(node) {
     if (!node || node.classList.contains("provisional")) return;
     const head = el("button", "provisional-head", "Réponse provisoire, reprise après un contrôle de Claw");
     head.type = "button";
@@ -1077,6 +1077,27 @@
     head.onclick = () => head.setAttribute("aria-expanded", String(node.classList.toggle("open")));
     node.classList.add("provisional");
     node.prepend(head);
+  }
+  function foldDraftAnswer() {
+    finishAssistant();
+    const node = draftAnswer;
+    draftAnswer = null;
+    // Un compte rendu gardé fait partie de la réponse qui vient d'être reprise.
+    foldAnswer(keptAnswer);
+    keptAnswer = null;
+    foldAnswer(node);
+    foldedAnswer = node;
+  }
+  // La réponse qui a suivi un contrôle n'en était qu'un accusé de réception :
+  // le compte rendu replié redevient la réponse, il est rouvert.
+  function keepFoldedAnswer() {
+    const node = foldedAnswer;
+    foldedAnswer = null;
+    if (!node || !node.classList.contains("provisional")) return;
+    node.classList.remove("provisional", "open");
+    const head = node.querySelector(".provisional-head");
+    if (head) head.remove();
+    keptAnswer = node;
   }
 
   // ---------------------------------------------------------------- étapes (outils)
@@ -1480,9 +1501,26 @@
     const cut = text.indexOf("\n\n[Claw] ");
     return cut < 0 ? [text, ""] : [text.slice(0, cut), text.slice(cut + 9).trim()];
   }
+  // La vue d'un fichier jointe au résultat d'une modification est destinée au
+  // modèle : la page la replie en une ligne, dépliable.
   function clawNote(note) {
     const node = el("div", "note claw-note");
-    node.append(el("b", null, "Remarque de Claw au modèle : "), note);
+    node.append(el("b", null, "Remarque de Claw au modèle : "));
+    const END = "[Claw] End of file view.";
+    const start = note.indexOf("File view: ");
+    const end = note.indexOf(END);
+    if (start < 0 || end < start) {
+      node.append(note);
+      return node;
+    }
+    const view = note.slice(start, end).trimEnd();
+    const cut = view.indexOf("\n");
+    const details = document.createElement("details");
+    details.append(
+      el("summary", null, cut < 0 ? view : view.slice(0, cut)),
+      el("pre", null, cut < 0 ? "" : view.slice(cut + 1)),
+    );
+    node.append(note.slice(0, start).replace(/\[Claw\] $/, ""), details, note.slice(end + END.length));
     return node;
   }
   function attachToolResult(name, rawOutput, isError) {
@@ -1841,6 +1879,8 @@
     draftAnswer = null;
     lastAnswer = null;
     continueAnswer = false;
+    foldedAnswer = null;
+    keptAnswer = null;
     renderAsk();
     logInner.textContent = "";
     const empty = el("div", "empty");
@@ -1886,6 +1926,7 @@
       case "notice": finishAssistant(); addNote(event.text); break;
       case "answer_drafted": markDraftAnswer(); break;
       case "answer_superseded": foldDraftAnswer(); break;
+      case "answer_kept": keepFoldedAnswer(); break;
       case "reply_discarded": dropPendingTools(); break;
       case "reply_continues": continueAnswer = true; break;
       case "error": finishAssistant(); addError(event.message, event.hint); break;

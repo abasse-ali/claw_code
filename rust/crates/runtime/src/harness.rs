@@ -78,6 +78,9 @@ pub enum Aid {
     FileView,
     /// Essais indépendants lancés un par réponse : à regrouper.
     BatchCalls,
+    /// Compte rendu gardé quand la réponse à un contrôle n'en est qu'un accusé
+    /// de réception.
+    KeptAnswer,
 }
 
 impl Aid {
@@ -112,6 +115,7 @@ impl Aid {
             Self::DataGuard => "CLAW_DATA_GUARD",
             Self::FileView => "CLAW_FILE_VIEW",
             Self::BatchCalls => "CLAW_BATCH_CALLS",
+            Self::KeptAnswer => "CLAW_KEPT_ANSWER",
         }
     }
 }

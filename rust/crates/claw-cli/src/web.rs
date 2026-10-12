@@ -172,6 +172,9 @@ enum WebEvent {
     /// Un contrôle de Claw renvoie le modèle au travail : la réponse qu'il
     /// venait de donner est provisoire, la page la replie.
     AnswerSuperseded,
+    /// La réponse repliée comme provisoire reste la réponse (celle qui a suivi
+    /// n'était qu'un accusé de réception du contrôle) : la page la rouvre.
+    AnswerKept,
     /// La réponse en cours est abandonnée (flux coupé) et redemandée au
     /// modèle : les appels d'outils qu'elle annonçait ne seront pas exécutés,
     /// la page retire leurs étapes.
@@ -427,6 +430,10 @@ impl TurnObserver for WebObserver {
 
     fn answer_superseded(&self) {
         self.app.publish(WebEvent::AnswerSuperseded);
+    }
+
+    fn answer_kept(&self) {
+        self.app.publish(WebEvent::AnswerKept);
     }
 
     fn reply_discarded(&self) {

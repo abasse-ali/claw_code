@@ -107,9 +107,12 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 | 695d03d | Lot 5 : résumé de compaction contrôlé et demandes notées mot pour mot par Claw, anciens résultats d'outils allégés à la réouverture, réponse coupée par la limite de sortie continuée et raccordée à l'affichage |
 
 | b278ae6 à 53fecdb | Campagne T1 : banc d'essai réel (`rust/scripts/real-tests/`), série propre, constats T1-01 à T1-10 |
-| (commit « Lot T1 ») | Lot T1 : garde des données réécrites, guide de débogage (hypothèse de l'utilisateur), fichier montré après une modification, essais regroupés, contexte Git borné, réglages sans secrets dans le prompt, Python du Microsoft Store |
+| a89ce3b | Lot T1 : garde des données réécrites, guide de débogage (hypothèse de l'utilisateur), fichier montré après une modification, essais regroupés, contexte Git borné, réglages sans secrets dans le prompt, Python du Microsoft Store |
 
-État des tests au lot T1 : 629 tests Rust, analyse statique à zéro sous Windows et Linux,
+| e3740fb, 83bb46a | Campagne T1 : mesure du lot T1 (34/36 contre 32/36, 74 requêtes contre 99), constat T1-13 |
+| (commit « T1-13 ») | Compte rendu gardé quand la réponse à un contrôle n'en est qu'un accusé de réception (T1-13) ; vue de fichier repliée dans la page (T1-12) |
+
+État des tests après T1-13 : 630 tests Rust, analyse statique à zéro sous Windows et Linux,
 client 28 sur 28, extension VS Code 18 sur 18.
 
 ## Études
@@ -223,3 +226,5 @@ Hors lots :
   corriger le script, et les deux gaspillent des requêtes à relire leurs propres
   modifications. Lot T1 fait en réponse, relu par deux agents (20 constats).
 - Reprise automatique programmée à la demande de l'utilisateur (6 h 22 puis toutes les 5 h).
+- Reprise de 6 h 22 : T1-13 et T1-12 corrigés. La suite est dans `suivi/t1-tests-reels.md`
+  (scénarios plus durs d'abord).

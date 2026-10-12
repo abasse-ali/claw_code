@@ -5488,6 +5488,8 @@ trait TurnObserver: Send + Sync {
     fn answer_drafted(&self) {}
     /// Un contrôle de Claw le renvoie au travail : cette réponse est provisoire.
     fn answer_superseded(&self) {}
+    /// La réponse rendue provisoire reste la réponse : l'interface la rouvre.
+    fn answer_kept(&self) {}
     /// La réponse en cours est abandonnée (flux coupé) et va être redemandée :
     /// les appels d'outils qu'elle annonçait ne seront pas exécutés.
     fn reply_discarded(&self) {}
@@ -5856,6 +5858,12 @@ impl ApiClient for DefaultRuntimeClient {
     fn answer_superseded(&mut self) {
         if let Some(observer) = &self.observer {
             observer.answer_superseded();
+        }
+    }
+
+    fn answer_kept(&mut self) {
+        if let Some(observer) = &self.observer {
+            observer.answer_kept();
         }
     }
 

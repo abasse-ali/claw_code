@@ -82,6 +82,11 @@ pub trait ApiClient {
     /// celle qui suivra la remplace.
     fn answer_superseded(&mut self) {}
 
+    /// La réponse rendue provisoire par un contrôle reste la réponse : celle
+    /// qui a suivi n'en était qu'un accusé de réception. L'interface rouvre
+    /// la réponse qu'elle avait repliée.
+    fn answer_kept(&mut self) {}
+
     /// La dernière réponse s'est arrêtée sur la limite de sortie du modèle au
     /// milieu de son texte, sans appel d'outil : le runtime en demande la suite.
     fn reply_cut_by_output_limit(&mut self) -> bool {
@@ -580,6 +585,11 @@ const EMPTY_RESPONSE_NUDGE: &str = "[Claw] Your last reply was empty: no text an
 /// Relance d'une réponse en texte arrêtée par la limite de sortie du modèle.
 const CUT_REPLY_NUDGE: &str = "[Claw] Your reply was cut off by the output limit. Continue exactly where you stopped, without repeating anything you already wrote.";
 
+/// Un compte rendu d'au moins cette taille est gardé quand la réponse au
+/// contrôle qui l'a suivi fait moins du tiers de sa longueur.
+const KEPT_ANSWER_MIN_CHARS: usize = 400;
+const KEPT_ANSWER_RATIO: usize = 3;
+
 /// Suites demandées au plus pour une même réponse coupée.
 const MAX_CUT_CONTINUATIONS: usize = 2;
 
@@ -862,6 +872,44 @@ where
         true
     }
 
+    /// Un contrôle de Claw n'a rien fait changer et le modèle lui répond en
+    /// quelques lignes (« la relecture confirme... ») : ce n'est pas un compte
+    /// rendu, or l'utilisateur ne lit que le dernier message. Le compte rendu
+    /// précédent (`draft`) est remis devant cette réponse. Vrai si c'est fait.
+    fn keep_draft_answer(
+        &mut self,
+        draft: &str,
+        assistant_messages: &mut [ConversationMessage],
+    ) -> bool {
+        let Some(reply) = assistant_messages.last().map(message_text) else {
+            return false;
+        };
+        let draft = draft.trim();
+        let (draft_size, reply_size) = (draft.chars().count(), reply.trim().chars().count());
+        if !harness::enabled(Aid::KeptAnswer)
+            || draft_size < KEPT_ANSWER_MIN_CHARS
+            || reply_size * KEPT_ANSWER_RATIO >= draft_size
+        {
+            return false;
+        }
+        for message in [
+            self.session.messages.last_mut(),
+            assistant_messages.last_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let text = message.blocks.iter_mut().find_map(|block| match block {
+                ContentBlock::Text { text } => Some(text),
+                _ => None,
+            });
+            if let Some(text) = text {
+                *text = format!("{draft}\n\n{}", text.trim_start());
+            }
+        }
+        true
+    }
+
     /// La suite d'une réponse coupée par la limite de sortie complète cette
     /// réponse : la relance de Claw est retirée et les deux parties ne font
     /// plus qu'un message, celui que l'utilisateur et les contrôles lisent.
@@ -1003,6 +1051,9 @@ where
         let mut stop_continuations = 0;
         let mut empty_nudged = false;
         let mut cut_continuations = 0;
+        // Réponse qu'un contrôle vient de rendre provisoire, tant que le
+        // modèle n'a rien changé depuis.
+        let mut superseded_draft: Option<String> = None;
         let team = !self.subagent && crate::team::team();
         let mut aids = TurnAids {
             ultracode: !self.subagent && crate::workflow::active_for(&request_text),
@@ -1135,6 +1186,14 @@ where
                     continue;
                 }
                 cut_continuations = 0;
+                // Accusé de réception d'un contrôle : le compte rendu
+                // précédent reste la réponse.
+                let kept = superseded_draft
+                    .take()
+                    .is_some_and(|draft| self.keep_draft_answer(&draft, &mut assistant_messages));
+                if kept {
+                    self.api_client.answer_kept();
+                }
                 self.api_client.answer_drafted();
                 if cut {
                     self.api_client.notify(
@@ -1196,6 +1255,7 @@ where
                 if !asking {
                     self.api_client.answer_superseded();
                     aids.feedback_pending = true;
+                    superseded_draft = Some(answer);
                 }
                 self.session
                     .messages
@@ -1207,6 +1267,9 @@ where
             // réponse coupée a de nouveau droit à ses suites.
             cut_continuations = 0;
             aids.calls_in_reply = pending_tool_uses.len();
+            // Le modèle retravaille : sa prochaine réponse sera un nouveau
+            // compte rendu, l'ancien n'est plus à garder.
+            superseded_draft = None;
             if self.run_parallel_batch(
                 &pending_tool_uses,
                 &mut prompter,
@@ -3829,6 +3892,8 @@ mod tests {
         /// rendues provisoires.
         drafted: usize,
         superseded: usize,
+        /// Comptes rendus gardés après un simple accusé de réception.
+        kept: usize,
         /// Rôles annoncés au client en mode équipe, dans l'ordre.
         team_steps: Vec<String>,
     }
@@ -3889,6 +3954,10 @@ mod tests {
 
         fn answer_superseded(&mut self) {
             self.observed.borrow_mut().superseded += 1;
+        }
+
+        fn answer_kept(&mut self) {
+            self.observed.borrow_mut().kept += 1;
         }
 
         fn reply_cut_by_output_limit(&mut self) -> bool {
@@ -4032,6 +4101,46 @@ mod tests {
             const { std::cell::RefCell::new(Vec::new()) };
         /// Réponses en texte suivantes arrêtées par la limite de sortie.
         static CUT_REPLIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn a_short_reply_to_a_check_keeps_the_report_it_follows() {
+        // Essai réel du 12 octobre : après un contrôle sans reproche, la
+        // réponse finale n'était plus que « La revue confirme... ».
+        let report = format!(
+            "**Résultat**\nTout passe.\n\n**Cause**\n{}\n\n**Vérification**\npytest : 3 passed.",
+            "La liste par défaut était partagée entre les stocks. ".repeat(10)
+        );
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                text_step(&report),
+                text_step("La vérification confirme que tout est correct."),
+            ],
+            vec![],
+        );
+        let summary = runtime.run_turn("les tests échouent", None).expect("tour");
+        let last = super::message_text(summary.assistant_messages.last().expect("réponse"));
+        assert!(last.starts_with("**Résultat**"), "{last}");
+        assert!(
+            last.ends_with("pytest : 3 passed.\n\nLa vérification confirme que tout est correct."),
+            "{last}"
+        );
+        assert_eq!(observed.borrow().kept, 1);
+        // Le dernier message de la session porte le compte rendu lui aussi.
+        let stored = super::message_text(runtime.session().messages.last().expect("message"));
+        assert_eq!(stored, last);
+
+        // Une réponse de taille comparable remplace la précédente, comme avant.
+        let second = format!(
+            "**Résultat**\nTout passe, vérifié.\n\n{}",
+            "Détail. ".repeat(60)
+        );
+        let (mut runtime, observed, _) =
+            aided_runtime(vec![text_step(&report), text_step(&second)], vec![]);
+        let summary = runtime.run_turn("les tests échouent", None).expect("tour");
+        let last = super::message_text(summary.assistant_messages.last().expect("réponse"));
+        assert_eq!(last.trim(), second.trim());
+        assert_eq!(observed.borrow().kept, 0);
     }
 
     #[test]
