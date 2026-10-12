@@ -1745,15 +1745,15 @@ pub const AWAY_NOTE: &str = "The user is not answering permission requests right
 const FEATURE_EDGE_CASES: &[(&[&str], &str)] = &[
     (
         &["recherch", "filtr", "search", "filter"],
-        "Text search or filter: ignore case and accents (people type \"creme\" for \"crème\"), ignore leading and trailing spaces, treat an empty or blank query as no filter, accept several words, and read query strings with the standard parser of the language (`+` and `%20` both mean a space), never with a hand-made split.",
+        "Text search or filter: people type \"creme\" for \"Crème\", so compare without case and accents (in Python, `unicodedata.normalize(\"NFD\", ...)` then drop the combining marks); strip surrounding spaces, so that \"  \" is an empty query and shows everything; accept several words; read query strings with the standard parser (`urllib.parse.parse_qs`, `URLSearchParams`), where `+` and `%20` both mean a space, never with `split(\"=\")` and `unquote`. Try \"creme\", \"  tarte  \" and \"pommes+de+terre\".",
     ),
     (
         &["prix", "montant", "tva", "euro", "facture", "paiement", "price", "amount", "invoice", "payment"],
-        "Money: round to cents once, at the end, not at each step; never compare floating-point amounts exactly; accept a decimal comma as well as a point in user input; handle zero and negative amounts.",
+        "Money: in Python `0.1 * 3 == 0.3` is false, so never compare amounts with `==` and never round each line before adding them: compute in cents (integers) or `Decimal` and round once, at the end; accept \"12,50\" as well as \"12.50\" from users; try three lines of 0.10, a total of many lines, a zero and a negative amount.",
     ),
     (
         &["date", "heure", "horaire", "calendrier", "echeance", "delai", "fuseau", "calendar", "deadline", "timezone"],
-        "Dates and times: the user's format (day/month/year in French), time zones and daylight saving changes, month ends and leap years, and whether a range includes its last day.",
+        "Dates and times: \"03/04/2026\" is 3 April for a French user, not 4 March, so parse with an explicit format; in Python, comparing a date that has a time zone with one that has none raises an error; one month after 31 January and the 29th of February need a decision; say whether a range includes its last day, and try that last day, a month end and a daylight saving change.",
     ),
     (
         &["csv", "excel", "tableur", "xlsx", "spreadsheet"],
@@ -1761,23 +1761,23 @@ const FEATURE_EDGE_CASES: &[(&[&str], &str)] = &[
     ),
     (
         &["pagination", "paginer", "pagine", "par page", "page suivante", "paginate", "per page"],
-        "Pagination: a last page only partly full, a page number past the end or below 1, a limit on the page size, and the same order from one page to the next.",
+        "Pagination: try the last page when the count is not a multiple of the page size, page 0, a negative page and a page past the end (an empty list, not an error); cap the page size a client can ask for; sort on a unique key, or items repeat or vanish between pages.",
     ),
     (
         &["formulaire", "saisie", "form"],
-        "Forms and user input: required fields, surrounding spaces trimmed, length limits, a clear error message next to the field, and the same checks on the server as in the page.",
+        "Forms and user input: try an empty required field, a field of spaces only, a value that is too long and one with an accent or an apostrophe (\"Zoé\", \"O'Brien\"); show each error next to its field; repeat every check on the server, because anyone can send a request without the page.",
     ),
     (
         &["upload", "televers", "piece jointe", "pieces jointes", "attachment"],
-        "File uploads: a size limit, allowed types checked on the content and not only the name, file names with spaces or accents, and the same file sent twice.",
+        "File uploads: never build a path from the uploaded name without cleaning it (\"../\" escapes the folder); check the type on the content, since a file named .jpg may not be an image; try a file over the size limit, a name with spaces and accents (\"photo été.jpg\") and the same file sent twice.",
     ),
     (
         &["mot de passe", "mots de passe", "connexion", "login", "authentif", "password", "sign in"],
-        "Accounts and passwords: passwords hashed with a slow hash, never stored or logged in clear; the same error for an unknown user and a wrong password; sessions that expire.",
+        "Accounts and passwords: hash passwords with a slow hash (bcrypt, argon2), never a plain SHA, and never store or log them in clear; give the same error for an unknown user and a wrong password, or the answer tells who has an account; compare secrets in constant time; make sessions expire; try a wrong password and an unknown user.",
     ),
     (
         &["trier", "tri par", "ordre alphabetique", "sort"],
-        "Sorting text: accents and case must not change the order (\"Écrire\" goes with the E, not after Z); equal items keep a stable order; numbers sort as numbers.",
+        "Sorting text: Python's `sorted()` puts \"Écrire\" after \"Zèbre\" and \"b\" after \"Z\", so sort on a key without accents and case; \"10\" comes before \"9\" as text, so sort numbers as numbers; equal items keep their order. Try names with accents, capitals and numbers together.",
     ),
 ];
 
@@ -3064,7 +3064,7 @@ mod guide_tests {
             false,
         );
         assert!(search.contains("What experienced engineers always check"));
-        assert!(search.contains("ignore case and accents"));
+        assert!(search.contains("without case and accents"));
         assert!(search.contains("`+` and `%20` both mean a space"));
         assert!(!prompt.contains("not answering permission requests"));
         // « reprendre » : la demande poursuivie est citée.

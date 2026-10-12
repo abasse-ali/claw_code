@@ -124,9 +124,13 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | d70da68 | Attente sans témoin allongée à une dizaine de minutes ; un tour en échec en mode JSON rend son erreur et ses notices ; t5 avec laguna : 12/12 |
 
-| (commit « T1-26 ») | Cas limites joints dès le début du tour et rappelés dans la demande de preuves (T1-26) ; piège précis des espaces insécables : t3 fait 4/4 pour la première fois (T1-04) ; t4 avec laguna : 12/12 en 16 requêtes |
+| f744320 | Cas limites joints dès le début du tour et rappelés dans la demande de preuves (T1-26) ; piège précis des espaces insécables : t3 fait 4/4 pour la première fois (T1-04) ; t4 avec laguna : 12/12 en 16 requêtes |
 
-État des tests après T1-26 : 652 (un test de temps, `waiting_for_a_task_returns_once_it_is_done`, a échoué une fois sous forte charge de la machine, puis passé seul trois fois et dans la suite) tests Rust, analyse statique à zéro sous Windows et
+| (commit « T1-27 ») | Chaque cas limite nomme son piège précis et l'essai à faire (T1-27) : au rejeu de t5, 12/12 en 14 requêtes au lieu de 22 |
+
+État des tests après T1-27 : 652 tests Rust (le test de temps
+`waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
+il passe seul), analyse statique à zéro sous Windows et
 Linux, client 28 sur 28, extension VS Code 18 sur 18 (lancée à T1-16 ; rien de l'interface n'a
 changé depuis).
 

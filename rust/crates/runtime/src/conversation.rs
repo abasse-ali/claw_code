@@ -5509,7 +5509,7 @@ mod tests {
         assert!(observed.borrow().requests[0].contains(
             "[Claw guide] What experienced engineers always check for this kind of work"
         ));
-        assert!(observed.borrow().requests[0].contains("ignore case and accents"));
+        assert!(observed.borrow().requests[0].contains("without case and accents"));
         assert!(!plain.borrow().requests[0].contains("What experienced engineers"));
     }
 

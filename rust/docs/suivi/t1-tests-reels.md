@@ -127,6 +127,7 @@ Rejeux du contrôle des exigences de t5 (message 37) :
 | 12/10 14:36 | celle de 806bf81 | free | 9/12, 2 requêtes : il confirme son travail |
 | 12/10 14:37 | avec les cas limites d'une recherche (T1-24) | free | 12/12, 22 requêtes : décodeur standard (`parse_qs`), espaces retirés, accents et majuscules ignorés, plusieurs mots, tests ajoutés ; il lance aussi le serveur pour essayer l'API (aide des commandes non essayées) et l'arrête |
 | 12/10 15:10 | relecture de t5b avec le rappel final de la forme (T1-23, suite) | dots (imposé) | écrit les deux étapes puis approuve, quand il avait répondu « VERDICT LGTM » nu pendant l'essai |
+| 12/10 18:47 | contrôle des exigences, cas limites sous forme de pièges précis (T1-27) | free | 12/12 en 14 requêtes, contre 22 avec la forme générale |
 
 La session de cet essai a pu être lue pendant qu'il tournait : elle s'écrit maintenant à
 chaque étape (T1-16).
@@ -551,6 +552,17 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   mot ; avec un rappel qui nomme le piège précis (ci-dessus), 4/4. Ce qui fait agir le modèle :
   le piège concret et l'essai à faire, pas la catégorie.
 
+### T1-27 Un cas limite écrit en catégorie ne fait pas agir le modèle
+- Preuve : T1-26 et T1-04 : sur t3, « thousands separators (space or non-breaking space) »,
+  rappelé deux fois, n'est pas même mentionné par le modèle ; « `replace(" ", "")` ne retire
+  pas U+00A0 ni U+202F, essayer « 1\u00a0250,00 » » fait 4/4.
+- État : corrigé (reprise du 12 octobre, 16 h 22) : chaque ligne de `FEATURE_EDGE_CASES` nomme
+  le piège précis et l'essai à faire (recherche : `normalize("NFD")`, `parse_qs` et pas
+  `split("=")` ; montants : `0.1 * 3 == 0.3` est faux, compter en centimes ou `Decimal` ; dates :
+  « 03/04/2026 » est le 3 avril ; pagination, formulaires, envois de fichiers, comptes, tris de
+  même). Mesuré sur la recherche (rejeu de t5) : 12/12 en 14 requêtes au lieu de 22 ; les
+  autres genres n'ont pas encore de scénario.
+
 ## Améliorations
 
 Lot T1 (en cours le 12 octobre 2026), dans cet ordre : T1-08 (garde des données), T1-03 et
@@ -568,14 +580,13 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 12 octobre, 18 h 30) : (1) écrire chaque cas limite de
-`FEATURE_EDGE_CASES` sous la forme qui a marché (le piège précis et l'essai à faire), puis
-mesurer sur t1 (montants) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
+Suite, dans l'ordre (mise à jour du 12 octobre, 19 h) : (1) T1-11, les données réécrites par
+une commande ; (2) un scénario pour un autre genre de fonctionnalité (dates ou montants) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
 sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par
 une commande ; (5) T1-04, les espaces insécables oubliées sur t3 ; (6) refaire chaque mesure
-deux ou trois fois avant de conclure. T1-03 à T1-10, T1-12 à T1-17 et T1-19 à T1-26 sont
+deux ou trois fois avant de conclure. T1-03 à T1-10, T1-12 à T1-17 et T1-19 à T1-27 sont
 faits, T1-18 en partie, T1-11 à faire. Le troisième modèle gratuit (laguna) fait 12/12 sur t4
 et t5 avec le moins de requêtes (16 et 26), mais son fournisseur le limite souvent.
 
