@@ -89,11 +89,16 @@ try:
             break
         time.sleep(0.25)
 
+    # La recherche existe dès que `q` filtre : sans elle, tout est rendu, et
+    # les points qui passeraient alors d'eux-mêmes ne comptent pas. Chaque
+    # point juge ensuite son seul comportement (une erreur n'en coûte qu'un).
+    _, chocolat = lire(base, "/api/recettes?q=chocolat")
+    existe = pret and isinstance(chocolat, list) and len(chocolat) < TOUTES
     statut, pommes = lire(base, "/api/recettes?q=pomme")
-    existe = pret and statut == 200 and noms(pommes) == ["Gratin dauphinois", "Tarte aux pommes"]
     check(
         "`?q=pomme` trouve par le nom et par un ingrédient (pommes de terre)",
-        existe, f"{statut} {pommes}"[:300],
+        existe and statut == 200 and noms(pommes) == ["Gratin dauphinois", "Tarte aux pommes"],
+        f"{statut} {pommes}"[:300],
     )
     statut, tarte = lire(base, "/api/recettes?q=TARTE")
     check("les majuscules sont ignorées", existe and noms(tarte) == ["Tarte aux pommes"], f"{statut} {tarte}"[:300])

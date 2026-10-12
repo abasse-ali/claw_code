@@ -116,9 +116,11 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | 806bf81 | Budget de requêtes par tour (T1-19) ; relecture qui aboutit sur un vrai diff : place, temps, raisonnement plafonné, seconde demande, échec expliqué (T1-20) ; relecture qui repart des phrases de la demande et règle de lecture dans le contrôle des exigences (T1-18, en partie) ; notices dans la sortie JSON (T1-21) ; `claw review-replay` |
 
-| (commit « T1-22 à T1-24 ») | Mesures de t4d (12/12, la relecture trouve un vrai défaut) et rejeux sur t4c ; vérification automatique qui trouve les tests pytest sans réglage (T1-22) ; second relecteur après une approbation sans analyse, verdict lu sans perdre les problèmes (T1-23) ; cas limites par genre de fonctionnalité dans le contrôle des exigences (T1-24 : 9/12 devient 12/12 au rejeu de t5) ; `checklist_replay.py`, `claw checklist-note` ; premier essai du scénario web t5 |
+| f2eac48 | Mesures de t4d (12/12, la relecture trouve un vrai défaut) et rejeux sur t4c ; vérification automatique qui trouve les tests pytest sans réglage (T1-22) ; second relecteur après une approbation sans analyse, verdict lu sans perdre les problèmes (T1-23) ; cas limites par genre de fonctionnalité dans le contrôle des exigences (T1-24 : 9/12 devient 12/12 au rejeu de t5) ; `checklist_replay.py`, `claw checklist-note` ; premier essai du scénario web t5 |
 
-État des tests après T1-24 : 647 tests Rust, analyse statique à zéro sous Windows et
+| (commit « mesures de t5 ») | t5b 12/12 (T1-24 confirmé sur un essai complet), petit modèle 10/12 ; vérification de t5 corrigée (une erreur en coûtait huit) ; rappel final de la forme au relecteur et double approbation nue dite à l'utilisateur (suite de T1-23) |
+
+État des tests après la suite de T1-23 : 648 tests Rust, analyse statique à zéro sous Windows et
 Linux, client 28 sur 28, extension VS Code 18 sur 18 (lancée à T1-16 ; rien de l'interface n'a
 changé depuis).
 
@@ -264,4 +266,6 @@ Hors lots :
   réglage (T1-22). Premier essai du scénario web t5 : 9/12, le modèle oublie les accents, le
   `+` de l'URL et une recherche faite d'espaces. Claw rappelle maintenant, dans le contrôle des
   exigences, ce qu'un ingénieur expérimenté vérifie d'office pour le genre de fonctionnalité
-  demandé (T1-24) : rejoué au même point, le même modèle passe de 9/12 à 12/12.
+  demandé (T1-24) : rejoué au même point, le même modèle passe de 9/12 à 12/12, puis 12/12 sur
+  un essai complet ; le petit modèle fait 10/12. Un relecteur qui approuve sans analyse reçoit
+  désormais, en fin de demande, le rappel de la forme exigée.

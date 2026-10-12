@@ -2727,6 +2727,12 @@ where
                 &consultation.model,
             ) {
                 harness::log_review(&second.model, &second.text);
+                if harness::bare_approval(&second.text) {
+                    self.api_client.notify(&format!(
+                        "Relecture par {} : approbation sans analyse elle aussi ; le travail n'a pas vraiment été relu",
+                        second.model
+                    ));
+                }
                 consultation = second;
             }
         }
@@ -5454,6 +5460,28 @@ mod tests {
             == "Relecture par relecteur : approbation sans analyse, un autre modèle relit"));
         // Les remarques du second relecteur reviennent à l'agent.
         assert!(observed.requests[3].contains("liste vide non gérée"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn two_bare_approvals_are_reported_as_no_real_review() {
+        // Essai réel t5b : les deux relecteurs ont répondu « VERDICT / LGTM ».
+        let (path, output) = written_file("deux-nues");
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                tool_step("write_file", r#"{"path":"total.py","content":"x"}"#),
+                text_step("C'est fait."),
+                text_step("Exigences vérifiées."),
+            ],
+            vec![PASSING],
+            vec!["VERDICT\nLGTM", "VERDICT\nLGTM"],
+            output,
+        );
+        runtime.run_turn("écris total.py", None).expect("tour");
+        let observed = observed.borrow();
+        assert!(observed.notices.iter().any(|notice| notice.ends_with(
+            "approbation sans analyse elle aussi ; le travail n'a pas vraiment été relu"
+        )));
         let _ = std::fs::remove_file(path);
     }
 

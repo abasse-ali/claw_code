@@ -2681,8 +2681,15 @@ pub fn review_prompt(
             shortened(answer, MAX_REVIEW_TEXT_CHARS)
         }
     );
+    // Rappelé en dernier : dans les essais réels, des relecteurs répondaient
+    // « VERDICT / LGTM » sans aucune analyse.
+    prompt.push_str("\n\n");
+    prompt.push_str(REVIEW_FORMAT_REMINDER);
     prompt
 }
+
+/// Fin de la demande au relecteur : la forme exigée, même quand tout est juste.
+const REVIEW_FORMAT_REMINDER: &str = "Now write your review in the required form: Step 1 (one line per sentence of the request), Step 2 (the code that meets each line, or what differs), then the VERDICT line. Write Step 1 and Step 2 even if everything is correct: an approval without them is not accepted.";
 
 /// Ce que le relecteur conclut : ce qui suit la dernière ligne `VERDICT` de
 /// sa réponse. Sans elle (modèle qui n'a pas suivi la forme demandée), toute
@@ -3802,6 +3809,8 @@ mod tests {
         let prompt =
             super::review_prompt("ajoute x", None, "Fait.", &["--- a/x\n+++ b/x".to_string()]);
         assert!(prompt.starts_with("The user asked:\najoute x"));
+        // La forme exigée est rappelée en dernier.
+        assert!(prompt.ends_with("an approval without them is not accepted."));
         assert!(
             prompt.find("--- a/x").expect("diff")
                 < prompt

@@ -109,6 +109,13 @@ Scénario t5 (projet web : serveur Python, API JSON, page), Claw au commit 806bf
 |---|---|---|---|---|---|---|---|
 | 12/10 13:04 | t5-recettes-web | free = nemotron-3-ultra-550b | t5 | 9/12 | 16 | 351 s | lit tout le projet d'un coup, liste de tâches jointe aux modifications ; la vérification automatique lance pytest (T1-22, vu en réel) ; oublie les accents, le `+` de l'URL (requête lue à la main avec `unquote`) et une recherche faite d'espaces ; la relecture (laguna, avec analyse) approuve sans les voir (T1-24) |
 | 12/10 13:12 | t5-recettes-web | cohere/north-mini-code | t5-north | - | - | - | interrompu à la deuxième minute par l'arrêt de la session de travail, sans note ; sa session, enregistrée au fil du tour, garde 49 messages lisibles : première confirmation réelle de T1-16 |
+| 12/10 14:44 | t5-recettes-web | free = nemotron-3-ultra-550b | t5b | 12/12 | 29 | 676 s | Claw au commit f2eac48 (T1-24) : au contrôle des exigences, il vérifie les cas limites de la recherche et corrige accents, espaces et décodage de l'URL, avec des tests ; deux relecteurs répondent « VERDICT LGTM » sans analyse (le second par T1-23) |
+| 12/10 14:56 | t5-recettes-web | cohere/north-mini-code | t5-north2 | 10/12 | 49 | 604 s | même Claw ; accents, espaces et décodage justes ; un ingrédient doit égaler le mot cherché (« pomme » ne trouve pas « pommes de terre ») et plusieurs mots ne trouvent rien ; 16 lectures de fichiers, 6 retirées du contexte et 2 remarques (T1-17) ; la relecture (nemotron-ultra) relève deux affirmations fausses de sa réponse (un test qui n'existe pas, un compte de tests) |
+
+Les essais de t5 ont été notés une seconde fois après une correction de la vérification
+cachée : tous les points de la recherche dépendaient du premier (`?q=pomme` exact), si bien
+qu'une seule erreur en coûtait huit (t5-north2 avait d'abord 4/12). La condition commune est
+maintenant seulement que `q` filtre ; les autres notes ne changent pas.
 
 Rejeux du contrôle des exigences de t5 (message 37) :
 
@@ -116,6 +123,7 @@ Rejeux du contrôle des exigences de t5 (message 37) :
 |---|---|---|---|
 | 12/10 14:36 | celle de 806bf81 | free | 9/12, 2 requêtes : il confirme son travail |
 | 12/10 14:37 | avec les cas limites d'une recherche (T1-24) | free | 12/12, 22 requêtes : décodeur standard (`parse_qs`), espaces retirés, accents et majuscules ignorés, plusieurs mots, tests ajoutés ; il lance aussi le serveur pour essayer l'API (aide des commandes non essayées) et l'arrête |
+| 12/10 15:10 | relecture de t5b avec le rappel final de la forme (T1-23, suite) | dots (imposé) | écrit les deux étapes puis approuve, quand il avait répondu « VERDICT LGTM » nu pendant l'essai |
 
 La session de cet essai a pu être lue pendant qu'il tournait : elle s'écrit maintenant à
 chaque étape (T1-16).
@@ -355,7 +363,9 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
 - État : corrigé (reprise du 12 octobre, 6 h 22, suite) : aide `CLAW_REPEATED_READS`
   (`repeated_read_note` dans `conversation.rs`, `read_result`, `repeated_read_stub`). Deux
   remarques au plus par tour ; une relecture d'un tour à l'autre n'est pas reprochée (le
-  fichier avait pu changer), mais une seule copie reste. Effet à mesurer.
+  fichier avait pu changer), mais une seule copie reste.
+- Mesure (t5-north2) : 6 lectures identiques retirées du contexte, 2 remarques ; le petit
+  modèle relit encore ses fichiers après ses propres modifications (16 lectures). Effet limité.
 
 ### T1-18 Une exigence mal lue passe le contrôle des exigences et la relecture
 - Preuve : t4b-north, session `20261012-080214-t4-bibliotheque-t4b-north`. La demande dit
@@ -477,6 +487,11 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   l'avis remplace le premier ; dans le verdict, un « LGTM » n'efface plus les problèmes qui
   citent un emplacement du code (`cites_a_location`) ; « NOT LGTM » est un refus. Une
   consultation vide dit si le modèle a été redemandé.
+- Mesure (t5b) : `dots` répond « VERDICT LGTM » nu, le second relecteur (nemotron-super)
+  aussi. Suite : la demande au relecteur se termine par un rappel de la forme exigée, même
+  quand tout est juste (`REVIEW_FORMAT_REMINDER`) ; rejouée sur t5b, la relecture de `dots`
+  écrit alors les deux étapes. Deux approbations nues sont dites à l'utilisateur (« le travail
+  n'a pas vraiment été relu »).
 
 ### T1-24 Les cas limites qu'un ingénieur vérifie d'office sont oubliés
 - Preuve : t5 (free), 9/12 : la recherche ne retire pas les accents (« creme » ne trouve pas
@@ -493,8 +508,9 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   contrôle des exigences, avec la consigne de montrer le test ou la commande qui couvre chacun,
   ou de l'ajouter. `claw checklist-note` imprime le contrôle exact pour le banc.
 - Mesure : rejeu du contrôle de t5 au message 37 (tableau) : 9/12 avec l'ancienne formulation,
-  12/12 avec les cas limites, pour 22 requêtes de plus. Un essai de chaque : à confirmer sur un
-  essai complet et sur un autre genre de fonctionnalité.
+  12/12 avec les cas limites, pour 22 requêtes de plus. Confirmé sur un essai complet (t5b :
+  12/12 contre 9/12) ; avec le petit modèle, 10/12 (accents, espaces et décodage justes). À
+  essayer sur un autre genre de fonctionnalité.
 
 ## Améliorations
 
@@ -513,15 +529,14 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 12 octobre, 13 h 30) : (1) t5-recettes-web avec le petit
-modèle, puis un troisième modèle gratuit ; (2) mesurer le second relecteur (T1-23) sur un essai
-réel, et la relecture sur le petit modèle ; (3) T1-18 : chercher ce qui fait voir à un modèle
+Suite, dans l'ordre (mise à jour du 12 octobre, 15 h 15) : (1) un troisième modèle gratuit
+sur t4 et t5 ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
+(3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
 sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par
 une commande ; (5) T1-04, les espaces insécables oubliées sur t3 ; (6) refaire chaque mesure
-deux ou trois fois avant de conclure ; (7) confirmer T1-24 sur un essai complet de t5 et sur
-un autre genre de fonctionnalité (t1 et t3 en touchent : montants, CSV). T1-12 à T1-17 et T1-19
-à T1-24 sont faits, T1-18 en partie.
+deux ou trois fois avant de conclure. T1-12 à T1-17 et T1-19 à T1-24 sont faits, T1-18 en
+partie.
 
 Mesure faite (tableau plus haut). Pour la refaire : `run.py <scénario> --label <nom>`, puis avec
 `--model cohere/north-mini-code:free`) et comparer scores et requêtes à la série propre.
