@@ -130,9 +130,11 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | 5414b81 | Un fichier de données réécrit par une commande du modèle est vu par la garde des données (T1-11) |
 
-| (commit « scénario t6 ») | Scénario t6-conges (dates) : projet intact 1/12, référence 12/12 ; premier essai du plus puissant : 10/12 |
+| f1250cb | Scénario t6-conges (dates) : projet intact 1/12, référence 12/12 ; premier essai du plus puissant : 10/12 |
 
-État des tests après T1-11 : 653 tests Rust (le test de temps
+| (commit « T1-28 ») | Table des cas limites revue : faits vérifiés, mots-clés sans faux amis, quatorze genres nouveaux, résultat attendu de chaque essai, cas limites donnés au relecteur (T1-28) ; t6 passe de 10/12 à 12/12 (rejeu du contrôle et essai complet) |
+
+État des tests après T1-28 : 657 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
 il passe seul), analyse statique à zéro sous Windows et
 Linux, client 28 sur 28, extension VS Code 18 sur 18 (lancée à T1-16 ; rien de l'interface n'a
@@ -295,3 +297,11 @@ Hors lots :
   pris cette forme (T1-27) ; T1-11 est corrigé (garde des données après une commande).
   Nouveau scénario t6 (dates) : 10/12 au premier essai, le modèle laisse passer une période
   à l'envers et un solde négatif.
+- Reprise de 21 h 22 (« ajoute ce qu'il y a à ajouter ») : la table des cas limites, revue par
+  deux agents qui ont rejoué chaque fait, est corrigée (18 affirmations fausses ou
+  incomplètes, des mots-clés qui se trompaient de genre) et passe de 9 à 23 genres (T1-28).
+  Rejouée sur t6, elle ne suffisait pas : le modèle faisait les essais qui confirmaient son
+  code. Avec le résultat attendu de chaque essai entre parenthèses, et la consigne qu'un autre
+  résultat veut dire un code faux, même voulu, t6 fait 12/12 au rejeu comme à l'essai complet,
+  mais en plus de requêtes. Le banc de rejeu réécrit maintenant les chemins de l'essai
+  d'origine.

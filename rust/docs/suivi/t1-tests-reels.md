@@ -120,7 +120,22 @@ intact 1/12, solution de référence 12/12), Claw au commit 5414b81 :
 
 | Date | Scénario | Modèle | Étiquette | Score | Requêtes | Durée | Remarques |
 |---|---|---|---|---|---|---|---|
-| 12/10 20:46 | t6-conges | free = nemotron-3-ultra-550b | t6 | 10/12 | 19 | 446 s | dates à la française, bornes comprises, week-ends, fériés (un samedi compté une fois) et année bissextile justes ; une période dont la fin précède le début est comptée au lieu d'être refusée, et un solde peut devenir négatif (Bilal à -3) ; la relecture (dots) ne voit rien |
+| 12/10 20:26 | t6-conges | free = nemotron-3-ultra-550b | t6 | 10/12 | 19 | 446 s | dates à la française, bornes comprises, week-ends, fériés (un samedi compté une fois) et année bissextile justes ; une période dont la fin précède le début est comptée au lieu d'être refusée, et un solde peut devenir négatif (Bilal à -3) ; la relecture (dots) ne voit rien |
+| 12/10 22:28 | t6-conges | free = nemotron-3-ultra-550b | t6-t28 | 12/12 | 32 | 664 s | Claw avec la table des cas limites revue (T1-28) : la période à l'envers est refusée, un solde insuffisant aussi, avec ce qui reste ; la relecture (laguna) reprend les cas limites dans son étape 1 et trouve l'aide `--help` manquante |
+
+Rejeux du contrôle des exigences de t6 (message 35). Mesure non indépendante : les lignes des
+dates et des soldes ont été écrites après avoir vu les deux erreurs de t6.
+
+| Date | Formulation | Modèle | Résultat |
+|---|---|---|---|
+| 12/10 20:37 | celle de 5414b81 | free | 10/12, 9 requêtes |
+| 12/10 22:09 | table revue (T1-28) : faits vérifiés, soldes, période à l'envers | free | 10/12, 11 requêtes : il fait les essais qui confirment son code (31/04, 29/02, accents), garde « 5 (échange auto) » pour une période à l'envers et n'essaie pas le solde |
+| 12/10 22:20 | et le résultat attendu de chaque essai entre parenthèses ; un autre résultat veut dire un code faux, même voulu | free | 12/12, 40 requêtes : il refuse la période à l'envers « au lieu d'inverser silencieusement », refuse un solde insuffisant en disant ce qui reste et corrige son propre test qui exigeait l'échange ; un essai par requête |
+
+Deux défauts du banc vus pendant ces rejeux, corrigés : la session rejouée gardait les chemins
+de l'essai d'origine (le modèle a lancé des essais dans l'ancien projet), et le rejeu joignait
+une seconde fois le guide des cas limites. Les rejeux suivants ne sont donc pas tout à fait
+comparables aux précédents.
 
 Les essais de t5 ont été notés une seconde fois après une correction de la vérification
 cachée : tous les points de la recherche dépendaient du premier (`?q=pomme` exact), si bien
@@ -579,6 +594,38 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   même). Mesuré sur la recherche (rejeu de t5) : 12/12 en 14 requêtes au lieu de 22 ; les
   autres genres n'ont pas encore de scénario.
 
+### T1-28 Des cas limites dont certains faits étaient faux, et qu'un modèle lit à sa façon
+- Preuve : t6 (10/12) : une période à l'envers comptée, un solde à -3 ; la table ne parlait ni
+  de soldes ni de période à l'envers. Revue de la table par deux agents (lecture seule, chaque
+  fait rejoué sur cette machine) : 18 affirmations fausses ou incomplètes. Par exemple `==`
+  entre une date avec fuseau et une sans ne lève rien, il répond faux ; `parse_qs("q=")` donne
+  `{}`, donc `["q"]` plante sur la recherche vide que la ligne demandait ; NFD garde « œ », et
+  « oeufs » ne trouvait pas « Œufs » ; Windows écrit U+202F dans « 1 250,00 », pas U+00A0 ;
+  `cgi` et `imghdr` n'existent plus en Python 3.13. Des mots déclenchaient aussi le mauvais
+  genre : « sort » dans « sortie » et « fais en sorte », « form » dans « format », « excel »
+  dans « Excellent », « connexion » dans « erreur de connexion », « par page » dans « page par
+  page », « heure » dans « tout à l'heure » (sur un corpus écrit pour l'occasion : 52 genres de
+  trop pour 71 demandes ordinaires, 26 manqués pour 62 demandes de fonctionnalité).
+- Puis, au rejeu de t6 avec la table corrigée : encore 10/12. Le modèle fait les essais qui
+  confirment son code et garde l'échange automatique des dates (« 5 (échange auto) »), que la
+  ligne interdisait pourtant.
+- État : corrigé (reprise du 12 octobre, 21 h 22). La table a son module (`edge_cases.rs`) :
+  formulations corrigées, faits rejoués ; mots-clés en expressions, et un mot suivi d'une
+  espace est un mot entier, aussi devant une ponctuation (`has_word_start`) ; l'apostrophe des
+  téléphones vaut la droite. Quatorze genres nouveaux, faits vérifiés une seconde fois de façon
+  indépendante : soldes, stocks, quotas et réservations ; doublons ; adresses et téléphones ;
+  bases SQL ; clés d'API ; OCR et traduction ; images ; appels à un service extérieur ; liaison
+  front et back ; API JSON ; code de page web ; données en JSON ; fichiers texte sous Windows ;
+  scripts en ligne de commande, en dernier car le plus large (quatre genres au plus, dans
+  l'ordre de la table). Chaque essai porte son résultat attendu entre parenthèses, et le
+  contrôle dit qu'un autre résultat veut dire un code faux, même voulu (sauf si la demande le
+  veut). Le relecteur reçoit aussi ces lignes, à confronter au code.
+- Mesures (non indépendantes pour t6) : rejeu du contrôle, 10/12 puis 12/12 (40 requêtes au
+  lieu de 9 à 11) ; essai complet, 12/12 en 32 requêtes (le premier faisait 10/12 en 19). Le
+  coût : le modèle fait maintenant ses essais un par un, une requête chacun.
+- Reste : mesurer les genres nouveaux sur des scénarios à eux (seuls soldes et ligne de
+  commande ont servi, sur t6) ; faire partir les essais d'une ligne en une seule commande.
+
 ## Améliorations
 
 Lot T1 (en cours le 12 octobre 2026), dans cet ordre : T1-08 (garde des données), T1-03 et
@@ -596,16 +643,15 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 12 octobre, 21 h) : (1) t6 : les deux règles manquées
-(période à l'envers, solde qui passe sous zéro) sont des vérifications d'expert générales ;
-les ajouter aux cas limites (dates ; soldes, stocks et quotas), puis mesurer par rejeu du
-contrôle de t6 en le disant non indépendant (règles écrites après avoir vu l'erreur), et
-refaire t6 avec le petit modèle et laguna ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
+Suite, dans l'ordre (mise à jour du 12 octobre, 23 h) : (1) t6 avec le petit modèle et
+laguna ; rejouer le contrôle de t5 pour vérifier que la ligne de recherche réécrite garde
+12/12 ; faire partir les essais d'une ligne en une seule commande (T1-28 coûte des
+requêtes) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
 sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par
 une commande ; (5) T1-04, les espaces insécables oubliées sur t3 ; (6) refaire chaque mesure
-deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-27 sont faits, T1-18 en
+deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-28 sont faits, T1-18 en
 partie. Le troisième modèle gratuit (laguna) fait 12/12 sur t4
 et t5 avec le moins de requêtes (16 et 26), mais son fournisseur le limite souvent.
 

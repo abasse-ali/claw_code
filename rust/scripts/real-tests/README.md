@@ -36,7 +36,9 @@ gratuit). Le résultat s'ajoute à `<essai>/review-replay.jsonl`.
 contrôle des exigences de Claw au point exact où il était arrivé dans la session de l'essai
 (message N) : la session est coupée là, le contrôle est renvoyé au vrai modèle (formulation
 actuelle, ou celle d'un commit), qui reprend avec tout ce qu'il savait alors. Une à deux
-requêtes au lieu d'un essai entier ; le résultat est noté par la vérification cachée.
+requêtes au lieu d'un essai entier ; le résultat est noté par la vérification cachée. Les
+chemins de l'essai d'origine sont réécrits vers le rejeu (sinon le modèle essaie son code dans
+l'ancien projet), et le guide des cas limites du début de tour n'est pas joint une seconde fois.
 
 `<essais>` est hors du dépôt : `CLAW_REAL_TESTS_DIR`, sinon le dossier `claw-real-tests` à côté
 du dépôt (`D:\Mes_Projets\claw-real-tests`). Pas dans `%LOCALAPPDATA%` : le Python du

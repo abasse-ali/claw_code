@@ -94,7 +94,12 @@ def main():
     session_path = sessions[-1]
     for other in sessions[:-1]:
         other.unlink()
-    session = json.loads(session_path.read_text(encoding="utf-8"))
+    # Les chemins de l'essai d'origine deviennent ceux du rejeu : sinon le modèle, qui les
+    # lit dans les sorties de ses commandes, essaie son code dans l'ancien projet (rejeu de
+    # t6 du 12 octobre : `cd /d ...-t6\project && python -c ...`). Le nom du dossier d'un
+    # essai est unique, le remplacer suffit quelle que soit l'écriture du chemin.
+    text = session_path.read_text(encoding="utf-8").replace(source.name, run_id)
+    session = json.loads(text)
     kept = session["messages"][: args.cut]
     cut_message = session["messages"][args.cut] if args.cut < len(session["messages"]) else {}
     first_block = (cut_message.get("blocks") or [{}])[0]
@@ -121,6 +126,9 @@ def main():
     env = run.real_env()
     env["CLAW_CHECKLIST"] = "0"
     env["CLAW_REVIEW"] = "0"
+    # Le contrôle renvoyé contient déjà les cas limites ; envoyé comme un nouveau message, il
+    # recevrait en plus le guide du début de tour, que le vrai contrôle n'a pas.
+    env["CLAW_EDGE_CASES"] = "0"
     before = run.free_requests_left(claw, env)
     command = [
         str(claw), "--permission-mode", "danger-full-access", "--input-format", "stream-json",

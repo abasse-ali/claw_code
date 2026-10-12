@@ -290,12 +290,25 @@ pub(crate) fn without_accents(text: &str) -> String {
         .collect()
 }
 
+/// Vrai si `word` commence un mot de `text`. Un mot terminé par une espace
+/// (« loi ») est un mot entier : il compte aussi devant une ponctuation ou en
+/// fin de texte, mais pas au début d'un mot plus long (« emploi », « loisir »).
 pub(crate) fn has_word_start(text: &str, word: &str) -> bool {
-    text.match_indices(word).any(|(index, _)| {
-        text[..index]
+    let (core, whole) = match word.strip_suffix(' ') {
+        Some(core) => (core, true),
+        None => (word, false),
+    };
+    text.match_indices(core).any(|(index, _)| {
+        let starts = text[..index]
             .chars()
             .next_back()
-            .is_none_or(|before| !before.is_alphanumeric())
+            .is_none_or(|before| !before.is_alphanumeric());
+        let ends = !whole
+            || text[index + core.len()..]
+                .chars()
+                .next()
+                .is_none_or(|after| !after.is_alphanumeric());
+        starts && ends
     })
 }
 
@@ -383,6 +396,21 @@ mod tests {
         assert_eq!(topic_of("Bonjour, comment vas-tu ?"), None);
         // « loi » en mot entier : pas « emploi ».
         assert_eq!(topic_of("Quel emploi du temps me conseilles-tu ?"), None);
+    }
+
+    #[test]
+    fn a_word_followed_by_a_space_is_a_whole_word() {
+        use super::has_word_start;
+        // Un début de mot : « excel » trouve « excellent ».
+        assert!(has_word_start("c'est excellent", "excel"));
+        // Un mot entier : devant une espace, une ponctuation ou en fin de texte.
+        assert!(!has_word_start("c'est excellent", "excel "));
+        assert!(has_word_start("exporte vers excel.", "excel "));
+        assert!(has_word_start("exporte vers excel", "excel "));
+        assert!(has_word_start("excel et csv", "excel "));
+        // Toujours au début d'un mot.
+        assert!(!has_word_start("emploi du temps", "loi "));
+        assert!(has_word_start("que dit la loi ?", "loi "));
     }
 
     #[test]

@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::edge_cases::feature_edge_cases;
+
 /// Une aide au raisonnement, activée par défaut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Aid {
@@ -1903,53 +1905,6 @@ const CHECKLIST_REQUEST_MAX_CHARS: usize = 4_000;
 /// sans réponse : le modèle ne peut plus lancer ce qui en demande une.
 pub const AWAY_NOTE: &str = "The user is not answering permission requests right now: check with read-only tools only (read, search), and list in your answer what is left unverified and which calls wait for their approval.";
 
-/// Ce que vérifie d'office un ingénieur expérimenté pour un genre de
-/// fonctionnalité, reconnu à des débuts de mots de la demande (minuscules,
-/// sans accents). Un modèle gratuit les oublie : dans l'essai réel t5, une
-/// recherche ignorait les accents (« creme » pour « crème »), le `+` d'une URL
-/// et une recherche faite d'espaces, trois points sur douze.
-const FEATURE_EDGE_CASES: &[(&[&str], &str)] = &[
-    (
-        &["recherch", "filtr", "search", "filter"],
-        "Text search or filter: people type \"creme\" for \"Crème\", so compare without case and accents (in Python, `unicodedata.normalize(\"NFD\", ...)` then drop the combining marks); strip surrounding spaces, so that \"  \" is an empty query and shows everything; accept several words; read query strings with the standard parser (`urllib.parse.parse_qs`, `URLSearchParams`), where `+` and `%20` both mean a space, never with `split(\"=\")` and `unquote`. Try \"creme\", \"  tarte  \" and \"pommes+de+terre\".",
-    ),
-    (
-        &["prix", "montant", "tva", "euro", "facture", "paiement", "price", "amount", "invoice", "payment"],
-        "Money: in Python `0.1 * 3 == 0.3` is false, so never compare amounts with `==` and never round each line before adding them: compute in cents (integers) or `Decimal` and round once, at the end; accept \"12,50\" as well as \"12.50\" from users; try three lines of 0.10, a total of many lines, a zero and a negative amount.",
-    ),
-    (
-        &["date", "heure", "horaire", "calendrier", "echeance", "delai", "fuseau", "calendar", "deadline", "timezone"],
-        "Dates and times: \"03/04/2026\" is 3 April for a French user, not 4 March, so parse with an explicit format; in Python, comparing a date that has a time zone with one that has none raises an error; one month after 31 January and the 29th of February need a decision; say whether a range includes its last day, and try that last day, a month end and a daylight saving change.",
-    ),
-    (
-        &["csv", "excel", "tableur", "xlsx", "spreadsheet"],
-        "CSV and Excel files from French users: `;` as separator, decimal comma, and thousands separators that are a plain space or, from Excel, a non-breaking space (U+00A0 or U+202F) that `replace(\" \", \"\")` does not remove: test a value such as \"1\\u00a0250,00\" (Python notation); also UTF-8 with or without BOM, or cp1252, and quoted fields that contain the separator. Keep the user's file as it is and fix the code that reads it.",
-    ),
-    (
-        &["pagination", "paginer", "pagine", "par page", "page suivante", "paginate", "per page"],
-        "Pagination: try the last page when the count is not a multiple of the page size, page 0, a negative page and a page past the end (an empty list, not an error); cap the page size a client can ask for; sort on a unique key, or items repeat or vanish between pages.",
-    ),
-    (
-        &["formulaire", "saisie", "form"],
-        "Forms and user input: try an empty required field, a field of spaces only, a value that is too long and one with an accent or an apostrophe (\"Zoé\", \"O'Brien\"); show each error next to its field; repeat every check on the server, because anyone can send a request without the page.",
-    ),
-    (
-        &["upload", "televers", "piece jointe", "pieces jointes", "attachment"],
-        "File uploads: never build a path from the uploaded name without cleaning it (\"../\" escapes the folder); check the type on the content, since a file named .jpg may not be an image; try a file over the size limit, a name with spaces and accents (\"photo été.jpg\") and the same file sent twice.",
-    ),
-    (
-        &["mot de passe", "mots de passe", "connexion", "login", "authentif", "password", "sign in"],
-        "Accounts and passwords: hash passwords with a slow hash (bcrypt, argon2), never a plain SHA, and never store or log them in clear; give the same error for an unknown user and a wrong password, or the answer tells who has an account; compare secrets in constant time; make sessions expire; try a wrong password and an unknown user.",
-    ),
-    (
-        &["trier", "tri par", "ordre alphabetique", "sort"],
-        "Sorting text: Python's `sorted()` puts \"Écrire\" after \"Zèbre\" and \"b\" after \"Z\", so sort on a key without accents and case; \"10\" comes before \"9\" as text, so sort numbers as numbers; equal items keep their order. Try names with accents, capitals and numbers together.",
-    ),
-];
-
-/// Au plus, les genres de fonctionnalité rappelés dans un même contrôle.
-const MAX_FEATURE_EDGE_CASES: usize = 4;
-
 /// Fin d'un contrôle de fin de tour (exigences, preuves d'un problème) : les
 /// cas limites du genre de fonctionnalité que nomme la demande, chacun à
 /// prouver. Vide si la demande n'en nomme aucun. Le guide du début de tour ne
@@ -1965,7 +1920,7 @@ pub fn edge_case_check(request: &str, earlier: Option<&str>) -> String {
         return String::new();
     }
     format!(
-        "\n\nWhat experienced engineers always check for this kind of feature. For each line that applies to this request, show the test or the command of this session that covers it, or add it now:\n- {}",
+        "\n\nWhat experienced engineers always check for this kind of feature. For each line that applies to this request, show the test or the command of this session that covers it, or add it now. The expected result of each try is in parentheses: a different result means your code is wrong, even if you chose that behavior on purpose (unless the user's request asks for it): fix the code and its tests, and say what you changed:\n- {}",
         cases.join("\n- ")
     )
 }
@@ -1982,26 +1937,10 @@ pub fn edge_case_guide(request: &str, earlier: Option<&str>) -> Option<String> {
     let cases = feature_edge_cases(&format!("{request}\n{}", earlier.unwrap_or_default()));
     (!cases.is_empty()).then(|| {
         format!(
-            "{GUIDE_PREFIX} What experienced engineers always check for this kind of work. Keep each line that applies in mind from the start, and cover it with a test or a command:\n- {}",
+            "{GUIDE_PREFIX} What experienced engineers always check for this kind of work. Keep each line that applies in mind from the start, and cover it with a test or a command; the expected result of each try is in parentheses:\n- {}",
             cases.join("\n- ")
         )
     })
-}
-
-/// Les cas limites des genres de fonctionnalité que nomme la demande.
-#[must_use]
-pub fn feature_edge_cases(request: &str) -> Vec<&'static str> {
-    let folded = crate::team::without_accents(&request.to_lowercase());
-    FEATURE_EDGE_CASES
-        .iter()
-        .filter(|(starts, _)| {
-            starts
-                .iter()
-                .any(|start| crate::team::has_word_start(&folded, start))
-        })
-        .map(|(_, cases)| *cases)
-        .take(MAX_FEATURE_EDGE_CASES)
-        .collect()
 }
 
 /// Contrôle des exigences, avec la demande à contrôler citée mot pour mot.
@@ -2868,6 +2807,19 @@ pub fn review_prompt(
             shortened(earlier, MAX_REVIEW_TEXT_CHARS)
         );
     }
+    // Les cas limites du genre de fonctionnalité demandé : le relecteur les
+    // confronte au code comme les phrases de la demande (essai réel t6 : une
+    // période à l'envers et un solde négatif sont passés sans remarque).
+    if enabled(Aid::EdgeCases) {
+        let cases = feature_edge_cases(&format!("{request}\n{}", earlier.unwrap_or_default()));
+        if !cases.is_empty() {
+            let _ = write!(
+                prompt,
+                "What an experienced engineer always checks for this kind of feature. In Step 1, add a line for each point that applies to this request; in Step 2, say whether the code handles it. The expected result of each try is in parentheses: code that gives another result is a defect to report, even when the agent chose it on purpose:\n- {}\n\n",
+                cases.join("\n- ")
+            );
+        }
+    }
     // La réponse de l'agent vient en dernier : elle décrit les changements à
     // sa façon, et le relecteur doit les avoir jugés d'après la demande.
     let answer = answer.trim();
@@ -3221,8 +3173,14 @@ mod guide_tests {
         // seul peut alors l'emprunter » devenait un prêt d'office.
         assert!(prompt.contains("Read each sentence again as it is written"));
         assert!(prompt.contains("must not do it for them automatically"));
-        // Rien à rappeler pour une traduction par URL.
-        assert!(!prompt.contains("What experienced engineers always check"));
+        // Une traduction par URL : les pièges de la traduction et des appels
+        // à un service extérieur (vraie demande de l'utilisateur, appli manga).
+        assert!(prompt.contains("What experienced engineers always check"));
+        assert!(prompt.contains("- OCR and translation:"));
+        assert!(prompt.contains("- Calling an external service:"));
+        // Une demande qui ne nomme aucun genre de fonctionnalité : rien.
+        assert!(!checklist_prompt("corrige le bug", None, false)
+            .contains("What experienced engineers always check"));
         // Essai réel t5 : une recherche, ses cas limites.
         let search = checklist_prompt(
             "Ajoute une recherche au carnet de recettes : un champ filtre la liste",
@@ -3232,6 +3190,10 @@ mod guide_tests {
         assert!(search.contains("What experienced engineers always check"));
         assert!(search.contains("without case and accents"));
         assert!(search.contains("`+` and `%20` both mean a space"));
+        // Rejeu de t6 : le modèle gardait l'échange automatique des dates
+        // (« 5 (échange auto) ») ; le résultat attendu de chaque essai le dément.
+        assert!(search.contains("a different result means your code is wrong"));
+        assert!(search.contains("\"oeufs\" (finds \"Œufs\")"));
         assert!(!prompt.contains("not answering permission requests"));
         // « reprendre » : la demande poursuivie est citée.
         let prompt = checklist_prompt(
@@ -3258,24 +3220,6 @@ mod guide_tests {
         // « continue » : le genre se lit dans la demande poursuivie.
         assert!(super::edge_case_guide("continue", Some("ajoute un filtre par prix")).is_some());
         assert_eq!(super::edge_case_guide("explique ce module", None), None);
-    }
-
-    #[test]
-    fn the_kind_of_feature_is_read_from_the_start_of_words() {
-        use super::feature_edge_cases;
-        let kinds = |request: &str| feature_edge_cases(request).len();
-        assert_eq!(kinds("Le total de la facture doit arrondir les prix"), 1);
-        assert!(feature_edge_cases("Importe le fichier CSV exporté d'Excel")[0].starts_with("CSV"));
-        assert!(feature_edge_cases("Affiche la date d'échéance")[0].starts_with("Dates"));
-        assert!(feature_edge_cases("ajoute un filtre par catégorie")[0].starts_with("Text search"));
-        // Au milieu d'un mot, ou sans rapport : rien.
-        assert_eq!(kinds("corrige le transform de la liste"), 0);
-        assert_eq!(kinds("explique ce module"), 0);
-        // Plusieurs genres, quatre au plus.
-        assert_eq!(
-            kinds("recherche, prix, date, csv, pagination, formulaire, upload et mot de passe"),
-            4
-        );
     }
 
     #[test]
@@ -4075,6 +4019,22 @@ mod tests {
         assert!(prompt.starts_with("The user asked:\najoute x"));
         // La forme exigée est rappelée en dernier.
         assert!(prompt.ends_with("an approval without them is not accepted."));
+        // Une demande qui nomme un genre de fonctionnalité : ses cas limites aussi.
+        assert!(!prompt.contains("What an experienced engineer always checks"));
+        let dated = super::review_prompt(
+            "Ajoute le calcul des jours ouvrés entre deux dates",
+            None,
+            "Fait.",
+            &["--- a/x\n+++ b/x".to_string()],
+        );
+        assert!(dated.contains("What an experienced engineer always checks"));
+        assert!(dated.contains("code that gives another result is a defect to report"));
+        assert!(
+            dated
+                .find("What an experienced engineer")
+                .expect("cas limites")
+                < dated.find("Changes made by the agent").expect("diff")
+        );
         assert!(
             prompt.find("--- a/x").expect("diff")
                 < prompt
