@@ -110,10 +110,13 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 | a89ce3b | Lot T1 : garde des données réécrites, guide de débogage (hypothèse de l'utilisateur), fichier montré après une modification, essais regroupés, contexte Git borné, réglages sans secrets dans le prompt, Python du Microsoft Store |
 
 | e3740fb, 83bb46a | Campagne T1 : mesure du lot T1 (34/36 contre 32/36, 74 requêtes contre 99), constat T1-13 |
-| (commit « T1-13 ») | Compte rendu gardé quand la réponse à un contrôle n'en est qu'un accusé de réception (T1-13) ; vue de fichier repliée dans la page (T1-12) |
+| fcbbb34 | Compte rendu gardé quand la réponse à un contrôle n'en est qu'un accusé de réception (T1-13) ; vue de fichier repliée dans la page (T1-12) |
+| a138b69, 83fb196 | Campagne T1 : scénario t4 (tâche longue sur plusieurs modules), essais, constats T1-14 à T1-16 |
+| (commit « T1-14 à T1-17 ») | Session enregistrée à chaque étape d'un tour, écriture atomique (T1-16) ; liste de tâches envoyée seule signalée et son résultat allégé (T1-14) ; remarque de regroupement plus tôt, redite, avec l'exemple des commandes du modèle (T1-15) ; fichier relu à l'identique gardé une fois et dit (T1-17) ; constats T1-18 et T1-19 |
 
-État des tests après T1-13 : 630 tests Rust, analyse statique à zéro sous Windows et Linux,
-client 28 sur 28, extension VS Code 18 sur 18.
+État des tests après T1-17 : 639 tests Rust, analyse statique à zéro sous Windows et Linux,
+client 28 sur 28, extension VS Code 18 sur 18 (lancée avant T1-17, qui ne touche pas à
+l'interface).
 
 ## Études
 
@@ -228,3 +231,13 @@ Hors lots :
 - Reprise automatique programmée à la demande de l'utilisateur (6 h 22 puis toutes les 5 h).
 - Reprise de 6 h 22 : T1-13 et T1-12 corrigés. La suite est dans `suivi/t1-tests-reels.md`
   (scénarios plus durs d'abord).
+- Même reprise, suite : scénario t4 (tâche longue). Le plus puissant le réussit en 31
+  requêtes, dont 7 pour la seule liste de tâches et 14 commandes une par requête ; le petit
+  modèle a dépensé 250 requêtes en 25 minutes sans finir, et sans laisser de trace. D'où
+  T1-14 à T1-17 : la session s'écrit maintenant à chaque étape d'un tour (un tour interrompu
+  se relit et se reprend ; vérifié en arrêtant `claw.exe` pendant une commande), la liste de
+  tâches part avec l'appel suivant, la remarque de regroupement vient plus tôt et montre
+  l'exemple, un fichier relu sans avoir changé n'est gardé qu'une fois. Second essai du petit
+  modèle, lu pendant qu'il tournait : 34 requêtes, 8/12. Il a mal lu une phrase de la demande
+  et ni son contrôle ni la relecture ne l'ont vu (T1-18) ; rien ne borne les requêtes d'un
+  tour (T1-19). Ces deux points sont les suivants.

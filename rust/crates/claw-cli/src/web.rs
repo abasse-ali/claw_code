@@ -878,6 +878,7 @@ impl Worker {
             app: self.app.clone(),
             mode: self.permission_mode,
         };
+        self.runtime.autosave_to(&self.session.path);
         let result = self
             .runtime
             .run_turn_with_images(prompt, images, Some(&mut prompter));

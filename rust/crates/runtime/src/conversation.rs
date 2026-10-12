@@ -256,6 +256,8 @@ pub struct ConversationRuntime<C, T> {
     /// vue, fichier, taille et date au moment de la vue) : retirées dès que
     /// le fichier change par un autre moyen qu'une modification du modèle.
     file_views: BTreeMap<String, FileStamp>,
+    /// Fichier où la session s'enregistre à chaque étape d'un tour.
+    autosave: Option<std::path::PathBuf>,
 }
 
 /// Fichier, taille et date de modification au moment d'une vue.
@@ -352,8 +354,16 @@ struct TurnAids {
     calls_in_reply: usize,
     /// Réponses d'un seul appel d'observation, à la suite.
     single_call_streak: u32,
-    /// Le regroupement des essais a déjà été demandé pendant ce tour.
-    batch_noted: bool,
+    /// Outil et commande des derniers appels isolés qui étaient des commandes.
+    single_commands: Vec<(String, String)>,
+    /// Remarques de regroupement des essais déjà faites pendant ce tour.
+    batch_notes: u32,
+    /// Remarques déjà faites pendant ce tour pour une liste de tâches envoyée seule.
+    todo_alone_notes: u32,
+    /// Lectures de fichiers de ce tour (empreinte du résultat).
+    reads_seen: std::collections::BTreeSet<u64>,
+    /// Remarques déjà faites pendant ce tour pour un fichier relu à l'identique.
+    repeated_read_notes: u32,
 }
 
 /// Mots en dessous desquels un message de l'utilisateur peut n'être qu'une
@@ -476,6 +486,59 @@ fn lean_stored_results(session: &mut Session) {
     }
 }
 
+/// Remarque pour une réponse qui n'a fait qu'un appel, chaque réponse étant
+/// une requête : la liste de tâches envoyée seule alors que du travail suit,
+/// ou une observation isolée de plus (lecture, recherche, commande) après
+/// plusieurs à la suite. Une commande au code de sortie non nul reste une
+/// observation (un refus essayé exprès) ; seuls un outil en erreur ou une
+/// réponse d'un autre genre interrompent la série.
+fn lone_call_note(
+    tool_name: &str,
+    input: &str,
+    output: &str,
+    is_error: bool,
+    aids: &mut TurnAids,
+) -> Option<String> {
+    let alone = aids.calls_in_reply == 1 && !is_error && harness::enabled(Aid::BatchCalls);
+    let observation = matches!(
+        tool_name,
+        "read_file" | "grep_search" | "glob_search" | "bash" | "PowerShell"
+    );
+    if !alone || !observation {
+        aids.single_call_streak = 0;
+        aids.single_commands.clear();
+        if alone
+            && tool_name == "TodoWrite"
+            && aids.todo_alone_notes < harness::MAX_TODO_ALONE_NOTES
+            && harness::todos_left(output)
+        {
+            aids.todo_alone_notes += 1;
+            return Some(harness::TODO_ALONE_NOTE.to_string());
+        }
+        return None;
+    }
+    aids.single_call_streak += 1;
+    match json_field(input, "command").filter(|_| matches!(tool_name, "bash" | "PowerShell")) {
+        Some(command) => aids.single_commands.push((tool_name.to_string(), command)),
+        None => aids.single_commands.clear(),
+    }
+    let kept = harness::SINGLE_CALL_REPLIES as usize;
+    let extra = aids.single_commands.len().saturating_sub(kept);
+    aids.single_commands.drain(..extra);
+    if !aids
+        .single_call_streak
+        .is_multiple_of(harness::SINGLE_CALL_REPLIES)
+        || aids.batch_notes >= harness::MAX_BATCH_NOTES
+    {
+        return None;
+    }
+    aids.batch_notes += 1;
+    Some(harness::batch_note(
+        aids.single_call_streak,
+        &aids.single_commands,
+    ))
+}
+
 /// Issue connue d'une commande du modèle.
 struct CommandOutcome {
     command: String,
@@ -593,6 +656,10 @@ const KEPT_ANSWER_RATIO: usize = 3;
 /// Suites demandées au plus pour une même réponse coupée.
 const MAX_CUT_CONTINUATIONS: usize = 2;
 
+/// Résultat noté, dans la session enregistrée en cours de tour, pour un appel
+/// dont l'exécution n'est pas finie : il n'y reste que si Claw est arrêté avant.
+const INTERRUPTED_CALL_RESULT: &str = "[Claw] Claw was stopped while this call was running: its result was not recorded, and the call may have run only in part. Check the current state (files, processes) before relying on it or running it again.";
+
 /// Le dernier message est la relance d'une réponse coupée, juste après elle.
 fn after_cut_nudge(messages: &[ConversationMessage]) -> bool {
     let [.., cut, nudge] = messages else {
@@ -704,7 +771,40 @@ where
             review: feature_config.review_enabled(),
             response_language: feature_config.response_language().map(ToOwned::to_owned),
             file_views: BTreeMap::new(),
+            autosave: None,
         }
+    }
+
+    /// Enregistre la session dans `path` à chaque étape des tours suivants :
+    /// un tour interrompu (fenêtre fermée, plantage, coupure) garde sa trace
+    /// et peut être repris.
+    pub fn autosave_to(&mut self, path: impl Into<std::path::PathBuf>) {
+        self.autosave = Some(path.into());
+    }
+
+    /// Enregistrement en cours de tour. `pending` : appels dont le résultat
+    /// n'est pas encore connu ; ils sont notés comme interrompus, pour que la
+    /// session enregistrée reste valide si Claw s'arrête pendant leur
+    /// exécution. Un échec d'écriture n'arrête pas le tour : l'interface
+    /// enregistre de nouveau à la fin et le signale.
+    fn autosave(&self, pending: &[(String, String, String)]) {
+        let Some(path) = &self.autosave else {
+            return;
+        };
+        if pending.is_empty() {
+            let _ = self.session.save_to_path(path);
+            return;
+        }
+        let mut session = self.session.clone();
+        session.messages.extend(pending.iter().map(|(id, name, _)| {
+            ConversationMessage::tool_result(
+                id.clone(),
+                name.clone(),
+                INTERRUPTED_CALL_RESULT.to_string(),
+                true,
+            )
+        }));
+        let _ = session.save_to_path(path);
     }
 
     /// Runtime d'un sous-agent : pas de `UserPromptSubmit`, et `SubagentStop`
@@ -986,6 +1086,8 @@ where
         let result = self.run_turn_inner(user_input.into(), images, prompter);
         // Après une escalade, le tour suivant repart avec le modèle habituel.
         self.api_client.restore_model();
+        // Fin du tour, réussi ou non : ce qui a été fait est enregistré.
+        self.autosave(&[]);
         result
     }
 
@@ -1101,6 +1203,7 @@ where
                 ));
             }
             self.auto_compact(false);
+            self.autosave(&[]);
             let request = ApiRequest {
                 system_prompt: self.system_prompt.clone(),
                 messages: self.session.messages.clone(),
@@ -1270,6 +1373,7 @@ where
             // Le modèle retravaille : sa prochaine réponse sera un nouveau
             // compte rendu, l'ancien n'est plus à garder.
             superseded_draft = None;
+            self.autosave(&pending_tool_uses);
             if self.run_parallel_batch(
                 &pending_tool_uses,
                 &mut prompter,
@@ -1522,24 +1626,11 @@ where
         } else {
             0
         };
-        // Une seule observation par réponse, plusieurs fois de suite : les
-        // essais indépendants se regroupent (chaque réponse est une requête).
-        let observation = matches!(
-            tool_name,
-            "read_file" | "grep_search" | "glob_search" | "bash" | "PowerShell"
-        );
-        aids.single_call_streak =
-            if aids.calls_in_reply == 1 && observation && !is_error && !command_failed {
-                aids.single_call_streak + 1
-            } else {
-                0
-            };
-        if aids.single_call_streak == harness::SINGLE_CALL_REPLIES
-            && !aids.batch_noted
-            && harness::enabled(Aid::BatchCalls)
-        {
-            aids.batch_noted = true;
-            notes.push(harness::BATCH_NOTE.to_string());
+        // Un seul appel par réponse (observations à la suite, liste de tâches
+        // seule) : ce qui est déjà prévu se regroupe.
+        notes.extend(lone_call_note(tool_name, input, &output, is_error, aids));
+        if tool_name == "read_file" && !is_error {
+            notes.extend(self.repeated_read_note(&output, aids));
         }
 
         if matches!(tool_name, "edit_file" | "write_file" | "NotebookEdit") && !is_error {
@@ -1674,6 +1765,44 @@ where
                 notes.push(harness::syntax_feedback(&path, &error));
             }
         }
+    }
+
+    /// Lecture identique (même fichier, mêmes lignes, même contenu) à une
+    /// lecture encore dans la conversation : l'ancienne copie laisse la place
+    /// à la nouvelle. Refaite dans le même tour, elle n'a rien appris au
+    /// modèle pour le prix d'une requête : une remarque le lui dit.
+    fn repeated_read_note(&mut self, output: &str, aids: &mut TurnAids) -> Option<String> {
+        if !harness::enabled(Aid::RepeatedReads) {
+            return None;
+        }
+        let (path, length) = harness::read_result(output)?;
+        let read = &output[..length];
+        let stub = harness::repeated_read_stub(&path);
+        let mut repeated = false;
+        for message in &mut self.session.messages {
+            for block in &mut message.blocks {
+                if let ContentBlock::ToolResult {
+                    tool_name,
+                    output: earlier,
+                    is_error: false,
+                    ..
+                } = block
+                {
+                    if tool_name == "read_file" && earlier.starts_with(read) {
+                        earlier.replace_range(..length, &stub);
+                        repeated = true;
+                    }
+                }
+            }
+        }
+        // Une lecture d'un tour précédent refaite à l'identique n'est pas une
+        // faute : le fichier avait pu changer entre-temps.
+        let same_turn = !aids.reads_seen.insert(harness::fingerprint(read));
+        if repeated && same_turn && aids.repeated_read_notes < harness::MAX_REPEATED_READ_NOTES {
+            aids.repeated_read_notes += 1;
+            return Some(harness::repeated_read_note(&path));
+        }
+        None
     }
 
     /// Un appel n'a pas tourné faute de réponse à la demande d'autorisation :
@@ -5468,15 +5597,253 @@ mod tests {
         );
         runtime.run_turn("essaie la recherche", None).expect("tour");
         let observed = observed.borrow();
-        // La remarque arrive avec le troisième résultat, une seule fois.
+        // La remarque arrive avec le troisième résultat, une seule fois, et
+        // montre les trois commandes réunies en un appel.
         assert!(!observed.requests[2].contains("each made a single call"));
         assert!(observed.requests[3].contains("each made a single call"));
+        assert!(observed.requests[3].contains(
+            "fit in one `bash` call: `python notes.py chercher a; python notes.py chercher b; python notes.py chercher c`"
+        ));
         assert_eq!(
             observed.requests[4]
                 .matches("each made a single call")
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn single_calls_are_counted_through_failing_commands_and_noted_again() {
+        // Essai réel t4 : douze commandes une par requête. Un refus du guichet
+        // essayé exprès (code de sortie 1) remettait le compteur à zéro, et la
+        // remarque, venue tard, n'était dite qu'une fois.
+        let mut steps = (0..13)
+            .map(|n| {
+                tool_step(
+                    "bash",
+                    &format!(r#"{{"command":"cd projet && python biblio.py essai{n}"}}"#),
+                )
+            })
+            .collect::<Vec<_>>();
+        steps.push(text_step("Fait."));
+        let mut outputs = vec![PASSING; 13];
+        outputs[1] = FAILING;
+        outputs[4] = FAILING;
+        let (mut runtime, observed, _) = aided_runtime(steps, outputs);
+        runtime.run_turn("essaie le guichet", None).expect("tour");
+        let observed = observed.borrow();
+        assert!(!observed.requests[2].contains("made a single call"));
+        // Troisième réponse d'un seul appel, malgré le refus de la deuxième ;
+        // le `cd` commun n'est écrit qu'une fois dans l'exemple.
+        assert!(observed.requests[3].contains("Your last 3 replies each made a single call"));
+        assert!(observed.requests[3].contains(
+            "`cd projet && python biblio.py essai0; python biblio.py essai1; python biblio.py essai2`"
+        ));
+        // Redite à la sixième et à la neuvième, puis plus rien.
+        assert!(!observed.requests[5].contains("6 replies in a row"));
+        assert!(observed.requests[6].contains("[Claw] 6 replies in a row"));
+        assert!(observed.requests[9].contains("[Claw] 9 replies in a row"));
+        let last = observed.requests.last().expect("requêtes");
+        assert!(!last.contains("12 replies in a row"));
+        assert_eq!(last.matches("made a single call").count(), 3);
+    }
+
+    #[test]
+    fn a_tool_error_or_a_grouped_reply_breaks_the_series_of_single_calls() {
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                tool_step("bash", r#"{"command":"python a.py"}"#),
+                tool_step("bash", r#"{"command":"python b.py"}"#),
+                tool_step("probe", "{}"),
+                tool_step("bash", r#"{"command":"python c.py"}"#),
+                vec![
+                    AssistantEvent::ToolUse {
+                        id: "un".to_string(),
+                        name: "bash".to_string(),
+                        input: r#"{"command":"python d.py"}"#.to_string(),
+                    },
+                    AssistantEvent::ToolUse {
+                        id: "deux".to_string(),
+                        name: "bash".to_string(),
+                        input: r#"{"command":"python e.py"}"#.to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ],
+                tool_step("bash", r#"{"command":"python f.py"}"#),
+                text_step("Fait."),
+            ],
+            vec![PASSING; 6],
+        );
+        runtime.run_turn("essaie", None).expect("tour");
+        let observed = observed.borrow();
+        assert!(!observed
+            .requests
+            .last()
+            .expect("requêtes")
+            .contains("made a single call"));
+    }
+
+    #[test]
+    fn a_task_list_sent_alone_is_told_to_travel_with_the_next_call() {
+        // Essai réel t4 : sept requêtes pour la seule mise à jour de la liste.
+        let open = r#"{"oldTodos":[],"newTodos":[{"content":"a","activeForm":"a","status":"in_progress"},{"content":"b","activeForm":"b","status":"pending"}]}"#;
+        let done = r#"{"oldTodos":[],"newTodos":[{"content":"a","activeForm":"a","status":"completed"},{"content":"b","activeForm":"b","status":"completed"}]}"#;
+        let todo = |id: &str| AssistantEvent::ToolUse {
+            id: id.to_string(),
+            name: "TodoWrite".to_string(),
+            input: r#"{"todos":[]}"#.to_string(),
+        };
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                vec![todo("liste-1"), AssistantEvent::MessageStop],
+                vec![
+                    todo("liste-2"),
+                    AssistantEvent::ToolUse {
+                        id: "commande".to_string(),
+                        name: "bash".to_string(),
+                        input: r#"{"command":"python a.py"}"#.to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ],
+                vec![todo("liste-3"), AssistantEvent::MessageStop],
+                text_step("Fait."),
+            ],
+            vec![PASSING],
+        );
+        let mut outputs = std::collections::VecDeque::from(vec![open, open, done]);
+        runtime.tool_executor = std::mem::take(&mut runtime.tool_executor)
+            .register("TodoWrite", move |_| {
+                Ok(outputs.pop_front().unwrap_or(done).to_string())
+            });
+        runtime.run_turn("fais a puis b", None).expect("tour");
+        let observed = observed.borrow();
+        // Seule, avec du travail à suivre : dit. Avec une commande dans la
+        // même réponse, ou pour clore la liste : rien.
+        assert!(observed.requests[1].contains("This reply only updated the task list"));
+        assert_eq!(
+            observed
+                .requests
+                .last()
+                .expect("requêtes")
+                .matches("This reply only updated the task list")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_file_read_again_unchanged_is_kept_once_and_said() {
+        // Essai réel t4 (petit modèle) : chaque fichier, lu au début du tour,
+        // est relu juste avant d'être modifié. Quatre requêtes sur dix.
+        let read = |content: &str| {
+            serde_json::json!({ "type": "text", "file": {
+                "filePath": std::env::current_dir().expect("dossier").join("services.py").to_string_lossy(),
+                "content": content, "numLines": 1, "startLine": 1, "totalLines": 1 } })
+            .to_string()
+        };
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                tool_step("read_file", r#"{"path":"services.py"}"#),
+                tool_step("read_file", r#"{"path":"services.py"}"#),
+                tool_step("read_file", r#"{"path":"services.py"}"#),
+                text_step("Lu."),
+                tool_step("read_file", r#"{"path":"services.py"}"#),
+                text_step("Relu."),
+            ],
+            vec![],
+        );
+        let mut outputs = std::collections::VecDeque::from(vec![
+            read("def emprunter(): pass"),
+            read("def emprunter(): pass"),
+            read("def emprunter(): return 1"),
+            read("def emprunter(): return 1"),
+        ]);
+        runtime.tool_executor = std::mem::take(&mut runtime.tool_executor)
+            .register("read_file", move |_| {
+                Ok(outputs.pop_front().expect("lecture"))
+            });
+        runtime.run_turn("lis services.py", None).expect("tour");
+        {
+            let observed = observed.borrow();
+            // Deuxième lecture, identique : dite, et l'ancienne copie s'efface.
+            assert!(!observed.requests[1].contains("has not changed since you read it"));
+            assert_eq!(
+                observed.requests[1]
+                    .matches("def emprunter(): pass")
+                    .count(),
+                1
+            );
+            assert!(observed.requests[2]
+                .contains("`services.py` has not changed since you read it earlier in this turn"));
+            assert_eq!(
+                observed.requests[2]
+                    .matches("def emprunter(): pass")
+                    .count(),
+                1
+            );
+            assert!(observed.requests[2].contains("An earlier read of `services.py` was here"));
+            // Contenu différent (le fichier a changé) : une lecture normale.
+            assert_eq!(
+                observed.requests[3]
+                    .matches("has not changed since you read it")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                observed.requests[3]
+                    .matches("def emprunter(): pass")
+                    .count(),
+                1
+            );
+        }
+        // Tour suivant : relire le même contenu n'est pas reproché, mais une
+        // seule copie reste dans la conversation.
+        runtime.run_turn("relis-le", None).expect("tour");
+        let observed = observed.borrow();
+        let last = observed.requests.last().expect("requêtes");
+        assert_eq!(last.matches("has not changed since you read it").count(), 1);
+        assert_eq!(last.matches("def emprunter(): return 1").count(), 1);
+    }
+
+    #[test]
+    fn the_session_is_saved_at_each_step_of_a_turn() {
+        // Essai réel t4 (north) : arrêté après 25 minutes, le fichier de
+        // session ne contenait rien du tour.
+        let dir = std::env::temp_dir().join(format!("claw-autosave-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let path = dir.join("session.json");
+        let (mut runtime, _, _) = aided_runtime(
+            vec![
+                tool_step("bash", r#"{"command":"python long.py"}"#),
+                text_step("Fait."),
+            ],
+            vec![],
+        );
+        let during = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let seen = std::rc::Rc::clone(&during);
+        let read = path.clone();
+        runtime.tool_executor =
+            std::mem::take(&mut runtime.tool_executor).register("bash", move |_| {
+                *seen.borrow_mut() = std::fs::read_to_string(&read).unwrap_or_default();
+                Ok(PASSING.to_string())
+            });
+        runtime.autosave_to(&path);
+        runtime.run_turn("lance le calcul", None).expect("tour");
+        let after = std::fs::read_to_string(&path).expect("session enregistrée");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Pendant la commande : la demande, l'appel en cours, et un résultat
+        // qui dit qu'il a été interrompu (la session reste valide).
+        let during = during.borrow();
+        assert!(during.contains("lance le calcul"));
+        assert!(during.contains("python long.py"));
+        assert!(during.contains("Claw was stopped while this call was running"));
+        let saved = Session::from_json(&crate::json::JsonValue::parse(&during).expect("JSON"))
+            .expect("session");
+        assert_eq!(saved.messages.len(), 3);
+        // À la fin : le vrai résultat et la réponse.
+        assert!(!after.contains("Claw was stopped while this call was running"));
+        assert!(after.contains("Fait."));
     }
 
     #[test]

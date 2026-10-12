@@ -620,7 +620,7 @@ fn get_engineering_workflow_section() -> String {
     let items = prepend_bullets(vec![
         "Work autonomously with your tools: when you need information that is in the project (file contents, error messages, test results), read the files or run the commands yourself instead of asking the user; ask only for decisions or facts that the project cannot tell you.".to_string(),
         "Understand before acting: locate the relevant code with search tools and read it; identify the language, framework, build system and test commands (CLAW.md, README, manifests such as Cargo.toml, package.json, pyproject.toml).".to_string(),
-        "For work of more than two steps, break it into tasks with TodoWrite before you start, keep exactly one task in progress, and mark a task done only once it is verified. Open tasks mean the work is not finished: do them, or say plainly why they are left.".to_string(),
+        "For work of more than two steps, break it into tasks with TodoWrite before you start, keep exactly one task in progress, and mark a task done only once it is verified. Send each TodoWrite update in the same reply as the next tool call of your work, never alone: every reply costs one request. Open tasks mean the work is not finished: do them, or say plainly why they are left.".to_string(),
         "Follow the conventions of the surrounding code: naming, error handling, formatting, comment density and test style.".to_string(),
         "Prefer the simplest design that solves the problem; refactor only when it serves the task or the user asked for it.".to_string(),
     ]);

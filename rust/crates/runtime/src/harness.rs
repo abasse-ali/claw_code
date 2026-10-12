@@ -76,11 +76,13 @@ pub enum Aid {
     DataGuard,
     /// Fichier montré après une modification : inutile de le relire.
     FileView,
-    /// Essais indépendants lancés un par réponse : à regrouper.
+    /// Essais lancés un par réponse, liste de tâches envoyée seule : à regrouper.
     BatchCalls,
     /// Compte rendu gardé quand la réponse à un contrôle n'en est qu'un accusé
     /// de réception.
     KeptAnswer,
+    /// Fichier relu sans avoir changé : une seule copie gardée, et dit au modèle.
+    RepeatedReads,
 }
 
 impl Aid {
@@ -116,6 +118,7 @@ impl Aid {
             Self::FileView => "CLAW_FILE_VIEW",
             Self::BatchCalls => "CLAW_BATCH_CALLS",
             Self::KeptAnswer => "CLAW_KEPT_ANSWER",
+            Self::RepeatedReads => "CLAW_REPEATED_READS",
         }
     }
 }
@@ -923,7 +926,7 @@ fn segment_is_check(segment: &str) -> bool {
     }
 }
 
-fn fingerprint(text: &str) -> u64 {
+pub(crate) fn fingerprint(text: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut hasher);
@@ -1433,12 +1436,148 @@ pub fn view_after_edit(tool_name: &str, tool_output: &str) -> Option<String> {
 
 // --- Essais regroupés -----------------------------------------------------------------
 
-/// Réponses d'un seul appel d'observation à la suite, avant la remarque.
+/// Réponses d'un seul appel d'observation à la suite, avant la remarque. Elle
+/// est redite toutes les `SINGLE_CALL_REPLIES` réponses tant que les appels
+/// isolés continuent, `MAX_BATCH_NOTES` fois au plus par tour.
 pub const SINGLE_CALL_REPLIES: u32 = 3;
+pub const MAX_BATCH_NOTES: u32 = 3;
 
-/// Remarque jointe au résultat du troisième appel isolé de suite : chaque
-/// réponse coûte une requête, les essais indépendants se regroupent.
-pub const BATCH_NOTE: &str = "[Claw] Your last 3 replies each made a single call. When the next things you need do not depend on each other (several files to read, several commands or inputs to try), ask for them together: parallel tool calls in one reply, or the commands chained in one `bash` call. Each reply costs one request of a limited daily quota.";
+/// Au-delà, une commande n'entre pas dans l'exemple de la remarque.
+const CHAINED_COMMAND_MAX_CHARS: usize = 200;
+
+/// Des commandes lancées une par réponse, réunies en un seul appel : l'exemple
+/// de la remarque. `None` si l'une d'elles ne s'y prête pas (plusieurs lignes,
+/// trop longue, finie par un opérateur). Un même `cd dossier &&` en tête de
+/// chacune n'est gardé qu'une fois.
+#[must_use]
+pub fn chained_commands(commands: &[&str]) -> Option<String> {
+    let commands = commands
+        .iter()
+        .map(|command| command.trim())
+        .collect::<Vec<_>>();
+    let chainable = |command: &&str| {
+        !command.is_empty()
+            && !command.contains(['\n', '`'])
+            && command.chars().count() <= CHAINED_COMMAND_MAX_CHARS
+            && !command.ends_with(['&', ';', '|', '\\'])
+    };
+    if commands.len() < 2 || !commands.iter().all(chainable) {
+        return None;
+    }
+    let prefix = commands[0]
+        .find(" && ")
+        .map(|at| &commands[0][..at + " && ".len()])
+        .filter(|prefix| {
+            prefix.starts_with("cd ")
+                && commands
+                    .iter()
+                    .all(|command| command.len() > prefix.len() && command.starts_with(prefix))
+        })
+        .unwrap_or_default();
+    let chained = commands
+        .iter()
+        .map(|command| &command[prefix.len()..])
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(format!("{prefix}{chained}"))
+}
+
+/// Remarque jointe au résultat d'un appel isolé quand `streak` réponses de
+/// suite n'ont fait qu'un appel d'observation : chaque réponse coûte une
+/// requête, ce qui est déjà prévu se demande ensemble. `recent` : outil et
+/// commande des derniers appels isolés qui étaient des commandes ; les
+/// `SINGLE_CALL_REPLIES` dernières servent d'exemple quand elles s'enchaînent.
+#[must_use]
+pub fn batch_note(streak: u32, recent: &[(String, String)]) -> String {
+    let last = recent
+        .len()
+        .checked_sub(SINGLE_CALL_REPLIES as usize)
+        .map(|from| &recent[from..]);
+    let example = last
+        .filter(|last| last.iter().all(|(tool, _)| *tool == last[0].0))
+        .and_then(|last| {
+            let commands = last
+                .iter()
+                .map(|(_, command)| command.as_str())
+                .collect::<Vec<_>>();
+            Some((last[0].0.as_str(), chained_commands(&commands)?))
+        });
+    let how = match &example {
+        Some((tool, chained)) => format!(
+            "several tool calls in one reply, or the commands chained in one call. For example, your last {SINGLE_CALL_REPLIES} commands fit in one `{tool}` call: `{chained}`"
+        ),
+        None => "several tool calls in one reply, or the commands chained in one `bash` call (`cmd1; cmd2; cmd3`).".to_string(),
+    };
+    if streak <= SINGLE_CALL_REPLIES {
+        format!(
+            "[Claw] Your last {streak} replies each made a single call, and each reply costs one request of a limited daily quota. When you already know the next things you need (several files to read, several commands or inputs to try), ask for them together and read all the results at once: {how}"
+        )
+    } else {
+        format!(
+            "[Claw] {streak} replies in a row have now made a single call each: {streak} requests of a limited daily quota, one observation at a time. Decide now what you still have to check and send it all in your next reply: {how}"
+        )
+    }
+}
+
+// --- Fichier relu sans avoir changé ------------------------------------------------------
+
+/// Remarques par tour, au plus, pour un fichier relu à l'identique.
+pub const MAX_REPEATED_READ_NOTES: u32 = 2;
+
+/// Fichier lu, et longueur du JSON qui ouvre ce résultat de `read_file` (des
+/// remarques ou un retour de hook peuvent le suivre).
+#[must_use]
+pub fn read_result(output: &str) -> Option<(String, usize)> {
+    let mut values = serde_json::Deserializer::from_str(output).into_iter::<Value>();
+    let result = values.next()?.ok()?;
+    let path = result.get("file")?.get("filePath")?.as_str()?.to_string();
+    Some((path, values.byte_offset()))
+}
+
+/// Ce qui reste, dans la conversation, d'une lecture que le modèle a refaite
+/// à l'identique : la copie la plus récente est la seule gardée.
+#[must_use]
+pub fn repeated_read_stub(path: &str) -> String {
+    format!(
+        "[Claw] (An earlier read of `{}` was here. You read it again later and got the same content: that later copy is the one kept.)",
+        shown_path(path)
+    )
+}
+
+/// Remarque jointe à une lecture identique à une lecture du même tour : elle
+/// n'a rien appris au modèle (et lui a coûté une requête si elle était seule
+/// dans sa réponse).
+#[must_use]
+pub fn repeated_read_note(path: &str) -> String {
+    format!(
+        "[Claw] `{}` has not changed since you read it earlier in this turn: reading it again brought nothing new. Work from the reads you already have, and edit a file directly from them (after each edit, Claw shows you the file as it is). Read a file again only when something other than your own edits may have changed it, or after an edit failed. Each reply costs one request of a limited daily quota.",
+        shown_path(path)
+    )
+}
+
+// --- Liste de tâches envoyée seule -------------------------------------------------------
+
+/// Remarques par tour, au plus, pour une liste de tâches envoyée seule.
+pub const MAX_TODO_ALONE_NOTES: u32 = 3;
+
+/// Remarque jointe au résultat de `TodoWrite` quand la réponse n'a fait que
+/// mettre la liste à jour : une requête entière pour une coche.
+pub const TODO_ALONE_NOTE: &str = "[Claw] This reply only updated the task list, and it cost a full request of a limited daily quota. From now on, send `TodoWrite` in the same reply as the next tool call of your work (the edit, the read or the command of the task you are starting), never alone.";
+
+/// La liste que ce résultat de `TodoWrite` enregistre garde des tâches à
+/// faire : du travail suit, la mise à jour pouvait partir avec lui.
+#[must_use]
+pub fn todos_left(output: &str) -> bool {
+    first_json(output)
+        .as_ref()
+        .and_then(|result| result.get("newTodos"))
+        .and_then(Value::as_array)
+        .is_some_and(|todos| {
+            todos
+                .iter()
+                .any(|todo| todo.get("status").and_then(Value::as_str) != Some("completed"))
+        })
+}
 
 // --- Python du Microsoft Store ---------------------------------------------------------
 
@@ -3374,6 +3513,91 @@ mod tests {
             "+nouveau fichier"
         ])));
         assert!(!super::removes_existing_lines("pas du JSON"));
+    }
+
+    #[test]
+    fn single_commands_are_shown_chained_in_one_call() {
+        use super::{batch_note, chained_commands};
+        assert_eq!(
+            chained_commands(&["python a.py", " python b.py ", "python c.py"]).as_deref(),
+            Some("python a.py; python b.py; python c.py")
+        );
+        // Le même `cd dossier &&` devant chacune : une fois suffit.
+        assert_eq!(
+            chained_commands(&["cd app && npm test", "cd app && npm run lint"]).as_deref(),
+            Some("cd app && npm test; npm run lint")
+        );
+        // Un autre dossier, ou un `&&` qui n'est pas un `cd` : commandes entières.
+        assert_eq!(
+            chained_commands(&["cd app && ls", "cd lib && ls"]).as_deref(),
+            Some("cd app && ls; cd lib && ls")
+        );
+        assert_eq!(
+            chained_commands(&["make && ./a", "make && ./b"]).as_deref(),
+            Some("make && ./a; make && ./b")
+        );
+        // Ce qui ne s'enchaîne pas : plusieurs lignes, arrière-plan, trop long, seule.
+        assert_eq!(
+            chained_commands(&["python - <<EOF\nprint(1)\nEOF", "ls"]),
+            None
+        );
+        assert_eq!(chained_commands(&["npm run dev &", "ls"]), None);
+        assert_eq!(chained_commands(&[&"x".repeat(201), "ls"]), None);
+        assert_eq!(chained_commands(&["ls"]), None);
+
+        let command = |tool: &str, text: &str| (tool.to_string(), text.to_string());
+        let recent = [
+            command("bash", "python a.py"),
+            command("bash", "python b.py"),
+            command("bash", "python c.py"),
+        ];
+        let first = batch_note(3, &recent);
+        assert!(first.starts_with("[Claw] Your last 3 replies each made a single call"));
+        assert!(first.ends_with("fit in one `bash` call: `python a.py; python b.py; python c.py`"));
+        // Redite : plus ferme, et elle compte les requêtes dépensées.
+        let again = batch_note(6, &recent);
+        assert!(again.starts_with("[Claw] 6 replies in a row have now made a single call each"));
+        assert!(again.contains("send it all in your next reply"));
+        // Sans trois commandes du même outil à la suite : pas d'exemple inventé.
+        let mixed = [
+            command("bash", "python a.py"),
+            command("PowerShell", "Get-ChildItem"),
+            command("bash", "python c.py"),
+        ];
+        assert!(batch_note(3, &mixed).ends_with("(`cmd1; cmd2; cmd3`)."));
+        assert!(batch_note(3, &recent[..2]).ends_with("(`cmd1; cmd2; cmd3`)."));
+    }
+
+    #[test]
+    fn a_read_result_names_its_file_and_where_its_json_ends() {
+        let json = r#"{"type":"text","file":{"filePath":"D:/projet/a.py","content":"x = 1\n","numLines":1,"startLine":1,"totalLines":1}}"#;
+        let noted = format!("{json}\n\n[Claw] une remarque");
+        assert_eq!(
+            super::read_result(&noted),
+            Some(("D:/projet/a.py".to_string(), json.len()))
+        );
+        // Une image, une erreur en texte : pas une lecture de texte.
+        assert_eq!(super::read_result(r#"{"type":"image"}"#), None);
+        assert_eq!(super::read_result("fichier introuvable"), None);
+    }
+
+    #[test]
+    fn a_task_list_with_open_tasks_has_work_left() {
+        let list = |statuses: &[&str]| {
+            let todos = statuses
+                .iter()
+                .map(|status| serde_json::json!({ "content": "x", "status": status }))
+                .collect::<Vec<_>>();
+            format!(
+                "{}\n\nRetour des hooks:\nok",
+                serde_json::json!({ "oldTodos": [], "newTodos": todos })
+            )
+        };
+        assert!(super::todos_left(&list(&["completed", "in_progress"])));
+        assert!(super::todos_left(&list(&["pending"])));
+        assert!(!super::todos_left(&list(&["completed", "completed"])));
+        assert!(!super::todos_left(&list(&[])));
+        assert!(!super::todos_left("liste illisible"));
     }
 
     #[test]

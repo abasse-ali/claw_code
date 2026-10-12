@@ -512,6 +512,7 @@ impl AcpServer {
             calls: Arc::clone(&session.calls),
         };
         runtime::interrupt::clear_interrupt();
+        session.runtime.autosave_to(&session.handle.path);
         let result = session
             .runtime
             .run_turn_with_images(text, images, Some(&mut prompter));

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -101,8 +101,21 @@ impl Session {
         }
     }
 
+    /// Écrite à côté puis renommée : une écriture interrompue (Claw arrêté,
+    /// coupure) ne laisse jamais une session à moitié écrite.
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), SessionError> {
-        fs::write(path, self.to_json().render())?;
+        let path = path.as_ref();
+        let contents = self.to_json().render();
+        let mut staged = path.as_os_str().to_owned();
+        staged.push(format!(".{}.tmp", std::process::id()));
+        let staged = PathBuf::from(staged);
+        if fs::write(&staged, &contents).is_ok() && fs::rename(&staged, path).is_ok() {
+            return Ok(());
+        }
+        // Renommage impossible (fichier tenu ouvert par un autre programme) :
+        // écriture directe, comme avant.
+        let _ = fs::remove_file(&staged);
+        fs::write(path, contents)?;
         Ok(())
     }
 
@@ -471,10 +484,16 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("runtime-session-{nanos}.json"));
+        let dir = std::env::temp_dir().join(format!("runtime-session-{nanos}"));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("session.json");
+        // Un enregistrement en remplace un autre, sans fichier laissé à côté.
+        Session::new().save_to_path(&path).expect("first save");
         session.save_to_path(&path).expect("session should save");
         let restored = Session::load_from_path(&path).expect("session should load");
-        fs::remove_file(&path).expect("temp file should be removable");
+        let left = fs::read_dir(&dir).expect("temp dir").count();
+        fs::remove_dir_all(&dir).expect("temp dir should be removable");
+        assert_eq!(left, 1);
 
         assert_eq!(restored, session);
         assert_eq!(restored.messages[2].role, MessageRole::Tool);

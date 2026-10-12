@@ -87,7 +87,11 @@ Scénario t4 (tâche longue, plusieurs modules), Claw au commit fcbbb34 :
 | Date | Scénario | Modèle | Étiquette | Score | Requêtes | Durée | Remarques |
 |---|---|---|---|---|---|---|---|
 | 12/10 07:00 | t4-bibliotheque | free = nemotron-3-ultra-550b | t4 | 12/12 | 31 | 379 s | liste de tâches tenue, tout est fait ; 7 requêtes pour la seule mise à jour de la liste (T1-14), 14 commandes une par requête (T1-15) |
-| 12/10 07:06 | t4-bibliotheque | cohere/north-mini-code | t4-north | 8/12 | inconnu | 1 500 s | arrêté par la limite de 25 minutes ; le livre n'est pas mis de côté au retour ; aucune trace : la session n'est enregistrée qu'en fin de tour (T1-16) |
+| 12/10 07:06 | t4-bibliotheque | cohere/north-mini-code | t4-north | 8/12 | 250 | 1 500 s | arrêté par la limite de 25 minutes ; le livre n'est pas mis de côté au retour ; plus aucun fichier modifié après la 6e minute, donc environ 200 requêtes sans effet (T1-17) ; aucune trace : la session n'est enregistrée qu'en fin de tour (T1-16) |
+| 12/10 08:02 | t4-bibliotheque | cohere/north-mini-code | t4b-north | 8/12 | 35 | 349 s | Claw avec T1-14 à T1-16 ; terminé normalement, la dérive du premier essai ne s'est pas reproduite ; relit quatre fichiers juste avant de les modifier (T1-17) ; prête le livre d'office au premier de la file au lieu de le mettre de côté, et ni son contrôle des exigences ni la relecture par un autre modèle ne le voient (T1-18) ; trois remarques de regroupement reçues, sans effet |
+
+La session de cet essai a pu être lue pendant qu'il tournait : elle s'écrit maintenant à
+chaque étape (T1-16).
 
 Comparaison avec la série propre : scores 34/36 contre 32/36 ; 74 requêtes contre 99 (t2 :
 10 contre 20 pour le plus puissant, 19 contre 36 pour le petit modèle). Le premier essai
@@ -267,7 +271,12 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   entre deux modifications. 7 requêtes sur 31.
 - Remède : quand une réponse ne fait que mettre la liste à jour, le résultat de `TodoWrite`
   dit de l'envoyer avec l'appel suivant, dans la même réponse.
-- État : à faire
+- État : corrigé (reprise du 12 octobre, 6 h 22, suite) : `lone_call_note` joint `TODO_ALONE_NOTE`
+  au résultat d'un `TodoWrite` envoyé seul quand la liste garde des tâches à faire
+  (`todos_left`), trois fois au plus par tour (aide `CLAW_BATCH_CALLS`) ; la consigne du
+  prompt et la description de l'outil le demandent d'avance. Le résultat gardé dans la session
+  ne répète plus l'ancienne et la nouvelle liste (`lean_todos` : nombre de tâches, faites, en
+  cours) : sept mises à jour répétaient 15 000 caractères à chaque requête suivante.
 
 ### T1-15 La remarque de regroupement arrive tard et une seule fois
 - Preuve : t4 (free), réponses 15 à 26 : douze commandes `python biblio.py ...` une par
@@ -277,7 +286,14 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
 - Remède : compter aussi les commandes au code de sortie non nul ; redire la remarque quand
   les appels isolés continuent (plus précise : enchaîner les commandes avec `;` dans un seul
   appel), trois fois au plus par tour.
-- État : à faire
+- État : corrigé (même reprise) : `lone_call_note` compte toute observation isolée (seul un
+  outil en erreur ou une réponse d'un autre genre remet le compteur à zéro) ; `batch_note` est
+  redite à la 6e et à la 9e réponse isolée (`MAX_BATCH_NOTES`), plus ferme, et montre les trois
+  dernières commandes du modèle réunies en un appel (`chained_commands` : `cd dossier &&`
+  commun écrit une fois, rien si une commande ne s'enchaîne pas).
+- Mesure (t4b-north) : les trois remarques sont arrivées aux réponses isolées 3, 6 et 9, avec
+  l'exemple tiré de ses commandes ; le petit modèle a continué une commande par réponse (onze
+  d'affilée). Sur lui, la remarque ne change rien. Effet sur le plus puissant : à mesurer.
 
 ### T1-16 Un tour interrompu ne laisse aucune trace : la session n'est enregistrée qu'à la fin
 - Preuve : t4 (north), arrêté après 25 minutes : le fichier de session fait 27 octets.
@@ -287,6 +303,63 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   fichiers, eux, ont été modifiés.
 - Remède : enregistrer la session après chaque étape (écriture dans un fichier temporaire
   puis renommage, pour ne jamais laisser un fichier à moitié écrit).
+- État : corrigé (même reprise) : `ConversationRuntime::autosave_to`, appelé avant chaque tour
+  par le terminal (trois modes), la page et ACP. La session est écrite avant chaque requête au
+  modèle, dès qu'une réponse demande des outils (les appels en cours y portent un résultat
+  « Claw was stopped while this call was running », pour que la session reste valide si Claw
+  s'arrête pendant leur exécution) et à la fin du tour, réussi ou non. `Session::save_to_path`
+  écrit à côté puis renomme. Vérifié de bout en bout sur `claw.exe` avec le faux modèle (arrêt
+  forcé pendant un `sleep 40` : trois messages enregistrés, aucun fichier temporaire laissé).
+
+### T1-17 Le petit modèle relit chaque fichier juste avant de le modifier
+- Preuve : t4b-north, messages 12, 16, 20 et 24 : `read_file` de `services.py`, `stockage.py`,
+  `biblio.py` et `test_services.py`, tous lus au message 1 et inchangés depuis (« Tout
+  d'abord, la vue du fichier »). Quatre requêtes sur les dix premières, et chaque fichier deux
+  fois dans le contexte.
+- Remède : quand une lecture rend exactement ce qu'une lecture encore présente dans la
+  conversation a rendu (même fichier, mêmes lignes, même contenu), ne garder que la plus
+  récente ; si les deux sont du même tour, le dire au modèle.
+- État : corrigé (reprise du 12 octobre, 6 h 22, suite) : aide `CLAW_REPEATED_READS`
+  (`repeated_read_note` dans `conversation.rs`, `read_result`, `repeated_read_stub`). Deux
+  remarques au plus par tour ; une relecture d'un tour à l'autre n'est pas reprochée (le
+  fichier avait pu changer), mais une seule copie reste. Effet à mesurer.
+
+### T1-18 Une exigence mal lue passe le contrôle des exigences et la relecture
+- Preuve : t4b-north, session `20261012-080214-t4-bibliotheque-t4b-north`. La demande dit
+  « Quand le livre est rendu, il est mis de côté pour le premier de la file : lui seul peut
+  alors l'emprunter ». Le modèle fait prêter le livre d'office au premier de la file (message
+  38 : « la logique s'attend à ce que après rendre L1, le livre soit attribué à Bilal »),
+  l'essaie ainsi (messages 36 à 45), et son contrôle des exigences (message 69) le confirme
+  avec la même lecture. La relecture par un autre modèle (une requête) n'a rien signalé.
+  Quatre points perdus sur douze, dont un pour une exigence implicite (réserver le livre qu'on
+  a déjà ; réserver un livre disponible est accepté aussi).
+- Défaut : celui qui a mal lu une phrase se relit avec la même lecture ; le relecteur reçoit
+  le diff et la réponse de l'agent, qui présentent cette lecture comme acquise, et rien ne
+  l'oblige à repartir des phrases de la demande. Quand il approuve, sa réponse n'est gardée
+  nulle part : on ne peut pas savoir ce qu'il a vu.
+- Remède : (1) la relecture demande au relecteur, avant de lire le diff, de traduire chaque
+  phrase de la demande en un comportement observable (une commande ou un appel, et son
+  résultat attendu), puis de dire où le code fait autre chose, même si c'est une variante
+  raisonnable ; (2) le contrôle des exigences demande la même chose à l'agent : citer la
+  phrase, dire ce que l'utilisateur observerait au mot près, l'essayer ; (3) garder la réponse
+  du relecteur dans un journal.
+- État : à faire
+
+### T1-19 Rien ne borne le nombre de requêtes d'un tour
+- Preuve : t4-north (07:06) : 250 requêtes en 25 minutes, plus aucun fichier modifié après
+  la 6e minute ; seul le délai du banc l'a arrêté. Pour l'agent principal, `max_iterations`
+  vaut `usize::MAX` ; le garde-fou (`StallGuard`) ne fait que des rappels (même appel et même
+  résultat trois fois ; 40 appels d'outils, une fois), et des commandes d'essai qui changent
+  l'état à chaque fois ne se répètent jamais à l'identique. Les relances du client de l'API,
+  elles, sont bornées (`BROKEN_STREAM_RETRIES`, `UPSTREAM_SWITCHES`) : ce sont bien des
+  réponses du modèle. Le second essai (t4b-north) s'est terminé en 34 requêtes : le cas n'est
+  pas reproduit, et le premier n'a pas laissé de trace (T1-16, corrigé depuis).
+- Défaut : un modèle qui tourne en rond peut dépenser en un seul tour le quota gratuit de la
+  journée (1 000 requêtes), sans que personne le voie.
+- Remède : un budget de requêtes par tour (réglage, 80 par défaut ; les tours réels de
+  l'utilisateur vont jusqu'à 35). Arrivé là, Claw demande au modèle de conclure (ce qui est
+  fait et vérifié, ce qui reste), n'exécute plus d'outil et rend la main ; l'utilisateur dit
+  « continue » pour poursuivre.
 - État : à faire
 
 ## Améliorations
@@ -306,11 +379,12 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre : (1) des scénarios plus durs (plusieurs fichiers, tâche longue, projet
-web comme ceux de l'utilisateur) et un troisième modèle gratuit, les trois scénarios actuels
-étant presque tous réussis ; (2) T1-11, les données réécrites par une commande ; (3) T1-04,
-les espaces insécables que les deux modèles oublient encore sur t3 ; (4) refaire chaque
-mesure deux ou trois fois avant de conclure. T1-13 et T1-12 sont faits (reprise de 6 h 22).
+Suite, dans l'ordre (mise à jour du 12 octobre, 8 h 30) : (1) T1-19, le budget de requêtes
+par tour ; (2) T1-18, la relecture qui repart des phrases de la demande ; (3) mesurer T1-14,
+T1-15 et T1-17 sur t4 avec les deux modèles ; (4) un scénario de projet web comme ceux de
+l'utilisateur et un troisième modèle gratuit ; (5) T1-11, les données réécrites par une
+commande ; (6) T1-04, les espaces insécables oubliées sur t3 ; (7) refaire chaque mesure deux
+ou trois fois avant de conclure. T1-12 à T1-17 sont faits.
 
 Mesure faite (tableau plus haut). Pour la refaire : `run.py <scénario> --label <nom>`, puis avec
 `--model cohere/north-mini-code:free`) et comparer scores et requêtes à la série propre.

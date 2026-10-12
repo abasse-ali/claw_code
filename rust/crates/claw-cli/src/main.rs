@@ -2094,6 +2094,7 @@ impl LiveCli {
         }
         // Échap interrompt, le texte tapé pendant le tour est conservé.
         let keys = turn_keys::TurnKeyListener::start();
+        self.runtime.autosave_to(&self.session.path);
         let result =
             self.runtime
                 .run_turn_with_images(text, images, Some(&mut permission_prompter));
@@ -2313,6 +2314,7 @@ impl LiveCli {
             "permission_mode": self.permission_mode.as_str(),
         }));
         let (text, images) = take_image_attachments(input);
+        runtime.autosave_to(&self.session.path);
         let result =
             runtime.run_turn_with_images(text, images, Some(&mut stream_json::StreamJsonPrompter));
         observer.flush();
@@ -2364,6 +2366,7 @@ impl LiveCli {
         )?;
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
         let (text, images) = take_image_attachments(input);
+        runtime.autosave_to(&self.session.path);
         let summary = runtime.run_turn_with_images(text, images, Some(&mut permission_prompter))?;
         self.runtime = runtime;
         self.persist_session()?;

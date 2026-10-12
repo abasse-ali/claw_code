@@ -23,6 +23,7 @@ pub fn lean_tool_output(tool_name: &str, output: &str) -> Option<String> {
         "edit_file" => lean_edit(&fields)?,
         "write_file" => lean_write(&fields)?,
         "bash" | "PowerShell" => lean_command(&fields)?,
+        "TodoWrite" => lean_todos(&fields)?,
         _ => return None,
     };
     let lean = format!(
@@ -83,6 +84,35 @@ fn lean_write(fields: &Map<String, Value>) -> Option<Map<String, Value>> {
         if let Some(value) = fields.get(key).filter(|value| !value.is_null()) {
             lean.insert(key.to_string(), value.clone());
         }
+    }
+    Some(lean)
+}
+
+/// Liste de tâches : le modèle vient de l'envoyer en entier (et l'ancienne
+/// avant elle). Il lui suffit de savoir qu'elle est enregistrée et où il en
+/// est. Dans un essai réel, sept mises à jour répétaient 15 000 caractères.
+fn lean_todos(fields: &Map<String, Value>) -> Option<Map<String, Value>> {
+    let todos = fields.get("newTodos")?.as_array()?;
+    let with_status = |status: &str| {
+        todos
+            .iter()
+            .filter(|todo| todo.get("status").and_then(Value::as_str) == Some(status))
+            .collect::<Vec<_>>()
+    };
+    let mut lean = Map::new();
+    lean.insert("saved".to_string(), json!(true));
+    lean.insert("tasks".to_string(), json!(todos.len()));
+    lean.insert(
+        "completed".to_string(),
+        json!(with_status("completed").len()),
+    );
+    let current = with_status("in_progress")
+        .iter()
+        .filter_map(|todo| todo.get("content").cloned())
+        .collect::<Vec<_>>();
+    lean.insert("inProgress".to_string(), Value::Array(current));
+    if fields.get("verificationNudgeNeeded") == Some(&json!(true)) {
+        lean.insert("verificationNudgeNeeded".to_string(), json!(true));
     }
     Some(lean)
 }
@@ -265,6 +295,28 @@ mod tests {
             json!({ "stdout": "ok", "stderr": "", "interrupted": true, "backgroundTaskId": "bash_1",
                 "sandboxStatus": { "enabled": true, "network_active": true } })
         );
+    }
+
+    #[test]
+    fn a_task_list_result_says_where_the_work_stands_not_the_list_again() {
+        let task = |content: &str, status: &str| json!({ "content": content, "activeForm": format!("{content} en cours"), "status": status });
+        let full = json!({
+            "oldTodos": [task("Lire le code", "in_progress"), task("Écrire le test", "pending"), task("Corriger", "pending")],
+            "newTodos": [task("Lire le code", "completed"), task("Écrire le test", "in_progress"), task("Corriger", "pending")],
+            "verificationNudgeNeeded": null
+        });
+        let output = format!(
+            "{}\n\n[Claw] This reply only updated the task list",
+            serde_json::to_string_pretty(&full).expect("json")
+        );
+        let lean = lean_tool_output("TodoWrite", &output).expect("résultat allégé");
+        assert_eq!(
+            parsed(&lean),
+            json!({ "saved": true, "tasks": 3, "completed": 1, "inProgress": ["Écrire le test"] })
+        );
+        assert!(lean.ends_with("\n\n[Claw] This reply only updated the task list"));
+        // Déjà allégé (session rouverte) : laissé tel quel.
+        assert_eq!(lean_tool_output("TodoWrite", &lean), None);
     }
 
     #[test]

@@ -496,7 +496,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "TodoWrite",
-            description: "Update the structured task list for the current session.",
+            description: "Update the structured task list for the current session. Send it in the same reply as the next tool call of your work, not alone: a reply that only updates the list costs a full request.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
