@@ -134,9 +134,11 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | 002c275 | Table des cas limites revue : faits vérifiés, mots-clés sans faux amis, quatorze genres nouveaux, résultat attendu de chaque essai, cas limites donnés au relecteur (T1-28) ; t6 passe de 10/12 à 12/12 (rejeu du contrôle et essai complet) |
 
-| (commit « T1-28, suite ») | Les essais d'une ligne partent ensemble (contrôle et guide) ; t6 refait à 12/12, t5 rejoué à 12/12 ; le petit modèle sur t6, arrêté, perd ses modifications par une commande (T1-29, ouvert) |
+| 866bc7e | Les essais d'une ligne partent ensemble (contrôle et guide) ; t6 refait à 12/12, t5 rejoué à 12/12 ; le petit modèle sur t6, arrêté, perd ses modifications par une commande (T1-29, ouvert) |
 
-État des tests après T1-28 : 657 tests Rust (le test de temps
+| (commit « T1-29 ») | Une commande qui supprime un fichier que le modèle avait modifié, ou le ramène à son état du début du tour, est signalée ; sa dernière version est gardée sous `.claw/kept/` (T1-29) |
+
+État des tests après T1-29 : 660 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
 il passe seul), analyse statique à zéro sous Windows et
 Linux, client 28 sur 28, extension VS Code 18 sur 18 (lancée à T1-16 ; rien de l'interface n'a
@@ -310,4 +312,6 @@ Hors lots :
   du contrôle partent groupés, ceux du guide pas encore : consigne ajoutée au guide), t5
   rejoué 12/12. Le petit modèle sur t6 a été arrêté à 81 requêtes pour garder une réserve :
   il avait perdu deux fois ses modifications en supprimant puis restaurant `conges.py` par des
-  commandes (T1-29, ouvert).
+  commandes (T1-29). Corrigé ensuite : Claw garde la dernière version d'un fichier que le
+  modèle avait modifié quand une commande le supprime ou le ramène en arrière, et le lui dit
+  avec la commande qui le remet en place.

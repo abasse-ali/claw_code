@@ -88,6 +88,9 @@ pub enum Aid {
     /// Ce qu'un ingénieur vérifie d'office pour le genre de fonctionnalité
     /// demandé : joint à la demande, puis rappelé au contrôle des exigences.
     EdgeCases,
+    /// Fichier que le modèle avait modifié, supprimé ou ramené à son état du
+    /// début du tour par une commande : sa dernière version est gardée.
+    LostEdits,
 }
 
 impl Aid {
@@ -125,6 +128,7 @@ impl Aid {
             Self::KeptAnswer => "CLAW_KEPT_ANSWER",
             Self::RepeatedReads => "CLAW_REPEATED_READS",
             Self::EdgeCases => "CLAW_EDGE_CASES",
+            Self::LostEdits => "CLAW_LOST_EDITS",
         }
     }
 }
@@ -1590,6 +1594,39 @@ pub fn shown_path(path: &str) -> String {
         })
         .unwrap_or_else(|| std::path::PathBuf::from(path));
     relative.to_string_lossy().replace('\\', "/")
+}
+
+/// Où Claw garde la dernière version d'un fichier que le modèle avait modifié
+/// quand une commande l'a supprimé ou ramené en arrière : sous `.claw/kept/`
+/// du projet, ou dans le dossier temporaire pour un fichier hors du projet.
+#[must_use]
+pub fn kept_copy_path(cwd: &Path, path: &Path) -> std::path::PathBuf {
+    match path.strip_prefix(cwd) {
+        Ok(inside) => cwd.join(".claw").join("kept").join(inside),
+        Err(_) => std::env::temp_dir()
+            .join("claw-kept")
+            .join(path.file_name().unwrap_or(path.as_os_str())),
+    }
+}
+
+/// Remarque au modèle : une commande a supprimé (`deleted`) un fichier qu'il
+/// avait modifié pendant le tour, ou l'a ramené à son état du début du tour ;
+/// `kept` : la copie de sa dernière version, si Claw a pu la garder.
+#[must_use]
+pub fn lost_edits_note(shown: &str, kept: Option<&str>, deleted: bool) -> String {
+    let what = if deleted {
+        format!("This command deleted `{shown}`, a file you had changed in this turn: your changes to it are gone from the project.")
+    } else {
+        format!("After this command, `{shown}` is back to its state from before your changes in this turn (as `git checkout`, `git restore` or `git stash` do): your changes to it are gone.")
+    };
+    match kept {
+        Some(kept) => format!(
+            "[Claw] {what} If that was not intended, Claw kept your last version: `cp \"{kept}\" \"{shown}\"` restores it in one command, while `git checkout` would bring back the version from before your changes. Then change the file with your editing tools, not by rewriting it through the shell."
+        ),
+        None => format!(
+            "[Claw] {what} If that was not intended, write your last version back with your editing tools; `git checkout` would bring back the version from before your changes."
+        ),
+    }
 }
 
 /// Marque qui ouvre les vues de ce fichier (pour retirer les plus anciennes).
@@ -3208,6 +3245,27 @@ mod guide_tests {
             "<<<\ndans la langue traduite, c'est que le français ; et une page pour l'URL\n>>>"
         ));
         assert!(prompt.contains("not answering permission requests"));
+    }
+
+    #[test]
+    fn a_lost_change_is_named_with_the_command_that_restores_it() {
+        let cwd = std::path::Path::new("projet");
+        assert_eq!(
+            super::kept_copy_path(cwd, &cwd.join("equipe").join("calendrier.py")),
+            cwd.join(".claw")
+                .join("kept")
+                .join("equipe")
+                .join("calendrier.py")
+        );
+        // Hors du projet : dans le dossier temporaire.
+        let outside = std::path::Path::new("ailleurs").join("x.py");
+        assert!(super::kept_copy_path(cwd, &outside).starts_with(std::env::temp_dir()));
+        let deleted = super::lost_edits_note("conges.py", Some(".claw/kept/conges.py"), true);
+        assert!(deleted.starts_with("[Claw] This command deleted `conges.py`"));
+        assert!(deleted.contains("`cp \".claw/kept/conges.py\" \"conges.py\"`"));
+        let reverted = super::lost_edits_note("conges.py", None, false);
+        assert!(reverted.contains("is back to its state from before your changes"));
+        assert!(!reverted.contains("cp "));
     }
 
     #[test]

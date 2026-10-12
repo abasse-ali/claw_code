@@ -14,6 +14,9 @@
 // Un message de l'utilisateur peut aussi piloter le modèle, le temps de son tour :
 //   [mock:write chemin=contenu]         demande write_file
 //   [mock:tool Nom={"argument": 1}]     appelle cet outil, puis cite son résultat
+//   [mock:steps [{"name": "bash", "arguments": {...}}, ...]]
+//                                       appelle ces outils l'un après l'autre, un par
+//                                       réponse, dans le même tour (en fin de ligne)
 //   [mock:questions]                    écrit ses questions en texte, puis les pose
 //                                       avec AskUserQuestion quand Claw le lui demande
 //
@@ -74,8 +77,13 @@ function messageText(message) {
 function lastDirective(messages) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (messages[index].role !== "user") continue;
-    const match = messageText(messages[index]).match(/\[mock:(write|tool) ([^\n]+)\]/);
+    const match = messageText(messages[index]).match(/\[mock:(write|tool|steps) ([^\n]+)\]/);
     if (!match) continue;
+    if (match[1] === "steps") {
+      const steps = JSON.parse(match[2]);
+      const done = messages.slice(index + 1).filter((later) => later.role === "tool").length;
+      return { kind: "steps", steps, done, answered: done >= steps.length };
+    }
     const separator = match[2].indexOf("=");
     return {
       kind: match[1],
@@ -94,6 +102,16 @@ const failedOnce = new Set();
 const rateLimited = new Map();
 
 function directiveReply(directive, messages) {
+  if (directive.kind === "steps") {
+    if (!directive.answered) {
+      directiveCalls += 1;
+      const step = directive.steps[directive.done];
+      const id = `call_mock_directive_${directiveCalls}`;
+      return { toolCall: { id, name: step.name, arguments: JSON.stringify(step.arguments || {}) } };
+    }
+    const last = [...messages].reverse().find((message) => message.role === "tool");
+    return { text: `Étapes faites. Dernier résultat : ${messageText(last).slice(0, 400)}` };
+  }
   if (!directive.answered) {
     directiveCalls += 1;
     const id = `call_mock_directive_${directiveCalls}`;

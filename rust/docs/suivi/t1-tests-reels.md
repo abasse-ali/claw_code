@@ -640,7 +640,18 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   avec ses outils pendant le tour. Après une commande, si l'un d'eux a disparu ou est revenu à
   son état du début du tour, Claw le dit au modèle et lui donne de quoi le restaurer (une copie
   gardée sous `.claw/`), sans le faire à sa place : une suppression peut être voulue.
-- État : ouvert.
+- État : corrigé (reprise du 12 octobre, 21 h 22, suite) : aide `CLAW_LOST_EDITS`. Avant la
+  première modification d'un fichier par les outils du modèle, Claw relève son contenu ; après
+  chaque modification, la version écrite. Après une commande (`bash`, `PowerShell`), un de ces
+  fichiers supprimé, ou revenu au contenu du début du tour aux fins de ligne près (Git peut
+  les changer en restaurant), est signalé au modèle avec la commande `cp` qui remet sa
+  dernière version, gardée sous `.claw/kept/` (dans le dossier temporaire pour un fichier
+  hors du projet), et à l'utilisateur. Un fichier changé autrement (formateur, `sed -i`)
+  devient la version de référence ; un fichier créé puis effacé dans le tour ne compte pas.
+  Testé avec un faux modèle et de vrais fichiers, puis de bout en bout avec le vrai binaire
+  et ses vrais outils (le faux modèle sait maintenant enchaîner plusieurs appels dans un tour,
+  `[mock:steps ...]`) : `rm` puis `git checkout` sont vus, la copie gardée est la dernière
+  version du modèle. Pas encore vu dans un essai réel.
 
 ## Améliorations
 
@@ -659,14 +670,13 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 12 octobre, 23 h 30) : (1) T1-29, la garde des
-fichiers que le modèle est en train de modifier ; puis t6 avec laguna et de nouveau avec le
-petit modèle, après la remise à zéro du quota gratuit (2 h) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
+Suite, dans l'ordre (mise à jour du 13 octobre, 0 h) : (1) après la remise à zéro du
+quota gratuit (2 h) : t6 avec laguna, et de nouveau avec le petit modèle (T1-29 fait) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
 sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par
 une commande ; (5) T1-04, les espaces insécables oubliées sur t3 ; (6) refaire chaque mesure
-deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-28 sont faits, T1-18 en
+deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-29 sont faits, T1-18 en
 partie. Le troisième modèle gratuit (laguna) fait 12/12 sur t4
 et t5 avec le moins de requêtes (16 et 26), mais son fournisseur le limite souvent.
 

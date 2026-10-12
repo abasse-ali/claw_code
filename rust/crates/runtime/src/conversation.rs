@@ -373,6 +373,12 @@ struct TurnAids {
     command_changes: Vec<String>,
     /// Fichiers de données dont des lignes ont été réécrites, déjà signalés.
     guarded_data: std::collections::BTreeSet<String>,
+    /// Contenu des fichiers au début du tour (`None` : absents), relevé avant
+    /// leur première modification par les outils du modèle.
+    turn_start_files: std::collections::BTreeMap<std::path::PathBuf, Option<String>>,
+    /// Dernière version écrite par les outils du modèle : une commande qui la
+    /// supprime ou la ramène en arrière lui fait perdre son travail.
+    edited_files: std::collections::BTreeMap<std::path::PathBuf, String>,
     /// Fichiers de données du dépôt au début du tour, pour voir ce qu'une
     /// commande du modèle en réécrit.
     data_snapshot: Option<harness::DataSnapshot>,
@@ -510,6 +516,42 @@ fn lean_stored_results(session: &mut Session) {
             lean_result(&tool_name, message);
         }
     }
+}
+
+/// Contenu d'un fichier avant sa première modification du tour par les outils
+/// du modèle (garde des modifications perdues).
+fn remember_turn_start(tool_name: &str, input: &str, aids: &mut TurnAids) {
+    if !matches!(tool_name, "edit_file" | "write_file") || !harness::enabled(Aid::LostEdits) {
+        return;
+    }
+    if let Some(path) = edited_path(input) {
+        aids.turn_start_files
+            .entry(path)
+            .or_insert_with_key(|path| std::fs::read_to_string(path).ok());
+    }
+}
+
+/// Chemin absolu, sans `.` ni `..`, du fichier que modifie un appel
+/// `edit_file` ou `write_file`.
+fn edited_path(input: &str) -> Option<std::path::PathBuf> {
+    let path = json_field(input, "path")?;
+    let joined = std::env::current_dir().ok()?.join(path);
+    let mut clean = std::path::PathBuf::new();
+    for part in joined.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                clean.pop();
+            }
+            other => clean.push(other),
+        }
+    }
+    Some(clean)
+}
+
+/// Même texte, aux fins de ligne près (Git peut les changer en restaurant).
+fn same_text(left: &str, right: &str) -> bool {
+    left.lines().eq(right.lines())
 }
 
 /// Remarque pour une réponse qui n'a fait qu'un appel, chaque réponse étant
@@ -1487,6 +1529,7 @@ where
                     tool_results.push(message);
                     continue;
                 }
+                remember_turn_start(&tool_name, &input, &mut aids);
                 let (mut result_message, refused) = self.execute_tool_call(
                     tool_use_id,
                     tool_name.clone(),
@@ -1728,6 +1771,9 @@ where
             // Une commande ou un autre outil a pu changer des fichiers.
             self.drop_stale_file_views();
         }
+        if matches!(tool_name, "bash" | "PowerShell") {
+            self.edits_lost_by_command(aids, &mut notes);
+        }
         if matches!(tool_name, "bash" | "PowerShell") && !is_error {
             self.data_rewritten_by_command(input, aids, &mut notes);
         }
@@ -1784,6 +1830,63 @@ where
         }
     }
 
+    /// Une commande a supprimé un fichier que le modèle avait modifié pendant le
+    /// tour, ou l'a ramené à son état du début du tour : ses modifications sont
+    /// perdues. Essai réel t6 avec le petit modèle : `sed ... && rm conges.py`,
+    /// puis `git checkout conges.py`, deux fois, et tout son travail à refaire.
+    /// Claw garde la dernière version et le dit, sans la remettre à sa place
+    /// (une suppression peut être voulue).
+    fn edits_lost_by_command(&mut self, aids: &mut TurnAids, notes: &mut Vec<String>) {
+        if aids.edited_files.is_empty() {
+            return;
+        }
+        let Ok(cwd) = std::env::current_dir() else {
+            return;
+        };
+        let mut lost = Vec::new();
+        for (path, last) in &mut aids.edited_files {
+            let start = aids.turn_start_files.get(path).cloned().flatten();
+            match std::fs::read_to_string(path) {
+                // Illisible mais présent, ou créé pendant le tour puis retiré
+                // (un fichier de travail) : rien à dire.
+                Err(_) if path.exists() || start.is_none() => {}
+                Err(_) => lost.push((path.clone(), last.clone(), true)),
+                Ok(now) if same_text(&now, last) => {}
+                Ok(now) if start.as_deref().is_some_and(|start| same_text(&now, start)) => {
+                    lost.push((path.clone(), last.clone(), false));
+                }
+                // Changé autrement (formateur, `sed -i`) : cette version compte.
+                Ok(now) => *last = now,
+            }
+        }
+        for (path, last, deleted) in lost {
+            aids.edited_files.remove(&path);
+            let kept = harness::kept_copy_path(&cwd, &path);
+            let saved = kept
+                .parent()
+                .is_some_and(|folder| std::fs::create_dir_all(folder).is_ok())
+                && std::fs::write(&kept, &last).is_ok();
+            let shown = harness::shown_path(&path.to_string_lossy());
+            let kept_shown = saved.then(|| harness::shown_path(&kept.to_string_lossy()));
+            let event = if deleted {
+                format!("a supprimé {shown}, que le modèle avait modifié pendant ce tour")
+            } else {
+                format!("a ramené {shown} à son état du début du tour, effaçant les modifications du modèle")
+            };
+            let copy = kept_shown.as_deref().map_or_else(
+                || "Claw n'a pas pu en garder une copie".to_string(),
+                |kept| format!("sa dernière version est gardée dans {kept}"),
+            );
+            self.api_client
+                .notify(&format!("Attention : une commande {event} ; {copy}"));
+            notes.push(harness::lost_edits_note(
+                &shown,
+                kept_shown.as_deref(),
+                deleted,
+            ));
+        }
+    }
+
     /// Une commande du modèle a réécrit des lignes d'un fichier de données qui
     /// existait au début du tour (essai réel t3 : le CSV « réparé » de mémoire) :
     /// même garde que pour `edit_file`, une fois par fichier.
@@ -1822,6 +1925,14 @@ where
         aids: &mut TurnAids,
         notes: &mut Vec<String>,
     ) {
+        // La version que le modèle vient d'écrire : une commande peut la perdre.
+        if harness::enabled(Aid::LostEdits) {
+            if let Some(path) = edited_path(input) {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    aids.edited_files.insert(path, text);
+                }
+            }
+        }
         aids.dirty = true;
         aids.editor_dirty = true;
         aids.workflow_dirty = true;
@@ -5819,6 +5930,129 @@ mod tests {
         assert!(observed.requests[1].contains("fix the code that reads the file"));
         // Les lignes d'origine sont citées, pour une remise en place exacte.
         assert!(observed.requests[1].contains("2026-09-02;Paris;12,5"));
+    }
+
+    /// Runtime dont `write_file` écrit vraiment `après` dans le fichier, et dont
+    /// `bash` supprime le fichier (`rm`) ou le remet comme avant (`checkout`).
+    fn file_runtime(
+        path: &std::path::Path,
+        steps: Vec<Vec<AssistantEvent>>,
+    ) -> (
+        ConversationRuntime<StepsApiClient, StaticToolExecutor>,
+        std::rc::Rc<std::cell::RefCell<Observed>>,
+    ) {
+        let observed = std::rc::Rc::new(std::cell::RefCell::new(Observed::default()));
+        let (written, target) = (path.to_path_buf(), path.to_path_buf());
+        let output = serde_json::json!({ "filePath": path.to_string_lossy() }).to_string();
+        let executor = StaticToolExecutor::new()
+            .register("write_file", move |_| {
+                std::fs::write(&written, "après\n").expect("écrit");
+                Ok(output.clone())
+            })
+            .register("bash", move |input| {
+                if input.contains("rm ") {
+                    let _ = std::fs::remove_file(&target);
+                } else if input.contains("checkout") {
+                    std::fs::write(&target, "avant\r\n").expect("remis");
+                } else if input.contains("black") {
+                    std::fs::write(&target, "après  \n").expect("formaté");
+                }
+                Ok(PASSING.to_string())
+            });
+        let runtime = ConversationRuntime::new(
+            Session::new(),
+            StepsApiClient {
+                steps: steps.into(),
+                observed: std::rc::Rc::clone(&observed),
+                advisor: std::collections::VecDeque::new(),
+                escalation: None,
+            },
+            executor,
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["système".to_string()],
+        )
+        .with_verify(crate::harness::VerifySetting::Commands(vec![
+            "verifier".to_string()
+        ]));
+        (runtime, observed)
+    }
+
+    fn scratch_file(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "claw-perdu-{name}-{}.py",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ))
+    }
+
+    #[test]
+    fn a_command_that_loses_the_agent_s_changes_is_pointed_out() {
+        // Essai réel t6 avec le petit modèle : `sed ... && rm conges.py`, puis
+        // `git checkout conges.py` ; ses modifications perdues, deux fois.
+        let path = scratch_file("garde");
+        std::fs::write(&path, "avant\n").expect("fichier");
+        let write =
+            serde_json::json!({ "path": path.to_string_lossy(), "content": "après" }).to_string();
+        let (mut runtime, observed) = file_runtime(
+            &path,
+            vec![
+                tool_step("write_file", &write),
+                tool_step("bash", r#"{"command":"black x.py"}"#),
+                tool_step("bash", r#"{"command":"sed -n 1p x.py > y.py && rm x.py"}"#),
+                tool_step("write_file", &write),
+                tool_step("bash", r#"{"command":"git checkout x.py"}"#),
+                text_step("Fait."),
+            ],
+        );
+        runtime.run_turn("modifie le fichier", None).expect("tour");
+        let observed = observed.borrow();
+        // Un formateur change le fichier : rien à dire.
+        assert!(!observed.requests[2].contains("[Claw] This command deleted"));
+        assert!(!observed.requests[2].contains("is back to its state"));
+        // Supprimé : la dernière version (celle du formateur) est gardée.
+        assert!(observed.requests[3].contains("[Claw] This command deleted `"));
+        let kept =
+            crate::harness::kept_copy_path(&std::env::current_dir().expect("dossier"), &path);
+        assert!(observed.requests[3].contains(&crate::harness::shown_path(&kept.to_string_lossy())));
+        assert!(observed.requests[3].contains("restores it in one command"));
+        // Ramené à son état du début du tour, fins de ligne changées comprises.
+        assert!(observed.requests[5].contains("is back to its state from before your changes"));
+        assert_eq!(std::fs::read_to_string(&kept).expect("copie"), "après\n");
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.starts_with("Attention : une commande a supprimé ")));
+        assert!(observed.notices.iter().any(|notice| notice
+            .starts_with("Attention : une commande a ramené ")
+            && notice.contains(
+                " à son état du début du tour, effaçant les modifications du modèle ; "
+            )));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&kept);
+    }
+
+    #[test]
+    fn a_file_created_and_removed_in_the_same_turn_is_not_reported() {
+        // Un script de travail écrit puis effacé par le modèle : voulu.
+        let path = scratch_file("travail");
+        let write =
+            serde_json::json!({ "path": path.to_string_lossy(), "content": "après" }).to_string();
+        let (mut runtime, observed) = file_runtime(
+            &path,
+            vec![
+                tool_step("write_file", &write),
+                tool_step("bash", r#"{"command":"rm x.py"}"#),
+                text_step("Fait."),
+            ],
+        );
+        runtime.run_turn("essaie un script", None).expect("tour");
+        let observed = observed.borrow();
+        assert!(!observed.requests[2].contains("[Claw] This command deleted"));
+        assert!(!observed
+            .notices
+            .iter()
+            .any(|notice| notice.starts_with("Attention : une commande a supprimé")));
     }
 
     #[test]
