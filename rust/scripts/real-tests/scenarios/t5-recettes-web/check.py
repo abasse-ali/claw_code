@@ -122,15 +122,16 @@ try:
     )
     statut, rien = lire(base, "/api/recettes?q=chocolat")
     check("aucune correspondance : liste vide, pas une erreur", existe and statut == 200 and rien == [], f"{statut} {rien}"[:300])
-    statut, pates = lire(base, "/api/recettes?q=pate")
+    # Sans accent dans le mot cherché : ce point ne dépend pas du précédent.
+    statut, lait = lire(base, "/api/recettes?q=lait")
     entieres = (
-        isinstance(pates, list)
-        and all(isinstance(recette, dict) and {"id", "nom", "ingredients"} <= set(recette) for recette in pates)
+        isinstance(lait, list)
+        and all(isinstance(recette, dict) and {"id", "nom", "ingredients"} <= set(recette) for recette in lait)
     )
     check(
         "résultats triés par nom et entiers (id, nom, ingrédients)",
-        existe and entieres and noms(pates) == ["Pâtes à la carbonara", "Quiche lorraine", "Tarte aux pommes"],
-        f"{statut} {pates}"[:300],
+        existe and entieres and noms(lait) == ["Clafoutis aux cerises", "Gratin dauphinois", "Quiche lorraine"],
+        f"{statut} {lait}"[:300],
     )
     statut, toutes = lire(base, "/api/recettes")
     statut2, une = lire(base, "/api/recettes/r3")

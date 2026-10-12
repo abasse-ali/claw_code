@@ -114,9 +114,11 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 | a138b69, 83fb196 | Campagne T1 : scénario t4 (tâche longue sur plusieurs modules), essais, constats T1-14 à T1-16 |
 | 93d40ae | Session enregistrée à chaque étape d'un tour, écriture atomique (T1-16) ; liste de tâches envoyée seule signalée et son résultat allégé (T1-14) ; remarque de regroupement plus tôt, redite, avec l'exemple des commandes du modèle (T1-15) ; fichier relu à l'identique gardé une fois et dit (T1-17) ; constats T1-18 et T1-19 |
 
-| (commit « T1-18 à T1-21 ») | Budget de requêtes par tour (T1-19) ; relecture qui aboutit sur un vrai diff : place, temps, raisonnement plafonné, seconde demande, échec expliqué (T1-20) ; relecture qui repart des phrases de la demande et règle de lecture dans le contrôle des exigences (T1-18, en partie) ; notices dans la sortie JSON (T1-21) ; `claw review-replay` |
+| 806bf81 | Budget de requêtes par tour (T1-19) ; relecture qui aboutit sur un vrai diff : place, temps, raisonnement plafonné, seconde demande, échec expliqué (T1-20) ; relecture qui repart des phrases de la demande et règle de lecture dans le contrôle des exigences (T1-18, en partie) ; notices dans la sortie JSON (T1-21) ; `claw review-replay` |
 
-État des tests après T1-21 : 645 tests Rust, analyse statique à zéro sous Windows et
+| (commit « T1-22 à T1-24 ») | Mesures de t4d (12/12, la relecture trouve un vrai défaut) et rejeux sur t4c ; vérification automatique qui trouve les tests pytest sans réglage (T1-22) ; second relecteur après une approbation sans analyse, verdict lu sans perdre les problèmes (T1-23) ; cas limites par genre de fonctionnalité dans le contrôle des exigences (T1-24 : 9/12 devient 12/12 au rejeu de t5) ; `checklist_replay.py`, `claw checklist-note` ; premier essai du scénario web t5 |
+
+État des tests après T1-24 : 647 tests Rust, analyse statique à zéro sous Windows et
 Linux, client 28 sur 28, extension VS Code 18 sur 18 (lancée à T1-16 ; rien de l'interface n'a
 changé depuis).
 
@@ -252,3 +254,14 @@ Hors lots :
   pour le premier de la file : lui seul peut alors l'emprunter » comme un prêt d'office : la
   règle ajoutée au contrôle des exigences (une action laissée à une personne n'est pas faite
   automatiquement) reste à mesurer sur un essai réel (T1-18).
+- Suite de la reprise de 11 h 22 : t4d fait 12/12, et la relecture, qui aboutit maintenant,
+  y trouve un vrai défaut, corrigé avec un test. Un outil rejoue le contrôle des exigences au
+  point exact où il était arrivé dans une session réelle (une à deux requêtes) : sur t4c, la
+  règle de lecture ne change rien, le modèle traduit bien la phrase puis affirme que son
+  prêt d'office la respecte. Ce qui trouve de vrais défauts, c'est un relecteur qui fait les
+  deux étapes demandées ; une approbation nue fait donc consulter un second relecteur
+  (T1-23). Corrigé aussi : la vérification automatique ne voyait pas les tests pytest sans
+  réglage (T1-22). Premier essai du scénario web t5 : 9/12, le modèle oublie les accents, le
+  `+` de l'URL et une recherche faite d'espaces. Claw rappelle maintenant, dans le contrôle des
+  exigences, ce qu'un ingénieur expérimenté vérifie d'office pour le genre de fonctionnalité
+  demandé (T1-24) : rejoué au même point, le même modèle passe de 9/12 à 12/12.

@@ -296,6 +296,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         CliAction::Credits => println!("{}", credits::report(true)),
         CliAction::ReviewReplay { model, raw, files } => review_replay(model, raw, &files)?,
+        CliAction::ChecklistNote { request } => println!(
+            "{}",
+            runtime::harness::checklist_prompt(fs::read_to_string(request)?.trim(), None, false)
+        ),
         CliAction::Doctor { model } => println!(
             "{}",
             doctor::report(&model.unwrap_or_else(default_model), &version_summary())
@@ -417,6 +421,11 @@ enum CliAction {
         model: Option<String>,
         raw: bool,
         files: Vec<PathBuf>,
+    },
+    /// `claw checklist-note DEMANDE` (banc d'essais réels) : le contrôle des
+    /// exigences que Claw enverrait pour cette demande, sans requête.
+    ChecklistNote {
+        request: PathBuf,
     },
     Serve {
         host: String,
@@ -684,6 +693,12 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             model,
         }),
         "credits" | "solde" => Ok(CliAction::Credits),
+        "checklist-note" => match &rest[1..] {
+            [request] => Ok(CliAction::ChecklistNote {
+                request: PathBuf::from(request),
+            }),
+            _ => Err("usage : claw checklist-note FICHIER_DE_LA_DEMANDE".to_string()),
+        },
         "review-replay" => {
             let raw = rest.get(1).map(String::as_str) == Some("--raw");
             let files: Vec<PathBuf> = rest[1 + usize::from(raw)..]
@@ -5706,6 +5721,46 @@ impl DefaultRuntimeClient {
         self
     }
 
+    /// Avis du premier de ces modèles qui répond (relecture, diagnostic).
+    fn consult_models(
+        &mut self,
+        purpose: runtime::ConsultPurpose,
+        system: &str,
+        prompt: &str,
+        models: &[String],
+    ) -> Option<runtime::Consultation> {
+        if models.is_empty() {
+            return None;
+        }
+        if self.emit_output {
+            live::show(match purpose {
+                runtime::ConsultPurpose::Review => "Relecture par un autre modèle…",
+                runtime::ConsultPurpose::Unblock => "Diagnostic par un autre modèle…",
+            });
+        }
+        // La relecture clôt le tour : elle a le temps et la place de finir.
+        let opinion = match purpose {
+            runtime::ConsultPurpose::Review => tools::advisors::ask_within(
+                models,
+                system,
+                prompt,
+                tools::advisors::REVIEW_MAX_TOKENS,
+                tools::advisors::Patience::REVIEW,
+            ),
+            runtime::ConsultPurpose::Unblock => tools::advisors::ask(models, system, prompt, 3_000),
+        };
+        match opinion {
+            Ok(opinion) => Some(runtime::Consultation {
+                model: opinion.model,
+                text: opinion.text,
+            }),
+            Err(error) => {
+                self.notify(&format!("Aucun autre modèle n'a répondu ({error})"));
+                None
+            }
+        }
+    }
+
     /// Modèles proposés à la place de `current` : le gratuit le plus puissant
     /// d'abord, puis les secours configurés.
     fn model_suggestions(&self, current: &str) -> Vec<String> {
@@ -5946,38 +6001,21 @@ impl ApiClient for DefaultRuntimeClient {
         prompt: &str,
     ) -> Option<runtime::Consultation> {
         let models = tools::advisors::configured_models();
-        if models.is_empty() {
-            return None;
-        }
-        if self.emit_output {
-            live::show(match purpose {
-                runtime::ConsultPurpose::Review => "Relecture par un autre modèle…",
-                runtime::ConsultPurpose::Unblock => "Diagnostic par un autre modèle…",
-            });
-        }
-        // La relecture clôt le tour : elle a le temps et la place de finir.
-        let opinion = match purpose {
-            runtime::ConsultPurpose::Review => tools::advisors::ask_within(
-                &models,
-                system,
-                prompt,
-                tools::advisors::REVIEW_MAX_TOKENS,
-                tools::advisors::Patience::REVIEW,
-            ),
-            runtime::ConsultPurpose::Unblock => {
-                tools::advisors::ask(&models, system, prompt, 3_000)
-            }
-        };
-        match opinion {
-            Ok(opinion) => Some(runtime::Consultation {
-                model: opinion.model,
-                text: opinion.text,
-            }),
-            Err(error) => {
-                self.notify(&format!("Aucun autre modèle n'a répondu ({error})"));
-                None
-            }
-        }
+        self.consult_models(purpose, system, prompt, &models)
+    }
+
+    fn consult_again(
+        &mut self,
+        purpose: runtime::ConsultPurpose,
+        system: &str,
+        prompt: &str,
+        excluded: &str,
+    ) -> Option<runtime::Consultation> {
+        let models = tools::advisors::configured_models()
+            .into_iter()
+            .filter(|model| model != excluded)
+            .collect::<Vec<_>>();
+        self.consult_models(purpose, system, prompt, &models)
     }
 
     fn escalate(&mut self) -> Option<String> {

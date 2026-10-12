@@ -90,6 +90,32 @@ Scénario t4 (tâche longue, plusieurs modules), Claw au commit fcbbb34 :
 | 12/10 07:06 | t4-bibliotheque | cohere/north-mini-code | t4-north | 8/12 | 250 | 1 500 s | arrêté par la limite de 25 minutes ; le livre n'est pas mis de côté au retour ; plus aucun fichier modifié après la 6e minute, donc environ 200 requêtes sans effet (T1-17) ; aucune trace : la session n'est enregistrée qu'en fin de tour (T1-16) |
 | 12/10 08:02 | t4-bibliotheque | cohere/north-mini-code | t4b-north | 8/12 | 35 | 349 s | Claw avec T1-14 à T1-16 ; terminé normalement, la dérive du premier essai ne s'est pas reproduite ; relit quatre fichiers juste avant de les modifier (T1-17) ; prête le livre d'office au premier de la file au lieu de le mettre de côté, et son contrôle des exigences ne le voit pas (T1-18) ; la relecture par un autre modèle n'a vraisemblablement pas abouti (T1-20) ; trois remarques de regroupement reçues, sans effet |
 | 12/10 08:28 | t4-bibliotheque | free = nemotron-3-ultra-550b | t4c | 9/12 | 30 | 455 s | même Claw ; une seule mise à jour de la liste envoyée seule (contre sept) : après la remarque, les cinq suivantes partent avec une modification (T1-14) ; après les remarques des 6e et 9e réponses isolées, il enchaîne deux puis quatre commandes par appel, toujours un appel par réponse (T1-15) ; a mal lu la même phrase que le petit modèle : prêt d'office au premier de la file (T1-18) |
+| 12/10 12:34 | t4-bibliotheque | free = nemotron-3-ultra-550b | t4d | 12/12 | 29 | 779 s | Claw au commit 806bf81 ; bonne lecture de « mis de côté » dès son plan (deux essais sur trois pour ce modèle) ; la relecture aboutit (dots, les deux étapes suivies) et trouve un vrai défaut, l'emprunteur qui peut réserver son propre livre : corrigé avec un test, 12/12 au lieu de 11/12 ; liste de tâches toujours jointe à la modification suivante ; la vérification automatique de Claw lance `unittest`, qui ne trouve pas les tests pytest (T1-22) |
+
+Rejeux sur le travail enregistré de t4c (`review_replay.py`, `checklist_replay.py` : le
+contrôle des exigences renvoyé au point exact où Claw l'avait envoyé, message 61 ; une à deux
+requêtes chacun) :
+
+| Date | Rejeu | Relecteur ou modèle | Résultat |
+|---|---|---|---|
+| 12/10 12:15 | relecture, consignes actuelles | laguna (choisi par Claw) | « VERDICT / LGTM » en 8 s, sans l'analyse demandée : approuve le prêt d'office |
+| 12/10 12:51 | contrôle des exigences, formulation de 93d40ae | free | 9/12 : il confirme sa lecture, comme dans l'essai |
+| 12/10 12:52 | contrôle des exigences, formulation actuelle | free | 9/12 : il traduit bien la phrase (« set aside for the first in line: only they can then borrow it »), puis écrit que son code la respecte et que ses tests « valident le passage automatique », alors que sa sortie montre « emprunté par Bilal » |
+| 12/10 12:54 | relecture, consignes actuelles | dots (imposé) | suit les deux étapes et trouve un vrai bogue (le premier de la file emprunte un livre pas encore rendu), sans relever le prêt d'office ; finit sa liste de problèmes par « LGTM » (T1-23) |
+
+Scénario t5 (projet web : serveur Python, API JSON, page), Claw au commit 806bf81 et T1-22 :
+
+| Date | Scénario | Modèle | Étiquette | Score | Requêtes | Durée | Remarques |
+|---|---|---|---|---|---|---|---|
+| 12/10 13:04 | t5-recettes-web | free = nemotron-3-ultra-550b | t5 | 9/12 | 16 | 351 s | lit tout le projet d'un coup, liste de tâches jointe aux modifications ; la vérification automatique lance pytest (T1-22, vu en réel) ; oublie les accents, le `+` de l'URL (requête lue à la main avec `unquote`) et une recherche faite d'espaces ; la relecture (laguna, avec analyse) approuve sans les voir (T1-24) |
+| 12/10 13:12 | t5-recettes-web | cohere/north-mini-code | t5-north | - | - | - | interrompu à la deuxième minute par l'arrêt de la session de travail, sans note ; sa session, enregistrée au fil du tour, garde 49 messages lisibles : première confirmation réelle de T1-16 |
+
+Rejeux du contrôle des exigences de t5 (message 37) :
+
+| Date | Formulation | Modèle | Résultat |
+|---|---|---|---|
+| 12/10 14:36 | celle de 806bf81 | free | 9/12, 2 requêtes : il confirme son travail |
+| 12/10 14:37 | avec les cas limites d'une recherche (T1-24) | free | 12/12, 22 requêtes : décodeur standard (`parse_qs`), espaces retirés, accents et majuscules ignorés, plusieurs mots, tests ajoutés ; il lance aussi le serveur pour essayer l'API (aide des commandes non essayées) et l'arrête |
 
 La session de cet essai a pu être lue pendant qu'il tournait : elle s'écrit maintenant à
 chaque étape (T1-16).
@@ -369,6 +395,12 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   M2 ») puis se contredit (« emprunter M2 L ; the borrow succeeds »). Trois modèles sur quatre
   lisent cette phrase ainsi : un second lecteur ne corrige pas sûrement une lecture par défaut
   partagée, la consultation n'est pas retenue. L'effet de (2) reste à mesurer sur un essai réel.
+- Mesure de (2) par rejeu du contrôle sur t4c (tableau des rejeux) : sans effet. Le modèle
+  traduit correctement la phrase puis affirme que son prêt d'office la respecte ; la règle sur
+  l'action laissée à une personne ne lui fait pas voir la contradiction avec sa propre sortie.
+  Gardée (générale, sans coût), mais ce n'est pas elle qui protège de ce défaut. Ce qui a
+  trouvé de vrais défauts : la relecture par un autre modèle quand il fait les deux étapes
+  (dots, deux fois sur deux) ; d'où T1-23.
 
 ### T1-19 Rien ne borne le nombre de requêtes d'un tour
 - Preuve : t4-north (07:06) : 250 requêtes en 25 minutes, plus aucun fichier modifié après
@@ -420,6 +452,50 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   pendant le tour (`start_collecting_notices`, `take_notices`) ; le banc les garde dans
   `result.json` avec les réponses du relecteur (`reviews`).
 
+### T1-22 La vérification automatique ne trouve pas des tests écrits pour pytest
+- Preuve : t4d, notices de Claw : « Vérification automatique après modification : python -m
+  unittest discover -s tests -q », puis « Vérification sans objet : aucun test n'a été trouvé ;
+  le travail n'est pas vérifié », pour un projet dont douze tests pytest passaient.
+  `python_verify` ne choisit pytest que s'il est réglé (`pytest.ini`, `conftest.py`, section
+  de `pyproject.toml`...) ; des tests qui importent pytest ou ne sont que des fonctions
+  `test_...`, sans réglage, partaient à `unittest`, qui ne les voit pas.
+- Défaut : sur un projet Python courant, la vérification de Claw ne vérifiait rien et le
+  disait au modèle.
+- État : corrigé (même reprise) : `tests_written_for_pytest` lit les fichiers de test (racine,
+  `tests/`, `test/` et leurs sous-dossiers, 40 au plus) ; s'ils importent pytest ou n'ont que
+  des fonctions `test_...`, et que `python -m pytest --version` répond (`pytest_installed`,
+  une fois par processus), la vérification est `python -m pytest -q -x`.
+
+### T1-23 Une approbation sans analyse passe pour une relecture
+- Preuve : rejeux sur t4c (tableau). `laguna` répond « VERDICT / LGTM » en 8 s sans les deux
+  étapes demandées et approuve un travail fautif ; `dots`, qui les fait, y trouve un vrai
+  bogue. Dans t4d, `dots` trouve aussi un vrai défaut. Et `dots` termine sa liste de
+  problèmes par « LGTM » : la règle qui lisait un « LGTM » en dernière ligne comme une
+  approbation aurait jeté ses remarques.
+- État : corrigé (même reprise) : `bare_approval` (une approbation sans « Step 1 » ni
+  « Step 2 ») fait consulter un second relecteur, autre que le premier (`consult_again`), dont
+  l'avis remplace le premier ; dans le verdict, un « LGTM » n'efface plus les problèmes qui
+  citent un emplacement du code (`cites_a_location`) ; « NOT LGTM » est un refus. Une
+  consultation vide dit si le modèle a été redemandé.
+
+### T1-24 Les cas limites qu'un ingénieur vérifie d'office sont oubliés
+- Preuve : t5 (free), 9/12 : la recherche ne retire pas les accents (« creme » ne trouve pas
+  « Crème brûlée »), lit la requête à la main avec `unquote` (un `+` n'est pas un espace) et
+  ne retire pas les espaces (« %20%20 » ne trouve rien). Le contrôle des exigences parle des
+  cas limites en général (« empty or missing input, boundaries... ») ; le modèle a vérifié la
+  recherche vide, pas le reste. La relecture (laguna, avec analyse) ne les a pas vus non plus.
+- Défaut : un ingénieur expérimenté a, pour chaque genre de fonctionnalité, une liste de
+  vérifications qu'il fait sans qu'on les lui demande ; un modèle gratuit ne s'en souvient pas.
+- État : corrigé (reprise du 12 octobre, 11 h 22, suite) : `FEATURE_EDGE_CASES`, neuf genres
+  (recherche ou filtre, montants, dates, CSV et Excel, pagination, formulaires, envois de
+  fichiers, comptes et mots de passe, tris), reconnus à des débuts de mots de la demande
+  (minuscules, sans accents, demande poursuivie comprise) ; au plus quatre sont ajoutés au
+  contrôle des exigences, avec la consigne de montrer le test ou la commande qui couvre chacun,
+  ou de l'ajouter. `claw checklist-note` imprime le contrôle exact pour le banc.
+- Mesure : rejeu du contrôle de t5 au message 37 (tableau) : 9/12 avec l'ancienne formulation,
+  12/12 avec les cas limites, pour 22 requêtes de plus. Un essai de chaque : à confirmer sur un
+  essai complet et sur un autre genre de fonctionnalité.
+
 ## Améliorations
 
 Lot T1 (en cours le 12 octobre 2026), dans cet ordre : T1-08 (garde des données), T1-03 et
@@ -437,13 +513,15 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 12 octobre, 12 h 30) : (1) mesurer sur t4, avec le plus
-puissant puis le petit modèle, la règle de lecture du contrôle des exigences (T1-18) et la
-relecture qui aboutit (T1-20) ; (2) faire tourner le scénario web t5-recettes-web (écrit le
-12 octobre : projet intact 1/12, solution de référence 12/12) avec les deux modèles, puis un
-troisième modèle gratuit ; (3) T1-11, les données réécrites par une commande ; (4) T1-04, les
-espaces insécables oubliées sur t3 ; (5) refaire chaque mesure deux ou trois fois avant de
-conclure. T1-12 à T1-17 et T1-19 à T1-21 sont faits, T1-18 en partie.
+Suite, dans l'ordre (mise à jour du 12 octobre, 13 h 30) : (1) t5-recettes-web avec le petit
+modèle, puis un troisième modèle gratuit ; (2) mesurer le second relecteur (T1-23) sur un essai
+réel, et la relecture sur le petit modèle ; (3) T1-18 : chercher ce qui fait voir à un modèle
+la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
+sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par
+une commande ; (5) T1-04, les espaces insécables oubliées sur t3 ; (6) refaire chaque mesure
+deux ou trois fois avant de conclure ; (7) confirmer T1-24 sur un essai complet de t5 et sur
+un autre genre de fonctionnalité (t1 et t3 en touchent : montants, CSV). T1-12 à T1-17 et T1-19
+à T1-24 sont faits, T1-18 en partie.
 
 Mesure faite (tableau plus haut). Pour la refaire : `run.py <scénario> --label <nom>`, puis avec
 `--model cohere/north-mini-code:free`) et comparer scores et requêtes à la série propre.

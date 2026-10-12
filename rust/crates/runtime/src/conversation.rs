@@ -64,6 +64,17 @@ pub trait ApiClient {
         None
     }
 
+    /// La même consultation, à un autre modèle que `excluded` (second avis).
+    fn consult_again(
+        &mut self,
+        _purpose: ConsultPurpose,
+        _system: &str,
+        _prompt: &str,
+        _excluded: &str,
+    ) -> Option<Consultation> {
+        None
+    }
+
     /// Confie la suite du tour à un modèle plus fort (`escalationModel`) ;
     /// renvoie son nom, ou `None` s'il n'y en a pas.
     fn escalate(&mut self) -> Option<String> {
@@ -2696,12 +2707,29 @@ where
         }
         self.api_client
             .notify("Relecture des modifications par un autre modèle…");
-        let consultation = self.api_client.consult(
-            ConsultPurpose::Review,
-            harness::REVIEW_SYSTEM,
-            &harness::review_prompt(request, earlier, answer, &diffs),
-        )?;
+        let prompt = harness::review_prompt(request, earlier, answer, &diffs);
+        let mut consultation =
+            self.api_client
+                .consult(ConsultPurpose::Review, harness::REVIEW_SYSTEM, &prompt)?;
         harness::log_review(&consultation.model, &consultation.text);
+        // Une approbation sans aucune analyse ne prouve pas que le travail a
+        // été relu (rejoué sur un vrai travail : « LGTM » en 8 s, quand un
+        // autre relecteur y trouvait un bogue) : un second relecteur la remplace.
+        if harness::bare_approval(&consultation.text) {
+            self.api_client.notify(&format!(
+                "Relecture par {} : approbation sans analyse, un autre modèle relit",
+                consultation.model
+            ));
+            if let Some(second) = self.api_client.consult_again(
+                ConsultPurpose::Review,
+                harness::REVIEW_SYSTEM,
+                &prompt,
+                &consultation.model,
+            ) {
+                harness::log_review(&second.model, &second.text);
+                consultation = second;
+            }
+        }
         match harness::review_findings(&consultation.text) {
             None => {
                 self.api_client.notify(&format!(
@@ -4142,6 +4170,16 @@ mod tests {
             })
         }
 
+        fn consult_again(
+            &mut self,
+            purpose: super::ConsultPurpose,
+            system: &str,
+            prompt: &str,
+            _excluded: &str,
+        ) -> Option<super::Consultation> {
+            self.consult(purpose, system, prompt)
+        }
+
         fn escalate(&mut self) -> Option<String> {
             self.observed.borrow_mut().escalations += 1;
             self.escalation.map(ToOwned::to_owned)
@@ -5084,7 +5122,7 @@ mod tests {
                 text_step("Chaque exigence est couverte."),
             ],
             vec![PASSING],
-            vec!["LGTM"],
+            vec!["Step 1.\n- a page to translate an image from a URL\nStep 2.\n- done\n\nVERDICT\nLGTM"],
             output,
         );
         runtime
@@ -5387,6 +5425,35 @@ mod tests {
         assert!(observed.notices.iter().any(
             |notice| notice == "Relecture par relecteur : 1 remarque(s) transmise(s) à l'agent"
         ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_bare_approval_is_checked_by_a_second_reviewer() {
+        // Rejoué sur un vrai travail : « VERDICT / LGTM » en 8 s, sans
+        // l'analyse demandée, quand un autre relecteur y trouvait un bogue.
+        let (path, output) = written_file("seconde");
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                tool_step("write_file", r#"{"path":"total.py","content":"x"}"#),
+                text_step("C'est fait."),
+                text_step("Exigences vérifiées."),
+                text_step("Corrigé."),
+            ],
+            vec![PASSING],
+            vec![
+                "VERDICT\nLGTM",
+                "Step 1.\n- the total of an empty list\nStep 2.\n- not handled\n\nVERDICT\ntotal.py:2 - liste vide non gérée - renvoyer 0",
+            ],
+            output,
+        );
+        runtime.run_turn("écris total.py", None).expect("tour");
+        let observed = observed.borrow();
+        assert_eq!(observed.consults.len(), 2);
+        assert!(observed.notices.iter().any(|notice| notice
+            == "Relecture par relecteur : approbation sans analyse, un autre modèle relit"));
+        // Les remarques du second relecteur reviennent à l'agent.
+        assert!(observed.requests[3].contains("liste vide non gérée"));
         let _ = std::fs::remove_file(path);
     }
 

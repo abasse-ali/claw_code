@@ -137,16 +137,18 @@ struct Reply {
     stop: Option<String>,
 }
 
-/// Pourquoi une réponse est arrivée sans texte, en quelques mots.
-fn empty_reply_reason(reply: &Reply) -> String {
+/// Pourquoi une réponse est arrivée sans texte, en quelques mots ; `again` :
+/// c'était déjà la seconde demande à ce modèle.
+fn empty_reply_reason(reply: &Reply, again: bool) -> String {
     let stop = reply.stop.as_deref().unwrap_or("inconnu");
+    let again = if again { ", redemandé" } else { "" };
     if reply.thought > 0 {
         format!(
-            "réponse sans texte après {} caractères de raisonnement (arrêt : {stop})",
+            "réponse sans texte après {} caractères de raisonnement (arrêt : {stop}{again})",
             reply.thought
         )
     } else {
-        format!("réponse vide (arrêt : {stop})")
+        format!("réponse vide (arrêt : {stop}{again})")
     }
 }
 
@@ -311,7 +313,7 @@ fn ask_with(
                                         asked_again = true;
                                         continue;
                                     }
-                                    break Some(empty_reply_reason(&reply));
+                                    break Some(empty_reply_reason(&reply, asked_again));
                                 }
                                 Err(_) if runtime::interrupt::interrupt_requested() => {
                                     return Err("consultation interrompue".to_string());
@@ -382,11 +384,16 @@ mod tests {
             stop: stop.map(str::to_string),
         };
         assert_eq!(
-            empty_reply_reason(&reply(31_200, Some("length"))),
+            empty_reply_reason(&reply(31_200, Some("length")), false),
             "réponse sans texte après 31200 caractères de raisonnement (arrêt : length)"
         );
+        // Déjà redemandé, avec un raisonnement plus court : ce n'est pas mieux.
         assert_eq!(
-            empty_reply_reason(&reply(0, None)),
+            empty_reply_reason(&reply(9_000, Some("length")), true),
+            "réponse sans texte après 9000 caractères de raisonnement (arrêt : length, redemandé)"
+        );
+        assert_eq!(
+            empty_reply_reason(&reply(0, None), false),
             "réponse vide (arrêt : inconnu)"
         );
     }

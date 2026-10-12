@@ -276,7 +276,7 @@ const CODING_WORDS: &[&str] = &[
     "repo",
 ];
 
-fn without_accents(text: &str) -> String {
+pub(crate) fn without_accents(text: &str) -> String {
     text.chars()
         .map(|c| match c {
             'à' | 'â' | 'ä' => 'a',
@@ -290,7 +290,7 @@ fn without_accents(text: &str) -> String {
         .collect()
 }
 
-fn has_word_start(text: &str, word: &str) -> bool {
+pub(crate) fn has_word_start(text: &str, word: &str) -> bool {
     text.match_indices(word).any(|(index, _)| {
         text[..index]
             .chars()

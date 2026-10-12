@@ -283,6 +283,89 @@ fn has_test_files(dir: &Path) -> bool {
     })
 }
 
+/// Fichiers de test Python du projet : à la racine, dans `tests/` ou `test/`
+/// et leurs sous-dossiers directs (au plus `MAX_TEST_FILES_READ`).
+fn python_test_files(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![root.to_path_buf()];
+    for name in ["tests", "test"] {
+        let dir = root.join(name);
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            dirs.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.is_dir()),
+            );
+        }
+        dirs.push(dir);
+    }
+    dirs.iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flat_map(|entries| entries.flatten().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_ascii_lowercase())
+                .and_then(|name| name.strip_suffix(".py").map(str::to_string))
+                .is_some_and(|stem| stem.starts_with("test_") || stem.ends_with("_test"))
+        })
+        .take(MAX_TEST_FILES_READ)
+        .collect()
+}
+
+/// Fichiers de test lus, au plus, pour savoir pour quel lanceur ils sont écrits.
+const MAX_TEST_FILES_READ: usize = 40;
+
+/// Les tests sont écrits pour pytest : un fichier l'importe, ou ses tests sont
+/// de simples fonctions `test_...`, que `unittest` ne trouve pas.
+fn tests_written_for_pytest(root: &Path) -> bool {
+    python_test_files(root).iter().any(|path| {
+        std::fs::read_to_string(path).is_ok_and(|text| {
+            text.lines().any(|line| {
+                line.starts_with("import pytest")
+                    || line.starts_with("from pytest")
+                    || line.starts_with("def test_")
+                    || line.starts_with("async def test_")
+            })
+        })
+    })
+}
+
+/// Délai accordé à `python -m pytest --version`.
+const PYTEST_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// pytest est installé pour ce Python : `python -m pytest --version` réussit.
+/// Essayé une fois par processus (une seconde environ).
+fn pytest_installed(python: &str) -> bool {
+    static INSTALLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *INSTALLED.get_or_init(|| {
+        let Some(executable) = crate::paths::find_executable(python) else {
+            return false;
+        };
+        let Ok(mut child) = Command::new(executable)
+            .args(["-m", "pytest", "--version"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return false;
+        };
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return status.success(),
+                Ok(None) if started.elapsed() < PYTEST_PROBE_TIMEOUT => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                _ => {
+                    let _ = child.kill();
+                    return false;
+                }
+            }
+        }
+    })
+}
+
 /// Le dossier, ou l'un de ses sous-dossiers directs, porte des fichiers de test.
 fn holds_tests(dir: &Path) -> bool {
     has_test_files(dir)
@@ -327,7 +410,10 @@ fn python_verify(root: &Path) -> Option<String> {
             std::fs::read_to_string(root.join(name))
                 .is_ok_and(|text| text.to_ascii_lowercase().contains("pytest"))
         });
-    if pytest_configured {
+    // Des tests écrits pour pytest, sans réglage : `unittest` n'y trouverait
+    // aucun test (essai réel t4 : « aucun test n'a été trouvé ; le travail
+    // n'est pas vérifié », pour douze tests pytest qui passaient).
+    if pytest_configured || (tests_written_for_pytest(root) && pytest_installed(python)) {
         return Some(format!("{python} -m pytest -q -x"));
     }
     if has_test_files(root) {
@@ -1647,6 +1733,69 @@ const CHECKLIST_REQUEST_MAX_CHARS: usize = 4_000;
 /// sans réponse : le modèle ne peut plus lancer ce qui en demande une.
 pub const AWAY_NOTE: &str = "The user is not answering permission requests right now: check with read-only tools only (read, search), and list in your answer what is left unverified and which calls wait for their approval.";
 
+/// Ce que vérifie d'office un ingénieur expérimenté pour un genre de
+/// fonctionnalité, reconnu à des débuts de mots de la demande (minuscules,
+/// sans accents). Un modèle gratuit les oublie : dans l'essai réel t5, une
+/// recherche ignorait les accents (« creme » pour « crème »), le `+` d'une URL
+/// et une recherche faite d'espaces, trois points sur douze.
+const FEATURE_EDGE_CASES: &[(&[&str], &str)] = &[
+    (
+        &["recherch", "filtr", "search", "filter"],
+        "Text search or filter: ignore case and accents (people type \"creme\" for \"crème\"), ignore leading and trailing spaces, treat an empty or blank query as no filter, accept several words, and read query strings with the standard parser of the language (`+` and `%20` both mean a space), never with a hand-made split.",
+    ),
+    (
+        &["prix", "montant", "tva", "euro", "facture", "paiement", "price", "amount", "invoice", "payment"],
+        "Money: round to cents once, at the end, not at each step; never compare floating-point amounts exactly; accept a decimal comma as well as a point in user input; handle zero and negative amounts.",
+    ),
+    (
+        &["date", "heure", "horaire", "calendrier", "echeance", "delai", "fuseau", "calendar", "deadline", "timezone"],
+        "Dates and times: the user's format (day/month/year in French), time zones and daylight saving changes, month ends and leap years, and whether a range includes its last day.",
+    ),
+    (
+        &["csv", "excel", "tableur", "xlsx", "spreadsheet"],
+        "CSV and Excel files from French users: `;` as separator, decimal comma, thousands separators (space or non-breaking space), UTF-8 with or without BOM, or cp1252, and quoted fields that contain the separator. Keep the user's file as it is and fix the code that reads it.",
+    ),
+    (
+        &["pagination", "paginer", "pagine", "par page", "page suivante", "paginate", "per page"],
+        "Pagination: a last page only partly full, a page number past the end or below 1, a limit on the page size, and the same order from one page to the next.",
+    ),
+    (
+        &["formulaire", "saisie", "form"],
+        "Forms and user input: required fields, surrounding spaces trimmed, length limits, a clear error message next to the field, and the same checks on the server as in the page.",
+    ),
+    (
+        &["upload", "televers", "piece jointe", "pieces jointes", "attachment"],
+        "File uploads: a size limit, allowed types checked on the content and not only the name, file names with spaces or accents, and the same file sent twice.",
+    ),
+    (
+        &["mot de passe", "mots de passe", "connexion", "login", "authentif", "password", "sign in"],
+        "Accounts and passwords: passwords hashed with a slow hash, never stored or logged in clear; the same error for an unknown user and a wrong password; sessions that expire.",
+    ),
+    (
+        &["trier", "tri par", "ordre alphabetique", "sort"],
+        "Sorting text: accents and case must not change the order (\"Écrire\" goes with the E, not after Z); equal items keep a stable order; numbers sort as numbers.",
+    ),
+];
+
+/// Au plus, les genres de fonctionnalité rappelés dans un même contrôle.
+const MAX_FEATURE_EDGE_CASES: usize = 4;
+
+/// Les cas limites des genres de fonctionnalité que nomme la demande.
+#[must_use]
+pub fn feature_edge_cases(request: &str) -> Vec<&'static str> {
+    let folded = crate::team::without_accents(&request.to_lowercase());
+    FEATURE_EDGE_CASES
+        .iter()
+        .filter(|(starts, _)| {
+            starts
+                .iter()
+                .any(|start| crate::team::has_word_start(&folded, start))
+        })
+        .map(|(_, cases)| *cases)
+        .take(MAX_FEATURE_EDGE_CASES)
+        .collect()
+}
+
 /// Contrôle des exigences, avec la demande à contrôler citée mot pour mot.
 /// Sans elle, un petit modèle qui ne la voit plus (trente messages plus haut,
 /// après un « reprendre ») contrôle ce qu'il croit avoir fait, pas ce qui est
@@ -1667,6 +1816,16 @@ pub fn checklist_prompt(request: &str, earlier: Option<&str>, away: bool) -> Str
     let mut prompt = format!(
         "{CHECKLIST_PROMPT}\n\n{quoted}\nGo through it line by line: one line of your check per sentence or bullet of this request, even for a part you believe is already done (then quote the file and line that show it). Read each sentence again as it is written, not as you remember it: say what the user must be able to observe (who can do what, when, and what is refused), and make sure your code does exactly that, not a close variant. An action that the request leaves to a person (\"the manager can then approve it\", \"only the owner can then confirm\") stays theirs to do: your code must not do it for them automatically, and the scenario that shows it is that person doing it, after the step that allows it."
     );
+    // Le genre de fonctionnalité se lit dans la demande poursuivie aussi.
+    let named = format!("{request}\n{}", earlier.unwrap_or_default());
+    let cases = feature_edge_cases(&named);
+    if !cases.is_empty() {
+        prompt.push_str("\n\nWhat experienced engineers always check for this kind of feature. For each line that applies to this request, show the test or the command of this session that covers it, or add it now:");
+        for case in cases {
+            prompt.push_str("\n- ");
+            prompt.push_str(case);
+        }
+    }
     if away {
         prompt.push(' ');
         prompt.push_str(AWAY_NOTE);
@@ -2555,22 +2714,50 @@ pub fn log_review(model: &str, answer: &str) {
     }
 }
 
+/// Le relecteur approuve sans avoir écrit l'analyse demandée (ni « Step 1 »
+/// ni « Step 2 ») : rien ne dit qu'il a relu le travail.
+#[must_use]
+pub fn bare_approval(answer: &str) -> bool {
+    let lower = answer.to_ascii_lowercase();
+    review_findings(answer).is_none() && !lower.contains("step 1") && !lower.contains("step 2")
+}
+
+/// La ligne cite un emplacement du code (`services.py:43`, `src/a.rs:12-20`).
+fn cites_a_location(line: &str) -> bool {
+    line.split_whitespace().any(|word| {
+        let word = word
+            .trim_matches(|character: char| matches!(character, '`' | '*' | '(' | ')' | ',' | ';'));
+        word.split_once(':').is_some_and(|(file, rest)| {
+            file.contains('.') && rest.starts_with(|character: char| character.is_ascii_digit())
+        })
+    })
+}
+
 /// Remarques du relecteur, ou `None` s'il approuve (« LGTM »). Seul son
 /// verdict repart à l'agent, pas le raisonnement qui le précède.
 #[must_use]
 pub fn review_findings(answer: &str) -> Option<String> {
+    let marked = answer.to_ascii_uppercase().contains("VERDICT");
     let text = review_verdict(answer).trim();
     let head: String = text
         .chars()
         .take(24)
         .collect::<String>()
         .to_ascii_uppercase();
-    // Sans ligne `VERDICT`, une approbation peut clore un raisonnement.
-    let closing = text.lines().last().unwrap_or_default().trim();
-    let approved = head.contains("LGTM")
-        || closing
-            .trim_matches(|character: char| !character.is_ascii_alphabetic())
-            .eq_ignore_ascii_case("LGTM");
+    // « NOT LGTM » est un refus.
+    let lgtm = |text: &str| text.contains("LGTM") && !text.contains("NOT LGTM");
+    let approved = if marked {
+        // Un « LGTM » n'efface pas les problèmes que le verdict cite avec
+        // lui (un relecteur réel en a mis un après sa liste).
+        lgtm(&text.to_ascii_uppercase()) && !text.lines().any(cites_a_location)
+    } else {
+        // Sans ligne `VERDICT`, une approbation peut clore un raisonnement.
+        let closing = text.lines().last().unwrap_or_default().trim();
+        lgtm(&head)
+            || closing
+                .trim_matches(|character: char| !character.is_ascii_alphabetic())
+                .eq_ignore_ascii_case("LGTM")
+    };
     if text.is_empty() || approved {
         return None;
     }
@@ -2828,6 +3015,17 @@ mod guide_tests {
         // seul peut alors l'emprunter » devenait un prêt d'office.
         assert!(prompt.contains("Read each sentence again as it is written"));
         assert!(prompt.contains("must not do it for them automatically"));
+        // Rien à rappeler pour une traduction par URL.
+        assert!(!prompt.contains("What experienced engineers always check"));
+        // Essai réel t5 : une recherche, ses cas limites.
+        let search = checklist_prompt(
+            "Ajoute une recherche au carnet de recettes : un champ filtre la liste",
+            None,
+            false,
+        );
+        assert!(search.contains("What experienced engineers always check"));
+        assert!(search.contains("ignore case and accents"));
+        assert!(search.contains("`+` and `%20` both mean a space"));
         assert!(!prompt.contains("not answering permission requests"));
         // « reprendre » : la demande poursuivie est citée.
         let prompt = checklist_prompt(
@@ -2840,6 +3038,24 @@ mod guide_tests {
             "<<<\ndans la langue traduite, c'est que le français ; et une page pour l'URL\n>>>"
         ));
         assert!(prompt.contains("not answering permission requests"));
+    }
+
+    #[test]
+    fn the_kind_of_feature_is_read_from_the_start_of_words() {
+        use super::feature_edge_cases;
+        let kinds = |request: &str| feature_edge_cases(request).len();
+        assert_eq!(kinds("Le total de la facture doit arrondir les prix"), 1);
+        assert!(feature_edge_cases("Importe le fichier CSV exporté d'Excel")[0].starts_with("CSV"));
+        assert!(feature_edge_cases("Affiche la date d'échéance")[0].starts_with("Dates"));
+        assert!(feature_edge_cases("ajoute un filtre par catégorie")[0].starts_with("Text search"));
+        // Au milieu d'un mot, ou sans rapport : rien.
+        assert_eq!(kinds("corrige le transform de la liste"), 0);
+        assert_eq!(kinds("explique ce module"), 0);
+        // Plusieurs genres, quatre au plus.
+        assert_eq!(
+            kinds("recherche, prix, date, csv, pagination, formulaire, upload et mot de passe"),
+            4
+        );
     }
 
     #[test]
@@ -2966,6 +3182,35 @@ mod tests {
         let commands = detect_verify_commands(&python);
         assert_eq!(commands.len(), 1);
         assert!(commands[0].ends_with("-m unittest discover -q"));
+        // Des tests écrits pour pytest, sans réglage (essai réel t4).
+        assert!(!super::tests_written_for_pytest(&python));
+        let written = temp_dir("pytest-sans-reglage");
+        fs::create_dir_all(written.join("tests")).expect("dossier");
+        fs::write(
+            written.join("tests").join("test_services.py"),
+            "import pytest\n\nfrom bibliotheque import services\n",
+        )
+        .expect("fichier");
+        assert!(super::tests_written_for_pytest(&written));
+        let functions = temp_dir("fonctions-de-test");
+        fs::write(
+            functions.join("test_calcul.py"),
+            "from calcul import total\n\ndef test_total():\n    assert total([]) == 0\n",
+        )
+        .expect("fichier");
+        assert!(super::tests_written_for_pytest(&functions));
+        // pytest installé : il est choisi ; sinon, `unittest` comme avant.
+        let chosen = detect_verify_commands(&written);
+        if super::pytest_installed(super::python_program()) {
+            assert!(chosen[0].ends_with("-m pytest -q -x"), "{chosen:?}");
+        } else {
+            assert!(
+                chosen[0].ends_with("-m unittest discover -s tests -q"),
+                "{chosen:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(written);
+        let _ = fs::remove_dir_all(functions);
 
         let pytest = temp_dir("pytest");
         fs::write(pytest.join("conftest.py"), "").expect("fichier");
@@ -3531,6 +3776,28 @@ mod tests {
         assert_eq!(review_findings("Step 2.\n- met\nVERDICT"), None);
         // Verdict oublié : une approbation en dernière ligne en est une.
         assert_eq!(review_findings("Step 1.\n- one requirement\n\nLGTM."), None);
+        // « NOT LGTM » n'approuve rien.
+        assert_eq!(
+            review_findings("VERDICT\nNOT LGTM: a.py:3 - the book is lent at once").as_deref(),
+            Some("NOT LGTM: a.py:3 - the book is lent at once")
+        );
+        // Relecture rejouée sur t4c (dots) : des problèmes, puis « LGTM » à
+        // la suite. Les problèmes l'emportent, sur la même ligne ou après.
+        let listed = "Step 2.\n- emprunter lends a book still borrowed\n\nVERDICT\n`services.py:15-26 - borrowing is checked against the queue before the loan - check the loan first` `tests/test_services.py:93-99 - the test accepts it - fix the test` LGTM";
+        assert!(review_findings(listed).is_some_and(|found| found.starts_with("services.py:15-26")));
+        assert!(review_findings(
+            "VERDICT\nservices.py:43 - the borrower can reserve his own book - refuse it\nLGTM"
+        )
+        .is_some());
+        // Sans emplacement cité, un « LGTM » du verdict reste une approbation.
+        assert_eq!(review_findings("**Verdict:** LGTM, nothing to fix"), None);
+        // Approuver sans l'analyse demandée : un second relecteur est consulté.
+        assert!(super::bare_approval("VERDICT\nLGTM"));
+        assert!(super::bare_approval("LGTM"));
+        assert!(!super::bare_approval(
+            "Step 1.\n- one requirement\nStep 2.\n- met\n\nVERDICT\nLGTM"
+        ));
+        assert!(!super::bare_approval("VERDICT\na.py:3 - bug - fix"));
         // Dans la demande au relecteur, la réponse de l'agent vient après le diff.
         let prompt =
             super::review_prompt("ajoute x", None, "Fait.", &["--- a/x\n+++ b/x".to_string()]);

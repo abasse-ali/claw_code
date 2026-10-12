@@ -2,6 +2,7 @@
 
 Usage :
     python review_replay.py DOSSIER_DE_L_ESSAI [--model MODELE_DU_TRAVAIL] [--baseline COMMIT]
+                            [--reviewer MODELE_GRATUIT]
 
 Reprend la demande, la réponse finale (dernière session de l'essai) et le diff du projet
 (l'essai est un dépôt Git : tout ce qui a changé depuis le commit de départ), et demande à
@@ -66,8 +67,11 @@ def main():
     parser.add_argument("run_dir")
     parser.add_argument("--model", help="modèle qui a fait le travail (le relecteur en est un autre)")
     parser.add_argument("--baseline", help="commit dont on rejoue les consignes de relecture")
+    parser.add_argument("--reviewer", help="relecteur imposé (un modèle gratuit), par le réglage advisorModels")
     parser.add_argument("--claw")
     args = parser.parse_args()
+    if args.reviewer and not args.reviewer.endswith(":free"):
+        sys.exit("relecteur : un modèle gratuit seulement (identifiant en « :free »)")
 
     run_dir = Path(args.run_dir).resolve()
     project = run_dir / "project"
@@ -81,6 +85,13 @@ def main():
 
     work = run_dir / "review-replay"
     work.mkdir(exist_ok=True)
+    # Relecteur imposé, ou celui que Claw choisirait (pas de réglage resté d'un rejeu précédent).
+    settings = work / ".claw" / "settings.json"
+    if args.reviewer:
+        settings.parent.mkdir(exist_ok=True)
+        settings.write_text(json.dumps({"advisorModels": [args.reviewer]}), encoding="utf-8")
+    elif settings.exists():
+        settings.unlink()
     command = [str(run.claw_binary(args.claw))]
     if args.model:
         command += ["--model", args.model]
