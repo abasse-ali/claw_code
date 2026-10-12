@@ -210,6 +210,23 @@ Total de la série : 99 requêtes gratuites.
 - Remède : replier la vue en une ligne dans la page.
 - État : à faire
 
+### T1-13 Après une relecture sans reproche, la réponse finale n'est plus qu'un accusé de réception
+- Preuve : t1 lotT1 (free), session `20261012-022030-t1-inventaire-lotT1`. Message 18 : compte
+  rendu complet (1 467 caractères : résultat, causes, corrections, vérification). Message 19 :
+  relecture par un autre modèle, aucun point à corriger. Message 20, le seul que l'utilisateur
+  lit : 270 caractères, « La revue confirme que les deux corrections sont correctes et
+  minimales... ». La page replie le message 18 comme « réponse provisoire ».
+- Défaut : chaque contrôle de fin de tour qui ne trouve rien à redire peut remplacer un bon
+  compte rendu par un commentaire du contrôle (T1-02 en est la forme atténuée). La consigne
+  finale (`FINAL_ANSWER_RULE`) le demande pourtant ; un modèle qui n'a rien à changer répond
+  au contrôle au lieu de réécrire son compte rendu.
+- Remède, sans requête de plus : quand la réponse à un contrôle n'appelle aucun outil et est
+  nettement plus courte que la réponse qu'elle remplace (par exemple moins de la moitié), la
+  réponse précédente reste la réponse finale : rien n'a changé entre les deux, et les deux
+  textes sont du modèle. À faire dans la session (le dernier message porte le compte rendu) et
+  dans l'interface (la réponse repliée est rouverte, au lieu d'être marquée provisoire).
+- État : à faire (premier point à reprendre)
+
 ## Améliorations
 
 Lot T1 (en cours le 12 octobre 2026), dans cet ordre : T1-08 (garde des données), T1-03 et

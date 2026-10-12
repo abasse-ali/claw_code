@@ -48,9 +48,12 @@ money = python(
     "s = Stock(); s.ajouter('c', 3, 0.1)\n"
     "assert s.valeur_totale() == 0.3, s.valeur_totale()\n"
 )
+# Les deux remèdes prévus : un montant exact rendu par le code, ou une comparaison
+# approchée dans le test (pytest.approx, math.isclose, arrondi, écart borné).
+approximate = bool(re.search(r"approx\(|isclose\(|round\(|abs\(", source))
 check(
-    "la valeur d'un stock est un montant exact (seconde cause traitée dans le code)",
-    money.returncode == 0,
+    "seconde cause traitée : montant exact dans le code, ou comparaison approchée dans le test",
+    money.returncode == 0 or approximate,
     money.stderr[-300:],
 )
 
