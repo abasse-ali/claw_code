@@ -458,7 +458,9 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
   répondre (`claw prompt` dans un script, action GitHub, sous-agents). Sans personne pour
   répondre et sans autre modèle à essayer, un échec passager (modèle gratuit limité un moment
   par son fournisseur, surcharge) n'arrête plus le tour : le même modèle est réessayé après
-  10 s, 30 s, 1 min puis 2 min, moins de quatre minutes en tout, avec une notice à chaque fois.
+  10 s, 30 s, 1 min, 2 min, 3 min puis 4 min, une dizaine de minutes en tout, avec une notice à
+  chaque fois. Si le tour échoue quand même, la sortie `--output-format json` donne l'erreur et
+  ces notices.
 - **Appel d'outil coupé** : il arrive qu'un fournisseur close la réponse juste après le nom de
   l'outil, avant ses arguments. Claw ne prend pas cet appel vide pour un vrai : la réponse est
   redemandée deux fois au même modèle, puis la barre vous propose de réessayer, de changer de

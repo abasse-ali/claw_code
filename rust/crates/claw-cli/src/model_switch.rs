@@ -47,12 +47,13 @@ pub(crate) const STUCK_AUTO_CONTINUE: Duration = Duration::from_secs(60);
 pub(crate) const AUTO_RETRIES: u32 = 12;
 
 /// Sans personne pour décider : délais avant chaque nouvel essai d'un modèle
-/// limité passagèrement par son fournisseur, moins de quatre minutes en tout
-/// (un script ne doit pas attendre vingt minutes). Essai réel du 12 octobre :
-/// « laguna est temporairement limité en amont, réessayez bientôt », et le tour
-/// s'arrêtait après trois essais en quatre secondes.
-const UNATTENDED_RETRY_DELAYS: [u64; 4] = [10, 30, 60, 120];
-pub(crate) const UNATTENDED_RETRIES: u32 = 4;
+/// limité passagèrement par son fournisseur, une dizaine de minutes en tout
+/// (un script ne doit pas attendre vingt minutes). Essais réels du 12 octobre :
+/// « laguna est temporairement limité en amont, réessayez bientôt », le tour
+/// s'arrêtait après trois essais en quatre secondes, puis une limite a duré
+/// plus de quatre minutes.
+const UNATTENDED_RETRY_DELAYS: [u64; 6] = [10, 30, 60, 120, 180, 240];
+pub(crate) const UNATTENDED_RETRIES: u32 = 6;
 
 /// Délai avant le nouvel essai numéro `done + 1` sans personne pour décider.
 pub(crate) fn unattended_retry_delay(done: u32) -> Option<Duration> {
@@ -222,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn without_anyone_to_decide_a_passing_limit_is_waited_out_for_minutes_only() {
+    fn without_anyone_to_decide_a_passing_limit_is_waited_out_for_ten_minutes() {
         use super::{pause, unattended_retry_delay, UNATTENDED_RETRIES};
         assert_eq!(unattended_retry_delay(0), Some(Duration::from_secs(10)));
         assert_eq!(unattended_retry_delay(UNATTENDED_RETRIES), None);
@@ -230,7 +231,7 @@ mod tests {
             .filter_map(unattended_retry_delay)
             .map(|delay| delay.as_secs())
             .sum();
-        assert!(total < 4 * 60, "{total} s");
+        assert!((8 * 60..12 * 60).contains(&total), "{total} s");
         assert!(pause(Duration::from_millis(10)));
     }
 

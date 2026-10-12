@@ -112,6 +112,7 @@ Scénario t5 (projet web : serveur Python, API JSON, page), Claw au commit 806bf
 | 12/10 14:44 | t5-recettes-web | free = nemotron-3-ultra-550b | t5b | 12/12 | 29 | 676 s | Claw au commit f2eac48 (T1-24) : au contrôle des exigences, il vérifie les cas limites de la recherche et corrige accents, espaces et décodage de l'URL, avec des tests ; deux relecteurs répondent « VERDICT LGTM » sans analyse (le second par T1-23) |
 | 12/10 14:56 | t5-recettes-web | cohere/north-mini-code | t5-north2 | 10/12 | 49 | 604 s | même Claw ; accents, espaces et décodage justes ; un ingrédient doit égaler le mot cherché (« pomme » ne trouve pas « pommes de terre ») et plusieurs mots ne trouvent rien ; 16 lectures de fichiers, 6 retirées du contexte et 2 remarques (T1-17) ; la relecture (nemotron-ultra) relève deux affirmations fausses de sa réponse (un test qui n'existe pas, un compte de tests) |
 | 12/10 15:20 | t5-recettes-web | poolside/laguna-s-2.1 (troisième modèle) | t5-laguna | non noté | 3 | 144 s | bonne lecture de tout le projet, plan clair, une modification ; puis « laguna est temporairement limité en amont, réessayez bientôt » (429) : trois essais en 4 s et le tour s'arrête (T1-25). La session, enregistrée au fil du tour, garde ses 14 messages |
+| 12/10 15:31 | t5-recettes-web | poolside/laguna-s-2.1 | t5-laguna2 | 12/12 | 26 | 1 124 s | Claw au commit 9c29c4a (T1-25) : le travail est complet, et au contrôle des exigences il ajoute l'insensibilité aux accents (T1-24) ; puis une limite du fournisseur dure plus que les quatre minutes d'attente prévues et le tour finit en erreur, sans JSON ni notices (suite de T1-25) |
 
 Les essais de t5 ont été notés une seconde fois après une correction de la vérification
 cachée : tous les points de la recherche dépendaient du premier (`?q=pomme` exact), si bien
@@ -521,10 +522,15 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   secours, le tour s'arrêtait après les trois essais rapprochés du client de l'API.
 - État : corrigé (reprise du 12 octobre, 11 h 22, suite) : dans ce cas, un échec passager
   (`failure_is_transient` : 429 hors quota du jour, 408, 409, 5xx) est réessayé après 10 s,
-  30 s, 1 min puis 2 min (`unattended_retry_delay`, moins de quatre minutes), avec une notice à
+  30 s, 1 min, 2 min, 3 min puis 4 min (`unattended_retry_delay`, une dizaine de minutes ; quatre
+  minutes d'abord, trop peu : voir t5-laguna2), avec une notice à
   chaque fois ; l'attente s'interrompt avec le tour (`model_switch::pause`). Le faux modèle a un
   cas « amont-limite » (429 aux quatre premières requêtes) : avant, le tour échouait en 4 s ;
   après, il aboutit en 16 s avec une notice.
+- Suite (t5-laguna2) : une limite a duré plus de quatre minutes ; l'attente va maintenant à une
+  dizaine de minutes (six essais, jusqu'à 4 min d'écart). Et un tour en échec en mode
+  `--output-format json` n'imprimait rien : il rend maintenant `{"error", "model", "notices"}`,
+  pour qu'un script sache ce qui est arrivé (vérifié avec le faux modèle « introuvable »).
 
 ## Améliorations
 
@@ -543,8 +549,8 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 12 octobre, 15 h 30) : (1) refaire t5 avec le troisième
-modèle (laguna), arrêté la première fois par une limite du fournisseur (T1-25), puis t4 ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
+Suite, dans l'ordre (mise à jour du 12 octobre, 15 h 55) : (1) t4 avec le troisième modèle
+(laguna ; t5 : 12/12) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
 sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par

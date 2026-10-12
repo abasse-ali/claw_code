@@ -120,9 +120,11 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | 05d235f | t5b 12/12 (T1-24 confirmé sur un essai complet), petit modèle 10/12 ; vérification de t5 corrigée (une erreur en coûtait huit) ; rappel final de la forme au relecteur et double approbation nue dite à l'utilisateur (suite de T1-23) |
 
-| (commit « T1-25 ») | Sans personne pour décider, une limite passagère du fournisseur est réessayée après une pause au lieu d'arrêter le tour (T1-25) ; cas « amont-limite » du faux modèle |
+| 9c29c4a | Sans personne pour décider, une limite passagère du fournisseur est réessayée après une pause au lieu d'arrêter le tour (T1-25) ; cas « amont-limite » du faux modèle |
 
-État des tests après T1-25 : 649 tests Rust, analyse statique à zéro sous Windows et
+| (commit « T1-25, suite ») | Attente sans témoin allongée à une dizaine de minutes ; un tour en échec en mode JSON rend son erreur et ses notices ; t5 avec laguna : 12/12 |
+
+État des tests après la suite de T1-25 : 649 tests Rust, analyse statique à zéro sous Windows et
 Linux, client 28 sur 28, extension VS Code 18 sur 18 (lancée à T1-16 ; rien de l'interface n'a
 changé depuis).
 
@@ -272,4 +274,6 @@ Hors lots :
   un essai complet ; le petit modèle fait 10/12. Un relecteur qui approuve sans analyse reçoit
   désormais, en fin de demande, le rappel de la forme exigée. Troisième modèle gratuit
   (laguna) : arrêté après trois réponses par une limite passagère de son fournisseur ; sans
-  personne pour décider, Claw abandonnait au lieu d'attendre un peu (T1-25, corrigé).
+  personne pour décider, Claw abandonnait au lieu d'attendre un peu (T1-25, corrigé). Refait :
+  12/12, mais une limite plus longue a fini le tour en erreur ; l'attente est allongée et la
+  sortie JSON garde l'erreur et les notices.

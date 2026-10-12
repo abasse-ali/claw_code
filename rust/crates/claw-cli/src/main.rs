@@ -2449,7 +2449,18 @@ impl LiveCli {
         start_collecting_notices();
         let result = runtime.run_turn_with_images(text, images, Some(&mut permission_prompter));
         let notices = take_notices();
-        let summary = result?;
+        let summary = match result {
+            Ok(summary) => summary,
+            Err(error) => {
+                // Un tour en échec rend quand même son JSON : l'erreur et ce
+                // que Claw a signalé avant (essais après une limite...).
+                println!(
+                    "{}",
+                    json!({ "error": error.to_string(), "model": self.model, "notices": notices })
+                );
+                return Err(Box::new(error));
+            }
+        };
         self.runtime = runtime;
         self.persist_session()?;
         println!(
