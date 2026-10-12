@@ -737,7 +737,13 @@ pub fn skills_prompt_section(cwd: &Path) -> Option<String> {
         .take(40)
         .map(|skill| match &skill.description {
             // Description coupée : 40 compétences ne doivent pas noyer le prompt.
-            Some(description) => format!("- {}: {}", skill.name, shorten(description, 400)),
+            // Une description écrite ailleurs peut porter un tiret long ou des
+            // emoji, que ce même prompt interdit au modèle d'écrire.
+            Some(description) => format!(
+                "- {}: {}",
+                skill.name,
+                runtime::typography::cleaned(&shorten(description, 400))
+            ),
             None => format!("- {}", skill.name),
         })
         .collect::<Vec<_>>();

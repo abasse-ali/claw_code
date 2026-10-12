@@ -247,6 +247,18 @@ pub struct ConversationRuntime<C, T> {
     review: bool,
     /// Langue des réponses réglée par l'utilisateur, rappelée dans les notes de Claw.
     response_language: Option<String>,
+    /// Vues de fichiers encore affichées dans la conversation (marque de la
+    /// vue, fichier, taille et date au moment de la vue) : retirées dès que
+    /// le fichier change par un autre moyen qu'une modification du modèle.
+    file_views: BTreeMap<String, FileStamp>,
+}
+
+/// Fichier, taille et date de modification au moment d'une vue.
+type FileStamp = (std::path::PathBuf, u64, Option<std::time::SystemTime>);
+
+fn file_stamp(path: &std::path::Path) -> Option<FileStamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((path.to_path_buf(), metadata.len(), metadata.modified().ok()))
 }
 
 /// Aides au raisonnement, le temps d'un tour.
@@ -329,6 +341,14 @@ struct TurnAids {
     snapshot: Option<harness::ProjectSnapshot>,
     /// Fichiers changés par une commande pendant le tour.
     command_changes: Vec<String>,
+    /// Fichiers de données dont des lignes ont été réécrites, déjà signalés.
+    guarded_data: std::collections::BTreeSet<String>,
+    /// Appels d'outils de la réponse en cours.
+    calls_in_reply: usize,
+    /// Réponses d'un seul appel d'observation, à la suite.
+    single_call_streak: u32,
+    /// Le regroupement des essais a déjà été demandé pendant ce tour.
+    batch_noted: bool,
 }
 
 /// Mots en dessous desquels un message de l'utilisateur peut n'être qu'une
@@ -407,6 +427,28 @@ fn lean_result(tool_name: &str, message: &mut ConversationMessage) {
         {
             if let Some(lean) = crate::lean::lean_tool_output(tool_name, output) {
                 *output = lean;
+            }
+        }
+    }
+}
+
+/// Remplace par `placeholder` les vues de fichier qui commencent par `marker`
+/// dans les résultats déjà enregistrés : une seule vue à jour par fichier dans
+/// la conversation, pour que le modèle ne cite pas un texte périmé.
+fn replace_file_views(session: &mut Session, marker: &str, placeholder: &str) {
+    for message in &mut session.messages {
+        for block in &mut message.blocks {
+            let ContentBlock::ToolResult { output, .. } = block else {
+                continue;
+            };
+            let mut from = 0;
+            while let Some(start) = output[from..].find(marker).map(|at| from + at) {
+                let Some(length) = output[start..].find(harness::FILE_VIEW_END) else {
+                    break;
+                };
+                let end = start + length + harness::FILE_VIEW_END.len();
+                output.replace_range(start..end, placeholder);
+                from = start + placeholder.len();
             }
         }
     }
@@ -628,6 +670,13 @@ where
         // qu'il était coupé) : ses anciens résultats d'outils repartiraient en
         // entier avec chaque requête.
         lean_stored_results(&mut session);
+        // Les fichiers ont pu changer depuis l'enregistrement de la session :
+        // les vues qu'elle garde ne sont plus « le fichier tel qu'il est ».
+        replace_file_views(
+            &mut session,
+            harness::FILE_VIEW_PREFIX,
+            harness::FILE_VIEW_STALE,
+        );
         let usage_tracker = UsageTracker::from_session(&session);
         Self {
             session,
@@ -644,6 +693,7 @@ where
             verify: feature_config.verify().clone(),
             review: feature_config.review_enabled(),
             response_language: feature_config.response_language().map(ToOwned::to_owned),
+            file_views: BTreeMap::new(),
         }
     }
 
@@ -904,6 +954,8 @@ where
         if !self.subagent {
             crate::permissions::set_user_away(false);
         }
+        // L'utilisateur a pu modifier des fichiers depuis le tour précédent.
+        self.drop_stale_file_views();
         let request_text = user_input.clone();
         // « reprendre » : la relecture doit connaître la demande poursuivie.
         let earlier = earlier_request(&self.session.messages, &request_text);
@@ -1062,6 +1114,7 @@ where
             assistant_messages.push(assistant_message);
 
             if pending_tool_uses.is_empty() {
+                aids.single_call_streak = 0;
                 // Réponse en texte arrêtée par la limite de sortie : Claw en
                 // demande la suite (deux fois au plus pour une même réponse,
                 // jamais au-delà des étapes permises) au lieu de rendre un
@@ -1153,6 +1206,7 @@ where
             // Une réponse qui appelle des outils est finie : la prochaine
             // réponse coupée a de nouveau droit à ses suites.
             cut_continuations = 0;
+            aids.calls_in_reply = pending_tool_uses.len();
             if self.run_parallel_batch(
                 &pending_tool_uses,
                 &mut prompter,
@@ -1405,43 +1459,31 @@ where
         } else {
             0
         };
+        // Une seule observation par réponse, plusieurs fois de suite : les
+        // essais indépendants se regroupent (chaque réponse est une requête).
+        let observation = matches!(
+            tool_name,
+            "read_file" | "grep_search" | "glob_search" | "bash" | "PowerShell"
+        );
+        aids.single_call_streak =
+            if aids.calls_in_reply == 1 && observation && !is_error && !command_failed {
+                aids.single_call_streak + 1
+            } else {
+                0
+            };
+        if aids.single_call_streak == harness::SINGLE_CALL_REPLIES
+            && !aids.batch_noted
+            && harness::enabled(Aid::BatchCalls)
+        {
+            aids.batch_noted = true;
+            notes.push(harness::BATCH_NOTE.to_string());
+        }
 
         if matches!(tool_name, "edit_file" | "write_file" | "NotebookEdit") && !is_error {
-            aids.dirty = true;
-            aids.editor_dirty = true;
-            aids.workflow_dirty = true;
-            aids.feedback_pending = false;
-            aids.verified_commands.clear();
-            // Une commande encore en cours a été lancée sur l'ancien code.
-            aids.background_commands.clear();
-            let path = json_field(&output, "filePath").or_else(|| json_field(input, "path"));
-            if let Some(path) = &path {
-                if !aids.originals.contains_key(path) {
-                    aids.originals.insert(
-                        path.clone(),
-                        harness::original_content(&output).unwrap_or_default(),
-                    );
-                }
-            }
-            if let Some(path) = path.as_deref().filter(|_| aids.check_failed) {
-                if let Some(name) = self.rewritten_check(path, &output, aids) {
-                    self.api_client.notify(&format!(
-                        "Attention : {name} sert à vérifier le travail et a été modifié après un échec : relisez ce changement"
-                    ));
-                    notes.push(harness::test_guard_feedback(&name));
-                }
-            }
-            if let Some(path) = path.filter(|_| harness::enabled(Aid::Diagnostics)) {
-                if let Some(error) = harness::syntax_check(std::path::Path::new(&path)) {
-                    let name = std::path::Path::new(&path)
-                        .file_name()
-                        .map_or_else(|| path.clone(), |name| name.to_string_lossy().to_string());
-                    self.api_client.notify(&format!(
-                        "Erreur de syntaxe dans {name} : signalée au modèle"
-                    ));
-                    notes.push(harness::syntax_feedback(&path, &error));
-                }
-            }
+            self.after_file_change(tool_name, input, &output, aids, &mut notes);
+        } else if !matches!(tool_name, "read_file" | "grep_search" | "glob_search") {
+            // Une commande ou un autre outil a pu changer des fichiers.
+            self.drop_stale_file_views();
         }
         if let Some(outcome) = command_outcome {
             if outcome.passed {
@@ -1473,6 +1515,10 @@ where
                 }
                 // Un outil de Claw écrit comme une commande (`KillShell bash_4`).
                 notes.extend(harness::tool_named_in_command(&outcome.command));
+                // Python du Microsoft Store : il ne voit pas `/tmp` de Git Bash.
+                if harness::enabled(Aid::PathHelp) {
+                    notes.extend(harness::store_python_hint(&outcome.output));
+                }
             }
         }
         if harness::enabled(Aid::StallGuard) {
@@ -1492,6 +1538,81 @@ where
         }
     }
 
+    /// Suites d'une modification de fichier réussie : état du tour, garde des
+    /// tests et des données réécrits, fichier montré tel qu'il est, syntaxe.
+    fn after_file_change(
+        &mut self,
+        tool_name: &str,
+        input: &str,
+        output: &str,
+        aids: &mut TurnAids,
+        notes: &mut Vec<String>,
+    ) {
+        aids.dirty = true;
+        aids.editor_dirty = true;
+        aids.workflow_dirty = true;
+        aids.feedback_pending = false;
+        aids.verified_commands.clear();
+        // Une commande encore en cours a été lancée sur l'ancien code.
+        aids.background_commands.clear();
+        let path = json_field(output, "filePath").or_else(|| json_field(input, "path"));
+        if let Some(path) = &path {
+            if !aids.originals.contains_key(path) {
+                aids.originals.insert(
+                    path.clone(),
+                    harness::original_content(output).unwrap_or_default(),
+                );
+            }
+        }
+        if let Some(path) = path.as_deref().filter(|_| aids.check_failed) {
+            if let Some(name) = self.rewritten_check(path, output, aids) {
+                self.api_client.notify(&format!(
+                    "Attention : {name} sert à vérifier le travail et a été modifié après un échec : relisez ce changement"
+                ));
+                notes.push(harness::test_guard_feedback(&name));
+            }
+        }
+        if let Some((shown, replaced)) = path
+            .as_deref()
+            .and_then(|path| Self::rewritten_data(path, output, aids))
+        {
+            self.api_client.notify(&format!(
+                "Attention : des lignes de {shown}, un fichier de données, ont été modifiées ou retirées : relisez ce changement"
+            ));
+            notes.push(harness::data_guard_feedback(&shown, &replaced));
+        }
+        // Le fichier tel qu'il est maintenant : une relecture de moins, et
+        // une seule vue à jour par fichier dans la conversation.
+        if matches!(tool_name, "edit_file" | "write_file") && harness::enabled(Aid::FileView) {
+            if let Some(marker) = harness::file_view_marker(output) {
+                replace_file_views(&mut self.session, &marker, harness::FILE_VIEW_REPLACED);
+                self.file_views.remove(&marker);
+                if let Some(view) = harness::view_after_edit(tool_name, output) {
+                    let stamp = path
+                        .as_deref()
+                        .and_then(|path| file_stamp(std::path::Path::new(path)));
+                    if let Some(stamp) =
+                        stamp.filter(|_| view.starts_with(harness::FILE_VIEW_PREFIX))
+                    {
+                        self.file_views.insert(marker, stamp);
+                    }
+                    notes.push(view);
+                }
+            }
+        }
+        if let Some(path) = path.filter(|_| harness::enabled(Aid::Diagnostics)) {
+            if let Some(error) = harness::syntax_check(std::path::Path::new(&path)) {
+                let name = std::path::Path::new(&path)
+                    .file_name()
+                    .map_or_else(|| path.clone(), |name| name.to_string_lossy().to_string());
+                self.api_client.notify(&format!(
+                    "Erreur de syntaxe dans {name} : signalée au modèle"
+                ));
+                notes.push(harness::syntax_feedback(&path, &error));
+            }
+        }
+    }
+
     /// Un appel n'a pas tourné faute de réponse à la demande d'autorisation :
     /// l'utilisateur apprend, une fois par tour, que les suivantes ne lui
     /// seront pas posées.
@@ -1501,6 +1622,51 @@ where
             self.api_client.notify(
                 "Demande d'autorisation restée sans réponse : les suivantes de ce tour sont refusées sans vous être posées ; l'agent termine ce qui n'en demande pas",
             );
+        }
+    }
+
+    /// Chemin (tel que le modèle l'écrit) et lignes d'origine quand cette
+    /// modification change ou retire des lignes d'un fichier de données qui
+    /// existait au début du tour. Signalé une fois ; un fichier remis dans son
+    /// état de départ réarme la garde.
+    fn rewritten_data(
+        path: &str,
+        output: &str,
+        aids: &mut TurnAids,
+    ) -> Option<(String, Vec<String>)> {
+        let file = std::path::Path::new(path);
+        if !harness::enabled(Aid::DataGuard) || !harness::is_data_file(file) {
+            return None;
+        }
+        // Créé pendant ce tour, ou vide au départ : ce sont les données de l'agent.
+        let original = aids.originals.get(path)?.clone();
+        if original.trim().is_empty() {
+            return None;
+        }
+        if std::fs::read_to_string(file).is_ok_and(|now| now.lines().eq(original.lines())) {
+            aids.guarded_data.remove(path);
+            return None;
+        }
+        let replaced = harness::replaced_lines(output);
+        if replaced.is_empty() || !aids.guarded_data.insert(path.to_string()) {
+            return None;
+        }
+        Some((harness::shown_path(path), replaced))
+    }
+
+    /// Les vues dont le fichier a changé depuis (commande, formateur, `git
+    /// checkout`, l'utilisateur entre deux tours) ne sont plus à jour : elles
+    /// sont retirées de la conversation, le modèle relira le fichier.
+    fn drop_stale_file_views(&mut self) {
+        let stale: Vec<String> = self
+            .file_views
+            .iter()
+            .filter(|(_, stamp)| file_stamp(&stamp.0).as_ref() != Some(*stamp))
+            .map(|(marker, _)| marker.clone())
+            .collect();
+        for marker in stale {
+            replace_file_views(&mut self.session, &marker, harness::FILE_VIEW_STALE);
+            self.file_views.remove(&marker);
         }
     }
 
@@ -5113,6 +5279,139 @@ mod tests {
             .notices
             .iter()
             .any(|notice| notice.contains("reprend la fin du tour")));
+    }
+
+    #[test]
+    fn rewriting_lines_of_a_data_file_is_flagged_once() {
+        // Essai réel t3 : un petit modèle « répare » le CSV de l'utilisateur
+        // au lieu du script qui ne sait pas le lire.
+        let cwd = std::env::current_dir().expect("dossier");
+        let rewritten = serde_json::json!({
+            "filePath": cwd.join("ventes.csv").to_string_lossy(),
+            "structuredPatch": [{ "lines": ["-2026-09-02;Paris;12,5", "+2026-09-02;Paris;12.5"] }],
+        })
+        .to_string();
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                tool_step("write_file", r#"{"path":"ventes.csv","content":"x"}"#),
+                tool_step("write_file", r#"{"path":"ventes.csv","content":"y"}"#),
+                text_step("Fait."),
+            ],
+            vec![],
+            Vec::new(),
+            rewritten,
+        );
+        runtime.run_turn("range ventes.csv", None).expect("tour");
+        let observed = observed.borrow();
+        assert_eq!(
+            observed
+                .notices
+                .iter()
+                .filter(|notice| notice.contains("ventes.csv, un fichier de données"))
+                .count(),
+            1
+        );
+        assert!(observed.requests[1].contains("a data file"));
+        assert!(observed.requests[1].contains("fix the code that reads the file"));
+        // Les lignes d'origine sont citées, pour une remise en place exacte.
+        assert!(observed.requests[1].contains("2026-09-02;Paris;12,5"));
+    }
+
+    #[test]
+    fn a_data_file_created_in_the_turn_is_the_agent_s_own() {
+        // Créé puis retouché pendant le même tour : pas les données de
+        // l'utilisateur, la garde ne dit rien.
+        let cwd = std::env::current_dir().expect("dossier");
+        let created = serde_json::json!({
+            "filePath": cwd.join("exemple.csv").to_string_lossy(),
+            "structuredPatch": [{ "lines": ["+a;b", "+1;2"] }],
+        })
+        .to_string();
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                tool_step("write_file", r#"{"path":"exemple.csv","content":"x"}"#),
+                text_step("Fait."),
+            ],
+            vec![],
+            Vec::new(),
+            created,
+        );
+        runtime.run_turn("ajoute un exemple", None).expect("tour");
+        assert!(!observed
+            .borrow()
+            .notices
+            .iter()
+            .any(|notice| notice.contains("fichier de données")));
+    }
+
+    #[test]
+    fn three_single_calls_in_a_row_get_a_note_about_grouping() {
+        // Essais réels t2 : sept commandes d'essai, chacune dans sa requête.
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                tool_step("bash", r#"{"command":"python notes.py chercher a"}"#),
+                tool_step("bash", r#"{"command":"python notes.py chercher b"}"#),
+                tool_step("bash", r#"{"command":"python notes.py chercher c"}"#),
+                tool_step("bash", r#"{"command":"python notes.py chercher d"}"#),
+                text_step("Fait."),
+            ],
+            vec![PASSING, PASSING, PASSING, PASSING],
+        );
+        runtime.run_turn("essaie la recherche", None).expect("tour");
+        let observed = observed.borrow();
+        // La remarque arrive avec le troisième résultat, une seule fois.
+        assert!(!observed.requests[2].contains("each made a single call"));
+        assert!(observed.requests[3].contains("each made a single call"));
+        assert_eq!(
+            observed.requests[4]
+                .matches("each made a single call")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn only_the_latest_view_of_a_file_is_kept() {
+        use crate::harness::{FILE_VIEW_END, FILE_VIEW_PREFIX, FILE_VIEW_REPLACED};
+        use crate::session::ConversationMessage;
+        let view = |name: &str, text: &str| {
+            format!(
+                "{{\"edited\": true}}\n\n{FILE_VIEW_PREFIX}`{name}` as it is now (1 lines), after your change. You do not need to read it again.\n{text}\n{FILE_VIEW_END}"
+            )
+        };
+        let mut session = Session::new();
+        session.messages.push(ConversationMessage::tool_result(
+            "t1",
+            "edit_file",
+            view("notes.py", "a = 1"),
+            false,
+        ));
+        session.messages.push(ConversationMessage::tool_result(
+            "t2",
+            "edit_file",
+            view("autre.py", "x = 1"),
+            false,
+        ));
+        super::replace_file_views(
+            &mut session,
+            &format!("{FILE_VIEW_PREFIX}`notes.py`"),
+            FILE_VIEW_REPLACED,
+        );
+        let text = |index: usize| match &session.messages[index].blocks[0] {
+            ContentBlock::ToolResult { output, .. } => output.clone(),
+            _ => String::new(),
+        };
+        assert!(!text(0).contains("a = 1"), "{}", text(0));
+        assert!(text(0).contains(FILE_VIEW_REPLACED));
+        assert!(text(1).contains("x = 1"));
+        // Session rouverte : aucune vue ne dit plus « tel qu'il est ».
+        let runtime = compacting_runtime(session, false);
+        let reopened = match &runtime.session().messages[1].blocks[0] {
+            ContentBlock::ToolResult { output, .. } => output.clone(),
+            _ => String::new(),
+        };
+        assert!(!reopened.contains("x = 1"), "{reopened}");
+        assert!(reopened.contains(crate::harness::FILE_VIEW_STALE));
     }
 
     #[test]

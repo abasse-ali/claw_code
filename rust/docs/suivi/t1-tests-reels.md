@@ -80,7 +80,8 @@ Total de la série : 99 requêtes gratuites.
   réponse.
 - Remède : ne pas l'envoyer quand une même commande a échoué puis réussi après la dernière
   modification (cause observée, disparition observée).
-- État : à faire
+- État : laissé tel quel : la demande de preuves coûte une requête mais rend la réponse du
+  petit modèle mieux étayée ; l'utilisateur préfère la profondeur à la vitesse.
 
 ### T1-02 Après le contrôle des exigences, la réponse finale devient un tableau d'audit
 - Preuve : t2 base, message 29 : « Vérification de chaque exigence » suivi d'un tableau ;
@@ -89,7 +90,7 @@ Total de la série : 99 requêtes gratuites.
 - Remède : la remarque du contrôle demande de finir par le compte rendu pour l'utilisateur
   (résultat, ce qui a été fait, vérification), la vérification des exigences n'y entrant
   qu'en résumé.
-- État : à faire
+- État : mineur, laissé : la consigne demande déjà de finir par le compte rendu.
 
 ### T1-03 L'hypothèse de l'utilisateur n'est ni vérifiée ni démentie dans la réponse
 - Preuve : t3 base : « Je pense que le fichier ventes.csv est corrompu, tu peux le réparer ? ».
@@ -97,14 +98,17 @@ Total de la série : 99 requêtes gratuites.
   corrompu ni qu'il n'a pas été modifié (R1, R7).
 - Remède : le guide de débogage dit qu'une cause avancée par l'utilisateur est une hypothèse
   à confirmer ou réfuter avec une preuve, et que la réponse le lui dit.
-- État : à faire
+- État : corrigé (lot T1) : `DEBUGGER_STEPS` dit qu'une cause nommée par l'utilisateur est une
+  hypothèse à vérifier, que des données valides ne se changent pas pour convenir au code, et
+  la réponse dit si la cause soupçonnée était la bonne ; `PROBLEM_EVIDENCE_PROMPT` le redemande.
 
 ### T1-04 Le correctif n'est essayé que sur les données de l'exemple
 - Preuve : t3 base : `replace(" ", "")` ; les espaces insécables des exports Excel en
   français (U+00A0, U+202F) font encore échouer la lecture ; aucun essai sur d'autres valeurs.
   La réponse conclut « Rien d'autre à faire » (R5, R6).
 - Remède : à préciser après les essais avec des modèles plus petits.
-- État : à étudier
+- État : corrigé (lot T1) pour la consigne : l'étape 4 du guide demande un essai du correctif sur
+  une entrée que l'exemple ne contient pas, par une commande ou un test. Effet à mesurer.
 
 ### T1-05 Le prompt système porte l'état et le diff Git de tout le dépôt, sans limite de taille
 - Preuve : `prompt.rs`, `read_git_status` et `read_git_diff` (`git status --short --branch`,
@@ -119,7 +123,9 @@ Total de la série : 99 requêtes gratuites.
 - Remède : état et diff limités au dossier de travail (`-- .`), diff plafonné (au-delà, la
   liste des fichiers modifiés avec `git diff --stat` et une ligne qui dit de lancer
   `git diff` pour le détail).
-- État : à faire
+- État : corrigé (lot T1) : `read_git_status` et `read_git_diff` sont limités au dossier de travail
+  (`-- .`, `--relative`), l'état à 60 lignes, le diff à 6 000 caractères (au-delà : la liste
+  des fichiers par `--stat`) ; une sortie Git qui n'est pas en UTF-8 ne fait plus tout perdre.
 
 ### T1-06 Le prompt système recopie les règles de permission de l'utilisateur
 - Preuve : `claw system-prompt` : la section « Runtime config » recopie le JSON fusionné des
@@ -129,7 +135,10 @@ Total de la série : 99 requêtes gratuites.
   même prompt interdit d'écrire.
 - Remède : ne pas rendre la clé `permissions` (ni les secrets éventuels) dans le prompt ;
   passer les descriptions de compétences par le filtre typographique.
-- État : à faire
+- État : corrigé (lot T1) : seuls `model`, `language`, `verify`, `review` et `permissionMode` sont
+  montrés au modèle (la relecture a vu que `mcpServers`, `hooks` et les en-têtes des
+  fournisseurs, donc des jetons, partaient aussi dans le prompt) ; les descriptions de
+  compétences passent par le filtre typographique.
 
 ### T1-07 Le Python du Microsoft Store ne voit pas `/tmp` de Git Bash
 - Preuve : t2 north, messages 34 à 46 : `mkdir /tmp/x && cp notes.py /tmp/x && cd /tmp/x &&
@@ -139,7 +148,8 @@ Total de la série : 99 requêtes gratuites.
 - Remède : quand une commande échoue ainsi (chemin sous `AppData\\Local\\Temp` introuvable
   pour un `python` de `WindowsApps`), le dire au modèle : travailler dans le dossier du
   projet, pas dans `/tmp`.
-- État : à faire
+- État : corrigé (lot T1) : `store_python_hint`, joint au résultat de la commande en échec (avec
+  l'aide aux chemins).
 
 ### T1-08 Un petit modèle « répare » les données de l'utilisateur au lieu du code qui les lit
 - Preuve : t3 north, message 4 : sans avoir reproduit l'erreur, `write_file ventes.csv` avec
@@ -155,7 +165,10 @@ Total de la série : 99 requêtes gratuites.
   sait pas lire des données ne prouve pas qu'elles sont fausses, de restaurer le fichier et de
   corriger le lecteur si les valeurs sont valides dans leur format, sinon de dire exactement
   quelles lignes ont changé et pourquoi ; (2) le guide de débogage le dit avant (T1-03).
-- État : à faire
+- État : corrigé (lot T1) : aide `CLAW_DATA_GUARD` (`is_data_file`, `replaced_lines`,
+  `data_guard_feedback`, `rewritten_data`). La remarque cite les lignes d'origine pour une
+  remise en place exacte, ne se déclenche pas sur un fichier créé pendant le tour, et se
+  réarme quand le fichier est restauré. Reste T1-11.
 
 ### T1-09 Le modèle relit un fichier après chacune de ses propres modifications
 - Preuve : t2 north : 13 lectures de `notes.py` (60 lignes) pour 5 modifications, dont trois
@@ -165,7 +178,11 @@ Total de la série : 99 requêtes gratuites.
   sait plus quel est le texte exact à citer pour sa modification suivante.
 - Remède : le résultat d'une modification réussie porte le fichier tel qu'il est maintenant
   s'il est petit, sinon les lignes autour du changement, avec « inutile de le relire ».
-- État : à faire
+- État : corrigé (lot T1) : aide `CLAW_FILE_VIEW` (`view_after_edit`). Petit fichier montré en
+  entier, grand fichier montré autour du changement (trouvé en comparant l'avant et l'après,
+  lignes et taille bornées), une ligne après `write_file`. Une seule vue à jour par fichier
+  (`replace_file_views`) ; une vue est retirée dès que le fichier change par un autre moyen
+  (`drop_stale_file_views`) et à la réouverture d'une session. Reste T1-12.
 
 ### T1-10 Des vérifications indépendantes lancées une par requête
 - Preuve : t2 clean, messages 20 à 28 et 34 à 38 : sept commandes `python notes.py chercher
@@ -175,6 +192,22 @@ Total de la série : 99 requêtes gratuites.
 - Remède : après trois réponses de suite faites d'un seul appel en lecture ou d'une seule
   commande réussie, une remarque jointe au résultat : regrouper les essais indépendants dans
   une commande ou dans une même réponse.
+- État : corrigé (lot T1) : aide `CLAW_BATCH_CALLS`, `BATCH_NOTE` jointe au troisième appel isolé
+  de suite, une fois par tour. Effet à mesurer.
+
+### T1-11 Un fichier de données réécrit par une commande n'est pas vu
+- Preuve : relecture du lot T1. `sed -i`, un script Python ou `cat > ventes.csv` changent le
+  fichier sans passer par `edit_file` ni `write_file` ; l'instantané du projet
+  (`project_snapshot`) ne suit que les extensions de code.
+- Remède : suivre aussi les fichiers de données dans l'instantané, sans déclencher pour eux
+  la vérification du code.
+- État : à faire
+
+### T1-12 Après `/undo`, la page réaffiche la vue du fichier en entier
+- Preuve : relecture du lot T1. Dans le fil rejoué, la vue jointe au résultat de la dernière
+  modification de chaque fichier apparaît sous « Remarque de Claw au modèle » (jusqu'à 4 000
+  caractères). À la réouverture d'une session ce n'est plus le cas (vues remplacées).
+- Remède : replier la vue en une ligne dans la page.
 - État : à faire
 
 ## Améliorations
@@ -187,20 +220,12 @@ T1-01 est laissé tel quel : la demande de preuves coûte une requête mais a re
 réponse du petit modèle mieux étayée, et l'utilisateur préfère la profondeur à la vitesse.
 T1-02 est mineur (la consigne demande déjà de finir par le compte rendu).
 
-État le 12 octobre 2026 à 02 h : le code du lot T1 est écrit dans l'arbre de travail, pas
-encore commité (`git status` : `harness.rs`, `conversation.rs`, `prompt.rs`, `README.md`) ;
-clippy à zéro et tests du runtime au vert. T1-06 n'est fait qu'à moitié (règles de permission
-retirées du prompt ; le tiret long d'une description de compétence reste). Reste à faire,
-dans l'ordre : vérification complète (voir `suivi-intelligence.md`), corrections de la
-relecture par deux agents (constats dans le dossier temporaire de la session, à refaire si
-elle est perdue), `cargo build -p claw-cli`, puis les six essais ci-dessous, le tableau des
-essais, l'état de chaque constat, et le commit « Lot T1 ».
-
-Ce que fait le lot : `Aid::DataGuard` (`is_data_file`, `data_guard_feedback`,
-`rewritten_data`), guide de débogage et demande de preuves complétés (`DEBUGGER_STEPS`,
-`PROBLEM_EVIDENCE_PROMPT`), `Aid::FileView` (`view_after_edit`, `drop_older_file_views`),
-`Aid::BatchCalls` (`BATCH_NOTE` après trois appels isolés), `store_python_hint`, contexte Git
-limité au dossier de travail et plafonné (`read_git_status`, `read_git_diff`).
+Lot T1 fait le 12 octobre 2026 (commit « Lot T1 ») : 629 tests, vérification complète au
+vert. Relecture contradictoire par deux agents avant le commit : 20 constats (1 grave, 8
+moyens), 18 corrigés, 2 restés ouverts (T1-11, T1-12). Trois défauts qui existaient avant le
+lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé, codage) perdues
+à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
+jetons des réglages envoyés dans le prompt.
 
 Après le lot : relancer les six essais (`run.py <scénario> --label lotT1`, puis avec
 `--model cohere/north-mini-code:free`) et comparer scores et requêtes à la série propre.

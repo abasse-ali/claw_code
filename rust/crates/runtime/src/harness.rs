@@ -72,6 +72,12 @@ pub enum Aid {
     PlaceholderGuard,
     /// Réponse en texte coupée par la limite de sortie : la suite est demandée.
     CutReplies,
+    /// Lignes d'un fichier de données réécrites : corriger le code qui les lit.
+    DataGuard,
+    /// Fichier montré après une modification : inutile de le relire.
+    FileView,
+    /// Essais indépendants lancés un par réponse : à regrouper.
+    BatchCalls,
 }
 
 impl Aid {
@@ -103,6 +109,9 @@ impl Aid {
             Self::EmptyTitles => "CLAW_EMPTY_TITLES",
             Self::PlaceholderGuard => "CLAW_PLACEHOLDER_GUARD",
             Self::CutReplies => "CLAW_CUT_REPLIES",
+            Self::DataGuard => "CLAW_DATA_GUARD",
+            Self::FileView => "CLAW_FILE_VIEW",
+            Self::BatchCalls => "CLAW_BATCH_CALLS",
         }
     }
 }
@@ -1166,19 +1175,28 @@ pub fn is_test_file(path: &Path, root: &Path) -> bool {
 /// ne compte pas.
 #[must_use]
 pub fn removes_existing_lines(tool_output: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(tool_output) else {
-        return false;
+    !replaced_lines(tool_output).is_empty()
+}
+
+/// Les lignes qui existaient et que la modification a retirées ou changées,
+/// dans l'ordre du fichier (résultat de `edit_file` ou `write_file` ; le
+/// retour d'un hook peut suivre le JSON).
+#[must_use]
+pub fn replaced_lines(tool_output: &str) -> Vec<String> {
+    let Some(value) = first_json(tool_output) else {
+        return Vec::new();
     };
-    let mut remaining: HashMap<&str, i64> = HashMap::new();
-    let lines = value
+    let lines: Vec<&str> = value
         .get("structuredPatch")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|hunk| hunk.get("lines").and_then(Value::as_array))
         .flatten()
-        .filter_map(Value::as_str);
-    for line in lines {
+        .filter_map(Value::as_str)
+        .collect();
+    let mut remaining: HashMap<&str, i64> = HashMap::new();
+    for line in &lines {
         let (sign, text) = line.split_at(line.len().min(1));
         let text = text.trim();
         if text.is_empty() {
@@ -1190,7 +1208,19 @@ pub fn removes_existing_lines(tool_output: &str) -> bool {
             _ => {}
         }
     }
-    remaining.values().any(|count| *count > 0)
+    let mut replaced = Vec::new();
+    for line in &lines {
+        let Some(text) = line.strip_prefix('-') else {
+            continue;
+        };
+        if let Some(count) = remaining.get_mut(text.trim()) {
+            if *count > 0 {
+                *count -= 1;
+                replaced.push(text.to_string());
+            }
+        }
+    }
+    replaced
 }
 
 /// Texte joint au résultat de l'outil quand un test existant est réécrit
@@ -1200,6 +1230,240 @@ pub fn test_guard_feedback(name: &str) -> String {
     format!(
         "[Claw] You changed existing lines of `{name}`, which is used to check the work, after a failing check. A check describes the expected behavior: making it pass by rewriting it proves nothing. Fix the code instead and restore the check, unless the user asked you to change it or the check itself is wrong; in that case say so explicitly in your final answer, with the reason. If the failing check exposed a real defect in the code, fix that defect: do not point the check at something else to get around it."
     )
+}
+
+// --- Données réécrites ----------------------------------------------------------------
+
+/// Lignes d'origine citées au plus par la garde des données.
+const DATA_GUARD_MAX_LINES: usize = 20;
+
+/// Extensions des fichiers de données en lignes ou en colonnes.
+const DATA_EXTENSIONS: [&str; 6] = ["csv", "tsv", "psv", "dat", "jsonl", "ndjson"];
+
+/// `path` est un fichier de données, d'après son extension.
+#[must_use]
+pub fn is_data_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            DATA_EXTENSIONS
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+        })
+}
+
+/// Texte joint au résultat de l'outil quand des lignes existantes d'un fichier
+/// de données sont remplacées : un petit modèle « répare » sinon les données de
+/// l'utilisateur au lieu du code qui ne sait pas les lire.
+#[must_use]
+pub fn data_guard_feedback(path: &str, replaced: &[String]) -> String {
+    let mut quoted: Vec<String> = replaced
+        .iter()
+        .take(DATA_GUARD_MAX_LINES)
+        .map(|line| shortened(line, 200))
+        .collect();
+    if replaced.len() > DATA_GUARD_MAX_LINES {
+        quoted.push(format!(
+            "(and {} more lines)",
+            replaced.len() - DATA_GUARD_MAX_LINES
+        ));
+    }
+    format!(
+        "[Claw] You replaced or removed existing lines of `{path}`, a data file. A program that fails on some data does not show that the data is wrong: values written in another valid format (decimal comma, thousands separator, another date format or encoding) are for the code to read, and the same source will produce them again. A user who says the file is broken, or asks you to repair it, is giving you a hypothesis to check, not asking for these edits. Keep this change only if the user asked for this exact edit of the data (rows to add, remove or correct) or if these lines are really invalid; otherwise put the original lines back with edit_file and fix the code that reads the file. Never rewrite a data file from memory, and say in your final answer exactly which lines you changed and why. If the user reported a problem, tell them plainly whether their file was really the cause.\nThe lines as they were before your change:\n{}",
+        quoted.join("\n")
+    )
+}
+
+// --- Fichier montré après une modification --------------------------------------------
+
+/// Début et fin de la vue d'un fichier jointe au résultat d'une modification.
+pub const FILE_VIEW_PREFIX: &str = "[Claw] File view: ";
+pub const FILE_VIEW_END: &str = "[Claw] End of file view.";
+/// Mis à la place d'une vue quand une plus récente du même fichier la remplace.
+pub const FILE_VIEW_REPLACED: &str =
+    "[Claw] (An older view of this file was here; the file has changed since.)";
+/// Mis à la place d'une vue quand le fichier a changé par un autre moyen
+/// (commande, formateur, autre programme) ou quand la session est rouverte.
+pub const FILE_VIEW_STALE: &str = "[Claw] (A view of this file was here, but the file may have changed since then by other means: read it again before you edit it.)";
+/// En dessous, le fichier entier est montré ; au-dessus, les lignes autour du changement.
+const VIEW_WHOLE_FILE_MAX_CHARS: usize = 4_000;
+const VIEW_WHOLE_FILE_MAX_LINES: usize = 120;
+const VIEW_CONTEXT_LINES: usize = 8;
+const VIEW_REGION_MAX_LINES: usize = 60;
+/// Caractères montrés au plus d'une ligne, et d'une vue autour d'un changement.
+const VIEW_LINE_MAX_CHARS: usize = 300;
+const VIEW_REGION_MAX_CHARS: usize = 4_000;
+
+/// Une ligne trop longue (fichier minifié, base64) est coupée dans une vue.
+fn clipped_line(line: &str) -> String {
+    let count = line.chars().count();
+    if count <= VIEW_LINE_MAX_CHARS {
+        return line.to_string();
+    }
+    let kept: String = line.chars().take(VIEW_LINE_MAX_CHARS).collect();
+    format!("{kept}… [line cut: {count} characters]")
+}
+
+/// Premier objet JSON d'un résultat d'outil (des remarques peuvent le suivre).
+fn first_json(output: &str) -> Option<Value> {
+    serde_json::Deserializer::from_str(output)
+        .into_iter::<Value>()
+        .next()?
+        .ok()
+}
+
+/// Chemin tel que le modèle l'écrit : relatif au dossier de travail, barres obliques.
+#[must_use]
+pub fn shown_path(path: &str) -> String {
+    let relative = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            Path::new(path)
+                .strip_prefix(cwd)
+                .ok()
+                .map(Path::to_path_buf)
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from(path));
+    relative.to_string_lossy().replace('\\', "/")
+}
+
+/// Marque qui ouvre les vues de ce fichier (pour retirer les plus anciennes).
+#[must_use]
+pub fn file_view_marker(tool_output: &str) -> Option<String> {
+    let value = first_json(tool_output)?;
+    let path = value.get("filePath")?.as_str()?;
+    Some(format!("{FILE_VIEW_PREFIX}`{}`", shown_path(path)))
+}
+
+/// Ce que le modèle doit savoir du fichier après une modification réussie,
+/// pour ne pas le relire (une requête et le fichier une fois de plus dans le
+/// contexte, à chaque fois) : le fichier tel qu'il est maintenant s'il est
+/// petit, sinon les lignes autour de chaque changement. Après `write_file`, une
+/// ligne suffit : le modèle vient d'écrire tout le contenu.
+#[must_use]
+pub fn view_after_edit(tool_name: &str, tool_output: &str) -> Option<String> {
+    let value = first_json(tool_output)?;
+    let path = value.get("filePath")?.as_str()?;
+    let content = std::fs::read_to_string(path).ok()?;
+    // Un fichier qui porte lui-même les marques d'une vue : on ne saurait plus
+    // où la vue finit.
+    if content.contains(FILE_VIEW_END) || content.contains(FILE_VIEW_PREFIX) {
+        return None;
+    }
+    let shown = shown_path(path);
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    let small = content.len() <= VIEW_WHOLE_FILE_MAX_CHARS && total <= VIEW_WHOLE_FILE_MAX_LINES;
+    if tool_name == "write_file" {
+        // L'outil a déjà une remarque (contenu abrégé, codage) : rien de
+        // rassurant à y ajouter.
+        if value.get("note").is_some_and(|note| !note.is_null()) {
+            return None;
+        }
+        let as_sent = value
+            .get("content")
+            .and_then(Value::as_str)
+            .is_some_and(|sent| {
+                sent.lines()
+                    .eq(content.trim_start_matches('\u{feff}').lines())
+            });
+        if as_sent {
+            return Some(format!(
+                "[Claw] `{shown}` is written exactly as you sent it ({total} lines): you do not need to read it again."
+            ));
+        }
+        // Un formateur ou un hook l'a changé après l'écriture.
+        if !small {
+            return Some(format!(
+                "[Claw] `{shown}` on disk now differs from what you sent ({total} lines; a formatter or a hook changed it): read it again before you edit it."
+            ));
+        }
+    }
+    if small {
+        return Some(format!(
+            "{FILE_VIEW_PREFIX}`{shown}` as it is now ({total} lines). You do not need to read it again.\n{}\n{FILE_VIEW_END}",
+            lines.join("\n")
+        ));
+    }
+    // Grand fichier : les lignes autour du changement, trouvé en comparant le
+    // fichier d'avant (le correctif le porte en entier) à celui du disque.
+    let before = original_content(tool_output)?;
+    let old: Vec<&str> = before.lines().collect();
+    let prefix = old.iter().zip(&lines).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(lines[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let changed_end = total - suffix;
+    let from = prefix.saturating_sub(VIEW_CONTEXT_LINES);
+    let wanted = (changed_end + VIEW_CONTEXT_LINES).min(total);
+    let mut to = from;
+    let mut text = String::new();
+    while to < wanted && to - from < VIEW_REGION_MAX_LINES {
+        let line = clipped_line(lines[to]);
+        if text.len() + line.len() + 1 > VIEW_REGION_MAX_CHARS {
+            break;
+        }
+        text.push_str(&line);
+        text.push('\n');
+        to += 1;
+    }
+    if to == from {
+        return None;
+    }
+    let more = if to < wanted {
+        format!(
+            " (the changed part goes on to line {changed_end}: read those lines if you need them)"
+        )
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "{FILE_VIEW_PREFIX}`{shown}` now has {total} lines. Lines {} to {to} as they are now, around your change{more}. You do not need to read the file again to continue from these lines.\n{}\n{FILE_VIEW_END}",
+        from + 1,
+        text.trim_end_matches('\n')
+    ))
+}
+
+// --- Essais regroupés -----------------------------------------------------------------
+
+/// Réponses d'un seul appel d'observation à la suite, avant la remarque.
+pub const SINGLE_CALL_REPLIES: u32 = 3;
+
+/// Remarque jointe au résultat du troisième appel isolé de suite : chaque
+/// réponse coûte une requête, les essais indépendants se regroupent.
+pub const BATCH_NOTE: &str = "[Claw] Your last 3 replies each made a single call. When the next things you need do not depend on each other (several files to read, several commands or inputs to try), ask for them together: parallel tool calls in one reply, or the commands chained in one `bash` call. Each reply costs one request of a limited daily quota.";
+
+// --- Python du Microsoft Store ---------------------------------------------------------
+
+/// Le Python installé par le Microsoft Store a sa propre vue de `AppData` : il
+/// ne voit pas ce que les autres programmes mettent dans le dossier temporaire
+/// (`/tmp` de Git Bash), et ce qu'il y écrit leur est invisible. Un modèle y
+/// perd plusieurs requêtes à chercher un fichier qu'il vient de copier.
+#[must_use]
+pub fn store_python_hint(output: &str) -> Option<String> {
+    let texts: Vec<String> = match first_json(output) {
+        Some(value) => ["stderr", "stdout"]
+            .iter()
+            .filter_map(|key| value.get(*key)?.as_str().map(str::to_string))
+            .collect(),
+        None => vec![output.to_string()],
+    };
+    let seen = texts.iter().flat_map(|text| text.lines()).any(|line| {
+        let flat: String = line
+            .to_lowercase()
+            .chars()
+            .filter(|ch| !matches!(ch, '\\' | '/'))
+            .collect();
+        flat.contains("windowsapps")
+            && flat.contains("can't open file")
+            && flat.contains("appdatalocaltemp")
+    });
+    seen.then(|| {
+        "[Claw] This Python comes from the Microsoft Store: it has its own private view of AppData, so it cannot see files that other programs put in the temp folder (`/tmp` in Git Bash), and files it writes there are invisible to them. Work inside the project folder instead (a sub-folder you delete afterwards), not in /tmp.".to_string()
+    })
 }
 
 // --- Exigences et escalade ------------------------------------------------------------
@@ -1606,7 +1870,7 @@ pub fn problem_guide(images: usize, defects: &[(usize, String)]) -> String {
 
 /// La méthode du débogueur : symptômes, reproduction, cause prouvée,
 /// disparition observée, et ce que la réponse en dit.
-const DEBUGGER_STEPS: &str = "1. Symptoms: list every distinct problem in their message and in each image, one line each, quoting what is shown. Drop none of them, and start with the one that makes the result useless to them.\n2. Reproduce: observe each symptom yourself with your tools, the way the user gets it (same entry point, same kind of input), before you change anything. A request that answers 200 or tests that pass do not show that what the user sees is right: look at the result itself (the page as the browser shows it, with the ViewPage tool when you have it; the produced file or image; the text).\n3. Cause: find it from evidence (logs, outputs, the code path that produces the symptom). Do not fix a guess; when several causes are possible, run the check that tells them apart.\n4. Fix the cause, then observe again that each symptom is gone.\nIn your answer, say for each symptom what you observed after the fix. If you could not observe one (for example what a browser displays), do not call it solved: say what you changed, what you could not check and exactly what the user should look at. Do not ask the user to investigate for you while one of your tools can still do it.";
+const DEBUGGER_STEPS: &str = "1. Symptoms: list every distinct problem in their message and in each image, one line each, quoting what is shown. Drop none of them, and start with the one that makes the result useless to them.\n2. Reproduce: observe each symptom yourself with your tools, the way the user gets it (same entry point, same kind of input), before you change anything. A request that answers 200 or tests that pass do not show that what the user sees is right: look at the result itself (the page as the browser shows it, with the ViewPage tool when you have it; the produced file or image; the text).\n3. Cause: find it from evidence (logs, outputs, the code path that produces the symptom). Do not fix a guess; when several causes are possible, run the check that tells them apart. A cause the user names themselves (\"the file is corrupted\", \"it is the cache\") is a hypothesis like any other: check it, and when it is wrong, fix the real cause, not what they pointed at. Data that a program fails to read is not wrong for that reason: when its values are valid in their own format, fix the code that reads them and leave the user's data as it is.\n4. Fix the cause, then observe again that each symptom is gone, and run the fix once on input the example does not contain (the other forms the same data or request can take: another format, an empty or missing value, a larger number), with a throwaway command or a test, never by editing the user's data.\nIn your answer, say for each symptom what you observed after the fix and, if the user named a cause themselves, tell them plainly whether it was the real one. If you could not observe one (for example what a browser displays), do not call it solved: say what you changed, what you could not check and exactly what the user should look at. Do not ask the user to investigate for you while one of your tools can still do it.";
 
 /// Ce que le lecteur d'images a vu (« image 2: zone de comparaison vide »).
 fn seen_defects(defects: &[(usize, String)]) -> String {
@@ -1660,7 +1924,7 @@ pub fn image_guide(images: usize) -> String {
 
 /// Message renvoyé au modèle qui conclut après un signalement de problème :
 /// chaque symptôme doit avoir sa cause observée et sa disparition observée.
-pub const PROBLEM_EVIDENCE_PROMPT: &str = "[Claw] Before this answer goes to the user: they reported a problem. Go back to their message and to each image it carries, and list every symptom. For each one, name the observation you made in this turn, with your tools, that shows its cause, and the one that shows it is gone after your change. A guess (\"probably\", \"likely\") is not a cause; a passing test or a 200 response is not the symptom gone. Where an observation is missing, make it now: read the code that produces the symptom, run it the way the user does, read the logs and the result itself. If something truly cannot be observed with your tools, say so in your answer instead of calling it solved, and never hand the investigation to the user while one of your tools can still do it.";
+pub const PROBLEM_EVIDENCE_PROMPT: &str = "[Claw] Before this answer goes to the user: they reported a problem. Go back to their message and to each image it carries, and list every symptom. For each one, name the observation you made in this turn, with your tools, that shows its cause, and the one that shows it is gone after your change. A guess (\"probably\", \"likely\") is not a cause; a passing test or a 200 response is not the symptom gone. If the user named a cause themselves, say whether your observations confirm it; if you changed their data rather than the code that reads it, justify it line by line or undo it and fix the code. Where an observation is missing, make it now: read the code that produces the symptom, run it the way the user does, read the logs and the result itself. If something truly cannot be observed with your tools, say so in your answer instead of calling it solved, and never hand the investigation to the user while one of your tools can still do it.";
 
 /// Message renvoyé au modèle qui conclut après des images envoyées sans
 /// plainte écrite, quand il a modifié des fichiers ou que le lecteur d'images
@@ -1900,7 +2164,7 @@ const DIFF_CONTEXT: usize = 3;
 /// résultat de `edit_file` ou `write_file` (lignes « - » du correctif complet).
 #[must_use]
 pub fn original_content(tool_output: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(tool_output).ok()?;
+    let value = first_json(tool_output)?;
     let hunks = value.get("structuredPatch")?.as_array()?;
     let mut lines = Vec::new();
     for hunk in hunks {
@@ -2800,6 +3064,91 @@ mod tests {
     }
 
     #[test]
+    fn a_changed_file_is_shown_so_that_it_is_not_read_again() {
+        use super::{file_view_marker, view_after_edit, FILE_VIEW_END, FILE_VIEW_PREFIX};
+        let dir = std::env::temp_dir().join(format!("claw-vue-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let output = |path: &std::path::Path, start: usize, count: usize| {
+            serde_json::json!({
+                "filePath": path.to_string_lossy(),
+                "structuredPatch": [{ "oldStart": start, "oldLines": 1, "newStart": start, "newLines": count }]
+            })
+            .to_string()
+        };
+        // Petit fichier : montré en entier, tel qu'il est sur le disque.
+        let small = dir.join("notes.py");
+        std::fs::write(&small, "a = 1\nb = 2\n").expect("petit fichier");
+        let view = view_after_edit("edit_file", &output(&small, 2, 1)).expect("vue");
+        assert!(view.starts_with(FILE_VIEW_PREFIX), "{view}");
+        assert!(view.contains("as it is now (2 lines)"), "{view}");
+        assert!(view.contains("\na = 1\nb = 2\n"), "{view}");
+        // Fichier en CRLF : montré sans retours chariot, comme read_file.
+        std::fs::write(&small, "a = 1\r\nb = 2\r\n").expect("CRLF");
+        let crlf = view_after_edit("edit_file", &output(&small, 2, 1)).expect("vue");
+        assert!(
+            crlf.contains("\na = 1\nb = 2\n") && !crlf.contains('\r'),
+            "{crlf:?}"
+        );
+        std::fs::write(&small, "a = 1\nb = 2\n").expect("petit fichier");
+        assert!(view.ends_with(FILE_VIEW_END), "{view}");
+        let marker = file_view_marker(&output(&small, 2, 1)).expect("marque");
+        assert!(view.starts_with(&marker), "{marker}");
+        // Après `write_file`, une ligne suffit : le modèle vient de tout écrire.
+        let sent = |content: &str, note: Option<&str>| {
+            serde_json::json!({ "filePath": small.to_string_lossy(), "content": content, "note": note })
+                .to_string()
+        };
+        let written = view_after_edit("write_file", &sent("a = 1\nb = 2\n", None)).expect("ligne");
+        assert!(written.contains("is written exactly as you sent it (2 lines)"));
+        assert!(!written.contains("a = 1"));
+        // Changé après l'écriture (formateur, hook) : le fichier est montré.
+        let changed = view_after_edit("write_file", &sent("a=1\nb=2\n", None)).expect("vue");
+        assert!(
+            changed.starts_with(FILE_VIEW_PREFIX) && changed.contains("a = 1"),
+            "{changed}"
+        );
+        // L'outil a déjà une remarque (contenu abrégé) : rien de rassurant.
+        assert!(
+            view_after_edit("write_file", &sent("a = 1\nb = 2\n", Some("placeholder"))).is_none()
+        );
+        // Grand fichier : les lignes autour du changement, d'après le vrai
+        // résultat de l'outil (un seul bloc de diff pour tout le fichier).
+        let big = dir.join("page.tsx");
+        let text: Vec<String> = (1..=400).map(|n| format!("ligne {n}")).collect();
+        std::fs::write(&big, text.join("\n")).expect("grand fichier");
+        let edited = crate::file_ops::edit_file(
+            &big.to_string_lossy(),
+            "ligne 300\n",
+            "ligne 300 changée\nligne ajoutée\n",
+            false,
+        )
+        .expect("modification");
+        let result = serde_json::to_string(&edited).expect("JSON");
+        let view = view_after_edit("edit_file", &result).expect("vue");
+        assert!(view.contains("now has 401 lines"), "{view}");
+        assert!(view.contains("Lines 292 to 309 as they are now"), "{view}");
+        assert!(
+            view.contains("ligne 300 changée\nligne ajoutée\nligne 301"),
+            "{view}"
+        );
+        assert!(!view.contains("ligne 150\n"));
+        assert!(view.ends_with(FILE_VIEW_END), "{view}");
+        // Une ligne énorme est coupée, la vue reste bornée.
+        let wide = dir.join("donnees.json");
+        std::fs::write(&wide, format!("{{\"a\": \"{}\"}}\n", "x".repeat(50_000))).expect("large");
+        let edited = crate::file_ops::edit_file(&wide.to_string_lossy(), "\"a\"", "\"b\"", false)
+            .expect("modification");
+        let view = view_after_edit("edit_file", &serde_json::to_string(&edited).expect("JSON"))
+            .expect("vue");
+        assert!(view.len() < 1_000, "{}", view.len());
+        assert!(view.contains("line cut: "), "{view}");
+        // Fichier disparu ou résultat sans chemin : rien.
+        assert!(view_after_edit("edit_file", &output(&dir.join("absent.py"), 1, 1)).is_none());
+        assert!(view_after_edit("edit_file", "pas du JSON").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn reads_command_results_and_builds_the_feedback() {
         let passed = read_bash_output(r#"{"stdout":"ok","stderr":""}"#);
         assert!(passed.passed && !passed.timed_out);
@@ -2973,6 +3322,30 @@ mod tests {
             assert!(!super::is_test_file(&root.join(path), root), "{path}");
         }
         assert!(super::test_guard_feedback("test_x.py").contains("`test_x.py`"));
+        // Données : par extension, et la remarque nomme le fichier.
+        assert!(super::is_data_file(std::path::Path::new("data/ventes.CSV")));
+        assert!(super::is_data_file(std::path::Path::new("journal.jsonl")));
+        assert!(!super::is_data_file(std::path::Path::new("rapport.py")));
+        assert!(!super::is_data_file(std::path::Path::new("package.json")));
+        let note = super::data_guard_feedback("data/ventes.csv", &["a;12,5".to_string()]);
+        assert!(
+            note.contains("`data/ventes.csv`") && note.ends_with("\na;12,5"),
+            "{note}"
+        );
+        // Lignes retirées lues même quand un retour de hook suit le JSON.
+        let patched = "{\"structuredPatch\":[{\"lines\":[\"-a;12,5\",\"-b;1\",\"+a;12.5\",\"+b;1\"]}]}\n\nRetour des hooks:\nformaté";
+        assert_eq!(super::replaced_lines(patched), vec!["a;12,5".to_string()]);
+        assert_eq!(
+            super::original_content(patched).as_deref(),
+            Some("a;12,5\nb;1")
+        );
+        // Python du Microsoft Store et dossier temporaire.
+        let stderr = r"C:\Users\HP\AppData\Local\Microsoft\WindowsApps\python.exe: can't open file 'C:\\Users\\HP\\AppData\\Local\\Temp\\essai\\notes_test.py': [Errno 2] No such file or directory";
+        assert!(super::store_python_hint(stderr).is_some_and(|hint| hint.contains("/tmp")));
+        assert!(super::store_python_hint("python: can't open file 'x.py'").is_none());
+        // Un autre Python, l'alias du Store seulement cité plus haut : rien.
+        let other = "C:\\Users\\HP\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe\nC:\\Python312\\python.exe: can't open file 'C:\\Users\\HP\\AppData\\Local\\Temp\\x.py'";
+        assert!(super::store_python_hint(other).is_none());
 
         // Le correctif liste tout l'ancien fichier : seul un vrai retrait compte.
         let patch = |lines: &[&str]| {

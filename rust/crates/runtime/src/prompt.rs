@@ -307,9 +307,36 @@ fn push_context_file(files: &mut Vec<ContextFile>, path: PathBuf) -> std::io::Re
     }
 }
 
+/// Lignes de l'état Git et taille du diff rendues au plus dans le prompt : ce
+/// contexte repart avec chaque requête.
+const MAX_GIT_STATUS_LINES: usize = 60;
+const MAX_GIT_DIFF_CHARS: usize = 6_000;
+
+/// Les `limit` premières lignes, et le nombre de celles qui restent.
+fn first_lines(text: &str, limit: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= limit {
+        return text.to_string();
+    }
+    format!(
+        "{}\n(… and {} more lines: run the git command yourself to see them)",
+        lines[..limit].join("\n"),
+        lines.len() - limit
+    )
+}
+
+/// État Git du dossier de travail seulement (`-- .`) : dans un dépôt à
+/// plusieurs projets, le reste ne concerne pas le modèle.
 fn read_git_status(cwd: &Path) -> Option<String> {
     let output = Command::new("git")
-        .args(["--no-optional-locks", "status", "--short", "--branch"])
+        .args([
+            "--no-optional-locks",
+            "status",
+            "--short",
+            "--branch",
+            "--",
+            ".",
+        ])
         .current_dir(cwd)
         .output()
         .ok()?;
@@ -321,28 +348,55 @@ fn read_git_status(cwd: &Path) -> Option<String> {
     if trimmed.is_empty() {
         None
     } else {
-        Some(trimmed.to_string())
+        Some(first_lines(trimmed, MAX_GIT_STATUS_LINES))
     }
 }
 
+/// Diff Git du dossier de travail seulement. Trop long, il est remplacé par la
+/// liste des fichiers modifiés : le modèle lit ensuite ce dont il a besoin.
 fn read_git_diff(cwd: &Path) -> Option<String> {
+    let kinds: [(&str, &[&str]); 2] =
+        [("Staged changes", &["--cached"]), ("Unstaged changes", &[])];
     let mut sections = Vec::new();
-
-    let staged = read_git_output(cwd, &["diff", "--cached"])?;
-    if !staged.trim().is_empty() {
-        sections.push(format!("Staged changes:\n{}", staged.trim_end()));
+    for (title, flags) in kinds {
+        // `--relative` : chemins comptés depuis le dossier de travail, comme
+        // ceux de l'état Git.
+        let mut args = vec!["diff", "--relative"];
+        args.extend_from_slice(flags);
+        args.extend(["--", "."]);
+        let diff = read_git_output(cwd, &args)?;
+        if !diff.trim().is_empty() {
+            sections.push((title, flags, diff.trim_end().to_string()));
+        }
     }
-
-    let unstaged = read_git_output(cwd, &["diff"])?;
-    if !unstaged.trim().is_empty() {
-        sections.push(format!("Unstaged changes:\n{}", unstaged.trim_end()));
-    }
-
     if sections.is_empty() {
-        None
-    } else {
-        Some(sections.join("\n\n"))
+        return None;
     }
+    let total: usize = sections.iter().map(|(_, _, diff)| diff.len()).sum();
+    if total <= MAX_GIT_DIFF_CHARS {
+        return Some(
+            sections
+                .iter()
+                .map(|(title, _, diff)| format!("{title}:\n{diff}"))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        );
+    }
+    let mut parts = Vec::new();
+    for (title, flags, _) in &sections {
+        let mut args = vec!["diff", "--relative", "--stat"];
+        args.extend_from_slice(flags);
+        args.extend(["--", "."]);
+        let stat = read_git_output(cwd, &args)?;
+        parts.push(format!(
+            "{title} (files only):\n{}",
+            first_lines(stat.trim_end(), MAX_GIT_STATUS_LINES)
+        ));
+    }
+    parts.push(format!(
+        "(The full diff is {total} characters and is not shown: run `git diff` on the files you need.)"
+    ));
+    Some(parts.join("\n\n"))
 }
 
 fn read_git_output(cwd: &Path, args: &[&str]) -> Option<String> {
@@ -354,7 +408,8 @@ fn read_git_output(cwd: &Path, args: &[&str]) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    String::from_utf8(output.stdout).ok()
+    // Un fichier dans un autre codage (Windows-1252) ne fait pas perdre le reste.
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn render_project_context(project_context: &ProjectContext) -> String {
@@ -511,6 +566,9 @@ fn render_language_section(language: &str) -> String {
     )
 }
 
+/// Réglages montrés au modèle dans le prompt.
+const PROMPT_CONFIG_KEYS: [&str; 5] = ["model", "language", "verify", "review", "permissionMode"];
+
 fn render_config_section(config: &RuntimeConfig) -> String {
     let mut lines = vec!["# Runtime config".to_string()];
     if config.loaded_entries().is_empty() {
@@ -528,7 +586,22 @@ fn render_config_section(config: &RuntimeConfig) -> String {
             .collect(),
     ));
     lines.push(String::new());
-    lines.push(config.as_json().render());
+    // Seuls les réglages utiles au modèle sont montrés. Le reste (règles de
+    // permission, hooks, serveurs MCP avec leurs jetons, en-têtes des
+    // fournisseurs) est appliqué par Claw : rien de cela ne part chez le
+    // fournisseur du modèle.
+    let shown: std::collections::BTreeMap<String, crate::json::JsonValue> = match config.as_json() {
+        crate::json::JsonValue::Object(entries) => entries
+            .into_iter()
+            .filter(|(key, _)| PROMPT_CONFIG_KEYS.contains(&key.as_str()))
+            .collect(),
+        _ => std::collections::BTreeMap::new(),
+    };
+    if shown.is_empty() {
+        lines.pop();
+    } else {
+        lines.push(crate::json::JsonValue::Object(shown).render());
+    }
     lines.join("\n")
 }
 
@@ -955,6 +1028,44 @@ mod tests {
         let diff = context.git_diff.expect("git diff should be present");
         assert!(diff.contains("Unstaged changes:"));
         assert!(diff.contains("tracked.txt"));
+
+        // Un sous-dossier du dépôt ne reçoit que ce qui le concerne : essai
+        // réel du 12 octobre, un modèle a lu dans le diff du dépôt entier des
+        // notes sans rapport avec son projet.
+        let project = root.join("projet");
+        fs::create_dir_all(&project).expect("sous-dossier");
+        fs::write(project.join("notes.txt"), "a\n").expect("fichier du projet");
+        let context =
+            ProjectContext::discover_with_git(&project, "2026-03-31").expect("context should load");
+        let status = context.git_status.expect("état du sous-dossier");
+        // Git résume un dossier entièrement nouveau en « ?? ./ ».
+        assert!(status.contains("?? "), "{status}");
+        assert!(!status.contains("tracked.txt"), "{status}");
+        assert!(context.git_diff.is_none());
+
+        // Un gros diff est remplacé par la liste des fichiers.
+        let big = "une ligne de plus\n".repeat(2_000);
+        fs::write(root.join("tracked.txt"), big).expect("gros fichier");
+        let context =
+            ProjectContext::discover_with_git(&root, "2026-03-31").expect("context should load");
+        let diff = context.git_diff.expect("git diff should be present");
+        assert!(diff.contains("Unstaged changes (files only):"), "{diff}");
+        assert!(diff.contains("tracked.txt"));
+        // Depuis un sous-dossier, les chemins du diff se comptent comme ceux
+        // de l'état : depuis le dossier de travail.
+        fs::write(project.join("notes.txt"), "a\n").expect("fichier du projet");
+        std::process::Command::new("git")
+            .args(["add", "projet/notes.txt"])
+            .current_dir(&root)
+            .status()
+            .expect("git add should run");
+        let inside =
+            ProjectContext::discover_with_git(&project, "2026-03-31").expect("context should load");
+        let inside_diff = inside.git_diff.expect("diff du sous-dossier");
+        assert!(inside_diff.contains("b/notes.txt"), "{inside_diff}");
+        assert!(!inside_diff.contains("projet/notes.txt"), "{inside_diff}");
+        assert!(diff.contains("is not shown"));
+        assert!(diff.len() < 2_000, "{}", diff.len());
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }

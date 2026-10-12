@@ -78,6 +78,12 @@ fn lean_write(fields: &Map<String, Value>) -> Option<Map<String, Value>> {
     lean.insert("filePath".to_string(), fields.get("filePath")?.clone());
     lean.insert("lines".to_string(), json!(content.lines().count()));
     lean.insert("structuredPatch".to_string(), hunk_positions(fields));
+    // Contenu abrégé écrit tel quel, codage changé : le modèle doit le lire.
+    for key in ["note", "encodingNote"] {
+        if let Some(value) = fields.get(key).filter(|value| !value.is_null()) {
+            lean.insert(key.to_string(), value.clone());
+        }
+    }
     Some(lean)
 }
 

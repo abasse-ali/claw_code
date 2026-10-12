@@ -27,6 +27,14 @@ compenser leurs faiblesses :
    bouger), écrire le test, corriger, lancer la vérification complète, committer, pousser, puis
    mettre à jour ce fichier et l'état du constat dans son fichier d'étude, dans le même commit.
 
+Reprise automatique : le 12 octobre 2026, l'utilisateur a demandé que la session reprenne
+d'elle-même (« continue ») à 6 h 22 puis toutes les 5 heures (6 h 20 demandé, plus deux
+minutes de marge). Des tâches planifiées le font
+pendant 7 jours, mais elles ne vivent que dans la session qui les a créées : une nouvelle
+session vérifie qu'elles existent (liste des tâches planifiées) et les recrée sinon. À chaque
+reprise : continuer au premier point ouvert, committer et pousser ce qui est vérifié,
+retirer les tâches des jours passés et programmer les suivantes.
+
 Règles permanentes (détail dans la mémoire du projet) :
 
 - Répondre en français. Textes de l'interface en français, remarques destinées au modèle en
@@ -96,9 +104,12 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 | fbc5369 | Serveurs arrêtés avec leurs petits-enfants sous Windows, serveur prêt malgré un délai long, bash sous Linux, pytest sans test, sous-projet à côté d'une racine vérifiable, code changé par une commande vérifié, `PowerShell` 5.1, navigateur qui refuse de démarrer, vLLM |
 | 9ef1956 | Lot 3 : contenu abrégé refusé, dossier listé, `grep_search` et `glob_search` qui réparent et disent, `edit_file` qui joint ce qu'il faut pour réussir, BOM et CRLF gardés, chemin introuvable expliqué |
 | 595bb90 | Lot 4 : arguments mis à la forme de l'outil et dits au modèle, outil inconnu expliqué, noms d'outils dans les sous-agents, `TodoWrite` tolérant |
-| (commit « Lot 5 ») | Lot 5 : résumé de compaction contrôlé et demandes notées mot pour mot par Claw, anciens résultats d'outils allégés à la réouverture, réponse coupée par la limite de sortie continuée et raccordée à l'affichage |
+| 695d03d | Lot 5 : résumé de compaction contrôlé et demandes notées mot pour mot par Claw, anciens résultats d'outils allégés à la réouverture, réponse coupée par la limite de sortie continuée et raccordée à l'affichage |
 
-État des tests au lot 5 : 624 tests Rust, analyse statique à zéro sous Windows et Linux,
+| b278ae6 à 53fecdb | Campagne T1 : banc d'essai réel (`rust/scripts/real-tests/`), série propre, constats T1-01 à T1-10 |
+| (commit « Lot T1 ») | Lot T1 : garde des données réécrites, guide de débogage (hypothèse de l'utilisateur), fichier montré après une modification, essais regroupés, contexte Git borné, réglages sans secrets dans le prompt, Python du Microsoft Store |
+
+État des tests au lot T1 : 629 tests Rust, analyse statique à zéro sous Windows et Linux,
 client 28 sur 28, extension VS Code 18 sur 18.
 
 ## Études
@@ -206,4 +217,9 @@ Hors lots :
 - Les 38 processus de test des 8 et 9 octobre (serveurs `mock_*.py`, `log_proxy.py`, boucle
   d'attente et leurs `bash`) sont arrêtés, à la demande de l'utilisateur ; son `uvicorn` reste.
 - Nouvelle demande de l'utilisateur : tester Claw avec de vrais modèles gratuits et l'améliorer
-  pour qu'il guide les modèles à raisonner comme Opus et Fable. Campagne T ci-dessous.
+  pour qu'il guide les modèles à raisonner comme Opus et Fable. Campagne T1 : banc d'essai
+  réel, 99 requêtes pour la série propre. Le gratuit le plus puissant réussit presque tout ;
+  un petit modèle réécrit de mémoire le fichier de données de l'utilisateur au lieu de
+  corriger le script, et les deux gaspillent des requêtes à relire leurs propres
+  modifications. Lot T1 fait en réponse, relu par deux agents (20 constats).
+- Reprise automatique programmée à la demande de l'utilisateur (6 h 22 puis toutes les 5 h).
