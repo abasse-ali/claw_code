@@ -791,9 +791,10 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 13 octobre, 10 h) : (1) peu d'essais réels pendant la
-journée de l'utilisateur (le quota du jour est partagé) : t1 et t5 pour vérifier qu'ils ne
-régressent pas (t2 8/8 et t4 12/12 ce matin), un essai chacun ; les répétitions de t7 ont montré qu'un seul essai ne
+Suite, dans l'ordre (mise à jour du 13 octobre, 10 h) : (1) plus d'essai réel avant la
+remise à zéro du quota gratuit (2 h) : il en reste environ 400 pour la journée de
+l'utilisateur. Ensuite : t1 et t5 pour vérifier qu'ils ne régressent pas (t2 8/8 et t4 12/12
+ce matin), un essai chacun ; entre-temps, du travail sans vrai modèle ; les répétitions de t7 ont montré qu'un seul essai ne
 suffit pas (11/12 puis 3/12 pour le même témoin) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
