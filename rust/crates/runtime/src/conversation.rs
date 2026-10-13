@@ -523,7 +523,9 @@ fn lean_stored_results(session: &mut Session) {
 /// Contenu d'un fichier avant sa première modification du tour par les outils
 /// du modèle (garde des modifications perdues).
 fn remember_turn_start(tool_name: &str, input: &str, aids: &mut TurnAids) {
-    if !matches!(tool_name, "edit_file" | "write_file") || !harness::enabled(Aid::LostEdits) {
+    if !matches!(tool_name, "edit_file" | "write_file")
+        || !(harness::enabled(Aid::LostEdits) || harness::enabled(Aid::DataGuard))
+    {
         return;
     }
     if let Some(path) = edited_path(input) {
@@ -1977,6 +1979,9 @@ where
                 notes.push(harness::test_guard_feedback(&name));
             }
         }
+        if let Some(note) = self.json_data_reshaped(input, aids) {
+            notes.push(note);
+        }
         if let Some((shown, replaced)) = path
             .as_deref()
             .and_then(|path| Self::rewritten_data(path, output, aids))
@@ -2095,6 +2100,32 @@ where
             return None;
         }
         Some((harness::shown_path(path), replaced))
+    }
+
+    /// Le modèle a changé un fichier JSON de données qui existait au début du
+    /// tour pour qu'il colle à son nouveau code. Essai réel t7, deux fois :
+    /// `"inscrits": []` ajouté à chaque atelier de `donnees.json`, puis un code
+    /// qui plante sur le fichier de l'utilisateur, resté à l'ancienne forme.
+    fn json_data_reshaped(&mut self, input: &str, aids: &mut TurnAids) -> Option<String> {
+        if !harness::enabled(Aid::DataGuard) {
+            return None;
+        }
+        let path = edited_path(input)?;
+        let cwd = std::env::current_dir().ok()?;
+        if !harness::is_json_data_file(path.strip_prefix(&cwd).unwrap_or(&path)) {
+            return None;
+        }
+        let before = aids.turn_start_files.get(&path)?.clone()?;
+        let after = std::fs::read_to_string(&path).ok()?;
+        let (added, changed) = harness::json_data_change(&before, &after)?;
+        let shown = harness::shown_path(&path.to_string_lossy());
+        if !aids.guarded_data.insert(shown.clone()) {
+            return None;
+        }
+        self.api_client.notify(&format!(
+            "Attention : {shown}, les données que le programme enregistre, a été modifié pour coller au nouveau code : relisez ce changement"
+        ));
+        Some(harness::json_data_feedback(&shown, &added, changed))
     }
 
     /// Les vues dont le fichier a changé depuis (commande, formateur, `git
@@ -6044,6 +6075,64 @@ mod tests {
             )));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&kept);
+    }
+
+    #[test]
+    fn a_data_file_reshaped_for_the_new_code_is_pointed_out() {
+        // Essai réel t7, deux fois : `"inscrits": []` ajouté à chaque atelier
+        // de `donnees.json`, et un code qui plante sur l'ancien fichier.
+        let path = std::env::temp_dir().join(format!(
+            "claw-donnees-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        std::fs::write(
+            &path,
+            r#"{"ateliers": {"Poterie": {"places": 2}, "Couture": {"places": 8}}}"#,
+        )
+        .expect("données");
+        let observed = std::rc::Rc::new(std::cell::RefCell::new(Observed::default()));
+        let target = path.clone();
+        let output = serde_json::json!({ "filePath": path.to_string_lossy() }).to_string();
+        let executor = StaticToolExecutor::new()
+            .register("write_file", move |_| {
+                std::fs::write(
+                    &target,
+                    r#"{"ateliers": {"Poterie": {"places": 2, "inscrits": []}, "Couture": {"places": 8, "inscrits": []}}}"#,
+                )
+                .expect("écrit");
+                Ok(output.clone())
+            })
+            .register("bash", |_| Ok(PASSING.to_string()));
+        let write =
+            serde_json::json!({ "path": path.to_string_lossy(), "content": "x" }).to_string();
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            StepsApiClient {
+                steps: vec![tool_step("write_file", &write), text_step("Fait.")].into(),
+                observed: std::rc::Rc::clone(&observed),
+                advisor: std::collections::VecDeque::new(),
+                escalation: None,
+            },
+            executor,
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["système".to_string()],
+        )
+        .with_verify(crate::harness::VerifySetting::Commands(vec![
+            "verifier".to_string()
+        ]));
+        runtime
+            .run_turn("ajoute les inscriptions", None)
+            .expect("tour");
+        let observed = observed.borrow();
+        assert!(observed.requests[1]
+            .contains("you added `inscrits` to entries that were already there"));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("les données que le programme enregistre")));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

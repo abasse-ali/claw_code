@@ -149,6 +149,9 @@ référence 12/12), Claw au commit 8032009 puis avec T1-32 :
 |---|---|---|---|---|---|---|---|
 | 13/10 02:53 | t7-ateliers | free = nemotron-3-ultra-550b | t7-sans (`CLAW_EDGE_CASES=0`) | 11/12 | 17 | 312 s | témoin sans les cas limites : tout juste, sauf « zoé » et «  Zoé  » inscrits en plus de « Zoé » |
 | 13/10 02:58 | t7-ateliers | free | t7-avec | 11/12 | 21 | 245 s | même point manqué. Au contrôle, le modèle lit la ligne des doublons et écrit : « "Zoé", " zoé ", and decomposed "zoé" would count as three different people. The guide suggests normalizing, but the request doesn't explicitly ask for it » (T1-32) ; la relecture (laguna) n'y voit rien |
+| 13/10 04:09 | t7-ateliers | free | t7-sans2 (`CLAW_EDGE_CASES=0`) | 3/12 | 19 | 140 s | témoin répété : le modèle ajoute `"inscrits": []` à chaque atelier de `donnees.json` (migration à la main) et écrit un code qui ne lit plus l'ancienne forme ; sur le fichier d'origine, `liste` plante (KeyError) et presque tout échoue (T1-33) |
+| 13/10 04:12 | t7-ateliers | free | t7-avec2 | 3/12 | 31 | 340 s | même migration à la main, même plantage, avec l'aide ; la relecture (laguna) : rien à corriger |
+| 13/10 04:23 | t7-ateliers | free | t7-avec3 | 12/12 | 56 | 353 s | avec la garde des fichiers JSON de données (T1-33) : la migration est signalée, le code lit l'ancienne forme. Cher : une dizaine de requêtes perdues à faire passer la forme décomposée « Zoe\u0301 » par le shell (la ligne des doublons dit maintenant de la tester dans un test unitaire) |
 | 13/10 03:08 | t7-ateliers | free | t7-partie | 12/12 | 29 | 384 s | avec T1-32 (une ligne qui s'applique fait partie de la demande) : les noms sont comparés après `strip()`, `casefold()` et NFC |
 
 Rejeu du contrôle de t7-avec (message 46) : 13/10 03:05, avec T1-32, 12/12 en 16 requêtes ;
@@ -707,6 +710,23 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   « sauf si la demande le veut » devient « sauf si la demande veut explicitement l'autre
   résultat ». Mesures : rejeu du contrôle 12/12, essai complet 12/12 (tableau de t7).
 
+### T1-33 Le modèle migre à la main le fichier de données au lieu de lire l'ancienne forme
+- Preuve : t7 répété, avec et sans l'aide : 3/12 les deux fois. Pour ajouter les inscrits, le
+  modèle ajoute `"inscrits": []` à chaque atelier de `donnees.json`, puis écrit
+  `atelier["inscrits"]` sans valeur par défaut. Chez lui tout marche ; sur le fichier de
+  l'utilisateur (la vérification remet celui de départ, comme toute autre copie : sauvegardes,
+  autres postes), `liste` plante. La garde des données ne voyait pas les `.json` (pour ne pas
+  viser `package.json` et les autres fichiers de configuration).
+- État : corrigé (reprise du 13 octobre, 2 h 22). Un fichier `.json` du projet qui n'est pas
+  une configuration connue (`package.json`, `tsconfig*.json`, `*.config.json`, fichiers et
+  dossiers cachés, `node_modules`...) est vu comme les données de l'application. Quand le
+  modèle le change avec ses outils, Claw compare au contenu du début du tour : une clé ajoutée
+  à au moins deux entrées qui existaient (une migration ; une seule clé nouvelle est plutôt
+  une entrée ajoutée) ou une valeur changée ou retirée est signalée au modèle, une fois par
+  fichier : les copies de l'utilisateur gardent l'ancienne forme, le code doit la lire aussi
+  (une valeur par défaut au chargement), et le fichier revenir comme il était, sauf demande
+  de l'utilisateur. Mesure : t7 avec cette garde, 12/12 (essai complet, 56 requêtes).
+
 ## Améliorations
 
 Lot T1 (en cours le 12 octobre 2026), dans cet ordre : T1-08 (garde des données), T1-03 et
@@ -724,14 +744,15 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 13 octobre, 4 h) : (1) refaire chaque mesure récente
-deux ou trois fois avant de conclure (t7 sans et avec l'aide, t6 avec le petit modèle), en
-surveillant le quota ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
+Suite, dans l'ordre (mise à jour du 13 octobre, 4 h 35) : (1) refaire t7 avec Claw à
+jour une ou deux fois (12/12 à confirmer ; 56 requêtes à faire baisser), puis t6 avec le
+petit modèle, en surveillant le quota ; les répétitions de t7 ont montré qu'un seul essai ne
+suffit pas (11/12 puis 3/12 pour le même témoin) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
 sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par
 une commande ; (5) T1-04, les espaces insécables oubliées sur t3 ; (6) refaire chaque mesure
-deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-32 sont faits, T1-18 en
+deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-33 sont faits, T1-18 en
 partie. Le troisième modèle gratuit (laguna) fait 12/12 sur t4
 et t5 avec le moins de requêtes (16 et 26), mais son fournisseur le limite souvent.
 

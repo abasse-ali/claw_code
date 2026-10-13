@@ -1546,6 +1546,138 @@ pub fn data_guard_feedback(path: &str, replaced: &[String]) -> String {
     )
 }
 
+/// Fichiers JSON de configuration connus : pas les données de l'application.
+const JSON_CONFIG_NAMES: [&str; 23] = [
+    "package.json",
+    "package-lock.json",
+    "composer.json",
+    "jsconfig.json",
+    "deno.json",
+    "bower.json",
+    "angular.json",
+    "nx.json",
+    "lerna.json",
+    "vercel.json",
+    "firebase.json",
+    "renovate.json",
+    "tslint.json",
+    "global.json",
+    "project.json",
+    "manifest.json",
+    "settings.json",
+    "launch.json",
+    "tasks.json",
+    "extensions.json",
+    "devcontainer.json",
+    "app.json",
+    "babel.config.json",
+];
+
+/// `path` (relatif au projet si possible) est un fichier JSON de données de
+/// l'application, ce qu'elle enregistre, et non un fichier de configuration
+/// connu (`package.json`, `tsconfig*.json`, `*.config.json`, dossiers cachés
+/// comme `.vscode`, `node_modules`).
+#[must_use]
+pub fn is_json_data_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    let config = !Path::new(&name)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        || JSON_CONFIG_NAMES.contains(&name.as_str())
+        || name.starts_with('.')
+        || name.starts_with("tsconfig")
+        || name.starts_with("appsettings")
+        || name.ends_with(".config.json");
+    let tooling = path.parent().is_some_and(|folder| {
+        folder.components().any(|part| match part {
+            std::path::Component::Normal(part) => part
+                .to_str()
+                .is_some_and(|part| part.starts_with('.') || part == "node_modules"),
+            _ => false,
+        })
+    });
+    !config && !tooling
+}
+
+/// Ce qu'une modification change dans un fichier JSON de données qui existait :
+/// les clés ajoutées à au moins deux entrées déjà là (une migration faite à la
+/// main ; une seule clé nouvelle est plutôt une entrée ajoutée) et le nombre de
+/// valeurs existantes changées ou retirées. `None` si rien de cela, ou si l'un
+/// des deux contenus n'est pas du JSON.
+#[must_use]
+pub fn json_data_change(before: &str, after: &str) -> Option<(Vec<String>, usize)> {
+    let before: Value = serde_json::from_str(before).ok()?;
+    let after: Value = serde_json::from_str(after).ok()?;
+    let mut added = std::collections::BTreeMap::new();
+    let mut changed = 0;
+    compare_json(&before, &after, &mut added, &mut changed);
+    let added: Vec<String> = added
+        .into_iter()
+        .filter(|(_, count)| *count >= 2)
+        .map(|(key, _)| key)
+        .collect();
+    (!added.is_empty() || changed > 0).then_some((added, changed))
+}
+
+fn compare_json(
+    before: &Value,
+    after: &Value,
+    added: &mut std::collections::BTreeMap<String, usize>,
+    changed: &mut usize,
+) {
+    match (before, after) {
+        (Value::Object(old), Value::Object(new)) => {
+            for (key, value) in old {
+                match new.get(key) {
+                    Some(now) => compare_json(value, now, added, changed),
+                    None => *changed += 1,
+                }
+            }
+            if !old.is_empty() {
+                for key in new.keys().filter(|key| !old.contains_key(*key)) {
+                    *added.entry(key.clone()).or_default() += 1;
+                }
+            }
+        }
+        (Value::Array(old), Value::Array(new)) => {
+            for (index, value) in old.iter().enumerate() {
+                match new.get(index) {
+                    Some(now) => compare_json(value, now, added, changed),
+                    None => *changed += 1,
+                }
+            }
+        }
+        _ => {
+            if before != after {
+                *changed += 1;
+            }
+        }
+    }
+}
+
+/// Remarque au modèle qui a changé un fichier JSON de données pour qu'il colle à
+/// son nouveau code : les copies de l'utilisateur gardent l'ancienne forme.
+#[must_use]
+pub fn json_data_feedback(path: &str, added: &[String], changed: usize) -> String {
+    let mut text = format!("[Claw] You changed `{path}`, the data your program saves:");
+    if !added.is_empty() {
+        let keys: Vec<String> = added.iter().take(5).map(|key| format!("`{key}`")).collect();
+        let _ = write!(
+            text,
+            " you added {} to entries that were already there, so that they fit your new code.",
+            keys.join(", ")
+        );
+    }
+    if changed > 0 {
+        let _ = write!(text, " Existing values changed or removed: {changed}.");
+    }
+    text.push_str(" The user's own copies of this file (their real data, backups, other machines) keep the old shape, and your code will meet them: make it read that shape too (give a missing field its default where the data is loaded or used, such as `entry.get(\"field\", [])`), and put the file back as it was with your editing tools. Keep this change only if the user asked for this edit of their data, and say so in your final answer. Then try your commands on the file as it was.");
+    text
+}
+
 // --- Fichier montré après une modification --------------------------------------------
 
 /// Début et fin de la vue d'un fichier jointe au résultat d'une modification.
@@ -3317,6 +3449,44 @@ mod guide_tests {
             "<<<\ndans la langue traduite, c'est que le français ; et une page pour l'URL\n>>>"
         ));
         assert!(prompt.contains("not answering permission requests"));
+    }
+
+    #[test]
+    fn a_json_data_file_reshaped_for_new_code_is_told_apart_from_config() {
+        use super::{is_json_data_file, json_data_change, json_data_feedback};
+        use std::path::Path;
+        assert!(is_json_data_file(Path::new("donnees.json")));
+        assert!(is_json_data_file(Path::new("data/contacts.json")));
+        for config in [
+            "package.json",
+            "tsconfig.build.json",
+            ".vscode/settings.json",
+            ".claw/settings.json",
+            "node_modules/x/data.json",
+            "jest.config.json",
+            "notes.txt",
+        ] {
+            assert!(!is_json_data_file(Path::new(config)), "{config}");
+        }
+        // Essai réel t7 : `"inscrits": []` ajouté à chaque atelier.
+        let before = r#"{"ateliers": {"Poterie": {"places": 2}, "Couture": {"places": 8}}}"#;
+        let migrated = r#"{"ateliers": {"Poterie": {"places": 2, "inscrits": []}, "Couture": {"places": 8, "inscrits": []}}}"#;
+        assert_eq!(
+            json_data_change(before, migrated),
+            Some((vec!["inscrits".to_string()], 0))
+        );
+        // Une entrée ajoutée (un atelier de plus) : pas une migration.
+        let one_more = r#"{"ateliers": {"Poterie": {"places": 2}, "Couture": {"places": 8}, "Yoga": {"places": 5}}}"#;
+        assert_eq!(json_data_change(before, one_more), None);
+        // Une valeur changée.
+        let changed = r#"{"ateliers": {"Poterie": {"places": 3}, "Couture": {"places": 8}}}"#;
+        assert_eq!(json_data_change(before, changed), Some((Vec::new(), 1)));
+        assert_eq!(json_data_change(before, "pas du json"), None);
+        let note = json_data_feedback("donnees.json", &["inscrits".to_string()], 0);
+        assert!(note.starts_with(
+            "[Claw] You changed `donnees.json`, the data your program saves: you added `inscrits`"
+        ));
+        assert!(note.contains("make it read that shape too"));
     }
 
     #[test]
