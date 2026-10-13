@@ -150,7 +150,9 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | f273bc0 | t7 confirmé : 12/12 deux fois avec Claw à jour |
 
-| (commit « T1-34 ») | Une correction garde ce que renvoient les fonctions existantes (ligne des montants, étape 4 du débogueur) : t3 repasse de 2/4 à 4/4 (T1-34) |
+| 65a24fc | Une correction garde ce que renvoient les fonctions existantes (ligne des montants, étape 4 du débogueur) : t3 repasse de 2/4 à 4/4 (T1-34) |
+
+| (commit « T1-35, T1-18 suite ») | Relecture de secours par le modèle de la session quand aucun relecteur ne répond (T1-35) ; les phrases qui laissent une action à une personne sont citées au contrôle et à la relecture (T1-18) ; t2 8/8, t4 12/12 |
 
 État des tests après T1-33 : 664 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
@@ -351,4 +353,9 @@ Hors lots :
   modèle avait fait renvoyer des `Decimal` à une fonction (la ligne des montants l'y poussait)
   et `json.dumps` plantait ; la ligne et le débogueur disent maintenant de garder ce que
   renvoient les fonctions existantes (T1-34) : t3 refait, 4/4. Le petit modèle sur t6 :
-  10/12 en l'état, arrêté par la limite de temps.
+  10/12 en l'état, arrêté par la limite de temps. t2 refait : 8/8. t4 refait : 10/12, le
+  prêt d'office revient (T1-18) et aucun relecteur ne répond à temps. Rejoué, le même modèle
+  en relecteur lit lui aussi un prêt d'office, puis lit juste quand la phrase de l'utilisateur
+  lui est citée ; au contrôle, l'agent, lui, défend son code même avec la phrase citée.
+  D'où : relecture de secours par le modèle de la session (T1-35) et phrase citée à la
+  relecture comme au contrôle. t4 refait : 12/12.

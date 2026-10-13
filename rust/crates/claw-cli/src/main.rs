@@ -5766,6 +5766,30 @@ impl DefaultRuntimeClient {
                 text: opinion.text,
             }),
             Err(error) => {
+                // Aucun autre modèle n'a répondu (relecteurs gratuits saturés) :
+                // le modèle de la session relit, dans une conversation neuve,
+                // plutôt que de laisser le travail sans relecture. Essai réel t4 :
+                // sans relecture, le livre mis de côté redevenait un prêt d'office.
+                if purpose == runtime::ConsultPurpose::Review {
+                    let own = self.chain.primary().to_string();
+                    if !own.is_empty() && !models.contains(&own) {
+                        if let Ok(opinion) = tools::advisors::ask_within(
+                            std::slice::from_ref(&own),
+                            system,
+                            prompt,
+                            tools::advisors::REVIEW_MAX_TOKENS,
+                            tools::advisors::Patience::REVIEW,
+                        ) {
+                            self.notify(&format!(
+                                "Aucun autre modèle n'a répondu ({error}) : le modèle de la session relit, dans une conversation neuve"
+                            ));
+                            return Some(runtime::Consultation {
+                                model: opinion.model,
+                                text: opinion.text,
+                            });
+                        }
+                    }
+                }
                 self.notify(&format!("Aucun autre modèle n'a répondu ({error})"));
                 None
             }

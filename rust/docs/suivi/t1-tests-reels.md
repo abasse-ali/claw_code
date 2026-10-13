@@ -477,6 +477,16 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   Gardée (générale, sans coût), mais ce n'est pas elle qui protège de ce défaut. Ce qui a
   trouvé de vrais défauts : la relecture par un autre modèle quand il fait les deux étapes
   (dots, deux fois sur deux) ; d'où T1-23.
+- Suite (13 octobre, 9 h 30) : t4 refait à 10/12, le prêt d'office revient et aucun relecteur
+  ne répond à temps (T1-35). Rejouée sur ce travail, la relecture par le modèle de la session
+  (nemotron) lit elle aussi « auto-checkout to next in line » et approuve. Claw extrait
+  maintenant les phrases de la demande qui laissent une action à une personne (« peut
+  alors », « seul peut », « can then »...) et les cite telles quelles au contrôle et au
+  relecteur. Même travail, même relecteur, phrase citée : « they must actively run
+  `emprunter`, it is not auto-checked-out », et le défaut de `rendre` est signalé. Au
+  contrôle, en revanche, l'agent écrit encore « lui seul peut alors l'emprunter - Done » :
+  celui qui a écrit le code le défend ; c'est la relecture (autre modèle, ou le même en
+  secours, T1-35) qui rattrape. t4 refait ensuite : 12/12 (la relecture, dots, lit juste).
 
 ### T1-19 Rien ne borne le nombre de requêtes d'un tour
 - Preuve : t4-north (07:06) : 250 requêtes en 25 minutes, plus aucun fichier modifié après
@@ -750,6 +760,20 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   qui suffit, en gardant ce que les fonctions existantes prennent et renvoient. Mesure : t3
   refait, 4/4 en 17 requêtes.
 
+### T1-35 Pas de relecture quand les relecteurs gratuits sont saturés
+- Preuve : t4 du 13 octobre au matin (10/12) : laguna et dots ne finissent pas leur réponse
+  dans le temps donné (240 s, puis les 120 s qui restaient) ; le travail rend la main sans
+  relecture, et le prêt d'office de T1-18 passe. Le même jour, t7 (deux fois) et t4 ont aussi
+  vu des relecteurs inachevés.
+- État : corrigé (reprise du 13 octobre, 7 h 22) : si aucun relecteur ne répond, le modèle de
+  la session relit lui-même, dans une conversation neuve (pas le raisonnement qui a écrit le
+  code), avec les mêmes consignes. Vérifié de bout en bout avec le faux modèle (relecteur
+  configuré introuvable, relecture par le modèle de la session). Le faux modèle répond
+  maintenant aux demandes de relecture (reconnues à la consigne du relecteur).
+- Limite mesurée : sur t4, ce relecteur de secours, sans la phrase citée (T1-18, suite), lit
+  la même chose que l'agent (« auto-checkout to next in line ») ; c'est la phrase citée qui
+  lui fait lire juste.
+
 ## Améliorations
 
 Lot T1 (en cours le 12 octobre 2026), dans cet ordre : T1-08 (garde des données), T1-03 et
@@ -767,17 +791,17 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 13 octobre, 9 h) : (1) peu d'essais réels pendant la
-journée de l'utilisateur (le quota du jour est partagé) : repasser sur les scénarios déjà
-réussis pour vérifier qu'aucun ne régresse avec les dernières lignes (t1, t2, t4, t5), un
-essai chacun ; les répétitions de t7 ont montré qu'un seul essai ne
+Suite, dans l'ordre (mise à jour du 13 octobre, 10 h) : (1) peu d'essais réels pendant la
+journée de l'utilisateur (le quota du jour est partagé) : t1 et t5 pour vérifier qu'ils ne
+régressent pas (t2 8/8 et t4 12/12 ce matin), un essai chacun ; les répétitions de t7 ont montré qu'un seul essai ne
 suffit pas (11/12 puis 3/12 pour le même témoin) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
 sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par
 une commande ; (5) T1-04, les espaces insécables oubliées sur t3 ; (6) refaire chaque mesure
-deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-34 sont faits, T1-18 en
-partie. Le troisième modèle gratuit (laguna) fait 12/12 sur t4
+deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-35 sont faits, T1-18 en
+partie (la relecture le rattrape quand la phrase lui est citée ; l'agent, lui, défend encore
+son code). Le troisième modèle gratuit (laguna) fait 12/12 sur t4
 et t5 avec le moins de requêtes (16 et 26), mais son fournisseur le limite souvent.
 
 Mesure faite (tableau plus haut). Pour la refaire : `run.py <scénario> --label <nom>`, puis avec

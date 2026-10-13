@@ -2181,6 +2181,79 @@ pub fn edge_case_guide(request: &str, earlier: Option<&str>) -> Option<String> {
     })
 }
 
+/// Tournures qui laissent une action à une personne (« lui seul peut alors
+/// l'emprunter », « the manager can then approve it »).
+const LEFT_TO_A_PERSON: [&str; 10] = [
+    "peut alors",
+    "peuvent alors",
+    "peut ensuite",
+    "peuvent ensuite",
+    "seul peut",
+    "seule peut",
+    "seuls peuvent",
+    "seules peuvent",
+    "can then",
+    "may then",
+];
+
+/// Les phrases de la demande qui laissent une action à une personne, à citer
+/// telles quelles au contrôle des exigences et à la relecture. Essais réels t4 :
+/// « il est mis de côté pour le premier de la file : lui seul peut alors
+/// l'emprunter » devenait un prêt d'office, chez l'agent comme chez un
+/// relecteur du même modèle, malgré la règle générale.
+#[must_use]
+pub fn actions_left_to_people(request: &str) -> Vec<String> {
+    sentences(request)
+        .into_iter()
+        .filter(|sentence| {
+            let folded = crate::team::without_accents(&sentence.to_lowercase());
+            LEFT_TO_A_PERSON
+                .iter()
+                .any(|marker| crate::team::has_word_start(&folded, marker))
+        })
+        .take(4)
+        .collect()
+}
+
+/// Les phrases d'un texte : coupées après `.`, `!` ou `?` suivis d'un blanc,
+/// et aux fins de ligne (un nom de fichier comme `biblio.py` ne coupe pas).
+fn sentences(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut current = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\n' {
+            push_sentence(&mut found, &mut current);
+            continue;
+        }
+        current.push(character);
+        if matches!(character, '.' | '!' | '?')
+            && chars.peek().is_none_or(|next| next.is_whitespace())
+        {
+            push_sentence(&mut found, &mut current);
+        }
+    }
+    push_sentence(&mut found, &mut current);
+    found
+}
+
+fn push_sentence(found: &mut Vec<String>, current: &mut String) {
+    let sentence = current.trim();
+    if !sentence.is_empty() {
+        found.push(sentence.to_string());
+    }
+    current.clear();
+}
+
+/// Phrases citées entre guillemets, séparées par des points-virgules.
+fn quoted_sentences(sentences: &[String]) -> String {
+    sentences
+        .iter()
+        .map(|sentence| format!("\"{sentence}\""))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Contrôle des exigences, avec la demande à contrôler citée mot pour mot.
 /// Sans elle, un petit modèle qui ne la voit plus (trente messages plus haut,
 /// après un « reprendre ») contrôle ce qu'il croit avoir fait, pas ce qui est
@@ -2201,6 +2274,16 @@ pub fn checklist_prompt(request: &str, earlier: Option<&str>, away: bool) -> Str
     let mut prompt = format!(
         "{CHECKLIST_PROMPT}\n\n{quoted}\nGo through it line by line: one line of your check per sentence or bullet of this request, even for a part you believe is already done (then quote the file and line that show it). Read each sentence again as it is written, not as you remember it: say what the user must be able to observe (who can do what, when, and what is refused), and make sure your code does exactly that, not a close variant. An action that the request leaves to a person (\"the manager can then approve it\", \"only the owner can then confirm\") stays theirs to do: your code must not do it for them automatically, and the scenario that shows it is that person doing it, after the step that allows it."
     );
+    // Les phrases de cette demande qui le font, citées : la règle seule ne
+    // suffisait pas (essais réels t4).
+    let left = actions_left_to_people(&format!("{request}\n{}", earlier.unwrap_or_default()));
+    if !left.is_empty() {
+        let _ = write!(
+            prompt,
+            "\n\nIn this request, these sentences leave an action to a person: {}. For each one, after the step it describes your code must do nothing more for that person: they do the action themselves, with the usual command, and anyone else is refused. Show the command that proves it.",
+            quoted_sentences(&left)
+        );
+    }
     prompt.push_str(&edge_case_check(request, earlier));
     if away {
         prompt.push(' ');
@@ -3058,6 +3141,16 @@ pub fn review_prompt(
             );
         }
     }
+    // Les phrases qui laissent une action à une personne : un relecteur du même
+    // modèle y lisait aussi un prêt d'office (essai réel t4).
+    let left = actions_left_to_people(&format!("{request}\n{}", earlier.unwrap_or_default()));
+    if !left.is_empty() {
+        let _ = write!(
+            prompt,
+            "Sentences of the request that leave an action to a person: {}. In Step 1, say who performs each of these actions and when; in Step 2, check that the code does not perform it for them automatically.\n\n",
+            quoted_sentences(&left)
+        );
+    }
     // La réponse de l'agent vient en dernier : elle décrit les changements à
     // sa façon, et le relecteur doit les avoir jugés d'après la demande.
     let answer = answer.trim();
@@ -3455,6 +3548,36 @@ mod guide_tests {
             "<<<\ndans la langue traduite, c'est que le français ; et une page pour l'URL\n>>>"
         ));
         assert!(prompt.contains("not answering permission requests"));
+    }
+
+    #[test]
+    fn sentences_that_leave_an_action_to_a_person_are_quoted() {
+        use super::{actions_left_to_people, checklist_prompt, review_prompt};
+        // Essai réel t4 : le livre mis de côté devenait un prêt d'office.
+        let library = "Ajoute les réservations à la bibliothèque. Un livre déjà emprunté peut être réservé par un autre membre (`python biblio.py reserver MEMBRE LIVRE`) ; plusieurs membres peuvent attendre le même livre. Quand le livre est rendu, il est mis de côté pour le premier de la file : lui seul peut alors l'emprunter. Ajoute les tests.";
+        let left = actions_left_to_people(library);
+        assert_eq!(
+            left,
+            ["Quand le livre est rendu, il est mis de côté pour le premier de la file : lui seul peut alors l'emprunter."]
+        );
+        assert_eq!(
+            actions_left_to_people("The order is saved. The manager can then approve it."),
+            ["The manager can then approve it."]
+        );
+        assert!(actions_left_to_people(
+            "Les congés se comptent en jours ouvrés. Ajoute les tests."
+        )
+        .is_empty());
+        let check = checklist_prompt(library, None, false);
+        assert!(check.contains(
+            "these sentences leave an action to a person: \"Quand le livre est rendu, il est mis de côté"
+        ));
+        let review = review_prompt(library, None, "Fait.", &["--- a/x\n+++ b/x".to_string()]);
+        assert!(review.contains(
+            "Sentences of the request that leave an action to a person: \"Quand le livre"
+        ));
+        assert!(!checklist_prompt("Ajoute un bouton", None, false)
+            .contains("leave an action to a person:"));
     }
 
     #[test]

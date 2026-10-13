@@ -157,6 +157,14 @@ function questionsReply(messages) {
 
 function reply(body) {
   const messages = body.messages || [];
+  // Relecture demandée par Claw (sans outils, avec la consigne du relecteur) :
+  // un avis complet et favorable, pour les essais de bout en bout de la relecture.
+  const reviewing = messages.some(
+    (message) => message.role === "system" && messageText(message).startsWith("You are a strict, careful code reviewer"),
+  );
+  if (!(body.tools && body.tools.length) && reviewing) {
+    return { text: "Step 1.\n- the request, sentence by sentence\nStep 2.\n- handled\n\nVERDICT\nLGTM" };
+  }
   const questions = questionsReply(messages);
   if (questions) return questions;
   const directive = lastDirective(messages);
