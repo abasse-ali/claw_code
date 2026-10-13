@@ -239,7 +239,7 @@ const FEATURE_EDGE_CASES: &[(&[&str], &str)] = &[
             "argparse", "argv", "en argument", "sans argument", "`python", "python -m", "python3 ",
             "script python", "scripts python", "option --", "options --", "--help", "cli ",
         ],
-        "Command-line scripts: a missing, extra or invalid argument (an unknown name, the date 31/04) must print one clear message, like the project's other refusals, and exit with a non-zero code, never a traceback (`sys.argv[2]` raises IndexError, `int(\"abc\")` ValueError); when you add a command or an option, add it to the usage text (docstring, argparse help) with the format of its arguments; arguments with accents or spaces (\"Chloé\", \"mon fichier.txt\") must arrive intact. Try no argument, one too many and a wrong value (one clear message, an exit code other than 0, no traceback) and --help (the usage, with the new command and the format of its arguments), printing the exit code with `echo $?`.",
+        "Command-line scripts: a missing, extra or invalid argument (an unknown name, the date 31/04) must print one clear message, like the project's other refusals, and exit with a non-zero code, never a traceback (`sys.argv[2]` raises IndexError, `int(\"abc\")` ValueError); when you add a command or an option, add it to the usage text (docstring, argparse help) and write out the format each argument expects (a date as JJ/MM/AAAA, an amount as 12,50), not only its name; arguments with accents or spaces (\"Chloé\", \"mon fichier.txt\") must arrive intact. Try no argument, one too many and a wrong value (one clear message, an exit code other than 0, no traceback) and --help (the usage, with the new command and the format of its arguments), printing the exit code with `echo $?`.",
     ),
 ];
 

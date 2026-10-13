@@ -760,6 +760,23 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   qui suffit, en gardant ce que les fonctions existantes prennent et renvoient. Mesure : t3
   refait, 4/4 en 17 requêtes.
 
+### T1-37 Le petit modèle lit les fichiers un par un
+- Preuve : t6 avec le petit modèle (13 octobre) : sept lectures, une par requête, avant la
+  première modification, dont trois du même fichier ; 14 à 16 lectures dans l'essai. Le plus
+  puissant lit tous les fichiers en une réponse.
+- État : corrigé (reprise du 13 octobre, 22 h 52) : aide `CLAW_SMALL_PROJECT`. Au premier tour
+  d'une session, un dépôt Git d'au plus 20 fichiers texte (24 000 caractères en tout, chacun
+  de la taille d'une vue) est joint en entier au message, en vues enregistrées comme celles
+  qui suivent une modification (remplacées quand le fichier change, périmées à la
+  réouverture : `replace_file_views` traite aussi les blocs de texte). Lire un fichier qu'une
+  vue encore à jour montre est signalé au modèle (aide des relectures inutiles).
+- Mesures : le petit modèle sur t6 lit encore trois fichiers au départ (sept avant), puis se
+  perd dans 81 commandes isolées et atteint la limite de 100 requêtes (9/12) ; dérive sans
+  lien avec les vues, ce modèle varie beaucoup. Le plus puissant sur t6 : aucune lecture,
+  11/12 en 29 requêtes (36 avant) ; le point manqué, le format des dates dans l'aide, l'était
+  aussi par le petit modèle : la ligne « ligne de commande » demande maintenant d'écrire le
+  format de chaque argument, avec un exemple (non mesuré).
+
 ### T1-36 La garde des tests visait aussi les tests que le modèle venait d'écrire
 - Preuve : dans les essais du 13 octobre (t1, t4, t5), la remarque « test_x.py sert à vérifier
   le travail et a été modifié après un échec » revient souvent. Sur t5 (21 h), les trois
@@ -808,7 +825,8 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 13 octobre, 23 h 30) : avec Claw au commit 361f79d, le
+Suite, dans l'ordre (mise à jour du 14 octobre, 0 h 15) : (0) mesurer T1-37 sur d'autres
+scénarios (t4, t5) avec le plus puissant, et l'aide de la ligne de commande sur t6 ; avec Claw au commit 361f79d, le
 banc entier tient avec le plus puissant (t1 6/6, t2 8/8, t3 4/4, t4 12/12, t5 12/12, t6 12/12,
 t7 12/12). (1) Le petit modèle reste le point faible (t6 : 11/12 en 43 requêtes, puis arrêté
 par la limite de temps) : regarder ses essais pour ce qui lui coûte le plus (édition ratée,
@@ -818,7 +836,7 @@ suffit pas (11/12 puis 3/12 pour le même témoin) ; (2) T1-24 sur un autre genr
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
 sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par
 une commande ; (5) T1-04, les espaces insécables oubliées sur t3 ; (6) refaire chaque mesure
-deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-36 sont faits, T1-18 en
+deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-37 sont faits, T1-18 en
 partie (la relecture le rattrape quand la phrase lui est citée ; l'agent, lui, défend encore
 son code). Le troisième modèle gratuit (laguna) fait 12/12 sur t4
 et t5 avec le moins de requêtes (16 et 26), mais son fournisseur le limite souvent.

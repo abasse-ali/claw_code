@@ -93,6 +93,8 @@ pub enum Aid {
     LostEdits,
     /// Script Python muet qui définit `main()` sans l'appeler : dit au modèle.
     EntryPoint,
+    /// Petit projet montré en entier au premier tour : pas de lectures une à une.
+    SmallProject,
 }
 
 impl Aid {
@@ -132,6 +134,7 @@ impl Aid {
             Self::EdgeCases => "CLAW_EDGE_CASES",
             Self::LostEdits => "CLAW_LOST_EDITS",
             Self::EntryPoint => "CLAW_ENTRY_POINT",
+            Self::SmallProject => "CLAW_SMALL_PROJECT",
         }
     }
 }
@@ -1764,6 +1767,77 @@ pub fn lost_edits_note(shown: &str, kept: Option<&str>, deleted: bool) -> String
     }
 }
 
+/// Au plus, les fichiers et les caractères d'un projet montré en entier.
+const SMALL_PROJECT_MAX_FILES: usize = 20;
+const SMALL_PROJECT_MAX_CHARS: usize = 24_000;
+
+/// Les fichiers texte d'un petit projet suivi par Git, tels qu'ils sont :
+/// (chemin affiché, contenu). `None` si le projet n'est pas suivi par Git ou
+/// pas petit (plus de fichiers, de caractères ou un fichier plus long qu'une
+/// vue). Les fichiers qui ne sont pas du texte sont laissés de côté.
+#[must_use]
+pub fn small_project_files(cwd: &Path) -> Option<Vec<(String, String)>> {
+    let listing = Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(cwd)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !listing.status.success() {
+        return None;
+    }
+    let names: Vec<String> = String::from_utf8_lossy(&listing.stdout)
+        .split('\0')
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect();
+    if names.is_empty() || names.len() > SMALL_PROJECT_MAX_FILES {
+        return None;
+    }
+    let mut files = Vec::new();
+    let mut total = 0;
+    for name in names {
+        let Ok(content) = std::fs::read_to_string(cwd.join(&name)) else {
+            continue;
+        };
+        if content.len() > VIEW_WHOLE_FILE_MAX_CHARS
+            || content.lines().count() > VIEW_WHOLE_FILE_MAX_LINES
+            || content.contains(FILE_VIEW_END)
+            || content.contains(FILE_VIEW_PREFIX)
+        {
+            return None;
+        }
+        total += content.len();
+        if total > SMALL_PROJECT_MAX_CHARS {
+            return None;
+        }
+        files.push((name.replace('\\', "/"), content));
+    }
+    (!files.is_empty()).then_some(files)
+}
+
+/// Guide du premier tour d'un petit projet : chaque fichier en vue, comme
+/// après une modification. Essai réel t6 : le petit modèle lisait les fichiers
+/// un par un, sept requêtes avant la première modification, dont trois pour le
+/// même fichier ; le plus puissant les lisait tous d'un coup.
+#[must_use]
+pub fn small_project_guide(files: &[(String, String)]) -> String {
+    let mut text = format!(
+        "{GUIDE_PREFIX} This project is small: its {} files are shown below as they are now, so you do not need to read them. A view is replaced when its file changes; read a file only then.",
+        files.len()
+    );
+    for (path, content) in files {
+        let lines: Vec<&str> = content.lines().collect();
+        let _ = write!(
+            text,
+            "\n\n{FILE_VIEW_PREFIX}`{path}` as it is now ({} lines). You do not need to read it again.\n{}\n{FILE_VIEW_END}",
+            lines.len(),
+            lines.join("\n")
+        );
+    }
+    text
+}
+
 /// Marque qui ouvre les vues de ce fichier (pour retirer les plus anciennes).
 #[must_use]
 pub fn file_view_marker(tool_output: &str) -> Option<String> {
@@ -1987,6 +2061,16 @@ pub fn read_result(output: &str) -> Option<(String, usize)> {
     let result = values.next()?.ok()?;
     let path = result.get("file")?.get("filePath")?.as_str()?.to_string();
     Some((path, values.byte_offset()))
+}
+
+/// Remarque au modèle qui lit un fichier déjà montré en entier dans une vue
+/// encore à jour (petit projet au premier tour, fichier après une modification).
+#[must_use]
+pub fn viewed_read_note(path: &str) -> String {
+    format!(
+        "[Claw] `{}` is already shown in full above, in a view that is still up to date: you did not need to read it. Work from the views (each one is replaced when its file changes); each read costs one request of a limited daily quota.",
+        shown_path(path)
+    )
 }
 
 /// Ce qui reste, dans la conversation, d'une lecture que le modèle a refaite
@@ -3548,6 +3632,48 @@ mod guide_tests {
             "<<<\ndans la langue traduite, c'est que le français ; et une page pour l'URL\n>>>"
         ));
         assert!(prompt.contains("not answering permission requests"));
+    }
+
+    #[test]
+    fn a_small_project_is_shown_whole_as_file_views() {
+        use super::{small_project_files, small_project_guide, FILE_VIEW_END, FILE_VIEW_PREFIX};
+        let folder = std::env::temp_dir().join(format!(
+            "claw-petit-projet-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        std::fs::create_dir_all(folder.join("equipe")).expect("dossier");
+        std::fs::write(folder.join("conges.py"), "print('congés')\n").expect("fichier");
+        std::fs::write(folder.join("equipe").join("donnees.py"), "A = 1\nB = 2\n")
+            .expect("fichier");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(&folder)
+                .output()
+                .expect("git")
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        let files = small_project_files(&folder).expect("petit projet");
+        assert_eq!(files.len(), 2);
+        let guide = small_project_guide(&files);
+        assert!(guide.contains("This project is small: its 2 files are shown below"));
+        assert!(guide.contains(&format!(
+            "{FILE_VIEW_PREFIX}`equipe/donnees.py` as it is now (2 lines)."
+        )));
+        assert_eq!(guide.matches(FILE_VIEW_END).count(), 2);
+        // Trop de fichiers : rien.
+        for index in 0..25 {
+            std::fs::write(folder.join(format!("f{index}.txt")), "x\n").expect("fichier");
+        }
+        git(&["add", "-A"]);
+        assert!(small_project_files(&folder).is_none());
+        // Pas un dépôt Git : rien.
+        assert!(small_project_files(&std::env::temp_dir().join("claw-pas-de-depot-ici")).is_none());
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]

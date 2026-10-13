@@ -396,6 +396,8 @@ struct TurnAids {
     todo_alone_notes: u32,
     /// Lectures de fichiers de ce tour (empreinte du résultat).
     reads_seen: std::collections::BTreeSet<u64>,
+    /// Fichiers lus alors qu'une vue à jour les montrait, déjà signalés.
+    viewed_reads: std::collections::BTreeSet<String>,
     /// Remarques déjà faites pendant ce tour pour un fichier relu à l'identique.
     repeated_read_notes: u32,
 }
@@ -487,8 +489,12 @@ fn lean_result(tool_name: &str, message: &mut ConversationMessage) {
 fn replace_file_views(session: &mut Session, marker: &str, placeholder: &str) {
     for message in &mut session.messages {
         for block in &mut message.blocks {
-            let ContentBlock::ToolResult { output, .. } = block else {
-                continue;
+            // Vues jointes à un résultat d'outil, ou au premier message d'un
+            // petit projet.
+            let output = match block {
+                ContentBlock::ToolResult { output, .. } => output,
+                ContentBlock::Text { text } => text,
+                _ => continue,
             };
             let mut from = 0;
             while let Some(start) = output[from..].find(marker).map(|at| from + at) {
@@ -1244,6 +1250,13 @@ where
                 user_message.blocks.push(ContentBlock::Text { text });
             }
         }
+        // Petit projet : tous ses fichiers en vues, au premier tour de la session.
+        if !self.subagent && self.session.messages.is_empty() && harness::enabled(Aid::SmallProject)
+        {
+            if let Some(text) = self.small_project_views() {
+                user_message.blocks.push(ContentBlock::Text { text });
+            }
+        }
         self.session.messages.push(user_message);
 
         let mut assistant_messages = Vec::new();
@@ -1779,6 +1792,7 @@ where
         notes.extend(lone_call_note(tool_name, input, &output, is_error, aids));
         if tool_name == "read_file" && !is_error {
             notes.extend(self.repeated_read_note(&output, aids));
+            notes.extend(self.viewed_read_note(&output, aids));
         }
 
         if matches!(tool_name, "edit_file" | "write_file" | "NotebookEdit") && !is_error {
@@ -2073,6 +2087,33 @@ where
         None
     }
 
+    /// Le modèle lit un fichier qu'une vue encore à jour montre déjà en entier
+    /// (essai réel t6 : le petit modèle relisait les fichiers du petit projet
+    /// qu'il avait sous les yeux). Une fois par fichier, dans la limite des
+    /// remarques de relecture du tour.
+    fn viewed_read_note(&mut self, output: &str, aids: &mut TurnAids) -> Option<String> {
+        if !harness::enabled(Aid::RepeatedReads)
+            || aids.repeated_read_notes >= harness::MAX_REPEATED_READ_NOTES
+        {
+            return None;
+        }
+        let (path, _) = harness::read_result(output)?;
+        let marker = format!(
+            "{}`{}`",
+            harness::FILE_VIEW_PREFIX,
+            harness::shown_path(&path)
+        );
+        let current = self.file_views.get(&marker)?;
+        if file_stamp(std::path::Path::new(&path)).as_ref() != Some(current) {
+            return None;
+        }
+        if !aids.viewed_reads.insert(marker) {
+            return None;
+        }
+        aids.repeated_read_notes += 1;
+        Some(harness::viewed_read_note(&path))
+    }
+
     /// Un appel n'a pas tourné faute de réponse à la demande d'autorisation :
     /// l'utilisateur apprend, une fois par tour, que les suivantes ne lui
     /// seront pas posées.
@@ -2138,6 +2179,20 @@ where
             "Attention : {shown}, les données que le programme enregistre, a été modifié pour coller au nouveau code : relisez ce changement"
         ));
         Some(harness::json_data_feedback(&shown, &added, changed))
+    }
+
+    /// Le guide d'un petit projet, ses vues enregistrées comme celles qui
+    /// suivent une modification (remplacées quand le fichier change).
+    fn small_project_views(&mut self) -> Option<String> {
+        let cwd = std::env::current_dir().ok()?;
+        let files = harness::small_project_files(&cwd)?;
+        for (path, _) in &files {
+            if let Some(stamp) = file_stamp(&cwd.join(path)) {
+                self.file_views
+                    .insert(format!("{}`{path}`", harness::FILE_VIEW_PREFIX), stamp);
+            }
+        }
+        Some(harness::small_project_guide(&files))
     }
 
     /// Les vues dont le fichier a changé depuis (commande, formateur, `git
@@ -6180,6 +6235,68 @@ mod tests {
             "verifier".to_string()
         ]));
         (runtime, observed)
+    }
+
+    #[test]
+    fn reading_a_file_already_shown_in_an_up_to_date_view_is_pointed_out() {
+        // Essai réel t6 : le petit modèle relisait les fichiers qu'une vue lui
+        // montrait déjà en entier.
+        let path = std::env::temp_dir().join(format!(
+            "claw-vue-{}.py",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        std::fs::write(&path, "a = 1\n").expect("fichier");
+        let observed = std::rc::Rc::new(std::cell::RefCell::new(Observed::default()));
+        let target = path.clone();
+        let edited = serde_json::json!({
+            "filePath": path.to_string_lossy(),
+            "structuredPatch": [{ "lines": ["-a = 1", "+a = 2"] }],
+        })
+        .to_string();
+        let read = serde_json::json!({
+            "type": "text",
+            "file": { "filePath": path.to_string_lossy(), "content": "a = 2\n" },
+        })
+        .to_string();
+        let executor = StaticToolExecutor::new()
+            .register("edit_file", move |_| {
+                std::fs::write(&target, "a = 2\n").expect("écrit");
+                Ok(edited.clone())
+            })
+            .register("read_file", move |_| Ok(read.clone()))
+            .register("bash", |_| Ok(PASSING.to_string()));
+        let edit = serde_json::json!({ "path": path.to_string_lossy(), "old_string": "a = 1", "new_string": "a = 2" })
+            .to_string();
+        let read_input = serde_json::json!({ "path": path.to_string_lossy() }).to_string();
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            StepsApiClient {
+                steps: vec![
+                    tool_step("edit_file", &edit),
+                    tool_step("read_file", &read_input),
+                    text_step("Fait."),
+                    text_step("Fait."),
+                ]
+                .into(),
+                observed: std::rc::Rc::clone(&observed),
+                advisor: std::collections::VecDeque::new(),
+                escalation: None,
+            },
+            executor,
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["système".to_string()],
+        )
+        .with_verify(crate::harness::VerifySetting::Commands(vec![
+            "verifier".to_string()
+        ]));
+        runtime.run_turn("change a", None).expect("tour");
+        let observed = observed.borrow();
+        assert!(observed.requests[1].contains("as it is now"));
+        assert!(observed.requests[2]
+            .contains("is already shown in full above, in a view that is still up to date"));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -156,7 +156,9 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | 361f79d | La garde des tests ne vise plus les tests écrits par le modèle pendant le tour (T1-36) ; t1 6/6 et t5 12/12 avec Claw à jour : le banc entier tient |
 
-| (commit « t4 t5 t6 refaits ») | Avec Claw au commit 361f79d : t6 12/12, t5 12/12, t4 12/12, sans remarque de la garde des tests (4 essais sur 22 la recevaient dans la journée) |
+| 53a7496 | Avec Claw au commit 361f79d : t6 12/12, t5 12/12, t4 12/12, sans remarque de la garde des tests (4 essais sur 22 la recevaient dans la journée) |
+
+| (commit « T1-37 ») | Un petit projet est joint en vues au premier tour ; lire un fichier déjà en vue est signalé (T1-37) ; t6 : le plus puissant ne lit plus aucun fichier (11/12 en 29 requêtes) |
 
 État des tests après T1-33 : 664 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
@@ -368,4 +370,7 @@ Hors lots :
   les tests neufs du modèle ; elle ne regarde plus que les lignes qui existaient au début du
   tour (T1-36). Les scripts du banc écrivent en UTF-8 (une réponse avec « → » faisait planter
   `review_replay.py`). Puis t6, t5 et t4 refaits avec ce Claw : 12/12 les trois fois, et
-  plus aucune remarque de la garde des tests.
+  plus aucune remarque de la garde des tests. Le petit modèle lisait les fichiers un par un
+  (sept requêtes avant d'écrire) : un petit projet est maintenant joint en vues au premier
+  tour (T1-37). Le plus puissant n'a plus rien lu sur t6 (11/12 en 29 requêtes) ; le petit
+  modèle a moins lu, puis s'est perdu ailleurs (81 commandes isolées).
