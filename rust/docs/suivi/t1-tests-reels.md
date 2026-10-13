@@ -152,6 +152,7 @@ référence 12/12), Claw au commit 8032009 puis avec T1-32 :
 | 13/10 04:09 | t7-ateliers | free | t7-sans2 (`CLAW_EDGE_CASES=0`) | 3/12 | 19 | 140 s | témoin répété : le modèle ajoute `"inscrits": []` à chaque atelier de `donnees.json` (migration à la main) et écrit un code qui ne lit plus l'ancienne forme ; sur le fichier d'origine, `liste` plante (KeyError) et presque tout échoue (T1-33) |
 | 13/10 04:12 | t7-ateliers | free | t7-avec2 | 3/12 | 31 | 340 s | même migration à la main, même plantage, avec l'aide ; la relecture (laguna) : rien à corriger |
 | 13/10 04:23 | t7-ateliers | free | t7-avec3 | 12/12 | 56 | 353 s | avec la garde des fichiers JSON de données (T1-33) : la migration est signalée, le code lit l'ancienne forme. Cher : une dizaine de requêtes perdues à faire passer la forme décomposée « Zoe\u0301 » par le shell (la ligne des doublons dit maintenant de la tester dans un test unitaire) |
+| 13/10 04:34 | t7-ateliers | free | t7-avec4 | 11/12 | 27 | 297 s | confirmation : la normalisation des noms manque encore. Le modèle lit la ligne des doublons, puis : « the existing code doesn't do this for atelier names either », et suit l'ancien code (T1-32, suite). Rejoué au contrôle (message 39) avec la consigne complétée : 12/12 en 20 requêtes |
 | 13/10 03:08 | t7-ateliers | free | t7-partie | 12/12 | 29 | 384 s | avec T1-32 (une ligne qui s'applique fait partie de la demande) : les noms sont comparés après `strip()`, `casefold()` et NFC |
 
 Rejeu du contrôle de t7-avec (message 46) : 13/10 03:05, avec T1-32, 12/12 en 16 requêtes ;
@@ -709,6 +710,12 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   personne écrite autrement ; le guide du début de tour et le relecteur le disent aussi, et
   « sauf si la demande le veut » devient « sauf si la demande veut explicitement l'autre
   résultat ». Mesures : rejeu du contrôle 12/12, essai complet 12/12 (tableau de t7).
+- Suite (4 h 40) : un essai de confirmation fait 11/12 ; le modèle trouve une autre raison
+  d'écarter la ligne, « le code existant ne le fait pas non plus ». Le contrôle et le guide
+  disent maintenant qu'un ancien code qui saute un cas n'est pas une raison de le sauter dans
+  le nouveau (le modèle le traite et signale l'ancien manque à l'utilisateur) : rejoué au même
+  point, 12/12. Sur quatre essais complets de t7 avec la consigne, deux ont couvert la
+  normalisation : il faudra la remesurer après ce complément.
 
 ### T1-33 Le modèle migre à la main le fichier de données au lieu de lire l'ancienne forme
 - Preuve : t7 répété, avec et sans l'aide : 3/12 les deux fois. Pour ajouter les inscrits, le
@@ -744,8 +751,8 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 13 octobre, 4 h 35) : (1) refaire t7 avec Claw à
-jour une ou deux fois (12/12 à confirmer ; 56 requêtes à faire baisser), puis t6 avec le
+Suite, dans l'ordre (mise à jour du 13 octobre, 4 h 50) : (1) refaire t7 avec Claw à
+jour deux fois (le complément de T1-32 n'a été mesuré que par un rejeu), puis t6 avec le
 petit modèle, en surveillant le quota ; les répétitions de t7 ont montré qu'un seul essai ne
 suffit pas (11/12 puis 3/12 pour le même témoin) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle

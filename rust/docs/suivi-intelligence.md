@@ -144,7 +144,9 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | 9210cb1 | t6 : laguna 12/12 en 15 requêtes, le petit modèle 11/12 en 43 (contre un essai arrêté à 81 requêtes) ; l'essai `--help` de la ligne de commande attend aussi le format des arguments |
 
-| (commit « T1-33 ») | Garde des fichiers JSON de données : une migration faite à la main (champ ajouté à chaque entrée) est signalée, le code doit lire l'ancienne forme (T1-33) ; t7 répété : 3/12 avec et sans l'aide sans cette garde, 12/12 avec |
+| 97fefbf | Garde des fichiers JSON de données : une migration faite à la main (champ ajouté à chaque entrée) est signalée, le code doit lire l'ancienne forme (T1-33) ; t7 répété : 3/12 avec et sans l'aide sans cette garde, 12/12 avec |
+
+| (commit « T1-32, suite ») | Un ancien code qui saute un cas n'est pas une raison de le sauter : t7 rejoué au contrôle, 11/12 devient 12/12 |
 
 État des tests après T1-33 : 664 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
@@ -336,4 +338,6 @@ Hors lots :
   dans l'aide : l'essai `--help` l'attend maintenant). t7 répété : 3/12, avec et sans
   l'aide : le modèle migrait `donnees.json` à la main et son code plantait sur le fichier
   d'origine. La garde des données couvre maintenant les fichiers JSON de l'application
-  (T1-33) : t7 refait, 12/12.
+  (T1-33) : t7 refait, 12/12. Un essai de confirmation fait 11/12 : le modèle écartait la
+  ligne des doublons parce que « le code existant ne le fait pas » ; complété (T1-32, suite),
+  12/12 au rejeu.

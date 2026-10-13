@@ -2158,7 +2158,7 @@ pub fn edge_case_check(request: &str, earlier: Option<&str>) -> String {
         return String::new();
     }
     format!(
-        "\n\nWhat experienced engineers always check for this kind of feature. A line that applies is part of what the user asked even though they did not write it: users never list these cases, they expect them (asking that the same person is not registered twice means \" zoé \" is Zoé). For each line that applies to this request, show the test or the command of this session that covers it, or add it now. The expected result of each try is in parentheses: a different result means your code is wrong, even if you chose that behavior on purpose (unless the user's request explicitly asks for that other result): fix the code and its tests, and say what you changed. Run the tries of a line together, in the project's tests when it has some or in one command (`python app.py a; echo $?; python app.py b; echo $?`), not one request per try:\n- {}",
+        "\n\nWhat experienced engineers always check for this kind of feature. A line that applies is part of what the user asked even though they did not write it: users never list these cases, they expect them (asking that the same person is not registered twice means \" zoé \" is Zoé). Older code of the project that skips such a case is not a reason to skip it in the code you write now: handle it, and mention the older gap to the user. For each line that applies to this request, show the test or the command of this session that covers it, or add it now. The expected result of each try is in parentheses: a different result means your code is wrong, even if you chose that behavior on purpose (unless the user's request explicitly asks for that other result): fix the code and its tests, and say what you changed. Run the tries of a line together, in the project's tests when it has some or in one command (`python app.py a; echo $?; python app.py b; echo $?`), not one request per try:\n- {}",
         cases.join("\n- ")
     )
 }
@@ -2175,7 +2175,7 @@ pub fn edge_case_guide(request: &str, earlier: Option<&str>) -> Option<String> {
     let cases = feature_edge_cases(&format!("{request}\n{}", earlier.unwrap_or_default()));
     (!cases.is_empty()).then(|| {
         format!(
-            "{GUIDE_PREFIX} What experienced engineers always check for this kind of work. A line that applies is part of the request even though the user did not write it. Keep each line that applies in mind from the start, and cover it with a test or a command; the expected result of each try is in parentheses. Run the tries of a line together, in the project's tests or in one command, not one request per try:\n- {}",
+            "{GUIDE_PREFIX} What experienced engineers always check for this kind of work. A line that applies is part of the request even though the user did not write it, and even where older code of the project does not do it. Keep each line that applies in mind from the start, and cover it with a test or a command; the expected result of each try is in parentheses. Run the tries of a line together, in the project's tests or in one command, not one request per try:\n- {}",
             cases.join("\n- ")
         )
     })
@@ -3437,6 +3437,9 @@ mod guide_tests {
         // Essai réel t7 : la ligne des doublons lue, puis écartée parce que
         // « the request doesn't explicitly ask for it ».
         assert!(search.contains("A line that applies is part of what the user asked"));
+        // Puis, un autre essai de t7 : « the existing code doesn't do this for
+        // atelier names either ».
+        assert!(search.contains("Older code of the project that skips such a case"));
         assert!(!prompt.contains("not answering permission requests"));
         // « reprendre » : la demande poursuivie est citée.
         let prompt = checklist_prompt(
