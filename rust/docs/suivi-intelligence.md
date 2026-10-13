@@ -138,9 +138,11 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | 5795efe | Une commande qui supprime un fichier que le modèle avait modifié, ou le ramène à son état du début du tour, est signalée ; sa dernière version est gardée sous `.claw/kept/` (T1-29) |
 
-| (commit « t7 et T1-30 ») | Scénario t7-ateliers (places limitées, doublons, données en JSON ; projet intact 1/12, référence 12/12) ; « inscription » à un atelier ne déclenche plus les comptes, les places et les doublons sont reconnus (T1-30) |
+| 8032009 | Scénario t7-ateliers (places limitées, doublons, données en JSON ; projet intact 1/12, référence 12/12) ; « inscription » à un atelier ne déclenche plus les comptes, les places et les doublons sont reconnus (T1-30) |
 
-État des tests après T1-30 : 661 tests Rust (le test de temps
+| (commit « T1-31, T1-32 ») | Script muet qui définit `main()` sans l'appeler, signalé (T1-31) ; une ligne de cas limite qui s'applique fait partie de la demande (T1-32) : t7 passe de 11/12, avec ou sans l'aide, à 12/12 |
+
+État des tests après T1-32 : 662 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
 il passe seul), analyse statique à zéro sous Windows et
 Linux, client 28 sur 28, extension VS Code 18 sur 18 (lancée à T1-16 ; rien de l'interface n'a
@@ -319,3 +321,10 @@ Hors lots :
   avec la commande qui le remet en place. Nouveau scénario t7 (ateliers à places limitées),
   préparé pour mesurer les genres nouveaux avec et sans l'aide ; sa demande, écrite comme on
   la dirait, montrait des mots-clés qui se trompaient de genre (T1-30, corrigé).
+- Reprise du 13 octobre, 2 h 22 : t7 mesuré avec et sans l'aide des cas limites : 11/12 dans
+  les deux cas. Avec l'aide, le modèle avait lu la ligne des doublons, vu lui-même que « zoé »
+  passerait pour une autre personne, puis l'avait écartée : « la demande ne le dit pas ». Le
+  contrôle dit maintenant qu'une ligne qui s'applique fait partie de la demande (T1-32) : 12/12
+  au rejeu et à l'essai complet. Corrigé aussi : un script dont la commande ne fait plus rien
+  parce que `main()` n'est jamais appelée est signalé au modèle (T1-31, vu sur le petit
+  modèle dans t6).

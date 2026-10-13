@@ -91,6 +91,8 @@ pub enum Aid {
     /// Fichier que le modèle avait modifié, supprimé ou ramené à son état du
     /// début du tour par une commande : sa dernière version est gardée.
     LostEdits,
+    /// Script Python muet qui définit `main()` sans l'appeler : dit au modèle.
+    EntryPoint,
 }
 
 impl Aid {
@@ -129,6 +131,7 @@ impl Aid {
             Self::RepeatedReads => "CLAW_REPEATED_READS",
             Self::EdgeCases => "CLAW_EDGE_CASES",
             Self::LostEdits => "CLAW_LOST_EDITS",
+            Self::EntryPoint => "CLAW_ENTRY_POINT",
         }
     }
 }
@@ -1899,6 +1902,72 @@ pub fn todos_left(output: &str) -> bool {
         })
 }
 
+// --- Script muet -------------------------------------------------------------------------
+
+/// Un script Python lancé par une commande qui n'a rien écrit : s'il définit
+/// `main()` sans jamais l'appeler (plus de bloc `if __name__ == "__main__":`),
+/// la commande ne fait rien. Rend le script et la remarque au modèle. Essai
+/// réel t6 avec le petit modèle : le bloc perdu dans une réécriture, `python
+/// conges.py jours ...` muet, et le modèle qui appelle `main()` par `python -c`
+/// au lieu de réparer ; ses tests passaient, la commande ne marchait plus.
+#[must_use]
+pub fn uncalled_main_note(command: &str, output: &str, cwd: &Path) -> Option<(String, String)> {
+    let value = first_json(output)?;
+    let printed = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty())
+    };
+    if printed("stdout") || printed("stderr") {
+        return None;
+    }
+    let script = python_script(command)?;
+    let source = std::fs::read_to_string(cwd.join(&script)).ok()?;
+    uncalled_main(&source).then(|| {
+        let note = format!(
+            "[Claw] `{}` printed nothing: `{script}` defines `main()` but never calls it (no `if __name__ == \"__main__\":` block), so running it does nothing. Tests that call `main()` directly cannot see this. Put the block back at the end of the file (`if __name__ == \"__main__\":` then `sys.exit(main(sys.argv[1:]))`, with `import sys`) and run the command again.",
+            shortened(command, 200)
+        );
+        (script, note)
+    })
+}
+
+/// Le script `.py` qu'une commande lance avec Python, s'il y en a un.
+fn python_script(command: &str) -> Option<String> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let interpreter = words.iter().position(|word| {
+        let name = word.rsplit(['/', '\\']).next().unwrap_or(word);
+        matches!(name.trim_end_matches(".exe"), "python" | "python3" | "py")
+    })?;
+    words[interpreter + 1..]
+        .iter()
+        .map(|word| word.trim_matches(['"', '\'']))
+        .find(|word| {
+            !word.starts_with('-')
+                && Path::new(word)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
+        })
+        .map(str::to_string)
+}
+
+/// Le source définit `main()` au premier niveau sans jamais l'appeler.
+fn uncalled_main(source: &str) -> bool {
+    let top_level = |line: &&str| !line.starts_with([' ', '\t']);
+    let is_def = |line: &str| line.starts_with("def ") || line.starts_with("async def ");
+    let defines = source
+        .lines()
+        .filter(top_level)
+        .any(|line| line.starts_with("def main(") || line.starts_with("async def main("));
+    let calls = source.contains("__name__")
+        || source
+            .lines()
+            .filter(top_level)
+            .any(|line| line.contains("main(") && !is_def(line));
+    defines && !calls
+}
+
 // --- Python du Microsoft Store ---------------------------------------------------------
 
 /// Le Python installé par le Microsoft Store a sa propre vue de `AppData` : il
@@ -1957,7 +2026,7 @@ pub fn edge_case_check(request: &str, earlier: Option<&str>) -> String {
         return String::new();
     }
     format!(
-        "\n\nWhat experienced engineers always check for this kind of feature. For each line that applies to this request, show the test or the command of this session that covers it, or add it now. The expected result of each try is in parentheses: a different result means your code is wrong, even if you chose that behavior on purpose (unless the user's request asks for it): fix the code and its tests, and say what you changed. Run the tries of a line together, in the project's tests when it has some or in one command (`python app.py a; echo $?; python app.py b; echo $?`), not one request per try:\n- {}",
+        "\n\nWhat experienced engineers always check for this kind of feature. A line that applies is part of what the user asked even though they did not write it: users never list these cases, they expect them (asking that the same person is not registered twice means \" zoé \" is Zoé). For each line that applies to this request, show the test or the command of this session that covers it, or add it now. The expected result of each try is in parentheses: a different result means your code is wrong, even if you chose that behavior on purpose (unless the user's request explicitly asks for that other result): fix the code and its tests, and say what you changed. Run the tries of a line together, in the project's tests when it has some or in one command (`python app.py a; echo $?; python app.py b; echo $?`), not one request per try:\n- {}",
         cases.join("\n- ")
     )
 }
@@ -1974,7 +2043,7 @@ pub fn edge_case_guide(request: &str, earlier: Option<&str>) -> Option<String> {
     let cases = feature_edge_cases(&format!("{request}\n{}", earlier.unwrap_or_default()));
     (!cases.is_empty()).then(|| {
         format!(
-            "{GUIDE_PREFIX} What experienced engineers always check for this kind of work. Keep each line that applies in mind from the start, and cover it with a test or a command; the expected result of each try is in parentheses. Run the tries of a line together, in the project's tests or in one command, not one request per try:\n- {}",
+            "{GUIDE_PREFIX} What experienced engineers always check for this kind of work. A line that applies is part of the request even though the user did not write it. Keep each line that applies in mind from the start, and cover it with a test or a command; the expected result of each try is in parentheses. Run the tries of a line together, in the project's tests or in one command, not one request per try:\n- {}",
             cases.join("\n- ")
         )
     })
@@ -2852,7 +2921,7 @@ pub fn review_prompt(
         if !cases.is_empty() {
             let _ = write!(
                 prompt,
-                "What an experienced engineer always checks for this kind of feature. In Step 1, add a line for each point that applies to this request; in Step 2, say whether the code handles it. The expected result of each try is in parentheses: code that gives another result is a defect to report, even when the agent chose it on purpose:\n- {}\n\n",
+                "What an experienced engineer always checks for this kind of feature. A point that applies is part of the request even though the user did not write it. In Step 1, add a line for each point that applies to this request; in Step 2, say whether the code handles it. The expected result of each try is in parentheses: code that gives another result is a defect to report, even when the agent chose it on purpose:\n- {}\n\n",
                 cases.join("\n- ")
             );
         }
@@ -3233,6 +3302,9 @@ mod guide_tests {
         assert!(search.contains("\"oeufs\" (finds \"Œufs\")"));
         // Le même rejeu : un essai par requête, quarante requêtes.
         assert!(search.contains("not one request per try"));
+        // Essai réel t7 : la ligne des doublons lue, puis écartée parce que
+        // « the request doesn't explicitly ask for it ».
+        assert!(search.contains("A line that applies is part of what the user asked"));
         assert!(!prompt.contains("not answering permission requests"));
         // « reprendre » : la demande poursuivie est citée.
         let prompt = checklist_prompt(
@@ -3245,6 +3317,50 @@ mod guide_tests {
             "<<<\ndans la langue traduite, c'est que le français ; et une page pour l'URL\n>>>"
         ));
         assert!(prompt.contains("not answering permission requests"));
+    }
+
+    #[test]
+    fn a_silent_script_that_never_calls_main_is_pointed_out() {
+        use super::{python_script, uncalled_main, uncalled_main_note};
+        assert_eq!(
+            python_script("cd x && python conges.py jours 1 2").as_deref(),
+            Some("conges.py")
+        );
+        assert_eq!(python_script("python -m pytest -q"), None);
+        assert_eq!(python_script("python -c \"print(1)\""), None);
+        let lost = "import sys\n\ndef main(arguments):\n    print(arguments)\n    return 0\n";
+        assert!(uncalled_main(lost));
+        assert!(!uncalled_main(&format!(
+            "{lost}\nif __name__ == \"__main__\":\n    sys.exit(main(sys.argv[1:]))\n"
+        )));
+        assert!(!uncalled_main(&format!("{lost}\nmain(sys.argv[1:])\n")));
+        assert!(!uncalled_main("def total(x):\n    return x\n"));
+        // Essai réel t6 : `python conges.py jours ...` muet, le bloc perdu.
+        let folder = std::env::temp_dir().join(format!(
+            "claw-muet-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        std::fs::create_dir_all(&folder).expect("dossier");
+        std::fs::write(folder.join("conges.py"), lost).expect("script");
+        let silent = r#"{"stdout":"","stderr":""}"#;
+        let (script, note) = uncalled_main_note(
+            "python conges.py jours 13/04/2026 17/04/2026",
+            silent,
+            &folder,
+        )
+        .expect("remarque");
+        assert_eq!(script, "conges.py");
+        assert!(note
+            .starts_with("[Claw] `python conges.py jours 13/04/2026 17/04/2026` printed nothing"));
+        assert!(note.contains("defines `main()` but never calls it"));
+        // Une sortie, ou un script qui appelle `main()` : rien à dire.
+        let printed = r#"{"stdout":"5","stderr":""}"#;
+        assert!(uncalled_main_note("python conges.py jours", printed, &folder).is_none());
+        std::fs::write(folder.join("conges.py"), format!("{lost}\nmain([])\n")).expect("script");
+        assert!(uncalled_main_note("python conges.py jours", silent, &folder).is_none());
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]

@@ -140,6 +140,20 @@ de l'essai d'origine (le modèle a lancé des essais dans l'ancien projet), et l
 une seconde fois le guide des cas limites. Les rejeux suivants ne sont donc pas tout à fait
 comparables aux précédents.
 
+Scénario t7 (places limitées, doublons, données en JSON ; projet intact 1/12, solution de
+référence 12/12), Claw au commit 8032009 puis avec T1-32 :
+
+| Date | Scénario | Modèle | Étiquette | Score | Requêtes | Durée | Remarques |
+|---|---|---|---|---|---|---|---|
+| 13/10 02:53 | t7-ateliers | free = nemotron-3-ultra-550b | t7-sans (`CLAW_EDGE_CASES=0`) | 11/12 | 17 | 312 s | témoin sans les cas limites : tout juste, sauf « zoé » et «  Zoé  » inscrits en plus de « Zoé » |
+| 13/10 02:58 | t7-ateliers | free | t7-avec | 11/12 | 21 | 245 s | même point manqué. Au contrôle, le modèle lit la ligne des doublons et écrit : « "Zoé", " zoé ", and decomposed "zoé" would count as three different people. The guide suggests normalizing, but the request doesn't explicitly ask for it » (T1-32) ; la relecture (laguna) n'y voit rien |
+| 13/10 03:08 | t7-ateliers | free | t7-partie | 12/12 | 29 | 384 s | avec T1-32 (une ligne qui s'applique fait partie de la demande) : les noms sont comparés après `strip()`, `casefold()` et NFC |
+
+Rejeu du contrôle de t7-avec (message 46) : 13/10 03:05, avec T1-32, 12/12 en 16 requêtes ;
+le modèle écrit « This is a requirement from the engineering guide that applies here » et
+normalise les noms. Mesures non indépendantes pour la phrase ajoutée (écrite après avoir vu
+l'échec), mais le témoin `CLAW_EDGE_CASES=0` montre ce que fait le modèle sans aucune ligne.
+
 Les essais de t5 ont été notés une seconde fois après une correction de la vérification
 cachée : tous les points de la recherche dépendaient du premier (`?q=pomme` exact), si bien
 qu'une seule erreur en coûtait huit (t5-north2 avait d'abord 4/12). La condition commune est
@@ -667,6 +681,30 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   reconnaissance (mots choisis après avoir vu la demande) ; l'effet des lignes elles-mêmes se
   mesure sur t7 avec et sans l'aide (`CLAW_EDGE_CASES=0`).
 
+### T1-31 Un script que sa commande ne lance plus : `main()` jamais appelée
+- Preuve : t6 avec le petit modèle : dans une réécriture de `conges.py`, le bloc `if __name__
+  == "__main__":` disparaît. `python conges.py jours ...` n'écrit plus rien (code 0) ; le
+  modèle le remarque (« the command didn't produce any output ») puis appelle `main()` par
+  `python -c "from conges import main; ..."`. Ses tests, qui appellent `main()` directement,
+  passent ; la commande de l'utilisateur ne fait rien (2/12 en l'état).
+- État : corrigé (reprise du 13 octobre, 2 h 22) : aide `CLAW_ENTRY_POINT`. Une commande qui
+  lance un script `.py` du projet, réussit et n'écrit rien sur la sortie ni sur les erreurs :
+  si le script définit `main()` au premier niveau sans l'appeler nulle part (ni `__name__`, ni
+  appel de `main(`), Claw le dit au modèle, une fois par script et par tour, avec le bloc à
+  remettre. Testé avec de vrais fichiers, puis de bout en bout avec le vrai binaire.
+
+### T1-32 Le modèle lit le cas limite, puis l'écarte : « la demande ne le dit pas »
+- Preuve : t7 avec l'aide (11/12, comme le témoin sans l'aide). La ligne des doublons arrive
+  au début du tour et au contrôle ; le modèle l'applique à son code et conclut lui-même que
+  « Zoé », « zoé » et la forme décomposée compteraient pour trois personnes, puis : « the
+  request doesn't explicitly ask for it ». Les cas d'expert lui semblaient facultatifs.
+- État : corrigé (reprise du 13 octobre, 2 h 22) : le contrôle dit qu'une ligne qui
+  s'applique fait partie de ce que l'utilisateur a demandé même sans l'avoir écrite (« les
+  utilisateurs ne listent jamais ces cas, ils les attendent »), avec l'exemple de la même
+  personne écrite autrement ; le guide du début de tour et le relecteur le disent aussi, et
+  « sauf si la demande le veut » devient « sauf si la demande veut explicitement l'autre
+  résultat ». Mesures : rejeu du contrôle 12/12, essai complet 12/12 (tableau de t7).
+
 ## Améliorations
 
 Lot T1 (en cours le 12 octobre 2026), dans cet ordre : T1-08 (garde des données), T1-03 et
@@ -684,15 +722,13 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 13 octobre, 0 h 15) : (1) après la remise à zéro du
-quota gratuit (2 h) : t7 avec et sans l'aide des cas limites (`CLAW_EDGE_CASES=0 python
-run.py t7-ateliers --label t7-sans`, puis `--label t7-avec`), t6 avec laguna, et de nouveau
-avec le petit modèle (T1-29 fait) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
+Suite, dans l'ordre (mise à jour du 13 octobre, 3 h 20) : (1) t6 avec laguna, et de
+nouveau avec le petit modèle (T1-29 et T1-31 faits), en surveillant le quota ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
 sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par
 une commande ; (5) T1-04, les espaces insécables oubliées sur t3 ; (6) refaire chaque mesure
-deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-30 sont faits, T1-18 en
+deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-32 sont faits, T1-18 en
 partie. Le troisième modèle gratuit (laguna) fait 12/12 sur t4
 et t5 avec le moins de requêtes (16 et 26), mais son fournisseur le limite souvent.
 

@@ -379,6 +379,8 @@ struct TurnAids {
     /// Dernière version écrite par les outils du modèle : une commande qui la
     /// supprime ou la ramène en arrière lui fait perdre son travail.
     edited_files: std::collections::BTreeMap<std::path::PathBuf, String>,
+    /// Scripts muets déjà signalés (`main()` jamais appelée).
+    silent_scripts: std::collections::BTreeSet<String>,
     /// Fichiers de données du dépôt au début du tour, pour voir ce qu'une
     /// commande du modèle en réécrit.
     data_snapshot: Option<harness::DataSnapshot>,
@@ -1779,6 +1781,18 @@ where
         }
         if let Some(outcome) = command_outcome {
             if outcome.passed {
+                // Un script muet qui définit `main()` sans l'appeler.
+                if harness::enabled(Aid::EntryPoint) {
+                    if let Ok(cwd) = std::env::current_dir() {
+                        if let Some((script, note)) =
+                            harness::uncalled_main_note(&outcome.command, &outcome.output, &cwd)
+                        {
+                            if aids.silent_scripts.insert(script) {
+                                notes.push(note);
+                            }
+                        }
+                    }
+                }
                 if harness::is_check_command(&outcome.command)
                     && harness::exit_reflects_check(&outcome.command)
                 {
