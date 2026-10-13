@@ -5746,18 +5746,21 @@ impl DefaultRuntimeClient {
         if self.emit_output {
             live::show(match purpose {
                 runtime::ConsultPurpose::Review => "Relecture par un autre modèle…",
+                runtime::ConsultPurpose::Design => "Relecture du plan par un autre modèle…",
                 runtime::ConsultPurpose::Unblock => "Diagnostic par un autre modèle…",
             });
         }
         // La relecture clôt le tour : elle a le temps et la place de finir.
         let opinion = match purpose {
-            runtime::ConsultPurpose::Review => tools::advisors::ask_within(
-                models,
-                system,
-                prompt,
-                tools::advisors::REVIEW_MAX_TOKENS,
-                tools::advisors::Patience::REVIEW,
-            ),
+            runtime::ConsultPurpose::Review | runtime::ConsultPurpose::Design => {
+                tools::advisors::ask_within(
+                    models,
+                    system,
+                    prompt,
+                    tools::advisors::REVIEW_MAX_TOKENS,
+                    tools::advisors::Patience::REVIEW,
+                )
+            }
             runtime::ConsultPurpose::Unblock => tools::advisors::ask(models, system, prompt, 3_000),
         };
         match opinion {
@@ -5770,7 +5773,7 @@ impl DefaultRuntimeClient {
                 // le modèle de la session relit, dans une conversation neuve,
                 // plutôt que de laisser le travail sans relecture. Essai réel t4 :
                 // sans relecture, le livre mis de côté redevenait un prêt d'office.
-                if purpose == runtime::ConsultPurpose::Review {
+                if purpose != runtime::ConsultPurpose::Unblock {
                     let own = self.chain.primary().to_string();
                     if !own.is_empty() && !models.contains(&own) {
                         if let Ok(opinion) = tools::advisors::ask_within(

@@ -139,6 +139,8 @@ pub enum ConsultPurpose {
     Review,
     /// Débloquer un agent qui échoue plusieurs fois de suite.
     Unblock,
+    /// Mode projet : relire le cahier des charges et le plan avant le code.
+    Design,
 }
 
 /// Réponse d'un modèle consulté.
@@ -274,6 +276,19 @@ pub struct ConversationRuntime<C, T> {
     turn_request_limit: usize,
     /// Dossier suivi par le mode projet ; `None` : le dossier de travail.
     project_root: Option<std::path::PathBuf>,
+    /// Mode projet : la sonde de l'environnement, au premier tour (une fois
+    /// par session).
+    environment: EnvironmentProbe,
+}
+
+/// Sonde de l'environnement du mode projet : à faire au premier tour de la
+/// session, faite (ce qu'elle a trouvé, gardé pour le relecteur
+/// d'architecture), ou coupée (essais).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EnvironmentProbe {
+    Pending,
+    Done(String),
+    Off,
 }
 
 /// Budget de requêtes d'un tour : variable `CLAW_TURN_REQUESTS`, sinon réglage
@@ -872,6 +887,7 @@ where
             autosave: None,
             turn_request_limit: turn_request_limit(&feature_config),
             project_root: None,
+            environment: EnvironmentProbe::Pending,
         }
     }
 
@@ -974,6 +990,17 @@ where
     #[must_use]
     pub fn with_project_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
         self.project_root = Some(root.into());
+        self
+    }
+
+    /// Sonde de l'environnement du mode projet (versions, pièges connus).
+    #[must_use]
+    pub fn with_environment_probe(mut self, enabled: bool) -> Self {
+        self.environment = if enabled {
+            EnvironmentProbe::Pending
+        } else {
+            EnvironmentProbe::Off
+        };
         self
     }
 
@@ -1274,7 +1301,8 @@ where
             }
         }
         // Mode projet : où en est le projet, et l'étape à faire.
-        let project_turn = self.start_project_turn(&request_text, &mut user_message);
+        let project_turn =
+            self.start_project_turn(&request_text, earlier.as_deref(), &mut user_message);
         self.session.messages.push(user_message);
 
         let mut assistant_messages = Vec::new();
@@ -3055,6 +3083,7 @@ where
     fn start_project_turn(
         &mut self,
         request: &str,
+        earlier: Option<&str>,
         user_message: &mut ConversationMessage,
     ) -> Option<project::Turn> {
         if self.subagent || !harness::enabled(Aid::ProjectMode) {
@@ -3090,13 +3119,90 @@ where
         }
         let project = project::Project::read(&root);
         let can_ask = self.can_ask_now();
-        let guide = if starting && project.phase() == project::Phase::Spec {
+        let mut guide = if starting && project.phase() == project::Phase::Spec {
             project::activation_guide(can_ask)
         } else {
             project::phase_guide(&project, can_ask)
         };
+        // Au premier tour de la session : les outils de la machine et leurs pièges.
+        if self.environment == EnvironmentProbe::Pending {
+            let note = project::environment_note(&project::probe_environment());
+            guide.push('\n');
+            guide.push_str(&note);
+            self.environment = EnvironmentProbe::Done(note);
+        }
         user_message.blocks.push(ContentBlock::Text { text: guide });
-        Some(project::Turn::start(&project))
+        let mut turn = project::Turn::start(&project);
+        turn.request = match earlier {
+            Some(earlier) => {
+                format!("{request}\n\nEarlier request that this message continues:\n{earlier}")
+            }
+            None => request.to_string(),
+        };
+        Some(turn)
+    }
+
+    /// Mode projet : le cahier des charges et le plan sont écrits et lisibles.
+    /// Avant le code, un autre modèle les relit, une fois par contenu (de
+    /// nouveau si des exigences ou des jalons changent) ; ses remarques vont au
+    /// modèle. Sans relecteur, elle sera tentée au tour suivant.
+    fn design_review(&mut self, turn: &mut project::Turn) -> Option<String> {
+        if turn.design_review_tried
+            || !self.review
+            || interrupt_requested()
+            || !harness::enabled(Aid::Review)
+        {
+            return None;
+        }
+        let current = project::Project::read(&turn.root);
+        let plan = current.plan.as_ref()?;
+        if !matches!(current.phase(), project::Phase::Build(_))
+            || !project::plan_problems(plan, current.spec.as_ref()).is_empty()
+        {
+            return None;
+        }
+        let fingerprint = current.design_fingerprint();
+        if current.state.design_reviewed.as_deref() == Some(fingerprint.as_str()) {
+            return None;
+        }
+        turn.design_review_tried = true;
+        self.api_client.notify(
+            "Mode projet : un autre modèle relit le cahier des charges et le plan avant le code…",
+        );
+        let environment = match &self.environment {
+            EnvironmentProbe::Done(note) => Some(note.as_str()),
+            EnvironmentProbe::Pending | EnvironmentProbe::Off => None,
+        };
+        let prompt = project::design_review_prompt(&turn.request, &current, environment);
+        let consultation = self.api_client.consult(
+            ConsultPurpose::Design,
+            project::DESIGN_REVIEW_SYSTEM,
+            &prompt,
+        )?;
+        harness::log_review(&consultation.model, &consultation.text);
+        let mut state = current.state.clone();
+        state.design_reviewed = Some(fingerprint);
+        let _ = state.save(&turn.root);
+        match harness::review_findings(&consultation.text) {
+            None => {
+                self.api_client.notify(&format!(
+                    "Relecture du plan par {} : rien à redire",
+                    consultation.model
+                ));
+                None
+            }
+            Some(findings) => {
+                self.api_client.notify(&format!(
+                    "Relecture du plan par {} : {} remarque(s) transmise(s) à l'agent",
+                    consultation.model,
+                    findings.lines().count()
+                ));
+                Some(project::design_review_feedback(
+                    &consultation.model,
+                    &findings,
+                ))
+            }
+        }
     }
 
     /// Après les appels d'une réponse, en mode projet : cahier des charges et
@@ -3107,9 +3213,51 @@ where
         prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> Option<String> {
         let mut turn = aids.project.take()?;
-        let (notes, _) = self.project_checks(&mut turn, aids, prompter, false);
+        let (mut notes, _) = self.project_checks(&mut turn, aids, prompter, false);
+        notes.extend(self.design_review(&mut turn));
         aids.project = Some(turn);
         (!notes.is_empty()).then(|| notes.join("\n\n"))
+    }
+
+    /// Ce qui empêche Claw de suivre les fichiers du projet, une remarque par
+    /// problème nouveau. Le journal des décisions s'écrit juste après le plan :
+    /// il est réclamé une fois un jalon entamé, ou quand l'agent dit avoir fini.
+    fn project_structure_notes(
+        &mut self,
+        current: &project::Project,
+        turn: &mut project::Turn,
+        at_end: bool,
+    ) -> Vec<String> {
+        let mut problems = Vec::new();
+        if let Some(spec) = &current.spec {
+            problems.push((project::SPEC_FILE, project::spec_problems(spec)));
+        }
+        if let Some(plan) = &current.plan {
+            problems.push((
+                project::PLAN_FILE,
+                project::plan_problems(plan, current.spec.as_ref()),
+            ));
+        }
+        if at_end || current.milestones().iter().any(|milestone| milestone.done) {
+            problems.push((
+                project::DECISIONS_FILE,
+                project::decisions_problems(current),
+            ));
+        }
+        let mut notes = Vec::new();
+        for (file, found) in problems {
+            if found.is_empty() {
+                continue;
+            }
+            let note = project::structure_note(file, &found);
+            if turn.noted.insert(project::note_key(&note)) {
+                self.api_client.notify(&format!(
+                    "Mode projet : {file} est à compléter, signalé à l'agent"
+                ));
+                notes.push(note);
+            }
+        }
+        notes
     }
 
     /// Contrôles du mode projet : forme de `SPEC.md` et de `PLAN.md` (une
@@ -3125,31 +3273,8 @@ where
         at_end: bool,
     ) -> (Vec<String>, bool) {
         let current = project::Project::read(&turn.root);
-        let mut notes = Vec::new();
-        let mut to_fix = false;
-        let mut problems = Vec::new();
-        if let Some(spec) = &current.spec {
-            problems.push((project::SPEC_FILE, project::spec_problems(spec)));
-        }
-        if let Some(plan) = &current.plan {
-            problems.push((
-                project::PLAN_FILE,
-                project::plan_problems(plan, current.spec.as_ref()),
-            ));
-        }
-        for (file, found) in problems {
-            if found.is_empty() {
-                continue;
-            }
-            let note = project::structure_note(file, &found);
-            if turn.noted.insert(project::note_key(&note)) {
-                self.api_client.notify(&format!(
-                    "Mode projet : {file} est à compléter, signalé à l'agent"
-                ));
-                notes.push(note);
-                to_fix = true;
-            }
-        }
+        let mut notes = self.project_structure_notes(&current, turn, at_end);
+        let mut to_fix = !notes.is_empty();
         for milestone in current.milestones() {
             if !milestone.done || turn.done_at_start.contains(&milestone.id) {
                 continue;
@@ -7323,6 +7448,17 @@ mod tests {
         fails: &'static str,
         failures: usize,
     ) -> ProjectRun {
+        project_runtime_with(root, steps, fails, failures, Vec::new())
+    }
+
+    /// Comme `project_runtime`, avec les réponses de l'autre modèle consulté.
+    fn project_runtime_with(
+        root: &std::path::Path,
+        steps: Vec<Vec<AssistantEvent>>,
+        fails: &'static str,
+        failures: usize,
+        advisor: Vec<&'static str>,
+    ) -> ProjectRun {
         let observed = std::rc::Rc::new(std::cell::RefCell::new(Observed::default()));
         let commands = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let ran = std::rc::Rc::clone(&commands);
@@ -7355,7 +7491,7 @@ mod tests {
             StepsApiClient {
                 steps: steps.into(),
                 observed: std::rc::Rc::clone(&observed),
-                advisor: std::collections::VecDeque::new(),
+                advisor: advisor.into(),
                 escalation: None,
             },
             executor,
@@ -7365,7 +7501,8 @@ mod tests {
         .with_verify(crate::harness::VerifySetting::Commands(vec![
             "verifier".to_string()
         ]))
-        .with_project_root(root);
+        .with_project_root(root)
+        .with_environment_probe(false);
         (runtime, observed, commands)
     }
 
@@ -7631,6 +7768,71 @@ mod tests {
             .notices
             .iter()
             .any(|notice| notice == "Mode projet arrêté pour ce dossier"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn another_model_reviews_the_specification_and_the_plan_before_the_code() {
+        CAN_ASK.with(|flag| flag.set(false));
+        let root = project_folder("architecture");
+        std::fs::write(root.join("SPEC.md"), PROJECT_SPEC).expect("spec");
+        active_project(&root);
+        let (mut runtime, observed, _) = project_runtime_with(
+            &root,
+            vec![
+                write_step("PLAN.md", &project_plan("todo", "todo")),
+                text_step("Plan écrit."),
+                text_step("Plan écrit."),
+                text_step("Plan écrit."),
+                text_step("Plan écrit."),
+                text_step("Plan écrit."),
+            ],
+            "",
+            0,
+            vec!["Analyse.\nVERDICT\nSPEC.md - emprunter un livre déjà prêté n'a pas de cas limite - ajouter E2 et son test"],
+        );
+        runtime.run_turn("écris le plan", None).expect("tour");
+        {
+            let observed = observed.borrow();
+            // Les requêtes notées sont la forme de débogage des messages : les
+            // fins de ligne y sont écrites `\n`.
+            assert!(observed.requests[1].contains(
+                "Before the code, another model (relecteur) reviewed SPEC.md and PLAN.md and raised these points:\\nSPEC.md - emprunter un livre déjà prêté n'a pas de cas limite - ajouter E2 et son test"
+            ));
+            let designs: Vec<&String> = observed
+                .consults
+                .iter()
+                .filter(|(purpose, _)| *purpose == super::ConsultPurpose::Design)
+                .map(|(_, prompt)| prompt)
+                .collect();
+            assert_eq!(designs.len(), 1);
+            assert!(designs[0].starts_with("The user asked:\nécris le plan"));
+            assert!(observed.notices.iter().any(|notice| notice
+                == "Relecture du plan par relecteur : 1 remarque(s) transmise(s) à l'agent"));
+        }
+        assert!(crate::project::ProjectState::load(&root)
+            .design_reviewed
+            .is_some());
+        // Mêmes exigences, mêmes jalons : pas de seconde relecture.
+        let (mut runtime, observed, _) = project_runtime_with(
+            &root,
+            vec![
+                write_step("PLAN.md", &project_plan("todo", "todo")),
+                text_step("Fait."),
+                text_step("Fait."),
+                text_step("Fait."),
+                text_step("Fait."),
+            ],
+            "",
+            0,
+            vec!["VERDICT\nLGTM"],
+        );
+        runtime.run_turn("continue", None).expect("tour");
+        assert!(!observed
+            .borrow()
+            .consults
+            .iter()
+            .any(|(purpose, _)| *purpose == super::ConsultPurpose::Design));
         let _ = std::fs::remove_dir_all(&root);
     }
 

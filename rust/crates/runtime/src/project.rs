@@ -11,6 +11,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1187,6 +1189,23 @@ pub fn plan_problems(plan: &Plan, spec: Option<&Spec>) -> Vec<String> {
     problems
 }
 
+/// Le journal des décisions manque alors que le plan est écrit.
+#[must_use]
+pub fn decisions_problems(project: &Project) -> Vec<String> {
+    let planned = !project.milestones().is_empty();
+    let written = project
+        .decisions
+        .as_deref()
+        .is_some_and(|text| !text.trim().is_empty());
+    if planned && !written {
+        vec![format!(
+            "it does not exist yet (or is empty). {DECISIONS_STEP} Start with the language, the libraries, how data is stored and the answers you chose to the Questions of SPEC.md"
+        )]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Remarque au modèle : ce qu'il faut corriger dans `SPEC.md` ou `PLAN.md`.
 #[must_use]
 pub fn structure_note(file: &str, problems: &[String]) -> String {
@@ -1556,6 +1575,300 @@ pub fn reference_for_checks(project: &Project) -> Option<String> {
     ))
 }
 
+// --- Sonde de l'environnement --------------------------------------------------------------
+
+/// Délai d'une commande de la sonde.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Ce que la sonde a trouvé sur la machine.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Environment {
+    /// Windows, et l'outil `bash` y lance Git Bash.
+    pub windows: bool,
+    pub git_bash: bool,
+    /// Commande qui lance Python (`python`, `py -3`) et sa version.
+    pub python: Option<(String, String)>,
+    /// Codage de la sortie de Python quand elle va dans un tube ou un fichier.
+    pub python_encoding: Option<String>,
+    /// Version de pytest, s'il est installé pour ce Python.
+    pub pytest: Option<String>,
+    /// `zoneinfo` trouve les fuseaux horaires (paquet `tzdata` ou base du système).
+    pub time_zones: Option<bool>,
+    /// Autres outils, avec leur version, ou `None` s'ils manquent.
+    pub tools: Vec<(String, Option<String>)>,
+}
+
+/// Sortie (stdout puis stderr) d'une commande qui réussit dans le délai.
+fn probe(program: &str, args: &[&str]) -> Option<String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = child.wait_with_output().ok()?;
+                if !status.success() {
+                    return None;
+                }
+                let text = format!(
+                    "{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                return Some(text.trim().to_string());
+            }
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+/// Le numéro de version d'une sortie : `v22.11.0`, `go1.23.1`, `"21.0.1"`.
+fn version_in(text: &str) -> Option<String> {
+    text.split_whitespace().find_map(|word| {
+        let word = word.trim_matches(|character: char| matches!(character, '"' | '\'' | ','));
+        let digits = word
+            .strip_prefix("go")
+            .or_else(|| word.strip_prefix('v'))
+            .unwrap_or(word);
+        digits
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_digit())
+            .then(|| digits.to_string())
+    })
+}
+
+/// Ce que Python dit de lui : codage de sa sortie dans un tube, pytest,
+/// fuseaux horaires. Une ligne, sans `try`, pour passer en argument.
+const PYTHON_FACTS: &str = r#"import sys, json, os, importlib.util as u, importlib.metadata as m; print(json.dumps({"encoding": sys.stdout.encoding, "pytest": m.version("pytest") if u.find_spec("pytest") else None, "zones": bool(u.find_spec("tzdata")) or os.path.isdir("/usr/share/zoneinfo")}))"#;
+
+fn probe_python(environment: &mut Environment) {
+    let candidates: &[(&str, &[&str])] = if cfg!(windows) {
+        &[("python", &[]), ("py", &["-3"]), ("python3", &[])]
+    } else {
+        &[("python3", &[]), ("python", &[])]
+    };
+    for (program, prefix) in candidates {
+        let mut args = prefix.to_vec();
+        args.push("--version");
+        let Some(version) = probe(program, &args)
+            .filter(|text| text.starts_with("Python"))
+            .and_then(|text| version_in(&text))
+        else {
+            continue;
+        };
+        let command = std::iter::once(*program)
+            .chain(prefix.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ");
+        environment.python = Some((command, version));
+        let mut args = prefix.to_vec();
+        args.extend(["-c", PYTHON_FACTS]);
+        if let Some(facts) = probe(program, &args)
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        {
+            environment.python_encoding = facts["encoding"].as_str().map(str::to_string);
+            environment.pytest = facts["pytest"].as_str().map(str::to_string);
+            environment.time_zones = facts["zones"].as_bool();
+        }
+        return;
+    }
+}
+
+/// Les outils de la machine : Python (avec pytest, le codage de sa sortie, les
+/// fuseaux horaires), Node, npm, Git, Cargo, Go, Java. Deux secondes au plus
+/// d'ordinaire ; chaque commande s'arrête au bout de huit.
+#[must_use]
+pub fn probe_environment() -> Environment {
+    let mut environment = Environment {
+        windows: cfg!(windows),
+        git_bash: cfg!(windows) && plugins::posix_shell_program().is_some(),
+        ..Environment::default()
+    };
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let others: [(&str, &str, &[&str]); 6] = [
+        ("Node", "node", &["--version"]),
+        ("npm", npm, &["--version"]),
+        ("Git", "git", &["--version"]),
+        ("Cargo", "cargo", &["--version"]),
+        ("Go", "go", &["version"]),
+        ("Java", "java", &["-version"]),
+    ];
+    let tools = std::thread::scope(|scope| {
+        let python = scope.spawn(|| {
+            let mut found = Environment::default();
+            probe_python(&mut found);
+            found
+        });
+        let handles: Vec<_> = others
+            .iter()
+            .map(|(name, program, args)| {
+                scope.spawn(move || {
+                    let version = probe(program, args).and_then(|text| version_in(&text));
+                    ((*name).to_string(), version)
+                })
+            })
+            .collect();
+        let tools: Vec<(String, Option<String>)> = handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok())
+            .collect();
+        (python.join().unwrap_or_default(), tools)
+    });
+    let (python, tools) = tools;
+    environment.python = python.python;
+    environment.python_encoding = python.python_encoding;
+    environment.pytest = python.pytest;
+    environment.time_zones = python.time_zones;
+    environment.tools = tools;
+    environment
+}
+
+/// `(3, 13)` pour `3.13.1`.
+fn python_release(version: &str) -> Option<(u32, u32)> {
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts
+        .next()?
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    Some((major, minor))
+}
+
+/// Ce que la sonde a trouvé, dit au modèle avec les pièges connus de cette
+/// machine : Python du Store, sortie en cp1252, modules retirés de Python,
+/// fuseaux horaires absents, pytest à installer.
+#[must_use]
+pub fn environment_note(environment: &Environment) -> String {
+    let mut lines = Vec::new();
+    if environment.windows {
+        lines.push(if environment.git_bash {
+            "Windows; the bash tool runs Git Bash.".to_string()
+        } else {
+            "Windows.".to_string()
+        });
+    }
+    match &environment.python {
+        Some((command, version)) => {
+            let mut line = format!("Python {version}, run it as `{command}`.");
+            match &environment.pytest {
+                Some(pytest) => {
+                    let _ = write!(line, " pytest {pytest} is installed.");
+                }
+                None => {
+                    let _ = write!(
+                        line,
+                        " pytest is not installed for it: run `{command} -m pip install pytest` before your first test and list pytest in the project's requirements."
+                    );
+                }
+            }
+            lines.push(line);
+            if let Some(encoding) = environment.python_encoding.as_deref().filter(|encoding| {
+                !encoding
+                    .to_ascii_lowercase()
+                    .replace('-', "")
+                    .starts_with("utf8")
+            }) {
+                lines.push(format!(
+                    "When the user runs the program in their own terminal, Python writes its output as {encoding} (the bash tool sets PYTHONIOENCODING=utf-8, which hides it): print() of a character outside {encoding} (an arrow, an emoji, Asian scripts) raises UnicodeEncodeError there. Keep printed text within {encoding} or call `sys.stdout.reconfigure(encoding=\"utf-8\")` first; open files with `encoding=\"utf-8\"`."
+                ));
+            }
+            if python_release(version).is_some_and(|release| release >= (3, 12)) {
+                lines.push(
+                    "Not in this Python (removed in 3.12 and 3.13): distutils, imp, cgi, cgitb, imghdr, pipes, telnetlib, crypt, audioop, uu; do not import them."
+                        .to_string(),
+                );
+            }
+            if environment.time_zones == Some(false) {
+                lines.push(
+                    "zoneinfo finds no time zone data on this machine: add `tzdata` to the requirements if the project uses zoneinfo."
+                        .to_string(),
+                );
+            }
+        }
+        None => lines.push("Python is not installed.".to_string()),
+    }
+    let found: Vec<String> = environment
+        .tools
+        .iter()
+        .filter_map(|(name, version)| version.as_ref().map(|version| format!("{name} {version}")))
+        .collect();
+    if !found.is_empty() {
+        lines.push(format!("{}.", found.join("; ")));
+    }
+    let missing: Vec<&str> = environment
+        .tools
+        .iter()
+        .filter(|(_, version)| version.is_none())
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if !missing.is_empty() {
+        lines.push(format!("Not installed: {}.", missing.join(", ")));
+    }
+    format!(
+        "Environment probed by Claw on this machine (use these commands; do not build on what is not installed):\n- {}",
+        lines.join("\n- ")
+    )
+}
+
+// --- Relecture d'architecture ------------------------------------------------------------
+
+/// Consignes du relecteur d'architecture : un autre modèle lit le cahier des
+/// charges et le plan avant que le code soit écrit.
+pub const DESIGN_REVIEW_SYSTEM: &str = "You are a senior software architect. A coding agent is about to build a project for a user. Before any code is written, you review what it plans: the user's request, the specification (SPEC.md: requirements R1..., edge cases E1...), the plan (PLAN.md: milestones M1... with the command that verifies each, and the final demo) and its decisions (DECISIONS.md), with the tools installed on the machine. Look for what would make the finished project fail the user: a behavior the request implies that SPEC.md misses (wrong or missing input, empty data, duplicates, data kept between runs, two users at once, money, dates, text encodings); a requirement written so that nobody can check it; a Verify command that would pass without proving the requirements of its milestone; a milestone order that leaves nothing runnable (M1 must run from end to end); a choice the machine does not support (a tool or library that is not installed, a module removed from this Python, Windows paths and encodings); Demo lines that would fail in an empty copy of the project. Report only real problems, at most eight, the most important first, one line each. Finish with a line containing only the word VERDICT, followed by either the single line LGTM, or one line per problem in the form `FILE - problem - what to change`.";
+
+/// Taille gardée de chaque fichier montré au relecteur d'architecture.
+const DESIGN_FILE_MAX_CHARS: usize = 8_000;
+
+/// Demande au relecteur d'architecture : la demande de l'utilisateur, les
+/// trois fichiers du projet et l'environnement sondé.
+#[must_use]
+pub fn design_review_prompt(request: &str, project: &Project, environment: Option<&str>) -> String {
+    let file = |name: &str| {
+        std::fs::read_to_string(project.root.join(name))
+            .ok()
+            .map(|text| clipped(text.trim(), DESIGN_FILE_MAX_CHARS))
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| "(none yet)".to_string())
+    };
+    let mut prompt = format!(
+        "The user asked:\n{}\n\n{SPEC_FILE}:\n{}\n\n{PLAN_FILE}:\n{}\n\n{DECISIONS_FILE}:\n{}\n\n",
+        request.trim(),
+        file(SPEC_FILE),
+        file(PLAN_FILE),
+        file(DECISIONS_FILE)
+    );
+    if let Some(environment) = environment {
+        prompt.push_str(environment);
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str("Review them now, before any code is written, and end with the VERDICT line.");
+    prompt
+}
+
+/// Remarques du relecteur d'architecture, pour le modèle.
+#[must_use]
+pub fn design_review_feedback(model: &str, findings: &str) -> String {
+    format!(
+        "{CLAW_NOTE_PREFIX} Before the code, another model ({model}) reviewed {SPEC_FILE} and {PLAN_FILE} and raised these points:\n{findings}\n\nFor each point: if it is right, change {SPEC_FILE}, {PLAN_FILE} or {DECISIONS_FILE} now, before writing code; if it is wrong, add a line to {DECISIONS_FILE} that says why you keep your choice. Then go on with the plan."
+    )
+}
+
 // --- Suivi d'un tour ------------------------------------------------------------------------
 
 /// Ce que le mode projet suit pendant un tour.
@@ -1581,6 +1894,11 @@ pub(crate) struct Turn {
     pub completed: Vec<String>,
     /// La validation des jalons terminés a été demandée.
     pub validation_asked: bool,
+    /// La demande du tour (avec celle qu'une relance poursuit), pour la
+    /// relecture d'architecture.
+    pub request: String,
+    /// La relecture d'architecture a déjà été tentée pendant ce tour.
+    pub design_review_tried: bool,
 }
 
 impl Turn {
@@ -1805,6 +2123,88 @@ mod tests {
         assert!(names_id("test_r1_ajout", "r1"));
         assert!(!names_id("test_r10", "r1"));
         assert!(!names_id("ar1", "r1"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_environment_note_names_the_tools_and_the_known_pitfalls() {
+        let environment = Environment {
+            windows: true,
+            git_bash: true,
+            python: Some(("python".to_string(), "3.13.1".to_string())),
+            python_encoding: Some("cp1252".to_string()),
+            pytest: None,
+            time_zones: Some(false),
+            tools: vec![
+                ("Node".to_string(), Some("22.11.0".to_string())),
+                ("Git".to_string(), Some("2.47.1.windows.1".to_string())),
+                ("Cargo".to_string(), None),
+                ("Java".to_string(), None),
+            ],
+        };
+        let note = environment_note(&environment);
+        assert!(note.contains("- Windows; the bash tool runs Git Bash."));
+        assert!(note.contains("- Python 3.13.1, run it as `python`. pytest is not installed for it: run `python -m pip install pytest`"));
+        assert!(note.contains("Python writes its output as cp1252"));
+        assert!(note.contains("cgi, cgitb, imghdr"));
+        assert!(note.contains("add `tzdata` to the requirements"));
+        assert!(note.contains("- Node 22.11.0; Git 2.47.1.windows.1."));
+        assert!(note.contains("- Not installed: Cargo, Java."));
+        // Python en UTF-8, ancien, avec pytest et les fuseaux : rien de tout cela.
+        let quiet = environment_note(&Environment {
+            python: Some(("python3".to_string(), "3.11.4".to_string())),
+            python_encoding: Some("utf-8".to_string()),
+            pytest: Some("8.3.4".to_string()),
+            time_zones: Some(true),
+            ..Environment::default()
+        });
+        assert!(quiet.contains("pytest 8.3.4 is installed."));
+        assert!(!quiet.contains("UnicodeEncodeError"));
+        assert!(!quiet.contains("cgi"));
+        assert!(!quiet.contains("tzdata"));
+        assert_eq!(
+            version_in("git version 2.47.1.windows.1").as_deref(),
+            Some("2.47.1.windows.1")
+        );
+        assert_eq!(
+            version_in("go version go1.23.1 windows/amd64").as_deref(),
+            Some("1.23.1")
+        );
+        assert_eq!(version_in("v22.11.0").as_deref(), Some("22.11.0"));
+        assert_eq!(
+            version_in("openjdk version \"21.0.1\" 2023-10-17").as_deref(),
+            Some("21.0.1")
+        );
+        assert_eq!(python_release("3.13.1"), Some((3, 13)));
+        assert_eq!(python_release("3.9.0rc1"), Some((3, 9)));
+    }
+
+    #[test]
+    fn the_probe_finds_git_and_reports_missing_programs() {
+        // Git est là partout où ces essais tournent.
+        assert!(probe("git", &["--version"]).is_some_and(|text| text.starts_with("git version")));
+        assert!(probe("claw-programme-qui-n-existe-pas", &["--version"]).is_none());
+    }
+
+    #[test]
+    fn the_architecture_review_reads_the_request_the_three_files_and_the_machine() {
+        let root = folder("relecture");
+        std::fs::write(root.join(SPEC_FILE), "- R1: Ajouter un livre\n").expect("spec");
+        std::fs::write(root.join(PLAN_FILE), PLAN).expect("plan");
+        let project = Project::read(&root);
+        let prompt = design_review_prompt(
+            "Crée une bibliothèque",
+            &project,
+            Some("Environment probed by Claw on this machine:\n- Python 3.13.1"),
+        );
+        assert!(prompt.starts_with(
+            "The user asked:\nCrée une bibliothèque\n\nSPEC.md:\n- R1: Ajouter un livre"
+        ));
+        assert!(prompt.contains("PLAN.md:\n# Plan"));
+        assert!(prompt.contains("DECISIONS.md:\n(none yet)"));
+        assert!(prompt.contains("- Python 3.13.1"));
+        assert!(prompt.ends_with("end with the VERDICT line."));
+        assert!(DESIGN_REVIEW_SYSTEM.contains("M1 must run from end to end"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

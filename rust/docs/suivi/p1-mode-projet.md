@@ -44,8 +44,10 @@ actif pour ce dossier (état dans `.claw/project.json`) jusqu'à « sans mode pr
 
 | Lot | État |
 |---|---|
-| P1-1 | fait le 14 octobre 2026 (commit « Mode projet, lot P1-1 ») |
-| P1-2 à P1-6 | à faire |
+| P1-1 | fait le 14 octobre 2026 (ff3d899) |
+| P1-2 | fait le 14 octobre 2026 (commit « Mode projet, lots P1-2 et P1-3 ») |
+| P1-3 | fait le 14 octobre 2026 (même commit) |
+| P1-4 à P1-6 | à faire |
 
 ### P1-1 : ce qui est fait
 
@@ -73,6 +75,33 @@ actif pour ce dossier (état dans `.claw/project.json`) jusqu'à « sans mode pr
   scripté (seul jusqu'au bout du plan, avec l'utilisateur, jalon en échec puis corrigé,
   activation et arrêt, plan mal formé signalé une fois) ; essai du vrai binaire avec
   `mock-model.js` dans un dossier vide : guide, vérification du jalon, état enregistré.
+### P1-2 : ce qui est fait
+
+- Sonde (`project::probe_environment`, au premier tour de chaque session en mode projet, une
+  fois par runtime) : Python (`python`, `py -3`, `python3`), sa version, pytest, le codage de
+  sa sortie dans un tube, les fuseaux horaires de `zoneinfo`, en une seule commande Python ;
+  Node, npm (`npm.cmd` sous Windows), Git, Cargo, Go, Java, en parallèle ; huit secondes au
+  plus par commande. Le guide dit ce qui est installé, ce qui manque et les pièges : sortie en
+  cp1252 dans le terminal de l'utilisateur (l'outil `bash` la masque en posant
+  PYTHONIOENCODING), modules retirés de Python 3.12 et 3.13, `tzdata` absent, pytest à
+  installer. Sur la machine de l'utilisateur : Python 3.13.14, pytest 9.1.1, cp1252, Node 24,
+  npm 11, Git 2.52, Cargo 1.94, Java 1.8 ; Go absent.
+- `DECISIONS.md` : sa fin est jointe au guide de chaque tour ; son absence est signalée une
+  fois un jalon marqué fait, ou quand l'agent dit avoir fini.
+
+### P1-3 : ce qui est fait
+
+- Relecture d'architecture (`design_review`, après les appels d'une réponse) : dès que
+  `SPEC.md` a des exigences et que `PLAN.md` a des jalons sans problème de forme, un autre
+  modèle (`ConsultPurpose::Design`, mêmes délais que la relecture du code, même secours par
+  le modèle de la session) lit la demande, les trois fichiers et la sonde, et cherche ce qui
+  ferait échouer le projet : exigence implicite oubliée, exigence invérifiable, `Verify` qui ne
+  prouve rien, M1 qui ne tourne pas de bout en bout, choix que la machine ne permet pas, démo
+  qui échouerait dans une copie vide. Ses remarques vont au modèle avec la consigne de corriger
+  les fichiers, ou de dire dans `DECISIONS.md` pourquoi il garde son choix. Une seule relecture
+  par contenu (empreinte des exigences et des jalons dans `.claw/project.json`) ; sans
+  relecteur, elle est retentée au tour suivant.
+
 - Incident : la première version de cet essai transmettait au binaire l'environnement du
   terminal, qui porte maintenant la vraie clé OpenRouter : la relecture de fin de tour est
   partie vers un vrai modèle gratuit (une requête). Les essais vident désormais les clés
