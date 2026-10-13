@@ -27,13 +27,10 @@ compenser leurs faiblesses :
    bouger), écrire le test, corriger, lancer la vérification complète, committer, pousser, puis
    mettre à jour ce fichier et l'état du constat dans son fichier d'étude, dans le même commit.
 
-Reprise automatique : le 12 octobre 2026, l'utilisateur a demandé que la session reprenne
-d'elle-même (« continue ») à 6 h 22 puis toutes les 5 heures (6 h 20 demandé, plus deux
-minutes de marge). Des tâches planifiées le font
-pendant 7 jours, mais elles ne vivent que dans la session qui les a créées : une nouvelle
-session vérifie qu'elles existent (liste des tâches planifiées) et les recrée sinon. À chaque
-reprise : continuer au premier point ouvert, committer et pousser ce qui est vérifié,
-retirer les tâches des jours passés et programmer les suivantes.
+Reprise automatique : arrêtée. Le 12 octobre 2026, l'utilisateur avait demandé que la
+session reprenne d'elle-même (« continue ») à 6 h 22 puis toutes les 5 heures. Le 14 octobre
+à 0 h 15, il a choisi d'arrêter : les tâches planifiées ont été supprimées. Une nouvelle
+session ne les recrée pas ; le chantier reprend quand l'utilisateur le demande.
 
 Règles permanentes (détail dans la mémoire du projet) :
 
@@ -374,3 +371,9 @@ Hors lots :
   (sept requêtes avant d'écrire) : un petit projet est maintenant joint en vues au premier
   tour (T1-37). Le plus puissant n'a plus rien lu sur t6 (11/12 en 29 requêtes) ; le petit
   modèle a moins lu, puis s'est perdu ailleurs (81 commandes isolées).
+- 14 octobre, 0 h 15 : l'utilisateur arrête les reprises automatiques. Point d'arrêt : avec le
+  plus puissant des modèles gratuits, les sept scénarios du banc ont tous atteint leur note
+  maximale avec Claw à jour (le dernier essai de t6 : 11/12, consigne de l'aide précisée sans
+  mesure). Ouverts : le petit modèle reste instable ; T1-18 en partie (l'agent défend son
+  code, la relecture le rattrape) ; le format des arguments dans l'aide de la commande à
+  mesurer.
