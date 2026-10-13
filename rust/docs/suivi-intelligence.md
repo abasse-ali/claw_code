@@ -148,6 +148,10 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | 48d68e6 | Un ancien code qui saute un cas n'est pas une raison de le sauter : t7 rejoué au contrôle, 11/12 devient 12/12 |
 
+| f273bc0 | t7 confirmé : 12/12 deux fois avec Claw à jour |
+
+| (commit « T1-34 ») | Une correction garde ce que renvoient les fonctions existantes (ligne des montants, étape 4 du débogueur) : t3 repasse de 2/4 à 4/4 (T1-34) |
+
 État des tests après T1-33 : 664 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
 il passe seul), analyse statique à zéro sous Windows et
@@ -343,4 +347,8 @@ Hors lots :
   12/12 au rejeu.
 - Reprise de 7 h 22 : t7 refait deux fois avec Claw à jour : 12/12 les deux fois (37 et 39
   requêtes). Avec les aides, t7 coûte une vingtaine de requêtes de plus que sans (17 à 19),
-  pour un travail juste au lieu de 3/12 à 11/12.
+  pour un travail juste au lieu de 3/12 à 11/12. t3 refait avec la table revue : 2/4, le
+  modèle avait fait renvoyer des `Decimal` à une fonction (la ligne des montants l'y poussait)
+  et `json.dumps` plantait ; la ligne et le débogueur disent maintenant de garder ce que
+  renvoient les fonctions existantes (T1-34) : t3 refait, 4/4. Le petit modèle sur t6 :
+  10/12 en l'état, arrêté par la limite de temps.

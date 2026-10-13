@@ -124,6 +124,7 @@ intact 1/12, solution de référence 12/12), Claw au commit 5414b81 :
 | 12/10 20:26 | t6-conges | free = nemotron-3-ultra-550b | t6 | 10/12 | 19 | 446 s | dates à la française, bornes comprises, week-ends, fériés (un samedi compté une fois) et année bissextile justes ; une période dont la fin précède le début est comptée au lieu d'être refusée, et un solde peut devenir négatif (Bilal à -3) ; la relecture (dots) ne voit rien |
 | 12/10 22:28 | t6-conges | free = nemotron-3-ultra-550b | t6-t28 | 12/12 | 32 | 664 s | Claw avec la table des cas limites revue (T1-28) : la période à l'envers est refusée, un solde insuffisant aussi, avec ce qui reste ; la relecture (laguna) reprend les cas limites dans son étape 1 et trouve l'aide `--help` manquante |
 | 12/10 22:50 | t6-conges | free = nemotron-3-ultra-550b | t6-t28c | 12/12 | 32 | 482 s | avec la consigne de regrouper les essais d'une ligne au contrôle : après le contrôle, quatre commandes groupées au lieu d'une par essai ; avant lui, cinq essais isolés venus du guide du début de tour (la consigne y a été ajoutée ensuite) et cinq mises à jour seules de la liste de tâches malgré trois remarques (T1-14) |
+| 13/10 08:22 | t6-conges | north-mini-code (petit modèle) | t6-north3 | 10/12 en l'état | 48 | 1 200 s | Claw au commit f273bc0 : arrêté par la limite de 20 minutes, travail en cours (ses tests échouaient encore, l'aide sans le format des dates) ; ce modèle reste très variable (11/12 en 43 requêtes à l'essai précédent) |
 | 13/10 03:17 | t6-conges | poolside/laguna-s-2.1 (troisième modèle) | t6-laguna | 12/12 | 15 | 1 548 s | Claw avec T1-29 à T1-32 : tout juste en 15 requêtes ; lent (une limite 429 du fournisseur, une réflexion qui prend toute la réponse : niveau ramené à « high ») ; la relecture (nemotron) : rien à corriger |
 | 13/10 03:43 | t6-conges | north-mini-code (petit modèle) | t6-north2 | 11/12 | 43 | 971 s | même Claw : tout juste sauf l'aide, qui cite `jours` sans le format des dates (l'essai `--help` de la ligne de commande n'attendait que la commande : il attend maintenant aussi le format) ; ni garde des modifications perdues ni script muet cette fois ; un modèle aussi variable demande plusieurs essais avant de conclure |
 | 12/10 23:04 | t6-conges | north-mini-code (petit modèle) | t6-north | arrêté, 2/12 en l'état | 81 | 659 s | arrêté pour garder une réserve de requêtes gratuites (38 jusqu'à 2 h) ; une trentaine de requêtes perdues à l'édition : il croit voir un bloc en double, `edit_file` refuse (le bloc n'existe pas), il supprime `conges.py` par une commande, le restaure avec `git checkout` et perd ses modifications, deux fois (T1-29) ; ses essais partent ensuite un par requête |
@@ -736,6 +737,19 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   (une valeur par défaut au chargement), et le fichier revenir comme il était, sauf demande
   de l'utilisateur. Mesure : t7 avec cette garde, 12/12 (essai complet, 56 requêtes).
 
+### T1-34 Une correction qui change ce que renvoie une fonction
+- Preuve : t3 refait avec la table revue (T1-28) : 2/4, contre 4/4 avant. Le mot « ventes »
+  y déclenche maintenant aussi la ligne des montants, qui disait de garder les montants en
+  `Decimal`, « never in floats ». Pour corriger le plantage, le modèle fait renvoyer des
+  `Decimal` à `rapport.moyennes()` ; tout appelant qui fait `json.dumps` de son résultat
+  plante (TypeError), comme la vérification cachée.
+- État : corrigé (reprise du 13 octobre, 7 h 22). La ligne des montants dit de calculer en
+  centimes ou en `Decimal`, mais de garder ce que renvoient les fonctions existantes
+  (`json.dumps` refuse un `Decimal` : convertir là où les valeurs sortent du code), avec
+  l'essai qui le montre ; l'étape 4 du débogueur dit de corriger par le plus petit changement
+  qui suffit, en gardant ce que les fonctions existantes prennent et renvoient. Mesure : t3
+  refait, 4/4 en 17 requêtes.
+
 ## Améliorations
 
 Lot T1 (en cours le 12 octobre 2026), dans cet ordre : T1-08 (garde des données), T1-03 et
@@ -753,15 +767,16 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 13 octobre, 8 h 15) : (1) t6 avec le petit modèle et
-Claw à jour, puis t3 (CSV) pour vérifier que la ligne CSV réécrite (T1-28) garde 4/4, en
-surveillant le quota ; les répétitions de t7 ont montré qu'un seul essai ne
+Suite, dans l'ordre (mise à jour du 13 octobre, 9 h) : (1) peu d'essais réels pendant la
+journée de l'utilisateur (le quota du jour est partagé) : repasser sur les scénarios déjà
+réussis pour vérifier qu'aucun ne régresse avec les dernières lignes (t1, t2, t4, t5), un
+essai chacun ; les répétitions de t7 ont montré qu'un seul essai ne
 suffit pas (11/12 puis 3/12 pour le même témoin) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
 sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par
 une commande ; (5) T1-04, les espaces insécables oubliées sur t3 ; (6) refaire chaque mesure
-deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-33 sont faits, T1-18 en
+deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-34 sont faits, T1-18 en
 partie. Le troisième modèle gratuit (laguna) fait 12/12 sur t4
 et t5 avec le moins de requêtes (16 et 26), mais son fournisseur le limite souvent.
 

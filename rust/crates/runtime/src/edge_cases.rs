@@ -47,7 +47,7 @@ const FEATURE_EDGE_CASES: &[(&[&str], &str)] = &[
             "invoice", "payment", "discount", "refund", "currency", "billing", "subtotal", "salary",
             "payroll", "shopping cart",
         ],
-        "Money: keep amounts in integer cents or in `Decimal` built from strings, never in floats (`0.1 * 3 == 0.3` is false, and `Decimal(0.1)` is already wrong); round with `quantize(Decimal(\"0.01\"), rounding=ROUND_HALF_UP)`, not `round()` (`round(2.675, 2)` gives 2.67, and the default quantize turns 2.665 into 2.66); choose one rounding point and make the printed lines add up to the printed total (100 split in three is 33.33 + 33.33 + 33.34); accept \"12,50\" as well as \"12.50\" (`float(\"12,50\")` raises, and JavaScript's `parseFloat(\"12,50\")` silently gives 12). Try three lines of 0.10 (0.30 exactly), 100 split in three (33.33 + 33.33 + 33.34), 2.665 (2.67), a zero and a negative amount.",
+        "Money: compute amounts in integer cents or in `Decimal` built from strings, never in floats (`0.1 * 3 == 0.3` is false; `Decimal(0.1)` is already wrong), but keep what existing functions return: callers expect it, and `json.dumps` raises TypeError on a `Decimal` (convert where values leave your code); round with `quantize(Decimal(\"0.01\"), rounding=ROUND_HALF_UP)`, not `round()` (`round(2.675, 2)` gives 2.67; the default quantize turns 2.665 into 2.66); make the printed lines add up to the printed total; accept \"12,50\" as well as \"12.50\" (`float(\"12,50\")` raises, JavaScript's `parseFloat` gives 12). Try three lines of 0.10 (0.30 exactly), 100 split in three (33.33 + 33.33 + 33.34), 2.665 (2.67), a zero, a negative amount, and `json.dumps` of what your functions return (no TypeError).",
     ),
     (
         &[
@@ -282,6 +282,8 @@ mod tests {
             kinds("Le total de la facture doit arrondir les prix"),
             ["Money"]
         );
+        // Essai réel t3 : `Decimal` renvoyé à la place des floats, `json.dumps` plante.
+        assert!(feature_edge_cases("le prix")[0].contains("keep what existing functions return"));
         assert_eq!(
             kinds("Importe le fichier CSV exporté d'Excel"),
             ["CSV and Excel files from French users"]
