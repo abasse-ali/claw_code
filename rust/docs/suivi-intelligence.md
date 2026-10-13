@@ -140,7 +140,9 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | 8032009 | Scénario t7-ateliers (places limitées, doublons, données en JSON ; projet intact 1/12, référence 12/12) ; « inscription » à un atelier ne déclenche plus les comptes, les places et les doublons sont reconnus (T1-30) |
 
-| (commit « T1-31, T1-32 ») | Script muet qui définit `main()` sans l'appeler, signalé (T1-31) ; une ligne de cas limite qui s'applique fait partie de la demande (T1-32) : t7 passe de 11/12, avec ou sans l'aide, à 12/12 |
+| ef6d54b | Script muet qui définit `main()` sans l'appeler, signalé (T1-31) ; une ligne de cas limite qui s'applique fait partie de la demande (T1-32) : t7 passe de 11/12, avec ou sans l'aide, à 12/12 |
+
+| (commit « t6 laguna et petit modèle ») | t6 : laguna 12/12 en 15 requêtes, le petit modèle 11/12 en 43 (contre un essai arrêté à 81 requêtes) ; l'essai `--help` de la ligne de commande attend aussi le format des arguments |
 
 État des tests après T1-32 : 662 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
@@ -327,4 +329,6 @@ Hors lots :
   contrôle dit maintenant qu'une ligne qui s'applique fait partie de la demande (T1-32) : 12/12
   au rejeu et à l'essai complet. Corrigé aussi : un script dont la commande ne fait plus rien
   parce que `main()` n'est jamais appelée est signalé au modèle (T1-31, vu sur le petit
-  modèle dans t6).
+  modèle dans t6). Puis t6 : laguna 12/12 en 15 requêtes ; le petit modèle 11/12 en 43
+  requêtes, contre un essai arrêté à 81 la veille (il manque seulement le format des dates
+  dans l'aide : l'essai `--help` l'attend maintenant).
