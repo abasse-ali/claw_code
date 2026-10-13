@@ -760,6 +760,20 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   qui suffit, en gardant ce que les fonctions existantes prennent et renvoient. Mesure : t3
   refait, 4/4 en 17 requêtes.
 
+### T1-36 La garde des tests visait aussi les tests que le modèle venait d'écrire
+- Preuve : dans les essais du 13 octobre (t1, t4, t5), la remarque « test_x.py sert à vérifier
+  le travail et a été modifié après un échec » revient souvent. Sur t5 (21 h), les trois
+  modifications gardées de `test_api.py` retiraient des lignes du test neuf du modèle ; deux
+  seulement contenaient une ligne présente aussi dans le fichier d'origine
+  (`assert statut == 200`). La garde regardait toute ligne retirée, et la remarque dit de
+  « restaurer la vérification » : elle peut pousser le modèle à défaire la correction de son
+  propre test.
+- État : corrigé (reprise du 13 octobre, 20 h 55) : seules comptent les lignes qui existaient
+  au début du tour, et seulement si le fichier en compte maintenant moins qu'alors (retirer une
+  copie ajoutée par le modèle ne compte pas) ; un fichier de tests créé pendant le tour est au
+  modèle. Le contenu du début du tour est relevé avant la première modification (comme pour
+  T1-29).
+
 ### T1-35 Pas de relecture quand les relecteurs gratuits sont saturés
 - Preuve : t4 du 13 octobre au matin (10/12) : laguna et dots ne finissent pas leur réponse
   dans le temps donné (240 s, puis les 120 s qui restaient) ; le travail rend la main sans
@@ -791,16 +805,16 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 13 octobre, 10 h) : (1) plus d'essai réel avant la
-remise à zéro du quota gratuit (2 h) : il en reste environ 400 pour la journée de
-l'utilisateur. Ensuite : t1 et t5 pour vérifier qu'ils ne régressent pas (t2 8/8 et t4 12/12
-ce matin), un essai chacun ; entre-temps, du travail sans vrai modèle ; les répétitions de t7 ont montré qu'un seul essai ne
+Suite, dans l'ordre (mise à jour du 13 octobre, 21 h 30) : avec Claw à jour, le banc entier
+tient (t1 6/6, t2 8/8, t3 4/4, t4 12/12, t5 12/12, t7 12/12 ; t6 12/12 le 12 au soir). (1)
+après la remise à zéro du quota (2 h) : t6 avec le plus puissant et Claw à jour, et une
+mesure de T1-36 (combien de remarques de la garde des tests restent) ; les répétitions de t7 ont montré qu'un seul essai ne
 suffit pas (11/12 puis 3/12 pour le même témoin) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
 sur t4c sert de banc : une à deux requêtes par essai) ; (4) T1-11, les données réécrites par
 une commande ; (5) T1-04, les espaces insécables oubliées sur t3 ; (6) refaire chaque mesure
-deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-35 sont faits, T1-18 en
+deux ou trois fois avant de conclure. T1-03 à T1-17 et T1-19 à T1-36 sont faits, T1-18 en
 partie (la relecture le rattrape quand la phrase lui est citée ; l'agent, lui, défend encore
 son code). Le troisième modèle gratuit (laguna) fait 12/12 sur t4
 et t5 avec le moins de requêtes (16 et 26), mais son fournisseur le limite souvent.

@@ -63,6 +63,8 @@ def baseline_system(commit):
 
 
 def main():
+    # Une console Windows en cp1252 ne sait pas écrire « → » d'une réponse de relecteur.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("run_dir")
     parser.add_argument("--model", help="modèle qui a fait le travail (le relecteur en est un autre)")

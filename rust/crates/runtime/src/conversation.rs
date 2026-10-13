@@ -524,7 +524,9 @@ fn lean_stored_results(session: &mut Session) {
 /// du modèle (garde des modifications perdues).
 fn remember_turn_start(tool_name: &str, input: &str, aids: &mut TurnAids) {
     if !matches!(tool_name, "edit_file" | "write_file")
-        || !(harness::enabled(Aid::LostEdits) || harness::enabled(Aid::DataGuard))
+        || !(harness::enabled(Aid::LostEdits)
+            || harness::enabled(Aid::DataGuard)
+            || harness::enabled(Aid::TestGuard))
     {
         return;
     }
@@ -556,6 +558,16 @@ fn edited_path(input: &str) -> Option<std::path::PathBuf> {
 /// Même texte, aux fins de ligne près (Git peut les changer en restaurant).
 fn same_text(left: &str, right: &str) -> bool {
     left.lines().eq(right.lines())
+}
+
+/// Nombre d'occurrences de chaque ligne non vide d'un texte, sans les blancs
+/// autour.
+fn line_counts(text: &str) -> std::collections::HashMap<&str, usize> {
+    let mut counts = std::collections::HashMap::new();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        *counts.entry(line).or_insert(0) += 1;
+    }
+    counts
 }
 
 /// Remarque pour une réponse qui n'a fait qu'un appel, chaque réponse étant
@@ -1972,7 +1984,7 @@ where
             }
         }
         if let Some(path) = path.as_deref().filter(|_| aids.check_failed) {
-            if let Some(name) = self.rewritten_check(path, output, aids) {
+            if let Some(name) = self.rewritten_check(path, input, output, aids) {
                 self.api_client.notify(&format!(
                     "Attention : {name} sert à vérifier le travail et a été modifié après un échec : relisez ce changement"
                 ));
@@ -2147,13 +2159,48 @@ where
     /// Nom du fichier si cette modification réécrit, après un échec, des lignes
     /// d'un fichier qui sert à vérifier le travail (test, ou script nommé par
     /// la commande de vérification). Signalé une fois par fichier.
-    fn rewritten_check(&self, path: &str, output: &str, aids: &mut TurnAids) -> Option<String> {
+    fn rewritten_check(
+        &self,
+        path: &str,
+        input: &str,
+        output: &str,
+        aids: &mut TurnAids,
+    ) -> Option<String> {
         if !harness::enabled(Aid::TestGuard) || aids.guarded_tests.contains(path) {
             return None;
         }
         // Ajouter des tests est normal ; seules les lignes retirées comptent.
         if !harness::removes_existing_lines(output) {
             return None;
+        }
+        // Et seulement celles qui existaient au début du tour : corriger un
+        // test que le modèle vient d'écrire n'est pas réécrire une vérification
+        // (essais réels du 13 octobre : la garde se déclenchait sur ses propres
+        // tests neufs, et lui disait de les « restaurer »).
+        let edited = edited_path(input);
+        match edited
+            .as_ref()
+            .and_then(|file| aids.turn_start_files.get(file))
+        {
+            // Absent au début du tour et là maintenant : créé par le modèle.
+            Some(None) if edited.as_ref().is_some_and(|file| file.exists()) => return None,
+            // Une ligne d'origine est retirée quand le fichier en compte moins
+            // qu'au début du tour : retirer une copie que le modèle avait
+            // ajoutée (`assert statut == 200` dans un test neuf) ne compte pas.
+            Some(Some(start)) => {
+                let now = edited
+                    .as_ref()
+                    .and_then(|file| std::fs::read_to_string(file).ok())
+                    .unwrap_or_default();
+                let (before, after) = (line_counts(start), line_counts(&now));
+                if !harness::replaced_lines(output).iter().any(|line| {
+                    let line = line.trim();
+                    after.get(line).copied().unwrap_or(0) < before.get(line).copied().unwrap_or(0)
+                }) {
+                    return None;
+                }
+            }
+            _ => {}
         }
         let cwd = std::env::current_dir().ok()?;
         let file = std::path::Path::new(path);
@@ -6075,6 +6122,106 @@ mod tests {
             )));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&kept);
+    }
+
+    /// Runtime où un test échoue (`python -m pytest`), puis où `edit_file`
+    /// rend le résultat donné après avoir écrit `after` dans `path`.
+    fn guarded_runtime(
+        path: &std::path::Path,
+        after: &'static str,
+        patch_lines: &[&str],
+    ) -> (
+        ConversationRuntime<StepsApiClient, StaticToolExecutor>,
+        std::rc::Rc<std::cell::RefCell<Observed>>,
+    ) {
+        let observed = std::rc::Rc::new(std::cell::RefCell::new(Observed::default()));
+        let target = path.to_path_buf();
+        let output = serde_json::json!({
+            "filePath": path.to_string_lossy(),
+            "structuredPatch": [{ "lines": patch_lines }],
+        })
+        .to_string();
+        let executor = StaticToolExecutor::new()
+            .register("edit_file", move |_| {
+                std::fs::write(&target, after).expect("écrit");
+                Ok(output.clone())
+            })
+            .register("bash", |input| {
+                Ok(if input.contains("pytest") {
+                    FAILING
+                } else {
+                    PASSING
+                }
+                .to_string())
+            });
+        let edit = serde_json::json!({ "path": path.to_string_lossy(), "old_string": "x", "new_string": "y" })
+            .to_string();
+        let runtime = ConversationRuntime::new(
+            Session::new(),
+            StepsApiClient {
+                steps: vec![
+                    tool_step("bash", r#"{"command":"python -m pytest"}"#),
+                    tool_step("edit_file", &edit),
+                    // Contrôles de fin de tour (preuves, exigences) : de quoi répondre.
+                    text_step("Fait."),
+                    text_step("Fait."),
+                    text_step("Fait."),
+                ]
+                .into(),
+                observed: std::rc::Rc::clone(&observed),
+                advisor: std::collections::VecDeque::new(),
+                escalation: None,
+            },
+            executor,
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["système".to_string()],
+        )
+        .with_verify(crate::harness::VerifySetting::Commands(vec![
+            "verifier".to_string()
+        ]));
+        (runtime, observed)
+    }
+
+    #[test]
+    fn rewriting_an_existing_check_is_guarded_but_not_the_agent_s_own_new_test() {
+        let folder = std::env::temp_dir().join(format!(
+            "claw-garde-tests-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        std::fs::create_dir_all(&folder).expect("dossier");
+        let path = folder.join("test_stock.py");
+        let original = "def test_a():\n    assert total() == 1\n";
+        // Le modèle change une ligne qui existait : la garde parle.
+        std::fs::write(&path, original).expect("tests");
+        let (mut runtime, observed) = guarded_runtime(
+            &path,
+            "def test_a():\n    assert total() == 2\n",
+            &["-    assert total() == 1", "+    assert total() == 2"],
+        );
+        runtime.run_turn("corrige", None).expect("tour");
+        assert!(observed.borrow().requests[2].contains("which is used to check the work"));
+        // Il corrige un test qu'il avait ajouté pendant le tour : rien à dire.
+        std::fs::write(&path, original).expect("tests");
+        let (mut runtime, observed) = guarded_runtime(
+            &path,
+            "def test_a():\n    assert total() == 1\n\ndef test_b():\n    assert stock() == 3\n",
+            &["-    assert stock() == 2", "+    assert stock() == 3"],
+        );
+        runtime.run_turn("corrige", None).expect("tour");
+        assert!(!observed.borrow().requests[2].contains("which is used to check the work"));
+        // Il retire une copie d'une ligne d'origine qu'il avait mise dans un
+        // test neuf (essai réel t5 : `assert statut == 200`) : rien non plus.
+        std::fs::write(&path, original).expect("tests");
+        let (mut runtime, observed) = guarded_runtime(
+            &path,
+            "def test_a():\n    assert total() == 1\n\ndef test_b():\n    pass\n",
+            &["-    assert total() == 1", "+    pass"],
+        );
+        runtime.run_turn("corrige", None).expect("tour");
+        assert!(!observed.borrow().requests[2].contains("which is used to check the work"));
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]

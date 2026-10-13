@@ -139,6 +139,8 @@ def session_stats(project):
 
 
 def main():
+    # Une console Windows en cp1252 ne sait pas écrire tous les caractères d'un résultat.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("scenario", nargs="?")
     parser.add_argument("--model")

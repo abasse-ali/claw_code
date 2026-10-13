@@ -152,7 +152,9 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | 65a24fc | Une correction garde ce que renvoient les fonctions existantes (ligne des montants, étape 4 du débogueur) : t3 repasse de 2/4 à 4/4 (T1-34) |
 
-| (commit « T1-35, T1-18 suite ») | Relecture de secours par le modèle de la session quand aucun relecteur ne répond (T1-35) ; les phrases qui laissent une action à une personne sont citées au contrôle et à la relecture (T1-18) ; t2 8/8, t4 12/12 |
+| 9d58e46 | Relecture de secours par le modèle de la session quand aucun relecteur ne répond (T1-35) ; les phrases qui laissent une action à une personne sont citées au contrôle et à la relecture (T1-18) ; t2 8/8, t4 12/12 |
+
+| (commit « T1-36 ») | La garde des tests ne vise plus les tests écrits par le modèle pendant le tour (T1-36) ; t1 6/6 et t5 12/12 avec Claw à jour : le banc entier tient |
 
 État des tests après T1-33 : 664 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
@@ -359,3 +361,8 @@ Hors lots :
   lui est citée ; au contrôle, l'agent, lui, défend son code même avec la phrase citée.
   D'où : relecture de secours par le modèle de la session (T1-35) et phrase citée à la
   relecture comme au contrôle. t4 refait : 12/12.
+- Reprise de 20 h 55 : le quota du jour restait entier (416), t1 et t5 refaits : 6/6 et
+  12/12. Le banc entier tient avec Claw à jour. La garde des tests se déclenchait souvent sur
+  les tests neufs du modèle ; elle ne regarde plus que les lignes qui existaient au début du
+  tour (T1-36). Les scripts du banc écrivent en UTF-8 (une réponse avec « → » faisait planter
+  `review_replay.py`).
