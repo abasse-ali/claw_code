@@ -95,6 +95,9 @@ pub enum Aid {
     EntryPoint,
     /// Petit projet montré en entier au premier tour : pas de lectures une à une.
     SmallProject,
+    /// Mode projet : cahier des charges, plan en jalons vérifiés et
+    /// démonstration finale pour créer un projet complet.
+    ProjectMode,
 }
 
 impl Aid {
@@ -135,6 +138,7 @@ impl Aid {
             Self::LostEdits => "CLAW_LOST_EDITS",
             Self::EntryPoint => "CLAW_ENTRY_POINT",
             Self::SmallProject => "CLAW_SMALL_PROJECT",
+            Self::ProjectMode => "CLAW_PROJECT_MODE",
         }
     }
 }
@@ -3199,6 +3203,19 @@ pub fn review_prompt(
     answer: &str,
     diffs: &[String],
 ) -> String {
+    review_prompt_with(request, earlier, answer, diffs, None)
+}
+
+/// Comme [`review_prompt`], avec une référence de plus à confronter au code
+/// avant le diff : les lignes du cahier des charges du mode projet.
+#[must_use]
+pub fn review_prompt_with(
+    request: &str,
+    earlier: Option<&str>,
+    answer: &str,
+    diffs: &[String],
+    reference: Option<&str>,
+) -> String {
     let mut body = diffs.join("\n");
     if body.chars().count() > MAX_REVIEW_DIFF_CHARS {
         body =
@@ -3233,6 +3250,12 @@ pub fn review_prompt(
             prompt,
             "Sentences of the request that leave an action to a person: {}. In Step 1, say who performs each of these actions and when; in Step 2, check that the code does not perform it for them automatically.\n\n",
             quoted_sentences(&left)
+        );
+    }
+    if let Some(reference) = reference.map(str::trim).filter(|text| !text.is_empty()) {
+        let _ = write!(
+            prompt,
+            "{reference}\nIn Step 1, add a line for each of these lines too.\n\n"
         );
     }
     // La réponse de l'agent vient en dernier : elle décrit les changements à

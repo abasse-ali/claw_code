@@ -27,6 +27,10 @@ compenser leurs faiblesses :
    bouger), écrire le test, corriger, lancer la vérification complète, committer, pousser, puis
    mettre à jour ce fichier et l'état du constat dans son fichier d'étude, dans le même commit.
 
+Depuis le 14 octobre 2026, le chantier du mode projet (créer un projet complet de A à Z,
+neuf aides demandées par l'utilisateur) se suit dans [suivi/p1-mode-projet.md](suivi/p1-mode-projet.md) :
+reprendre au premier lot qui n'est pas fait.
+
 Reprise automatique : arrêtée. Le 12 octobre 2026, l'utilisateur avait demandé que la
 session reprenne d'elle-même (« continue ») à 6 h 22 puis toutes les 5 heures. Le 14 octobre
 à 0 h 15, il a choisi d'arrêter : les tâches planifiées ont été supprimées. Une nouvelle
@@ -155,7 +159,9 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | 53a7496 | Avec Claw au commit 361f79d : t6 12/12, t5 12/12, t4 12/12, sans remarque de la garde des tests (4 essais sur 22 la recevaient dans la journée) |
 
-| (commit « T1-37 ») | Un petit projet est joint en vues au premier tour ; lire un fichier déjà en vue est signalé (T1-37) ; t6 : le plus puissant ne lit plus aucun fichier (11/12 en 29 requêtes) |
+| f70d511 | Un petit projet est joint en vues au premier tour ; lire un fichier déjà en vue est signalé (T1-37) ; t6 : le plus puissant ne lit plus aucun fichier (11/12 en 29 requêtes) |
+
+| (commit « Mode projet, lot P1-1 ») | Mode projet : cahier des charges `SPEC.md`, plan en jalons `PLAN.md` vérifiés par Claw, tests d'acceptation nommés d'après les exigences, validation par l'utilisateur, plan suivi jusqu'au bout sans lui (P1-1) ; essais du client sans les vraies clés du terminal |
 
 État des tests après T1-33 : 664 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
@@ -377,3 +383,11 @@ Hors lots :
   mesure). Ouverts : le petit modèle reste instable ; T1-18 en partie (l'agent défend son
   code, la relecture le rattrape) ; le format des arguments dans l'aide de la commande à
   mesurer.
+- 14 octobre : l'utilisateur demande des aides pour mener un projet complet de A à Z ; neuf
+  proposées (cahier des charges vivant, tests d'acceptation d'abord, plan en jalons, sonde de
+  l'environnement, journal des décisions, relecture d'architecture, démonstration finale
+  réelle, validation par l'utilisateur, budget de requêtes), réponse « intègre tous ». Plan en
+  six lots dans [suivi/p1-mode-projet.md](suivi/p1-mode-projet.md). Lot P1-1 fait : mode
+  projet, cahier des charges, plan en jalons vérifiés, tests d'acceptation, validation. Un
+  essai du vrai binaire avec le faux modèle a laissé partir une relecture vers un vrai modèle
+  gratuit (une requête) : le terminal porte maintenant la vraie clé ; les essais la vident.

@@ -14,6 +14,7 @@ use crate::permissions::{
     PermissionOutcome, PermissionPolicy, PermissionPromptDecision, PermissionPrompter,
     PermissionRequest,
 };
+use crate::project;
 use crate::session::{ContentBlock, ConversationMessage, Session};
 use crate::usage::{TokenUsage, UsageTracker};
 
@@ -271,6 +272,8 @@ pub struct ConversationRuntime<C, T> {
     autosave: Option<std::path::PathBuf>,
     /// Requêtes au modèle par tour avant que Claw lui fasse conclure (0 : sans limite).
     turn_request_limit: usize,
+    /// Dossier suivi par le mode projet ; `None` : le dossier de travail.
+    project_root: Option<std::path::PathBuf>,
 }
 
 /// Budget de requêtes d'un tour : variable `CLAW_TURN_REQUESTS`, sinon réglage
@@ -400,6 +403,11 @@ struct TurnAids {
     viewed_reads: std::collections::BTreeSet<String>,
     /// Remarques déjà faites pendant ce tour pour un fichier relu à l'identique.
     repeated_read_notes: u32,
+    /// Mode projet : ce que Claw suit pendant le tour.
+    project: Option<project::Turn>,
+    /// Modifications et commandes du tour : une vérification de jalon en échec
+    /// ne se refait qu'après un changement.
+    project_changes: usize,
 }
 
 /// Mots en dessous desquels un message de l'utilisateur peut n'être qu'une
@@ -863,6 +871,7 @@ where
             file_views: BTreeMap::new(),
             autosave: None,
             turn_request_limit: turn_request_limit(&feature_config),
+            project_root: None,
         }
     }
 
@@ -958,6 +967,13 @@ where
     #[must_use]
     pub fn with_verify(mut self, verify: VerifySetting) -> Self {
         self.verify = verify;
+        self
+    }
+
+    /// Dossier que suit le mode projet, à la place du dossier de travail.
+    #[must_use]
+    pub fn with_project_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.project_root = Some(root.into());
         self
     }
 
@@ -1257,6 +1273,8 @@ where
                 user_message.blocks.push(ContentBlock::Text { text });
             }
         }
+        // Mode projet : où en est le projet, et l'étape à faire.
+        let project_turn = self.start_project_turn(&request_text, &mut user_message);
         self.session.messages.push(user_message);
 
         let mut assistant_messages = Vec::new();
@@ -1287,6 +1305,7 @@ where
                 .then(|| std::env::current_dir().ok())
                 .flatten()
                 .and_then(|cwd| harness::DataSnapshot::take(&cwd)),
+            project: project_turn,
             ..TurnAids::default()
         };
         // Ultracode : un agent au contexte vierge étudie la demande avant le
@@ -1468,12 +1487,14 @@ where
                         )
                     })
                     .or_else(|| self.evidence_gate(&mut aids, &request_text, earlier.as_deref()))
+                    .or_else(|| self.project_gate(&mut aids, &answer, &mut prompter))
                     .or_else(|| {
                         self.requirements_gate(&mut aids, &request_text, earlier.as_deref())
                     })
                     .or_else(|| {
                         self.review_gate(&mut aids, &request_text, earlier.as_deref(), &answer)
                     })
+                    .or_else(|| self.milestone_validation_gate(&mut aids, &answer))
                     .or_else(|| self.instructions_gate(&mut aids, &answer))
                     .or_else(|| {
                         asking = self.questions_gate(&mut aids, &answer);
@@ -1575,6 +1596,15 @@ where
                 // Plan approuvé (ExitPlanMode) : la suite du tour peut modifier.
                 if let Some(mode) = crate::permissions::take_mode_switch() {
                     self.permission_policy.set_active_mode(mode);
+                }
+            }
+            // Mode projet : un jalon marqué fait se vérifie tout de suite.
+            if let Some(note) = self.project_after_tools(&mut aids, &mut prompter) {
+                if let Some(last) = self.session.messages.last_mut() {
+                    append_tool_output(last, &note);
+                }
+                if let Some(last) = tool_results.last_mut() {
+                    append_tool_output(last, &note);
                 }
             }
         }
@@ -1769,6 +1799,12 @@ where
         if refused {
             self.note_not_run(&output, aids);
             return;
+        }
+        if matches!(
+            tool_name,
+            "edit_file" | "write_file" | "NotebookEdit" | "bash" | "PowerShell"
+        ) {
+            aids.project_changes += 1;
         }
         let mut notes = Vec::new();
         notes.extend(self.tool_executor.argument_note(tool_name, input));
@@ -2663,11 +2699,13 @@ where
         aids.checklisted = true;
         self.api_client
             .notify("Claw fait confronter le travail à chaque exigence avant de conclure");
-        Some(harness::checklist_prompt(
-            request,
-            earlier,
-            crate::permissions::user_away(),
-        ))
+        let mut prompt =
+            harness::checklist_prompt(request, earlier, crate::permissions::user_away());
+        if let Some(reference) = Self::project_reference(aids) {
+            prompt.push_str("\n\n");
+            prompt.push_str(&reference);
+        }
+        Some(prompt)
     }
 
     /// Une étape du déroulé ultracode : un sous-agent lancé par Claw avec
@@ -2998,6 +3036,381 @@ where
         Some(harness::persistence_feedback(aids.failure_streak))
     }
 
+    /// Dossier que suit le mode projet.
+    fn project_root(&self) -> Option<std::path::PathBuf> {
+        self.project_root
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+    }
+
+    /// Quelqu'un peut répondre maintenant aux questions de l'agent.
+    fn can_ask_now(&self) -> bool {
+        self.api_client.can_ask_user() && !crate::permissions::user_away()
+    }
+
+    /// Mode projet au début du tour : ouvert par une demande de création dans
+    /// un dossier vide ou par « mode projet », arrêté par « sans mode projet »,
+    /// gardé ensuite pour ce dossier (`.claw/project.json`). Le guide de
+    /// l'étape à faire est joint à la demande.
+    fn start_project_turn(
+        &mut self,
+        request: &str,
+        user_message: &mut ConversationMessage,
+    ) -> Option<project::Turn> {
+        if self.subagent || !harness::enabled(Aid::ProjectMode) {
+            return None;
+        }
+        let root = self.project_root()?;
+        let mut state = project::ProjectState::load(&root);
+        let wish = project::read_wish(request);
+        if wish == project::Wish::Stop {
+            if state.active {
+                state.active = false;
+                let _ = state.save(&root);
+                self.api_client.notify("Mode projet arrêté pour ce dossier");
+            }
+            return None;
+        }
+        let starting = !state.active
+            && (wish == project::Wish::Start
+                || (project::creation_request(request) && project::empty_folder(&root)));
+        if !state.active && !starting {
+            return None;
+        }
+        if starting {
+            state.active = true;
+            if let Err(error) = state.save(&root) {
+                self.api_client.notify(&format!(
+                    "Mode projet : son état n'a pas pu être enregistré ({error}) ; il ne vaut que pour ce tour"
+                ));
+            }
+            self.api_client.notify(
+                "Mode projet : Claw guide la création pas à pas (cahier des charges, plan en jalons vérifiés, tests d'acceptation, démonstration finale) ; « sans mode projet » l'arrête pour ce dossier",
+            );
+        }
+        let project = project::Project::read(&root);
+        let can_ask = self.can_ask_now();
+        let guide = if starting && project.phase() == project::Phase::Spec {
+            project::activation_guide(can_ask)
+        } else {
+            project::phase_guide(&project, can_ask)
+        };
+        user_message.blocks.push(ContentBlock::Text { text: guide });
+        Some(project::Turn::start(&project))
+    }
+
+    /// Après les appels d'une réponse, en mode projet : cahier des charges et
+    /// plan relus, jalon marqué fait vérifié tout de suite. Remarques au modèle.
+    fn project_after_tools(
+        &mut self,
+        aids: &mut TurnAids,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> Option<String> {
+        let mut turn = aids.project.take()?;
+        let (notes, _) = self.project_checks(&mut turn, aids, prompter, false);
+        aids.project = Some(turn);
+        (!notes.is_empty()).then(|| notes.join("\n\n"))
+    }
+
+    /// Contrôles du mode projet : forme de `SPEC.md` et de `PLAN.md` (une
+    /// remarque par problème nouveau), vérification des jalons marqués faits
+    /// pendant le tour (refaite après un échec si le projet a changé depuis).
+    /// En fin de tour (`at_end`), un jalon toujours marqué fait après un échec
+    /// est rappelé. Renvoie les remarques, et vrai si l'une demande une correction.
+    fn project_checks(
+        &mut self,
+        turn: &mut project::Turn,
+        aids: &mut TurnAids,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+        at_end: bool,
+    ) -> (Vec<String>, bool) {
+        let current = project::Project::read(&turn.root);
+        let mut notes = Vec::new();
+        let mut to_fix = false;
+        let mut problems = Vec::new();
+        if let Some(spec) = &current.spec {
+            problems.push((project::SPEC_FILE, project::spec_problems(spec)));
+        }
+        if let Some(plan) = &current.plan {
+            problems.push((
+                project::PLAN_FILE,
+                project::plan_problems(plan, current.spec.as_ref()),
+            ));
+        }
+        for (file, found) in problems {
+            if found.is_empty() {
+                continue;
+            }
+            let note = project::structure_note(file, &found);
+            if turn.noted.insert(project::note_key(&note)) {
+                self.api_client.notify(&format!(
+                    "Mode projet : {file} est à compléter, signalé à l'agent"
+                ));
+                notes.push(note);
+                to_fix = true;
+            }
+        }
+        for milestone in current.milestones() {
+            if !milestone.done || turn.done_at_start.contains(&milestone.id) {
+                continue;
+            }
+            let key = project::check_key(milestone);
+            let due = match turn.checked.get(&milestone.id) {
+                None => true,
+                Some((known, passed)) => {
+                    *known != key
+                        || (!passed
+                            && turn
+                                .failed_at
+                                .get(&milestone.id)
+                                .is_some_and(|at| aids.project_changes > *at))
+                }
+            };
+            if !due {
+                let failing = turn
+                    .checked
+                    .get(&milestone.id)
+                    .is_some_and(|(_, passed)| !passed);
+                if at_end && failing {
+                    notes.push(project::still_failing_note(&milestone.id));
+                    to_fix = true;
+                }
+                continue;
+            }
+            if milestone.verify.is_empty() {
+                turn.checked.insert(milestone.id.clone(), (key, false));
+                turn.failed_at
+                    .insert(milestone.id.clone(), aids.project_changes);
+                notes.push(project::milestone_without_check_note(&milestone.id));
+                to_fix = true;
+                continue;
+            }
+            match self.run_milestone_check(aids, milestone, prompter) {
+                // Pas lancée (refus, demande sans réponse) : déjà dit à l'utilisateur.
+                None => {
+                    turn.checked.insert(milestone.id.clone(), (key, true));
+                }
+                Some(Err(note)) => {
+                    turn.checked.insert(milestone.id.clone(), (key, false));
+                    turn.failed_at
+                        .insert(milestone.id.clone(), aids.project_changes);
+                    self.api_client.notify(&format!(
+                        "Le jalon {} est marqué fait mais sa vérification échoue : renvoyé à l'agent",
+                        milestone.id
+                    ));
+                    notes.push(note);
+                    to_fix = true;
+                }
+                Some(Ok(())) => {
+                    turn.checked.insert(milestone.id.clone(), (key, true));
+                    turn.failed_at.remove(&milestone.id);
+                    if !turn.completed.contains(&milestone.id) {
+                        turn.completed.push(milestone.id.clone());
+                    }
+                    self.api_client.notify(&format!(
+                        "Jalon {} vérifié : sa commande de vérification réussit",
+                        milestone.id
+                    ));
+                    let untested = project::untested(&turn.root, &milestone.items);
+                    notes.push(project::milestone_checked_note(
+                        &milestone.id,
+                        &milestone.verify,
+                        &untested,
+                    ));
+                }
+            }
+        }
+        (notes, to_fix)
+    }
+
+    /// Lance les commandes `Verify` d'un jalon ; celles que le modèle a déjà
+    /// lancées avec succès depuis sa dernière modification comptent. `None` :
+    /// elles n'ont pas pu tourner (refus, demande d'autorisation sans réponse).
+    fn run_milestone_check(
+        &mut self,
+        aids: &mut TurnAids,
+        milestone: &project::Milestone,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> Option<Result<(), String>> {
+        for (index, command) in milestone.verify.iter().enumerate() {
+            if aids
+                .verified_commands
+                .iter()
+                .any(|ran| harness::covers(ran, command))
+            {
+                continue;
+            }
+            self.api_client.notify(&format!(
+                "Mode projet : vérification du jalon {} : {command}",
+                milestone.id
+            ));
+            let input = serde_json::json!({
+                "command": command,
+                "timeout": harness::VERIFY_TIMEOUT_MS,
+                "run_in_background": false,
+                "description": format!("Vérification du jalon {} par Claw", milestone.id),
+            })
+            .to_string();
+            self.tool_executor.announce("bash", &input);
+            let (message, _) = self.execute_tool_call(
+                format!("claw-milestone-{}-{index}", milestone.id),
+                "bash".to_string(),
+                &input,
+                prompter
+                    .as_mut()
+                    .map(|prompt| &mut **prompt as &mut dyn PermissionPrompter),
+            );
+            let (output, is_error) = tool_result_parts(&message)?;
+            if is_error {
+                self.api_client.notify(&format!(
+                    "Vérification du jalon {} non lancée ({command}) : le jalon n'est pas vérifié",
+                    milestone.id
+                ));
+                return None;
+            }
+            let result = harness::read_bash_output(output);
+            if !result.passed || result.pending {
+                return Some(Err(project::milestone_failed_note(
+                    &milestone.id,
+                    command,
+                    &result.excerpt,
+                    result.timed_out || result.pending,
+                )));
+            }
+            aids.verified_commands.push(command.clone());
+        }
+        Some(Ok(()))
+    }
+
+    /// Mode projet, quand l'agent dit avoir fini : jalons vérifiés et forme
+    /// des fichiers du projet, cahier des charges d'abord, tests d'acceptation ;
+    /// sans personne pour répondre, le plan est suivi jusqu'au bout.
+    fn project_gate(
+        &mut self,
+        aids: &mut TurnAids,
+        answer: &str,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> Option<String> {
+        if aids.project.is_none() || self.subagent || interrupt_requested() || aids.verify_failing {
+            return None;
+        }
+        let mut turn = aids.project.take()?;
+        let feedback = self.project_gate_for(&mut turn, aids, answer, prompter);
+        aids.project = Some(turn);
+        feedback.map(|feedback| format!("{feedback}\n\n{}", harness::FINAL_ANSWER_RULE))
+    }
+
+    fn project_gate_for(
+        &mut self,
+        turn: &mut project::Turn,
+        aids: &mut TurnAids,
+        answer: &str,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> Option<String> {
+        let (notes, to_fix) = self.project_checks(turn, aids, prompter, true);
+        if to_fix {
+            turn.gate_rounds += 1;
+            if turn.gate_rounds > project::MAX_GATE_ROUNDS {
+                self.api_client.notify(
+                    "Mode projet : des contrôles échouent encore après plusieurs renvois : le travail n'est pas validé",
+                );
+                return None;
+            }
+            return Some(notes.join("\n\n"));
+        }
+        let current = project::Project::read(&turn.root);
+        // Jalons terminés dont des lignes n'ont toujours aucun test (une fois).
+        let untested: Vec<String> = current
+            .milestones()
+            .iter()
+            .filter(|milestone| turn.completed.contains(&milestone.id))
+            .flat_map(|milestone| project::untested(&turn.root, &milestone.items))
+            .collect();
+        if !untested.is_empty() && turn.asked.insert("tests".to_string()) {
+            self.api_client.notify(
+                "Mode projet : des exigences de jalons faits n'ont aucun test : Claw demande à l'agent de les écrire",
+            );
+            return Some(project::untested_feedback(&untested));
+        }
+        let can_ask = self.can_ask_now();
+        match current.phase() {
+            project::Phase::Spec => {
+                let changed = !aids.originals.is_empty();
+                if (changed || !can_ask) && turn.asked.insert("spec".to_string()) {
+                    self.api_client.notify(
+                        "Mode projet : Claw demande à l'agent d'écrire d'abord le cahier des charges (SPEC.md)",
+                    );
+                    return Some(project::spec_first_feedback(changed));
+                }
+                None
+            }
+            project::Phase::Plan if can_ask => {
+                let confirm = !turn.spec_at_start
+                    && !aids.asked
+                    && !harness::ends_with_questions(answer)
+                    && turn.asked.insert("confirm-spec".to_string());
+                confirm.then(|| {
+                    self.api_client.notify(
+                        "Mode projet : Claw demande à l'agent de faire valider le cahier des charges",
+                    );
+                    project::confirm_spec_feedback()
+                })
+            }
+            project::Phase::Plan => turn.asked.insert("plan".to_string()).then(|| {
+                self.api_client.notify(
+                    "Mode projet : cahier des charges écrit : Claw demande à l'agent d'écrire le plan",
+                );
+                project::plan_next_feedback()
+            }),
+            project::Phase::Build(index) if !can_ask => {
+                let id = current.milestones()[index].id.clone();
+                turn.asked.insert(format!("continue-{id}")).then(|| {
+                    self.api_client.notify(&format!(
+                        "Mode projet : jalons restants : Claw renvoie l'agent au jalon {id}"
+                    ));
+                    project::continue_feedback(&current, index)
+                })
+            }
+            project::Phase::Build(_) | project::Phase::Finish | project::Phase::Done => None,
+        }
+    }
+
+    /// Mode projet, quand quelqu'un peut répondre : un jalon terminé pendant le
+    /// tour est à faire essayer à l'utilisateur, qui dit s'il convient (une fois).
+    fn milestone_validation_gate(&mut self, aids: &mut TurnAids, answer: &str) -> Option<String> {
+        if self.subagent
+            || interrupt_requested()
+            || aids.asked
+            || !self.can_ask_now()
+            || harness::ends_with_questions(answer)
+        {
+            return None;
+        }
+        let turn = aids.project.as_mut()?;
+        if turn.completed.is_empty() || turn.validation_asked {
+            return None;
+        }
+        turn.validation_asked = true;
+        let current = project::Project::read(&turn.root);
+        let next = current
+            .milestones()
+            .iter()
+            .find(|milestone| !milestone.done)
+            .map(|milestone| milestone.id.clone());
+        let feedback = project::validation_feedback(&turn.completed, next.as_deref());
+        self.api_client.notify(
+            "Mode projet : jalon terminé : Claw demande à l'agent de le faire essayer à l'utilisateur",
+        );
+        Some(feedback)
+    }
+
+    /// Les lignes du cahier des charges des jalons faits, pour le contrôle des
+    /// exigences et la relecture.
+    fn project_reference(aids: &TurnAids) -> Option<String> {
+        let turn = aids.project.as_ref()?;
+        project::reference_for_checks(&project::Project::read(&turn.root))
+    }
+
     /// Relecture imposée : quand le tour a modifié assez de code et que la
     /// vérification passe, un autre modèle relit le diff et la réponse que
     /// l'agent s'apprête à donner. Ses remarques sont renvoyées au modèle
@@ -3028,7 +3441,9 @@ where
         }
         self.api_client
             .notify("Relecture des modifications par un autre modèle…");
-        let prompt = harness::review_prompt(request, earlier, answer, &diffs);
+        let reference = Self::project_reference(aids);
+        let prompt =
+            harness::review_prompt_with(request, earlier, answer, &diffs, reference.as_deref());
         let mut consultation =
             self.api_client
                 .consult(ConsultPurpose::Review, harness::REVIEW_SYSTEM, &prompt)?;
@@ -6890,5 +7305,367 @@ mod tests {
         );
         runtime.run_turn("ajoute un test", None).expect("tour");
         assert_eq!(flagged(&observed.borrow().notices), 0);
+    }
+
+    /// Runtime du mode projet, ce que le modèle a reçu, commandes lancées.
+    type ProjectRun = (
+        ConversationRuntime<StepsApiClient, StaticToolExecutor>,
+        std::rc::Rc<std::cell::RefCell<Observed>>,
+        std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    );
+
+    /// Runtime du mode projet sur `root` : `write_file` écrit vraiment le
+    /// fichier sous `root` ; `bash` note chaque commande et échoue, tant qu'il
+    /// reste des échecs à rendre (`failures`), quand elle contient `fails`.
+    fn project_runtime(
+        root: &std::path::Path,
+        steps: Vec<Vec<AssistantEvent>>,
+        fails: &'static str,
+        failures: usize,
+    ) -> ProjectRun {
+        let observed = std::rc::Rc::new(std::cell::RefCell::new(Observed::default()));
+        let commands = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let ran = std::rc::Rc::clone(&commands);
+        let base = root.to_path_buf();
+        let mut left = failures;
+        let executor = StaticToolExecutor::new()
+            .register("write_file", move |input| {
+                let value: serde_json::Value = serde_json::from_str(input).expect("json");
+                let path = base.join(value["path"].as_str().expect("chemin"));
+                if let Some(folder) = path.parent() {
+                    std::fs::create_dir_all(folder).expect("dossier");
+                }
+                std::fs::write(&path, value["content"].as_str().expect("contenu")).expect("écrit");
+                Ok(serde_json::json!({ "filePath": path.to_string_lossy() }).to_string())
+            })
+            .register("bash", move |input| {
+                let command = super::json_field(input, "command").unwrap_or_default();
+                let failing = !fails.is_empty() && command.contains(fails) && left > 0;
+                if failing {
+                    left -= 1;
+                }
+                ran.borrow_mut().push(command);
+                Ok(if failing { FAILING } else { PASSING }.to_string())
+            })
+            .register("AskUserQuestion", |_| {
+                Ok("L'utilisateur a répondu : Valider".to_string())
+            });
+        let runtime = ConversationRuntime::new(
+            Session::new(),
+            StepsApiClient {
+                steps: steps.into(),
+                observed: std::rc::Rc::clone(&observed),
+                advisor: std::collections::VecDeque::new(),
+                escalation: None,
+            },
+            executor,
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["système".to_string()],
+        )
+        .with_verify(crate::harness::VerifySetting::Commands(vec![
+            "verifier".to_string()
+        ]))
+        .with_project_root(root);
+        (runtime, observed, commands)
+    }
+
+    fn project_folder(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "claw-mode-projet-{name}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        std::fs::create_dir_all(&path).expect("dossier");
+        path
+    }
+
+    fn write_step(path: &str, content: &str) -> Vec<AssistantEvent> {
+        tool_step(
+            "write_file",
+            &serde_json::json!({ "path": path, "content": content }).to_string(),
+        )
+    }
+
+    const PROJECT_SPEC: &str = "# Bibliothèque\n\n- R1: Ajouter un livre. Check: `python biblio.py ajouter Dune` -> il apparaît dans la liste\n- R2: Emprunter un livre. Check: `python biblio.py emprunter Dune` -> il est marqué prêté\n- E1: titre vide -> refusé avec un message\n\n## Questions\nAucune.\n\n## Hors périmètre\nComptes utilisateurs.\n";
+
+    const PROJECT_TESTS: &str = "def test_r1_ajout():\n    assert True\n\n# E1 : titre vide refusé\ndef test_titre_vide():\n    assert True\n";
+
+    const PROJECT_REQUEST: &str =
+        "Crée une application de gestion de bibliothèque en Python : ajouter des livres et les emprunter.";
+
+    fn project_plan(first: &str, second: &str) -> String {
+        format!(
+            "# Plan\n\n## M1 - Squelette\nRequirements: R1, E1\nVerify: `python -m pytest -q`\nStatus: {first}\n\n## M2 - Emprunts\nRequirements: R2\nVerify: `python -m pytest -q tests/test_m2.py`\nStatus: {second}\n\n## Demo\nInstall: `python -m pip install -r requirements.txt`\nRun: `python biblio.py liste`\n"
+        )
+    }
+
+    fn active_project(root: &std::path::Path) {
+        crate::project::ProjectState {
+            active: true,
+            ..crate::project::ProjectState::default()
+        }
+        .save(root)
+        .expect("état");
+    }
+
+    #[test]
+    fn project_mode_takes_a_new_project_through_its_milestones_when_nobody_can_answer() {
+        CAN_ASK.with(|flag| flag.set(false));
+        let root = project_folder("seul");
+        let (mut runtime, observed, commands) = project_runtime(
+            &root,
+            vec![
+                write_step("SPEC.md", PROJECT_SPEC),
+                write_step("PLAN.md", &project_plan("todo", "todo")),
+                write_step("tests/test_biblio.py", PROJECT_TESTS),
+                write_step("PLAN.md", &project_plan("done", "todo")),
+                text_step("Fini."),
+                write_step("PLAN.md", &project_plan("done", "done")),
+                text_step("Fini."),
+                write_step(
+                    "tests/test_m2.py",
+                    "def test_r2_emprunt():\n    assert True\n",
+                ),
+                text_step("Fini."),
+                text_step("Fini."),
+                text_step("Fini."),
+                text_step("Fini."),
+            ],
+            "",
+            0,
+        );
+        runtime.run_turn(PROJECT_REQUEST, None).expect("tour");
+        let observed = observed.borrow();
+        // Toute la méthode, pour un modèle que personne ne peut renseigner.
+        assert!(observed.requests[0].contains("Project mode is on for this folder"));
+        assert!(observed.requests[0].contains("Nobody can answer you during this turn"));
+        let state = std::fs::read_to_string(root.join(".claw").join("project.json"))
+            .expect("état enregistré");
+        assert!(state.contains("\"active\": true"));
+        // Le jalon marqué fait est vérifié aussitôt, par sa propre commande.
+        assert!(
+            observed.requests[4].contains("M1: its Verify command passes (`python -m pytest -q`).")
+        );
+        assert!(commands
+            .borrow()
+            .iter()
+            .any(|command| command == "python -m pytest -q"));
+        assert!(commands
+            .borrow()
+            .iter()
+            .any(|command| command == "python -m pytest -q tests/test_m2.py"));
+        // Seul, le modèle qui s'arrête avant la fin du plan repart au jalon suivant.
+        assert!(observed.requests[5].contains("Go on with M2 of 2: Emprunts."));
+        // Une exigence d'un jalon fait qu'aucun test ne nomme : dite, puis redemandée.
+        assert!(observed.requests[6].contains("no test file of the project names R2"));
+        assert!(
+            observed.requests[7].contains("Project mode: no test file of the project names R2 yet")
+        );
+        // Le contrôle des exigences cite le cahier des charges.
+        assert!(observed.requests.iter().any(|request| request
+            .contains("This project has a specification, SPEC.md.")
+            && request.contains("R2: Emprunter un livre.")));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.starts_with("Mode projet : Claw guide la création pas à pas")));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice == "Jalon M1 vérifié : sa commande de vérification réussit"));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice
+                == "Mode projet : jalons restants : Claw renvoie l'agent au jalon M2"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn project_mode_has_the_user_confirm_the_specification_and_try_each_milestone() {
+        CAN_ASK.with(|flag| flag.set(true));
+        let root = project_folder("avec-utilisateur");
+        // Cahier des charges écrit : à faire valider avant le plan.
+        let (mut runtime, observed, _) = project_runtime(
+            &root,
+            vec![
+                write_step("SPEC.md", PROJECT_SPEC),
+                text_step("Voici le cahier des charges."),
+                tool_step(
+                    "AskUserQuestion",
+                    r#"{"questions":[{"question":"Ce cahier des charges vous convient-il ?","options":[{"label":"Valider"},{"label":"Modifier"}]}]}"#,
+                ),
+                text_step("Je passe au plan."),
+                text_step("Je passe au plan."),
+                text_step("Je passe au plan."),
+            ],
+            "",
+            0,
+        );
+        runtime.run_turn(PROJECT_REQUEST, None).expect("tour");
+        {
+            let observed = observed.borrow();
+            assert!(observed.requests[0].contains("The user can answer you: after SPEC.md"));
+            assert!(observed.requests[2].contains(
+                "Before PLAN.md, show the user its requirements in a few lines and ask them with AskUserQuestion"
+            ));
+        }
+        // Jalon terminé : l'utilisateur est invité à l'essayer avant le suivant.
+        std::fs::write(root.join("PLAN.md"), project_plan("todo", "todo")).expect("plan");
+        let (mut runtime, observed, _) = project_runtime(
+            &root,
+            vec![
+                write_step("tests/test_biblio.py", PROJECT_TESTS),
+                write_step("PLAN.md", &project_plan("done", "todo")),
+                text_step("M1 est prêt."),
+                text_step("Tout est couvert."),
+                tool_step(
+                    "AskUserQuestion",
+                    r#"{"questions":[{"question":"M1 vous convient-il ?","options":[{"label":"Oui"},{"label":"Non"}]}]}"#,
+                ),
+                text_step("Merci : M2 au prochain tour."),
+                text_step("Merci : M2 au prochain tour."),
+            ],
+            "",
+            0,
+        );
+        runtime.run_turn("continue", None).expect("tour");
+        let observed = observed.borrow();
+        assert!(observed.requests[0].contains("Milestones: M1 (current), M2."));
+        assert!(observed.requests[0].contains(
+            "Then stop: tell the user how to try it and ask whether it does what they want."
+        ));
+        assert!(observed.requests.iter().any(|request| request.contains(
+            "M1 is done. End your answer with how the user can try it (the exact commands, from the project folder), then ask them with AskUserQuestion whether it does what they want, before you start M2."
+        )));
+        assert!(observed.notices.iter().any(|notice| notice
+            == "Mode projet : jalon terminé : Claw demande à l'agent de le faire essayer à l'utilisateur"));
+        CAN_ASK.with(|flag| flag.set(false));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_milestone_marked_done_whose_check_fails_goes_back_to_the_agent() {
+        CAN_ASK.with(|flag| flag.set(false));
+        let root = project_folder("echec");
+        std::fs::write(root.join("SPEC.md"), PROJECT_SPEC).expect("spec");
+        std::fs::write(root.join("PLAN.md"), project_plan("todo", "todo")).expect("plan");
+        std::fs::create_dir_all(root.join("tests")).expect("tests");
+        std::fs::write(root.join("tests").join("test_biblio.py"), PROJECT_TESTS).expect("tests");
+        active_project(&root);
+        let (mut runtime, observed, commands) = project_runtime(
+            &root,
+            vec![
+                write_step("PLAN.md", &project_plan("done", "todo")),
+                text_step("M1 est fait."),
+                write_step("biblio.py", "LIVRES = []\n"),
+                text_step("Corrigé."),
+                text_step("Fini."),
+                text_step("Fini."),
+                text_step("Fini."),
+            ],
+            "python -m pytest -q",
+            1,
+        );
+        runtime.run_turn("continue", None).expect("tour");
+        let observed = observed.borrow();
+        assert!(observed.requests[1]
+            .contains("M1 is marked done in PLAN.md, but its Verify command fails"));
+        // Rien n'a changé depuis l'échec : rappelé quand l'agent dit avoir fini.
+        assert!(observed.requests[2].contains("M1 is still marked done in PLAN.md"));
+        // Après une correction, la vérification est refaite et passe.
+        assert!(observed.requests[3].contains("M1: its Verify command passes"));
+        assert_eq!(
+            commands
+                .borrow()
+                .iter()
+                .filter(|command| *command == "python -m pytest -q")
+                .count(),
+            2
+        );
+        assert!(observed.notices.iter().any(|notice| notice
+            == "Le jalon M1 est marqué fait mais sa vérification échoue : renvoyé à l'agent"));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice == "Jalon M1 vérifié : sa commande de vérification réussit"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn project_mode_starts_for_a_new_project_or_when_asked_and_stops_when_told() {
+        CAN_ASK.with(|flag| flag.set(false));
+        let root = project_folder("activation");
+        std::fs::write(root.join("app.py"), "print('bonjour')\n").expect("code");
+        // Un dossier qui a déjà du code : une demande de création ne suffit pas.
+        let (mut runtime, observed, _) = project_runtime(&root, vec![text_step("Fait.")], "", 0);
+        runtime.run_turn(PROJECT_REQUEST, None).expect("tour");
+        assert!(!observed.borrow().requests[0].contains("Project mode"));
+        assert!(!root.join(".claw").join("project.json").exists());
+        // « mode projet » l'ouvre pour ce dossier.
+        let (mut runtime, observed, _) =
+            project_runtime(&root, vec![text_step("Fait."), text_step("Fait.")], "", 0);
+        runtime
+            .run_turn("Passe en mode projet pour ajouter les emprunts", None)
+            .expect("tour");
+        assert!(observed.borrow().requests[0].contains("Project mode is on for this folder"));
+        assert!(crate::project::ProjectState::load(&root).active);
+        // Le tour suivant, d'une autre session aussi, le mode reste ouvert.
+        let (mut runtime, observed, _) =
+            project_runtime(&root, vec![text_step("Fait."), text_step("Fait.")], "", 0);
+        runtime
+            .run_turn("Ajoute aussi les retours de livres", None)
+            .expect("tour");
+        assert!(observed.borrow().requests[0]
+            .contains("[Claw guide] Project mode: SPEC.md, PLAN.md and DECISIONS.md"));
+        // « sans mode projet » l'arrête.
+        let (mut runtime, observed, _) = project_runtime(&root, vec![text_step("Fait.")], "", 0);
+        runtime
+            .run_turn("Continue sans mode projet", None)
+            .expect("tour");
+        assert!(!observed.borrow().requests[0].contains("Project mode"));
+        assert!(!crate::project::ProjectState::load(&root).active);
+        assert!(observed
+            .borrow()
+            .notices
+            .iter()
+            .any(|notice| notice == "Mode projet arrêté pour ce dossier"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_plan_claw_cannot_follow_is_pointed_out_once_after_it_is_written() {
+        CAN_ASK.with(|flag| flag.set(false));
+        let root = project_folder("forme");
+        std::fs::write(root.join("SPEC.md"), PROJECT_SPEC).expect("spec");
+        active_project(&root);
+        let (mut runtime, observed, _) = project_runtime(
+            &root,
+            vec![
+                write_step(
+                    "PLAN.md",
+                    "# Plan\n\n## M1 - Squelette\nRequirements: R1, E1\nStatus: todo\n",
+                ),
+                text_step("Plan écrit."),
+                text_step("Plan écrit."),
+                text_step("Plan écrit."),
+                text_step("Plan écrit."),
+            ],
+            "",
+            0,
+        );
+        runtime.run_turn("écris le plan", None).expect("tour");
+        let observed = observed.borrow();
+        assert!(observed.requests[1].contains("[Claw] PLAN.md: M1 has no `Verify: <command>` line"));
+        assert!(observed.requests[1].contains("R2 of SPEC.md is in no milestone"));
+        assert!(observed.requests[1].contains("it has no `## Demo` section"));
+        // La même remarque n'est pas refaite en fin de tour (chaque requête
+        // reprend toute la conversation).
+        assert_eq!(
+            observed.requests[2].matches("PLAN.md: M1 has no").count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

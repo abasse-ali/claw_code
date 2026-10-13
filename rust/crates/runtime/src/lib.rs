@@ -22,6 +22,7 @@ mod mcp_stdio;
 mod oauth;
 mod paths;
 mod permissions;
+pub mod project;
 mod prompt;
 mod remote;
 pub mod repo_map;

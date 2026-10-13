@@ -55,6 +55,8 @@ async function main() {
         // Compte OpenRouter fictif servi par le faux modèle (crédits en barre d'état).
         OPENROUTER_BASE_URL: mock.baseUrl,
         OPENROUTER_API_KEY: "sk-or-test-factice",
+        // Clé du terminal qui lance l'essai : jamais vers le vrai fournisseur.
+        GEMINI_API_KEY: "",
         CLAW_CONFIG_HOME: path.join(root, "claw-home"),
         CLAW_NO_CLAUDE_CONFIG: "1",
         // L'essai ne reprend pas les clés du compte de la machine.

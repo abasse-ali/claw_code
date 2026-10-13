@@ -50,11 +50,17 @@ function get(port, path) {
   fs.writeFileSync(logPath, "");
   const mock = await startMockModel(logPath);
   // CLAW_NO_USER_ENV : l'essai ne reprend pas les clés du compte de la machine.
+  // Les clés vides : celles du terminal qui lance l'essai n'atteignent pas les
+  // vrais fournisseurs (une relecture partirait sinon vers un vrai modèle).
   const env = {
     OLLAMA_BASE_URL: mock.baseUrl,
     CLAW_CONFIG_HOME: path.join(root, "claw-home"),
     CLAW_NO_CLAUDE_CONFIG: "1",
     CLAW_NO_USER_ENV: "1",
+    OPENROUTER_API_KEY: "",
+    GEMINI_API_KEY: "",
+    ANTHROPIC_API_KEY: "",
+    OPENAI_API_KEY: "",
   };
 
   const server = new ClawServer({ clawPath: claw, cwd, model: "ollama:mock", permissionMode: "read-only", env });
