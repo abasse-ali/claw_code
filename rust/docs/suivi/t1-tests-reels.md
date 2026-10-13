@@ -773,6 +773,9 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   copie ajoutée par le modèle ne compte pas) ; un fichier de tests créé pendant le tour est au
   modèle. Le contenu du début du tour est relevé avant la première modification (comme pour
   T1-29).
+- Mesure (13 octobre, 23 h) : avant, 4 essais sur 22 de la journée recevaient la remarque
+  (t4 deux fois, t1, t5). Avec Claw au commit 361f79d : t6 12/12 en 36 requêtes, t5 12/12 en
+  18, t4 12/12 en 54, aucun ne la reçoit.
 
 ### T1-35 Pas de relecture quand les relecteurs gratuits sont saturés
 - Preuve : t4 du 13 octobre au matin (10/12) : laguna et dots ne finissent pas leur réponse
@@ -805,10 +808,11 @@ lot ont été corrigés au passage : remarques de `write_file` (contenu abrégé
 à l'allègement, garde des tests réécrits muette quand un hook ajoute du texte au résultat,
 jetons des réglages envoyés dans le prompt.
 
-Suite, dans l'ordre (mise à jour du 13 octobre, 21 h 30) : avec Claw à jour, le banc entier
-tient (t1 6/6, t2 8/8, t3 4/4, t4 12/12, t5 12/12, t7 12/12 ; t6 12/12 le 12 au soir). (1)
-après la remise à zéro du quota (2 h) : t6 avec le plus puissant et Claw à jour, et une
-mesure de T1-36 (combien de remarques de la garde des tests restent) ; les répétitions de t7 ont montré qu'un seul essai ne
+Suite, dans l'ordre (mise à jour du 13 octobre, 23 h 30) : avec Claw au commit 361f79d, le
+banc entier tient avec le plus puissant (t1 6/6, t2 8/8, t3 4/4, t4 12/12, t5 12/12, t6 12/12,
+t7 12/12). (1) Le petit modèle reste le point faible (t6 : 11/12 en 43 requêtes, puis arrêté
+par la limite de temps) : regarder ses essais pour ce qui lui coûte le plus (édition ratée,
+essais un par un) ; les répétitions de t7 ont montré qu'un seul essai ne
 suffit pas (11/12 puis 3/12 pour le même témoin) ; (2) T1-24 sur un autre genre de fonctionnalité (montants de t1, CSV de t3) ;
 (3) T1-18 : chercher ce qui fait voir à un modèle
 la contradiction entre la phrase de l'utilisateur et sa propre sortie (le rejeu du contrôle
