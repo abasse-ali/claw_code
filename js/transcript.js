@@ -175,6 +175,9 @@ function eventHtml(event, key, lastTodo) {
       return `<div class="ev notice">${escapeHtml(event.t || "")}</div>`;
     case "tool":
       return toolHtml(event, key, lastTodo);
+    case "quota":
+      return `<div class="ev meta">Requêtes gratuites : ${event.run !== null && event.run !== undefined ? `${plural(event.run, "requête")} pour ce passage · ` : ""}`
+        + `${event.used}/${event.limit} utilisées aujourd'hui (${event.remaining} restantes)</div>`;
     case "end": {
       const parts = [shortModel(event.model), event.turns ? plural(event.turns, "requête") : "", event.ms ? duration(event.ms) : "", event.cost || ""];
       return `<div class="ev meta">${escapeHtml(parts.filter(Boolean).join(" · "))}</div>`;

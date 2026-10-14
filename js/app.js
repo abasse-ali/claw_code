@@ -7,6 +7,7 @@ import { ANSWER, GitHub, GitHubError, LABEL, PROGRESS } from "./github.js";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 import { sealedBox } from "./sealed-box.js";
 import { LOG, changesHtml, decodeLog, transcriptHtml } from "./transcript.js";
+import { accountStatus, freeModels, resetTime } from "./openrouter.js";
 
 const STORE = "claw-web.settings.v1";
 const DEFAULT_ENGINE = "abasse-ali/claw_code";
@@ -30,6 +31,7 @@ const ICON = {
   stop: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
   trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4h6v3"/></svg>',
   diff: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v8M8 8h8M8 18h8"/><rect x="3.5" y="2.5" width="17" height="19" rx="2"/></svg>',
+  gauge: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 17a8.5 8.5 0 1 1 15 0"/><path d="M12 13l4-4"/><circle cx="12" cy="13" r="1.2"/></svg>',
 };
 
 const state = {
@@ -45,6 +47,10 @@ const state = {
   pollTimer: null,
   dispatchedAt: 0,
   sending: false,
+  // Requêtes gratuites du jour et crédits (clé OpenRouter gardée sur l'appareil).
+  quota: null,
+  quotaError: "",
+  quotaLoading: false,
   // Liste des sessions du tiroir, et sessions cochées pour être effacées.
   drawerSessions: [],
   selecting: false,
@@ -179,24 +185,24 @@ async function loadBranches(repo) {
 }
 
 /** Modèles gratuits d'OpenRouter (liste publique, sans clé). */
+/** Modèles gratuits utilisables, classés comme Claw les classe : `ranked` (le premier est
+ * celui d'« Auto »), puis `others`. */
 async function loadModels() {
   if (state.models) return state.models;
   try {
-    const response = await fetch("https://openrouter.ai/api/v1/models", { cache: "no-store" });
-    const data = await response.json();
-    state.models = (data.data || [])
-      .filter((model) => model.id.endsWith(":free"))
-      .map((model) => ({
-        id: model.id,
-        short: (model.name || model.id).replace(/\s*\(free\)\s*$/i, ""),
-        detail: model.id,
-      }))
-      .sort((left, right) => left.short.localeCompare(right.short));
+    const { ranked, others } = await freeModels();
+    state.models = [
+      ...ranked.map((model, index) => ({ ...model, rank: index + 1 })),
+      ...others.map((model) => ({ ...model, rank: 0 })),
+    ];
   } catch {
     state.models = [];
   }
   return state.models;
 }
+
+const contextLabel = (tokens) => (tokens >= 1000000 ? `${Math.round(tokens / 100000) / 10} M` : `${Math.round(tokens / 1024)} k`)
+  .replace(".", ",");
 
 async function refreshRuns() {
   try {
@@ -393,13 +399,19 @@ async function pickBranch() {
 
 async function pickModel() {
   const models = await loadModels();
+  const best = models.find((model) => model.rank === 1);
+  const detail = (model) => [
+    model.rank === 1 ? "le plus puissant" : model.rank ? `n°${model.rank} pour le code` : "non retenu pour le code",
+    ...model.reasons,
+    model.context ? `contexte ${contextLabel(model.context)}` : "",
+  ].filter(Boolean).join(" · ");
   openPicker({
     title: "Modèle (gratuit)",
     placeholder: "Rechercher un modèle",
     current: state.settings.model || "",
     items: [
-      { value: "", label: "Auto", detail: "le meilleur modèle gratuit pour le code" },
-      ...models.map((model) => ({ value: model.id, label: model.short, detail: model.detail })),
+      { value: "", label: "Auto", detail: best ? `en ce moment ${best.short}, le plus puissant des gratuits pour le code (et les suivants s'il ne répond plus)` : "le meilleur modèle gratuit pour le code" },
+      ...models.map((model) => ({ value: model.id, label: model.rank ? `${model.rank}. ${model.short}` : model.short, detail: detail(model) })),
     ],
     onPick: (value) => {
       state.settings.model = value;
@@ -407,6 +419,95 @@ async function pickModel() {
       renderComposer();
     },
   });
+}
+
+// --- Requêtes gratuites ------------------------------------------------------------------------
+
+function quotaLabel() {
+  if (!state.settings.openrouterKey) return "Requêtes gratuites";
+  const free = state.quota && state.quota.free;
+  if (free) return `${free.remaining}/${free.limit} gratuites`;
+  if (state.quotaError) return "Quota indisponible";
+  return "Quota…";
+}
+
+function showQuotaLabel() {
+  const chip = document.querySelector('#composer [data-action="quota"] span');
+  if (chip) chip.textContent = quotaLabel();
+}
+
+/** Relit le quota chez OpenRouter (au plus une fois par minute, sauf `force`). */
+async function refreshQuota(force = false) {
+  const key = state.settings.openrouterKey;
+  if (!key || state.quotaLoading) return;
+  if (!force && state.quota && Date.now() - state.quota.at < 60_000) return;
+  state.quotaLoading = true;
+  try {
+    state.quota = await accountStatus(key);
+    state.quotaError = "";
+  } catch (error) {
+    state.quotaError = error.message || String(error);
+  } finally {
+    state.quotaLoading = false;
+    showQuotaLabel();
+  }
+}
+
+/** Détail du quota gratuit du jour et des crédits ; sans clé gardée, comment l'afficher. */
+async function openQuota() {
+  const sheet = $("#sheet");
+  const close = () => {
+    sheet.hidden = true;
+    sheet.innerHTML = "";
+  };
+  const draw = () => {
+    const free = state.quota && state.quota.free;
+    const balance = state.quota && state.quota.balance;
+    let body;
+    if (!state.settings.openrouterKey) {
+      body = `<p>Pour voir ici les requêtes gratuites utilisées et restantes aujourd'hui, gardez une clé OpenRouter sur cet appareil.</p>
+        <p class="help">Chaque réponse de Claw dit déjà combien son passage en a pris et combien il en reste.</p>
+        <a class="primary" href="#/reglages">Ouvrir les réglages</a>`;
+    } else if (free) {
+      const share = free.limit ? Math.min(100, Math.round((free.used / free.limit) * 100)) : 0;
+      body = `<div class="quota-big"><strong>${free.remaining}</strong> requêtes gratuites restantes aujourd'hui</div>
+        <div class="quota-bar" role="img" aria-label="${share} % utilisées" data-share="${share}"><span></span></div>
+        <p>${free.used} utilisées sur ${free.limit} · remise à zéro à ${escapeHtml(resetTime())} (minuit UTC)</p>
+        ${balance !== null && balance !== undefined ? `<p class="help">Crédits du compte : ${balance.toFixed(2).replace(".", ",")} $ (les modèles gratuits n'en consomment pas ; au moins 10 $ de crédits achetés donnent 1000 requêtes gratuites par jour au lieu de 50).</p>` : ""}
+        <p class="help">Lu chez OpenRouter ${since(new Date(state.quota.at).toISOString())}.</p>`;
+    } else {
+      body = `<p>${escapeHtml(state.quotaError || "OpenRouter n'a pas donné le quota gratuit de cette clé.")}</p>`;
+    }
+    sheet.innerHTML = `
+      <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="Requêtes gratuites">
+        <div class="sheet-head">
+          <strong>Requêtes gratuites</strong>
+          <button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button>
+        </div>
+        <div class="quota-sheet">${body}
+          ${state.settings.openrouterKey ? `<button class="small-link" data-action="refresh-quota">${ICON.retry}<span>Actualiser</span></button>` : ""}
+        </div>
+      </div>`;
+    // Largeur par le DOM : la politique de sécurité de l'appli refuse les styles écrits dans le HTML.
+    const bar = sheet.querySelector(".quota-bar");
+    if (bar) bar.querySelector("span").style.width = `${bar.dataset.share}%`;
+  };
+  sheet.onclick = async (event) => {
+    if (event.target === sheet || event.target.closest("[data-close]") || event.target.closest('a[href="#/reglages"]')) {
+      close();
+      return;
+    }
+    if (event.target.closest('[data-action="refresh-quota"]')) {
+      await refreshQuota(true);
+      if (!sheet.hidden) draw();
+    }
+  };
+  draw();
+  sheet.hidden = false;
+  if (state.settings.openrouterKey && (!state.quota || Date.now() - state.quota.at > 15_000)) {
+    await refreshQuota(true);
+    if (!sheet.hidden) draw();
+  }
 }
 
 // --- Zone de saisie --------------------------------------------------------------------------
@@ -425,6 +526,7 @@ function renderComposer() {
       <button class="chip" data-action="repo">${ICON.repo}<span>${escapeHtml(repo || "Choisir un dépôt")}</span></button>
       <button class="chip" data-action="branch">${ICON.branch}<span>${escapeHtml(branch || "branche")}</span></button>`}
       <button class="chip" data-action="model">${ICON.model}<span>${escapeHtml(modelLabel(state.settings.model))}</span></button>
+      <button class="chip quota" data-action="quota">${ICON.gauge}<span>${escapeHtml(quotaLabel())}</span></button>
     </div>
     <form class="prompt" autocomplete="off">
       <textarea rows="1" name="text" placeholder="${followUp ? "Répondez ou donnez une nouvelle consigne." : "Décrivez une tâche ou posez une question."}" aria-label="Message pour Claw"></textarea>
@@ -456,6 +558,8 @@ function renderComposer() {
   composer.querySelector('[data-action="repo"]')?.addEventListener("click", pickRepo);
   composer.querySelector('[data-action="branch"]')?.addEventListener("click", pickBranch);
   composer.querySelector('[data-action="model"]').addEventListener("click", pickModel);
+  composer.querySelector('[data-action="quota"]').addEventListener("click", openQuota);
+  refreshQuota();
   resize();
   // Tout de suite, pas au rappel de l'observateur : le défilement vers le bas suit.
   updateComposerSpace();
@@ -964,6 +1068,8 @@ async function pollSession(force = false) {
     issue.updated_at, issue.state, comments.map((comment) => [comment.id, comment.updated_at]),
     run && [run.id, run.status, run.conclusion], session.step, session.pull && [session.pull.state, session.pull.merged_at],
   ]);
+  // Fin du passage suivi : le quota gratuit a bougé.
+  if (session.active && run && run.status === "completed") refreshQuota(true);
   if (force || signature !== session.signature) {
     const atBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
     session.signature = signature;
@@ -1097,8 +1203,19 @@ function showSettings(first = false, justConnected = false) {
         </label>
         <label class="check"><input name="share" type="checkbox" checked>
           <span>Donner aussi ce jeton au moteur (secret CLAW_REPO_TOKEN), pour qu'il pousse ses branches et ouvre les pull requests</span></label>
-        <p class="help">Les secrets partent chiffrés dans le navigateur, pour la clé publique du moteur ; la clé OpenRouter n'est pas gardée ici.</p>
+        <label class="check"><input name="keep" type="checkbox" checked>
+          <span>Garder aussi la clé OpenRouter sur cet appareil, pour afficher les requêtes gratuites utilisées et restantes</span></label>
+        <p class="help">Les secrets partent chiffrés dans le navigateur, pour la clé publique du moteur.</p>
         <button class="primary" type="submit">Configurer le moteur</button>
+      </form>
+      <h2>Requêtes gratuites</h2>
+      <form class="quota-form" autocomplete="off">
+        <label>Clé OpenRouter gardée sur cet appareil
+          <input name="key" type="password" placeholder="${settings.openrouterKey ? "clé enregistrée" : "sk-or-…"}" spellcheck="false">
+        </label>
+        <p class="help">Elle sert seulement à lire chez OpenRouter les requêtes gratuites du jour et les crédits, affichés près du choix du modèle. Elle reste dans ce navigateur. Conseil : créez pour l'appli une clé avec une limite de crédit de 0 $ (réglage « Credit limit » de la clé sur openrouter.ai) : elle ne peut rien dépenser.</p>
+        <button class="primary" type="submit">Enregistrer la clé</button>
+        ${settings.openrouterKey ? '<button class="small-link" type="button" data-action="forget-key">Effacer la clé de cet appareil</button>' : ""}
       </form>
       <button class="danger" data-action="forget">Effacer le jeton de cet appareil</button>` : ""}
     </section>`;
@@ -1141,6 +1258,11 @@ function showSettings(first = false, justConnected = false) {
         const key = await state.github.secretKey(engine);
         const secrets = [];
         if (form.openrouter.value.trim()) secrets.push(["OPENROUTER_API_KEY", form.openrouter.value.trim()]);
+        if (form.openrouter.value.trim() && form.keep.checked) {
+          state.settings.openrouterKey = form.openrouter.value.trim();
+          state.quota = null;
+          saveSettings();
+        }
         if (form.share.checked) secrets.push(["CLAW_REPO_TOKEN", state.settings.token]);
         for (const [name, value] of secrets) {
           await state.github.putSecret(engine, name, sealedBox(value, key.key), key.key_id);
@@ -1152,6 +1274,29 @@ function showSettings(first = false, justConnected = false) {
       } catch (error) {
         failure(error);
       }
+    });
+    $("#view .quota-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const key = event.target.key.value.trim();
+      if (!key) return;
+      try {
+        state.quota = await accountStatus(key);
+        state.quotaError = "";
+        state.settings.openrouterKey = key;
+        saveSettings();
+        const free = state.quota.free;
+        toast(free ? `Clé enregistrée : ${free.remaining}/${free.limit} requêtes gratuites restantes aujourd'hui` : "Clé enregistrée");
+        showSettings();
+      } catch (error) {
+        failure(error);
+      }
+    });
+    $("#view [data-action=forget-key]")?.addEventListener("click", () => {
+      delete state.settings.openrouterKey;
+      state.quota = null;
+      saveSettings();
+      toast("Clé OpenRouter effacée de cet appareil");
+      showSettings();
     });
     $("#view [data-action=forget]").addEventListener("click", () => {
       delete state.settings.token;
@@ -1242,6 +1387,7 @@ async function boot() {
   window.addEventListener("hashchange", route);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && state.session) pollSession().catch(failure);
+    if (!document.hidden) refreshQuota();
   });
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("sw.js").catch(() => {});
