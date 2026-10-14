@@ -49,7 +49,7 @@ actif pour ce dossier (état dans `.claw/project.json`) jusqu'à « sans mode pr
 | P1-3 | fait le 14 octobre 2026 (096f80d) |
 | P1-4 | fait le 14 octobre 2026 (dff13a1) |
 | P1-5 | fait le 14 octobre 2026 (dff13a1) |
-| P1-6 | en cours : scénario t8 (1188dfa) ; premiers essais réels : 11/12 avec et sans le mode projet (défauts différents) ; avec le binaire à jour, 12/12 en 48 requêtes ; comparaison à binaire égal en cours |
+| P1-6 | fait le 14 octobre 2026 : scénario t8 (1188dfa), cinq essais réels ; à binaire égal, 12/12 avec (84 requêtes) et sans (41) le mode projet ; pistes de mesure plus parlantes notées plus bas |
 
 ### P1-1 : ce qui est fait
 
@@ -222,6 +222,40 @@ des doublons, pas de rappel du 40e appel). Même modèle, mêmes limites.
 - Lecture prudente : 12/12 en 48 requêtes contre 11/12 en 115 au premier essai du mode projet
   et 11/12 en 87 sans lui, mais un essai par côté, et le modèle a fait un plan plus court (quatre
   jalons au lieu de six). Deux essais suivent, avec et sans le mode projet, sur le même binaire.
+
+#### Comparaison à binaire égal (14 octobre, 3 h 35, binaire 5d2bf93)
+
+| Essai | Note | Requêtes du modèle | Durée | Remarques |
+|---|---|---|---|---|
+| mode projet | 12/12 | 84 (80 appels d'outils) | 28 min | relecture d'architecture sans remarque ; quatre jalons marqués faits d'un coup, chacun vérifié ; démonstration en échec une fois puis réussie, `materiel.json` laissé hors de la copie ; relecture finale : trois remarques |
+| sans mode projet | 12/12 | 41 (38 appels d'outils) | 16 min | un fichier `nul` laissé dans le projet (`del ... > nul` lancé dans Git Bash) |
+
+Bilan des cinq essais de t8 (même modèle) :
+
+| Binaire | Mode projet | Sans mode projet |
+|---|---|---|
+| ff3d899 à 1188dfa (premiers essais) | 11/12, 115 requêtes | 11/12, 87 requêtes |
+| de3e5d3 | 12/12, 48 requêtes | (pas d'essai) |
+| 5d2bf93 | 12/12, 84 requêtes | 12/12, 41 requêtes |
+
+- Sur t8, le plus puissant des modèles gratuits atteint 12/12 sans le mode projet dès que les
+  autres aides de Claw sont à jour (ligne des doublons corrigée pendant la nuit). Le mode
+  projet ne change pas la note de ce scénario et coûte en moyenne une fois et demie à deux
+  fois plus de requêtes (82 contre 64 sur tous les essais, 84 contre 41 à binaire égal).
+- Ce qu'il apporte et que t8 ne note pas : cahier des charges, plan, journal des décisions,
+  tests nommés d'après les exigences, jalons vérifiés, relecture du plan, et surtout la
+  démonstration dans une copie vide, qui a trouvé de vrais défauts (un `requirements.txt` promis
+  et absent, des lignes d'installation fausses).
+- t8 décrit l'interface en entier ; il éprouve peu ce qui fait la force du mode projet (une
+  demande vague à préciser, un projet plus grand, un modèle plus faible). Pistes de mesure :
+  une demande vague notée sur ce qu'elle implique, ou le petit modèle sur t8 (instable,
+  coûteux en requêtes : à faire juste après une remise à zéro).
+- Défaut de Claw vu dans le témoin, corrigé : `> nul`, `2>nul`, `< nul` (cmd) lancés dans Git
+  Bash créaient un vrai fichier `nul` dans le projet, presque impossible à supprimer sous
+  Windows ; l'outil `bash` les réécrit maintenant en `/dev/null`. La vérification de t8 saute
+  les noms réservés de Windows (elle ne pouvait pas copier ce fichier).
+- Requêtes gratuites de la nuit pour cette mesure : 201 (premiers essais), 49 (P2), 229 (les
+  deux essais à binaire égal, relecteurs compris) ; il en restait plus de 500 à 4 h.
 
 - Incident : la première version de cet essai transmettait au binaire l'environnement du
   terminal, qui porte maintenant la vraie clé OpenRouter : la relecture de fin de tour est

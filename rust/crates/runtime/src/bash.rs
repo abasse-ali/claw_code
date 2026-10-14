@@ -902,10 +902,12 @@ fn segment_is_long_running(segment: &str) -> bool {
 }
 
 /// Sous Windows, `bash` est Git Bash : écrit hors guillemets, un chemin
-/// `D:\dossier\fichier` y perd ses barres obliques inverses, et le `cd /d` de
-/// cmd y est une erreur. La commande est réécrite comme elle était voulue :
-/// `D:/dossier/fichier`, `cd` sans `/d`. Un document en ligne (`<<`) porte du
-/// texte à garder tel quel : la commande n'est alors pas touchée.
+/// `D:\dossier\fichier` y perd ses barres obliques inverses, le `cd /d` de cmd
+/// y est une erreur, et `> nul` y crée un vrai fichier `nul` dans le projet,
+/// presque impossible à supprimer sous Windows (essai réel t8). La commande est
+/// réécrite comme elle était voulue : `D:/dossier/fichier`, `cd` sans `/d`,
+/// `> /dev/null`. Un document en ligne (`<<`) porte du texte à garder tel
+/// quel : la commande n'est alors pas touchée.
 fn adapt_windows_command(command: &str) -> String {
     if command.contains("<<") {
         return command.to_string();
@@ -946,6 +948,11 @@ fn adapt_windows_command(command: &str) -> String {
                 index = push_drive_path(&chars, index, &mut out);
                 continue;
             }
+            if let Some(after) = nul_redirection(&chars, index, &out) {
+                out.push_str("/dev/null");
+                index = after;
+                continue;
+            }
         }
         if ch == '"' || ch == '\'' {
             quote = Some(ch);
@@ -962,6 +969,18 @@ fn adapt_windows_command(command: &str) -> String {
         index += 1;
     }
     out
+}
+
+/// `nul` de cmd comme cible d'une redirection (`> nul`, `2>nul`, `< NUL`) à
+/// `index` : la position qui suit le mot, s'il en est bien un.
+fn nul_redirection(chars: &[char], index: usize, out: &str) -> Option<usize> {
+    let word: String = chars.get(index..index + 3)?.iter().collect();
+    let after = index + 3;
+    let ends = chars
+        .get(after)
+        .is_none_or(|ch| ch.is_whitespace() || ";&|)".contains(*ch));
+    let redirected = out.trim_end_matches([' ', '\t']).ends_with(['>', '<']);
+    (word.eq_ignore_ascii_case("nul") && ends && redirected).then_some(after)
 }
 
 /// `cd /d chemin` à `index` : la position du chemin, s'il y en a bien un.
@@ -1899,6 +1918,30 @@ mod windows_command_tests {
         );
         // `/d` seul est le lecteur D: de Git Bash.
         for kept in ["cd /d", "cd /d && ls", "cd /dev", "abcd /d x"] {
+            assert_eq!(adapt_windows_command(kept), kept);
+        }
+    }
+
+    #[test]
+    fn the_cmd_null_device_becomes_dev_null() {
+        // Essai réel t8 : `> nul` avait laissé un fichier `nul` dans le projet.
+        for (written, meant) in [
+            ("python x.py > nul 2>&1", "python x.py > /dev/null 2>&1"),
+            ("dir 2>nul", "dir 2>/dev/null"),
+            (
+                "python x.py >>NUL && echo ok",
+                "python x.py >>/dev/null && echo ok",
+            ),
+            ("python x.py < nul", "python x.py < /dev/null"),
+        ] {
+            assert_eq!(adapt_windows_command(written), meant);
+        }
+        for kept in [
+            "echo nul",
+            "cat nul.txt > copie",
+            r#"echo "> nul""#,
+            "ls > nulle",
+        ] {
             assert_eq!(adapt_windows_command(kept), kept);
         }
     }

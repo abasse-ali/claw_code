@@ -32,6 +32,7 @@ PLAIN = {
     if name not in ("PYTHONIOENCODING", "PYTHONUTF8")
 }
 SKIP = {".git", ".claw", "__pycache__", ".pytest_cache", ".venv", "venv", "node_modules"}
+RESERVED = {"nul", "con", "aux", "prn"} | {f"com{n}" for n in range(1, 10)} | {f"lpt{n}" for n in range(1, 10)}
 COPIES = []
 
 
@@ -46,7 +47,12 @@ def fresh_copy():
     target = base / "projet"
 
     def ignore(folder, names):
-        return [name for name in names if name in SKIP or name == "materiel.json"]
+        # Un fichier `nul` (redirection `> nul` de cmd lancée dans Git Bash) ne se copie
+        # pas sous Windows : nom réservé, comme con, aux, prn, com1 à com9, lpt1 à lpt9.
+        return [
+            name for name in names
+            if name in SKIP or name == "materiel.json" or name.split(".")[0].lower() in RESERVED
+        ]
 
     shutil.copytree(project, target, ignore=ignore)
     return target

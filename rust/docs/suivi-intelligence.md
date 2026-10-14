@@ -171,7 +171,9 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | de3e5d3 | t8 avec et sans le mode projet : 11/12 des deux côtés, défauts différents ; ligne des doublons (comparer replié, afficher tel qu'écrit), « LGM » vaut approbation, pas de rappel du 40e appel en mode projet, vérifications du banc lisibles quel que soit le codage, `rescore.py` |
 
-| (commit « t8 P2 ») | Mode projet avec le binaire à jour : t8 à 12/12 en 48 requêtes, relecture d'architecture et démonstration finale réelles ; les données que le programme écrit, non suivies par Git, restent hors de la copie vide |
+| 5d2bf93 | Mode projet avec le binaire à jour : t8 à 12/12 en 48 requêtes, relecture d'architecture et démonstration finale réelles ; les données que le programme écrit, non suivies par Git, restent hors de la copie vide |
+
+| (commit « Bilan t8 ») | Comparaison à binaire égal : t8 à 12/12 avec (84 requêtes) et sans (41) le mode projet ; `> nul` de cmd réécrit `> /dev/null` dans Git Bash (un fichier `nul` restait dans le projet) |
 
 État des tests après T1-33 : 664 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
@@ -405,4 +407,7 @@ Hors lots :
   finale, budget). Scénario t8 (créer un projet complet) ; premiers essais réels à 2 h 15 :
   11/12 avec et sans le mode projet, 115 contre 87 requêtes ; le mode projet tient toutes les
   exigences écrites, le témoin oublie « à côté du programme » ; corrections tirées des deux
-  essais (voir P1-6).
+  essais (voir P1-6). Avec le binaire à jour : 12/12 en 48 requêtes (P2) ; puis, à binaire
+  égal, 12/12 avec (84) et sans (41) le mode projet : sur ce scénario entièrement décrit, le mode
+  projet ne change pas la note et coûte plus de requêtes ; sa démonstration finale a trouvé de
+  vrais défauts que t8 ne note pas. Fichier `nul` créé par `> nul` dans Git Bash : réécrit.
