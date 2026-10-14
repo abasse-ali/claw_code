@@ -23,7 +23,13 @@ modèle, démonstration réussie, requêtes par jalon). Aide coupée par `CLAW_P
 
 Activation : dossier sans fichier de code et demande de création (verbe et objet : « crée une
 application... », au moins huit mots), ou « mode projet » écrit dans la demande. Le mode reste
-actif pour ce dossier (état dans `.claw/project.json`) jusqu'à « sans mode projet ».
+actif pour ce dossier (état dans `.claw/project.json`) jusqu'à « sans mode projet ». Seuls les
+mots de l'utilisateur comptent : la demande jusqu'à sa première ligne `[Claw]` (ce qu'un moteur
+y ajoute pour le modèle, comme celui de l'appli web, n'active ni n'arrête rien).
+
+Reprise sans l'état (clone neuf, `.claw` effacé) : un dossier dont `SPEC.md` a des exigences et
+`PLAN.md` des jalons reprend le mode projet tout seul ; son plan est tenu pour déjà relu (relu
+de nouveau si des exigences ou des jalons changent). Un arrêt enregistré reste un arrêt.
 
 ## Les neuf aides et leur lot
 

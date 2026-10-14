@@ -22,6 +22,14 @@ connexion par **jeton personnel** gardé dans le navigateur.
 - **Sessions** : des issues privées de `claw_code` (étiquette `claw-web`). Le corps porte la
   tâche et ses réglages (dépôt, branche, modèle) ; chaque message de suivi est un commentaire ;
   le moteur publie un commentaire de progression mis à jour en direct, puis sa réponse.
+- **D'un passage à l'autre** : le clone est neuf à chaque passage et `.claw/` n'est jamais
+  poussé. La demande donne d'abord les mots de l'utilisateur (la tâche, ou les nouveaux
+  messages), puis la conversation précédente et le dépôt dans des notes `[Claw]` : Claw ne
+  décide le mode projet que sur ce qui précède la première ligne `[Claw]`. L'état du mode
+  projet de la session (`.claw/project.json` : actif ou arrêté, plan relu, démonstration
+  réussie) est gardé dans le cache d'Actions (`claw-web-state-<session>-...`). Sans cet état
+  (nouvelle session sur un projet déjà fusionné), Claw reprend le mode projet de lui-même quand
+  `SPEC.md` et un `PLAN.md` à jalons sont à la racine.
 - **Secrets du moteur** : `OPENROUTER_API_KEY` et `CLAW_REPO_TOKEN`, posés par l'appli
   (chiffrés dans le navigateur avec la clé publique du dépôt) ou à la main.
 - **Sécurité** : le jeton n'est jamais dans l'environnement de l'agent (clone puis adresse du
@@ -36,7 +44,9 @@ connexion par **jeton personnel** gardé dans le navigateur.
 |---|---|---|
 | W1-1 | Moteur : workflow, préparation (session, dépôt, branche), agent avec progression, publication ; essai sur GitHub avec le faux modèle | fait le 14 octobre 2026 (6744ce0, 2ed50f0, fc2d0bb) |
 | W1-2 | Appli : réglages (jeton, clé, secrets), accueil (dépôt, branche, modèle, tâche), sessions, conversation en direct, appli installable (manifeste, service worker, icônes) | fait le 14 octobre 2026 (dépôt `claw-web`, 8c0b5f2) |
-| W1-3 | Publication : dépôt public `claw-web`, GitHub Pages, essai réel de bout en bout | en cours : Pages actif (https://abasse-ali.github.io/claw-web/) ; secret `OPENROUTER_API_KEY` posé ; `CLAW_REPO_TOKEN` attend le jeton à grain fin de l'utilisateur |
+| W1-3 | Publication : dépôt public `claw-web`, GitHub Pages, essai réel de bout en bout | en cours : Pages actif (https://abasse-ali.github.io/claw-web/) ; secrets `OPENROUTER_API_KEY` et `CLAW_REPO_TOKEN` posés (vérifications du moteur au vert dans l'appli) ; vrai modèle gratuit essayé (session 2) ; reste le premier essai de l'utilisateur sur un de ses dépôts |
+| W1-4 | Retours de l'utilisateur : pas de zoom, comme une appli ; réglages sur leur propre page (`#/reglages`), plus à l'accueil | fait le 14 octobre 2026 (`claw-web` 1e04535) |
+| W1-5 | Création de dépôt depuis le choix du dépôt (nom, description, public ou privé, `.gitignore`, premier commit) ; mode projet continu d'un passage à l'autre du moteur | fait le 14 octobre 2026 (`claw-web` 6e72294 ; moteur et Claw dans ce dépôt) |
 
 ## Essais
 

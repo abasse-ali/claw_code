@@ -3115,8 +3115,10 @@ where
             return None;
         }
         let root = self.project_root()?;
+        let saved = project::ProjectState::exists(&root);
         let mut state = project::ProjectState::load(&root);
-        let wish = project::read_wish(request);
+        let words = project::own_words(request);
+        let wish = project::read_wish(words);
         if wish == project::Wish::Stop {
             if state.active {
                 state.active = false;
@@ -3127,9 +3129,28 @@ where
         }
         let starting = !state.active
             && (wish == project::Wish::Start
-                || (project::creation_request(request) && project::empty_folder(&root)));
-        if !state.active && !starting {
+                || (project::creation_request(words) && project::empty_folder(&root)));
+        // Projet déjà mené en mode projet (cahier des charges et plan en jalons à la racine)
+        // dont l'état de Claw a disparu : clone neuf du moteur de l'appli web, `.claw`
+        // effacé. Le mode reprend ; un arrêt enregistré (« sans mode projet ») reste.
+        let resumed = !state.active
+            && !starting
+            && !saved
+            && !matches!(
+                project::Project::read(&root).phase(),
+                project::Phase::Spec | project::Phase::Plan
+            );
+        if !state.active && !starting && !resumed {
             return None;
+        }
+        if resumed {
+            state.active = true;
+            // Le plan a été relu par un autre modèle quand il a été écrit ; la
+            // relecture revient si des exigences ou des jalons changent.
+            state.design_reviewed = Some(project::Project::read(&root).design_fingerprint());
+            let _ = state.save(&root);
+            self.api_client
+                .notify("Mode projet repris : SPEC.md et PLAN.md sont à la racine du projet");
         }
         if starting {
             state.active = true;
@@ -8136,6 +8157,76 @@ mod tests {
         ));
         assert!(observed.notices.iter().any(|notice| notice
             == "Mode projet : il reste 40 requêtes gratuites aujourd'hui, de quoi faire environ 1 des 2 jalons restants"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn project_mode_resumes_in_a_fresh_clone_of_a_project_with_its_plan() {
+        CAN_ASK.with(|flag| flag.set(false));
+        // Clone neuf du moteur de l'appli web : SPEC.md et PLAN.md, pas de .claw.
+        let root = project_folder("reprise");
+        std::fs::write(root.join("SPEC.md"), PROJECT_SPEC).expect("spec");
+        std::fs::write(root.join("PLAN.md"), project_plan("done", "todo")).expect("plan");
+        std::fs::write(root.join("app.py"), "print(1)\n").expect("code");
+        let (mut runtime, observed, _) = project_runtime(
+            &root,
+            vec![
+                text_step("Je reprends."),
+                text_step("Je reprends."),
+                text_step("Je reprends."),
+            ],
+            "",
+            0,
+        );
+        runtime.run_turn("continue", None).expect("tour");
+        {
+            let observed = observed.borrow();
+            assert!(observed.requests[0].contains("Milestones: M1 done, M2 (current)."));
+            assert!(observed
+                .notices
+                .iter()
+                .any(|notice| notice.starts_with("Mode projet repris")));
+        }
+        let state = crate::project::ProjectState::load(&root);
+        assert!(state.active);
+        assert_eq!(
+            state.design_reviewed,
+            Some(crate::project::Project::read(&root).design_fingerprint())
+        );
+        // Un arrêt enregistré reste un arrêt.
+        crate::project::ProjectState::default()
+            .save(&root)
+            .expect("état");
+        let (mut runtime, observed, _) = project_runtime(&root, vec![text_step("Fait.")], "", 0);
+        runtime.run_turn("continue", None).expect("tour");
+        assert!(!observed.borrow().requests[0].contains("Project mode"));
+        // Un cahier des charges sans plan ne suffit pas à reprendre.
+        let other = project_folder("reprise-sans-plan");
+        std::fs::write(other.join("SPEC.md"), PROJECT_SPEC).expect("spec");
+        std::fs::write(other.join("app.py"), "print(1)\n").expect("code");
+        let (mut runtime, observed, _) = project_runtime(&other, vec![text_step("Fait.")], "", 0);
+        runtime.run_turn("continue", None).expect("tour");
+        assert!(!observed.borrow().requests[0].contains("Project mode"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&other);
+    }
+
+    #[test]
+    fn the_notes_of_the_web_engine_do_not_start_project_mode_in_an_empty_repository() {
+        CAN_ASK.with(|flag| flag.set(false));
+        // Dépôt neuf de l'appli web : README et .gitignore seulement.
+        let root = project_folder("note-moteur");
+        std::fs::write(root.join("README.md"), "# todo-app\n").expect("readme");
+        std::fs::write(root.join(".gitignore"), "*.pyc\n").expect("gitignore");
+        let (mut runtime, observed, _) = project_runtime(&root, vec![text_step("Fait.")], "", 0);
+        runtime
+            .run_turn(
+                "Ajoute une licence MIT\n\n[Claw] You are working in the repository abasse-ali/todo-app, on the branch claw/session-3 (created from main). Nobody can answer questions during this task: make reasonable choices and state them in your final answer.",
+                None,
+            )
+            .expect("tour");
+        assert!(!observed.borrow().requests[0].contains("Project mode"));
+        assert!(!crate::project::ProjectState::exists(&root));
         let _ = std::fs::remove_dir_all(&root);
     }
 

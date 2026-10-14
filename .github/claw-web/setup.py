@@ -3,13 +3,16 @@ de la tâche sur la branche de la session et écrit la demande pour l'agent.
 
 Entrées (environnement) : REPO, BASE, SESSION, JOB_TOKEN, REPO_TOKEN (peut être vide),
 GITHUB_REPOSITORY. Le jeton du dépôt ne reste pas dans le clone : l'adresse du dépôt est
-remise sans lui avant que l'agent ne travaille.
+remise sans lui avant que l'agent ne travaille. L'état du mode projet du passage précédent
+(`claw-state/project.json`, en cache) est remis dans `.claw/` du clone.
 """
 
 import os
 import re
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 from common import (ANSWER, PROGRESS, WORK, GitHubError, api, comments, output,
                     post_comment, run_url, task_text)
@@ -22,6 +25,8 @@ JOB_TOKEN = os.environ["JOB_TOKEN"]
 REPO_TOKEN = os.environ.get("REPO_TOKEN", "").strip()
 # Taille gardée de la conversation passée (les réponses les plus anciennes sont raccourcies).
 HISTORY_MAX_CHARS = 30_000
+# État du mode projet de la session, gardé en cache entre les passages (claw-web.yml).
+STATE = Path("claw-state") / "project.json"
 
 
 def fail(message):
@@ -46,8 +51,8 @@ def git(*args, cwd="work", check=True):
 
 
 def conversation(issue, notes):
-    """La demande pour l'agent : la tâche, ou, pour un message de suivi, la conversation
-    passée puis le nouveau message."""
+    """Le message à traiter (la tâche, ou les messages de suivi pas encore traités) et, pour
+    un suivi, la conversation qui précède."""
     task = task_text(issue.get("body"))
     exchanges, pending = [], []
     for note in notes:
@@ -59,15 +64,16 @@ def conversation(issue, notes):
                 exchanges.append(("Message", "\n\n".join(pending)))
                 pending = []
             # Sans le pied de la réponse (lien de la pull request, du job), après le dernier `---`.
-            exchanges.append(("Ta réponse", body.replace(ANSWER, "").rsplit("\n---\n", 1)[0].strip()))
+            exchanges.append(("Your answer", body.replace(ANSWER, "").rsplit("\n---\n", 1)[0].strip()))
         elif body:
             pending.append(body)
     if not pending:
-        # Premier passage (ou relance sans nouveau message) : la tâche elle-même.
+        # Premier passage : la tâche elle-même. Relance sans nouveau message : la tâche
+        # encore (elle dit ce qu'on veut, mode projet compris), à reprendre où elle en est.
         if not exchanges:
-            return task
-        pending = ["Reprends la tâche là où elle en est et termine-la."]
-    history = [("Demande", task), *exchanges]
+            return task, ""
+        pending = [f"{task}\n\n(Relance : reprends cette tâche là où elle en est et termine-la.)"]
+    history = [("Request", task), *exchanges]
     text = ""
     for label, content in reversed(history):
         block = f"[{label}]\n{content}\n\n"
@@ -76,11 +82,7 @@ def conversation(issue, notes):
             if len(text) + len(block) > HISTORY_MAX_CHARS:
                 break
         text = block + text
-    return (
-        "Conversation précédente de cette session (tes modifications précédentes sont déjà sur la branche) :\n\n"
-        + text
-        + "Nouveau message :\n" + "\n\n".join(pending)
-    )
+    return "\n\n".join(pending), text.strip()
 
 
 def main():
@@ -127,8 +129,21 @@ def main():
                          ".ruff_cache/\nnode_modules/\n.venv/\n")
     except RuntimeError as error:
         fail(str(error))
+    # Mode projet en cours, ou arrêté (« sans mode projet »), au passage précédent : le clone
+    # est neuf et .claw n'est jamais poussé, l'état revient du cache.
+    if STATE.is_file():
+        (Path("work") / ".claw").mkdir(exist_ok=True)
+        shutil.copyfile(STATE, Path("work") / ".claw" / "project.json")
+        print("État du mode projet repris du passage précédent")
 
-    request = conversation(issue, notes)
+    # Les mots de l'utilisateur d'abord : Claw ne décide le mode projet que sur ce qui
+    # précède la première ligne `[Claw]`.
+    request, history = conversation(issue, notes)
+    if history:
+        request += (
+            "\n\n[Claw] Earlier conversation of this session, for context (your earlier changes "
+            "are already on the branch):\n\n" + history
+        )
     request += (
         f"\n\n[Claw] You are working in the repository {REPO}, on the branch {branch} "
         f"(created from {BASE}). When you finish, Claw commits your changes on this branch, "

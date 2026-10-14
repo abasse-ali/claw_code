@@ -89,6 +89,12 @@ impl ProjectState {
         root.join(".claw").join(STATE_FILE)
     }
 
+    /// Claw a déjà enregistré un état pour ce dossier (même « mode arrêté »).
+    #[must_use]
+    pub fn exists(root: &Path) -> bool {
+        Self::path(root).is_file()
+    }
+
     /// L'état enregistré, ou un état vide (mode inactif).
     #[must_use]
     pub fn load(root: &Path) -> Self {
@@ -143,6 +149,21 @@ const STOP_PHRASES: &[&str] = &[
 ];
 
 const START_PHRASES: &[&str] = &["mode projet", "project mode"];
+
+/// Les mots de l'utilisateur : la demande jusqu'à la première ligne qui commence
+/// par `[Claw]`. Ce qui suit, un moteur l'y ajoute pour le modèle (la conversation
+/// qui précède, le dépôt de la tâche) ; le mode projet ne se décide pas dessus.
+#[must_use]
+pub fn own_words(request: &str) -> &str {
+    let mut end = 0;
+    for line in request.split_inclusive('\n') {
+        if line.trim_start().starts_with("[Claw]") {
+            return request[..end].trim_end();
+        }
+        end += line.len();
+    }
+    request
+}
 
 /// Ce que le message dit du mode projet. Une question (« qu'est-ce que le
 /// mode projet ? ») ne l'active pas.
@@ -2304,6 +2325,16 @@ mod tests {
         );
         assert_eq!(read_wish("Exit project mode"), Wish::Stop);
         assert_eq!(read_wish("Ajoute un bouton"), Wish::Nothing);
+    }
+
+    #[test]
+    fn the_notes_an_engine_adds_are_not_the_users_words() {
+        let request = "Ajoute une licence MIT\n\n[Claw] Earlier conversation:\n\n[Request]\nsans mode projet\n\n[Claw] You are working in the repository abasse-ali/todo-app: make reasonable choices.";
+        assert_eq!(own_words(request), "Ajoute une licence MIT");
+        assert_eq!(read_wish(own_words(request)), Wish::Nothing);
+        assert!(!creation_request(own_words(request)));
+        assert!(creation_request(request));
+        assert_eq!(own_words("Crée une appli\n"), "Crée une appli\n");
     }
 
     #[test]

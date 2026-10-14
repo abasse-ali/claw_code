@@ -68,6 +68,15 @@ jobs:
       - name: Claw dans le PATH
         run: echo "$HOME/.claw-bin/bin" >> "$GITHUB_PATH"
 
+      # État du mode projet de la session (.claw/project.json) d'un passage à l'autre : le
+      # clone est neuf à chaque passage et .claw n'est jamais poussé.
+      - name: État de la session
+        uses: actions/cache/restore@v4
+        with:
+          path: claw-state
+          key: claw-web-state-${{ inputs.session }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: claw-web-state-${{ inputs.session }}-
+
       # Les entrées passent par l'environnement, jamais dans le script : un nom de branche
       # comme `"; curl … | sh; "` serait sinon exécuté.
       - name: Session et dépôt de la tâche
@@ -90,6 +99,23 @@ jobs:
           CLAW_SRC: ${{ github.workspace }}/claw-src
           PYTHONPATH: ${{ github.workspace }}/claw-src/.github/claw-web
         run: python3 claw-src/.github/claw-web/run.py
+
+      - name: Garder l'état de la session
+        id: state
+        if: always() && steps.setup.outcome == 'success'
+        run: |
+          if [ -f work/.claw/project.json ]; then
+            mkdir -p claw-state
+            cp work/.claw/project.json claw-state/project.json
+            echo "saved=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: État de la session en cache
+        if: always() && steps.state.outputs.saved == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: claw-state
+          key: claw-web-state-${{ inputs.session }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Publier
         if: always() && steps.setup.outcome == 'success'
