@@ -9,11 +9,9 @@ ouvrir de pull request : un message de suivi le reprend.
 """
 
 import os
-import signal
 import subprocess
-import time
 
-from common import ANSWER, WORK, GitHubError, api, post_comment, run_url
+from common import ANSWER, WORK, GitHubError, api, post_comment, run_url, stop_tree
 
 REPO = os.environ["REPO"]
 BASE = os.environ["BASE"]
@@ -42,16 +40,22 @@ def read(name):
 
 
 def stop_leftover_agent():
-    """Un job annulé de force a pu laisser l'agent tourner : il s'arrête avant le commit."""
+    """Un job annulé de force a pu laisser l'agent tourner, avec ses commandes : ils
+    s'arrêtent avant le commit."""
     try:
         pid = int(read("claw.pid"))
-        os.kill(pid, signal.SIGTERM)
-        for _ in range(50):
-            time.sleep(0.1)
+    except ValueError:
+        return
+
+    def alive():
+        try:
             os.kill(pid, 0)
-        os.kill(pid, signal.SIGKILL)
-    except (ValueError, ProcessLookupError, PermissionError):
-        pass
+        except (ProcessLookupError, PermissionError):
+            return False
+        return True
+
+    if alive():
+        stop_tree(pid, alive=alive)
 
 
 def main():

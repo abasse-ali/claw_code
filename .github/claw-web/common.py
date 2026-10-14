@@ -9,6 +9,8 @@ reconnaissent.
 import json
 import os
 import re
+import signal
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -90,6 +92,47 @@ def output(name, value):
     delimiter = f"CLAW_WEB_{os.urandom(8).hex()}"
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(f"{name}<<{delimiter}\n{value}\n{delimiter}\n")
+
+
+def process_tree(root):
+    """Le processus et tous ses descendants (Linux : /proc), lus avant de l'arrêter : mort,
+    ses enfants changeraient de parent."""
+    children = {}
+    if os.path.isdir("/proc"):
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/stat", encoding="utf-8", errors="replace") as handle:
+                    parent = int(handle.read().rsplit(")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            children.setdefault(parent, []).append(int(entry))
+    tree, todo = [], [root]
+    while todo:
+        pid = todo.pop()
+        tree.append(pid)
+        todo.extend(children.get(pid, []))
+    return tree
+
+
+def stop_tree(root, alive=lambda: True, grace=5):
+    """Arrête l'agent et les commandes qu'il a lancées (serveur, tests...) : rien ne doit plus
+    écrire dans le dépôt pendant la publication. SIGTERM, puis SIGKILL après `grace` s."""
+    tree = process_tree(root)
+
+    def send(sig):
+        for pid in tree:
+            try:
+                os.kill(pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    send(signal.SIGTERM)
+    deadline = time.time() + grace
+    while time.time() < deadline and alive():
+        time.sleep(0.1)
+    send(signal.SIGKILL)
 
 
 def run_url():

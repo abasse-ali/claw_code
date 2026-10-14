@@ -16,7 +16,8 @@ import sys
 import threading
 import time
 
-from common import PROGRESS, WORK, GitHubError, edit_comment, output, post_comment, run_url
+from common import (PROGRESS, WORK, GitHubError, edit_comment, output, post_comment, run_url,
+                    stop_tree)
 
 SESSION = os.environ["SESSION"]
 ENGINE = os.environ["GITHUB_REPOSITORY"]
@@ -201,13 +202,9 @@ def main():
             status = process.wait()
         except Stopped:
             stopped = True
-            print("Job annulé : arrêt de Claw", flush=True)
-            process.terminate()
-            try:
-                status = process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                status = process.wait()
+            print("Job annulé : arrêt de Claw et des commandes qu'il a lancées", flush=True)
+            stop_tree(process.pid, alive=lambda: process.poll() is None)
+            status = process.wait()
     (WORK / "claw.pid").unlink(missing_ok=True)
     stop_refresh.set()
     if mock:
