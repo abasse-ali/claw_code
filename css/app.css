@@ -183,6 +183,8 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 
 /* Requêtes gratuites */
 .chip.quota span { font-variant-numeric: tabular-nums; }
+.chip.pill { border-radius: 999px; color: var(--muted); }
+.chip.pill[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); }
 .quota-sheet { display: flex; flex-direction: column; gap: 10px; padding: 0 4px 6px; }
 .quota-sheet p { margin: 0; }
 .quota-sheet .primary { align-self: flex-start; text-decoration: none; }

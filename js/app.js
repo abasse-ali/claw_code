@@ -421,6 +421,30 @@ async function pickModel() {
   });
 }
 
+// --- Équipe et Ultracode, comme dans l'interface locale de Claw -------------------------------
+
+const AIDS = {
+  team: {
+    on: "Mode équipe : chaque étape (comprendre, écrire le code, déboguer, relire) va au modèle gratuit le plus fort pour elle",
+    off: "Mode équipe coupé : un seul modèle fait tout le travail",
+  },
+  ultracode: {
+    on: "Ultracode : un agent au contexte vierge étudie la demande avant le travail, un vérificateur indépendant contrôle le résultat après (une à trois dizaines de requêtes de plus)",
+    off: "Ultracode coupé",
+  },
+};
+
+/** Options du prochain passage (nouvelle tâche ou suivi), pour le moteur. */
+const aidInputs = () => ({ team: state.settings.team ? "1" : "", ultracode: state.settings.ultracode ? "1" : "" });
+
+function toggleAid(name) {
+  state.settings[name] = !state.settings[name];
+  saveSettings();
+  const button = document.querySelector(`#composer [data-aid="${name}"]`);
+  if (button) button.setAttribute("aria-pressed", String(state.settings[name]));
+  toast(state.settings[name] ? AIDS[name].on : AIDS[name].off);
+}
+
 // --- Requêtes gratuites ------------------------------------------------------------------------
 
 function quotaLabel() {
@@ -527,6 +551,8 @@ function renderComposer() {
       <button class="chip" data-action="branch">${ICON.branch}<span>${escapeHtml(branch || "branche")}</span></button>`}
       <button class="chip" data-action="model">${ICON.model}<span>${escapeHtml(modelLabel(state.settings.model))}</span></button>
       <button class="chip quota" data-action="quota">${ICON.gauge}<span>${escapeHtml(quotaLabel())}</span></button>
+      <button class="chip pill" data-aid="team" aria-pressed="${Boolean(state.settings.team)}">Équipe</button>
+      <button class="chip pill" data-aid="ultracode" aria-pressed="${Boolean(state.settings.ultracode)}">Ultracode</button>
     </div>
     <form class="prompt" autocomplete="off">
       <textarea rows="1" name="text" placeholder="${followUp ? "Répondez ou donnez une nouvelle consigne." : "Décrivez une tâche ou posez une question."}" aria-label="Message pour Claw"></textarea>
@@ -559,6 +585,7 @@ function renderComposer() {
   composer.querySelector('[data-action="branch"]')?.addEventListener("click", pickBranch);
   composer.querySelector('[data-action="model"]').addEventListener("click", pickModel);
   composer.querySelector('[data-action="quota"]').addEventListener("click", openQuota);
+  for (const button of composer.querySelectorAll("[data-aid]")) button.addEventListener("click", () => toggleAid(button.dataset.aid));
   refreshQuota();
   resize();
   // Tout de suite, pas au rappel de l'observateur : le défilement vers le bas suit.
@@ -585,7 +612,7 @@ async function startSession(text, textarea) {
     const block = `<!-- claw-web ${JSON.stringify({ repo, base: branch, model: model || "", n, branch: work })} -->`;
     const issue = await state.github.createIssue(engine, title, `${text}\n\n${block}`);
     await state.github.dispatch(engine, state.engineRef,
-      { repo, base: branch || "main", session: String(issue.number), model: model || "" });
+      { repo, base: branch || "main", session: String(issue.number), model: model || "", ...aidInputs() });
     state.dispatchedAt = Date.now();
     textarea.value = "";
     location.hash = `#/session/${issue.number}`;
@@ -621,6 +648,7 @@ async function dispatchSession(session) {
     base: session.settings.base || "main",
     session: String(session.number),
     model: state.settings.model || "",
+    ...aidInputs(),
   });
   state.dispatchedAt = Date.now();
 }
