@@ -14,8 +14,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from common import (ANSWER, PROGRESS, WORK, GitHubError, api, comments, output,
-                    post_comment, run_url, settings, task_text)
+import urllib.request
+
+from common import (ANSWER, API, FILES_BRANCH, PROGRESS, WORK, GitHubError, api, comments,
+                    images_of, output, post_comment, run_url, settings, task_text)
 
 REPO = os.environ.get("REPO", "").strip()
 BASE = os.environ.get("BASE", "").strip()
@@ -51,12 +53,12 @@ def git(*args, cwd="work", check=True):
 
 
 def conversation(issue, notes):
-    """Le message à traiter (la tâche, ou les messages de suivi pas encore traités) et, pour
-    un suivi, la conversation qui précède."""
-    task = task_text(issue.get("body"))
-    exchanges, pending = [], []
+    """Le message à traiter (la tâche, ou les messages de suivi pas encore traités), pour un
+    suivi la conversation qui précède, et les images jointes au message traité."""
+    task, task_images = images_of(task_text(issue.get("body")))
+    exchanges, pending, images = [], [], []
     for note in notes:
-        body = (note.get("body") or "").strip()
+        body, note_images = images_of((note.get("body") or "").strip())
         if PROGRESS in body:
             continue
         if ANSWER in body:
@@ -65,14 +67,17 @@ def conversation(issue, notes):
                 pending = []
             # Sans le pied de la réponse (lien de la pull request, du job), après le dernier `---`.
             exchanges.append(("Your answer", body.replace(ANSWER, "").rsplit("\n---\n", 1)[0].strip()))
+            images = []
         elif body:
             pending.append(body)
+            images.extend(note_images)
     if not pending:
         # Premier passage : la tâche elle-même. Relance sans nouveau message : la tâche
         # encore (elle dit ce qu'on veut, mode projet compris), à reprendre où elle en est.
         if not exchanges:
-            return task, ""
+            return task, "", task_images
         pending = [f"{task}\n\n(Relance : reprends cette tâche là où elle en est et termine-la.)"]
+        images = task_images
     history = [("Request", task), *exchanges]
     text = ""
     for label, content in reversed(history):
@@ -82,7 +87,29 @@ def conversation(issue, notes):
             if len(text) + len(block) > HISTORY_MAX_CHARS:
                 break
         text = block + text
-    return "\n\n".join(pending), text.strip()
+    return "\n\n".join(pending), text.strip(), images
+
+
+def fetch_images(paths):
+    """Télécharge les images jointes (branche FILES_BRANCH du moteur) hors du dépôt de la
+    tâche ; leurs chemins sur le disque du job."""
+    folder = WORK / "images"
+    folder.mkdir(parents=True, exist_ok=True)
+    saved = []
+    for index, path in enumerate(paths[:10]):
+        request = urllib.request.Request(f"{API}/repos/{ENGINE}/contents/{path}?ref={FILES_BRANCH}")
+        request.add_header("Authorization", f"Bearer {JOB_TOKEN}")
+        request.add_header("Accept", "application/vnd.github.raw")
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                data = response.read()
+        except OSError as error:
+            print(f"::warning::image {path} non téléchargée : {error}")
+            continue
+        target = folder / f"{index + 1}-{path.rsplit('/', 1)[-1]}"
+        target.write_bytes(data)
+        saved.append(target)
+    return saved
 
 
 def main():
@@ -143,10 +170,16 @@ def main():
 
     # Les mots de l'utilisateur d'abord : Claw ne décide le mode projet que sur ce qui
     # précède la première ligne `[Claw]`.
-    request, history = conversation(issue, notes)
+    request, history, images = conversation(issue, notes)
     # Titre du commit et de la pull request : le message traité, pas le titre de la session
     # (son premier message, parfois une simple question).
     title = next((line.strip() for line in request.splitlines() if line.strip()), "")
+    # Images jointes au message : Claw les joint à la demande (`@chemin`) et les fait décrire
+    # si le modèle ne lit pas les images.
+    saved = fetch_images(images)
+    if saved:
+        request += "\n\nImages jointes : " + " ".join(f"@{path}" for path in saved)
+        print(f"{len(saved)} image(s) jointe(s)")
     if history:
         request += (
             "\n\n[Claw] Earlier conversation of this session, for context (your earlier changes "

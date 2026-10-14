@@ -19,6 +19,10 @@ API = "https://api.github.com"
 ANSWER = "<!-- claw-web:answer -->"
 PROGRESS = "<!-- claw-web:progress -->"
 SETTINGS = re.compile(r"<!--\s*claw-web\s+(\{.*?\})\s*-->", re.S)
+# Images jointes à un message par l'appli : chemins dans la branche FILES_BRANCH du moteur.
+IMAGES = re.compile(r"<!--\s*claw-web:images\s+(\[.*?\])\s*-->", re.S)
+FILES_BRANCH = "claw-web-fichiers"
+IMAGE_PATH = re.compile(r"uploads/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\.(?:png|jpe?g|gif|webp)")
 
 # Fichiers échangés entre les étapes du job.
 WORK = Path(os.environ.get("RUNNER_TEMP", ".")) / "claw-web"
@@ -76,6 +80,23 @@ def settings(body):
     except json.JSONDecodeError:
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def images_of(text):
+    """Le texte sans ses blocs d'images (remplacés par « (n image(s) jointe(s)) ») et les
+    chemins des images, vérifiés."""
+    found = []
+
+    def replace(match):
+        try:
+            paths = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            return ""
+        paths = [path for path in paths if isinstance(path, str) and IMAGE_PATH.fullmatch(path)]
+        found.extend(paths)
+        return f"({len(paths)} image(s) jointe(s))" if paths else ""
+
+    return IMAGES.sub(replace, text or "").strip(), found
 
 
 def task_text(body):
