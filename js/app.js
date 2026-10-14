@@ -24,6 +24,7 @@ const ICON = {
   external: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>',
   pull: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="19" r="2"/><path d="M6 7v10M18 17V9a3 3 0 0 0-3-3h-4M13 3.5 10.5 6 13 8.5"/></svg>',
   retry: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v4.5h4.5"/></svg>',
+  back: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>',
   archive: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/></svg>',
 };
 
@@ -617,14 +618,16 @@ async function engineChecks() {
   return checks.join("");
 }
 
-function showSettings(first = false) {
+function showSettings(first = false, justConnected = false) {
   state.session = null;
   $("#composer").hidden = true;
   const settings = state.settings;
   $("#view").innerHTML = `
     <section class="settings">
+      ${state.github ? `<a class="back" href="#/">${ICON.back}<span>Accueil</span></a>` : ""}
       <h1>Réglages</h1>
       ${first ? '<p class="intro">Claw travaille sur vos dépôts GitHub depuis GitHub Actions. Pour commencer, donnez à l\'appli un jeton GitHub.</p>' : ""}
+      ${justConnected ? `<div class="ready"><p>Connecté. Configurez le moteur ci-dessous une fois, puis décrivez votre première tâche depuis l'accueil.</p><a class="primary" href="#/">Aller à l'accueil</a></div>` : ""}
       <form class="settings-form" autocomplete="off">
         <label>Jeton GitHub
           <input name="token" type="password" placeholder="github_pat_…" value="${escapeHtml(settings.token || "")}" spellcheck="false">
@@ -670,7 +673,8 @@ function showSettings(first = false) {
       state.settings.engine = engine;
       saveSettings();
       toast(`Connecté en tant que ${state.user.login}`);
-      showSettings();
+      $("#settings-button").classList.add("active");
+      showSettings(false, true);
     } catch (error) {
       failure(error);
     }
@@ -718,12 +722,18 @@ function showSettings(first = false) {
 function route() {
   clearTimeout(state.pollTimer);
   closeDrawer();
+  const hash = location.hash || "#/";
+  const onSettings = hash.startsWith("#/reglages");
+  $("#settings-button").classList.toggle("active", onSettings);
+  // Les réglages ont leur propre page : sans jeton, l'appli y va (l'accueil reste `#/`,
+  // et toucher « Claw » y ramène).
   if (!state.github) {
+    if (!onSettings) history.replaceState(null, "", "#/reglages");
+    $("#settings-button").classList.add("active");
     showSettings(true);
     return;
   }
-  const hash = location.hash || "#/";
-  if (hash.startsWith("#/reglages")) {
+  if (onSettings) {
     showSettings();
     return;
   }
@@ -735,7 +745,20 @@ function route() {
   showHome();
 }
 
+/** Pas de zoom, comme une appli : Safari sur iPhone ignore `user-scalable=no`, on arrête
+ * donc le geste de pincement lui-même (le CSS `touch-action` suffit ailleurs). */
+function blockZoom() {
+  const stop = (event) => event.preventDefault();
+  document.addEventListener("gesturestart", stop, { passive: false });
+  document.addEventListener("gesturechange", stop, { passive: false });
+  document.addEventListener("gestureend", stop, { passive: false });
+  document.addEventListener("touchmove", (event) => {
+    if (event.touches.length > 1 || (event.scale !== undefined && event.scale !== 1)) event.preventDefault();
+  }, { passive: false });
+}
+
 async function boot() {
+  blockZoom();
   $("#menu").innerHTML = ICON.menu;
   $("#settings-button").innerHTML = ICON.gear;
   $("#drawer .new-session").innerHTML = `${ICON.plus}<span>Nouvelle tâche</span>`;

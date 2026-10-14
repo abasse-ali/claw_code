@@ -23,6 +23,19 @@ html, body {
   color: var(--text);
   font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Comme une appli : ni pincement ni double tap pour zoomer (le défilement reste). Les
+   champs gardent 16 px : en dessous, iOS zoome tout seul quand on y touche. */
+* { touch-action: pan-x pan-y; }
+
+/* Boutons, puces, en-tête : pas de sélection ni de menu par appui long. Le texte des
+   messages, lui, reste sélectionnable pour être copié. */
+button, .chip, .topbar, .brand, .meta-link, .session-item, .sheet-item, .small-link {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 
 a { color: var(--accent); }
@@ -187,7 +200,16 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .sheet-item.current { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .sheet-item small { color: var(--muted); }
 
-/* Réglages */
+/* Réglages : une page à part, avec son retour à l'accueil */
+.icon-button.active { background: var(--panel); color: var(--accent); }
+.back {
+  display: inline-flex; align-items: center; gap: 4px; margin: 4px 0 0 -6px; padding: 4px 6px;
+  border-radius: 8px; color: var(--muted); text-decoration: none; font-size: .92rem;
+}
+.back:hover, .back:focus-visible { color: var(--text); background: var(--panel); }
+.ready { margin: 0 0 18px; padding: 12px 14px; border: 1px solid var(--ok); border-radius: var(--radius); }
+.ready p { margin: 0 0 10px; }
+.ready .primary { display: inline-block; text-decoration: none; }
 .settings h1 { font-size: 1.4rem; font-weight: 600; }
 .settings h2 { font-size: 1.05rem; margin-top: 28px; }
 .settings .intro { color: var(--muted); }
