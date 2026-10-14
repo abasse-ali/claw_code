@@ -121,8 +121,10 @@ def main():
         git("remote", "set-url", "origin", f"https://github.com/{REPO}.git")
         git("config", "user.name", "Claw")
         git("config", "user.email", "claw@users.noreply.github.com")
+        # Sessions de Claw et caches que laissent les tests : jamais dans le commit.
         with open("work/.git/info/exclude", "a", encoding="utf-8") as handle:
-            handle.write("\n.claw/\n")
+            handle.write("\n.claw/\n__pycache__/\n*.pyc\n.pytest_cache/\n.mypy_cache/\n"
+                         ".ruff_cache/\nnode_modules/\n.venv/\n")
     except RuntimeError as error:
         fail(str(error))
 
