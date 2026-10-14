@@ -27,6 +27,9 @@ const STATE_FILE: &str = "project.json";
 
 /// Renvois au plus, par tour, pour un jalon dont la vérification échoue.
 pub const MAX_GATE_ROUNDS: usize = 3;
+/// Vérifications en échec d'un même jalon dans un tour, après quoi Claw ne la relance plus
+/// à chaque modification du projet (un outil absent de la machine la fait échouer en boucle).
+pub const MAX_MILESTONE_CHECKS: usize = 3;
 /// Longueur gardée du texte d'une exigence montrée au modèle.
 const ITEM_TEXT_MAX_CHARS: usize = 300;
 /// Longueur gardée des exigences jointes au contrôle et à la relecture.
@@ -762,6 +765,24 @@ pub struct Milestone {
     /// Commandes de sa ligne `Verify`.
     pub verify: Vec<String>,
     pub done: bool,
+    /// Son état est écrit : ligne `Status:`, case `[ ]`/`[x]` ou « (done) » dans le titre.
+    pub status_given: bool,
+}
+
+impl Milestone {
+    /// Jalon lu dans un titre ; `status` : l'état que le titre donne, s'il en donne un.
+    fn new(id: String, title: String, status: Option<bool>) -> Self {
+        let mut items = Vec::new();
+        ids_in(&title, &mut items);
+        Self {
+            id,
+            title,
+            items,
+            verify: Vec::new(),
+            done: status == Some(true),
+            status_given: status.is_some(),
+        }
+    }
 }
 
 /// La démonstration finale : installation puis lancement, depuis une copie
@@ -826,14 +847,15 @@ fn status_done(value: &str) -> bool {
 }
 
 /// Jalon annoncé par un titre : `M2 - Emprunts`, `Milestone 2: ...`, `Jalon 2 ...`,
-/// avec une case cochée ou un état entre crochets ou parenthèses.
-fn milestone_heading(heading: &str) -> Option<(String, String, bool)> {
+/// avec une case cochée ou un état entre crochets ou parenthèses (`Some(fait)` : l'état est
+/// dans le titre).
+fn milestone_heading(heading: &str) -> Option<(String, String, Option<bool>)> {
     let mut rest = heading.trim();
-    let mut checked = false;
+    let mut checked = None;
     for (checkbox, value) in [("[ ]", false), ("[x]", true), ("[X]", true)] {
         if let Some(after) = rest.strip_prefix(checkbox) {
             rest = after.trim_start();
-            checked = value;
+            checked = Some(value);
             break;
         }
     }
@@ -861,7 +883,11 @@ fn milestone_heading(heading: &str) -> Option<(String, String, bool)> {
     ]
     .iter()
     .any(|mark| folded_title.contains(mark));
-    Some((id, title.to_string(), checked || marked))
+    Some((
+        id,
+        title.to_string(),
+        if marked { Some(true) } else { checked },
+    ))
 }
 
 /// `label: valeur` (étiquette de trois mots au plus), étiquette ramenée à des
@@ -963,9 +989,17 @@ pub fn demo_script(place: &str, demo: &Demo) -> String {
     format!("cd \"{place}\" && {}", steps.join(" && "))
 }
 
-/// Commandes d'une valeur : chaque passage entre accents graves, sinon la
-/// valeur entière ; vide, celles du bloc de code qui suit (`index` avance alors
-/// après lui).
+/// Un passage entre accents graves est une commande : pas une option seule
+/// (`--hors-ligne`), ni un nom de fichier seul (`verif_edt.py`, `edt_sync.yml`).
+fn is_command(text: &str) -> bool {
+    let file_name =
+        !text.contains(char::is_whitespace) && text.contains('.') && !text.contains('/');
+    !(text.starts_with('-') || file_name)
+}
+
+/// Commandes d'une valeur : chaque passage entre accents graves qui est une
+/// commande, sinon la valeur entière ; vide, celles du bloc de code qui suit
+/// (`index` avance alors après lui).
 fn commands_of(value: &str, lines: &[&str], index: &mut usize) -> Vec<String> {
     let value = value.trim();
     let mut commands: Vec<String> = if value.contains('`') {
@@ -974,7 +1008,7 @@ fn commands_of(value: &str, lines: &[&str], index: &mut usize) -> Vec<String> {
             .skip(1)
             .step_by(2)
             .map(str::trim)
-            .filter(|command| !command.is_empty())
+            .filter(|command| !command.is_empty() && is_command(command))
             .map(str::to_string)
             .collect()
     } else if value.is_empty() {
@@ -1104,20 +1138,9 @@ impl Plan {
                     continue;
                 }
                 demo_part = None;
-                if let Some((id, title, done)) = milestone_heading(heading) {
+                if let Some((id, title, status)) = milestone_heading(heading) {
                     plan.close(std::mem::replace(&mut section, Section::None));
-                    let mut items = Vec::new();
-                    ids_in(&title, &mut items);
-                    section = Section::Milestone(
-                        Milestone {
-                            id,
-                            title,
-                            items,
-                            verify: Vec::new(),
-                            done,
-                        },
-                        level,
-                    );
+                    section = Section::Milestone(Milestone::new(id, title, status), level);
                 } else if folded.contains("demo") {
                     plan.close(std::mem::replace(&mut section, Section::None));
                     section = Section::Demo(Demo::default(), level);
@@ -1145,6 +1168,7 @@ impl Plan {
                     if is_status_label(&label) =>
                 {
                     milestone.done = status_done(value);
+                    milestone.status_given = true;
                 }
                 (Section::Milestone(milestone, _), _) => ids_in(line, &mut milestone.items),
                 (Section::Demo(demo, _), Some((label, value))) if is_install_label(&label) => {
@@ -1415,9 +1439,22 @@ pub fn plan_problems(plan: &Plan, spec: Option<&Spec>) -> Vec<String> {
         .collect();
     if !unchecked.is_empty() {
         problems.push(format!(
-            "{} {} no `Verify: <command>` line (one command that exits with 0 only when the milestone works, usually its tests)",
+            "{} {} no `Verify: <command>` line (one command that exits with 0 only when the milestone works, usually its tests, written as is in backticks: no file name or option alone)",
             listed(&unchecked),
             if unchecked.len() > 1 { "have" } else { "has" }
+        ));
+    }
+    let unmarked: Vec<String> = plan
+        .milestones
+        .iter()
+        .filter(|milestone| !milestone.status_given)
+        .map(|milestone| milestone.id.clone())
+        .collect();
+    if !unmarked.is_empty() {
+        problems.push(format!(
+            "{} {} no `Status: todo` or `Status: done` line: Claw runs the Verify command of a milestone when its Status says done, and only then is it done",
+            listed(&unmarked),
+            if unmarked.len() > 1 { "have" } else { "has" }
         ));
     }
     if let Some(spec) = spec.filter(|spec| !spec.items.is_empty()) {
@@ -1717,6 +1754,14 @@ pub fn milestone_failed_note(id: &str, command: &str, excerpt: &str, timed_out: 
 pub fn still_failing_note(id: &str) -> String {
     format!(
         "{CLAW_NOTE_PREFIX} {id} is still marked done in {PLAN_FILE}, although its Verify command failed and nothing changed since: fix the code and run the check again, or set its Status back to todo if it is not done."
+    )
+}
+
+/// Vérification d'un jalon en échec trop de fois dans le tour : Claw ne la relance plus.
+#[must_use]
+pub fn milestone_blocked_note(id: &str, failures: usize) -> String {
+    format!(
+        "{CLAW_NOTE_PREFIX} The Verify command of {id} has now failed {failures} times in this turn: Claw will not run it again in this turn. Do not mark {id} done again in this turn: set its Status back to todo. Then fix what makes the check fail; or, if this machine lacks something the check needs (a system tool, a service, network access), say exactly what in {PLAN_FILE} and in your final answer, and go on with what you can verify."
     )
 }
 
@@ -2422,6 +2467,8 @@ pub(crate) struct Turn {
     pub checked: BTreeMap<String, (String, bool)>,
     /// Changements du projet comptés au moment de chaque vérification en échec.
     pub failed_at: BTreeMap<String, usize>,
+    /// Vérifications en échec de chaque jalon pendant ce tour.
+    pub failures: BTreeMap<String, usize>,
     /// Remarques de structure déjà faites.
     pub noted: BTreeSet<String>,
     /// Renvois de fin de tour déjà faits (sujet).
@@ -2565,6 +2612,34 @@ mod tests {
         );
         assert_eq!(read_wish("Exit project mode"), Wish::Stop);
         assert_eq!(read_wish("Ajoute un bouton"), Wish::Nothing);
+    }
+
+    #[test]
+    fn verify_lines_keep_only_commands_and_a_milestone_without_status_is_pointed_out() {
+        // Plans écrits dans les sessions 5 (test_claw) et 9 (edt_stri) de l'appli web.
+        let plan = Plan::parse(
+            "### M1 - Existant\n**Requirements:** R1\n**Verify:** `python tests/verif_edt.py` (sans `--hors-ligne`) → 0 anomalie\n**Status:** done\n\n### M2 - CI\n**Requirements:** R1\n**Verify:** Workflow GitHub Actions `edt_sync.yml` passe avec `verif_edt.py` (sans `--sans-fraicheur`)\n**Status:** todo\n\n### M3 - Deux commandes\n**Requirements:** R1\n**Verify:** `python tests/a.py` et `./tests/b.sh --vite`\n\n## Demo\nInstall: `pip install -r requirements.txt`\nRun: `python app.py`\n",
+        );
+        assert_eq!(plan.milestones[0].verify, ["python tests/verif_edt.py"]);
+        assert!(plan.milestones[0].done && plan.milestones[0].status_given);
+        assert!(plan.milestones[1].verify.is_empty());
+        assert_eq!(
+            plan.milestones[2].verify,
+            ["python tests/a.py", "./tests/b.sh --vite"]
+        );
+        assert!(!plan.milestones[2].done && !plan.milestones[2].status_given);
+        let problems = plan_problems(&plan, None);
+        assert!(problems
+            .iter()
+            .any(|problem| problem.starts_with("M2 has no `Verify: <command>` line")));
+        assert!(problems
+            .iter()
+            .any(|problem| problem.starts_with("M3 has no `Status: todo` or `Status: done` line")));
+        // L'état écrit dans le titre compte.
+        let plan = Plan::parse("## [x] M1 - Fait\nVerify: `pytest`\n\n## M2 - Ensuite (done)\nVerify: `pytest`\n\n## [ ] M3 - Plus tard\nVerify: `pytest`\n");
+        assert!(plan.milestones[0].done && plan.milestones[0].status_given);
+        assert!(plan.milestones[1].done && plan.milestones[1].status_given);
+        assert!(!plan.milestones[2].done && plan.milestones[2].status_given);
     }
 
     #[test]

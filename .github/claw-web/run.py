@@ -109,6 +109,7 @@ class Progress:
             "done": f"**Claw a fini** en {duration}",
             "failed": f"**Claw s'est arrêté sur une erreur** après {duration}",
             "stopped": f"**Claw a été arrêté** après {duration} (passage annulé)",
+            "unfinished": f"**Claw s'est arrêté sans conclure** après {duration}",
         }[state]
         lines = [PROGRESS, f"{head} · {len(self.actions)} action(s)"]
         if self.actions:
@@ -211,12 +212,22 @@ def main():
         mock.terminate()
     if stopped:
         error = "Passage annulé : Claw a été arrêté."
-    elif not result and not error:
+    elif not result and not error and status != 0:
         error = (WORK / "claw.stderr").read_text(encoding="utf-8", errors="replace")[-1500:].strip()
     if error:
         print(f"Erreur : {error[-800:]}", flush=True)
-    state = "stopped" if stopped else "done" if status == 0 and result else "failed"
+    # Fini sans réponse ni erreur : le tour s'est arrêté avant la conclusion (limite de
+    # requêtes du tour, par exemple) ; ce n'est pas une erreur.
+    if stopped:
+        state = "stopped"
+    elif status == 0 and result:
+        state = "done"
+    elif status == 0 and not error:
+        state = "unfinished"
+    else:
+        state = "failed"
     progress.publish(state, force=True)
+    (WORK / "notices.txt").write_text("\n".join(progress.notices[-2:]), encoding="utf-8")
     (WORK / "result.md").write_text(result or "", encoding="utf-8")
     (WORK / "error.txt").write_text(error or "", encoding="utf-8")
     output("status", str(status))

@@ -35,6 +35,13 @@ connexion par **jeton personnel** gardé dans le navigateur.
   arrêté ». Un passage inachevé (arrêt ou erreur) garde son travail sur la branche de la
   session sans ouvrir de pull request ; un message de suivi le reprend. Le titre du commit et
   de la pull request est le message traité, pas le premier message de la session.
+- **Suppression** : « Supprimer » dans une session, « Choisir » dans la liste des sessions pour
+  en supprimer plusieurs. La session (issue du moteur) est effacée par l'API GraphQL
+  (`deleteIssue`) ; en option, sa branche dans le dépôt de la tâche (une pull request ouverte
+  est fermée) et ses passages dans Actions. Une session au travail n'est pas supprimée. Si
+  GitHub refuse au jeton d'effacer l'issue (l'autorisation que demande `deleteIssue` à un jeton
+  à grain fin n'est pas documentée), la session est fermée et perd l'étiquette `claw-web` :
+  elle quitte l'appli, et c'est dit.
 - **Diagnostic** : les actions et les avis de Claw vont au journal du job ; le journal complet
   de Claw (`claw.jsonl`, `claw.stderr`) est gardé 7 jours comme artefact du passage.
 - **Secrets du moteur** : `OPENROUTER_API_KEY` et `CLAW_REPO_TOKEN`, posés par l'appli
@@ -54,6 +61,7 @@ connexion par **jeton personnel** gardé dans le navigateur.
 | W1-3 | Publication : dépôt public `claw-web`, GitHub Pages, essai réel de bout en bout | en cours : Pages actif (https://abasse-ali.github.io/claw-web/) ; secrets `OPENROUTER_API_KEY` et `CLAW_REPO_TOKEN` posés (vérifications du moteur au vert dans l'appli) ; vrai modèle gratuit essayé (session 2) ; reste le premier essai de l'utilisateur sur un de ses dépôts |
 | W1-4 | Retours de l'utilisateur : pas de zoom, comme une appli ; réglages sur leur propre page (`#/reglages`), plus à l'accueil | fait le 14 octobre 2026 (`claw-web` 1e04535) |
 | W1-5 | Création de dépôt depuis le choix du dépôt (nom, description, public ou privé, `.gitignore`, premier commit) ; mode projet continu d'un passage à l'autre du moteur | fait le 14 octobre 2026 (`claw-web` 6e72294 ; moteur et Claw dans ce dépôt) |
+| W1-7 | Supprimer des sessions (une ou plusieurs, avec branches et passages) ; d'après les sessions 5 et 9 : vérification d'un jalon limitée à 3 échecs par tour (45 relances dans la session 9), commandes `Verify` mal lues (`--hors-ligne` lancé seul), plan sans lignes `Status:` non signalé (jalons de la session 5 jamais vérifiés), passage arrêté sans conclusion présenté comme une erreur | fait le 14 octobre 2026 (`claw-web` bbef23e ; Claw et moteur dans ce dépôt) |
 | W1-6 | Retours du premier essai de l'utilisateur (session 5, `test_claw`) : mode projet pas activé par « Crée un Comparateur de prix... » (objet inconnu de Claw) ; aucun moyen d'arrêter depuis l'appli ; à l'annulation, Claw continuait pendant la publication, qui ouvrait une pull request pour un travail inachevé, sous le titre du premier message ; chemins absolus du job dans la progression ; puces de la zone de saisie sur les boutons de la session ; avertissement Node.js 20 sur chaque job | fait le 14 octobre 2026 (d422f5a, be1c522, a59e3a2 ; `claw-web` 89e8438) |
 
 ## Essais
@@ -99,4 +107,19 @@ connexion par **jeton personnel** gardé dans le navigateur.
   réussi seulement) : il est gardé dès la compilation (session 8 : « Cache saved » juste
   après). Appli : vue de session au format téléphone avec un faux GitHub (boutons 28 px
   au-dessus de la zone de saisie, aucun débordement, « Arrêter » en deux appuis).
+- Sessions 5 et 9 de l'utilisateur (14 octobre, 15 h 22), lancées avec le même texte (deux
+  options de reprise copiées de ma réponse) : « mode projet » y a activé le mode projet.
+  Session 5 (`test_claw`, 33 min, 100 requêtes, bascules de modèle sur 429 et 503) : plan sans
+  aucune ligne `Status:`, donc aucun jalon vérifié par Claw, alors que la réponse annonçait
+  M1 à M6 faits ; 56 fichiers sur `claw/session-5` (pull request n° 1 mise à jour). Session 9
+  (`edt_stri`, dépôt réel et public de l'utilisateur, 40 min) : `SPEC.md`, `PLAN.md`,
+  `DECISIONS.md` écrits pour le projet existant, M1 renvoyé 45 fois (Poppler absent de la
+  machine du job, finalement téléchargé par l'agent), `--hors-ligne` lancé comme commande ;
+  limite de 100 requêtes atteinte sans conclusion ; travail gardé sur `claw/session-9` sans
+  pull request (`donnees/journal.csv` y est modifié par les commandes lancées). Corrections : W1-7.
+- Suppression, appli au format téléphone avec un faux GitHub : une session (branche, passage,
+  session effacés, retour à l'accueil) ; trois cochées dont une au travail (exclue et dite),
+  pull request n° 1 annoncée puis fermée, effacement refusé pour l'une (repli : fermée, sans
+  étiquette, dit). Effacement réel par l'API GraphQL essayé sur une issue jetable créée pour
+  l'occasion (n° 10, effacée : « 410 Gone » ensuite).
 

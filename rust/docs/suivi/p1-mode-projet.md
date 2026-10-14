@@ -15,7 +15,13 @@ est le projet et ce qu'il doit vérifier :
   Questions et Hors périmètre.
 - `PLAN.md`, les jalons : `## M1 - titre`, puis `Requirements: R1, E1`, `Verify: <commande>`,
   `Status: todo|done`. M1 est un squelette qui marche de bout en bout. Une section `## Demo`
-  donne `Install:` et `Run:` (commandes depuis une copie vide du projet).
+  donne `Install:` et `Run:` (commandes depuis une copie vide du projet). Dans une ligne
+  `Verify:`, seuls les passages entre accents graves qui sont des commandes comptent (pas une
+  option seule comme `--hors-ligne`, ni un nom de fichier seul comme `verif_edt.py`). Un jalon
+  sans état écrit (ligne `Status:`, case `[ ]`/`[x]` ou « (done) » dans le titre) est signalé :
+  sans lui, Claw ne vérifie jamais le jalon. La vérification d'un jalon marqué fait est
+  relancée après chaque modification tant qu'elle échoue, 3 fois au plus par tour ; ensuite
+  l'agent doit le remettre à faire ou dire ce qui bloque (outil absent de la machine...).
 - `DECISIONS.md` : une ligne par choix (langage, bibliothèques, stockage, formats) et sa raison.
 
 Claw garde son propre état dans `.claw/project.json` (mode actif, plan déjà relu par un autre

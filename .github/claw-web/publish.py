@@ -114,6 +114,13 @@ def main():
         text = "**La tâche a été arrêtée** (passage annulé)."
         if result:
             text += f"\n\n{result}"
+    elif not error:
+        # Claw s'est arrêté sans réponse finale, sans erreur : ses derniers avis disent pourquoi.
+        text = ("**La tâche n'est pas finie** : Claw s'est arrêté sans réponse finale. Envoyez "
+                "« continue » pour la reprendre.")
+        notices = read("notices.txt")
+        if notices:
+            text += "\n\n" + "\n".join(f"> {line}" for line in notices.splitlines())
     else:
         text = "**La tâche s'est arrêtée sur une erreur.**"
         if error:

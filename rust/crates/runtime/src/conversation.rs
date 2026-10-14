@@ -3347,11 +3347,15 @@ where
                 continue;
             }
             let key = project::check_key(milestone);
+            // Après trop d'échecs, plus de nouvel essai à chaque modification du projet
+            // (seulement si la commande de vérification change).
+            let failures = turn.failures.get(&milestone.id).copied().unwrap_or(0);
             let due = match turn.checked.get(&milestone.id) {
                 None => true,
                 Some((known, passed)) => {
                     *known != key
                         || (!passed
+                            && failures < project::MAX_MILESTONE_CHECKS
                             && turn
                                 .failed_at
                                 .get(&milestone.id)
@@ -3386,11 +3390,24 @@ where
                     turn.checked.insert(milestone.id.clone(), (key, false));
                     turn.failed_at
                         .insert(milestone.id.clone(), aids.project_changes);
-                    self.api_client.notify(&format!(
-                        "Le jalon {} est marqué fait mais sa vérification échoue : renvoyé à l'agent",
-                        milestone.id
-                    ));
-                    notes.push(note);
+                    let failures = turn.failures.entry(milestone.id.clone()).or_insert(0);
+                    *failures += 1;
+                    if *failures >= project::MAX_MILESTONE_CHECKS {
+                        self.api_client.notify(&format!(
+                            "Le jalon {} échoue encore à sa vérification ({} essais) : Claw ne la relance plus dans ce tour, l'agent doit le remettre à faire ou dire ce qui bloque",
+                            milestone.id, failures
+                        ));
+                        notes.push(format!(
+                            "{note}\n\n{}",
+                            project::milestone_blocked_note(&milestone.id, *failures)
+                        ));
+                    } else {
+                        self.api_client.notify(&format!(
+                            "Le jalon {} est marqué fait mais sa vérification échoue : renvoyé à l'agent",
+                            milestone.id
+                        ));
+                        notes.push(note);
+                    }
                     to_fix = true;
                 }
                 Some(Ok(())) => {
@@ -7952,6 +7969,47 @@ mod tests {
             .iter()
             .any(|notice| notice
                 .starts_with("Jalon M1 vérifié : sa commande de vérification réussit (")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_milestone_check_that_keeps_failing_is_run_three_times_at_most_in_a_turn() {
+        // Session 9 de l'appli web : un outil absent de la machine, M1 renvoyé 45 fois.
+        CAN_ASK.with(|flag| flag.set(false));
+        let root = project_folder("echec-repete");
+        std::fs::write(root.join("SPEC.md"), PROJECT_SPEC).expect("spec");
+        std::fs::write(root.join("PLAN.md"), project_plan("todo", "todo")).expect("plan");
+        std::fs::create_dir_all(root.join("tests")).expect("tests");
+        std::fs::write(root.join("tests").join("test_biblio.py"), PROJECT_TESTS).expect("tests");
+        active_project(&root);
+        let mut steps = vec![
+            write_step("PLAN.md", &project_plan("done", "todo")),
+            write_step("biblio.py", "LIVRES = [1]\n"),
+            write_step("biblio.py", "LIVRES = [2]\n"),
+            write_step("biblio.py", "LIVRES = [3]\n"),
+        ];
+        steps.extend((0..8).map(|_| text_step("Fini.")));
+        let (mut runtime, observed, commands) =
+            project_runtime(&root, steps, "python -m pytest -q", 100);
+        runtime.run_turn("continue", None).expect("tour");
+        let observed = observed.borrow();
+        assert_eq!(
+            commands
+                .borrow()
+                .iter()
+                .filter(|command| *command == "python -m pytest -q")
+                .count(),
+            3
+        );
+        assert!(observed.requests[3]
+            .contains("The Verify command of M1 has now failed 3 times in this turn"));
+        // Quatrième modification : plus de nouvel échec renvoyé (chaque requête porte
+        // l'historique, d'où le compte).
+        let failed = |request: &String| request.matches("but its Verify command fails").count();
+        assert_eq!(failed(&observed.requests[4]), failed(&observed.requests[3]));
+        assert!(observed.notices.iter().any(|notice| notice.starts_with(
+            "Le jalon M1 échoue encore à sa vérification (3 essais) : Claw ne la relance plus"
+        )));
         let _ = std::fs::remove_dir_all(&root);
     }
 
