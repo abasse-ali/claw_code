@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 from common import (ANSWER, PROGRESS, WORK, GitHubError, api, comments, output,
-                    post_comment, run_url, task_text)
+                    post_comment, run_url, settings, task_text)
 
 REPO = os.environ.get("REPO", "").strip()
 BASE = os.environ.get("BASE", "").strip()
@@ -103,7 +103,12 @@ def main():
         fail("Le moteur n'a pas le secret `CLAW_REPO_TOKEN` (jeton qui peut lire et pousser dans "
              f"`{REPO}`). Ajoutez-le depuis les réglages de l'appli, ou dans Settings > Secrets "
              "and variables > Actions du dépôt du moteur.")
-    branch = f"claw/session-{SESSION}"
+    # Branche notée par l'appli dans la session (claw/session-<numéro de l'appli>) ; les
+    # anciennes sessions n'en ont pas : celle du numéro d'issue.
+    branch = str(settings(issue.get("body")).get("branch") or "")
+    if not re.fullmatch(r"claw/[A-Za-z0-9._/-]{1,80}", branch) or ".." in branch or subprocess.run(
+            ["git", "check-ref-format", "--branch", branch], capture_output=True).returncode != 0:
+        branch = f"claw/session-{SESSION}"
     WORK.mkdir(parents=True, exist_ok=True)
     clone = subprocess.run(
         ["git", "clone", "--quiet", "--no-tags", f"https://x-access-token:{token}@github.com/{REPO}.git", "work"],
