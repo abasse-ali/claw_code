@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 
 from common import (PROGRESS, WORK, GitHubError, edit_comment, output, post_comment, run_url,
                     stop_tree)
@@ -183,6 +184,24 @@ class Progress:
                 print(f"::warning::journal non publié : {error}")
 
 
+def free_quota(key):
+    """Requêtes gratuites du jour chez OpenRouter ({used, limit, remaining}), ou None. Une
+    lecture de la clé : aucune requête de modèle, rien du quota."""
+    if not key:
+        return None
+    request = urllib.request.Request("https://openrouter.ai/api/v1/key")
+    request.add_header("Authorization", f"Bearer {key}")
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            data = json.loads(response.read()).get("data") or {}
+    except (OSError, ValueError):
+        return None
+    quota = data.get("free_model_daily_requests")
+    if not isinstance(quota, dict) or not all(isinstance(quota.get(name), int) for name in ("used", "limit", "remaining")):
+        return None
+    return quota
+
+
 def start_mock():
     """Faux modèle local (`rust/scripts/mock-model.js`) pour essayer le moteur sans requête."""
     script = os.path.join(os.environ["CLAW_SRC"], "rust", "scripts", "mock-model.js")
@@ -213,6 +232,7 @@ def main():
         args += ["--model", MODEL]
     args += ["prompt", request]
 
+    quota_before = free_quota(env.get("OPENROUTER_API_KEY", ""))
     progress = Progress()
     progress.publish(force=True)
     stop_refresh = threading.Event()
@@ -270,6 +290,15 @@ def main():
         state = "unfinished"
     else:
         state = "failed"
+    quota = free_quota(env.get("OPENROUTER_API_KEY", ""))
+    if quota:
+        spent = quota["used"] - quota_before["used"] if quota_before else None
+        quota["run"] = spent if spent is not None and spent >= 0 else None
+        with progress.lock:
+            progress.journal.events.append({"k": "quota", **quota})
+            progress.journal.dirty = True
+        (WORK / "quota.json").write_text(json.dumps(quota), encoding="utf-8")
+        print(f"Requêtes gratuites : {quota['used']}/{quota['limit']} utilisées aujourd'hui", flush=True)
     progress.publish(state, force=True)
     progress.publish_journal(force=True)
     (WORK / "notices.txt").write_text("\n".join(progress.notices[-2:]), encoding="utf-8")

@@ -8,6 +8,7 @@ Un passage inachevé (erreur, annulation) garde son travail sur la branche de la
 ouvrir de pull request : un message de suivi le reprend.
 """
 
+import json
 import os
 import subprocess
 
@@ -130,6 +131,14 @@ def main():
     parts = [ANSWER, text]
     if notes:
         parts.append("\n".join(f"> {note}" for note in notes))
+    try:
+        quota = json.loads(read("quota.json") or "null")
+    except ValueError:
+        quota = None
+    if quota:
+        spent = f"{quota['run']} pour ce passage · " if quota.get("run") is not None else ""
+        footer.append(f"Requêtes gratuites : {spent}{quota['used']}/{quota['limit']} utilisées aujourd'hui "
+                      f"({quota['remaining']} restantes)")
     footer.append(f"[Détail du job]({run_url()})")
     parts.append("---\n" + "\n".join(f"- {line}" for line in footer))
     try:
