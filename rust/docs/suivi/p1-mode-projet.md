@@ -45,9 +45,11 @@ actif pour ce dossier (état dans `.claw/project.json`) jusqu'à « sans mode pr
 | Lot | État |
 |---|---|
 | P1-1 | fait le 14 octobre 2026 (ff3d899) |
-| P1-2 | fait le 14 octobre 2026 (commit « Mode projet, lots P1-2 et P1-3 ») |
-| P1-3 | fait le 14 octobre 2026 (même commit) |
-| P1-4 à P1-6 | à faire |
+| P1-2 | fait le 14 octobre 2026 (096f80d) |
+| P1-3 | fait le 14 octobre 2026 (096f80d) |
+| P1-4 | fait le 14 octobre 2026 (commit « Mode projet, lots P1-4 et P1-5 ») |
+| P1-5 | fait le 14 octobre 2026 (même commit) |
+| P1-6 | à faire |
 
 ### P1-1 : ce qui est fait
 
@@ -101,6 +103,34 @@ actif pour ce dossier (état dans `.claw/project.json`) jusqu'à « sans mode pr
   les fichiers, ou de dire dans `DECISIONS.md` pourquoi il garde son choix. Une seule relecture
   par contenu (empreinte des exigences et des jalons dans `.claw/project.json`) ; sans
   relecteur, elle est retentée au tour suivant.
+
+### P1-4 : ce qui est fait
+
+- Démonstration finale (`final_demo`, contrôle de fin de tour, phase « tous les jalons faits ») :
+  copie des fichiers que Git suit ou suivrait (`git ls-files --cached --others
+  --exclude-standard`, sinon tout sauf les dossiers cachés, de dépendances et de sortie ; jamais
+  `.claw`) dans un dossier neuf du dossier temporaire, puis lignes `Install` (cinq minutes au
+  plus) et `Run` (deux minutes) lancées par l'outil `bash` dans cette copie, comme les tapera
+  l'utilisateur. Un échec repart au modèle avec les causes habituelles (fichier hors du projet,
+  paquet absent des dépendances, chemin relatif au dossier courant, commande fausse dans le
+  README), trois fois au plus ; une réussite est notée pour ce plan (`demoPassed`), puis le
+  README doit montrer les commandes `Run`. Sans section `## Demo`, elle est demandée. La copie
+  est retirée après usage.
+- Essai du vrai binaire avec le faux modèle : copie de quatre fichiers, `python biblio.py`
+  lancé par Git Bash dans le dossier temporaire, réussite notée, copie retirée.
+
+### P1-5 : ce qui est fait
+
+- Validation par l'utilisateur : faite en P1-1 (cahier des charges, puis chaque jalon terminé).
+- Budget : le coût de chaque jalon (requêtes depuis le début du tour ou la fin du jalon
+  précédent, dans le tour où il se termine) est gardé dans `.claw/project.json`. Au début de
+  chaque tour en mode projet, le client lit le quota gratuit du jour chez `OpenRouter`
+  (`free_requests_left`, pour un modèle gratuit) ; s'il ne suffit pas pour les jalons restants
+  au coût moyen mesuré (30 requêtes à défaut), le guide le dit au modèle (finir les jalons un à
+  un, ou s'arrêter sur un état propre avec `PLAN.md` à jour) et une notice le dit à
+  l'utilisateur. Quand la limite de requêtes du tour est atteinte, la note de conclusion
+  demande en plus un `PLAN.md` qui dit où en est le jalon en cours.
+- Limite connue : un jalon mené sur plusieurs tours n'est compté que pour son dernier tour.
 
 - Incident : la première version de cet essai transmettait au binaire l'environnement du
   terminal, qui porte maintenant la vraie clé OpenRouter : la relecture de fin de tour est

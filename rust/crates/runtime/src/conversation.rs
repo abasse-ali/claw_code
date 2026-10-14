@@ -111,6 +111,12 @@ pub trait ApiClient {
         false
     }
 
+    /// Requêtes gratuites qu'il reste aujourd'hui pour le modèle de la session
+    /// (`None` : inconnu, ou modèle qui n'est pas gratuit).
+    fn free_requests_left(&mut self) -> Option<u64> {
+        None
+    }
+
     /// Défauts que montrent les images jointes à la demande, d'après le
     /// lecteur d'images : (numéro de l'image, défaut en une ligne). Le client
     /// peut les faire décrire à ce moment. Vide quand le modèle lit lui-même
@@ -281,6 +287,15 @@ pub struct ConversationRuntime<C, T> {
     environment: EnvironmentProbe,
 }
 
+/// Issue de la démonstration finale du mode projet.
+enum DemoOutcome {
+    Passed,
+    /// Pas lancée (refus, demande d'autorisation sans réponse).
+    NotRun,
+    /// Remarque de l'échec, pour le modèle.
+    Failed(String),
+}
+
 /// Sonde de l'environnement du mode projet : à faire au premier tour de la
 /// session, faite (ce qu'elle a trouvé, gardé pour le relecteur
 /// d'architecture), ou coupée (essais).
@@ -420,6 +435,8 @@ struct TurnAids {
     repeated_read_notes: u32,
     /// Mode projet : ce que Claw suit pendant le tour.
     project: Option<project::Turn>,
+    /// Requêtes au modèle faites pendant le tour.
+    requests: usize,
     /// Modifications et commandes du tour : une vérification de jalon en échec
     /// ne se refait qu'après un changement.
     project_changes: usize,
@@ -1346,6 +1363,7 @@ where
 
         loop {
             iterations += 1;
+            aids.requests = iterations;
             if iterations > self.max_iterations {
                 return Err(RuntimeError::new(
                     "la boucle de conversation a dépassé le nombre maximal d'itérations",
@@ -1365,6 +1383,9 @@ where
                     "Ce tour a utilisé {limit} requête{plural}, la limite d'un tour (réglage `turnRequestLimit`) : Claw demande à l'agent de conclure. Écrivez « continue » pour poursuivre"
                 ));
                 let mut note = harness::turn_limit_note(limit);
+                if aids.project.is_some() {
+                    note.push_str(project::WRAP_UP_NOTE);
+                }
                 note.push_str(&harness::language_note(self.response_language.as_deref()));
                 self.session
                     .messages
@@ -3124,6 +3145,27 @@ where
         } else {
             project::phase_guide(&project, can_ask)
         };
+        // Quota gratuit du jour trop court pour les jalons restants : le modèle
+        // le sait, et finit proprement plutôt que de s'arrêter au milieu.
+        let remaining = match project.phase() {
+            project::Phase::Spec | project::Phase::Plan => 1,
+            project::Phase::Build(_) => project
+                .milestones()
+                .iter()
+                .filter(|milestone| !milestone.done)
+                .count(),
+            project::Phase::Finish | project::Phase::Done => 0,
+        };
+        if remaining > 0 {
+            if let Some(left) = self.api_client.free_requests_left() {
+                let cost = project::milestone_cost(&project.state);
+                if let Some((note, notice)) = project::budget_note(left, cost, remaining) {
+                    guide.push('\n');
+                    guide.push_str(&note);
+                    self.api_client.notify(&notice);
+                }
+            }
+        }
         // Au premier tour de la session : les outils de la machine et leurs pièges.
         if self.environment == EnvironmentProbe::Pending {
             let note = project::environment_note(&project::probe_environment());
@@ -3332,9 +3374,19 @@ where
                     if !turn.completed.contains(&milestone.id) {
                         turn.completed.push(milestone.id.clone());
                     }
+                    // Ce qu'a coûté le jalon dans ce tour, pour le budget des suivants.
+                    let spent = aids.requests.saturating_sub(turn.requests_at_milestone);
+                    turn.requests_at_milestone = aids.requests;
+                    let mut state = project::ProjectState::load(&turn.root);
+                    state.milestone_requests.insert(
+                        milestone.id.clone(),
+                        u64::try_from(spent).unwrap_or(u64::MAX),
+                    );
+                    let _ = state.save(&turn.root);
                     self.api_client.notify(&format!(
-                        "Jalon {} vérifié : sa commande de vérification réussit",
-                        milestone.id
+                        "Jalon {} vérifié : sa commande de vérification réussit ({spent} requête{} dans ce tour)",
+                        milestone.id,
+                        if spent > 1 { "s" } else { "" }
                     ));
                     let untested = project::untested(&turn.root, &milestone.items);
                     notes.push(project::milestone_checked_note(
@@ -3496,8 +3548,137 @@ where
                     project::continue_feedback(&current, index)
                 })
             }
-            project::Phase::Build(_) | project::Phase::Finish | project::Phase::Done => None,
+            project::Phase::Finish => self.final_demo(turn, &current, prompter),
+            project::Phase::Build(_) | project::Phase::Done => None,
         }
+    }
+
+    /// Mode projet, tous les jalons faits : Claw copie le projet dans un dossier
+    /// vide et y lance les lignes `Install` puis `Run` de la démonstration, comme
+    /// le fera l'utilisateur. Réussie, elle est notée pour ce plan et le README
+    /// doit montrer les mêmes commandes ; en échec, le modèle corrige (trois
+    /// fois au plus).
+    fn final_demo(
+        &mut self,
+        turn: &mut project::Turn,
+        current: &project::Project,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> Option<String> {
+        let plan = current.plan.as_ref()?;
+        let Some(demo) = plan.demo.as_ref().filter(|demo| !demo.run.is_empty()) else {
+            return turn.asked.insert("demo".to_string()).then(|| {
+                self.api_client.notify(
+                    "Mode projet : tous les jalons sont faits mais le plan ne dit pas comment montrer le projet : demandé à l'agent",
+                );
+                project::demo_missing_feedback()
+            });
+        };
+        if turn.demo_rounds >= project::MAX_DEMO_ROUNDS {
+            return None;
+        }
+        let (copy, files) = match project::clean_copy(&turn.root) {
+            Ok(copied) => copied,
+            Err(reason) => {
+                turn.demo_rounds = project::MAX_DEMO_ROUNDS;
+                self.api_client.notify(&format!(
+                    "Mode projet : démonstration finale impossible, le projet n'a pas pu être copié ({reason})"
+                ));
+                return None;
+            }
+        };
+        self.api_client.notify(&format!(
+            "Mode projet : démonstration finale dans une copie vide du projet ({files} fichiers)"
+        ));
+        let outcome = self.run_demo(&copy, files, demo, prompter);
+        let _ = std::fs::remove_dir_all(&copy);
+        match outcome {
+            DemoOutcome::NotRun => {
+                turn.demo_rounds = project::MAX_DEMO_ROUNDS;
+                None
+            }
+            DemoOutcome::Failed(feedback) => {
+                turn.demo_rounds += 1;
+                self.api_client.notify(if turn.demo_rounds >= project::MAX_DEMO_ROUNDS {
+                    "La démonstration finale échoue encore : renvoyée une dernière fois à l'agent, le projet n'est pas validé"
+                } else {
+                    "La démonstration finale échoue dans une copie vide du projet : renvoyée à l'agent"
+                });
+                Some(feedback)
+            }
+            DemoOutcome::Passed => {
+                let mut state = current.state.clone();
+                state.demo_passed = Some(plan.fingerprint());
+                let _ = state.save(&turn.root);
+                self.api_client
+                    .notify("Démonstration finale réussie dans une copie vide du projet");
+                (!project::readme_shows(&turn.root, &demo.run)
+                    && turn.asked.insert("readme".to_string()))
+                .then(|| {
+                    self.api_client.notify(
+                        "Le README ne montre pas les commandes de la démonstration : demandé à l'agent",
+                    );
+                    project::readme_feedback(&demo.run)
+                })
+            }
+        }
+    }
+
+    /// Lignes `Install` puis `Run` de la démonstration, lancées dans la copie
+    /// `copy` du projet (`files` fichiers).
+    fn run_demo(
+        &mut self,
+        copy: &std::path::Path,
+        files: usize,
+        demo: &project::Demo,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> DemoOutcome {
+        let place = copy.to_string_lossy().replace('\\', "/");
+        let commands = demo
+            .install
+            .iter()
+            .map(|command| (command, harness::VERIFY_TIMEOUT_MS))
+            .chain(
+                demo.run
+                    .iter()
+                    .map(|command| (command, project::DEMO_RUN_TIMEOUT_MS)),
+            );
+        for (index, (command, timeout)) in commands.enumerate() {
+            let input = serde_json::json!({
+                "command": format!("cd \"{place}\" && {command}"),
+                "timeout": timeout,
+                "run_in_background": false,
+                "description": "Démonstration finale par Claw",
+            })
+            .to_string();
+            self.tool_executor.announce("bash", &input);
+            let (message, _) = self.execute_tool_call(
+                format!("claw-demo-{index}"),
+                "bash".to_string(),
+                &input,
+                prompter
+                    .as_mut()
+                    .map(|prompt| &mut **prompt as &mut dyn PermissionPrompter),
+            );
+            let Some((output, is_error)) = tool_result_parts(&message) else {
+                return DemoOutcome::NotRun;
+            };
+            if is_error {
+                self.api_client.notify(&format!(
+                    "Démonstration finale non lancée ({command}) : le projet n'est pas démontré"
+                ));
+                return DemoOutcome::NotRun;
+            }
+            let result = harness::read_bash_output(output);
+            if !result.passed || result.pending {
+                return DemoOutcome::Failed(project::demo_failed_feedback(
+                    files,
+                    command,
+                    &result.excerpt,
+                    result.timed_out || result.pending,
+                ));
+            }
+        }
+        DemoOutcome::Passed
     }
 
     /// Mode projet, quand quelqu'un peut répondre : un jalon terminé pendant le
@@ -5080,6 +5261,10 @@ mod tests {
             CAN_ASK.with(std::cell::Cell::get)
         }
 
+        fn free_requests_left(&mut self) -> Option<u64> {
+            FREE_LEFT.with(std::cell::Cell::get)
+        }
+
         fn image_defects(
             &mut self,
             _images: &[crate::attachments::ImageAttachment],
@@ -5209,6 +5394,8 @@ mod tests {
             const { std::cell::RefCell::new(Vec::new()) };
         /// Réponses en texte suivantes arrêtées par la limite de sortie.
         static CUT_REPLIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        /// Requêtes gratuites restantes annoncées par le client.
+        static FREE_LEFT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     }
 
     #[test]
@@ -7610,12 +7797,20 @@ mod tests {
         assert!(observed
             .notices
             .iter()
-            .any(|notice| notice == "Jalon M1 vérifié : sa commande de vérification réussit"));
+            .any(|notice| notice
+                .starts_with("Jalon M1 vérifié : sa commande de vérification réussit (")));
         assert!(observed
             .notices
             .iter()
             .any(|notice| notice
                 == "Mode projet : jalons restants : Claw renvoie l'agent au jalon M2"));
+        // Le coût de chaque jalon terminé est gardé pour le budget des suivants.
+        let state = crate::project::ProjectState::load(&root);
+        assert_eq!(state.milestone_requests.len(), 2);
+        assert!(state
+            .milestone_requests
+            .values()
+            .all(|requests| *requests > 0));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7726,7 +7921,8 @@ mod tests {
         assert!(observed
             .notices
             .iter()
-            .any(|notice| notice == "Jalon M1 vérifié : sa commande de vérification réussit"));
+            .any(|notice| notice
+                .starts_with("Jalon M1 vérifié : sa commande de vérification réussit (")));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7833,6 +8029,102 @@ mod tests {
             .consults
             .iter()
             .any(|(purpose, _)| *purpose == super::ConsultPurpose::Design));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_final_demo_runs_in_an_empty_copy_and_a_failure_goes_back_to_the_agent() {
+        CAN_ASK.with(|flag| flag.set(false));
+        let root = project_folder("demo");
+        std::fs::write(root.join("SPEC.md"), PROJECT_SPEC).expect("spec");
+        std::fs::write(root.join("PLAN.md"), project_plan("done", "todo")).expect("plan");
+        std::fs::write(root.join("DECISIONS.md"), "- Python 3 : déjà installé\n")
+            .expect("décisions");
+        std::fs::create_dir_all(root.join("tests")).expect("tests");
+        std::fs::write(root.join("tests").join("test_biblio.py"), PROJECT_TESTS).expect("tests");
+        active_project(&root);
+        let (mut runtime, observed, commands) = project_runtime(
+            &root,
+            vec![
+                write_step(
+                    "tests/test_m2.py",
+                    "def test_r2_emprunt():\n    assert True\n",
+                ),
+                write_step("PLAN.md", &project_plan("done", "done")),
+                text_step("Fini."),
+                write_step("biblio.py", "LIVRES = []\n"),
+                text_step("Corrigé."),
+                write_step(
+                    "README.md",
+                    "# Bibliothèque\n\n    python biblio.py liste\n",
+                ),
+                text_step("README écrit."),
+                text_step("Fini."),
+                text_step("Fini."),
+                text_step("Fini."),
+            ],
+            "biblio.py liste",
+            1,
+        );
+        runtime.run_turn("continue", None).expect("tour");
+        let observed = observed.borrow();
+        // Lancée dans une copie vide du projet, installation puis lancement.
+        let demo: Vec<String> = commands
+            .borrow()
+            .iter()
+            .filter(|command| command.starts_with("cd \"") && command.contains("claw-demo-"))
+            .cloned()
+            .collect();
+        assert_eq!(demo.len(), 4, "{demo:?}");
+        assert!(demo[0].ends_with("&& python -m pip install -r requirements.txt"));
+        assert!(demo[1].ends_with("&& python biblio.py liste"));
+        assert!(observed.requests.iter().any(|request| request.contains(
+            "Final demo: Claw copied the project to an empty folder (5 files: those Git tracks or would track)"
+        ) && request.contains("This command failed:")));
+        // Réussie après la correction : notée, puis le README est demandé.
+        assert!(observed.requests.iter().any(|request| request
+            .contains("Final demo passed. README.md does not show how to run the project")));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice == "Démonstration finale réussie dans une copie vide du projet"));
+        let state = crate::project::ProjectState::load(&root);
+        assert!(state.demo_passed.is_some());
+        assert_eq!(
+            crate::project::Project::read(&root).phase(),
+            crate::project::Phase::Done
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_short_free_quota_is_told_to_the_model_and_the_user_at_the_start_of_the_turn() {
+        CAN_ASK.with(|flag| flag.set(false));
+        FREE_LEFT.with(|left| left.set(Some(40)));
+        let root = project_folder("budget");
+        std::fs::write(root.join("SPEC.md"), PROJECT_SPEC).expect("spec");
+        std::fs::write(root.join("PLAN.md"), project_plan("todo", "todo")).expect("plan");
+        active_project(&root);
+        let (mut runtime, observed, _) = project_runtime(
+            &root,
+            // Contrôles de fin de tour (décisions, jalon suivant) : de quoi répondre.
+            vec![
+                text_step("Je commence."),
+                text_step("Je commence."),
+                text_step("Je commence."),
+                text_step("Je commence."),
+            ],
+            "",
+            0,
+        );
+        runtime.run_turn("continue", None).expect("tour");
+        FREE_LEFT.with(|left| left.set(None));
+        let observed = observed.borrow();
+        assert!(observed.requests[0].contains(
+            "Budget: 40 free requests are left today and a milestone of this project takes about 30: there is room for about 1 of the 2 milestones left."
+        ));
+        assert!(observed.notices.iter().any(|notice| notice
+            == "Mode projet : il reste 40 requêtes gratuites aujourd'hui, de quoi faire environ 1 des 2 jalons restants"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

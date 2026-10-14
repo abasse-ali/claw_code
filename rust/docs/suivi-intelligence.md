@@ -163,7 +163,9 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | ff3d899 | Mode projet : cahier des charges `SPEC.md`, plan en jalons `PLAN.md` vérifiés par Claw, tests d'acceptation nommés d'après les exigences, validation par l'utilisateur, plan suivi jusqu'au bout sans lui (P1-1) ; essais du client sans les vraies clés du terminal |
 
-| (commit « Mode projet, lots P1-2 et P1-3 ») | Sonde de l'environnement et pièges connus au premier tour de la session, journal des décisions rappelé et réclamé (P1-2) ; relecture d'architecture par un autre modèle avant le code (P1-3) |
+| 096f80d | Sonde de l'environnement et pièges connus au premier tour de la session, journal des décisions rappelé et réclamé (P1-2) ; relecture d'architecture par un autre modèle avant le code (P1-3) |
+
+| (commit « Mode projet, lots P1-4 et P1-5 ») | Démonstration finale réelle dans une copie vide du projet, README qui montre les mêmes commandes (P1-4) ; budget de requêtes par jalon et quota gratuit du jour dit au modèle et à l'utilisateur (P1-5) |
 
 État des tests après T1-33 : 664 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;

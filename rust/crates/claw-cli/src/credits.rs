@@ -316,6 +316,15 @@ pub fn account_status(fresh: bool) -> Option<Result<AccountStatus, String>> {
     Some(status)
 }
 
+/// Requêtes gratuites qu'il reste aujourd'hui d'après `OpenRouter` (lecture
+/// gardée 15 s), celles de ce processus déjà décomptées. `None` sans clé ou
+/// sans réponse.
+#[must_use]
+pub fn free_requests_left() -> Option<u64> {
+    let status = account_status(false)?.ok()?;
+    Some(live(&status).free_requests?.remaining)
+}
+
 /// État avec les requêtes gratuites faites depuis la dernière lecture déjà
 /// décomptées (affichage en temps réel).
 fn live(status: &AccountStatus) -> AccountStatus {

@@ -1826,6 +1826,204 @@ pub fn environment_note(environment: &Environment) -> String {
     )
 }
 
+// --- Démonstration finale -------------------------------------------------------------------
+
+/// Fichiers et octets au plus d'une copie pour la démonstration finale.
+const DEMO_MAX_FILES: usize = 3_000;
+const DEMO_MAX_BYTES: u64 = 100_000_000;
+/// Délai d'une commande `Run` de la démonstration, en millisecondes.
+pub const DEMO_RUN_TIMEOUT_MS: u64 = 120_000;
+/// Renvois au plus pour une démonstration finale en échec.
+pub const MAX_DEMO_ROUNDS: usize = 3;
+
+/// Fichiers qu'aurait l'utilisateur (chemins relatifs) : ceux que Git suit
+/// ou suivrait (`git ls-files --cached --others --exclude-standard`), sinon
+/// tout sauf les dossiers cachés, de dépendances et de sortie ; jamais `.claw`.
+#[must_use]
+pub fn project_files(root: &Path) -> Vec<PathBuf> {
+    let listed = Command::new("git")
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success());
+    let mut files: Vec<PathBuf> = match listed {
+        Some(output) => String::from_utf8_lossy(&output.stdout)
+            .split('\0')
+            .filter(|name| !name.is_empty())
+            .map(PathBuf::from)
+            .collect(),
+        None => walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_entry(|entry| {
+                entry.depth() == 0
+                    || !(entry.file_type().is_dir() && skipped_dir(entry.path(), root))
+            })
+            .flatten()
+            .filter(|entry| entry.file_type().is_file())
+            .filter_map(|entry| entry.path().strip_prefix(root).ok().map(Path::to_path_buf))
+            .collect(),
+    };
+    files.retain(|file| !file.starts_with(".claw") && root.join(file).is_file());
+    files.sort();
+    files
+}
+
+/// Copie les fichiers du projet dans un dossier neuf du dossier temporaire :
+/// le dossier, et le nombre de fichiers copiés.
+pub fn clean_copy(root: &Path) -> Result<(PathBuf, usize), String> {
+    let files = project_files(root);
+    if files.len() > DEMO_MAX_FILES {
+        return Err(format!("{} fichiers", files.len()));
+    }
+    let bytes: u64 = files
+        .iter()
+        .filter_map(|file| std::fs::metadata(root.join(file)).ok())
+        .map(|meta| meta.len())
+        .sum();
+    if bytes > DEMO_MAX_BYTES {
+        return Err(format!("{} Mo", bytes / 1_000_000));
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let copy = std::env::temp_dir().join(format!("claw-demo-{}-{stamp}", std::process::id()));
+    std::fs::create_dir_all(&copy).map_err(|error| error.to_string())?;
+    for file in &files {
+        let target = copy.join(file);
+        if let Some(folder) = target.parent() {
+            std::fs::create_dir_all(folder).map_err(|error| error.to_string())?;
+        }
+        std::fs::copy(root.join(file), &target).map_err(|error| error.to_string())?;
+    }
+    Ok((copy, files.len()))
+}
+
+fn squeezed(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Le README du projet montre chacune de ces commandes.
+#[must_use]
+pub fn readme_shows(root: &Path, commands: &[String]) -> bool {
+    let readme = [
+        "README.md",
+        "readme.md",
+        "Readme.md",
+        "README.txt",
+        "README",
+    ]
+    .iter()
+    .find_map(|name| std::fs::read_to_string(root.join(name)).ok());
+    let Some(readme) = readme else {
+        return false;
+    };
+    let text = squeezed(&readme);
+    commands
+        .iter()
+        .all(|command| text.contains(&squeezed(command)))
+}
+
+/// Tous les jalons sont faits mais rien ne dit comment montrer le projet.
+#[must_use]
+pub fn demo_missing_feedback() -> String {
+    format!(
+        "{CLAW_NOTE_PREFIX} Project mode: every milestone of {PLAN_FILE} is done, but it has no `## Demo` section with a `Run:` line, so the project cannot be shown working the way the user will run it. Add `## Demo` with `Install: <commands to run in an empty copy of the project>` and `Run: <a command that shows the project working and exits by itself>`, keep README.md in step with them, then finish again: Claw runs them in an empty copy."
+    )
+}
+
+/// Une commande de la démonstration finale a échoué dans la copie vide.
+#[must_use]
+pub fn demo_failed_feedback(files: usize, command: &str, excerpt: &str, timed_out: bool) -> String {
+    let what = if timed_out {
+        "did not finish in time (a Demo command must exit by itself; for a server: start it, request a page, stop it)"
+    } else {
+        "failed"
+    };
+    format!(
+        "{CLAW_NOTE_PREFIX} Final demo: Claw copied the project to an empty folder ({files} files: those Git tracks or would track) and ran the Demo lines of {PLAN_FILE} there, as the user will. This command {what}:\n$ {command}\n{excerpt}\n\nUsual causes: a file the program needs that is not in the project (made by hand, or ignored by .gitignore), a package missing from the requirements, a path relative to the current folder instead of the program's own folder, a wrong command in README.md. Fix the project (or the Demo line, if that is what is wrong), then finish again: Claw runs the demo again."
+    )
+}
+
+/// La démonstration a réussi, mais le README ne montre pas ses commandes.
+#[must_use]
+pub fn readme_feedback(run: &[String]) -> String {
+    let commands = run
+        .iter()
+        .map(|command| format!("`{command}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{CLAW_NOTE_PREFIX} Final demo passed. README.md does not show how to run the project the way the Demo lines do ({commands}): write or update README.md so that the user can install and run it with exactly these commands."
+    )
+}
+
+// --- Budget de requêtes -----------------------------------------------------------------------
+
+/// Requêtes comptées pour un jalon tant qu'aucun jalon du projet n'a été mesuré.
+pub const DEFAULT_MILESTONE_REQUESTS: u64 = 30;
+
+/// Requêtes que prend un jalon de ce projet : la moyenne des jalons terminés
+/// (mesurés dans le tour où ils se terminent), sinon une estimation.
+#[must_use]
+pub fn milestone_cost(state: &ProjectState) -> u64 {
+    let spent: Vec<u64> = state
+        .milestone_requests
+        .values()
+        .copied()
+        .filter(|requests| *requests > 0)
+        .collect();
+    let count = u64::try_from(spent.len()).unwrap_or(u64::MAX);
+    if count == 0 {
+        DEFAULT_MILESTONE_REQUESTS
+    } else {
+        (spent.iter().sum::<u64>() / count).max(1)
+    }
+}
+
+/// Le quota gratuit du jour ne suffit pas pour les `remaining` jalons restants
+/// à `cost` requêtes chacun : le guide pour le modèle, et la notice pour
+/// l'utilisateur. `None` quand le quota suffit.
+#[must_use]
+pub fn budget_note(left: u64, cost: u64, remaining: usize) -> Option<(String, String)> {
+    let remaining_count = u64::try_from(remaining).unwrap_or(u64::MAX);
+    let cost = cost.max(1);
+    if remaining == 0 || left >= cost.saturating_mul(remaining_count) {
+        return None;
+    }
+    if left < cost {
+        return Some((
+            format!(
+                "{GUIDE_PREFIX} Budget: {left} free requests are left today, and a milestone of this project takes about {cost}. Do only what fits in about {} requests, then stop with the project in a clean state: its tests passing and {PLAN_FILE} saying what is done and what is left. The free quota comes back at 00:00 UTC.",
+                left / 2
+            ),
+            format!(
+                "Mode projet : il reste {left} requêtes gratuites aujourd'hui pour environ {cost} par jalon : l'agent s'arrêtera sur un état propre"
+            ),
+        ));
+    }
+    let fits = left / cost;
+    Some((
+        format!(
+            "{GUIDE_PREFIX} Budget: {left} free requests are left today and a milestone of this project takes about {cost}: there is room for about {fits} of the {remaining} milestones left. Finish them one at a time, each leaving the project in a working state, and stop cleanly when the budget runs low."
+        ),
+        format!(
+            "Mode projet : il reste {left} requêtes gratuites aujourd'hui, de quoi faire environ {fits} des {remaining} jalons restants"
+        ),
+    ))
+}
+
+/// Fin de la note de Claw quand le budget de requêtes du tour est atteint.
+pub const WRAP_UP_NOTE: &str = " Project mode: before you stop, make sure PLAN.md says which milestones are done (their Status) and what is left in the current one, so that the next turn starts from there.";
+
 // --- Relecture d'architecture ------------------------------------------------------------
 
 /// Consignes du relecteur d'architecture : un autre modèle lit le cahier des
@@ -1899,6 +2097,11 @@ pub(crate) struct Turn {
     pub request: String,
     /// La relecture d'architecture a déjà été tentée pendant ce tour.
     pub design_review_tried: bool,
+    /// Démonstrations finales en échec renvoyées pendant ce tour.
+    pub demo_rounds: usize,
+    /// Requêtes du tour au moment où le dernier jalon s'est terminé (0 au
+    /// début du tour) : le coût du jalon suivant part de là.
+    pub requests_at_milestone: usize,
 }
 
 impl Turn {
@@ -2206,6 +2409,61 @@ mod tests {
         assert!(prompt.ends_with("end with the VERDICT line."));
         assert!(DESIGN_REVIEW_SYSTEM.contains("M1 must run from end to end"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_clean_copy_holds_the_project_files_and_not_claw_s_own() {
+        let root = folder("copie");
+        std::fs::write(root.join("app.py"), "print(1)\n").expect("code");
+        std::fs::create_dir_all(root.join("tests")).expect("tests");
+        std::fs::write(
+            root.join("tests").join("test_app.py"),
+            "def test_r1(): pass\n",
+        )
+        .expect("test");
+        std::fs::create_dir_all(root.join(".claw")).expect("claw");
+        std::fs::write(root.join(".claw").join("project.json"), "{}").expect("état");
+        std::fs::create_dir_all(root.join("__pycache__")).expect("cache");
+        std::fs::write(root.join("__pycache__").join("app.pyc"), "x").expect("pyc");
+        let (copy, files) = clean_copy(&root).expect("copie");
+        assert_eq!(files, 2);
+        assert!(copy.join("app.py").is_file());
+        assert!(copy.join("tests").join("test_app.py").is_file());
+        assert!(!copy.join(".claw").exists());
+        assert!(!copy.join("__pycache__").exists());
+        let _ = std::fs::remove_dir_all(&copy);
+        let run = vec!["python app.py liste".to_string()];
+        assert!(!readme_shows(&root, &run));
+        std::fs::write(
+            root.join("README.md"),
+            "Lancer :\n\n    python  app.py liste\n",
+        )
+        .expect("readme");
+        assert!(readme_shows(&root, &run));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_budget_note_compares_the_free_quota_with_the_milestones_left() {
+        let mut state = ProjectState::default();
+        assert_eq!(milestone_cost(&state), DEFAULT_MILESTONE_REQUESTS);
+        state.milestone_requests.insert("M1".to_string(), 20);
+        state.milestone_requests.insert("M2".to_string(), 40);
+        assert_eq!(milestone_cost(&state), 30);
+        // Assez pour tout : rien à dire.
+        assert!(budget_note(200, 30, 3).is_none());
+        assert!(budget_note(10, 30, 0).is_none());
+        let (guide, notice) = budget_note(70, 30, 3).expect("pas assez pour tout");
+        assert!(guide.contains("there is room for about 2 of the 3 milestones left"));
+        assert_eq!(
+            notice,
+            "Mode projet : il reste 70 requêtes gratuites aujourd'hui, de quoi faire environ 2 des 3 jalons restants"
+        );
+        let (guide, notice) = budget_note(12, 30, 2).expect("pas assez pour un jalon");
+        assert!(guide.contains(
+            "Do only what fits in about 6 requests, then stop with the project in a clean state"
+        ));
+        assert!(notice.contains("l'agent s'arrêtera sur un état propre"));
     }
 
     #[test]

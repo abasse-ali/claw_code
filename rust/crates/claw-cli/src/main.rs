@@ -5995,6 +5995,15 @@ impl ApiClient for DefaultRuntimeClient {
         self.enable_tools && tools::question_asker_available()
     }
 
+    /// Mode projet : le quota gratuit du jour, pour un modèle gratuit d'`OpenRouter`.
+    fn free_requests_left(&mut self) -> Option<u64> {
+        let model = self.chain.primary().to_string();
+        if !(credits::is_openrouter_model(&model) && model.ends_with(":free")) {
+            return None;
+        }
+        credits::free_requests_left()
+    }
+
     /// Images de la demande décrites dès le début du tour, pour un modèle qui
     /// ne les lit pas (elles l'auraient été à la première requête) : le
     /// défaut qu'elles montrent décide de la méthode jointe à la demande.
