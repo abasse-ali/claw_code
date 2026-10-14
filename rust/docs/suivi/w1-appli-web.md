@@ -42,6 +42,16 @@ connexion par **jeton personnel** gardé dans le navigateur.
   GitHub refuse au jeton d'effacer l'issue (l'autorisation que demande `deleteIssue` à un jeton
   à grain fin n'est pas documentée), la session est fermée et perd l'étiquette `claw-web` :
   elle quitte l'appli, et c'est dit.
+- **Journal détaillé** (`journal.py`, `js/transcript.js`) : comme l'interface locale de Claw,
+  chaque passage montre les messages de l'agent, ses réflexions (repliées), chaque outil
+  dépliable (entrée et sortie des commandes, différences numérotées des écritures et
+  modifications, liste de tâches cochée), les avis de Claw, puis modèle, requêtes et durée.
+  Le moteur le publie toutes les 24 s, en bref (sorties et différences tronquées), dans des
+  commentaires de la session : gzip puis base64 dans un commentaire HTML, invisible sur GitHub,
+  60 000 caractères au plus par partie (un passage de 30 min : une partie de 42 000). L'appli
+  ne relit que les commentaires modifiés (`since`) et garde les panneaux dépliés.
+- **Modifications** : la vue « Modifications » d'une session montre les fichiers changés sur
+  sa branche et leurs différences (API de comparaison de GitHub).
 - **Diagnostic** : les actions et les avis de Claw vont au journal du job ; le journal complet
   de Claw (`claw.jsonl`, `claw.stderr`) est gardé 7 jours comme artefact du passage.
 - **Secrets du moteur** : `OPENROUTER_API_KEY` et `CLAW_REPO_TOKEN`, posés par l'appli
@@ -61,6 +71,7 @@ connexion par **jeton personnel** gardé dans le navigateur.
 | W1-3 | Publication : dépôt public `claw-web`, GitHub Pages, essai réel de bout en bout | en cours : Pages actif (https://abasse-ali.github.io/claw-web/) ; secrets `OPENROUTER_API_KEY` et `CLAW_REPO_TOKEN` posés (vérifications du moteur au vert dans l'appli) ; vrai modèle gratuit essayé (session 2) ; reste le premier essai de l'utilisateur sur un de ses dépôts |
 | W1-4 | Retours de l'utilisateur : pas de zoom, comme une appli ; réglages sur leur propre page (`#/reglages`), plus à l'accueil | fait le 14 octobre 2026 (`claw-web` 1e04535) |
 | W1-5 | Création de dépôt depuis le choix du dépôt (nom, description, public ou privé, `.gitignore`, premier commit) ; mode projet continu d'un passage à l'autre du moteur | fait le 14 octobre 2026 (`claw-web` 6e72294 ; moteur et Claw dans ce dépôt) |
+| W1-8 | Interface « comme Claw » : journal détaillé de chaque passage (messages, réflexions, outils avec entrée et sortie, différences, tâches) et vue des modifications de la branche ; outil de capture adapté à Edge 155 (port lu dans `DevToolsActivePort`) | fait le 15 octobre 2026 (moteur 4e95875 ; `claw-web` 7a4b497) ; essayé sur le vrai journal de la session 12 (237 événements) et sur GitHub avec le faux modèle (journal lu pendant puis après le passage) |
 | W1-7 | Supprimer des sessions (une ou plusieurs, avec branches et passages) ; d'après les sessions 5 et 9 : vérification d'un jalon limitée à 3 échecs par tour (45 relances dans la session 9), commandes `Verify` mal lues (`--hors-ligne` lancé seul), plan sans lignes `Status:` non signalé (jalons de la session 5 jamais vérifiés), passage arrêté sans conclusion présenté comme une erreur | fait le 14 octobre 2026 (`claw-web` bbef23e ; Claw et moteur dans ce dépôt) |
 | W1-6 | Retours du premier essai de l'utilisateur (session 5, `test_claw`) : mode projet pas activé par « Crée un Comparateur de prix... » (objet inconnu de Claw) ; aucun moyen d'arrêter depuis l'appli ; à l'annulation, Claw continuait pendant la publication, qui ouvrait une pull request pour un travail inachevé, sous le titre du premier message ; chemins absolus du job dans la progression ; puces de la zone de saisie sur les boutons de la session ; avertissement Node.js 20 sur chaque job | fait le 14 octobre 2026 (d422f5a, be1c522, a59e3a2 ; `claw-web` 89e8438) |
 
