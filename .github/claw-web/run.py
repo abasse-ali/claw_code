@@ -219,6 +219,13 @@ def main():
     env = {key: value for key, value in os.environ.items()
            if "TOKEN" not in key.upper() or key == "OPENROUTER_API_KEY"}
     env["CLAW_NO_BROWSER"] = "1"
+    # Options choisies dans l'appli : mode équipe, Ultracode (comme les boutons de l'interface
+    # locale de Claw).
+    for choice, variable, label in (("TEAM", "CLAW_TEAM", "mode équipe"), ("ULTRACODE", "CLAW_ULTRACODE", "Ultracode")):
+        env.pop(choice, None)
+        if os.environ.get(choice, "").strip() == "1":
+            env[variable] = "1"
+            print(f"Option : {label}", flush=True)
     args = ["claw", "--permission-mode", "danger-full-access", "--output-format", "stream-json"]
     mock = None
     if MODEL == "mock":

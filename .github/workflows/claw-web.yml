@@ -28,6 +28,16 @@ on:
         required: false
         type: string
         default: ""
+      team:
+        description: "Mode équipe (1 : chaque étape au modèle gratuit le plus fort pour son rôle)"
+        required: false
+        type: string
+        default: ""
+      ultracode:
+        description: "Ultracode (1 : demande étudiée avant le travail, résultat vérifié après)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -101,6 +111,8 @@ jobs:
         id: claw
         env:
           MODEL: ${{ inputs.model }}
+          TEAM: ${{ inputs.team }}
+          ULTRACODE: ${{ inputs.ultracode }}
           SESSION: ${{ inputs.session }}
           JOB_TOKEN: ${{ github.token }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
