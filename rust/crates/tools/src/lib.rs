@@ -4595,11 +4595,16 @@ const POWERSHELL_UTF8: &str = "try { [Console]::OutputEncoding = [System.Text.UT
 /// La commande du modèle, prête pour `PowerShell`. Un `2>&1` final est retiré :
 /// sous `PowerShell` 5.1, il change chaque ligne d'erreur d'un programme en
 /// erreur de `PowerShell`, et une compilation réussie qui écrit un
-/// avertissement sort en échec ; Claw garde déjà stderr à part.
+/// avertissement sort en échec ; Claw garde déjà stderr à part. Sous Windows,
+/// la sortie est d'abord mise en UTF-8 ; ailleurs, `pwsh` y écrit déjà.
 fn powershell_script(command: &str) -> String {
     let trimmed = command.trim_end();
     let command = trimmed.strip_suffix("2>&1").map_or(trimmed, str::trim_end);
-    format!("{POWERSHELL_UTF8}{command}")
+    if cfg!(windows) {
+        format!("{POWERSHELL_UTF8}{command}")
+    } else {
+        command.to_string()
+    }
 }
 
 fn detect_powershell_shell() -> std::io::Result<&'static str> {
@@ -4892,16 +4897,21 @@ mod tests {
         assert!(!second.contains("## Section 0\n"));
     }
 
-    /// Avec un vrai navigateur (`CLAW_TEST_BROWSER=1`) : la page rend son état
-    /// après exécution du JavaScript, et sa console.
     #[test]
     fn a_powershell_command_writes_utf8_and_keeps_its_exit_code() {
         let script = super::powershell_script("cd frontend; npm run build 2>&1  ");
-        assert!(script.starts_with(super::POWERSHELL_UTF8));
         assert!(script.ends_with("cd frontend; npm run build"), "{script}");
-        assert!(super::powershell_script("Get-ChildItem").ends_with("\nGet-ChildItem"));
+        // Sous Windows seulement, la sortie est d'abord mise en UTF-8.
+        let expected = if cfg!(windows) {
+            format!("{}Get-ChildItem", super::POWERSHELL_UTF8)
+        } else {
+            "Get-ChildItem".to_string()
+        };
+        assert_eq!(super::powershell_script("Get-ChildItem"), expected);
     }
 
+    /// Avec un vrai navigateur (`CLAW_TEST_BROWSER=1`) : la page rend son état
+    /// après exécution du JavaScript, et sa console.
     #[test]
     fn view_page_shows_what_the_browser_displays_and_its_console() {
         if std::env::var_os("CLAW_TEST_BROWSER").is_none() || !super::page_viewer_available() {

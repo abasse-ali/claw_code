@@ -120,6 +120,16 @@ async function run() {
     }, 30000);
   });
 
+  /** L'agent a fini son tour : un message, un changement de modèle ou de mode
+   * ne passe qu'au repos (sinon 409 : l'agent est déjà en train de travailler). */
+  const idle = async () => {
+    for (;;) {
+      await waitFor("agent au repos", () => api.busy === false, 60000);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      if (api.busy === false) return;
+    }
+  };
+
   await step("la barre d'état affiche les crédits OpenRouter", async () => {
     await waitFor("crédits dans la barre d'état", () => api.statusText.includes("8,25 $"), 20000);
   });
@@ -127,6 +137,7 @@ async function run() {
   await step("les crédits se mettent à jour en temps réel pendant que l'agent travaille", async () => {
     // Modèle gratuit « OpenRouter » servi par le faux modèle : chaque étape
     // décompte une requête gratuite, poussée aussitôt à la barre d'état.
+    await idle();
     await api.server.request("POST", "/api/model", { value: "mock/codeur:free" });
     await api.server.send("Réponds bonjour");
     await waitFor(
@@ -134,6 +145,7 @@ async function run() {
       () => /· 67[0-7] gratuites/.test(api.statusText),
       4000,
     );
+    await idle();
     await api.server.request("POST", "/api/model", { value: "ollama:mock" });
   });
 
@@ -184,14 +196,6 @@ async function run() {
     () => diffTabs("modified", "claw-proposed").length === 1 && api.pendingEdits.length === 1,
     40000,
   );
-  /** L'agent a fini son tour : le mode de permission ne se change qu'au repos. */
-  const idle = async () => {
-    for (;;) {
-      await waitFor("agent au repos", () => api.busy === false, 60000);
-      await new Promise((resolve) => setTimeout(resolve, 600));
-      if (api.busy === false) return;
-    }
-  };
   const setMode = async (mode) => {
     await idle();
     await api.server.request("POST", "/api/permissions", { value: mode });
