@@ -3,7 +3,8 @@
 Entrées (environnement) : MODEL (vide : le meilleur modèle gratuit ; `mock` : faux modèle
 d'essai), SESSION, JOB_TOKEN, OPENROUTER_API_KEY, CLAW_SRC (source de Claw, pour le faux
 modèle). L'agent tourne dans `work/`, sans aucun jeton GitHub dans son environnement. Un
-commentaire de progression est créé dans la session puis mis à jour au fil du travail ; les
+commentaire de progression est créé dans la session puis mis à jour au fil du travail ; le
+journal détaillé du passage (journal.py) suit dans d'autres commentaires, lus par l'appli ; les
 actions et les avis de Claw vont aussi au journal du job. Un job annulé (SIGINT puis SIGTERM,
 reçus grâce à `exec` dans le workflow) arrête l'agent et le dit dans la progression.
 """
@@ -18,13 +19,17 @@ import time
 
 from common import (PROGRESS, WORK, GitHubError, edit_comment, output, post_comment, run_url,
                     stop_tree)
+from journal import Journal
 
 SESSION = os.environ["SESSION"]
 ENGINE = os.environ["GITHUB_REPOSITORY"]
 JOB_TOKEN = os.environ["JOB_TOKEN"]
 MODEL = os.environ.get("MODEL", "").strip()
-# Mise à jour du commentaire de progression au plus toutes les N secondes.
+# Mise à jour du commentaire de progression au plus toutes les N secondes, du journal
+# détaillé (plus lourd) au plus toutes les LOG_EVERY secondes.
 PROGRESS_EVERY = 12
+LOG_EVERY = 24
+RUN_ID = int(os.environ.get("GITHUB_RUN_ID") or 0)
 SHOWN_ACTIONS = 8
 # Racine du dépôt de la tâche : les chemins sont montrés depuis elle, pas depuis le disque du job.
 ROOT = os.path.abspath("work")
@@ -82,9 +87,16 @@ class Progress:
         self.comment_id = None
         self.dirty = True
         self.lock = threading.Lock()
+        self.journal = Journal(relative)
+        self.journal_at = 0.0
+        self.log_comments = {}
+        # Un envoi à la fois (le fil de rafraîchissement et la fin du passage) : jamais deux
+        # commentaires pour la même partie.
+        self.sending = threading.Lock()
 
     def event(self, event):
         with self.lock:
+            self.journal.add(event)
             kind = event.get("type")
             if kind == "assistant":
                 for part in (event.get("message") or {}).get("content") or []:
@@ -126,11 +138,16 @@ class Progress:
         return "\n".join(lines)
 
     def publish(self, state="running", force=False):
-        with self.lock:
-            if not (self.dirty or force):
-                return
-            body = self.body(state)
-            self.dirty = False
+        # Calculé sous le verrou d'envoi : un état plus ancien n'écrase jamais un plus récent.
+        with self.sending:
+            with self.lock:
+                if not (self.dirty or force):
+                    return
+                body = self.body(state)
+                self.dirty = False
+            self._send_progress(body)
+
+    def _send_progress(self, body):
         try:
             if self.comment_id is None:
                 self.comment_id = post_comment(JOB_TOKEN, ENGINE, SESSION, body)["id"]
@@ -138,6 +155,32 @@ class Progress:
                 edit_comment(JOB_TOKEN, ENGINE, self.comment_id, body)
         except GitHubError as error:
             print(f"::warning::progression non publiée : {error}")
+
+    def publish_journal(self, force=False):
+        """Les parties du journal détaillé qui ont changé, au plus toutes les LOG_EVERY s."""
+        with self.sending:
+            with self.lock:
+                if not (self.journal.dirty or force):
+                    return
+                if not force and time.time() - self.journal_at < LOG_EVERY:
+                    return
+                pages = self.journal.bodies(RUN_ID)
+                self.journal.dirty = False
+                self.journal_at = time.time()
+            self._send_journal(pages)
+
+    def _send_journal(self, pages):
+        for number, body, digest in pages:
+            if self.journal.sent.get(number) == digest:
+                continue
+            try:
+                if number in self.log_comments:
+                    edit_comment(JOB_TOKEN, ENGINE, self.log_comments[number], body)
+                else:
+                    self.log_comments[number] = post_comment(JOB_TOKEN, ENGINE, SESSION, body)["id"]
+                self.journal.sent[number] = digest
+            except GitHubError as error:
+                print(f"::warning::journal non publié : {error}")
 
 
 def start_mock():
@@ -177,6 +220,7 @@ def main():
     def refresh():
         while not stop_refresh.wait(PROGRESS_EVERY):
             progress.publish()
+            progress.publish_journal()
 
     threading.Thread(target=refresh, daemon=True).start()
     result, error, stopped = "", "", False
@@ -227,6 +271,7 @@ def main():
     else:
         state = "failed"
     progress.publish(state, force=True)
+    progress.publish_journal(force=True)
     (WORK / "notices.txt").write_text("\n".join(progress.notices[-2:]), encoding="utf-8")
     (WORK / "result.md").write_text(result or "", encoding="utf-8")
     (WORK / "error.txt").write_text(error or "", encoding="utf-8")
