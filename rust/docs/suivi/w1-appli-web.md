@@ -54,7 +54,7 @@ connexion par **jeton personnel** gardé dans le navigateur.
 | W1-3 | Publication : dépôt public `claw-web`, GitHub Pages, essai réel de bout en bout | en cours : Pages actif (https://abasse-ali.github.io/claw-web/) ; secrets `OPENROUTER_API_KEY` et `CLAW_REPO_TOKEN` posés (vérifications du moteur au vert dans l'appli) ; vrai modèle gratuit essayé (session 2) ; reste le premier essai de l'utilisateur sur un de ses dépôts |
 | W1-4 | Retours de l'utilisateur : pas de zoom, comme une appli ; réglages sur leur propre page (`#/reglages`), plus à l'accueil | fait le 14 octobre 2026 (`claw-web` 1e04535) |
 | W1-5 | Création de dépôt depuis le choix du dépôt (nom, description, public ou privé, `.gitignore`, premier commit) ; mode projet continu d'un passage à l'autre du moteur | fait le 14 octobre 2026 (`claw-web` 6e72294 ; moteur et Claw dans ce dépôt) |
-| W1-6 | Retours du premier essai de l'utilisateur (session 5, `test_claw`) : mode projet pas activé par « Crée un Comparateur de prix... » (objet inconnu de Claw) ; aucun moyen d'arrêter depuis l'appli ; à l'annulation, Claw continuait pendant la publication, qui ouvrait une pull request pour un travail inachevé, sous le titre du premier message ; chemins absolus du job dans la progression ; puces de la zone de saisie sur les boutons de la session ; avertissement Node.js 20 sur chaque job | fait le 14 octobre 2026 |
+| W1-6 | Retours du premier essai de l'utilisateur (session 5, `test_claw`) : mode projet pas activé par « Crée un Comparateur de prix... » (objet inconnu de Claw) ; aucun moyen d'arrêter depuis l'appli ; à l'annulation, Claw continuait pendant la publication, qui ouvrait une pull request pour un travail inachevé, sous le titre du premier message ; chemins absolus du job dans la progression ; puces de la zone de saisie sur les boutons de la session ; avertissement Node.js 20 sur chaque job | fait le 14 octobre 2026 (d422f5a, be1c522, a59e3a2 ; `claw-web` 89e8438) |
 
 ## Essais
 
@@ -82,4 +82,21 @@ connexion par **jeton personnel** gardé dans le navigateur.
   du faux modèle et quatre fichiers `.port_sessions/` laissés par les essais Python du dépôt).
   Pull request fermée, branche supprimée, sa CI arrêtée. Les essais du moteur se font
   désormais sur une session dont la tâche ne fait rien écrire.
+- Premier essai de l'utilisateur (session 5, `test_claw`, modèle Auto) : une question, puis
+  « Crée un Comparateur de prix... » ; mode projet pas activé, travail commencé sans cahier des
+  charges ; `nemotron-3-ultra` a lâché (504) et la requête est passée à `laguna-s-2.1`, comme
+  prévu quand personne ne peut répondre ; passage annulé depuis GitHub au bout de 9 min ;
+  Claw a continué pendant la publication, qui a ouvert la pull request n° 1 de `test_claw`
+  (sept fichiers du début du backend, titre « Donne des idées de projet web »). Corrections :
+  W1-6.
+- Arrêt, sur GitHub avec le faux modèle (sessions 6 et 7, commande `sleep 100` lancée par
+  l'agent, annulée en cours) : carte « Claw a été arrêté après 1 min 00 s (passage annulé) »,
+  réponse « La tâche a été arrêtée », chemin montré `ls . > /dev/null && sleep 100`, titre tiré
+  du message, journal de Claw en artefact, aucune pull request, plus d'avertissement Node.js 20.
+  À la session 6, le `sleep` survivait à Claw jusqu'au nettoyage du job : l'arbre des
+  processus de Claw est maintenant arrêté (session 7 : aucun orphelin). Les deux passages
+  annulés n'avaient pas gardé le binaire compilé (sauvegarde d'actions/cache en fin de job
+  réussi seulement) : il est gardé dès la compilation (session 8 : « Cache saved » juste
+  après). Appli : vue de session au format téléphone avec un faux GitHub (boutons 28 px
+  au-dessus de la zone de saisie, aucun débordement, « Arrêter » en deux appuis).
 
