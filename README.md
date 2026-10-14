@@ -22,12 +22,17 @@ Adresse : https://abasse-ali.github.io/claw-web/
 1. Créez un [jeton à grain fin](https://github.com/settings/personal-access-tokens/new) :
    - dépôts : le moteur et ceux où Claw travaillera (ou tous) ;
    - autorisations des dépôts, en lecture et écriture : **Actions**, **Contents**, **Issues**,
-     **Pull requests**, **Secrets** (Metadata en lecture vient avec).
+     **Pull requests**, **Secrets** (Metadata en lecture vient avec) ;
+   - pour créer des dépôts depuis l'appli (« Créer un dépôt » dans le choix du dépôt) :
+     **All repositories** et **Administration** en lecture et écriture. Modifier ces réglages
+     garde la valeur du jeton : rien à refaire dans l'appli.
 2. Ouvrez l'appli, collez le jeton, enregistrez.
 3. Dans « Moteur » : collez votre clé OpenRouter, laissez coché « Donner aussi ce jeton au
    moteur », puis « Configurer le moteur ». L'appli pose deux secrets dans le dépôt du moteur,
    chiffrés dans le navigateur : `OPENROUTER_API_KEY` et `CLAW_REPO_TOKEN`.
-4. Choisissez un dépôt et une branche, décrivez la tâche.
+4. Choisissez un dépôt et une branche, ou créez un dépôt neuf, puis décrivez la tâche. Dans un
+   dépôt neuf, une demande de création (« Crée une application... ») fait passer Claw en mode
+   projet : cahier des charges, plan en jalons vérifiés, démonstration finale.
 
 Le premier passage compile Claw (quelques minutes) ; le binaire reste ensuite en cache et les
 passages suivants démarrent en moins d'une minute.

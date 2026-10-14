@@ -199,6 +199,20 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .sheet-item:hover, .sheet-item:focus-visible { background: var(--panel-2); }
 .sheet-item.current { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .sheet-item small { color: var(--muted); }
+.sheet-label { display: inline-flex; align-items: center; gap: 8px; }
+.sheet-item.pinned { color: var(--accent); border-bottom: 1px solid var(--border); border-radius: 10px 10px 0 0; margin-bottom: 4px; }
+.sheet-item.pinned svg { width: 18px; height: 18px; }
+
+/* Création d'un dépôt */
+.create-repo { display: flex; flex-direction: column; gap: 12px; padding: 0 4px 4px; overflow-y: auto; }
+.create-repo label { display: flex; flex-direction: column; gap: 6px; font-size: .92rem; }
+.create-repo input[type="text"], .create-repo select {
+  padding: 11px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit;
+}
+.create-repo .owner-line { margin-top: -6px; color: var(--muted); overflow-wrap: anywhere; }
+.create-repo .owner-line .slug { color: var(--text); }
+.create-repo .visibility { display: flex; gap: 18px; margin: 0; padding: 0; border: 0; }
+.create-repo label.check { flex-direction: row; align-items: center; gap: 8px; }
 
 /* Réglages : une page à part, avec son retour à l'accueil */
 .icon-button.active { background: var(--panel); color: var(--accent); }

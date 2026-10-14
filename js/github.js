@@ -71,6 +71,17 @@ export class GitHub {
     return found;
   }
 
+  /** Nouveau dépôt du compte, avec un README (donc une branche `main` dès le départ). */
+  createRepository({ name, description, isPrivate, gitignore }) {
+    return this.request("POST", "/user/repos", {
+      name,
+      description: description || undefined,
+      private: Boolean(isPrivate),
+      auto_init: true,
+      gitignore_template: gitignore || undefined,
+    });
+  }
+
   async branches(fullName) {
     const found = [];
     for (let page = 1; page <= 3; page += 1) {
@@ -172,7 +183,13 @@ export class GitHub {
 function explain(status, reason, path) {
   if (status === 401) return "Jeton GitHub refusé (invalide ou expiré) : renouvelez-le dans les réglages";
   if (status === 403 && /rate limit/i.test(reason)) return "Limite de requêtes GitHub atteinte : réessayez dans quelques minutes";
+  if (path === "/user/repos" && status === 422) {
+    return /already exists/i.test(reason) ? "Vous avez déjà un dépôt de ce nom" : `Création refusée : ${reason}`;
+  }
   if (status === 403 || status === 404) {
+    if (path === "/user/repos") {
+      return "Le jeton ne peut pas créer de dépôt : dans ses réglages sur GitHub, choisissez « All repositories » et l'autorisation Administration en lecture et écriture (le jeton garde la même valeur)";
+    }
     if (path.includes("/secrets")) return "Le jeton n'a pas le droit de gérer les secrets du moteur (autorisation Secrets)";
     if (path.includes("/dispatches") || path.includes("/actions/")) return "Le jeton n'a pas accès aux Actions du moteur (autorisation Actions)";
     return `Accès refusé ou introuvable (${reason}) : vérifiez les dépôts et autorisations du jeton`;

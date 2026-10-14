@@ -185,12 +185,14 @@ function openPicker({ title, items, current, placeholder, onPick }) {
       <ul class="sheet-list"></ul>
     </div>`;
   const list = sheet.querySelector(".sheet-list");
+  // Les éléments épinglés (« Créer un dépôt ») restent en tête, quelle que soit la recherche.
   const draw = (filter = "") => {
     const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
-    const shown = items.filter((item) => words.every((word) => `${item.label} ${item.detail || ""}`.toLowerCase().includes(word)));
+    const shown = items.filter((item) => item.pinned
+      || words.every((word) => `${item.label} ${item.detail || ""}`.toLowerCase().includes(word)));
     list.innerHTML = shown.slice(0, 200).map((item) => `
-      <li><button class="sheet-item${item.value === current ? " current" : ""}" data-value="${escapeHtml(item.value)}">
-        <span>${escapeHtml(item.label)}</span>
+      <li><button class="sheet-item${item.value === current ? " current" : ""}${item.pinned ? " pinned" : ""}" data-value="${escapeHtml(item.value)}">
+        <span class="sheet-label">${item.icon ? ICON[item.icon] : ""}<span>${escapeHtml(item.label)}</span></span>
         ${item.detail ? `<small>${escapeHtml(item.detail)}</small>` : ""}
       </button></li>`).join("") || '<li class="empty">Rien ne correspond.</li>';
   };
@@ -203,8 +205,9 @@ function openPicker({ title, items, current, placeholder, onPick }) {
     if (event.target === sheet || event.target.closest("[data-close]")) close();
     const button = event.target.closest(".sheet-item");
     if (button) {
+      const typed = search ? search.value.trim() : "";
       close();
-      onPick(button.dataset.value);
+      onPick(button.dataset.value, typed);
     }
   };
   const search = sheet.querySelector(".sheet-search");
@@ -213,6 +216,8 @@ function openPicker({ title, items, current, placeholder, onPick }) {
   (search || sheet.querySelector(".sheet-item"))?.focus();
 }
 
+const NEW_REPO = "__nouveau-depot__";
+
 async function pickRepo() {
   try {
     const repos = await loadRepos();
@@ -220,22 +225,115 @@ async function pickRepo() {
       title: "Dépôt",
       placeholder: "Rechercher un dépôt",
       current: state.settings.repo,
-      items: repos.map((repo) => ({
-        value: repo.full_name,
-        label: repo.full_name,
-        detail: `${repo.private ? "privé" : "public"} · ${since(repo.pushed_at)}`,
-      })),
-      onPick: async (value) => {
-        state.settings.repo = value;
+      items: [
+        { value: NEW_REPO, label: "Créer un dépôt", detail: "nouveau dépôt GitHub, avec un README et sa branche main", pinned: true, icon: "plus" },
+        ...repos.map((repo) => ({
+          value: repo.full_name,
+          label: repo.full_name,
+          detail: `${repo.private ? "privé" : "public"} · ${since(repo.pushed_at)}`,
+        })),
+      ],
+      onPick: async (value, typed) => {
+        if (value === NEW_REPO) {
+          openCreateRepo(typed);
+          return;
+        }
         const repo = repos.find((item) => item.full_name === value);
-        state.settings.branch = repo ? repo.default_branch : "main";
-        saveSettings();
-        renderComposer();
+        useRepo(value, repo ? repo.default_branch : "main");
       },
     });
   } catch (error) {
     failure(error);
   }
+}
+
+function useRepo(fullName, branch) {
+  state.settings.repo = fullName;
+  state.settings.branch = branch || "main";
+  saveSettings();
+  renderComposer();
+}
+
+/** Nom de dépôt proposé à partir d'un texte (« Mon appli de prêts » : mon-appli-de-prets). */
+function repoSlug(text) {
+  return (text || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+}
+
+const GITIGNORES = ["", "Python", "Node", "Rust", "Go", "Java", "Dart", "Swift", "Kotlin", "C++", "Unity"];
+
+/** Formulaire de création d'un dépôt ; le dépôt créé devient celui de la tâche. */
+function openCreateRepo(prefill = "") {
+  const sheet = $("#sheet");
+  sheet.innerHTML = `
+    <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="Nouveau dépôt">
+      <div class="sheet-head">
+        <strong>Nouveau dépôt</strong>
+        <button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button>
+      </div>
+      <form class="create-repo" autocomplete="off">
+        <label>Nom
+          <input name="repo_name" type="text" required maxlength="100" spellcheck="false" autocapitalize="none"
+            placeholder="mon-projet" value="${escapeHtml(repoSlug(prefill))}">
+        </label>
+        <small class="owner-line">${escapeHtml(state.user ? state.user.login : "")}/<span class="slug">${escapeHtml(repoSlug(prefill) || "mon-projet")}</span></small>
+        <label>Description (facultative)
+          <input name="description" type="text" maxlength="350" placeholder="Ce que fera le projet">
+        </label>
+        <fieldset class="visibility">
+          <label class="check"><input type="radio" name="visibility" value="private" checked><span>Privé</span></label>
+          <label class="check"><input type="radio" name="visibility" value="public"><span>Public</span></label>
+        </fieldset>
+        <label>Fichier .gitignore
+          <select name="gitignore">${GITIGNORES.map((name) => `<option value="${name}">${name || "Aucun"}</option>`).join("")}</select>
+        </label>
+        <button class="primary" type="submit">Créer le dépôt</button>
+      </form>
+    </div>`;
+  const form = sheet.querySelector(".create-repo");
+  const fields = form.elements;
+  const slug = sheet.querySelector(".slug");
+  fields.repo_name.addEventListener("input", () => {
+    slug.textContent = fields.repo_name.value.trim() || "mon-projet";
+  });
+  const close = () => {
+    sheet.hidden = true;
+    sheet.innerHTML = "";
+  };
+  sheet.onclick = (event) => {
+    if (event.target === sheet || event.target.closest("[data-close]")) close();
+  };
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const name = fields.repo_name.value.trim();
+    if (!/^[A-Za-z0-9._-]{1,100}$/.test(name)) {
+      toast("Nom de dépôt : lettres, chiffres, points, tirets et soulignés seulement", "error");
+      return;
+    }
+    const button = form.querySelector("button[type=submit]");
+    button.disabled = true;
+    button.textContent = "Création…";
+    try {
+      const repo = await state.github.createRepository({
+        name,
+        description: fields.description.value.trim(),
+        isPrivate: fields.visibility.value !== "public",
+        gitignore: fields.gitignore.value,
+      });
+      if (state.repos) state.repos.unshift(repo);
+      state.branches.set(repo.full_name, [repo.default_branch || "main"]);
+      close();
+      useRepo(repo.full_name, repo.default_branch);
+      toast(`Dépôt ${repo.full_name} créé : décrivez ce que Claw doit y construire`);
+      document.querySelector("#composer textarea")?.focus();
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = "Créer le dépôt";
+      failure(error);
+    }
+  });
+  sheet.hidden = false;
+  fields.repo_name.focus();
 }
 
 async function pickBranch() {
@@ -635,6 +733,7 @@ function showSettings(first = false, justConnected = false) {
         <p class="help">Créez un <a href="${TOKEN_HELP}" target="_blank" rel="noopener noreferrer">jeton à grain fin</a> :
           dépôts : le moteur et ceux où Claw travaillera ;
           autorisations des dépôts en lecture et écriture : Actions, Contents, Issues, Pull requests, Secrets.
+          Pour créer des dépôts depuis l'appli : « All repositories » et Administration en lecture et écriture.
           Il reste dans ce navigateur seulement.</p>
         <label>Dépôt du moteur
           <input name="engine" type="text" value="${escapeHtml(settings.engine || DEFAULT_ENGINE)}" spellcheck="false">
