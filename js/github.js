@@ -139,6 +139,58 @@ export class GitHub {
     return data.workflow_runs || [];
   }
 
+  /** Requête GraphQL : ses erreurs arrivent avec un statut 200 ; elles deviennent des exceptions. */
+  async graphql(query, variables) {
+    const data = await this.request("POST", "/graphql", { query, variables });
+    const errors = (data && data.errors) || [];
+    if (errors.length) {
+      const refused = errors.some((error) => error.type === "FORBIDDEN"
+        || /not authorized|not accessible|permission/i.test(error.message || ""));
+      throw new GitHubError(refused ? 403 : 422, errors.map((error) => error.message).join(" ; "));
+    }
+    return data ? data.data : null;
+  }
+
+  /** Efface une issue de GitHub, sans retour possible (réservé à qui administre le dépôt). */
+  deleteIssue(nodeId) {
+    return this.graphql("mutation($id: ID!) { deleteIssue(input: {issueId: $id}) { clientMutationId } }", { id: nodeId });
+  }
+
+  removeLabel(repo, number, label) {
+    return this.request("DELETE", `/repos/${repo}/issues/${number}/labels/${encodeURIComponent(label)}`);
+  }
+
+  closePull(repo, number) {
+    return this.request("PATCH", `/repos/${repo}/pulls/${number}`, { state: "closed" });
+  }
+
+  /** Supprime une branche ; déjà absente, rien à faire (faux). */
+  async deleteBranch(repo, branch) {
+    try {
+      await this.request("DELETE", `/repos/${repo}/git/refs/heads/${branch}`);
+      return true;
+    } catch (error) {
+      if (error instanceof GitHubError && (error.status === 404 || error.status === 422)) return false;
+      throw error;
+    }
+  }
+
+  deleteRun(engine, runId) {
+    return this.request("DELETE", `/repos/${engine}/actions/runs/${runId}`);
+  }
+
+  /** Passages du moteur, jusqu'à `pages` pages de 100, les plus récents d'abord. */
+  async allRuns(engine, pages = 3) {
+    const runs = [];
+    for (let page = 1; page <= pages; page += 1) {
+      const data = await this.request("GET", `/repos/${engine}/actions/workflows/${WORKFLOW}/runs?per_page=100&page=${page}`);
+      const batch = data.workflow_runs || [];
+      runs.push(...batch);
+      if (batch.length < 100) break;
+    }
+    return runs;
+  }
+
   /** Arrête un passage : le moteur garde ce qui est fait sur la branche de la session. */
   cancelRun(engine, runId) {
     return this.request("POST", `/repos/${engine}/actions/runs/${runId}/cancel`);

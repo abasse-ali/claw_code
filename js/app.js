@@ -3,7 +3,7 @@
 // pousse une branche, ouvre la pull request et répond. Chaque session est une issue du
 // moteur ; l'appli la suit en direct (progression, réponse, pull request).
 
-import { ANSWER, GitHub, GitHubError, PROGRESS } from "./github.js";
+import { ANSWER, GitHub, GitHubError, LABEL, PROGRESS } from "./github.js";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 import { sealedBox } from "./sealed-box.js";
 
@@ -27,6 +27,7 @@ const ICON = {
   back: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>',
   archive: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/></svg>',
   stop: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4h6v3"/></svg>',
 };
 
 const state = {
@@ -42,6 +43,10 @@ const state = {
   pollTimer: null,
   dispatchedAt: 0,
   sending: false,
+  // Liste des sessions du tiroir, et sessions cochées pour être effacées.
+  drawerSessions: [],
+  selecting: false,
+  selected: new Set(),
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -487,17 +492,43 @@ function renderSending(sending) {
 
 // --- Vues ------------------------------------------------------------------------------------
 
-function sessionItem(issue) {
+function sessionItem(issue, selectable = false) {
   const settings = settingsOf(issue);
   const status = issue.state === "closed" ? { key: "archived", label: "Archivée" } : runStatus(latestRun(settings.repo, issue.number));
-  return `
-    <li><a class="session-item" href="#/session/${issue.number}">
+  const inner = `
       <span class="dot ${status ? status.key : "idle"}" aria-hidden="true"></span>
       <span class="session-text">
         <strong>${escapeHtml(issue.title)}</strong>
         <small>${escapeHtml(settings.repo || "")} · ${status ? escapeHtml(status.label) : "en attente"} · ${since(issue.updated_at)}</small>
-      </span>
+      </span>`;
+  if (selectable) {
+    return `
+    <li><label class="session-item selectable">
+      <input type="checkbox" value="${issue.number}"${state.selected.has(issue.number) ? " checked" : ""} aria-label="Choisir ${escapeHtml(issue.title)}">${inner}
+    </label></li>`;
+  }
+  return `
+    <li><a class="session-item" href="#/session/${issue.number}">${inner}
     </a></li>`;
+}
+
+/** Liste du tiroir, depuis les sessions déjà lues ; en mode « Choisir », des cases à cocher. */
+function drawDrawerList() {
+  const list = $("#drawer .sessions");
+  list.innerHTML = state.drawerSessions.map((issue) => sessionItem(issue, state.selecting)).join("")
+    || '<li class="empty">Aucune session pour l\'instant.</li>';
+  const toggle = $("#drawer .select-toggle");
+  if (toggle) {
+    toggle.textContent = state.selecting ? "Annuler" : "Choisir";
+    toggle.hidden = !state.drawerSessions.length && !state.selecting;
+  }
+  const bar = $("#drawer .drawer-actions");
+  if (bar) {
+    bar.hidden = !state.selecting;
+    const button = bar.querySelector("button");
+    button.disabled = !state.selected.size;
+    button.querySelector("span").textContent = state.selected.size ? `Supprimer (${state.selected.size})` : "Supprimer";
+  }
 }
 
 async function renderDrawer() {
@@ -505,11 +536,44 @@ async function renderDrawer() {
   list.innerHTML = '<li class="empty">Chargement…</li>';
   try {
     const [sessions] = await Promise.all([state.github.sessions(state.settings.engine), refreshRuns()]);
-    list.innerHTML = sessions.map(sessionItem).join("") || '<li class="empty">Aucune session pour l\'instant.</li>';
+    state.drawerSessions = sessions;
+    state.selected = new Set([...state.selected].filter((number) => sessions.some((issue) => issue.number === number)));
+    drawDrawerList();
   } catch (error) {
     list.innerHTML = '<li class="empty">Sessions indisponibles.</li>';
     failure(error);
   }
+}
+
+/** Mode « Choisir » du tiroir : cocher des sessions puis les supprimer d'un coup. */
+function setupDrawerSelection() {
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "small-link select-toggle";
+  toggle.textContent = "Choisir";
+  $("#drawer .drawer-head").insertBefore(toggle, $("#drawer-close"));
+  const bar = document.createElement("div");
+  bar.className = "drawer-actions";
+  bar.hidden = true;
+  bar.innerHTML = `<button type="button" class="small-link stop" disabled>${ICON.trash}<span>Supprimer</span></button>`;
+  $("#drawer").appendChild(bar);
+  toggle.addEventListener("click", () => {
+    state.selecting = !state.selecting;
+    state.selected.clear();
+    drawDrawerList();
+  });
+  $("#drawer .sessions").addEventListener("change", (event) => {
+    const box = event.target.closest('input[type="checkbox"]');
+    if (!box) return;
+    const number = Number(box.value);
+    if (box.checked) state.selected.add(number);
+    else state.selected.delete(number);
+    drawDrawerList();
+  });
+  bar.querySelector("button").addEventListener("click", () => {
+    const issues = state.drawerSessions.filter((issue) => state.selected.has(issue.number));
+    if (issues.length) openDeleteSessions(issues);
+  });
 }
 
 function openDrawer() {
@@ -521,6 +585,135 @@ function openDrawer() {
 function closeDrawer() {
   $("#drawer").hidden = true;
   $("#app").classList.remove("drawer-open");
+  state.selecting = false;
+  state.selected.clear();
+}
+
+/** Session au travail (passage en file ou en cours) : elle s'arrête avant d'être supprimée. */
+function sessionRunning(issue) {
+  const status = runStatus(latestRun(settingsOf(issue).repo, issue.number));
+  return Boolean(status && (status.key === "running" || status.key === "queued"));
+}
+
+/** Feuille de suppression d'une ou plusieurs sessions : ce qui sera effacé, et les options. */
+async function openDeleteSessions(issues) {
+  const sheet = $("#sheet");
+  const engine = state.settings.engine;
+  const running = issues.filter(sessionRunning);
+  const chosen = issues.filter((issue) => !running.includes(issue));
+  const many = chosen.length > 1;
+  const close = () => {
+    sheet.hidden = true;
+    sheet.innerHTML = "";
+  };
+  sheet.innerHTML = `
+    <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="Supprimer">
+      <div class="sheet-head">
+        <strong>${many ? `Supprimer ${chosen.length} sessions` : "Supprimer la session"}</strong>
+        <button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button>
+      </div>
+      <p class="empty">Lecture des pull requests…</p>
+    </div>`;
+  sheet.onclick = (event) => {
+    if (event.target === sheet || event.target.closest("[data-close]")) close();
+  };
+  sheet.hidden = false;
+  // Pull request de chaque branche : une ouverte est fermée avec sa branche, et c'est dit.
+  const pulls = await Promise.all(chosen.map((issue) => {
+    const repo = settingsOf(issue).repo;
+    return repo ? state.github.pull(repo, `claw/session-${issue.number}`).catch(() => null) : null;
+  }));
+  if (sheet.hidden) return;
+  const open = chosen
+    .map((issue, index) => ({ repo: settingsOf(issue).repo, pull: pulls[index] }))
+    .filter(({ pull }) => pull && pull.state === "open" && !pull.merged_at);
+  const shown = chosen.slice(0, 6);
+  sheet.querySelector(".sheet-panel").innerHTML = `
+      <div class="sheet-head">
+        <strong>${many ? `Supprimer ${chosen.length} sessions` : "Supprimer la session"}</strong>
+        <button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button>
+      </div>
+      <form class="delete-sessions">
+        ${chosen.length ? `<ul>${shown.map((issue) => `
+          <li><strong>${escapeHtml(issue.title)}</strong>
+            <small>${escapeHtml(settingsOf(issue).repo || "?")} · claw/session-${issue.number}</small></li>`).join("")}
+          ${chosen.length > shown.length ? `<li class="more">et ${chosen.length - shown.length} autre(s)</li>` : ""}</ul>
+        <p class="help">${many ? "Leurs messages sont effacés" : "Ses messages sont effacés"} de GitHub, sans retour possible.</p>
+        <label class="check"><input type="checkbox" name="branches" checked>
+          <span>Supprimer aussi ${many ? "leurs branches" : "sa branche"} <code>claw/session-${many ? "…" : chosen[0].number}</code> dans ${many ? "les dépôts" : "le dépôt"}${open.length
+            ? ` ; ${open.map(({ repo, pull }) => `la pull request n° ${pull.number} de ${escapeHtml(repo.split("/").pop())}`).join(", ")} ${open.length > 1 ? "seront fermées" : "sera fermée"}`
+            : ""}</span></label>
+        <label class="check"><input type="checkbox" name="runs" checked>
+          <span>Effacer aussi ${many ? "leurs passages" : "ses passages"} dans GitHub Actions (journaux)</span></label>` : ""}
+        ${running.length ? `<p class="help warn">${running.length > 1 ? `${running.length} sessions travaillent encore : elles ne sont pas supprimées` : "Une session travaille encore : elle n'est pas supprimée"}. Arrêtez-la d'abord.</p>` : ""}
+        ${chosen.length ? '<button class="delete-confirm" type="submit">Supprimer</button>' : ""}
+      </form>`;
+  const form = sheet.querySelector(".delete-sessions");
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = form.querySelector(".delete-confirm");
+    button.disabled = true;
+    const withBranches = form.elements.branches.checked;
+    const withRuns = form.elements.runs.checked;
+    const problems = [];
+    let erased = 0;
+    let hidden = 0;
+    const runs = withRuns ? await state.github.allRuns(engine).catch(() => state.runs) : [];
+    for (const [index, issue] of chosen.entries()) {
+      button.textContent = many ? `Suppression ${index + 1}/${chosen.length}…` : "Suppression…";
+      const repo = settingsOf(issue).repo;
+      if (withBranches && repo) {
+        try {
+          const pull = pulls[index];
+          if (pull && pull.state === "open" && !pull.merged_at) await state.github.closePull(repo, pull.number);
+          await state.github.deleteBranch(repo, `claw/session-${issue.number}`);
+        } catch (error) {
+          problems.push(`branche de la session ${issue.number} : ${error.message}`);
+        }
+      }
+      if (withRuns && repo) {
+        const done = runs.filter((run) => run.display_title === runTitle(repo, issue.number) && run.status === "completed");
+        for (const run of done) {
+          await state.github.deleteRun(engine, run.id).catch((error) => problems.push(`passage ${run.id} : ${error.message}`));
+        }
+      }
+      try {
+        await state.github.deleteIssue(issue.node_id);
+        erased += 1;
+      } catch (error) {
+        if (!(error instanceof GitHubError) || error.status !== 403) {
+          problems.push(`session ${issue.number} : ${error.message}`);
+          continue;
+        }
+        // GitHub n'autorise pas ce jeton à effacer : la session quitte l'appli (fermée, sans étiquette).
+        try {
+          await state.github.setIssueState(engine, issue.number, "closed");
+          await state.github.removeLabel(engine, issue.number, LABEL);
+          hidden += 1;
+        } catch (fallback) {
+          problems.push(`session ${issue.number} : ${fallback.message}`);
+        }
+      }
+    }
+    close();
+    const removed = new Set(chosen.map((issue) => issue.number));
+    state.selecting = false;
+    state.selected.clear();
+    const parts = [];
+    if (erased) parts.push(erased > 1 ? `${erased} sessions supprimées` : "Session supprimée");
+    if (hidden) {
+      parts.push(`${hidden > 1 ? `${hidden} sessions retirées` : "session retirée"} de l'appli : GitHub ne permet pas à ce jeton d'effacer une issue (elle reste fermée dans les issues du moteur, où « Delete issue » l'efface)`);
+    }
+    if (problems.length) parts.push(`à revoir : ${problems.slice(0, 3).join(" ; ")}`);
+    toast(parts.join(" ; ") || "Rien à supprimer", problems.length ? "error" : undefined);
+    if (state.session && removed.has(state.session.number)) {
+      location.hash = "#/";
+    } else if (!$("#drawer").hidden) {
+      renderDrawer();
+    } else if (!state.session) {
+      showHome();
+    }
+  });
 }
 
 async function showHome() {
@@ -603,6 +796,7 @@ function renderSessionView() {
           ${run ? `<a href="${escapeHtml(run.html_url)}" target="_blank" rel="noopener noreferrer" class="small-link">${ICON.external}<span>Job</span></a>` : ""}
           ${!active ? `<button class="small-link" data-action="retry">${ICON.retry}<span>Relancer</span></button>` : ""}
           ${session.issue.state === "open" ? `<button class="small-link" data-action="archive">${ICON.archive}<span>Archiver</span></button>` : ""}
+          ${!active ? `<button class="small-link" data-action="delete">${ICON.trash}<span>Supprimer</span></button>` : ""}
           <a href="${escapeHtml(session.issue.html_url)}" target="_blank" rel="noopener noreferrer" class="small-link">${ICON.external}<span>Session</span></a>
         </span>
       </div>
@@ -639,6 +833,7 @@ function renderSessionView() {
       failure(error);
     }
   });
+  view.querySelector('[data-action="delete"]')?.addEventListener("click", () => openDeleteSessions([session.issue]));
   view.querySelector('[data-action="archive"]')?.addEventListener("click", async () => {
     try {
       await state.github.setIssueState(state.settings.engine, session.number, "closed");
@@ -900,6 +1095,7 @@ function blockZoom() {
 async function boot() {
   blockZoom();
   watchComposer();
+  setupDrawerSelection();
   $("#menu").innerHTML = ICON.menu;
   $("#settings-button").innerHTML = ICON.gear;
   $("#drawer .new-session").innerHTML = `${ICON.plus}<span>Nouvelle tâche</span>`;

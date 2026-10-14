@@ -36,6 +36,18 @@ Adresse : https://abasse-ali.github.io/claw-web/
    de suivi le poursuivent (une nouvelle session aussi, quand `SPEC.md` et `PLAN.md` sont dans
    le dépôt) ; « sans mode projet » l'arrête pour la session.
 
+## Arrêter, supprimer
+
+- « Arrêter » (deux appuis) annule un passage en cours : ce qui est fait reste sur la branche
+  de la session, sans pull request ; un message de suivi reprend le travail.
+- « Supprimer » dans une session, ou « Choisir » dans la liste des sessions (menu) pour en
+  supprimer plusieurs : la session et ses messages sont effacés de GitHub, sans retour possible.
+  En option, sa branche `claw/session-<n>` (une pull request ouverte est alors fermée) et ses
+  passages dans GitHub Actions. Une session au travail s'arrête d'abord.
+- Effacer une issue est réservé à l'administrateur du dépôt du moteur. Si GitHub le refuse au
+  jeton, la session est seulement retirée de l'appli (fermée, sans l'étiquette `claw-web`) ;
+  « Delete issue » sur GitHub l'efface.
+
 Le premier passage compile Claw (quelques minutes) ; le binaire reste ensuite en cache et les
 passages suivants démarrent en moins d'une minute.
 
