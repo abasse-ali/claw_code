@@ -32,7 +32,9 @@ Adresse : https://abasse-ali.github.io/claw-web/
    chiffrés dans le navigateur : `OPENROUTER_API_KEY` et `CLAW_REPO_TOKEN`.
 4. Choisissez un dépôt et une branche, ou créez un dépôt neuf, puis décrivez la tâche. Dans un
    dépôt neuf, une demande de création (« Crée une application... ») fait passer Claw en mode
-   projet : cahier des charges, plan en jalons vérifiés, démonstration finale.
+   projet : cahier des charges, plan en jalons vérifiés, démonstration finale. Les messages
+   de suivi le poursuivent (une nouvelle session aussi, quand `SPEC.md` et `PLAN.md` sont dans
+   le dépôt) ; « sans mode projet » l'arrête pour la session.
 
 Le premier passage compile Claw (quelques minutes) ; le binaire reste ensuite en cache et les
 passages suivants démarrent en moins d'une minute.
