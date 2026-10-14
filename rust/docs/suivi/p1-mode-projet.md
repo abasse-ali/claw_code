@@ -47,9 +47,9 @@ actif pour ce dossier (état dans `.claw/project.json`) jusqu'à « sans mode pr
 | P1-1 | fait le 14 octobre 2026 (ff3d899) |
 | P1-2 | fait le 14 octobre 2026 (096f80d) |
 | P1-3 | fait le 14 octobre 2026 (096f80d) |
-| P1-4 | fait le 14 octobre 2026 (commit « Mode projet, lots P1-4 et P1-5 ») |
-| P1-5 | fait le 14 octobre 2026 (même commit) |
-| P1-6 | à faire |
+| P1-4 | fait le 14 octobre 2026 (dff13a1) |
+| P1-5 | fait le 14 octobre 2026 (dff13a1) |
+| P1-6 | en cours : scénario t8 prêt (commit « Scénario t8 »), essais réels lancés le 14 octobre à 2 h 15 |
 
 ### P1-1 : ce qui est fait
 
@@ -131,6 +131,31 @@ actif pour ce dossier (état dans `.claw/project.json`) jusqu'à « sans mode pr
   l'utilisateur. Quand la limite de requêtes du tour est atteinte, la note de conclusion
   demande en plus un `PLAN.md` qui dit où en est le jalon en cours.
 - Limite connue : un jalon mené sur plusieurs tours n'est compté que pour son dernier tour.
+
+### P1-6 : scénario t8 et mesure
+
+- Scénario `t8-materiel` (banc `rust/scripts/real-tests/`) : créer, dans un dossier vide (un
+  `.gitignore` seul), une application en ligne de commande de prêts de matériel (ajouter,
+  prêter avec une date de retour, rendre, stock, retards ; données dans `materiel.json` à côté
+  du programme ; refus clairs avec un code d'erreur ; tests ; README). Vérification cachée en
+  12 points dans une copie sans données, comme chez un utilisateur qui vient d'installer :
+  README, tests qui passent, ajouter et stock, données à côté du programme lancé d'un autre
+  dossier, prêter, augmenter la quantité, plus d'exemplaire, matériel inconnu, rendre et
+  retour inexistant, retards comptés le lendemain, saisies invalides sans plantage, sortie dans
+  un tube sans UTF-8 forcé. Projet intact 0/12, référence 12/12 ; quatre variantes fautives de
+  la référence perdent chacune le point attendu (coche hors cp1252, données dans le dossier
+  courant, retard compté le jour même, prêt sans stock).
+- Le premier essai réel a montré deux défauts, corrigés aussitôt (pour les essais suivants) :
+  le modèle écrit la démonstration en sous-titres (`### Install`, `### Run`) suivis de blocs de
+  code, que Claw ne lisait pas (il lit maintenant cette forme) ; il y met une activation
+  d'environnement (`.venv/Scripts/activate`), qui ne vaut que dans la même session : les lignes
+  de la démonstration partent maintenant en une seule commande, dans l'ordre, comme
+  l'utilisateur qui les tape à la suite (commentaires de fin retirés). Le guide dit que Claw
+  les lance dans une session du shell de l'outil `bash`.
+- La note de la sonde sur le cp1252 était inexacte : une vraie console Windows affiche
+  l'Unicode (PEP 528) ; c'est une sortie dans un tube ou un fichier (terminal de Git Bash,
+  `> fichier.txt`, autre programme) qui passe en cp1252. La note le dit maintenant ainsi, et le
+  point 12 de t8 accepte une sortie en UTF-8 ou en cp1252, pas un plantage.
 
 - Incident : la première version de cet essai transmettait au binaire l'environnement du
   terminal, qui porte maintenant la vraie clé OpenRouter : la relecture de fin de tour est

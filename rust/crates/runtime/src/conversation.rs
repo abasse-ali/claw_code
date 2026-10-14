@@ -3633,52 +3633,48 @@ where
         prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> DemoOutcome {
         let place = copy.to_string_lossy().replace('\\', "/");
-        let commands = demo
+        // Une seule session, comme l'utilisateur qui tape les lignes à la suite.
+        let input = serde_json::json!({
+            "command": project::demo_script(&place, demo),
+            "timeout": harness::VERIFY_TIMEOUT_MS + project::DEMO_RUN_TIMEOUT_MS,
+            "run_in_background": false,
+            "description": "Démonstration finale par Claw",
+        })
+        .to_string();
+        self.tool_executor.announce("bash", &input);
+        let (message, _) = self.execute_tool_call(
+            "claw-demo".to_string(),
+            "bash".to_string(),
+            &input,
+            prompter
+                .as_mut()
+                .map(|prompt| &mut **prompt as &mut dyn PermissionPrompter),
+        );
+        let Some((output, is_error)) = tool_result_parts(&message) else {
+            return DemoOutcome::NotRun;
+        };
+        if is_error {
+            self.api_client
+                .notify("Démonstration finale non lancée : le projet n'est pas démontré");
+            return DemoOutcome::NotRun;
+        }
+        let result = harness::read_bash_output(output);
+        if result.passed && !result.pending {
+            return DemoOutcome::Passed;
+        }
+        let shown = demo
             .install
             .iter()
-            .map(|command| (command, harness::VERIFY_TIMEOUT_MS))
-            .chain(
-                demo.run
-                    .iter()
-                    .map(|command| (command, project::DEMO_RUN_TIMEOUT_MS)),
-            );
-        for (index, (command, timeout)) in commands.enumerate() {
-            let input = serde_json::json!({
-                "command": format!("cd \"{place}\" && {command}"),
-                "timeout": timeout,
-                "run_in_background": false,
-                "description": "Démonstration finale par Claw",
-            })
-            .to_string();
-            self.tool_executor.announce("bash", &input);
-            let (message, _) = self.execute_tool_call(
-                format!("claw-demo-{index}"),
-                "bash".to_string(),
-                &input,
-                prompter
-                    .as_mut()
-                    .map(|prompt| &mut **prompt as &mut dyn PermissionPrompter),
-            );
-            let Some((output, is_error)) = tool_result_parts(&message) else {
-                return DemoOutcome::NotRun;
-            };
-            if is_error {
-                self.api_client.notify(&format!(
-                    "Démonstration finale non lancée ({command}) : le projet n'est pas démontré"
-                ));
-                return DemoOutcome::NotRun;
-            }
-            let result = harness::read_bash_output(output);
-            if !result.passed || result.pending {
-                return DemoOutcome::Failed(project::demo_failed_feedback(
-                    files,
-                    command,
-                    &result.excerpt,
-                    result.timed_out || result.pending,
-                ));
-            }
-        }
-        DemoOutcome::Passed
+            .chain(&demo.run)
+            .map(|command| project::without_comment(command))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        DemoOutcome::Failed(project::demo_failed_feedback(
+            files,
+            &shown,
+            &result.excerpt,
+            result.timed_out || result.pending,
+        ))
     }
 
     /// Mode projet, quand quelqu'un peut répondre : un jalon terminé pendant le
@@ -8075,12 +8071,15 @@ mod tests {
             .filter(|command| command.starts_with("cd \"") && command.contains("claw-demo-"))
             .cloned()
             .collect();
-        assert_eq!(demo.len(), 4, "{demo:?}");
-        assert!(demo[0].ends_with("&& python -m pip install -r requirements.txt"));
-        assert!(demo[1].ends_with("&& python biblio.py liste"));
+        assert_eq!(demo.len(), 2, "{demo:?}");
+        assert!(demo[0].ends_with(
+            "&& { python -m pip install -r requirements.txt; } && { python biblio.py liste; }"
+        ));
         assert!(observed.requests.iter().any(|request| request.contains(
             "Final demo: Claw copied the project to an empty folder (5 files: those Git tracks or would track)"
-        ) && request.contains("This command failed:")));
+        ) && request.contains(
+            "This command failed:\\n$ python -m pip install -r requirements.txt && python biblio.py liste"
+        )));
         // Réussie après la correction : notée, puis le README est demandé.
         assert!(observed.requests.iter().any(|request| request
             .contains("Final demo passed. README.md does not show how to run the project")));

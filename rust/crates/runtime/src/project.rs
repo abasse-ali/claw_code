@@ -712,6 +712,54 @@ fn is_run_label(label: &str) -> bool {
     .any(|word| label.starts_with(word))
 }
 
+/// Lignes d'un bloc de code qui commence à `index` (sans commentaires ni
+/// invite `$ `) ; `index` passe après sa fin.
+fn fenced_commands(lines: &[&str], index: &mut usize) -> Vec<String> {
+    let mut commands = Vec::new();
+    *index += 1;
+    while *index < lines.len() && !lines[*index].trim_start().starts_with("```") {
+        let line = lines[*index].trim();
+        if !line.is_empty() && !line.starts_with('#') {
+            commands.push(line.strip_prefix("$ ").unwrap_or(line).to_string());
+        }
+        *index += 1;
+    }
+    *index += 1;
+    commands
+}
+
+/// Une commande sans son commentaire de fin (`activate  # Windows`), hors
+/// guillemets.
+#[must_use]
+pub fn without_comment(command: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut previous = ' ';
+    for (at, character) in command.char_indices() {
+        match (quote, character) {
+            (Some(open), _) if character == open => quote = None,
+            (None, '\'' | '"') => quote = Some(character),
+            (None, '#') if previous.is_whitespace() => return command[..at].trim_end(),
+            _ => {}
+        }
+        previous = character;
+    }
+    command.trim_end()
+}
+
+/// Les lignes de la démonstration en une seule commande, dans l'ordre, comme
+/// les tape l'utilisateur dans un même terminal (un environnement activé reste
+/// actif), depuis le dossier `place`.
+#[must_use]
+pub fn demo_script(place: &str, demo: &Demo) -> String {
+    let steps: Vec<String> = demo
+        .install
+        .iter()
+        .chain(&demo.run)
+        .map(|command| format!("{{ {}; }}", without_comment(command)))
+        .collect();
+    format!("cd \"{place}\" && {}", steps.join(" && "))
+}
+
 /// Commandes d'une valeur : chaque passage entre accents graves, sinon la
 /// valeur entière ; vide, celles du bloc de code qui suit (`index` avance alors
 /// après lui).
@@ -812,10 +860,24 @@ impl Plan {
         let mut plan = Plan::default();
         let mut section = Section::None;
         let mut fence = false;
+        // Sous-titre de la démonstration (`### Install`, `### Run`) : vrai pour
+        // l'installation, faux pour le lancement ; son bloc de code suit.
+        let mut demo_part: Option<bool> = None;
         let mut index = 0;
         while index < lines.len() {
             let line = lines[index].trim();
             if line.starts_with("```") {
+                if let (false, Section::Demo(demo, _), Some(install)) =
+                    (fence, &mut section, demo_part)
+                {
+                    let commands = fenced_commands(&lines, &mut index);
+                    if install {
+                        demo.install.extend(commands);
+                    } else {
+                        demo.run.extend(commands);
+                    }
+                    continue;
+                }
                 fence = !fence;
                 index += 1;
                 continue;
@@ -826,6 +888,19 @@ impl Plan {
             }
             if let Some(level) = heading_level(line) {
                 let heading = line[level..].trim();
+                let folded = fold(heading);
+                if matches!(&section, Section::Demo(_, open) if level > *open) {
+                    demo_part = if is_install_label(&folded) {
+                        Some(true)
+                    } else if is_run_label(&folded) || folded.contains("demo") {
+                        Some(false)
+                    } else {
+                        None
+                    };
+                    index += 1;
+                    continue;
+                }
+                demo_part = None;
                 if let Some((id, title, done)) = milestone_heading(heading) {
                     plan.close(std::mem::replace(&mut section, Section::None));
                     let mut items = Vec::new();
@@ -840,7 +915,7 @@ impl Plan {
                         },
                         level,
                     );
-                } else if fold(heading).contains("demo") {
+                } else if folded.contains("demo") {
                     plan.close(std::mem::replace(&mut section, Section::None));
                     section = Section::Demo(Demo::default(), level);
                 } else {
@@ -1321,7 +1396,7 @@ pub fn untested(root: &Path, ids: &[String]) -> Vec<String> {
 
 const SPEC_STEP: &str = "One line per requirement a user can observe: `R1: <behavior>. Check: <exact command or action> -> <expected result>`; one line per edge case: `E1: <case> -> <expected result>`. Write requirements for every sentence of the request and for what it implies without saying it: the pitfalls listed above when there are some, wrong or missing input, empty data, data kept between runs. End with a `Questions` section (only what really changes what you build; \"none\" is fine) and an `Out of scope` section.";
 
-const PLAN_STEP: &str = "Milestones that each leave a project that runs: `## M1 - <title>`, then the lines `Requirements: R1, E1`, `Verify: <one command that exits with 0 only when the milestone works, usually its tests>` and `Status: todo`. M1 is a walking skeleton: the smallest version that runs from end to end. Every R and E line of SPEC.md belongs to one milestone. End with a `## Demo` section: `Install: <commands to run in an empty copy of the project>` and `Run: <a command that shows the project working and exits by itself>`.";
+const PLAN_STEP: &str = "Milestones that each leave a project that runs: `## M1 - <title>`, then the lines `Requirements: R1, E1`, `Verify: <one command that exits with 0 only when the milestone works, usually its tests>` and `Status: todo`. M1 is a walking skeleton: the smallest version that runs from end to end. Every R and E line of SPEC.md belongs to one milestone. End with a `## Demo` section: `Install: <commands to run in an empty copy of the project>` and `Run: <a command that shows the project working and exits by itself>`; Claw runs them in that order in one session of the bash tool's shell, from the project folder.";
 
 const DECISIONS_STEP: &str = "One line per choice (language, libraries, storage, file formats) with its reason: `- <decision>: <reason>`.";
 
@@ -1785,7 +1860,7 @@ pub fn environment_note(environment: &Environment) -> String {
                     .starts_with("utf8")
             }) {
                 lines.push(format!(
-                    "When the user runs the program in their own terminal, Python writes its output as {encoding} (the bash tool sets PYTHONIOENCODING=utf-8, which hides it): print() of a character outside {encoding} (an arrow, an emoji, Asian scripts) raises UnicodeEncodeError there. Keep printed text within {encoding} or call `sys.stdout.reconfigure(encoding=\"utf-8\")` first; open files with `encoding=\"utf-8\"`."
+                    "When the program's output goes to a pipe or a file (the Git Bash terminal, `> out.txt`, another program), Python writes it as {encoding} (the bash tool sets PYTHONIOENCODING=utf-8, which hides it): print() of a character outside {encoding} (an arrow, a check mark, an emoji, Asian scripts) raises UnicodeEncodeError there, and accents come out garbled in Git Bash. Call `sys.stdout.reconfigure(encoding=\"utf-8\")` at start, or keep printed text within {encoding}; open files with `encoding=\"utf-8\"`."
                 ));
             }
             if python_release(version).is_some_and(|release| release >= (3, 12)) {
@@ -2348,7 +2423,7 @@ mod tests {
         let note = environment_note(&environment);
         assert!(note.contains("- Windows; the bash tool runs Git Bash."));
         assert!(note.contains("- Python 3.13.1, run it as `python`. pytest is not installed for it: run `python -m pip install pytest`"));
-        assert!(note.contains("Python writes its output as cp1252"));
+        assert!(note.contains("Python writes it as cp1252"));
         assert!(note.contains("cgi, cgitb, imghdr"));
         assert!(note.contains("add `tzdata` to the requirements"));
         assert!(note.contains("- Node 22.11.0; Git 2.47.1.windows.1."));
@@ -2409,6 +2484,32 @@ mod tests {
         assert!(prompt.ends_with("end with the VERDICT line."));
         assert!(DESIGN_REVIEW_SYSTEM.contains("M1 must run from end to end"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_demo_written_with_subheadings_and_code_blocks_is_read_and_run_in_one_session() {
+        let plan = Plan::parse(
+            "## M1 - x\nVerify: pytest\nStatus: done\n\n## Demo\n\n### Install\n```bash\npython -m venv .venv\nsource .venv/Scripts/activate  # Windows\n$ pip install -r requirements.txt\n```\n\n### Run\n```bash\n# lancer\npython app.py stock\n```\n",
+        );
+        let demo = plan.demo.expect("démo");
+        assert_eq!(
+            demo.install,
+            [
+                "python -m venv .venv",
+                "source .venv/Scripts/activate  # Windows",
+                "pip install -r requirements.txt"
+            ]
+        );
+        assert_eq!(demo.run, ["python app.py stock"]);
+        assert_eq!(
+            demo_script("C:/tmp/copie", &demo),
+            "cd \"C:/tmp/copie\" && { python -m venv .venv; } && { source .venv/Scripts/activate; } && { pip install -r requirements.txt; } && { python app.py stock; }"
+        );
+        assert_eq!(
+            without_comment("echo '# pas un commentaire' # fin"),
+            "echo '# pas un commentaire'"
+        );
+        assert_eq!(without_comment("grep -c '#' a.txt"), "grep -c '#' a.txt");
     }
 
     #[test]

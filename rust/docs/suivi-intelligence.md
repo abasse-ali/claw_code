@@ -165,7 +165,9 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | 096f80d | Sonde de l'environnement et pièges connus au premier tour de la session, journal des décisions rappelé et réclamé (P1-2) ; relecture d'architecture par un autre modèle avant le code (P1-3) |
 
-| (commit « Mode projet, lots P1-4 et P1-5 ») | Démonstration finale réelle dans une copie vide du projet, README qui montre les mêmes commandes (P1-4) ; budget de requêtes par jalon et quota gratuit du jour dit au modèle et à l'utilisateur (P1-5) |
+| dff13a1 | Démonstration finale réelle dans une copie vide du projet, README qui montre les mêmes commandes (P1-4) ; budget de requêtes par jalon et quota gratuit du jour dit au modèle et à l'utilisateur (P1-5) |
+
+| (commit « Scénario t8 ») | Scénario t8-materiel (créer un projet complet, 12 points, référence 12/12) ; démonstration lue en sous-titres et blocs de code, lancée en une seule session ; note cp1252 exacte (P1-6) |
 
 État des tests après T1-33 : 664 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
