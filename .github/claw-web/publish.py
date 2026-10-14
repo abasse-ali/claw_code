@@ -40,9 +40,10 @@ def main():
     result, error = read("result.md"), read("error.txt")
     footer, notes = [], []
     try:
-        # Ce que l'agent a laissé sans commit (il a pu committer lui-même aussi).
-        if git("status", "--porcelain", "--", ".", ":(exclude).claw"):
-            git("add", "-A", "--", ".", ":(exclude).claw")
+        # Ce que l'agent a laissé sans commit (il a pu committer lui-même aussi). `.claw/`
+        # est exclu par setup.py (.git/info/exclude) : nommé ici, git add le refuserait.
+        if git("status", "--porcelain"):
+            git("add", "-A")
             git("commit", "--quiet", "-m", f"Claw : {TITLE}")
         remote = f"origin/{BRANCH}" if git("rev-parse", "--verify", "--quiet", f"origin/{BRANCH}",
                                            check=False) else f"origin/{BASE}"
