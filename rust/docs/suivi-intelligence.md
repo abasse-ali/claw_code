@@ -169,7 +169,9 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | 1188dfa | Scénario t8-materiel (créer un projet complet, 12 points, référence 12/12) ; démonstration lue en sous-titres et blocs de code, lancée en une seule session ; note cp1252 exacte (P1-6) |
 
-| (commit « t8 mesuré ») | t8 avec et sans le mode projet : 11/12 des deux côtés, défauts différents ; ligne des doublons (comparer replié, afficher tel qu'écrit), « LGM » vaut approbation, pas de rappel du 40e appel en mode projet, vérifications du banc lisibles quel que soit le codage, `rescore.py` |
+| de3e5d3 | t8 avec et sans le mode projet : 11/12 des deux côtés, défauts différents ; ligne des doublons (comparer replié, afficher tel qu'écrit), « LGM » vaut approbation, pas de rappel du 40e appel en mode projet, vérifications du banc lisibles quel que soit le codage, `rescore.py` |
+
+| (commit « t8 P2 ») | Mode projet avec le binaire à jour : t8 à 12/12 en 48 requêtes, relecture d'architecture et démonstration finale réelles ; les données que le programme écrit, non suivies par Git, restent hors de la copie vide |
 
 État des tests après T1-33 : 664 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;

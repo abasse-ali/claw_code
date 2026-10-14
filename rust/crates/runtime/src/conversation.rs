@@ -3580,7 +3580,7 @@ where
         if turn.demo_rounds >= project::MAX_DEMO_ROUNDS {
             return None;
         }
-        let (copy, files) = match project::clean_copy(&turn.root) {
+        let copy = match project::clean_copy(&turn.root) {
             Ok(copied) => copied,
             Err(reason) => {
                 turn.demo_rounds = project::MAX_DEMO_ROUNDS;
@@ -3590,11 +3590,20 @@ where
                 return None;
             }
         };
+        let left_out = if copy.left_out.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " ; laissées de côté comme données du programme : {}",
+                copy.left_out.join(", ")
+            )
+        };
         self.api_client.notify(&format!(
-            "Mode projet : démonstration finale dans une copie vide du projet ({files} fichiers)"
+            "Mode projet : démonstration finale dans une copie vide du projet ({} fichiers{left_out})",
+            copy.files
         ));
-        let outcome = self.run_demo(&copy, files, demo, prompter);
-        let _ = std::fs::remove_dir_all(&copy);
+        let outcome = self.run_demo(&copy, demo, prompter);
+        let _ = std::fs::remove_dir_all(&copy.folder);
         match outcome {
             DemoOutcome::NotRun => {
                 turn.demo_rounds = project::MAX_DEMO_ROUNDS;
@@ -3628,15 +3637,14 @@ where
     }
 
     /// Lignes `Install` puis `Run` de la démonstration, lancées dans la copie
-    /// `copy` du projet (`files` fichiers).
+    /// vide du projet.
     fn run_demo(
         &mut self,
-        copy: &std::path::Path,
-        files: usize,
+        copy: &project::CleanCopy,
         demo: &project::Demo,
         prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> DemoOutcome {
-        let place = copy.to_string_lossy().replace('\\', "/");
+        let place = copy.folder.to_string_lossy().replace('\\', "/");
         // Une seule session, comme l'utilisateur qui tape les lignes à la suite.
         let input = serde_json::json!({
             "command": project::demo_script(&place, demo),
@@ -3674,7 +3682,7 @@ where
             .collect::<Vec<_>>()
             .join(" && ");
         DemoOutcome::Failed(project::demo_failed_feedback(
-            files,
+            copy,
             &shown,
             &result.excerpt,
             result.timed_out || result.pending,

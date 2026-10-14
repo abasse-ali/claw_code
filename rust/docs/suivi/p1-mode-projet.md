@@ -49,7 +49,7 @@ actif pour ce dossier (état dans `.claw/project.json`) jusqu'à « sans mode pr
 | P1-3 | fait le 14 octobre 2026 (096f80d) |
 | P1-4 | fait le 14 octobre 2026 (dff13a1) |
 | P1-5 | fait le 14 octobre 2026 (dff13a1) |
-| P1-6 | en cours : scénario t8 (1188dfa) ; premiers essais réels : 11/12 avec et sans le mode projet (défauts différents, voir plus bas) ; essai suivant avec le binaire à jour |
+| P1-6 | en cours : scénario t8 (1188dfa) ; premiers essais réels : 11/12 avec et sans le mode projet (défauts différents) ; avec le binaire à jour, 12/12 en 48 requêtes ; comparaison à binaire égal en cours |
 
 ### P1-1 : ce qui est fait
 
@@ -197,6 +197,31 @@ essais ensemble ont pris 201 requêtes gratuites (relecteurs compris).
   10 minutes de plus ; son seul défaut venait d'une consigne de Claw, corrigée. Prochain essai :
   le mode projet avec le binaire à jour (démonstration finale et relecture d'architecture
   réelles).
+
+#### Essai P2 : le mode projet avec le binaire à jour (14 octobre, 3 h 05)
+
+Binaire au commit de3e5d3 (démonstration lue en sous-titres et lancée en une session, ligne
+des doublons, pas de rappel du 40e appel). Même modèle, mêmes limites.
+
+| Essai | Note | Requêtes du modèle | Durée |
+|---|---|---|---|
+| mode projet, binaire à jour | 12/12 | 48 (44 appels d'outils) | 17 min |
+
+- Tout le circuit a tourné avec un vrai modèle : relecture d'architecture par laguna avant le
+  code (six remarques : isoler les tests du vrai `materiel.json`, écriture atomique, `--help` et
+  README dans un jalon...), quatre jalons vérifiés par Claw (11, 8, 7 et 5 requêtes),
+  démonstration finale en échec deux fois puis réussie, contrôle des exigences, relecture sans
+  remarque.
+- Les deux échecs de la démonstration : la ligne `Install` et le README demandaient un
+  `requirements.txt` qui n'existait pas (vrai défaut, corrigé par le modèle) ; puis « Bob a déjà
+  un prêt » : la copie « vide » contenait le `materiel.json` rempli par les essais du modèle
+  (défaut de Claw). Corrigé : les données que le programme écrit (données JSON, CSV, bases,
+  journaux) qui ne sont pas suivies par Git restent hors de la copie, et la remarque d'échec le
+  dit (« un programme crée ses données quand elles manquent ; s'il en faut une dès le départ,
+  `git add` »).
+- Lecture prudente : 12/12 en 48 requêtes contre 11/12 en 115 au premier essai du mode projet
+  et 11/12 en 87 sans lui, mais un essai par côté, et le modèle a fait un plan plus court (quatre
+  jalons au lieu de six). Deux essais suivent, avec et sans le mode projet, sur le même binaire.
 
 - Incident : la première version de cet essai transmettait au binaire l'environnement du
   terminal, qui porte maintenant la vraie clé OpenRouter : la relecture de fin de tour est

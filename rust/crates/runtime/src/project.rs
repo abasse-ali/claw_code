@@ -1911,32 +1911,52 @@ pub const DEMO_RUN_TIMEOUT_MS: u64 = 120_000;
 /// Renvois au plus pour une démonstration finale en échec.
 pub const MAX_DEMO_ROUNDS: usize = 3;
 
-/// Fichiers qu'aurait l'utilisateur (chemins relatifs) : ceux que Git suit
-/// ou suivrait (`git ls-files --cached --others --exclude-standard`), sinon
-/// tout sauf les dossiers cachés, de dépendances et de sortie ; jamais `.claw`.
-#[must_use]
-pub fn project_files(root: &Path) -> Vec<PathBuf> {
-    let listed = Command::new("git")
-        .args([
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ])
+/// Fichiers que liste `git ls-files` avec ces options (chemins relatifs) ;
+/// `None` hors d'un dépôt.
+fn git_files(root: &Path, options: &[&str]) -> Option<Vec<PathBuf>> {
+    let output = Command::new("git")
+        .arg("ls-files")
+        .args(options)
+        .arg("-z")
         .current_dir(root)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
         .ok()
-        .filter(|output| output.status.success());
-    let mut files: Vec<PathBuf> = match listed {
-        Some(output) => String::from_utf8_lossy(&output.stdout)
+        .filter(|output| output.status.success())?;
+    Some(
+        String::from_utf8_lossy(&output.stdout)
             .split('\0')
             .filter(|name| !name.is_empty())
             .map(PathBuf::from)
             .collect(),
-        None => walkdir::WalkDir::new(root)
+    )
+}
+
+/// Données qu'un programme écrit en tournant (données JSON, CSV, bases,
+/// journaux) : une installation neuve part sans elles, sauf si Git les suit.
+fn run_time_data(file: &Path) -> bool {
+    let extension = file
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    matches!(
+        extension.as_str(),
+        "csv" | "db" | "sqlite" | "sqlite3" | "log"
+    ) || crate::harness::is_json_data_file(file)
+}
+
+/// Fichiers qu'aurait l'utilisateur (chemins relatifs) : ceux que Git suit,
+/// et ceux qu'il suivrait (`--others --exclude-standard`) sauf les données que
+/// le programme écrit en tournant, laissées de côté (second élément). Hors d'un
+/// dépôt : tout sauf les dossiers cachés, de dépendances et de sortie, et sauf
+/// ces données. Jamais `.claw`.
+#[must_use]
+pub fn project_files(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let listed =
+        git_files(root, &["--cached"]).zip(git_files(root, &["--others", "--exclude-standard"]));
+    let (tracked, untracked) = listed.unwrap_or_else(|| {
+        let walked = walkdir::WalkDir::new(root)
             .into_iter()
             .filter_entry(|entry| {
                 entry.depth() == 0
@@ -1945,17 +1965,38 @@ pub fn project_files(root: &Path) -> Vec<PathBuf> {
             .flatten()
             .filter(|entry| entry.file_type().is_file())
             .filter_map(|entry| entry.path().strip_prefix(root).ok().map(Path::to_path_buf))
-            .collect(),
-    };
-    files.retain(|file| !file.starts_with(".claw") && root.join(file).is_file());
-    files.sort();
-    files
+            .collect();
+        (Vec::new(), walked)
+    });
+    let usable = |file: &PathBuf| !file.starts_with(".claw") && root.join(file).is_file();
+    let mut kept: Vec<PathBuf> = tracked.into_iter().filter(usable).collect();
+    let mut left_out = Vec::new();
+    for file in untracked.into_iter().filter(usable) {
+        if run_time_data(&file) {
+            left_out.push(file);
+        } else {
+            kept.push(file);
+        }
+    }
+    kept.sort();
+    kept.dedup();
+    left_out.sort();
+    (kept, left_out)
 }
 
-/// Copie les fichiers du projet dans un dossier neuf du dossier temporaire :
-/// le dossier, et le nombre de fichiers copiés.
-pub fn clean_copy(root: &Path) -> Result<(PathBuf, usize), String> {
-    let files = project_files(root);
+/// La copie vide du projet où tourne la démonstration finale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanCopy {
+    pub folder: PathBuf,
+    /// Fichiers copiés.
+    pub files: usize,
+    /// Données du programme laissées de côté (chemins relatifs, barres obliques).
+    pub left_out: Vec<String>,
+}
+
+/// Copie les fichiers du projet dans un dossier neuf du dossier temporaire.
+pub fn clean_copy(root: &Path) -> Result<CleanCopy, String> {
+    let (files, left_out) = project_files(root);
     if files.len() > DEMO_MAX_FILES {
         return Err(format!("{} fichiers", files.len()));
     }
@@ -1979,7 +2020,14 @@ pub fn clean_copy(root: &Path) -> Result<(PathBuf, usize), String> {
         }
         std::fs::copy(root.join(file), &target).map_err(|error| error.to_string())?;
     }
-    Ok((copy, files.len()))
+    Ok(CleanCopy {
+        folder: copy,
+        files: files.len(),
+        left_out: left_out
+            .iter()
+            .map(|file| file.to_string_lossy().replace('\\', "/"))
+            .collect(),
+    })
 }
 
 fn squeezed(text: &str) -> String {
@@ -2017,14 +2065,28 @@ pub fn demo_missing_feedback() -> String {
 
 /// Une commande de la démonstration finale a échoué dans la copie vide.
 #[must_use]
-pub fn demo_failed_feedback(files: usize, command: &str, excerpt: &str, timed_out: bool) -> String {
+pub fn demo_failed_feedback(
+    copy: &CleanCopy,
+    command: &str,
+    excerpt: &str,
+    timed_out: bool,
+) -> String {
     let what = if timed_out {
         "did not finish in time (a Demo command must exit by itself; for a server: start it, request a page, stop it)"
     } else {
         "failed"
     };
+    let left_out = if copy.left_out.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Left out of the copy, as data the program writes when it runs and that Git does not track: {}. A program must create its data files when they are missing; if it needs one of them from the start, track it with `git add`.",
+            copy.left_out.join(", ")
+        )
+    };
     format!(
-        "{CLAW_NOTE_PREFIX} Final demo: Claw copied the project to an empty folder ({files} files: those Git tracks or would track) and ran the Demo lines of {PLAN_FILE} there, as the user will. This command {what}:\n$ {command}\n{excerpt}\n\nUsual causes: a file the program needs that is not in the project (made by hand, or ignored by .gitignore), a package missing from the requirements, a path relative to the current folder instead of the program's own folder, a wrong command in README.md. Fix the project (or the Demo line, if that is what is wrong), then finish again: Claw runs the demo again."
+        "{CLAW_NOTE_PREFIX} Final demo: Claw copied the project to an empty folder ({} files: those Git tracks or would track) and ran the Demo lines of {PLAN_FILE} there, as the user will.{left_out} This command {what}:\n$ {command}\n{excerpt}\n\nUsual causes: a file the program needs that is not in the project (made by hand, or ignored by .gitignore), a package missing from the requirements, a path relative to the current folder instead of the program's own folder, a wrong command in README.md. Fix the project (or the Demo line, if that is what is wrong), then finish again: Claw runs the demo again.",
+        copy.files
     )
 }
 
@@ -2526,12 +2588,22 @@ mod tests {
         std::fs::write(root.join(".claw").join("project.json"), "{}").expect("état");
         std::fs::create_dir_all(root.join("__pycache__")).expect("cache");
         std::fs::write(root.join("__pycache__").join("app.pyc"), "x").expect("pyc");
-        let (copy, files) = clean_copy(&root).expect("copie");
-        assert_eq!(files, 2);
+        // Données écrites par les essais du modèle : une installation neuve part sans elles.
+        std::fs::write(root.join("materiel.json"), "{\"prets\": [1]}").expect("données");
+        std::fs::write(root.join("package.json"), "{}").expect("configuration");
+        let copied = clean_copy(&root).expect("copie");
+        let copy = copied.folder.clone();
+        assert_eq!(copied.files, 3);
+        assert_eq!(copied.left_out, ["materiel.json"]);
         assert!(copy.join("app.py").is_file());
+        assert!(copy.join("package.json").is_file());
         assert!(copy.join("tests").join("test_app.py").is_file());
+        assert!(!copy.join("materiel.json").exists());
         assert!(!copy.join(".claw").exists());
         assert!(!copy.join("__pycache__").exists());
+        assert!(demo_failed_feedback(&copied, "python app.py", "erreur", false).contains(
+            "Left out of the copy, as data the program writes when it runs and that Git does not track: materiel.json."
+        ));
         let _ = std::fs::remove_dir_all(&copy);
         let run = vec!["python app.py liste".to_string()];
         assert!(!readme_shows(&root, &run));
