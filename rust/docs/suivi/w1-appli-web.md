@@ -63,4 +63,15 @@ connexion par **jeton personnel** gardé dans le navigateur.
   session (messages, progression, réponses, actions). Chiffrement des secrets : BLAKE2b
   identique à Python sur 33 cas, aller-retour de la sealed box. Rendu Markdown : HTML et liens
   `javascript:` neutralisés.
+- Continuité du mode projet (6c62306, e48d59d), sur GitHub avec le faux modèle, session 4
+  (tâche en mode projet, sans consigne d'écriture) : premier passage en 21 s (binaire en
+  cache), mode projet activé, état mis en cache ; message de suivi : « État du mode projet
+  repris du passage précédent », mode projet poursuivi ; aucun fichier modifié, rien publié.
+  Un passage au faux modèle ne reçoit plus aucune clé réelle (relecteurs compris).
+- Incident pendant cet essai : relancée avec le faux modèle, la session 1 portait dans sa tâche
+  une consigne d'écriture (`[mock:write ...]`) ; `CLAW_REPO_TOKEN` étant maintenant posé, le
+  moteur a poussé `claw/session-1` et ouvert la pull request n° 3 dans `claw_code` (le fichier
+  du faux modèle et quatre fichiers `.port_sessions/` laissés par les essais Python du dépôt).
+  Pull request fermée, branche supprimée, sa CI arrêtée. Les essais du moteur se font
+  désormais sur une session dont la tâche ne fait rien écrire.
 
