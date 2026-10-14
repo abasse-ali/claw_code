@@ -167,7 +167,9 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | dff13a1 | Démonstration finale réelle dans une copie vide du projet, README qui montre les mêmes commandes (P1-4) ; budget de requêtes par jalon et quota gratuit du jour dit au modèle et à l'utilisateur (P1-5) |
 
-| (commit « Scénario t8 ») | Scénario t8-materiel (créer un projet complet, 12 points, référence 12/12) ; démonstration lue en sous-titres et blocs de code, lancée en une seule session ; note cp1252 exacte (P1-6) |
+| 1188dfa | Scénario t8-materiel (créer un projet complet, 12 points, référence 12/12) ; démonstration lue en sous-titres et blocs de code, lancée en une seule session ; note cp1252 exacte (P1-6) |
+
+| (commit « t8 mesuré ») | t8 avec et sans le mode projet : 11/12 des deux côtés, défauts différents ; ligne des doublons (comparer replié, afficher tel qu'écrit), « LGM » vaut approbation, pas de rappel du 40e appel en mode projet, vérifications du banc lisibles quel que soit le codage, `rescore.py` |
 
 État des tests après T1-33 : 664 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
@@ -397,3 +399,8 @@ Hors lots :
   projet, cahier des charges, plan en jalons vérifiés, tests d'acceptation, validation. Un
   essai du vrai binaire avec le faux modèle a laissé partir une relecture vers un vrai modèle
   gratuit (une requête) : le terminal porte maintenant la vraie clé ; les essais la vident.
+  Lots P1-2 à P1-5 faits dans la nuit (sonde, décisions, relecture d'architecture, démonstration
+  finale, budget). Scénario t8 (créer un projet complet) ; premiers essais réels à 2 h 15 :
+  11/12 avec et sans le mode projet, 115 contre 87 requêtes ; le mode projet tient toutes les
+  exigences écrites, le témoin oublie « à côté du programme » ; corrections tirées des deux
+  essais (voir P1-6).

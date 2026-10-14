@@ -1353,6 +1353,10 @@ where
             project: project_turn,
             ..TurnAids::default()
         };
+        // Mode projet : un tour long est normal, le plan en jalons fait le point.
+        if aids.project.is_some() {
+            aids.stall.skip_budget();
+        }
         // Ultracode : un agent au contexte vierge étudie la demande avant le
         // travail ; à la fin, un vérificateur indépendant remplace le contrôle
         // des exigences que le modèle faisait sur son propre travail.

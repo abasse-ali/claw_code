@@ -49,7 +49,7 @@ actif pour ce dossier (état dans `.claw/project.json`) jusqu'à « sans mode pr
 | P1-3 | fait le 14 octobre 2026 (096f80d) |
 | P1-4 | fait le 14 octobre 2026 (dff13a1) |
 | P1-5 | fait le 14 octobre 2026 (dff13a1) |
-| P1-6 | en cours : scénario t8 prêt (commit « Scénario t8 »), essais réels lancés le 14 octobre à 2 h 15 |
+| P1-6 | en cours : scénario t8 (1188dfa) ; premiers essais réels : 11/12 avec et sans le mode projet (défauts différents, voir plus bas) ; essai suivant avec le binaire à jour |
 
 ### P1-1 : ce qui est fait
 
@@ -156,6 +156,47 @@ actif pour ce dossier (état dans `.claw/project.json`) jusqu'à « sans mode pr
   l'Unicode (PEP 528) ; c'est une sortie dans un tube ou un fichier (terminal de Git Bash,
   `> fichier.txt`, autre programme) qui passe en cp1252. La note le dit maintenant ainsi, et le
   point 12 de t8 accepte une sortie en UTF-8 ou en cp1252, pas un plantage.
+
+#### Premiers essais réels de t8 (14 octobre, 2 h 15, quota du jour neuf)
+
+Même modèle (`nvidia/nemotron-3-ultra-550b-a55b:free`), même binaire (avant la lecture des
+démonstrations en sous-titres), limite de 150 requêtes par tour, une heure au plus. Les deux
+essais ensemble ont pris 201 requêtes gratuites (relecteurs compris).
+
+| Essai | Note | Requêtes du modèle | Durée | Point manqué |
+|---|---|---|---|---|
+| mode projet | 11/12 | 115 (110 appels d'outils) | 32 min | noms affichés en minuscules (« projecteur », « bob ») |
+| sans mode projet (`CLAW_PROJECT_MODE=0`) | 11/12 | 87 (85 appels d'outils) | 22 min | `materiel.json` rangé dans le dossier courant au lieu d'être à côté du programme, pourtant écrit dans la demande |
+
+- Avec le mode projet : `SPEC.md` (R1 à R7, E1 à E8), `PLAN.md` en six jalons au format
+  attendu, `DECISIONS.md`, code en modules, 57 tests. Claw a vérifié chaque jalon marqué fait
+  (coût mesuré : M1 35 requêtes, M2 9, M3 11, M4 6, M5 6, M6 14) ; la vérification de M6 a
+  échoué une fois et le modèle l'a corrigée. La démonstration était écrite en sous-titres que
+  ce binaire ne lisait pas : elle n'a pas tourné, et la relecture d'architecture non plus (elle
+  attend un plan sans problème de forme). Ces deux points sont corrigés depuis.
+- Le point manqué vient de la ligne des cas limites des doublons, qui disait de comparer les
+  noms après `casefold()` : le modèle a gardé et affiché la forme repliée. La ligne dit
+  maintenant que cette forme ne sert qu'à comparer, et que le nom se garde et s'affiche tel que
+  l'utilisateur l'a écrit (essai : « Zoé » puis « zoé », une seule personne, toujours montrée
+  « Zoé »).
+- Sans le mode projet : un seul fichier de code, des tests, un README ; la vérification
+  automatique (`python -m unittest discover`) n'a trouvé aucun test, le travail n'a donc pas
+  été vérifié par Claw.
+- Défauts du banc vus à cette occasion, corrigés : la vérification cachée de t8 plantait en
+  imprimant son rapport vers une sortie en cp1252 (le piège même qu'elle mesure) : rapport en
+  ASCII échappé, et `run.py` lance les vérifications avec `PYTHONIOENCODING=utf-8` ; les points
+  10 et 12 de t8 échouaient pour la casse des noms, non pour ce qu'ils mesurent : la casse
+  n'est plus exigée qu'au point 3 (nom tel qu'écrit dans `stock`) ; nouvel outil
+  `rescore.py` qui rejoue la vérification d'un essai sans requête au modèle.
+- Défauts de Claw vus à cette occasion, corrigés : un relecteur a conclu « VERDICT LGM »
+  (faute de frappe), transmis comme une remarque : c'est maintenant une approbation ; le rappel
+  du 40e appel d'outil (« si la tâche est finie, réponds maintenant ») tombait au milieu du
+  jalon M2 sur six : il ne parle plus en mode projet, où le plan en jalons fait ce point.
+- Lecture : un essai de chaque côté, même note, défauts différents. Le mode projet a tenu
+  toutes les exigences écrites et produit un projet structuré et testé, pour 28 requêtes et
+  10 minutes de plus ; son seul défaut venait d'une consigne de Claw, corrigée. Prochain essai :
+  le mode projet avec le binaire à jour (démonstration finale et relecture d'architecture
+  réelles).
 
 - Incident : la première version de cet essai transmettait au binaire l'environnement du
   terminal, qui porte maintenant la vraie clé OpenRouter : la relecture de fin de tour est

@@ -930,6 +930,9 @@ pub struct StallGuard {
     /// Vérifications réussies depuis la dernière modification, par commande.
     passed_checks: HashMap<String, u32>,
     tool_calls: u32,
+    /// Pas de rappel au 40e appel : en mode projet, un tour long est normal et
+    /// le plan en jalons fait déjà le point.
+    no_budget: bool,
 }
 
 /// Rappel adressé au modèle, et sa description pour l'utilisateur.
@@ -1050,6 +1053,11 @@ fn is_failure(tool_name: &str, output: &str, is_error: bool) -> bool {
 }
 
 impl StallGuard {
+    /// Sans rappel au 40e appel d'outil (mode projet).
+    pub fn skip_budget(&mut self) {
+        self.no_budget = true;
+    }
+
     /// Observe un résultat d'outil ; renvoie un rappel si le modèle s'enlise.
     pub fn observe(
         &mut self,
@@ -1155,7 +1163,7 @@ impl StallGuard {
             }
         }
 
-        if self.tool_calls == TOOL_BUDGET {
+        if !self.no_budget && self.tool_calls == TOOL_BUDGET {
             return Some(Reminder {
                 to_model: format!(
                     "[Claw] This turn has already used {TOOL_BUDGET} tool calls. Pause and take stock: what is done, what remains. If the task is complete, answer now. Otherwise name the single remaining obstacle and deal with it directly."
@@ -3341,7 +3349,17 @@ pub fn review_findings(answer: &str) -> Option<String> {
         .collect::<String>()
         .to_ascii_uppercase();
     // « NOT LGTM » est un refus.
-    let lgtm = |text: &str| text.contains("LGTM") && !text.contains("NOT LGTM");
+    // Fautes de frappe vues chez de vrais relecteurs (« VERDICT LGM ») : une
+    // approbation, pas une remarque à transmettre.
+    let lgtm = |text: &str| {
+        let first = text
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_matches(|character: char| !character.is_ascii_alphabetic());
+        (text.contains("LGTM") || matches!(first, "LGM" | "LTGM" | "LGMT"))
+            && !text.contains("NOT LGTM")
+    };
     let approved = if marked {
         // Un « LGTM » n'efface pas les problèmes que le verdict cite avec
         // lui (un relecteur réel en a mis un après sa liste).
@@ -4568,6 +4586,25 @@ mod tests {
         assert!(reminder
             .to_model
             .contains("second failed edit of `src/lib.rs`"));
+
+        // Au 40e appel d'outil, le modèle fait le point ; pas en mode projet,
+        // où un tour long est normal et le plan en jalons fait le point.
+        let calls = |guard: &mut StallGuard| {
+            (0..super::TOOL_BUDGET)
+                .filter_map(|index| {
+                    guard.observe(
+                        "read_file",
+                        &format!(r#"{{"path":"f{index}.py"}}"#),
+                        "{}",
+                        false,
+                    )
+                })
+                .count()
+        };
+        assert_eq!(calls(&mut StallGuard::default()), 1);
+        let mut project = StallGuard::default();
+        project.skip_budget();
+        assert_eq!(calls(&mut project), 0);
     }
 
     #[test]
@@ -4615,6 +4652,8 @@ mod tests {
         );
         assert_eq!(review_findings("Step 2.\n- met\n**Verdict:** LGTM"), None);
         assert_eq!(review_findings("Step 2.\n- met\nVERDICT"), None);
+        // Faute de frappe d'un vrai relecteur (essai t8) : une approbation.
+        assert_eq!(review_findings("Step 2.\n- met\n\nVERDICT LGM"), None);
         // Verdict oublié : une approbation en dernière ligne en est une.
         assert_eq!(review_findings("Step 1.\n- one requirement\n\nLGTM."), None);
         // « NOT LGTM » n'approuve rien.

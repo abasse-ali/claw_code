@@ -92,7 +92,7 @@ if not (project / "materiel.py").is_file():
     for name in (
         "README qui explique l'installation et chaque commande",
         "les tests du projet passent, dans une copie sans données",
-        "ajouter puis stock : 2/2",
+        "ajouter puis stock : Projecteur 2/2, nom tel qu'écrit",
         "données dans materiel.json à côté du programme, lancé d'un autre dossier",
         "prêter : un exemplaire de moins",
         "ajouter un matériel existant augmente sa quantité",
@@ -105,7 +105,7 @@ if not (project / "materiel.py").is_file():
     ):
         check(name, False, "materiel.py absent")
     score = sum(item["ok"] for item in checks)
-    print(json.dumps({"score": score, "max": len(checks), "checks": checks}, ensure_ascii=False))
+    print(json.dumps({"score": score, "max": len(checks), "checks": checks}))
     sys.exit(0)
 
 # 1. README.
@@ -143,7 +143,13 @@ check(
 copy = fresh_copy()
 code, output = run(copy, "ajouter", "Projecteur", "2")
 found, listing = stock(copy, "Projecteur")
-check("ajouter puis stock : 2/2", code == 0 and found == (2, 2), output + listing)
+# Le nom affiché est celui que l'utilisateur a écrit (comparer sans la casse ne
+# permet pas de le changer) ; les autres points comparent sans la casse.
+check(
+    "ajouter puis stock : Projecteur 2/2, nom tel qu'écrit",
+    code == 0 and found == (2, 2) and "Projecteur" in listing,
+    output + listing,
+)
 
 # 4. Lancé depuis un autre dossier : les données vont à côté du programme.
 elsewhere = fresh_copy()
@@ -194,13 +200,14 @@ _, on_day = run(copy, "retards", "2026-11-01")
 _, next_day = run(copy, "retards", "2026-11-02")
 run(copy, "rendre", "Projecteur", "Bob")
 _, after_return = run(copy, "retards", "2026-11-02")
+on_day, next_day, after_return = (text.lower() for text in (on_day, next_day, after_return))
 check(
     "retards : en retard le lendemain de la date prévue, plus après le retour",
-    "Bob" not in on_day
-    and "Bob" in next_day
-    and "Projecteur" in next_day
-    and "Bob" not in after_return
-    and "Chloé" in after_return,
+    "bob" not in on_day
+    and "bob" in next_day
+    and "projecteur" in next_day
+    and "bob" not in after_return
+    and "chloé" in after_return,
     on_day + next_day + after_return,
 )
 
@@ -231,15 +238,15 @@ results = [
 ]
 try:
     stored = json.loads((plain / "materiel.json").read_bytes().decode("utf-8"))
-    stored_ok = name in json.dumps(stored, ensure_ascii=False)
+    stored_ok = name.lower() in json.dumps(stored, ensure_ascii=False).lower()
 except (OSError, ValueError) as error:
     stored_ok = False
     results.append((1, f"materiel.json : {error}"))
 check(
     "sortie dans un tube sans UTF-8 forcé : pas de plantage, accents lisibles, données en UTF-8",
     all(code == 0 and "Traceback" not in output for code, output in results[:4])
-    and name in results[2][1]
-    and "Hélène" in results[3][1]
+    and name.lower() in results[2][1].lower()
+    and "hélène" in results[3][1].lower()
     and stored_ok,
     "\n".join(output for _, output in results),
 )
@@ -247,4 +254,5 @@ check(
 for base in COPIES:
     shutil.rmtree(base, ignore_errors=True)
 score = sum(item["ok"] for item in checks)
-print(json.dumps({"score": score, "max": len(checks), "checks": checks}, ensure_ascii=False))
+# En ASCII échappé : le rapport passe quel que soit le codage de la sortie.
+print(json.dumps({"score": score, "max": len(checks), "checks": checks}))

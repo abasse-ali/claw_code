@@ -202,9 +202,12 @@ def main():
     (run_dir / "stderr.txt").write_bytes(stderr)
     after = free_requests_left(claw, env)
 
+    # La vérification écrit son rapport en UTF-8, lu tel quel (sous Windows, une
+    # sortie dans un tube serait sinon en cp1252).
     check = subprocess.run(
         [sys.executable, str(scenario / "check.py"), str(project)],
         capture_output=True, encoding="utf-8", errors="replace", timeout=300,
+        env=dict(os.environ, PYTHONIOENCODING="utf-8"),
     )
     try:
         verdict = json.loads(check.stdout)

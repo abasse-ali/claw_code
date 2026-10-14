@@ -26,6 +26,10 @@ Chaque essai :
 - lance `check.py` et écrit `result.json` ; une ligne résume l'essai dans
   `<essais>/results.jsonl`.
 
+`python rescore.py <essai>` rejoue la vérification cachée d'un essai déjà fait, sans requête au
+modèle (vérification corrigée ou rapport illisible) : la note et la ligne de `results.jsonl`
+sont refaites.
+
 `python review_replay.py <essai> [--model M] [--baseline COMMIT]` rejoue la relecture par un
 autre modèle sur le travail d'un essai déjà fait (demande, diff du projet, réponse finale) : une
 requête, aucun outil. Avec `--baseline`, ce sont les consignes de relecture de ce commit, pour

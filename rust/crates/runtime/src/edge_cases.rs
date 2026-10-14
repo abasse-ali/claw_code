@@ -149,7 +149,7 @@ const FEATURE_EDGE_CASES: &[(&[&str], &str)] = &[
             "doublon", "dedoublon", "en double", "deux fois", "duplicate", "dedup", "existe deja",
             "deja existant", "already exists", "unicite",
         ],
-        "Duplicates and unique keys: compare names and e-mails after `strip()`, `casefold()` and `unicodedata.normalize(\"NFC\", ...)`, or \"Zoé\", \" zoé \" and a decomposed \"zoé\" count as three people; enforce uniqueness where the data is written, since two requests or a double click can both pass an earlier check; running an import twice must not double the data; `set()` loses the order, `dict.fromkeys` keeps it. Try \"Zoé\" then \" zoé \" (one person; the decomposed form \"Zoe\\u0301\" belongs in a unit test, the shell does not read that escape), a double submit (one record) and the same import run twice (no new rows).",
+        "Duplicates and unique keys: compare names and e-mails after `strip()`, `casefold()` and `unicodedata.normalize(\"NFC\", ...)`, or \"Zoé\", \" zoé \" and a decomposed \"zoé\" count as three people; that folded form is only for comparing: store and show each name as the user first wrote it (\"Zoé\", not \"zoé\"); enforce uniqueness where the data is written, since two requests or a double click can both pass an earlier check; running an import twice must not double the data; `set()` loses the order, `dict.fromkeys` keeps it. Try \"Zoé\" then \" zoé \" (one person, still shown as \"Zoé\"; the decomposed form \"Zoe\\u0301\" belongs in a unit test, the shell does not read that escape), a double submit (one record) and the same import run twice (no new rows).",
     ),
     (
         &[
