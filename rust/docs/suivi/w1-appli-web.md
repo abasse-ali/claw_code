@@ -34,6 +34,23 @@ connexion par **jeton personnel** gardé dans le navigateur.
 
 | Étape | Contenu | État |
 |---|---|---|
-| W1-1 | Moteur : workflow, préparation (session, dépôt, branche), agent avec progression, publication ; essai sur GitHub avec le faux modèle | en cours |
-| W1-2 | Appli : réglages (jeton, clé, secrets), accueil (dépôt, branche, modèle, tâche), sessions, conversation en direct, appli installable (manifeste, service worker, icônes) | à faire |
-| W1-3 | Publication : dépôt public `claw-web`, GitHub Pages, essai réel de bout en bout | à faire |
+| W1-1 | Moteur : workflow, préparation (session, dépôt, branche), agent avec progression, publication ; essai sur GitHub avec le faux modèle | fait le 14 octobre 2026 (6744ce0, 2ed50f0, fc2d0bb) |
+| W1-2 | Appli : réglages (jeton, clé, secrets), accueil (dépôt, branche, modèle, tâche), sessions, conversation en direct, appli installable (manifeste, service worker, icônes) | fait le 14 octobre 2026 (dépôt `claw-web`, 8c0b5f2) |
+| W1-3 | Publication : dépôt public `claw-web`, GitHub Pages, essai réel de bout en bout | en cours : Pages actif (https://abasse-ali.github.io/claw-web/) ; secret `OPENROUTER_API_KEY` posé ; `CLAW_REPO_TOKEN` attend le jeton à grain fin de l'utilisateur |
+
+## Essais
+
+- Moteur avec le faux modèle (session 1, sur `claw_code` lui-même) : premier passage 4 min 26 s
+  compilation comprise, progression mise à jour en direct, réponse publiée ; la publication
+  échouait sur `git add -A -- . ':(exclude).claw'` (git refuse de nommer un chemin ignoré) :
+  `.claw/` étant exclu par `.git/info/exclude`, un simple `git add -A` suffit. Message de suivi
+  sur la même session : binaire en cache, fini en 3 s, modifications non publiées faute de
+  `CLAW_REPO_TOKEN` (dit dans la réponse). Les caches des tests (`__pycache__`...) sont
+  maintenant exclus du commit.
+- Appli au format téléphone (Edge sans fenêtre piloté par le protocole DevTools, émulation
+  390 x 844 tactile ; `--headless=new` impose sinon une largeur minimale et coupe la capture) :
+  premier lancement, accueil connecté (sessions récentes, puces dépôt, branche, modèle),
+  session (messages, progression, réponses, actions). Chiffrement des secrets : BLAKE2b
+  identique à Python sur 33 cas, aller-retour de la sealed box. Rendu Markdown : HTML et liens
+  `javascript:` neutralisés.
+
