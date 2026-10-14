@@ -79,6 +79,7 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .session-text { display: flex; flex-direction: column; min-width: 0; }
 .session-text strong { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-text small { color: var(--muted); }
+.num { color: var(--muted); font-weight: 400; }
 .dot { width: 10px; height: 10px; margin-top: 7px; border-radius: 50%; background: var(--muted); flex: none; }
 .dot.running, .dot.queued { background: var(--warn); box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 25%, transparent); }
 .dot.done { background: var(--ok); }

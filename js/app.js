@@ -103,6 +103,34 @@ function settingsOf(issue) {
 }
 
 const taskOf = (issue) => (issue.body || "").replace(SETTINGS_BLOCK, "").trim();
+// Numéro et branche d'une session, notés par l'appli (les numéros d'issue de GitHub ne
+// reculent jamais, même après une suppression) ; d'anciennes sessions n'ont que l'issue.
+const numberOf = (issue) => Number(settingsOf(issue).n) || issue.number;
+const branchOf = (issue) => settingsOf(issue).branch || `claw/session-${issue.number}`;
+
+/** Numéro de la prochaine session : un de plus que le plus grand, 1 s'il n'y en a plus. */
+function nextNumber(sessions) {
+  return sessions.reduce((most, issue) => Math.max(most, Number(settingsOf(issue).n) || 0), 0) + 1;
+}
+
+/** Sessions d'avant la numérotation de l'appli : numérotées une fois, dans l'ordre de création,
+ * en gardant leur branche (le travail y est). */
+async function numberOldSessions(sessions) {
+  const old = sessions.filter((issue) => !settingsOf(issue).n)
+    .sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
+  let next = nextNumber(sessions);
+  for (const issue of old) {
+    const settings = { ...settingsOf(issue), n: next, branch: branchOf(issue) };
+    const body = (issue.body || "").replace(SETTINGS_BLOCK, `<!-- claw-web ${JSON.stringify(settings)} -->`);
+    try {
+      await state.github.setIssueBody(state.settings.engine, issue.number, body);
+      issue.body = body;
+      next += 1;
+    } catch {
+      return;
+    }
+  }
+}
 const runTitle = (repo, number) => `Claw ${repo} #${number}`;
 
 function since(date) {
@@ -388,7 +416,7 @@ function renderComposer() {
   const session = state.session;
   const followUp = Boolean(session);
   const repo = followUp ? session.settings.repo : state.settings.repo;
-  const branch = followUp ? `claw/session-${session.number}` : state.settings.branch;
+  const branch = followUp ? branchOf(session.issue) : state.settings.branch;
   composer.hidden = !state.github || location.hash.startsWith("#/reglages") || location.hash.includes("/modifications");
   // En suivi de session, le dépôt et la branche sont dans l'en-tête : seul le modèle se choisit.
   composer.innerHTML = `
@@ -442,7 +470,15 @@ async function startSession(text, textarea) {
   try {
     const firstLine = text.split("\n")[0].trim();
     const title = firstLine.length > 72 ? `${firstLine.slice(0, 71)}…` : firstLine;
-    const block = `<!-- claw-web ${JSON.stringify({ repo, base: branch, model: model || "" })} -->`;
+    // Numéro suivant de l'appli ; sa branche, si une ancienne du même nom reste dans le dépôt,
+    // prend un suffixe (jamais le travail d'une autre session).
+    const sessions = await state.github.sessions(engine);
+    const n = nextNumber(sessions);
+    let work = `claw/session-${n}`;
+    for (let suffix = 2; suffix < 20 && await state.github.branchExists(repo, work); suffix += 1) {
+      work = `claw/session-${n}-${suffix}`;
+    }
+    const block = `<!-- claw-web ${JSON.stringify({ repo, base: branch, model: model || "", n, branch: work })} -->`;
     const issue = await state.github.createIssue(engine, title, `${text}\n\n${block}`);
     await state.github.dispatch(engine, state.engineRef,
       { repo, base: branch || "main", session: String(issue.number), model: model || "" });
@@ -500,7 +536,7 @@ function sessionItem(issue, selectable = false) {
   const inner = `
       <span class="dot ${status ? status.key : "idle"}" aria-hidden="true"></span>
       <span class="session-text">
-        <strong>${escapeHtml(issue.title)}</strong>
+        <strong><span class="num">#${numberOf(issue)}</span> ${escapeHtml(issue.title)}</strong>
         <small>${escapeHtml(settings.repo || "")} · ${status ? escapeHtml(status.label) : "en attente"} · ${since(issue.updated_at)}</small>
       </span>`;
   if (selectable) {
@@ -538,6 +574,7 @@ async function renderDrawer() {
   list.innerHTML = '<li class="empty">Chargement…</li>';
   try {
     const [sessions] = await Promise.all([state.github.sessions(state.settings.engine), refreshRuns()]);
+    await numberOldSessions(sessions);
     state.drawerSessions = sessions;
     state.selected = new Set([...state.selected].filter((number) => sessions.some((issue) => issue.number === number)));
     drawDrawerList();
@@ -623,7 +660,7 @@ async function openDeleteSessions(issues) {
   // Pull request de chaque branche : une ouverte est fermée avec sa branche, et c'est dit.
   const pulls = await Promise.all(chosen.map((issue) => {
     const repo = settingsOf(issue).repo;
-    return repo ? state.github.pull(repo, `claw/session-${issue.number}`).catch(() => null) : null;
+    return repo ? state.github.pull(repo, branchOf(issue)).catch(() => null) : null;
   }));
   if (sheet.hidden) return;
   const open = chosen
@@ -638,11 +675,11 @@ async function openDeleteSessions(issues) {
       <form class="delete-sessions">
         ${chosen.length ? `<ul>${shown.map((issue) => `
           <li><strong>${escapeHtml(issue.title)}</strong>
-            <small>${escapeHtml(settingsOf(issue).repo || "?")} · claw/session-${issue.number}</small></li>`).join("")}
+            <small>${escapeHtml(settingsOf(issue).repo || "?")} · ${escapeHtml(branchOf(issue))}</small></li>`).join("")}
           ${chosen.length > shown.length ? `<li class="more">et ${chosen.length - shown.length} autre(s)</li>` : ""}</ul>
         <p class="help">${many ? "Leurs messages sont effacés" : "Ses messages sont effacés"} de GitHub, sans retour possible.</p>
         <label class="check"><input type="checkbox" name="branches" checked>
-          <span>Supprimer aussi ${many ? "leurs branches" : "sa branche"} <code>claw/session-${many ? "…" : chosen[0].number}</code> dans ${many ? "les dépôts" : "le dépôt"}${open.length
+          <span>Supprimer aussi ${many ? "leurs branches" : "sa branche"} <code>${many ? "claw/session-…" : escapeHtml(branchOf(chosen[0]))}</code> dans ${many ? "les dépôts" : "le dépôt"}${open.length
             ? ` ; ${open.map(({ repo, pull }) => `la pull request n° ${pull.number} de ${escapeHtml(repo.split("/").pop())}`).join(", ")} ${open.length > 1 ? "seront fermées" : "sera fermée"}`
             : ""}</span></label>
         <label class="check"><input type="checkbox" name="runs" checked>
@@ -668,9 +705,9 @@ async function openDeleteSessions(issues) {
         try {
           const pull = pulls[index];
           if (pull && pull.state === "open" && !pull.merged_at) await state.github.closePull(repo, pull.number);
-          await state.github.deleteBranch(repo, `claw/session-${issue.number}`);
+          await state.github.deleteBranch(repo, branchOf(issue));
         } catch (error) {
-          problems.push(`branche de la session ${issue.number} : ${error.message}`);
+          problems.push(`branche de la session ${numberOf(issue)} : ${error.message}`);
         }
       }
       if (withRuns && repo) {
@@ -684,7 +721,7 @@ async function openDeleteSessions(issues) {
         erased += 1;
       } catch (error) {
         if (!(error instanceof GitHubError) || error.status !== 403) {
-          problems.push(`session ${issue.number} : ${error.message}`);
+          problems.push(`session ${numberOf(issue)} : ${error.message}`);
           continue;
         }
         // GitHub n'autorise pas ce jeton à effacer : la session quitte l'appli (fermée, sans étiquette).
@@ -693,7 +730,7 @@ async function openDeleteSessions(issues) {
           await state.github.removeLabel(engine, issue.number, LABEL);
           hidden += 1;
         } catch (fallback) {
-          problems.push(`session ${issue.number} : ${fallback.message}`);
+          problems.push(`session ${numberOf(issue)} : ${fallback.message}`);
         }
       }
     }
@@ -741,6 +778,7 @@ async function showHome() {
   renderComposer();
   try {
     const [sessions] = await Promise.all([state.github.sessions(state.settings.engine), refreshRuns()]);
+    await numberOldSessions(sessions);
     const recent = view.querySelector(".recent");
     if (recent) {
       recent.innerHTML = sessions.filter((issue) => issue.state === "open").slice(0, 8).map(sessionItem).join("")
@@ -796,10 +834,10 @@ function renderSessionView() {
   view.innerHTML = `
     <section class="session">
       <header class="session-head">
-        <h1>${escapeHtml(session.issue.title)}</h1>
+        <h1><span class="num">#${numberOf(session.issue)}</span> ${escapeHtml(session.issue.title)}</h1>
         <div class="session-meta">
           <a class="meta-link" href="https://github.com/${escapeHtml(settings.repo || "")}" target="_blank" rel="noopener noreferrer">${ICON.repo}<span>${escapeHtml(settings.repo || "?")}</span></a>
-          <span class="meta-link">${ICON.branch}<span>claw/session-${session.number}</span></span>
+          <span class="meta-link">${ICON.branch}<span>${escapeHtml(branchOf(session.issue))}</span></span>
           ${pull ? `<a class="meta-link pull ${pullBadge}" href="${escapeHtml(pull.html_url)}" target="_blank" rel="noopener noreferrer">${ICON.pull}<span>PR #${pull.number} ${pullBadge}</span></a>` : ""}
           <a class="meta-link" href="#/session/${session.number}/modifications">${ICON.diff}<span>Modifications</span></a>
         </div>
@@ -918,7 +956,7 @@ async function pollSession(force = false) {
     }
   }
   try {
-    session.pull = session.settings.repo ? await state.github.pull(session.settings.repo, `claw/session-${session.number}`) : null;
+    session.pull = session.settings.repo ? await state.github.pull(session.settings.repo, branchOf(issue)) : null;
   } catch {
     session.pull = null;
   }
@@ -971,7 +1009,7 @@ async function showChanges(number) {
   try {
     const issue = await state.github.issue(state.settings.engine, number);
     const settings = settingsOf(issue);
-    const branch = `claw/session-${number}`;
+    const branch = branchOf(issue);
     const section = view.querySelector(".changes");
     if (!section) return;
     let content;

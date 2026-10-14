@@ -193,6 +193,21 @@ export class GitHub {
     return runs;
   }
 
+  /** La branche existe-t-elle dans le dépôt ? */
+  async branchExists(repo, branch) {
+    try {
+      await this.request("GET", `/repos/${repo}/git/ref/heads/${branch}`);
+      return true;
+    } catch (error) {
+      if (error instanceof GitHubError && error.status === 404) return false;
+      throw error;
+    }
+  }
+
+  setIssueBody(engine, number, body) {
+    return this.request("PATCH", `/repos/${engine}/issues/${number}`, { body });
+  }
+
   /** Différences entre deux branches : commits et fichiers, avec leurs différences. */
   compare(repo, base, head) {
     const ref = (name) => name.split("/").map(encodeURIComponent).join("/");
