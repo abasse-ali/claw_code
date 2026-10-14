@@ -1236,6 +1236,11 @@ function showSettings(first = false, justConnected = false) {
         <p class="help">Les secrets partent chiffrés dans le navigateur, pour la clé publique du moteur.</p>
         <button class="primary" type="submit">Configurer le moteur</button>
       </form>
+      <h2>Apparence</h2>
+      <fieldset class="theme-choice">
+        ${[["", "Sombre"], ["light", "Clair"], ["system", "Comme le téléphone"]].map(([value, label]) => `
+          <label><input type="radio" name="theme" value="${value}"${(settings.theme || "") === value ? " checked" : ""}><span>${label}</span></label>`).join("")}
+      </fieldset>
       <h2>Requêtes gratuites</h2>
       <form class="quota-form" autocomplete="off">
         <label>Clé OpenRouter gardée sur cet appareil
@@ -1303,6 +1308,13 @@ function showSettings(first = false, justConnected = false) {
         failure(error);
       }
     });
+    for (const radio of $("#view").querySelectorAll('input[name="theme"]')) {
+      radio.addEventListener("change", () => {
+        state.settings.theme = radio.value;
+        saveSettings();
+        applyTheme();
+      });
+    }
     $("#view .quota-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const key = event.target.key.value.trim();
@@ -1370,6 +1382,15 @@ function route() {
   showHome();
 }
 
+/** Thème : sombre (par défaut), clair, ou celui du téléphone ; la barre du téléphone suit. */
+function applyTheme() {
+  const theme = state.settings.theme || "";
+  if (theme) document.documentElement.dataset.theme = theme;
+  else delete document.documentElement.dataset.theme;
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() || "#1b1a18";
+}
+
 /** La zone de saisie est fixée en bas : le contenu garde en dessous la place qu'elle prend
  * vraiment (deux lignes de consigne, encoche du téléphone), sinon elle couvre ses boutons. */
 function updateComposerSpace() {
@@ -1397,6 +1418,8 @@ function blockZoom() {
 }
 
 async function boot() {
+  applyTheme();
+  window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", applyTheme);
   blockZoom();
   watchComposer();
   setupDrawerSelection();
