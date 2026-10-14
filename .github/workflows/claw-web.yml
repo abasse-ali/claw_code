@@ -1,0 +1,106 @@
+name: Claw web
+
+# Moteur de l'appli web de Claw (dépôt claw-web, GitHub Pages) : l'appli lance ce workflow
+# pour une session (une issue de ce dépôt, étiquette claw-web) ; Claw travaille dans le dépôt
+# choisi, sur la branche claw/session-<n>, pousse, ouvre la pull request et répond dans la
+# session. Secrets : OPENROUTER_API_KEY, CLAW_REPO_TOKEN (jeton qui peut lire et pousser dans
+# les dépôts des tâches). Suivi : rust/docs/suivi/w1-appli-web.md.
+run-name: "Claw ${{ inputs.repo }} #${{ inputs.session }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: Dépôt où travailler (propriétaire/nom)
+        required: true
+        type: string
+      base:
+        description: Branche de départ
+        required: true
+        type: string
+        default: main
+      session:
+        description: Numéro de l'issue de la session, dans ce dépôt
+        required: true
+        type: string
+      model:
+        description: "Modèle (vide : le meilleur modèle gratuit pour le code ; mock : faux modèle d'essai)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+
+# Un passage à la fois par session : un message de suivi attend la fin du précédent.
+concurrency:
+  group: claw-web-${{ inputs.session }}
+  cancel-in-progress: false
+
+jobs:
+  task:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Source de Claw
+        uses: actions/checkout@v4
+        with:
+          path: claw-src
+          persist-credentials: false
+
+      # Recompilé seulement quand le code Rust change.
+      - name: Binaire de Claw en cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.claw-bin
+          key: claw-bin-${{ runner.os }}-${{ hashFiles('claw-src/rust/Cargo.lock', 'claw-src/rust/crates/**/*.rs', 'claw-src/rust/crates/**/Cargo.toml', 'claw-src/rust/crates/**/*.html', 'claw-src/rust/crates/**/*.js') }}
+
+      - name: Installer Rust
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Compiler Claw
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: cargo install --path claw-src/rust/crates/claw-cli --locked --root ~/.claw-bin
+
+      - name: Claw dans le PATH
+        run: echo "$HOME/.claw-bin/bin" >> "$GITHUB_PATH"
+
+      # Les entrées passent par l'environnement, jamais dans le script : un nom de branche
+      # comme `"; curl … | sh; "` serait sinon exécuté.
+      - name: Session et dépôt de la tâche
+        id: setup
+        env:
+          REPO: ${{ inputs.repo }}
+          BASE: ${{ inputs.base }}
+          SESSION: ${{ inputs.session }}
+          JOB_TOKEN: ${{ github.token }}
+          REPO_TOKEN: ${{ secrets.CLAW_REPO_TOKEN }}
+        run: python3 claw-src/.github/claw-web/setup.py
+
+      - name: Claw au travail
+        id: claw
+        env:
+          MODEL: ${{ inputs.model }}
+          SESSION: ${{ inputs.session }}
+          JOB_TOKEN: ${{ github.token }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          CLAW_SRC: ${{ github.workspace }}/claw-src
+          PYTHONPATH: ${{ github.workspace }}/claw-src/.github/claw-web
+        run: python3 claw-src/.github/claw-web/run.py
+
+      - name: Publier
+        if: always() && steps.setup.outcome == 'success'
+        env:
+          REPO: ${{ inputs.repo }}
+          BASE: ${{ inputs.base }}
+          SESSION: ${{ inputs.session }}
+          BRANCH: ${{ steps.setup.outputs.branch }}
+          TITLE: ${{ steps.setup.outputs.title }}
+          PUBLISH: ${{ steps.setup.outputs.publish }}
+          CLAW_OUTCOME: ${{ steps.claw.outcome }}
+          JOB_TOKEN: ${{ github.token }}
+          REPO_TOKEN: ${{ secrets.CLAW_REPO_TOKEN }}
+        run: python3 claw-src/.github/claw-web/publish.py
