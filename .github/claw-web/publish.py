@@ -3,10 +3,15 @@ puis réponse de l'agent dans la session.
 
 Entrées (environnement) : REPO, BASE, SESSION, BRANCH, TITLE, PUBLISH (`true` si le jeton du
 dépôt est là), REPO_TOKEN, JOB_TOKEN, CLAW_OUTCOME (issue de l'étape de l'agent).
+
+Un passage inachevé (erreur, annulation) garde son travail sur la branche de la session, sans
+ouvrir de pull request : un message de suivi le reprend.
 """
 
 import os
+import signal
 import subprocess
+import time
 
 from common import ANSWER, WORK, GitHubError, api, post_comment, run_url
 
@@ -36,8 +41,23 @@ def read(name):
     return path.read_text(encoding="utf-8").strip() if path.exists() else ""
 
 
+def stop_leftover_agent():
+    """Un job annulé de force a pu laisser l'agent tourner : il s'arrête avant le commit."""
+    try:
+        pid = int(read("claw.pid"))
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(50):
+            time.sleep(0.1)
+            os.kill(pid, 0)
+        os.kill(pid, signal.SIGKILL)
+    except (ValueError, ProcessLookupError, PermissionError):
+        pass
+
+
 def main():
+    stop_leftover_agent()
     result, error = read("result.md"), read("error.txt")
+    finished = OUTCOME == "success" and bool(result)
     footer, notes = [], []
     try:
         # Ce que l'agent a laissé sans commit (il a pu committer lui-même aussi). `.claw/`
@@ -67,28 +87,35 @@ def main():
             else:
                 owner = REPO.split("/")[0]
                 found = api("GET", f"/repos/{REPO}/pulls?state=open&head={owner}:{BRANCH}", REPO_TOKEN)
-                if found:
-                    pull = found[0]
-                else:
+                pull = found[0] if found else None
+                if pull is None and finished:
                     pull = api("POST", f"/repos/{REPO}/pulls", REPO_TOKEN, {
                         "title": f"Claw : {TITLE}",
                         "head": BRANCH,
                         "base": BASE,
                         "body": "Proposé par Claw depuis l'appli web.\n\n" + (result[:3000] or TITLE),
                     })
-                footer.append(f"Pull request : {pull['html_url']}")
+                if pull is None:
+                    notes.append(f"Travail inachevé gardé sur la branche `{BRANCH}`, sans pull request "
+                                 "tant que la tâche n'est pas finie : envoyez un message pour la reprendre.")
+                else:
+                    footer.append(f"Pull request : {pull['html_url']}")
                 footer.append(f"Branche `{BRANCH}` : {summary}")
     except (RuntimeError, GitHubError, ValueError) as failure:
         notes.append(f"Publication impossible : {failure}")
 
-    if OUTCOME != "success" or not result:
+    if finished:
+        text = result
+    elif OUTCOME == "cancelled":
+        text = "**La tâche a été arrêtée** (passage annulé)."
+        if result:
+            text += f"\n\n{result}"
+    else:
         text = "**La tâche s'est arrêtée sur une erreur.**"
         if error:
             text += f"\n\n```\n{error[-1500:]}\n```"
         if result:
             text += f"\n\n{result}"
-    else:
-        text = result
     parts = [ANSWER, text]
     if notes:
         parts.append("\n".join(f"> {note}" for note in notes))

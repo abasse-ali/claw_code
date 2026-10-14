@@ -44,7 +44,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Source de Claw
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: claw-src
           persist-credentials: false
@@ -52,7 +52,7 @@ jobs:
       # Recompilé seulement quand le code Rust change.
       - name: Binaire de Claw en cache
         id: cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.claw-bin
           key: claw-bin-${{ runner.os }}-${{ hashFiles('claw-src/rust/Cargo.lock', 'claw-src/rust/crates/**/*.rs', 'claw-src/rust/crates/**/Cargo.toml', 'claw-src/rust/crates/**/*.html', 'claw-src/rust/crates/**/*.js') }}
@@ -71,7 +71,7 @@ jobs:
       # État du mode projet de la session (.claw/project.json) d'un passage à l'autre : le
       # clone est neuf à chaque passage et .claw n'est jamais poussé.
       - name: État de la session
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: claw-state
           key: claw-web-state-${{ inputs.session }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -98,7 +98,20 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           CLAW_SRC: ${{ github.workspace }}/claw-src
           PYTHONPATH: ${{ github.workspace }}/claw-src/.github/claw-web
-        run: python3 claw-src/.github/claw-web/run.py
+        # `exec` : à l'annulation, le signal arrive au script, qui arrête Claw proprement.
+        run: exec python3 claw-src/.github/claw-web/run.py
+
+      # Journal complet de Claw (événements, erreurs), gardé 7 jours pour comprendre un passage.
+      - name: Journal de Claw
+        if: always() && steps.setup.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: claw-session-${{ inputs.session }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/claw-web/claw.jsonl
+            ${{ runner.temp }}/claw-web/claw.stderr
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Garder l'état de la session
         id: state
@@ -112,7 +125,7 @@ jobs:
 
       - name: État de la session en cache
         if: always() && steps.state.outputs.saved == 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: claw-state
           key: claw-web-state-${{ inputs.session }}-${{ github.run_id }}-${{ github.run_attempt }}

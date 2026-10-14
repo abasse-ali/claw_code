@@ -21,8 +21,13 @@ est le projet et ce qu'il doit vérifier :
 Claw garde son propre état dans `.claw/project.json` (mode actif, plan déjà relu par un autre
 modèle, démonstration réussie, requêtes par jalon). Aide coupée par `CLAW_PROJECT_MODE=0`.
 
-Activation : dossier sans fichier de code et demande de création (verbe et objet : « crée une
-application... », au moins huit mots), ou « mode projet » écrit dans la demande. Le mode reste
+Activation : dossier sans fichier de code et demande de création, ou « mode projet » écrit dans
+la demande. Une demande de création a au moins huit mots, un verbe de création (« crée »,
+« développe », « build »...) ou un besoin (« je veux »), suivi de ce qu'il faut créer, quel
+qu'il soit (« un comparateur de prix »). Ne comptent pas : un texte ou un document seul (liste,
+idées, plan, README, licence, `.gitignore`...), une question d'information (« Comment créer...
+? »), un verbe à l'infinitif après « je veux » (« comprendre »), un verbe précédé d'un
+déterminant, qui est alors un nom (« explique ce code »). Le mode reste
 actif pour ce dossier (état dans `.claw/project.json`) jusqu'à « sans mode projet ». Seuls les
 mots de l'utilisateur comptent : la demande jusqu'à sa première ligne `[Claw]` (ce qu'un moteur
 y ajoute pour le modèle, comme celui de l'appli web, n'active ni n'arrête rien).

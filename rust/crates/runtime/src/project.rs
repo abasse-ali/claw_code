@@ -220,8 +220,10 @@ const CREATION_VERBS: &[&str] = &[
     "scaffold",
 ];
 
-/// Ce qu'on crée : une application, un site, un outil...
+/// Ce qu'on crée quand c'est un projet : une application, un site, un outil... Juste
+/// après un premier mot de texte, il en fait un projet (« a resume *builder* »).
 const PROJECT_NOUNS: &[&str] = &[
+    "builder",
     "application",
     "appli",
     "app ",
@@ -326,8 +328,174 @@ const WHOLE_PROJECT_PHRASES: &[&str] = &[
 /// vaut pas un cahier des charges et un plan.
 const CREATION_MIN_WORDS: usize = 8;
 
-/// La demande crée un projet : un verbe de création (ou un besoin) et ce qu'il
-/// faut créer, en au moins huit mots ; ou « de A à Z », « from scratch ».
+/// Ce qu'une demande crée sans que ce soit un projet : un texte ou un document. Comparé au
+/// premier mot qui suit le verbe (pluriel compris).
+const TEXT_OBJECTS: &[&str] = &[
+    "liste",
+    "list",
+    "idee",
+    "idea",
+    "explication",
+    "explanation",
+    "resume",
+    "summary",
+    "conseil",
+    "advice",
+    "tip",
+    "exemple",
+    "example",
+    "description",
+    "article",
+    "email",
+    "mail",
+    "lettre",
+    "letter",
+    "message",
+    "texte",
+    "text",
+    "reponse",
+    "answer",
+    "question",
+    "poeme",
+    "poem",
+    "histoire",
+    "story",
+    "traduction",
+    "translation",
+    "tutoriel",
+    "tutorial",
+    "plan",
+    "rapport",
+    "report",
+    "presentation",
+    "cahier",
+    "specification",
+    "spec",
+    "readme",
+    "licence",
+    "license",
+    "gitignore",
+    "documentation",
+    "doc",
+    "changelog",
+    "contributing",
+    "note",
+    "commentaire",
+    "comment",
+];
+
+/// Mots sautés entre le verbe et ce qu'il crée : articles, pronoms, adjectifs courants.
+/// « fichier » aussi : le mot suivant dit de quel fichier il s'agit.
+const FILLER_WORDS: &[&str] = &[
+    "un", "une", "des", "du", "de", "d", "le", "la", "les", "l", "au", "aux", "moi", "nous", "me",
+    "m", "te", "t", "toi", "lui", "leur", "mon", "ma", "mes", "ton", "ta", "tes", "son", "sa",
+    "ses", "notre", "nos", "votre", "vos", "ce", "cet", "cette", "ces", "petit", "petite",
+    "petits", "petites", "simple", "nouveau", "nouvelle", "nouvel", "vrai", "vraie", "bon",
+    "bonne", "joli", "jolie", "beau", "belle", "super", "autre", "en", "pour", "tout", "toute",
+    "vite", "stp", "svp", "fichier", "fichiers", "a", "an", "the", "my", "our", "your", "some",
+    "new", "small", "little", "quick", "basic", "nice", "please", "us", "for", "file", "files",
+];
+
+/// Premiers mots d'une question d'information : « Comment créer une appli... ? » demande
+/// une explication, pas un projet (« Peux-tu créer... ? » en est un).
+const QUESTION_WORDS: &[&str] = &[
+    "comment", "pourquoi", "quel", "quelle", "quels", "quelles", "quoi", "qu", "combien", "quand",
+    "how", "why", "what", "which", "when", "where", "who",
+];
+
+/// Mots devant un nom : après eux, « code », « build » ou « écriture » ne sont pas des
+/// verbes (« Explique ce code », « fix the build »).
+const DETERMINERS: &[&str] = &[
+    "ce", "cet", "cette", "ces", "le", "la", "les", "l", "un", "une", "des", "du", "mon", "ma",
+    "mes", "ton", "ta", "tes", "son", "sa", "ses", "notre", "nos", "votre", "vos", "leur", "leurs",
+    "the", "this", "that", "these", "those", "my", "your", "our", "their", "its", "a", "an",
+];
+
+/// Mots d'un texte replié (minuscules, sans accents), sans ponctuation.
+fn words(text: &str) -> Vec<&str> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+/// Positions (dans `words`) juste après chaque occurrence de `phrase` : ses mots dans
+/// l'ordre, le dernier comme début de mot (« cree » couvre « creer »), sauf espace finale
+/// (mot entier : « fais »). Pas après un déterminant : c'est alors un nom.
+fn after_phrase(words: &[&str], phrase: &str) -> Vec<usize> {
+    let whole = phrase.ends_with(' ');
+    let parts: Vec<&str> = phrase
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect();
+    let Some((last, first)) = parts.split_last() else {
+        return Vec::new();
+    };
+    (0..words.len().saturating_sub(first.len()))
+        .filter(|&start| {
+            (start == 0 || !DETERMINERS.contains(&words[start - 1]))
+                && first
+                    .iter()
+                    .enumerate()
+                    .all(|(offset, part)| words[start + offset] == *part)
+                && {
+                    let word = words[start + first.len()];
+                    if whole {
+                        word == *last
+                    } else {
+                        word.starts_with(last)
+                    }
+                }
+        })
+        .map(|start| start + parts.len())
+        .collect()
+}
+
+fn same_word(word: &str, list: &[&str]) -> bool {
+    list.iter().any(|item| {
+        word == *item
+            || word.strip_suffix('s') == Some(item)
+            || word.strip_suffix('x') == Some(item)
+    })
+}
+
+fn project_noun(word: &str) -> bool {
+    PROJECT_NOUNS
+        .iter()
+        .any(|noun| match noun.strip_suffix(' ') {
+            Some(core) => word == core,
+            None => !noun.contains(' ') && word.starts_with(noun),
+        })
+}
+
+/// Après le verbe (ou le besoin), ce qui est créé fait-il un projet ? Un texte ou un
+/// document en premier mot n'en fait pas un, sauf si un projet le suit aussitôt
+/// (« a resume builder »). Après « je veux », un verbe à l'infinitif (« comprendre »,
+/// « to ») dit autre chose qu'un objet.
+fn creates_a_project(words: &[&str], from: usize, wish: bool) -> bool {
+    let object: Vec<&str> = words[from..]
+        .iter()
+        .copied()
+        .filter(|word| !FILLER_WORDS.contains(word))
+        .take(3)
+        .collect();
+    let Some(first) = object.first() else {
+        return false;
+    };
+    if wish
+        && (*first == "to"
+            || (first.len() > 4
+                && ["er", "ir", "re", "oir"]
+                    .iter()
+                    .any(|end| first.ends_with(end))))
+    {
+        return false;
+    }
+    !same_word(first, TEXT_OBJECTS) || object.get(1).is_some_and(|word| project_noun(word))
+}
+
+/// La demande crée un projet : un verbe de création (ou un besoin) suivi de ce qu'il faut
+/// créer, en au moins huit mots ; ou « de A à Z », « from scratch ». Pas une question
+/// d'information, ni un texte ou un document seul (liste, idées, README, licence...).
 #[must_use]
 pub fn creation_request(request: &str) -> bool {
     let text = fold(request);
@@ -337,12 +505,26 @@ pub fn creation_request(request: &str) -> bool {
     {
         return true;
     }
-    let wants = CREATION_VERBS
+    if request.split_whitespace().count() < CREATION_MIN_WORDS {
+        return false;
+    }
+    let words = words(&text);
+    let question = request.trim_end().ends_with('?')
+        && words
+            .first()
+            .is_some_and(|word| QUESTION_WORDS.contains(word));
+    if question {
+        return false;
+    }
+    CREATION_VERBS
         .iter()
-        .chain(WISH_PHRASES)
-        .any(|word| has_word_start(&text, word));
-    let object = PROJECT_NOUNS.iter().any(|word| has_word_start(&text, word));
-    wants && object && request.split_whitespace().count() >= CREATION_MIN_WORDS
+        .map(|verb| (verb, false))
+        .chain(WISH_PHRASES.iter().map(|wish| (wish, true)))
+        .any(|(phrase, wish)| {
+            after_phrase(&words, phrase)
+                .into_iter()
+                .any(|from| creates_a_project(&words, from, wish))
+        })
 }
 
 /// Extensions des fichiers qui ne sont pas du code : documents, notes, images
@@ -2312,6 +2494,64 @@ mod tests {
             "Build a todo app with tags, due dates and a JSON file for storage"
         ));
         assert!(creation_request("Fais-moi tout de A à Z"));
+        // Ce qui est créé n'a pas à être connu de Claw (appli web, 14 octobre 2026).
+        assert!(creation_request(
+            "Crée un Comparateur de prix : Scraping (legal), alertes baisse, historique \nPour les supermarchés au alentour"
+        ));
+        assert!(creation_request(
+            "Je veux un comparateur de prix pour les supermarchés de mon quartier"
+        ));
+        assert!(creation_request(
+            "Build a price comparison tool that scrapes local supermarkets every day"
+        ));
+        assert!(creation_request(
+            "Peux-tu créer une application de quiz en Python avec Flask ?"
+        ));
+        assert!(creation_request(
+            "Crée-moi un bot Discord qui annonce les matchs de foot du jour"
+        ));
+        assert!(creation_request(
+            "Build a resume builder website with templates and a PDF export"
+        ));
+        // Un texte ou un document seul, une question, un savoir : pas un projet.
+        assert!(!creation_request(
+            "Fais-moi une liste d'idées de projets web pour débuter en JavaScript"
+        ));
+        assert!(!creation_request(
+            "Écris un README qui présente le dépôt et ses objectifs principaux"
+        ));
+        assert!(!creation_request(
+            "Crée un fichier .gitignore pour Python, Node et les éditeurs courants"
+        ));
+        assert!(!creation_request(
+            "Écris le cahier des charges d'une application de covoiturage entre voisins"
+        ));
+        assert!(!creation_request(
+            "Prépare un plan de migration de la base de données vers PostgreSQL"
+        ));
+        assert!(!creation_request(
+            "Comment créer une application de quiz en Python avec Flask ?"
+        ));
+        assert!(!creation_request(
+            "J'aimerais comprendre comment fonctionnent les hooks de React en détail"
+        ));
+        assert!(!creation_request(
+            "I want to understand how React hooks work under the hood"
+        ));
+        assert!(!creation_request("Donne des idées de projet web"));
+        // « ce code », « le développement » : des noms, pas des verbes.
+        assert!(!creation_request(
+            "Explique ce code\n\nFichier : src/lib.rs, lignes 3 à 5\n\n```rust\nfn main() {}\n```"
+        ));
+        assert!(!creation_request(
+            "Explique le développement d'une application mobile avec Flutter en quelques mots"
+        ));
+        assert!(creation_request(
+            "Code un jeu du serpent en JavaScript avec un tableau des scores"
+        ));
+        assert!(creation_request(
+            "Essaie de créer une application de quiz avec Flask et SQLite"
+        ));
         // Trop court pour un cahier des charges et un plan.
         assert!(!creation_request("Écris un script qui affiche bonjour"));
         // Pas une création.

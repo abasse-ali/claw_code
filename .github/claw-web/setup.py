@@ -139,6 +139,9 @@ def main():
     # Les mots de l'utilisateur d'abord : Claw ne décide le mode projet que sur ce qui
     # précède la première ligne `[Claw]`.
     request, history = conversation(issue, notes)
+    # Titre du commit et de la pull request : le message traité, pas le titre de la session
+    # (son premier message, parfois une simple question).
+    title = next((line.strip() for line in request.splitlines() if line.strip()), "")
     if history:
         request += (
             "\n\n[Claw] Earlier conversation of this session, for context (your earlier changes "
@@ -153,7 +156,7 @@ def main():
     )
     (WORK / "prompt.txt").write_text(request, encoding="utf-8")
     output("branch", branch)
-    output("title", (issue.get("title") or f"session {SESSION}").strip()[:120])
+    output("title", (title or issue.get("title") or f"session {SESSION}").strip()[:100])
     # Sans jeton du dépôt, le travail est fait mais pas poussé (essai du moteur sur lui-même).
     output("publish", "true" if REPO_TOKEN else "false")
     print(f"Session {SESSION} : {REPO}, branche {branch} ({'existante' if existing else 'nouvelle'})")

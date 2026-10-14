@@ -30,6 +30,13 @@ connexion par **jeton personnel** gardé dans le navigateur.
   réussie) est gardé dans le cache d'Actions (`claw-web-state-<session>-...`). Sans cet état
   (nouvelle session sur un projet déjà fusionné), Claw reprend le mode projet de lui-même quand
   `SPEC.md` et un `PLAN.md` à jalons sont à la racine.
+- **Arrêt** : « Arrêter » dans l'appli (deux appuis) annule le passage. Le script de l'agent,
+  lancé par `exec`, reçoit le signal, arrête Claw et marque la progression « Claw a été
+  arrêté ». Un passage inachevé (arrêt ou erreur) garde son travail sur la branche de la
+  session sans ouvrir de pull request ; un message de suivi le reprend. Le titre du commit et
+  de la pull request est le message traité, pas le premier message de la session.
+- **Diagnostic** : les actions et les avis de Claw vont au journal du job ; le journal complet
+  de Claw (`claw.jsonl`, `claw.stderr`) est gardé 7 jours comme artefact du passage.
 - **Secrets du moteur** : `OPENROUTER_API_KEY` et `CLAW_REPO_TOKEN`, posés par l'appli
   (chiffrés dans le navigateur avec la clé publique du dépôt) ou à la main.
 - **Sécurité** : le jeton n'est jamais dans l'environnement de l'agent (clone puis adresse du
@@ -47,6 +54,7 @@ connexion par **jeton personnel** gardé dans le navigateur.
 | W1-3 | Publication : dépôt public `claw-web`, GitHub Pages, essai réel de bout en bout | en cours : Pages actif (https://abasse-ali.github.io/claw-web/) ; secrets `OPENROUTER_API_KEY` et `CLAW_REPO_TOKEN` posés (vérifications du moteur au vert dans l'appli) ; vrai modèle gratuit essayé (session 2) ; reste le premier essai de l'utilisateur sur un de ses dépôts |
 | W1-4 | Retours de l'utilisateur : pas de zoom, comme une appli ; réglages sur leur propre page (`#/reglages`), plus à l'accueil | fait le 14 octobre 2026 (`claw-web` 1e04535) |
 | W1-5 | Création de dépôt depuis le choix du dépôt (nom, description, public ou privé, `.gitignore`, premier commit) ; mode projet continu d'un passage à l'autre du moteur | fait le 14 octobre 2026 (`claw-web` 6e72294 ; moteur et Claw dans ce dépôt) |
+| W1-6 | Retours du premier essai de l'utilisateur (session 5, `test_claw`) : mode projet pas activé par « Crée un Comparateur de prix... » (objet inconnu de Claw) ; aucun moyen d'arrêter depuis l'appli ; à l'annulation, Claw continuait pendant la publication, qui ouvrait une pull request pour un travail inachevé, sous le titre du premier message ; chemins absolus du job dans la progression ; puces de la zone de saisie sur les boutons de la session ; avertissement Node.js 20 sur chaque job | fait le 14 octobre 2026 |
 
 ## Essais
 

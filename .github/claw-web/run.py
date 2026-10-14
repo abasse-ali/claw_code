@@ -3,11 +3,14 @@
 Entrées (environnement) : MODEL (vide : le meilleur modèle gratuit ; `mock` : faux modèle
 d'essai), SESSION, JOB_TOKEN, OPENROUTER_API_KEY, CLAW_SRC (source de Claw, pour le faux
 modèle). L'agent tourne dans `work/`, sans aucun jeton GitHub dans son environnement. Un
-commentaire de progression est créé dans la session puis mis à jour au fil du travail.
+commentaire de progression est créé dans la session puis mis à jour au fil du travail ; les
+actions et les avis de Claw vont aussi au journal du job. Un job annulé (SIGINT puis SIGTERM,
+reçus grâce à `exec` dans le workflow) arrête l'agent et le dit dans la progression.
 """
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -22,12 +25,30 @@ MODEL = os.environ.get("MODEL", "").strip()
 # Mise à jour du commentaire de progression au plus toutes les N secondes.
 PROGRESS_EVERY = 12
 SHOWN_ACTIONS = 8
+# Racine du dépôt de la tâche : les chemins sont montrés depuis elle, pas depuis le disque du job.
+ROOT = os.path.abspath("work")
+
+
+class Stopped(Exception):
+    """Le job est annulé."""
+
+
+def stop(signum, frame):
+    # Un seul arrêt : le SIGTERM qui suit le SIGINT ne doit pas interrompre le rangement.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise Stopped()
+
+
+def relative(text):
+    """`/home/runner/.../work/app/main.py` devient `app/main.py`."""
+    return str(text).replace(ROOT + os.sep, "").replace(ROOT, ".")
 
 
 def describe(name, data):
     """Une action de l'agent en quelques mots, pour l'utilisateur."""
     data = data if isinstance(data, dict) else {}
-    path = data.get("path") or data.get("file_path") or data.get("notebook_path") or ""
+    path = relative(data.get("path") or data.get("file_path") or data.get("notebook_path") or "")
     short = lambda text, size=90: (text if len(text) <= size else text[: size - 1] + "…")  # noqa: E731
     if name == "read_file":
         return f"Lecture de `{short(path)}`"
@@ -36,7 +57,7 @@ def describe(name, data):
     if name in ("edit_file", "NotebookEdit"):
         return f"Modification de `{short(path)}`"
     if name in ("bash", "PowerShell"):
-        command = " ".join(str(data.get("command", "")).split())
+        command = relative(" ".join(str(data.get("command", "")).split()))
         return f"Commande : `{short(command)}`"
     if name in ("grep_search", "glob_search"):
         return f"Recherche : `{short(str(data.get('pattern', '')))}`"
@@ -67,12 +88,16 @@ class Progress:
             if kind == "assistant":
                 for part in (event.get("message") or {}).get("content") or []:
                     if part.get("type") == "tool_use":
-                        self.actions.append(describe(part.get("name", ""), part.get("input")))
+                        action = describe(part.get("name", ""), part.get("input"))
+                        self.actions.append(action)
+                        print(f"[action] {action}", flush=True)
                         self.dirty = True
                     elif part.get("type") == "text" and part.get("text", "").strip():
                         self.replies += 1
             elif kind == "system" and event.get("subtype") == "notice":
-                self.notices.append(" ".join(str(event.get("text", "")).split()))
+                notice = " ".join(str(event.get("text", "")).split())
+                self.notices.append(notice)
+                print(f"[avis] {notice}", flush=True)
                 self.dirty = True
 
     def body(self, state):
@@ -82,6 +107,7 @@ class Progress:
             "running": f"**Claw travaille** depuis {duration}",
             "done": f"**Claw a fini** en {duration}",
             "failed": f"**Claw s'est arrêté sur une erreur** après {duration}",
+            "stopped": f"**Claw a été arrêté** après {duration} (passage annulé)",
         }[state]
         lines = [PROGRESS, f"{head} · {len(self.actions)} action(s)"]
         if self.actions:
@@ -144,40 +170,60 @@ def main():
 
     progress = Progress()
     progress.publish(force=True)
-    stop = threading.Event()
+    stop_refresh = threading.Event()
 
     def refresh():
-        while not stop.wait(PROGRESS_EVERY):
+        while not stop_refresh.wait(PROGRESS_EVERY):
             progress.publish()
 
     threading.Thread(target=refresh, daemon=True).start()
-    result, error = "", ""
+    result, error, stopped = "", "", False
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
     with open(WORK / "claw.jsonl", "w", encoding="utf-8") as log, \
             open(WORK / "claw.stderr", "w", encoding="utf-8") as errors:
         process = subprocess.Popen(args, cwd="work", env=env, stdout=subprocess.PIPE, stderr=errors,
                                    text=True, encoding="utf-8", errors="replace")
-        for line in process.stdout:
-            log.write(line)
-            log.flush()
+        # L'étape de publication arrête un agent qui aurait survécu à la sienne.
+        (WORK / "claw.pid").write_text(str(process.pid), encoding="utf-8")
+        try:
+            for line in process.stdout:
+                log.write(line)
+                log.flush()
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                progress.event(event)
+                if event.get("type") == "result":
+                    result = event.get("result") or ""
+                    error = event.get("error") or ""
+            status = process.wait()
+        except Stopped:
+            stopped = True
+            print("Job annulé : arrêt de Claw", flush=True)
+            process.terminate()
             try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            progress.event(event)
-            if event.get("type") == "result":
-                result = event.get("result") or ""
-                error = event.get("error") or ""
-        status = process.wait()
-    stop.set()
+                status = process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                status = process.wait()
+    (WORK / "claw.pid").unlink(missing_ok=True)
+    stop_refresh.set()
     if mock:
         mock.terminate()
-    if not result and not error:
+    if stopped:
+        error = "Passage annulé : Claw a été arrêté."
+    elif not result and not error:
         error = (WORK / "claw.stderr").read_text(encoding="utf-8", errors="replace")[-1500:].strip()
-    progress.publish("done" if status == 0 and result else "failed", force=True)
+    if error:
+        print(f"Erreur : {error[-800:]}", flush=True)
+    state = "stopped" if stopped else "done" if status == 0 and result else "failed"
+    progress.publish(state, force=True)
     (WORK / "result.md").write_text(result or "", encoding="utf-8")
     (WORK / "error.txt").write_text(error or "", encoding="utf-8")
     output("status", str(status))
-    sys.exit(status)
+    sys.exit(130 if stopped else status)
 
 
 if __name__ == "__main__":
