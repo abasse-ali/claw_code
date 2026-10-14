@@ -139,6 +139,11 @@ export class GitHub {
     return data.workflow_runs || [];
   }
 
+  /** Arrête un passage : le moteur garde ce qui est fait sur la branche de la session. */
+  cancelRun(engine, runId) {
+    return this.request("POST", `/repos/${engine}/actions/runs/${runId}/cancel`);
+  }
+
   async jobs(engine, runId) {
     const data = await this.request("GET", `/repos/${engine}/actions/runs/${runId}/jobs`);
     return data.jobs || [];

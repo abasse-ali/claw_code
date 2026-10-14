@@ -26,6 +26,7 @@ const ICON = {
   retry: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v4.5h4.5"/></svg>',
   back: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>',
   archive: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/></svg>',
+  stop: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
 };
 
 const state = {
@@ -421,6 +422,8 @@ function renderComposer() {
   composer.querySelector('[data-action="branch"]')?.addEventListener("click", pickBranch);
   composer.querySelector('[data-action="model"]').addEventListener("click", pickModel);
   resize();
+  // Tout de suite, pas au rappel de l'observateur : le défilement vers le bas suit.
+  updateComposerSpace();
 }
 
 // --- Sessions --------------------------------------------------------------------------------
@@ -596,6 +599,7 @@ function renderSessionView() {
         ${active ? `<span class="spinner" aria-hidden="true"></span><span>${run ? escapeHtml(status.label) : "Lancement du passage"}${step}</span>` : ""}
         ${!active && status && status.key === "failed" && !answered ? `<span>Le dernier passage a échoué.</span>` : ""}
         <span class="run-actions">
+          ${active && run ? `<button class="small-link stop" data-action="stop">${ICON.stop}<span>Arrêter</span></button>` : ""}
           ${run ? `<a href="${escapeHtml(run.html_url)}" target="_blank" rel="noopener noreferrer" class="small-link">${ICON.external}<span>Job</span></a>` : ""}
           ${!active ? `<button class="small-link" data-action="retry">${ICON.retry}<span>Relancer</span></button>` : ""}
           ${session.issue.state === "open" ? `<button class="small-link" data-action="archive">${ICON.archive}<span>Archiver</span></button>` : ""}
@@ -609,6 +613,29 @@ function renderSessionView() {
       toast("Passage relancé");
       await pollSession(true);
     } catch (error) {
+      failure(error);
+    }
+  });
+  // Deux appuis pour arrêter (pas de fenêtre de confirmation, comme le reste de l'appli).
+  view.querySelector('[data-action="stop"]')?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    if (!button.classList.contains("confirm")) {
+      button.classList.add("confirm");
+      button.querySelector("span").textContent = "Confirmer l'arrêt";
+      setTimeout(() => {
+        if (!button.isConnected) return;
+        button.classList.remove("confirm");
+        button.querySelector("span").textContent = "Arrêter";
+      }, 4000);
+      return;
+    }
+    button.disabled = true;
+    try {
+      await state.github.cancelRun(state.settings.engine, run.id);
+      toast("Arrêt demandé : ce qui est fait reste sur la branche");
+      await pollSession(true);
+    } catch (error) {
+      button.disabled = false;
       failure(error);
     }
   });
@@ -844,6 +871,20 @@ function route() {
   showHome();
 }
 
+/** La zone de saisie est fixée en bas : le contenu garde en dessous la place qu'elle prend
+ * vraiment (deux lignes de consigne, encoche du téléphone), sinon elle couvre ses boutons. */
+function updateComposerSpace() {
+  const composer = $("#composer");
+  const space = composer.hidden ? 0 : composer.offsetHeight;
+  document.documentElement.style.setProperty("--composer-space", `${space}px`);
+}
+
+function watchComposer() {
+  if ("ResizeObserver" in window) new ResizeObserver(updateComposerSpace).observe($("#composer"));
+  window.addEventListener("resize", updateComposerSpace);
+  updateComposerSpace();
+}
+
 /** Pas de zoom, comme une appli : Safari sur iPhone ignore `user-scalable=no`, on arrête
  * donc le geste de pincement lui-même (le CSS `touch-action` suffit ailleurs). */
 function blockZoom() {
@@ -858,6 +899,7 @@ function blockZoom() {
 
 async function boot() {
   blockZoom();
+  watchComposer();
   $("#menu").innerHTML = ICON.menu;
   $("#settings-button").innerHTML = ICON.gear;
   $("#drawer .new-session").innerHTML = `${ICON.plus}<span>Nouvelle tâche</span>`;

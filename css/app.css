@@ -63,7 +63,7 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .icon-button svg { width: 22px; height: 22px; }
 
 /* Contenu */
-.view { flex: 1; width: 100%; max-width: var(--width); margin: 0 auto; padding: 8px 16px 220px; }
+.view { flex: 1; width: 100%; max-width: var(--width); margin: 0 auto; padding: 8px 16px calc(var(--composer-space, 190px) + 28px); }
 .home { padding-top: 12vh; }
 .greeting { display: flex; align-items: center; gap: 12px; font-size: 1.6rem; font-weight: 500; margin: 0 0 40px; }
 .greeting .logo { width: 34px; height: 34px; }
@@ -115,7 +115,7 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
 table { border-collapse: collapse; font-size: .9rem; }
 th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
 
-.progress-card { font-size: .9rem; padding: 10px 14px; border-radius: var(--radius); background: var(--panel); border: 1px dashed var(--border); }
+.progress-card { font-size: .9rem; padding: 10px 14px; border-radius: var(--radius); background: var(--panel); border: 1px dashed var(--border); overflow-wrap: anywhere; }
 .progress-card ul { margin: .3em 0; padding-left: 1.2em; color: var(--muted); }
 .progress-card p { margin: 0 0 .4em; }
 .progress-card.old ul, .progress-card.old blockquote { display: none; }
@@ -128,6 +128,9 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
   border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: .82rem; text-decoration: none; cursor: pointer;
 }
 .small-link:hover { color: var(--text); border-color: var(--muted); }
+.small-link.stop { color: var(--error); border-color: color-mix(in srgb, var(--error) 45%, var(--border)); }
+.small-link.stop.confirm { background: var(--error); border-color: var(--error); color: #fff; }
+.small-link:disabled { opacity: .6; cursor: default; }
 .small-link svg { width: 15px; height: 15px; }
 .spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--accent); animation: spin .9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -135,8 +138,13 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 /* Zone de saisie */
 .composer {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 4;
-  padding: 10px 12px calc(12px + env(safe-area-inset-bottom));
-  background: linear-gradient(to top, var(--bg) 78%, transparent);
+  padding: 8px 12px calc(12px + env(safe-area-inset-bottom));
+  background: var(--bg);
+}
+/* Fondu au-dessus de la zone de saisie : le contenu passe dessous sans se mêler aux puces. */
+.composer::before {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 100%; height: 18px;
+  background: linear-gradient(to top, var(--bg), transparent); pointer-events: none;
 }
 .composer > * { max-width: var(--width); margin-left: auto; margin-right: auto; }
 .chips { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 8px; scrollbar-width: none; }
@@ -245,7 +253,7 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 
 /* Messages de l'appli */
 .toast {
-  position: fixed; left: 50%; bottom: calc(150px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 40;
+  position: fixed; left: 50%; bottom: calc(var(--composer-space, 150px) + 12px); transform: translateX(-50%); z-index: 40;
   max-width: min(92vw, 560px); padding: 10px 14px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border);
   box-shadow: 0 6px 24px rgba(0, 0, 0, .4); font-size: .92rem;
 }
