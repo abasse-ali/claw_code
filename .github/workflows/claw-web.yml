@@ -49,10 +49,11 @@ jobs:
           path: claw-src
           persist-credentials: false
 
-      # Recompilé seulement quand le code Rust change.
+      # Recompilé seulement quand le code Rust change ; gardé dès la compilation finie (un
+      # passage annulé ensuite ne la fait pas perdre).
       - name: Binaire de Claw en cache
         id: cache
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: ~/.claw-bin
           key: claw-bin-${{ runner.os }}-${{ hashFiles('claw-src/rust/Cargo.lock', 'claw-src/rust/crates/**/*.rs', 'claw-src/rust/crates/**/Cargo.toml', 'claw-src/rust/crates/**/*.html', 'claw-src/rust/crates/**/*.js') }}
@@ -64,6 +65,13 @@ jobs:
       - name: Compiler Claw
         if: steps.cache.outputs.cache-hit != 'true'
         run: cargo install --path claw-src/rust/crates/claw-cli --locked --root ~/.claw-bin
+
+      - name: Garder le binaire de Claw
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ~/.claw-bin
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
       - name: Claw dans le PATH
         run: echo "$HOME/.claw-bin/bin" >> "$GITHUB_PATH"
