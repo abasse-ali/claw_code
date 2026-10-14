@@ -2,7 +2,7 @@
 // requêtes à GitHub et OpenRouter, elles, ne passent jamais par le cache).
 // Réseau d'abord : une nouvelle version publiée est prise dès qu'elle est là.
 
-const CACHE = "claw-web-v5";
+const CACHE = "claw-web-v6";
 const SHELL = [
   "./",
   "index.html",
@@ -12,6 +12,7 @@ const SHELL = [
   "js/markdown.js",
   "js/blake2b.js",
   "js/sealed-box.js",
+  "js/transcript.js",
   "vendor/nacl-fast.min.js",
   "manifest.webmanifest",
   "icons/icon.svg",

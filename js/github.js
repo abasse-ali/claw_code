@@ -103,10 +103,12 @@ export class GitHub {
     return this.request("GET", `/repos/${engine}/issues/${number}`);
   }
 
-  async comments(engine, number) {
+  /** Commentaires d'une issue ; avec `since`, seulement ceux modifiés depuis (date ISO). */
+  async comments(engine, number, since = "") {
     const found = [];
+    const after = since ? `&since=${encodeURIComponent(since)}` : "";
     for (let page = 1; page <= 5; page += 1) {
-      const batch = await this.request("GET", `/repos/${engine}/issues/${number}/comments?per_page=100&page=${page}`);
+      const batch = await this.request("GET", `/repos/${engine}/issues/${number}/comments?per_page=100&page=${page}${after}`);
       found.push(...batch);
       if (batch.length < 100) break;
     }
@@ -189,6 +191,12 @@ export class GitHub {
       if (batch.length < 100) break;
     }
     return runs;
+  }
+
+  /** Différences entre deux branches : commits et fichiers, avec leurs différences. */
+  compare(repo, base, head) {
+    const ref = (name) => name.split("/").map(encodeURIComponent).join("/");
+    return this.request("GET", `/repos/${repo}/compare/${ref(base)}...${ref(head)}`);
   }
 
   /** Arrête un passage : le moteur garde ce qui est fait sur la branche de la session. */

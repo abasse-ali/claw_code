@@ -6,6 +6,7 @@
 import { ANSWER, GitHub, GitHubError, LABEL, PROGRESS } from "./github.js";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 import { sealedBox } from "./sealed-box.js";
+import { LOG, changesHtml, decodeLog, transcriptHtml } from "./transcript.js";
 
 const STORE = "claw-web.settings.v1";
 const DEFAULT_ENGINE = "abasse-ali/claw_code";
@@ -28,6 +29,7 @@ const ICON = {
   archive: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/></svg>',
   stop: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
   trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4h6v3"/></svg>',
+  diff: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v8M8 8h8M8 18h8"/><rect x="3.5" y="2.5" width="17" height="19" rx="2"/></svg>',
 };
 
 const state = {
@@ -387,7 +389,7 @@ function renderComposer() {
   const followUp = Boolean(session);
   const repo = followUp ? session.settings.repo : state.settings.repo;
   const branch = followUp ? `claw/session-${session.number}` : state.settings.branch;
-  composer.hidden = !state.github || location.hash.startsWith("#/reglages");
+  composer.hidden = !state.github || location.hash.startsWith("#/reglages") || location.hash.includes("/modifications");
   // En suivi de session, le dépôt et la branche sont dans l'en-tête : seul le modèle se choisit.
   composer.innerHTML = `
     <div class="chips">
@@ -749,9 +751,25 @@ async function showHome() {
   }
 }
 
+/** Numéro du passage d'un commentaire de progression (lien « Détail du job »). */
+const runOf = (body) => Number((String(body).match(/\/actions\/runs\/(\d+)/) || [])[1] || 0);
+
+/** Événements du journal détaillé d'un passage, toutes parties dans l'ordre. */
+function journalOf(run) {
+  const logs = [...(state.session.logs || new Map()).values()].filter((log) => log.run === run);
+  return logs.sort((a, b) => a.page - b.page).flatMap((log) => log.events);
+}
+
 function messageHtml(comment, isLastProgress) {
   const body = comment.body || "";
+  if (body.startsWith(LOG)) return "";
   if (body.includes(PROGRESS)) {
+    const run = runOf(body);
+    const events = run ? journalOf(run) : [];
+    if (events.length) {
+      const head = body.split("\n").find((line) => line.startsWith("**Claw")) || "";
+      return `<div class="progress-card journal">${renderMarkdown(head)}${transcriptHtml(events, { key: `run${run}`, live: isLastProgress })}</div>`;
+    }
     return `<div class="progress-card${isLastProgress ? "" : " old"}">${renderMarkdown(body)}</div>`;
   }
   if (body.includes(ANSWER)) {
@@ -774,6 +792,7 @@ function renderSessionView() {
   const step = session.step ? ` · ${escapeHtml(session.step)}` : "";
   const pull = session.pull;
   const pullBadge = pull ? (pull.merged_at ? "fusionnée" : pull.state === "open" ? "ouverte" : "fermée") : "";
+  const opened = new Map([...view.querySelectorAll("details[data-key]")].map((details) => [details.dataset.key, details.open]));
   view.innerHTML = `
     <section class="session">
       <header class="session-head">
@@ -782,6 +801,7 @@ function renderSessionView() {
           <a class="meta-link" href="https://github.com/${escapeHtml(settings.repo || "")}" target="_blank" rel="noopener noreferrer">${ICON.repo}<span>${escapeHtml(settings.repo || "?")}</span></a>
           <span class="meta-link">${ICON.branch}<span>claw/session-${session.number}</span></span>
           ${pull ? `<a class="meta-link pull ${pullBadge}" href="${escapeHtml(pull.html_url)}" target="_blank" rel="noopener noreferrer">${ICON.pull}<span>PR #${pull.number} ${pullBadge}</span></a>` : ""}
+          <a class="meta-link" href="#/session/${session.number}/modifications">${ICON.diff}<span>Modifications</span></a>
         </div>
       </header>
       <div class="messages">
@@ -801,6 +821,9 @@ function renderSessionView() {
         </span>
       </div>
     </section>`;
+  for (const details of view.querySelectorAll("details[data-key]")) {
+    if (opened.has(details.dataset.key)) details.open = opened.get(details.dataset.key);
+  }
   view.querySelector('[data-action="retry"]')?.addEventListener("click", async () => {
     try {
       await dispatchSession(session);
@@ -850,7 +873,7 @@ async function showSession(number) {
   const view = $("#view");
   if (!state.session || state.session.number !== number) {
     view.innerHTML = '<section class="session"><p class="empty">Chargement de la session…</p></section>';
-    state.session = { number, issue: null, comments: [], settings: {}, pull: null, step: "", signature: "" };
+    state.session = { number, issue: null, comments: [], settings: {}, pull: null, step: "", signature: "", logs: new Map() };
   }
   try {
     await pollSession(true);
@@ -865,11 +888,20 @@ async function pollSession(force = false) {
   if (!session) return;
   clearTimeout(state.pollTimer);
   const engine = state.settings.engine;
-  const [issue, comments] = await Promise.all([
+  // Après la première lecture, seuls les commentaires modifiés depuis la dernière (le journal
+  // d'un passage en cours change toutes les 24 s : inutile de tout relire toutes les 4 s).
+  const known = session.comments.length && !force;
+  const since = known ? session.comments.reduce((last, comment) => (comment.updated_at > last ? comment.updated_at : last), "") : "";
+  const [issue, fresh] = await Promise.all([
     state.github.issue(engine, session.number),
-    state.github.comments(engine, session.number),
+    state.github.comments(engine, session.number, since),
     refreshRuns(),
   ]);
+  if (state.session !== session) return;
+  const byId = new Map((known ? session.comments : []).map((comment) => [comment.id, comment]));
+  for (const comment of fresh) byId.set(comment.id, comment);
+  const comments = [...byId.values()].sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id - b.id));
+  await readJournals(session, comments);
   if (state.session !== session) return;
   session.issue = issue;
   session.comments = comments;
@@ -905,6 +937,62 @@ async function pollSession(force = false) {
   }
   if (state.session === session && !document.hidden) {
     state.pollTimer = setTimeout(() => pollSession().catch(failure), session.active ? 4000 : 30000);
+  }
+}
+
+/** Décode les parties du journal détaillé nouvelles ou modifiées. */
+async function readJournals(session, comments) {
+  for (const comment of comments) {
+    if (!(comment.body || "").startsWith(LOG)) continue;
+    const cached = session.logs.get(comment.id);
+    if (cached && cached.updated === comment.updated_at) continue;
+    try {
+      const log = await decodeLog(comment.body);
+      if (log) session.logs.set(comment.id, { ...log, updated: comment.updated_at });
+    } catch {
+      // Navigateur sans décompression gzip, ou partie abîmée : la carte de progression reste.
+      session.logs.delete(comment.id);
+    }
+  }
+}
+
+// --- Modifications d'une session ----------------------------------------------------------
+
+async function showChanges(number) {
+  state.session = null;
+  const view = $("#view");
+  renderComposer();
+  view.innerHTML = `
+    <section class="changes">
+      <a class="back" href="#/session/${number}">${ICON.back}<span>Session</span></a>
+      <h1>Modifications</h1>
+      <p class="empty">Lecture des différences…</p>
+    </section>`;
+  try {
+    const issue = await state.github.issue(state.settings.engine, number);
+    const settings = settingsOf(issue);
+    const branch = `claw/session-${number}`;
+    const section = view.querySelector(".changes");
+    if (!section) return;
+    let content;
+    try {
+      const compare = await state.github.compare(settings.repo, settings.base || "main", branch);
+      content = compare.files && compare.files.length
+        ? changesHtml(compare)
+        : `<p class="empty">Aucune différence entre <code>${escapeHtml(branch)}</code> et <code>${escapeHtml(settings.base || "main")}</code>.</p>`;
+    } catch (error) {
+      if (!(error instanceof GitHubError) || error.status !== 404) throw error;
+      content = `<p class="empty">Pas encore de branche <code>${escapeHtml(branch)}</code> dans ${escapeHtml(settings.repo || "")} : Claw n'y a encore rien publié.</p>`;
+    }
+    if (!location.hash.startsWith(`#/session/${number}/modifications`)) return;
+    section.innerHTML = `
+      <a class="back" href="#/session/${number}">${ICON.back}<span>Session</span></a>
+      <h1>Modifications</h1>
+      <p class="help"><code>${escapeHtml(branch)}</code> comparée à <code>${escapeHtml(settings.base || "main")}</code> dans
+        <a href="https://github.com/${escapeHtml(settings.repo || "")}/compare/${escapeHtml(settings.base || "main")}...${escapeHtml(branch)}" target="_blank" rel="noopener noreferrer">${escapeHtml(settings.repo || "")}</a></p>
+      ${content}`;
+  } catch (error) {
+    failure(error);
   }
 }
 
@@ -1056,6 +1144,11 @@ function route() {
   }
   if (onSettings) {
     showSettings();
+    return;
+  }
+  const changes = hash.match(/^#\/session\/(\d+)\/modifications/);
+  if (changes) {
+    showChanges(Number(changes[1]));
     return;
   }
   const match = hash.match(/^#\/session\/(\d+)/);
