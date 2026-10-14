@@ -31,6 +31,7 @@ const ICON = {
   stop: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
   trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4h6v3"/></svg>',
   diff: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v8M8 8h8M8 18h8"/><rect x="3.5" y="2.5" width="17" height="19" rx="2"/></svg>',
+  image: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.6-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9"/></svg>',
   gauge: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 17a8.5 8.5 0 1 1 15 0"/><path d="M12 13l4-4"/><circle cx="12" cy="13" r="1.2"/></svg>',
 };
 
@@ -47,6 +48,9 @@ const state = {
   pollTimer: null,
   dispatchedAt: 0,
   sending: false,
+  // Images jointes au prochain message, et images déjà lues (chemin : adresse data:).
+  attachments: [],
+  images: new Map(),
   // Requêtes gratuites du jour et crédits (clé OpenRouter gardée sur l'appareil).
   quota: null,
   quotaError: "",
@@ -109,6 +113,127 @@ function settingsOf(issue) {
 }
 
 const taskOf = (issue) => (issue.body || "").replace(SETTINGS_BLOCK, "").trim();
+// Images jointes à un message par l'appli : chemins dans la branche FILES_BRANCH du moteur.
+const IMAGES_BLOCK = /<!--\s*claw-web:images\s+(\[[\s\S]*?\])\s*-->/g;
+const FILES_BRANCH = "claw-web-fichiers";
+
+/** Le texte sans ses blocs d'images, et les chemins des images. */
+function withoutImages(text) {
+  const paths = [];
+  const clean = String(text || "").replace(IMAGES_BLOCK, (_, list) => {
+    try {
+      paths.push(...JSON.parse(list).filter((path) => typeof path === "string"));
+    } catch {
+      // bloc abîmé : ignoré
+    }
+    return "";
+  }).trim();
+  return { text: clean, paths };
+}
+
+/** Texte d'un message et vignettes de ses images (remplies ensuite par loadThumbs). */
+function messageBody(text) {
+  const { text: clean, paths } = withoutImages(text);
+  const thumbs = paths.length
+    ? `<div class="thumbs">${paths.map((path) => `<button class="thumb" data-image="${escapeHtml(path)}" aria-label="Voir l'image"><img alt=""></button>`).join("")}</div>`
+    : "";
+  return renderMarkdown(clean) + thumbs;
+}
+
+/** Remplit les vignettes de la vue (images lues une fois, gardées en mémoire). */
+async function loadThumbs() {
+  for (const button of document.querySelectorAll("#view .thumb[data-image]")) {
+    const path = button.dataset.image;
+    let url = state.images.get(path);
+    if (!url) {
+      try {
+        const blob = await state.github.rawFile(state.settings.engine, path, FILES_BRANCH);
+        url = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+        state.images.set(path, url);
+      } catch {
+        button.classList.add("missing");
+        continue;
+      }
+    }
+    const image = button.querySelector("img");
+    if (image && image.getAttribute("src") !== url) image.src = url;
+  }
+}
+
+/** Image en grand. */
+function openImage(path) {
+  const url = state.images.get(path);
+  if (!url) return;
+  const sheet = $("#sheet");
+  sheet.innerHTML = `
+    <div class="sheet-panel image-panel" role="dialog" aria-modal="true" aria-label="Image">
+      <div class="sheet-head"><strong>Image jointe</strong><button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button></div>
+      <img class="full-image" alt="" src="${url}">
+    </div>`;
+  sheet.onclick = (event) => {
+    if (event.target === sheet || event.target.closest("[data-close]")) {
+      sheet.hidden = true;
+      sheet.innerHTML = "";
+    }
+  };
+  sheet.hidden = false;
+}
+
+/** Image choisie, réduite si besoin (2000 px au plus de côté, JPEG) : { name, base64, url }. */
+async function prepareImage(file) {
+  const keep = ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type) && file.size <= 1_500_000;
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, 2000 / Math.max(bitmap.width, bitmap.height));
+  let blob = file;
+  let extension = (file.type.split("/")[1] || "jpg").replace("jpeg", "jpg");
+  if (!keep || scale < 1) {
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.85));
+    extension = "jpg";
+  }
+  const url = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+  return { name: file.name || `image.${extension}`, extension, base64: url.split(",")[1], url };
+}
+
+/** Dépose les images jointes sur la branche FILES_BRANCH du moteur ; le bloc à ajouter au message. */
+async function uploadAttachments() {
+  if (!state.attachments.length) return "";
+  const engine = state.settings.engine;
+  await state.github.ensureBranch(engine, FILES_BRANCH, state.engineRef || "main");
+  const folder = `uploads/${new Date().toISOString().replace(/[-:]/g, "").replace(/\..*/, "").replace("T", "-")}-${Math.random().toString(36).slice(2, 8)}`;
+  const paths = [];
+  for (const [index, image] of state.attachments.entries()) {
+    const path = `${folder}/${index + 1}.${image.extension}`;
+    await state.github.putFile(engine, path, image.base64, "Image jointe depuis l'appli Claw", FILES_BRANCH);
+    state.images.set(path, image.url);
+    paths.push(path);
+  }
+  return `\n\n<!-- claw-web:images ${JSON.stringify(paths)} -->`;
+}
+
+function renderAttachments() {
+  const row = document.querySelector("#composer .attachments");
+  if (!row) return;
+  row.hidden = !state.attachments.length;
+  row.innerHTML = state.attachments.map((image, index) => `
+    <span class="attachment"><img alt="" src="${image.url}"><button type="button" data-remove="${index}" aria-label="Retirer l'image">${ICON.close}</button></span>`).join("");
+  const send = document.querySelector("#composer .send");
+  const textarea = document.querySelector("#composer textarea");
+  if (send && textarea) textarea.dispatchEvent(new Event("input"));
+}
 // Numéro et branche d'une session, notés par l'appli (les numéros d'issue de GitHub ne
 // reculent jamais, même après une suppression) ; d'anciennes sessions n'ont que l'issue.
 const numberOf = (issue) => Number(settingsOf(issue).n) || issue.number;
@@ -554,7 +679,10 @@ function renderComposer() {
       <button class="chip pill" data-aid="team" aria-pressed="${Boolean(state.settings.team)}">Équipe</button>
       <button class="chip pill" data-aid="ultracode" aria-pressed="${Boolean(state.settings.ultracode)}">Ultracode</button>
     </div>
+    <div class="attachments" hidden></div>
     <form class="prompt" autocomplete="off">
+      <button class="attach" type="button" aria-label="Joindre une image">${ICON.image}</button>
+      <input class="file-input" type="file" accept="image/*" multiple hidden>
       <textarea rows="1" name="text" placeholder="${followUp ? "Répondez ou donnez une nouvelle consigne." : "Décrivez une tâche ou posez une question."}" aria-label="Message pour Claw"></textarea>
       <button class="send" type="submit" aria-label="Envoyer" disabled>${ICON.send}</button>
     </form>`;
@@ -563,7 +691,7 @@ function renderComposer() {
   const resize = () => {
     textarea.style.height = "auto";
     textarea.style.height = `${Math.min(textarea.scrollHeight, 220)}px`;
-    send.disabled = state.sending || !textarea.value.trim() || (!followUp && !repo);
+    send.disabled = state.sending || (!textarea.value.trim() && !state.attachments.length) || (!followUp && !repo);
   };
   textarea.addEventListener("input", resize);
   textarea.addEventListener("keydown", (event) => {
@@ -576,7 +704,7 @@ function renderComposer() {
   });
   composer.querySelector("form").addEventListener("submit", (event) => {
     event.preventDefault();
-    const text = textarea.value.trim();
+    const text = textarea.value.trim() || (state.attachments.length ? "Voici l'image jointe." : "");
     if (!text) return;
     if (followUp) followUpSession(text, textarea);
     else startSession(text, textarea);
@@ -585,6 +713,26 @@ function renderComposer() {
   composer.querySelector('[data-action="branch"]')?.addEventListener("click", pickBranch);
   composer.querySelector('[data-action="model"]').addEventListener("click", pickModel);
   composer.querySelector('[data-action="quota"]').addEventListener("click", openQuota);
+  const picker = composer.querySelector(".file-input");
+  composer.querySelector(".attach").addEventListener("click", () => picker.click());
+  picker.addEventListener("change", async () => {
+    for (const file of [...picker.files].slice(0, 6 - state.attachments.length)) {
+      try {
+        state.attachments.push(await prepareImage(file));
+      } catch {
+        toast(`${file.name} : image illisible (png, jpg, webp ou gif)`, "error");
+      }
+    }
+    picker.value = "";
+    renderAttachments();
+  });
+  composer.querySelector(".attachments").addEventListener("click", (event) => {
+    const remove = event.target.closest("[data-remove]");
+    if (!remove) return;
+    state.attachments.splice(Number(remove.dataset.remove), 1);
+    renderAttachments();
+  });
+  renderAttachments();
   for (const button of composer.querySelectorAll("[data-aid]")) button.addEventListener("click", () => toggleAid(button.dataset.aid));
   refreshQuota();
   resize();
@@ -599,6 +747,7 @@ async function startSession(text, textarea) {
   state.sending = true;
   renderSending(true);
   try {
+    const images = await uploadAttachments();
     const firstLine = text.split("\n")[0].trim();
     const title = firstLine.length > 72 ? `${firstLine.slice(0, 71)}…` : firstLine;
     // Numéro suivant de l'appli ; sa branche, si une ancienne du même nom reste dans le dépôt,
@@ -610,7 +759,8 @@ async function startSession(text, textarea) {
       work = `claw/session-${n}-${suffix}`;
     }
     const block = `<!-- claw-web ${JSON.stringify({ repo, base: branch, model: model || "", n, branch: work })} -->`;
-    const issue = await state.github.createIssue(engine, title, `${text}\n\n${block}`);
+    const issue = await state.github.createIssue(engine, title, `${text}${images}\n\n${block}`);
+    state.attachments = [];
     await state.github.dispatch(engine, state.engineRef,
       { repo, base: branch || "main", session: String(issue.number), model: model || "", ...aidInputs() });
     state.dispatchedAt = Date.now();
@@ -629,7 +779,9 @@ async function followUpSession(text, textarea) {
   state.sending = true;
   renderSending(true);
   try {
-    await state.github.comment(state.settings.engine, session.number, text);
+    const images = await uploadAttachments();
+    await state.github.comment(state.settings.engine, session.number, `${text}${images}`);
+    state.attachments = [];
     await dispatchSession(session);
     textarea.value = "";
     textarea.dispatchEvent(new Event("input"));
@@ -848,6 +1000,14 @@ async function openDeleteSessions(issues) {
           await state.github.deleteRun(engine, run.id).catch((error) => problems.push(`passage ${run.id} : ${error.message}`));
         }
       }
+      // Images jointes à la session (tâche et messages) : effacées de la branche des fichiers.
+      try {
+        const notes = await state.github.comments(engine, issue.number);
+        const paths = [issue.body, ...notes.map((note) => note.body)].flatMap((text) => withoutImages(text).paths);
+        for (const path of paths) await state.github.deleteFile(engine, path, "Image d'une session supprimée", FILES_BRANCH);
+      } catch (error) {
+        problems.push(`images de la session ${numberOf(issue)} : ${error.message}`);
+      }
       try {
         await state.github.deleteIssue(issue.node_id);
         erased += 1;
@@ -945,7 +1105,7 @@ function messageHtml(comment, isLastProgress) {
   if (body.includes(ANSWER)) {
     return `<article class="message claw"><div class="who">Claw</div>${renderMarkdown(body)}</article>`;
   }
-  return `<article class="message user"><div class="who">${escapeHtml(comment.user ? comment.user.login : "Vous")}</div>${renderMarkdown(body)}</article>`;
+  return `<article class="message user"><div class="who">${escapeHtml(comment.user ? comment.user.login : "Vous")}</div>${messageBody(body)}</article>`;
 }
 
 function renderSessionView() {
@@ -975,7 +1135,7 @@ function renderSessionView() {
         </div>
       </header>
       <div class="messages">
-        <article class="message user"><div class="who">${escapeHtml(session.issue.user ? session.issue.user.login : "Vous")}</div>${renderMarkdown(taskOf(session.issue))}</article>
+        <article class="message user"><div class="who">${escapeHtml(session.issue.user ? session.issue.user.login : "Vous")}</div>${messageBody(taskOf(session.issue))}</article>
         ${comments.map((comment) => messageHtml(comment, comment === lastProgress && !answered)).join("")}
       </div>
       <div class="run-status ${active ? "active" : status ? status.key : ""}">
@@ -1027,6 +1187,11 @@ function renderSessionView() {
     }
   });
   view.querySelector('[data-action="delete"]')?.addEventListener("click", () => openDeleteSessions([session.issue]));
+  view.querySelector(".messages").addEventListener("click", (event) => {
+    const thumb = event.target.closest(".thumb[data-image]");
+    if (thumb) openImage(thumb.dataset.image);
+  });
+  loadThumbs();
   view.querySelector('[data-action="archive"]')?.addEventListener("click", async () => {
     try {
       await state.github.setIssueState(state.settings.engine, session.number, "closed");

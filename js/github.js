@@ -193,6 +193,43 @@ export class GitHub {
     return runs;
   }
 
+  /** Crée la branche depuis `from` si elle n'existe pas encore. */
+  async ensureBranch(repo, branch, from = "main") {
+    if (await this.branchExists(repo, branch)) return;
+    const base = await this.request("GET", `/repos/${repo}/git/ref/heads/${from}`);
+    await this.request("POST", `/repos/${repo}/git/refs`, { ref: `refs/heads/${branch}`, sha: base.object.sha });
+  }
+
+  /** Dépose un fichier (contenu en base64) sur une branche. */
+  putFile(repo, path, base64, message, branch) {
+    return this.request("PUT", `/repos/${repo}/contents/${path}`, { message, content: base64, branch });
+  }
+
+  /** Contenu brut d'un fichier d'une branche, en Blob. */
+  async rawFile(repo, path, branch) {
+    let response;
+    try {
+      response = await fetch(`${API}/repos/${repo}/contents/${path}?ref=${encodeURIComponent(branch)}`, {
+        cache: "force-cache",
+        headers: { Authorization: `Bearer ${this.token}`, Accept: "application/vnd.github.raw", "X-GitHub-Api-Version": "2022-11-28" },
+      });
+    } catch {
+      throw new GitHubError(0, "GitHub ne répond pas : vérifiez la connexion");
+    }
+    if (!response.ok) throw new GitHubError(response.status, `Image introuvable (${response.status})`);
+    return response.blob();
+  }
+
+  /** Supprime un fichier d'une branche ; déjà absent, rien à faire. */
+  async deleteFile(repo, path, message, branch) {
+    try {
+      const file = await this.request("GET", `/repos/${repo}/contents/${path}?ref=${encodeURIComponent(branch)}`);
+      await this.request("DELETE", `/repos/${repo}/contents/${path}`, { message, sha: file.sha, branch });
+    } catch (error) {
+      if (!(error instanceof GitHubError) || error.status !== 404) throw error;
+    }
+  }
+
   /** La branche existe-t-elle dans le dépôt ? */
   async branchExists(repo, branch) {
     try {
