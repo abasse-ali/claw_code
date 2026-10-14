@@ -132,6 +132,9 @@ def main():
     args = ["claw", "--permission-mode", "danger-full-access", "--output-format", "stream-json"]
     mock = None
     if MODEL == "mock":
+        # Aucune clé réelle : rien ne peut partir vers un vrai modèle, relecteurs compris.
+        env = {key: value for key, value in env.items() if not key.upper().endswith("_API_KEY")}
+        env["CLAW_NO_USER_ENV"] = "1"
         mock, base_url = start_mock()
         env["OLLAMA_BASE_URL"] = base_url
         args += ["--model", "ollama:mock"]
