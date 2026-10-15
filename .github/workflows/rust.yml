@@ -66,9 +66,10 @@ jobs:
       # Les tests changent le dossier courant du processus : un seul fil.
       # Un test bloqué arrête l'étape au bout de 15 minutes (les tests en prennent 2) :
       # le journal reste lisible, ce qui n'est pas le cas d'une exécution annulée.
-      # Garde-fous : depuis l'image Ubuntu du 15 octobre 2026, un test du crate runtime prend
-      # toute la mémoire et la machine gèle sans journal (le code d'avant gèle aussi) ; sous ces
-      # limites (diagnostic-linux.yml), les 322 tests passent. `timeout` arrête un test bloqué.
+      # Garde-fous : un test qui laisserait des processus ou prendrait toute la mémoire échoue
+      # au lieu de geler la machine sans journal (cas du 15 octobre 2026 : `kill -KILL -<pid>`
+      # ne tuait rien avec le kill de procps 4, les processus des tests arrêtés s'accumulaient).
+      # `timeout` arrête un test bloqué.
       - name: Tests
         shell: bash
         timeout-minutes: 15

@@ -182,6 +182,8 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | (commit « Captures d'écran », 15 octobre 2026) | Outil `Screenshot` : captures d'une page au téléphone et à l'ordinateur (navigateur piloté par le protocole DevTools, client WebSocket local), actions avant la capture (clic, saisie, défilement), défauts mesurés dans la page (contenu qui sort de l'écran, texte coupé, éléments superposés, `hidden` affiché, image absente, texte trop petit ou trop pâle, console) ; les captures suivent le dernier résultat d'outil de la réponse comme des images (décrites par le lecteur d'images pour un modèle qui ne les lit pas), quatre au plus dans la conversation ; ligne « Page layout » des cas limites ; `ViewPage` passe aussi par DevTools : sous Windows, Edge 155 se relance et `--dump-dom` ne rendait plus rien |
 
+| (commit « Linux : arrêter une commande arrête aussi ses sous-processus », 16 octobre 2026) | Sous Ubuntu 24.04, `kill -KILL -<pid>` (procps 4) lit `-<pid>` comme un signal : rien n'était tué et la réponse était 0. Les descendants des commandes arrêtées (délai dépassé, tâche de fond, hook trop lent) survivaient, et les tests du crate runtime finissaient par geler la machine Linux de la CI sans laisser de journal. Forme `kill -s KILL -- -<pid>`, hooks dans leur propre groupe, essai sous Linux ; CI : durée maximale par job, limites de mémoire et de processus, tests Windows à la demande |
+
 État des tests après T1-33 : 664 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
 il passe seul), analyse statique à zéro sous Windows et
