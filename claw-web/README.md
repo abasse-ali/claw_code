@@ -1,11 +1,13 @@
 # Claw web
 
-Appli web de [Claw](https://github.com/abasse-ali/claw_code), l'agent de code qui travaille avec
+Appli web de [Claw](https://github.com/abasse-ali/claw_code) (dossier `claw-web` du dépôt du
+code de Claw), l'agent de code qui travaille avec
 des modèles gratuits : choisissez un dépôt GitHub, une branche et un modèle, décrivez une tâche ;
 Claw y travaille dans GitHub Actions, pousse une branche, ouvre la pull request et vous répond.
 Installable sur le téléphone (« Ajouter à l'écran d'accueil »).
 
-Adresse : https://abasse-ali.github.io/claw-web/
+Adresse : https://abasse-ali.github.io/claw_code/ (publiée par le workflow `pages.yml` à chaque
+changement de ce dossier ; l'ancienne adresse, https://abasse-ali.github.io/claw-web/, y renvoie).
 
 ## Comment ça marche
 
