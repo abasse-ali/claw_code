@@ -1,15 +1,32 @@
 name: Claw web
 
-# Moteur de l'appli web de Claw (dépôt claw-web, GitHub Pages) : l'appli lance ce workflow
-# pour une session (une issue de ce dépôt, étiquette claw-web) ; Claw travaille dans le dépôt
-# choisi, sur la branche claw/session-<n>, pousse, ouvre la pull request et répond dans la
-# session. Secrets : OPENROUTER_API_KEY, CLAW_REPO_TOKEN (jeton qui peut lire et pousser dans
-# les dépôts des tâches). Suivi : rust/docs/suivi/w1-appli-web.md.
-run-name: "Claw ${{ inputs.repo }} #${{ inputs.session }}"
+# Moteur de l'appli web de Claw (dépôt claw-web, GitHub Pages), appelé par le workflow
+# claw-web.yml du dépôt des sessions (privé, par exemple abasse-ali/claw-sessions) : l'appli
+# lance ce dernier pour une session (une issue de ce dépôt-là, étiquette claw-web) ; Claw
+# travaille dans le dépôt choisi, sur la branche de la session, pousse, ouvre la pull request
+# et répond dans la session. Tout se passe dans le dépôt appelant (issues, caches, journaux) :
+# ses minutes, ses secrets (OPENROUTER_API_KEY, CLAW_REPO_TOKEN, jeton qui peut lire et
+# pousser dans les dépôts des tâches), son nom de passage (« Claw <dépôt> #<session> »).
+# Suivi : rust/docs/suivi/w1-appli-web.md.
 
 on:
-  workflow_dispatch:
+  workflow_call:
+    secrets:
+      OPENROUTER_API_KEY:
+        required: false
+      CLAW_REPO_TOKEN:
+        required: false
     inputs:
+      claw_source:
+        description: Dépôt du code de Claw (compilé, scripts du moteur)
+        required: false
+        type: string
+        default: abasse-ali/claw_code
+      claw_ref:
+        description: Branche du code de Claw
+        required: false
+        type: string
+        default: main
       repo:
         description: Dépôt où travailler (propriétaire/nom)
         required: true
@@ -45,11 +62,6 @@ permissions:
   contents: read
   issues: write
 
-# Un passage à la fois par session : un message de suivi attend la fin du précédent.
-concurrency:
-  group: claw-web-${{ inputs.session }}
-  cancel-in-progress: false
-
 jobs:
   task:
     runs-on: ubuntu-latest
@@ -58,6 +70,8 @@ jobs:
       - name: Source de Claw
         uses: actions/checkout@v6
         with:
+          repository: ${{ inputs.claw_source }}
+          ref: ${{ inputs.claw_ref }}
           path: claw-src
           persist-credentials: false
 
