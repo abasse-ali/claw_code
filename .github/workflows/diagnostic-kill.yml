@@ -1,0 +1,41 @@
+name: Diagnostic kill
+
+# Quel programme `kill` la machine Linux de GitHub fournit, et ce que fait
+# `kill -KILL -<pid>` (forme utilisée par Claw) quand le processus n'est pas chef de
+# son groupe. À la demande seulement ; l'essai se fait dans une session à part.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  kill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Programme kill
+        run: |
+          which -a kill
+          ls -l "$(command -v kill)" "$(readlink -f "$(command -v kill)")"
+          /usr/bin/kill --version 2>&1 | head -2 || true
+          dpkg -S "$(readlink -f /usr/bin/kill)" || true
+          cat /etc/os-release | head -3
+      - name: Essai dans une session à part
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state=pending -f context=diagnostic/kill -f description="essai lancé" > /dev/null
+          setsid bash -c '
+            sleep 300 & s=$!
+            echo "shell $$ groupe $(ps -o pgid= -p $$) ; sleep $s groupe $(ps -o pgid= -p $s)"
+            /usr/bin/kill -KILL -$s
+            echo "code de kill : $?"
+            sleep 1
+            ps -o pid,pgid,stat,cmd -p $$,$s || true
+          ' > /tmp/essai.txt 2>&1
+          echo "--- essai"
+          cat /tmp/essai.txt
+          echo "--- la machine répond encore"
+          gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state=success -f context=diagnostic/kill -f description="$(tr '\n' ' ' < /tmp/essai.txt | cut -c1-139)" > /dev/null
