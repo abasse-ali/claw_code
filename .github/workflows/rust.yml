@@ -75,9 +75,11 @@ jobs:
         timeout-minutes: 15
         run: |
           set -o pipefail
-          export MALLOC_ARENA_MAX=2
-          ulimit -u 1500
-          ulimit -v 4000000
+          if [ "$RUNNER_OS" = Linux ]; then
+            export MALLOC_ARENA_MAX=2
+            ulimit -u 1500
+            ulimit -v 4000000
+          fi
           timeout --kill-after=30 780 cargo test --workspace --locked --no-fail-fast -- --test-threads=1 2>&1 | tee test-output.log
       # Avec un seul fil, le test en cours est écrit avant son résultat : la fin de la
       # sortie nomme le test bloqué.
