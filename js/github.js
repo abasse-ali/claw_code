@@ -203,6 +203,17 @@ export class GitHub {
     await this.request("POST", `/repos/${repo}/git/refs`, { ref: `refs/heads/${branch}`, sha: base.object.sha });
   }
 
+  /** Nouvelle branche `name`, au même point que la branche `from`. */
+  async createBranch(repo, name, from) {
+    const base = await this.request("GET", `/repos/${repo}/git/ref/heads/${encodePath(from)}`);
+    return this.request("POST", `/repos/${repo}/git/refs`, { ref: `refs/heads/${name}`, sha: base.object.sha });
+  }
+
+  /** Renomme une branche ; GitHub fait suivre les pull requests qui y arrivent et ses adresses. */
+  renameBranch(repo, branch, name) {
+    return this.request("POST", `/repos/${repo}/branches/${encodePath(branch)}/rename`, { new_name: name });
+  }
+
   /** Dépose un fichier (contenu en base64) sur une branche. */
   putFile(repo, path, base64, message, branch) {
     return this.request("PUT", `/repos/${repo}/contents/${path}`, { message, content: base64, branch });
@@ -362,6 +373,15 @@ function explain(status, reason, path) {
   }
   if (/\/merge$/.test(path)) {
     if (status === 405 || status === 409) return `Fusion impossible : ${reason} (conflit ou vérifications en cours ; voyez la pull request sur GitHub)`;
+  }
+  if (/\/rename$/.test(path)) {
+    if (status === 403 || status === 404) {
+      return "Le jeton ne peut pas renommer cette branche : pour la branche par défaut d'un dépôt, GitHub demande l'autorisation Administration en lecture et écriture (réglages du jeton sur GitHub ; sa valeur ne change pas)";
+    }
+    if (status === 422) return `Renommage refusé : ${reason}`;
+  }
+  if (/\/git\/refs$/.test(path) && status === 422) {
+    return /already exists/i.test(reason) ? "Une branche porte déjà ce nom" : `Branche refusée : ${reason}`;
   }
   if (status === 403 || status === 404) {
     if (path === "/user/repos") {

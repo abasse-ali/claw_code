@@ -31,6 +31,8 @@ const ICON = {
   stop: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
   trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4h6v3"/></svg>',
   globe: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.5 2.6 2.5 14.4 0 17M12 3.5c-2.5 2.6-2.5 14.4 0 17"/></svg>',
+  edit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>',
+  spark: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 3.5l1.9 5.1 5.1 1.9-5.1 1.9L11 17.5l-1.9-5.1L4 10.5l5.1-1.9z"/><path d="M18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></svg>',
   chat: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14a1.5 1.5 0 0 1 1.5 1.5v9A1.5 1.5 0 0 1 19 17h-8l-4.5 3.5V17H5a1.5 1.5 0 0 1-1.5-1.5v-9A1.5 1.5 0 0 1 5 5z"/></svg>',
   folder: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5a1.5 1.5 0 0 1 1.5-1.5h4l2 2.5h8a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z"/></svg>',
   file: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>',
@@ -64,6 +66,9 @@ const state = {
   drawerSessions: [],
   selecting: false,
   selected: new Set(),
+  // Bloc ouvert dans le menu (« sessions » ou « files ») et dossier parcouru dans « Fichiers ».
+  drawerPane: "sessions",
+  explorer: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -510,21 +515,198 @@ function openCreateRepo(prefill = "") {
 
 async function pickBranch() {
   if (!state.settings.repo) return pickRepo();
+  return openBranches({
+    repo: state.settings.repo,
+    current: state.settings.branch,
+    title: "Branche de départ",
+    onPick: (value) => {
+      state.settings.branch = value;
+      saveSettings();
+      renderComposer();
+    },
+  });
+}
+
+// --- Branches : choisir, créer, renommer -----------------------------------------------------
+
+/** Ce qui ne va pas dans un nom de branche (règles de Git), ou "". */
+function branchProblem(name, branches) {
+  if (!name) return "Donnez un nom à la branche";
+  if (branches.includes(name)) return "Une branche porte déjà ce nom";
+  if (/[\s~^:?*[\\]|\.\.|@\{|\/\/|^[-/.]|[/.]$|\.lock$|\/\./.test(name)) {
+    return "Nom refusé par Git : ni espace, ni ~ ^ : ? * [ \\, ni « .. », ni « / » au début ou à la fin";
+  }
+  return "";
+}
+
+/** Branches d'un dépôt : en choisir une, en créer une à partir d'une autre, en renommer une. */
+async function openBranches({ repo, current, title, onPick }) {
+  let branches;
+  let fallback = "";
   try {
-    const branches = await loadBranches(state.settings.repo);
-    openPicker({
-      title: "Branche de départ",
-      current: state.settings.branch,
-      items: branches.map((name) => ({ value: name, label: name })),
-      onPick: (value) => {
-        state.settings.branch = value;
-        saveSettings();
-        renderComposer();
-      },
-    });
+    const [names, info] = await Promise.all([loadBranches(repo), state.github.repository(repo)]);
+    branches = [...names];
+    fallback = info.default_branch || "";
   } catch (error) {
     failure(error);
+    return;
   }
+  const sheet = $("#sheet");
+  sheet.innerHTML = `
+    <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
+      <div class="sheet-head">
+        <strong>${escapeHtml(title)}</strong>
+        <button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button>
+      </div>
+      <p class="help sheet-sub">${ICON.repo}<span>${escapeHtml(repo)}</span></p>
+      <div class="branch-body"></div>
+    </div>`;
+  const body = sheet.querySelector(".branch-body");
+  const close = () => {
+    sheet.hidden = true;
+    sheet.innerHTML = "";
+  };
+  const showList = () => {
+    body.innerHTML = `
+      <button type="button" class="sheet-item pinned" data-new><span class="sheet-label">${ICON.plus}<span>Nouvelle branche</span></span>
+        <small>à partir de ${escapeHtml(current || fallback)} ou d'une autre</small></button>
+      ${branches.length > 8 ? '<input class="sheet-search" type="search" placeholder="Rechercher une branche" autocomplete="off">' : ""}
+      <ul class="sheet-list"></ul>`;
+    const list = body.querySelector(".sheet-list");
+    const draw = (filter = "") => {
+      const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
+      const shown = branches.filter((name) => words.every((word) => name.toLowerCase().includes(word)));
+      list.innerHTML = shown.slice(0, 300).map((name) => `
+        <li class="branch-row">
+          <button type="button" class="sheet-item${name === current ? " current" : ""}" data-pick="${escapeHtml(name)}">
+            <span class="sheet-label">${ICON.branch}<span>${escapeHtml(name)}</span></span>
+            ${name === fallback ? "<small>branche par défaut</small>" : ""}
+          </button>
+          <button type="button" class="icon-button" data-rename="${escapeHtml(name)}" aria-label="Renommer ${escapeHtml(name)}">${ICON.edit}</button>
+        </li>`).join("") || '<li class="empty">Rien ne correspond.</li>';
+    };
+    draw();
+    const search = body.querySelector(".sheet-search");
+    if (search) search.oninput = () => draw(search.value);
+  };
+  // Formulaire de création (`old` vide) ou de renommage de la branche `old`.
+  const showForm = (old) => {
+    const creating = !old;
+    const from = current || fallback;
+    body.innerHTML = `
+      <form class="branch-form" autocomplete="off">
+        <label>${creating ? "Nom de la nouvelle branche" : `Nouveau nom pour <code>${escapeHtml(old)}</code>`}
+          <input name="name" type="text" required maxlength="200" spellcheck="false" autocapitalize="none" autocorrect="off"
+            placeholder="ma-branche" value="${escapeHtml(old)}">
+        </label>
+        ${creating ? `<label>À partir de
+          <select name="from">${branches.map((name) => `<option value="${escapeHtml(name)}"${name === from ? " selected" : ""}>${escapeHtml(name)}</option>`).join("")}</select>
+        </label>` : `<p class="help">${old === fallback ? "C'est la branche par défaut du dépôt : GitHub demande au jeton l'autorisation Administration (lecture et écriture) pour la renommer. " : ""}GitHub fait suivre les pull requests qui arrivent sur cette branche, et les sessions de l'appli qui y travaillent passent au nouveau nom.</p>`}
+        <div class="form-actions">
+          <button type="button" class="small-link" data-back>${ICON.back}<span>Retour</span></button>
+          <button class="primary" type="submit">${creating ? "Créer la branche" : "Renommer"}</button>
+        </div>
+      </form>`;
+    const form = body.querySelector("form");
+    const input = form.elements.name;
+    input.focus();
+    if (!creating) input.select();
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const name = input.value.trim();
+      if (!creating && name === old) {
+        showList();
+        return;
+      }
+      const problem = branchProblem(name, branches);
+      if (problem) {
+        toast(problem, "error");
+        return;
+      }
+      const button = form.querySelector("button[type=submit]");
+      button.disabled = true;
+      button.textContent = creating ? "Création…" : "Renommage…";
+      try {
+        if (creating) {
+          const start = form.elements.from.value;
+          await state.github.createBranch(repo, name, start);
+          branches.push(name);
+          state.branches.set(repo, [...branches]);
+          toast(`Branche ${name} créée à partir de ${start}`);
+          close();
+          onPick(name);
+          return;
+        }
+        await state.github.renameBranch(repo, old, name);
+        branches.splice(branches.indexOf(old), 1, name);
+        state.branches.set(repo, [...branches]);
+        if (current === old) current = name;
+        if (fallback === old) fallback = name;
+        const moved = await followRenamedBranch(repo, old, name);
+        toast(`Branche ${old} renommée en ${name}${moved ? ` ; ${moved > 1 ? `${moved} sessions suivent` : "sa session suit"} le nouveau nom` : ""}`);
+        showList();
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = creating ? "Créer la branche" : "Renommer";
+        failure(error);
+      }
+    });
+  };
+  sheet.onclick = (event) => {
+    if (event.target === sheet || event.target.closest("[data-close]")) {
+      close();
+      return;
+    }
+    if (event.target.closest("[data-new]")) {
+      showForm("");
+      return;
+    }
+    const rename = event.target.closest("[data-rename]");
+    if (rename) {
+      showForm(rename.dataset.rename);
+      return;
+    }
+    if (event.target.closest("[data-back]")) {
+      showList();
+      return;
+    }
+    const pick = event.target.closest("[data-pick]");
+    if (pick) {
+      close();
+      onPick(pick.dataset.pick);
+    }
+  };
+  showList();
+  sheet.hidden = false;
+}
+
+/** Après un renommage : la zone de saisie, le menu « Fichiers » et les sessions de l'appli qui
+ * utilisent l'ancien nom (branche de travail ou de départ) passent au nouveau. */
+async function followRenamedBranch(repo, old, name) {
+  if (state.settings.repo === repo && state.settings.branch === old) {
+    state.settings.branch = name;
+    saveSettings();
+    const chip = document.querySelector('#composer [data-action="branch"] span');
+    if (chip) chip.textContent = name;
+  }
+  if (state.explorer && state.explorer.repo === repo && state.explorer.ref === old) state.explorer.ref = name;
+  let moved = 0;
+  for (const issue of await state.github.sessions(state.settings.engine)) {
+    const settings = settingsOf(issue);
+    const branch = branchOf(issue);
+    if (settings.repo !== repo || (branch !== old && settings.base !== old)) continue;
+    const next = { ...settings, branch: branch === old ? name : branch };
+    if (settings.base === old) next.base = name;
+    const text = (issue.body || "").replace(SETTINGS_BLOCK, `<!-- claw-web ${JSON.stringify(next)} -->`);
+    await state.github.setIssueBody(state.settings.engine, issue.number, text);
+    moved += 1;
+    if (state.session && state.session.number === issue.number) {
+      state.session.issue.body = text;
+      state.session.settings = settingsOf(state.session.issue);
+      renderSessionView();
+    }
+  }
+  return moved;
 }
 
 async function pickModel() {
@@ -555,12 +737,12 @@ async function pickModel() {
 
 const AIDS = {
   team: {
-    on: "Mode équipe : chaque étape (comprendre, écrire le code, déboguer, relire) va au modèle gratuit le plus fort pour elle",
-    off: "Mode équipe coupé : un seul modèle fait tout le travail",
+    label: "Équipe",
+    detail: "Chaque étape (comprendre, écrire le code, déboguer, relire) va au modèle gratuit le plus fort pour elle",
   },
   ultracode: {
-    on: "Ultracode : un agent au contexte vierge étudie la demande avant le travail, un vérificateur indépendant contrôle le résultat après (une à trois dizaines de requêtes de plus)",
-    off: "Ultracode coupé",
+    label: "Ultracode",
+    detail: "Un agent neuf étudie la demande avant le travail, un vérificateur indépendant contrôle le résultat (une à trois dizaines de requêtes de plus)",
   },
 };
 
@@ -570,9 +752,27 @@ const aidInputs = () => ({ team: state.settings.team ? "1" : "", ultracode: stat
 function toggleAid(name) {
   state.settings[name] = !state.settings[name];
   saveSettings();
-  const button = document.querySelector(`#composer [data-aid="${name}"]`);
-  if (button) button.setAttribute("aria-pressed", String(state.settings[name]));
-  toast(state.settings[name] ? AIDS[name].on : AIDS[name].off);
+  drawAids();
+}
+
+/** Bouton des options à côté du trombone (allumé si l'une est active) et les cases de son menu. */
+function drawAids() {
+  const button = document.querySelector("#composer .aids");
+  if (!button) return;
+  const on = Object.keys(AIDS).filter((name) => state.settings[name]);
+  button.classList.toggle("on", on.length > 0);
+  button.setAttribute("aria-label", on.length ? `Options actives : ${on.map((name) => AIDS[name].label).join(" et ")}` : "Options Équipe et Ultracode");
+  for (const item of document.querySelectorAll("#composer .aid-menu [data-aid]")) {
+    item.setAttribute("aria-checked", String(Boolean(state.settings[item.dataset.aid])));
+  }
+}
+
+function setAidMenu(open) {
+  const menu = document.querySelector("#composer .aid-menu");
+  const button = document.querySelector("#composer .aids");
+  if (!menu || !button) return;
+  menu.hidden = !open;
+  button.setAttribute("aria-expanded", String(open));
 }
 
 // --- Requêtes gratuites ------------------------------------------------------------------------
@@ -691,12 +891,17 @@ function renderComposer() {
       <button class="chip" data-action="repo">${ICON.repo}<span>${escapeHtml(repo || "Choisir un dépôt")}</span></button>
       <button class="chip" data-action="branch">${ICON.branch}<span>${escapeHtml(branch || "branche")}</span></button>`}
       <button class="chip" data-action="model">${ICON.model}<span>${escapeHtml(modelLabel(state.settings.model))}</span></button>
-      <button class="chip pill" data-aid="team" aria-pressed="${Boolean(state.settings.team)}">Équipe</button>
-      <button class="chip pill" data-aid="ultracode" aria-pressed="${Boolean(state.settings.ultracode)}">Ultracode</button>
     </div>
     <div class="attachments" hidden></div>
     <form class="prompt" autocomplete="off">
       <button class="attach" type="button" aria-label="Joindre une image">${ICON.image}</button>
+      <button class="aids" type="button" aria-haspopup="true" aria-expanded="false">${ICON.spark}</button>
+      <div class="aid-menu" role="menu" hidden>${Object.entries(AIDS).map(([name, aid]) => `
+        <button type="button" role="menuitemcheckbox" class="aid-item" data-aid="${name}" aria-checked="${Boolean(state.settings[name])}">
+          <span class="aid-text"><strong>${aid.label}</strong><small>${escapeHtml(aid.detail)}</small></span>
+          <span class="switch" aria-hidden="true"></span>
+        </button>`).join("")}
+      </div>
       <input class="file-input" type="file" accept="image/*" multiple hidden>
       <textarea rows="1" name="text" placeholder="${followUp ? "Répondez ou donnez une nouvelle consigne." : "Décrivez une tâche ou posez une question."}" aria-label="Message pour Claw"></textarea>
       <button class="send" type="submit" aria-label="Envoyer" disabled>${ICON.send}</button>
@@ -747,7 +952,9 @@ function renderComposer() {
     renderAttachments();
   });
   renderAttachments();
-  for (const button of composer.querySelectorAll("[data-aid]")) button.addEventListener("click", () => toggleAid(button.dataset.aid));
+  composer.querySelector(".aids").addEventListener("click", () => setAidMenu(composer.querySelector(".aid-menu").hidden));
+  for (const item of composer.querySelectorAll(".aid-menu [data-aid]")) item.addEventListener("click", () => toggleAid(item.dataset.aid));
+  drawAids();
   refreshQuota();
   resize();
   // Tout de suite, pas au rappel de l'observateur : le défilement vers le bas suit.
@@ -856,7 +1063,7 @@ function drawDrawerList() {
   const toggle = $("#drawer .select-toggle");
   if (toggle) {
     toggle.textContent = state.selecting ? "Annuler" : "Choisir";
-    toggle.hidden = !state.drawerSessions.length && !state.selecting;
+    toggle.hidden = state.drawerPane !== "sessions" || (!state.drawerSessions.length && !state.selecting);
   }
   const bar = $("#drawer .drawer-actions");
   if (bar) {
@@ -916,7 +1123,25 @@ function setupDrawerSelection() {
 function openDrawer() {
   $("#drawer").hidden = false;
   $("#app").classList.add("drawer-open");
-  renderDrawer();
+  showDrawerPane(state.drawerPane);
+}
+
+/** Menu : la liste des sessions, ou les dossiers et fichiers d'une branche. */
+function showDrawerPane(pane) {
+  state.drawerPane = pane;
+  for (const tab of document.querySelectorAll("#drawer .drawer-tab")) {
+    tab.classList.toggle("current", tab.dataset.pane === pane);
+    tab.setAttribute("aria-pressed", String(tab.dataset.pane === pane));
+  }
+  for (const element of document.querySelectorAll("#drawer .pane")) element.hidden = element.dataset.pane !== pane;
+  if (pane === "files") {
+    state.selecting = false;
+    state.selected.clear();
+    drawDrawerList();
+    renderExplorer();
+  } else {
+    renderDrawer();
+  }
 }
 
 function closeDrawer() {
@@ -1129,18 +1354,17 @@ function messageHtml(comment, isLastProgress) {
   return `<article class="message user"><div class="who">${escapeHtml(comment.user ? comment.user.login : "Vous")}</div>${messageBody(body)}</article>`;
 }
 
-/** Onglets d'une session : la discussion, les fichiers de sa branche, ses modifications. */
+/** Onglets d'une session : la discussion, ses modifications (les fichiers sont dans le menu). */
 function sessionTabs(number, current) {
   const tabs = [
     ["discussion", `#/session/${number}`, ICON.chat, "Discussion"],
-    ["fichiers", `#/session/${number}/fichiers`, ICON.folder, "Fichiers"],
     ["modifications", `#/session/${number}/modifications`, ICON.diff, "Modifications"],
   ];
   return `<nav class="session-tabs" aria-label="Session">${tabs.map(([key, href, icon, label]) => `
     <a class="session-tab${key === current ? " current" : ""}" href="${href}"${key === current ? ' aria-current="page"' : ""}>${icon}<span>${label}</span></a>`).join("")}</nav>`;
 }
 
-/** En-tête des onglets Fichiers et Modifications : titre de la session (une fois lue), onglets. */
+/** En-tête de l'onglet Modifications : titre de la session (une fois lue), onglets. */
 function sessionTop(number, current, issue) {
   const title = issue ? `<h1><span class="num">#${numberOf(issue)}</span> ${escapeHtml(issue.title)}</h1>` : "";
   return `<header class="session-head">${title}${sessionTabs(number, current)}</header>`;
@@ -1382,7 +1606,7 @@ async function readJournals(session, comments) {
   }
 }
 
-// --- Fichiers de la branche d'une session --------------------------------------------------
+// --- Fichiers : dans le menu, et ouverts en grand ----------------------------------------------
 
 const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp"];
 const sizeLabel = (bytes) => (bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1).replace(".", ",")} Mo`
@@ -1390,35 +1614,179 @@ const sizeLabel = (bytes) => (bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)
 
 /** Dossiers et fichiers de la branche de la session (ou de la branche de départ si la session
  * n'a encore rien publié) ; `path` : dossier ou fichier ouvert. */
-async function showFiles(number, path) {
+/** Adresse d'un dossier ou d'un fichier d'une branche (`number` : la session d'où il vient). */
+function filesHash({ repo, ref, path = "", number = null }) {
+  const params = new URLSearchParams({ depot: repo, branche: ref });
+  if (path) params.set("chemin", path);
+  if (number) params.set("session", String(number));
+  return `#/fichiers?${params}`;
+}
+
+function filesParams(hash) {
+  if (!/^#\/fichiers(\?|$)/.test(hash)) return null;
+  const params = new URLSearchParams(hash.split("?")[1] || "");
+  return {
+    repo: params.get("depot") || state.settings.repo || "",
+    ref: params.get("branche") || state.settings.branch || "main",
+    path: params.get("chemin") || "",
+    number: Number(params.get("session")) || null,
+  };
+}
+
+const sortEntries = (items) => [...items].sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "dir" ? -1 : 1));
+
+/** Ce que le bloc « Fichiers » du menu montre en s'ouvrant : la branche de la session ouverte
+ * (celle de départ tant que Claw n'y a rien publié), le dossier du fichier ouvert, ou le dépôt
+ * et la branche de la zone de saisie. Le dossier parcouru reste ouvert tant qu'on reste là. */
+async function ensureExplorer() {
+  const hash = location.hash || "#/";
+  const files = filesParams(hash);
+  if (files) {
+    const same = state.explorer && state.explorer.repo === files.repo && state.explorer.ref === files.ref;
+    if (!same) {
+      state.explorer = { key: "fichiers", number: files.number, repo: files.repo, ref: files.ref, path: files.path.split("/").slice(0, -1).join("/") };
+    }
+    return;
+  }
+  const session = hash.match(/^#\/session\/(\d+)/);
+  const key = session ? `session-${session[1]}` : `accueil-${state.settings.repo || ""}@${state.settings.branch || ""}`;
+  if (state.explorer && state.explorer.key === key) return;
+  if (!session) {
+    state.explorer = { key, number: null, repo: state.settings.repo || "", ref: state.settings.branch || "main", path: "" };
+    return;
+  }
+  const number = Number(session[1]);
+  const issue = state.session && state.session.number === number ? state.session.issue
+    : await state.github.issue(state.settings.engine, number);
+  const settings = settingsOf(issue);
+  let ref = branchOf(issue);
+  if (settings.repo && !(await state.github.branchExists(settings.repo, ref))) ref = settings.base || "main";
+  state.explorer = { key, number, repo: settings.repo || "", ref, path: "" };
+}
+
+async function renderExplorer() {
+  const pane = $("#drawer .explorer");
+  pane.innerHTML = '<p class="empty">Lecture…</p>';
+  try {
+    await ensureExplorer();
+  } catch (error) {
+    pane.innerHTML = '<p class="empty">Fichiers indisponibles.</p>';
+    failure(error);
+    return;
+  }
+  drawExplorer();
+}
+
+/** Bloc « Fichiers » du menu : dépôt et branche (à changer d'un appui), fil d'Ariane, dossiers
+ * à parcourir sur place ; un fichier s'ouvre en grand. */
+async function drawExplorer() {
+  const pane = $("#drawer .explorer");
+  const explorer = state.explorer;
+  const head = `
+    <div class="explorer-head">
+      <button type="button" class="chip" data-explorer="repo">${ICON.repo}<span>${escapeHtml(explorer.repo || "Choisir un dépôt")}</span></button>
+      ${explorer.repo ? `<button type="button" class="chip" data-explorer="branch">${ICON.branch}<span>${escapeHtml(explorer.ref)}</span></button>` : ""}
+    </div>`;
+  if (!explorer.repo) {
+    pane.innerHTML = head;
+    return;
+  }
+  const where = `${explorer.repo}@${explorer.ref}:${explorer.path}`;
+  const name = explorer.repo.split("/").pop();
+  const parts = explorer.path.split("/").filter(Boolean);
+  const crumbs = `<p class="crumbs">${[
+    parts.length ? `<button type="button" data-path="">${escapeHtml(name)}</button>` : `<span>${escapeHtml(name)}</span>`,
+    ...parts.map((part, index) => (index === parts.length - 1 ? `<span>${escapeHtml(part)}</span>`
+      : `<button type="button" data-path="${escapeHtml(parts.slice(0, index + 1).join("/"))}">${escapeHtml(part)}</button>`)),
+  ].join('<span class="sep">/</span>')}</p>`;
+  pane.innerHTML = `${head}${crumbs}<p class="empty">Lecture…</p>`;
+  let body;
+  try {
+    const items = await state.github.contents(explorer.repo, explorer.path, explorer.ref);
+    const entries = Array.isArray(items) ? sortEntries(items) : [];
+    body = entries.length ? `<ul class="file-list">${entries.map((entry) => (entry.type === "dir"
+      ? `<li><button type="button" class="file-row" data-path="${escapeHtml(entry.path)}">${ICON.folder}<span class="name">${escapeHtml(entry.name)}</span></button></li>`
+      : `<li><a class="file-row" href="${escapeHtml(filesHash({ ...explorer, path: entry.path }))}">${ICON.file}<span class="name">${escapeHtml(entry.name)}</span><small>${sizeLabel(entry.size || 0)}</small></a></li>`)).join("")}</ul>`
+      : '<p class="empty">Dossier vide.</p>';
+  } catch (error) {
+    if (!(error instanceof GitHubError) || error.status !== 404) failure(error);
+    body = `<p class="empty">${/empty/i.test(error.message) ? "Dépôt vide : aucun fichier pour l'instant." : "Introuvable sur cette branche."}</p>`;
+  }
+  if (state.explorer !== explorer || `${explorer.repo}@${explorer.ref}:${explorer.path}` !== where) return;
+  pane.innerHTML = `${head}${crumbs}${body}`;
+}
+
+function onExplorerClick(event) {
+  if (!state.explorer) return;
+  const folder = event.target.closest("[data-path]");
+  if (folder) {
+    state.explorer.path = folder.dataset.path;
+    drawExplorer();
+    return;
+  }
+  const action = event.target.closest("[data-explorer]");
+  if (!action) return;
+  if (action.dataset.explorer === "repo") {
+    pickExplorerRepo();
+    return;
+  }
+  openBranches({
+    repo: state.explorer.repo,
+    current: state.explorer.ref,
+    title: "Branche",
+    onPick: (name) => {
+      state.explorer.ref = name;
+      state.explorer.path = "";
+      drawExplorer();
+    },
+  });
+}
+
+async function pickExplorerRepo() {
+  try {
+    const repos = await loadRepos();
+    openPicker({
+      title: "Dépôt",
+      placeholder: "Rechercher un dépôt",
+      current: state.explorer.repo,
+      items: repos.map((repo) => ({ value: repo.full_name, label: repo.full_name, detail: `${repo.private ? "privé" : "public"} · ${since(repo.pushed_at)}` })),
+      onPick: (value) => {
+        const repo = repos.find((item) => item.full_name === value);
+        Object.assign(state.explorer, { repo: value, ref: repo ? repo.default_branch : "main", path: "" });
+        drawExplorer();
+      },
+    });
+  } catch (error) {
+    failure(error);
+  }
+}
+
+/** Dossier ou fichier d'une branche, en grand (ouvert depuis le bloc « Fichiers » du menu). */
+async function showFiles({ repo, ref, path, number }) {
   state.session = null;
   renderComposer();
   const view = $("#view");
+  const back = number ? `<a class="back" href="#/session/${number}">${ICON.back}<span>Session</span></a>`
+    : `<a class="back" href="#/">${ICON.back}<span>Accueil</span></a>`;
   view.innerHTML = `
     <section class="files">
-      ${sessionTop(number, "fichiers")}
+      ${back}
+      <h1>Fichiers</h1>
       <p class="empty">Lecture…</p>
     </section>`;
+  const here = location.hash;
   try {
-    const issue = await state.github.issue(state.settings.engine, number);
-    const settings = settingsOf(issue);
-    const repo = settings.repo;
-    let ref = branchOf(issue);
-    let note = "";
-    if (!(await state.github.branchExists(repo, ref))) {
-      ref = settings.base || "main";
-      note = `<p class="help">Claw n'a encore rien publié sur <code>${escapeHtml(branchOf(issue))}</code> : voici <code>${escapeHtml(ref)}</code>.</p>`;
-    }
+    if (!repo) throw new GitHubError(404, "Aucun dépôt choisi");
     const item = await state.github.contents(repo, path, ref);
-    if (!location.hash.startsWith(`#/session/${number}/fichiers`)) return;
-    const link = (target) => `#/session/${number}/fichiers/${target.split("/").map(encodeURIComponent).join("/")}`;
+    if (location.hash !== here) return;
+    const link = (target) => escapeHtml(filesHash({ repo, ref, path: target, number }));
     const parts = path.split("/").filter(Boolean);
-    const crumbs = [`<a href="#/session/${number}/fichiers">${escapeHtml(repo.split("/").pop())}</a>`,
+    const crumbs = [`<a href="${link("")}">${escapeHtml(repo.split("/").pop())}</a>`,
       ...parts.map((part, index) => (index === parts.length - 1 ? `<span>${escapeHtml(part)}</span>`
         : `<a href="${link(parts.slice(0, index + 1).join("/"))}">${escapeHtml(part)}</a>`))].join(" / ");
     let body;
     if (Array.isArray(item)) {
-      const entries = [...item].sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "dir" ? -1 : 1));
+      const entries = sortEntries(item);
       body = entries.length ? `<ul class="file-list">${entries.map((entry) => `
         <li><a class="file-row" href="${link(entry.path)}">${entry.type === "dir" ? ICON.folder : ICON.file}
           <span class="name">${escapeHtml(entry.name)}</span>
@@ -1427,10 +1795,11 @@ async function showFiles(number, path) {
     } else {
       body = await fileHtml(repo, item, ref);
     }
+    if (location.hash !== here) return;
     view.querySelector(".files").innerHTML = `
-      ${sessionTop(number, "fichiers", issue)}
+      ${back}
+      <h1>Fichiers</h1>
       <p class="crumbs">${crumbs} <span class="ref">${ICON.branch}${escapeHtml(ref)}</span></p>
-      ${note}
       ${body}`;
     const toggle = view.querySelector('[data-action="source"]');
     if (toggle) {
@@ -1821,9 +2190,9 @@ function route() {
     showSettings();
     return;
   }
-  const files = hash.match(/^#\/session\/(\d+)\/fichiers\/?(.*)$/);
+  const files = filesParams(hash);
   if (files) {
-    showFiles(Number(files[1]), files[2].split("/").map((part) => decodeURIComponent(part)).join("/"));
+    showFiles(files);
     return;
   }
   const changes = hash.match(/^#\/session\/(\d+)\/modifications/);
@@ -1893,6 +2262,15 @@ async function boot() {
   });
   $("#settings-button").addEventListener("click", () => { location.hash = "#/reglages"; });
   $("#scrim").addEventListener("click", closeDrawer);
+  for (const tab of document.querySelectorAll("#drawer .drawer-tab")) tab.addEventListener("click", () => showDrawerPane(tab.dataset.pane));
+  $("#drawer .explorer").addEventListener("click", onExplorerClick);
+  // Le menu Équipe / Ultracode se ferme en touchant ailleurs, ou avec Échap.
+  document.addEventListener("pointerdown", (event) => {
+    if (!event.target.closest("#composer .aid-menu, #composer .aids")) setAidMenu(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") setAidMenu(false);
+  });
   window.addEventListener("hashchange", route);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && state.session) pollSession().catch(failure);

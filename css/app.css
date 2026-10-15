@@ -70,6 +70,9 @@
 
 * { box-sizing: border-box; }
 
+/* Un élément caché le reste, quel que soit son affichage (boutons en ligne, puces...). */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   background: var(--bg);
@@ -283,8 +286,6 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .todo.doing .box { border-color: var(--accent); box-shadow: inset 0 0 0 3px var(--panel), inset 0 0 0 8px var(--accent); }
 
 /* Requêtes gratuites */
-.chip.pill { border-radius: 999px; color: var(--muted); }
-.chip.pill[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); }
 .quota-sheet { display: flex; flex-direction: column; gap: 10px; padding: 0 4px 6px; }
 .quota-sheet p { margin: 0; }
 .quota-sheet .primary { align-self: flex-start; text-decoration: none; }
@@ -311,6 +312,7 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .theme-choice label:has(input:checked) { border-color: var(--accent); color: var(--accent); }
 
 /* Fichiers de la branche */
+.files h1 { font-size: 1.3rem; font-weight: 600; margin: 8px 0; }
 .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: 0 0 10px; overflow-wrap: anywhere; }
 .crumbs a { color: var(--accent); text-decoration: none; }
 .crumbs .ref { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; color: var(--muted); font-size: .82rem; }
@@ -391,6 +393,36 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
   color: var(--muted); display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
 }
 .attach:hover { color: var(--text); }
+
+/* Équipe et Ultracode : menu déroulant à côté du trombone */
+.prompt { position: relative; }
+.aids {
+  position: relative; width: 38px; height: 38px; flex: none; margin-left: -6px; border: 0; border-radius: 11px;
+  background: transparent; color: var(--muted); display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.aids:hover, .aids[aria-expanded="true"] { color: var(--text); background: var(--panel-2); }
+.aids.on { color: var(--accent); }
+.aids.on::after { content: ""; position: absolute; top: 6px; right: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.aid-menu {
+  position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 6; width: min(340px, calc(100vw - 24px));
+  display: flex; flex-direction: column; gap: 2px; padding: 6px; border: 1px solid var(--border); border-radius: 14px;
+  background: var(--panel); box-shadow: 0 10px 30px var(--shadow);
+}
+.aid-menu[hidden] { display: none; }
+.aid-item {
+  display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px; border: 0; border-radius: 10px;
+  background: transparent; text-align: left; cursor: pointer;
+}
+.aid-item:hover, .aid-item:focus-visible { background: var(--panel-2); }
+.aid-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.aid-text small { color: var(--muted); font-size: .8rem; line-height: 1.35; }
+.switch { position: relative; flex: none; width: 40px; height: 24px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel-2); transition: background .15s; }
+.switch::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--muted); transition: transform .15s, background .15s;
+}
+.aid-item[aria-checked="true"] .switch { border-color: var(--accent); background: var(--accent); }
+.aid-item[aria-checked="true"] .switch::after { transform: translateX(16px); background: var(--accent-text); }
 .attachments { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 8px; }
 .attachments[hidden] { display: none; }
 .attachment { position: relative; flex: none; }
@@ -433,6 +465,40 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 }
 .drawer-actions[hidden] { display: none; }
 .scrim { display: none; }
+
+/* Menu : sessions ou fichiers */
+.drawer-head { gap: 6px; }
+.drawer-tabs { display: flex; gap: 2px; margin-right: auto; padding: 3px; border-radius: 10px; background: var(--panel-2); }
+.drawer-tab { padding: 6px 12px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-weight: 500; cursor: pointer; }
+.drawer-tab.current { background: var(--panel); color: var(--text); box-shadow: 0 1px 3px var(--shadow); }
+.pane[hidden] { display: none; }
+.explorer-head { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.explorer-head .chip { max-width: 100%; }
+.explorer .crumbs { gap: 2px; font-size: .9rem; }
+.explorer .crumbs button { padding: 2px 4px; border: 0; border-radius: 6px; background: transparent; color: var(--accent); font: inherit; cursor: pointer; }
+.explorer .crumbs > span:not(.sep) { padding: 2px 4px; }
+.explorer .crumbs .sep { color: var(--muted); }
+.explorer .file-list { border: 0; border-radius: 0; }
+.explorer .file-list li + li { border-top: 0; }
+.explorer .file-row { width: 100%; padding: 9px 8px; border: 0; border-radius: 8px; background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.explorer .file-row:hover, .explorer .file-row:focus-visible { background: var(--panel-2); }
+
+/* Branches : choisir, créer, renommer */
+.sheet-sub { display: flex; align-items: center; gap: 6px; padding: 0 4px 8px; overflow-wrap: anywhere; }
+.sheet-sub svg { width: 15px; height: 15px; }
+.branch-body { display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
+.branch-row { display: flex; align-items: center; gap: 4px; }
+.branch-row .sheet-item { flex: 1; min-width: 0; }
+.branch-row .sheet-label span { overflow-wrap: anywhere; }
+.branch-row .sheet-label svg { width: 15px; height: 15px; color: var(--muted); }
+.branch-row .icon-button { flex: none; color: var(--muted); }
+.branch-row .icon-button:hover, .branch-row .icon-button:focus-visible { color: var(--text); background: var(--panel-2); }
+.branch-form { display: flex; flex-direction: column; gap: 12px; padding: 0 4px 4px; }
+.branch-form label { display: flex; flex-direction: column; gap: 6px; font-size: .92rem; }
+.branch-form input[type="text"], .branch-form select {
+  padding: 11px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit;
+}
+.form-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .drawer-open .scrim { display: block; position: fixed; inset: 0; z-index: 15; background: rgba(0, 0, 0, .45); }
 
 /* Feuille de choix */

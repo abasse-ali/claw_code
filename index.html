@@ -21,13 +21,19 @@
 </head>
 <body>
   <div id="app" class="app">
-    <aside id="drawer" class="drawer" aria-label="Sessions" hidden>
+    <aside id="drawer" class="drawer" aria-label="Menu" hidden>
       <div class="drawer-head">
-        <strong>Sessions</strong>
+        <div class="drawer-tabs">
+          <button type="button" class="drawer-tab current" data-pane="sessions" aria-pressed="true">Sessions</button>
+          <button type="button" class="drawer-tab" data-pane="files" aria-pressed="false">Fichiers</button>
+        </div>
         <button id="drawer-close" class="icon-button" aria-label="Fermer"></button>
       </div>
-      <button class="new-session"></button>
-      <ul class="sessions"></ul>
+      <div class="pane" data-pane="sessions">
+        <button class="new-session"></button>
+        <ul class="sessions"></ul>
+      </div>
+      <div class="pane explorer" data-pane="files" hidden></div>
     </aside>
     <div id="scrim" class="scrim" aria-hidden="true"></div>
     <header class="topbar">
