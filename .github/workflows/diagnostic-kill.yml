@@ -22,20 +22,16 @@ jobs:
           /usr/bin/kill --version 2>&1 | head -2 || true
           dpkg -S "$(readlink -f /usr/bin/kill)" || true
           cat /etc/os-release | head -3
-      - name: Essai dans une session à part
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Chef de groupe, avec et sans --
         run: |
-          gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state=pending -f context=diagnostic/kill -f description="essai lancé" > /dev/null
-          setsid bash -c '
-            sleep 300 & s=$!
-            echo "shell $$ groupe $(ps -o pgid= -p $$) ; sleep $s groupe $(ps -o pgid= -p $s)"
-            /usr/bin/kill -KILL -$s
-            echo "code de kill : $?"
+          for forme in sans avec; do
+            setsid bash -c "sleep 300 & wait" & leader=$!
             sleep 1
-            ps -o pid,pgid,stat,cmd -p $$,$s || true
-          ' > /tmp/essai.txt 2>&1
-          echo "--- essai"
-          cat /tmp/essai.txt
-          echo "--- la machine répond encore"
-          gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state=success -f context=diagnostic/kill -f description="$(tr '\n' ' ' < /tmp/essai.txt | cut -c1-139)" > /dev/null
+            child=$(pgrep -P "$leader" sleep)
+            echo "forme $forme : chef $leader groupe $(ps -o pgid= -p "$leader"), enfant $child"
+            if [ "$forme" = sans ]; then /usr/bin/kill -KILL -"$leader"; else /usr/bin/kill -KILL -- -"$leader"; fi
+            echo "  code de kill : $?"
+            sleep 1
+            ps -o pid=,stat=,cmd= -p "$leader","$child" | sed 's/^/  encore là : /' || true
+            /usr/bin/kill -KILL -- -"$leader" 2>/dev/null || true
+          done
