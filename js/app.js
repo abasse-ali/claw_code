@@ -10,7 +10,9 @@ import { LOG, changesHtml, decodeLog, transcriptHtml } from "./transcript.js";
 import { accountStatus, freeModels, resetTime } from "./openrouter.js";
 
 const STORE = "claw-web.settings.v1";
-const DEFAULT_ENGINE = "abasse-ali/claw_code";
+const DEFAULT_ENGINE = "abasse-ali/claw-sessions";
+// Moteurs déplacés : les sessions de claw_code (devenu public) vivent dans un dépôt privé.
+const MOVED_ENGINES = { "abasse-ali/claw_code": "abasse-ali/claw-sessions" };
 const SETTINGS_BLOCK = /<!--\s*claw-web\s+(\{[\s\S]*?\})\s*-->/;
 const TOKEN_HELP = "https://github.com/settings/personal-access-tokens/new";
 
@@ -1985,6 +1987,21 @@ async function showChanges(number) {
 
 // --- Réglages --------------------------------------------------------------------------------
 
+/** Étiquette des sessions et secrets du moteur (chiffrés ici pour sa clé publique) ; rend les
+ * noms des secrets posés. */
+async function configureEngine(openrouterKey, shareToken) {
+  const engine = state.settings.engine;
+  await state.github.ensureLabel(engine);
+  const key = await state.github.secretKey(engine);
+  const secrets = [];
+  if (openrouterKey) secrets.push(["OPENROUTER_API_KEY", openrouterKey]);
+  if (shareToken) secrets.push(["CLAW_REPO_TOKEN", state.settings.token]);
+  for (const [name, value] of secrets) {
+    await state.github.putSecret(engine, name, sealedBox(value, key.key), key.key_id);
+  }
+  return secrets.map(([name]) => name);
+}
+
 async function engineChecks() {
   const engine = state.settings.engine;
   const checks = [];
@@ -2049,7 +2066,7 @@ function showSettings(first = false, justConnected = false) {
           <span>Donner aussi ce jeton au moteur (secret CLAW_REPO_TOKEN), pour qu'il pousse ses branches et ouvre les pull requests</span></label>
         <label class="check"><input name="keep" type="checkbox" checked>
           <span>Garder aussi la clé OpenRouter sur cet appareil, pour afficher les requêtes gratuites utilisées et restantes</span></label>
-        <p class="help">Les secrets partent chiffrés dans le navigateur, pour la clé publique du moteur.</p>
+        <p class="help">Les secrets partent chiffrés dans le navigateur, pour la clé publique du moteur. Champ vide : la clé OpenRouter gardée sur cet appareil, s'il y en a une.</p>
         <button class="primary" type="submit">Configurer le moteur</button>
       </form>
       <h2>Apparence</h2>
@@ -2103,23 +2120,17 @@ function showSettings(first = false, justConnected = false) {
     engineForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const form = event.target;
-      const engine = state.settings.engine;
       try {
-        await state.github.ensureLabel(engine);
-        const key = await state.github.secretKey(engine);
-        const secrets = [];
-        if (form.openrouter.value.trim()) secrets.push(["OPENROUTER_API_KEY", form.openrouter.value.trim()]);
-        if (form.openrouter.value.trim() && form.keep.checked) {
-          state.settings.openrouterKey = form.openrouter.value.trim();
+        const typed = form.openrouter.value.trim();
+        if (typed && form.keep.checked) {
+          state.settings.openrouterKey = typed;
           state.quota = null;
           saveSettings();
         }
-        if (form.share.checked) secrets.push(["CLAW_REPO_TOKEN", state.settings.token]);
-        for (const [name, value] of secrets) {
-          await state.github.putSecret(engine, name, sealedBox(value, key.key), key.key_id);
-        }
+        // Champ vide : la clé gardée sur cet appareil, s'il y en a une.
+        const names = await configureEngine(typed || state.settings.openrouterKey || "", form.share.checked);
         form.openrouter.value = "";
-        toast(secrets.length ? `Moteur configuré (${secrets.map(([name]) => name).join(", ")})` : "Étiquette prête ; aucun secret envoyé");
+        toast(names.length ? `Moteur configuré (${names.join(", ")})` : "Étiquette prête ; aucun secret envoyé");
         const list = $("#view .checks");
         if (list) list.innerHTML = await engineChecks();
       } catch (error) {
@@ -2243,8 +2254,29 @@ function blockZoom() {
   }, { passive: false });
 }
 
+/** Sessions et moteur déplacés dans un dépôt privé : le moteur y reçoit ses secrets (la clé
+ * OpenRouter gardée ici, le jeton), ce que l'on fait d'habitude avec « Configurer le moteur ». */
+async function announceMove(engine, reachable) {
+  if (!reachable) {
+    toast(`Vos sessions sont maintenant dans ${engine}, que ce jeton ne voit pas : sur GitHub, ajoutez ce dépôt au jeton (Repository access ; sa valeur ne change pas)`, "error");
+    return;
+  }
+  try {
+    const names = await configureEngine(state.settings.openrouterKey || "", true);
+    toast(`Sessions et moteur déplacés dans ${engine}, dépôt privé ; secrets posés : ${names.join(", ")}${state.settings.openrouterKey ? "" : ". Il manque la clé OpenRouter : Réglages, Moteur"}`);
+  } catch (error) {
+    toast(`Sessions déplacées dans ${engine} ; secrets du moteur à poser dans Réglages, Moteur (${error.message})`, "error");
+  }
+}
+
 async function boot() {
   applyTheme();
+  const moved = MOVED_ENGINES[state.settings.engine];
+  if (moved) {
+    state.settings.engine = moved;
+    state.repos = null;
+    saveSettings();
+  }
   $("#quota-button").addEventListener("click", openQuota);
   window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", applyTheme);
   blockZoom();
@@ -2288,6 +2320,7 @@ async function boot() {
       refreshQuota();
       const engine = await github.repository(state.settings.engine).catch(() => null);
       if (engine) state.engineRef = engine.default_branch || "main";
+      if (moved) announceMove(moved, Boolean(engine));
     } catch (error) {
       failure(error);
     }

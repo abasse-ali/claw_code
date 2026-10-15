@@ -11,11 +11,14 @@ Adresse : https://abasse-ali.github.io/claw-web/
 
 - Cette appli est une page statique, sans serveur : elle parle directement à l'API de GitHub
   (et à la liste publique des modèles d'OpenRouter), avec votre jeton.
-- Le travail se fait dans le **dépôt du moteur** (par défaut `abasse-ali/claw_code`) : son
-  workflow `claw-web.yml` lance Claw sur le dépôt de la tâche, sur la branche
-  `claw/session-<n>`, puis pousse et ouvre la pull request.
+- Le travail se fait dans le **dépôt du moteur**, un dépôt privé (par défaut
+  `abasse-ali/claw-sessions`) : son workflow `claw-web.yml` appelle le moteur, workflow du dépôt
+  public du code de Claw, qui lance Claw sur le dépôt de la tâche, sur la branche de la session,
+  puis pousse et ouvre la pull request. Les journaux et les minutes de GitHub Actions restent
+  dans le dépôt privé.
 - Chaque session est une issue du dépôt du moteur (étiquette `claw-web`) : la tâche, vos
-  messages de suivi, la progression en direct et les réponses de Claw.
+  messages de suivi, la progression en direct et les réponses de Claw. Le dépôt étant privé,
+  elles ne sont visibles que de vous.
 
 ## Mise en route
 
@@ -29,8 +32,9 @@ Adresse : https://abasse-ali.github.io/claw-web/
      **All repositories** et **Administration** en lecture et écriture. Modifier ces réglages
      garde la valeur du jeton : rien à refaire dans l'appli.
 2. Ouvrez l'appli, collez le jeton, enregistrez.
-3. Dans « Moteur » : collez votre clé OpenRouter, laissez coché « Donner aussi ce jeton au
-   moteur », puis « Configurer le moteur ». L'appli pose deux secrets dans le dépôt du moteur,
+3. Dans « Moteur » : collez votre clé OpenRouter (ou laissez le champ vide si elle est déjà
+   gardée sur l'appareil), laissez coché « Donner aussi ce jeton au moteur », puis
+   « Configurer le moteur ». L'appli pose deux secrets dans le dépôt du moteur,
    chiffrés dans le navigateur : `OPENROUTER_API_KEY` et `CLAW_REPO_TOKEN`.
 4. Choisissez un dépôt et une branche, ou créez un dépôt neuf, puis décrivez la tâche. Dans un
    dépôt neuf, une demande de création (« Crée une application... ») fait passer Claw en mode
