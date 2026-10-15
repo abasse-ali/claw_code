@@ -7,6 +7,9 @@ export const LABEL = "claw-web";
 export const ANSWER = "<!-- claw-web:answer -->";
 export const PROGRESS = "<!-- claw-web:progress -->";
 
+/** Chemin d'un fichier pour une adresse de l'API : chaque partie encodée, les « / » gardés. */
+const encodePath = (path) => String(path || "").split("/").filter(Boolean).map(encodeURIComponent).join("/");
+
 export class GitHubError extends Error {
   constructor(status, message) {
     super(message);
@@ -205,11 +208,16 @@ export class GitHub {
     return this.request("PUT", `/repos/${repo}/contents/${path}`, { message, content: base64, branch });
   }
 
+  /** Contenu d'un dossier (liste) ou d'un fichier (objet) sur une branche. */
+  contents(repo, path, ref) {
+    return this.request("GET", `/repos/${repo}/contents/${encodePath(path)}?ref=${encodeURIComponent(ref)}`);
+  }
+
   /** Contenu brut d'un fichier d'une branche, en Blob. */
   async rawFile(repo, path, branch) {
     let response;
     try {
-      response = await fetch(`${API}/repos/${repo}/contents/${path}?ref=${encodeURIComponent(branch)}`, {
+      response = await fetch(`${API}/repos/${repo}/contents/${encodePath(path)}?ref=${encodeURIComponent(branch)}`, {
         cache: "force-cache",
         headers: { Authorization: `Bearer ${this.token}`, Accept: "application/vnd.github.raw", "X-GitHub-Api-Version": "2022-11-28" },
       });

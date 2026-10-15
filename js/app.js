@@ -31,6 +31,8 @@ const ICON = {
   stop: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
   trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4h6v3"/></svg>',
   globe: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.5 2.6 2.5 14.4 0 17M12 3.5c-2.5 2.6-2.5 14.4 0 17"/></svg>',
+  folder: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5a1.5 1.5 0 0 1 1.5-1.5h4l2 2.5h8a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z"/></svg>',
+  file: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>',
   merge: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="12" r="2"/><path d="M6 7v10M6 7c0 4 4 5 10 5"/></svg>',
   diff: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v8M8 8h8M8 18h8"/><rect x="3.5" y="2.5" width="17" height="19" rx="2"/></svg>',
   image: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.6-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9"/></svg>',
@@ -574,17 +576,26 @@ function toggleAid(name) {
 
 // --- Requêtes gratuites ------------------------------------------------------------------------
 
-function quotaLabel() {
-  if (!state.settings.openrouterKey) return "Requêtes gratuites";
-  const free = state.quota && state.quota.free;
-  if (free) return `${free.remaining}/${free.limit} gratuites`;
-  if (state.quotaError) return "Quota indisponible";
-  return "Quota…";
-}
-
+/** Compteur de la barre du haut : requêtes gratuites restantes / limite du jour, en vert,
+ * orange ou rouge selon ce qu'il reste ; « Quota ? » sans clé gardée (le détail explique). */
 function showQuotaLabel() {
-  const chip = document.querySelector('#composer [data-action="quota"] span');
-  if (chip) chip.textContent = quotaLabel();
+  const pill = $("#quota-button");
+  if (!pill) return;
+  pill.hidden = !state.github;
+  pill.className = "quota-pill";
+  const free = state.quota && state.quota.free;
+  if (!free) {
+    pill.classList.add("unknown");
+    pill.innerHTML = `${ICON.gauge}<span>${state.settings.openrouterKey && !state.quotaError ? "…" : "Quota ?"}</span>`;
+    pill.setAttribute("aria-label", "Requêtes gratuites du jour");
+    return;
+  }
+  const share = free.limit ? free.remaining / free.limit : 0;
+  pill.classList.add(share > 0.5 ? "ok" : share > 0.1 ? "warn" : "low");
+  pill.innerHTML = `<strong>${free.remaining}</strong><small>/${free.limit}</small><span class="bar"><span></span></span>`;
+  // Largeur par le DOM : la politique de sécurité de l'appli refuse les styles écrits dans le HTML.
+  pill.querySelector(".bar span").style.width = `${Math.round(share * 100)}%`;
+  pill.setAttribute("aria-label", `${free.remaining} requêtes gratuites restantes sur ${free.limit} aujourd'hui`);
 }
 
 /** Relit le quota chez OpenRouter (au plus une fois par minute, sauf `force`). */
@@ -669,7 +680,8 @@ function renderComposer() {
   const followUp = Boolean(session);
   const repo = followUp ? session.settings.repo : state.settings.repo;
   const branch = followUp ? branchOf(session.issue) : state.settings.branch;
-  composer.hidden = !state.github || location.hash.startsWith("#/reglages") || location.hash.includes("/modifications");
+  composer.hidden = !state.github || location.hash.startsWith("#/reglages") || location.hash.includes("/modifications")
+    || location.hash.includes("/fichiers");
   // En suivi de session, le dépôt et la branche sont dans l'en-tête : seul le modèle se choisit.
   composer.innerHTML = `
     <div class="chips">
@@ -677,7 +689,6 @@ function renderComposer() {
       <button class="chip" data-action="repo">${ICON.repo}<span>${escapeHtml(repo || "Choisir un dépôt")}</span></button>
       <button class="chip" data-action="branch">${ICON.branch}<span>${escapeHtml(branch || "branche")}</span></button>`}
       <button class="chip" data-action="model">${ICON.model}<span>${escapeHtml(modelLabel(state.settings.model))}</span></button>
-      <button class="chip quota" data-action="quota">${ICON.gauge}<span>${escapeHtml(quotaLabel())}</span></button>
       <button class="chip pill" data-aid="team" aria-pressed="${Boolean(state.settings.team)}">Équipe</button>
       <button class="chip pill" data-aid="ultracode" aria-pressed="${Boolean(state.settings.ultracode)}">Ultracode</button>
     </div>
@@ -714,7 +725,6 @@ function renderComposer() {
   composer.querySelector('[data-action="repo"]')?.addEventListener("click", pickRepo);
   composer.querySelector('[data-action="branch"]')?.addEventListener("click", pickBranch);
   composer.querySelector('[data-action="model"]').addEventListener("click", pickModel);
-  composer.querySelector('[data-action="quota"]').addEventListener("click", openQuota);
   const picker = composer.querySelector(".file-input");
   composer.querySelector(".attach").addEventListener("click", () => picker.click());
   picker.addEventListener("change", async () => {
@@ -1146,6 +1156,7 @@ function renderSessionView() {
           <span class="meta-link">${ICON.branch}<span>${escapeHtml(branchOf(session.issue))}</span></span>
           ${pull ? `<a class="meta-link pull ${pullBadge}" href="${escapeHtml(pull.html_url)}" target="_blank" rel="noopener noreferrer">${ICON.pull}<span>PR #${pull.number} ${pullBadge}</span></a>` : ""}
           ${pull && pull.state === "open" && !pull.merged_at && !active ? `<button class="meta-link action" data-action="merge">${ICON.merge}<span>Fusionner</span></button>` : ""}
+          <a class="meta-link" href="#/session/${session.number}/fichiers">${ICON.folder}<span>Fichiers</span></a>
           <a class="meta-link" href="#/session/${session.number}/modifications">${ICON.diff}<span>Modifications</span></a>
           ${session.site ? `<a class="meta-link site" href="${escapeHtml(session.site)}" target="_blank" rel="noopener noreferrer">${ICON.globe}<span>Site en ligne</span></a>` : ""}
         </div>
@@ -1320,8 +1331,9 @@ async function pollSession(force = false) {
     issue.updated_at, issue.state, comments.map((comment) => [comment.id, comment.updated_at]),
     run && [run.id, run.status, run.conclusion], session.step, session.pull && [session.pull.state, session.pull.merged_at],
   ]);
-  // Fin du passage suivi : le quota gratuit a bougé.
+  // Fin du passage suivi : le quota gratuit a bougé ; pendant le passage, il se relit chaque minute.
   if (session.active && run && run.status === "completed") refreshQuota(true);
+  else if (session.active) refreshQuota();
   if (force || signature !== session.signature) {
     const atBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
     session.signature = signature;
@@ -1350,6 +1362,108 @@ async function readJournals(session, comments) {
       session.logs.delete(comment.id);
     }
   }
+}
+
+// --- Fichiers de la branche d'une session --------------------------------------------------
+
+const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp"];
+const sizeLabel = (bytes) => (bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1).replace(".", ",")} Mo`
+  : bytes >= 1024 ? `${Math.round(bytes / 1024)} Ko` : `${bytes} o`);
+
+/** Dossiers et fichiers de la branche de la session (ou de la branche de départ si la session
+ * n'a encore rien publié) ; `path` : dossier ou fichier ouvert. */
+async function showFiles(number, path) {
+  state.session = null;
+  renderComposer();
+  const view = $("#view");
+  view.innerHTML = `
+    <section class="files">
+      <a class="back" href="#/session/${number}">${ICON.back}<span>Session</span></a>
+      <h1>Fichiers</h1>
+      <p class="empty">Lecture…</p>
+    </section>`;
+  try {
+    const issue = await state.github.issue(state.settings.engine, number);
+    const settings = settingsOf(issue);
+    const repo = settings.repo;
+    let ref = branchOf(issue);
+    let note = "";
+    if (!(await state.github.branchExists(repo, ref))) {
+      ref = settings.base || "main";
+      note = `<p class="help">Claw n'a encore rien publié sur <code>${escapeHtml(branchOf(issue))}</code> : voici <code>${escapeHtml(ref)}</code>.</p>`;
+    }
+    const item = await state.github.contents(repo, path, ref);
+    if (!location.hash.startsWith(`#/session/${number}/fichiers`)) return;
+    const link = (target) => `#/session/${number}/fichiers/${target.split("/").map(encodeURIComponent).join("/")}`;
+    const parts = path.split("/").filter(Boolean);
+    const crumbs = [`<a href="#/session/${number}/fichiers">${escapeHtml(repo.split("/").pop())}</a>`,
+      ...parts.map((part, index) => (index === parts.length - 1 ? `<span>${escapeHtml(part)}</span>`
+        : `<a href="${link(parts.slice(0, index + 1).join("/"))}">${escapeHtml(part)}</a>`))].join(" / ");
+    let body;
+    if (Array.isArray(item)) {
+      const entries = [...item].sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "dir" ? -1 : 1));
+      body = entries.length ? `<ul class="file-list">${entries.map((entry) => `
+        <li><a class="file-row" href="${link(entry.path)}">${entry.type === "dir" ? ICON.folder : ICON.file}
+          <span class="name">${escapeHtml(entry.name)}</span>
+          <small>${entry.type === "dir" ? "" : sizeLabel(entry.size || 0)}</small></a></li>`).join("")}</ul>`
+        : '<p class="empty">Dossier vide.</p>';
+    } else {
+      body = await fileHtml(repo, item, ref);
+    }
+    view.querySelector(".files").innerHTML = `
+      <a class="back" href="${parts.length ? link(parts.slice(0, -1).join("/")) : `#/session/${number}`}">${ICON.back}<span>${parts.length ? "Dossier parent" : "Session"}</span></a>
+      <h1>Fichiers</h1>
+      <p class="crumbs">${crumbs} <span class="ref">${ICON.branch}${escapeHtml(ref)}</span></p>
+      ${note}
+      ${body}`;
+    const toggle = view.querySelector('[data-action="source"]');
+    if (toggle) {
+      toggle.addEventListener("click", () => {
+        const rendered = view.querySelector(".md-rendered");
+        const source = view.querySelector(".md-source");
+        rendered.hidden = !rendered.hidden;
+        source.hidden = !source.hidden;
+        toggle.querySelector("span").textContent = source.hidden ? "Voir la source" : "Voir le rendu";
+      });
+    }
+  } catch (error) {
+    if (error instanceof GitHubError && error.status === 404) {
+      const section = view.querySelector(".files");
+      if (section) section.querySelector(".empty").textContent = "Introuvable sur cette branche.";
+      return;
+    }
+    failure(error);
+  }
+}
+
+/** Un fichier : image affichée, Markdown mis en forme (source à côté), texte numéroté. */
+async function fileHtml(repo, file, ref) {
+  const extension = file.name.includes(".") ? file.name.split(".").pop().toLowerCase() : "";
+  const head = `<p class="file-head"><strong>${escapeHtml(file.name)}</strong> <small>${sizeLabel(file.size || 0)}</small>
+    <a class="small-link" href="${escapeHtml(file.html_url || "#")}" target="_blank" rel="noopener noreferrer">${ICON.external}<span>GitHub</span></a></p>`;
+  const blob = await state.github.rawFile(repo, file.path, ref);
+  if (IMAGE_EXTENSIONS.includes(extension)) {
+    const url = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(extension === "svg" ? new Blob([blob], { type: "image/svg+xml" }) : blob);
+    });
+    return `${head}<img class="file-image" alt="${escapeHtml(file.name)}" src="${url}">`;
+  }
+  const limit = 1_000_000;
+  const text = await blob.slice(0, limit).text();
+  if (text.includes("\u0000")) return `${head}<p class="empty">Fichier binaire : ouvrez-le sur GitHub.</p>`;
+  const lines = text.replace(/\n$/, "").split("\n");
+  const shown = lines.slice(0, 3000);
+  const more = lines.length - shown.length;
+  const code = `<div class="diff code-view">${shown.map((line, index) => `<div class="dl"><span class="no">${index + 1}</span><span class="tx">${escapeHtml(line) || " "}</span></div>`).join("")}
+    ${more > 0 || blob.size > limit ? `<div class="dl gap">… la suite sur GitHub</div>` : ""}</div>`;
+  if (extension === "md") {
+    return `${head}<button class="small-link" data-action="source">${ICON.file}<span>Voir la source</span></button>
+      <div class="md-rendered message">${renderMarkdown(text)}</div><div class="md-source" hidden>${code}</div>`;
+  }
+  return head + code;
 }
 
 // --- Mise en ligne (GitHub Pages) -------------------------------------------------------
@@ -1588,6 +1702,8 @@ function showSettings(first = false, justConnected = false) {
       if (state.settings.engine !== engine) state.repos = null;
       state.settings.engine = engine;
       saveSettings();
+      showQuotaLabel();
+      refreshQuota();
       toast(`Connecté en tant que ${state.user.login}`);
       $("#settings-button").classList.add("active");
       showSettings(false, true);
@@ -1643,6 +1759,7 @@ function showSettings(first = false, justConnected = false) {
         state.quotaError = "";
         state.settings.openrouterKey = key;
         saveSettings();
+        showQuotaLabel();
         const free = state.quota.free;
         toast(free ? `Clé enregistrée : ${free.remaining}/${free.limit} requêtes gratuites restantes aujourd'hui` : "Clé enregistrée");
         showSettings();
@@ -1654,6 +1771,7 @@ function showSettings(first = false, justConnected = false) {
       delete state.settings.openrouterKey;
       state.quota = null;
       saveSettings();
+      showQuotaLabel();
       toast("Clé OpenRouter effacée de cet appareil");
       showSettings();
     });
@@ -1662,6 +1780,7 @@ function showSettings(first = false, justConnected = false) {
       saveSettings();
       state.github = null;
       state.user = null;
+      showQuotaLabel();
       toast("Jeton effacé de cet appareil");
       showSettings(true);
     });
@@ -1686,6 +1805,11 @@ function route() {
   }
   if (onSettings) {
     showSettings();
+    return;
+  }
+  const files = hash.match(/^#\/session\/(\d+)\/fichiers\/?(.*)$/);
+  if (files) {
+    showFiles(Number(files[1]), files[2].split("/").map((part) => decodeURIComponent(part)).join("/"));
     return;
   }
   const changes = hash.match(/^#\/session\/(\d+)\/modifications/);
@@ -1738,6 +1862,7 @@ function blockZoom() {
 
 async function boot() {
   applyTheme();
+  $("#quota-button").addEventListener("click", openQuota);
   window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", applyTheme);
   blockZoom();
   watchComposer();
@@ -1767,6 +1892,8 @@ async function boot() {
     try {
       state.user = await github.user();
       state.github = github;
+      showQuotaLabel();
+      refreshQuota();
       const engine = await github.repository(state.settings.engine).catch(() => null);
       if (engine) state.engineRef = engine.default_branch || "main";
     } catch (error) {
