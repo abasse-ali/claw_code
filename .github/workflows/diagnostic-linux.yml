@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [api, commands, compat-harness, lsp, plugins, runtime, server, tools, claw-cli]
+        crate: [runtime]
     defaults:
       run:
         working-directory: rust
@@ -51,13 +51,17 @@ jobs:
               free=$(free -m | awk '/Mem:/ {print $7}')
               bin=$(grep -o 'Running [^ ]* ([^)]*)' /tmp/tests.txt 2>/dev/null | tail -1 | sed 's/.*deps\///; s/-[0-9a-f]*)$//')
               last=$(tail -c 300 /tmp/tests.txt 2>/dev/null | tr '\n' ' ' | grep -o 'test [^ ]* \.\.\.[^t]*$' | tail -1)
-              line="$(date +%H:%M:%S) $count proc ${free}M | $bin | $last"
+              names=$(ps -eo comm= | sort | uniq -c | sort -rn | head -3 | awk '{printf "%s x%s ", $2, $1}')
+              line="$(date +%H:%M:%S) $count proc ${free}M | $names| $last"
               echo "$line" >> /tmp/releve.txt
               statut pending "${line:0:139}"
               sleep 5
             done
           ) &
           monitor=$!
+          export MALLOC_ARENA_MAX=2
+          ulimit -u 1500
+          ulimit -v 4000000
           timeout -k 10 600 cargo test -p ${{ matrix.crate }} --locked --no-fail-fast -- --test-threads=1 > /tmp/tests.txt 2>&1
           code=$?
           kill $monitor
@@ -65,6 +69,10 @@ jobs:
           grep -E "^test result|Running " /tmp/tests.txt | tail -40
           echo "=== relevé"
           cat /tmp/releve.txt
+          echo "=== processus restants"
+          ps -eo pid,ppid,pgid,etimes,rss,args --sort=-etimes | head -40
+          echo "=== erreurs de fork ou de mémoire"
+          grep -n "Resource temporarily\|Cannot allocate\|memory allocation" /tmp/tests.txt | head -20
           echo "=== fin de la sortie"
           tail -n 30 /tmp/tests.txt
           statut success "code $code"
