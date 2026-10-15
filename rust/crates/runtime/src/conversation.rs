@@ -184,6 +184,12 @@ pub trait ToolExecutor {
     /// que l'interface l'affiche comme un appel du modèle.
     fn announce(&mut self, _tool_name: &str, _input: &str) {}
 
+    /// Images produites par le dernier appel (captures d'écran), à joindre à
+    /// son résultat ; par défaut aucune.
+    fn take_images(&mut self) -> Vec<crate::attachments::ImageAttachment> {
+        Vec::new()
+    }
+
     /// L'appel n'a pas été exécuté (autorisation refusée, hook, interruption) :
     /// l'interface, qui l'a déjà affiché, peut le clore. `reason` est le
     /// résultat rendu au modèle.
@@ -285,6 +291,9 @@ pub struct ConversationRuntime<C, T> {
     /// Mode projet : la sonde de l'environnement, au premier tour (une fois
     /// par session).
     environment: EnvironmentProbe,
+    /// Captures d'écran des appels de la réponse en cours, jointes à son
+    /// dernier résultat d'outil.
+    tool_images: Vec<crate::attachments::ImageAttachment>,
 }
 
 /// Issue de la démonstration finale du mode projet.
@@ -737,6 +746,10 @@ fn command_outcome(
     })
 }
 
+/// Captures d'écran d'outils gardées dans la conversation.
+const MAX_TOOL_IMAGES: usize = 4;
+const OLD_SCREENSHOTS_NOTE: &str = "[Claw] The screenshots of this call were removed from the conversation to save room: call Screenshot again to see the page as it is now.";
+
 /// Ajoute une note de Claw à la suite d'un résultat d'outil (lue par le modèle).
 fn append_tool_output(message: &mut ConversationMessage, note: &str) {
     for block in &mut message.blocks {
@@ -905,6 +918,7 @@ where
             turn_request_limit: turn_request_limit(&feature_config),
             project_root: None,
             environment: EnvironmentProbe::Pending,
+            tool_images: Vec::new(),
         }
     }
 
@@ -1651,6 +1665,7 @@ where
                     self.permission_policy.set_active_mode(mode);
                 }
             }
+            self.attach_tool_images(&mut tool_results);
             // Mode projet : un jalon marqué fait se vérifie tout de suite.
             if let Some(note) = self.project_after_tools(&mut aids, &mut prompter) {
                 if let Some(last) = self.session.messages.last_mut() {
@@ -3847,6 +3862,65 @@ where
     /// Autorisation, hooks `PreToolUse`/`PostToolUse`, point de restauration
     /// et exécution d'un appel d'outil ; renvoie le message de résultat, et
     /// vrai si l'appel a été refusé (autorisation ou hook).
+    /// Joint au dernier résultat d'outil de la réponse les captures prises par
+    /// ses appels : les résultats d'outils restent d'un seul tenant (des images
+    /// placées entre deux résultats feraient refuser la requête par une API de
+    /// type `OpenAI`, qui veut les résultats juste après les appels).
+    fn attach_tool_images(&mut self, tool_results: &mut [ConversationMessage]) {
+        if self.tool_images.is_empty() {
+            return;
+        }
+        let images = std::mem::take(&mut self.tool_images);
+        self.forget_old_tool_images(images.len());
+        let blocks: Vec<ContentBlock> = images
+            .into_iter()
+            .map(|image| ContentBlock::Image {
+                media_type: image.media_type,
+                data: image.data,
+            })
+            .collect();
+        if let Some(last) = self
+            .session
+            .messages
+            .last_mut()
+            .filter(|message| message.role == crate::session::MessageRole::Tool)
+        {
+            last.blocks.extend(blocks.iter().cloned());
+        }
+        if let Some(last) = tool_results.last_mut() {
+            last.blocks.extend(blocks);
+        }
+    }
+
+    /// Chaque image renvoyée au modèle compte à chaque requête : au-delà des
+    /// `MAX_TOOL_IMAGES` captures les plus récentes (`coming` comprises), les
+    /// plus anciennes sont retirées et leur résultat le dit au modèle.
+    fn forget_old_tool_images(&mut self, coming: usize) {
+        let mut kept = coming;
+        for message in self.session.messages.iter_mut().rev() {
+            if message.role != crate::session::MessageRole::Tool {
+                continue;
+            }
+            let images = message
+                .blocks
+                .iter()
+                .filter(|block| matches!(block, ContentBlock::Image { .. }))
+                .count();
+            if images == 0 {
+                continue;
+            }
+            if kept + images <= MAX_TOOL_IMAGES {
+                kept += images;
+                continue;
+            }
+            message
+                .blocks
+                .retain(|block| !matches!(block, ContentBlock::Image { .. }));
+            append_tool_output(message, OLD_SCREENSHOTS_NOTE);
+            kept = MAX_TOOL_IMAGES;
+        }
+    }
+
     fn execute_tool_call(
         &mut self,
         tool_use_id: String,
@@ -3887,6 +3961,7 @@ where
                             Ok(output) => (output, false),
                             Err(error) => (error.to_string(), true),
                         };
+                    self.tool_images.extend(self.tool_executor.take_images());
                     output = merge_hook_feedback(pre_hook_result.messages(), output, false);
 
                     let post_hook_result = self
@@ -4439,6 +4514,113 @@ mod tests {
             *seen.lock().expect("journal"),
             ["écarté blocked (secret) : not now"]
         );
+    }
+
+    #[test]
+    fn screenshots_follow_the_last_tool_result_and_only_the_latest_are_kept() {
+        /// Trois réponses à captures, la première avec un second appel après la capture.
+        struct Script(usize);
+        impl ApiClient for Script {
+            fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                self.0 += 1;
+                let call = |id: &str, name: &str| AssistantEvent::ToolUse {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    input: "{}".to_string(),
+                };
+                Ok(match self.0 {
+                    1 => vec![
+                        call("shot-1", "shot"),
+                        call("other-1", "other"),
+                        AssistantEvent::MessageStop,
+                    ],
+                    2 => vec![call("shot-2", "shot"), AssistantEvent::MessageStop],
+                    3 => vec![call("shot-3", "shot"), AssistantEvent::MessageStop],
+                    _ => vec![
+                        AssistantEvent::TextDelta("Fait.".to_string()),
+                        AssistantEvent::MessageStop,
+                    ],
+                })
+            }
+        }
+
+        /// Chaque capture rend deux images (téléphone et ordinateur).
+        struct Camera(Vec<crate::attachments::ImageAttachment>);
+        impl super::ToolExecutor for Camera {
+            fn execute(
+                &mut self,
+                tool_name: &str,
+                _input: &str,
+            ) -> Result<String, super::ToolError> {
+                if tool_name == "shot" {
+                    self.0 = ["phone", "desktop"]
+                        .iter()
+                        .map(|screen| crate::attachments::ImageAttachment {
+                            media_type: "image/jpeg".to_string(),
+                            data: (*screen).to_string(),
+                            path: std::path::PathBuf::new(),
+                        })
+                        .collect();
+                }
+                Ok(format!("{tool_name} fait"))
+            }
+
+            fn take_images(&mut self) -> Vec<crate::attachments::ImageAttachment> {
+                std::mem::take(&mut self.0)
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            Script(0),
+            Camera(Vec::new()),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+        runtime.run_turn("regarde la page", None).expect("tour");
+        let results: Vec<(String, usize, String)> = runtime
+            .session()
+            .messages
+            .iter()
+            .filter(|message| message.role == MessageRole::Tool)
+            .map(|message| {
+                let images = message
+                    .blocks
+                    .iter()
+                    .filter(|block| matches!(block, ContentBlock::Image { .. }))
+                    .count();
+                let (id, output) = message
+                    .blocks
+                    .iter()
+                    .find_map(|block| match block {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            output,
+                            ..
+                        } => Some((tool_use_id.clone(), output.clone())),
+                        _ => None,
+                    })
+                    .expect("résultat");
+                (id, images, output)
+            })
+            .collect();
+        let shape: Vec<(&str, usize)> = results
+            .iter()
+            .map(|(id, images, _)| (id.as_str(), *images))
+            .collect();
+        // Les captures de la première réponse suivent son dernier résultat, puis
+        // celles de la première réponse laissent la place aux deux suivantes.
+        assert_eq!(
+            shape,
+            [("shot-1", 0), ("other-1", 0), ("shot-2", 2), ("shot-3", 2)]
+        );
+        assert!(results[1]
+            .2
+            .contains("screenshots of this call were removed"));
+        assert!(!results[2].2.contains("removed"));
     }
 
     #[test]

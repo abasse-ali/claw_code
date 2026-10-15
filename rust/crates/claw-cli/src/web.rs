@@ -1170,6 +1170,9 @@ fn transcript_from_messages(messages: &[ConversationMessage]) -> Vec<WebEvent> {
                     output: output.clone(),
                     is_error: *is_error,
                 },
+                // Captures d'un outil : elles vont au modèle ; la page montre
+                // le résultat de l'outil, pas une image de l'utilisateur.
+                (ContentBlock::Image { .. }, MessageRole::Tool) => continue,
                 (ContentBlock::Image { media_type, data }, _) => WebEvent::UserImage {
                     url: format!("data:{media_type};base64,{data}"),
                 },

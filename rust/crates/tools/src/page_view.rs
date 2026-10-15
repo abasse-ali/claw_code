@@ -254,31 +254,20 @@ fn render(browser: &Path, url: &str, wait_ms: u64) -> Result<Rendered, String> {
     outcome
 }
 
-/// Ce que `ViewPage` rend au modèle.
-pub(crate) fn view_page(input: &ViewPageInput) -> Result<Value, String> {
-    let url = input.url.trim();
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err(format!(
-            "ViewPage opens http and https pages: `{url}` is not one (for a local project, start its server and give its http://localhost address)"
-        ));
-    }
-    let browser = find_browser().ok_or_else(|| {
-        "no Chromium-based browser found (Edge, Chrome or Chromium): install one, or set CLAW_BROWSER to its executable".to_string()
-    })?;
-    let wait_ms = input
-        .wait_ms
-        .unwrap_or(DEFAULT_WAIT_MS)
-        .clamp(200, MAX_WAIT_MS);
+/// La page rendue par la ligne de commande du navigateur (`--dump-dom`) : son
+/// DOM, et sa console quand le journal du navigateur a pu être lu.
+fn command_line_page(
+    browser: &Path,
+    url: &str,
+    wait_ms: u64,
+) -> Result<(String, Option<Vec<ConsoleMessage>>), String> {
     let Rendered {
         dom,
         log,
         exit_code,
         errors,
-    } = render(&browser, url, wait_ms)?;
-    // Sans journal (absent ou vide), les erreurs de la console sont inconnues :
-    // dire « aucune » enverrait le modèle chercher ailleurs.
+    } = render(browser, url, wait_ms)?;
     let log = log.filter(|log| !log.trim().is_empty());
-    let console = log.as_deref().map(console_messages).unwrap_or_default();
     // Le navigateur s'est arrêté en échec sans rien rendre : le serveur
     // n'y est pour rien (navigateur lancé en root sans --no-sandbox, bloqué
     // par une stratégie de l'entreprise, profil illisible).
@@ -295,6 +284,51 @@ pub(crate) fn view_page(input: &ViewPageInput) -> Result<Value, String> {
             if errors.is_empty() { "nothing" } else { errors.as_str() }
         ));
     }
+    Ok((dom, log.as_deref().map(console_messages)))
+}
+
+/// Ce que `ViewPage` rend au modèle.
+pub(crate) fn view_page(input: &ViewPageInput) -> Result<Value, String> {
+    let url = input.url.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(format!(
+            "ViewPage opens http and https pages: `{url}` is not one (for a local project, start its server and give its http://localhost address)"
+        ));
+    }
+    let browser = find_browser().ok_or_else(|| {
+        "no Chromium-based browser found (Edge, Chrome or Chromium): install one, or set CLAW_BROWSER to its executable".to_string()
+    })?;
+    let wait_ms = input
+        .wait_ms
+        .unwrap_or(DEFAULT_WAIT_MS)
+        .clamp(200, MAX_WAIT_MS);
+    let (dom, console) =
+        match crate::screenshot::load_page(&browser, url, Duration::from_millis(wait_ms)) {
+            Ok(page) => (
+                page.dom,
+                Some(
+                    page.console
+                        .into_iter()
+                        .map(|(text, source)| ConsoleMessage {
+                            text: text.chars().take(MAX_MESSAGE_CHARS).collect(),
+                            source,
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+            ),
+            Err(crate::screenshot::LoadError::Page(error)) => return Err(error),
+            // Navigateur qui refuse d'être piloté (politique d'entreprise) : la
+            // ligne de commande, comme avant Edge 155.
+            Err(crate::screenshot::LoadError::Browser(reason)) => {
+                command_line_page(&browser, url, wait_ms).map_err(|error| {
+                    format!("{error} (driving the browser through DevTools failed first: {reason})")
+                })?
+            }
+        };
+    // Sans journal, les erreurs de la console sont inconnues : dire
+    // « aucune » enverrait le modèle chercher ailleurs.
+    let console_known = console.is_some();
+    let console = console.unwrap_or_default();
     if dom.trim().is_empty() {
         return Err(format!(
             "the browser returned no page for {url}: is the server running and the address right? (a connection that is refused gives an empty page)"
@@ -334,12 +368,12 @@ pub(crate) fn view_page(input: &ViewPageInput) -> Result<Value, String> {
         );
     }
     // Erreurs de la console inconnues quand le journal manque.
-    let console_errors = if log.is_some() {
+    let console_errors = if console_known {
         json!(errors)
     } else {
         Value::Null
     };
-    if log.is_none() {
+    if !console_known {
         notes.push(
             "The browser's console log could not be read: console errors are unknown, not absent."
                 .to_string(),

@@ -66,7 +66,7 @@ CLAW_NO_USER_ENV=1 node test/run-vscode.js ../../target/debug/claw.exe
 
 S'y ajoutent la vérification Linux (`cargo clippy --target x86_64-unknown-linux-gnu` avec les
 faux compilateurs C, voir la mémoire) et le contrôle des tirets longs. `CLAW_TEST_BROWSER=1`
-active l'essai de `ViewPage` avec le vrai navigateur.
+active les essais de `ViewPage` et de `Screenshot` avec le vrai navigateur.
 
 Outil pour lire une vraie session sans appeler de modèle :
 
@@ -175,6 +175,8 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | (commit « Bilan t8 ») | Comparaison à binaire égal : t8 à 12/12 avec (84 requêtes) et sans (41) le mode projet ; `> nul` de cmd réécrit `> /dev/null` dans Git Bash (un fichier `nul` restait dans le projet) |
 
+| (commit « Captures d'écran », 15 octobre 2026) | Outil `Screenshot` : captures d'une page au téléphone et à l'ordinateur (navigateur piloté par le protocole DevTools, client WebSocket local), actions avant la capture (clic, saisie, défilement), défauts mesurés dans la page (contenu qui sort de l'écran, texte coupé, éléments superposés, `hidden` affiché, image absente, texte trop petit ou trop pâle, console) ; les captures suivent le dernier résultat d'outil de la réponse comme des images (décrites par le lecteur d'images pour un modèle qui ne les lit pas), quatre au plus dans la conversation ; ligne « Page layout » des cas limites ; `ViewPage` passe aussi par DevTools : sous Windows, Edge 155 se relance et `--dump-dom` ne rendait plus rien |
+
 État des tests après T1-33 : 664 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
 il passe seul), analyse statique à zéro sous Windows et
@@ -216,7 +218,7 @@ Hors lots :
 
 | Id | Sujet | État |
 |---|---|---|
-| A5 | `ViewPage` : cliquer, saisir, déposer un fichier (protocole DevTools, client WebSocket à écrire) | à faire |
+| A5 | `ViewPage` : cliquer, saisir, déposer un fichier (protocole DevTools, client WebSocket à écrire) | en partie le 15 octobre 2026 : client WebSocket écrit, clic, saisie et défilement dans l'outil `Screenshot` ; déposer un fichier reste à faire |
 | A6 | `grep_search` en mode `content` : `head_limit` et `offset` s'appliquent aussi à la liste des fichiers | fait (lot 3) |
 | A7 | Relecture indépendante (étude E4) | à faire après les lots 1 à 3 |
 | A8 | Vérifier Gemini en conditions réelles (signatures renvoyées, schéma des outils) | bloqué : demande une requête de génération, accord de l'utilisateur requis |

@@ -210,6 +210,18 @@ const FEATURE_EDGE_CASES: &[(&[&str], &str)] = &[
     ),
     (
         &[
+            "affichage", "s'affich", "mise en page", "responsive", "sur mobile", "version mobile",
+            "sur telephone", "sur le telephone", "sur mon telephone", "sur un telephone",
+            "sur iphone", "sur mon iphone", "sur android", "petit ecran", "petits ecrans",
+            "deborde", "debordement", "chevauch", "se superpos", "tronque", "mal aligne",
+            "alignement", "decale", "css", "layout", "overflow", "screenshot", "capture d'ecran",
+            "captures d'ecran", "flou", "illisible", "on mobile", "on a phone", "on my phone",
+            "mobile view", "display issue", "display problem", "looks broken", "looks wrong",
+        ],
+        "Page layout: a page that works can still look broken on the user's screen: content wider than a phone (a fixed `width`, a long word or URL, a table, a `pre`), a label or a tab cut by `overflow: hidden`, elements drawn on top of each other (absolute positions, negative margins), an element with the `hidden` attribute shown because a CSS `display` rule wins over it, text too small or too pale. The usual fixes: `max-width: 100%`, `min-width: 0` on flex children, `flex-wrap: wrap`, `overflow-wrap: anywhere`, `[hidden] { display: none !important; }`. Try the page with Screenshot at phone and desktop sizes after each change of its look, with `actions` to open its menus and dialogs (no problem listed, and images that look right at both sizes).",
+    ),
+    (
+        &[
             "fetch", "javascript", "html", "innerhtml", "page web", "pages web", "web page",
             "la page", "une page", "navigateur", "browser", "ajax", "axios", "dom ", "react ",
             "vue.js", "svelte",
@@ -361,6 +373,30 @@ mod tests {
             kinds("Ajoute les réservations à la bibliothèque (`python biblio.py reserver MEMBRE LIVRE`)"),
             ["Balances, stocks, quotas and bookings", "Command-line scripts"]
         );
+    }
+
+    #[test]
+    fn a_display_problem_asks_for_screenshots_at_phone_and_desktop_sizes() {
+        for request in [
+            "Le menu déborde sur mobile",
+            "Les onglets sont coupés sur mon téléphone",
+            "pourquoi j'ai du flou en haut de l'appli sur mon iPhone",
+            "The header looks broken on a phone",
+            "Corrige la mise en page du tableau",
+        ] {
+            // « téléphone » nomme aussi les numéros d'un formulaire : le genre
+            // de la mise en page est là, pas forcément le premier.
+            assert!(
+                kinds(request).contains(&"Page layout"),
+                "{request}: {:?}",
+                kinds(request)
+            );
+            assert!(feature_edge_cases(request)
+                .iter()
+                .any(|line| line.contains("Screenshot at phone and desktop sizes")));
+        }
+        // Afficher une valeur n'est pas un problème d'affichage.
+        assert_eq!(kinds("Affiche la date d'échéance"), ["Dates and times"]);
     }
 
     #[test]

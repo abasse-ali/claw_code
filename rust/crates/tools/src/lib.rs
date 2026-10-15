@@ -12,11 +12,20 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 mod page_view;
+mod screenshot;
 
-/// Un navigateur est installé : l'outil `ViewPage` peut montrer une page.
+/// Un navigateur est installé : les outils `ViewPage` et `Screenshot` peuvent
+/// montrer une page.
 #[must_use]
 pub fn page_viewer_available() -> bool {
     page_view::find_browser().is_some()
+}
+
+/// Captures prises par le dernier appel de `Screenshot` sur ce fil, à joindre
+/// à son résultat.
+#[must_use]
+pub fn take_screenshots() -> Vec<runtime::attachments::ImageAttachment> {
+    screenshot::take_captured()
 }
 
 use mcp_bridge::connected_mcp_tools;
@@ -474,6 +483,38 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "Screenshot",
+            description:
+                "Take screenshots of a web page in a headless browser, at phone and desktop sizes by default, and measure its layout problems: content wider than the screen, cut or overlapping text and buttons, elements that should be hidden but show, broken images, text too small or too pale, plus console errors. The screenshots follow the result as images (a model that cannot see images gets their description). Use it after building or changing how a page looks, and when the user reports a display problem: fix what it finds, then take the screenshots again until the list is empty and the images look right. `actions` first bring the page to the state to check (open a menu, fill a field, scroll down). For a local project, start its server in the background and give its http://localhost address, or give `path` for a plain .html file.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "An http or https address, for example http://localhost:5173/" },
+                    "path": { "type": "string", "description": "Instead of url: an .html file of the project, for a page that needs no server." },
+                    "viewports": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Screen sizes, one screenshot each: \"phone\" (390x844), \"tablet\" (820x1180), \"desktop\" (1280x800) or \"WIDTHxHEIGHT\". Default: phone and desktop."
+                    },
+                    "theme": { "type": "string", "enum": ["light", "dark"], "description": "Color scheme the device says it prefers (prefers-color-scheme)." },
+                    "full_page": { "type": "boolean", "description": "Capture the page down to its end (up to three screens) instead of the first screen." },
+                    "wait_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 15000,
+                        "description": "Time left to the page after it loads and after each action, in milliseconds (default 1500)."
+                    },
+                    "actions": {
+                        "type": "array",
+                        "description": "Steps played in order before each screenshot: {\"click\": \"CSS selector\"}, {\"type\": \"text\", \"into\": \"CSS selector\"}, {\"scroll\": \"CSS selector\" or \"bottom\"}, {\"wait_ms\": 500}.",
+                        "items": { "type": "object" }
+                    }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "WebSearch",
             description: "Search the web for current information and return cited results.",
             input_schema: json!({
@@ -861,6 +902,9 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
         "ViewPage" => from_value::<page_view::ViewPageInput>(input)
             .and_then(|input| page_view::view_page(&input))
+            .and_then(to_pretty_json),
+        "Screenshot" => from_value::<screenshot::ScreenshotInput>(input)
+            .and_then(|input| screenshot::take(&input))
             .and_then(to_pretty_json),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
         "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
@@ -2947,6 +2991,7 @@ const READ_ONLY_ROLE_TOOLS: &[&str] = &[
     "FindSymbol",
     "WebFetch",
     "ViewPage",
+    "Screenshot",
     "WebSearch",
     "ToolSearch",
     "Skill",
@@ -2964,6 +3009,7 @@ const TESTER_TOOLS: &[&str] = &[
     "grep_search",
     "FindSymbol",
     "ViewPage",
+    "Screenshot",
     "TodoWrite",
     "ToolSearch",
     "NotebookEdit",
@@ -3007,6 +3053,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "FindSymbol",
             "WebFetch",
             "ViewPage",
+            "Screenshot",
             "WebSearch",
             "ToolSearch",
             "TodoWrite",
@@ -3044,6 +3091,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "grep_search",
             "WebFetch",
             "ViewPage",
+            "Screenshot",
             "WebSearch",
             "TodoWrite",
             "Skill",
@@ -3437,6 +3485,14 @@ impl SubagentToolExecutor {
 }
 
 impl ToolExecutor for SubagentToolExecutor {
+    /// Un sous-agent n'a pas de lecteur d'images : ses captures ne partent pas
+    /// au modèle (un modèle qui ne lit pas les images ferait refuser la
+    /// requête) ; il garde le rapport mesuré, en texte.
+    fn take_images(&mut self) -> Vec<runtime::attachments::ImageAttachment> {
+        let _ = take_screenshots();
+        Vec::new()
+    }
+
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         if !self.allowed_tools.contains(tool_name) {
             let allowed: Vec<&str> = self.allowed_tools.iter().map(String::as_str).collect();
@@ -4908,6 +4964,96 @@ mod tests {
             "Get-ChildItem".to_string()
         };
         assert_eq!(super::powershell_script("Get-ChildItem"), expected);
+    }
+
+    /// Avec un vrai navigateur (`CLAW_TEST_BROWSER=1`) : une page piégée, prise
+    /// au téléphone et à l'ordinateur ; chaque défaut est mesuré, les captures
+    /// partent en images, un clic sur un bouton recouvert le dit.
+    #[test]
+    fn screenshot_measures_layout_problems_and_returns_images() {
+        if std::env::var_os("CLAW_TEST_BROWSER").is_none() || !super::page_viewer_available() {
+            return;
+        }
+        let server = TestServer::spawn(Arc::new(|request_line: &str| {
+            if request_line.contains("absente") {
+                return HttpResponse::text(404, "Not Found", "absente");
+            }
+            HttpResponse::html(
+                200,
+                "OK",
+                r#"<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Page piégée</title>
+<style>
+body { margin: 0; font: 16px sans-serif; background: #fff; }
+.wide { width: 600px; height: 20px; background: #ddd; }
+.tabs { display: flex; width: 200px; }
+.tab { width: 60px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.pale { color: #d0d0d0; }
+.chip { display: inline-flex; }
+#menu { position: absolute; top: 120px; left: 10px; }
+#over { position: absolute; top: 120px; left: 20px; }
+</style></head><body>
+<div class="wide">large</div>
+<div class="tabs"><button class="tab">Modifications</button><button class="tab">Fichiers</button></div>
+<p class="pale">Texte pâle sur fond blanc</p>
+<button class="chip" hidden>Choisir</button>
+<button id="menu">Menu</button><button id="over">Par-dessus</button>
+<img src="/absente.png" alt="absente">
+<script>console.error("erreur de test");</script>
+</body></html>"#,
+            )
+        }));
+        let _ = super::take_screenshots();
+        let result = execute_tool(
+            "Screenshot",
+            &json!({
+                "url": format!("http://{}/", server.addr()),
+                "actions": [{ "click": "#menu" }],
+                "wait_ms": 300
+            }),
+        )
+        .expect("Screenshot should succeed");
+        let output: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        let phone = &output["captures"][0];
+        assert_eq!(phone["screen"], "phone 390x844", "{output}");
+        assert_eq!(phone["title"], "Page piégée", "{output}");
+        let problems = phone["problems"].to_string();
+        for expected in [
+            "past the edge",
+            "div.wide",
+            "Text cut off",
+            "Modifications",
+            "on top of each other",
+            "hidden attribute",
+            "button.chip",
+            "did not load",
+            "too little contrast",
+        ] {
+            assert!(problems.contains(expected), "{expected}: {output}");
+        }
+        assert!(
+            phone["console"].to_string().contains("erreur de test"),
+            "{output}"
+        );
+        assert!(
+            phone["actions"][0]
+                .as_str()
+                .is_some_and(|line| line.contains("button#over lies on top")),
+            "{output}"
+        );
+        // À l'ordinateur, la page tient en largeur.
+        let desktop = &output["captures"][1];
+        assert_eq!(desktop["screen"], "desktop 1280x800", "{output}");
+        assert!(
+            !desktop["problems"].to_string().contains("past the edge"),
+            "{output}"
+        );
+        let images = super::take_screenshots();
+        assert_eq!(images.len(), 2);
+        assert!(images.iter().all(|image| image.media_type == "image/jpeg"
+            && image.data.starts_with("/9j/")
+            && image.path.is_file()));
+        assert!(super::take_screenshots().is_empty());
     }
 
     /// Avec un vrai navigateur (`CLAW_TEST_BROWSER=1`) : la page rend son état
