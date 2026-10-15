@@ -18,7 +18,7 @@ jobs:
       - name: Programme kill
         run: |
           which -a kill
-          ls -l "$(command -v kill)" "$(readlink -f "$(command -v kill)")"
+          ls -l /usr/bin/kill /bin/kill "$(readlink -f /usr/bin/kill)" || true
           /usr/bin/kill --version 2>&1 | head -2 || true
           dpkg -S "$(readlink -f /usr/bin/kill)" || true
           cat /etc/os-release | head -3
