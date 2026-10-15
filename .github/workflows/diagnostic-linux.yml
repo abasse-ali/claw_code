@@ -13,13 +13,16 @@ permissions:
 
 jobs:
   tests:
-    name: cargo test -p ${{ matrix.crate }}
+    name: runtime, ${{ matrix.part.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        crate: [runtime]
+        part:
+          - { name: bash, filter: "bash::", skip: "" }
+          - { name: bash_tasks, filter: "bash_tasks::", skip: "" }
+          - { name: reste, filter: "", skip: "--skip bash::" }
     defaults:
       run:
         working-directory: rust
@@ -43,7 +46,7 @@ jobs:
         run: |
           set +e
           statut() {
-            gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state="$1" -f context="diagnostic/${{ matrix.crate }}" -f description="$2" > /dev/null 2>&1
+            gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state="$1" -f context="diagnostic/${{ matrix.part.name }}" -f description="$2" > /dev/null 2>&1
           }
           (
             while true; do
@@ -59,11 +62,10 @@ jobs:
             done
           ) &
           monitor=$!
-          export MALLOC_ARENA_MAX=2
-          ulimit -u 1500
-          ulimit -v 4000000
-          timeout -k 10 600 cargo test -p ${{ matrix.crate }} --locked --no-fail-fast -- --test-threads=1 > /tmp/tests.txt 2>&1
+          timeout -k 10 600 cargo test -p runtime --lib --locked -- --test-threads=1 ${{ matrix.part.filter }} ${{ matrix.part.skip }} > /tmp/tests.txt 2>&1
           code=$?
+          echo "tests finis (code $code), une minute d'observation" >> /tmp/releve.txt
+          sleep 60
           kill $monitor
           echo "=== code des tests : $code"
           grep -E "^test result|Running " /tmp/tests.txt | tail -40
