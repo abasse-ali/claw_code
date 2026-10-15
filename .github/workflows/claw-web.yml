@@ -72,6 +72,9 @@ jobs:
         with:
           repository: ${{ inputs.claw_source }}
           ref: ${{ inputs.claw_ref }}
+          # Le jeton du dépôt des sessions ne lit que ce dépôt-là : tant que le code de Claw
+          # est privé, celui de l'utilisateur (CLAW_REPO_TOKEN) le lit.
+          token: ${{ secrets.CLAW_REPO_TOKEN || github.token }}
           path: claw-src
           persist-credentials: false
 
