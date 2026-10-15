@@ -99,33 +99,44 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 
 .app { min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; }
 
+/* Appli installée sur l'écran d'accueil d'un iPhone, en portrait : depuis iOS 26, le système
+   floute une bande sous la barre d'état, par-dessus la page, et aucun réglage ne l'enlève. La
+   barre du haut et le tiroir descendent sous cette bande ; Safari et les ordinateurs ne changent pas. */
+:root { --app-inset-top: env(safe-area-inset-top, 0px); }
+@supports (-webkit-touch-callout: none) {
+  @media (display-mode: standalone) and (orientation: portrait) {
+    :root { --app-inset-top: calc(env(safe-area-inset-top, 0px) + 18px); }
+  }
+}
+
 /* Barre du haut */
 .topbar {
   position: sticky; top: 0; z-index: 5;
-  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
-  padding: calc(8px + env(safe-area-inset-top)) 12px 8px;
+  display: flex; align-items: center; gap: 4px;
+  padding: calc(8px + var(--app-inset-top)) 12px 8px;
   background: var(--bg);
 }
-.topbar > #menu { justify-self: start; }
-.topbar-right { justify-self: end; display: flex; align-items: center; gap: 4px; }
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 2px; }
 
-/* Requêtes gratuites du jour, toujours en vue */
-.quota-pill {
+/* Requêtes gratuites du jour, toujours en vue : un anneau qui se vide et le nombre restant */
+.quota-meter {
   --level: var(--muted);
-  position: relative; display: inline-flex; align-items: baseline; gap: 1px;
-  padding: 5px 11px 9px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel);
-  color: var(--text); font: inherit; cursor: pointer; font-variant-numeric: tabular-nums;
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 8px; border: 0; border-radius: 10px;
+  background: transparent; color: var(--text); font: inherit; cursor: pointer; font-variant-numeric: tabular-nums;
 }
-.quota-pill[hidden] { display: none; }
-.quota-pill strong { font-size: 1.02rem; color: var(--level); }
-.quota-pill small { font-size: .74rem; color: var(--muted); }
-.quota-pill .bar { position: absolute; left: 11px; right: 11px; bottom: 4px; height: 3px; border-radius: 2px; background: var(--panel-2); overflow: hidden; }
-.quota-pill .bar span { display: block; height: 100%; background: var(--level); }
-.quota-pill.ok { --level: var(--ok); }
-.quota-pill.warn { --level: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, var(--border)); }
-.quota-pill.low { --level: var(--error); border-color: var(--error); }
-.quota-pill.unknown { align-items: center; gap: 6px; padding: 6px 11px; color: var(--muted); font-size: .85rem; }
-.quota-pill.unknown svg { width: 16px; height: 16px; }
+.quota-meter[hidden] { display: none; }
+.quota-meter:hover, .quota-meter:focus-visible { background: var(--panel); }
+.quota-meter strong { font-size: .98rem; font-weight: 600; }
+.quota-meter small { margin-left: -5px; font-size: .78rem; color: var(--muted); }
+.quota-meter .ring { width: 18px; height: 18px; }
+.quota-meter .ring .track { stroke: var(--panel-2); stroke-width: 3; }
+.quota-meter .ring .level { stroke: var(--level); stroke-width: 3; }
+.quota-meter.ok { --level: var(--ok); }
+.quota-meter.warn { --level: var(--warn); }
+.quota-meter.low { --level: var(--error); }
+.quota-meter.low strong { color: var(--error); }
+.quota-meter.unknown { color: var(--muted); font-size: .85rem; }
+.quota-meter.unknown svg { width: 16px; height: 16px; }
 .brand { display: flex; align-items: center; gap: 8px; color: var(--text); text-decoration: none; font-weight: 600; }
 .logo { display: inline-block; width: 26px; height: 26px; background: url("../icons/icon.svg") center / contain no-repeat; }
 .icon-button {
@@ -161,7 +172,24 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 
 /* Session */
 .session-head h1 { font-size: 1.3rem; font-weight: 600; margin: 8px 0 8px; }
-.session-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.session-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+
+/* Onglets d'une session : discussion, fichiers de la branche, modifications */
+.session-tabs {
+  display: flex; gap: 4px; margin: 0 0 16px; padding: 4px;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--panel);
+}
+.session-tab {
+  flex: 1 1 auto; display: flex; align-items: center; justify-content: center; gap: 5px; min-width: 0; padding: 8px 6px;
+  border-radius: 9px; color: var(--muted); text-decoration: none; font-size: .86rem;
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+}
+.session-tab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-tab svg { width: 16px; height: 16px; }
+.session-tab:hover, .session-tab:focus-visible { color: var(--text); }
+.session-tab.current { background: var(--panel-2); color: var(--text); font-weight: 600; }
+.session-tab.current svg { color: var(--accent); }
+@media (max-width: 380px) { .session-tab svg { display: none; } }
 .meta-link {
   display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px;
   background: var(--panel); color: var(--muted); font-size: .85rem; text-decoration: none; max-width: 100%;
@@ -283,7 +311,6 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .theme-choice label:has(input:checked) { border-color: var(--accent); color: var(--accent); }
 
 /* Fichiers de la branche */
-.files h1 { font-size: 1.3rem; font-weight: 600; margin: 8px 0; }
 .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: 0 0 10px; overflow-wrap: anywhere; }
 .crumbs a { color: var(--accent); text-decoration: none; }
 .crumbs .ref { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; color: var(--muted); font-size: .82rem; }
@@ -389,7 +416,7 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 /* Tiroir des sessions */
 .drawer {
   position: fixed; top: 0; bottom: 0; left: 0; z-index: 20; width: min(340px, 86vw);
-  padding: calc(10px + env(safe-area-inset-top)) 12px 12px; background: var(--panel); overflow-y: auto;
+  padding: calc(10px + var(--app-inset-top)) 12px 12px; background: var(--panel); overflow-y: auto;
   box-shadow: 8px 0 30px rgba(0, 0, 0, .35);
 }
 .drawer-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }

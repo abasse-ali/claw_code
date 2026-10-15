@@ -31,6 +31,7 @@ const ICON = {
   stop: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
   trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4h6v3"/></svg>',
   globe: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.5 2.6 2.5 14.4 0 17M12 3.5c-2.5 2.6-2.5 14.4 0 17"/></svg>',
+  chat: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14a1.5 1.5 0 0 1 1.5 1.5v9A1.5 1.5 0 0 1 19 17h-8l-4.5 3.5V17H5a1.5 1.5 0 0 1-1.5-1.5v-9A1.5 1.5 0 0 1 5 5z"/></svg>',
   folder: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5a1.5 1.5 0 0 1 1.5-1.5h4l2 2.5h8a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z"/></svg>',
   file: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>',
   merge: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="12" r="2"/><path d="M6 7v10M6 7c0 4 4 5 10 5"/></svg>',
@@ -582,7 +583,7 @@ function showQuotaLabel() {
   const pill = $("#quota-button");
   if (!pill) return;
   pill.hidden = !state.github;
-  pill.className = "quota-pill";
+  pill.className = "quota-meter";
   const free = state.quota && state.quota.free;
   if (!free) {
     pill.classList.add("unknown");
@@ -592,9 +593,10 @@ function showQuotaLabel() {
   }
   const share = free.limit ? free.remaining / free.limit : 0;
   pill.classList.add(share > 0.5 ? "ok" : share > 0.1 ? "warn" : "low");
-  pill.innerHTML = `<strong>${free.remaining}</strong><small>/${free.limit}</small><span class="bar"><span></span></span>`;
-  // Largeur par le DOM : la politique de sécurité de l'appli refuse les styles écrits dans le HTML.
-  pill.querySelector(".bar span").style.width = `${Math.round(share * 100)}%`;
+  // Anneau qui se vide avec la journée (attribut SVG : la politique de sécurité refuse les styles en ligne).
+  pill.innerHTML = `<svg class="ring" viewBox="0 0 20 20" aria-hidden="true"><circle class="track" cx="10" cy="10" r="7.5"/>`
+    + `<circle class="level" cx="10" cy="10" r="7.5" pathLength="100" stroke-dasharray="${Math.round(share * 100)} 100" transform="rotate(-90 10 10)"/></svg>`
+    + `<strong>${free.remaining}</strong><small>/${free.limit}</small>`;
   pill.setAttribute("aria-label", `${free.remaining} requêtes gratuites restantes sur ${free.limit} aujourd'hui`);
 }
 
@@ -1127,6 +1129,23 @@ function messageHtml(comment, isLastProgress) {
   return `<article class="message user"><div class="who">${escapeHtml(comment.user ? comment.user.login : "Vous")}</div>${messageBody(body)}</article>`;
 }
 
+/** Onglets d'une session : la discussion, les fichiers de sa branche, ses modifications. */
+function sessionTabs(number, current) {
+  const tabs = [
+    ["discussion", `#/session/${number}`, ICON.chat, "Discussion"],
+    ["fichiers", `#/session/${number}/fichiers`, ICON.folder, "Fichiers"],
+    ["modifications", `#/session/${number}/modifications`, ICON.diff, "Modifications"],
+  ];
+  return `<nav class="session-tabs" aria-label="Session">${tabs.map(([key, href, icon, label]) => `
+    <a class="session-tab${key === current ? " current" : ""}" href="${href}"${key === current ? ' aria-current="page"' : ""}>${icon}<span>${label}</span></a>`).join("")}</nav>`;
+}
+
+/** En-tête des onglets Fichiers et Modifications : titre de la session (une fois lue), onglets. */
+function sessionTop(number, current, issue) {
+  const title = issue ? `<h1><span class="num">#${numberOf(issue)}</span> ${escapeHtml(issue.title)}</h1>` : "";
+  return `<header class="session-head">${title}${sessionTabs(number, current)}</header>`;
+}
+
 function renderSessionView() {
   const session = state.session;
   const view = $("#view");
@@ -1156,10 +1175,9 @@ function renderSessionView() {
           <span class="meta-link">${ICON.branch}<span>${escapeHtml(branchOf(session.issue))}</span></span>
           ${pull ? `<a class="meta-link pull ${pullBadge}" href="${escapeHtml(pull.html_url)}" target="_blank" rel="noopener noreferrer">${ICON.pull}<span>PR #${pull.number} ${pullBadge}</span></a>` : ""}
           ${pull && pull.state === "open" && !pull.merged_at && !active ? `<button class="meta-link action" data-action="merge">${ICON.merge}<span>Fusionner</span></button>` : ""}
-          <a class="meta-link" href="#/session/${session.number}/fichiers">${ICON.folder}<span>Fichiers</span></a>
-          <a class="meta-link" href="#/session/${session.number}/modifications">${ICON.diff}<span>Modifications</span></a>
           ${session.site ? `<a class="meta-link site" href="${escapeHtml(session.site)}" target="_blank" rel="noopener noreferrer">${ICON.globe}<span>Site en ligne</span></a>` : ""}
         </div>
+        ${sessionTabs(session.number, "discussion")}
       </header>
       <div class="messages">
         <article class="message user"><div class="who">${escapeHtml(session.issue.user ? session.issue.user.login : "Vous")}</div>${messageBody(taskOf(session.issue))}</article>
@@ -1378,8 +1396,7 @@ async function showFiles(number, path) {
   const view = $("#view");
   view.innerHTML = `
     <section class="files">
-      <a class="back" href="#/session/${number}">${ICON.back}<span>Session</span></a>
-      <h1>Fichiers</h1>
+      ${sessionTop(number, "fichiers")}
       <p class="empty">Lecture…</p>
     </section>`;
   try {
@@ -1411,8 +1428,7 @@ async function showFiles(number, path) {
       body = await fileHtml(repo, item, ref);
     }
     view.querySelector(".files").innerHTML = `
-      <a class="back" href="${parts.length ? link(parts.slice(0, -1).join("/")) : `#/session/${number}`}">${ICON.back}<span>${parts.length ? "Dossier parent" : "Session"}</span></a>
-      <h1>Fichiers</h1>
+      ${sessionTop(number, "fichiers", issue)}
       <p class="crumbs">${crumbs} <span class="ref">${ICON.branch}${escapeHtml(ref)}</span></p>
       ${note}
       ${body}`;
@@ -1568,8 +1584,7 @@ async function showChanges(number) {
   renderComposer();
   view.innerHTML = `
     <section class="changes">
-      <a class="back" href="#/session/${number}">${ICON.back}<span>Session</span></a>
-      <h1>Modifications</h1>
+      ${sessionTop(number, "modifications")}
       <p class="empty">Lecture des différences…</p>
     </section>`;
   try {
@@ -1590,8 +1605,7 @@ async function showChanges(number) {
     }
     if (!location.hash.startsWith(`#/session/${number}/modifications`)) return;
     section.innerHTML = `
-      <a class="back" href="#/session/${number}">${ICON.back}<span>Session</span></a>
-      <h1>Modifications</h1>
+      ${sessionTop(number, "modifications", issue)}
       <p class="help"><code>${escapeHtml(branch)}</code> comparée à <code>${escapeHtml(settings.base || "main")}</code> dans
         <a href="https://github.com/${escapeHtml(settings.repo || "")}/compare/${escapeHtml(settings.base || "main")}...${escapeHtml(branch)}" target="_blank" rel="noopener noreferrer">${escapeHtml(settings.repo || "")}</a></p>
       ${content}`;
