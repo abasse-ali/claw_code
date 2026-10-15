@@ -1,9 +1,9 @@
 name: Diagnostic Linux
 
-# Diagnostic d'un test qui fige la machine Linux de la CI : une machine par crate, chaque
-# test lancé seul (60 s au plus) sous des limites strictes de mémoire et de processus. Le
-# programme de test en cours est publié comme statut du commit (lisible même quand la
-# machine fige et que son journal est perdu). À la demande seulement.
+# Diagnostic d'un blocage des tests Linux de la CI : la commande exacte de la CI, sur une
+# seule machine, sous des limites de mémoire et de processus ; toutes les 20 s, le nombre
+# de processus et les plus gros sont notés, et publiés comme statut du commit (lisible même
+# quand la machine fige et que son journal est perdu). À la demande seulement.
 on:
   workflow_dispatch:
 
@@ -12,14 +12,10 @@ permissions:
   statuses: write
 
 jobs:
-  crate:
-    name: Tests de ${{ matrix.crate }}
+  tests:
+    name: Tests comme la CI, avec relevé des processus
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        crate: [api, commands, compat-harness, lsp, plugins, runtime, server, tools, claw-cli]
     defaults:
       run:
         working-directory: rust
@@ -34,38 +30,39 @@ jobs:
           git config --global user.name "claw-ci"
           git config --global user.email "claw-ci@example.invalid"
           git config --global init.defaultBranch main
-      - name: Compilation des tests
-        run: cargo test -p ${{ matrix.crate }} --no-run --locked --message-format=json > ../binaires.json
-      - name: Programmes de test en entier
+      - name: Compilation
+        run: cargo build --workspace --all-targets --locked
+      - name: Tests avec relevé des processus
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          MALLOC_ARENA_MAX: "2"
         run: |
           set +e
-          ulimit -u 1500
-          ulimit -v 4000000
           statut() {
-            gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state="$1"               -f context="diagnostic/${{ matrix.crate }}" -f description="$2" > /dev/null 2>&1
+            gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state="$1" -f context="diagnostic/processus" -f description="$2" > /dev/null 2>&1
           }
-          dir=$(pwd)/crates/${{ matrix.crate }}
-          for bin in $(jq -r 'select(.profile.test == true and .executable != null) | .executable' ../binaires.json); do
-            name=$(basename "$bin")
-            statut pending "en cours : $name"
-            start=$(date +%s)
-            (cd "$dir" && timeout -k 10 300 "$bin" --test-threads=1 > /tmp/sortie.txt 2>&1)
-            code=$?
-            took=$(( $(date +%s) - start ))
-            echo "=== $name : code $code, $took s"
-            if [ "$code" -ne 0 ]; then
-              echo "::warning title=${{ matrix.crate }}::$name : code $code, $took s ; dernier test lancé : $(grep -o '^test [^ ]*' /tmp/sortie.txt | tail -1)"
-              tail -n 15 /tmp/sortie.txt | sed 's/^/    /'
-            fi
-          done
-          statut pending "en cours : tests de documentation"
-          start=$(date +%s)
-          timeout -k 10 300 cargo test -p ${{ matrix.crate }} --doc --locked > /tmp/doc.txt 2>&1
+          (
+            while true; do
+              count=$(ps -e --no-headers | wc -l)
+              free=$(free -m | awk '/Mem:/ {print $7}')
+              top=$(ps -eo rss=,comm= --sort=-rss | head -3 | awk '{printf "%s %dM, ", $2, $1/1024}')
+              names=$(ps -eo comm= | sort | uniq -c | sort -rn | head -3 | awk '{printf "%s x%s, ", $2, $1}')
+              line="$(date +%H:%M:%S) $count proc, ${free}M libres ; $names; $top"
+              echo "$line" >> /tmp/releve.txt
+              statut pending "${line:0:139}"
+              sleep 20
+            done
+          ) &
+          monitor=$!
+          ulimit -u 3000
+          ulimit -v 8000000
+          timeout -k 10 900 cargo test --workspace --locked --no-fail-fast -- --test-threads=1 > /tmp/tests.txt 2>&1
           code=$?
-          echo "=== documentation : code $code, $(( $(date +%s) - start )) s"
-          [ "$code" -ne 0 ] && { echo "::warning title=${{ matrix.crate }}::tests de documentation : code $code"; tail -n 15 /tmp/doc.txt | sed 's/^/    /'; }
-          statut success "fini"
+          kill $monitor
+          echo "=== code des tests : $code"
+          grep -E "^test result|Running " /tmp/tests.txt | tail -40
+          echo "=== relevé"
+          cat /tmp/releve.txt
+          echo "=== fin de la sortie"
+          tail -n 30 /tmp/tests.txt
+          statut success "code $code"
