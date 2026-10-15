@@ -1174,10 +1174,13 @@ pub(crate) fn kill_process_tree(pid: Option<u32>) -> bool {
         command.args(["/PID", &pid.to_string(), "/T", "/F"]);
         command
     };
+    // `--` : sans lui, le `kill` de procps 4 (Ubuntu 24.04) lit `-<pid>` comme
+    // un signal, ne tue rien et répond quand même 0 ; les descendants d'une
+    // commande arrêtée continuaient de tourner.
     #[cfg(not(windows))]
     let mut killer = {
         let mut command = Command::new("kill");
-        command.args(["-KILL", &format!("-{pid}")]);
+        command.args(["-s", "KILL", "--", &format!("-{pid}")]);
         command
     };
     killer
@@ -1793,6 +1796,46 @@ I    1900    1700    1609      44444  ?         197609 21:06:00 /usr/bin/sleep";
             "{output:?}"
         );
         assert!(output.background_task_id.is_none());
+    }
+
+    /// Sous Linux, arrêter une commande arrête aussi ce qu'elle a lancé : avec
+    /// le `kill` de procps 4 (Ubuntu 24.04), `kill -KILL -<pid>` sans `--` ne
+    /// tuait rien et répondait 0.
+    #[cfg(unix)]
+    #[test]
+    fn stopping_a_command_also_stops_what_it_launched() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", "sleep 30 & echo $!; wait"])
+            .stdout(std::process::Stdio::piped())
+            .process_group(0);
+        let mut child = command.spawn().expect("lancement");
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().expect("sortie"))
+            .read_line(&mut line)
+            .expect("lecture");
+        let grandchild = line.trim().to_string();
+        let alive = |pid: &str| {
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+                !stat
+                    .split_whitespace()
+                    .nth(2)
+                    .is_some_and(|state| state == "Z")
+            })
+        };
+        assert!(alive(&grandchild), "{grandchild}");
+        assert!(super::kill_process_tree(Some(child.id())));
+        let _ = child.wait();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while alive(&grandchild) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            !alive(&grandchild),
+            "le petit-enfant {grandchild} tourne encore"
+        );
     }
 
     #[test]

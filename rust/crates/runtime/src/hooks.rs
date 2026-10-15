@@ -525,6 +525,13 @@ fn run_with_timeout(
     stdin: &str,
     timeout: Duration,
 ) -> std::io::Result<Option<std::process::Output>> {
+    // Sous Unix, un groupe de processus dédié : un hook arrêté pour délai
+    // dépassé l'est avec tout ce qu'il a lancé.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        process.process_group(0);
+    }
     let mut child = process.spawn()?;
     // Écritures et lectures dans des fils dédiés : un hook qui ne lit pas
     // stdin ou qui écrit beaucoup ne doit pas bloquer l'agent.
