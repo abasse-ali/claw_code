@@ -13,9 +13,13 @@ permissions:
 
 jobs:
   tests:
-    name: Tests comme la CI, avec relevé des processus
+    name: cargo test -p ${{ matrix.crate }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [api, commands, compat-harness, lsp, plugins, runtime, server, tools, claw-cli]
     defaults:
       run:
         working-directory: rust
@@ -39,7 +43,7 @@ jobs:
         run: |
           set +e
           statut() {
-            gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state="$1" -f context="diagnostic/processus" -f description="$2" > /dev/null 2>&1
+            gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state="$1" -f context="diagnostic/${{ matrix.crate }}" -f description="$2" > /dev/null 2>&1
           }
           (
             while true; do
@@ -54,9 +58,7 @@ jobs:
             done
           ) &
           monitor=$!
-          ulimit -u 3000
-          ulimit -v 8000000
-          timeout -k 10 900 cargo test --workspace --locked --no-fail-fast -- --test-threads=1 > /tmp/tests.txt 2>&1
+          timeout -k 10 600 cargo test -p ${{ matrix.crate }} --locked --no-fail-fast -- --test-threads=1 > /tmp/tests.txt 2>&1
           code=$?
           kill $monitor
           echo "=== code des tests : $code"
