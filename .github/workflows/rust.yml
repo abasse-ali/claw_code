@@ -57,9 +57,18 @@ jobs:
       - name: Compilation
         run: cargo build --workspace --all-targets --locked
       # Les tests changent le dossier courant du processus : un seul fil.
+      # Un test bloqué arrête l'étape au bout de 15 minutes (les tests en prennent 2) :
+      # le journal reste lisible, ce qui n'est pas le cas d'une exécution annulée.
       - name: Tests
         shell: bash
+        timeout-minutes: 15
         run: cargo test --workspace --locked --no-fail-fast -- --test-threads=1 2>&1 | tee test-output.log
+      # Avec un seul fil, le test en cours est écrit avant son résultat : la fin de la
+      # sortie nomme le test bloqué.
+      - name: Fin de la sortie des tests
+        if: failure()
+        shell: bash
+        run: '[ -f test-output.log ] && tail -n 12 test-output.log | sed "s/^/::warning title=Fin des tests::/" || true'
       # Chaque test en échec devient une annotation avec sa sortie : visible
       # sur la page du run sans ouvrir les journaux.
       - name: Annoter les tests en échec
