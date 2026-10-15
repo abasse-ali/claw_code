@@ -17,6 +17,11 @@ compenser leurs faiblesses :
 
 ## Reprendre le chantier dans une nouvelle session
 
+Depuis le 15 octobre 2026, ce dépôt est public et ses identifiants de commits ont changé
+(adresse de l'auteur des deux premiers commits remplacée) : les identifiants cités avant cette
+date se traduisent avec [suivi/correspondance-commits.md](suivi/correspondance-commits.md).
+L'ancien dépôt privé, avec l'ancien historique, est archivé sous `abasse-ali/claw_code-prive`.
+
 1. Lire ce fichier en entier, puis `git log --oneline -15` et `git status`.
 2. Aller à la section « Lots » : le premier lot dont l'état n'est pas « fait » est le suivant.
    Depuis le 12 octobre 2026, la campagne d'essais réels (étude T1) passe avant les lots 6 à
