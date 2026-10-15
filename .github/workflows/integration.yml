@@ -37,6 +37,7 @@ jobs:
   vscode:
     name: Extension VS Code (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -71,6 +72,7 @@ jobs:
   sandbox:
     name: Bac à sable ${{ matrix.engine }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -91,6 +93,7 @@ jobs:
   action:
     name: Action GitHub (faux modèle)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2

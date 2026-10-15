@@ -236,15 +236,17 @@ fn target(input: &ScreenshotInput) -> Result<String, String> {
                 Err(format!("Screenshot opens http and https pages: `{url}` is not one (for a file of the project, pass `path`; for a local server, give its http://localhost address)"))
             }
         }
-        (None, Some(path)) => file_url(Path::new(path)),
+        (None, Some(path)) => {
+            let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+            file_url(&cwd, Path::new(path))
+        }
         (Some(_), Some(_)) => Err("give either url or path, not both".to_string()),
         (None, None) => Err("give the page to capture: url (http://localhost:3000/ for a local server) or path (an .html file of the project)".to_string()),
     }
 }
 
-/// Adresse `file://` d'un fichier HTML du dossier de travail (pas ailleurs).
-fn file_url(path: &Path) -> Result<String, String> {
-    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+/// Adresse `file://` d'un fichier HTML du dossier de travail `cwd` (pas ailleurs).
+fn file_url(cwd: &Path, path: &Path) -> Result<String, String> {
     let full = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -253,7 +255,7 @@ fn file_url(path: &Path) -> Result<String, String> {
     let full = full
         .canonicalize()
         .map_err(|_| format!("{} does not exist", path.display()))?;
-    let root = cwd.canonicalize().unwrap_or(cwd);
+    let root = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     if !full.starts_with(&root) {
         return Err(format!(
             "{} is outside the working directory: only the project's files can be opened by path",
@@ -1311,8 +1313,11 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{actions, console_lines, decode_base64, target, viewports, ScreenshotInput};
+    use super::{
+        actions, console_lines, decode_base64, file_url, target, viewports, ScreenshotInput,
+    };
     use serde_json::json;
+    use std::path::Path;
 
     fn input(url: Option<&str>, path: Option<&str>) -> ScreenshotInput {
         ScreenshotInput {
@@ -1377,15 +1382,28 @@ mod tests {
         }
         assert!(target(&input(None, None)).is_err());
         assert!(target(&input(Some("http://x/"), Some("a.html"))).is_err());
-        // Un fichier hors du dossier de travail, ou qui n'est pas une page, est refusé.
-        let outside = std::env::temp_dir().join("claw-shot-test-outside.html");
-        std::fs::write(&outside, "<p>x</p>").expect("écriture");
-        let error = target(&input(None, Some(outside.to_str().unwrap()))).unwrap_err();
+        // Un fichier du projet s'ouvre ; un fichier à côté du projet, ou qui
+        // n'est pas une page, est refusé (sans dépendre du dossier courant).
+        let base = std::env::temp_dir().join(format!("claw-shot-test-{}", std::process::id()));
+        let project = base.join("projet");
+        std::fs::create_dir_all(&project).expect("dossier");
+        std::fs::write(project.join("page d'essai.html"), "<p>x</p>").expect("page");
+        std::fs::write(project.join("notes.txt"), "x").expect("notes");
+        std::fs::write(base.join("dehors.html"), "<p>x</p>").expect("dehors");
+        let url = file_url(&project, Path::new("page d'essai.html")).expect("page du projet");
+        assert!(
+            url.starts_with("file:///") && url.ends_with("/projet/page%20d%27essai.html"),
+            "{url}"
+        );
+        let error = file_url(&project, &base.join("dehors.html")).unwrap_err();
         assert!(error.contains("outside the working directory"), "{error}");
-        let _ = std::fs::remove_file(outside);
-        assert!(target(&input(None, Some("Cargo.toml")))
-            .unwrap_err()
-            .contains(".html"));
+        let error = file_url(&project, Path::new("../dehors.html")).unwrap_err();
+        assert!(error.contains("outside the working directory"), "{error}");
+        let error = file_url(&project, Path::new("notes.txt")).unwrap_err();
+        assert!(error.contains(".html"), "{error}");
+        let error = file_url(&project, Path::new("absente.html")).unwrap_err();
+        assert!(error.contains("does not exist"), "{error}");
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

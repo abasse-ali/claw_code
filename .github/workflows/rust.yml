@@ -9,8 +9,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Dépôt privé : minutes de CI comptées (Windows x2, macOS x10). Un nouveau push
-# annule la vérification en cours du précédent.
+# Dépôt privé : minutes de CI comptées (Windows x2, macOS x10 ; 2 000 par mois
+# avec le compte gratuit). Un nouveau push annule la vérification en cours du
+# précédent ; chaque job a une durée maximale (un test bloqué occupait la machine
+# jusqu'à l'annulation) ; les tests Windows, lancés sur la machine de
+# l'utilisateur avant chaque envoi, ne tournent ici qu'à la demande (Run workflow)
+# et sur les pull requests.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -29,6 +33,7 @@ jobs:
   fmt:
     name: Formatage
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -39,10 +44,12 @@ jobs:
   test:
     name: Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Les tests prennent 2 à 4 minutes, compilation comprise.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: ${{ fromJSON(github.event_name == 'push' && '["ubuntu-latest"]' || '["windows-latest", "ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -92,6 +99,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [fmt, test]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     permissions:
       contents: write
     strategy:
