@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src https://api.github.com https://openrouter.ai; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#1b1a18">
+  <meta name="description" content="Claw travaille sur vos dépôts GitHub depuis le téléphone ou l'ordinateur, avec des modèles gratuits.">
+  <title>Claw</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Claw">
+  <link rel="stylesheet" href="css/app.css">
+  <script src="vendor/nacl-fast.min.js" defer></script>
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <div id="app" class="app">
+    <aside id="drawer" class="drawer" aria-label="Menu" hidden>
+      <div class="drawer-head">
+        <div class="drawer-tabs">
+          <button type="button" class="drawer-tab current" data-pane="sessions" aria-pressed="true">Sessions</button>
+          <button type="button" class="drawer-tab" data-pane="files" aria-pressed="false">Fichiers</button>
+        </div>
+        <button id="drawer-close" class="icon-button" aria-label="Fermer"></button>
+      </div>
+      <div class="pane" data-pane="sessions">
+        <button class="new-session"></button>
+        <ul class="sessions"></ul>
+      </div>
+      <div class="pane explorer" data-pane="files" hidden></div>
+    </aside>
+    <div id="scrim" class="scrim" aria-hidden="true"></div>
+    <header class="topbar">
+      <button id="menu" class="icon-button" aria-label="Sessions"></button>
+      <a class="brand" href="#/"><span class="logo" aria-hidden="true"></span>Claw</a>
+      <div class="topbar-right">
+        <button id="quota-button" class="quota-meter" aria-label="Requêtes gratuites" hidden></button>
+        <button id="settings-button" class="icon-button" aria-label="Réglages"></button>
+      </div>
+    </header>
+    <main id="view" class="view"></main>
+    <footer id="composer" class="composer" hidden></footer>
+  </div>
+  <div id="sheet" class="sheet" hidden></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <noscript>Claw a besoin de JavaScript.</noscript>
+</body>
+</html>
