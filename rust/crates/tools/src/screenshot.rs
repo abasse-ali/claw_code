@@ -335,6 +335,27 @@ fn close_browser(port: u16, path: &str) {
 
 impl Browser {
     /// Lance le navigateur et rend le port de son protocole `DevTools`.
+    /// Lance le premier navigateur qui démarre parmi `candidates` (un navigateur
+    /// peut s'arrêter au démarrage, bac à sable mal installé : le suivant est
+    /// essayé).
+    fn launch_first(candidates: &[PathBuf]) -> Result<(Self, u16), String> {
+        let mut failures = Vec::new();
+        for executable in candidates {
+            match Self::launch(executable) {
+                Ok(started) => return Ok(started),
+                Err(error) => failures.push(error),
+            }
+            if runtime::interrupt::interrupt_requested() {
+                break;
+            }
+        }
+        Err(if failures.is_empty() {
+            "no Chromium-based browser found (Edge, Chrome or Chromium): install one, or set CLAW_BROWSER to its executable".to_string()
+        } else {
+            failures.join("; ")
+        })
+    }
+
     fn launch(executable: &Path) -> Result<(Self, u16), String> {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -772,11 +793,11 @@ pub(crate) enum LoadError {
 /// `--dump-dom` ne rend plus rien (le navigateur se relance et sa sortie se
 /// perd) : la page se lit par le protocole `DevTools`.
 pub(crate) fn load_page(
-    executable: &Path,
+    candidates: &[PathBuf],
     url: &str,
     wait: Duration,
 ) -> Result<LoadedPage, LoadError> {
-    let (_browser, port) = Browser::launch(executable).map_err(LoadError::Browser)?;
+    let (_browser, port) = Browser::launch_first(candidates).map_err(LoadError::Browser)?;
     let path = page_socket_path(port).map_err(LoadError::Browser)?;
     let mut devtools = DevTools::connect(port, &path).map_err(LoadError::Browser)?;
     for domain in ["Page.enable", "Runtime.enable", "Log.enable"] {
@@ -1203,10 +1224,7 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
     let steps = actions(input.actions.as_ref())?;
     let theme = color_scheme(input.theme.as_deref())?;
     let wait = Duration::from_millis(input.wait_ms.unwrap_or(DEFAULT_WAIT_MS).min(MAX_WAIT_MS));
-    let executable = crate::page_view::find_browser().ok_or_else(|| {
-        "no Chromium-based browser found (Edge, Chrome or Chromium): install one, or set CLAW_BROWSER to its executable".to_string()
-    })?;
-    let (_browser, port) = Browser::launch(&executable)?;
+    let (_browser, port) = Browser::launch_first(&crate::page_view::browser_candidates())?;
     let path = page_socket_path(port)?;
     let mut devtools = DevTools::connect(port, &path)?;
     for domain in ["Page.enable", "Runtime.enable", "Log.enable"] {

@@ -44,6 +44,20 @@ const BROWSER_NAMES: &[&str] = &[
     "chromium-browser",
 ];
 
+/// Sous Linux, Chrome et Chromium d'abord : le bac à sable d'Edge y est
+/// souvent mal installé et Edge s'arrête au démarrage (machines Linux de
+/// GitHub : « The SUID sandbox helper binary was found, but is not configured
+/// correctly »), alors que Chrome y marche.
+const LINUX_BROWSER_NAMES: &[&str] = &[
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+    "chrome",
+    "microsoft-edge",
+    "msedge",
+];
+
 fn usual_locations() -> Vec<PathBuf> {
     let mut locations = Vec::new();
     for variable in ["ProgramFiles(x86)", "ProgramFiles", "LocalAppData"] {
@@ -64,31 +78,47 @@ fn usual_locations() -> Vec<PathBuf> {
     locations
 }
 
-/// Navigateur de la famille Chromium à utiliser : `CLAW_BROWSER`, sinon le
-/// premier trouvé (cherché une fois par lancement de Claw). Un navigateur
-/// installé en snap a son propre `/tmp`, où son journal reste hors de portée :
-/// un autre lui est préféré.
-pub(crate) fn find_browser() -> Option<PathBuf> {
-    static FOUND: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+/// Navigateurs de la famille Chromium à essayer, dans l'ordre : `CLAW_BROWSER`
+/// seul s'il est donné, sinon ceux qui sont installés (cherchés une fois par
+/// lancement de Claw). Un navigateur installé en snap a son propre `/tmp`, où
+/// son journal reste hors de portée : il passe après les autres.
+pub(crate) fn browser_candidates() -> Vec<PathBuf> {
+    static FOUND: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
     FOUND
         .get_or_init(|| {
             if let Some(chosen) = std::env::var_os("CLAW_BROWSER").filter(|value| !value.is_empty())
             {
                 let chosen = PathBuf::from(chosen);
-                return chosen.is_file().then_some(chosen);
+                return if chosen.is_file() {
+                    vec![chosen]
+                } else {
+                    Vec::new()
+                };
             }
-            let found: Vec<PathBuf> = BROWSER_NAMES
+            let names = if cfg!(target_os = "linux") {
+                LINUX_BROWSER_NAMES
+            } else {
+                BROWSER_NAMES
+            };
+            let mut found: Vec<PathBuf> = Vec::new();
+            for path in names
                 .iter()
                 .filter_map(|name| runtime::find_executable(name))
                 .chain(usual_locations().into_iter().filter(|path| path.is_file()))
-                .collect();
+            {
+                if !found.contains(&path) {
+                    found.push(path);
+                }
+            }
+            found.sort_by_key(|path| path.starts_with("/snap/"));
             found
-                .iter()
-                .find(|path| !path.starts_with("/snap/"))
-                .or_else(|| found.first())
-                .cloned()
         })
         .clone()
+}
+
+/// Navigateur à utiliser en premier.
+pub(crate) fn find_browser() -> Option<PathBuf> {
+    browser_candidates().into_iter().next()
 }
 
 /// Dossier temporaire du profil, propre à cet appel.
@@ -287,6 +317,35 @@ fn command_line_page(
     Ok((dom, log.as_deref().map(console_messages)))
 }
 
+/// DOM et console de la page : par le protocole `DevTools`, sinon par la ligne
+/// de commande (navigateur qui refuse d'être piloté, politique d'entreprise).
+fn rendered_page(
+    browser: &Path,
+    url: &str,
+    wait_ms: u64,
+) -> Result<(String, Option<Vec<ConsoleMessage>>), String> {
+    match crate::screenshot::load_page(&browser_candidates(), url, Duration::from_millis(wait_ms)) {
+        Ok(page) => Ok((
+            page.dom,
+            Some(
+                page.console
+                    .into_iter()
+                    .map(|(text, source)| ConsoleMessage {
+                        text: text.chars().take(MAX_MESSAGE_CHARS).collect(),
+                        source,
+                    })
+                    .collect(),
+            ),
+        )),
+        Err(crate::screenshot::LoadError::Page(error)) => Err(error),
+        Err(crate::screenshot::LoadError::Browser(reason)) => {
+            command_line_page(browser, url, wait_ms).map_err(|error| {
+                format!("{error} (driving the browser through DevTools failed first: {reason})")
+            })
+        }
+    }
+}
+
 /// Ce que `ViewPage` rend au modèle.
 pub(crate) fn view_page(input: &ViewPageInput) -> Result<Value, String> {
     let url = input.url.trim();
@@ -302,29 +361,7 @@ pub(crate) fn view_page(input: &ViewPageInput) -> Result<Value, String> {
         .wait_ms
         .unwrap_or(DEFAULT_WAIT_MS)
         .clamp(200, MAX_WAIT_MS);
-    let (dom, console) =
-        match crate::screenshot::load_page(&browser, url, Duration::from_millis(wait_ms)) {
-            Ok(page) => (
-                page.dom,
-                Some(
-                    page.console
-                        .into_iter()
-                        .map(|(text, source)| ConsoleMessage {
-                            text: text.chars().take(MAX_MESSAGE_CHARS).collect(),
-                            source,
-                        })
-                        .collect::<Vec<_>>(),
-                ),
-            ),
-            Err(crate::screenshot::LoadError::Page(error)) => return Err(error),
-            // Navigateur qui refuse d'être piloté (politique d'entreprise) : la
-            // ligne de commande, comme avant Edge 155.
-            Err(crate::screenshot::LoadError::Browser(reason)) => {
-                command_line_page(&browser, url, wait_ms).map_err(|error| {
-                    format!("{error} (driving the browser through DevTools failed first: {reason})")
-                })?
-            }
-        };
+    let (dom, console) = rendered_page(&browser, url, wait_ms)?;
     // Sans journal, les erreurs de la console sont inconnues : dire
     // « aucune » enverrait le modèle chercher ailleurs.
     let console_known = console.is_some();
