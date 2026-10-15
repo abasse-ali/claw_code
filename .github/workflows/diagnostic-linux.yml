@@ -1,0 +1,67 @@
+name: Diagnostic Linux
+
+# Diagnostic d'un test qui fige la machine Linux de la CI : une machine par crate, chaque
+# test lancé seul (60 s au plus) sous des limites strictes de mémoire et de processus. Le
+# programme de test en cours est publié comme statut du commit (lisible même quand la
+# machine fige et que son journal est perdu). À la demande seulement.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  crate:
+    name: Tests de ${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [api, commands, compat-harness, lsp, plugins, runtime, server, tools, claw-cli]
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Configurer git (tests des commandes /branch et /worktree)
+        run: |
+          git config --global user.name "claw-ci"
+          git config --global user.email "claw-ci@example.invalid"
+          git config --global init.defaultBranch main
+      - name: Compilation des tests
+        run: cargo test -p ${{ matrix.crate }} --no-run --locked --message-format=json > ../binaires.json
+      - name: Tests un par un
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MALLOC_ARENA_MAX: "2"
+        run: |
+          set +e
+          ulimit -u 1500
+          ulimit -v 4000000
+          statut() {
+            gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state="$1" \
+              -f context="diagnostic/${{ matrix.crate }}" -f description="$2" > /dev/null 2>&1
+          }
+          dir=$(pwd)/crates/${{ matrix.crate }}
+          for bin in $(jq -r 'select(.profile.test == true and .executable != null) | .executable' ../binaires.json); do
+            statut pending "$(basename "$bin")"
+            echo "=== $(basename "$bin")"
+            for t in $(cd "$dir" && "$bin" --list --format terse 2>/dev/null | sed -n 's/: test$//p'); do
+              start=$(date +%s)
+              (cd "$dir" && timeout -k 5 60 "$bin" --exact "$t" --test-threads=1 -q > /tmp/sortie.txt 2>&1)
+              code=$?
+              took=$(( $(date +%s) - start ))
+              if [ "$code" -ne 0 ] || [ "$took" -ge 20 ]; then
+                echo "::warning title=${{ matrix.crate }}::${t} : code ${code}, ${took} s"
+                tail -n 8 /tmp/sortie.txt | sed 's/^/    /'
+              fi
+            done
+          done
+          statut success "fini"
