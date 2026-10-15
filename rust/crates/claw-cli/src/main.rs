@@ -317,6 +317,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             allowed_tools,
             permission_mode,
         } => {
+            let prompt = prompt_from(prompt, io::stdin())?;
             install_interrupt_handler();
             let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode)?;
             cli.session_hook_start("startup");
@@ -6853,6 +6854,23 @@ fn apply_team_command(args: Option<&str>, current_model: &str) -> String {
     }
 }
 
+/// `claw prompt -` : la demande lue sur l'entrée standard. Un moteur y passe une longue
+/// conversation : hors de la ligne de commande de Claw, un `pkill -f <texte>` lancé par
+/// l'agent ne le trouve pas par le texte de la conversation.
+fn prompt_from(prompt: String, mut input: impl io::Read) -> Result<String, String> {
+    if prompt.trim() != "-" {
+        return Ok(prompt);
+    }
+    let mut text = String::new();
+    input
+        .read_to_string(&mut text)
+        .map_err(|error| format!("lecture de la demande sur l'entrée standard : {error}"))?;
+    if text.trim().is_empty() {
+        return Err("la demande lue sur l'entrée standard est vide".to_string());
+    }
+    Ok(text.trim_end_matches(['\n', '\r']).to_string())
+}
+
 /// Mode équipe au démarrage : `CLAW_TEAM`, sinon `"team"` dans la config.
 fn init_team(config: Option<&runtime::RuntimeConfig>) {
     let from_env = env::var("CLAW_TEAM").ok().and_then(|value| {
@@ -7857,6 +7875,22 @@ mod tests {
                 permission_mode: PermissionMode::Prompt,
             }
         );
+    }
+
+    #[test]
+    fn a_dash_prompt_is_read_from_standard_input() {
+        assert_eq!(
+            super::prompt_from(
+                "-".to_string(),
+                "Mets-le en ligne\n\n[Claw] Earlier conversation\n".as_bytes()
+            ),
+            Ok("Mets-le en ligne\n\n[Claw] Earlier conversation".to_string())
+        );
+        assert_eq!(
+            super::prompt_from("bonjour".to_string(), "ignoré".as_bytes()),
+            Ok("bonjour".to_string())
+        );
+        assert!(super::prompt_from("-".to_string(), " \n".as_bytes()).is_err());
     }
 
     #[test]

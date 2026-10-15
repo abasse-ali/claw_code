@@ -40,6 +40,8 @@ on:
         default: ""
 
 permissions:
+  # actions: read : date du passage, pour ignorer un passage lancé en double.
+  actions: read
   contents: read
   issues: write
 
@@ -109,6 +111,7 @@ jobs:
 
       - name: Claw au travail
         id: claw
+        if: steps.setup.outputs.skip != 'true'
         env:
           MODEL: ${{ inputs.model }}
           TEAM: ${{ inputs.team }}
@@ -123,7 +126,7 @@ jobs:
 
       # Journal complet de Claw (événements, erreurs), gardé 7 jours pour comprendre un passage.
       - name: Journal de Claw
-        if: always() && steps.setup.outcome == 'success'
+        if: always() && steps.setup.outcome == 'success' && steps.setup.outputs.skip != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: claw-session-${{ inputs.session }}-${{ github.run_attempt }}
@@ -135,7 +138,7 @@ jobs:
 
       - name: Garder l'état de la session
         id: state
-        if: always() && steps.setup.outcome == 'success'
+        if: always() && steps.setup.outcome == 'success' && steps.setup.outputs.skip != 'true'
         run: |
           if [ -f work/.claw/project.json ]; then
             mkdir -p claw-state
@@ -151,7 +154,7 @@ jobs:
           key: claw-web-state-${{ inputs.session }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Publier
-        if: always() && steps.setup.outcome == 'success'
+        if: always() && steps.setup.outcome == 'success' && steps.setup.outputs.skip != 'true'
         env:
           REPO: ${{ inputs.repo }}
           BASE: ${{ inputs.base }}

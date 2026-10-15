@@ -237,7 +237,9 @@ def main():
         args += ["--model", "ollama:mock"]
     elif MODEL:
         args += ["--model", MODEL]
-    args += ["prompt", request]
+    # La demande (avec la conversation) sur l'entrée standard, pas dans la ligne de commande :
+    # un `pkill -f <texte>` lancé par l'agent y trouvait Claw et l'arrêtait (session 12).
+    args += ["prompt", "-"]
 
     quota_before = free_quota(env.get("OPENROUTER_API_KEY", ""))
     progress = Progress()
@@ -255,8 +257,10 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     with open(WORK / "claw.jsonl", "w", encoding="utf-8") as log, \
             open(WORK / "claw.stderr", "w", encoding="utf-8") as errors:
-        process = subprocess.Popen(args, cwd="work", env=env, stdout=subprocess.PIPE, stderr=errors,
-                                   text=True, encoding="utf-8", errors="replace")
+        process = subprocess.Popen(args, cwd="work", env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=errors, text=True, encoding="utf-8", errors="replace")
+        process.stdin.write(request)
+        process.stdin.close()
         # L'étape de publication arrête un agent qui aurait survécu à la sienne.
         (WORK / "claw.pid").write_text(str(process.pid), encoding="utf-8")
         try:

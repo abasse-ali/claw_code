@@ -18,6 +18,36 @@ from pathlib import Path
 API = "https://api.github.com"
 ANSWER = "<!-- claw-web:answer -->"
 PROGRESS = "<!-- claw-web:progress -->"
+LOG = "<!-- claw-web:log"
+# Dans une réponse : le dernier message traité (identifiant de commentaire), ou « keep »
+# (réponse qui ne traite rien : échec au démarrage).
+ANSWERED = re.compile(r"<!--\s*claw-web:answered\s+(\d+|keep)\s*-->")
+
+
+def kind_of(body):
+    """« engine » (progression, journal), « answer » ou « message » (de l'utilisateur)."""
+    body = (body or "").strip()
+    if PROGRESS in body or body.startswith(LOG):
+        return "engine"
+    return "answer" if ANSWER in body else "message"
+
+
+def answered_up_to(notes):
+    """Identifiant du dernier message traité par une réponse. Une réponse sans marque (plus
+    ancienne) a traité les messages qui la précèdent."""
+    answered = last_message = 0
+    for note in notes:
+        body = note.get("body") or ""
+        kind = kind_of(body)
+        if kind == "message":
+            last_message = note["id"]
+        elif kind == "answer":
+            mark = ANSWERED.search(body)
+            if mark is None:
+                answered = max(answered, last_message)
+            elif mark.group(1) != "keep":
+                answered = max(answered, int(mark.group(1)))
+    return answered
 SETTINGS = re.compile(r"<!--\s*claw-web\s+(\{.*?\})\s*-->", re.S)
 # Images jointes à un message par l'appli : chemins dans la branche FILES_BRANCH du moteur.
 IMAGES = re.compile(r"<!--\s*claw-web:images\s+(\[.*?\])\s*-->", re.S)

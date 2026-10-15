@@ -16,8 +16,8 @@ from pathlib import Path
 
 import urllib.request
 
-from common import (ANSWER, API, FILES_BRANCH, PROGRESS, WORK, GitHubError, api, comments,
-                    images_of, output, post_comment, run_url, settings, task_text)
+from common import (ANSWER, ANSWERED, API, FILES_BRANCH, WORK, GitHubError, answered_up_to, api,
+                    comments, images_of, kind_of, output, post_comment, run_url, settings, task_text)
 
 REPO = os.environ.get("REPO", "").strip()
 BASE = os.environ.get("BASE", "").strip()
@@ -37,7 +37,7 @@ def fail(message):
     if SESSION.isdigit():
         try:
             post_comment(JOB_TOKEN, ENGINE, SESSION,
-                         f"{ANSWER}\n**La tâche n'a pas pu commencer.** {message}\n\n[Détail du job]({run_url()})")
+                         f"{ANSWER}\n<!-- claw-web:answered keep -->\n**La tâche n'a pas pu commencer.** {message}\n\n[Détail du job]({run_url()})")
         except GitHubError as error:
             print(f"::warning::{error}")
     sys.exit(1)
@@ -53,29 +53,35 @@ def git(*args, cwd="work", check=True):
 
 
 def conversation(issue, notes):
-    """Le message à traiter (la tâche, ou les messages de suivi pas encore traités), pour un
-    suivi la conversation qui précède, et les images jointes au message traité."""
+    """Le message à traiter (la tâche, ou les messages pas encore traités par une réponse,
+    même arrivés pendant un passage), pour un suivi la conversation qui précède, les images
+    jointes au message traité et l'identifiant du dernier message traité."""
     task, task_images = images_of(task_text(issue.get("body")))
+    answered = answered_up_to(notes)
     exchanges, pending, images = [], [], []
+    last = answered
     for note in notes:
-        body, note_images = images_of((note.get("body") or "").strip())
-        if PROGRESS in body:
+        raw = (note.get("body") or "").strip()
+        kind = kind_of(raw)
+        if kind == "engine":
             continue
-        if ANSWER in body:
-            if pending:
-                exchanges.append(("Message", "\n\n".join(pending)))
-                pending = []
+        body, note_images = images_of(raw)
+        if kind == "answer":
             # Sans le pied de la réponse (lien de la pull request, du job), après le dernier `---`.
-            exchanges.append(("Your answer", body.replace(ANSWER, "").rsplit("\n---\n", 1)[0].strip()))
-            images = []
+            text = ANSWERED.sub("", body.replace(ANSWER, "")).rsplit("\n---\n", 1)[0].strip()
+            exchanges.append(("Your answer", text))
+        elif note["id"] > answered:
+            if body or note_images:
+                pending.append(body)
+                images.extend(note_images)
+                last = max(last, note["id"])
         elif body:
-            pending.append(body)
-            images.extend(note_images)
+            exchanges.append(("Message", body))
     if not pending:
         # Premier passage : la tâche elle-même. Relance sans nouveau message : la tâche
         # encore (elle dit ce qu'on veut, mode projet compris), à reprendre où elle en est.
         if not exchanges:
-            return task, "", task_images
+            return task, "", task_images, last
         pending = [f"{task}\n\n(Relance : reprends cette tâche là où elle en est et termine-la.)"]
         images = task_images
     history = [("Request", task), *exchanges]
@@ -87,7 +93,25 @@ def conversation(issue, notes):
             if len(text) + len(block) > HISTORY_MAX_CHARS:
                 break
         text = block + text
-    return "\n\n".join(pending), text.strip(), images
+    return "\n\n".join(pending), text.strip(), images, last
+
+
+def already_answered(notes):
+    """Ce passage arrive après la réponse à ses messages : lancé deux fois (plusieurs appuis,
+    appli rechargée), il attendait son tour pendant que le premier travaillait. Une relance
+    voulue est lancée après la réponse, elle ; un message pas encore traité a son passage."""
+    answers = [note for note in notes if kind_of(note.get("body")) == "answer"]
+    if not answers:
+        return False
+    last = answers[-1]
+    answered = answered_up_to(notes)
+    if any(kind_of(note.get("body")) == "message" and note["id"] > answered for note in notes):
+        return False
+    try:
+        run = api("GET", f"/repos/{ENGINE}/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}", JOB_TOKEN)
+    except GitHubError:
+        return False
+    return bool(run and run.get("created_at") and run["created_at"] < last.get("created_at", ""))
 
 
 def fetch_images(paths):
@@ -124,6 +148,10 @@ def main():
         notes = comments(JOB_TOKEN, ENGINE, SESSION)
     except GitHubError as error:
         fail(f"Session introuvable : {error}")
+    if already_answered(notes):
+        print("Passage en double : ses messages ont déjà eu leur réponse, rien à faire.")
+        output("skip", "true")
+        return
 
     token = REPO_TOKEN or (JOB_TOKEN if REPO.lower() == ENGINE.lower() else "")
     if not token:
@@ -170,7 +198,10 @@ def main():
 
     # Les mots de l'utilisateur d'abord : Claw ne décide le mode projet que sur ce qui
     # précède la première ligne `[Claw]`.
-    request, history, images = conversation(issue, notes)
+    request, history, images, processed = conversation(issue, notes)
+    # Pour la réponse : jusqu'où elle répond (les messages arrivés pendant le passage auront
+    # le leur).
+    (WORK / "answered.txt").write_text(str(processed), encoding="utf-8")
     # Titre du commit et de la pull request : le message traité, pas le titre de la session
     # (son premier message, parfois une simple question).
     title = next((line.strip() for line in request.splitlines() if line.strip()), "")
@@ -190,7 +221,12 @@ def main():
         f"(created from {BASE}). When you finish, Claw commits your changes on this branch, "
         "pushes them and proposes them as a pull request: do not commit, push or open the pull "
         "request yourself. Nobody can answer questions during this task: make reasonable "
-        "choices and state them in your final answer."
+        "choices and state them in your final answer. You cannot act on GitHub itself (merge "
+        "the pull request, repository settings such as GitHub Pages, other repositories): the "
+        "user does that from the Claw app, which has a button to merge the pull request and a "
+        "button « Mettre en ligne » that publishes a static site on GitHub Pages (from docs/ "
+        "or the repository root). Say so in one sentence when it matters, instead of a guide "
+        "to GitHub's settings."
     )
     (WORK / "prompt.txt").write_text(request, encoding="utf-8")
     output("branch", branch)

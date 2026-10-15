@@ -128,7 +128,8 @@ def main():
             text += f"\n\n```\n{error[-1500:]}\n```"
         if result:
             text += f"\n\n{result}"
-    parts = [ANSWER, text]
+    processed = read("answered.txt")
+    parts = [ANSWER + (f"\n<!-- claw-web:answered {processed} -->" if processed.isdigit() else ""), text]
     if notes:
         parts.append("\n".join(f"> {note}" for note in notes))
     try:
