@@ -1,7 +1,7 @@
 name: Diagnostic Linux
 
 # Diagnostic d'un blocage des tests Linux de la CI : la commande exacte de la CI, sur une
-# seule machine, sous des limites de mémoire et de processus ; toutes les 20 s, le nombre
+# seule machine, sous des limites de mémoire et de processus ; toutes les 5 s, le nombre
 # de processus et les plus gros sont notés, et publiés comme statut du commit (lisible même
 # quand la machine fige et que son journal est perdu). À la demande seulement.
 on:
@@ -45,12 +45,12 @@ jobs:
             while true; do
               count=$(ps -e --no-headers | wc -l)
               free=$(free -m | awk '/Mem:/ {print $7}')
-              top=$(ps -eo rss=,comm= --sort=-rss | head -3 | awk '{printf "%s %dM, ", $2, $1/1024}')
-              names=$(ps -eo comm= | sort | uniq -c | sort -rn | head -3 | awk '{printf "%s x%s, ", $2, $1}')
-              line="$(date +%H:%M:%S) $count proc, ${free}M libres ; $names; $top"
+              bin=$(grep -o 'Running [^ ]* ([^)]*)' /tmp/tests.txt 2>/dev/null | tail -1 | sed 's/.*deps\///; s/-[0-9a-f]*)$//')
+              last=$(tail -c 300 /tmp/tests.txt 2>/dev/null | tr '\n' ' ' | grep -o 'test [^ ]* \.\.\.[^t]*$' | tail -1)
+              line="$(date +%H:%M:%S) $count proc ${free}M | $bin | $last"
               echo "$line" >> /tmp/releve.txt
               statut pending "${line:0:139}"
-              sleep 20
+              sleep 5
             done
           ) &
           monitor=$!
