@@ -80,7 +80,14 @@ function lastDirective(messages) {
     const match = messageText(messages[index]).match(/\[mock:(write|tool|steps) ([^\n]+)\]/);
     if (!match) continue;
     if (match[1] === "steps") {
-      const steps = JSON.parse(match[2]);
+      // Une consigne coupée (résumé d'une compaction) n'est plus du JSON : la
+      // précédente, intacte, compte (le serveur s'arrêtait sur l'exception).
+      let steps;
+      try {
+        steps = JSON.parse(match[2]);
+      } catch {
+        continue;
+      }
       const done = messages.slice(index + 1).filter((later) => later.role === "tool").length;
       return { kind: "steps", steps, done, answered: done >= steps.length };
     }
