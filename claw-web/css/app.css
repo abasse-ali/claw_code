@@ -215,6 +215,39 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 code { font: .88em ui-monospace, "Cascadia Code", Consolas, monospace; background: var(--panel-2); padding: 1px 5px; border-radius: 5px; }
 pre { overflow-x: auto; background: var(--code-bg); padding: 12px; border-radius: 10px; }
 pre code { background: none; padding: 0; }
+
+/* Coloration du code : couleurs lisibles sur le fond des blocs, en sombre comme en clair. */
+:root {
+  --tok-com: #8f8a84; --tok-str: #a6d189; --tok-num: #ef9f76; --tok-kw: #ca9ee6; --tok-fn: #8caaee;
+  --tok-type: #e5c890; --tok-tag: #e78284; --tok-attr: #81c8be; --tok-var: #f4b8e4;
+}
+:root[data-theme="light"] {
+  --tok-com: #6c6f85; --tok-str: #2f7d1f; --tok-num: #c2410c; --tok-kw: #8839ef; --tok-fn: #1d5bd8;
+  --tok-type: #9a6400; --tok-tag: #c8102e; --tok-attr: #0f766e; --tok-var: #b0307f;
+}
+@media (prefers-color-scheme: light) {
+  :root[data-theme="system"] {
+    --tok-com: #6c6f85; --tok-str: #2f7d1f; --tok-num: #c2410c; --tok-kw: #8839ef; --tok-fn: #1d5bd8;
+    --tok-type: #9a6400; --tok-tag: #c8102e; --tok-attr: #0f766e; --tok-var: #b0307f;
+  }
+}
+.tok-com { color: var(--tok-com); font-style: italic; }
+.tok-str { color: var(--tok-str); }
+.tok-num { color: var(--tok-num); }
+.tok-kw { color: var(--tok-kw); }
+.tok-fn { color: var(--tok-fn); }
+.tok-type { color: var(--tok-type); }
+.tok-tag { color: var(--tok-tag); }
+.tok-attr { color: var(--tok-attr); }
+.tok-var { color: var(--tok-var); }
+.tok-add { color: var(--add-text); }
+.tok-del { color: var(--del-text); }
+/* Langage du bloc, en petit dans son coin. */
+pre[data-lang] { position: relative; padding-top: 24px; }
+pre[data-lang]::before {
+  content: attr(data-lang); position: absolute; top: 5px; right: 10px;
+  font: .72rem ui-monospace, Consolas, monospace; color: var(--muted);
+}
 hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
 .table { overflow-x: auto; }
 table { border-collapse: collapse; font-size: .9rem; }

@@ -7,6 +7,7 @@ import { ANSWER, GitHub, GitHubError, LABEL, PROGRESS } from "./github.js";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 import { sealedBox } from "./sealed-box.js";
 import { LOG, changesHtml, decodeLog, transcriptHtml } from "./transcript.js";
+import { highlightLines, languageOf } from "./highlight.js";
 import { accountStatus, freeModels, resetTime } from "./openrouter.js";
 
 const STORE = "claw-web.settings.v1";
@@ -1844,7 +1845,9 @@ async function fileHtml(repo, file, ref) {
   const lines = text.replace(/\n$/, "").split("\n");
   const shown = lines.slice(0, 3000);
   const more = lines.length - shown.length;
-  const code = `<div class="diff code-view">${shown.map((line, index) => `<div class="dl"><span class="no">${index + 1}</span><span class="tx">${escapeHtml(line) || " "}</span></div>`).join("")}
+  // Coloration dans le langage du fichier (d'après son nom), lignes affichées seulement.
+  const colored = highlightLines(shown.join("\n"), languageOf(file.name));
+  const code = `<div class="diff code-view">${colored.map((line, index) => `<div class="dl"><span class="no">${index + 1}</span><span class="tx">${line || " "}</span></div>`).join("")}
     ${more > 0 || blob.size > limit ? `<div class="dl gap">… la suite sur GitHub</div>` : ""}</div>`;
   if (extension === "md") {
     return `${head}<button class="small-link" data-action="source">${ICON.file}<span>Voir la source</span></button>

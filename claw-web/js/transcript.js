@@ -4,6 +4,7 @@
 // liste de tâches. Aussi : les modifications d'une branche (comparaison GitHub).
 
 import { escapeHtml, renderMarkdown } from "./markdown.js";
+import { highlight, languageOf } from "./highlight.js";
 
 export const LOG = "<!-- claw-web:log";
 const DATA = "<!-- claw-web:data ";
@@ -78,8 +79,9 @@ function todosHtml(todos) {
     </div>`).join("")}</div>`;
 }
 
-/** Lignes de différence (`+`, `-`, ` `), numérotées depuis le début de chaque passage. */
-function diffRows(hunks) {
+/** Lignes de différence (`+`, `-`, ` `), numérotées depuis le début de chaque passage, colorées
+ * dans le langage du fichier (ligne par ligne). */
+function diffRows(hunks, language = "") {
   const rows = [];
   hunks.forEach(({ oldStart, newStart, lines }, index) => {
     if (index) rows.push('<div class="dl gap">⋯</div>');
@@ -87,7 +89,7 @@ function diffRows(hunks) {
     let newNo = newStart || 1;
     for (const line of lines) {
       const kind = line[0];
-      const text = escapeHtml(line.slice(1)) || " ";
+      const text = highlight(line.slice(1), language) || " ";
       if (kind === "+") rows.push(`<div class="dl add"><span class="no">${newNo++}</span><span class="tx">${text}</span></div>`);
       else if (kind === "-") rows.push(`<div class="dl del"><span class="no">${oldNo++}</span><span class="tx">${text}</span></div>`);
       else if (kind === "\\") continue;
@@ -102,27 +104,27 @@ function diffRows(hunks) {
 }
 
 /** Différence du journal : lignes `@@ ancien nouveau` puis les lignes du passage. */
-function journalDiffHtml(lines, more) {
+function journalDiffHtml(lines, more, language) {
   const hunks = [];
   for (const line of lines || []) {
     const header = line.match(/^@@ (\d+) (\d+)/);
     if (header) hunks.push({ oldStart: Number(header[1]), newStart: Number(header[2]), lines: [] });
     else if (hunks.length) hunks[hunks.length - 1].lines.push(line);
   }
-  const rows = diffRows(hunks);
+  const rows = diffRows(hunks, language);
   if (more) rows.push(`<div class="dl gap">… ${plural(more, "ligne")} de plus</div>`);
   return `<div class="diff">${rows.join("")}</div>`;
 }
 
 /** Différence au format unifié (comparaison GitHub). */
-function unifiedDiffHtml(patch) {
+function unifiedDiffHtml(patch, language) {
   const hunks = [];
   for (const line of String(patch || "").split("\n")) {
     const header = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)/);
     if (header) hunks.push({ oldStart: Number(header[1]), newStart: Number(header[2]), lines: [] });
     else if (hunks.length) hunks[hunks.length - 1].lines.push(line);
   }
-  return `<div class="diff">${diffRows(hunks).join("")}</div>`;
+  return `<div class="diff">${diffRows(hunks, language).join("")}</div>`;
 }
 
 function toolHtml(event, key, openTodo) {
@@ -134,7 +136,7 @@ function toolHtml(event, key, openTodo) {
   if (event.n === "bash" || event.n === "PowerShell") {
     const output = result ? [result.out, result.err].filter(Boolean).join("\n") : "";
     body = `<div class="io">
-      <span class="io-k">Entrée</span><pre class="io-v">${escapeHtml(input.cmd || "")}</pre>
+      <span class="io-k">Entrée</span><pre class="io-v">${highlight(input.cmd || "", "sh")}</pre>
       ${result ? `<span class="io-k">Sortie</span><pre class="io-v">${output ? escapeHtml(output) : '<span class="none">(aucune sortie)</span>'}</pre>` : ""}
       ${result && result.code ? `<span class="io-note">${escapeHtml(result.code)}</span>` : ""}
       ${result && result.bg ? '<span class="io-note">Lancée en arrière-plan</span>' : ""}
@@ -142,7 +144,7 @@ function toolHtml(event, key, openTodo) {
     if (result && result.code) side = `<span class="del">${escapeHtml(result.code)}</span>`;
   } else if ((event.n === "write_file" || event.n === "edit_file") && result && Array.isArray(result.lines)) {
     side = counts(result.add, result.del);
-    body = journalDiffHtml(result.lines, result.more);
+    body = journalDiffHtml(result.lines, result.more, languageOf(input.path || input.file_path || target));
   } else if (event.n === "read_file" && result && result.count) {
     side = plural(result.count, "ligne");
   } else if (event.n === "TodoWrite") {
@@ -212,7 +214,7 @@ export function changesHtml(compare) {
         <summary><span class="file-status ${escapeHtml(file.status)}">${escapeHtml(label[file.status] || file.status)}</span>
           <span class="path">${escapeHtml(file.filename)}</span>
           <span class="side">${counts(file.additions, file.deletions)}</span></summary>
-        ${file.patch ? unifiedDiffHtml(file.patch)
+        ${file.patch ? unifiedDiffHtml(file.patch, languageOf(file.filename))
           : `<p class="help">Différence non fournie par GitHub (fichier binaire ou trop grand) : <a href="${escapeHtml(file.blob_url || "#")}" target="_blank" rel="noopener noreferrer">voir le fichier</a>.</p>`}
       </details>`).join("")}`;
 }

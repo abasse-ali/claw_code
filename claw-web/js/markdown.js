@@ -3,8 +3,12 @@
 // blocs et morceaux de code, gras, italique, liens http(s)). Aucun HTML venu d'un
 // message ne passe tel quel : un agent ou un commentaire ne peut rien injecter.
 
+import { highlight, languageOf } from "./highlight.js";
+
 const ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 export const escapeHtml = (text) => String(text).replace(/[&<>"']/g, (character) => ESCAPES[character]);
+const UNESCAPES = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'" };
+const unescapeHtml = (text) => text.replace(/&(?:amp|lt|gt|quot|#39);/g, (entity) => UNESCAPES[entity]);
 
 /** Mise en forme d'une ligne déjà échappée : code, liens, gras, italique. */
 function inline(text) {
@@ -43,7 +47,10 @@ export function renderMarkdown(source) {
         index += 1;
       }
       index += 1;
-      out.push(`<pre><code>${code.join("\n")}</code></pre>`);
+      // Le texte du bloc, échappé avec tout le message, est rendu à la coloration.
+      const language = languageOf(fence[1]);
+      const label = language ? ` data-lang="${escapeHtml(fence[1].toLowerCase())}"` : "";
+      out.push(`<pre${label}><code>${highlight(unescapeHtml(code.join("\n")), language)}</code></pre>`);
       continue;
     }
     if (!line.trim()) {
