@@ -36,7 +36,7 @@ jobs:
           git config --global init.defaultBranch main
       - name: Compilation des tests
         run: cargo test -p ${{ matrix.crate }} --no-run --locked --message-format=json > ../binaires.json
-      - name: Tests un par un
+      - name: Programmes de test en entier
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -46,22 +46,26 @@ jobs:
           ulimit -u 1500
           ulimit -v 4000000
           statut() {
-            gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state="$1" \
-              -f context="diagnostic/${{ matrix.crate }}" -f description="$2" > /dev/null 2>&1
+            gh api "repos/${{ github.repository }}/statuses/${{ github.sha }}" -f state="$1"               -f context="diagnostic/${{ matrix.crate }}" -f description="$2" > /dev/null 2>&1
           }
           dir=$(pwd)/crates/${{ matrix.crate }}
           for bin in $(jq -r 'select(.profile.test == true and .executable != null) | .executable' ../binaires.json); do
-            statut pending "$(basename "$bin")"
-            echo "=== $(basename "$bin")"
-            for t in $(cd "$dir" && "$bin" --list --format terse 2>/dev/null | sed -n 's/: test$//p'); do
-              start=$(date +%s)
-              (cd "$dir" && timeout -k 5 60 "$bin" --exact "$t" --test-threads=1 -q > /tmp/sortie.txt 2>&1)
-              code=$?
-              took=$(( $(date +%s) - start ))
-              if [ "$code" -ne 0 ] || [ "$took" -ge 20 ]; then
-                echo "::warning title=${{ matrix.crate }}::${t} : code ${code}, ${took} s"
-                tail -n 8 /tmp/sortie.txt | sed 's/^/    /'
-              fi
-            done
+            name=$(basename "$bin")
+            statut pending "en cours : $name"
+            start=$(date +%s)
+            (cd "$dir" && timeout -k 10 300 "$bin" --test-threads=1 > /tmp/sortie.txt 2>&1)
+            code=$?
+            took=$(( $(date +%s) - start ))
+            echo "=== $name : code $code, $took s"
+            if [ "$code" -ne 0 ]; then
+              echo "::warning title=${{ matrix.crate }}::$name : code $code, $took s ; dernier test lancé : $(grep -o '^test [^ ]*' /tmp/sortie.txt | tail -1)"
+              tail -n 15 /tmp/sortie.txt | sed 's/^/    /'
+            fi
           done
+          statut pending "en cours : tests de documentation"
+          start=$(date +%s)
+          timeout -k 10 300 cargo test -p ${{ matrix.crate }} --doc --locked > /tmp/doc.txt 2>&1
+          code=$?
+          echo "=== documentation : code $code, $(( $(date +%s) - start )) s"
+          [ "$code" -ne 0 ] && { echo "::warning title=${{ matrix.crate }}::tests de documentation : code $code"; tail -n 15 /tmp/doc.txt | sed 's/^/    /'; }
           statut success "fini"
