@@ -261,6 +261,46 @@ export class GitHub {
     return data.jobs || [];
   }
 
+  /** Fusionne une pull request dans sa branche de base. */
+  mergePull(repo, number) {
+    return this.request("PUT", `/repos/${repo}/pulls/${number}/merge`, { merge_method: "merge" });
+  }
+
+  /** Réglage GitHub Pages du dépôt, ou null s'il n'est pas publié. */
+  async pages(repo) {
+    try {
+      return await this.request("GET", `/repos/${repo}/pages`);
+    } catch (error) {
+      if (error instanceof GitHubError && error.status === 404) return null;
+      throw error;
+    }
+  }
+
+  /** Publie le dépôt sur GitHub Pages depuis une branche et un dossier (`/` ou `/docs`). */
+  async publishPages(repo, branch, path) {
+    const source = { source: { branch, path } };
+    if (await this.pages(repo)) {
+      await this.request("PUT", `/repos/${repo}/pages`, source);
+      return this.pages(repo);
+    }
+    return this.request("POST", `/repos/${repo}/pages`, source);
+  }
+
+  /** Le fichier existe-t-il sur cette branche ? */
+  async fileExists(repo, path, ref) {
+    try {
+      await this.request("GET", `/repos/${repo}/contents/${path}?ref=${encodeURIComponent(ref)}`);
+      return true;
+    } catch (error) {
+      if (error instanceof GitHubError && error.status === 404) return false;
+      throw error;
+    }
+  }
+
+  setVisibility(repo, isPrivate) {
+    return this.request("PATCH", `/repos/${repo}`, { private: isPrivate });
+  }
+
   async pull(fullName, branch) {
     const owner = fullName.split("/")[0];
     const pulls = await this.request("GET",
@@ -302,6 +342,18 @@ function explain(status, reason, path) {
   if (status === 403 && /rate limit/i.test(reason)) return "Limite de requêtes GitHub atteinte : réessayez dans quelques minutes";
   if (path === "/user/repos" && status === 422) {
     return /already exists/i.test(reason) ? "Vous avez déjà un dépôt de ce nom" : `Création refusée : ${reason}`;
+  }
+  if (/\/pages$/.test(path)) {
+    if (status === 422 && /plan|private/i.test(reason)) {
+      return "GitHub Pages refuse ce dépôt privé (compte gratuit) : rendez-le public pour le publier gratuitement";
+    }
+    if (status === 403 || status === 404) {
+      return "Le jeton n'a pas l'autorisation Pages : sur GitHub, dans les réglages du jeton, ajoutez Pages en lecture et écriture (la valeur du jeton ne change pas)";
+    }
+    return `GitHub Pages : ${reason}`;
+  }
+  if (/\/merge$/.test(path)) {
+    if (status === 405 || status === 409) return `Fusion impossible : ${reason} (conflit ou vérifications en cours ; voyez la pull request sur GitHub)`;
   }
   if (status === 403 || status === 404) {
     if (path === "/user/repos") {

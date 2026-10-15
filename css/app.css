@@ -247,6 +247,18 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .quota-bar { height: 8px; border-radius: 999px; background: var(--panel-2); overflow: hidden; }
 .quota-bar span { display: block; height: 100%; background: var(--accent); }
 .quota-form { display: flex; flex-direction: column; gap: 12px; }
+.meta-link.action { border: 1px solid var(--accent); color: var(--accent); background: transparent; cursor: pointer; font: inherit; font-size: .85rem; }
+.meta-link.action.confirm { background: var(--accent); color: var(--accent-text); }
+.meta-link.site { color: var(--ok); }
+.unsent { margin: 14px 0 0; padding: 10px 12px; border: 1px solid var(--warn); border-radius: 10px; font-size: .9rem; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.small-link.primary-link { color: var(--accent); border-color: var(--accent); }
+.publish-form { display: flex; flex-direction: column; gap: 12px; padding: 0 4px 6px; overflow-y: auto; }
+.publish-form p { margin: 0; overflow-wrap: anywhere; }
+.publish-form .choices { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 0; border: 0; }
+.publish-form label.check { display: flex; align-items: flex-start; gap: 10px; font-size: .92rem; }
+.publish-form label.check input { margin-top: 3px; flex: none; accent-color: var(--accent); }
+.publish-form .warn { color: var(--warn); }
+.publish-form .primary { align-self: flex-start; }
 .theme-choice { display: flex; gap: 8px; flex-wrap: wrap; margin: 0; padding: 0; border: 0; }
 .theme-choice label { flex-direction: row; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; cursor: pointer; }
 .theme-choice label:has(input:checked) { border-color: var(--accent); color: var(--accent); }

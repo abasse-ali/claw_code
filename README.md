@@ -23,6 +23,8 @@ Adresse : https://abasse-ali.github.io/claw-web/
    - dépôts : le moteur et ceux où Claw travaillera (ou tous) ;
    - autorisations des dépôts, en lecture et écriture : **Actions**, **Contents**, **Issues**,
      **Pull requests**, **Secrets** (Metadata en lecture vient avec) ;
+   - pour mettre un site en ligne depuis l'appli (« Mettre en ligne », GitHub Pages) :
+     **Pages** en lecture et écriture ;
    - pour créer des dépôts depuis l'appli (« Créer un dépôt » dans le choix du dépôt) :
      **All repositories** et **Administration** en lecture et écriture. Modifier ces réglages
      garde la valeur du jeton : rien à refaire dans l'appli.
@@ -35,6 +37,15 @@ Adresse : https://abasse-ali.github.io/claw-web/
    projet : cahier des charges, plan en jalons vérifiés, démonstration finale. Les messages
    de suivi le poursuivent (une nouvelle session aussi, quand `SPEC.md` et `PLAN.md` sont dans
    le dépôt) ; « sans mode projet » l'arrête pour la session.
+
+## Fusionner, mettre en ligne
+
+- « Fusionner » (à côté de la pull request ouverte, deux appuis) : la branche de la session
+  rejoint la branche de départ.
+- « Mettre en ligne » : publie un site statique sur GitHub Pages (dossier `docs/` ou racine),
+  après fusion de la pull request ou depuis la branche de la session telle quelle. Sur un compte
+  GitHub gratuit, GitHub Pages ne publie que les dépôts publics : l'appli le signale et propose
+  de rendre le dépôt public. Claw (l'agent) n'a aucun accès à GitHub : il renvoie à ces boutons.
 
 ## Arrêter, supprimer
 

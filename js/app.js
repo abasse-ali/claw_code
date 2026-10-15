@@ -30,6 +30,8 @@ const ICON = {
   archive: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/></svg>',
   stop: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
   trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4h6v3"/></svg>',
+  globe: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.5 2.6 2.5 14.4 0 17M12 3.5c-2.5 2.6-2.5 14.4 0 17"/></svg>',
+  merge: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="12" r="2"/><path d="M6 7v10M6 7c0 4 4 5 10 5"/></svg>',
   diff: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v8M8 8h8M8 18h8"/><rect x="3.5" y="2.5" width="17" height="19" rx="2"/></svg>',
   image: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.6-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9"/></svg>',
   gauge: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 17a8.5 8.5 0 1 1 15 0"/><path d="M12 13l4-4"/><circle cx="12" cy="13" r="1.2"/></svg>',
@@ -1081,6 +1083,13 @@ async function showHome() {
   }
 }
 
+/** « engine » (progression, journal), « answer » (réponse de Claw) ou « message ». */
+function kindOf(body) {
+  const text = String(body || "").trim();
+  if (text.includes(PROGRESS) || text.startsWith(LOG)) return "engine";
+  return text.includes(ANSWER) ? "answer" : "message";
+}
+
 /** Numéro du passage d'un commentaire de progression (lien « Détail du job »). */
 const runOf = (body) => Number((String(body).match(/\/actions\/runs\/(\d+)/) || [])[1] || 0);
 
@@ -1123,6 +1132,11 @@ function renderSessionView() {
   const pull = session.pull;
   const pullBadge = pull ? (pull.merged_at ? "fusionnée" : pull.state === "open" ? "ouverte" : "fermée") : "";
   const opened = new Map([...view.querySelectorAll("details[data-key]")].map((details) => [details.dataset.key, details.open]));
+  // Dernier message sans passage lancé après lui (lancement raté, message écrit sur GitHub).
+  const lastMessage = [...comments].reverse().find((comment) => kindOf(comment.body) === "message");
+  const lastAnswer = [...comments].reverse().find((comment) => kindOf(comment.body) === "answer");
+  const unsent = !active && Boolean(lastMessage) && (!lastAnswer || lastAnswer.created_at < lastMessage.created_at)
+    && (!run || run.created_at < lastMessage.created_at);
   view.innerHTML = `
     <section class="session">
       <header class="session-head">
@@ -1131,20 +1145,25 @@ function renderSessionView() {
           <a class="meta-link" href="https://github.com/${escapeHtml(settings.repo || "")}" target="_blank" rel="noopener noreferrer">${ICON.repo}<span>${escapeHtml(settings.repo || "?")}</span></a>
           <span class="meta-link">${ICON.branch}<span>${escapeHtml(branchOf(session.issue))}</span></span>
           ${pull ? `<a class="meta-link pull ${pullBadge}" href="${escapeHtml(pull.html_url)}" target="_blank" rel="noopener noreferrer">${ICON.pull}<span>PR #${pull.number} ${pullBadge}</span></a>` : ""}
+          ${pull && pull.state === "open" && !pull.merged_at && !active ? `<button class="meta-link action" data-action="merge">${ICON.merge}<span>Fusionner</span></button>` : ""}
           <a class="meta-link" href="#/session/${session.number}/modifications">${ICON.diff}<span>Modifications</span></a>
+          ${session.site ? `<a class="meta-link site" href="${escapeHtml(session.site)}" target="_blank" rel="noopener noreferrer">${ICON.globe}<span>Site en ligne</span></a>` : ""}
         </div>
       </header>
       <div class="messages">
         <article class="message user"><div class="who">${escapeHtml(session.issue.user ? session.issue.user.login : "Vous")}</div>${messageBody(taskOf(session.issue))}</article>
         ${comments.map((comment) => messageHtml(comment, comment === lastProgress && !answered)).join("")}
       </div>
+      ${unsent ? `<div class="unsent">Ce message n'a pas encore été envoyé à Claw (aucun passage lancé depuis).
+        <button class="small-link primary-link" data-action="retry">${ICON.retry}<span>Lancer le passage</span></button></div>` : ""}
       <div class="run-status ${active ? "active" : status ? status.key : ""}">
         ${active ? `<span class="spinner" aria-hidden="true"></span><span>${run ? escapeHtml(status.label) : "Lancement du passage"}${step}</span>` : ""}
         ${!active && status && status.key === "failed" && !answered ? `<span>Le dernier passage a échoué.</span>` : ""}
         <span class="run-actions">
           ${active && run ? `<button class="small-link stop" data-action="stop">${ICON.stop}<span>Arrêter</span></button>` : ""}
           ${run ? `<a href="${escapeHtml(run.html_url)}" target="_blank" rel="noopener noreferrer" class="small-link">${ICON.external}<span>Job</span></a>` : ""}
-          ${!active ? `<button class="small-link" data-action="retry">${ICON.retry}<span>Relancer</span></button>` : ""}
+          ${!active && !unsent ? `<button class="small-link" data-action="retry">${ICON.retry}<span>Relancer</span></button>` : ""}
+          ${!active ? `<button class="small-link" data-action="publish-site">${ICON.globe}<span>Mettre en ligne</span></button>` : ""}
           ${session.issue.state === "open" ? `<button class="small-link" data-action="archive">${ICON.archive}<span>Archiver</span></button>` : ""}
           ${!active ? `<button class="small-link" data-action="delete">${ICON.trash}<span>Supprimer</span></button>` : ""}
           <a href="${escapeHtml(session.issue.html_url)}" target="_blank" rel="noopener noreferrer" class="small-link">${ICON.external}<span>Session</span></a>
@@ -1154,15 +1173,44 @@ function renderSessionView() {
   for (const details of view.querySelectorAll("details[data-key]")) {
     if (opened.has(details.dataset.key)) details.open = opened.get(details.dataset.key);
   }
-  view.querySelector('[data-action="retry"]')?.addEventListener("click", async () => {
+  for (const retry of view.querySelectorAll('[data-action="retry"]')) {
+    retry.addEventListener("click", async () => {
+      // Un seul passage par appui : le bouton se désactive aussitôt (plusieurs appuis lançaient
+      // plusieurs passages).
+      for (const button of view.querySelectorAll('[data-action="retry"]')) button.disabled = true;
+      try {
+        await dispatchSession(session);
+        toast("Passage lancé");
+        await pollSession(true);
+      } catch (error) {
+        for (const button of view.querySelectorAll('[data-action="retry"]')) button.disabled = false;
+        failure(error);
+      }
+    });
+  }
+  view.querySelector('[data-action="merge"]')?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    if (!button.classList.contains("confirm")) {
+      button.classList.add("confirm");
+      button.querySelector("span").textContent = "Confirmer la fusion";
+      setTimeout(() => {
+        if (!button.isConnected) return;
+        button.classList.remove("confirm");
+        button.querySelector("span").textContent = "Fusionner";
+      }, 4000);
+      return;
+    }
+    button.disabled = true;
     try {
-      await dispatchSession(session);
-      toast("Passage relancé");
+      await state.github.mergePull(settings.repo, pull.number);
+      toast(`Pull request n° ${pull.number} fusionnée dans ${settings.base || "main"}`);
       await pollSession(true);
     } catch (error) {
+      button.disabled = false;
       failure(error);
     }
   });
+  view.querySelector('[data-action="publish-site"]')?.addEventListener("click", () => openPublish(session));
   // Deux appuis pour arrêter (pas de fenêtre de confirmation, comme le reste de l'appli).
   view.querySelector('[data-action="stop"]')?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
@@ -1257,6 +1305,17 @@ async function pollSession(force = false) {
   } catch {
     session.pull = null;
   }
+  if (session.site === undefined && session.settings.repo) {
+    session.site = null;
+    state.github.pages(session.settings.repo)
+      .then((pages) => {
+        if (pages && pages.html_url && state.session === session) {
+          session.site = pages.html_url;
+          renderSessionView();
+        }
+      })
+      .catch(() => {});
+  }
   const signature = JSON.stringify([
     issue.updated_at, issue.state, comments.map((comment) => [comment.id, comment.updated_at]),
     run && [run.id, run.status, run.conclusion], session.step, session.pull && [session.pull.state, session.pull.merged_at],
@@ -1290,6 +1349,100 @@ async function readJournals(session, comments) {
       // Navigateur sans décompression gzip, ou partie abîmée : la carte de progression reste.
       session.logs.delete(comment.id);
     }
+  }
+}
+
+// --- Mise en ligne (GitHub Pages) -------------------------------------------------------
+
+/** Feuille de mise en ligne : fusion éventuelle, branche, dossier du site, visibilité. */
+async function openPublish(session) {
+  const sheet = $("#sheet");
+  const repo = session.settings.repo;
+  const base = session.settings.base || "main";
+  const branch = branchOf(session.issue);
+  const pull = session.pull;
+  const close = () => {
+    sheet.hidden = true;
+    sheet.innerHTML = "";
+  };
+  sheet.innerHTML = `
+    <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="Mettre en ligne">
+      <div class="sheet-head"><strong>Mettre en ligne (GitHub Pages)</strong>
+        <button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button></div>
+      <p class="empty">Lecture du dépôt…</p>
+    </div>`;
+  sheet.onclick = (event) => {
+    if (event.target === sheet || event.target.closest("[data-close]")) close();
+  };
+  sheet.hidden = false;
+  try {
+    const open = pull && pull.state === "open" && !pull.merged_at;
+    const [info, pages, sessionBranch] = await Promise.all([
+      state.github.repository(repo),
+      state.github.pages(repo).catch(() => null),
+      state.github.branchExists(repo, branch),
+    ]);
+    // Dossier du site sur une branche : docs/ s'il a un index.html, sinon la racine.
+    const folderOf = async (ref) => ((await state.github.fileExists(repo, "docs/index.html", ref)) ? "/docs"
+      : (await state.github.fileExists(repo, "index.html", ref)) ? "/" : null);
+    const choices = [];
+    if (open) choices.push({ value: "merge", label: `Fusionner la pull request n° ${pull.number}, puis publier ${base}`, ref: branch, recommended: true });
+    if (sessionBranch && open) choices.push({ value: "branch", label: `Publier ${branch} telle quelle, sans fusion`, ref: branch });
+    if (!open) choices.push({ value: "base", label: `Publier ${base}`, ref: base, recommended: true });
+    for (const choice of choices) choice.folder = await folderOf(choice.ref);
+    if (sheet.hidden) return;
+    sheet.querySelector(".sheet-panel").innerHTML = `
+      <div class="sheet-head"><strong>Mettre en ligne (GitHub Pages)</strong>
+        <button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button></div>
+      <form class="publish-form">
+        ${pages && pages.html_url ? `<p>Publié en ce moment : <a href="${escapeHtml(pages.html_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(pages.html_url)}</a>
+          (${escapeHtml((pages.source && pages.source.branch) || "?")}, ${escapeHtml((pages.source && pages.source.path) || "/")}).</p>` : ""}
+        <fieldset class="choices">
+          ${choices.map((choice, index) => `
+            <label class="check"><input type="radio" name="choice" value="${choice.value}"${index === 0 ? " checked" : ""}>
+              <span>${escapeHtml(choice.label)}${choice.folder ? ` · site dans <code>${choice.folder === "/" ? "la racine" : "docs/"}</code>` : " · aucun <code>index.html</code> trouvé (racine ou docs/)"}</span></label>`).join("")}
+        </fieldset>
+        ${info.private ? `<p class="help warn">Ce dépôt est privé : sur un compte GitHub gratuit, GitHub Pages ne publie que les dépôts publics.</p>
+          <label class="check"><input type="checkbox" name="public"><span>Rendre le dépôt public (son code devient visible par tous)</span></label>` : ""}
+        <button class="primary" type="submit">Mettre en ligne</button>
+        <p class="help result" hidden></p>
+      </form>`;
+    const form = sheet.querySelector(".publish-form");
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const choice = choices.find((item) => item.value === form.elements.choice.value);
+      const button = form.querySelector("button[type=submit]");
+      const result = form.querySelector(".result");
+      button.disabled = true;
+      try {
+        if (choice.value === "merge") {
+          button.textContent = "Fusion…";
+          await state.github.mergePull(repo, pull.number);
+        }
+        if (info.private && form.elements.public && form.elements.public.checked) {
+          button.textContent = "Dépôt rendu public…";
+          await state.github.setVisibility(repo, false);
+        }
+        button.textContent = "Publication…";
+        const target = choice.value === "branch" ? branch : base;
+        const published = await state.github.publishPages(repo, target, choice.folder || "/");
+        const url = (published && published.html_url) || `https://${repo.split("/")[0]}.github.io/${repo.split("/")[1]}/`;
+        session.site = url;
+        result.hidden = false;
+        result.innerHTML = `GitHub construit le site (une à deux minutes), puis il sera en ligne ici :
+          <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`;
+        button.textContent = "Mis en ligne";
+        toast("Site publié sur GitHub Pages");
+        pollSession(true).catch(() => {});
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = "Mettre en ligne";
+        failure(error);
+      }
+    });
+  } catch (error) {
+    close();
+    failure(error);
   }
 }
 
@@ -1381,6 +1534,7 @@ function showSettings(first = false, justConnected = false) {
           dépôts : le moteur et ceux où Claw travaillera ;
           autorisations des dépôts en lecture et écriture : Actions, Contents, Issues, Pull requests, Secrets.
           Pour créer des dépôts depuis l'appli : « All repositories » et Administration en lecture et écriture.
+          Pour mettre un site en ligne (GitHub Pages) : Pages en lecture et écriture.
           Il reste dans ce navigateur seulement.</p>
         <label>Dépôt du moteur
           <input name="engine" type="text" value="${escapeHtml(settings.engine || DEFAULT_ENGINE)}" spellcheck="false">
