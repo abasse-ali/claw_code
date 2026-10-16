@@ -21,6 +21,9 @@ pub enum ReadOutcome {
     ShowDetails(String),
     /// Échap deux fois, saisie vide : revenir avant un message précédent.
     Rewind,
+    /// Une tâche planifiée est due ; le texte en cours de saisie est rendu
+    /// pour être remis après son passage.
+    Scheduled(String),
 }
 
 /// Un collage plus long que ceci est remplacé par « [Texte collé n°1 : 40 lignes] ».
@@ -667,7 +670,16 @@ impl LineEditor {
         loop {
             let event = match pending.pop_front() {
                 Some(event) => event,
-                None => event::read()?,
+                // Une tâche planifiée échue passe entre deux saisies.
+                None => loop {
+                    if event::poll(Duration::from_millis(500))? {
+                        break event::read()?;
+                    }
+                    if pasting.is_none() && runtime::cron::has_due() {
+                        session.clear_render(&mut stdout)?;
+                        return Ok(ReadOutcome::Scheduled(session.text.clone()));
+                    }
+                },
             };
             let queued = !pending.is_empty() || event::poll(Duration::ZERO)?;
             let (before, before_cursor) = (session.text.clone(), session.cursor);

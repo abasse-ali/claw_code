@@ -585,8 +585,8 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "loop",
         aliases: &["boucle"],
-        summary: "Relance une demande à intervalle régulier tant que la session est ouverte (Échap arrête)",
-        argument_hint: Some("[intervalle: 30s|5m|1h] <demande>"),
+        summary: "Relance une demande entre les tours, à intervalle fixe ou choisi par Claw (/loop list, /loop stop)",
+        argument_hint: Some("[intervalle: 5m|1h] [demande] | list | stop [id]"),
         resume_supported: false,
         category: SlashCommandCategory::Automation,
     },
@@ -2862,7 +2862,7 @@ mod tests {
         assert!(help.contains("/context"));
         assert!(help.contains("/equipe [off]"));
         assert!(help.contains("/compact [consigne]"));
-        assert!(help.contains("/loop [intervalle: 30s|5m|1h] <demande>"));
+        assert!(help.contains("/loop [intervalle: 5m|1h] [demande] | list | stop [id]"));
         assert!(help.contains("/output-style [nom|new <nom>]"));
         assert!(help.contains("/schedule [list|<horaire> <demande>|delete <nom>]"));
         assert!(help.contains("/btw"));

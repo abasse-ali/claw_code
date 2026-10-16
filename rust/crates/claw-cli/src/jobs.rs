@@ -577,11 +577,20 @@ pub fn wait_message(id: &str) -> Option<String> {
     }
 }
 
+/// Ce qui relance une session en attente.
+pub enum NextPrompt {
+    /// Réponse envoyée par l'utilisateur.
+    Message(String),
+    /// Tâche planifiée échue (`/loop`, `CronCreate`).
+    Task(runtime::cron::ScheduledTask),
+}
+
 /// Attente d'une nouvelle demande après un tour : `Some` quand elle arrive,
 /// `None` quand la session doit libérer son processus (`claw attach`,
-/// `claw stop`, ou une heure sans demande hors épinglage).
+/// `claw stop`, ou une heure sans demande hors épinglage et sans tâche
+/// planifiée).
 #[must_use]
-pub fn wait_next_prompt(id: &str) -> Option<String> {
+pub fn wait_next_prompt(id: &str) -> Option<NextPrompt> {
     let idle = std::env::var("CLAW_JOB_IDLE_SECS")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
@@ -589,13 +598,17 @@ pub fn wait_next_prompt(id: &str) -> Option<String> {
     let started = std::time::Instant::now();
     loop {
         if let Some(message) = take_message(id) {
-            return Some(message);
+            return Some(NextPrompt::Message(message));
+        }
+        if let Some(task) = runtime::cron::take_due() {
+            return Some(NextPrompt::Task(task));
         }
         if take_flag(id, "release") || take_flag(id, "stop") {
             return None;
         }
         let pinned = load(id).is_some_and(|job| job.pinned);
-        if !pinned && started.elapsed() >= Duration::from_secs(idle) {
+        let scheduled = !runtime::cron::list().is_empty();
+        if !pinned && !scheduled && started.elapsed() >= Duration::from_secs(idle) {
             return None;
         }
         thread::sleep(Duration::from_millis(500));

@@ -413,7 +413,7 @@ Les équivalents gratuits des commandes de Claude Code pour travailler longtemps
 | Commande | Effet |
 |---|---|
 | `/goal <condition>` | Claw travaille jusqu'à ce que la condition soit remplie : après chaque tour, un contrôle (sans outils, hors conversation) répond « atteint » ou « pas encore, parce que… », et Claw continue avec cette raison. Pause sur `Échap`, après `CLAW_GOAL_MAX_TURNS` tours (12) ou quand deux contrôles de suite donnent la même raison. `/goal` montre l'état, `/goal reprendre` relance, `/goal clear` efface. La ligne d'état affiche `◎ objectif actif`. |
-| `/loop [intervalle] <demande>` | Relance la demande (ou une commande personnalisée `/ma-commande`) toutes les `30s`, `5m`, `1h`… (10 min par défaut, 30 s au moins), avec un compte à rebours ; `Échap` ou `Ctrl+C` arrête, `CLAW_LOOP_MAX` limite le nombre de passages (50). À partir du deuxième passage, Claw ne rapporte que ce qui a changé. |
+| `/loop [intervalle] [demande]` | Dans le terminal : relance la demande (ou `/ma-commande`) entre les tours, la saisie restant libre : toutes les `5m`, `1h`… ; sans intervalle, Claw choisit l'attente ; seul, `loop.md` ou une passe d'entretien. `/loop list`, `/loop stop [id]`. Voir « Tâches planifiées ». Dans la page web : compte à rebours, bouton Arrêter. |
 | `/schedule <horaire> <demande>` | Routine qui tourne chez GitHub, ordinateur éteint : un workflow `.github/workflows/claw-routine-<nom>.yml` lance l'action Claw selon l'horaire avec un modèle gratuit d'OpenRouter, et ouvre une pull request si des fichiers changent. Horaires : `horaire`, `quotidien[@HH:MM]`, `jours-ouvres[@HH:MM]`, `hebdo[@jour-HH:MM]` (heure UTC, ou `@09:00+02:00`), ou `"M H J M S"` en cron. `/schedule` liste, `/schedule delete <nom>` supprime. La demande est rangée à part dans `.github/claw-routines/<nom>.md`. |
 | `/btw <question>` | Question en aparté : réponse courte du modèle sans outils, qui n'entre pas dans la conversation et n'interrompt pas la tâche. |
 | `/recap` | Bilan de la session : demandes, travail fait, reste à faire, prochaine étape. Hors conversation. |
@@ -1150,6 +1150,37 @@ part, sur sa propre branche), rangé dans `.claw/worktrees/<nom>`. Ce dossier es
   modèle (`gh pr create`), ou le lien pour l'ouvrir dans GitHub si `gh` manque.
 - **`/tasks`** (alias de `/bashes`) montre aussi les derniers sous-agents : en cours, terminé ou
   en échec, avec le fichier de leur rapport.
+
+### Tâches planifiées : `/loop` et rappels
+
+Comme dans Claude Code, une demande peut revenir toute seule pendant la session : surveiller
+un déploiement, relancer les tests, rappeler quelque chose plus tard. Les tâches passent
+**entre deux tours** : la saisie reste libre entre les passages, et un texte en cours de frappe
+est remis dans la saisie après le passage.
+
+- `/loop 5m vérifie si le déploiement est terminé` : premier passage tout de suite, puis toutes
+  les 5 minutes (intervalle arrondi au pas cron le plus proche : `7m` devient 6 minutes ;
+  `CLAW_LOOP_MAX`, 50 par défaut, limite le nombre de passages pour ménager le quota gratuit).
+- `/loop vérifie la CI et traite les commentaires` (sans intervalle) : Claw choisit lui-même
+  l'attente après chaque passage, entre 1 minute et 1 heure (outil `ScheduleWakeup`), et arrête
+  la boucle quand le travail est fini. Sans nouveau délai, un passage de secours a lieu
+  20 minutes plus tard, puis la boucle s'arrête.
+- `/loop` seul : le contenu de `.claw/loop.md` ou `.claude/loop.md` (projet), sinon
+  `~/.claw/loop.md` ou `~/.claude/loop.md`, sinon une passe d'entretien (travail en cours,
+  pull request de la branche, petit nettoyage, rien d'irréversible sans accord).
+- `/loop list` montre les tâches ; `/loop stop` arrête les boucles, `/loop stop <id>` une tâche.
+- En langage courant : « rappelle-moi dans 45 minutes de pousser la branche », « quelles tâches
+  sont planifiées ? », « annule la vérification du déploiement ». Le modèle utilise les outils
+  `CronCreate` (expression cron à cinq champs en heure locale, récurrente ou non), `CronList`
+  et `CronDelete`.
+- Règles : 50 tâches au plus par session ; une tâche récurrente expire au bout de 7 jours ; une
+  échéance manquée pendant un long tour passe une seule fois ; les tâches sont enregistrées avec
+  la conversation (`<session>.tasks.json`) et reviennent avec `--resume`. La ligne d'état
+  indique leur nombre. Une session passée en arrière-plan (`/bg`) emporte ses tâches, qui y
+  continuent sans terminal.
+- L'heure locale vient du système (`date +%z`, ou PowerShell sous Windows) ; `CLAW_TZ_OFFSET`
+  (`+02:00`) la fixe. `CLAW_DISABLE_CRON=1` (ou `CLAUDE_CODE_DISABLE_CRON=1`) coupe tout.
+- Dans l'interface web, `/loop` garde son fonctionnement précédent (attente avec bouton Arrêter).
 
 ### Sessions en arrière-plan : `claw agents`
 

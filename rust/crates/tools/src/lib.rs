@@ -613,6 +613,57 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "CronCreate",
+            description: "Schedule a prompt to run later in this session, between turns: a 5-field cron expression in local time (minute hour day-of-month month day-of-week), the prompt, and recurring (default true; false runs once then deletes itself). Use it for reminders (\"in 45 minutes check the tests\": pin the minute and hour) and polling. Recurring tasks expire after 7 days.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "cron": { "type": "string" },
+                    "prompt": { "type": "string" },
+                    "recurring": { "type": "boolean" }
+                },
+                "required": ["cron", "prompt"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "CronList",
+            description: "List this session's scheduled tasks: id, schedule, next run time, prompt.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "CronDelete",
+            description: "Cancel a scheduled task by its 8-character id.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "ScheduleWakeup",
+            description: "Self-paced /loop only: at the end of an iteration, schedule the next one in delaySeconds (60-3600, chosen from what you observed: short while something is in progress, long when nothing is pending) with the same prompt and a one-line reason, or pass stop: true when the task is complete.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "delaySeconds": { "type": "integer", "minimum": 60, "maximum": 3600 },
+                    "prompt": { "type": "string" },
+                    "reason": { "type": "string" },
+                    "stop": { "type": "boolean" }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "Consult",
             description: "Ask two or three other AI models the same hard question and get their independent answers. Use it for a difficult design decision, when you hesitate between approaches, or when you are still stuck after several failed attempts. They do not see this conversation or the files: put everything they need in `context` (code excerpts, error messages, constraints).",
             input_schema: json!({
@@ -963,6 +1014,10 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
             .and_then(to_pretty_json),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
         "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
+        "CronCreate" => from_value::<CronCreateInput>(input).and_then(run_cron_create),
+        "CronList" => run_cron_list(),
+        "CronDelete" => from_value::<CronDeleteInput>(input).and_then(run_cron_delete),
+        "ScheduleWakeup" => from_value::<ScheduleWakeupInput>(input).and_then(run_schedule_wakeup),
         "Remember" => from_value::<RememberInput>(input).and_then(run_remember),
         "FindSymbol" => {
             from_value::<FindSymbolInput>(input).and_then(|input| run_find_symbol(&input))
@@ -1073,6 +1128,88 @@ fn run_web_fetch(input: WebFetchInput) -> Result<String, String> {
 #[allow(clippy::needless_pass_by_value)]
 fn run_web_search(input: WebSearchInput) -> Result<String, String> {
     to_pretty_json(execute_web_search(&input)?)
+}
+
+#[derive(Debug, Deserialize)]
+struct CronCreateInput {
+    cron: String,
+    prompt: String,
+    #[serde(default)]
+    recurring: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CronDeleteInput {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScheduleWakeupInput {
+    #[serde(default)]
+    delay_seconds: Option<u64>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    stop: Option<bool>,
+}
+
+fn task_json(task: &runtime::cron::ScheduledTask) -> serde_json::Value {
+    json!({
+        "id": task.id,
+        "cron": task.cron,
+        "recurring": task.recurring,
+        "nextRun": runtime::cron::format_local(task.next_run),
+        "prompt": task.prompt,
+    })
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_cron_create(input: CronCreateInput) -> Result<String, String> {
+    let recurring = input.recurring.unwrap_or(true);
+    let task = runtime::cron::create(&input.cron, &input.prompt, recurring, None)?;
+    to_pretty_json(json!({
+        "scheduled": task_json(&task),
+        "note": format!(
+            "Task {} runs {} (local time), between turns. Tell the user its id and next run time.",
+            task.id,
+            if recurring { "on this schedule for up to 7 days" } else { "once" }
+        ),
+    }))
+}
+
+fn run_cron_list() -> Result<String, String> {
+    let tasks: Vec<serde_json::Value> = runtime::cron::list().iter().map(task_json).collect();
+    to_pretty_json(json!({ "tasks": tasks }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_cron_delete(input: CronDeleteInput) -> Result<String, String> {
+    let task = runtime::cron::delete(&input.id)?;
+    to_pretty_json(json!({ "deleted": task_json(&task) }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_schedule_wakeup(input: ScheduleWakeupInput) -> Result<String, String> {
+    if input.stop == Some(true) {
+        let _ = runtime::cron::stop_self_paced();
+        return to_pretty_json(json!({
+            "stopped": true,
+            "note": "The loop is over: no further iteration will run.",
+        }));
+    }
+    let prompt = input
+        .prompt
+        .filter(|prompt| !prompt.trim().is_empty())
+        .ok_or_else(|| "prompt is required (the /loop prompt to run again)".to_string())?;
+    let delay = Duration::from_secs(input.delay_seconds.unwrap_or(1_200));
+    let task = runtime::cron::schedule_wakeup(&prompt, delay)?;
+    to_pretty_json(json!({
+        "nextRun": runtime::cron::format_local(task.next_run),
+        "reason": input.reason.unwrap_or_default(),
+    }))
 }
 
 fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
@@ -5981,6 +6118,28 @@ setTimeout(function () { nexistepas(); }, 100);
 
         let output: serde_json::Value = serde_json::from_str(&nudge).expect("valid json");
         assert_eq!(output["verificationNudgeNeeded"], true);
+    }
+
+    #[test]
+    fn cron_tools_create_list_and_delete_tasks() {
+        let created = execute_tool(
+            "CronCreate",
+            &json!({"cron": "0 9 * * 1-5", "prompt": "check the nightly build", "recurring": true}),
+        )
+        .expect("CronCreate");
+        let id = serde_json::from_str::<serde_json::Value>(&created).expect("json")["scheduled"]
+            ["id"]
+            .as_str()
+            .expect("id")
+            .to_string();
+        let listed = execute_tool("CronList", &json!({})).expect("CronList");
+        assert!(listed.contains(&id), "{listed}");
+        assert!(execute_tool("CronCreate", &json!({"cron": "0 9 * *", "prompt": "x"})).is_err());
+        let deleted = execute_tool("CronDelete", &json!({"id": id})).expect("CronDelete");
+        assert!(deleted.contains("nightly"), "{deleted}");
+        assert!(!execute_tool("CronList", &json!({}))
+            .expect("CronList")
+            .contains(&id));
     }
 
     #[test]

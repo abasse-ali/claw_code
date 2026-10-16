@@ -228,6 +228,7 @@ fn trailing_question(text: &str) -> Option<String> {
 
 /// Processus d'une session en arrière-plan : il traite la première demande,
 /// puis chaque réponse déposée dans sa boîte, jusqu'à être libéré.
+#[allow(clippy::too_many_lines)]
 fn run_job_worker(id: &str) -> Result<(), Box<dyn std::error::Error>> {
     let job = jobs::load(id).ok_or("session en arrière-plan inconnue")?;
     let _heartbeat = jobs::Heartbeat::start(id);
@@ -262,6 +263,7 @@ fn run_job_worker(id: &str) -> Result<(), Box<dyn std::error::Error>> {
             let _ = fs::remove_file(&cli.session.path);
             cli.session.path = target;
             cli.persist_session()?;
+            runtime::cron::bind_session(Some(&cli.session.path));
         }
     }
     let session_path = cli.session.path.display().to_string();
@@ -276,11 +278,22 @@ fn run_job_worker(id: &str) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         jobs::take_message(id)
     };
+    // Boucle au rythme choisi en cours : (demande, réveil de secours).
+    let mut self_paced: Option<(String, bool)> = None;
     loop {
         let Some(prompt) = next.take() else {
             match jobs::wait_next_prompt(id) {
-                Some(message) => {
+                Some(jobs::NextPrompt::Message(message)) => {
                     next = Some(message);
+                    continue;
+                }
+                Some(jobs::NextPrompt::Task(task)) => {
+                    println!("\n↻ Tâche planifiée {}", task.id);
+                    if task.self_paced {
+                        self_paced = Some((task.prompt.clone(), task.fallback));
+                        let _ = runtime::cron::take_stop_requested();
+                    }
+                    next = Some(scheduled_prompt(&task));
                     continue;
                 }
                 None => break,
@@ -321,6 +334,9 @@ fn run_job_worker(id: &str) -> Result<(), Box<dyn std::error::Error>> {
         });
         if let Some(error) = error {
             eprintln!("{}", render_cli_error(&error));
+        }
+        if let Some((request, fallback)) = self_paced.take() {
+            after_self_paced_pass(&request, fallback);
         }
         next = jobs::take_message(id);
     }
@@ -586,6 +602,103 @@ fn run_agent_view(
                 selected = Some(id);
             }
         }
+    }
+}
+
+/// Demande par défaut d'un `/loop` sans demande.
+const LOOP_MAINTENANCE_PROMPT: &str = "Maintenance pass: 1. continue any unfinished work from this conversation; 2. tend to the current branch's pull request if there is one (review comments, failed CI runs, merge conflicts); 3. when nothing else is pending, run a cleanup pass (bug hunt or simplification) limited to code this conversation touched. Do not start new initiatives outside that scope, and only push, delete or take other irreversible actions when they continue something the conversation already authorized. If nothing needs doing, say so in one line.";
+
+/// `/loop` sans demande : `.claw/loop.md` ou `.claude/loop.md` du projet,
+/// sinon de l'utilisateur (`~/.claw/loop.md`, `~/.claude/loop.md`), sinon la
+/// passe d'entretien intégrée.
+fn default_loop_prompt() -> String {
+    let cwd = env::current_dir().unwrap_or_default();
+    let config_home = ConfigLoader::default_for(&cwd).config_home().to_path_buf();
+    let mut candidates = vec![
+        cwd.join(".claw").join("loop.md"),
+        cwd.join(".claude").join("loop.md"),
+        config_home.join("loop.md"),
+    ];
+    if let Some(home) = config_home.parent() {
+        candidates.push(home.join(".claude").join("loop.md"));
+    }
+    for path in candidates {
+        if let Ok(text) = fs::read_to_string(&path) {
+            if !text.trim().is_empty() {
+                let mut end = text.len().min(25_000);
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                return text[..end].trim().to_string();
+            }
+        }
+    }
+    LOOP_MAINTENANCE_PROMPT.to_string()
+}
+
+/// Consigne d'une boucle au rythme choisi.
+fn self_paced_note(request: &str) -> String {
+    format!(
+        "\n\n[Claw] This is a self-paced /loop. When this iteration is done, call ScheduleWakeup with delaySeconds between 60 and 3600 chosen from what you observed (short while something is still in progress, long when nothing is pending), prompt set to exactly {} and a one-line reason; or call ScheduleWakeup with stop: true when the task is complete.",
+        serde_json::to_string(request).unwrap_or_default()
+    )
+}
+
+/// Demande envoyée quand une tâche planifiée passe.
+fn scheduled_prompt(task: &runtime::cron::ScheduledTask) -> String {
+    let schedule = if task.self_paced {
+        "self-paced /loop".to_string()
+    } else if task.recurring {
+        format!("cron {}, run {}", task.cron, task.runs)
+    } else {
+        "one-time reminder".to_string()
+    };
+    let mut prompt = format!(
+        "[Claw] Scheduled task {} ({schedule}) is due: do this now. If it names a skill (/name), run it with the Skill tool.",
+        task.id
+    );
+    if task.recurring && task.runs > 1 {
+        prompt.push_str(
+            " Report only what changed since the previous run; say so briefly if nothing did.",
+        );
+    }
+    let _ = write!(prompt, "\n\n{}", task.prompt);
+    if task.self_paced {
+        prompt.push_str(&self_paced_note(&task.prompt));
+    }
+    prompt
+}
+
+/// Après un passage d'une boucle au rythme choisi : prochain réveil demandé
+/// par le modèle, arrêt, ou réveil de secours dans 20 minutes (une seule
+/// fois : sans nouveau réveil après celui-là, la boucle s'arrête).
+fn after_self_paced_pass(request: &str, was_fallback: bool) {
+    let dim = transcript::DIM;
+    let reset = transcript::RESET;
+    if runtime::cron::take_stop_requested() {
+        println!("  ⎿  {dim}Boucle terminée par Claw{reset}");
+        return;
+    }
+    if let Some(task) = runtime::cron::list()
+        .into_iter()
+        .find(|task| task.self_paced && task.prompt == request)
+    {
+        println!(
+            "  ⎿  {dim}Prochain passage de la boucle à {} · /loop stop pour l'arrêter{reset}",
+            runtime::cron::format_local(task.next_run)
+        );
+        return;
+    }
+    if was_fallback {
+        println!("  ⎿  {dim}Boucle arrêtée : aucun nouveau passage demandé{reset}");
+        return;
+    }
+    match runtime::cron::schedule_fallback(request) {
+        Ok(task) => println!(
+            "  ⎿  {dim}Aucun délai choisi : prochain passage à {} · /loop stop pour l'arrêter{reset}",
+            runtime::cron::format_local(task.next_run)
+        ),
+        Err(error) => eprintln!("{}", render_cli_error(&error)),
     }
 }
 
@@ -2881,6 +2994,13 @@ fn run_repl(
                 cli.session_hook_end("exit");
                 break;
             }
+            // Tâche planifiée échue : elle passe, puis la saisie reprend.
+            input::ReadOutcome::Scheduled(text) => {
+                cli.run_due_tasks();
+                if !text.is_empty() {
+                    editor.set_initial_text(text);
+                }
+            }
         }
     }
 
@@ -2981,6 +3101,7 @@ impl LiveCli {
             last_turn_interrupted: false,
         };
         cli.persist_session()?;
+        runtime::cron::bind_session(Some(&cli.session.path));
         Ok(cli)
     }
 
@@ -3215,6 +3336,11 @@ impl LiveCli {
                 line.push_str(&credits);
             }
         }
+        let scheduled = runtime::cron::list().len();
+        if scheduled > 0 {
+            let plural = if scheduled > 1 { "s" } else { "" };
+            let _ = write!(line, " · ↻ {scheduled} tâche{plural} planifiée{plural}");
+        }
         let waiting = jobs::needing_input();
         if waiting > 0 {
             let _ = write!(
@@ -3334,6 +3460,7 @@ impl LiveCli {
             None,
         )?;
         self.session = handle;
+        runtime::cron::bind_session(Some(&self.session.path));
         Ok(())
     }
 
@@ -3977,6 +4104,7 @@ impl LiveCli {
 
         self.session_hook_end("clear");
         self.session = create_managed_session_handle()?;
+        runtime::cron::bind_session(Some(&self.session.path));
         self.runtime = build_runtime(
             Session::new(),
             self.model.clone(),
@@ -4028,6 +4156,7 @@ impl LiveCli {
             None,
         )?;
         self.session = handle;
+        runtime::cron::bind_session(Some(&self.session.path));
         self.session_hook_start("resume");
         println!(
             "{}",
@@ -4114,6 +4243,7 @@ impl LiveCli {
                     None,
                 )?;
                 self.session = handle;
+                runtime::cron::bind_session(Some(&self.session.path));
                 println!(
                     "Session changée\n  Session active   {}\n  Fichier          {}\n  Messages         {}",
                     self.session.id,
@@ -4489,95 +4619,139 @@ impl LiveCli {
 
     /// `/loop [intervalle] <demande>` : la demande relancée à intervalle
     /// régulier, jusqu'à Échap, Ctrl+C ou la limite de passages.
+    /// Tâches planifiées échues : chacune passe comme un tour.
+    fn run_due_tasks(&mut self) {
+        while let Some(task) = runtime::cron::take_due() {
+            let kind = if task.self_paced {
+                "boucle".to_string()
+            } else if task.recurring {
+                task.cron.clone()
+            } else {
+                "rappel".to_string()
+            };
+            println!(
+                "{}↻ Tâche planifiée {} · {kind}{}",
+                transcript::ACCENT,
+                task.id,
+                transcript::RESET
+            );
+            let _ = runtime::cron::take_stop_requested();
+            if let Err(error) = self.run_turn(&scheduled_prompt(&task)) {
+                eprintln!("{}", render_cli_error(&error.to_string()));
+            }
+            if task.self_paced {
+                after_self_paced_pass(&task.prompt, task.fallback);
+            }
+            if self.last_turn_interrupted {
+                break;
+            }
+        }
+    }
+
+    /// `/loop` : `/loop 5m demande` (tâche récurrente, la saisie reste libre),
+    /// `/loop demande` (Claw choisit l'intervalle), `/loop` seul (`loop.md` ou
+    /// la passe d'entretien), `/loop list`, `/loop stop [id]`.
+    #[allow(clippy::too_many_lines)]
     fn run_loop(&mut self, args: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        let (interval, request) = match parse_loop_args(args) {
-            Ok(parsed) => parsed,
-            Err(usage) => {
-                println!("{usage}");
+        let args = args.map(str::trim).unwrap_or_default();
+        let (first, remainder) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+        let dim = transcript::DIM;
+        let reset = transcript::RESET;
+        match first.to_lowercase().as_str() {
+            "list" | "liste" => {
+                let tasks = runtime::cron::list();
+                if tasks.is_empty() {
+                    println!("Aucune tâche planifiée.");
+                } else {
+                    println!("Tâches planifiées");
+                    for task in tasks {
+                        println!("  {}", task.describe());
+                    }
+                }
                 return Ok(());
             }
+            "stop" | "arrêter" | "arreter" => {
+                if remainder.trim().is_empty() {
+                    let stopped = runtime::cron::stop_loops();
+                    println!("  ⎿  {stopped} boucle(s) arrêtée(s)");
+                } else {
+                    match runtime::cron::delete(remainder) {
+                        Ok(task) => println!("  ⎿  Tâche {} supprimée", task.id),
+                        Err(error) => println!("  ⎿  {error}"),
+                    }
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+        if runtime::cron::disabled() {
+            println!("Les tâches planifiées sont désactivées (CLAW_DISABLE_CRON).");
+            return Ok(());
+        }
+        let (interval, request) = match parse_interval(first) {
+            Some(interval) => (Some(interval), remainder.trim()),
+            None => (None, args),
         };
-        // `/loop 5m /ma-commande` : une commande personnalisée devient sa demande.
-        let request = if request.starts_with('/') {
-            match custom_command_prompt(&request) {
+        let request = if request.is_empty() {
+            default_loop_prompt()
+        } else if request.starts_with('/') {
+            // `/loop 5m /ma-commande` : une commande personnalisée devient sa demande.
+            match custom_command_prompt(request) {
                 Some(Ok(invocation)) => invocation.prompt,
                 Some(Err(error)) => {
                     eprintln!("{error}");
                     return Ok(());
                 }
-                None => {
-                    println!(
-                        "/loop relance une demande ou une commande personnalisée (.claw/commands) ; « {} » n'en est pas une",
-                        request.split_whitespace().next().unwrap_or_default()
-                    );
-                    return Ok(());
-                }
+                None => request.to_string(),
             }
         } else {
-            request
+            request.to_string()
         };
+        let Some(interval) = interval else {
+            println!(
+                "{}↻ Boucle au rythme choisi par Claw · /loop stop pour l'arrêter{reset}",
+                transcript::ACCENT
+            );
+            let _ = runtime::cron::take_stop_requested();
+            self.run_turn(&format!("{request}{}", self_paced_note(&request)))?;
+            if self.last_turn_interrupted {
+                let _ = runtime::cron::stop_loops();
+                println!("  ⎿  Boucle arrêtée");
+                return Ok(());
+            }
+            after_self_paced_pass(&request, false);
+            return Ok(());
+        };
+        let (cron, minutes) = runtime::cron::interval_to_cron(interval);
         let max = loop_max_passes();
         println!(
-            "{}↻ Boucle · toutes les {} · au plus {max} passages · Échap ou Ctrl+C pour arrêter{}",
+            "{}↻ Boucle · toutes les {} ({cron}) · au plus {max} passages · /loop stop pour l'arrêter{reset}",
             transcript::ACCENT,
-            format_interval(interval),
-            transcript::RESET
+            format_interval(Duration::from_secs(minutes * 60)),
         );
-        for pass in 1..=max {
-            if let Err(error) = self.run_turn(&loop_prompt(&request, pass)) {
-                eprintln!("{}", render_cli_error(&error.to_string()));
-                println!("  ⎿  Boucle arrêtée après une erreur");
-                return Ok(());
-            }
-            self.persist_session()?;
-            if self.last_turn_interrupted {
-                println!("  ⎿  Boucle arrêtée");
-                return Ok(());
-            }
-            if pass == max {
-                println!(
-                    "  ⎿  Boucle terminée : {max} passages (CLAW_LOOP_MAX pour en permettre plus)"
-                );
-                return Ok(());
-            }
-            if !self.wait_for_next_pass(interval) {
-                println!("  ⎿  Boucle arrêtée");
-                return Ok(());
-            }
+        if minutes * 60 != interval.as_secs() {
+            println!(
+                "  ⎿  {dim}Intervalle arrondi à {} (pas d'une expression cron){reset}",
+                format_interval(Duration::from_secs(minutes * 60))
+            );
+        }
+        self.run_turn(&request)?;
+        if self.last_turn_interrupted {
+            println!("  ⎿  Boucle arrêtée");
+            return Ok(());
+        }
+        if max <= 1 {
+            return Ok(());
+        }
+        match runtime::cron::create_loop(&cron, &request, u32::try_from(max - 1).ok()) {
+            Ok(task) => println!(
+                "  ⎿  {dim}Boucle {} · prochain passage à {} · la saisie reste libre entre les passages{reset}",
+                task.id,
+                runtime::cron::format_local(task.next_run)
+            ),
+            Err(error) => eprintln!("{}", render_cli_error(&error)),
         }
         Ok(())
-    }
-
-    /// Attente entre deux passages de `/loop` ; `false` si Échap ou Ctrl+C l'a
-    /// interrompue. Le texte tapé pendant l'attente est gardé.
-    fn wait_for_next_pass(&mut self, interval: Duration) -> bool {
-        runtime::interrupt::clear_interrupt();
-        let keys = turn_keys::TurnKeyListener::start();
-        let deadline = Instant::now() + interval;
-        live::start("Prochain passage…");
-        let completed = loop {
-            if runtime::interrupt::interrupt_requested() {
-                break false;
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                break true;
-            }
-            let left = deadline - now;
-            live::show(&format!(
-                "Prochain passage dans {} · Échap pour arrêter la boucle",
-                format_elapsed(left)
-            ));
-            thread::sleep(left.min(Duration::from_millis(200)));
-        };
-        live::stop();
-        let typed = keys.finish();
-        self.typeahead.lines.extend(typed.lines);
-        if !typed.partial.is_empty() {
-            self.typeahead.partial = typed.partial;
-        }
-        runtime::interrupt::clear_interrupt();
-        completed
     }
 
     fn run_internal_prompt_text_with_progress(

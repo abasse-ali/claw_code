@@ -7,6 +7,7 @@ pub mod claude_skills;
 mod compact;
 mod config;
 mod conversation;
+pub mod cron;
 mod edge_cases;
 pub mod editor;
 mod file_ops;
