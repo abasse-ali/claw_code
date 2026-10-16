@@ -192,8 +192,13 @@ impl SystemPromptBuilder {
         sections.push(get_actions_section());
         sections.push(SYSTEM_PROMPT_DYNAMIC_BOUNDARY.to_string());
         sections.push(self.environment_section());
+        // `includeGitInstructions: false` : ni consignes git ni état du dépôt.
+        let include_git = self
+            .config
+            .as_ref()
+            .is_none_or(crate::settings::include_git_instructions);
         if let Some(project_context) = &self.project_context {
-            sections.push(render_project_context(project_context));
+            sections.push(render_project_context(project_context, include_git));
             if !project_context.instruction_files.is_empty() {
                 sections.push(render_instruction_files(&project_context.instruction_files));
             }
@@ -208,6 +213,11 @@ impl SystemPromptBuilder {
         }
         if let Some(config) = &self.config {
             sections.push(render_config_section(config));
+            if include_git {
+                sections.push(crate::settings::git_instructions_section(
+                    &crate::settings::attribution(config),
+                ));
+            }
             match config.language() {
                 Some(language) => sections.push(render_language_section(language)),
                 // Sans réglage : la langue dans laquelle l'utilisateur écrit.
@@ -412,7 +422,7 @@ fn read_git_output(cwd: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn render_project_context(project_context: &ProjectContext) -> String {
+fn render_project_context(project_context: &ProjectContext, include_git: bool) -> String {
     let mut lines = vec!["# Project context".to_string()];
     let mut bullets = vec![
         format!("Today's date is {}.", project_context.current_date),
@@ -425,12 +435,12 @@ fn render_project_context(project_context: &ProjectContext) -> String {
         ));
     }
     lines.extend(prepend_bullets(bullets));
-    if let Some(status) = &project_context.git_status {
+    if let Some(status) = project_context.git_status.as_ref().filter(|_| include_git) {
         lines.push(String::new());
         lines.push("Git status snapshot:".to_string());
         lines.push(status.clone());
     }
-    if let Some(diff) = &project_context.git_diff {
+    if let Some(diff) = project_context.git_diff.as_ref().filter(|_| include_git) {
         lines.push(String::new());
         lines.push("Git diff snapshot:".to_string());
         lines.push(diff.clone());

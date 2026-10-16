@@ -91,6 +91,11 @@ const FOREIGN_KEYS: &[&str] = &[
     "statusLine",
     "outputStyle",
     "claudeMdExcludes",
+    "attribution",
+    "includeCoAuthoredBy",
+    "includeGitInstructions",
+    "cleanupPeriodDays",
+    "companyAnnouncements",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +103,10 @@ pub struct RuntimeConfig {
     merged: BTreeMap<String, JsonValue>,
     loaded_entries: Vec<ConfigEntry>,
     feature_config: RuntimeFeatureConfig,
+    /// Réglage `env` après les exclusions des fichiers de projet.
+    env_vars: BTreeMap<String, String>,
+    /// Variables du réglage `env` qu'un fichier de projet ne peut pas fixer.
+    ignored_env: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -407,6 +416,8 @@ impl ConfigLoader {
         let mut loaded_entries = Vec::new();
         let mut mcp_servers = BTreeMap::new();
         let mut permission_rules = RuntimePermissionRuleConfig::default();
+        let mut env_vars = BTreeMap::new();
+        let mut ignored_env = Vec::new();
 
         for entry in self.discover() {
             let value = if entry.foreign {
@@ -422,6 +433,9 @@ impl ConfigLoader {
             };
             merge_mcp_servers(&mut mcp_servers, entry.source, &value, &entry.path)?;
             merge_permission_rules(&mut permission_rules, &value, &entry.path)?;
+            if !entry.foreign {
+                crate::settings::merge_env(&mut env_vars, &mut ignored_env, entry.source, &value);
+            }
             deep_merge_objects(&mut merged, &value);
             loaded_entries.push(entry);
         }
@@ -487,6 +501,8 @@ impl ConfigLoader {
             merged,
             loaded_entries,
             feature_config,
+            env_vars,
+            ignored_env,
         })
     }
 }
@@ -498,7 +514,22 @@ impl RuntimeConfig {
             merged: BTreeMap::new(),
             loaded_entries: Vec::new(),
             feature_config: RuntimeFeatureConfig::default(),
+            env_vars: BTreeMap::new(),
+            ignored_env: Vec::new(),
         }
+    }
+
+    /// Variables du réglage `env` à appliquer (voir `settings::apply_env`).
+    #[must_use]
+    pub fn env_vars(&self) -> &BTreeMap<String, String> {
+        &self.env_vars
+    }
+
+    /// Variables du réglage `env` ignorées : un fichier de projet ne peut pas
+    /// les fixer.
+    #[must_use]
+    pub fn ignored_env(&self) -> &[String] {
+        &self.ignored_env
     }
 
     #[must_use]

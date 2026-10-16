@@ -33,6 +33,7 @@ pub mod security_guidance;
 pub mod skills;
 pub use bash::stop_all_containers;
 mod session;
+pub mod settings;
 pub mod team;
 pub mod typography;
 mod usage;

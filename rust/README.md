@@ -1014,6 +1014,31 @@ Claw lit aussi `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` 
 - **`/memory`** liste les fichiers chargés (imports compris), les règles par chemin et les imports
   externes en attente ; `/memory imports allow|deny` décide pour le projet.
 
+**Réglages généraux** (mêmes noms que dans Claude Code ; sauf `env`, ils sont aussi lus depuis
+`.claude/settings.json`) :
+
+- **`env`** : variables d'environnement appliquées au démarrage, pour Claw et tout ce qu'il lance
+  (bash, hooks, serveurs MCP). Une valeur du réglage remplace celle du shell ; `""` la vide.
+  Un fichier de projet (`.claw/settings.json`, `.claw/settings.local.json`) ne peut pas fixer
+  les clés et adresses des fournisseurs (`*_API_KEY`, `*_TOKEN`, `*_BASE_URL`, proxys),
+  `PATH`, `HOME`, les dossiers temporaires ou système : un dépôt cloné ne doit pas pouvoir
+  envoyer vos clés ailleurs. Mettez-les dans `~/.claw/settings.json` ou le shell ;
+  `/config env` liste celles qui ont été ignorées.
+- **`attribution`** : texte ajouté à la fin des commits (`commit`, par défaut
+  `Assisted-by: Claw Code`) et des descriptions de PR (`pr`, par défaut `Generated with Claw Code`) ;
+  `""` retire l'un, `"attribution": false` retire les deux. L'ancien `includeCoAuthoredBy: false`
+  est toujours compris. `/commit`, `/commit-push-pr` et `/pr` l'ajoutent eux-mêmes ; quand le
+  modèle fait un commit sans cette ligne, Claw le lui signale pour qu'il corrige le commit
+  avant de le pousser. Vos consignes (`CLAW.md`, `CLAUDE.md`) l'emportent.
+- **`includeGitInstructions: false`** (ou `CLAW_DISABLE_GIT_INSTRUCTIONS=1`) retire du prompt
+  les consignes de commit et de PR et l'état git du dépôt, par exemple si vos propres skills
+  gèrent git.
+- **`cleanupPeriodDays`** : au début d'une session, les sessions et points de restauration du
+  projet plus anciens que ce nombre de jours sont supprimés. Sans ce réglage, Claw garde tout
+  (Claude Code, lui, supprime au bout de 30 jours par défaut).
+- **`companyAnnouncements`** : annonces de l'équipe ; l'une d'elles, prise au hasard, s'affiche
+  au démarrage.
+
 **Compétences (skills)** : un dossier `<nom>/SKILL.md` placé dans `.claude/skills/` (ou
 `.claw/skills/`, `.codex/skills/`) du projet, d'un dossier parent ou du dossier personnel. Claw
 donne au modèle le nom et la description de chacune (40 au plus) ; quand une demande y

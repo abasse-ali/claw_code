@@ -120,6 +120,7 @@ fn main() {
     ensure_home_env();
     // Clés définies dans le compte mais absentes de l'environnement reçu.
     user_env::adopt();
+    apply_settings_env();
     let result = run();
     // Les serveurs de dev et autres commandes de fond ne survivent pas à Claw.
     runtime::bash_tasks::kill_all();
@@ -129,6 +130,26 @@ fn main() {
         eprintln!("{}", render_cli_error(&error.to_string()));
         std::process::exit(1);
     }
+}
+
+/// Réglage `env` des fichiers de config (`~/.claw/settings.json`,
+/// `.claw/settings.json`…), appliqué avant le démarrage des autres threads.
+fn apply_settings_env() {
+    let Ok(cwd) = env::current_dir() else {
+        return;
+    };
+    if let Ok(config) = ConfigLoader::default_for(&cwd).load() {
+        runtime::settings::apply_env(&config);
+    }
+}
+
+/// Réglages `attribution` et `includeCoAuthoredBy` du projet courant.
+fn current_attribution() -> runtime::settings::Attribution {
+    let config = env::current_dir()
+        .ok()
+        .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok())
+        .unwrap_or_else(runtime::RuntimeConfig::empty);
+    runtime::settings::attribution(&config)
 }
 
 /// La config utilisateur (`~/.claw`), les sessions et les skills se basent sur
@@ -2343,6 +2364,13 @@ impl LiveCli {
             transcript::clip(&self.model, room)
         ));
         let mut lines = transcript::boxed(&rows, width, accent);
+        if let Some(announcement) = cwd
+            .as_ref()
+            .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok())
+            .and_then(|config| runtime::settings::company_announcement(&config))
+        {
+            lines.push(format!(" {accent}※{reset} {announcement}"));
+        }
         lines.push(String::new());
         if has_claw_md {
             lines.push(format!(
@@ -3947,6 +3975,7 @@ impl LiveCli {
         if message.trim().is_empty() {
             return Err("le message de commit généré est vide".into());
         }
+        let message = runtime::settings::with_attribution(&message, &current_attribution().commit);
 
         let path = write_temp_text_file("claw-commit-message.txt", &message)?;
         let output = Command::new("git")
@@ -4126,6 +4155,7 @@ impl LiveCli {
                 draft.clone(),
             )
         });
+        let body = runtime::settings::with_attribution(&body, &current_attribution().pr);
         if command_exists("gh") {
             let body_path = write_temp_text_file("claw-pr-body.md", &body)?;
             let output = Command::new("gh")
@@ -4168,6 +4198,7 @@ impl LiveCli {
         let draft = sanitize_generated_message(&self.run_internal_prompt_text(&prompt, false)?);
         let (title, body) = parse_titled_body(&draft)
             .ok_or_else(|| "titre ou corps de PR généré illisible".to_string())?;
+        let body = runtime::settings::with_attribution(&body, &current_attribution().pr);
 
         if command_exists("gh") {
             let body_path = write_temp_text_file("claw-pr-body.md", &body)?;
@@ -4229,11 +4260,29 @@ fn sessions_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(path)
 }
 
+/// `cleanupPeriodDays` : sessions et points de restauration du projet plus
+/// anciens que ce nombre de jours supprimés au début d'une session. Sans ce
+/// réglage, Claw garde tout.
+fn sweep_old_sessions(current: &str) {
+    let Ok(cwd) = env::current_dir() else {
+        return;
+    };
+    let Some(days) = ConfigLoader::default_for(&cwd)
+        .load()
+        .ok()
+        .and_then(|config| runtime::settings::cleanup_period_days(&config))
+    else {
+        return;
+    };
+    let _removed = runtime::settings::sweep_old_sessions(&cwd.join(".claw"), days, Some(current));
+}
+
 fn create_managed_session_handle() -> Result<SessionHandle, Box<dyn std::error::Error>> {
     let id = generate_session_id();
     let path = sessions_dir()?.join(format!("{id}.json"));
     let handle = SessionHandle { id, path };
     activate_checkpoints(&handle);
+    sweep_old_sessions(&handle.id);
     Ok(handle)
 }
 
@@ -5535,6 +5584,12 @@ fn render_config_report(section: Option<&str>) -> Result<String, Box<dyn std::er
                 None => "<non défini>".to_string(),
             }
         ));
+        if section == "env" && !runtime_config.ignored_env().is_empty() {
+            lines.push(format!(
+                "  Ignorées          {} (un fichier de projet ne peut pas les fixer : ~/.claw/settings.json ou le shell)",
+                runtime_config.ignored_env().join(", ")
+            ));
+        }
         return Ok(lines.join(
             "
 ",

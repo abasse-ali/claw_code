@@ -1004,8 +1004,21 @@ fn from_value<T: for<'de> Deserialize<'de>>(input: &Value) -> Result<T, String> 
 }
 
 fn run_bash(input: BashCommandInput) -> Result<String, String> {
-    serde_json::to_string_pretty(&execute_bash(input).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())
+    let watch = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| runtime::settings::CommitWatch::start(&input.command, &cwd));
+    let output =
+        serde_json::to_string_pretty(&execute_bash(input).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    Ok(
+        match watch
+            .as_ref()
+            .and_then(runtime::settings::CommitWatch::note)
+        {
+            Some(note) => format!("{output}\n\n{note}"),
+            None => output,
+        },
+    )
 }
 
 #[allow(clippy::needless_pass_by_value)]
