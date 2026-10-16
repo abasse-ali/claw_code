@@ -1010,12 +1010,13 @@ fn run_read_file(input: ReadFileInput) -> Result<String, String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_write_file(input: WriteFileInput) -> Result<String, String> {
-    to_pretty_json(write_file(&input.path, &input.content).map_err(io_to_string)?)
+    let output = to_pretty_json(write_file(&input.path, &input.content).map_err(io_to_string)?)?;
+    Ok(with_security_note(output, &input.path, &input.content))
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_edit_file(input: EditFileInput) -> Result<String, String> {
-    to_pretty_json(
+    let output = to_pretty_json(
         edit_file(
             &input.path,
             &input.old_string,
@@ -1023,7 +1024,17 @@ fn run_edit_file(input: EditFileInput) -> Result<String, String> {
             input.replace_all.unwrap_or(false),
         )
         .map_err(io_to_string)?,
-    )
+    )?;
+    Ok(with_security_note(output, &input.path, &input.new_string))
+}
+
+/// Motif risqué dans le texte écrit (injection, `eval`, secret…) : remarque
+/// du garde-fou de sécurité après le résultat, gardée telle quelle pour le modèle.
+fn with_security_note(output: String, path: &str, written: &str) -> String {
+    match runtime::security_guidance::review_write(path, written) {
+        Some(note) => format!("{output}\n\n{note}"),
+        None => output,
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]

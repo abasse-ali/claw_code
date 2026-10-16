@@ -80,6 +80,9 @@ pub enum ExpertCommand {
     Adr,
     Fix,
     Avis,
+    SecurityReview,
+    CodeReview,
+    PrComments,
 }
 
 impl ExpertCommand {
@@ -92,6 +95,9 @@ impl ExpertCommand {
             Self::Adr => "adr",
             Self::Fix => "fix",
             Self::Avis => "avis",
+            Self::SecurityReview => "security-review",
+            Self::CodeReview => "code-review",
+            Self::PrComments => "pr-comments",
         }
     }
 
@@ -103,6 +109,9 @@ impl ExpertCommand {
             "adr" => Some(Self::Adr),
             "fix" => Some(Self::Fix),
             "avis" | "consult" => Some(Self::Avis),
+            "security-review" | "securite" | "sécurité" => Some(Self::SecurityReview),
+            "code-review" | "ultrareview" | "revue-multi" => Some(Self::CodeReview),
+            "pr-comments" | "commentaires-pr" => Some(Self::PrComments),
             _ => None,
         }
     }
@@ -425,6 +434,38 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         category: SlashCommandCategory::Engineering,
     },
     SlashCommandSpec {
+        name: "security-review",
+        aliases: &["securite", "sécurité"],
+        summary: "Revue de sécurité des changements : failles exploitables, faux positifs écartés",
+        argument_hint: Some("[fichiers|branche|commit]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Engineering,
+    },
+    SlashCommandSpec {
+        name: "code-review",
+        aliases: &["ultrareview", "revue-multi"],
+        summary: "Revue multi-agents : relecteurs en parallèle, chaque problème vérifié avant d'être rapporté",
+        argument_hint: Some("[fichiers|branche|commit|PR n°]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Engineering,
+    },
+    SlashCommandSpec {
+        name: "pr-comments",
+        aliases: &["commentaires-pr"],
+        summary: "Commentaires d'une pull request GitHub (gh), regroupés, avec les corrections proposées",
+        argument_hint: Some("[numéro de PR]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Engineering,
+    },
+    SlashCommandSpec {
+        name: "install-github-action",
+        aliases: &["install-github-app"],
+        summary: "Installe Claw dans GitHub : @claw dans les commentaires et revue des PR (modèles gratuits)",
+        argument_hint: Some("[assistant|review|all]"),
+        resume_supported: true,
+        category: SlashCommandCategory::Automation,
+    },
+    SlashCommandSpec {
         name: "teleport",
         aliases: &[],
         summary: "Saute à un fichier ou symbole en cherchant dans l'espace de travail",
@@ -577,6 +618,9 @@ pub enum SlashCommand {
     Schedule {
         args: Option<String>,
     },
+    InstallGithubAction {
+        args: Option<String>,
+    },
     Branch {
         action: Option<String>,
         target: Option<String>,
@@ -715,6 +759,9 @@ impl SlashCommand {
                 args: remainder_after_command(trimmed, command),
             },
             "schedule" | "routines" | "routine" => Self::Schedule {
+                args: remainder_after_command(trimmed, command),
+            },
+            "install-github-action" | "install-github-app" => Self::InstallGithubAction {
                 args: remainder_after_command(trimmed, command),
             },
             "branch" => Self::Branch {
@@ -2290,6 +2337,7 @@ pub fn handle_slash_command(
         | SlashCommand::Loop { .. }
         | SlashCommand::OutputStyle { .. }
         | SlashCommand::Schedule { .. }
+        | SlashCommand::InstallGithubAction { .. }
         | SlashCommand::Branch { .. }
         | SlashCommand::Bughunter { .. }
         | SlashCommand::Worktree { .. }
@@ -2740,8 +2788,11 @@ mod tests {
         assert!(help.contains("/schedule [list|<horaire> <demande>|delete <nom>]"));
         assert!(help.contains("/btw"));
         assert!(help.contains("/goal"));
-        assert_eq!(slash_command_specs().len(), 53);
-        assert_eq!(resume_supported_slash_commands().len(), 17);
+        assert!(help.contains("/security-review [fichiers|branche|commit]"));
+        assert!(help.contains("/code-review [fichiers|branche|commit|PR n°]"));
+        assert!(help.contains("/install-github-action [assistant|review|all]"));
+        assert_eq!(slash_command_specs().len(), 57);
+        assert_eq!(resume_supported_slash_commands().len(), 18);
     }
 
     #[test]

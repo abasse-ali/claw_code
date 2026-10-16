@@ -284,6 +284,20 @@ correction jusqu'au vert, jamais de test affaibli pour passer) et méthode d'arc
 | `/adr <décision>` | Rédige un ADR numéroté dans `docs/adr/` |
 | `/fix [commande]` | Lance les tests et corrige jusqu'à ce qu'ils passent |
 | `/avis <question>` | Second avis : la question est posée à plusieurs autres modèles, l'agent compare et tranche |
+| `/security-review [cible]` | Revue de sécurité des changements : failles exploitables seulement (injection, autorisations, secrets, désérialisation, XSS, SSRF, workflows GitHub), chaque piste remontée de la source à l'usage dangereux puis mise à l'épreuve ; seules les failles jugées sûres à 8/10 au moins sont rapportées |
+| `/code-review [cible\|n° de PR]` | Revue multi-agents, l'équivalent local et gratuit de la revue multi-agents de Claude Code : quatre relecteurs en parallèle (bugs, sécurité, erreurs et performances, tests et maintenabilité), puis chaque problème est vérifié dans le code et classé confirmé, plausible ou rejeté. `/code-review 42` relit la PR n° 42 (`gh pr diff`) |
+| `/pr-comments [n°]` | Commentaires d'une pull request (avec `gh`), regroupés par fichier et par fil, avec une correction proposée pour chaque point encore ouvert |
+
+**Garde-fou de sécurité à l'écriture** (l'équivalent du plugin `security-guidance` de Claude
+Code, inclus d'office) : quand l'agent écrit ou modifie un fichier avec un motif risqué, le
+résultat de l'écriture porte une remarque qui lui demande de corriger ou de justifier. Motifs
+suivis : expression `${{ github.event… }}` dans un workflow GitHub, `exec`/`execSync` avec une
+commande composée, `new Function`, `eval`, `dangerouslySetInnerHTML`, `document.write`,
+`innerHTML`, `pickle.load`, `os.system`, `subprocess(..., shell=True)`, `yaml.load` sans
+`SafeLoader`, requête SQL composée par concaténation ou f-string, vérification TLS coupée, secret
+en clair (clés AWS, GitHub, OpenRouter, Anthropic, Slack, clés privées). Une règle n'est signalée
+qu'une fois par fichier et par session ; l'écriture a lieu dans tous les cas.
+`"securityGuidance": false` dans les réglages ou `CLAW_SECURITY_GUIDANCE=0` le désactivent.
 
 L'outil `Agent` délègue à des sous-agents **synchrones** qui renvoient leur rapport :
 `architect`, `reviewer`, `auditor` (lecture seule), `tester` (corrige), `Explore`, `Plan`,
@@ -1051,8 +1065,13 @@ coupe cet import.
 - `claw review-replay DEMANDE DIFF RÉPONSE` rejoue la relecture par un autre modèle sur un
   travail enregistré (trois fichiers texte), sans outil : une requête. Le banc d'essais réels
   s'en sert pour comparer deux formulations de la relecture sur le même travail.
-- **GitHub** : l'action `.github/actions/claw` et un exemple de workflow « `@claw` dans un
-  commentaire » sont décrits dans [`docs/github-action.md`](docs/github-action.md).
+- **GitHub** : `/install-github-action` (alias `/install-github-app`) écrit dans le dépôt deux
+  workflows qui utilisent un modèle gratuit : `claw-assistant.yml` (un membre du dépôt écrit
+  `@claw …` dans une issue ou une PR ; Claw répond et ouvre une PR, ou pousse sur la branche de
+  la PR commentée) et `claw-review.yml` (revue en lecture seule de chaque PR, publiée dans un
+  commentaire mis à jour à chaque poussée). `/install-github-action assistant` ou `review` pour
+  un seul, `--force` pour remplacer les fichiers existants. L'action `.github/actions/claw` est
+  décrite dans [`docs/github-action.md`](docs/github-action.md).
 - **VS Code** : l'extension `editors/vscode` (paquet `claw-code-0.3.0.vsix`, à installer avec
   « Extensions : installer depuis VSIX… ») ouvre l'agent dans un panneau (`Ctrl+Alt+K`), envoie la
   sélection (`Ctrl+Alt+L`) ou le fichier courant.

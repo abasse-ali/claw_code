@@ -5,6 +5,7 @@ mod bench_hard;
 mod clipboard;
 mod credits;
 mod doctor;
+mod github_setup;
 mod image_reader;
 mod init;
 mod input;
@@ -1847,6 +1848,10 @@ fn run_resume_command(
             session: session.clone(),
             message: Some(run_schedule_command(args.as_deref(), &default_model())),
         }),
+        SlashCommand::InstallGithubAction { args } => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some(run_install_github_action(args.as_deref(), &default_model())),
+        }),
         SlashCommand::Bughunter { .. }
         | SlashCommand::Btw { .. }
         | SlashCommand::Recap
@@ -2752,6 +2757,13 @@ impl LiveCli {
             }
             SlashCommand::Schedule { args } => {
                 println!("{}", run_schedule_command(args.as_deref(), &self.model));
+                false
+            }
+            SlashCommand::InstallGithubAction { args } => {
+                println!(
+                    "{}",
+                    run_install_github_action(args.as_deref(), &self.model)
+                );
                 false
             }
             SlashCommand::Model { model } => self.set_model(model)?,
@@ -4298,6 +4310,28 @@ fn run_schedule_command(args: Option<&str>, model: &str) -> String {
             }
             Err(error) => error,
         },
+    }
+}
+
+/// `/install-github-action [assistant|review|all] [--force]` : workflows
+/// `@claw` et revue des pull requests, avec un modèle gratuit.
+fn run_install_github_action(args: Option<&str>, model: &str) -> String {
+    let request = match github_setup::parse_request(args) {
+        Ok(request) => request,
+        Err(error) => return error,
+    };
+    let Ok(repo) = find_git_root() else {
+        return "Lancez /install-github-action dans un dépôt git hébergé sur GitHub.".to_string();
+    };
+    let repo = PathBuf::from(
+        repo.display()
+            .to_string()
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
+    let model = routines::routine_model(model);
+    match github_setup::install(&repo, &request, &routine_action(), &model) {
+        Ok(outcomes) => github_setup::render_report(&outcomes, &model),
+        Err(error) => format!("installation impossible : {error}"),
     }
 }
 
@@ -6070,9 +6104,68 @@ fn expert_command_prompt(command: ExpertCommand, args: Option<&str>) -> Result<S
             );
             format!("/fix - {command}\n\n{}", role("tester"))
         }
+        ExpertCommand::SecurityReview => {
+            let target = args.unwrap_or(
+                "the current uncommitted changes (`git diff` and `git diff --staged`), or the latest commit if the working tree is clean",
+            );
+            format!("/security-review - Perform a security review of {target}.\n\n{SECURITY_REVIEW_INSTRUCTIONS}")
+        }
+        ExpertCommand::CodeReview => {
+            let target = args.map_or_else(
+                || "the current uncommitted changes (`git diff` and `git diff --staged`), or the latest commit if the working tree is clean".to_string(),
+                |target| {
+                    let number = target.trim_start_matches('#');
+                    if !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()) {
+                        format!("pull request #{number} (`gh pr diff {number}`)")
+                    } else {
+                        target.to_string()
+                    }
+                },
+            );
+            format!(
+                "/code-review - Multi-agent code review of {target}.\n\n{CODE_REVIEW_INSTRUCTIONS}"
+            )
+        }
+        ExpertCommand::PrComments => {
+            let number = args.map(|value| value.trim_start_matches('#').to_string());
+            let target = number.as_deref().map_or_else(
+                || "the pull request of the current branch".to_string(),
+                |number| format!("pull request #{number}"),
+            );
+            let view = number.map_or_else(
+                || "gh pr view --json number,title,url,reviews,comments".to_string(),
+                |number| format!("gh pr view {number} --json number,title,url,reviews,comments"),
+            );
+            format!(
+                "/pr-comments - Collect the review comments of {target} with the GitHub CLI: `{view}`, then the inline review comments with `gh api repos/OWNER/REPO/pulls/NUMBER/comments` (`gh repo view --json nameWithOwner` gives OWNER/REPO). If `gh` is missing or not logged in, say how to fix it (install it, then `gh auth login`) and stop.\n\nThen summarize: group the comments by file and by thread, give each reviewer's point briefly with file:line, say which ones look already addressed by the current code, and for each open point propose a concrete change. Do not modify any file; end by asking which points I want you to address."
+            )
+        }
     };
     Ok(format!("{prompt}{LANGUAGE_NOTE}"))
 }
+
+/// Consignes de `/security-review`, reprises de la revue de sécurité de Claude Code.
+const SECURITY_REVIEW_INSTRUCTIONS: &str = "Look only for security vulnerabilities that these changes introduce or touch and that an attacker could realistically exploit:
+- injection: SQL, shell commands, templates, LDAP, path traversal, unsafe file names;
+- authentication and authorization: missing checks, privilege escalation, insecure direct object references, session handling;
+- secrets and sensitive data: keys or tokens in code or logs, data exposed in responses or errors;
+- unsafe deserialization, `eval`-like execution, server-side request forgery, XML external entities;
+- cross-site scripting and unsafe HTML, open redirects;
+- weak or misused cryptography (hard-coded keys, disabled certificate checks, predictable randomness for secrets);
+- CI/CD: GitHub Actions expressions with untrusted event data inside `run:` scripts, overly broad token permissions.
+
+Do not report: denial of service or resource exhaustion, missing rate limiting, generic hardening advice without a concrete exploit, issues only in tests or documentation, outdated dependencies without a reachable known vulnerability, memory-safety issues in memory-safe code, theoretical race conditions.
+
+Method: understand the context first (frameworks, existing validation and sanitizers). For each candidate, trace the untrusted input from its source to the dangerous sink, then try to disprove the finding: is the input really attacker-controlled, is it validated upstream, is the code reachable? Keep only findings you rate at least 8/10 in confidence.
+
+Report each finding with: title, severity (high, medium or low), confidence, file:line, a concrete exploit scenario (input and impact) and the fix. If nothing passes the bar, say that no high-confidence vulnerability was found and list what you checked. Do not modify any file; end by asking which findings I want you to fix.";
+
+/// Consignes de `/code-review` : relecteurs en parallèle puis vérification,
+/// l'équivalent local et gratuit de la revue multi-agents de Claude Code.
+const CODE_REVIEW_INSTRUCTIONS: &str = "1. Scope: get the diff (the target above; `git diff` and `git diff --staged` by default; `gh pr diff N` for a pull request) and list the changed files. If there is nothing to review, say so and stop.
+2. Parallel review: in a single message, call the Agent tool four times with subagent_type \"reviewer\" so the four reviews run at the same time. Sub-agents do not see this conversation: give each one the command that shows the diff and the list of changed files, and one focus: (a) correctness bugs and regressions; (b) security (injection, secrets, authorization, unsafe input); (c) error handling, resource leaks, concurrency and performance; (d) tests and maintainability (changed behavior without tests, duplication, dead code). Ask each for at most 8 verified findings, each with severity, file:line, problem, failure scenario and fix, and no style nitpicks.
+3. Verification: merge duplicate findings. Check every finding of medium severity or above against the code yourself (for many findings, verify them in parallel with Agent calls of subagent_type \"Verification\"), and classify it CONFIRMED, PLAUSIBLE or REJECTED with the reason. Drop the rejected ones.
+4. Report: confirmed then plausible findings, most severe first, each with file:line, failure scenario and suggested fix; then one line with the verdict (ready to merge, or needs changes) and how many findings were rejected during verification. Do not modify any file; end by asking which findings I want you to fix.";
 
 const PLAN_MODE_PROMPT: &str = "# Plan mode
 - The session is in read-only plan mode: file edits and commands with side effects are denied.
@@ -9129,6 +9222,7 @@ mod tests {
                 "init",
                 "diff",
                 "version",
+                "install-github-action",
                 "export",
                 "copy",
                 "rename",
@@ -9219,6 +9313,34 @@ mod tests {
         let adr =
             expert_command_prompt(ExpertCommand::Adr, Some("utiliser PostgreSQL")).expect("adr");
         assert!(adr.contains("docs/adr/"));
+    }
+
+    #[test]
+    fn review_commands_name_their_scope_and_method() {
+        let security =
+            expert_command_prompt(ExpertCommand::SecurityReview, None).expect("security");
+        assert!(security.starts_with(
+            "/security-review - Perform a security review of the current uncommitted changes"
+        ));
+        assert!(security.contains("8/10") && security.contains("Do not report"));
+        assert!(security.contains("user's language"));
+
+        let multi = expert_command_prompt(ExpertCommand::CodeReview, Some("#42")).expect("multi");
+        assert!(
+            multi.contains("pull request #42 (`gh pr diff 42`)"),
+            "{multi}"
+        );
+        assert!(multi.contains("subagent_type \"reviewer\"") && multi.contains("CONFIRMED"));
+        let branch =
+            expert_command_prompt(ExpertCommand::CodeReview, Some("main..HEAD")).expect("branche");
+        assert!(branch.contains("review of main..HEAD."));
+
+        let comments =
+            expert_command_prompt(ExpertCommand::PrComments, Some("#7")).expect("comments");
+        assert!(comments.contains("pull request #7") && comments.contains("`gh pr view 7 --json"));
+        let current = expert_command_prompt(ExpertCommand::PrComments, None).expect("courante");
+        assert!(current.contains("the pull request of the current branch"));
+        assert!(current.contains("`gh pr view --json"));
     }
 
     #[test]

@@ -27,6 +27,7 @@ mod prompt;
 mod remote;
 pub mod repo_map;
 pub mod sandbox;
+pub mod security_guidance;
 pub use bash::stop_all_containers;
 mod session;
 pub mod team;

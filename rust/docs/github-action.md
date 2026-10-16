@@ -6,6 +6,11 @@ L'action `.github/actions/claw` lance l'agent sur une demande et renvoie sa rép
 `@claw …` dans une issue ou une pull request : il publie la réponse en commentaire
 et, si l'agent a modifié des fichiers, ouvre une pull request.
 
+Le plus simple : lancez `/install-github-action` dans `claw`, à la racine du dépôt. La commande
+écrit ce workflow (`claw-assistant.yml`, qui sait aussi travailler sur la branche d'une pull
+request commentée) et `claw-review.yml`, qui publie une revue de chaque pull request dans un
+commentaire mis à jour à chaque poussée. À la main :
+
 1. Ajoutez le secret `OPENROUTER_API_KEY` (Settings → Secrets and variables → Actions).
 2. Copiez ce fichier dans `.github/workflows/claw-assistant.yml`.
 
