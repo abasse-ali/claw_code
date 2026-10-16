@@ -17,7 +17,7 @@ from pathlib import Path
 
 import urllib.request
 
-from common import (ANSWER, ANSWERED, API, FILES_BRANCH, WORK, GitHubError, answered_up_to, api,
+from common import (ANSWER, ANSWERED, API, FILES_BRANCH, WORK, GitHubError, answer_marks, answered_up_to, api,
                     comments, images_of, kind_of, output, post_comment, run_url, settings, task_text)
 from on_github import STATE_FILE, describe, read_state
 
@@ -57,9 +57,22 @@ def git(*args, cwd="work", check=True):
 def conversation(issue, notes):
     """Le message à traiter (la tâche, ou les messages pas encore traités par une réponse,
     même arrivés pendant un passage), pour un suivi la conversation qui précède, les images
-    jointes au message traité et l'identifiant du dernier message traité."""
+    jointes au message traité, l'identifiant du dernier message traité et s'il s'agit d'une
+    relance.
+
+    Relance (« Relancer » sans nouveau message) : une nouvelle réponse au dernier lot de
+    messages traité, ou à la tâche. Elle porte la même marque que les réponses précédentes à
+    ce lot, que l'appli montre en pages ; elles restent hors de l'historique."""
     task, task_images = images_of(task_text(issue.get("body")))
-    answered = answered_up_to(notes)
+    marks = answer_marks(notes)
+    answered = max((mark for _, mark in marks if mark is not None), default=0)
+    fresh = any(kind_of(note.get("body")) == "message" and note["id"] > answered for note in notes)
+    retry = not fresh and any(mark is not None for _, mark in marks)
+    # Messages à traiter : ceux d'après la réponse au lot précédent pour une relance.
+    since = max((mark for _, mark in marks if mark is not None and mark < answered), default=0) if retry else answered
+    # Réponses gardées dans l'historique : ni les essais précédents d'une relance, ni les
+    # « La tâche n'a pas pu commencer » (rien de Claw).
+    kept = {note["id"] for note, mark in marks if mark is not None and not (retry and mark == answered)}
     exchanges, pending, images = [], [], []
     last = answered
     for note in notes:
@@ -69,10 +82,12 @@ def conversation(issue, notes):
             continue
         body, note_images = images_of(raw)
         if kind == "answer":
+            if note["id"] not in kept:
+                continue
             # Sans le pied de la réponse (lien de la pull request, du job), après le dernier `---`.
             text = ANSWERED.sub("", body.replace(ANSWER, "")).rsplit("\n---\n", 1)[0].strip()
             exchanges.append(("Your answer", text))
-        elif note["id"] > answered:
+        elif note["id"] > since:
             if body or note_images:
                 pending.append(body)
                 images.extend(note_images)
@@ -80,11 +95,10 @@ def conversation(issue, notes):
         elif body:
             exchanges.append(("Message", body))
     if not pending:
-        # Premier passage : la tâche elle-même. Relance sans nouveau message : la tâche
-        # encore (elle dit ce qu'on veut, mode projet compris), à reprendre où elle en est.
+        # Premier passage, ou relance de la tâche : la tâche elle-même (mode projet compris).
         if not exchanges:
-            return task, "", task_images, last
-        pending = [f"{task}\n\n(Relance : reprends cette tâche là où elle en est et termine-la.)"]
+            return task, "", task_images, last, retry
+        pending = [task]
         images = task_images
     history = [("Request", task), *exchanges]
     text = ""
@@ -95,7 +109,7 @@ def conversation(issue, notes):
             if len(text) + len(block) > HISTORY_MAX_CHARS:
                 break
         text = block + text
-    return "\n\n".join(pending), text.strip(), images, last
+    return "\n\n".join(pending), text.strip(), images, last, retry
 
 
 def already_answered(notes):
@@ -215,7 +229,7 @@ def main():
 
     # Les mots de l'utilisateur d'abord : Claw ne décide le mode projet que sur ce qui
     # précède la première ligne `[Claw]`.
-    request, history, images, processed = conversation(issue, notes)
+    request, history, images, processed, retry = conversation(issue, notes)
     # Pour la réponse : jusqu'où elle répond (les messages arrivés pendant le passage auront
     # le leur).
     (WORK / "answered.txt").write_text(str(processed), encoding="utf-8")
@@ -232,6 +246,12 @@ def main():
         request += (
             "\n\n[Claw] Earlier conversation of this session, for context (your earlier changes "
             "are already on the branch):\n\n" + history
+        )
+    if retry:
+        request += (
+            "\n\n[Claw] The user asked for a new answer to this message: your earlier attempts at it "
+            "are set aside and not shown, but the file changes they made, if any, are already on "
+            "the branch. Answer it again in full, from the current state of the repository."
         )
     request += (
         f"\n\n[Claw] You are working in the repository {REPO}, on the branch {branch} "

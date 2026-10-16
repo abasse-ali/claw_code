@@ -32,10 +32,11 @@ def kind_of(body):
     return "answer" if ANSWER in body else "message"
 
 
-def answered_up_to(notes):
-    """Identifiant du dernier message traité par une réponse. Une réponse sans marque (plus
-    ancienne) a traité les messages qui la précèdent."""
-    answered = last_message = 0
+def answer_marks(notes):
+    """Chaque réponse, dans l'ordre, avec l'identifiant du dernier message qu'elle a traité (0 :
+    la tâche seule ; None : « keep », la tâche n'a pas pu commencer et ne traite rien). Une
+    réponse sans marque (plus ancienne) a traité les messages qui la précèdent."""
+    marks, last_message = [], 0
     for note in notes:
         body = note.get("body") or ""
         kind = kind_of(body)
@@ -44,10 +45,15 @@ def answered_up_to(notes):
         elif kind == "answer":
             mark = ANSWERED.search(body)
             if mark is None:
-                answered = max(answered, last_message)
-            elif mark.group(1) != "keep":
-                answered = max(answered, int(mark.group(1)))
-    return answered
+                marks.append((note, last_message))
+            else:
+                marks.append((note, None if mark.group(1) == "keep" else int(mark.group(1))))
+    return marks
+
+
+def answered_up_to(notes):
+    """Identifiant du dernier message traité par une réponse."""
+    return max((mark for _, mark in answer_marks(notes) if mark is not None), default=0)
 SETTINGS = re.compile(r"<!--\s*claw-web\s+(\{.*?\})\s*-->", re.S)
 # Images jointes à un message par l'appli : chemins dans la branche FILES_BRANCH du moteur.
 IMAGES = re.compile(r"<!--\s*claw-web:images\s+(\[.*?\])\s*-->", re.S)

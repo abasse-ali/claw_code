@@ -28,4 +28,4 @@ jobs:
       - name: Essais
         run: |
           python3 -m py_compile *.py
-          RUNNER_TEMP="$RUNNER_TEMP" python3 -m unittest -v test_on_github
+          python3 -m unittest discover -v -p "test_*.py"

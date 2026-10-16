@@ -72,6 +72,8 @@ const state = {
   // Bloc ouvert dans le menu (« sessions » ou « files ») et dossier parcouru dans « Fichiers ».
   drawerPane: "sessions",
   explorer: null,
+  // Page montrée de chaque groupe de réponses relancées ({index, count}).
+  attemptPages: new Map(),
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -1339,15 +1341,102 @@ function journalOf(run) {
   return logs.sort((a, b) => a.page - b.page).flatMap((log) => log.events);
 }
 
-/** La réponse publiée du passage d'un commentaire de progression : la suivante avant le passage
- * d'après (des messages arrivés pendant le passage peuvent la précéder). */
-function answerAfter(comments, index) {
-  for (const comment of comments.slice(index + 1)) {
+/** La discussion en blocs : les messages de l'utilisateur et, pour chacun, les passages de Claw
+ * (progression et journal, puis réponse). Les passages d'un même message (« Relancer ») forment
+ * un groupe montré en pages. Une réponse complète le dernier passage resté sans réponse : un
+ * message envoyé pendant un passage peut la précéder. */
+function discussionBlocks(comments) {
+  const blocks = [];
+  let group = null;
+  let open = null;
+  const attempt = (entry) => {
+    if (!group) {
+      group = { attempts: [] };
+      blocks.push(group);
+    }
+    group.attempts.push(entry);
+    return entry;
+  };
+  for (const comment of comments) {
     const body = comment.body || "";
-    if (body.includes(PROGRESS)) return "";
-    if (kindOf(body) === "answer") return body;
+    if (body.startsWith(LOG)) continue;
+    if (body.includes(PROGRESS)) {
+      open = attempt({ progress: comment, answer: null });
+    } else if (kindOf(body) === "answer") {
+      if (open) open.answer = comment;
+      else attempt({ progress: null, answer: comment });
+      open = null;
+    } else {
+      blocks.push({ message: comment });
+      group = null;
+    }
   }
-  return "";
+  return blocks;
+}
+
+/** Les passages d'un message : un seul tel quel ; plusieurs (relances) en pages, du plus
+ * ancien au plus récent, la plus récente montrée, à feuilleter avec ‹ › ou d'un glissement. */
+function attemptsHtml(group, isLive) {
+  const parts = group.attempts.map((entry) => {
+    const answer = entry.answer ? entry.answer.body || "" : "";
+    return (entry.progress ? messageHtml(entry.progress, isLive(entry.progress), answer) : "")
+      + (entry.answer ? messageHtml(entry.answer, false) : "");
+  });
+  if (parts.length === 1) return parts[0];
+  const first = group.attempts[0];
+  const key = `attempts:${(first.progress || first.answer).id}`;
+  const count = parts.length;
+  const saved = state.attemptPages.get(key);
+  // Une nouvelle relance s'affiche d'elle-même ; sinon la page choisie reste.
+  const index = saved && saved.count === count ? saved.index : count - 1;
+  state.attemptPages.set(key, { index, count });
+  return `<div class="attempts" data-group="${escapeHtml(key)}">
+    <div class="attempts-bar">
+      <button class="attempt-step" data-step="-1" aria-label="Réponse précédente"${index === 0 ? " disabled" : ""}>${ICON.back}</button>
+      <span class="attempts-label">Réponse ${index + 1}/${count}</span>
+      <button class="attempt-step next" data-step="1" aria-label="Réponse suivante"${index === count - 1 ? " disabled" : ""}>${ICON.back}</button>
+    </div>
+    ${parts.map((part, at) => `<div class="attempt"${at === index ? "" : " hidden"}>${part}</div>`).join("")}
+  </div>`;
+}
+
+/** Montre la page voisine (`step` : -1 ou 1) d'un groupe de passages. */
+function showAttempt(container, step) {
+  const pages = [...container.querySelectorAll(":scope > .attempt")];
+  const key = container.dataset.group;
+  const saved = state.attemptPages.get(key) || { index: pages.length - 1 };
+  const index = Math.max(0, Math.min(pages.length - 1, saved.index + step));
+  if (index === saved.index) return;
+  state.attemptPages.set(key, { index, count: pages.length });
+  pages.forEach((page, at) => { page.hidden = at !== index; });
+  container.querySelector(".attempts-label").textContent = `Réponse ${index + 1}/${pages.length}`;
+  const [previous, next] = container.querySelectorAll(":scope > .attempts-bar .attempt-step");
+  previous.disabled = index === 0;
+  next.disabled = index === pages.length - 1;
+}
+
+/** Boutons ‹ › et glissement horizontal des groupes de passages. */
+function wireAttempts(view) {
+  for (const container of view.querySelectorAll(".attempts")) {
+    for (const button of container.querySelectorAll(":scope > .attempts-bar .attempt-step")) {
+      button.addEventListener("click", () => showAttempt(container, Number(button.dataset.step)));
+    }
+    let start = null;
+    container.addEventListener("touchstart", (event) => {
+      const touch = event.touches[0];
+      // Pas depuis ce qui défile lui-même de côté (code, tableaux, différences).
+      start = event.touches.length === 1 && !event.target.closest("pre, .table, .diff")
+        ? { x: touch.clientX, y: touch.clientY } : null;
+    }, { passive: true });
+    container.addEventListener("touchend", (event) => {
+      if (!start) return;
+      const touch = event.changedTouches[0];
+      const dx = touch.clientX - start.x;
+      const dy = touch.clientY - start.y;
+      start = null;
+      if (Math.abs(dx) > 60 && Math.abs(dx) > 2 * Math.abs(dy)) showAttempt(container, dx < 0 ? 1 : -1);
+    }, { passive: true });
+  }
 }
 
 function messageHtml(comment, isLastProgress, answer = "") {
@@ -1419,8 +1508,8 @@ function renderSessionView() {
       </header>
       <div class="messages">
         <article class="message user"><div class="who">${escapeHtml(session.issue.user ? session.issue.user.login : "Vous")}</div>${messageBody(taskOf(session.issue))}</article>
-        ${comments.map((comment, index) => messageHtml(comment, comment === lastProgress && !answered,
-          (comment.body || "").includes(PROGRESS) ? answerAfter(comments, index) : "")).join("")}
+        ${discussionBlocks(comments).map((block) => (block.message ? messageHtml(block.message, false)
+          : attemptsHtml(block, (comment) => comment === lastProgress && !answered))).join("")}
       </div>
       ${unsent ? `<div class="unsent">Ce message n'a pas encore été envoyé à Claw (aucun passage lancé depuis).
         <button class="small-link primary-link" data-action="retry">${ICON.retry}<span>Lancer le passage</span></button></div>` : ""}
@@ -1441,6 +1530,7 @@ function renderSessionView() {
   for (const details of view.querySelectorAll("details[data-key]")) {
     if (opened.has(details.dataset.key)) details.open = opened.get(details.dataset.key);
   }
+  wireAttempts(view);
   for (const retry of view.querySelectorAll('[data-action="retry"]')) {
     retry.addEventListener("click", async () => {
       // Un seul passage par appui : le bouton se désactive aussitôt (plusieurs appuis lançaient

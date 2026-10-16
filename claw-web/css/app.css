@@ -206,6 +206,17 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .message { padding: 12px 14px; border-radius: var(--radius); overflow-wrap: anywhere; }
 .message.user { background: var(--panel-2); align-self: flex-end; max-width: 92%; }
 .message.claw { background: transparent; border: 1px solid var(--border); }
+/* Réponses d'un même message (relances) : une page à la fois, ‹ › ou glissement. */
+.attempts, .attempt { display: flex; flex-direction: column; gap: 14px; }
+.attempt[hidden] { display: none; }
+.attempts-bar { display: flex; align-items: center; justify-content: center; gap: 12px; color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
+.attempt-step {
+  display: inline-grid; place-items: center; width: 34px; height: 34px; padding: 0; border-radius: 50%;
+  border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer;
+}
+.attempt-step:disabled { opacity: .35; cursor: default; }
+.attempt-step svg { width: 16px; height: 16px; }
+.attempt-step.next svg { transform: scaleX(-1); }
 .message .who { font-size: .78rem; color: var(--muted); margin-bottom: 4px; }
 .message p { margin: 0 0 .7em; }
 .message p:last-child { margin-bottom: 0; }

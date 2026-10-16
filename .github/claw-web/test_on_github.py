@@ -1,6 +1,6 @@
 """Essais de on_github.py et de la commande `claw-github`, avec une fausse API GitHub.
 
-    cd .github/claw-web && python -m unittest test_on_github
+    cd .github/claw-web && python -m unittest discover -p "test_*.py"
 """
 
 import io
