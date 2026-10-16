@@ -172,6 +172,11 @@ sombre ou claire (thème du système, de VS Code ou choisi) :
   confirmation ; la session en cours ne s'efface pas ;
 - diagrammes Mermaid à la demande ; commandes `/review`, `/audit`, `/archi`, `/adr`, `/fix`,
   `/models`, `/credits`, `/mcp`, `/cost`, `/compact`…
+- les commandes de travail continu et de revue marchent aussi dans la page : `/goal` et `/loop`
+  (le bouton Arrêter met en pause l'objectif ou arrête la boucle), `/btw`, `/recap`, `/copy`
+  (copie dans le presse-papiers du navigateur), `/rename`, `/output-style`, `/schedule`,
+  `/install-github-action`, `/security-review`, `/code-review`, `/pr-comments`, `/branch`,
+  `/worktree`, `/add-dir`, `/permissions allow|deny|ask|remove <règle>` ;
 
 Sécurité : écoute sur `127.0.0.1` uniquement (sauf `--host`), jeton secret aléatoire à chaque
 lancement exigé par toute l'API, contrôle des en-têtes `Host` et `Origin` (DNS rebinding,

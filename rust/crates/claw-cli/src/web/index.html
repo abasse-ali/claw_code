@@ -1923,6 +1923,12 @@
       case "question": addQuestion(event); break;
       case "question_resolved": resolveQuestion(event.id); break;
       case "info": finishAssistant(); addInfo(event.text); break;
+      case "copy":
+        finishAssistant();
+        copyText(event.text).then((ok) => addInfo(ok
+          ? "Réponse copiée dans le presse-papiers (" + event.text.length + " caractères)."
+          : "Copie refusée par le navigateur : sélectionnez la réponse pour la copier."));
+        break;
       case "notice": finishAssistant(); addNote(event.text); break;
       case "answer_drafted": markDraftAnswer(); break;
       case "answer_superseded": foldDraftAnswer(); break;

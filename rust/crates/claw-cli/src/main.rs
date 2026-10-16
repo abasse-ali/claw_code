@@ -6882,8 +6882,13 @@ fn edit_permission_rule(
             }
         }
     } else {
-        for list in ["allow", "deny", "ask"] {
-            if let Some(rules) = permissions[list].as_array_mut() {
+        // `get_mut` et non `permissions[list]` : l'indexation créerait une
+        // liste `null`, que la lecture de la config refuse ensuite.
+        for list in ["allow", "deny", "ask", "additionalDirectories"] {
+            if let Some(rules) = permissions
+                .get_mut(list)
+                .and_then(serde_json::Value::as_array_mut)
+            {
                 let before = rules.len();
                 rules.retain(|existing| existing.as_str() != Some(rule));
                 changed |= rules.len() != before;
@@ -9849,6 +9854,18 @@ mod tests {
                 .expect("absente")
                 .1
         );
+        // Retrait dans un fichier où des listes manquent : aucune liste `null` créée.
+        fs::write(
+            root.join(".claw").join("settings.local.json"),
+            r#"{"permissions":{"allow":["Bash(git status)"]}}"#,
+        )
+        .expect("réglages partiels");
+        let (path, removed) =
+            super::edit_permission_rule(&root, None, "Bash(git status)").expect("retrait");
+        assert!(removed);
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("relu")).expect("json");
+        assert_eq!(saved["permissions"], json!({ "allow": [] }));
         assert_eq!(
             super::parse_rule_command("deny  Bash(rm:*)"),
             Some((Some("deny"), "Bash(rm:*)"))

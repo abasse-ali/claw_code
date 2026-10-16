@@ -65,6 +65,10 @@ pub(crate) struct ServeOptions {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WebEvent {
+    /// `/copy` : texte à mettre dans le presse-papiers du navigateur.
+    Copy {
+        text: String,
+    },
     UserMessage {
         text: String,
         /// Heure d'envoi (millisecondes Unix) ; absente pour une session reprise.
@@ -346,7 +350,10 @@ impl WebApp {
             }
             // Pas rejoués à la reconnexion : la page relit /api/credits, et une
             // demande à l'éditeur ne vaut que sur le moment.
-            WebEvent::TurnDone | WebEvent::Credits { .. } | WebEvent::EditorSync { .. } => {}
+            WebEvent::TurnDone
+            | WebEvent::Credits { .. }
+            | WebEvent::EditorSync { .. }
+            | WebEvent::Copy { .. } => {}
             _ => view.transcript.push(event.clone()),
         }
         let _ = self.events.send(event);
@@ -664,6 +671,8 @@ struct Worker {
     system_prompt: Vec<String>,
     session: SessionHandle,
     runtime: WebRuntime,
+    /// Objectif de `/goal`, poursuivi d'un message à l'autre.
+    goal: Option<crate::GoalState>,
 }
 
 fn web_ui(app: &WebApp, mode: PermissionMode) -> RuntimeUi {
@@ -856,6 +865,7 @@ impl Worker {
                     });
                 }
                 self.run_turn_with_images(&text, images);
+                self.pursue_goal();
                 Ok(())
             }
             WorkerCommand::SetModel(model) => self.set_model(&model),
@@ -958,7 +968,94 @@ impl Worker {
                 self.runtime.session().messages.len(),
                 self.runtime.usage().turns(),
             )),
-            Some(SlashCommand::Permissions { mode: Some(mode) }) => self.set_permissions(&mode)?,
+            Some(SlashCommand::Permissions { mode: Some(mode) }) => {
+                match crate::parse_rule_command(&mode) {
+                    Some((list, rule)) => self.edit_rule(list, rule)?,
+                    None => self.set_permissions(&mode)?,
+                }
+            }
+            Some(SlashCommand::Btw { question }) => match question.as_deref().map(str::trim) {
+                Some(question) if !question.is_empty() => {
+                    let prompt = format!(
+                        "[Side question from the user, asked in passing. Answer it briefly from what you already know of this conversation and project, in the user's language. Do not use tools, do not continue or change the current task.]\n\n{question}"
+                    );
+                    let answer = self.side_answer(&prompt)?;
+                    self.info(format!("※ Aparté (hors conversation)\n\n{answer}"));
+                }
+                _ => self.info("Usage : /btw <question>"),
+            },
+            Some(SlashCommand::Recap) => {
+                let answer = self.side_answer("[The user asks for a recap of this session. In their language and in at most 12 short bullet points, say: what was asked, what was done (files changed, commands run and their results), what is still open, and the next step. Do not use tools and do not continue the work.]")?;
+                self.info(format!("※ Bilan de la session (hors conversation)\n\n{answer}"));
+            }
+            Some(SlashCommand::Copy { index }) => {
+                let replies = crate::assistant_replies(self.runtime.session());
+                let wanted = index
+                    .as_deref()
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(1)
+                    .max(1);
+                match replies.iter().rev().nth(wanted - 1) {
+                    Some(text) => self.app.publish(WebEvent::Copy {
+                        text: text.trim().to_string(),
+                    }),
+                    None => self.info("Aucune réponse à copier."),
+                }
+            }
+            Some(SlashCommand::Rename { title }) => {
+                let title = match title.as_deref().map(str::trim) {
+                    Some(title) if !title.is_empty() => title.to_string(),
+                    _ => self
+                        .side_answer("[Give this conversation a short title: 3 to 7 words, in the user's language, no quotes, no final period. Reply with the title only.]")?
+                        .lines()
+                        .map(|line| line.trim().trim_matches(['"', '«', '»', '*', '#', ' ']))
+                        .find(|line| !line.is_empty())
+                        .unwrap_or_default()
+                        .to_string(),
+                };
+                self.info(crate::rename_report(&self.session.id, Some(&title)));
+            }
+            Some(SlashCommand::Goal { args }) => self.goal_command(args.as_deref()),
+            Some(SlashCommand::Loop { args }) => self.loop_command(args.as_deref())?,
+            Some(SlashCommand::OutputStyle { args }) => {
+                let (report, changed) = crate::apply_output_style_command(args.as_deref())
+                    .map_err(|error| error.to_string())?;
+                if changed {
+                    self.system_prompt = build_system_prompt().map_err(|error| error.to_string())?;
+                    self.rebuild()?;
+                }
+                self.info(report);
+            }
+            Some(SlashCommand::Schedule { args }) => {
+                self.info(crate::run_schedule_command(args.as_deref(), &self.model));
+            }
+            Some(SlashCommand::InstallGithubAction { args }) => {
+                self.info(crate::run_install_github_action(args.as_deref(), &self.model));
+            }
+            Some(SlashCommand::AddDir { args }) => {
+                self.info(crate::run_add_dir_command(args.as_deref()));
+            }
+            Some(SlashCommand::Branch { action, target }) => {
+                let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+                self.info(crate::git_work::branch_command(
+                    &cwd,
+                    action.as_deref(),
+                    target.as_deref(),
+                ));
+            }
+            Some(SlashCommand::Worktree {
+                action,
+                path,
+                branch,
+            }) => {
+                let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+                self.info(crate::git_work::worktree_command(
+                    &cwd,
+                    action.as_deref(),
+                    path.as_deref(),
+                    branch.as_deref(),
+                ));
+            }
             Some(SlashCommand::Permissions { mode: None }) => self.info(format_permissions_report(
                 self.permission_mode.as_str(),
                 self.runtime.permission_policy().rules(),
@@ -1023,7 +1120,7 @@ impl Worker {
                 self.info(report);
             }
             Some(SlashCommand::Help) => self.info(format!(
-                "{}\n\nDans l'interface web : /review /audit /archi /adr /fix /undo /checkpoints /hooks /think /equipe /bashes /models /mcp /model /permissions /cost /compact /clear.\nLes autres commandes s'utilisent dans le terminal.\n\n{}",
+                "{}\n\nDans l'interface web : /review /audit /archi /adr /fix /security-review /code-review /pr-comments /goal /loop /btw /recap /copy /rename /output-style /schedule /install-github-action /add-dir /branch /worktree /undo /checkpoints /hooks /think /equipe /bashes /models /mcp /model /permissions /cost /compact /clear.\nLes autres commandes s'utilisent dans le terminal.\n\n{}",
                 render_slash_command_help(),
                 commands::render_custom_commands_help(
                     &std::env::current_dir().unwrap_or_default()
@@ -1059,6 +1156,217 @@ impl Worker {
         Ok(())
     }
 
+    /// Réponse du modèle hors conversation (sans outils, non gardée).
+    fn side_answer(&self, prompt: &str) -> Result<String, String> {
+        let mut runtime = crate::build_runtime(
+            self.runtime.session().clone(),
+            self.model.clone(),
+            self.system_prompt.clone(),
+            false,
+            false,
+            self.allowed_tools.clone(),
+            self.permission_mode,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        let summary = runtime
+            .run_turn(prompt, None)
+            .map_err(|error| error.to_string())?;
+        Ok(crate::final_assistant_text(&summary).trim().to_string())
+    }
+
+    /// `/permissions allow|deny|ask|remove <règle>`.
+    fn edit_rule(&mut self, list: Option<&str>, rule: &str) -> Result<(), String> {
+        if runtime::PermissionRule::parse(rule).is_none() {
+            self.info(format!("Règle illisible : {rule}"));
+            return Ok(());
+        }
+        let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+        let (path, changed) = crate::edit_permission_rule(&cwd, list, rule)?;
+        self.rebuild()?;
+        let action = match (list, changed) {
+            (Some(list), true) => format!("ajoutée à {list}"),
+            (Some(list), false) => format!("déjà dans {list}"),
+            (None, true) => "retirée".to_string(),
+            (None, false) => "absente de ce fichier".to_string(),
+        };
+        self.info(format!(
+            "Permissions · règle {rule} {action} ({})",
+            path.display()
+        ));
+        Ok(())
+    }
+
+    /// `/goal [condition|reprendre|clear]`, comme dans le terminal.
+    fn goal_command(&mut self, args: Option<&str>) {
+        let args = args.map(str::trim).filter(|args| !args.is_empty());
+        let Some(args) = args else {
+            self.info(crate::render_goal_status(self.goal.as_ref()));
+            return;
+        };
+        match crate::fold_command_word(args).as_str() {
+            "clear" | "stop" | "effacer" | "arreter" | "annuler" => {
+                let cleared = self.goal.take().is_some();
+                self.info(if cleared {
+                    "Objectif effacé"
+                } else {
+                    "Aucun objectif en cours"
+                });
+            }
+            "reprendre" | "resume" | "continuer" | "continue" => {
+                let Some(goal) = self.goal.as_mut() else {
+                    self.info("Aucun objectif à reprendre ; fixez-en un : /goal <condition>");
+                    return;
+                };
+                goal.paused = false;
+                goal.stalls = 0;
+                goal.rounds = 0;
+                let prompt =
+                    crate::goal_continue_prompt(&goal.condition, goal.last_reason.as_deref());
+                let condition = goal.condition.clone();
+                self.info(format!("◎ Reprise de l'objectif : {condition}"));
+                self.run_turn(&prompt);
+                self.pursue_goal();
+            }
+            _ => {
+                let goal = crate::GoalState::new(args);
+                self.info(format!(
+                    "◎ Objectif : {}\nClaw continue tant qu'un contrôle ne le juge pas atteint (au plus {} tours) · Arrêter pour mettre en pause",
+                    goal.condition,
+                    crate::goal_max_rounds()
+                ));
+                let prompt = crate::goal_start_prompt(&goal.condition);
+                self.goal = Some(goal);
+                self.run_turn(&prompt);
+                self.pursue_goal();
+            }
+        }
+    }
+
+    /// Contrôle de l'objectif après chaque tour ; Claw continue tant qu'il
+    /// n'est pas atteint (limite de tours, absence de progrès, arrêt).
+    fn pursue_goal(&mut self) {
+        let max_rounds = crate::goal_max_rounds();
+        loop {
+            let Some(goal) = self.goal.clone().filter(|goal| !goal.paused) else {
+                return;
+            };
+            if runtime::interrupt::interrupt_requested() {
+                self.pause_goal("interrompu");
+                return;
+            }
+            let verdict = match self.side_answer(&crate::goal_check_prompt(&goal.condition)) {
+                Ok(text) => crate::parse_goal_verdict(&text),
+                Err(error) => {
+                    self.info(format!("Contrôle de l'objectif impossible : {error}"));
+                    self.pause_goal("contrôle impossible");
+                    return;
+                }
+            };
+            let reason = match verdict {
+                crate::GoalVerdict::Met(reason) => {
+                    self.info(format!("✓ Objectif atteint · {reason}"));
+                    self.goal = None;
+                    return;
+                }
+                crate::GoalVerdict::NotMet(reason) => reason,
+            };
+            let Some(goal) = self.goal.as_mut() else {
+                return;
+            };
+            goal.rounds += 1;
+            if goal.last_reason.as_deref() == Some(reason.as_str()) {
+                goal.stalls += 1;
+            } else {
+                goal.stalls = 0;
+            }
+            goal.last_reason = Some(reason.clone());
+            let (rounds, stalls) = (goal.rounds, goal.stalls);
+            let prompt = crate::goal_continue_prompt(&goal.condition, Some(&reason));
+            if rounds >= max_rounds {
+                self.pause_goal(&format!("{max_rounds} tours sans l'atteindre"));
+                return;
+            }
+            if stalls >= 2 {
+                self.pause_goal("plus de progrès");
+                return;
+            }
+            self.info(format!(
+                "◎ Pas encore atteint ({rounds}/{max_rounds}) · {reason}"
+            ));
+            self.run_turn(&prompt);
+        }
+    }
+
+    fn pause_goal(&mut self, why: &str) {
+        if let Some(goal) = self.goal.as_mut() {
+            goal.paused = true;
+            let last = goal
+                .last_reason
+                .as_deref()
+                .map(|reason| format!(" · dernier contrôle : {reason}"))
+                .unwrap_or_default();
+            self.info(format!(
+                "◎ Objectif en pause ({why}){last} · /goal reprendre ou /goal clear"
+            ));
+        }
+    }
+
+    /// `/loop [intervalle] <demande>` : la demande relancée à intervalle,
+    /// jusqu'au bouton Arrêter ou à la limite de passages.
+    fn loop_command(&mut self, args: Option<&str>) -> Result<(), String> {
+        let (interval, request) = match crate::parse_loop_args(args) {
+            Ok(parsed) => parsed,
+            Err(usage) => {
+                self.info(usage);
+                return Ok(());
+            }
+        };
+        let request = if request.starts_with('/') {
+            let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+            let Some(invocation) = commands::resolve_custom_command(&cwd, &request) else {
+                self.info(
+                    "/loop relance une demande ou une commande personnalisée (.claw/commands).",
+                );
+                return Ok(());
+            };
+            invocation?.prompt
+        } else {
+            request
+        };
+        let max = crate::loop_max_passes();
+        self.info(format!(
+            "↻ Boucle · toutes les {} · au plus {max} passages · Arrêter pour l'interrompre",
+            crate::format_interval(interval)
+        ));
+        for pass in 1..=max {
+            self.run_turn(&crate::loop_prompt(&request, pass));
+            if runtime::interrupt::interrupt_requested() {
+                self.info("↻ Boucle arrêtée");
+                return Ok(());
+            }
+            if pass == max {
+                self.info(format!("↻ Boucle terminée : {max} passages"));
+                return Ok(());
+            }
+            self.info(format!(
+                "↻ Prochain passage dans {}",
+                crate::format_interval(interval)
+            ));
+            runtime::interrupt::clear_interrupt();
+            let deadline = std::time::Instant::now() + interval;
+            while std::time::Instant::now() < deadline {
+                if runtime::interrupt::interrupt_requested() {
+                    runtime::interrupt::clear_interrupt();
+                    self.info("↻ Boucle arrêtée");
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+        Ok(())
+    }
+
     fn set_model(&mut self, model: &str) -> Result<(), String> {
         let model = resolve_model_alias(model.trim());
         if model.is_empty() {
@@ -1075,7 +1383,7 @@ impl Worker {
 
     fn set_permissions(&mut self, mode: &str) -> Result<(), String> {
         let label = normalize_permission_mode(mode).ok_or_else(|| {
-            format!("mode de permission inconnu « {mode} » (prompt, read-only, workspace-write, danger-full-access)")
+            format!("mode de permission inconnu « {mode} » (prompt, read-only, workspace-write, dont-ask, danger-full-access)")
         })?;
         self.permission_mode = permission_mode_from_label(label);
         self.rebuild()?;
@@ -2040,6 +2348,7 @@ pub(crate) fn serve(options: ServeOptions) -> Result<(), Box<dyn std::error::Err
                     system_prompt,
                     session,
                     runtime,
+                    goal: None,
                 })
             })();
             match setup {
