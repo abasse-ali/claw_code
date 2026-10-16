@@ -7,6 +7,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod custom;
+pub mod output_styles;
 
 pub use custom::{
     custom_command_completions, discover_custom_commands, expand_template, find_custom_command,
@@ -137,8 +138,8 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "compact",
         aliases: &[],
-        summary: "Compacte l'historique de la session locale",
-        argument_hint: None,
+        summary: "Résume l'historique pour libérer le contexte (consigne facultative : ce qu'il faut garder)",
+        argument_hint: Some("[consigne]"),
         resume_supported: true,
         category: SlashCommandCategory::Core,
     },
@@ -466,6 +467,70 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         category: SlashCommandCategory::Automation,
     },
     SlashCommandSpec {
+        name: "btw",
+        aliases: &["aparte"],
+        summary: "Question annexe sur la session, sans outils ; la réponse n'entre pas dans la conversation",
+        argument_hint: Some("<question>"),
+        resume_supported: false,
+        category: SlashCommandCategory::Session,
+    },
+    SlashCommandSpec {
+        name: "recap",
+        aliases: &["bilan"],
+        summary: "Bilan de la session : objectif, fait, état actuel, suite (non gardé dans la conversation)",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Session,
+    },
+    SlashCommandSpec {
+        name: "copy",
+        aliases: &["copier"],
+        summary: "Copie la dernière réponse (ou l'avant-dernière avec 2, etc.) dans le presse-papiers",
+        argument_hint: Some("[n]"),
+        resume_supported: true,
+        category: SlashCommandCategory::Session,
+    },
+    SlashCommandSpec {
+        name: "rename",
+        aliases: &["renommer"],
+        summary: "Renomme la session courante",
+        argument_hint: Some("<titre>"),
+        resume_supported: true,
+        category: SlashCommandCategory::Session,
+    },
+    SlashCommandSpec {
+        name: "goal",
+        aliases: &["objectif"],
+        summary: "Objectif : Claw continue tour après tour jusqu'à ce qu'un évaluateur le juge atteint",
+        argument_hint: Some("[condition|clear]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "loop",
+        aliases: &["boucle"],
+        summary: "Relance une demande à intervalle régulier tant que la session est ouverte (Échap arrête)",
+        argument_hint: Some("[intervalle: 30s|5m|1h] <demande>"),
+        resume_supported: false,
+        category: SlashCommandCategory::Automation,
+    },
+    SlashCommandSpec {
+        name: "output-style",
+        aliases: &["style"],
+        summary: "Style de réponse : par défaut, explicatif, apprentissage, concis, ou un style personnalisé",
+        argument_hint: Some("[nom|new <nom>]"),
+        resume_supported: true,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "schedule",
+        aliases: &["routines", "routine"],
+        summary: "Routines planifiées sur GitHub Actions : Claw lance une demande selon un horaire, même ordinateur éteint",
+        argument_hint: Some("[list|<horaire> <demande>|delete <nom>]"),
+        resume_supported: true,
+        category: SlashCommandCategory::Automation,
+    },
+    SlashCommandSpec {
         name: "agents",
         aliases: &[],
         summary: "Liste les agents configurés",
@@ -487,7 +552,31 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
 pub enum SlashCommand {
     Help,
     Status,
-    Compact,
+    Compact {
+        instructions: Option<String>,
+    },
+    Btw {
+        question: Option<String>,
+    },
+    Recap,
+    Copy {
+        index: Option<String>,
+    },
+    Rename {
+        title: Option<String>,
+    },
+    Goal {
+        args: Option<String>,
+    },
+    Loop {
+        args: Option<String>,
+    },
+    OutputStyle {
+        args: Option<String>,
+    },
+    Schedule {
+        args: Option<String>,
+    },
     Branch {
         action: Option<String>,
         target: Option<String>,
@@ -603,7 +692,31 @@ impl SlashCommand {
         Some(match command {
             "help" => Self::Help,
             "status" => Self::Status,
-            "compact" => Self::Compact,
+            "compact" => Self::Compact {
+                instructions: remainder_after_command(trimmed, command),
+            },
+            "btw" | "aparte" | "aparté" => Self::Btw {
+                question: remainder_after_command(trimmed, command),
+            },
+            "recap" | "bilan" => Self::Recap,
+            "copy" | "copier" => Self::Copy {
+                index: parts.next().map(ToOwned::to_owned),
+            },
+            "rename" | "renommer" => Self::Rename {
+                title: remainder_after_command(trimmed, command),
+            },
+            "goal" | "objectif" => Self::Goal {
+                args: remainder_after_command(trimmed, command),
+            },
+            "loop" | "boucle" => Self::Loop {
+                args: remainder_after_command(trimmed, command),
+            },
+            "output-style" | "style" => Self::OutputStyle {
+                args: remainder_after_command(trimmed, command),
+            },
+            "schedule" | "routines" | "routine" => Self::Schedule {
+                args: remainder_after_command(trimmed, command),
+            },
             "branch" => Self::Branch {
                 action: parts.next().map(ToOwned::to_owned),
                 target: parts.next().map(ToOwned::to_owned),
@@ -2149,7 +2262,7 @@ pub fn handle_slash_command(
     compaction: CompactionConfig,
 ) -> Option<SlashCommandResult> {
     match SlashCommand::parse(input)? {
-        SlashCommand::Compact => {
+        SlashCommand::Compact { .. } => {
             let result = compact_session(session, compaction);
             let message = if result.removed_message_count == 0 {
                 "Compaction ignorée : la session est sous le seuil de compaction.".to_string()
@@ -2169,6 +2282,14 @@ pub fn handle_slash_command(
             session: session.clone(),
         }),
         SlashCommand::Status
+        | SlashCommand::Btw { .. }
+        | SlashCommand::Recap
+        | SlashCommand::Copy { .. }
+        | SlashCommand::Rename { .. }
+        | SlashCommand::Goal { .. }
+        | SlashCommand::Loop { .. }
+        | SlashCommand::OutputStyle { .. }
+        | SlashCommand::Schedule { .. }
         | SlashCommand::Branch { .. }
         | SlashCommand::Bughunter { .. }
         | SlashCommand::Worktree { .. }
@@ -2613,8 +2734,14 @@ mod tests {
         assert!(help.contains("/skills"));
         assert!(help.contains("/context"));
         assert!(help.contains("/equipe [off]"));
-        assert_eq!(slash_command_specs().len(), 45);
-        assert_eq!(resume_supported_slash_commands().len(), 13);
+        assert!(help.contains("/compact [consigne]"));
+        assert!(help.contains("/loop [intervalle: 30s|5m|1h] <demande>"));
+        assert!(help.contains("/output-style [nom|new <nom>]"));
+        assert!(help.contains("/schedule [list|<horaire> <demande>|delete <nom>]"));
+        assert!(help.contains("/btw"));
+        assert!(help.contains("/goal"));
+        assert_eq!(slash_command_specs().len(), 53);
+        assert_eq!(resume_supported_slash_commands().len(), 17);
     }
 
     #[test]

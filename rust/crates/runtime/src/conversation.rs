@@ -4045,6 +4045,48 @@ where
         Some(reason)
     }
 
+    /// Compaction manuelle (`/compact [consigne]`) : la conversation est
+    /// résumée par le modèle, qui suit la consigne de l'utilisateur (ce qu'il
+    /// faut garder) ; à défaut de résumé utilisable, celui de Claw le remplace.
+    /// Les messages récents restent tels quels. La session est remplacée et le
+    /// résultat renvoyé.
+    pub fn compact_with_model(
+        &mut self,
+        config: CompactionConfig,
+        instructions: Option<&str>,
+    ) -> CompactionResult {
+        let instructions = instructions.map(str::trim).filter(|text| !text.is_empty());
+        let pre_compact = self.hook_runner.run_event(
+            HookEvent::PreCompact,
+            Some("manual"),
+            serde_json::json!({
+                "trigger": "manual",
+                "custom_instructions": instructions.unwrap_or_default(),
+            }),
+            &[],
+        );
+        self.notify_hook_feedback(HookEvent::PreCompact, &pre_compact);
+        let system = match instructions {
+            Some(focus) => format!(
+                "{MODEL_SUMMARY_PROMPT}\n\nThe user asked for this compaction with these instructions; follow them when choosing what to keep: {focus}"
+            ),
+            None => MODEL_SUMMARY_PROMPT.to_string(),
+        };
+        let client = &mut self.api_client;
+        let result = compact_session_with(&self.session, config, |messages| {
+            let transcript = render_transcript_for_summary(messages);
+            let first = client.summarize(&system, &transcript)?;
+            if summary_is_usable(&first, messages) {
+                return Some(first);
+            }
+            client.summarize(&system, &format!("{transcript}\n\n{SUMMARY_RETRY_NOTE}"))
+        });
+        if result.removed_message_count > 0 {
+            self.session = result.compacted_session.clone();
+        }
+        result
+    }
+
     /// Compaction manuelle (`/compact`), précédée des hooks `PreCompact`.
     #[must_use]
     pub fn compact(&self, config: CompactionConfig) -> CompactionResult {
@@ -4254,6 +4296,9 @@ impl ToolExecutor for StaticToolExecutor {
 }
 
 #[cfg(test)]
+// Chaque test prend d'abord le verrou commun ([`crate::test_serial`]), avant
+// les types qu'il déclare.
+#[allow(clippy::items_after_statements)]
 mod tests {
     use super::{
         ApiClient, ApiRequest, AssistantEvent, ConversationRuntime, RuntimeError,
@@ -4332,6 +4377,7 @@ mod tests {
 
     #[test]
     fn runs_user_to_tool_to_result_loop_end_to_end_and_tracks_usage() {
+        let _serial = crate::test_serial();
         let api_client = ScriptedApiClient { call_count: 0 };
         let tool_executor = StaticToolExecutor::new().register("add", |input| {
             let total = input
@@ -4384,6 +4430,7 @@ mod tests {
 
     #[test]
     fn records_denied_tool_results_when_prompt_rejects() {
+        let _serial = crate::test_serial();
         struct RejectPrompter;
         impl PermissionPrompter for RejectPrompter {
             fn decide(&mut self, _request: &PermissionRequest) -> PermissionPromptDecision {
@@ -4438,6 +4485,7 @@ mod tests {
 
     #[test]
     fn a_refused_tool_call_is_reported_to_the_interface_as_skipped() {
+        let _serial = crate::test_serial();
         use std::sync::{Arc, Mutex};
 
         struct RejectPrompter;
@@ -4518,6 +4566,7 @@ mod tests {
 
     #[test]
     fn screenshots_follow_the_last_tool_result_and_only_the_latest_are_kept() {
+        let _serial = crate::test_serial();
         /// Trois réponses à captures, la première avec un second appel après la capture.
         struct Script(usize);
         impl ApiClient for Script {
@@ -4625,6 +4674,7 @@ mod tests {
 
     #[test]
     fn a_call_with_unusable_arguments_fails_without_asking_for_permission() {
+        let _serial = crate::test_serial();
         struct NeverAsked;
         impl PermissionPrompter for NeverAsked {
             fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
@@ -4707,6 +4757,7 @@ mod tests {
     #[allow(clippy::items_after_statements)]
     #[test]
     fn an_empty_reply_is_followed_up_once_instead_of_failing() {
+        let _serial = crate::test_serial();
         struct EmptyThenText {
             calls: usize,
         }
@@ -4791,6 +4842,7 @@ mod tests {
 
     #[test]
     fn user_prompt_hooks_add_context_and_stop_hooks_can_resume_the_agent() {
+        let _serial = crate::test_serial();
         let marker = std::env::temp_dir().join(format!(
             "claw-stop-hook-{}-{}",
             std::process::id(),
@@ -4840,6 +4892,7 @@ mod tests {
 
     #[test]
     fn notification_hooks_run_when_permission_is_requested() {
+        let _serial = crate::test_serial();
         let file = std::env::temp_dir().join(format!(
             "claw-notification-{}-{}.json",
             std::process::id(),
@@ -4890,6 +4943,7 @@ mod tests {
 
     #[test]
     fn user_prompt_hooks_can_reject_a_request() {
+        let _serial = crate::test_serial();
         let hooks = RuntimeHookConfig::default().with_commands(
             crate::hooks::HookEvent::UserPromptSubmit,
             vec!["printf \"secret détecté\" >&2; exit 2".to_string()],
@@ -4916,6 +4970,7 @@ mod tests {
 
     #[test]
     fn denies_tool_use_when_pre_tool_hook_blocks() {
+        let _serial = crate::test_serial();
         struct SingleCallApiClient;
         impl ApiClient for SingleCallApiClient {
             fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -4977,6 +5032,7 @@ mod tests {
 
     #[test]
     fn appends_post_tool_hook_feedback_to_tool_result() {
+        let _serial = crate::test_serial();
         struct TwoCallApiClient {
             calls: usize,
         }
@@ -5051,6 +5107,7 @@ mod tests {
 
     #[test]
     fn reconstructs_usage_tracker_from_restored_session() {
+        let _serial = crate::test_serial();
         struct SimpleApi;
         impl ApiClient for SimpleApi {
             fn stream(
@@ -5093,6 +5150,7 @@ mod tests {
 
     #[test]
     fn compacts_session_after_turns() {
+        let _serial = crate::test_serial();
         struct SimpleApi;
         impl ApiClient for SimpleApi {
             fn stream(
@@ -5226,6 +5284,7 @@ mod tests {
 
     #[test]
     fn auto_compacts_with_a_model_summary_when_the_threshold_is_crossed() {
+        let _serial = crate::test_serial();
         let mut runtime = compacting_runtime(long_session(10), false).with_auto_compaction(Some(
             super::AutoCompactionConfig {
                 threshold_tokens: 1_000,
@@ -5250,6 +5309,7 @@ mod tests {
 
     #[test]
     fn a_summary_that_continues_the_conversation_is_asked_again_then_replaced() {
+        let _serial = crate::test_serial();
         let config = Some(super::AutoCompactionConfig {
             threshold_tokens: 1_000,
             preserve_recent_messages: 4,
@@ -5295,6 +5355,7 @@ mod tests {
 
     #[test]
     fn results_stored_before_leaning_are_leaned_when_the_session_is_opened() {
+        let _serial = crate::test_serial();
         // Session enregistrée avant l'allègement : l'ancien et le nouveau
         // texte, et le fichier entier, repartaient avec chaque requête.
         let fat = serde_json::json!({
@@ -5342,6 +5403,7 @@ mod tests {
 
     #[test]
     fn does_not_compact_below_the_threshold_or_when_disabled() {
+        let _serial = crate::test_serial();
         let mut runtime = compacting_runtime(long_session(2), false).with_auto_compaction(Some(
             super::AutoCompactionConfig {
                 threshold_tokens: 1_000_000,
@@ -5358,6 +5420,7 @@ mod tests {
 
     #[test]
     fn retries_once_after_a_context_overflow_error() {
+        let _serial = crate::test_serial();
         let mut runtime = compacting_runtime(long_session(10), true).with_auto_compaction(Some(
             super::AutoCompactionConfig {
                 threshold_tokens: usize::MAX,
@@ -5587,6 +5650,7 @@ mod tests {
 
     #[test]
     fn a_failed_verification_sends_the_model_back_to_work() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, bash_calls) = aided_runtime(
             vec![
                 tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
@@ -5628,6 +5692,7 @@ mod tests {
 
     #[test]
     fn a_short_reply_to_a_check_keeps_the_report_it_follows() {
+        let _serial = crate::test_serial();
         // Essai réel du 12 octobre : après un contrôle sans reproche, la
         // réponse finale n'était plus que « La revue confirme... ».
         let report = format!(
@@ -5668,6 +5733,7 @@ mod tests {
 
     #[test]
     fn a_reply_cut_by_the_output_limit_is_continued_and_joined() {
+        let _serial = crate::test_serial();
         CUT_REPLIES.with(|cut| cut.set(1));
         let (mut runtime, observed, _) = aided_runtime(
             vec![
@@ -5699,6 +5765,7 @@ mod tests {
 
     #[test]
     fn a_continuation_joins_the_text_even_after_a_reasoning_block() {
+        let _serial = crate::test_serial();
         use crate::session::ConversationMessage;
         // Modèles d'OpenRouter : le raisonnement arrive après le texte.
         CUT_REPLIES.with(|cut| cut.set(1));
@@ -5742,6 +5809,7 @@ mod tests {
 
     #[test]
     fn an_empty_continuation_is_asked_again_then_the_cut_reply_is_kept() {
+        let _serial = crate::test_serial();
         // Suite vide, puis suite : elle rejoint la réponse coupée, sans la
         // relance des réponses vides.
         CUT_REPLIES.with(|cut| cut.set(1));
@@ -5792,6 +5860,7 @@ mod tests {
 
     #[test]
     fn no_continuation_is_asked_at_the_last_allowed_step() {
+        let _serial = crate::test_serial();
         // Sous-agent à sa dernière étape : sa réponse, même coupée, est rendue.
         CUT_REPLIES.with(|cut| cut.set(1));
         let (runtime, observed, _) = aided_runtime(vec![text_step("Rapport : tout est")], vec![]);
@@ -5804,6 +5873,7 @@ mod tests {
 
     #[test]
     fn a_reply_still_cut_after_two_continuations_is_given_as_it_is() {
+        let _serial = crate::test_serial();
         CUT_REPLIES.with(|cut| cut.set(5));
         let (mut runtime, observed, _) = aided_runtime(
             vec![text_step("un"), text_step(" deux"), text_step(" trois")],
@@ -5827,6 +5897,7 @@ mod tests {
 
     #[test]
     fn a_problem_report_gets_a_debugging_guide_and_evidence_is_asked_before_the_answer() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, _) = aided_runtime(
             vec![
                 text_step("Problème résolu : c'était probablement le CSS."),
@@ -5866,6 +5937,7 @@ mod tests {
 
     #[test]
     fn the_evidence_of_a_reported_problem_covers_the_edge_cases_of_its_kind() {
+        let _serial = crate::test_serial();
         // Essai réel t3 : le guide du début de tour est arrivé, et l'espace
         // insécable des exports Excel est restée oubliée.
         let (mut runtime, observed, _) =
@@ -5892,6 +5964,7 @@ mod tests {
 
     #[test]
     fn images_sent_without_a_complaint_are_sorted_before_any_debugging() {
+        let _serial = crate::test_serial();
         // Un constat bref avec une capture : le modèle trie d'abord, et rien
         // n'est demandé de plus quand il n'a rien modifié.
         let (mut runtime, observed, _) =
@@ -5953,6 +6026,7 @@ mod tests {
 
     #[test]
     fn a_reply_that_stops_on_empty_titles_is_sent_back_to_do_the_work() {
+        let _serial = crate::test_serial();
         const TITLES: &str =
             "Maintenant, la page :\n\n### 2a. Composant URLInput\n\n### 2b. Page /url";
         let (mut runtime, observed, _) = aided_runtime(
@@ -5977,6 +6051,7 @@ mod tests {
 
     #[test]
     fn a_permission_request_left_unanswered_is_not_asked_again_in_the_turn() {
+        let _serial = crate::test_serial();
         struct Away(usize);
         impl PermissionPrompter for Away {
             fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
@@ -6042,6 +6117,7 @@ mod tests {
 
     #[test]
     fn commands_advised_without_being_run_send_the_model_back_to_try_them() {
+        let _serial = crate::test_serial();
         const ADVICE: &str = "Pour lancer :\n\n```bash\nnpm run dev\n```";
         let (mut runtime, observed, bash_calls) = aided_runtime(
             vec![
@@ -6063,6 +6139,7 @@ mod tests {
 
     #[test]
     fn a_tool_written_as_a_command_is_pointed_out_to_the_model() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, _) = aided_runtime(
             vec![
                 tool_step("bash", r#"{"command":"KillShell bash_4"}"#),
@@ -6078,6 +6155,7 @@ mod tests {
 
     #[test]
     fn questions_written_in_the_answer_are_asked_again_with_the_menu() {
+        let _serial = crate::test_serial();
         // Quelqu'un peut répondre : le modèle est renvoyé poser ses questions
         // avec l'outil, puis continue avec les réponses.
         CAN_ASK.with(|flag| flag.set(true));
@@ -6131,6 +6209,7 @@ mod tests {
 
     #[test]
     fn a_command_sent_to_the_background_verifies_nothing_until_its_end_is_read() {
+        let _serial = crate::test_serial();
         // `verifier && npm run dev` part en arrière-plan : le résultat de la
         // vérification n'a pas été montré, Claw la lance donc lui-même.
         let (mut runtime, _, bash_calls) = aided_runtime(
@@ -6206,6 +6285,7 @@ mod tests {
 
     #[test]
     fn no_verification_without_changes_or_when_the_model_already_ran_it() {
+        let _serial = crate::test_serial();
         // Aucun fichier modifié : rien à vérifier.
         let (mut runtime, _, bash_calls) = aided_runtime(vec![text_step("Bonjour.")], vec![]);
         runtime.run_turn("salut", None).expect("tour");
@@ -6227,6 +6307,7 @@ mod tests {
 
     #[test]
     fn verification_gives_up_after_a_few_corrections_and_says_so() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, bash_calls) = aided_runtime(
             vec![
                 tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
@@ -6248,6 +6329,7 @@ mod tests {
 
     #[test]
     fn a_model_going_in_circles_gets_one_reminder() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, _) = aided_runtime(
             vec![
                 tool_step("probe", "{}"),
@@ -6276,6 +6358,7 @@ mod tests {
 
     #[test]
     fn an_agent_stopping_on_failures_is_sent_back_once_to_try_another_way() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, bash_calls) = aided_runtime(
             vec![
                 tool_step("bash", r#"{"command":"npm run dev"}"#),
@@ -6313,6 +6396,7 @@ mod tests {
 
     #[test]
     fn a_success_or_a_refusal_ends_the_failure_streak() {
+        let _serial = crate::test_serial();
         // Un échec puis une commande qui réussit : rien à redire.
         let (mut runtime, observed, _) = aided_runtime(
             vec![
@@ -6352,6 +6436,7 @@ mod tests {
 
     #[test]
     fn a_short_follow_up_points_the_review_to_the_request_it_continues() {
+        let _serial = crate::test_serial();
         use super::{earlier_request, ConversationMessage};
         let request = "Ajoute une page frontend pour traduire une image depuis une URL";
         let messages = vec![
@@ -6379,6 +6464,7 @@ mod tests {
 
     #[test]
     fn after_a_compaction_a_short_follow_up_finds_the_request_claw_recorded() {
+        let _serial = crate::test_serial();
         use super::{earlier_request, ConversationMessage};
         let request = "Traduis les mangas du japonais vers le français, en trois étapes";
         let session = crate::session::Session {
@@ -6413,6 +6499,7 @@ mod tests {
 
     #[test]
     fn the_review_sees_the_answer_and_the_continued_request() {
+        let _serial = crate::test_serial();
         let (path, output) = written_file("reprise");
         let (mut runtime, observed, _) = aided_runtime_with(
             vec![
@@ -6480,6 +6567,7 @@ mod tests {
 
     #[test]
     fn ultracode_prepares_a_brief_then_an_independent_verifier_sends_problems_back() {
+        let _serial = crate::test_serial();
         let (path, output) = written_file("ultracode");
         let (mut runtime, observed, agents) = ultracode_runtime(
             vec![
@@ -6534,6 +6622,7 @@ mod tests {
 
     #[test]
     fn without_ultracode_or_for_a_short_follow_up_no_agent_is_started() {
+        let _serial = crate::test_serial();
         let (mut runtime, _, agents) = ultracode_runtime(
             vec![text_step("Bonjour, que puis-je faire ?")],
             vec![],
@@ -6553,6 +6642,7 @@ mod tests {
 
     #[test]
     fn an_analysis_answer_is_fact_checked_once_in_ultracode() {
+        let _serial = crate::test_serial();
         let long_answer = "Le module de paiement calcule les taxes dans taxes.py. ".repeat(14);
         let (mut runtime, observed, agents) = ultracode_runtime(
             vec![
@@ -6582,6 +6672,7 @@ mod tests {
 
     #[test]
     fn without_a_readable_verdict_the_model_checks_its_own_work_again() {
+        let _serial = crate::test_serial();
         let (path, output) = written_file("sans-verdict");
         let (mut runtime, observed, agents) = ultracode_runtime(
             vec![
@@ -6607,6 +6698,7 @@ mod tests {
 
     #[test]
     fn in_team_mode_each_step_is_announced_with_the_role_the_work_needs() {
+        let _serial = crate::test_serial();
         struct Off;
         impl Drop for Off {
             fn drop(&mut self) {
@@ -6646,6 +6738,7 @@ mod tests {
 
     #[test]
     fn the_session_setting_turns_ultracode_on_until_it_is_turned_off() {
+        let _serial = crate::test_serial();
         struct Off;
         impl Drop for Off {
             fn drop(&mut self) {
@@ -6696,6 +6789,7 @@ mod tests {
 
     #[test]
     fn another_model_reviews_the_changes_once() {
+        let _serial = crate::test_serial();
         let (path, output) = written_file("remarques");
         let (mut runtime, observed, _) = aided_runtime_with(
             vec![
@@ -6730,6 +6824,7 @@ mod tests {
 
     #[test]
     fn a_bare_approval_is_checked_by_a_second_reviewer() {
+        let _serial = crate::test_serial();
         // Rejoué sur un vrai travail : « VERDICT / LGTM » en 8 s, sans
         // l'analyse demandée, quand un autre relecteur y trouvait un bogue.
         let (path, output) = written_file("seconde");
@@ -6759,6 +6854,7 @@ mod tests {
 
     #[test]
     fn the_edge_cases_of_the_requested_feature_come_with_the_request() {
+        let _serial = crate::test_serial();
         // Essais réels t5 : faits d'emblée, ils évitent une reprise au contrôle.
         let (mut runtime, observed, _) = aided_runtime(vec![text_step("Fait.")], vec![]);
         runtime
@@ -6775,6 +6871,7 @@ mod tests {
 
     #[test]
     fn two_bare_approvals_are_reported_as_no_real_review() {
+        let _serial = crate::test_serial();
         // Essai réel t5b : les deux relecteurs ont répondu « VERDICT / LGTM ».
         let (path, output) = written_file("deux-nues");
         let (mut runtime, observed, _) = aided_runtime_with(
@@ -6797,6 +6894,7 @@ mod tests {
 
     #[test]
     fn an_approved_review_ends_the_turn_and_small_edits_are_not_reviewed() {
+        let _serial = crate::test_serial();
         let (path, output) = written_file("approuve");
         let (mut runtime, observed, _) = aided_runtime_with(
             vec![
@@ -6842,6 +6940,7 @@ mod tests {
 
     #[test]
     fn a_second_failed_verification_brings_advice_from_another_model() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, _) = aided_runtime_with(
             vec![
                 tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
@@ -6866,6 +6965,7 @@ mod tests {
 
     #[test]
     fn substantial_work_is_checked_against_every_requirement_once() {
+        let _serial = crate::test_serial();
         let (path, output) = written_file("exigences");
         let (mut runtime, observed, _) = aided_runtime_with(
             vec![
@@ -6907,6 +7007,7 @@ mod tests {
 
     #[test]
     fn errors_seen_by_the_connected_editor_go_back_to_the_model() {
+        let _serial = crate::test_serial();
         use crate::editor::{tests::fake_editor, tests::problem, FileDiagnostics, Severity};
         let (path, output) = written_file("editeur");
         let shown = path.to_string_lossy().to_string();
@@ -6952,6 +7053,7 @@ mod tests {
 
     #[test]
     fn a_stronger_model_takes_over_after_the_second_failed_verification() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, _) = aided_runtime_with(
             vec![
                 tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
@@ -7000,6 +7102,7 @@ mod tests {
 
     #[test]
     fn rewriting_lines_of_a_data_file_is_flagged_once() {
+        let _serial = crate::test_serial();
         // Essai réel t3 : un petit modèle « répare » le CSV de l'utilisateur
         // au lieu du script qui ne sait pas le lire.
         let cwd = std::env::current_dir().expect("dossier");
@@ -7090,6 +7193,7 @@ mod tests {
 
     #[test]
     fn a_command_that_loses_the_agent_s_changes_is_pointed_out() {
+        let _serial = crate::test_serial();
         // Essai réel t6 avec le petit modèle : `sed ... && rm conges.py`, puis
         // `git checkout conges.py` ; ses modifications perdues, deux fois.
         let path = scratch_file("garde");
@@ -7194,6 +7298,7 @@ mod tests {
 
     #[test]
     fn reading_a_file_already_shown_in_an_up_to_date_view_is_pointed_out() {
+        let _serial = crate::test_serial();
         // Essai réel t6 : le petit modèle relisait les fichiers qu'une vue lui
         // montrait déjà en entier.
         let path = std::env::temp_dir().join(format!(
@@ -7256,6 +7361,7 @@ mod tests {
 
     #[test]
     fn rewriting_an_existing_check_is_guarded_but_not_the_agent_s_own_new_test() {
+        let _serial = crate::test_serial();
         let folder = std::env::temp_dir().join(format!(
             "claw-garde-tests-{}",
             std::time::SystemTime::now()
@@ -7298,6 +7404,7 @@ mod tests {
 
     #[test]
     fn a_data_file_reshaped_for_the_new_code_is_pointed_out() {
+        let _serial = crate::test_serial();
         // Essai réel t7, deux fois : `"inscrits": []` ajouté à chaque atelier
         // de `donnees.json`, et un code qui plante sur l'ancien fichier.
         let path = std::env::temp_dir().join(format!(
@@ -7356,6 +7463,7 @@ mod tests {
 
     #[test]
     fn a_file_created_and_removed_in_the_same_turn_is_not_reported() {
+        let _serial = crate::test_serial();
         // Un script de travail écrit puis effacé par le modèle : voulu.
         let path = scratch_file("travail");
         let write =
@@ -7379,6 +7487,7 @@ mod tests {
 
     #[test]
     fn a_data_file_created_in_the_turn_is_the_agent_s_own() {
+        let _serial = crate::test_serial();
         // Créé puis retouché pendant le même tour : pas les données de
         // l'utilisateur, la garde ne dit rien.
         let cwd = std::env::current_dir().expect("dossier");
@@ -7406,6 +7515,7 @@ mod tests {
 
     #[test]
     fn three_single_calls_in_a_row_get_a_note_about_grouping() {
+        let _serial = crate::test_serial();
         // Essais réels t2 : sept commandes d'essai, chacune dans sa requête.
         let (mut runtime, observed, _) = aided_runtime(
             vec![
@@ -7436,6 +7546,7 @@ mod tests {
 
     #[test]
     fn single_calls_are_counted_through_failing_commands_and_noted_again() {
+        let _serial = crate::test_serial();
         // Essai réel t4 : douze commandes une par requête. Un refus du guichet
         // essayé exprès (code de sortie 1) remettait le compteur à zéro, et la
         // remarque, venue tard, n'était dite qu'une fois.
@@ -7472,6 +7583,7 @@ mod tests {
 
     #[test]
     fn a_tool_error_or_a_grouped_reply_breaks_the_series_of_single_calls() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, _) = aided_runtime(
             vec![
                 tool_step("bash", r#"{"command":"python a.py"}"#),
@@ -7507,6 +7619,7 @@ mod tests {
 
     #[test]
     fn a_task_list_sent_alone_is_told_to_travel_with_the_next_call() {
+        let _serial = crate::test_serial();
         // Essai réel t4 : sept requêtes pour la seule mise à jour de la liste.
         let open = r#"{"oldTodos":[],"newTodos":[{"content":"a","activeForm":"a","status":"in_progress"},{"content":"b","activeForm":"b","status":"pending"}]}"#;
         let done = r#"{"oldTodos":[],"newTodos":[{"content":"a","activeForm":"a","status":"completed"},{"content":"b","activeForm":"b","status":"completed"}]}"#;
@@ -7555,6 +7668,7 @@ mod tests {
 
     #[test]
     fn a_turn_that_reaches_its_request_limit_is_asked_to_conclude() {
+        let _serial = crate::test_serial();
         // Essai réel t4 (petit modèle) : 250 requêtes en 25 minutes, plus
         // aucun fichier modifié après la sixième minute, et rien pour l'arrêter.
         let (runtime, observed, bash_calls) = aided_runtime(
@@ -7590,6 +7704,7 @@ mod tests {
 
     #[test]
     fn tool_calls_made_after_the_request_limit_do_not_run() {
+        let _serial = crate::test_serial();
         let (runtime, observed, bash_calls) = aided_runtime(
             vec![
                 tool_step("bash", r#"{"command":"python essai.py 1"}"#),
@@ -7630,6 +7745,7 @@ mod tests {
 
     #[test]
     fn a_file_read_again_unchanged_is_kept_once_and_said() {
+        let _serial = crate::test_serial();
         // Essai réel t4 (petit modèle) : chaque fichier, lu au début du tour,
         // est relu juste avant d'être modifié. Quatre requêtes sur dix.
         let read = |content: &str| {
@@ -7704,6 +7820,7 @@ mod tests {
 
     #[test]
     fn the_session_is_saved_at_each_step_of_a_turn() {
+        let _serial = crate::test_serial();
         // Essai réel t4 (north) : arrêté après 25 minutes, le fichier de
         // session ne contenait rien du tour.
         let dir = std::env::temp_dir().join(format!("claw-autosave-{}", std::process::id()));
@@ -7745,6 +7862,7 @@ mod tests {
 
     #[test]
     fn only_the_latest_view_of_a_file_is_kept() {
+        let _serial = crate::test_serial();
         use crate::harness::{FILE_VIEW_END, FILE_VIEW_PREFIX, FILE_VIEW_REPLACED};
         use crate::session::ConversationMessage;
         let view = |name: &str, text: &str| {
@@ -7789,6 +7907,7 @@ mod tests {
 
     #[test]
     fn rewriting_a_test_after_a_failed_check_is_flagged_once() {
+        let _serial = crate::test_serial();
         let cwd = std::env::current_dir().expect("dossier");
         let patched = |added: &str| {
             serde_json::json!({
@@ -7963,6 +8082,7 @@ mod tests {
 
     #[test]
     fn project_mode_takes_a_new_project_through_its_milestones_when_nobody_can_answer() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         let root = project_folder("seul");
         let (mut runtime, observed, commands) = project_runtime(
@@ -8044,6 +8164,7 @@ mod tests {
 
     #[test]
     fn project_mode_has_the_user_confirm_the_specification_and_try_each_milestone() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(true));
         let root = project_folder("avec-utilisateur");
         // Cahier des charges écrit : à faire valider avant le plan.
@@ -8107,6 +8228,7 @@ mod tests {
 
     #[test]
     fn a_milestone_marked_done_whose_check_fails_goes_back_to_the_agent() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         let root = project_folder("echec");
         std::fs::write(root.join("SPEC.md"), PROJECT_SPEC).expect("spec");
@@ -8156,6 +8278,7 @@ mod tests {
 
     #[test]
     fn a_milestone_check_that_keeps_failing_is_run_three_times_at_most_in_a_turn() {
+        let _serial = crate::test_serial();
         // Session 9 de l'appli web : un outil absent de la machine, M1 renvoyé 45 fois.
         CAN_ASK.with(|flag| flag.set(false));
         let root = project_folder("echec-repete");
@@ -8197,6 +8320,7 @@ mod tests {
 
     #[test]
     fn project_mode_starts_for_a_new_project_or_when_asked_and_stops_when_told() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         let root = project_folder("activation");
         std::fs::write(root.join("app.py"), "print('bonjour')\n").expect("code");
@@ -8238,6 +8362,7 @@ mod tests {
 
     #[test]
     fn another_model_reviews_the_specification_and_the_plan_before_the_code() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         let root = project_folder("architecture");
         std::fs::write(root.join("SPEC.md"), PROJECT_SPEC).expect("spec");
@@ -8303,6 +8428,7 @@ mod tests {
 
     #[test]
     fn the_final_demo_runs_in_an_empty_copy_and_a_failure_goes_back_to_the_agent() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         let root = project_folder("demo");
         std::fs::write(root.join("SPEC.md"), PROJECT_SPEC).expect("spec");
@@ -8371,6 +8497,7 @@ mod tests {
 
     #[test]
     fn a_short_free_quota_is_told_to_the_model_and_the_user_at_the_start_of_the_turn() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         FREE_LEFT.with(|left| left.set(Some(40)));
         let root = project_folder("budget");
@@ -8402,6 +8529,7 @@ mod tests {
 
     #[test]
     fn project_mode_resumes_in_a_fresh_clone_of_a_project_with_its_plan() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         // Clone neuf du moteur de l'appli web : SPEC.md et PLAN.md, pas de .claw.
         let root = project_folder("reprise");
@@ -8453,6 +8581,7 @@ mod tests {
 
     #[test]
     fn the_notes_of_the_web_engine_do_not_start_project_mode_in_an_empty_repository() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         // Dépôt neuf de l'appli web : README et .gitignore seulement.
         let root = project_folder("note-moteur");
@@ -8472,6 +8601,7 @@ mod tests {
 
     #[test]
     fn a_plan_claw_cannot_follow_is_pointed_out_once_after_it_is_written() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         let root = project_folder("forme");
         std::fs::write(root.join("SPEC.md"), PROJECT_SPEC).expect("spec");

@@ -34,6 +34,15 @@ pub mod typography;
 mod usage;
 pub mod workflow;
 
+/// Les tours de conversation lisent des réglages globaux (utilisateur absent,
+/// équipe, ultracode, point de restauration actif…) et le dossier courant, que
+/// d'autres tests changent : les tests qui en lancent passent un par un, avec le
+/// même verrou que ceux qui touchent à l'environnement.
+#[cfg(test)]
+pub(crate) fn test_serial() -> std::sync::MutexGuard<'static, ()> {
+    test_env_lock()
+}
+
 pub use bash::{
     effective_timeout_ms, execute_bash, run_tool_command, starts_long_running, BashCommandInput,
     BashCommandOutput,

@@ -1463,17 +1463,27 @@ fn free_quota_line() -> Option<String> {
 
 /// Coût estimé d'une session pour un modèle `OpenRouter` connu du catalogue.
 pub fn estimated_cost(model: &str, usage: TokenUsage) -> Option<String> {
+    let cost = estimated_cost_usd(model, usage)?;
+    let free = api::model_limits(model).is_some_and(|limits| {
+        limits.prompt_price.abs() < f64::EPSILON && limits.completion_price.abs() < f64::EPSILON
+    });
+    if free {
+        return Some("0 $ (modèle gratuit)".to_string());
+    }
+    Some(format!("{cost:.4} $ (tarifs OpenRouter)"))
+}
+
+/// Même estimation, en dollars (ligne d'état personnalisée).
+pub fn estimated_cost_usd(model: &str, usage: TokenUsage) -> Option<f64> {
     register_cached_limits();
     let limits = api::model_limits(model)?;
     if limits.prompt_price < 0.0 || limits.completion_price < 0.0 {
         return None;
     }
-    if limits.prompt_price.abs() < f64::EPSILON && limits.completion_price.abs() < f64::EPSILON {
-        return Some("0 $ (modèle gratuit)".to_string());
-    }
-    let cost = f64::from(usage.input_tokens) * limits.prompt_price
-        + f64::from(usage.output_tokens) * limits.completion_price;
-    Some(format!("{cost:.4} $ (tarifs OpenRouter)"))
+    Some(
+        f64::from(usage.input_tokens) * limits.prompt_price
+            + f64::from(usage.output_tokens) * limits.completion_price,
+    )
 }
 
 /// Ligne « coût estimé » de `/cost`.

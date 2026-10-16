@@ -989,8 +989,15 @@ impl Worker {
             Some(SlashCommand::Bashes { args }) => {
                 self.info(crate::render_background_tasks(args.as_deref()));
             }
-            Some(SlashCommand::Compact) => {
-                let result = self.runtime.compact(runtime::CompactionConfig::default());
+            Some(SlashCommand::Compact { instructions }) => {
+                // Demandée par l'utilisateur : compactée même sous le seuil automatique.
+                let result = self.runtime.compact_with_model(
+                    runtime::CompactionConfig {
+                        max_estimated_tokens: 0,
+                        ..runtime::CompactionConfig::default()
+                    },
+                    instructions.as_deref(),
+                );
                 let removed = result.removed_message_count;
                 let kept = result.compacted_session.messages.len();
                 self.runtime = self.build(result.compacted_session)?;

@@ -15,6 +15,8 @@ mod model_switch;
 mod models;
 mod questions;
 mod render;
+mod routines;
+mod statusline;
 mod stream_json;
 mod transcript;
 mod turn_keys;
@@ -1656,7 +1658,7 @@ fn format_compact_report(removed: usize, resulting_messages: usize, skipped: boo
         format!(
             "Compaction
   Résultat         ignorée
-  Raison           la session est sous le seuil de compaction
+  Raison           rien à résumer : les derniers messages sont toujours gardés tels quels
   Messages gardés  {resulting_messages}"
         )
     } else {
@@ -1714,7 +1716,8 @@ fn run_resume_command(
             session: session.clone(),
             message: Some(render_repl_help()),
         }),
-        SlashCommand::Compact => {
+        // Sans modèle chargé, le résumé est celui de Claw : la consigne est ignorée.
+        SlashCommand::Compact { .. } => {
             let result = runtime::compact_session(
                 session,
                 CompactionConfig {
@@ -1822,7 +1825,33 @@ fn run_resume_command(
                 message: Some(handle_skills_slash_command(args.as_deref(), &cwd)?),
             })
         }
+        SlashCommand::Copy { index } => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some(copy_assistant_reply(session, index.as_deref())),
+        }),
+        SlashCommand::Rename { title } => {
+            let id = session_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or_default();
+            Ok(ResumeCommandOutcome {
+                session: session.clone(),
+                message: Some(rename_report(id, title.as_deref())),
+            })
+        }
+        SlashCommand::OutputStyle { args } => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some(apply_output_style_command(args.as_deref())?.0),
+        }),
+        SlashCommand::Schedule { args } => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some(run_schedule_command(args.as_deref(), &default_model())),
+        }),
         SlashCommand::Bughunter { .. }
+        | SlashCommand::Btw { .. }
+        | SlashCommand::Recap
+        | SlashCommand::Goal { .. }
+        | SlashCommand::Loop { .. }
         | SlashCommand::Branch { .. }
         | SlashCommand::Worktree { .. }
         | SlashCommand::CommitPushPr { .. }
@@ -1981,6 +2010,8 @@ fn run_repl(
                 // Une requête en échec (quota gratuit, réseau…) ne doit pas fermer la session.
                 if let Err(error) = cli.run_turn(&input) {
                     eprintln!("{}", render_cli_error(&error.to_string()));
+                } else {
+                    cli.continue_goal_after_turn();
                 }
             }
             input::ReadOutcome::Cancel => {}
@@ -2042,6 +2073,41 @@ struct LiveCli {
     system_prompt: Vec<String>,
     runtime: ConversationRuntime<DefaultRuntimeClient, CliToolExecutor>,
     session: SessionHandle,
+    /// Objectif de `/goal` poursuivi d'un tour à l'autre.
+    goal: Option<GoalState>,
+    /// Le dernier tour s'est arrêté sur Échap ou Ctrl+C.
+    last_turn_interrupted: bool,
+}
+
+/// Objectif de `/goal` : après chaque tour, un contrôle dit s'il est atteint ;
+/// sinon Claw continue, jusqu'à une limite de tours.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GoalState {
+    condition: String,
+    rounds: usize,
+    last_reason: Option<String>,
+    /// Contrôles successifs donnant la même raison (aucun progrès).
+    stalls: usize,
+    /// En pause (interruption, limite atteinte) : `/goal reprendre` relance.
+    paused: bool,
+}
+
+impl GoalState {
+    fn new(condition: &str) -> Self {
+        Self {
+            condition: condition.trim().to_string(),
+            rounds: 0,
+            last_reason: None,
+            stalls: 0,
+            paused: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GoalVerdict {
+    Met(String),
+    NotMet(String),
 }
 
 impl LiveCli {
@@ -2072,6 +2138,8 @@ impl LiveCli {
             system_prompt,
             runtime,
             session,
+            goal: None,
+            last_turn_interrupted: false,
         };
         cli.persist_session()?;
         Ok(cli)
@@ -2164,6 +2232,7 @@ impl LiveCli {
 
     fn run_turn(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let started = Instant::now();
+        self.last_turn_interrupted = false;
         transcript::begin_turn();
         live::start("Réflexion…");
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
@@ -2205,6 +2274,7 @@ impl LiveCli {
                     transcript::RED,
                     transcript::RESET
                 );
+                self.last_turn_interrupted = true;
                 self.persist_session()?;
                 Ok(())
             }
@@ -2235,8 +2305,51 @@ impl LiveCli {
         }
     }
 
-    /// Ligne d'état sous la saisie : mode de permission, modèle, crédits.
+    /// Ligne d'état sous la saisie : celle de la commande `statusLine` des
+    /// réglages s'il y en a une, sinon la ligne intégrée.
     fn status_line(&self) -> String {
+        if let Some(command) = statusline::load_command() {
+            if let Some(line) = statusline::run(&command, &self.status_input()) {
+                return line;
+            }
+        }
+        self.builtin_status_line()
+    }
+
+    /// Ce que reçoit la commande de ligne d'état.
+    fn status_input(&self) -> statusline::StatusInput {
+        let window = api::context_window_for_model(&self.model);
+        let used = self.runtime.estimated_context_tokens();
+        let cost = models::estimated_cost_usd(&self.model, self.runtime.usage().cumulative_usage());
+        let output_style = env::current_dir()
+            .ok()
+            .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok())
+            .and_then(|config| {
+                config
+                    .get(commands::output_styles::SETTING_KEY)
+                    .and_then(|value| value.as_str().map(ToOwned::to_owned))
+            });
+        statusline::StatusInput {
+            session_id: self.session.id.clone(),
+            transcript_path: self.session.path.display().to_string(),
+            cwd: env::current_dir()
+                .map(|cwd| cwd.display().to_string())
+                .unwrap_or_default(),
+            model: self.model.clone(),
+            permission_mode: self.permission_mode.as_str().to_string(),
+            output_style,
+            context_used_percent: usize::try_from(window)
+                .ok()
+                .filter(|window| *window > 0)
+                .map(|window| (used * 100 / window).min(100)),
+            context_window: Some(window).filter(|window| *window > 0),
+            total_cost_usd: cost,
+            goal: self.goal.as_ref().map(|goal| goal.condition.clone()),
+            version: VERSION.to_string(),
+        }
+    }
+
+    fn builtin_status_line(&self) -> String {
         let mode = match self.permission_mode {
             PermissionMode::Prompt => "⏵ demander avant d'agir",
             PermissionMode::WorkspaceWrite => "⏵⏵ éditions acceptées",
@@ -2254,6 +2367,14 @@ impl LiveCli {
                 line.push_str(" · ");
                 line.push_str(&credits);
             }
+        }
+        if let Some(goal) = &self.goal {
+            let state = if goal.paused { "en pause" } else { "actif" };
+            let _ = write!(
+                line,
+                " · ◎ objectif {state} : {}",
+                transcript::clip(&goal.condition, 40)
+            );
         }
         line
     }
@@ -2586,8 +2707,51 @@ impl LiveCli {
                 self.run_debug_tool_call()?;
                 false
             }
-            SlashCommand::Compact => {
-                self.compact()?;
+            SlashCommand::Compact { instructions } => {
+                self.compact(instructions.as_deref())?;
+                false
+            }
+            SlashCommand::Btw { question } => {
+                self.run_side_question(question.as_deref());
+                false
+            }
+            SlashCommand::Recap => {
+                self.run_recap();
+                false
+            }
+            SlashCommand::Copy { index } => {
+                println!(
+                    "{}",
+                    copy_assistant_reply(self.runtime.session(), index.as_deref())
+                );
+                false
+            }
+            SlashCommand::Rename { title } => {
+                self.rename_session(title.as_deref());
+                false
+            }
+            SlashCommand::Goal { args } => {
+                self.handle_goal_command(args.as_deref())?;
+                true
+            }
+            SlashCommand::Loop { args } => {
+                self.run_loop(args.as_deref())?;
+                true
+            }
+            SlashCommand::OutputStyle { args } => {
+                match apply_output_style_command(args.as_deref()) {
+                    Ok((report, changed)) => {
+                        if changed {
+                            self.refresh_system_prompt()?;
+                        }
+                        println!("{report}");
+                    }
+                    Err(error) => eprintln!("{}", render_cli_error(&error.to_string())),
+                }
+                false
+            }
+            SlashCommand::Schedule { args } => {
+                println!("{}", run_schedule_command(args.as_deref(), &self.model));
                 false
             }
             SlashCommand::Model { model } => self.set_model(model)?,
@@ -3104,8 +3268,18 @@ impl LiveCli {
         self.persist_session()
     }
 
-    fn compact(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let result = self.runtime.compact(CompactionConfig::default());
+    /// `/compact [consigne]` : le modèle résume l'historique (en suivant la
+    /// consigne : ce qu'il faut garder), même sous le seuil automatique.
+    fn compact(&mut self, instructions: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        live::start("Compaction de la conversation…");
+        let result = self.runtime.compact_with_model(
+            CompactionConfig {
+                max_estimated_tokens: 0,
+                ..CompactionConfig::default()
+            },
+            instructions,
+        );
+        live::stop();
         let removed = result.removed_message_count;
         let kept = result.compacted_session.messages.len();
         let skipped = removed == 0;
@@ -3122,6 +3296,341 @@ impl LiveCli {
         self.persist_session()?;
         println!("{}", format_compact_report(removed, kept, skipped));
         Ok(())
+    }
+
+    /// Réponse hors conversation (sans outils, non gardée), affichée sous un titre.
+    fn print_side_answer(&self, title: &str, label: &str, prompt: &str) {
+        live::start(label);
+        let answer = self.run_internal_prompt_text(prompt, false);
+        live::stop();
+        match answer {
+            Ok(text) if !text.trim().is_empty() => {
+                println!(
+                    "\n{}※ {title}{}\n{}\n{}  (hors conversation : rien n'est gardé){}\n",
+                    transcript::ACCENT,
+                    transcript::RESET,
+                    TerminalRenderer::new().markdown_to_ansi(&text),
+                    transcript::DIM,
+                    transcript::RESET
+                );
+            }
+            Ok(_) => println!("  ⎿  Réponse vide du modèle"),
+            Err(error) if runtime::interrupt::is_interruption(&error.to_string()) => {
+                println!("  ⎿  {}Interrompu{}", transcript::RED, transcript::RESET);
+            }
+            Err(error) => eprintln!("{}", render_cli_error(&error.to_string())),
+        }
+    }
+
+    /// `/btw <question>` : question en aparté, sans interrompre ni allonger la
+    /// conversation.
+    fn run_side_question(&self, question: Option<&str>) {
+        let Some(question) = question.map(str::trim).filter(|text| !text.is_empty()) else {
+            println!("Usage : /btw <question>  (réponse en aparté, hors conversation)");
+            return;
+        };
+        let prompt = format!(
+            "[Side question from the user, asked in passing. Answer it briefly from what you already know of this conversation and project, in the user's language. Do not use tools, do not continue or change the current task.]\n\n{question}"
+        );
+        self.print_side_answer("Aparté", "Réponse en aparté…", &prompt);
+    }
+
+    /// `/recap` : bilan de la session (demandes, travail fait, reste à faire).
+    fn run_recap(&self) {
+        if assistant_replies(self.runtime.session()).is_empty() {
+            println!("  ⎿  Rien à récapituler : la session vient de commencer");
+            return;
+        }
+        let prompt = "[The user asks for a recap of this session. In their language and in at most 12 short bullet points, say: what was asked, what was done (files changed, commands run and their results), what is still open, and the next step. Do not use tools and do not continue the work.]";
+        self.print_side_answer("Bilan de la session", "Bilan de la session…", prompt);
+    }
+
+    /// `/rename [titre]` : sans titre, le modèle en propose un d'après la
+    /// conversation.
+    fn rename_session(&self, title: Option<&str>) {
+        if let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) {
+            println!("{}", rename_report(&self.session.id, Some(title)));
+            return;
+        }
+        if assistant_replies(self.runtime.session()).is_empty() {
+            println!(
+                "Usage : /rename <titre>  (sans titre : titre proposé d'après la conversation)"
+            );
+            return;
+        }
+        live::start("Choix d'un titre…");
+        let proposed = self.run_internal_prompt_text(
+            "[Give this conversation a short title: 3 to 7 words, in the user's language, no quotes, no final period. Reply with the title only.]",
+            false,
+        );
+        live::stop();
+        match proposed {
+            Ok(text) => {
+                let title = text
+                    .lines()
+                    .map(|line| line.trim().trim_matches(['"', '«', '»', '*', '#', ' ']))
+                    .find(|line| !line.is_empty())
+                    .unwrap_or_default()
+                    .to_string();
+                if title.is_empty() {
+                    println!("  ⎿  Aucun titre proposé ; donnez-en un : /rename <titre>");
+                } else {
+                    println!("{}", rename_report(&self.session.id, Some(&title)));
+                }
+            }
+            Err(error) => eprintln!("{}", render_cli_error(&error.to_string())),
+        }
+    }
+
+    /// `/goal <condition>` fixe un objectif ; `/goal` montre où il en est,
+    /// `/goal reprendre` relance un objectif en pause, `/goal clear` l'efface.
+    fn handle_goal_command(
+        &mut self,
+        args: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let args = args.map(str::trim).filter(|args| !args.is_empty());
+        let Some(args) = args else {
+            println!("{}", render_goal_status(self.goal.as_ref()));
+            return Ok(());
+        };
+        match fold_command_word(args).as_str() {
+            "clear" | "stop" | "effacer" | "arreter" | "annuler" => {
+                if self.goal.take().is_some() {
+                    println!("  ⎿  Objectif effacé");
+                } else {
+                    println!("  ⎿  Aucun objectif en cours");
+                }
+                return Ok(());
+            }
+            "reprendre" | "resume" | "continuer" | "continue" => {
+                let Some(goal) = self.goal.as_mut() else {
+                    println!("  ⎿  Aucun objectif à reprendre ; fixez-en un : /goal <condition>");
+                    return Ok(());
+                };
+                goal.paused = false;
+                goal.stalls = 0;
+                goal.rounds = 0;
+                let prompt = goal_continue_prompt(&goal.condition, goal.last_reason.as_deref());
+                println!(
+                    "{}◎ Reprise de l'objectif : {}{}",
+                    transcript::ACCENT,
+                    goal.condition,
+                    transcript::RESET
+                );
+                self.run_goal_turn(&prompt);
+                return self.pursue_goal();
+            }
+            _ => {}
+        }
+        let goal = GoalState::new(args);
+        println!(
+            "{}◎ Objectif : {}{}\n{}  Claw continue tant qu'un contrôle ne le juge pas atteint (au plus {} tours) · Échap pour mettre en pause{}",
+            transcript::ACCENT,
+            goal.condition,
+            transcript::RESET,
+            transcript::DIM,
+            goal_max_rounds(),
+            transcript::RESET
+        );
+        let prompt = goal_start_prompt(&goal.condition);
+        self.goal = Some(goal);
+        self.run_goal_turn(&prompt);
+        self.pursue_goal()
+    }
+
+    /// Tour poursuivant l'objectif : une erreur (quota, réseau) le met en pause
+    /// au lieu de fermer la session.
+    fn run_goal_turn(&mut self, prompt: &str) {
+        if let Err(error) = self.run_turn(prompt) {
+            eprintln!("{}", render_cli_error(&error.to_string()));
+            self.last_turn_interrupted = true;
+        }
+    }
+
+    /// Après un tour : l'objectif est contrôlé ; tant qu'il n'est pas atteint,
+    /// Claw continue (jusqu'à la limite, une interruption ou l'absence de progrès).
+    fn pursue_goal(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let max_rounds = goal_max_rounds();
+        loop {
+            let Some(goal) = self.goal.clone().filter(|goal| !goal.paused) else {
+                return Ok(());
+            };
+            if self.last_turn_interrupted {
+                self.pause_goal("interrompu");
+                return Ok(());
+            }
+            live::start("Contrôle de l'objectif…");
+            let verdict = self.run_internal_prompt_text(&goal_check_prompt(&goal.condition), false);
+            live::stop();
+            let verdict = match verdict {
+                Ok(text) => parse_goal_verdict(&text),
+                Err(error) => {
+                    if !runtime::interrupt::is_interruption(&error.to_string()) {
+                        eprintln!("{}", render_cli_error(&error.to_string()));
+                    }
+                    self.pause_goal("contrôle impossible");
+                    return Ok(());
+                }
+            };
+            let reason = match verdict {
+                GoalVerdict::Met(reason) => {
+                    println!(
+                        "{}✓ Objectif atteint{} · {reason}\n",
+                        transcript::ACCENT,
+                        transcript::RESET
+                    );
+                    self.goal = None;
+                    return Ok(());
+                }
+                GoalVerdict::NotMet(reason) => reason,
+            };
+            let Some(goal) = self.goal.as_mut() else {
+                return Ok(());
+            };
+            goal.rounds += 1;
+            if goal.last_reason.as_deref() == Some(reason.as_str()) {
+                goal.stalls += 1;
+            } else {
+                goal.stalls = 0;
+            }
+            goal.last_reason = Some(reason.clone());
+            let (rounds, stalls) = (goal.rounds, goal.stalls);
+            let prompt = goal_continue_prompt(&goal.condition, Some(&reason));
+            if rounds >= max_rounds {
+                self.pause_goal(&format!("{max_rounds} tours sans l'atteindre"));
+                return Ok(());
+            }
+            if stalls >= 2 {
+                self.pause_goal("plus de progrès");
+                return Ok(());
+            }
+            println!(
+                "{}◎ Pas encore atteint ({rounds}/{max_rounds}) · {reason}{}",
+                transcript::DIM,
+                transcript::RESET
+            );
+            self.run_goal_turn(&prompt);
+            self.persist_session()?;
+        }
+    }
+
+    fn pause_goal(&mut self, why: &str) {
+        if let Some(goal) = self.goal.as_mut() {
+            goal.paused = true;
+            let reason = goal
+                .last_reason
+                .as_deref()
+                .map(|reason| format!("\n  Dernier contrôle  {reason}"))
+                .unwrap_or_default();
+            println!(
+                "{}◎ Objectif en pause ({why}){reason}\n  Suite            /goal reprendre · /goal clear{}\n",
+                transcript::DIM,
+                transcript::RESET
+            );
+        }
+    }
+
+    /// Un message tapé pendant qu'un objectif est actif : le contrôle reprend
+    /// après la réponse.
+    fn continue_goal_after_turn(&mut self) {
+        if self.goal.as_ref().is_some_and(|goal| !goal.paused) {
+            if let Err(error) = self.pursue_goal() {
+                eprintln!("{}", render_cli_error(&error.to_string()));
+            }
+        }
+    }
+
+    /// `/loop [intervalle] <demande>` : la demande relancée à intervalle
+    /// régulier, jusqu'à Échap, Ctrl+C ou la limite de passages.
+    fn run_loop(&mut self, args: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let (interval, request) = match parse_loop_args(args) {
+            Ok(parsed) => parsed,
+            Err(usage) => {
+                println!("{usage}");
+                return Ok(());
+            }
+        };
+        // `/loop 5m /ma-commande` : une commande personnalisée devient sa demande.
+        let request = if request.starts_with('/') {
+            match custom_command_prompt(&request) {
+                Some(Ok(invocation)) => invocation.prompt,
+                Some(Err(error)) => {
+                    eprintln!("{error}");
+                    return Ok(());
+                }
+                None => {
+                    println!(
+                        "/loop relance une demande ou une commande personnalisée (.claw/commands) ; « {} » n'en est pas une",
+                        request.split_whitespace().next().unwrap_or_default()
+                    );
+                    return Ok(());
+                }
+            }
+        } else {
+            request
+        };
+        let max = loop_max_passes();
+        println!(
+            "{}↻ Boucle · toutes les {} · au plus {max} passages · Échap ou Ctrl+C pour arrêter{}",
+            transcript::ACCENT,
+            format_interval(interval),
+            transcript::RESET
+        );
+        for pass in 1..=max {
+            if let Err(error) = self.run_turn(&loop_prompt(&request, pass)) {
+                eprintln!("{}", render_cli_error(&error.to_string()));
+                println!("  ⎿  Boucle arrêtée après une erreur");
+                return Ok(());
+            }
+            self.persist_session()?;
+            if self.last_turn_interrupted {
+                println!("  ⎿  Boucle arrêtée");
+                return Ok(());
+            }
+            if pass == max {
+                println!(
+                    "  ⎿  Boucle terminée : {max} passages (CLAW_LOOP_MAX pour en permettre plus)"
+                );
+                return Ok(());
+            }
+            if !self.wait_for_next_pass(interval) {
+                println!("  ⎿  Boucle arrêtée");
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    /// Attente entre deux passages de `/loop` ; `false` si Échap ou Ctrl+C l'a
+    /// interrompue. Le texte tapé pendant l'attente est gardé.
+    fn wait_for_next_pass(&mut self, interval: Duration) -> bool {
+        runtime::interrupt::clear_interrupt();
+        let keys = turn_keys::TurnKeyListener::start();
+        let deadline = Instant::now() + interval;
+        live::start("Prochain passage…");
+        let completed = loop {
+            if runtime::interrupt::interrupt_requested() {
+                break false;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                break true;
+            }
+            let left = deadline - now;
+            live::show(&format!(
+                "Prochain passage dans {} · Échap pour arrêter la boucle",
+                format_elapsed(left)
+            ));
+            thread::sleep(left.min(Duration::from_millis(200)));
+        };
+        live::stop();
+        let typed = keys.finish();
+        self.typeahead.lines.extend(typed.lines);
+        if !typed.partial.is_empty() {
+            self.typeahead.partial = typed.partial;
+        }
+        runtime::interrupt::clear_interrupt();
+        completed
     }
 
     fn run_internal_prompt_text_with_progress(
@@ -3599,6 +4108,375 @@ fn rename_managed_session(id: &str, title: &str) -> Result<Option<String>, Strin
     Ok(Some(title).filter(|title| !title.is_empty()))
 }
 
+/// `/rename <titre>` ; sans titre, la session reprend son titre automatique.
+fn rename_report(id: &str, title: Option<&str>) -> String {
+    match rename_managed_session(id, title.unwrap_or_default()) {
+        Ok(Some(title)) => format!("  ⎿  Session renommée : {title}"),
+        Ok(None) => "  ⎿  Titre automatique rétabli (tiré du premier message)".to_string(),
+        Err(error) => format!("renommage impossible : {error}"),
+    }
+}
+
+/// Textes des réponses de Claw, de la plus ancienne à la plus récente.
+fn assistant_replies(session: &Session) -> Vec<String> {
+    session
+        .messages
+        .iter()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .map(|message| {
+            message
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+        })
+        .filter(|text| !text.trim().is_empty())
+        .collect()
+}
+
+/// `/copy [n]` : la n-ième réponse en partant de la fin (1 = la dernière)
+/// dans le presse-papiers.
+fn copy_assistant_reply(session: &Session, index: Option<&str>) -> String {
+    let wanted = match index.map(str::trim).filter(|value| !value.is_empty()) {
+        None => 1,
+        Some(value) => match value.parse::<usize>() {
+            Ok(number) if number >= 1 => number,
+            _ => {
+                return "Usage : /copy [n] (1 = dernière réponse, 2 = l'avant-dernière…)"
+                    .to_string()
+            }
+        },
+    };
+    let replies = assistant_replies(session);
+    let Some(text) = replies.iter().rev().nth(wanted - 1) else {
+        return if replies.is_empty() {
+            "  ⎿  Aucune réponse à copier pour l'instant".to_string()
+        } else {
+            format!(
+                "  ⎿  Seulement {} réponse(s) dans cette session",
+                replies.len()
+            )
+        };
+    };
+    let size = text.chars().count();
+    if clipboard::copy_text(text.trim()) {
+        format!("  ⎿  Réponse copiée dans le presse-papiers ({size} caractères)")
+    } else {
+        // Sans outil système, la copie passe par le terminal (OSC 52).
+        format!(
+            "  ⎿  Réponse envoyée au presse-papiers du terminal ({size} caractères) ; \
+si rien n'est copié, votre terminal ne gère pas OSC 52"
+        )
+    }
+}
+
+/// `/output-style [nom|new <nom>]` : rapport, et `true` quand le style actif
+/// a changé (le prompt système est alors reconstruit).
+fn apply_output_style_command(
+    args: Option<&str>,
+) -> Result<(String, bool), Box<dyn std::error::Error>> {
+    use commands::output_styles;
+    let cwd = env::current_dir()?;
+    let loader = ConfigLoader::default_for(&cwd);
+    let config_home = loader.config_home().to_path_buf();
+    let active = loader.load().ok().and_then(|config| {
+        config
+            .get(output_styles::SETTING_KEY)
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+    });
+    let styles = output_styles::discover_styles(&cwd, &config_home);
+    let args = args.map(str::trim).filter(|args| !args.is_empty());
+    let Some(args) = args.filter(|args| !matches!(*args, "list" | "liste")) else {
+        return Ok((
+            output_styles::render_styles_report(&styles, active.as_deref()),
+            false,
+        ));
+    };
+    if let Some(name) = args
+        .strip_prefix("new ")
+        .or_else(|| args.strip_prefix("nouveau "))
+    {
+        let path = output_styles::create_style_file(&cwd, name)?;
+        return Ok((
+            format!(
+                "Style créé\n  Fichier          {}\n  Suite            décrivez le style dans ce fichier, puis /output-style {}",
+                path.display(),
+                name.trim()
+            ),
+            false,
+        ));
+    }
+    let Some(style) = output_styles::find_style(&styles, args) else {
+        return Ok((
+            format!(
+                "Style inconnu : {args}\n\n{}",
+                output_styles::render_styles_report(&styles, active.as_deref())
+            ),
+            false,
+        ));
+    };
+    let path = output_styles::persist_style(&cwd, &style.name)?;
+    Ok((
+        format!(
+            "Style de réponse\n  Actif            {} · {}\n  Enregistré dans  {}",
+            style.name,
+            style.description,
+            path.display()
+        ),
+        true,
+    ))
+}
+
+/// Action GitHub qui lance Claw dans les routines.
+fn routine_action() -> String {
+    if let Some(action) = env::var("CLAW_ROUTINE_ACTION")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return action.trim().to_string();
+    }
+    env::current_dir()
+        .ok()
+        .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok())
+        .and_then(|config| {
+            config
+                .get("routineAction")
+                .and_then(|value| value.as_str().map(|value| value.trim().to_string()))
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| routines::DEFAULT_ACTION.to_string())
+}
+
+/// `/schedule` : routines du dépôt, des workflows GitHub Actions qui lancent
+/// Claw selon un horaire avec un modèle gratuit.
+fn run_schedule_command(args: Option<&str>, model: &str) -> String {
+    let action = match routines::parse_command(args) {
+        Ok(action) => action,
+        Err(error) => return error,
+    };
+    if action == routines::Action::Help {
+        return routines::usage();
+    }
+    let Ok(repo) = find_git_root() else {
+        return "Routines : lancez /schedule dans un dépôt git (une routine est un workflow GitHub Actions du dépôt)."
+            .to_string();
+    };
+    // Git rend des `/` même sous Windows : chemins affichés d'un seul tenant.
+    let repo = PathBuf::from(
+        repo.display()
+            .to_string()
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
+    match action {
+        routines::Action::Help => routines::usage(),
+        routines::Action::List => routines::render_list(&routines::list_routines(&repo)),
+        routines::Action::Create { schedule, prompt } => {
+            let model = routines::routine_model(model);
+            match routines::create_routine(&repo, &schedule, &prompt, &model, &routine_action()) {
+                Ok((name, workflow, prompt_path)) => format!(
+                    "Routine créée\n  Nom              {name}\n  Horaire          {} (cron « {} »)\n  Modèle           {}\n  Workflow         {}\n  Demande          {}\n\nPour l'activer :\n  1. git add .github && git commit -m \"Routine {name}\" && git push\n  2. gh secret set OPENROUTER_API_KEY   (clé gratuite : https://openrouter.ai/keys)\n  3. Settings › Actions › General › cochez « Allow GitHub Actions to create and approve pull requests »\n  Essai immédiat : gh workflow run claw-routine-{name}.yml",
+                    schedule.label,
+                    schedule.cron,
+                    if model.is_empty() { "meilleur modèle gratuit (choisi par l'action)" } else { model.as_str() },
+                    workflow.display(),
+                    prompt_path.display(),
+                ),
+                Err(error) => format!("routine impossible : {error}"),
+            }
+        }
+        routines::Action::Delete { name } => match routines::delete_routine(&repo, &name) {
+            Ok(removed) => {
+                let files = removed
+                    .iter()
+                    .map(|path| format!("  Supprimé         {}", path.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("Routine supprimée\n{files}\n  Suite            committez et poussez pour l'arrêter chez GitHub")
+            }
+            Err(error) => error,
+        },
+    }
+}
+
+/// Mot de commande sans accents ni majuscules (`Arrêter` → `arreter`).
+fn fold_command_word(word: &str) -> String {
+    word.trim()
+        .chars()
+        .map(|character| match character {
+            'à' | 'â' | 'À' | 'Â' => 'a',
+            'é' | 'è' | 'ê' | 'É' | 'È' | 'Ê' => 'e',
+            'î' | 'ï' => 'i',
+            'ô' => 'o',
+            'û' | 'ù' => 'u',
+            other => other.to_ascii_lowercase(),
+        })
+        .collect()
+}
+
+/// Tours au plus pour atteindre un objectif (`CLAW_GOAL_MAX_TURNS`, 12 par défaut).
+fn goal_max_rounds() -> usize {
+    env::var("CLAW_GOAL_MAX_TURNS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(12)
+        .min(200)
+}
+
+fn goal_start_prompt(condition: &str) -> String {
+    format!(
+        "[Goal set with /goal. Keep working until this condition is met, verifying it yourself (run the tests, read the files) before you stop: {condition}]\n\nWork toward this goal: {condition}"
+    )
+}
+
+fn goal_continue_prompt(condition: &str, reason: Option<&str>) -> String {
+    let reason = reason
+        .map(|reason| format!(" A check found it is not met yet: {reason}."))
+        .unwrap_or_default();
+    format!(
+        "[Goal still open: {condition}.{reason} Continue working toward it; do not repeat what already failed, try another approach if needed, and verify the result before stopping.]"
+    )
+}
+
+fn goal_check_prompt(condition: &str) -> String {
+    format!(
+        "[Goal check: do not continue the work and do not use tools. Goal: {condition}\nJudge only from the evidence in this conversation (tool results, test output, files written). On the first line answer exactly MET or NOT MET. On the second line give a one-sentence reason in the user's language; when not met, say what is missing. Without clear evidence, answer NOT MET.]"
+    )
+}
+
+/// Réponse du contrôle : `MET` / `NOT MET` sur la première ligne, la raison ensuite.
+fn parse_goal_verdict(text: &str) -> GoalVerdict {
+    let mut lines = text
+        .lines()
+        .map(|line| line.trim().trim_matches(['*', '#', '`', '_', ' ']))
+        .filter(|line| !line.is_empty());
+    let first = lines.next().unwrap_or_default();
+    let upper = first.to_uppercase().replace(['_', '-'], " ");
+    let upper = upper
+        .strip_prefix("VERDICT")
+        .map_or(upper.as_str(), |rest| rest.trim_start_matches([':', ' ']));
+    let rest_of_first = first
+        .split_once([':', '\u{2014}', '.'])
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or_default();
+    let reason = lines
+        .next()
+        .map_or(rest_of_first, str::trim)
+        .trim_start_matches(['-', '•', ' '])
+        .trim_start_matches("Reason:")
+        .trim_start_matches("Raison :")
+        .trim();
+    let reason: String = if reason.is_empty() {
+        "aucune raison donnée".to_string()
+    } else {
+        reason.chars().take(240).collect()
+    };
+    let not_met = ["NOT MET", "NON ATTEINT", "PAS ATTEINT", "UNMET"]
+        .iter()
+        .any(|marker| upper.starts_with(marker));
+    let met = ["MET", "ATTEINT", "YES", "OUI"]
+        .iter()
+        .any(|marker| upper.starts_with(marker));
+    if !not_met && met {
+        GoalVerdict::Met(reason)
+    } else {
+        GoalVerdict::NotMet(reason)
+    }
+}
+
+fn render_goal_status(goal: Option<&GoalState>) -> String {
+    let Some(goal) = goal else {
+        return "Objectif\n  Aucun objectif en cours\n\nUsage\n  /goal <condition>   Claw continue jusqu'à ce que la condition soit remplie\n  /goal reprendre     relance un objectif en pause\n  /goal clear         efface l'objectif".to_string();
+    };
+    let state = if goal.paused { "en pause" } else { "actif" };
+    let mut report = format!(
+        "Objectif\n  Condition        {}\n  État             {state}\n  Tours            {}/{}",
+        goal.condition,
+        goal.rounds,
+        goal_max_rounds()
+    );
+    if let Some(reason) = &goal.last_reason {
+        let _ = write!(report, "\n  Dernier contrôle {reason}");
+    }
+    report.push_str("\n  Suite            /goal reprendre · /goal clear");
+    report
+}
+
+/// Passages au plus d'une boucle (`CLAW_LOOP_MAX`, 50 par défaut).
+fn loop_max_passes() -> usize {
+    env::var("CLAW_LOOP_MAX")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(50)
+}
+
+const LOOP_USAGE: &str = "Usage : /loop [intervalle] <demande ou /commande>
+  intervalle       30s, 5m, 1h… (10m par défaut, 30s au moins)
+  Exemple          /loop 5m vérifie si le déploiement est terminé
+  Arrêt            Échap ou Ctrl+C, ou après CLAW_LOOP_MAX passages (50)";
+
+/// `[intervalle] <demande>` : intervalle facultatif en tête (`30s`, `5m`, `1h`).
+fn parse_loop_args(args: Option<&str>) -> Result<(Duration, String), String> {
+    let args = args.map(str::trim).unwrap_or_default();
+    if args.is_empty() {
+        return Err(LOOP_USAGE.to_string());
+    }
+    let (first, rest) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+    let (interval, request) = match parse_interval(first) {
+        Some(interval) => (interval, rest.trim()),
+        None => (Duration::from_secs(600), args),
+    };
+    if request.is_empty() {
+        return Err(LOOP_USAGE.to_string());
+    }
+    if interval < Duration::from_secs(30) {
+        return Err(format!(
+            "intervalle trop court : 30s au moins\n{LOOP_USAGE}"
+        ));
+    }
+    Ok((interval, request.to_string()))
+}
+
+fn parse_interval(token: &str) -> Option<Duration> {
+    let token = token.trim().to_lowercase();
+    let split = token.find(|character: char| !character.is_ascii_digit())?;
+    let (number, unit) = token.split_at(split);
+    let number: u64 = number.parse().ok()?;
+    let seconds = match unit {
+        "s" | "sec" => number,
+        "m" | "min" | "mn" => number.checked_mul(60)?,
+        "h" => number.checked_mul(3600)?,
+        "j" | "d" => number.checked_mul(86_400)?,
+        _ => return None,
+    };
+    Some(Duration::from_secs(seconds))
+}
+
+fn format_interval(interval: Duration) -> String {
+    let seconds = interval.as_secs();
+    if seconds.is_multiple_of(3600) {
+        format!("{} h", seconds / 3600)
+    } else if seconds.is_multiple_of(60) {
+        format!("{} min", seconds / 60)
+    } else {
+        format!("{seconds} s")
+    }
+}
+
+fn loop_prompt(request: &str, pass: usize) -> String {
+    if pass == 1 {
+        request.to_string()
+    } else {
+        format!(
+            "[/loop, pass {pass}: the same request again. Report only what changed since the previous pass; say so briefly if nothing did.]\n\n{request}"
+        )
+    }
+}
+
 /// Minuscule d'un caractère, un pour un : les positions restent alignées
 /// avec le texte d'origine.
 fn lower_char(ch: char) -> char {
@@ -3940,6 +4818,8 @@ fn render_repl_help() -> String {
         "  Pour commencer       décrivez une tâche en langage courant, ou utilisez les commandes ci-dessous."
             .to_string(),
         "  Essentiel            /help · /status · /model · /permissions · /compact".to_string(),
+        "  Travail continu      /goal <condition> · /loop 5m <demande> · /schedule (routines GitHub)".to_string(),
+        "  Sans interrompre     /btw <question> (aparté) · /recap (bilan) · /copy (dernière réponse)".to_string(),
         "  Quitter              exit, /exit ou /quit".to_string(),
         "  Mode                 Maj+Tab : demander → éditions acceptées → plan".to_string(),
         "  Effacer l'écran      clear (la conversation est gardée)".to_string(),
@@ -4580,6 +5460,20 @@ fn build_system_prompt() -> Result<Vec<String>, Box<dyn std::error::Error>> {
     )?;
     if let Some(skills) = commands::skills_prompt_section(&cwd) {
         prompt.push(skills);
+    }
+    // Style de réponse choisi avec /output-style (clé `outputStyle`).
+    let loader = ConfigLoader::default_for(&cwd);
+    let configured = loader.load().ok().and_then(|config| {
+        config
+            .get(commands::output_styles::SETTING_KEY)
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+    });
+    if let Some(style) = commands::output_styles::configured_section(
+        &cwd,
+        loader.config_home(),
+        configured.as_deref(),
+    ) {
+        prompt.push(style);
     }
     Ok(prompt)
 }
@@ -8225,8 +9119,23 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "help", "status", "compact", "clear", "cost", "config", "memory", "init", "diff",
-                "version", "export", "agents", "skills",
+                "help",
+                "status",
+                "compact",
+                "clear",
+                "cost",
+                "config",
+                "memory",
+                "init",
+                "diff",
+                "version",
+                "export",
+                "copy",
+                "rename",
+                "output-style",
+                "schedule",
+                "agents",
+                "skills",
             ]
         );
     }
@@ -9012,6 +9921,113 @@ mod tests {
             "Raisonnement : max (le plus haut niveau que le modèle accepte)"
         );
         assert!(!runtime::workflow::ultracode());
+    }
+
+    #[test]
+    fn goal_checks_read_met_or_not_met_and_the_reason() {
+        use super::{parse_goal_verdict, GoalVerdict};
+        assert_eq!(
+            parse_goal_verdict("MET\nLes 42 tests passent."),
+            GoalVerdict::Met("Les 42 tests passent.".to_string())
+        );
+        assert_eq!(
+            parse_goal_verdict("**NOT MET**\n- Deux tests échouent encore"),
+            GoalVerdict::NotMet("Deux tests échouent encore".to_string())
+        );
+        assert_eq!(
+            parse_goal_verdict("NOT_MET: le build casse"),
+            GoalVerdict::NotMet("le build casse".to_string())
+        );
+        assert_eq!(
+            parse_goal_verdict("Verdict: MET\nTout est vert"),
+            GoalVerdict::Met("Tout est vert".to_string())
+        );
+        // Sans verdict lisible, l'objectif n'est pas tenu pour atteint.
+        assert!(matches!(
+            parse_goal_verdict("Je pense que oui, à peu près."),
+            GoalVerdict::NotMet(_)
+        ));
+        assert!(matches!(parse_goal_verdict(""), GoalVerdict::NotMet(_)));
+    }
+
+    #[test]
+    fn goal_status_and_prompts_name_the_condition() {
+        let mut goal = super::GoalState::new("  tous les tests passent ");
+        assert_eq!(goal.condition, "tous les tests passent");
+        assert!(super::render_goal_status(None).contains("Aucun objectif"));
+        goal.paused = true;
+        goal.last_reason = Some("un test échoue".to_string());
+        let status = super::render_goal_status(Some(&goal));
+        assert!(
+            status.contains("en pause") && status.contains("un test échoue"),
+            "{status}"
+        );
+        assert!(super::goal_check_prompt(&goal.condition).contains("NOT MET"));
+        assert!(
+            super::goal_continue_prompt(&goal.condition, Some("un test échoue"))
+                .contains("not met yet: un test échoue")
+        );
+        assert_eq!(super::fold_command_word(" Arrêter "), "arreter");
+    }
+
+    #[test]
+    fn loop_takes_an_optional_interval_before_the_request() {
+        use std::time::Duration;
+        assert_eq!(
+            super::parse_loop_args(Some("5m vérifie le déploiement")),
+            Ok((
+                Duration::from_secs(300),
+                "vérifie le déploiement".to_string()
+            ))
+        );
+        assert_eq!(
+            super::parse_loop_args(Some("vérifie la CI")),
+            Ok((Duration::from_secs(600), "vérifie la CI".to_string()))
+        );
+        assert_eq!(
+            super::parse_loop_args(Some("2h /rapport")),
+            Ok((Duration::from_secs(7200), "/rapport".to_string()))
+        );
+        assert!(super::parse_loop_args(Some("10s trop vite"))
+            .unwrap_err()
+            .contains("30s au moins"));
+        assert!(super::parse_loop_args(Some("5m")).is_err());
+        assert!(super::parse_loop_args(None).is_err());
+        assert_eq!(super::format_interval(Duration::from_secs(300)), "5 min");
+        assert_eq!(super::format_interval(Duration::from_secs(3600)), "1 h");
+        assert_eq!(super::format_interval(Duration::from_secs(45)), "45 s");
+        assert_eq!(super::loop_prompt("vérifie", 1), "vérifie");
+        assert!(super::loop_prompt("vérifie", 2).contains("pass 2"));
+    }
+
+    #[test]
+    fn copy_finds_the_replies_of_claw_from_the_end() {
+        use runtime::{ContentBlock, ConversationMessage, MessageRole, Session};
+        let message = |role: MessageRole, text: &str| ConversationMessage {
+            role,
+            blocks: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+            usage: None,
+        };
+        let mut session = Session::new();
+        assert!(super::copy_assistant_reply(&session, None).contains("Aucune réponse"));
+        session.messages = vec![
+            message(MessageRole::User, "bonjour"),
+            message(MessageRole::Assistant, "première réponse"),
+            message(MessageRole::User, "encore"),
+            message(MessageRole::Assistant, "   "),
+            message(MessageRole::Assistant, "seconde réponse"),
+        ];
+        assert_eq!(
+            super::assistant_replies(&session),
+            vec![
+                "première réponse".to_string(),
+                "seconde réponse".to_string()
+            ]
+        );
+        assert!(super::copy_assistant_reply(&session, Some("3")).contains("Seulement 2"));
+        assert!(super::copy_assistant_reply(&session, Some("zéro")).starts_with("Usage"));
     }
 
     #[test]

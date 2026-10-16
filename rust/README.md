@@ -374,6 +374,61 @@ forme `mcp__<serveur>__<outil>` et sont aussi disponibles pour les sous-agents.
   `NotebookEdit`) pendant les n derniers tours et ramène la conversation avant eux ;
   `/checkpoints` liste les points de restauration. Les modifications faites par des commandes
   shell ne sont pas suivies.
+- **Compacter à la demande** : `/compact [consigne]` fait résumer l'historique par le modèle tout
+  de suite, même sous le seuil automatique ; la consigne dit ce qu'il faut garder
+  (`/compact garde les erreurs de build et le plan de migration`). Les hooks `PreCompact` la
+  reçoivent dans `custom_instructions`.
+
+### Travail continu, apartés et routines
+
+Les équivalents gratuits des commandes de Claude Code pour travailler longtemps sans surveiller :
+
+| Commande | Effet |
+|---|---|
+| `/goal <condition>` | Claw travaille jusqu'à ce que la condition soit remplie : après chaque tour, un contrôle (sans outils, hors conversation) répond « atteint » ou « pas encore, parce que… », et Claw continue avec cette raison. Pause sur `Échap`, après `CLAW_GOAL_MAX_TURNS` tours (12) ou quand deux contrôles de suite donnent la même raison. `/goal` montre l'état, `/goal reprendre` relance, `/goal clear` efface. La ligne d'état affiche `◎ objectif actif`. |
+| `/loop [intervalle] <demande>` | Relance la demande (ou une commande personnalisée `/ma-commande`) toutes les `30s`, `5m`, `1h`… (10 min par défaut, 30 s au moins), avec un compte à rebours ; `Échap` ou `Ctrl+C` arrête, `CLAW_LOOP_MAX` limite le nombre de passages (50). À partir du deuxième passage, Claw ne rapporte que ce qui a changé. |
+| `/schedule <horaire> <demande>` | Routine qui tourne chez GitHub, ordinateur éteint : un workflow `.github/workflows/claw-routine-<nom>.yml` lance l'action Claw selon l'horaire avec un modèle gratuit d'OpenRouter, et ouvre une pull request si des fichiers changent. Horaires : `horaire`, `quotidien[@HH:MM]`, `jours-ouvres[@HH:MM]`, `hebdo[@jour-HH:MM]` (heure UTC, ou `@09:00+02:00`), ou `"M H J M S"` en cron. `/schedule` liste, `/schedule delete <nom>` supprime. La demande est rangée à part dans `.github/claw-routines/<nom>.md`. |
+| `/btw <question>` | Question en aparté : réponse courte du modèle sans outils, qui n'entre pas dans la conversation et n'interrompt pas la tâche. |
+| `/recap` | Bilan de la session : demandes, travail fait, reste à faire, prochaine étape. Hors conversation. |
+| `/copy [n]` | Copie la dernière réponse (ou la n-ième en partant de la fin) dans le presse-papiers (PowerShell, `pbcopy`, `wl-copy`, `xclip` ou `xsel`, sinon la séquence OSC 52 du terminal, qui marche aussi par SSH). |
+| `/rename [titre]` | Titre de la session en cours ; sans titre, le modèle en propose un d'après la conversation. |
+| `/output-style [nom]` | Style des réponses : `default`, `explanatory` (explique ses choix avec des encarts « ※ Insight »), `learning` (vous fait écrire les morceaux de logique qui comptent, marqués `TODO(human)`), `concise`. `/output-style new <nom>` crée un style à vous dans `.claw/output-styles/` (fichier Markdown avec `name` et `description` en en-tête) ; ceux de `~/.claw/output-styles/` valent pour tous les projets. Le choix est enregistré dans `.claw/settings.local.json` (`"outputStyle"`). |
+
+Activer une routine créée par `/schedule` :
+
+```bash
+git add .github && git commit -m "Routine" && git push
+gh secret set OPENROUTER_API_KEY          # clé gratuite : https://openrouter.ai/keys
+# Settings › Actions › General : « Allow GitHub Actions to create and approve pull requests »
+gh workflow run claw-routine-<nom>.yml    # essai immédiat
+```
+
+L'action utilisée est `abasse-ali/claw_code/.github/actions/claw@main` ; `CLAW_ROUTINE_ACTION` ou
+la clé `"routineAction"` des réglages en choisissent une autre (fork, version figée).
+
+**Ligne d'état personnalisée** : comme dans Claude Code, la clé `statusLine` des réglages
+remplace la ligne sous la saisie par la sortie d'une commande (trois lignes au plus). La commande
+reçoit sur son entrée standard un JSON avec `session_id`, `transcript_path`, `cwd`,
+`model.id`, `workspace.current_dir`, `permission_mode`, `output_style.name`,
+`context_window.used_percentage`, `cost.total_cost_usd` et `goal`. Une commande en échec, muette
+ou plus lente que `timeout` (2 s par défaut) laisse la ligne intégrée.
+
+```json
+{ "statusLine": { "type": "command", "command": "~/.claw/statusline.sh", "timeout": 2 } }
+```
+
+```bash
+#!/bin/sh
+# ~/.claw/statusline.sh : modèle, dossier et contexte
+input=$(cat)
+model=$(printf '%s' "$input" | jq -r '.model.id')
+dir=$(printf '%s' "$input" | jq -r '.workspace.current_dir' | xargs basename)
+used=$(printf '%s' "$input" | jq -r '.context_window.used_percentage // 0')
+printf '%s · %s · contexte %s %%\n' "$model" "$dir" "$used"
+```
+
+Avec `claw --resume <session>`, `/copy`, `/rename`, `/output-style` et `/schedule` marchent aussi ;
+`/goal`, `/loop`, `/btw` et `/recap` demandent une session interactive.
 
 ### Hooks
 
