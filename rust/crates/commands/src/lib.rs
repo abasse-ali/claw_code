@@ -373,6 +373,14 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         category: SlashCommandCategory::Core,
     },
     SlashCommandSpec {
+        name: "keybindings",
+        aliases: &["raccourcis"],
+        summary: "Raccourcis clavier : crée ou montre ~/.claw/keybindings.json (format de Claude Code)",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
         name: "doctor",
         aliases: &["diagnostic"],
         summary: "Vérifie l'installation : clés, modèles, Ollama, Git, shell, terminal",
@@ -688,6 +696,7 @@ pub enum SlashCommand {
     },
     Credits,
     Doctor,
+    Keybindings,
     Teleport {
         target: Option<String>,
     },
@@ -834,6 +843,7 @@ impl SlashCommand {
             },
             "credits" | "solde" => Self::Credits,
             "doctor" | "diagnostic" => Self::Doctor,
+            "keybindings" | "raccourcis" => Self::Keybindings,
             "model" => Self::Model {
                 model: parts.next().map(ToOwned::to_owned),
             },
@@ -2375,6 +2385,7 @@ pub fn handle_slash_command(
         | SlashCommand::Schedule { .. }
         | SlashCommand::InstallGithubAction { .. }
         | SlashCommand::MemoryImports { .. }
+        | SlashCommand::Keybindings
         | SlashCommand::AddDir { .. }
         | SlashCommand::Branch { .. }
         | SlashCommand::Bughunter { .. }
@@ -2830,7 +2841,7 @@ mod tests {
         assert!(help.contains("/code-review [fichiers|branche|commit|PR n°]"));
         assert!(help.contains("/install-github-action [assistant|review|all]"));
         assert!(help.contains("/add-dir [dossier] [--save]"));
-        assert_eq!(slash_command_specs().len(), 58);
+        assert_eq!(slash_command_specs().len(), 59);
         assert_eq!(resume_supported_slash_commands().len(), 19);
     }
 

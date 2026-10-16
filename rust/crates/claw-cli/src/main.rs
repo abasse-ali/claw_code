@@ -10,6 +10,7 @@ mod github_setup;
 mod image_reader;
 mod init;
 mod input;
+mod keybindings;
 mod likeness;
 mod live;
 mod mcp_cli;
@@ -130,6 +131,49 @@ fn main() {
         eprintln!("{}", render_cli_error(&error.to_string()));
         std::process::exit(1);
     }
+}
+
+/// `/keybindings` : crée `~/.claw/keybindings.json` s'il n'existe aucun fichier
+/// de raccourcis, puis montre les raccourcis en vigueur et les remarques.
+fn keybindings_command() -> String {
+    let mut lines = vec!["Raccourcis clavier".to_string()];
+    if !keybindings::files().iter().any(|path| path.is_file()) {
+        let path = keybindings::claw_file();
+        let created = path
+            .parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| fs::write(&path, keybindings::TEMPLATE));
+        match created {
+            Ok(()) => lines.push(format!("  Créé             {}", path.display())),
+            Err(error) => lines.push(format!(
+                "  Création impossible de {} : {error}",
+                path.display()
+            )),
+        }
+    }
+    let keymap = keybindings::Keymap::load();
+    for path in &keymap.sources {
+        lines.push(format!("  Fichier          {}", path.display()));
+    }
+    lines.push(
+        "  Format           celui de Claude Code : https://code.claude.com/docs/en/keybindings"
+            .to_string(),
+    );
+    lines.push(
+        "  Prise en compte  à la saisie suivante, sans redémarrer ; \"null\" retire un raccourci"
+            .to_string(),
+    );
+    lines.push("En vigueur".to_string());
+    lines.push(keymap.report());
+    if !keymap.warnings.is_empty() {
+        lines.push("Remarques".to_string());
+        lines.extend(keymap.warnings.iter().map(|warning| format!("  {warning}")));
+    }
+    lines.push(
+        "Toujours actifs : Ctrl+C (effacer, quitter), Ctrl+D (quitter), Ctrl+A/E/K/U/W/Y, Alt+B/F/D"
+            .to_string(),
+    );
+    lines.join("\n")
 }
 
 /// Réglage `env` des fichiers de config (`~/.claw/settings.json`,
@@ -2024,6 +2068,7 @@ fn run_resume_command(
         | SlashCommand::Models { .. }
         | SlashCommand::Credits
         | SlashCommand::Doctor
+        | SlashCommand::Keybindings
         | SlashCommand::Context
         | SlashCommand::Teleport { .. }
         | SlashCommand::DebugToolCall
@@ -2866,6 +2911,10 @@ impl LiveCli {
             }
             SlashCommand::Doctor => {
                 println!("{}", doctor::report(&self.model, &version_summary()));
+                false
+            }
+            SlashCommand::Keybindings => {
+                println!("{}", keybindings_command());
                 false
             }
             SlashCommand::Teleport { target } => {

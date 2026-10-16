@@ -1200,6 +1200,31 @@ part, sur sa propre branche), rangé dans `.claw/worktrees/<nom>`. Ce dossier es
 - Coller un texte de plusieurs lignes le garde en un seul message ; un long collage s'affiche
   `[Texte collé n°1 : 40 lignes]` et part en entier. `Alt+V` joint l'image du presse-papiers
   (`[Image n°1]`).
+- Raccourcis de Claude Code dans la saisie :
+  - `Ctrl+G` (ou `Ctrl+X Ctrl+E`) ouvre la saisie dans `$VISUAL`, `$EDITOR`, ou à défaut le
+    Bloc-notes (Windows) ou `vi` ; le texte enregistré la remplace.
+  - `Ctrl+S` met la saisie de côté ; sur une saisie vide, il la reprend.
+  - `Ctrl+_` annule la dernière modification de la saisie (mot par mot). Sur un clavier AZERTY,
+    c'est `Ctrl+8`, la touche du « _ ».
+  - `Ctrl+R` cherche dans l'historique : tapez un extrait, `Ctrl+R` passe à une entrée plus
+    ancienne, `Tab` ou `Échap` la garde, `Entrée` l'envoie, `Ctrl+C` annule.
+  - `Ctrl+L` efface l'écran et redessine la saisie.
+  - Comme dans readline : `Ctrl+A`/`Ctrl+E` (début, fin de ligne), `Ctrl+K`/`Ctrl+U`/`Ctrl+W`
+    (supprimer jusqu'à la fin, jusqu'au début, le mot précédent ; `Ctrl+Y` recolle), `Alt+B`/`Alt+F`
+    (mot précédent, suivant), `Alt+D` (supprimer le mot), `Ctrl+P`/`Ctrl+N` (historique).
+  - Dans une saisie de plusieurs lignes, les flèches haut et bas déplacent d'abord le curseur.
+- **Raccourcis personnalisés** : `/keybindings` crée `~/.claw/keybindings.json` (format de Claude
+  Code, `~/.claude/keybindings.json` est aussi lu) et liste les raccourcis en vigueur. Chaque bloc
+  donne un contexte (`Chat`, `Global`, `Autocomplete`, `HistorySearch`) et une table touches →
+  action ; `null` retire un raccourci, les accords s'écrivent `ctrl+x ctrl+e` :
+
+  ```json
+  {"bindings": [{"context": "Chat", "bindings": {"ctrl+e": "chat:externalEditor", "ctrl+s": null}}]}
+  ```
+
+  Les modifications s'appliquent à la saisie suivante. `Ctrl+C` et `Ctrl+D` ne se changent pas ;
+  une action de Claude Code que Claw n'a pas (`chat:fastMode`…) est acceptée et sans effet, une
+  faute de frappe est signalée par `/keybindings`.
 - `clear` (ou `cls`) efface l'écran, `exit` (ou `quit`) quitte.
 - `claw doctor` (ou `/doctor`) vérifie l'installation : copie de `claw` utilisée, configuration,
   modèle et secours, clé et crédits OpenRouter, Ollama, Git, shell, bac à sable, terminal.
