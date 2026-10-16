@@ -43,11 +43,14 @@ struct Frame {
     status: String,
     /// Lignes affichées à la place de la ligne d'état (menu, avis).
     below: Vec<String>,
+    /// Couleur des traits (`/color`).
+    color: Option<String>,
 }
 
 impl Frame {
     fn rule(&self) -> String {
-        format!("\x1b[38;5;240m{}\x1b[0m", "─".repeat(self.width))
+        let color = self.color.as_deref().unwrap_or("\x1b[38;5;240m");
+        format!("{color}{}\x1b[0m", "─".repeat(self.width))
     }
 
     fn below_lines(&self) -> Vec<String> {
@@ -458,6 +461,8 @@ pub struct LineEditor {
     keymap: Keymap,
     /// Saisie mise de côté avec Ctrl+S.
     stash: Option<String>,
+    /// Couleur des traits de la saisie (`/color`).
+    rule_color: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -485,7 +490,13 @@ impl LineEditor {
             image_count: 0,
             keymap: Keymap::default(),
             stash: None,
+            rule_color: None,
         }
+    }
+
+    /// `/color` : couleur des traits de la saisie (`None` : par défaut).
+    pub fn set_rule_color(&mut self, color: Option<String>) {
+        self.rule_color = color;
     }
 
     /// Encadre la saisie (traits) avec cette ligne d'état dessous.
@@ -504,6 +515,7 @@ impl LineEditor {
             width: columns.saturating_sub(1).max(20),
             status: status.clone(),
             below: self.below_lines(session, columns.saturating_sub(1).max(20)),
+            color: self.rule_color.clone(),
         });
         session.render(out, &self.prompt, self.vim_enabled, frame.as_ref(), columns)
     }
@@ -675,7 +687,7 @@ impl LineEditor {
                     if event::poll(Duration::from_millis(500))? {
                         break event::read()?;
                     }
-                    if pasting.is_none() && runtime::cron::has_due() {
+                    if pasting.is_none() && crate::idle_wakeup() {
                         session.clear_render(&mut stdout)?;
                         return Ok(ReadOutcome::Scheduled(session.text.clone()));
                     }

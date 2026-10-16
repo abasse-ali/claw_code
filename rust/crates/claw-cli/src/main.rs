@@ -7,6 +7,7 @@ mod bench_hard;
 mod clipboard;
 mod credits;
 mod doctor;
+mod extra_commands;
 mod git_work;
 mod github_setup;
 mod image_reader;
@@ -126,6 +127,17 @@ fn main() {
     user_env::adopt();
     apply_settings_env();
     runtime::set_classify_all_shell(auto_mode::rules().classify_all_shell);
+    if let Some(theme) = env::current_dir()
+        .ok()
+        .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok())
+        .and_then(|config| {
+            config
+                .get("theme")
+                .and_then(|value| value.as_str().map(str::to_string))
+        })
+    {
+        render::set_theme(&theme);
+    }
     runtime::telemetry::install(
         VERSION,
         Box::new(tools::http_post_json),
@@ -547,18 +559,26 @@ fn attach_job(reference: &str) -> Result<(), Box<dyn std::error::Error>> {
         state.pid = Some(std::process::id());
     });
     let heartbeat = jobs::Heartbeat::start(&id);
+    *ATTACHED_JOB
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(id.clone());
+    STOP_ATTACHED.store(false, std::sync::atomic::Ordering::SeqCst);
     install_interrupt_handler();
     let mode = parse_permission_mode_arg(&job.permission_mode)
         .unwrap_or_else(|_| default_permission_mode());
     let result = run_repl(job.model.clone(), None, mode, Some(PathBuf::from(&session)));
     drop(heartbeat);
+    *ATTACHED_JOB
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    let stopped = STOP_ATTACHED.swap(false, std::sync::atomic::Ordering::SeqCst);
     let answer = Session::load_from_path(Path::new(&session))
         .map(|session| last_assistant_of(&session))
         .unwrap_or_default();
     jobs::update_state(&id, |state| {
         state.attached = false;
         state.pid = None;
-        state.state = jobs::DONE.to_string();
+        state.state = if stopped { jobs::STOPPED } else { jobs::DONE }.to_string();
         state.waiting_for = None;
         state.question = None;
         state.finished_at = Some(jobs::now_ms());
@@ -753,6 +773,50 @@ fn keybindings_command() -> String {
             .to_string(),
     );
     lines.join("\n")
+}
+
+/// La saisie s'interrompt : une tâche planifiée est due, ou une sous-tâche a
+/// fini.
+pub(crate) fn idle_wakeup() -> bool {
+    runtime::cron::has_due() || extra_commands::has_finished_subtask()
+}
+
+/// Session en arrière-plan ouverte dans ce terminal (`claw attach`), et
+/// `/stop` demandé pendant qu'elle l'est.
+static ATTACHED_JOB: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static STOP_ATTACHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `/sandbox` : état du bac à sable ; `docker`, `podman` ou `off` choisit le
+/// conteneur pour la session.
+fn sandbox_command(args: Option<&str>) -> String {
+    match args.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(engine @ ("docker" | "podman")) => {
+            env::set_var("CLAW_SANDBOX", engine);
+            format!("Bac à sable : chaque commande shell s'exécute dans un conteneur {engine} (pour cette session ; \"sandbox\": {{\"backend\": \"{engine}\"}} dans .claw/settings.json pour le garder)")
+        }
+        Some("off" | "aucun" | "none") => {
+            env::remove_var("CLAW_SANDBOX");
+            "Bac à sable : plus de conteneur pour cette session (les réglages \"sandbox\" restent appliqués)".to_string()
+        }
+        Some(other) => format!("Option inconnue « {other} » : /sandbox [docker|podman|off]"),
+        None => {
+            let cwd = env::current_dir().unwrap_or_default();
+            let config = ConfigLoader::default_for(&cwd).load().ok();
+            let sandbox = config
+                .as_ref()
+                .map(|config| config.sandbox().clone())
+                .unwrap_or_default();
+            let container = sandbox.container().map_or_else(
+                || "aucun".to_string(),
+                |container| format!("{} ({})", container.program, container.image),
+            );
+            let status = runtime::sandbox::resolve_sandbox_status(&sandbox, &cwd);
+            format!(
+                "Bac à sable\n  Conteneur        {container}\n  Isolation Linux  {}\n  Changer          /sandbox docker|podman|off (session) · \"sandbox\" dans .claw/settings.json",
+                if status.active { "active (namespaces)" } else { "inactive" }
+            )
+        }
+    }
 }
 
 /// La conversation active change : ses tâches planifiées reviennent, et la
@@ -2875,6 +2939,21 @@ fn run_resume_command(
         | SlashCommand::Keybindings
         | SlashCommand::Background { .. }
         | SlashCommand::Fork { .. }
+        | SlashCommand::Plan { .. }
+        | SlashCommand::Tasks
+        | SlashCommand::Stop
+        | SlashCommand::Cd { .. }
+        | SlashCommand::Subtask { .. }
+        | SlashCommand::Rewind
+        | SlashCommand::Sandbox { .. }
+        | SlashCommand::TerminalSetup
+        | SlashCommand::Theme { .. }
+        | SlashCommand::Color { .. }
+        | SlashCommand::ReloadSkills
+        | SlashCommand::ReloadPlugins
+        | SlashCommand::ReleaseNotes
+        | SlashCommand::Usage
+        | SlashCommand::Insights
         | SlashCommand::Context
         | SlashCommand::Teleport { .. }
         | SlashCommand::DebugToolCall
@@ -3014,6 +3093,41 @@ fn run_repl(
                             continue;
                         }
                     }
+                    if matches!(command, SlashCommand::Rewind) {
+                        match cli.rewind_prompt() {
+                            Ok(Some(request)) => editor.set_initial_text(request),
+                            Ok(None) => {}
+                            Err(error) => eprintln!("{}", render_cli_error(&error.to_string())),
+                        }
+                        continue;
+                    }
+                    if let SlashCommand::Color { color } = &command {
+                        let (message, change) = extra_commands::color_command(color.as_deref());
+                        match change {
+                            extra_commands::ColorChange::Default => editor.set_rule_color(None),
+                            extra_commands::ColorChange::Color(code) => {
+                                editor.set_rule_color(Some(code));
+                            }
+                            extra_commands::ColorChange::Unchanged => {}
+                        }
+                        println!("  ⎿  {message}");
+                        continue;
+                    }
+                    if matches!(command, SlashCommand::Stop) {
+                        let attached = ATTACHED_JOB
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone();
+                        if let Some(id) = attached {
+                            STOP_ATTACHED.store(true, std::sync::atomic::Ordering::SeqCst);
+                            cli.persist_session()?;
+                            cli.session_hook_end("stop");
+                            println!("  ⎿  Session {id} arrêtée (conversation et worktree gardés)");
+                            break;
+                        }
+                        println!("  ⎿  Aucune session en arrière-plan n'est ouverte ici : claw stop <id> en arrête une, /exit quitte");
+                        continue;
+                    }
                     if let SlashCommand::Background { prompt } = &command {
                         match cli.send_to_background(prompt.as_deref()) {
                             Ok(true) => {
@@ -3066,8 +3180,10 @@ fn run_repl(
                 cli.session_hook_end("exit");
                 break;
             }
-            // Tâche planifiée échue : elle passe, puis la saisie reprend.
+            // Tâche planifiée échue ou sous-tâche finie : elle passe, puis
+            // la saisie reprend.
             input::ReadOutcome::Scheduled(text) => {
+                cli.deliver_subtasks();
                 cli.run_due_tasks();
                 if !text.is_empty() {
                     editor.set_initial_text(text);
@@ -3733,7 +3849,17 @@ impl LiveCli {
                 false
             }
             SlashCommand::Think { level } => {
-                println!("{}", apply_think_command(level.as_deref()));
+                // Niveaux de Claude Code (/effort) : xhigh, auto, status.
+                let level = level.map(|level| level.trim().to_lowercase());
+                match level.as_deref() {
+                    Some("auto") => {
+                        api::set_reasoning_effort(None);
+                        println!("Raisonnement : auto (le réglage du modèle)");
+                    }
+                    Some("status") => println!("{}", apply_think_command(None)),
+                    Some("xhigh") => println!("{}", apply_think_command(Some("max"))),
+                    other => println!("{}", apply_think_command(other)),
+                }
                 false
             }
             SlashCommand::Team { args } => {
@@ -3766,14 +3892,94 @@ impl LiveCli {
                 println!("{}", keybindings_command());
                 false
             }
+            SlashCommand::Plan { task } => {
+                self.set_permissions(Some("read-only".to_string()))?;
+                if let Some(task) = task.filter(|task| !task.trim().is_empty()) {
+                    self.run_turn(&task)?;
+                    return Ok(true);
+                }
+                false
+            }
+            SlashCommand::Tasks => {
+                Self::print_tasks();
+                false
+            }
+            SlashCommand::Cd { path } => {
+                if let Err(error) = self.change_directory(path.as_deref()) {
+                    eprintln!("{}", render_cli_error(&error.to_string()));
+                }
+                false
+            }
+            SlashCommand::Subtask { task } => {
+                match task.filter(|task| !task.trim().is_empty()) {
+                    Some(task) => {
+                        let transcript =
+                            extra_commands::transcript_text(self.runtime.session(), 12_000);
+                        let id = extra_commands::spawn_subtask(&task, &transcript, &self.model);
+                        println!("  ⎿  Sous-tâche {id} lancée en arrière-plan : son résultat reviendra ici (/tasks pour la suivre)");
+                    }
+                    None => println!("Usage : /subtask <tâche>"),
+                }
+                false
+            }
+            SlashCommand::Sandbox { args } => {
+                println!("{}", sandbox_command(args.as_deref()));
+                false
+            }
+            SlashCommand::TerminalSetup => {
+                println!("{}", extra_commands::terminal_setup());
+                false
+            }
+            SlashCommand::Theme { name } => {
+                println!("{}", extra_commands::theme_command(name.as_deref()));
+                false
+            }
+            SlashCommand::ReloadSkills => {
+                self.refresh_system_prompt()?;
+                let count = env::current_dir()
+                    .map(|cwd| commands::skill_registry::installed_skills(&cwd).len())
+                    .unwrap_or(0);
+                println!("  ⎿  Skills relus : {count} disponible(s)");
+                false
+            }
+            SlashCommand::ReloadPlugins => {
+                self.reload_runtime_features()?;
+                self.refresh_system_prompt()?;
+                println!("  ⎿  Plugins, hooks, serveurs MCP et réglages rechargés");
+                false
+            }
+            SlashCommand::ReleaseNotes => {
+                println!("{}", extra_commands::release_notes());
+                false
+            }
+            SlashCommand::Usage => {
+                self.print_cost();
+                if credits::is_openrouter_model(&self.model) {
+                    println!("{}", credits::report(false));
+                }
+                let mut activity = extra_commands::Activity::default();
+                activity.add(self.runtime.session());
+                println!("Activité de la session\n{}", activity.summary());
+                false
+            }
+            SlashCommand::Insights => {
+                match extra_commands::insights(&env::current_dir()?) {
+                    Ok((_, summary)) => println!("{summary}"),
+                    Err(error) => println!("  ⎿  {error}"),
+                }
+                false
+            }
             SlashCommand::Fork { prompt } => {
                 if let Err(error) = self.fork_to_background(prompt.as_deref()) {
                     eprintln!("{}", render_cli_error(&error.to_string()));
                 }
                 false
             }
-            // Traité par la boucle du terminal (la session se libère).
-            SlashCommand::Background { .. } => false,
+            // Traitées par la boucle du terminal (saisie, sortie, session libérée).
+            SlashCommand::Background { .. }
+            | SlashCommand::Rewind
+            | SlashCommand::Stop
+            | SlashCommand::Color { .. } => false,
             SlashCommand::Teleport { target } => {
                 self.run_teleport(target.as_deref())?;
                 false
@@ -4700,6 +4906,109 @@ impl LiveCli {
 
     /// `/loop [intervalle] <demande>` : la demande relancée à intervalle
     /// régulier, jusqu'à Échap, Ctrl+C ou la limite de passages.
+    /// Sous-tâches finies : le résultat est montré et rejoint la conversation.
+    fn deliver_subtasks(&mut self) {
+        for subtask in extra_commands::take_finished_subtasks() {
+            match subtask.result {
+                Some(Ok(report)) => {
+                    println!(
+                        "\n{}※ Sous-tâche {} terminée{} · {}\n{}\n",
+                        transcript::ACCENT,
+                        subtask.id,
+                        transcript::RESET,
+                        subtask.task,
+                        TerminalRenderer::new().markdown_to_ansi(&report)
+                    );
+                    self.pending_context.push(format!(
+                        "[Result of sub-task {} \"{}\", run by a forked sub-agent]\n{report}",
+                        subtask.id, subtask.task
+                    ));
+                }
+                Some(Err(error)) => println!(
+                    "\n  ⎿  {}Sous-tâche {} en échec : {error}{}\n",
+                    transcript::RED,
+                    subtask.id,
+                    transcript::RESET
+                ),
+                None => {}
+            }
+        }
+    }
+
+    /// `/cd <chemin>` : la session continue dans ce dossier (consignes,
+    /// réglages, permissions et outils de ce dossier).
+    fn change_directory(&mut self, path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(path) = path.map(str::trim).filter(|path| !path.is_empty()) else {
+            println!(
+                "Usage : /cd <chemin>  (dossier actuel : {})",
+                env::current_dir()?.display()
+            );
+            return Ok(());
+        };
+        let target = env::current_dir()?.join(path);
+        let target =
+            fs::canonicalize(&target).map_err(|error| format!("{} : {error}", target.display()))?;
+        // Sous Windows, `canonicalize` rend un chemin `\\?\C:\…` : on garde la
+        // forme ordinaire (affichage, outils, git).
+        let target = target
+            .to_str()
+            .and_then(|text| text.strip_prefix(r"\\?\"))
+            .filter(|rest| !rest.starts_with("UNC"))
+            .map_or_else(|| target.clone(), PathBuf::from);
+        if !target.is_dir() {
+            return Err(format!("{} n'est pas un dossier", target.display()).into());
+        }
+        env::set_current_dir(&target)?;
+        self.refresh_system_prompt()?;
+        self.reload_runtime_features()?;
+        println!(
+            "  ⎿  Dossier : {}\n     Consignes, réglages et permissions de ce dossier appliqués ; la conversation continue (/add-dir garde au contraire le dossier actuel)",
+            transcript::display_path(&target.display().to_string())
+        );
+        Ok(())
+    }
+
+    /// `/tasks` : ce qui tourne en arrière-plan pour cette session.
+    fn print_tasks() {
+        let mut sections = vec![render_background_tasks(None)];
+        let subtasks = extra_commands::subtask_lines();
+        if !subtasks.is_empty() {
+            sections.push(format!("Sous-tâches\n{}", subtasks.join("\n")));
+        }
+        let scheduled = runtime::cron::list();
+        if !scheduled.is_empty() {
+            sections.push(format!(
+                "Tâches planifiées\n{}",
+                scheduled
+                    .iter()
+                    .map(|task| format!("  {}", task.describe()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+        let cwd = env::current_dir().unwrap_or_default();
+        let jobs: Vec<String> = jobs::all()
+            .into_iter()
+            .filter(|(job, _)| Path::new(&job.origin).starts_with(&cwd))
+            .take(8)
+            .map(|(job, state)| {
+                format!(
+                    "  {}  {:<8} {}",
+                    job.id,
+                    jobs::effective_state(&job, &state),
+                    job.name
+                )
+            })
+            .collect();
+        if !jobs.is_empty() {
+            sections.push(format!(
+                "Sessions en arrière-plan (claw agents)\n{}",
+                jobs.join("\n")
+            ));
+        }
+        println!("{}", sections.join("\n\n"));
+    }
+
     /// Tâches planifiées échues : chacune passe comme un tour.
     fn run_due_tasks(&mut self) {
         while let Some(task) = runtime::cron::take_due() {
@@ -7663,6 +7972,7 @@ fn auto_compaction_config(model: &str) -> Option<runtime::AutoCompactionConfig> 
 }
 
 /// Prompt d'une commande spécialisée, ou message d'usage si un argument requis manque.
+#[allow(clippy::too_many_lines)]
 fn expert_command_prompt(command: ExpertCommand, args: Option<&str>) -> Result<String, String> {
     // Les consignes sont en anglais pour le modèle ; la réponse doit rester
     // dans la langue de l'utilisateur.
@@ -7744,6 +8054,46 @@ fn expert_command_prompt(command: ExpertCommand, args: Option<&str>) -> Result<S
             );
             format!(
                 "/code-review - Multi-agent code review of {target}.\n\n{CODE_REVIEW_INSTRUCTIONS}"
+            )
+        }
+        ExpertCommand::Simplify => {
+            let target = args.unwrap_or(
+                "the current uncommitted changes (`git diff HEAD`), or the latest commit if the working tree is clean",
+            );
+            format!(
+                "/simplify - Review {target} for cleanup opportunities and apply the fixes.\n\nIn ONE reply, start four Agent sub-agents in parallel (subagent_type general-purpose), each reviewing the same changes with one focus and reporting concrete suggestions with file:line:\n1. Reuse: logic that duplicates an existing helper, utility or library function in this codebase.\n2. Simplification: needless complexity, dead code, redundant branches, over-long functions, unclear names.\n3. Efficiency: wasted work, repeated I/O or allocations, quadratic loops, missing early exits.\n4. Abstraction level: code at the wrong layer, leaky or premature abstractions, misplaced responsibilities.\nThis is not a bug hunt (that is /code-review): do not change behavior. Then merge their findings, apply the changes worth making, keep the behavior identical, run the project's build and tests, and summarize what you changed and what you deliberately left."
+            )
+        }
+        ExpertCommand::Verify => {
+            let what = args.unwrap_or(
+                "the most recent change in this conversation (or the uncommitted changes)",
+            );
+            format!(
+                "/verify - Confirm that {what} does what it should by building the project's application, running it and observing the result, rather than relying on tests or type checks alone.\n\nFind how the project is built and started (README, CLAW.md, manifests). Build it, then exercise the changed behavior the way a user would: run the CLI with representative inputs, start the server and request the affected endpoints, or open the page (ViewPage, Screenshot) and check what it shows. Use edge cases where they matter. Stop servers you started. Report what you ran, what you observed, and whether it matches the expected behavior, with the evidence. Do not fix anything unless I ask: if something is wrong, say what and where."
+            )
+        }
+        ExpertCommand::Statusline => {
+            let wanted = args.unwrap_or(
+                "a compact line inspired by my shell prompt: current directory, git branch, model, context use",
+            );
+            let os = std::env::consts::OS;
+            format!(
+                "/statusline - Configure Claw's status line: {wanted}.\n\nHow it works: before each prompt, Claw runs the command set in the `statusLine` setting, writes a JSON object on its stdin and shows the first lines it prints (ANSI colors allowed). The JSON has: hook_event_name, session_id, transcript_path, cwd, model.id, model.display_name, workspace.current_dir, workspace.project_dir, version, permission_mode, output_style.name, context_window.used_percentage, context_window.context_window_size, cost.total_cost_usd, goal.\n\nSteps: 1. Write a small script for this system ({os}: PowerShell or Python on Windows, sh or Python elsewhere) in the Claw config folder (`~/.claw/statusline.<ext>`) that reads that JSON and prints the line; it must be fast and never fail (missing fields: print nothing for them). 2. Test it by piping a sample JSON into it. 3. Set `\"statusLine\": {{\"type\": \"command\", \"command\": \"<the command>\"}}` in `~/.claw/settings.json`, keeping every other setting. 4. Show me the line it prints."
+            )
+        }
+        ExpertCommand::FewerPrompts => {
+            let cwd = env::current_dir().map_err(|error| error.to_string())?;
+            let frequencies = extra_commands::command_frequencies(&cwd);
+            if frequencies.is_empty() {
+                return Err("Aucune commande dans les conversations enregistrées de ce projet (.claw/sessions) : rien à proposer pour l'instant.".to_string());
+            }
+            let table = frequencies
+                .iter()
+                .map(|(name, count)| format!("- {name} ({count})"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "/fewer-permission-prompts - Reduce permission prompts in this project. These shell commands (first words) and MCP tools come up most in the project's saved conversations; read-only commands already run without a prompt and are not listed:\n{table}\n\nPropose `permissions.allow` rules (format `Bash(cargo test:*)` for a command prefix, or the MCP tool name such as `mcp__server__tool`) ONLY for the ones that are safe and routine: running tests, builds, linters, formatters, type checkers, listing or inspecting packages, read-only MCP tools. Never for commands that delete, push, deploy, publish, install system-wide, change git history or touch credentials. Show the list ranked by how many prompts it saves, with a one-line reason each, ask me to confirm, then add the approved rules to `.claw/settings.json` (create it if needed and keep the existing rules)."
             )
         }
         ExpertCommand::PrComments => {

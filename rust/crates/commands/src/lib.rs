@@ -84,6 +84,10 @@ pub enum ExpertCommand {
     SecurityReview,
     CodeReview,
     PrComments,
+    Simplify,
+    Verify,
+    Statusline,
+    FewerPrompts,
 }
 
 impl ExpertCommand {
@@ -99,6 +103,10 @@ impl ExpertCommand {
             Self::SecurityReview => "security-review",
             Self::CodeReview => "code-review",
             Self::PrComments => "pr-comments",
+            Self::Simplify => "simplify",
+            Self::Verify => "verify",
+            Self::Statusline => "statusline",
+            Self::FewerPrompts => "fewer-permission-prompts",
         }
     }
 
@@ -113,6 +121,10 @@ impl ExpertCommand {
             "security-review" | "securite" | "sécurité" => Some(Self::SecurityReview),
             "code-review" | "ultrareview" | "revue-multi" => Some(Self::CodeReview),
             "pr-comments" | "commentaires-pr" => Some(Self::PrComments),
+            "simplify" | "simplifier" => Some(Self::Simplify),
+            "verify" | "verifier" | "vérifier" => Some(Self::Verify),
+            "statusline" | "ligne-etat" => Some(Self::Statusline),
+            "fewer-permission-prompts" | "moins-de-demandes" => Some(Self::FewerPrompts),
             _ => None,
         }
     }
@@ -310,7 +322,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "undo",
-        aliases: &["rewind"],
+        aliases: &[],
         summary: "Annule les derniers tours : fichiers modifiés par l'agent et conversation",
         argument_hint: Some("[nombre de tours]"),
         resume_supported: false,
@@ -318,7 +330,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "bashes",
-        aliases: &["tasks"],
+        aliases: &[],
         summary: "Commandes lancées en arrière-plan par l'agent (état, arrêt : /bashes kill <id>)",
         argument_hint: Some("[kill <id>]"),
         resume_supported: false,
@@ -368,6 +380,158 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         name: "credits",
         aliases: &["solde"],
         summary: "Crédits OpenRouter en temps réel : solde, dépense du jour, requêtes gratuites restantes",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "plan",
+        aliases: &[],
+        summary: "Passe en mode plan ; avec une demande, la commence aussitôt",
+        argument_hint: Some("[demande]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "tasks",
+        aliases: &[],
+        summary: "Travail en arrière-plan de la session : commandes, sous-tâches, tâches planifiées, sessions",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "stop",
+        aliases: &[],
+        summary: "Arrête la session en arrière-plan ouverte dans ce terminal (claw attach)",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "cd",
+        aliases: &[],
+        summary: "Déplace la session dans un autre dossier, en gardant la conversation",
+        argument_hint: Some("<chemin>"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "subtask",
+        aliases: &["sous-tache", "sous-tâche"],
+        summary: "Sous-agent en arrière-plan qui reprend la conversation ; son résultat revient ici",
+        argument_hint: Some("<tâche>"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "rewind",
+        aliases: &["checkpoint"],
+        summary: "Revient avant un message précédent (conversation et fichiers), comme Échap Échap",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "sandbox",
+        aliases: &["bac-a-sable"],
+        summary: "Bac à sable des commandes : état, ou conteneur docker|podman|off pour la session",
+        argument_hint: Some("[docker|podman|off]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "terminal-setup",
+        aliases: &[],
+        summary: "Règle Maj+Entrée pour un saut de ligne dans le terminal de VS Code ou Cursor",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "theme",
+        aliases: &["theme-couleurs"],
+        summary: "Thème : auto, dark, light, versions daltonized et ansi",
+        argument_hint: Some("[nom]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "color",
+        aliases: &["couleur"],
+        summary: "Couleur des traits de la saisie pour la session",
+        argument_hint: Some("[couleur|default]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "reload-skills",
+        aliases: &[],
+        summary: "Relit les skills et commandes ajoutés pendant la session",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "reload-plugins",
+        aliases: &[],
+        summary: "Recharge plugins, hooks et serveurs MCP sans redémarrer",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "release-notes",
+        aliases: &["nouveautes", "nouveautés"],
+        summary: "Notes de version de Claw",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "usage",
+        aliases: &["stats"],
+        summary: "Coût, crédits et activité de la session",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "insights",
+        aliases: &[],
+        summary: "Bilan d'usage du projet en HTML : outils, commandes, échecs, pistes",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "simplify",
+        aliases: &["simplifier"],
+        summary: "Relit les changements avec quatre sous-agents (réutilisation, simplicité, efficacité, abstraction) et applique les corrections",
+        argument_hint: Some("[fichiers|branche]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "verify",
+        aliases: &["verifier", "vérifier"],
+        summary: "Vérifie qu'un changement fait ce qu'il doit en lançant l'application et en observant le résultat",
+        argument_hint: Some("[quoi vérifier]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "statusline",
+        aliases: &["ligne-etat"],
+        summary: "Configure la ligne d'état (script et réglage statusLine)",
+        argument_hint: Some("[description]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "fewer-permission-prompts",
+        aliases: &["moins-de-demandes"],
+        summary: "Propose des règles allow pour les commandes sûres et fréquentes du projet",
         argument_hint: None,
         resume_supported: false,
         category: SlashCommandCategory::Core,
@@ -716,6 +880,33 @@ pub enum SlashCommand {
     Background {
         prompt: Option<String>,
     },
+    Plan {
+        task: Option<String>,
+    },
+    Tasks,
+    Stop,
+    Cd {
+        path: Option<String>,
+    },
+    Subtask {
+        task: Option<String>,
+    },
+    Rewind,
+    Sandbox {
+        args: Option<String>,
+    },
+    TerminalSetup,
+    Theme {
+        name: Option<String>,
+    },
+    Color {
+        color: Option<String>,
+    },
+    ReloadSkills,
+    ReloadPlugins,
+    ReleaseNotes,
+    Usage,
+    Insights,
     Fork {
         prompt: Option<String>,
     },
@@ -852,10 +1043,10 @@ impl SlashCommand {
             "equipe" | "équipe" | "team" => Self::Team {
                 args: remainder_after_command(trimmed, command),
             },
-            "bashes" | "tasks" => Self::Bashes {
+            "bashes" => Self::Bashes {
                 args: remainder_after_command(trimmed, command),
             },
-            "undo" | "rewind" => Self::Undo {
+            "undo" => Self::Undo {
                 count: parts.next().map(ToOwned::to_owned),
             },
             "checkpoints" => Self::Checkpoints,
@@ -866,6 +1057,33 @@ impl SlashCommand {
             "credits" | "solde" => Self::Credits,
             "doctor" | "diagnostic" => Self::Doctor,
             "keybindings" | "raccourcis" => Self::Keybindings,
+            "plan" => Self::Plan {
+                task: remainder_after_command(trimmed, command),
+            },
+            "tasks" => Self::Tasks,
+            "stop" => Self::Stop,
+            "cd" => Self::Cd {
+                path: remainder_after_command(trimmed, command),
+            },
+            "subtask" | "sous-tache" | "sous-tâche" => Self::Subtask {
+                task: remainder_after_command(trimmed, command),
+            },
+            "rewind" | "checkpoint" => Self::Rewind,
+            "sandbox" | "bac-a-sable" => Self::Sandbox {
+                args: remainder_after_command(trimmed, command),
+            },
+            "terminal-setup" => Self::TerminalSetup,
+            "theme" | "theme-couleurs" => Self::Theme {
+                name: remainder_after_command(trimmed, command),
+            },
+            "color" | "couleur" => Self::Color {
+                color: remainder_after_command(trimmed, command),
+            },
+            "reload-skills" => Self::ReloadSkills,
+            "reload-plugins" => Self::ReloadPlugins,
+            "release-notes" | "nouveautes" | "nouveautés" => Self::ReleaseNotes,
+            "usage" | "stats" => Self::Usage,
+            "insights" => Self::Insights,
             "background" | "bg" => Self::Background {
                 prompt: remainder_after_command(trimmed, command),
             },
@@ -2416,6 +2634,21 @@ pub fn handle_slash_command(
         | SlashCommand::Keybindings
         | SlashCommand::Background { .. }
         | SlashCommand::Fork { .. }
+        | SlashCommand::Plan { .. }
+        | SlashCommand::Tasks
+        | SlashCommand::Stop
+        | SlashCommand::Cd { .. }
+        | SlashCommand::Subtask { .. }
+        | SlashCommand::Rewind
+        | SlashCommand::Sandbox { .. }
+        | SlashCommand::TerminalSetup
+        | SlashCommand::Theme { .. }
+        | SlashCommand::Color { .. }
+        | SlashCommand::ReloadSkills
+        | SlashCommand::ReloadPlugins
+        | SlashCommand::ReleaseNotes
+        | SlashCommand::Usage
+        | SlashCommand::Insights
         | SlashCommand::AddDir { .. }
         | SlashCommand::Branch { .. }
         | SlashCommand::Bughunter { .. }
@@ -2871,15 +3104,17 @@ mod tests {
         assert!(help.contains("/code-review [fichiers|branche|commit|PR n°]"));
         assert!(help.contains("/install-github-action [assistant|review|all]"));
         assert!(help.contains("/add-dir [dossier] [--save]"));
-        assert_eq!(slash_command_specs().len(), 61);
+        assert_eq!(slash_command_specs().len(), 80);
         assert_eq!(resume_supported_slash_commands().len(), 19);
     }
 
     #[test]
     fn suggests_close_slash_commands() {
-        let suggestions = suggest_slash_commands("stats", 3);
+        let suggestions = suggest_slash_commands("statu", 3);
         assert!(!suggestions.is_empty());
         assert_eq!(suggestions[0], "/status");
+        // `stats` est un alias de `/usage`, comme dans Claude Code.
+        assert_eq!(suggest_slash_commands("stats", 3)[0], "/usage");
     }
 
     #[test]

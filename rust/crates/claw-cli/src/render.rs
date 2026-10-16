@@ -19,6 +19,96 @@ pub struct ColorTheme {
     code_block_border: Color,
 }
 
+/// Thèmes de `/theme` (ceux de Claude Code) : le fond des blocs de code,
+/// la coloration syntaxique et les couleurs du Markdown suivent le thème.
+pub const THEMES: [(&str, &str); 7] = [
+    (
+        "auto",
+        "suit le fond du terminal (COLORFGBG), sombre par défaut",
+    ),
+    ("dark", "fond sombre (défaut)"),
+    ("light", "fond clair"),
+    ("dark-daltonized", "fond sombre, sans opposition rouge/vert"),
+    ("light-daltonized", "fond clair, sans opposition rouge/vert"),
+    ("dark-ansi", "palette du terminal, sans couleurs 24 bits"),
+    ("light-ansi", "palette du terminal sur fond clair"),
+];
+
+static THEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+
+/// Change le thème ; `false` si le nom est inconnu.
+pub fn set_theme(name: &str) -> bool {
+    let Some(index) = THEMES.iter().position(|(theme, _)| *theme == name.trim()) else {
+        return false;
+    };
+    THEME.store(
+        u8::try_from(index).unwrap_or(1),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    true
+}
+
+/// Nom du thème choisi (`auto` compris).
+#[must_use]
+pub fn theme_name() -> &'static str {
+    THEMES[usize::from(THEME.load(std::sync::atomic::Ordering::Relaxed)).min(THEMES.len() - 1)].0
+}
+
+/// Thème effectif : `auto` lit `COLORFGBG` (« 0;15 » : fond clair).
+fn effective_theme() -> &'static str {
+    match theme_name() {
+        "auto" => {
+            let light = std::env::var("COLORFGBG")
+                .ok()
+                .and_then(|value| value.rsplit(';').next()?.trim().parse::<u8>().ok())
+                .is_some_and(|background| background == 7 || background >= 9);
+            if light {
+                "light"
+            } else {
+                "dark"
+            }
+        }
+        other => other,
+    }
+}
+
+fn light_theme() -> bool {
+    effective_theme().starts_with("light")
+}
+
+fn ansi_theme() -> bool {
+    effective_theme().ends_with("ansi")
+}
+
+impl ColorTheme {
+    fn for_current_theme() -> Self {
+        let theme = effective_theme();
+        let mut colors = Self::default();
+        if theme.starts_with("light") {
+            colors = Self {
+                heading: Color::DarkBlue,
+                emphasis: Color::DarkMagenta,
+                strong: Color::DarkYellow,
+                inline_code: Color::DarkGreen,
+                link: Color::DarkBlue,
+                quote: Color::Grey,
+                table_border: Color::DarkBlue,
+                code_block_border: Color::Grey,
+            };
+        }
+        if theme.ends_with("daltonized") {
+            // Ni rouge ni vert l'un contre l'autre : bleu et orangé.
+            colors.inline_code = if theme.starts_with("light") {
+                Color::DarkBlue
+            } else {
+                Color::Blue
+            };
+            colors.strong = Color::DarkYellow;
+        }
+        colors
+    }
+}
+
 impl Default for ColorTheme {
     fn default() -> Self {
         Self {
@@ -145,12 +235,16 @@ impl Default for TerminalRenderer {
         let syntax_set = SyntaxSet::load_defaults_newlines();
         let syntax_theme = ThemeSet::load_defaults()
             .themes
-            .remove("base16-ocean.dark")
+            .remove(if light_theme() {
+                "InspiredGitHub"
+            } else {
+                "base16-ocean.dark"
+            })
             .unwrap_or_default();
         Self {
             syntax_set,
             syntax_theme,
-            color_theme: ColorTheme::default(),
+            color_theme: ColorTheme::for_current_theme(),
         }
     }
 }
@@ -484,6 +578,10 @@ impl TerminalRenderer {
 
     #[must_use]
     pub fn highlight_code(&self, code: &str, language: &str) -> String {
+        // Thèmes « ansi » : le code garde les couleurs du terminal.
+        if ansi_theme() {
+            return code.to_string();
+        }
         let syntax = self
             .syntax_set
             .find_syntax_by_token(language)
@@ -556,8 +654,9 @@ fn apply_code_block_background(line: &str) -> String {
     } else {
         "\n"
     };
-    let with_background = trimmed.replace("\u{1b}[0m", "\u{1b}[0;48;5;236m");
-    format!("\u{1b}[48;5;236m{with_background}\u{1b}[0m{trailing_newline}")
+    let background = if light_theme() { "255" } else { "236" };
+    let with_background = trimmed.replace("\u{1b}[0m", &format!("\u{1b}[0;48;5;{background}m"));
+    format!("\u{1b}[48;5;{background}m{with_background}\u{1b}[0m{trailing_newline}")
 }
 
 fn find_stream_safe_boundary(markdown: &str) -> Option<usize> {

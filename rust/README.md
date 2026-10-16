@@ -1204,6 +1204,30 @@ part, sur sa propre branche), rangé dans `.claw/worktrees/<nom>`. Ce dossier es
 - **`/tasks`** (alias de `/bashes`) montre aussi les derniers sous-agents : en cours, terminé ou
   en échec, avec le fichier de leur rapport.
 
+### Autres commandes de Claude Code
+
+| Commande | Effet |
+|---|---|
+| `/plan [demande]` | Passe en mode plan ; avec une demande, la commence aussitôt |
+| `/effort [low…max\|xhigh\|auto\|status]` | Niveau de raisonnement (alias de `/think`) |
+| `/tasks` | Ce qui tourne pour la session : commandes de fond, sous-agents, sous-tâches, tâches planifiées, sessions en arrière-plan du projet |
+| `/subtask <tâche>` | Un sous-agent reprend la conversation et travaille en arrière-plan ; son résultat revient dans la conversation dès qu'il a fini, sans interrompre votre saisie |
+| `/rewind` | Revient avant un message précédent (comme `Échap Échap`) |
+| `/cd <chemin>` | La session continue dans un autre dossier : ses consignes, réglages, permissions et outils s'appliquent (`/add-dir` garde au contraire le dossier actuel) |
+| `/stop` | Arrête la session en arrière-plan ouverte avec `claw attach` (conversation et worktree gardés) |
+| `/sandbox [docker\|podman\|off]` | État du bac à sable ; conteneur pour la session |
+| `/theme [nom]` | `auto`, `dark`, `light`, `dark-daltonized`, `light-daltonized`, `dark-ansi`, `light-ansi` : coloration du code, fond des blocs et couleurs du Markdown ; enregistré dans `~/.claw/settings.json` (`"theme"`) |
+| `/color [couleur\|default]` | Couleur des traits de la saisie pour la session |
+| `/terminal-setup` | Dans VS Code ou Cursor, règle `Maj+Entrée` pour un saut de ligne (copie de sauvegarde du fichier des raccourcis) |
+| `/reload-skills`, `/reload-plugins` | Relit les skills, ou recharge plugins, hooks, serveurs MCP et réglages, sans redémarrer |
+| `/usage` (`/stats`) | Coût, crédits OpenRouter et activité de la session |
+| `/insights` | Bilan d'usage du projet en HTML (`.claw/insights.html`) : outils, commandes, échecs, pistes |
+| `/release-notes` | Notes de version |
+| `/simplify [cible]` | Quatre sous-agents relisent les changements (réutilisation, simplicité, efficacité, niveau d'abstraction), puis Claw applique les corrections sans changer le comportement |
+| `/verify [quoi]` | Construit et lance l'application pour constater que le changement fait ce qu'il doit |
+| `/statusline [description]` | Écrit un script de ligne d'état et règle `statusLine` |
+| `/fewer-permission-prompts` | Relève les commandes fréquentes du projet et propose des règles `allow` pour les plus sûres (tests, builds, linters) |
+
 ### Tâches planifiées : `/loop` et rappels
 
 Comme dans Claude Code, une demande peut revenir toute seule pendant la session : surveiller
