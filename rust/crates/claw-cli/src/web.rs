@@ -461,6 +461,11 @@ struct WebPrompter {
 
 impl PermissionPrompter for WebPrompter {
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
+        // Mode auto : le classificateur juge ; la page n'est sollicitée que
+        // s'il s'est mis en pause après plusieurs blocages.
+        if let Some(decision) = crate::auto_mode::gate(request).decision {
+            return decision;
+        }
         let id = self.app.next_permission_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel();
         self.app.lock_pending().insert(id, sender);

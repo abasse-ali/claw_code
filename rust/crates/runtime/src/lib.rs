@@ -114,10 +114,10 @@ pub use oauth::{
 pub use paths::{find_executable, home_dir};
 pub use permissions::{
     add_session_directory, clear_turn_grants, deny_for_turn, grant_for_turn, is_not_run,
-    is_writable_without_asking, request_mode_switch, set_configured_directories,
-    unanswered_permission, user_away, writable_directories, PermissionMode, PermissionOutcome,
-    PermissionPolicy, PermissionPromptDecision, PermissionPrompter, PermissionRequest,
-    PermissionRule, PermissionRules, NOT_RUN_PREFIX,
+    is_protected_path, is_writable_without_asking, request_mode_switch, set_classify_all_shell,
+    set_configured_directories, unanswered_permission, user_away, writable_directories,
+    PermissionMode, PermissionOutcome, PermissionPolicy, PermissionPromptDecision,
+    PermissionPrompter, PermissionRequest, PermissionRule, PermissionRules, NOT_RUN_PREFIX,
 };
 pub use prompt::{
     current_date_iso, load_system_prompt, prepend_bullets, ContextFile, ProjectContext,

@@ -939,6 +939,15 @@ impl runtime::PermissionPrompter for JobPermissionPrompter {
         &mut self,
         request: &runtime::PermissionRequest,
     ) -> runtime::PermissionPromptDecision {
+        // Mode auto : le classificateur juge ; la session n'attend une
+        // réponse que s'il s'est mis en pause.
+        let gate = crate::auto_mode::gate(request);
+        if let Some(notice) = &gate.notice {
+            println!("  ⎿  {notice}");
+        }
+        if let Some(decision) = gate.decision {
+            return decision;
+        }
         let call = describe_call(&request.tool_name, &request.input);
         let always = if request.suggested_rule.is_some() {
             ", t : toujours"

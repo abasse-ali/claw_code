@@ -15,6 +15,10 @@ pub enum PermissionMode {
     /// `dontAsk` de Claude Code : rien n'est demandé ; ce qui n'est pas
     /// autorisé d'avance (lecture, règles `allow`) est refusé.
     DontAsk,
+    /// Mode auto de Claude Code : lectures et modifications du projet
+    /// acceptées ; le reste (commandes, chemins protégés, écritures hors du
+    /// projet) est jugé par un classificateur à la place de l'utilisateur.
+    Auto,
 }
 
 impl PermissionMode {
@@ -27,8 +31,130 @@ impl PermissionMode {
             Self::Prompt => "prompt",
             Self::Allow => "allow",
             Self::DontAsk => "dont-ask",
+            Self::Auto => "auto",
         }
     }
+}
+
+// ------------------------------------------------------------ mode auto
+//
+// Chemins dont l'écriture n'est jamais acceptée d'office en mode auto (état
+// du dépôt, configuration des outils et de Claw) : elle passe par le
+// classificateur.
+
+const PROTECTED_DIRS: &[&str] = &[
+    ".git",
+    ".vscode",
+    ".idea",
+    ".husky",
+    ".cargo",
+    ".devcontainer",
+    ".yarn",
+    ".mvn",
+    ".claude",
+    ".claw",
+];
+
+const PROTECTED_FILES: &[&str] = &[
+    ".gitconfig",
+    ".gitmodules",
+    ".gitattributes",
+    ".bashrc",
+    ".bash_profile",
+    ".zshrc",
+    ".zprofile",
+    ".profile",
+    ".mcp.json",
+    ".claw.json",
+];
+
+/// Écriture dans un chemin protégé (`.git/`, `.claw/settings.json`…). Les
+/// worktrees de Claw et le dossier de travail d'une session en arrière-plan
+/// n'en font pas partie.
+#[must_use]
+pub fn is_protected_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    if normalized.contains("/.claw/worktrees/") || normalized.contains("/.claude/worktrees/") {
+        return false;
+    }
+    if let Some(job_dir) = std::env::var_os("CLAW_JOB_DIR") {
+        let tmp = format!("{}/tmp/", job_dir.to_string_lossy().replace('\\', "/"));
+        if normalized.starts_with(&tmp) {
+            return false;
+        }
+    }
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    let Some((file, dirs)) = parts.split_last() else {
+        return false;
+    };
+    if PROTECTED_FILES.contains(file) {
+        return true;
+    }
+    dirs.iter().any(|dir| PROTECTED_DIRS.contains(dir)) || normalized.contains(".config/git/")
+}
+
+static CLASSIFY_ALL_SHELL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// `autoMode.classifyAllShell` : en mode auto, aucune règle `allow` ne
+/// dispense une commande shell du classificateur.
+pub fn set_classify_all_shell(enabled: bool) {
+    CLASSIFY_ALL_SHELL.store(enabled, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Règle `allow` trop large pour le mode auto (exécution de code
+/// arbitraire) : `Bash`, `Bash(*)`, interpréteurs avec joker, `npm run`…
+fn grants_arbitrary_code(tool: &str, specifier: Option<&str>) -> bool {
+    const INTERPRETERS: &[&str] = &[
+        "python",
+        "python3",
+        "node",
+        "deno",
+        "bun",
+        "ruby",
+        "perl",
+        "php",
+        "bash",
+        "sh",
+        "zsh",
+        "pwsh",
+        "powershell",
+        "cmd",
+        "npx",
+        "bunx",
+        "uv run",
+        "npm run",
+        "yarn run",
+        "pnpm run",
+        "cargo run",
+        "go run",
+        "java",
+        "dotnet run",
+    ];
+    if !matches!(tool, "bash" | "Bash" | "PowerShell") {
+        return tool == "Agent";
+    }
+    if CLASSIFY_ALL_SHELL.load(std::sync::atomic::Ordering::SeqCst) {
+        return true;
+    }
+    let Some(specifier) = specifier.map(str::trim) else {
+        return true;
+    };
+    if specifier.is_empty() || specifier == "*" || specifier == ":*" {
+        return true;
+    }
+    let head = specifier
+        .trim_end_matches('*')
+        .trim_end_matches(':')
+        .trim()
+        .to_ascii_lowercase();
+    specifier.ends_with('*')
+        && INTERPRETERS
+            .iter()
+            .any(|interpreter| head == *interpreter || head.starts_with(&format!("{interpreter} ")))
 }
 
 // ------------------------------------------------------------ dossiers autorisés
@@ -456,6 +582,7 @@ impl PermissionPolicy {
 
     /// Ordre d'évaluation : règles `deny` (toujours prioritaires), règles `ask`,
     /// mode actif, règles `allow` et commandes en lecture seule, puis demande.
+    #[allow(clippy::too_many_lines)]
     pub fn authorize(
         &mut self,
         tool_name: &str,
@@ -498,14 +625,22 @@ impl PermissionPolicy {
             }
         }
         if !must_ask {
-            if matches!(
-                current_mode,
-                PermissionMode::Allow | PermissionMode::DangerFullAccess
-            ) || required_mode <= PermissionMode::ReadOnly
-                || (current_mode == PermissionMode::WorkspaceWrite
-                    && required_mode <= PermissionMode::WorkspaceWrite
-                    && outside.is_none())
-                || is_read_only_command(&target)
+            // Mode auto : modifications dans le projet acceptées, sauf
+            // chemins protégés (classificateur).
+            let protected = current_mode == PermissionMode::Auto
+                && matches!(&target, ToolTarget::Path(path) if is_protected_path(path))
+                && matches!(tool_name, "write_file" | "edit_file" | "NotebookEdit");
+            if !protected
+                && (matches!(
+                    current_mode,
+                    PermissionMode::Allow | PermissionMode::DangerFullAccess
+                ) || required_mode <= PermissionMode::ReadOnly
+                    || (matches!(
+                        current_mode,
+                        PermissionMode::WorkspaceWrite | PermissionMode::Auto
+                    ) && required_mode <= PermissionMode::WorkspaceWrite
+                        && outside.is_none())
+                    || is_read_only_command(&target))
             {
                 return PermissionOutcome::Allow;
             }
@@ -650,11 +785,20 @@ impl PermissionPolicy {
     /// (par une règle ou parce qu'elle est en lecture seule), et jamais
     /// lorsqu'elle contient une substitution (`$(…)`, backticks).
     fn all_segments_allowed(&self, tool_name: &str, target: &ToolTarget) -> bool {
+        let auto = self.active_mode == PermissionMode::Auto;
+        let protected = auto && matches!(target, ToolTarget::Path(path) if is_protected_path(path));
+        if protected {
+            // Les règles `allow` n'accordent pas les chemins protégés.
+            return false;
+        }
         let rules = self
             .rules
             .allow
             .iter()
             .filter(|rule| rule.covers_tool(tool_name))
+            // En mode auto, les règles qui accordent l'exécution de code
+            // arbitraire sont suspendues : le classificateur juge.
+            .filter(|rule| !(auto && grants_arbitrary_code(&rule.tool, rule.specifier.as_deref())))
             .collect::<Vec<_>>();
         if rules.is_empty() {
             return false;
@@ -1137,6 +1281,60 @@ mod tests {
             policy.authorize("write_file", &path_input(elsewhere), None),
             PermissionOutcome::Allow
         );
+    }
+
+    #[test]
+    fn auto_mode_lets_project_edits_through_and_sends_the_rest_to_the_classifier() {
+        let project = std::env::current_dir()
+            .expect("cwd")
+            .join("projet-essai-auto");
+        let mut policy = PermissionPolicy::new(PermissionMode::Auto)
+            .with_tool_requirement("read_file", PermissionMode::ReadOnly)
+            .with_tool_requirement("edit_file", PermissionMode::WorkspaceWrite)
+            .with_tool_requirement("bash", PermissionMode::DangerFullAccess)
+            .with_rules(PermissionRules::from_strings(
+                &["Bash(*)".to_string(), "Bash(cargo test:*)".to_string()],
+                &[],
+                &[],
+            ))
+            .with_cwd(&project);
+        assert_eq!(
+            policy.authorize("edit_file", &path_input("src/lib.rs"), None),
+            PermissionOutcome::Allow
+        );
+        // Chemin protégé : le classificateur (ici l'invite) décide.
+        let mut prompter = RecordingPrompter::denying();
+        assert!(matches!(
+            policy.authorize("edit_file", &path_input(".git/config"), Some(&mut prompter)),
+            PermissionOutcome::Deny { .. }
+        ));
+        assert_eq!(prompter.seen.len(), 1);
+        assert_eq!(prompter.seen[0].current_mode, PermissionMode::Auto);
+        // `Bash(*)` est suspendue en mode auto ; une règle précise reste valable.
+        let mut prompter = RecordingPrompter::allowing();
+        assert_eq!(
+            policy.authorize(
+                "bash",
+                &json!({"command": "npm publish"}).to_string(),
+                Some(&mut prompter)
+            ),
+            PermissionOutcome::Allow
+        );
+        assert_eq!(prompter.seen.len(), 1);
+        assert_eq!(
+            policy.authorize(
+                "bash",
+                &json!({"command": "cargo test --workspace"}).to_string(),
+                None
+            ),
+            PermissionOutcome::Allow
+        );
+        assert!(super::is_protected_path("C:/repo/.claw/settings.json"));
+        assert!(super::is_protected_path("/repo/.bashrc"));
+        assert!(!super::is_protected_path(
+            "/repo/.claw/worktrees/bg-1/src/main.rs"
+        ));
+        assert!(!super::is_protected_path("/repo/src/main.rs"));
     }
 
     #[test]

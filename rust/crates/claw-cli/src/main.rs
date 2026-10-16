@@ -1,6 +1,7 @@
 mod acp;
 mod agent_view;
 mod approval;
+mod auto_mode;
 mod bench;
 mod bench_hard;
 mod clipboard;
@@ -124,6 +125,7 @@ fn main() {
     // Clés définies dans le compte mais absentes de l'environnement reçu.
     user_env::adopt();
     apply_settings_env();
+    runtime::set_classify_all_shell(auto_mode::rules().classify_all_shell);
     runtime::telemetry::install(
         VERSION,
         Box::new(tools::http_post_json),
@@ -1079,6 +1081,14 @@ fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         CliAction::Attach { target } => attach_job(&target)?,
+        CliAction::AutoModeReport { defaults } => println!(
+            "{}",
+            if defaults {
+                auto_mode::defaults_json()
+            } else {
+                auto_mode::config_json()
+            }
+        ),
         CliAction::JobLogs { target, follow } => show_job_logs(&target, follow)?,
         CliAction::JobStop { target } => println!("{}", jobs::stop(&target)?),
         CliAction::JobRemove { target } => println!("{}", jobs::remove(&target)?),
@@ -1233,6 +1243,10 @@ enum CliAction {
     },
     Attach {
         target: String,
+    },
+    /// `claw auto-mode defaults|config`.
+    AutoModeReport {
+        defaults: bool,
     },
     JobLogs {
         target: String,
@@ -1575,6 +1589,13 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         "agents" => Ok(CliAction::Agents {
             args: join_optional_args(&rest[1..]),
         }),
+        "auto-mode" => match rest.get(1).map(String::as_str) {
+            Some("defaults") => Ok(CliAction::AutoModeReport { defaults: true }),
+            Some("config") | None => Ok(CliAction::AutoModeReport { defaults: false }),
+            Some(other) => Err(format!(
+                "claw auto-mode {other} : utilisez claw auto-mode defaults ou claw auto-mode config"
+            )),
+        },
         "attach" => Ok(CliAction::Attach {
             target: job_target(&rest, "attach")?,
         }),
@@ -1858,6 +1879,7 @@ fn permission_mode_from_label(mode: &str) -> PermissionMode {
         "workspace-write" => PermissionMode::WorkspaceWrite,
         "danger-full-access" => PermissionMode::DangerFullAccess,
         "dont-ask" => PermissionMode::DontAsk,
+        "auto" => PermissionMode::Auto,
         other => panic!("label de mode de permission non pris en charge : {other}"),
     }
 }
@@ -1882,6 +1904,7 @@ fn default_permission_mode() -> PermissionMode {
             ResolvedPermissionMode::WorkspaceWrite => PermissionMode::WorkspaceWrite,
             ResolvedPermissionMode::DangerFullAccess => PermissionMode::DangerFullAccess,
             ResolvedPermissionMode::DontAsk => PermissionMode::DontAsk,
+            ResolvedPermissionMode::Auto => PermissionMode::Auto,
         })
 }
 
@@ -2349,6 +2372,10 @@ fn format_permissions_report(mode: &str, rules: &PermissionRules) -> String {
             "dont-ask",
             "Ne demande jamais : seuls la lecture et les règles allow passent",
         ),
+        (
+            "auto",
+            "Un classificateur juge les commandes à votre place ; le projet s'édite librement",
+        ),
         ("danger-full-access", "Tout est autorisé sans demande"),
     ]
     .into_iter()
@@ -2368,6 +2395,7 @@ fn format_permissions_report(mode: &str, rules: &PermissionRules) -> String {
         "read-only" => "Seuls la lecture, la recherche et les commandes sans effet s'exécutent",
         "workspace-write" => "Les fichiers du projet se modifient sans demander",
         "dont-ask" => "Rien n'est demandé : ce qui n'est pas autorisé d'avance est refusé",
+        "auto" => "Lecture et modifications du projet libres ; commandes, chemins protégés et écritures hors du projet jugés par le classificateur",
         "danger-full-access" => "Tous les outils s'exécutent sans demander",
         _ => "Mode de permission inconnu",
     };
@@ -2401,11 +2429,35 @@ Suite
   /permissions <mode>   Change de mode (alias : default, plan, acceptEdits, dontAsk, bypassPermissions)
   /permissions allow|deny|ask|remove <règle>   Ajoute ou retire une règle
   /add-dir <dossier>    Écriture libre aussi dans ce dossier
-  Répondre « toujours » à une demande enregistre la règle dans .claw/settings.local.json",
+  Répondre « toujours » à une demande enregistre la règle dans .claw/settings.local.json{}",
         render_rules(&rules.allow),
         render_rules(&rules.deny),
         render_rules(&rules.ask),
+        render_auto_denials(),
     )
+}
+
+/// Refus récents du mode auto, pour `/permissions`.
+fn render_auto_denials() -> String {
+    let denials = auto_mode::recent_denials();
+    if denials.is_empty() {
+        return String::new();
+    }
+    let mut lines = vec![
+        String::new(),
+        "Refusés récemment par le mode auto".to_string(),
+    ];
+    for denial in denials.iter().rev().take(10) {
+        lines.push(format!(
+            "  {}  [{}] {} : {}",
+            denial.at, denial.rule, denial.action, denial.reason
+        ));
+    }
+    lines.push(
+        "  Pour en autoriser un : dites-le à Claw avec précision, ajoutez une règle (/permissions allow), ou une exception dans autoMode.allow (~/.claw/settings.json)"
+            .to_string(),
+    );
+    lines.join("\n")
 }
 
 fn format_permissions_switch_report(previous: &str, next: &str) -> String {
@@ -3223,6 +3275,7 @@ impl LiveCli {
         transcript::begin_turn();
         live::start("Réflexion…");
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
+        self.share_auto_context(input);
         let (mut text, images) = take_image_attachments(input);
         if !self.pending_context.is_empty() {
             text = format!("{}\n\n{text}", self.pending_context.join("\n\n"));
@@ -3343,6 +3396,10 @@ impl LiveCli {
             PermissionMode::ReadOnly => "‖ mode plan",
             PermissionMode::DangerFullAccess | PermissionMode::Allow => "▲ accès complet",
             PermissionMode::DontAsk => "⊘ sans demande (règles seules)",
+            PermissionMode::Auto if auto_mode::paused() => {
+                "⏵⏵ mode auto (en pause : Claw redemande)"
+            }
+            PermissionMode::Auto => "⏵⏵ mode auto",
         };
         let mut line = format!("  {mode} (Maj+Tab) · {}", self.model);
         let window = usize::try_from(api::context_window_for_model(&self.model)).unwrap_or(0);
@@ -3436,8 +3493,12 @@ impl LiveCli {
         let next = match self.permission_mode {
             PermissionMode::Prompt => PermissionMode::WorkspaceWrite,
             PermissionMode::WorkspaceWrite => PermissionMode::ReadOnly,
+            PermissionMode::ReadOnly if !auto_mode::disabled() => PermissionMode::Auto,
             _ => PermissionMode::Prompt,
         };
+        if next == PermissionMode::Auto {
+            auto_mode::resume();
+        }
         let session = self.runtime.session().clone();
         self.runtime = build_runtime(
             session,
@@ -4898,6 +4959,7 @@ impl LiveCli {
         let mut prompter = jobs::JobPermissionPrompter {
             id: job_id.to_string(),
         };
+        self.share_auto_context(input);
         let (text, images) = take_image_attachments(input);
         self.runtime.autosave_to(&self.session.path);
         let result = self
@@ -4908,6 +4970,31 @@ impl LiveCli {
         result
             .map(|_| ())
             .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
+    }
+
+    /// Mode auto : les dernières demandes de l'utilisateur (ses limites et
+    /// ses accords), lues par le classificateur.
+    fn share_auto_context(&self, input: &str) {
+        let mut requests: Vec<String> = self
+            .runtime
+            .session()
+            .messages
+            .iter()
+            .filter(|message| message.role == runtime::MessageRole::User)
+            .filter_map(|message| {
+                message.blocks.iter().find_map(|block| match block {
+                    ContentBlock::Text { text }
+                        if !text.trim().is_empty() && !text.starts_with("[Claw]") =>
+                    {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+            })
+            .collect();
+        requests.push(input.to_string());
+        let start = requests.len().saturating_sub(8);
+        auto_mode::set_context(requests[start..].to_vec(), &self.model);
     }
 
     /// Première demande de la conversation (nom de la session).
@@ -6679,6 +6766,7 @@ fn normalize_permission_mode(mode: &str) -> Option<&'static str> {
         "danger-full-access" | "bypassPermissions" => Some("danger-full-access"),
         // `dontAsk` refuse ce qui n'est pas autorisé d'avance (et non l'inverse).
         "dont-ask" | "dontAsk" => Some("dont-ask"),
+        "auto" => Some("auto"),
         _ => None,
     }
 }
@@ -7860,13 +7948,28 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
         &mut self,
         request: &runtime::PermissionRequest,
     ) -> runtime::PermissionPromptDecision {
+        let gate = auto_mode::gate(request);
+        if let Some(notice) = &gate.notice {
+            live::hide();
+            transcript::print_call(&request.tool_name, &request.input);
+            println!("  ⎿  {}{notice}{}", transcript::RED, transcript::RESET);
+        }
+        if let Some(decision) = gate.decision {
+            return decision;
+        }
         live::hide();
         transcript::print_call(&request.tool_name, &request.input);
-        if approval::interactive() {
+        let decision = if approval::interactive() {
             self.decide_with_menu(request)
         } else {
             self.decide_with_text(request)
+        };
+        if request.current_mode == PermissionMode::Auto
+            && !matches!(decision, runtime::PermissionPromptDecision::Deny { .. })
+        {
+            auto_mode::resume();
         }
+        decision
     }
 }
 
@@ -10248,7 +10351,7 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         "  --output-format FORMAT                Sortie non interactive : text, json ou stream-json",
         "  --input-format stream-json            Tours lus en JSON sur l'entrée standard (scripts, éditeurs)",
         "  --continue, -c                        Reprend la dernière session du projet",
-        "  --permission-mode MODE                prompt (défaut), read-only (plan), workspace-write ou danger-full-access",
+        "  --permission-mode MODE                prompt (défaut), read-only (plan), workspace-write, auto ou danger-full-access",
         "  --dangerously-skip-permissions        Désactive toutes les vérifications de permission",
         "  --allowedTools OUTILS                 Limite les outils (répétable ; alias séparés par des virgules)",
         "  --version, -V                         Version et informations de build",

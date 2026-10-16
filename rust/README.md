@@ -248,6 +248,7 @@ est retenu ; avec `OPENROUTER_API_KEY`, le quota gratuit du jour est affiché.
 | `read-only` | `plan` | Mode plan : lecture et commandes sans effet uniquement ; l'agent propose un plan |
 | `workspace-write` | `acceptEdits` | Modifie sans demander les fichiers du projet (et des dossiers ajoutés) ; demande avant les commandes et avant d'écrire ailleurs |
 | `dont-ask` | `dontAsk` | Ne demande jamais : lecture et règles `allow` passent, tout le reste est refusé (pour l'automatisation) |
+| `auto` | `auto` | Lecture et modifications du projet sans demande ; commandes, outils MCP, chemins protégés et écritures hors du projet jugés par un classificateur (voir « Mode auto ») |
 | `danger-full-access` | `bypassPermissions` | Tout est autorisé sans demande |
 
 En `workspace-write`, l'écriture est libre dans le dossier du projet, le dossier temporaire et
@@ -257,7 +258,8 @@ les dossiers ajoutés : `permissions.additionalDirectories` dans la config, `cla
 terminal, l'écriture est refusée avec la marche à suivre.
 
 Les commandes en lecture seule (`git status`, `git diff`, `ls`, `cat`…) ne déclenchent pas de demande.
-Dans le terminal, `Maj+Tab` passe d'un mode à l'autre (demander → éditions acceptées → plan) ; le
+Dans le terminal, `Maj+Tab` passe d'un mode à l'autre (demander → éditions acceptées → plan →
+auto) ; le
 mode actif s'affiche sous la zone de saisie. Chaque demande s'ouvre dans un encadré (commande,
 diff numéroté de la modification…) avec un choix aux flèches ou au chiffre : `1` oui, `2` oui et
 ne plus demander (la règle proposée est enregistrée dans `.claw/settings.local.json`), `3` ou
@@ -281,6 +283,57 @@ Règles dans n'importe quel fichier de config (elles s'additionnent ; `deny` pri
 
 Une commande composée (`a && b`, `a | b`, `a; b`) n'est autorisée par une règle que si chacune
 de ses parties l'est ; une substitution (`$(…)`, backticks) déclenche toujours une demande.
+
+#### Mode auto
+
+Comme dans Claude Code, `--permission-mode auto` (ou `Maj+Tab`, ou `"defaultMode": "auto"`) laisse
+Claw travailler sans demandes de routine : un second modèle, le classificateur, juge à votre
+place chaque action qui en aurait demandé une.
+
+- **Sans classificateur** : lectures, recherches, commandes en lecture seule et modifications des
+  fichiers du projet. Les règles `deny` et `ask` passent avant tout, comme ailleurs.
+- **Jugé** : commandes shell, outils MCP, écritures hors du projet et écritures dans un chemin
+  protégé (`.git/`, `.claw/`, `.claude/`, `.vscode/`, `.husky/`, `.bashrc`, `.mcp.json`…). Les règles
+  `allow` qui accordent l'exécution de code arbitraire (`Bash(*)`, `Bash(python:*)`, `npm run`…)
+  sont suspendues ; les règles précises (`Bash(cargo test:*)`) restent valables.
+- **Ce que voit le classificateur** : l'action, vos derniers messages (vos limites, comme « ne pousse
+  pas », et vos accords explicites), `CLAW.md`/`CLAUDE.md`, le dossier et ses remotes git, et
+  des règles : blocages absolus (`hard_deny` : fuite de secrets, suppression d'un chemin
+  critique), blocages levables (`soft_deny` : `curl | bash`, push forcé, `git reset --hard`,
+  `git clean`, déploiement en production, destruction d'infrastructure, changement de remote,
+  drapeaux qui désarment une sécurité…), exceptions (`allow` : build et tests du projet,
+  dépendances déclarées, commits et push vers les remotes du dépôt…). Une demande générale
+  (« fais le ménage ») ne lève pas un blocage ; une demande précise (« fais un `git reset
+  --hard` ») le lève.
+- **Blocage** : l'action ne s'exécute pas, Claw voit la raison (`[Discarding uncommitted work]…`)
+  et continue autrement. `/permissions` liste les refus récents. Après 3 blocages de suite ou
+  20 au total, le mode auto se met en pause et Claw vous demande ; une approbation le relance.
+  Une réponse illisible du classificateur vaut refus.
+- **Réglages** (personnels seulement, `~/.claw/settings.json` ou `~/.claude/settings.json` : un
+  dépôt ne peut pas élargir ce qu'accepte le classificateur) :
+
+  ```json
+  {
+    "autoMode": {
+      "environment": ["$defaults", "Dépôts de confiance : github.com/mon-equipe/*"],
+      "allow": ["$defaults", "Déployer sur l'espace de staging est permis"],
+      "soft_deny": ["$defaults", "Ne jamais lancer de migration en dehors de l'outil prévu"],
+      "hard_deny": ["$defaults"],
+      "classifyAllShell": false,
+      "model": "openrouter/modele-classificateur"
+    }
+  }
+  ```
+
+  `"$defaults"` garde les règles intégrées à cet endroit ; une liste sans `"$defaults"` les
+  remplace. `classifyAllShell` soumet toutes les commandes au classificateur, même celles d'une
+  règle `allow`. Le classificateur utilise `autoMode.model`, sinon `smallModel`, sinon le modèle
+  de la session. `"permissions": {"disableAutoMode": "disable"}` retire le mode auto.
+  `claw auto-mode defaults` affiche les règles intégrées, `claw auto-mode config` les règles
+  effectives.
+- Le mode auto vaut aussi pour les sous-agents, les sessions en arrière-plan et l'interface web.
+  Il réduit les demandes sans garantir la sûreté : gardez une règle `deny` ou `ask` pour ce
+  qui doit toujours vous être soumis.
 
 ### Agent spécialisé code & architecture
 

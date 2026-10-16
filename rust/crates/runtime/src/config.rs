@@ -24,6 +24,8 @@ pub enum ResolvedPermissionMode {
     Prompt,
     /// `dontAsk` : rien n'est demandé, ce qui n'est pas autorisé d'avance est refusé.
     DontAsk,
+    /// Mode auto : un classificateur décide à la place de l'utilisateur.
+    Auto,
 }
 
 /// Règles `permissions.allow|deny|ask`, concaténées sur tous les fichiers de config.
@@ -1349,7 +1351,8 @@ fn parse_permission_mode_label(
     match mode {
         "default" | "prompt" | "ask" => Ok(ResolvedPermissionMode::Prompt),
         "plan" | "read-only" => Ok(ResolvedPermissionMode::ReadOnly),
-        "acceptEdits" | "auto" | "workspace-write" => Ok(ResolvedPermissionMode::WorkspaceWrite),
+        "acceptEdits" | "workspace-write" => Ok(ResolvedPermissionMode::WorkspaceWrite),
+        "auto" => Ok(ResolvedPermissionMode::Auto),
         "dontAsk" | "dont-ask" => Ok(ResolvedPermissionMode::DontAsk),
         "bypassPermissions" | "danger-full-access" => Ok(ResolvedPermissionMode::DangerFullAccess),
         other => Err(ConfigError::Parse(format!(
