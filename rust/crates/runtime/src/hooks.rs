@@ -114,6 +114,7 @@ pub struct HookRunResult {
     context: Vec<String>,
     decision: Option<HookPermissionDecision>,
     updated_input: Option<String>,
+    stop: Option<String>,
 }
 
 impl HookRunResult {
@@ -125,7 +126,14 @@ impl HookRunResult {
             messages,
             decision: None,
             updated_input: None,
+            stop: None,
         }
+    }
+
+    /// Arrêt de l'agent demandé par un hook (`"continue": false`), avec sa raison.
+    #[must_use]
+    pub fn stop_reason(&self) -> Option<&str> {
+        self.stop.as_deref()
     }
 
     /// Décision d'autorisation des hooks (`ask` l'emporte sur `allow`).
@@ -414,9 +422,13 @@ impl HookRunner {
                     context,
                     decision,
                     updated_input,
+                    stop,
                 } => {
                     result.messages.extend(message.clone());
                     result.context.extend(context.or(message));
+                    if result.stop.is_none() {
+                        result.stop = stop;
+                    }
                     if decision.is_some() && result.decision != Some(HookPermissionDecision::Ask) {
                         result.decision = decision;
                     }
@@ -529,6 +541,8 @@ enum HookCommandOutcome {
         context: Option<String>,
         decision: Option<HookPermissionDecision>,
         updated_input: Option<String>,
+        /// `"continue": false` : l'agent s'arrête après cette étape.
+        stop: Option<String>,
     },
     Deny {
         message: Option<String>,
@@ -644,6 +658,7 @@ fn parse_success_output(stdout: &str) -> HookCommandOutcome {
             context: None,
             decision: None,
             updated_input: None,
+            stop: None,
         };
     };
     let text = |value: Option<&Value>| value.and_then(Value::as_str).map(ToOwned::to_owned);
@@ -678,11 +693,15 @@ fn parse_success_output(stdout: &str) -> HookCommandOutcome {
     let message = text(object.get("systemMessage"))
         .or_else(|| context.clone())
         .or_else(|| text(field("permissionDecisionReason")));
+    let stop = (object.get("continue").and_then(Value::as_bool) == Some(false)).then(|| {
+        text(object.get("stopReason")).unwrap_or_else(|| "un hook a demandé l'arrêt".to_string())
+    });
     HookCommandOutcome::Allow {
         message,
         context,
         decision,
         updated_input,
+        stop,
     }
 }
 
@@ -828,6 +847,7 @@ fn parse_prompt_answer(answer: &str) -> Option<HookCommandOutcome> {
             context: None,
             decision: None,
             updated_input: None,
+            stop: None,
         }
     } else {
         HookCommandOutcome::Deny { message: reason }
@@ -1108,6 +1128,25 @@ mod tests {
             }
             _ => panic!("refus attendu"),
         }
+    }
+
+    #[test]
+    fn continue_false_asks_the_agent_to_stop() {
+        use super::{parse_success_output, HookCommandOutcome};
+        match parse_success_output(r#"{"continue": false, "stopReason": "budget atteint"}"#) {
+            HookCommandOutcome::Allow { stop, .. } => {
+                assert_eq!(stop.as_deref(), Some("budget atteint"));
+            }
+            _ => panic!("arrêt attendu"),
+        }
+        match parse_success_output(r#"{"continue": false}"#) {
+            HookCommandOutcome::Allow { stop, .. } => assert!(stop.is_some()),
+            _ => panic!("arrêt attendu"),
+        }
+        assert!(matches!(
+            parse_success_output(r#"{"continue": true}"#),
+            HookCommandOutcome::Allow { stop: None, .. }
+        ));
     }
 
     #[test]

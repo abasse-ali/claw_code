@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 
 use glob::{MatchOptions, Pattern};
 use serde_json::Value;
@@ -11,6 +12,9 @@ pub enum PermissionMode {
     DangerFullAccess,
     Prompt,
     Allow,
+    /// `dontAsk` de Claude Code : rien n'est demandé ; ce qui n'est pas
+    /// autorisé d'avance (lecture, règles `allow`) est refusé.
+    DontAsk,
 }
 
 impl PermissionMode {
@@ -22,7 +26,130 @@ impl PermissionMode {
             Self::DangerFullAccess => "danger-full-access",
             Self::Prompt => "prompt",
             Self::Allow => "allow",
+            Self::DontAsk => "dont-ask",
         }
+    }
+}
+
+// ------------------------------------------------------------ dossiers autorisés
+//
+// En `workspace-write`, les écritures sont libres dans le dossier du projet,
+// les dossiers ajoutés (`permissions.additionalDirectories`, `--add-dir`,
+// `/add-dir`) et le dossier temporaire ; ailleurs, l'utilisateur confirme.
+
+static CONFIGURED_DIRECTORIES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+static SESSION_DIRECTORIES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Dossiers de `permissions.additionalDirectories` (remplace les précédents).
+pub fn set_configured_directories(directories: Vec<PathBuf>) {
+    *CONFIGURED_DIRECTORIES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = directories;
+}
+
+/// Ajoute un dossier pour la session (`--add-dir`, `/add-dir`) ; faux s'il y était.
+pub fn add_session_directory(directory: PathBuf) -> bool {
+    let mut directories = SESSION_DIRECTORIES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if directories
+        .iter()
+        .any(|known| same_place(known, &directory))
+    {
+        return false;
+    }
+    directories.push(directory);
+    true
+}
+
+/// Dossiers où l'écriture est libre en `workspace-write`, `cwd` compris.
+#[must_use]
+pub fn writable_directories(cwd: &Path) -> Vec<PathBuf> {
+    let mut directories = vec![cwd.to_path_buf(), std::env::temp_dir()];
+    for list in [&CONFIGURED_DIRECTORIES, &SESSION_DIRECTORIES] {
+        directories.extend(
+            list.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .map(|directory| resolve_lexically(&directory.display().to_string(), cwd)),
+        );
+    }
+    directories
+}
+
+/// Chemin absolu sans `.` ni `..` (sans toucher au disque).
+fn resolve_lexically(path: &str, cwd: &Path) -> PathBuf {
+    let raw = Path::new(path);
+    let joined = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        cwd.join(raw)
+    };
+    let mut resolved = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => resolved.push(other.as_os_str()),
+        }
+    }
+    resolved
+}
+
+/// Forme comparable d'un chemin : `/`, sans préfixe `\\?\`, sans casse sous Windows.
+fn comparable(path: &Path) -> String {
+    let text = path.display().to_string().replace('\\', "/");
+    let text = text.strip_prefix("//?/").unwrap_or(&text);
+    let text = text.trim_end_matches('/');
+    if cfg!(windows) {
+        text.to_lowercase()
+    } else {
+        text.to_string()
+    }
+}
+
+fn same_place(left: &Path, right: &Path) -> bool {
+    comparable(left) == comparable(right)
+}
+
+fn is_inside(path: &Path, root: &Path) -> bool {
+    let path = comparable(path);
+    let root = comparable(root);
+    path == root || path.starts_with(&format!("{root}/"))
+}
+
+/// `path` (relatif à `cwd`) est dans un des dossiers où l'écriture est libre.
+#[must_use]
+pub fn is_writable_without_asking(path: &str, cwd: &Path) -> bool {
+    let target = resolve_lexically(path, cwd);
+    let canonical_target = target
+        .parent()
+        .and_then(|parent| parent.canonicalize().ok())
+        .map(|parent| parent.join(target.file_name().unwrap_or_default()));
+    writable_directories(cwd).iter().any(|root| {
+        let canonical_root = root.canonicalize().ok();
+        [Some(root.clone()), canonical_root]
+            .into_iter()
+            .flatten()
+            .any(|root| {
+                is_inside(&target, &root)
+                    || canonical_target
+                        .as_ref()
+                        .is_some_and(|target| is_inside(target, &root))
+            })
+    })
+}
+
+/// Appel qui écrit un fichier hors des dossiers autorisés.
+fn writes_outside_workspace(tool_name: &str, target: &ToolTarget, cwd: &Path) -> Option<String> {
+    if !matches!(tool_name, "write_file" | "edit_file" | "NotebookEdit") {
+        return None;
+    }
+    match target {
+        ToolTarget::Path(path) if !is_writable_without_asking(path, cwd) => Some(path.clone()),
+        _ => None,
     }
 }
 
@@ -309,13 +436,15 @@ impl PermissionPolicy {
         let must_ask = self
             .first_match_any(&self.rules.ask, tool_name, &target)
             .is_some();
+        let outside = writes_outside_workspace(tool_name, &target, &self.cwd);
         if !must_ask {
             if matches!(
                 current_mode,
                 PermissionMode::Allow | PermissionMode::DangerFullAccess
             ) || required_mode <= PermissionMode::ReadOnly
                 || (current_mode == PermissionMode::WorkspaceWrite
-                    && required_mode <= PermissionMode::WorkspaceWrite)
+                    && required_mode <= PermissionMode::WorkspaceWrite
+                    && outside.is_none())
                 || is_read_only_command(&target)
             {
                 return PermissionOutcome::Allow;
@@ -337,6 +466,15 @@ impl PermissionPolicy {
             }
         }
 
+        // `dontAsk` : ce qui n'est pas autorisé d'avance est refusé sans demander.
+        if current_mode == PermissionMode::DontAsk {
+            return PermissionOutcome::Deny {
+                reason: format!(
+                    "mode dontAsk : l'outil '{tool_name}' n'est pas autorisé d'avance ; ajoutez une règle (/permissions allow {}) ou changez de mode",
+                    suggest_rule(tool_name, &target).unwrap_or_else(|| tool_name.to_string())
+                ),
+            };
+        }
         let request = PermissionRequest {
             tool_name: tool_name.to_string(),
             input: input.to_string(),
@@ -356,11 +494,16 @@ impl PermissionPolicy {
                 PermissionPromptDecision::Deny { reason } => PermissionOutcome::Deny { reason },
             },
             None => PermissionOutcome::Deny {
-                reason: format!(
-                    "l'outil '{tool_name}' nécessite une approbation pour passer de {} à {}",
-                    current_mode.as_str(),
-                    required_mode.as_str()
-                ),
+                reason: match outside {
+                    Some(path) => format!(
+                        "écriture hors du projet ({path}) : ajoutez le dossier avec /add-dir ou --add-dir, ou dans permissions.additionalDirectories"
+                    ),
+                    None => format!(
+                        "l'outil '{tool_name}' nécessite une approbation pour passer de {} à {}",
+                        current_mode.as_str(),
+                        required_mode.as_str()
+                    ),
+                },
             },
         }
     }
@@ -879,6 +1022,95 @@ mod tests {
             self.seen.push(request.clone());
             self.decision.clone()
         }
+    }
+
+    #[test]
+    fn workspace_write_asks_before_writing_outside_the_project() {
+        let project = std::env::current_dir()
+            .expect("cwd")
+            .join("projet-essai-ecriture");
+        let elsewhere = if cfg!(windows) {
+            "C:/Windows/claw-essai/hors.txt"
+        } else {
+            "/etc/claw-essai/hors.txt"
+        };
+        let mut policy = PermissionPolicy::new(PermissionMode::WorkspaceWrite)
+            .with_tool_requirement("write_file", PermissionMode::WorkspaceWrite)
+            .with_cwd(&project);
+        assert_eq!(
+            policy.authorize("write_file", &path_input("src/lib.rs"), None),
+            PermissionOutcome::Allow
+        );
+        assert_eq!(
+            policy.authorize(
+                "write_file",
+                &path_input("../projet-essai-ecriture/a.txt"),
+                None
+            ),
+            PermissionOutcome::Allow
+        );
+        let temp = std::env::temp_dir().join("claw-essai.txt");
+        assert_eq!(
+            policy.authorize("write_file", &path_input(&temp.display().to_string()), None),
+            PermissionOutcome::Allow
+        );
+        let PermissionOutcome::Deny { reason } =
+            policy.authorize("write_file", &path_input(elsewhere), None)
+        else {
+            panic!("écriture hors du projet autorisée sans demander");
+        };
+        assert!(
+            reason.contains("hors du projet") && reason.contains("/add-dir"),
+            "{reason}"
+        );
+        let mut prompter = RecordingPrompter::allowing();
+        assert_eq!(
+            policy.authorize("write_file", &path_input(elsewhere), Some(&mut prompter)),
+            PermissionOutcome::Allow
+        );
+        assert_eq!(prompter.seen.len(), 1);
+        // Un dossier ajouté pour la session (`--add-dir`, `/add-dir`).
+        let parent = Path::new(elsewhere).parent().expect("parent").to_path_buf();
+        assert!(super::add_session_directory(parent.clone()));
+        assert!(!super::add_session_directory(parent));
+        assert_eq!(
+            policy.authorize("write_file", &path_input(elsewhere), None),
+            PermissionOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn dont_ask_refuses_what_is_not_allowed_in_advance() {
+        let mut policy = PermissionPolicy::new(PermissionMode::DontAsk)
+            .with_tool_requirement("read_file", PermissionMode::ReadOnly)
+            .with_tool_requirement("bash", PermissionMode::DangerFullAccess)
+            .with_rules(PermissionRules::from_strings(
+                &["Bash(cargo test:*)".to_string()],
+                &[],
+                &[],
+            ));
+        assert_eq!(
+            policy.authorize("read_file", &path_input("src/lib.rs"), None),
+            PermissionOutcome::Allow
+        );
+        assert_eq!(
+            policy.authorize("bash", &bash("cargo test -p runtime"), None),
+            PermissionOutcome::Allow
+        );
+        let mut prompter = RecordingPrompter::allowing();
+        let PermissionOutcome::Deny { reason } = policy.authorize(
+            "bash",
+            &bash("curl https://exemple.com"),
+            Some(&mut prompter),
+        ) else {
+            panic!("dontAsk a laissé passer une commande non autorisée");
+        };
+        assert!(prompter.seen.is_empty(), "dontAsk ne demande jamais");
+        assert!(
+            reason.contains("dontAsk") && reason.contains("/permissions allow"),
+            "{reason}"
+        );
+        assert_eq!(PermissionMode::DontAsk.as_str(), "dont-ask");
     }
 
     fn bash(command: &str) -> String {

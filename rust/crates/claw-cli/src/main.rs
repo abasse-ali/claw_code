@@ -251,6 +251,82 @@ fn error_hint(problem: &str) -> &'static str {
     }
 }
 
+/// `--add-dir <dossier>` et `--add-dir=<dossier>` retirés des arguments.
+fn take_add_dir_flags(args: &mut Vec<String>) -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        if let Some(value) = args[index].strip_prefix("--add-dir=") {
+            directories.push(PathBuf::from(value));
+            args.remove(index);
+        } else if args[index] == "--add-dir" && index + 1 < args.len() {
+            args.remove(index);
+            directories.push(PathBuf::from(args.remove(index)));
+        } else {
+            index += 1;
+        }
+    }
+    directories
+}
+
+/// `/add-dir [dossier] [--save]` : sans dossier, la liste ; sinon le dossier
+/// devient libre en écriture pour la session (et dans
+/// `.claw/settings.local.json` avec `--save`).
+fn run_add_dir_command(args: Option<&str>) -> String {
+    let cwd = env::current_dir().unwrap_or_default();
+    let args = args.map(str::trim).unwrap_or_default();
+    if args.is_empty() {
+        let lines: Vec<String> = runtime::writable_directories(&cwd)
+            .iter()
+            .map(|directory| format!("  {}", directory.display()))
+            .collect();
+        return format!(
+            "Dossiers où l'écriture est libre (workspace-write)\n{}\n  Ajouter          /add-dir <dossier> [--save]",
+            lines.join("\n")
+        );
+    }
+    let save = args.split_whitespace().any(|word| word == "--save");
+    let path = args.replace("--save", "");
+    let path = path.trim().trim_matches('"');
+    let directory = PathBuf::from(path);
+    let directory = if directory.is_absolute() {
+        directory
+    } else {
+        cwd.join(directory)
+    };
+    if !directory.is_dir() {
+        return format!("dossier introuvable : {}", directory.display());
+    }
+    let added = runtime::add_session_directory(directory.clone());
+    let mut report = format!(
+        "Dossier ajouté\n  Dossier          {}\n  Effet            écriture libre en workspace-write{}",
+        directory.display(),
+        if added { "" } else { " (déjà présent)" }
+    );
+    if save {
+        match add_directory_setting(&cwd, &directory.display().to_string()) {
+            Ok(path) => {
+                let _ = std::fmt::Write::write_fmt(
+                    &mut report,
+                    format_args!("\n  Enregistré dans  {}", path.display()),
+                );
+            }
+            Err(error) => {
+                let _ = std::fmt::Write::write_fmt(
+                    &mut report,
+                    format_args!("\n  Non enregistré   {error}"),
+                );
+            }
+        }
+    }
+    report
+}
+
+/// Ajoute `directory` à `permissions.additionalDirectories` de `.claw/settings.local.json`.
+fn add_directory_setting(cwd: &Path, directory: &str) -> Result<PathBuf, String> {
+    edit_permission_rule(cwd, Some("additionalDirectories"), directory).map(|(path, _)| path)
+}
+
 /// Question d'un hook `prompt` : son modèle, sinon le modèle par défaut, avec
 /// les modèles de second avis en secours (quota, panne).
 fn evaluate_prompt_hook(system: &str, prompt: &str, model: Option<&str>) -> Result<String, String> {
@@ -266,6 +342,10 @@ fn evaluate_prompt_hook(system: &str, prompt: &str, model: Option<&str>) -> Resu
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args: Vec<String> = env::args().skip(1).collect();
+    // `--add-dir <dossier>` (répétable) : écriture libre aussi dans ce dossier.
+    for directory in take_add_dir_flags(&mut args) {
+        runtime::add_session_directory(directory);
+    }
     // `--worktree [nom]` : la session travaille dans un worktree git à part,
     // sur sa propre branche (sessions en parallèle sans conflit).
     let worktree = match git_work::take_worktree_flag(&mut args) {
@@ -948,7 +1028,7 @@ fn parse_permission_mode_arg(value: &str) -> Result<PermissionMode, String> {
     normalize_permission_mode(value)
         .ok_or_else(|| {
             format!(
-                "mode de permission non pris en charge « {value} ». Utilisez prompt, read-only, workspace-write ou danger-full-access."
+                "mode de permission non pris en charge « {value} ». Utilisez prompt, read-only, workspace-write, dont-ask ou danger-full-access."
             )
         })
         .map(permission_mode_from_label)
@@ -960,6 +1040,7 @@ fn permission_mode_from_label(mode: &str) -> PermissionMode {
         "read-only" => PermissionMode::ReadOnly,
         "workspace-write" => PermissionMode::WorkspaceWrite,
         "danger-full-access" => PermissionMode::DangerFullAccess,
+        "dont-ask" => PermissionMode::DontAsk,
         other => panic!("label de mode de permission non pris en charge : {other}"),
     }
 }
@@ -983,6 +1064,7 @@ fn default_permission_mode() -> PermissionMode {
             ResolvedPermissionMode::ReadOnly => PermissionMode::ReadOnly,
             ResolvedPermissionMode::WorkspaceWrite => PermissionMode::WorkspaceWrite,
             ResolvedPermissionMode::DangerFullAccess => PermissionMode::DangerFullAccess,
+            ResolvedPermissionMode::DontAsk => PermissionMode::DontAsk,
         })
 }
 
@@ -1444,7 +1526,11 @@ fn format_permissions_report(mode: &str, rules: &PermissionRules) -> String {
         ),
         (
             "workspace-write",
-            "Édite sans demander, demande avant les commandes",
+            "Édite sans demander dans le projet, demande avant les commandes",
+        ),
+        (
+            "dont-ask",
+            "Ne demande jamais : seuls la lecture et les règles allow passent",
         ),
         ("danger-full-access", "Tout est autorisé sans demande"),
     ]
@@ -1464,6 +1550,7 @@ fn format_permissions_report(mode: &str, rules: &PermissionRules) -> String {
         "prompt" => "Lecture libre ; demande avant chaque modification ou commande",
         "read-only" => "Seuls la lecture, la recherche et les commandes sans effet s'exécutent",
         "workspace-write" => "Les fichiers du projet se modifient sans demander",
+        "dont-ask" => "Rien n'est demandé : ce qui n'est pas autorisé d'avance est refusé",
         "danger-full-access" => "Tous les outils s'exécutent sans demander",
         _ => "Mode de permission inconnu",
     };
@@ -1494,7 +1581,9 @@ Règles (les règles deny priment toujours)
   ask              {}
 
 Suite
-  /permissions <mode>   Change de mode (alias : default, plan, acceptEdits, bypassPermissions)
+  /permissions <mode>   Change de mode (alias : default, plan, acceptEdits, dontAsk, bypassPermissions)
+  /permissions allow|deny|ask|remove <règle>   Ajoute ou retire une règle
+  /add-dir <dossier>    Écriture libre aussi dans ce dossier
   Répondre « toujours » à une demande enregistre la règle dans .claw/settings.local.json",
         render_rules(&rules.allow),
         render_rules(&rules.deny),
@@ -1882,6 +1971,10 @@ fn run_resume_command(
         SlashCommand::InstallGithubAction { args } => Ok(ResumeCommandOutcome {
             session: session.clone(),
             message: Some(run_install_github_action(args.as_deref(), &default_model())),
+        }),
+        SlashCommand::AddDir { args } => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some(run_add_dir_command(args.as_deref())),
         }),
         SlashCommand::Bughunter { .. }
         | SlashCommand::Btw { .. }
@@ -2391,6 +2484,7 @@ impl LiveCli {
             PermissionMode::WorkspaceWrite => "⏵⏵ éditions acceptées",
             PermissionMode::ReadOnly => "‖ mode plan",
             PermissionMode::DangerFullAccess | PermissionMode::Allow => "▲ accès complet",
+            PermissionMode::DontAsk => "⊘ sans demande (règles seules)",
         };
         let mut line = format!("  {mode} (Maj+Tab) · {}", self.model);
         let window = usize::try_from(api::context_window_for_model(&self.model)).unwrap_or(0);
@@ -2788,6 +2882,10 @@ impl LiveCli {
             }
             SlashCommand::Schedule { args } => {
                 println!("{}", run_schedule_command(args.as_deref(), &self.model));
+                false
+            }
+            SlashCommand::AddDir { args } => {
+                println!("{}", run_add_dir_command(args.as_deref()));
                 false
             }
             SlashCommand::InstallGithubAction { args } => {
@@ -5339,7 +5437,9 @@ fn normalize_permission_mode(mode: &str) -> Option<&'static str> {
         "prompt" | "default" | "ask" => Some("prompt"),
         "read-only" | "plan" => Some("read-only"),
         "workspace-write" | "acceptEdits" | "accept-edits" => Some("workspace-write"),
-        "danger-full-access" | "bypassPermissions" | "dontAsk" => Some("danger-full-access"),
+        "danger-full-access" | "bypassPermissions" => Some("danger-full-access"),
+        // `dontAsk` refuse ce qui n'est pas autorisé d'avance (et non l'inverse).
+        "dont-ask" | "dontAsk" => Some("dont-ask"),
         _ => None,
     }
 }
@@ -6171,6 +6271,13 @@ fn build_runtime_with_ui(
         .unwrap_or_default();
     models::register_cached_limits();
     let rules = feature_config.permission_rules();
+    runtime::set_configured_directories(
+        rules
+            .additional_directories()
+            .iter()
+            .map(PathBuf::from)
+            .collect(),
+    );
     let rules = PermissionRules::from_strings(rules.allow(), rules.deny(), rules.ask());
     let policy = permission_policy(permission_mode, &tool_registry).with_rules(rules.clone());
     // Les sous-agents héritent du modèle, du mode et des règles de la session,
@@ -9475,6 +9582,7 @@ mod tests {
                 "init",
                 "diff",
                 "version",
+                "add-dir",
                 "install-github-action",
                 "export",
                 "copy",
@@ -9910,6 +10018,12 @@ mod tests {
         assert_eq!(
             normalize_permission_mode("bypassPermissions"),
             Some("danger-full-access")
+        );
+        // `dontAsk` refuse ce qui n'est pas autorisé d'avance : jamais l'accès complet.
+        assert_eq!(normalize_permission_mode("dontAsk"), Some("dont-ask"));
+        assert_eq!(
+            super::permission_mode_from_label("dont-ask"),
+            PermissionMode::DontAsk
         );
         assert_eq!(normalize_permission_mode("unknown"), None);
     }

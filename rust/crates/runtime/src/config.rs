@@ -22,6 +22,8 @@ pub enum ResolvedPermissionMode {
     WorkspaceWrite,
     DangerFullAccess,
     Prompt,
+    /// `dontAsk` : rien n'est demandé, ce qui n'est pas autorisé d'avance est refusé.
+    DontAsk,
 }
 
 /// Règles `permissions.allow|deny|ask`, concaténées sur tous les fichiers de config.
@@ -30,12 +32,25 @@ pub struct RuntimePermissionRuleConfig {
     allow: Vec<String>,
     deny: Vec<String>,
     ask: Vec<String>,
+    /// `permissions.additionalDirectories` : dossiers où l'écriture est libre
+    /// en `workspace-write`, en plus du projet.
+    additional_directories: Vec<String>,
 }
 
 impl RuntimePermissionRuleConfig {
     #[must_use]
     pub fn new(allow: Vec<String>, deny: Vec<String>, ask: Vec<String>) -> Self {
-        Self { allow, deny, ask }
+        Self {
+            allow,
+            deny,
+            ask,
+            additional_directories: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn additional_directories(&self) -> &[String] {
+        &self.additional_directories
     }
 
     #[must_use]
@@ -963,6 +978,7 @@ fn merge_permission_rules(
         ("allow", &mut target.allow),
         ("deny", &mut target.deny),
         ("ask", &mut target.ask),
+        ("additionalDirectories", &mut target.additional_directories),
     ] {
         if let Some(values) = optional_string_array(permissions, key, &context)? {
             extend_unique(rules, &values);
@@ -1290,9 +1306,8 @@ fn parse_permission_mode_label(
         "default" | "prompt" | "ask" => Ok(ResolvedPermissionMode::Prompt),
         "plan" | "read-only" => Ok(ResolvedPermissionMode::ReadOnly),
         "acceptEdits" | "auto" | "workspace-write" => Ok(ResolvedPermissionMode::WorkspaceWrite),
-        "dontAsk" | "bypassPermissions" | "danger-full-access" => {
-            Ok(ResolvedPermissionMode::DangerFullAccess)
-        }
+        "dontAsk" | "dont-ask" => Ok(ResolvedPermissionMode::DontAsk),
+        "bypassPermissions" | "danger-full-access" => Ok(ResolvedPermissionMode::DangerFullAccess),
         other => Err(ConfigError::Parse(format!(
             "{context} : mode de permission non supporté {other}"
         ))),

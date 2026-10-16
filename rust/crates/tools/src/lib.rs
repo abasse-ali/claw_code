@@ -2815,6 +2815,7 @@ fn run_isolated_agent(job: &AgentJob, label: &str, interactive: bool) -> Result<
     let mode = match job.permission_mode {
         PermissionMode::ReadOnly => "read-only",
         PermissionMode::DangerFullAccess | PermissionMode::Allow => "danger-full-access",
+        PermissionMode::DontAsk => "dont-ask",
         _ => "workspace-write",
     };
     if interactive {

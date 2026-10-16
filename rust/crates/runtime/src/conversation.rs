@@ -294,6 +294,9 @@ pub struct ConversationRuntime<C, T> {
     /// Captures d'écran des appels de la réponse en cours, jointes à son
     /// dernier résultat d'outil.
     tool_images: Vec<crate::attachments::ImageAttachment>,
+    /// Arrêt demandé par un hook (`"continue": false`) : le tour s'arrête
+    /// après les appels en cours.
+    hook_stop: Option<String>,
 }
 
 /// Issue de la démonstration finale du mode projet.
@@ -801,6 +804,10 @@ const MAX_CUT_CONTINUATIONS: usize = 2;
 
 /// Résultat noté, dans la session enregistrée en cours de tour, pour un appel
 /// dont l'exécution n'est pas finie : il n'y reste que si Claw est arrêté avant.
+/// Résultat des appels restants quand un hook arrête l'agent (`"continue": false`).
+const HOOK_STOP_MESSAGE: &str =
+    "[Claw] Not run: a hook stopped the agent (\"continue\": false) before this call.";
+
 const INTERRUPTED_CALL_RESULT: &str = "[Claw] Claw was stopped while this call was running: its result was not recorded, and the call may have run only in part. Check the current state (files, processes) before relying on it or running it again.";
 
 /// Le dernier message est la relance d'une réponse coupée, juste après elle.
@@ -949,6 +956,7 @@ where
             project_root: None,
             environment: EnvironmentProbe::Pending,
             tool_images: Vec::new(),
+            hook_stop: None,
         }
     }
 
@@ -1003,6 +1011,23 @@ where
     #[must_use]
     pub fn hooks(&self) -> &HookRunner {
         &self.hook_runner
+    }
+
+    /// Retient l'arrêt demandé par un hook (le premier compte).
+    fn note_hook_stop(&mut self, result: &HookRunResult) {
+        if self.hook_stop.is_none() {
+            self.hook_stop = result.stop_reason().map(ToOwned::to_owned);
+        }
+    }
+
+    /// Fin du tour demandée par un hook : l'utilisateur est prévenu.
+    fn finish_on_hook_stop(&mut self) -> bool {
+        let Some(reason) = self.hook_stop.take() else {
+            return false;
+        };
+        self.api_client
+            .notify(&format!("Un hook arrête l'agent : {reason}"));
+        true
     }
 
     /// Signale à l'utilisateur les retours de hooks qui ne vont pas au modèle.
@@ -1658,18 +1683,25 @@ where
                 &mut tool_results,
                 &mut aids,
             ) {
+                if self.finish_on_hook_stop() {
+                    break;
+                }
                 continue;
             }
             for (tool_use_id, tool_name, input) in pending_tool_uses {
                 // Après une interruption, chaque appel restant reçoit un résultat :
                 // un appel d'outil sans résultat rendrait la conversation invalide.
-                if interrupt_requested() {
-                    self.tool_executor
-                        .skipped(&tool_name, &input, INTERRUPTED_MESSAGE);
+                if interrupt_requested() || self.hook_stop.is_some() {
+                    let reason = if self.hook_stop.is_some() {
+                        HOOK_STOP_MESSAGE
+                    } else {
+                        INTERRUPTED_MESSAGE
+                    };
+                    self.tool_executor.skipped(&tool_name, &input, reason);
                     let message = ConversationMessage::tool_result(
                         tool_use_id,
                         tool_name,
-                        INTERRUPTED_MESSAGE.to_string(),
+                        reason.to_string(),
                         true,
                     );
                     self.session.messages.push(message.clone());
@@ -1696,6 +1728,9 @@ where
                 }
             }
             self.attach_tool_images(&mut tool_results);
+            if self.finish_on_hook_stop() {
+                break;
+            }
             // Mode projet : un jalon marqué fait se vérifie tout de suite.
             if let Some(note) = self.project_after_tools(&mut aids, &mut prompter) {
                 if let Some(last) = self.session.messages.last_mut() {
@@ -1770,6 +1805,7 @@ where
             let fallback = format!("hook PreToolUse : outil `{name}` refusé");
             return Err((format_hook_message(&pre, &fallback), true));
         }
+        self.note_hook_stop(&pre);
         let updated = pre.updated_input().map(ToOwned::to_owned);
         let effective = updated.as_deref().unwrap_or(input);
         let mut notifying = prompter.as_mut().map(|prompt| NotifyingPrompter {
@@ -1859,6 +1895,7 @@ where
             let post = self
                 .hook_runner
                 .run_post_tool_use(name, input, &output, is_error);
+            self.note_hook_stop(&post);
             if post.is_denied() {
                 is_error = true;
             }
@@ -3983,6 +4020,7 @@ where
             let message = ConversationMessage::tool_result(tool_use_id, tool_name, reason, true);
             return (message, true);
         }
+        self.note_hook_stop(&pre_hook_result);
         let updated = pre_hook_result.updated_input().map(ToOwned::to_owned);
         let input = updated.as_deref().unwrap_or(input);
         let mut notifying = prompter.map(|prompt| NotifyingPrompter {
@@ -4012,6 +4050,7 @@ where
                 let post_hook_result = self
                     .hook_runner
                     .run_post_tool_use(&tool_name, input, &output, is_error);
+                self.note_hook_stop(&post_hook_result);
                 if post_hook_result.is_denied() {
                     is_error = true;
                 }
@@ -5072,6 +5111,100 @@ mod tests {
             output.contains("denied tool") || output.contains("blocked by hook"),
             "unexpected hook denial output: {output:?}"
         );
+    }
+
+    /// Client qui demande deux appels d'outil, puis répond par du texte ;
+    /// compte ses requêtes.
+    struct TwoToolsApiClient {
+        requests: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl ApiClient for TwoToolsApiClient {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.requests.set(self.requests.get() + 1);
+            if self.requests.get() > 1 {
+                return Ok(vec![
+                    AssistantEvent::TextDelta("fini".to_string()),
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            Ok(vec![
+                AssistantEvent::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: "echo".to_string(),
+                    input: r#"{"text":"original"}"#.to_string(),
+                },
+                AssistantEvent::ToolUse {
+                    id: "tool-2".to_string(),
+                    name: "echo".to_string(),
+                    input: r#"{"text":"second"}"#.to_string(),
+                },
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    fn tool_output(message: &crate::session::ConversationMessage) -> &str {
+        match &message.blocks[0] {
+            ContentBlock::ToolResult { output, .. } => output.as_str(),
+            _ => panic!("résultat d'outil attendu"),
+        }
+    }
+
+    #[test]
+    fn pre_tool_hooks_can_allow_and_rewrite_a_call() {
+        let _serial = crate::test_serial();
+        let requests = std::rc::Rc::new(std::cell::Cell::new(0));
+        let hook = r#"printf '{"hookSpecificOutput":{"permissionDecision":"allow","updatedInput":{"text":"corrigé"}}}'"#;
+        let mut runtime = ConversationRuntime::new_with_features(
+            Session::new(),
+            TwoToolsApiClient {
+                requests: requests.clone(),
+            },
+            StaticToolExecutor::new().register("echo", |input| Ok(input.to_string())),
+            // Mode `prompt` sans invite : sans le hook, l'appel serait refusé.
+            PermissionPolicy::new(PermissionMode::Prompt),
+            vec!["system".to_string()],
+            RuntimeFeatureConfig::default()
+                .with_hooks(RuntimeHookConfig::new(vec![hook.to_string()], Vec::new())),
+        );
+        let summary = runtime.run_turn("fais-le", None).expect("tour");
+        assert_eq!(summary.tool_results.len(), 2);
+        for result in &summary.tool_results {
+            assert!(
+                tool_output(result).contains("corrigé"),
+                "{}",
+                tool_output(result)
+            );
+        }
+        assert_eq!(requests.get(), 2);
+    }
+
+    #[test]
+    fn a_hook_with_continue_false_stops_the_turn() {
+        let _serial = crate::test_serial();
+        let requests = std::rc::Rc::new(std::cell::Cell::new(0));
+        let hook = r#"printf '{"continue":false,"stopReason":"arrêt demandé"}'"#;
+        let mut runtime = ConversationRuntime::new_with_features(
+            Session::new(),
+            TwoToolsApiClient {
+                requests: requests.clone(),
+            },
+            StaticToolExecutor::new().register("echo", |input| Ok(input.to_string())),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+            RuntimeFeatureConfig::default()
+                .with_hooks(RuntimeHookConfig::new(Vec::new(), vec![hook.to_string()])),
+        );
+        let summary = runtime.run_turn("fais-le", None).expect("tour");
+        assert_eq!(summary.tool_results.len(), 2);
+        assert!(tool_output(&summary.tool_results[0]).contains("original"));
+        assert!(
+            tool_output(&summary.tool_results[1]).contains("a hook stopped the agent"),
+            "{}",
+            tool_output(&summary.tool_results[1])
+        );
+        assert_eq!(requests.get(), 1, "le modèle n'est plus rappelé");
     }
 
     #[test]

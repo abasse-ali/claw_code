@@ -460,6 +460,14 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         category: SlashCommandCategory::Engineering,
     },
     SlashCommandSpec {
+        name: "add-dir",
+        aliases: &["ajouter-dossier"],
+        summary: "Écriture libre aussi dans un autre dossier (sans dossier : la liste)",
+        argument_hint: Some("[dossier] [--save]"),
+        resume_supported: true,
+        category: SlashCommandCategory::Workspace,
+    },
+    SlashCommandSpec {
         name: "install-github-action",
         aliases: &["install-github-app"],
         summary: "Installe Claw dans GitHub : @claw dans les commentaires et revue des PR (modèles gratuits)",
@@ -623,6 +631,9 @@ pub enum SlashCommand {
     InstallGithubAction {
         args: Option<String>,
     },
+    AddDir {
+        args: Option<String>,
+    },
     Branch {
         action: Option<String>,
         target: Option<String>,
@@ -764,6 +775,9 @@ impl SlashCommand {
                 args: remainder_after_command(trimmed, command),
             },
             "install-github-action" | "install-github-app" => Self::InstallGithubAction {
+                args: remainder_after_command(trimmed, command),
+            },
+            "add-dir" | "ajouter-dossier" => Self::AddDir {
                 args: remainder_after_command(trimmed, command),
             },
             "branch" => Self::Branch {
@@ -2340,6 +2354,7 @@ pub fn handle_slash_command(
         | SlashCommand::OutputStyle { .. }
         | SlashCommand::Schedule { .. }
         | SlashCommand::InstallGithubAction { .. }
+        | SlashCommand::AddDir { .. }
         | SlashCommand::Branch { .. }
         | SlashCommand::Bughunter { .. }
         | SlashCommand::Worktree { .. }
@@ -2793,8 +2808,9 @@ mod tests {
         assert!(help.contains("/security-review [fichiers|branche|commit]"));
         assert!(help.contains("/code-review [fichiers|branche|commit|PR n°]"));
         assert!(help.contains("/install-github-action [assistant|review|all]"));
-        assert_eq!(slash_command_specs().len(), 57);
-        assert_eq!(resume_supported_slash_commands().len(), 18);
+        assert!(help.contains("/add-dir [dossier] [--save]"));
+        assert_eq!(slash_command_specs().len(), 58);
+        assert_eq!(resume_supported_slash_commands().len(), 19);
     }
 
     #[test]

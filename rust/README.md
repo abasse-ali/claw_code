@@ -241,8 +241,15 @@ est retenu ; avec `OPENROUTER_API_KEY`, le quota gratuit du jour est affiché.
 |---|---|---|
 | `prompt` (défaut) | `default` | Lecture libre ; demande avant chaque modification ou commande |
 | `read-only` | `plan` | Mode plan : lecture et commandes sans effet uniquement ; l'agent propose un plan |
-| `workspace-write` | `acceptEdits` | Modifie les fichiers sans demander ; demande avant les commandes |
+| `workspace-write` | `acceptEdits` | Modifie sans demander les fichiers du projet (et des dossiers ajoutés) ; demande avant les commandes et avant d'écrire ailleurs |
+| `dont-ask` | `dontAsk` | Ne demande jamais : lecture et règles `allow` passent, tout le reste est refusé (pour l'automatisation) |
 | `danger-full-access` | `bypassPermissions` | Tout est autorisé sans demande |
+
+En `workspace-write`, l'écriture est libre dans le dossier du projet, le dossier temporaire et
+les dossiers ajoutés : `permissions.additionalDirectories` dans la config, `claw --add-dir
+<dossier>` (répétable) ou `/add-dir <dossier>` pendant la session (`--save` l'enregistre dans
+`.claw/settings.local.json` ; `/add-dir` seul les liste). Ailleurs, Claw demande ; sans
+terminal, l'écriture est refusée avec la marche à suivre.
 
 Les commandes en lecture seule (`git status`, `git diff`, `ls`, `cat`…) ne déclenchent pas de demande.
 Dans le terminal, `Maj+Tab` passe d'un mode à l'autre (demander → éditions acceptées → plan) ; le
@@ -261,7 +268,8 @@ Règles dans n'importe quel fichier de config (elles s'additionnent ; `deny` pri
     "defaultMode": "default",
     "allow": ["Bash(cargo test:*)", "Bash(npm run lint)", "WebFetch(domain:docs.rs)"],
     "deny": ["Bash(git push:*)", "Read(.env)", "Edit(secrets/**)"],
-    "ask": ["Bash(git commit:*)"]
+    "ask": ["Bash(git commit:*)"],
+    "additionalDirectories": ["../bibliotheque-partagee"]
   }
 }
 ```
@@ -504,7 +512,9 @@ racine du dépôt. La raison d'un blocage est lue sur stderr (sinon stdout). Dé
 `permissionDecision` : `deny` (refus), `allow` (autorisé sans demander, seules les règles
 `deny` s'appliquent encore), `ask` (l'utilisateur confirme même si le mode l'autoriserait) et
 `updatedInput` (arguments de l'outil remplacés, par exemple une commande corrigée) ; pour
-`PermissionRequest`, `decision: {"behavior": "allow" | "deny", "message"}`. Les hooks
+`PermissionRequest`, `decision: {"behavior": "allow" | "deny", "message"}` ; sur
+`PreToolUse` et `PostToolUse`, `"continue": false` (avec `stopReason`) arrête l'agent : les
+appels restants de la réponse ne sont pas exécutés et le tour se termine. Les hooks
 `PreToolUse` passent désormais avant le contrôle des autorisations, comme dans Claude Code.
 
 **Règles depuis la session** : `/permissions allow <règle>`, `/permissions deny <règle>`,
