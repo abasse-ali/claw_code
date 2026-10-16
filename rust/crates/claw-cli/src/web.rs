@@ -1128,6 +1128,13 @@ impl Worker {
             )),
             Some(SlashCommand::Unknown(name)) => {
                 let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+                if let Some(skill) = commands::skill_registry::find_installed_skill(&cwd, &name) {
+                    let arguments = text
+                        .trim()
+                        .split_once(char::is_whitespace)
+                        .map_or("", |(_, rest)| rest.trim());
+                    return self.run_skill(&skill, arguments);
+                }
                 match commands::resolve_custom_command(&cwd, text) {
                     Some(invocation) => {
                         let invocation = invocation?;
@@ -1153,6 +1160,70 @@ impl Worker {
             ),
             None => self.run_turn(text),
         }
+        Ok(())
+    }
+
+    /// `/nom-du-skill arguments` dans la page.
+    fn run_skill(
+        &mut self,
+        installed: &commands::skill_registry::InstalledSkill,
+        arguments: &str,
+    ) -> Result<(), String> {
+        let skill = &installed.file;
+        if !installed.user_invocable() {
+            self.info(format!(
+                "/{} est réservé à Claude (user-invocable: false ou skillOverrides).",
+                skill.name
+            ));
+            return Ok(());
+        }
+        runtime::deny_for_turn(&skill.disallowed_tools);
+        let rendered = match tools::render_skill_for_session(skill, arguments) {
+            Ok(rendered) => rendered,
+            Err(error) => {
+                runtime::clear_turn_grants();
+                self.info(error);
+                return Ok(());
+            }
+        };
+        if skill.fork {
+            let agent = skill
+                .agent
+                .clone()
+                .unwrap_or_else(|| "general-purpose".to_string());
+            let output = tools::execute_tool(
+                "Agent",
+                &serde_json::json!({
+                    "description": format!("Skill {}", skill.name),
+                    "prompt": rendered,
+                    "subagent_type": agent,
+                    "model": skill.model,
+                }),
+            );
+            runtime::clear_turn_grants();
+            let report = output?;
+            let report = serde_json::from_str::<serde_json::Value>(&report)
+                .ok()
+                .and_then(|value| value.get("result")?.as_str().map(ToOwned::to_owned))
+                .unwrap_or(report);
+            self.info(format!(
+                "※ /{} (sous-agent {agent})
+
+{report}",
+                skill.name
+            ));
+            return Ok(());
+        }
+        match skill.model.clone() {
+            Some(model) => {
+                let previous = self.model.clone();
+                self.set_model(&model)?;
+                self.run_turn(&rendered);
+                self.set_model(&previous)?;
+            }
+            None => self.run_turn(&rendered),
+        }
+        runtime::clear_turn_grants();
         Ok(())
     }
 

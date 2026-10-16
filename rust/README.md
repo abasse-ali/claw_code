@@ -999,6 +999,37 @@ correspond, le modèle charge ses instructions avec l'outil `Skill` et lit les f
 l'accompagnent. `claw skills` (ou `/skills`) les liste. Une compétence marquée
 `disable-model-invocation: true` ne se lance que par `/nom`.
 
+Les skills suivent le format de Claude Code :
+
+- **`/nom arguments`** lance le skill (le nom du dossier ou le `name` du frontmatter) ; un skill
+  passe avant une commande de `commands/` de même nom. Le menu `/` et la complétion les listent.
+- **Arguments** : `$ARGUMENTS` (tout le texte), `$ARGUMENTS[0]` ou `$0` (premier argument, `$1`
+  le deuxième…), noms déclarés dans `arguments: [issue, branch]` (`$issue`, `$branch`). Les
+  guillemets groupent un argument (`/migrer "Search Bar" JS TS`) ; sans aucun emplacement, le
+  texte est ajouté en `ARGUMENTS: …` ; `\$1` reste littéral. Variables : `${CLAUDE_SKILL_DIR}`,
+  `${CLAUDE_PROJECT_DIR}`, `${CLAUDE_SESSION_ID}`, `${CLAUDE_EFFORT}` (et `${CLAW_…}`).
+- **Contexte dynamique** : `` !`git diff HEAD` `` (en début de ligne ou après un blanc) et les
+  blocs ` ```! ` sont exécutés avant l'envoi et remplacés par leur sortie. Chaque commande passe
+  les permissions de la session sans jamais demander : une commande non autorisée d'avance
+  (lecture seule, règle `allow`, `allowed-tools` du skill) annule l'invocation, comme une commande
+  en échec (le code 1 de `grep`, `diff`, `git diff`… compte comme un résultat).
+  `"disableSkillShellExecution": true` les remplace par `[shell command execution disabled by
+  policy]` ; jamais exécutées pour un skill synchronisé de claude.ai.
+- **`allowed-tools`** : outils accordés sans demande pendant le tour qui invoque le skill (ex.
+  `Bash(git add *) Bash(git commit *)`), sans restreindre les autres ; **`disallowed-tools`** :
+  outils refusés pendant ce tour. Les règles `deny` et `ask` restent prioritaires.
+- **`model`** et **`effort`** : modèle et niveau de raisonnement le temps du tour.
+- **`context: fork`** (avec `agent: Explore`, `Plan`, `general-purpose` ou un agent de
+  `.claude/agents/`) : le skill devient la demande d'un sous-agent ; son rapport s'affiche et
+  rejoint la conversation.
+- **`user-invocable: false`** : réservé au modèle ; **`when_to_use`** complète la description ;
+  **`paths`** est signalé au modèle (« only for files matching … »).
+- **`skillOverrides`** dans les réglages (aussi lu depuis `.claude/settings.json`) : `"on"`,
+  `"name-only"` (seul le nom est donné au modèle), `"user-invocable-only"` (caché au modèle),
+  `"off"` (caché partout), sans modifier le fichier du skill.
+- Invoqué par le modèle (outil `Skill`), un skill est rendu de la même façon ; un skill réservé à
+  l'utilisateur lui est refusé avec la consigne de vous proposer `/nom`.
+
 Claw importe aussi :
 
 - les compétences **synchronisées par l'application Claude** (`~/.claude/skills/synced/…`, un

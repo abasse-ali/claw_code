@@ -223,6 +223,12 @@ pub fn set_session_info(session_id: &str, transcript_path: &std::path::Path) {
     });
 }
 
+/// Identifiant de la session courante (skills : `${CLAUDE_SESSION_ID}`).
+#[must_use]
+pub fn current_session_id() -> Option<String> {
+    with_session(|state| state.session_id.clone())
+}
+
 /// Contexte `SessionStart` en attente, consommé par le prochain tour.
 pub(crate) fn take_pending_context() -> Vec<String> {
     with_session(|state| std::mem::take(&mut state.pending_context))

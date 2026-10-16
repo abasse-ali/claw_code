@@ -37,6 +37,48 @@ impl PermissionMode {
 // les dossiers ajoutés (`permissions.additionalDirectories`, `--add-dir`,
 // `/add-dir`) et le dossier temporaire ; ailleurs, l'utilisateur confirme.
 
+/// Outils accordés pour le tour en cours par le `allowed-tools` d'un skill :
+/// retirés à la fin du tour. Les règles `deny` et `ask` restent prioritaires.
+static TURN_GRANTS: Mutex<Vec<PermissionRule>> = Mutex::new(Vec::new());
+
+/// Accorde ces règles (`Bash(git add *)`, `Read`…) jusqu'à la fin du tour.
+pub fn grant_for_turn(rules: &[String]) {
+    let mut grants = TURN_GRANTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    grants.extend(rules.iter().filter_map(|rule| PermissionRule::parse(rule)));
+}
+
+/// Outils retirés pour le tour en cours par le `disallowed-tools` d'un skill.
+static TURN_DENIALS: Mutex<Vec<PermissionRule>> = Mutex::new(Vec::new());
+
+/// Refuse ces outils jusqu'à la fin du tour.
+pub fn deny_for_turn(rules: &[String]) {
+    TURN_DENIALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .extend(rules.iter().filter_map(|rule| PermissionRule::parse(rule)));
+}
+
+/// Fin du tour : les outils accordés ou retirés par un skill ne le sont plus.
+pub fn clear_turn_grants() {
+    TURN_GRANTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+    TURN_DENIALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+fn turn_grants() -> Vec<PermissionRule> {
+    TURN_GRANTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 static CONFIGURED_DIRECTORIES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 static SESSION_DIRECTORIES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
@@ -424,6 +466,18 @@ impl PermissionPolicy {
         let required_mode = self.required_mode_for(tool_name);
         let target = ToolTarget::from_input(tool_name, input);
 
+        let denials = TURN_DENIALS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(rule) = self.first_match_any(&denials, tool_name, &target) {
+            return PermissionOutcome::Deny {
+                reason: format!(
+                    "l'outil '{tool_name}' est retiré pendant ce skill (disallowed-tools : `{}`)",
+                    rule.as_str()
+                ),
+            };
+        }
         if let Some(rule) = self.first_match_any(&self.rules.deny, tool_name, &target) {
             return PermissionOutcome::Deny {
                 reason: format!(
@@ -437,6 +491,12 @@ impl PermissionPolicy {
             .first_match_any(&self.rules.ask, tool_name, &target)
             .is_some();
         let outside = writes_outside_workspace(tool_name, &target, &self.cwd);
+        if !must_ask && current_mode != PermissionMode::ReadOnly {
+            let grants = turn_grants();
+            if self.first_match_any(&grants, tool_name, &target).is_some() {
+                return PermissionOutcome::Allow;
+            }
+        }
         if !must_ask {
             if matches!(
                 current_mode,

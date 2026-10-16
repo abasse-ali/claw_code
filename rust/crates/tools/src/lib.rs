@@ -738,7 +738,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "Skill",
-            description: "Load a local skill definition and its instructions.",
+            description: "Run an installed skill: returns its instructions with the arguments filled in (and the output of its injected commands), or, for a skill with context: fork, the report of the sub-agent that ran it. Pass the user's arguments in `args`. Skills reserved to the user cannot be run this way.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -2363,16 +2363,117 @@ fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, String> 
 
 fn execute_skill(input: SkillInput) -> Result<SkillOutput, String> {
     let skill_path = resolve_skill_path(&input.skill)?;
-    let prompt = std::fs::read_to_string(&skill_path).map_err(|error| error.to_string())?;
-    let description = parse_skill_description(&prompt);
-
+    let dir_name = skill_path
+        .parent()
+        .and_then(std::path::Path::file_name)
+        .map_or_else(
+            || input.skill.clone(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+    let skill = runtime::skills::SkillFile::load(&skill_path, &dir_name)
+        .map_err(|error| error.to_string())?;
+    // `disable-model-invocation` : réservé à l'utilisateur (`/nom`).
+    if skill.disable_model_invocation {
+        return Err(format!(
+            "[Claw] The skill `{name}` can only be run by the user (disable-model-invocation). Do not carry out its steps another way: tell the user they can run /{name} themselves.",
+            name = skill.name
+        ));
+    }
+    let arguments = input.args.clone().unwrap_or_default();
+    let rendered = render_skill_for_session(&skill, &arguments)?;
+    let description = skill.description.clone();
+    if skill.fork {
+        // `context: fork` : le skill est la demande d'un sous-agent, dont le
+        // rapport revient comme résultat de l'outil.
+        let agent_type = skill
+            .agent
+            .clone()
+            .unwrap_or_else(|| "general-purpose".to_string());
+        let report = execute_agent(AgentInput {
+            description: format!("Skill {}", skill.name),
+            prompt: rendered,
+            subagent_type: Some(agent_type.clone()),
+            name: None,
+            model: skill.model.clone(),
+            run_in_background: None,
+            isolation: None,
+        })?;
+        return Ok(SkillOutput {
+            skill: input.skill,
+            path: skill_path.display().to_string(),
+            args: input.args,
+            description,
+            prompt: format!(
+                "[Claw] The skill ran in a {agent_type} sub-agent (context: fork). Its report:\n\n{}",
+                report.result.unwrap_or_default()
+            ),
+        });
+    }
     Ok(SkillOutput {
         skill: input.skill,
         path: skill_path.display().to_string(),
         args: input.args,
         description,
-        prompt,
+        prompt: rendered,
     })
+}
+
+/// Rend un skill pour la session en cours : `allowed-tools` accordés pour le
+/// tour, commandes injectées soumises aux permissions de la session (jamais
+/// de demande), coupées pour un skill synchronisé de claude.ai ou par le
+/// réglage `disableSkillShellExecution`.
+pub fn render_skill_for_session(
+    skill: &runtime::skills::SkillFile,
+    arguments: &str,
+) -> Result<String, String> {
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let project_dir = runtime::worktree::repo_root(&cwd).unwrap_or_else(|_| cwd.clone());
+    runtime::grant_for_turn(&skill.granted_rules(&project_dir));
+    let synced = skill
+        .path
+        .components()
+        .any(|component| component.as_os_str() == "synced");
+    let disabled_by_setting = runtime::ConfigLoader::default_for(&cwd)
+        .load()
+        .ok()
+        .and_then(|config| {
+            config
+                .get("disableSkillShellExecution")
+                .and_then(runtime::JsonValue::as_bool)
+        })
+        .unwrap_or(false);
+    let context = current_subagent_context();
+    let check = |command: &str| {
+        let mut policy = context.as_ref().map_or_else(
+            || agent_permission_policy_with(PermissionMode::Prompt, PermissionRules::default()),
+            |context| agent_permission_policy_with(context.permission_mode, context.rules.clone()),
+        );
+        match policy.authorize("bash", &json!({ "command": command }).to_string(), None) {
+            runtime::PermissionOutcome::Allow => runtime::skills::CommandCheck::Allow,
+            runtime::PermissionOutcome::Deny { reason } => {
+                runtime::skills::CommandCheck::Deny(reason)
+            }
+        }
+    };
+    let session_id = runtime::current_session_id().unwrap_or_default();
+    let effort = match api::reasoning_effort() {
+        Some(api::ReasoningEffort::Off | api::ReasoningEffort::Low) => "low",
+        Some(api::ReasoningEffort::Medium) => "medium",
+        Some(api::ReasoningEffort::Max) => "max",
+        _ => "high",
+    };
+    runtime::skills::render(
+        skill,
+        arguments,
+        &runtime::skills::RenderContext {
+            session_id: &session_id,
+            effort,
+            project_dir: &project_dir,
+            cwd: &cwd,
+            shell_disabled: synced || disabled_by_setting,
+            check: &check,
+        },
+    )
 }
 
 fn validate_todos(todos: &[TodoItem]) -> Result<(), String> {
@@ -5107,18 +5208,6 @@ fn make_cell_id(index: usize) -> String {
     format!("cell-{}", index + 1)
 }
 
-fn parse_skill_description(contents: &str) -> Option<String> {
-    for line in contents.lines() {
-        if let Some(value) = line.strip_prefix("description:") {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -5879,6 +5968,57 @@ setTimeout(function () { nexistepas(); }, 100);
 
         let output: serde_json::Value = serde_json::from_str(&nudge).expect("valid json");
         assert_eq!(output["verificationNudgeNeeded"], true);
+    }
+
+    #[test]
+    fn skills_render_their_arguments_and_refuse_user_only_ones() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let workspace = temp_path("skill-render");
+        let skills = workspace.join(".claude").join("skills");
+        std::fs::create_dir_all(skills.join("fix-issue")).expect("skill dir");
+        std::fs::write(
+            skills.join("fix-issue").join("SKILL.md"),
+            "---
+description: Fix an issue
+---
+Fix GitHub issue $0 in ${CLAUDE_SKILL_DIR}.
+",
+        )
+        .expect("skill file");
+        std::fs::create_dir_all(skills.join("deploy")).expect("skill dir");
+        std::fs::write(
+            skills.join("deploy").join("SKILL.md"),
+            "---
+description: Deploy
+disable-model-invocation: true
+---
+Deploy $ARGUMENTS
+",
+        )
+        .expect("skill file");
+        let original_dir = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&workspace).expect("set cwd");
+
+        let result = execute_tool("Skill", &json!({ "skill": "fix-issue", "args": "123" }));
+        let refused = execute_tool("Skill", &json!({ "skill": "deploy", "args": "prod" }));
+        std::env::set_current_dir(original_dir).expect("restore cwd");
+
+        let output: serde_json::Value =
+            serde_json::from_str(&result.expect("Skill should succeed")).expect("valid json");
+        let prompt = output["prompt"]
+            .as_str()
+            .expect("prompt")
+            .replace('\\', "/");
+        assert!(prompt.starts_with("Fix GitHub issue 123 in "), "{prompt}");
+        assert!(prompt.ends_with("/skills/fix-issue."), "{prompt}");
+        let refused = refused.expect_err("réservé à l'utilisateur");
+        assert!(
+            refused.contains("can only be run by the user") && refused.contains("/deploy"),
+            "{refused}"
+        );
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[test]

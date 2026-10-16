@@ -79,7 +79,18 @@ pub struct ConfigEntry {
 }
 
 /// Clés reprises des fichiers de Claude Code.
-const FOREIGN_KEYS: &[&str] = &["permissions", "hooks", "mcpServers"];
+/// Réglages repris des fichiers de Claude Code (`~/.claude/settings.json`,
+/// `.claude/settings.json`, `.claude/settings.local.json`) : ceux que Claw
+/// comprend de la même façon.
+const FOREIGN_KEYS: &[&str] = &[
+    "permissions",
+    "hooks",
+    "mcpServers",
+    "skillOverrides",
+    "disableSkillShellExecution",
+    "statusLine",
+    "outputStyle",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfig {

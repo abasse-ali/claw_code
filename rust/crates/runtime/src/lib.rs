@@ -15,6 +15,7 @@ mod hooks;
 pub mod interrupt;
 mod json;
 pub mod json_repair;
+pub use json::JsonValue;
 mod lean;
 mod mcp;
 mod mcp_client;
@@ -28,6 +29,7 @@ mod remote;
 pub mod repo_map;
 pub mod sandbox;
 pub mod security_guidance;
+pub mod skills;
 pub use bash::stop_all_containers;
 mod session;
 pub mod team;
@@ -74,9 +76,9 @@ pub use file_ops::{
     ReadFileOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput,
 };
 pub use hooks::{
-    set_http_hook_sender, set_prompt_hook_evaluator, set_session_info as set_hook_session_info,
-    HookEvent, HookPermissionDecision, HookRunResult, HookRunner, HttpHookSender,
-    PromptHookEvaluator,
+    current_session_id, set_http_hook_sender, set_prompt_hook_evaluator,
+    set_session_info as set_hook_session_info, HookEvent, HookPermissionDecision, HookRunResult,
+    HookRunner, HttpHookSender, PromptHookEvaluator,
 };
 pub use lsp::{
     FileDiagnostics, LspContextEnrichment, LspError, LspManager, LspServerConfig, SymbolLocation,
@@ -107,10 +109,11 @@ pub use oauth::{
 };
 pub use paths::{find_executable, home_dir};
 pub use permissions::{
-    add_session_directory, is_not_run, is_writable_without_asking, request_mode_switch,
-    set_configured_directories, unanswered_permission, user_away, writable_directories,
-    PermissionMode, PermissionOutcome, PermissionPolicy, PermissionPromptDecision,
-    PermissionPrompter, PermissionRequest, PermissionRule, PermissionRules, NOT_RUN_PREFIX,
+    add_session_directory, clear_turn_grants, deny_for_turn, grant_for_turn, is_not_run,
+    is_writable_without_asking, request_mode_switch, set_configured_directories,
+    unanswered_permission, user_away, writable_directories, PermissionMode, PermissionOutcome,
+    PermissionPolicy, PermissionPromptDecision, PermissionPrompter, PermissionRequest,
+    PermissionRule, PermissionRules, NOT_RUN_PREFIX,
 };
 pub use prompt::{
     current_date_iso, load_system_prompt, prepend_bullets, ContextFile, ProjectContext,

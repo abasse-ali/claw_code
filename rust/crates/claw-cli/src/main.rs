@@ -2098,6 +2098,13 @@ fn run_repl(
                 }
                 if let Some(command) = SlashCommand::parse(trimmed) {
                     if matches!(command, SlashCommand::Unknown(_)) {
+                        if let Some(outcome) = cli.invoke_skill(trimmed) {
+                            editor.push_history(&input);
+                            if let Err(error) = outcome {
+                                eprintln!("{}", render_cli_error(&error.to_string()));
+                            }
+                            continue;
+                        }
                         if let Some(invocation) = custom_command_prompt(trimmed) {
                             editor.push_history(&input);
                             match invocation {
@@ -3949,6 +3956,104 @@ impl LiveCli {
         Ok(())
     }
 
+    /// `/nom-du-skill arguments` : skill installé (`.claw/skills`,
+    /// `.claude/skills`, `~/.claude/skills`…) ; `None` si aucun skill ne porte
+    /// ce nom.
+    fn invoke_skill(&mut self, input: &str) -> Option<Result<(), Box<dyn std::error::Error>>> {
+        let line = input.trim().strip_prefix('/')?;
+        let (name, arguments) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        let cwd = env::current_dir().ok()?;
+        let installed = commands::skill_registry::find_installed_skill(&cwd, name)?;
+        Some(self.run_skill(&installed, arguments.trim(), &cwd))
+    }
+
+    fn run_skill(
+        &mut self,
+        installed: &commands::skill_registry::InstalledSkill,
+        arguments: &str,
+        cwd: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let skill = &installed.file;
+        if !installed.user_invocable() {
+            println!(
+                "  ⎿  /{} est réservé à Claude (user-invocable: false ou skillOverrides) : demandez la tâche en langage courant.",
+                skill.name
+            );
+            return Ok(());
+        }
+        let source = skill
+            .path
+            .strip_prefix(cwd)
+            .unwrap_or(&skill.path)
+            .display()
+            .to_string();
+        let model = skill
+            .model
+            .as_deref()
+            .map(|model| format!(" · modèle {model}"))
+            .unwrap_or_default();
+        eprintln!("↳ /{} ({source}){model}", skill.name);
+        runtime::deny_for_turn(&skill.disallowed_tools);
+        let rendered = match tools::render_skill_for_session(skill, arguments) {
+            Ok(rendered) => rendered,
+            Err(error) => {
+                runtime::clear_turn_grants();
+                println!("  ⎿  {}{error}{}", transcript::RED, transcript::RESET);
+                return Ok(());
+            }
+        };
+        if skill.fork {
+            let agent = skill
+                .agent
+                .clone()
+                .unwrap_or_else(|| "general-purpose".to_string());
+            let output = tools::execute_tool(
+                "Agent",
+                &json!({
+                    "description": format!("Skill {}", skill.name),
+                    "prompt": rendered,
+                    "subagent_type": agent,
+                    "model": skill.model,
+                }),
+            );
+            runtime::clear_turn_grants();
+            let report = output.map_err(|error| error.clone()).and_then(|text| {
+                serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|value| value.get("result")?.as_str().map(ToOwned::to_owned))
+                    .ok_or_else(|| "le sous-agent n'a pas rendu de rapport".to_string())
+            });
+            match report {
+                Ok(report) => {
+                    println!(
+                        "\n{}※ /{} (sous-agent {agent}){}\n{}\n",
+                        transcript::ACCENT,
+                        skill.name,
+                        transcript::RESET,
+                        TerminalRenderer::new().markdown_to_ansi(&report)
+                    );
+                    self.pending_context.push(format!(
+                        "[Result of the /{} skill, run by a {agent} sub-agent]\n{report}",
+                        skill.name
+                    ));
+                }
+                Err(error) => eprintln!("{}", render_cli_error(&error)),
+            }
+            return Ok(());
+        }
+        let previous_effort = api::reasoning_effort();
+        let effort = skill.effort.as_deref().and_then(parse_skill_effort);
+        if effort.is_some() {
+            api::set_reasoning_effort(effort);
+        }
+        let result = self.run_turn_with_overrides(&rendered, skill.model.clone(), None);
+        if effort.is_some() {
+            api::set_reasoning_effort(previous_effort);
+        }
+        runtime::clear_turn_grants();
+        result
+    }
+
     /// `/commit-push-pr [contexte]` : sur la branche principale, une branche
     /// est créée d'abord ; puis commit (message généré), poussée et pull
     /// request (avec `gh`, sinon le lien pour l'ouvrir).
@@ -4603,6 +4708,17 @@ fn run_schedule_command(args: Option<&str>, model: &str) -> String {
             }
             Err(error) => error,
         },
+    }
+}
+
+/// Champ `effort` d'un skill.
+fn parse_skill_effort(value: &str) -> Option<api::ReasoningEffort> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "low" => Some(api::ReasoningEffort::Low),
+        "medium" => Some(api::ReasoningEffort::Medium),
+        "high" => Some(api::ReasoningEffort::High),
+        "xhigh" | "max" => Some(api::ReasoningEffort::Max),
+        _ => None,
     }
 }
 
@@ -8402,6 +8518,14 @@ fn slash_command_menu_entries() -> Vec<(String, String)> {
         ("/exit".to_string(), "Quitte Claw".to_string()),
     ]);
     if let Ok(cwd) = env::current_dir() {
+        for (name, description) in commands::skill_registry::user_invocable_names(&cwd) {
+            let summary = if description.is_empty() {
+                "Skill".to_string()
+            } else {
+                format!("Skill · {description}")
+            };
+            entries.push((format!("/{name}"), summary));
+        }
         for command in commands::discover_custom_commands(&cwd) {
             let summary = command
                 .description
@@ -8438,6 +8562,11 @@ fn slash_command_completion_candidates() -> Vec<String> {
     ]);
     if let Ok(cwd) = env::current_dir() {
         candidates.extend(commands::custom_command_completions(&cwd));
+        candidates.extend(
+            commands::skill_registry::user_invocable_names(&cwd)
+                .into_iter()
+                .map(|(name, _)| format!("/{name}")),
+        );
     }
     candidates.extend(
         tools::mcp_prompt_commands()

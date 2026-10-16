@@ -1316,6 +1316,10 @@ where
         self.api_client.restore_model();
         // Fin du tour, réussi ou non : ce qui a été fait est enregistré.
         self.autosave(&[]);
+        // Les outils accordés par un skill ne valent que pour ce tour.
+        if !self.subagent {
+            crate::permissions::clear_turn_grants();
+        }
         result
     }
 

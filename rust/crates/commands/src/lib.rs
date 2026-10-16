@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 mod custom;
 pub mod output_styles;
+pub mod skill_registry;
 
 pub use custom::{
     custom_command_completions, discover_custom_commands, expand_template, find_custom_command,
@@ -898,37 +899,43 @@ pub fn resume_supported_slash_commands() -> Vec<&'static SlashCommandSpec> {
 }
 
 /// Section du prompt système listant les compétences disponibles (nom et
-/// description), pour que le modèle sache quand appeler l'outil `Skill`.
+/// description), pour que le modèle sache quand appeler l'outil `Skill`. Les
+/// skills réservés à l'utilisateur (`disable-model-invocation`, réglage
+/// `skillOverrides`) n'y figurent pas.
 #[must_use]
 pub fn skills_prompt_section(cwd: &Path) -> Option<String> {
-    let skills = load_all_skills(cwd).ok()?;
-    let active = skills
-        .iter()
-        .filter(|skill| {
-            skill.shadowed_by.is_none()
-                && skill.origin == SkillOrigin::SkillsDir
-                && skill.model_invocable
-                && skill.unavailable.is_none()
-        })
+    let active = skill_registry::installed_skills(cwd)
+        .into_iter()
+        .filter(skill_registry::InstalledSkill::model_invocable)
         .take(40)
-        .map(|skill| match &skill.description {
-            // Description coupée : 40 compétences ne doivent pas noyer le prompt.
-            // Une description écrite ailleurs peut porter un tiret long ou des
-            // emoji, que ce même prompt interdit au modèle d'écrire.
-            Some(description) => format!(
-                "- {}: {}",
-                skill.name,
-                runtime::typography::cleaned(&shorten(description, 400))
-            ),
-            None => format!("- {}", skill.name),
+        .map(|skill| {
+            let paths = if skill.file.paths.is_empty() {
+                String::new()
+            } else {
+                format!(" (only for files matching {})", skill.file.paths.join(", "))
+            };
+            match skill.file.listing_text() {
+                // Description coupée : 40 compétences ne doivent pas noyer le prompt.
+                // Une description écrite ailleurs peut porter un tiret long ou des
+                // emoji, que ce même prompt interdit au modèle d'écrire.
+                Some(text) if skill.visibility != skill_registry::Visibility::NameOnly => format!(
+                    "- {}: {}{paths}",
+                    skill.file.name,
+                    runtime::typography::cleaned(&shorten(&text, 400))
+                ),
+                _ => format!("- {}{paths}", skill.file.name),
+            }
         })
         .collect::<Vec<_>>();
     if active.is_empty() {
         return None;
     }
     Some(format!(
-        "# Skills\nThese skills are installed. When a task matches one, load its instructions with the Skill tool (argument `skill` = the name) before starting:\n{}",
-        active.join("\n")
+        "# Skills
+These skills are installed. When a task matches one, load its instructions with the Skill tool (argument `skill` = the name, `args` = the arguments) before starting:
+{}",
+        active.join("
+")
     ))
 }
 
