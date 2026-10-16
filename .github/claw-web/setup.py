@@ -7,6 +7,7 @@ remise sans lui avant que l'agent ne travaille. L'état du mode projet du passag
 (`claw-state/project.json`, en cache) est remis dans `.claw/` du clone.
 """
 
+import json
 import os
 import re
 import shutil
@@ -18,6 +19,7 @@ import urllib.request
 
 from common import (ANSWER, ANSWERED, API, FILES_BRANCH, WORK, GitHubError, answered_up_to, api,
                     comments, images_of, kind_of, output, post_comment, run_url, settings, task_text)
+from on_github import STATE_FILE, describe, read_state
 
 REPO = os.environ.get("REPO", "").strip()
 BASE = os.environ.get("BASE", "").strip()
@@ -136,6 +138,21 @@ def fetch_images(paths):
     return saved
 
 
+def github_state(token, branch):
+    """L'état GitHub du dépôt pour l'agent (pull request, GitHub Pages), gardé pour la commande
+    `claw-github` ; None sans le jeton du dépôt (rien ne pourra être fait sur GitHub)."""
+    if not REPO_TOKEN:
+        return None
+    try:
+        state = read_state(REPO, BASE, branch, token)
+    except (GitHubError, OSError, ValueError) as error:
+        print(f"::warning::état GitHub du dépôt illisible : {error}")
+        return None
+    STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+    print(describe(state))
+    return state
+
+
 def main():
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", REPO):
         fail(f"Dépôt invalide : `{REPO}` (attendu : propriétaire/nom).")
@@ -219,14 +236,34 @@ def main():
     request += (
         f"\n\n[Claw] You are working in the repository {REPO}, on the branch {branch} "
         f"(created from {BASE}). When you finish, Claw commits your changes on this branch, "
-        "pushes them and proposes them as a pull request: do not commit, push or open the pull "
-        "request yourself. Nobody can answer questions during this task: make reasonable "
-        "choices and state them in your final answer. You cannot act on GitHub itself (merge "
-        "the pull request, repository settings such as GitHub Pages, other repositories): the "
-        "user does that from the Claw app, which has a button to merge the pull request and a "
-        "button « Mettre en ligne » that publishes a static site on GitHub Pages (from docs/ "
-        "or the repository root). Say so in one sentence when it matters, instead of a guide "
-        "to GitHub's settings."
+        "pushes them and proposes them as a pull request (or updates the open one): do not "
+        "commit, push or open the pull request yourself. Nobody can answer questions during "
+        "this task: make reasonable choices and state them in your final answer."
+    )
+    state = github_state(token, branch)
+    if state:
+        request += "\n\n" + describe(state)
+        request += (
+            "\n\n[Claw] Acting on GitHub: you have no GitHub token, but the shell command "
+            "`claw-github` has Claw act for you right after your work is pushed:\n"
+            f"- `claw-github merge`: merge this session's pull request into {BASE} (opened first if needed).\n"
+            f"- `claw-github pages` (or `pages docs`, `pages root`): publish the site on GitHub Pages from {BASE} "
+            "(docs/ when docs/index.html exists, else the root). Add `claw-github merge` when the site's "
+            "files are only on this session's branch.\n"
+            "- `claw-github status`: the GitHub state above; `claw-github cancel`: drop your requests.\n"
+            "When the user asks to merge, publish, deploy or put online (« mets en ligne », « fusionne »), "
+            "run these commands yourself: never ask the user to press a button or to do it in GitHub. "
+            "Claw writes the outcome (merged, site address, or the exact reason of a refusal) under your "
+            "final answer: announce what you requested in one sentence, without claiming it is already "
+            "done. Some things only the user can do (repository visibility, token permissions, other "
+            "repositories): then name that one action, where to do it and why, in one sentence."
+        )
+    request += (
+        "\n\n[Claw] Your final answer: answer the latest message first and directly. Do not repeat "
+        "the tables, feature lists or summaries of your earlier answers in this session: say only what "
+        "is new or changed. State facts about the repository, its branches, pull request or site only "
+        "after checking them (the GitHub state above, git, the files, or fetching the page): never "
+        "guess. When the user reports that something does not work, check it yourself first."
     )
     (WORK / "prompt.txt").write_text(request, encoding="utf-8")
     output("branch", branch)

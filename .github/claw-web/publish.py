@@ -13,6 +13,7 @@ import os
 import subprocess
 
 from common import ANSWER, WORK, GitHubError, api, post_comment, run_url, stop_tree
+from on_github import Actor, load_requests
 
 REPO = os.environ["REPO"]
 BASE = os.environ["BASE"]
@@ -64,6 +65,9 @@ def main():
     result, error = read("result.md"), read("error.txt")
     finished = OUTCOME == "success" and bool(result)
     footer, notes = [], []
+    # Le travail est sur GitHub (poussé, ou rien à pousser) : les demandes de l'agent
+    # (`claw-github`) peuvent être faites.
+    pushed = False
     try:
         # Ce que l'agent a laissé sans commit (il a pu committer lui-même aussi). `.claw/`
         # est exclu par setup.py (.git/info/exclude) : nommé ici, git add le refuserait.
@@ -77,6 +81,7 @@ def main():
         summary = stat[-1].strip() if stat else ""
         if ahead == 0:
             notes.append("Aucune modification de fichier dans ce passage.")
+            pushed = True
         elif not PUBLISH:
             notes.append(f"Modifications **non publiées** ({summary}) : le moteur n'a pas le secret "
                          f"`CLAW_REPO_TOKEN` qui permet de pousser dans `{REPO}`.")
@@ -90,6 +95,7 @@ def main():
                 detail = push.stderr.replace(REPO_TOKEN, "***").strip()[:300]
                 notes.append(f"La poussée sur `{BRANCH}` a échoué : {detail}")
             else:
+                pushed = True
                 owner = REPO.split("/")[0]
                 found = api("GET", f"/repos/{REPO}/pulls?state=open&head={owner}:{BRANCH}", REPO_TOKEN)
                 pull = found[0] if found else None
@@ -108,6 +114,16 @@ def main():
                 footer.append(f"Branche `{BRANCH}` : {summary}")
     except (RuntimeError, GitHubError, ValueError) as failure:
         notes.append(f"Publication impossible : {failure}")
+    requests = load_requests()
+    if requests:
+        if not PUBLISH:
+            notes.append("Fusion ou mise en ligne non faite : le moteur n'a pas le secret `CLAW_REPO_TOKEN`.")
+        elif not finished:
+            notes.append("Fusion ou mise en ligne non faite : le passage ne s'est pas terminé.")
+        elif not pushed:
+            notes.append("Fusion ou mise en ligne non faite : les changements ne sont pas sur GitHub.")
+        else:
+            notes.extend(Actor(REPO, BASE, BRANCH, REPO_TOKEN, TITLE).carry_out(requests))
 
     if finished:
         text = result

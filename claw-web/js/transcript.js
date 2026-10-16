@@ -189,11 +189,28 @@ function eventHtml(event, key, lastTodo) {
   }
 }
 
-/** Le journal d'un passage : déplié pendant le passage, replié ensuite (une ligne). */
-export function transcriptHtml(events, { key, live }) {
+/** Les textes de la fin du passage (après sa dernière action) que la réponse publiée reprend :
+ * le journal ne les répète pas. */
+function repeatedInAnswer(events, answer) {
+  const flat = (text) => String(text || "").replace(/\s+/g, " ").trim();
+  const said = flat(answer);
+  const repeated = new Set();
+  if (!said) return repeated;
+  const lastTool = events.map((event) => event.k === "tool").lastIndexOf(true);
+  events.forEach((event, index) => {
+    if (index > lastTool && event.k === "text" && flat(event.t) && said.includes(flat(event.t))) repeated.add(index);
+  });
+  return repeated;
+}
+
+/** Le journal d'un passage : déplié pendant le passage, replié ensuite (une ligne). `answer` :
+ * la réponse publiée du passage, que le journal ne répète pas. */
+export function transcriptHtml(events, { key, live, answer = "" }) {
   const tools = events.filter((event) => event.k === "tool").length;
   const lastTodo = events.map((event) => event.k === "tool" && event.n === "TodoWrite").lastIndexOf(true);
-  const rows = events.map((event, index) => eventHtml(event, `${key}:${index}`, live && index === lastTodo)).join("");
+  const repeated = repeatedInAnswer(events, answer);
+  const rows = events.map((event, index) => (repeated.has(index) ? ""
+    : eventHtml(event, `${key}:${index}`, live && index === lastTodo))).join("");
   return `<details class="transcript" data-key="${key}"${live ? " open" : ""}>
     <summary><span>Journal du passage</span><span class="side">${plural(tools, "action")}</span></summary>
     <div class="events">${rows}</div>

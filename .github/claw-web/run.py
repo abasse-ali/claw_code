@@ -219,6 +219,16 @@ def main():
     env = {key: value for key, value in os.environ.items()
            if "TOKEN" not in key.upper() or key == "OPENROUTER_API_KEY"}
     env["CLAW_NO_BROWSER"] = "1"
+    # `claw-github` : l'agent demande une fusion ou une mise en ligne, faite après la poussée
+    # par publish.py avec le jeton du dépôt (claw_github.py n'en a aucun).
+    tools = WORK / "bin"
+    tools.mkdir(parents=True, exist_ok=True)
+    helper = tools / "claw-github"
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claw_github.py")
+    helper.write_text(f'#!/bin/sh\nexec python3 "{script}" "$@"\n', encoding="utf-8")
+    helper.chmod(0o755)
+    env["PATH"] = f"{tools}{os.pathsep}{env.get('PATH', '')}"
+    env["CLAW_WEB_REPO_DIR"] = ROOT
     # Options choisies dans l'appli : mode équipe, Ultracode (comme les boutons de l'interface
     # locale de Claw).
     for choice, variable, label in (("TEAM", "CLAW_TEAM", "mode équipe"), ("ULTRACODE", "CLAW_ULTRACODE", "Ultracode")):

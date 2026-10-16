@@ -59,7 +59,12 @@ WORK = Path(os.environ.get("RUNNER_TEMP", ".")) / "claw-web"
 
 
 class GitHubError(Exception):
-    pass
+    """Réponse d'erreur de l'API : `status` est le code HTTP, `reason` le message de GitHub."""
+
+    def __init__(self, message, status=0, reason=""):
+        super().__init__(message)
+        self.status = status
+        self.reason = reason
 
 
 def api(method, path, token, body=None):
@@ -77,7 +82,11 @@ def api(method, path, token, body=None):
             raw = response.read()
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", "replace")[:300]
-        raise GitHubError(f"{method} {path} : HTTP {error.code} {detail}") from None
+        try:
+            reason = str(json.loads(detail).get("message") or "")
+        except (ValueError, AttributeError):
+            reason = ""
+        raise GitHubError(f"{method} {path} : HTTP {error.code} {detail}", error.code, reason or detail) from None
     return json.loads(raw) if raw else None
 
 

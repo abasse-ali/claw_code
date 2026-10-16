@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-    paths-ignore: ["**/*.md", "rust/docs/**", "assets/**", "claw-web/**", ".github/workflows/pages.yml"]
+    paths-ignore: ["**/*.md", "rust/docs/**", "assets/**", "claw-web/**", ".github/workflows/pages.yml", ".github/claw-web/**", ".github/workflows/engine.yml"]
   pull_request:
     branches: [main]
   workflow_dispatch:

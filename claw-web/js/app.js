@@ -1339,7 +1339,18 @@ function journalOf(run) {
   return logs.sort((a, b) => a.page - b.page).flatMap((log) => log.events);
 }
 
-function messageHtml(comment, isLastProgress) {
+/** La réponse publiée du passage d'un commentaire de progression : la suivante avant le passage
+ * d'après (des messages arrivés pendant le passage peuvent la précéder). */
+function answerAfter(comments, index) {
+  for (const comment of comments.slice(index + 1)) {
+    const body = comment.body || "";
+    if (body.includes(PROGRESS)) return "";
+    if (kindOf(body) === "answer") return body;
+  }
+  return "";
+}
+
+function messageHtml(comment, isLastProgress, answer = "") {
   const body = comment.body || "";
   if (body.startsWith(LOG)) return "";
   if (body.includes(PROGRESS)) {
@@ -1347,7 +1358,7 @@ function messageHtml(comment, isLastProgress) {
     const events = run ? journalOf(run) : [];
     if (events.length) {
       const head = body.split("\n").find((line) => line.startsWith("**Claw")) || "";
-      return `<div class="progress-card journal">${renderMarkdown(head)}${transcriptHtml(events, { key: `run${run}`, live: isLastProgress })}</div>`;
+      return `<div class="progress-card journal">${renderMarkdown(head)}${transcriptHtml(events, { key: `run${run}`, live: isLastProgress, answer })}</div>`;
     }
     return `<div class="progress-card${isLastProgress ? "" : " old"}">${renderMarkdown(body)}</div>`;
   }
@@ -1408,7 +1419,8 @@ function renderSessionView() {
       </header>
       <div class="messages">
         <article class="message user"><div class="who">${escapeHtml(session.issue.user ? session.issue.user.login : "Vous")}</div>${messageBody(taskOf(session.issue))}</article>
-        ${comments.map((comment) => messageHtml(comment, comment === lastProgress && !answered)).join("")}
+        ${comments.map((comment, index) => messageHtml(comment, comment === lastProgress && !answered,
+          (comment.body || "").includes(PROGRESS) ? answerAfter(comments, index) : "")).join("")}
       </div>
       ${unsent ? `<div class="unsent">Ce message n'a pas encore été envoyé à Claw (aucun passage lancé depuis).
         <button class="small-link primary-link" data-action="retry">${ICON.retry}<span>Lancer le passage</span></button></div>` : ""}
