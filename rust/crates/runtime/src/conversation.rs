@@ -8,7 +8,7 @@ use crate::compact::{
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::harness::{self, Aid, StallGuard, VerifySetting};
-use crate::hooks::{HookEvent, HookRunResult, HookRunner};
+use crate::hooks::{HookEvent, HookPermissionDecision, HookRunResult, HookRunner};
 use crate::interrupt::{clear_interrupt, interrupt_requested, INTERRUPTED_MESSAGE};
 use crate::permissions::{
     PermissionOutcome, PermissionPolicy, PermissionPromptDecision, PermissionPrompter,
@@ -823,6 +823,23 @@ pub fn cut_reply_continued(messages: &[ConversationMessage]) -> Option<String> {
 }
 
 /// Demande l'avis des hooks `Notification` avant chaque demande d'autorisation.
+/// Autorisation d'un appel selon la décision des hooks `PreToolUse`.
+fn authorize_after_hook(
+    policy: &mut PermissionPolicy,
+    decision: Option<HookPermissionDecision>,
+    tool_name: &str,
+    input: &str,
+    prompter: Option<&mut dyn PermissionPrompter>,
+) -> PermissionOutcome {
+    match decision {
+        Some(HookPermissionDecision::Allow) => policy.authorize_preapproved(tool_name, input),
+        Some(HookPermissionDecision::Ask) => {
+            policy.authorize_with_prompt(tool_name, input, prompter)
+        }
+        None => policy.authorize(tool_name, input, prompter),
+    }
+}
+
 struct NotifyingPrompter<'a> {
     hooks: &'a HookRunner,
     inner: &'a mut dyn PermissionPrompter,
@@ -830,6 +847,19 @@ struct NotifyingPrompter<'a> {
 
 impl PermissionPrompter for NotifyingPrompter<'_> {
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
+        // Hooks `PermissionRequest` : ils peuvent répondre à la place de
+        // l'utilisateur (autoriser ou refuser).
+        let hooked = self
+            .hooks
+            .run_permission_request(&request.tool_name, &request.input);
+        if hooked.is_denied() {
+            return PermissionPromptDecision::Deny {
+                reason: hooked.reason("refusé par un hook PermissionRequest"),
+            };
+        }
+        if hooked.permission_decision() == Some(HookPermissionDecision::Allow) {
+            return PermissionPromptDecision::Allow;
+        }
         // Une demande de ce tour est restée sans réponse : l'utilisateur est
         // absent, et chaque nouvelle demande l'attendrait encore longtemps.
         if crate::permissions::user_away() {
@@ -1722,25 +1752,35 @@ where
         Ok(user_message)
     }
 
-    /// Arguments, autorisation puis hook `PreToolUse` d'un appel d'un lot : les
-    /// messages du hook s'il peut être exécuté, sinon la raison rendue au
-    /// modèle, et vrai si c'est un refus (autorisation ou hook).
+    /// Arguments, hook `PreToolUse` puis autorisation d'un appel d'un lot :
+    /// les messages du hook et les arguments à utiliser (remplacés par un hook
+    /// avec `updatedInput`) s'il peut être exécuté, sinon la raison rendue au
+    /// modèle, et vrai si c'est un refus (hook ou autorisation).
     fn admit_tool_call(
         &mut self,
         name: &str,
         input: &str,
         prompter: &mut Option<&mut dyn PermissionPrompter>,
-    ) -> Result<Vec<String>, (String, bool)> {
+    ) -> Result<(Vec<String>, Option<String>), (String, bool)> {
         if let Some(problem) = self.tool_executor.invalid_input(name, input) {
             return Err((problem, false));
         }
+        let pre = self.hook_runner.run_pre_tool_use(name, input);
+        if pre.is_denied() {
+            let fallback = format!("hook PreToolUse : outil `{name}` refusé");
+            return Err((format_hook_message(&pre, &fallback), true));
+        }
+        let updated = pre.updated_input().map(ToOwned::to_owned);
+        let effective = updated.as_deref().unwrap_or(input);
         let mut notifying = prompter.as_mut().map(|prompt| NotifyingPrompter {
             hooks: &self.hook_runner,
             inner: &mut **prompt,
         });
-        let outcome = self.permission_policy.authorize(
+        let outcome = authorize_after_hook(
+            &mut self.permission_policy,
+            pre.permission_decision(),
             name,
-            input,
+            effective,
             notifying
                 .as_mut()
                 .map(|prompt| prompt as &mut dyn PermissionPrompter),
@@ -1748,12 +1788,7 @@ where
         if let PermissionOutcome::Deny { reason } = outcome {
             return Err((reason, true));
         }
-        let pre = self.hook_runner.run_pre_tool_use(name, input);
-        if pre.is_denied() {
-            let fallback = format!("hook PreToolUse : outil `{name}` refusé");
-            return Err((format_hook_message(&pre, &fallback), true));
-        }
-        Ok(pre.messages().to_vec())
+        Ok((pre.messages().to_vec(), updated))
     }
 
     /// Plusieurs appels sans effet (sous-agents, lectures, recherches) : les
@@ -1779,9 +1814,13 @@ where
         let mut refused_calls = vec![false; calls.len()];
         let mut ready = Vec::new();
         let mut pre_messages = Vec::new();
+        let mut inputs: Vec<String> = calls.iter().map(|(_, _, input)| input.clone()).collect();
         for (index, (id, name, input)) in calls.iter().enumerate() {
             match self.admit_tool_call(name, input, prompter) {
-                Ok(messages) => {
+                Ok((messages, updated)) => {
+                    if let Some(updated) = updated {
+                        inputs[index] = updated;
+                    }
                     ready.push(index);
                     pre_messages.push(messages);
                 }
@@ -1801,7 +1840,7 @@ where
         // 2. Exécution simultanée des appels autorisés.
         let batch = ready
             .iter()
-            .map(|index| (calls[*index].1.clone(), calls[*index].2.clone()))
+            .map(|index| (calls[*index].1.clone(), inputs[*index].clone()))
             .collect::<Vec<_>>();
         let outputs = if batch.is_empty() {
             Vec::new()
@@ -1810,7 +1849,8 @@ where
         };
         // 3. Hooks PostToolUse et résultats, dans l'ordre d'origine.
         for ((index, outcome), pre) in ready.iter().zip(outputs).zip(pre_messages) {
-            let (id, name, input) = &calls[*index];
+            let (id, name, _) = &calls[*index];
+            let input = &inputs[*index];
             let (mut output, mut is_error) = match outcome {
                 Ok(output) => (output, false),
                 Err(error) => (error.to_string(), true),
@@ -3933,11 +3973,25 @@ where
             let message = ConversationMessage::tool_result(tool_use_id, tool_name, problem, true);
             return (message, false);
         }
+        // `PreToolUse` d'abord, comme dans Claude Code : un hook peut refuser,
+        // accorder (`allow`), faire confirmer (`ask`) ou corriger les arguments.
+        let pre_hook_result = self.hook_runner.run_pre_tool_use(&tool_name, input);
+        if pre_hook_result.is_denied() {
+            let deny_message = format!("hook PreToolUse : outil `{tool_name}` refusé");
+            let reason = format_hook_message(&pre_hook_result, &deny_message);
+            self.tool_executor.skipped(&tool_name, input, &reason);
+            let message = ConversationMessage::tool_result(tool_use_id, tool_name, reason, true);
+            return (message, true);
+        }
+        let updated = pre_hook_result.updated_input().map(ToOwned::to_owned);
+        let input = updated.as_deref().unwrap_or(input);
         let mut notifying = prompter.map(|prompt| NotifyingPrompter {
             hooks: &self.hook_runner,
             inner: prompt,
         });
-        let permission_outcome = self.permission_policy.authorize(
+        let permission_outcome = authorize_after_hook(
+            &mut self.permission_policy,
+            pre_hook_result.permission_decision(),
             &tool_name,
             input,
             notifying
@@ -3946,40 +4000,30 @@ where
         );
         match permission_outcome {
             PermissionOutcome::Allow => {
-                let pre_hook_result = self.hook_runner.run_pre_tool_use(&tool_name, input);
-                if pre_hook_result.is_denied() {
-                    let deny_message = format!("hook PreToolUse : outil `{tool_name}` refusé");
-                    let reason = format_hook_message(&pre_hook_result, &deny_message);
-                    self.tool_executor.skipped(&tool_name, input, &reason);
-                    let message =
-                        ConversationMessage::tool_result(tool_use_id, tool_name, reason, true);
-                    (message, true)
-                } else {
-                    crate::checkpoint::record_before_write(&tool_name, input);
-                    let (mut output, mut is_error) =
-                        match self.tool_executor.execute(&tool_name, input) {
-                            Ok(output) => (output, false),
-                            Err(error) => (error.to_string(), true),
-                        };
-                    self.tool_images.extend(self.tool_executor.take_images());
-                    output = merge_hook_feedback(pre_hook_result.messages(), output, false);
+                crate::checkpoint::record_before_write(&tool_name, input);
+                let (mut output, mut is_error) = match self.tool_executor.execute(&tool_name, input)
+                {
+                    Ok(output) => (output, false),
+                    Err(error) => (error.to_string(), true),
+                };
+                self.tool_images.extend(self.tool_executor.take_images());
+                output = merge_hook_feedback(pre_hook_result.messages(), output, false);
 
-                    let post_hook_result = self
-                        .hook_runner
-                        .run_post_tool_use(&tool_name, input, &output, is_error);
-                    if post_hook_result.is_denied() {
-                        is_error = true;
-                    }
-                    output = merge_hook_feedback(
-                        post_hook_result.messages(),
-                        output,
-                        post_hook_result.is_denied(),
-                    );
-
-                    let message =
-                        ConversationMessage::tool_result(tool_use_id, tool_name, output, is_error);
-                    (message, false)
+                let post_hook_result = self
+                    .hook_runner
+                    .run_post_tool_use(&tool_name, input, &output, is_error);
+                if post_hook_result.is_denied() {
+                    is_error = true;
                 }
+                output = merge_hook_feedback(
+                    post_hook_result.messages(),
+                    output,
+                    post_hook_result.is_denied(),
+                );
+
+                let message =
+                    ConversationMessage::tool_result(tool_use_id, tool_name, output, is_error);
+                (message, false)
             }
             PermissionOutcome::Deny { reason } => {
                 self.tool_executor.skipped(&tool_name, input, &reason);

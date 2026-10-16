@@ -163,8 +163,10 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "permissions",
         aliases: &[],
-        summary: "Affiche ou change le mode de permission actif",
-        argument_hint: Some("[prompt|read-only|workspace-write|danger-full-access]"),
+        summary: "Mode de permission, ou règles : allow, deny, ask, remove <règle>",
+        argument_hint: Some(
+            "[prompt|read-only|workspace-write|danger-full-access|allow|deny|ask|remove <règle>]",
+        ),
         resume_supported: false,
         category: SlashCommandCategory::Core,
     },
@@ -817,7 +819,7 @@ impl SlashCommand {
                 model: parts.next().map(ToOwned::to_owned),
             },
             "permissions" => Self::Permissions {
-                mode: parts.next().map(ToOwned::to_owned),
+                mode: remainder_after_command(trimmed, command),
             },
             "clear" => Self::Clear {
                 confirm: parts.next() == Some("--confirm"),
@@ -2760,7 +2762,7 @@ mod tests {
         assert!(help.contains("/teleport <symbole-ou-chemin>"));
         assert!(help.contains("/debug-tool-call"));
         assert!(help.contains("/model [modèle]"));
-        assert!(help.contains("/permissions [prompt|read-only|workspace-write|danger-full-access]"));
+        assert!(help.contains("/permissions [prompt|read-only|workspace-write|danger-full-access|allow|deny|ask|remove <règle>]"));
         assert!(help.contains("/clear [--confirm]"));
         assert!(help.contains("/cost"));
         assert!(help.contains("/resume <chemin-session>"));

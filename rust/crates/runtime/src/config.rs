@@ -136,13 +136,32 @@ pub struct RuntimeProviderConfig {
     pub text_tools: bool,
 }
 
-/// Une commande de hook, éventuellement filtrée par un `matcher` (nom d'outil,
-/// source de session…) et limitée par un délai en secondes.
+/// Type d'un hook (champ `type`, comme dans Claude Code).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum HookKind {
+    /// Commande shell (`command`) : charge utile sur stdin.
+    #[default]
+    Command,
+    /// Requête POST de la charge utile vers `url` (`command` contient l'URL) ;
+    /// `${VAR}` dans les en-têtes vient de l'environnement.
+    Http { headers: BTreeMap<String, String> },
+    /// Question posée à un modèle (`command` contient la consigne, où
+    /// `$ARGUMENTS` est remplacé par la charge utile) ; il répond
+    /// `{"ok": true|false, "reason": "..."}`.
+    Prompt { model: Option<String> },
+}
+
+/// Un hook, éventuellement filtré par un `matcher` (nom d'outil, source de
+/// session…) et limité par un délai en secondes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookCommandConfig {
+    /// Commande, URL (`http`) ou consigne (`prompt`).
     pub command: String,
     pub matcher: Option<String>,
     pub timeout_secs: Option<u64>,
+    pub kind: HookKind,
+    /// `"async": true` : lancé sans attendre, son résultat est ignoré.
+    pub run_async: bool,
 }
 
 impl HookCommandConfig {
@@ -152,6 +171,8 @@ impl HookCommandConfig {
             command,
             matcher: None,
             timeout_secs: None,
+            kind: HookKind::Command,
+            run_async: false,
         }
     }
 }
@@ -1148,6 +1169,8 @@ fn parse_hook_item(
             command: command.to_string(),
             matcher,
             timeout_secs: timeout(object),
+            kind: HookKind::Command,
+            run_async: object.get("async").and_then(JsonValue::as_bool) == Some(true),
         });
         return Ok(());
     }
@@ -1160,17 +1183,49 @@ fn parse_hook_item(
         let Some(hook) = hook.as_object() else {
             continue;
         };
-        // Seuls les hooks de type `command` existent ici (pas `prompt`).
-        let kind = hook
-            .get("type")
-            .and_then(JsonValue::as_str)
-            .unwrap_or("command");
-        if let (Some(command), "command") = (hook.get("command").and_then(JsonValue::as_str), kind)
-        {
+        let text = |key: &str| {
+            hook.get(key)
+                .and_then(JsonValue::as_str)
+                .map(ToOwned::to_owned)
+        };
+        let kind = text("type").unwrap_or_else(|| "command".to_string());
+        // Types inconnus (`agent`…) ignorés : réglages d'une autre version.
+        let (command, kind) = match kind.as_str() {
+            "command" => (text("command"), HookKind::Command),
+            "http" => (
+                text("url"),
+                HookKind::Http {
+                    headers: hook
+                        .get("headers")
+                        .and_then(JsonValue::as_object)
+                        .map(|headers| {
+                            headers
+                                .iter()
+                                .filter_map(|(name, value)| {
+                                    value
+                                        .as_str()
+                                        .map(|value| (name.clone(), value.to_string()))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                },
+            ),
+            "prompt" => (
+                text("prompt"),
+                HookKind::Prompt {
+                    model: text("model"),
+                },
+            ),
+            _ => (None, HookKind::Command),
+        };
+        if let Some(command) = command.filter(|command| !command.trim().is_empty()) {
             entries.push(HookCommandConfig {
-                command: command.to_string(),
+                command,
                 matcher: matcher.clone(),
                 timeout_secs: timeout(hook),
+                kind,
+                run_async: hook.get("async").and_then(JsonValue::as_bool) == Some(true),
             });
         }
     }
@@ -1555,6 +1610,47 @@ mod tests {
     use crate::sandbox::FilesystemIsolationMode;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn hooks_of_every_type_are_read() {
+        use super::{parse_optional_hooks_config, HookKind};
+        use crate::hooks::HookEvent;
+        let root = JsonValue::parse(
+            r#"{"hooks":{
+                "PreToolUse":[{"matcher":"Bash","hooks":[
+                    {"type":"command","command":"garde.sh","async":true},
+                    {"type":"http","url":"https://hooks.example/pre","headers":{"Authorization":"Bearer ${TOKEN}"},"timeout":5},
+                    {"type":"prompt","prompt":"Vérifie : $ARGUMENTS","model":"petit"},
+                    {"type":"agent","prompt":"inconnu"}
+                ]}],
+                "PermissionRequest":["approuve.sh"],
+                "EvenementFutur":["ignoré"]
+            }}"#,
+        )
+        .expect("json");
+        let config = parse_optional_hooks_config(&root).expect("hooks");
+        let pre = config.entries(HookEvent::PreToolUse);
+        assert_eq!(pre.len(), 3);
+        assert!(pre[0].run_async && pre[0].kind == HookKind::Command);
+        assert_eq!(pre[1].command, "https://hooks.example/pre");
+        assert_eq!(pre[1].timeout_secs, Some(5));
+        assert!(
+            matches!(&pre[1].kind, HookKind::Http { headers } if headers["Authorization"] == "Bearer ${TOKEN}")
+        );
+        assert_eq!(
+            pre[2].kind,
+            HookKind::Prompt {
+                model: Some("petit".to_string())
+            }
+        );
+        assert!(pre
+            .iter()
+            .all(|entry| entry.matcher.as_deref() == Some("Bash")));
+        assert_eq!(
+            config.entries(HookEvent::PermissionRequest)[0].command,
+            "approuve.sh"
+        );
+    }
 
     fn temp_dir() -> std::path::PathBuf {
         let nanos = SystemTime::now()

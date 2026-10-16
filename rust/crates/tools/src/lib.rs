@@ -2739,6 +2739,29 @@ fn run_agent_conversation(job: &AgentJob, interactive: bool) -> Result<String, S
         .subagent_type
         .clone()
         .unwrap_or_else(|| String::from("general-purpose"));
+    // Hooks `SubagentStart` : leur contexte (`additionalContext`, sortie)
+    // accompagne la demande du sous-agent ; un code 2 n'arrête rien.
+    let started =
+        runtime::HookRunner::new(job.hooks.clone()).run_subagent_start(&label, &job.prompt);
+    let context = started.context().join(
+        "
+
+",
+    );
+    let job = &if context.trim().is_empty() {
+        job.clone()
+    } else {
+        AgentJob {
+            prompt: format!(
+                "{}
+
+[Contexte des hooks SubagentStart]
+{context}",
+                job.prompt
+            ),
+            ..job.clone()
+        }
+    };
     if job.isolated {
         return run_isolated_agent(job, &label, interactive);
     }
@@ -4269,6 +4292,31 @@ fn agent_store_dir() -> Result<std::path::PathBuf, String> {
         return Ok(workspace_root.join(".claw-agents"));
     }
     Ok(cwd.join(".claw-agents"))
+}
+
+/// Envoi d'un hook `http` (fourni au runtime au démarrage) : POST du JSON de
+/// l'événement, renvoie le statut et le corps de la réponse.
+pub fn send_hook_request(
+    url: &str,
+    headers: &BTreeMap<String, String>,
+    body: &str,
+    timeout: Duration,
+) -> Result<(u16, String), String> {
+    let client = Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut request = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .body(body.to_string());
+    for (name, value) in headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    let response = request.send().map_err(|error| error.to_string())?;
+    let status = response.status().as_u16();
+    let text = response.text().map_err(|error| error.to_string())?;
+    Ok((status, text))
 }
 
 /// Sous-agent lancé par l'outil `Agent` (d'après son manifeste).

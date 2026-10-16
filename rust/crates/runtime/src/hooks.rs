@@ -1,21 +1,26 @@
-//! Hooks : commandes shell exécutées à des moments clés de la session.
+//! Hooks : commandes shell, requêtes HTTP ou questions à un modèle, exécutées
+//! à des moments clés de la session.
 //!
-//! Chaque hook reçoit sur stdin un objet JSON (`hook_event_name`, `cwd`,
-//! `session_id`, plus les champs propres à l'événement) et les variables
-//! d'environnement `HOOK_*`. Code de sortie 0 : succès (stdout est un retour
-//! ou du contexte), 2 : blocage (stderr, sinon stdout, donne la raison), autre :
-//! avertissement. Une sortie JSON façon Claude Code est aussi comprise
-//! (`decision: "block"`, `hookSpecificOutput.permissionDecision: "deny"`,
-//! `hookSpecificOutput.additionalContext`, `systemMessage`).
+//! Chaque hook reçoit un objet JSON (`hook_event_name`, `cwd`, `session_id`,
+//! plus les champs propres à l'événement) : sur stdin pour une commande, qui
+//! a aussi les variables `HOOK_*` et `CLAW_PROJECT_DIR`, dans le corps d'un
+//! POST pour un hook `http`, à la place de `$ARGUMENTS` pour un hook `prompt`.
+//! Code de sortie 0 : succès (stdout est un retour ou du contexte), 2 :
+//! blocage (stderr, sinon stdout, donne la raison), autre : avertissement.
+//! Une sortie JSON façon Claude Code est aussi comprise (`decision: "block"`,
+//! `hookSpecificOutput.permissionDecision` `allow` / `ask` / `deny`,
+//! `hookSpecificOutput.updatedInput`, `hookSpecificOutput.decision.behavior`
+//! de `PermissionRequest`, `additionalContext`, `systemMessage`).
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
-use crate::config::{HookCommandConfig, RuntimeFeatureConfig, RuntimeHookConfig};
+use crate::config::{HookCommandConfig, HookKind, RuntimeFeatureConfig, RuntimeHookConfig};
 
 const DEFAULT_HOOK_TIMEOUT_SECS: u64 = 60;
 
@@ -30,10 +35,13 @@ pub enum HookEvent {
     SessionEnd,
     PreCompact,
     Notification,
+    PostToolUseFailure,
+    SubagentStart,
+    PermissionRequest,
 }
 
 impl HookEvent {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 12] = [
         Self::PreToolUse,
         Self::PostToolUse,
         Self::UserPromptSubmit,
@@ -43,6 +51,9 @@ impl HookEvent {
         Self::SessionEnd,
         Self::PreCompact,
         Self::Notification,
+        Self::PostToolUseFailure,
+        Self::SubagentStart,
+        Self::PermissionRequest,
     ];
 
     #[must_use]
@@ -57,6 +68,9 @@ impl HookEvent {
             Self::SessionEnd => "SessionEnd",
             Self::PreCompact => "PreCompact",
             Self::Notification => "Notification",
+            Self::PostToolUseFailure => "PostToolUseFailure",
+            Self::SubagentStart => "SubagentStart",
+            Self::PermissionRequest => "PermissionRequest",
         }
     }
 
@@ -70,14 +84,27 @@ impl HookEvent {
     pub fn blocking_effect(self) -> &'static str {
         match self {
             Self::PreToolUse => "refuse l'appel d'outil",
-            Self::PostToolUse => "marque le résultat comme une erreur",
+            Self::PostToolUse | Self::PostToolUseFailure => "marque le résultat comme une erreur",
             Self::UserPromptSubmit => "rejette la demande",
             Self::Stop | Self::SubagentStop => "relance l'agent avec la raison donnée",
-            Self::SessionStart | Self::SessionEnd | Self::PreCompact | Self::Notification => {
-                "aucun (affiché seulement)"
-            }
+            Self::PermissionRequest => "refuse l'autorisation demandée",
+            Self::SessionStart
+            | Self::SessionEnd
+            | Self::PreCompact
+            | Self::Notification
+            | Self::SubagentStart => "aucun (affiché seulement)",
         }
     }
+}
+
+/// Décision d'autorisation rendue par un hook (`PreToolUse` :
+/// `permissionDecision`, `PermissionRequest` : `decision.behavior`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookPermissionDecision {
+    /// Autorisé sans demander à l'utilisateur (les règles `deny` restent).
+    Allow,
+    /// Demander à l'utilisateur même si le mode l'autoriserait.
+    Ask,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -85,6 +112,8 @@ pub struct HookRunResult {
     denied: bool,
     messages: Vec<String>,
     context: Vec<String>,
+    decision: Option<HookPermissionDecision>,
+    updated_input: Option<String>,
 }
 
 impl HookRunResult {
@@ -94,7 +123,21 @@ impl HookRunResult {
             denied: false,
             context: messages.clone(),
             messages,
+            decision: None,
+            updated_input: None,
         }
+    }
+
+    /// Décision d'autorisation des hooks (`ask` l'emporte sur `allow`).
+    #[must_use]
+    pub fn permission_decision(&self) -> Option<HookPermissionDecision> {
+        self.decision
+    }
+
+    /// Arguments de l'outil remplacés par un hook `PreToolUse` (`updatedInput`).
+    #[must_use]
+    pub fn updated_input(&self) -> Option<&str> {
+        self.updated_input.as_deref()
     }
 
     #[must_use]
@@ -255,6 +298,7 @@ impl HookRunner {
         )
     }
 
+    /// `PostToolUse`, puis `PostToolUseFailure` quand l'outil a échoué.
     #[must_use]
     pub fn run_post_tool_use(
         &self,
@@ -263,18 +307,63 @@ impl HookRunner {
         tool_output: &str,
         is_error: bool,
     ) -> HookRunResult {
-        self.run_event(
+        let fields = json!({
+            "tool_name": tool_name,
+            "tool_input": parse_tool_input(tool_input),
+            "tool_input_json": tool_input,
+            "tool_output": tool_output,
+            "tool_response": tool_output,
+            "tool_result_is_error": is_error,
+        });
+        let env = tool_env(tool_name, tool_input, Some(tool_output), is_error);
+        let mut result = self.run_event(
             HookEvent::PostToolUse,
+            Some(tool_name),
+            fields.clone(),
+            &env,
+        );
+        if is_error && !result.denied {
+            let mut failure = fields;
+            if let Value::Object(object) = &mut failure {
+                object.insert("error".into(), tool_output.into());
+            }
+            let failed = self.run_event(
+                HookEvent::PostToolUseFailure,
+                Some(tool_name),
+                failure,
+                &env,
+            );
+            result.denied = failed.denied;
+            result.messages.extend(failed.messages);
+            result.context.extend(failed.context);
+        }
+        result
+    }
+
+    /// `PermissionRequest` : avant de demander une autorisation à
+    /// l'utilisateur, un hook peut l'accorder ou la refuser à sa place.
+    #[must_use]
+    pub fn run_permission_request(&self, tool_name: &str, tool_input: &str) -> HookRunResult {
+        self.run_event(
+            HookEvent::PermissionRequest,
             Some(tool_name),
             json!({
                 "tool_name": tool_name,
                 "tool_input": parse_tool_input(tool_input),
                 "tool_input_json": tool_input,
-                "tool_output": tool_output,
-                "tool_response": tool_output,
-                "tool_result_is_error": is_error,
             }),
-            &tool_env(tool_name, tool_input, Some(tool_output), is_error),
+            &tool_env(tool_name, tool_input, None, false),
+        )
+    }
+
+    /// `SubagentStart` : un sous-agent démarre (`matcher` : son type).
+    #[must_use]
+    pub fn run_subagent_start(&self, agent_type: &str, prompt: &str) -> HookRunResult {
+        self.run_event(
+            HookEvent::SubagentStart,
+            Some(agent_type),
+            json!({ "agent_type": agent_type, "prompt": prompt }),
+            &[],
         )
     }
 
@@ -302,10 +391,38 @@ impl HookRunner {
         let payload = Self::payload(event, fields).to_string();
         let mut result = HookRunResult::default();
         for entry in entries {
+            if entry.run_async {
+                // `"async": true` : lancé sans attendre, résultat ignoré.
+                let entry = entry.clone();
+                let payload = payload.clone();
+                let env: Vec<(String, String)> = env
+                    .iter()
+                    .map(|(key, value)| ((*key).to_string(), value.clone()))
+                    .collect();
+                std::thread::spawn(move || {
+                    let env: Vec<(&str, String)> = env
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.clone()))
+                        .collect();
+                    let _ = run_command(&entry, event, &payload, &env);
+                });
+                continue;
+            }
             match run_command(entry, event, &payload, env) {
-                HookCommandOutcome::Allow { message, context } => {
+                HookCommandOutcome::Allow {
+                    message,
+                    context,
+                    decision,
+                    updated_input,
+                } => {
                     result.messages.extend(message.clone());
                     result.context.extend(context.or(message));
+                    if decision.is_some() && result.decision != Some(HookPermissionDecision::Ask) {
+                        result.decision = decision;
+                    }
+                    if updated_input.is_some() {
+                        result.updated_input = updated_input;
+                    }
                 }
                 HookCommandOutcome::Deny { message } => {
                     result.messages.push(message.unwrap_or_else(|| {
@@ -410,6 +527,8 @@ enum HookCommandOutcome {
     Allow {
         message: Option<String>,
         context: Option<String>,
+        decision: Option<HookPermissionDecision>,
+        updated_input: Option<String>,
     },
     Deny {
         message: Option<String>,
@@ -425,14 +544,39 @@ fn run_command(
     payload: &str,
     env: &[(&str, String)],
 ) -> HookCommandOutcome {
+    match &entry.kind {
+        HookKind::Command => run_shell_hook(entry, event, payload, env),
+        HookKind::Http { headers } => run_http_hook(entry, event, payload, headers),
+        HookKind::Prompt { model } => run_prompt_hook(entry, event, payload, model.as_deref()),
+    }
+}
+
+/// Dossier du projet pour les hooks : la racine git, sinon le dossier courant.
+fn project_dir() -> String {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    crate::worktree::repo_root(&cwd)
+        .unwrap_or(cwd)
+        .display()
+        .to_string()
+}
+
+fn run_shell_hook(
+    entry: &HookCommandConfig,
+    event: HookEvent,
+    payload: &str,
+    env: &[(&str, String)],
+) -> HookCommandOutcome {
     let command = entry.command.as_str();
     let timeout = Duration::from_secs(entry.timeout_secs.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS));
     let mut process = plugins::script_or_shell_command(command);
+    let project = project_dir();
     process
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env("HOOK_EVENT", event.as_str());
+        .env("HOOK_EVENT", event.as_str())
+        .env("CLAW_PROJECT_DIR", &project)
+        .env("CLAUDE_PROJECT_DIR", &project);
     // Sous Windows, Python écrit en cp1252 dans un tube : on impose l'UTF-8.
     if cfg!(windows) && std::env::var_os("PYTHONUTF8").is_none() {
         process.env("PYTHONUTF8", "1");
@@ -498,24 +642,196 @@ fn parse_success_output(stdout: &str) -> HookCommandOutcome {
         return HookCommandOutcome::Allow {
             message: (!stdout.is_empty()).then(|| stdout.to_string()),
             context: None,
+            decision: None,
+            updated_input: None,
         };
     };
     let text = |value: Option<&Value>| value.and_then(Value::as_str).map(ToOwned::to_owned);
     let specific = object.get("hookSpecificOutput");
+    let field = |key: &str| specific.and_then(|value| value.get(key));
+    // `PermissionRequest` : `decision: {behavior: "allow" | "deny", message}`.
+    let request = field("decision").filter(|value| value.is_object());
+    let behavior = request
+        .and_then(|value| value.get("behavior"))
+        .and_then(Value::as_str);
+    let permission = field("permissionDecision").and_then(Value::as_str);
     let blocked = object.get("decision").and_then(Value::as_str) == Some("block")
-        || specific
-            .and_then(|value| value.get("permissionDecision"))
-            .and_then(Value::as_str)
-            == Some("deny");
+        || permission == Some("deny")
+        || behavior == Some("deny");
     if blocked {
         return HookCommandOutcome::Deny {
             message: text(object.get("reason"))
-                .or_else(|| text(specific.and_then(|value| value.get("permissionDecisionReason")))),
+                .or_else(|| text(field("permissionDecisionReason")))
+                .or_else(|| text(request.and_then(|value| value.get("message")))),
         };
     }
-    let context = text(specific.and_then(|value| value.get("additionalContext")));
-    let message = text(object.get("systemMessage")).or_else(|| context.clone());
-    HookCommandOutcome::Allow { message, context }
+    let decision = match permission.or(behavior) {
+        Some("allow") => Some(HookPermissionDecision::Allow),
+        Some("ask") => Some(HookPermissionDecision::Ask),
+        _ => None,
+    };
+    let updated_input = field("updatedInput")
+        .or_else(|| request.and_then(|value| value.get("updatedInput")))
+        .filter(|value| value.is_object())
+        .map(Value::to_string);
+    let context = text(field("additionalContext"));
+    let message = text(object.get("systemMessage"))
+        .or_else(|| context.clone())
+        .or_else(|| text(field("permissionDecisionReason")));
+    HookCommandOutcome::Allow {
+        message,
+        context,
+        decision,
+        updated_input,
+    }
+}
+
+// ------------------------------------------------------------ hooks http et prompt
+//
+// Le runtime n'a ni client HTTP ni modèle : le programme qui l'utilise fournit
+// l'envoi d'une requête et la question à un modèle au démarrage.
+
+/// Envoi d'un POST : `(url, en-têtes, corps JSON, délai)` → `(statut, corps)`.
+pub type HttpHookSender = Box<
+    dyn Fn(&str, &BTreeMap<String, String>, &str, Duration) -> Result<(u16, String), String>
+        + Send
+        + Sync,
+>;
+
+/// Question à un modèle : `(consigne système, demande, modèle ?)` → réponse.
+pub type PromptHookEvaluator =
+    Box<dyn Fn(&str, &str, Option<&str>) -> Result<String, String> + Send + Sync>;
+
+static HTTP_SENDER: OnceLock<HttpHookSender> = OnceLock::new();
+static PROMPT_EVALUATOR: OnceLock<PromptHookEvaluator> = OnceLock::new();
+
+/// Fournit l'envoi des hooks `http` (une fois par processus).
+pub fn set_http_hook_sender(sender: HttpHookSender) {
+    let _ = HTTP_SENDER.set(sender);
+}
+
+/// Fournit le modèle des hooks `prompt` (une fois par processus).
+pub fn set_prompt_hook_evaluator(evaluator: PromptHookEvaluator) {
+    let _ = PROMPT_EVALUATOR.set(evaluator);
+}
+
+/// `${VAR}` remplacé par la variable d'environnement (vide si absente).
+fn expand_env(value: &str) -> String {
+    let mut expanded = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        expanded.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            expanded.push_str(&rest[start..]);
+            return expanded;
+        };
+        expanded.push_str(&std::env::var(&after[..end]).unwrap_or_default());
+        rest = &after[end + 1..];
+    }
+    expanded.push_str(rest);
+    expanded
+}
+
+/// Hook `http` : POST de la charge utile ; réponse 2xx lue comme la sortie
+/// d'une commande réussie (texte ou JSON), autre statut : avertissement.
+fn run_http_hook(
+    entry: &HookCommandConfig,
+    event: HookEvent,
+    payload: &str,
+    headers: &BTreeMap<String, String>,
+) -> HookCommandOutcome {
+    let url = expand_env(&entry.command);
+    let Some(sender) = HTTP_SENDER.get() else {
+        return HookCommandOutcome::Warn {
+            message: format!(
+                "hook {} `{url}` : envoi HTTP indisponible ici",
+                event.as_str()
+            ),
+        };
+    };
+    let headers: BTreeMap<String, String> = headers
+        .iter()
+        .map(|(name, value)| (name.clone(), expand_env(value)))
+        .collect();
+    let timeout = Duration::from_secs(entry.timeout_secs.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS));
+    match sender(&url, &headers, payload, timeout) {
+        Ok((status, body)) if (200..300).contains(&status) => parse_success_output(body.trim()),
+        Ok((status, body)) => HookCommandOutcome::Warn {
+            message: format!(
+                "hook {} `{url}` : réponse HTTP {status}, on continue{}",
+                event.as_str(),
+                Some(body.trim())
+                    .filter(|body| !body.is_empty())
+                    .map(|body| format!(" : {}", body.chars().take(200).collect::<String>()))
+                    .unwrap_or_default()
+            ),
+        },
+        Err(error) => HookCommandOutcome::Warn {
+            message: format!("hook {} `{url}` : {error}", event.as_str()),
+        },
+    }
+}
+
+const PROMPT_HOOK_SYSTEM: &str = "You evaluate a hook condition for a coding agent. You receive the hook instructions and the event data (JSON). Decide strictly according to the instructions. Answer with one JSON object only, no other text: {\"ok\": true} to let the action go on, or {\"ok\": false, \"reason\": \"...\"} to block it, the reason being addressed to the agent and saying what to do instead.";
+
+/// Hook `prompt` : la consigne (avec `$ARGUMENTS` remplacé par la charge
+/// utile) est posée à un modèle, qui répond `{"ok": …, "reason": …}`.
+fn run_prompt_hook(
+    entry: &HookCommandConfig,
+    event: HookEvent,
+    payload: &str,
+    model: Option<&str>,
+) -> HookCommandOutcome {
+    let Some(evaluator) = PROMPT_EVALUATOR.get() else {
+        return HookCommandOutcome::Warn {
+            message: format!(
+                "hook {} de type prompt : aucun modèle disponible ici",
+                event.as_str()
+            ),
+        };
+    };
+    let prompt = if entry.command.contains("$ARGUMENTS") {
+        entry.command.replace("$ARGUMENTS", payload)
+    } else {
+        format!("{}\n\nEvent data:\n{payload}", entry.command)
+    };
+    match evaluator(PROMPT_HOOK_SYSTEM, &prompt, model) {
+        Ok(answer) => parse_prompt_answer(&answer).unwrap_or_else(|| HookCommandOutcome::Warn {
+            message: format!(
+                "hook {} de type prompt : réponse illisible, on continue ({})",
+                event.as_str(),
+                answer.trim().chars().take(160).collect::<String>()
+            ),
+        }),
+        Err(error) => HookCommandOutcome::Warn {
+            message: format!("hook {} de type prompt : {error}", event.as_str()),
+        },
+    }
+}
+
+/// `{"ok": false, "reason": "..."}` dans la réponse du modèle (éventuellement
+/// entourée de texte ou d'un bloc de code).
+fn parse_prompt_answer(answer: &str) -> Option<HookCommandOutcome> {
+    let start = answer.find('{')?;
+    let end = answer.rfind('}')?;
+    let value: Value = serde_json::from_str(answer.get(start..=end)?).ok()?;
+    let ok = value.get("ok").and_then(Value::as_bool)?;
+    let reason = value
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .filter(|reason| !reason.trim().is_empty());
+    Some(if ok {
+        HookCommandOutcome::Allow {
+            message: None,
+            context: None,
+            decision: None,
+            updated_input: None,
+        }
+    } else {
+        HookCommandOutcome::Deny { message: reason }
+    })
 }
 
 /// Lance la commande, écrit `stdin`, attend au plus `timeout`. `Ok(None)` :
@@ -675,9 +991,8 @@ mod tests {
             .with_entries(
                 HookEvent::SessionStart,
                 vec![HookCommandConfig {
-                    command: "printf reprise".to_string(),
                     matcher: Some("resume".to_string()),
-                    timeout_secs: None,
+                    ..HookCommandConfig::new("printf reprise".to_string())
                 }],
             )
             .with_entries(
@@ -737,9 +1052,8 @@ mod tests {
         let runner = HookRunner::new(RuntimeHookConfig::default().with_entries(
             HookEvent::Notification,
             vec![HookCommandConfig {
-                command: "sleep 5".to_string(),
-                matcher: None,
                 timeout_secs: Some(1),
+                ..HookCommandConfig::new("sleep 5".to_string())
             }],
         ));
         let started = std::time::Instant::now();
@@ -748,6 +1062,178 @@ mod tests {
         assert!(
             result.messages()[0].contains("interrompu après 1 s"),
             "{result:?}"
+        );
+    }
+
+    #[test]
+    fn json_decisions_allow_ask_and_rewrite_the_tool_input() {
+        use super::{parse_success_output, HookCommandOutcome, HookPermissionDecision};
+        match parse_success_output(
+            r#"{"hookSpecificOutput":{"permissionDecision":"allow","permissionDecisionReason":"lecture sûre","updatedInput":{"command":"ls -la"}}}"#,
+        ) {
+            HookCommandOutcome::Allow {
+                decision,
+                updated_input,
+                message,
+                ..
+            } => {
+                assert_eq!(decision, Some(HookPermissionDecision::Allow));
+                assert_eq!(updated_input.as_deref(), Some(r#"{"command":"ls -la"}"#));
+                assert_eq!(message.as_deref(), Some("lecture sûre"));
+            }
+            _ => panic!("allow attendu"),
+        }
+        assert!(matches!(
+            parse_success_output(r#"{"hookSpecificOutput":{"permissionDecision":"ask"}}"#),
+            HookCommandOutcome::Allow {
+                decision: Some(HookPermissionDecision::Ask),
+                ..
+            }
+        ));
+        // `PermissionRequest` répond avec `decision.behavior`.
+        assert!(matches!(
+            parse_success_output(
+                r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#
+            ),
+            HookCommandOutcome::Allow {
+                decision: Some(HookPermissionDecision::Allow),
+                ..
+            }
+        ));
+        match parse_success_output(
+            r#"{"hookSpecificOutput":{"decision":{"behavior":"deny","message":"pas en production"}}}"#,
+        ) {
+            HookCommandOutcome::Deny { message } => {
+                assert_eq!(message.as_deref(), Some("pas en production"));
+            }
+            _ => panic!("refus attendu"),
+        }
+    }
+
+    #[test]
+    fn prompt_hook_answers_are_read_even_inside_text() {
+        use super::{parse_prompt_answer, HookCommandOutcome};
+        assert!(matches!(
+            parse_prompt_answer("```json\n{\"ok\": true}\n```"),
+            Some(HookCommandOutcome::Allow { .. })
+        ));
+        match parse_prompt_answer(r#"Réponse : {"ok": false, "reason": "lance d'abord les tests"}"#)
+        {
+            Some(HookCommandOutcome::Deny { message }) => {
+                assert_eq!(message.as_deref(), Some("lance d'abord les tests"));
+            }
+            _ => panic!("refus attendu"),
+        }
+        assert!(parse_prompt_answer("je ne sais pas").is_none());
+    }
+
+    #[test]
+    fn http_and_prompt_hooks_use_the_transports_given_at_startup() {
+        use crate::config::HookKind;
+        let _env = crate::test_env_lock();
+        std::env::set_var("CLAW_TEST_HOOK_TOKEN", "secret-de-test");
+        super::set_http_hook_sender(Box::new(|url, headers, body, _| {
+            if url.ends_with("/refuse") {
+                return Ok((
+                    200,
+                    r#"{"decision":"block","reason":"interdit par le serveur"}"#.to_string(),
+                ));
+            }
+            if url.ends_with("/panne") {
+                return Ok((503, "indisponible".to_string()));
+            }
+            assert_eq!(
+                headers.get("Authorization").map(String::as_str),
+                Some("Bearer secret-de-test")
+            );
+            assert!(body.contains(r#""hook_event_name":"PreToolUse""#), "{body}");
+            Ok((200, "contexte du serveur".to_string()))
+        }));
+        super::set_prompt_hook_evaluator(Box::new(|_, prompt, model| {
+            assert_eq!(model, Some("petit-modele"));
+            Ok(if prompt.contains("rm -rf") {
+                r#"{"ok": false, "reason": "commande destructrice"}"#.to_string()
+            } else {
+                r#"{"ok": true}"#.to_string()
+            })
+        }));
+        let http = |url: &str| HookCommandConfig {
+            kind: HookKind::Http {
+                headers: [(
+                    "Authorization".to_string(),
+                    "Bearer ${CLAW_TEST_HOOK_TOKEN}".to_string(),
+                )]
+                .into(),
+            },
+            ..HookCommandConfig::new(url.to_string())
+        };
+        let run = |entry: HookCommandConfig, command: &str| {
+            HookRunner::new(
+                RuntimeHookConfig::default().with_entries(HookEvent::PreToolUse, vec![entry]),
+            )
+            .run_pre_tool_use("bash", &format!(r#"{{"command":"{command}"}}"#))
+        };
+        let ok = run(http("https://hooks.example/ok"), "ls");
+        assert!(!ok.is_denied());
+        assert_eq!(ok.messages(), ["contexte du serveur"]);
+        let refused = run(http("https://hooks.example/refuse"), "ls");
+        assert!(refused.is_denied());
+        assert_eq!(refused.messages(), ["interdit par le serveur"]);
+        let down = run(http("https://hooks.example/panne"), "ls");
+        assert!(!down.is_denied());
+        assert!(down.messages()[0].contains("HTTP 503"), "{down:?}");
+
+        let guard = HookCommandConfig {
+            kind: HookKind::Prompt {
+                model: Some("petit-modele".to_string()),
+            },
+            ..HookCommandConfig::new("Refuse les commandes destructrices : $ARGUMENTS".to_string())
+        };
+        let blocked = run(guard.clone(), "rm -rf /");
+        assert!(blocked.is_denied());
+        assert_eq!(blocked.messages(), ["commande destructrice"]);
+        assert!(!run(guard, "ls").is_denied());
+        std::env::remove_var("CLAW_TEST_HOOK_TOKEN");
+    }
+
+    #[test]
+    fn async_hooks_do_not_hold_the_agent() {
+        let runner = HookRunner::new(RuntimeHookConfig::default().with_entries(
+            HookEvent::PostToolUse,
+            vec![HookCommandConfig {
+                run_async: true,
+                ..HookCommandConfig::new("sleep 3".to_string())
+            }],
+        ));
+        let started = std::time::Instant::now();
+        let result = runner.run_post_tool_use("bash", "{}", "ok", false);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(result.messages().is_empty());
+    }
+
+    #[test]
+    fn failures_also_run_post_tool_use_failure_hooks() {
+        let runner = HookRunner::new(RuntimeHookConfig::default().with_entries(
+            HookEvent::PostToolUseFailure,
+            vec![HookCommandConfig::new(shell_snippet("printf 'échec noté'"))],
+        ));
+        assert!(runner
+            .run_post_tool_use("bash", "{}", "ok", false)
+            .messages()
+            .is_empty());
+        assert_eq!(
+            runner
+                .run_post_tool_use("bash", "{}", "boom", true)
+                .messages(),
+            ["échec noté"]
+        );
+        assert_eq!(
+            HookEvent::from_name("PermissionRequest"),
+            Some(HookEvent::PermissionRequest)
+        );
+        assert_eq!(
+            HookEvent::from_name("SubagentStart"),
+            Some(HookEvent::SubagentStart)
         );
     }
 

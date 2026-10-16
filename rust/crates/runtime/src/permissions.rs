@@ -365,6 +365,63 @@ impl PermissionPolicy {
         }
     }
 
+    /// Appel déjà accordé par un hook (`permissionDecision: "allow"`) : seules
+    /// les règles `deny` peuvent encore l'interdire.
+    #[must_use]
+    pub fn authorize_preapproved(&self, tool_name: &str, input: &str) -> PermissionOutcome {
+        let target = ToolTarget::from_input(tool_name, input);
+        match self.first_match_any(&self.rules.deny, tool_name, &target) {
+            Some(rule) => PermissionOutcome::Deny {
+                reason: format!(
+                    "l'outil '{tool_name}' est interdit par la règle de permission `{}`",
+                    rule.as_str()
+                ),
+            },
+            None => PermissionOutcome::Allow,
+        }
+    }
+
+    /// Un hook demande de confirmer (`permissionDecision: "ask"`) : après les
+    /// règles `deny`, l'utilisateur est consulté même si le mode autoriserait
+    /// l'appel ; sans invite (mode non interactif), l'appel est refusé.
+    pub fn authorize_with_prompt(
+        &mut self,
+        tool_name: &str,
+        input: &str,
+        prompter: Option<&mut dyn PermissionPrompter>,
+    ) -> PermissionOutcome {
+        if let denied @ PermissionOutcome::Deny { .. } =
+            self.authorize_preapproved(tool_name, input)
+        {
+            return denied;
+        }
+        let target = ToolTarget::from_input(tool_name, input);
+        let request = PermissionRequest {
+            tool_name: tool_name.to_string(),
+            input: input.to_string(),
+            current_mode: self.active_mode,
+            required_mode: self.required_mode_for(tool_name),
+            suggested_rule: suggest_rule(tool_name, &target),
+        };
+        match prompter {
+            Some(prompter) => match prompter.decide(&request) {
+                PermissionPromptDecision::Allow => PermissionOutcome::Allow,
+                PermissionPromptDecision::AllowAlways { rule } => {
+                    if let Some(rule) = PermissionRule::parse(&rule) {
+                        self.rules.allow.push(rule);
+                    }
+                    PermissionOutcome::Allow
+                }
+                PermissionPromptDecision::Deny { reason } => PermissionOutcome::Deny { reason },
+            },
+            None => PermissionOutcome::Deny {
+                reason: format!(
+                    "un hook demande de confirmer l'outil '{tool_name}', et personne ne peut répondre ici"
+                ),
+            },
+        }
+    }
+
     /// Première règle qui couvre l'appel (pour une commande : n'importe quelle sous-commande).
     fn first_match_any<'a>(
         &self,

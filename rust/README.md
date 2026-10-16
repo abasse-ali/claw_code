@@ -462,16 +462,56 @@ format que Claude Code, ou une simple liste de commandes) :
 | Événement | Quand | Code de sortie 2 |
 |---|---|---|
 | `PreToolUse` / `PostToolUse` | avant / après un outil (`matcher` : nom d'outil, `Edit\|Write`, regex) | refuse l'appel / marque une erreur |
+| `PostToolUseFailure` | après un outil en échec (en plus de `PostToolUse`), avec `error` | marque une erreur |
+| `PermissionRequest` | avant de demander une autorisation à l'utilisateur | refuse à sa place |
 | `UserPromptSubmit` | à chaque demande ; stdout ajouté au contexte | rejette la demande |
 | `Stop` / `SubagentStop` | fin de tour de l'agent / d'un sous-agent | relance l'agent avec la raison (5 fois max) |
+| `SubagentStart` | un sous-agent démarre (`matcher` : son type) ; stdout ajouté à sa demande | - |
 | `SessionStart` / `SessionEnd` | début (`startup`, `resume`, `clear`) / fin de session | - |
-| `PreCompact` | avant une compaction (`auto`, `manual`) | - |
+| `PreCompact` | avant une compaction (`auto`, `manual`), avec la consigne de `/compact` | - |
 | `Notification` | quand une autorisation est demandée (en arrière-plan) | - |
 
-Chaque hook reçoit sur stdin un JSON (`hook_event_name`, `session_id`, `cwd`, champs de
-l'événement). La raison d'un blocage est lue sur stderr (sinon stdout). La sortie JSON de
-Claude Code est comprise (`decision: "block"`, `hookSpecificOutput.additionalContext`…). Délai
-par défaut : 60 s. Les hooks des plugins sont aussi appliqués. `/hooks` affiche la configuration.
+Chaque hook reçoit un JSON (`hook_event_name`, `session_id`, `cwd`, champs de l'événement) ;
+une commande le lit sur stdin et a aussi `CLAW_PROJECT_DIR` (et `CLAUDE_PROJECT_DIR`), la
+racine du dépôt. La raison d'un blocage est lue sur stderr (sinon stdout). Délai par défaut :
+60 s. Les hooks des plugins sont aussi appliqués. `/hooks` affiche la configuration.
+
+**Types de hooks** (champ `type`, comme dans Claude Code) :
+
+- `command` : commande shell (par défaut).
+- `http` : POST du JSON vers `url` ; `headers` accepte `${VAR}` (variable d'environnement). Une
+  réponse 2xx se lit comme la sortie d'une commande (texte ou JSON) ; un autre statut avertit.
+- `prompt` : la consigne (`prompt`, où `$ARGUMENTS` est remplacé par le JSON de l'événement) est
+  posée à un modèle gratuit (`model`, sinon le modèle par défaut, avec les modèles de second
+  avis en secours), qui répond `{"ok": true}` ou `{"ok": false, "reason": "…"}` : un garde-fou
+  en langage naturel, sans script à écrire.
+- `"async": true` sur n'importe quel hook : lancé sans attendre (journalisation, notifications),
+  son résultat est ignoré.
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "prompt",
+      "prompt": "Bloque toute commande qui supprime ou déplace des fichiers. $ARGUMENTS" }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "http", "url": "https://journal.exemple/claw",
+      "headers": { "Authorization": "Bearer ${JOURNAL_TOKEN}" }, "async": true }] }]
+  }
+}
+```
+
+**Sortie JSON** (format de Claude Code) : `decision: "block"` et `reason` ;
+`hookSpecificOutput.additionalContext` ; `systemMessage` ; pour `PreToolUse`,
+`permissionDecision` : `deny` (refus), `allow` (autorisé sans demander, seules les règles
+`deny` s'appliquent encore), `ask` (l'utilisateur confirme même si le mode l'autoriserait) et
+`updatedInput` (arguments de l'outil remplacés, par exemple une commande corrigée) ; pour
+`PermissionRequest`, `decision: {"behavior": "allow" | "deny", "message"}`. Les hooks
+`PreToolUse` passent désormais avant le contrôle des autorisations, comme dans Claude Code.
+
+**Règles depuis la session** : `/permissions allow <règle>`, `/permissions deny <règle>`,
+`/permissions ask <règle>` ajoutent une règle à `.claw/settings.local.json` (et l'appliquent
+aussitôt) ; `/permissions remove <règle>` la retire ; `/permissions rules` les liste.
+Exemples de règles : `Bash(npm test:*)`, `Edit(src/**)`, `WebFetch(domain:docs.rs)`,
+`mcp__serveur`.
 
 ### Commandes personnalisées
 

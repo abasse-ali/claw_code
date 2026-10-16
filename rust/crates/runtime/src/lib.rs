@@ -56,12 +56,12 @@ pub use compact::{
     CompactionConfig, CompactionResult, MODEL_SUMMARY_PROMPT, SUMMARY_RETRY_NOTE,
 };
 pub use config::{
-    ConfigEntry, ConfigError, ConfigLoader, ConfigSource, HookCommandConfig, McpConfigCollection,
-    McpManagedProxyServerConfig, McpOAuthConfig, McpRemoteServerConfig, McpSdkServerConfig,
-    McpServerConfig, McpStdioServerConfig, McpTransport, McpWebSocketServerConfig, OAuthConfig,
-    ResolvedPermissionMode, RuntimeConfig, RuntimeFeatureConfig, RuntimeHookConfig,
-    RuntimePermissionRuleConfig, RuntimePluginConfig, RuntimeProviderConfig, ScopedMcpServerConfig,
-    CLAW_SETTINGS_SCHEMA_NAME,
+    ConfigEntry, ConfigError, ConfigLoader, ConfigSource, HookCommandConfig, HookKind,
+    McpConfigCollection, McpManagedProxyServerConfig, McpOAuthConfig, McpRemoteServerConfig,
+    McpSdkServerConfig, McpServerConfig, McpStdioServerConfig, McpTransport,
+    McpWebSocketServerConfig, OAuthConfig, ResolvedPermissionMode, RuntimeConfig,
+    RuntimeFeatureConfig, RuntimeHookConfig, RuntimePermissionRuleConfig, RuntimePluginConfig,
+    RuntimeProviderConfig, ScopedMcpServerConfig, CLAW_SETTINGS_SCHEMA_NAME,
 };
 pub use conversation::{
     cut_reply_continued, ApiClient, ApiRequest, AssistantEvent, AutoCompactionConfig,
@@ -73,7 +73,11 @@ pub use file_ops::{
     EditFileOutput, EditPreview, GlobSearchOutput, GrepSearchInput, GrepSearchOutput,
     ReadFileOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput,
 };
-pub use hooks::{set_session_info as set_hook_session_info, HookEvent, HookRunResult, HookRunner};
+pub use hooks::{
+    set_http_hook_sender, set_prompt_hook_evaluator, set_session_info as set_hook_session_info,
+    HookEvent, HookPermissionDecision, HookRunResult, HookRunner, HttpHookSender,
+    PromptHookEvaluator,
+};
 pub use lsp::{
     FileDiagnostics, LspContextEnrichment, LspError, LspManager, LspServerConfig, SymbolLocation,
     WorkspaceDiagnostics,

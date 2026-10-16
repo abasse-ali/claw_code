@@ -251,6 +251,19 @@ fn error_hint(problem: &str) -> &'static str {
     }
 }
 
+/// Question d'un hook `prompt` : son modèle, sinon le modèle par défaut, avec
+/// les modèles de second avis en secours (quota, panne).
+fn evaluate_prompt_hook(system: &str, prompt: &str, model: Option<&str>) -> Result<String, String> {
+    let primary = model.map_or_else(default_model, resolve_model_alias);
+    let mut candidates = vec![primary.clone()];
+    candidates.extend(
+        models::advisor_models(&primary)
+            .into_iter()
+            .filter(|candidate| *candidate != primary),
+    );
+    tools::advisors::ask(&candidates, system, prompt, 2_000).map(|opinion| opinion.text)
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args: Vec<String> = env::args().skip(1).collect();
     // `--worktree [nom]` : la session travaille dans un worktree git à part,
@@ -268,6 +281,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 #[allow(clippy::too_many_lines)]
 fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Hooks `http` et `prompt` : le runtime reçoit l'envoi HTTP et le modèle.
+    runtime::set_http_hook_sender(Box::new(tools::send_hook_request));
+    runtime::set_prompt_hook_evaluator(Box::new(evaluate_prompt_hook));
     // Serveurs compatibles déclarés dans la config (`providers`) : nécessaires
     // dès l'analyse des arguments pour reconnaître `nom:modèle`.
     let startup_config = env::current_dir()
@@ -3010,6 +3026,42 @@ impl LiveCli {
         Ok(())
     }
 
+    /// Ajoute ou retire une règle de `.claw/settings.local.json`, puis
+    /// recharge les permissions de la session.
+    fn edit_rule(
+        &mut self,
+        list: Option<&str>,
+        rule: &str,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if runtime::PermissionRule::parse(rule).is_none() {
+            println!(
+                "Règle illisible : {rule}
+  Exemples         Bash(npm test:*) · Edit(src/**) · WebFetch(domain:docs.rs) · mcp__serveur"
+            );
+            return Ok(false);
+        }
+        let cwd = env::current_dir()?;
+        let (path, changed) = edit_permission_rule(&cwd, list, rule)?;
+        self.reload_runtime_features()?;
+        let action = match (list, changed) {
+            (Some(list), true) => format!("ajoutée à {list}"),
+            (Some(list), false) => format!("déjà dans {list}"),
+            (None, true) => "retirée".to_string(),
+            (None, false) => {
+                "absente de ce fichier (elle vient peut-être de .claw/settings.json ou de ~/.claw)"
+                    .to_string()
+            }
+        };
+        println!(
+            "Permissions
+  Règle            {rule}
+  Résultat         {action}
+  Fichier          {}",
+            path.display()
+        );
+        Ok(false)
+    }
+
     fn set_permissions(
         &mut self,
         mode: Option<String>,
@@ -3024,6 +3076,20 @@ impl LiveCli {
             );
             return Ok(false);
         };
+        // `/permissions allow|deny|ask|remove <règle>` : règles du projet.
+        if let Some((list, rule)) = parse_rule_command(&mode) {
+            return self.edit_rule(list, rule);
+        }
+        if matches!(mode.trim(), "rules" | "regles" | "règles" | "list") {
+            println!(
+                "{}",
+                format_permissions_report(
+                    self.permission_mode.as_str(),
+                    self.runtime.permission_policy().rules()
+                )
+            );
+            return Ok(false);
+        }
 
         let normalized = normalize_permission_mode(&mode).ok_or_else(|| {
             format!(
@@ -4049,7 +4115,7 @@ fn render_hooks_report(config: &runtime::RuntimeHookConfig) -> String {
             continue;
         }
         lines.push(format!(
-            "  {:<17} {} commande(s) · code 2 : {}",
+            "  {:<19} {} hook(s) · blocage : {}",
             event.as_str(),
             entries.len(),
             event.blocking_effect()
@@ -4065,7 +4131,16 @@ fn render_hooks_report(config: &runtime::RuntimeHookConfig) -> String {
                 .timeout_secs
                 .map(|seconds| format!(" ({seconds} s max)"))
                 .unwrap_or_default();
-            lines.push(format!("    {matcher}{}{timeout}", entry.command));
+            let kind = match &entry.kind {
+                runtime::HookKind::Command => "",
+                runtime::HookKind::Http { .. } => "http ",
+                runtime::HookKind::Prompt { .. } => "prompt ",
+            };
+            let background = if entry.run_async { " (async)" } else { "" };
+            lines.push(format!(
+                "    {matcher}{kind}{}{timeout}{background}",
+                entry.command
+            ));
         }
     }
     if lines.len() == 1 {
@@ -6639,8 +6714,37 @@ fn describe_permission_target(tool_name: &str, input: &str) -> String {
     })
 }
 
+/// `allow <règle>`, `deny <règle>`, `ask <règle>` ou `remove <règle>` :
+/// la liste visée (aucune pour un retrait) et la règle.
+fn parse_rule_command(args: &str) -> Option<(Option<&'static str>, &str)> {
+    let (verb, rule) = args.trim().split_once(char::is_whitespace)?;
+    let rule = rule.trim();
+    if rule.is_empty() {
+        return None;
+    }
+    let list = match verb {
+        "allow" | "autoriser" => Some("allow"),
+        "deny" | "interdire" => Some("deny"),
+        "ask" | "demander" => Some("ask"),
+        "remove" | "rm" | "retirer" => None,
+        _ => return None,
+    };
+    Some((list, rule))
+}
+
 /// Ajoute `rule` à `permissions.allow` de `.claw/settings.local.json` (créé si besoin).
 fn persist_allow_rule(cwd: &Path, rule: &str) -> Result<PathBuf, String> {
+    edit_permission_rule(cwd, Some("allow"), rule).map(|(path, _)| path)
+}
+
+/// Ajoute `rule` à la liste `list` (`allow`, `deny`, `ask`) de
+/// `.claw/settings.local.json`, ou la retire de toutes (`list` absent).
+/// Renvoie le fichier et vrai s'il a changé.
+fn edit_permission_rule(
+    cwd: &Path,
+    list: Option<&str>,
+    rule: &str,
+) -> Result<(PathBuf, bool), String> {
     let path = cwd.join(".claw").join("settings.local.json");
     let mut root = match fs::read_to_string(&path) {
         Ok(contents) if !contents.trim().is_empty() => {
@@ -6658,13 +6762,28 @@ fn persist_allow_rule(cwd: &Path, rule: &str) -> Result<PathBuf, String> {
     if !permissions.is_object() {
         *permissions = json!({});
     }
-    let allow = &mut permissions["allow"];
-    if !allow.is_array() {
-        *allow = json!([]);
-    }
-    if let Some(rules) = allow.as_array_mut() {
-        if !rules.iter().any(|existing| existing.as_str() == Some(rule)) {
-            rules.push(json!(rule));
+    let mut changed = false;
+    if let Some(list) = list {
+        let rules = &mut permissions[list];
+        if !rules.is_array() {
+            *rules = json!([]);
+        }
+        if let Some(rules) = rules.as_array_mut() {
+            if !rules.iter().any(|existing| existing.as_str() == Some(rule)) {
+                rules.push(json!(rule));
+                changed = true;
+            }
+        }
+    } else {
+        for list in ["allow", "deny", "ask"] {
+            if let Some(rules) = permissions[list].as_array_mut() {
+                let before = rules.len();
+                rules.retain(|existing| existing.as_str() != Some(rule));
+                changed |= rules.len() != before;
+            }
+        }
+        if !changed {
+            return Ok((path, false));
         }
     }
     if let Some(parent) = path.parent() {
@@ -6672,7 +6791,7 @@ fn persist_allow_rule(cwd: &Path, rule: &str) -> Result<PathBuf, String> {
     }
     let rendered = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())?;
     fs::write(&path, format!("{rendered}\n")).map_err(|error| error.to_string())?;
-    Ok(path)
+    Ok((path, changed))
 }
 
 /// Reçoit les événements d'un tour pour une interface autre que le terminal
@@ -9301,7 +9420,7 @@ mod tests {
         assert!(help.contains("/help"));
         assert!(help.contains("/status"));
         assert!(help.contains("/model [modèle]"));
-        assert!(help.contains("/permissions [prompt|read-only|workspace-write|danger-full-access]"));
+        assert!(help.contains("/permissions [prompt|read-only|workspace-write|danger-full-access|allow|deny|ask|remove <règle>]"));
         assert!(help.contains("/clear [--confirm]"));
         assert!(help.contains("/cost"));
         assert!(help.contains("/resume <chemin-session>"));
@@ -9605,6 +9724,33 @@ mod tests {
         assert_eq!(saved["model"], "qwen/qwen3-coder");
         assert_eq!(saved["permissions"]["deny"], json!(["Read(.env)"]));
         assert_eq!(saved["permissions"]["allow"], json!(["Bash(cargo test:*)"]));
+
+        // `/permissions ask|remove <règle>`.
+        let (_, added) =
+            super::edit_permission_rule(&root, Some("ask"), "Bash(git push:*)").expect("ask");
+        assert!(added);
+        let (path, removed) =
+            super::edit_permission_rule(&root, None, "Read(.env)").expect("retrait");
+        assert!(removed);
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("relu")).expect("json");
+        assert_eq!(saved["permissions"]["ask"], json!(["Bash(git push:*)"]));
+        assert_eq!(saved["permissions"]["deny"], json!([]));
+        assert!(
+            !super::edit_permission_rule(&root, None, "Read(.env)")
+                .expect("absente")
+                .1
+        );
+        assert_eq!(
+            super::parse_rule_command("deny  Bash(rm:*)"),
+            Some((Some("deny"), "Bash(rm:*)"))
+        );
+        assert_eq!(
+            super::parse_rule_command("remove WebFetch"),
+            Some((None, "WebFetch"))
+        );
+        assert_eq!(super::parse_rule_command("workspace-write"), None);
+        assert_eq!(super::parse_rule_command("allow"), None);
 
         fs::write(root.join(".claw").join("settings.local.json"), "{ broken").expect("corrupt");
         assert!(persist_allow_rule(&root, "Bash(ls:*)").is_err());
