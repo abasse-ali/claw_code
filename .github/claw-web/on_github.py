@@ -172,8 +172,9 @@ class Actor:
                     time.sleep(self.wait)
                     continue
                 if error.status in (403, 404):
+                    wanted = permissions_text(error.accepted) or "Contents (écriture) et Pull requests (écriture)"
                     reason = ("le jeton du moteur (secret CLAW_REPO_TOKEN, le jeton de l'appli) n'a pas "
-                              "le droit de fusionner : autorisations Contents et Pull requests en écriture")
+                              f"le droit de fusionner : il lui faut {wanted}")
                 elif error.status in (405, 409):
                     reason = f"{error.reason} (conflit avec `{self.base}` ou vérifications obligatoires)"
                 else:
@@ -232,12 +233,37 @@ class Actor:
         return notes
 
 
+PERMISSIONS = {"administration": "Administration", "pages": "Pages", "contents": "Contents",
+               "pull_requests": "Pull requests", "metadata": "Metadata", "workflows": "Workflows"}
+LEVELS = {"write": "écriture", "read": "lecture"}
+
+
+def permissions_text(accepted):
+    """En-tête X-Accepted-GitHub-Permissions en mots : « pages=write,administration=write »
+    devient « Pages (écriture) et Administration (écriture) » ; « ; » sépare des choix."""
+    choices = []
+    for group in (accepted or "").split(";"):
+        names = []
+        for item in group.split(","):
+            name, _, level = item.strip().partition("=")
+            if name:
+                names.append(f"{PERMISSIONS.get(name, name)} ({LEVELS.get(level, level)})")
+        if names:
+            choices.append(" et ".join(names))
+    return " ou ".join(choices)
+
+
 def pages_problem(error):
+    said = f" (GitHub : « {error.reason[:160]} »)" if error.reason else ""
     if error.status == 422 and any(word in error.reason.lower() for word in ("plan", "private")):
         return ("GitHub Pages refuse ce dépôt privé avec un compte GitHub gratuit. Rendez-le public "
                 "(Settings > General > Danger Zone > Change visibility), puis redemandez la mise en ligne.")
     if error.status in (403, 404):
-        return ("le jeton du moteur (secret CLAW_REPO_TOKEN, le jeton de l'appli) n'a pas l'autorisation "
-                "Pages en écriture : ajoutez-la dans ses réglages sur GitHub "
-                "(https://github.com/settings/personal-access-tokens), sa valeur ne change pas.")
+        # Activer ou changer Pages demande Administration ET Pages en écriture (documentation
+        # des jetons à autorisations fines) ; l'en-tête de GitHub le dit quand il est là.
+        wanted = permissions_text(error.accepted) or "Administration (écriture) et Pages (écriture)"
+        return ("le jeton du moteur (secret CLAW_REPO_TOKEN, le jeton de l'appli) n'a pas les autorisations "
+                f"que GitHub demande pour activer Pages : {wanted}. Ajoutez-les dans les réglages du jeton "
+                "(https://github.com/settings/personal-access-tokens, « Repository permissions ») ; sa "
+                f"valeur ne change pas{said}.")
     return f"GitHub Pages : {error.reason or error}"

@@ -38,8 +38,8 @@ class FakeGitHub:
         return answer
 
 
-def refused(status, reason):
-    return GitHubError(f"HTTP {status} {reason}", status, reason)
+def refused(status, reason, accepted=""):
+    return GitHubError(f"HTTP {status} {reason}", status, reason, accepted)
 
 
 class StateTest(unittest.TestCase):
@@ -136,12 +136,16 @@ class ActorTest(unittest.TestCase):
         self.assertIn(("POST", "/repos/o/r/pages", {"source": {"branch": "main", "path": "/docs"}}), fake.calls)
 
     def test_publication_refusals_are_explained(self):
-        for status, reason, expected in (
-                (422, "Your current plan does not support GitHub Pages for this repository.", "dépôt privé"),
-                (403, "Resource not accessible by personal access token", "autorisation Pages")):
+        for status, reason, accepted, expected in (
+                (422, "Your current plan does not support GitHub Pages for this repository.", "", "dépôt privé"),
+                (403, "Resource not accessible by personal access token", "",
+                 "Pages : Administration (écriture) et Pages (écriture). Ajoutez-les"),
+                (403, "Resource not accessible by personal access token", "pages=write,administration=write",
+                 "Pages : Pages (écriture) et Administration (écriture). Ajoutez-les"),
+                (403, "Resource not accessible by personal access token", "", "« Resource not accessible")):
             fake = FakeGitHub({
                 ("GET", "/contents/index.html?ref=main"): {"name": "index.html"},
-                ("POST", "/pages"): refused(status, reason),
+                ("POST", "/pages"): refused(status, reason, accepted),
             })
             with mock.patch.object(on_github, "api", fake):
                 notes = self.actor().carry_out({"pages": "root"})

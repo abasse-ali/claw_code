@@ -367,7 +367,7 @@ function explain(status, reason, path) {
       return "GitHub Pages refuse ce dépôt privé (compte gratuit) : rendez-le public pour le publier gratuitement";
     }
     if (status === 403 || status === 404) {
-      return "Le jeton n'a pas l'autorisation Pages : sur GitHub, dans les réglages du jeton, ajoutez Pages en lecture et écriture (la valeur du jeton ne change pas)";
+      return "Le jeton n'a pas les autorisations que GitHub demande pour activer Pages : dans ses réglages sur GitHub (Repository permissions), Administration et Pages en lecture et écriture (la valeur du jeton ne change pas)";
     }
     return `GitHub Pages : ${reason}`;
   }

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import urllib.request
 
-from common import (ANSWER, ANSWERED, API, FILES_BRANCH, WORK, GitHubError, answer_marks, answered_up_to, api,
+from common import (ANSWER, ANSWERED, API, FILES_BRANCH, NOTES, WORK, GitHubError, answer_marks, answered_up_to, api,
                     comments, images_of, kind_of, output, post_comment, run_url, settings, task_text)
 from on_github import STATE_FILE, describe, read_state
 
@@ -54,6 +54,23 @@ def git(*args, cwd="work", check=True):
     return result
 
 
+# Remarques du moteur sous les réponses d'avant leur marque NOTES : elles ne sont pas de
+# Claw, qui les recopiait dans ses réponses.
+ENGINE_NOTES = ("Aucune modification de fichier", "Travail inachevé gardé", "Modifications **non publiées**",
+                "La poussée sur", "Publication impossible", "Fusion", "Mise en ligne non faite",
+                "Rien à fusionner", "Pull request #", "Site mis en ligne")
+
+
+def answer_text(body):
+    """Le texte d'une réponse de Claw, sans le pied (après le dernier `---` : lien de la pull
+    request, du job) ni les remarques du moteur."""
+    text = ANSWERED.sub("", body.replace(ANSWER, "")).rsplit("\n---\n", 1)[0].split(NOTES, 1)[0]
+    lines = text.rstrip().splitlines()
+    while lines and (not lines[-1].strip() or (lines[-1].startswith("> ") and lines[-1][2:].startswith(ENGINE_NOTES))):
+        lines.pop()
+    return "\n".join(lines).strip()
+
+
 def conversation(issue, notes):
     """Le message à traiter (la tâche, ou les messages pas encore traités par une réponse,
     même arrivés pendant un passage), pour un suivi la conversation qui précède, les images
@@ -84,9 +101,7 @@ def conversation(issue, notes):
         if kind == "answer":
             if note["id"] not in kept:
                 continue
-            # Sans le pied de la réponse (lien de la pull request, du job), après le dernier `---`.
-            text = ANSWERED.sub("", body.replace(ANSWER, "")).rsplit("\n---\n", 1)[0].strip()
-            exchanges.append(("Your answer", text))
+            exchanges.append(("Your answer", answer_text(body)))
         elif note["id"] > since:
             if body or note_images:
                 pending.append(body)

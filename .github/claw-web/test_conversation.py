@@ -60,6 +60,15 @@ class ConversationTest(unittest.TestCase):
         self.assertEqual((request, last, retry), ("Ajoute un export\n\nen CSV", 11, True))
         self.assertNotIn("Export ajouté.", history)
 
+    def test_engine_notes_stay_out_of_the_history(self):
+        old = answer(2, 0, "Appli faite.\n\n> **Note** : données locales.\n\n> Aucune modification de fichier dans ce passage.")
+        new = answer(3, 0, "Site prêt.\n\n<!-- claw-web:notes -->\n> Mise en ligne non faite : jeton.")
+        notes = [old, new, message(10, "Et maintenant ?")]
+        _, history, _, _, _ = setup.conversation(ISSUE, notes)
+        self.assertIn("> **Note** : données locales.", history)
+        self.assertNotIn("Aucune modification", history)
+        self.assertNotIn("Mise en ligne non faite", history)
+
     def test_a_task_that_could_not_start_is_not_a_retry_nor_history(self):
         notes = [message(10, "Mets en ligne"),
                  {"id": 11, "body": "<!-- claw-web:answer -->\n<!-- claw-web:answered keep -->\n**La tâche n'a pas pu commencer.**"}]

@@ -17,6 +17,8 @@ from pathlib import Path
 
 API = "https://api.github.com"
 ANSWER = "<!-- claw-web:answer -->"
+# Début des remarques du moteur sous une réponse (publication, fusion, mise en ligne).
+NOTES = "<!-- claw-web:notes -->"
 PROGRESS = "<!-- claw-web:progress -->"
 LOG = "<!-- claw-web:log"
 # Dans une réponse : le dernier message traité (identifiant de commentaire), ou « keep »
@@ -65,12 +67,15 @@ WORK = Path(os.environ.get("RUNNER_TEMP", ".")) / "claw-web"
 
 
 class GitHubError(Exception):
-    """Réponse d'erreur de l'API : `status` est le code HTTP, `reason` le message de GitHub."""
+    """Réponse d'erreur de l'API : `status` est le code HTTP, `reason` le message de GitHub,
+    `accepted` les autorisations de jeton que GitHub demande (en-tête
+    X-Accepted-GitHub-Permissions, par exemple « pages=write,administration=write »)."""
 
-    def __init__(self, message, status=0, reason=""):
+    def __init__(self, message, status=0, reason="", accepted=""):
         super().__init__(message)
         self.status = status
         self.reason = reason
+        self.accepted = accepted
 
 
 def api(method, path, token, body=None):
@@ -92,7 +97,9 @@ def api(method, path, token, body=None):
             reason = str(json.loads(detail).get("message") or "")
         except (ValueError, AttributeError):
             reason = ""
-        raise GitHubError(f"{method} {path} : HTTP {error.code} {detail}", error.code, reason or detail) from None
+        accepted = (error.headers.get("X-Accepted-GitHub-Permissions") or "") if error.headers else ""
+        raise GitHubError(f"{method} {path} : HTTP {error.code} {detail}", error.code, reason or detail,
+                          accepted.strip()) from None
     return json.loads(raw) if raw else None
 
 

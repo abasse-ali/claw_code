@@ -12,7 +12,7 @@ import json
 import os
 import subprocess
 
-from common import ANSWER, WORK, GitHubError, api, post_comment, run_url, stop_tree
+from common import ANSWER, NOTES, WORK, GitHubError, api, post_comment, run_url, stop_tree
 from on_github import Actor, load_requests
 
 REPO = os.environ["REPO"]
@@ -147,7 +147,8 @@ def main():
     processed = read("answered.txt")
     parts = [ANSWER + (f"\n<!-- claw-web:answered {processed} -->" if processed.isdigit() else ""), text]
     if notes:
-        parts.append("\n".join(f"> {note}" for note in notes))
+        # Remarques du moteur, marquées : setup.py les laisse hors de l'historique de l'agent.
+        parts.append(NOTES + "\n" + "\n".join(f"> {note}" for note in notes))
     try:
         quota = json.loads(read("quota.json") or "null")
     except ValueError:
