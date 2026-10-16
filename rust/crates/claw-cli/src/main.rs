@@ -1972,6 +1972,10 @@ fn run_resume_command(
             session: session.clone(),
             message: Some(run_install_github_action(args.as_deref(), &default_model())),
         }),
+        SlashCommand::MemoryImports { allow } => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some(memory_imports_command(*allow)),
+        }),
         SlashCommand::AddDir { args } => Ok(ResumeCommandOutcome {
             session: session.clone(),
             message: Some(run_add_dir_command(args.as_deref())),
@@ -2893,6 +2897,13 @@ impl LiveCli {
             }
             SlashCommand::AddDir { args } => {
                 println!("{}", run_add_dir_command(args.as_deref()));
+                false
+            }
+            SlashCommand::MemoryImports { allow } => {
+                println!("{}", memory_imports_command(allow));
+                if allow.is_some() {
+                    self.refresh_system_prompt()?;
+                }
                 false
             }
             SlashCommand::InstallGithubAction { args } => {
@@ -4711,6 +4722,47 @@ fn run_schedule_command(args: Option<&str>, model: &str) -> String {
     }
 }
 
+/// `/memory imports [allow|deny]` : imports `@chemin` de CLAUDE.md qui sortent
+/// du projet (fichiers personnels par exemple), chargés seulement avec accord.
+fn memory_imports_command(allow: Option<bool>) -> String {
+    let cwd = env::current_dir().unwrap_or_default();
+    if let Some(allow) = allow {
+        return match runtime::memory::set_external_imports(&cwd, allow) {
+            Ok(path) => format!(
+                "Imports externes
+  Décision         {}
+  Enregistrée dans {}",
+                if allow {
+                    "autorisés pour ce projet"
+                } else {
+                    "refusés pour ce projet"
+                },
+                path.display()
+            ),
+            Err(error) => format!("imports externes : {error}"),
+        };
+    }
+    let _ = ProjectContext::discover(&cwd, runtime::current_date_iso());
+    let state = match runtime::memory::external_imports_approved(&cwd) {
+        Some(true) => "autorisés",
+        Some(false) => "refusés",
+        None => "pas encore décidé (non chargés)",
+    };
+    let skipped = runtime::memory::skipped_external_imports();
+    let mut lines = vec![format!(
+        "Imports externes
+  État             {state}"
+    )];
+    for path in skipped {
+        lines.push(format!("  En attente       {}", path.display()));
+    }
+    lines.push("  Changer          /memory imports allow · /memory imports deny".to_string());
+    lines.join(
+        "
+",
+    )
+}
+
 /// Champ `effort` d'un skill.
 fn parse_skill_effort(value: &str) -> Option<api::ReasoningEffort> {
     match value.trim().to_ascii_lowercase().as_str() {
@@ -5529,6 +5581,29 @@ fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
                 preview
             ));
         }
+    }
+    let rules = runtime::memory::path_rules();
+    if !rules.is_empty() {
+        lines.push(
+            "Règles limitées à des chemins (données au premier fichier correspondant)".to_string(),
+        );
+        for rule in rules {
+            lines.push(format!(
+                "  {} · {}",
+                rule.patterns.join(", "),
+                rule.path.display()
+            ));
+        }
+    }
+    let skipped = runtime::memory::skipped_external_imports();
+    if !skipped.is_empty() {
+        lines.push("Imports externes en attente (hors du projet, non chargés)".to_string());
+        for path in skipped {
+            lines.push(format!("  {}", path.display()));
+        }
+        lines.push(
+            "  Autoriser        /memory imports allow · refuser : /memory imports deny".to_string(),
+        );
     }
     Ok(lines.join(
         "

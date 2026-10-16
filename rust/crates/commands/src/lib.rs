@@ -632,6 +632,10 @@ pub enum SlashCommand {
     InstallGithubAction {
         args: Option<String>,
     },
+    /// `/memory imports [allow|deny]` : imports externes de CLAUDE.md.
+    MemoryImports {
+        allow: Option<bool>,
+    },
     AddDir {
         args: Option<String>,
     },
@@ -847,7 +851,16 @@ impl SlashCommand {
             "config" => Self::Config {
                 section: parts.next().map(ToOwned::to_owned),
             },
-            "memory" => Self::Memory,
+            "memory" => match (parts.next(), parts.next()) {
+                (Some("imports"), choice) => Self::MemoryImports {
+                    allow: match choice {
+                        Some("allow" | "autoriser" | "oui") => Some(true),
+                        Some("deny" | "refuser" | "non") => Some(false),
+                        _ => None,
+                    },
+                },
+                _ => Self::Memory,
+            },
             "init" => Self::Init,
             "diff" => Self::Diff,
             "version" => Self::Version,
@@ -2361,6 +2374,7 @@ pub fn handle_slash_command(
         | SlashCommand::OutputStyle { .. }
         | SlashCommand::Schedule { .. }
         | SlashCommand::InstallGithubAction { .. }
+        | SlashCommand::MemoryImports { .. }
         | SlashCommand::AddDir { .. }
         | SlashCommand::Branch { .. }
         | SlashCommand::Bughunter { .. }

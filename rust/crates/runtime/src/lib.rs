@@ -20,6 +20,7 @@ mod lean;
 mod mcp;
 mod mcp_client;
 mod mcp_stdio;
+pub mod memory;
 mod oauth;
 mod paths;
 mod permissions;

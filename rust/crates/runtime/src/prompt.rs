@@ -266,32 +266,32 @@ fn discover_instruction_files(cwd: &Path) -> std::io::Result<Vec<ContextFile>> {
     }
     directories.reverse();
 
-    let mut files = Vec::new();
+    // (fichier, portée utilisateur) : les imports d'un fichier personnel ne
+    // demandent pas d'accord, ceux d'un fichier de projet si.
+    let mut files: Vec<(ContextFile, bool)> = Vec::new();
+    let home = crate::home_dir();
     // Instructions personnelles valables pour tous les projets (Claw et Claude Code).
-    if let Some(home) = crate::home_dir() {
+    if let Some(home) = &home {
         for candidate in [
             home.join(".claw").join("CLAW.md"),
             home.join(".claude").join("CLAUDE.md"),
         ] {
-            push_context_file(&mut files, candidate)?;
+            let mut found = Vec::new();
+            push_context_file(&mut found, candidate)?;
+            files.extend(found.into_iter().map(|file| (file, true)));
         }
     }
     // Puis du dossier racine au dossier courant : fichiers de Claw, de Claude
     // Code et `AGENTS.md` (convention partagée par Codex, Cursor…).
     for dir in directories {
-        for candidate in [
-            dir.join("CLAW.md"),
-            dir.join("CLAW.local.md"),
-            dir.join(".claw").join("CLAW.md"),
-            dir.join(".claw").join("instructions.md"),
-            dir.join("CLAUDE.md"),
-            dir.join("CLAUDE.local.md"),
-            dir.join(".claude").join("CLAUDE.md"),
-            dir.join("AGENTS.md"),
-        ] {
-            push_context_file(&mut files, candidate)?;
+        for name in crate::memory::INSTRUCTION_NAMES {
+            let mut found = Vec::new();
+            push_context_file(&mut found, dir.join(name))?;
+            files.extend(found.into_iter().map(|file| (file, false)));
         }
     }
+    // Imports `@chemin`, règles `.claude/rules`, exclusions `claudeMdExcludes`.
+    let files = crate::memory::assemble(cwd, home.as_deref(), files);
     Ok(dedupe_instruction_files(files))
 }
 

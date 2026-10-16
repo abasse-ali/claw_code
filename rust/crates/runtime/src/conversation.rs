@@ -804,6 +804,28 @@ const MAX_CUT_CONTINUATIONS: usize = 2;
 
 /// Résultat noté, dans la session enregistrée en cours de tour, pour un appel
 /// dont l'exécution n'est pas finie : il n'y reste que si Claw est arrêté avant.
+/// Instructions liées au fichier qu'un outil lit ou modifie (règles avec
+/// `paths`, `CLAUDE.md` du sous-dossier), chacune donnée une seule fois.
+fn path_instruction_notes(tool_name: &str, input: &str) -> Vec<String> {
+    if !matches!(
+        tool_name,
+        "read_file" | "write_file" | "edit_file" | "NotebookEdit"
+    ) {
+        return Vec::new();
+    }
+    serde_json::from_str::<serde_json::Value>(input)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("path")
+                .or_else(|| value.get("notebook_path"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .map(|path| crate::memory::instructions_for(&path))
+        .unwrap_or_default()
+}
+
 /// Résultat des appels restants quand un hook arrête l'agent (`"continue": false`).
 const HOOK_STOP_MESSAGE: &str =
     "[Claw] Not run: a hook stopped the agent (\"continue\": false) before this call.";
@@ -1931,6 +1953,7 @@ where
     /// des modifications à vérifier, détection de blocage. Les remarques sont
     /// jointes au résultat que lira le modèle. `refused` : l'appel n'a pas
     /// tourné (refus, demande d'autorisation sans réponse, hook).
+    #[allow(clippy::too_many_lines)]
     fn after_tool(
         &mut self,
         tool_name: &str,
@@ -1979,7 +2002,11 @@ where
             notes.extend(self.repeated_read_note(&output, aids));
             notes.extend(self.viewed_read_note(&output, aids));
         }
-
+        // Règles `.claude/rules` liées à ce chemin et instructions du
+        // sous-dossier, données la première fois que le fichier est touché.
+        if !is_error {
+            notes.extend(path_instruction_notes(tool_name, input));
+        }
         if matches!(tool_name, "edit_file" | "write_file" | "NotebookEdit") && !is_error {
             self.after_file_change(tool_name, input, &output, aids, &mut notes);
         } else if !matches!(tool_name, "read_file" | "grep_search" | "glob_search") {

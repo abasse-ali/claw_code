@@ -90,6 +90,7 @@ const FOREIGN_KEYS: &[&str] = &[
     "disableSkillShellExecution",
     "statusLine",
     "outputStyle",
+    "claudeMdExcludes",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

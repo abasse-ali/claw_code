@@ -992,6 +992,28 @@ Claw lit aussi `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` 
 `model: sonnet` prend le modèle de la session si vous n'avez pas de clé Anthropic.
 `CLAW_NO_CLAUDE_CONFIG=1` ignore ces fichiers.
 
+**Mémoire du projet** (comme dans Claude Code) :
+
+- **Imports** : `@chemin` dans `CLAUDE.md`, `CLAW.md`, `AGENTS.md` ou une règle charge ce fichier
+  en plus (`See @README`, `@docs/git.md`, `@~/.claude/mes-preferences.md`, `@Design\ Docs/api.md`
+  pour un espace). Chemin relatif au fichier qui importe, quatre niveaux d'imports au plus,
+  ignoré dans le code (`` `@x` ``, blocs). Un import d'un fichier de projet qui sort du projet
+  (un fichier personnel par exemple) n'est chargé qu'après `/memory imports allow` : un
+  fichier commité par d'autres ne peut pas faire lire au modèle des fichiers de votre machine.
+  Les imports de vos fichiers personnels (`~/.claude/CLAUDE.md`, `~/.claw/CLAW.md`) passent.
+- **Commentaires** : les blocs `<!-- … -->` sont retirés avant l'envoi au modèle (hors code).
+- **Règles** : un fichier Markdown par sujet dans `.claude/rules/` ou `.claw/rules/` (sous-dossiers
+  acceptés, liens symboliques suivis), et `~/.claude/rules/` pour tous vos projets. Sans en-tête,
+  une règle est chargée au démarrage ; avec `paths` (`"src/api/**/*.ts"`, accolades acceptées :
+  `"src/**/*.{ts,tsx}"`), elle est donnée au modèle la première fois qu'il lit ou modifie un
+  fichier correspondant.
+- **Sous-dossiers** : le `CLAUDE.md` (ou `CLAW.md`, `AGENTS.md`) d'un sous-dossier est donné au
+  modèle la première fois qu'il touche un fichier de ce sous-dossier.
+- **`claudeMdExcludes`** (réglages, aussi lu depuis `.claude/settings.json`) : globs des fichiers
+  d'instructions à ignorer, par exemple ceux d'autres équipes dans un monorepo.
+- **`/memory`** liste les fichiers chargés (imports compris), les règles par chemin et les imports
+  externes en attente ; `/memory imports allow|deny` décide pour le projet.
+
 **Compétences (skills)** : un dossier `<nom>/SKILL.md` placé dans `.claude/skills/` (ou
 `.claw/skills/`, `.codex/skills/`) du projet, d'un dossier parent ou du dossier personnel. Claw
 donne au modèle le nom et la description de chacune (40 au plus) ; quand une demande y
