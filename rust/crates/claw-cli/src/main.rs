@@ -5,6 +5,7 @@ mod bench_hard;
 mod clipboard;
 mod credits;
 mod doctor;
+mod git_work;
 mod github_setup;
 mod image_reader;
 mod init;
@@ -250,8 +251,23 @@ fn error_hint(problem: &str) -> &'static str {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    // `--worktree [nom]` : la session travaille dans un worktree git à part,
+    // sur sa propre branche (sessions en parallèle sans conflit).
+    let worktree = match git_work::take_worktree_flag(&mut args) {
+        Some(name) => Some(git_work::enter(&name)?),
+        None => None,
+    };
+    let result = run_action(&args);
+    if let Some(session) = &worktree {
+        git_work::leave(session);
+    }
+    result
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Serveurs compatibles déclarés dans la config (`providers`) : nécessaires
     // dès l'analyse des arguments pour reconnaître `nom:modèle`.
     let startup_config = env::current_dir()
@@ -272,8 +288,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_reasoning_effort(startup_config.as_ref());
     init_ultracode(startup_config.as_ref());
     init_team(startup_config.as_ref());
-    let args: Vec<String> = env::args().skip(1).collect();
-    match parse_args(&args)? {
+    match parse_args(args)? {
         CliAction::DumpManifests => dump_manifests(),
         CliAction::BootstrapPlan => print_bootstrap_plan(),
         CliAction::Agents { args } => LiveCli::print_agents(args.as_deref())?,
@@ -2830,26 +2845,38 @@ impl LiveCli {
                 Self::print_skills(args.as_deref())?;
                 false
             }
-            SlashCommand::Branch { .. } => {
-                eprintln!(
+            SlashCommand::Branch { action, target } => {
+                println!(
                     "{}",
-                    render_mode_unavailable("branch", "commandes git branch")
+                    git_work::branch_command(
+                        &env::current_dir()?,
+                        action.as_deref(),
+                        target.as_deref()
+                    )
                 );
                 false
             }
-            SlashCommand::Worktree { .. } => {
-                eprintln!(
+            SlashCommand::Worktree {
+                action,
+                path,
+                branch,
+            } => {
+                println!(
                     "{}",
-                    render_mode_unavailable("worktree", "commandes git worktree")
+                    git_work::worktree_command(
+                        &env::current_dir()?,
+                        action.as_deref(),
+                        path.as_deref(),
+                        branch.as_deref()
+                    )
                 );
                 false
             }
-            SlashCommand::CommitPushPr { .. } => {
-                eprintln!(
-                    "{}",
-                    render_mode_unavailable("commit-push-pr", "automatisation commit + push + PR")
-                );
-                false
+            SlashCommand::CommitPushPr { context } => {
+                if let Err(error) = self.run_commit_push_pr(context.as_deref()) {
+                    eprintln!("{}", render_cli_error(&error.to_string()));
+                }
+                true
             }
             SlashCommand::Unknown(name) => {
                 eprintln!("{}", render_unknown_repl_command(&name));
@@ -3755,6 +3782,99 @@ impl LiveCli {
             path.display(),
             message.trim()
         );
+        Ok(())
+    }
+
+    /// `/commit-push-pr [contexte]` : sur la branche principale, une branche
+    /// est créée d'abord ; puis commit (message généré), poussée et pull
+    /// request (avec `gh`, sinon le lien pour l'ouvrir).
+    fn run_commit_push_pr(
+        &mut self,
+        context: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let cwd = env::current_dir()?;
+        let base = git_work::default_branch(&cwd);
+        let mut branch = git_work::current_branch(&cwd)?;
+        if branch == base || branch == "HEAD" {
+            let hint = context.map_or_else(
+                || {
+                    let session = self.runtime.session();
+                    let last = recent_user_context(session, 1);
+                    last.trim_start_matches("1. ").to_string()
+                },
+                ToOwned::to_owned,
+            );
+            let name = git_work::branch_name_for(&hint);
+            runtime::worktree::git(&cwd, &["switch", "-c", &name])?;
+            println!("Branche\n  Créée            {name} (depuis {base})");
+            branch = name;
+        }
+        self.run_commit()?;
+        let ahead =
+            runtime::worktree::git(&cwd, &["rev-list", "--count", &format!("{base}..HEAD")])
+                .ok()
+                .and_then(|count| count.trim().parse::<u32>().ok())
+                .unwrap_or(1);
+        if ahead == 0 {
+            println!("Pull request\n  Résultat         ignorée\n  Raison           {branch} n'a aucun commit de plus que {base}");
+            return Ok(());
+        }
+        live::start(&format!("git push origin {branch}…"));
+        let pushed = runtime::worktree::git(&cwd, &["push", "-u", "origin", &branch]);
+        live::stop();
+        if let Err(error) = pushed {
+            return Err(format!("échec de git push : {error}").into());
+        }
+        println!("Poussée\n  Branche          origin/{branch}");
+
+        let log = git_output(&["log", "--oneline", &format!("{base}..HEAD")]).unwrap_or_default();
+        let stat = git_output(&["diff", "--stat", &format!("{base}...HEAD")]).unwrap_or_default();
+        let prompt = format!(
+            "Generate a pull request title and body for these commits. Output plain text in this format exactly:\nTITLE: <title>\nBODY:\n<body markdown: what changes and why, how it was verified>\n\nContext hint: {}\n\nCommits:\n{}\n\nDiff summary:\n{}\n\nRecent requests:\n{}",
+            context.unwrap_or("none"),
+            truncate_for_prompt(&log, 4_000),
+            truncate_for_prompt(&stat, 8_000),
+            recent_user_context(self.runtime.session(), 4)
+        );
+        live::start("Rédaction de la pull request…");
+        let draft = self.run_internal_prompt_text(&prompt, false);
+        live::stop();
+        let draft = sanitize_generated_message(&draft?);
+        let (title, body) = parse_titled_body(&draft).unwrap_or_else(|| {
+            (
+                log.lines().next().unwrap_or(branch.as_str()).to_string(),
+                draft.clone(),
+            )
+        });
+        if command_exists("gh") {
+            let body_path = write_temp_text_file("claw-pr-body.md", &body)?;
+            let output = Command::new("gh")
+                .args([
+                    "pr",
+                    "create",
+                    "--base",
+                    &base,
+                    "--head",
+                    &branch,
+                    "--title",
+                    &title,
+                    "--body-file",
+                ])
+                .arg(&body_path)
+                .current_dir(&cwd)
+                .output()?;
+            if output.status.success() {
+                let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                println!("Pull request\n  Résultat         créée\n  Titre            {title}\n  URL              {url}");
+                return Ok(());
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            println!("  ⎿  gh pr create a échoué : {stderr}");
+        }
+        let link = git_work::compare_url(&cwd, &base, &branch).unwrap_or_else(|| {
+            format!("(dépôt hors GitHub : ouvrez la PR de {branch} vers {base})")
+        });
+        println!("Pull request à ouvrir\n  Lien             {link}\n  Titre            {title}\n\n{body}");
         Ok(())
     }
 
@@ -4918,16 +5038,6 @@ fn append_repl_command_suggestions(lines: &mut Vec<String>, name: &str) {
             .into_iter()
             .map(|suggestion| format!("  {suggestion}")),
     );
-}
-
-fn render_mode_unavailable(command: &str, label: &str) -> String {
-    [
-        "Commande indisponible dans ce mode".to_string(),
-        format!("  Commande         /{command}"),
-        format!("  Fonction         {label}"),
-        "  Astuce           /help liste les commandes disponibles".to_string(),
-    ]
-    .join("\n")
 }
 
 fn status_context(
@@ -7756,11 +7866,11 @@ fn render_background_tasks(args: Option<&str>) -> String {
         };
     }
     let tasks = runtime::bash_tasks::list();
-    if tasks.is_empty() {
-        return "Tâches de fond\n  Aucune commande lancée en arrière-plan.".to_string();
-    }
     let mut lines = vec!["Tâches de fond".to_string()];
-    for task in tasks {
+    if tasks.is_empty() {
+        lines.push("  Aucune commande lancée en arrière-plan.".to_string());
+    }
+    for task in &tasks {
         let state = if task.running {
             "en cours".to_string()
         } else {
@@ -7771,7 +7881,31 @@ fn render_background_tasks(args: Option<&str>) -> String {
             task.id, state, task.elapsed_secs, task.command
         ));
     }
-    lines.push("  Arrêter          /bashes kill <id>".to_string());
+    if !tasks.is_empty() {
+        lines.push("  Arrêter          /bashes kill <id>".to_string());
+    }
+    let agents = tools::recent_agent_runs(8);
+    if !agents.is_empty() {
+        lines.push(String::new());
+        lines.push("Sous-agents récents".to_string());
+        for agent in agents {
+            let state = match agent.status.as_str() {
+                "running" => "en cours",
+                "completed" => "terminé",
+                "failed" => "en échec",
+                other => other,
+            };
+            lines.push(format!(
+                "  {:<10} {:<28} {}",
+                state,
+                transcript::clip(&agent.name, 28),
+                transcript::clip(&agent.description, 50)
+            ));
+            if agent.status == "running" || agent.status == "completed" {
+                lines.push(format!("             rapport : {}", agent.output_file));
+            }
+        }
+    }
     lines.join("\n")
 }
 

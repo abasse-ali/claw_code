@@ -752,7 +752,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "Agent",
-            description: "Run a specialized sub-agent on a self-contained task and return its final report (field `result`). The sub-agent does not see this conversation: put every needed detail in `prompt`. Its tool calls follow the session's permissions; architect, reviewer, auditor, Explore and Plan are read-only. Set run_in_background to start it without waiting; its report is then appended to outputFile.",
+            description: "Run a specialized sub-agent on a self-contained task and return its final report (field `result`). The sub-agent does not see this conversation: put every needed detail in `prompt`. Its tool calls follow the session's permissions; architect, reviewer, auditor, Explore and Plan are read-only. Set run_in_background to start it without waiting; its report is then appended to outputFile. Set isolation to \"worktree\" for agents that edit code in parallel: each works in its own git worktree and branch.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -764,7 +764,12 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     },
                     "name": { "type": "string" },
                     "model": { "type": "string", "description": "Optional model override, e.g. an OpenRouter id such as qwen/qwen3-coder." },
-                    "run_in_background": { "type": "boolean" }
+                    "run_in_background": { "type": "boolean" },
+                    "isolation": {
+                        "type": "string",
+                        "enum": ["worktree"],
+                        "description": "worktree: run the sub-agent in its own git worktree (a separate checkout on a new branch), so several agents can edit code in parallel without conflicts. Its changes come back committed on that branch, to review and merge."
+                    }
                 },
                 "required": ["description", "prompt"],
                 "additionalProperties": false
@@ -1527,6 +1532,9 @@ struct AgentInput {
     name: Option<String>,
     model: Option<String>,
     run_in_background: Option<bool>,
+    /// `"worktree"` : le sous-agent travaille dans un worktree git à part.
+    #[serde(default)]
+    isolation: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1795,6 +1803,10 @@ struct AgentOutput {
 struct AgentJob {
     manifest: AgentOutput,
     prompt: String,
+    /// Sous-agent dans un worktree git à part (processus `claw` séparé).
+    isolated: bool,
+    /// Consignes du rôle, reprises dans la demande d'un sous-agent isolé.
+    role_instructions: Option<String>,
     system_prompt: Vec<String>,
     allowed_tools: BTreeSet<String>,
     permission_mode: PermissionMode,
@@ -2568,6 +2580,17 @@ where
     Ok(manifest)
 }
 
+/// Valeur de `isolation` : `worktree` ou rien.
+fn parse_isolation(value: Option<&str>) -> Result<bool, String> {
+    match value.map(str::trim) {
+        None | Some("" | "none") => Ok(false),
+        Some("worktree") => Ok(true),
+        Some(other) => Err(format!(
+            "isolation inconnue : {other} (seule valeur possible : worktree)"
+        )),
+    }
+}
+
 fn prepare_agent_job(input: AgentInput) -> Result<AgentJob, String> {
     if input.description.trim().is_empty() {
         return Err(String::from("description must not be empty"));
@@ -2575,6 +2598,7 @@ fn prepare_agent_job(input: AgentInput) -> Result<AgentJob, String> {
     if input.prompt.trim().is_empty() {
         return Err(String::from("prompt must not be empty"));
     }
+    let isolated = parse_isolation(input.isolation.as_deref())?;
 
     let agent_id = make_agent_id();
     let output_dir = agent_store_dir()?;
@@ -2662,6 +2686,8 @@ fn prepare_agent_job(input: AgentInput) -> Result<AgentJob, String> {
     Ok(AgentJob {
         manifest,
         prompt: input.prompt,
+        isolated,
+        role_instructions: definition.instructions.clone(),
         system_prompt,
         allowed_tools,
         permission_mode,
@@ -2713,6 +2739,9 @@ fn run_agent_conversation(job: &AgentJob, interactive: bool) -> Result<String, S
         .subagent_type
         .clone()
         .unwrap_or_else(|| String::from("general-purpose"));
+    if job.isolated {
+        return run_isolated_agent(job, &label, interactive);
+    }
     let mut runtime = build_agent_runtime(job, interactive.then(|| label.clone()))?
         .with_max_iterations(DEFAULT_AGENT_MAX_ITERATIONS);
     if interactive {
@@ -2733,6 +2762,203 @@ fn run_agent_conversation(job: &AgentJob, interactive: bool) -> Result<String, S
     }
     .map_err(|error| error.to_string())?;
     Ok(final_assistant_text(&summary))
+}
+
+/// Sous-agent isolé (`isolation: "worktree"`) : un processus `claw` à part,
+/// lancé dans un worktree git neuf, sur sa propre branche. Ses changements y
+/// sont enregistrés dans un commit à la fin ; un worktree resté intact est
+/// retiré. Plusieurs sous-agents peuvent ainsi modifier le code en parallèle.
+fn run_isolated_agent(job: &AgentJob, label: &str, interactive: bool) -> Result<String, String> {
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let suffix: String = job
+        .manifest
+        .agent_id
+        .chars()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let name = format!("agent-{}-{suffix}", job.manifest.name);
+    let worktree = runtime::worktree::create(&cwd, &name, None)?;
+    let model = job
+        .manifest
+        .model
+        .clone()
+        .unwrap_or_else(|| DEFAULT_AGENT_MODEL.to_string());
+    // Dans son worktree, le sous-agent peut modifier les fichiers sans toucher
+    // à la copie de travail de l'utilisateur.
+    let mode = match job.permission_mode {
+        PermissionMode::ReadOnly => "read-only",
+        PermissionMode::DangerFullAccess | PermissionMode::Allow => "danger-full-access",
+        _ => "workspace-write",
+    };
+    if interactive {
+        eprintln!(
+            "  ↳ sous-agent {label} · {model} · {} · worktree {} ({})",
+            job.manifest.description,
+            worktree.path.display(),
+            worktree.branch
+        );
+    }
+    let exe = std::env::var_os("CLAW_AGENT_EXE")
+        .map(PathBuf::from)
+        .map_or_else(std::env::current_exe, Ok)
+        .map_err(|error| error.to_string())?;
+    let prompt = isolated_agent_prompt(job, &worktree);
+    let (output, errors, interrupted) = run_isolated_process(
+        Command::new(exe)
+            .args([
+                "--model",
+                &model,
+                "--permission-mode",
+                mode,
+                "--output-format",
+                "json",
+                "-p",
+                &prompt,
+            ])
+            .current_dir(&worktree.path)
+            .env("CLAW_NO_SPINNER", "1"),
+        interactive,
+    )?;
+    let report = if interrupted {
+        "[Claw] The isolated sub-agent was interrupted by the user.".to_string()
+    } else {
+        isolated_agent_report(&output).unwrap_or_else(|| {
+            let detail = errors
+                .lines()
+                .last()
+                .unwrap_or("no output")
+                .trim()
+                .to_string();
+            format!("[Claw] The isolated sub-agent ended without a report ({detail}).")
+        })
+    };
+    Ok(format!(
+        "{report}\n\n{}",
+        finish_isolated_worktree(
+            &cwd,
+            &worktree,
+            &job.manifest.name,
+            &job.manifest.description
+        )
+    ))
+}
+
+/// Lance le processus et attend sa fin (Échap ou Ctrl+C l'arrêtent quand le
+/// sous-agent est au premier plan) ; renvoie ses sorties et s'il a été arrêté.
+fn run_isolated_process(
+    command: &mut Command,
+    interruptible: bool,
+) -> Result<(String, String, bool), String> {
+    use std::io::Read as _;
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("lancement du sous-agent isolé impossible : {error}"))?;
+    let read_all = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_string(&mut text);
+            }
+            text
+        })
+    };
+    let stdout = read_all(
+        child
+            .stdout
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn std::io::Read + Send>),
+    );
+    let stderr = read_all(
+        child
+            .stderr
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn std::io::Read + Send>),
+    );
+    let interrupted = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break false,
+            Ok(None) if interruptible && runtime::interrupt::interrupt_requested() => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break true;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(error) => return Err(error.to_string()),
+        }
+    };
+    Ok((
+        stdout.join().unwrap_or_default(),
+        stderr.join().unwrap_or_default(),
+        interrupted,
+    ))
+}
+
+/// Demande donnée au processus du sous-agent isolé.
+fn isolated_agent_prompt(job: &AgentJob, worktree: &runtime::worktree::Worktree) -> String {
+    let role = job
+        .role_instructions
+        .as_deref()
+        .map(|instructions| format!("{instructions}\n\n"))
+        .unwrap_or_default();
+    format!(
+        "{role}{}\n\n[Claw] You are a sub-agent working in an isolated git worktree: a separate checkout of the repository on branch `{}`. Make your changes directly in this directory. Do not commit, push or switch branches: Claw commits your work when you finish. End with a short report: what you changed (files) and how you verified it.",
+        job.prompt, worktree.branch
+    )
+}
+
+/// Réponse finale du sous-agent dans la sortie `--output-format json`.
+fn isolated_agent_report(output: &str) -> Option<String> {
+    output.lines().rev().find_map(|line| {
+        let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+        if let Some(message) = value.get("message").and_then(serde_json::Value::as_str) {
+            return Some(message.to_string());
+        }
+        value
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .map(|error| format!("[Claw] The isolated sub-agent failed: {error}"))
+    })
+}
+
+/// Commit des changements du sous-agent, ou retrait du worktree resté
+/// intact ; renvoie la note pour l'agent principal.
+fn finish_isolated_worktree(
+    repo: &Path,
+    worktree: &runtime::worktree::Worktree,
+    name: &str,
+    description: &str,
+) -> String {
+    let message = format!("Sous-agent {name} : {description}");
+    let committed = runtime::worktree::commit_all(&worktree.path, &message);
+    if !runtime::worktree::has_changes(&worktree.path, &worktree.base) {
+        let target = worktree.path.display().to_string();
+        return match runtime::worktree::remove(repo, &target, true) {
+            Ok(_) => "[Claw worktree] The sub-agent changed no file; its worktree was removed."
+                .to_string(),
+            Err(error) => format!(
+                "[Claw worktree] The sub-agent changed no file (worktree {target} could not be removed: {error})."
+            ),
+        };
+    }
+    let summary = runtime::worktree::change_summary(&worktree.path, &worktree.base);
+    let warning = committed
+        .err()
+        .map(|error| {
+            format!("\nThe changes could not be committed ({error}): they are uncommitted in the worktree.")
+        })
+        .unwrap_or_default();
+    format!(
+        "[Claw worktree] The sub-agent worked in an isolated git worktree. Its changes are committed on branch `{branch}` (worktree {path}), NOT in the main working tree yet:\n{summary}{warning}\nReview them with `git diff HEAD...{branch}`, bring them in with `git merge {branch}` (or `git cherry-pick`), then remove the worktree with `git worktree remove {path}`.",
+        branch = worktree.branch,
+        path = worktree.path.display(),
+    )
 }
 
 /// Demande d'approbation d'un sous-agent, transmise à l'invite de la session
@@ -4045,6 +4271,52 @@ fn agent_store_dir() -> Result<std::path::PathBuf, String> {
     Ok(cwd.join(".claw-agents"))
 }
 
+/// Sous-agent lancé par l'outil `Agent` (d'après son manifeste).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRun {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub status: String,
+    pub created_at: String,
+    pub output_file: String,
+}
+
+/// Les `limit` derniers sous-agents, du plus récent au plus ancien (`/tasks`).
+#[must_use]
+pub fn recent_agent_runs(limit: usize) -> Vec<AgentRun> {
+    let Ok(dir) = agent_store_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut runs: Vec<AgentRun> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        })
+        .filter_map(|path| {
+            let value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+            let text = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
+            Some(AgentRun {
+                id: text("agentId")?.to_string(),
+                name: text("name").unwrap_or_default().to_string(),
+                description: text("description").unwrap_or_default().to_string(),
+                status: text("status").unwrap_or("?").to_string(),
+                created_at: text("createdAt").unwrap_or_default().to_string(),
+                output_file: text("outputFile").unwrap_or_default().to_string(),
+            })
+        })
+        .collect();
+    runs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    runs.truncate(limit);
+    runs
+}
+
 fn make_agent_id() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -4836,6 +5108,82 @@ mod tests {
             .expect("time")
             .as_nanos();
         std::env::temp_dir().join(format!("claw-tools-{unique}-{name}"))
+    }
+
+    #[test]
+    fn isolated_agents_take_worktree_only_and_read_the_json_report() {
+        assert_eq!(super::parse_isolation(None), Ok(false));
+        assert_eq!(super::parse_isolation(Some("worktree")), Ok(true));
+        assert!(super::parse_isolation(Some("docker")).is_err());
+        let output = "journal\n{\"message\":\"J'ai corrigé src/a.rs\",\"model\":\"m\"}\n";
+        assert_eq!(
+            super::isolated_agent_report(output).as_deref(),
+            Some("J'ai corrigé src/a.rs")
+        );
+        assert!(super::isolated_agent_report("{\"error\":\"quota\"}")
+            .expect("erreur")
+            .contains("failed: quota"));
+        assert_eq!(super::isolated_agent_report("pas de json"), None);
+    }
+
+    #[test]
+    fn an_isolated_worktree_keeps_its_changes_on_a_branch_or_disappears() {
+        use runtime::worktree::{create, git};
+        if git(&std::env::temp_dir(), &["--version"]).is_err() {
+            return;
+        }
+        let repo = temp_path("isolation");
+        fs::create_dir_all(&repo).expect("dossier");
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "test@example.invalid"],
+            vec!["config", "user.name", "test"],
+            vec!["config", "core.autocrlf", "false"],
+        ] {
+            git(&repo, &args).expect("git");
+        }
+        fs::write(repo.join("a.txt"), "1\n").expect("fichier");
+        git(&repo, &["add", "."]).expect("add");
+        git(&repo, &["commit", "-q", "-m", "départ"]).expect("commit");
+
+        let busy = create(&repo, "agent-ecrit", None).expect("worktree");
+        fs::write(busy.path.join("a.txt"), "2\n").expect("modif");
+        let note = super::finish_isolated_worktree(&repo, &busy, "ecrit", "change a.txt");
+        assert!(
+            note.contains("committed on branch `claw/agent-ecrit`"),
+            "{note}"
+        );
+        assert!(note.contains("git merge claw/agent-ecrit"), "{note}");
+        let log = git(&repo, &["log", "--format=%s", "claw/agent-ecrit", "-1"]).expect("log");
+        assert_eq!(log.trim(), "Sous-agent ecrit : change a.txt");
+        // La copie de travail principale n'a pas bougé.
+        assert_eq!(fs::read_to_string(repo.join("a.txt")).expect("lu"), "1\n");
+
+        let idle = create(&repo, "agent-lit", None).expect("worktree");
+        let note = super::finish_isolated_worktree(&repo, &idle, "lit", "lit seulement");
+        assert!(note.contains("changed no file"), "{note}");
+        assert!(!idle.path.exists());
+        assert!(git(
+            &repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/heads/claw/agent-lit"
+            ]
+        )
+        .is_err());
+
+        let _ = git(
+            &repo,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                &busy.path.display().to_string(),
+            ],
+        );
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -5705,6 +6053,7 @@ setTimeout(function () { nexistepas(); }, 100);
                 name: Some("ship-audit".to_string()),
                 model: None,
                 run_in_background: None,
+                isolation: None,
             },
             move |job| {
                 *captured_for_spawn
@@ -5785,6 +6134,7 @@ setTimeout(function () { nexistepas(); }, 100);
                 name: Some("complete-task".to_string()),
                 model: Some("claude-sonnet-4-6".to_string()),
                 run_in_background: None,
+                isolation: None,
             },
             |job| {
                 persist_agent_terminal_state(
@@ -5812,6 +6162,7 @@ setTimeout(function () { nexistepas(); }, 100);
                 name: Some("fail-task".to_string()),
                 model: None,
                 run_in_background: None,
+                isolation: None,
             },
             |job| {
                 persist_agent_terminal_state(
@@ -5840,6 +6191,7 @@ setTimeout(function () { nexistepas(); }, 100);
                 name: Some("spawn-error".to_string()),
                 model: None,
                 run_in_background: None,
+                isolation: None,
             },
             |_| Err(String::from("thread creation failed")),
         )

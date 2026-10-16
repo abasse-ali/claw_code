@@ -34,6 +34,7 @@ pub mod team;
 pub mod typography;
 mod usage;
 pub mod workflow;
+pub mod worktree;
 
 /// Les tours de conversation lisent des réglages globaux (utilisateur absent,
 /// équipe, ultracode, point de restauration actif…) et le dossier courant, que

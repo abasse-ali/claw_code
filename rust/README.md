@@ -990,6 +990,34 @@ coupe cet import.
   s'affiche à part (une ligne `∴ Réflexion (5 s)` dans le terminal, le texte complet avec
   `CLAW_SHOW_THINKING=1` ; bloc repliable dans l'interface web) ; `off` le masque.
 
+### Travail en parallèle : worktrees, branches et sous-agents isolés
+
+Comme `claude --worktree`, Claw fait travailler plusieurs sessions ou sous-agents sur le même
+dépôt sans qu'ils se marchent dessus : chacun dans un **worktree git** (une copie de travail à
+part, sur sa propre branche), rangé dans `.claw/worktrees/<nom>`. Ce dossier est ajouté à
+`.git/info/exclude` (local : rien ne change dans le dépôt).
+
+- **`claw --worktree <nom>`** (ou `-w <nom>`, nom généré s'il manque) : la session se lance dans
+  le worktree `<nom>`, sur la branche `claw/<nom>` (créé s'il n'existe pas, rouvert sinon). À la
+  fin, un worktree créé pour la session et resté intact est retiré avec sa branche ; sinon il est
+  gardé, avec les commandes pour reprendre (`claw --worktree <nom>`) ou fusionner.
+- **Sous-agents isolés** : l'outil `Agent` accepte `isolation: "worktree"`. Le sous-agent tourne
+  alors dans un processus `claw` à part, dans un worktree neuf ; à la fin, Claw enregistre ses
+  changements dans un commit sur sa branche et dit à l'agent principal comment les relire
+  (`git diff HEAD...claw/agent-…`) et les fusionner. Un sous-agent qui n'a rien changé voit son
+  worktree retiré. Plusieurs sous-agents isolés lancés dans le même message modifient le code en
+  parallèle sans conflit.
+- **`.worktreeinclude`** à la racine du dépôt (syntaxe de `.gitignore`) : les fichiers ignorés par
+  git qu'il désigne (`.env`, configuration locale…) sont copiés dans chaque nouveau worktree.
+- **`/worktree`** : `list`, `add <nom> [branche]`, `remove <nom> [--force]` (la branche `claw/…`
+  est supprimée si elle n'a rien apporté), `prune`.
+- **`/branch`** : `list`, `create <nom>` (crée et bascule), `switch <nom>`.
+- **`/commit-push-pr [contexte]`** : sur la branche principale, crée d'abord une branche
+  `claw/<sujet>` ; puis commit (message généré), `git push -u`, et pull request rédigée par le
+  modèle (`gh pr create`), ou le lien pour l'ouvrir dans GitHub si `gh` manque.
+- **`/tasks`** (alias de `/bashes`) montre aussi les derniers sous-agents : en cours, terminé ou
+  en échec, avec le fichier de leur rapport.
+
 ### Travail de l'agent
 
 - **Parallélisme** : plusieurs sous-agents, lectures ou recherches demandés dans un même message
