@@ -373,6 +373,22 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         category: SlashCommandCategory::Core,
     },
     SlashCommandSpec {
+        name: "background",
+        aliases: &["bg"],
+        summary: "Passe la session en arrière-plan : elle continue seule (claw agents pour la retrouver)",
+        argument_hint: Some("[demande]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "fork",
+        aliases: &[],
+        summary: "Copie la conversation dans une session en arrière-plan qui continue seule",
+        argument_hint: Some("[demande]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
         name: "keybindings",
         aliases: &["raccourcis"],
         summary: "Raccourcis clavier : crée ou montre ~/.claw/keybindings.json (format de Claude Code)",
@@ -697,6 +713,12 @@ pub enum SlashCommand {
     Credits,
     Doctor,
     Keybindings,
+    Background {
+        prompt: Option<String>,
+    },
+    Fork {
+        prompt: Option<String>,
+    },
     Teleport {
         target: Option<String>,
     },
@@ -844,6 +866,12 @@ impl SlashCommand {
             "credits" | "solde" => Self::Credits,
             "doctor" | "diagnostic" => Self::Doctor,
             "keybindings" | "raccourcis" => Self::Keybindings,
+            "background" | "bg" => Self::Background {
+                prompt: remainder_after_command(trimmed, command),
+            },
+            "fork" => Self::Fork {
+                prompt: remainder_after_command(trimmed, command),
+            },
             "model" => Self::Model {
                 model: parts.next().map(ToOwned::to_owned),
             },
@@ -2386,6 +2414,8 @@ pub fn handle_slash_command(
         | SlashCommand::InstallGithubAction { .. }
         | SlashCommand::MemoryImports { .. }
         | SlashCommand::Keybindings
+        | SlashCommand::Background { .. }
+        | SlashCommand::Fork { .. }
         | SlashCommand::AddDir { .. }
         | SlashCommand::Branch { .. }
         | SlashCommand::Bughunter { .. }
@@ -2841,7 +2871,7 @@ mod tests {
         assert!(help.contains("/code-review [fichiers|branche|commit|PR n°]"));
         assert!(help.contains("/install-github-action [assistant|review|all]"));
         assert!(help.contains("/add-dir [dossier] [--save]"));
-        assert_eq!(slash_command_specs().len(), 59);
+        assert_eq!(slash_command_specs().len(), 61);
         assert_eq!(resume_supported_slash_commands().len(), 19);
     }
 

@@ -96,6 +96,7 @@ const FOREIGN_KEYS: &[&str] = &[
     "includeGitInstructions",
     "cleanupPeriodDays",
     "companyAnnouncements",
+    "worktree",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

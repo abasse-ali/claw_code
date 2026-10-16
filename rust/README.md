@@ -1151,6 +1151,52 @@ part, sur sa propre branche), rangé dans `.claw/worktrees/<nom>`. Ce dossier es
 - **`/tasks`** (alias de `/bashes`) montre aussi les derniers sous-agents : en cours, terminé ou
   en échec, avec le fichier de leur rapport.
 
+### Sessions en arrière-plan : `claw agents`
+
+Comme la vue des agents de Claude Code : plusieurs sessions travaillent seules, sans terminal
+ouvert, et une seule vue montre lesquelles avancent, lesquelles attendent une réponse et
+lesquelles ont fini.
+
+```bash
+claw --bg "corrige le test de connexion qui échoue"      # session en arrière-plan
+claw --bg --name revue "relis la PR 12 et liste les risques"
+claw --bg --exec "cargo test"                           # commande shell en arrière-plan
+claw agents                                             # la vue des sessions
+```
+
+- **La vue** (`claw agents`) groupe les sessions par état (épinglées, attendent une réponse, en
+  cours, terminées) avec leur dernière action ou leur résultat :
+  - `↑`/`↓` choisissent une session ; `Espace` ouvre l'aperçu, où une réponse se tape
+    directement (`o` ou `n` pour une permission) ;
+  - `Entrée` ou `→` ouvrent la session dans ce terminal ; `/exit` y revient ;
+  - `Ctrl+X` arrête, et `Ctrl+X` encore la supprime ; `Ctrl+R` renomme ; `Ctrl+T` épingle ;
+  - une demande tapée en bas lance une nouvelle session (`!commande` pour un shell).
+- **Isolation** : dans un dépôt git, une session lancée en arrière-plan travaille dans son
+  propre worktree (`.claw/worktrees/bg-<id>`, branche `claw/bg-<id>`) et y committe son travail.
+  `"worktree": {"bgIsolation": "none"}` dans les réglages la fait travailler sur place.
+  `claw rm` supprime un worktree resté vide ; celui qui contient des commits est gardé, avec sa
+  branche.
+- **Permissions et questions** : une session sans terminal ne refuse pas en silence. Elle passe
+  dans « attendent une réponse » ; vous répondez depuis l'aperçu, avec `claw reply <id> o`, ou en
+  l'ouvrant. Une réponse envoyée pendant qu'elle travaille attend la fin de son tour.
+- **Depuis une session** : `/bg [demande]` (ou `/background`) passe la conversation en
+  arrière-plan, au même endroit, et libère le terminal ; `/fork [demande]` en lance une copie
+  dans son propre worktree pendant que vous continuez. La ligne d'état signale les sessions qui
+  attendent une réponse.
+- **Depuis le shell** : `claw attach <id ou nom>` (sorties, puis la conversation ; `Échap` rend la
+  main sans l'arrêter), `claw logs <id> [-f]`, `claw reply <id> <texte>`, `claw stop <id>`,
+  `claw rm <id>`, `claw agents --json [--all] [--cwd CHEMIN]` pour les scripts (champs `id`,
+  `state` : `working`, `blocked`, `done`, `failed`, `stopped`, `waitingFor`…).
+- **Fonctionnement** : chaque session est un processus `claw` détaché (pas de service
+  permanent), dont l'état vit dans `~/.claw/jobs/<id>/` ; `CLAW_JOB_DIR` lui donne un dossier
+  `tmp/`. Sans demande pendant une heure (`CLAW_JOB_IDLE_SECS`), une session non épinglée libère
+  son processus ; une réponse la relance depuis sa conversation, qui reste dans `.claw/sessions`
+  (`claw --resume`). Sous Windows, les sessions tournent sur une copie de `claw.exe`, pour que
+  Claw reste installable pendant qu'elles travaillent.
+- **Différences avec Claude Code** : pas de superviseur ni de résumé écrit par un petit modèle
+  (la ligne reprend la dernière action ou le début de la réponse) ; l'ouverture d'une session
+  arrête son processus d'arrière-plan pendant que vous y travaillez.
+
 ### Travail de l'agent
 
 - **Parallélisme** : plusieurs sous-agents, lectures ou recherches demandés dans un même message
@@ -1399,7 +1445,7 @@ Depuis la version release :
 - Inspection des sessions sauvegardées et flux de reprise
 - Outils intégrés conscients de l'espace de travail pour le shell, la lecture/écriture/édition de fichiers, la recherche, la récupération/recherche web, les todos et les mises à jour de notebook
 - Commandes slash pour le statut, le compactage, l'inspection de config, le diff, l'export, la gestion de session et le rapport de version
-- Découverte d'agents et de skills locaux avec `claw agents` et `claw skills`
+- Découverte d'agents et de skills locaux avec `claw agents list` et `claw skills`
 - Découverte et gestion de plugins via la CLI et les surfaces de commandes slash
 - Connexion/déconnexion OAuth ainsi que sélection de modèle/fournisseur depuis la ligne de commande
 - Chargement d'instructions/config conscient de l'espace de travail (`CLAW.md`, fichiers de config, permissions, paramètres de plugins)

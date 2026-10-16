@@ -1,4 +1,5 @@
 mod acp;
+mod agent_view;
 mod approval;
 mod bench;
 mod bench_hard;
@@ -10,6 +11,7 @@ mod github_setup;
 mod image_reader;
 mod init;
 mod input;
+mod jobs;
 mod keybindings;
 mod likeness;
 mod live;
@@ -133,6 +135,460 @@ fn main() {
     }
 }
 
+/// `claw agents …` : options de la vue des agents.
+fn parse_agent_view_args(
+    args: &[String],
+    model: Option<String>,
+    permission_mode: PermissionMode,
+) -> Result<CliAction, String> {
+    let mut json = false;
+    let mut all = false;
+    let mut cwd = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--json" => json = true,
+            "--all" => all = true,
+            "--cwd" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "valeur manquante pour --cwd".to_string())?;
+                cwd = Some(PathBuf::from(value));
+                index += 1;
+            }
+            flag if flag.starts_with("--cwd=") => cwd = Some(PathBuf::from(&flag[6..])),
+            other => return Err(format!("option inconnue pour claw agents : {other}")),
+        }
+        index += 1;
+    }
+    let cwd = cwd.map(|path| {
+        if path.is_absolute() {
+            path
+        } else {
+            env::current_dir().map_or(path.clone(), |dir| dir.join(&path))
+        }
+    });
+    Ok(CliAction::AgentView {
+        json,
+        all,
+        cwd,
+        model,
+        permission_mode,
+    })
+}
+
+fn job_target(rest: &[String], command: &str) -> Result<String, String> {
+    rest.get(1)
+        .cloned()
+        .ok_or_else(|| format!("usage : claw {command} <identifiant ou nom de la session>"))
+}
+
+/// Texte de la dernière réponse du modèle dans une conversation.
+fn last_assistant_of(session: &Session) -> String {
+    session
+        .messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == runtime::MessageRole::Assistant)
+        .find_map(|message| {
+            let text = message
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.trim().is_empty()).then_some(text)
+        })
+        .unwrap_or_default()
+}
+
+/// Première ligne utile d'une réponse, pour la ligne de la vue des agents.
+fn summary_line(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            line.trim()
+                .trim_start_matches(['#', '*', '-', '>', ' '])
+                .trim()
+        })
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(200).collect())
+        .unwrap_or_default()
+}
+
+/// Dernière ligne d'une réponse qui se termine par une question.
+fn trailing_question(text: &str) -> Option<String> {
+    let last = text.lines().map(str::trim).rfind(|line| !line.is_empty())?;
+    last.trim_end_matches(['*', '_', ' '])
+        .ends_with('?')
+        .then(|| last.chars().take(300).collect())
+}
+
+/// Processus d'une session en arrière-plan : il traite la première demande,
+/// puis chaque réponse déposée dans sa boîte, jusqu'à être libéré.
+fn run_job_worker(id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let job = jobs::load(id).ok_or("session en arrière-plan inconnue")?;
+    let _heartbeat = jobs::Heartbeat::start(id);
+    env::set_current_dir(&job.cwd)?;
+    jobs::update_state(id, |state| state.pid = Some(std::process::id()));
+    if let Some(command) = &job.command {
+        run_exec_job(id, command);
+        return Ok(());
+    }
+    let mode = parse_permission_mode_arg(&job.permission_mode)
+        .unwrap_or_else(|_| default_permission_mode());
+    let mut cli = LiveCli::new(job.model.clone(), true, None, mode)?;
+    let initial = jobs::load_state(id);
+    let existing = initial
+        .session_path
+        .clone()
+        .or_else(|| job.session_path.clone())
+        .filter(|path| Path::new(path).is_file());
+    if let Some(path) = existing {
+        let fresh = cli.session.path.clone();
+        cli.load_session_quietly(Path::new(&path))?;
+        if fresh != cli.session.path {
+            let _ = fs::remove_file(fresh);
+        }
+    } else if job.worktree.is_some() {
+        // Conversation rangée avec celles du dossier d'origine : elle reste
+        // après la suppression du worktree (`claw --resume`).
+        let sessions = Path::new(&job.origin).join(".claw").join("sessions");
+        fs::create_dir_all(&sessions)?;
+        if let Some(name) = cli.session.path.file_name() {
+            let target = sessions.join(name);
+            let _ = fs::remove_file(&cli.session.path);
+            cli.session.path = target;
+            cli.persist_session()?;
+        }
+    }
+    let session_path = cli.session.path.display().to_string();
+    jobs::update_state(id, |state| state.session_path = Some(session_path.clone()));
+    tools::set_question_asker(Some(jobs::question_asker(id)));
+    cli.session_hook_start("startup");
+    let mut next = if initial.turns == 0 && !job.prompt.trim().is_empty() {
+        Some(match &job.worktree {
+            Some(tree) => format!("{}\n\n{}", job.prompt, jobs::isolation_note(tree)),
+            None => job.prompt.clone(),
+        })
+    } else {
+        jobs::take_message(id)
+    };
+    loop {
+        let Some(prompt) = next.take() else {
+            match jobs::wait_next_prompt(id) {
+                Some(message) => {
+                    next = Some(message);
+                    continue;
+                }
+                None => break,
+            }
+        };
+        let headline = summary_line(&prompt);
+        jobs::update_state(id, |state| {
+            state.state = jobs::WORKING.to_string();
+            state.waiting_for = None;
+            state.question = None;
+            state.finished_at = None;
+            state.detail = headline;
+        });
+        println!("\n> {}\n", prompt.trim());
+        let result = cli.run_job_turn(&prompt, id);
+        let answer = last_assistant_of(cli.runtime.session());
+        let error = result.as_ref().err().map(ToString::to_string);
+        jobs::update_state(id, |state| {
+            state.turns += 1;
+            state.finished_at = Some(jobs::now_ms());
+            state.waiting_for = None;
+            state.question = None;
+            match &error {
+                None => {
+                    state.state = jobs::DONE.to_string();
+                    state.detail = summary_line(&answer);
+                    // Une réponse qui finit par une question attend l'utilisateur.
+                    if let Some(question) = trailing_question(&answer) {
+                        state.waiting_for = Some("input needed".to_string());
+                        state.question = Some(question);
+                    }
+                }
+                Some(error) => {
+                    state.state = jobs::FAILED.to_string();
+                    state.detail = summary_line(error);
+                }
+            }
+        });
+        if let Some(error) = error {
+            eprintln!("{}", render_cli_error(&error));
+        }
+        next = jobs::take_message(id);
+    }
+    cli.session_hook_end("exit");
+    jobs::update_state(id, |state| state.pid = None);
+    Ok(())
+}
+
+/// `claw --bg --exec 'commande'` : une commande shell en arrière-plan.
+fn run_exec_job(id: &str, command: &str) {
+    jobs::update_state(id, |state| {
+        state.state = jobs::WORKING.to_string();
+        state.detail = format!("$ {command}");
+    });
+    println!("$ {command}");
+    let status = plugins::posix_shell_command(command)
+        .stdin(std::process::Stdio::null())
+        .status();
+    let tail = transcript::strip_ansi(&jobs::log_tail(id, 4 * 1024));
+    let last = tail
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    jobs::update_state(id, |state| {
+        state.finished_at = Some(jobs::now_ms());
+        state.pid = None;
+        match status {
+            Ok(status) if status.success() => {
+                state.state = jobs::DONE.to_string();
+                state.detail = if last.is_empty() {
+                    "terminée (code 0)".to_string()
+                } else {
+                    last
+                };
+            }
+            Ok(status) => {
+                state.state = jobs::FAILED.to_string();
+                state.detail = format!("code {} · {last}", status.code().unwrap_or(-1));
+            }
+            Err(error) => {
+                state.state = jobs::FAILED.to_string();
+                state.detail = format!("lancement impossible : {error}");
+            }
+        }
+    });
+}
+
+enum Follow {
+    /// L'utilisateur a rendu la main (Échap) : la session continue.
+    Detached,
+    /// La session ne travaille plus.
+    Idle,
+}
+
+/// Nouvelles sorties de la session depuis `offset`.
+fn read_new_output(id: &str, offset: &mut u64) -> String {
+    use std::io::{Read as _, Seek as _};
+    let Ok(mut file) = fs::File::open(jobs::log_path(id)) else {
+        return String::new();
+    };
+    let length = file.metadata().map_or(0, |metadata| metadata.len());
+    if length < *offset {
+        *offset = 0;
+    }
+    if file.seek(io::SeekFrom::Start(*offset)).is_err() {
+        return String::new();
+    }
+    let mut buffer = Vec::new();
+    let _ = file.read_to_end(&mut buffer);
+    *offset += u64::try_from(buffer.len()).unwrap_or(0);
+    String::from_utf8_lossy(&buffer).into_owned()
+}
+
+/// Suit les sorties d'une session au travail. Une question posée en plein
+/// tour (permission, `AskUserQuestion`) se répond ici ; Échap, ← ou Ctrl+C
+/// rendent la main sans arrêter la session.
+fn follow_job(id: &str, offset: &mut u64) -> io::Result<Follow> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let raw = |on: bool| {
+        if interactive {
+            let _ = if on {
+                crossterm::terminal::enable_raw_mode()
+            } else {
+                crossterm::terminal::disable_raw_mode()
+            };
+        }
+    };
+    raw(true);
+    let outcome = loop {
+        let text = read_new_output(id, offset);
+        if !text.is_empty() {
+            let mut out = io::stdout();
+            let text = if interactive {
+                text.replace("\r\n", "\n").replace('\n', "\r\n")
+            } else {
+                text
+            };
+            let _ = write!(out, "{text}");
+            let _ = out.flush();
+        }
+        let state = jobs::load_state(id);
+        if state.state == jobs::WORKING && state.waiting_for.is_some() {
+            raw(false);
+            print!("{}répondre >{} ", transcript::ACCENT, transcript::RESET);
+            let _ = io::stdout().flush();
+            let mut answer = String::new();
+            if io::stdin().read_line(&mut answer)? == 0 {
+                break Follow::Detached;
+            }
+            if !answer.trim().is_empty() {
+                jobs::send(id, answer.trim())?;
+                for _ in 0..50 {
+                    if jobs::load_state(id).waiting_for.is_none() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+            raw(true);
+            continue;
+        }
+        if !jobs::alive(id) || state.state != jobs::WORKING {
+            break Follow::Idle;
+        }
+        if interactive {
+            if event::poll(Duration::from_millis(300))? {
+                if let Event::Key(key) = event::read()? {
+                    let ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(key.code, KeyCode::Char('c' | 'C'));
+                    if key.kind == KeyEventKind::Press
+                        && (matches!(key.code, KeyCode::Esc | KeyCode::Left) || ctrl_c)
+                    {
+                        break Follow::Detached;
+                    }
+                }
+            }
+        } else {
+            thread::sleep(Duration::from_millis(300));
+        }
+    };
+    raw(false);
+    Ok(outcome)
+}
+
+/// `claw attach <id>` : les sorties de la session, puis sa conversation dans
+/// ce terminal (le processus d'arrière-plan s'efface). `/exit` rend la main ;
+/// la session reste dans la liste et reprend sur une réponse.
+fn attach_job(reference: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let job = jobs::find(reference)?;
+    let id = job.id.clone();
+    if jobs::load_state(&id).attached {
+        return Err(format!("{} est déjà ouverte dans un autre terminal", job.name).into());
+    }
+    let history = jobs::log_tail(&id, 48 * 1024);
+    let mut offset = fs::metadata(jobs::log_path(&id)).map_or(0, |metadata| metadata.len());
+    print!("{history}");
+    println!(
+        "\n{}── {} · {} · Échap rend la main sans arrêter la session ──{}",
+        transcript::DIM,
+        job.name,
+        id,
+        transcript::RESET
+    );
+    if jobs::alive(&id) {
+        if let Follow::Detached = follow_job(&id, &mut offset)? {
+            println!("\n  ⎿  {} continue en arrière-plan", job.name);
+            return Ok(());
+        }
+    }
+    if job.kind == "exec" {
+        println!("\n  ⎿  commande terminée");
+        return Ok(());
+    }
+    if jobs::alive(&id) {
+        jobs::set_flag(&id, "release");
+        let started = Instant::now();
+        while jobs::alive(&id) && started.elapsed() < Duration::from_secs(20) {
+            thread::sleep(Duration::from_millis(200));
+        }
+        if jobs::alive(&id) {
+            return Err("la session ne s'est pas libérée : réessayez dans un instant".into());
+        }
+    }
+    let state = jobs::load_state(&id);
+    let session = state
+        .session_path
+        .clone()
+        .or_else(|| job.session_path.clone())
+        .filter(|path| Path::new(path).is_file())
+        .ok_or("cette session n'a pas encore de conversation enregistrée")?;
+    let previous = env::current_dir()?;
+    env::set_current_dir(&job.cwd)?;
+    jobs::update_state(&id, |state| {
+        state.attached = true;
+        state.pid = Some(std::process::id());
+    });
+    let heartbeat = jobs::Heartbeat::start(&id);
+    install_interrupt_handler();
+    let mode = parse_permission_mode_arg(&job.permission_mode)
+        .unwrap_or_else(|_| default_permission_mode());
+    let result = run_repl(job.model.clone(), None, mode, Some(PathBuf::from(&session)));
+    drop(heartbeat);
+    let answer = Session::load_from_path(Path::new(&session))
+        .map(|session| last_assistant_of(&session))
+        .unwrap_or_default();
+    jobs::update_state(&id, |state| {
+        state.attached = false;
+        state.pid = None;
+        state.state = jobs::DONE.to_string();
+        state.waiting_for = None;
+        state.question = None;
+        state.finished_at = Some(jobs::now_ms());
+        if !answer.trim().is_empty() {
+            state.detail = summary_line(&answer);
+        }
+    });
+    env::set_current_dir(previous)?;
+    result
+}
+
+/// `claw logs <id> [-f]`.
+fn show_job_logs(reference: &str, follow: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let job = jobs::find(reference)?;
+    let text = jobs::log_tail(&job.id, 32 * 1024);
+    if text.trim().is_empty() {
+        println!("(aucune sortie pour l'instant)");
+    } else if io::stdout().is_terminal() {
+        print!("{text}");
+    } else {
+        print!("{}", transcript::strip_ansi(&text));
+    }
+    if follow && jobs::alive(&job.id) {
+        let mut offset = fs::metadata(jobs::log_path(&job.id)).map_or(0, |metadata| metadata.len());
+        let _ = follow_job(&job.id, &mut offset)?;
+    }
+    Ok(())
+}
+
+/// `claw agents` : la vue, puis la session ouverte, puis la vue à nouveau.
+fn run_agent_view(
+    model: String,
+    permission_mode: PermissionMode,
+    filter: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let defaults = agent_view::Defaults {
+        model,
+        permission_mode: permission_mode.as_str().to_string(),
+        cwd: env::current_dir()?,
+        filter,
+    };
+    let mut selected = None;
+    loop {
+        match agent_view::run(defaults.clone(), selected.clone())? {
+            agent_view::Outcome::Exit => return Ok(()),
+            agent_view::Outcome::Attach(id) => {
+                if let Err(error) = attach_job(&id) {
+                    eprintln!("{}", render_cli_error(&error.to_string()));
+                    thread::sleep(Duration::from_secs(2));
+                }
+                selected = Some(id);
+            }
+        }
+    }
+}
+
 /// `/keybindings` : crée `~/.claw/keybindings.json` s'il n'existe aucun fichier
 /// de raccourcis, puis montre les raccourcis en vigueur et les remarques.
 fn keybindings_command() -> String {
@@ -211,6 +667,10 @@ fn ensure_home_env() {
 /// un second Ctrl+C dans les deux secondes quitte. Pendant la saisie, l'éditeur
 /// de ligne (mode brut) reçoit Ctrl+C comme une touche : rien ne change.
 fn install_interrupt_handler() {
+    static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if INSTALLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let spawned = thread::Builder::new()
         .name("claw-ctrl-c".to_string())
         .spawn(|| {
@@ -453,6 +913,46 @@ fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         CliAction::DumpManifests => dump_manifests(),
         CliAction::BootstrapPlan => print_bootstrap_plan(),
         CliAction::Agents { args } => LiveCli::print_agents(args.as_deref())?,
+        CliAction::Background {
+            prompt,
+            name,
+            exec,
+            model,
+            permission_mode,
+        } => {
+            let job = jobs::dispatch(&jobs::Dispatch {
+                prompt,
+                name,
+                command: exec,
+                model: model.unwrap_or_else(default_model),
+                permission_mode: permission_mode.as_str().to_string(),
+                origin: env::current_dir()?,
+                session_path: None,
+                in_place: false,
+            })?;
+            println!("{}", jobs::launch_report(&job));
+        }
+        CliAction::AgentView {
+            json,
+            all,
+            cwd,
+            model,
+            permission_mode,
+        } => {
+            if json {
+                println!("{}", jobs::list_json(all, cwd.as_deref()));
+            } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
+                run_agent_view(model.unwrap_or_else(default_model), permission_mode, cwd)?;
+            } else {
+                println!("{}", agent_view::plain_list(cwd.as_deref()));
+            }
+        }
+        CliAction::Attach { target } => attach_job(&target)?,
+        CliAction::JobLogs { target, follow } => show_job_logs(&target, follow)?,
+        CliAction::JobStop { target } => println!("{}", jobs::stop(&target)?),
+        CliAction::JobRemove { target } => println!("{}", jobs::remove(&target)?),
+        CliAction::JobReply { target, text } => println!("{}", jobs::reply(&target, &text)?),
+        CliAction::JobWorker { id } => run_job_worker(&id)?,
         CliAction::Skills { args } => LiveCli::print_skills(args.as_deref())?,
         CliAction::Serve {
             host,
@@ -583,6 +1083,43 @@ enum CliAction {
     Agents {
         args: Option<String>,
     },
+    /// `claw --bg "demande"` (ou `--exec 'commande'`).
+    Background {
+        prompt: String,
+        name: Option<String>,
+        exec: Option<String>,
+        model: Option<String>,
+        permission_mode: PermissionMode,
+    },
+    /// `claw agents [--json] [--all] [--cwd CHEMIN]`.
+    AgentView {
+        json: bool,
+        all: bool,
+        cwd: Option<PathBuf>,
+        model: Option<String>,
+        permission_mode: PermissionMode,
+    },
+    Attach {
+        target: String,
+    },
+    JobLogs {
+        target: String,
+        follow: bool,
+    },
+    JobStop {
+        target: String,
+    },
+    JobRemove {
+        target: String,
+    },
+    JobReply {
+        target: String,
+        text: String,
+    },
+    /// Processus d'une session en arrière-plan (lancé par Claw lui-même).
+    JobWorker {
+        id: String,
+    },
     Skills {
         args: Option<String>,
     },
@@ -698,6 +1235,9 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
     let mut wants_version = false;
     let mut continue_session = false;
     let mut stream_input = false;
+    let mut background = false;
+    let mut job_name: Option<String> = None;
+    let mut exec_command: Option<String> = None;
     let mut allowed_tool_values = Vec::new();
     let mut rest = Vec::new();
     let mut index = 0;
@@ -763,6 +1303,12 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 index += 1;
             }
             "-p" => {
+                if background {
+                    return Err(
+                        "--bg ne se combine pas avec -p : la demande est l'argument, par exemple claw --bg \"corrige le test\""
+                            .to_string(),
+                    );
+                }
                 // Compat Claw Code : -p "prompt" = prompt ponctuel
                 let prompt = args[index + 1..].join(" ");
                 if prompt.trim().is_empty() {
@@ -775,6 +1321,24 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                     allowed_tools: normalize_allowed_tools(&allowed_tool_values)?,
                     permission_mode,
                 });
+            }
+            "--bg" | "--background" => {
+                background = true;
+                index += 1;
+            }
+            "--name" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "valeur manquante pour --name".to_string())?;
+                job_name = Some(value.clone());
+                index += 2;
+            }
+            "--exec" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "valeur manquante pour --exec".to_string())?;
+                exec_command = Some(value.clone());
+                index += 2;
             }
             "--print" => {
                 // Compat Claw Code : --print rend la sortie non interactive
@@ -805,6 +1369,22 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
 
     if wants_version {
         return Ok(CliAction::Version);
+    }
+    if background {
+        let prompt = rest.join(" ");
+        if prompt.trim().is_empty() && exec_command.is_none() {
+            return Err(
+                "--bg attend une demande : claw --bg \"corrige le test qui échoue\" (ou --exec 'commande')"
+                    .to_string(),
+            );
+        }
+        return Ok(CliAction::Background {
+            prompt,
+            name: job_name,
+            exec: exec_command,
+            model,
+            permission_mode,
+        });
     }
 
     let allowed_tools = normalize_allowed_tools(&allowed_tool_values)?;
@@ -851,8 +1431,48 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
     match rest[0].as_str() {
         "dump-manifests" => Ok(CliAction::DumpManifests),
         "bootstrap-plan" => Ok(CliAction::BootstrapPlan),
+        // `claw agents` : vue des sessions en arrière-plan ; `claw agents list`
+        // garde la liste des sous-agents définis.
+        "agents"
+            if rest
+                .get(1)
+                .is_none_or(|arg| arg.starts_with("--") && arg != "--help") =>
+        {
+            parse_agent_view_args(&rest[1..], model, permission_mode)
+        }
         "agents" => Ok(CliAction::Agents {
             args: join_optional_args(&rest[1..]),
+        }),
+        "attach" => Ok(CliAction::Attach {
+            target: job_target(&rest, "attach")?,
+        }),
+        "logs" => {
+            let follow = rest[1..]
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "-f" | "--follow"));
+            let target = rest[1..]
+                .iter()
+                .find(|arg| !matches!(arg.as_str(), "-f" | "--follow"))
+                .cloned()
+                .ok_or_else(|| "usage : claw logs <identifiant ou nom> [-f]".to_string())?;
+            Ok(CliAction::JobLogs { target, follow })
+        }
+        "stop" | "kill" => Ok(CliAction::JobStop {
+            target: job_target(&rest, "stop")?,
+        }),
+        "rm" => Ok(CliAction::JobRemove {
+            target: job_target(&rest, "rm")?,
+        }),
+        "reply" => {
+            let target = job_target(&rest, "reply")?;
+            let text = rest[2..].join(" ");
+            if text.trim().is_empty() {
+                return Err("usage : claw reply <identifiant ou nom> <réponse>".to_string());
+            }
+            Ok(CliAction::JobReply { target, text })
+        }
+        "__job-worker" => Ok(CliAction::JobWorker {
+            id: job_target(&rest, "__job-worker")?,
         }),
         "skills" => Ok(CliAction::Skills {
             args: join_optional_args(&rest[1..]),
@@ -2069,6 +2689,8 @@ fn run_resume_command(
         | SlashCommand::Credits
         | SlashCommand::Doctor
         | SlashCommand::Keybindings
+        | SlashCommand::Background { .. }
+        | SlashCommand::Fork { .. }
         | SlashCommand::Context
         | SlashCommand::Teleport { .. }
         | SlashCommand::DebugToolCall
@@ -2206,6 +2828,17 @@ fn run_repl(
                             }
                             continue;
                         }
+                    }
+                    if let SlashCommand::Background { prompt } = &command {
+                        match cli.send_to_background(prompt.as_deref()) {
+                            Ok(true) => {
+                                cli.session_hook_end("background");
+                                break;
+                            }
+                            Ok(false) => {}
+                            Err(error) => eprintln!("{}", render_cli_error(&error.to_string())),
+                        }
+                        continue;
                     }
                     if cli.handle_repl_command(command)? {
                         cli.persist_session()?;
@@ -2582,6 +3215,14 @@ impl LiveCli {
                 line.push_str(&credits);
             }
         }
+        let waiting = jobs::needing_input();
+        if waiting > 0 {
+            let _ = write!(
+                line,
+                " · ✻ {waiting} agent{} en attente (claw agents)",
+                if waiting > 1 { "s" } else { "" }
+            );
+        }
         if let Some(goal) = &self.goal {
             let state = if goal.paused { "en pause" } else { "actif" };
             let _ = write!(
@@ -2917,6 +3558,14 @@ impl LiveCli {
                 println!("{}", keybindings_command());
                 false
             }
+            SlashCommand::Fork { prompt } => {
+                if let Err(error) = self.fork_to_background(prompt.as_deref()) {
+                    eprintln!("{}", render_cli_error(&error.to_string()));
+                }
+                false
+            }
+            // Traité par la boucle du terminal (la session se libère).
+            SlashCommand::Background { .. } => false,
             SlashCommand::Teleport { target } => {
                 self.run_teleport(target.as_deref())?;
                 false
@@ -4042,6 +4691,107 @@ impl LiveCli {
             path.display(),
             message.trim()
         );
+        Ok(())
+    }
+
+    /// Un tour d'une session en arrière-plan : pas de terminal ; permissions
+    /// et questions attendent une réponse dans sa boîte.
+    fn run_job_turn(
+        &mut self,
+        input: &str,
+        job_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut prompter = jobs::JobPermissionPrompter {
+            id: job_id.to_string(),
+        };
+        let (text, images) = take_image_attachments(input);
+        self.runtime.autosave_to(&self.session.path);
+        let result = self
+            .runtime
+            .run_turn_with_images(text, images, Some(&mut prompter));
+        transcript::flush_calls();
+        self.persist_session()?;
+        result
+            .map(|_| ())
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
+    }
+
+    /// Première demande de la conversation (nom de la session).
+    fn first_user_text(&self) -> Option<String> {
+        self.runtime
+            .session()
+            .messages
+            .iter()
+            .filter(|message| message.role == runtime::MessageRole::User)
+            .find_map(|message| {
+                message.blocks.iter().find_map(|block| match block {
+                    ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.clone()),
+                    _ => None,
+                })
+            })
+    }
+
+    /// `/bg [demande]` : la conversation continue dans une session en
+    /// arrière-plan, au même endroit ; ce terminal se libère. `true` : quitter.
+    fn send_to_background(
+        &mut self,
+        prompt: Option<&str>,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let prompt = prompt.unwrap_or_default().trim().to_string();
+        if self.runtime.session().messages.is_empty() && prompt.is_empty() {
+            println!(
+                "  ⎿  Envoyez d'abord un message (ou /bg <demande>) : une session vide n'a rien à poursuivre."
+            );
+            return Ok(false);
+        }
+        self.persist_session()?;
+        let name =
+            jobs::name_from_prompt(&self.first_user_text().unwrap_or_else(|| prompt.clone()));
+        let job = jobs::dispatch(&jobs::Dispatch {
+            prompt,
+            name: Some(name),
+            command: None,
+            model: self.model.clone(),
+            permission_mode: self.permission_mode.as_str().to_string(),
+            origin: env::current_dir()?,
+            session_path: Some(self.session.path.clone()),
+            in_place: true,
+        })?;
+        println!("{}", jobs::launch_report(&job));
+        Ok(true)
+    }
+
+    /// `/fork [demande]` : une copie de la conversation continue en
+    /// arrière-plan (dans son propre worktree) ; cette session reste ici.
+    fn fork_to_background(
+        &mut self,
+        prompt: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.persist_session()?;
+        let copy = sessions_dir()?.join(format!("{}.json", generate_session_id()));
+        fs::copy(&self.session.path, &copy)?;
+        let base = jobs::name_from_prompt(
+            &self
+                .first_user_text()
+                .unwrap_or_else(|| prompt.unwrap_or("copie").to_string()),
+        );
+        let job = jobs::dispatch(&jobs::Dispatch {
+            prompt: prompt.unwrap_or_default().trim().to_string(),
+            name: Some(format!("{base} (copie)")),
+            command: None,
+            model: self.model.clone(),
+            permission_mode: self.permission_mode.as_str().to_string(),
+            origin: env::current_dir()?,
+            session_path: Some(copy),
+            in_place: false,
+        })?;
+        println!("{}", jobs::launch_report(&job));
+        if prompt.is_none_or(|text| text.trim().is_empty()) {
+            println!(
+                "  ⎿  La copie attend sa première demande : claw reply {} <demande>, ou Espace sur sa ligne dans claw agents",
+                job.id
+            );
+        }
         Ok(())
     }
 
@@ -9274,6 +10024,7 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         "  /status                               Session et espace de travail",
         "  /model <nom>                          Change de modèle en cours de session",
         "  /permissions <mode>                   Règle l'accès aux outils",
+        "  /bg [demande], /fork [demande]        Passe la session (ou une copie) en arrière-plan",
         "  Ctrl+C                                Interrompt le tour en cours (/undo l'annule)",
         "  Tab                                   Complète les commandes slash",
         "  /vim                                  Active l'édition modale",
@@ -9285,7 +10036,10 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         "  claw acp                              Agent pour les éditeurs (Zed, Neovim… via ACP)",
         "  claw models [refresh|recherche]       Modèles gratuits recommandés pour le code",
         "  claw credits                          Crédits OpenRouter : solde, requêtes gratuites restantes",
-        "  claw agents                           Liste les agents configurés",
+        "  claw --bg \"tâche\" [--name NOM]       Lance une session en arrière-plan (--exec 'cmd' : commande shell)",
+        "  claw agents [--json] [--all]          Sessions en arrière-plan (vue, ou JSON pour les scripts)",
+        "  claw attach|logs|reply|stop|rm ID     Ouvre, lit, répond, arrête ou supprime une session",
+        "  claw agents list                      Liste les sous-agents configurés",
         "  claw skills                           Liste les compétences installées",
         "  claw init                             Crée CLAW.md et les fichiers locaux",
         "  claw login                            Connexion OAuth",
@@ -9715,9 +10469,56 @@ mod tests {
             parse_args(&["init".to_string()]).expect("init should parse"),
             CliAction::Init
         );
-        assert_eq!(
+        assert!(matches!(
             parse_args(&["agents".to_string()]).expect("agents should parse"),
-            CliAction::Agents { args: None }
+            CliAction::AgentView { json: false, .. }
+        ));
+        assert!(matches!(
+            parse_args(&[
+                "agents".to_string(),
+                "--json".to_string(),
+                "--all".to_string()
+            ])
+            .expect("agents --json should parse"),
+            CliAction::AgentView {
+                json: true,
+                all: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            parse_args(&["agents".to_string(), "list".to_string()]).expect("agents list"),
+            CliAction::Agents {
+                args: Some("list".to_string())
+            }
+        );
+        assert!(matches!(
+            parse_args(&[
+                "--bg".to_string(),
+                "--name".to_string(),
+                "fix".to_string(),
+                "corrige".to_string(),
+                "le test".to_string()
+            ])
+            .expect("--bg should parse"),
+            CliAction::Background { ref prompt, ref name, .. }
+                if prompt == "corrige le test" && name.as_deref() == Some("fix")
+        ));
+        assert!(parse_args(&["--bg".to_string(), "-p".to_string(), "x".to_string()]).is_err());
+        assert_eq!(
+            parse_args(&["logs".to_string(), "-f".to_string(), "7c5d".to_string()]).expect("logs"),
+            CliAction::JobLogs {
+                target: "7c5d".to_string(),
+                follow: true
+            }
+        );
+        assert_eq!(
+            parse_args(&["reply".to_string(), "7c5d".to_string(), "oui".to_string()])
+                .expect("reply"),
+            CliAction::JobReply {
+                target: "7c5d".to_string(),
+                text: "oui".to_string()
+            }
         );
         assert_eq!(
             parse_args(&["skills".to_string()]).expect("skills should parse"),
