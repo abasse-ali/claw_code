@@ -53,7 +53,9 @@ def main(argv):
         if command != "status":
             print(USAGE)
             return 0
-        print(describe(current) if current else "GitHub state unavailable (no token for this repository).")
+        # Sans le préfixe des notes de Claw, que le journal de l'appli masque dans les sorties.
+        print(describe(current).removeprefix("[Claw] ") if current else
+              "GitHub state unavailable (no token for this repository).")
         if requests:
             print(f"Requested for the end of this task: {json.dumps(requests)}")
         return 0

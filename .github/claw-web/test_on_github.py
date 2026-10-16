@@ -193,6 +193,7 @@ class CommandTest(unittest.TestCase):
         self.run_command("merge")
         self.assertEqual(on_github.load_requests(), {"pages": "docs", "merge": True})
         code, out = self.run_command("status")
+        self.assertTrue(out.startswith("GitHub state of o/r"))
         self.assertIn("Pull request of claw/x: none", out)
         self.assertIn('"merge": true', out)
         self.run_command("cancel")
