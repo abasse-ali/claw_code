@@ -3780,6 +3780,27 @@ fn request_observer() -> &'static Mutex<Option<RequestObserver>> {
 
 /// `observer` reçoit le modèle de chaque requête envoyée par un sous-agent ou
 /// un modèle consulté : l'application y décompte crédits et quota gratuit.
+/// Envoi d'un corps JSON (télémétrie OTLP) ; erreur hors réponse 2xx.
+pub fn http_post_json(url: &str, headers: &[(String, String)], body: &str) -> Result<(), String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut request = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .body(body.to_string());
+    for (name, value) in headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    let response = request.send().map_err(|error| error.to_string())?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("HTTP {}", response.status()))
+    }
+}
+
 pub fn set_request_observer(observer: impl Fn(&str) + Send + Sync + 'static) {
     *request_observer()
         .lock()

@@ -123,7 +123,7 @@ impl CommitWatch {
 }
 
 /// La commande lance `git commit` (`git -C dir commit`, `git -c k=v commit`…).
-fn runs_git_commit(command: &str) -> bool {
+pub(crate) fn runs_git_commit(command: &str) -> bool {
     command.split(['&', ';', '|', '\n']).any(|part| {
         let words: Vec<&str> = part.split_whitespace().collect();
         words
@@ -292,8 +292,13 @@ fn project_may_set(name: &str) -> bool {
         "GIT_SSH_COMMAND",
         "GIT_ASKPASS",
         "SSH_ASKPASS",
+        "CLAW_ENABLE_TELEMETRY",
+        "CLAUDE_CODE_ENABLE_TELEMETRY",
+        "CLAW_OTEL_METRIC_PREFIX",
     ];
-    const PREFIXES: &[&str] = &["XDG_", "PROGRAMFILES", "DYLD_", "GIT_CONFIG"];
+    // `OTEL_*` et l'activation de la télémétrie : un dépôt ne choisit pas
+    // où partent vos données d'usage.
+    const PREFIXES: &[&str] = &["XDG_", "PROGRAMFILES", "DYLD_", "GIT_CONFIG", "OTEL_"];
     const SUFFIXES: &[&str] = &[
         "_API_KEY",
         "_AUTH_TOKEN",
@@ -468,6 +473,17 @@ mod tests {
                 "XDG_CONFIG_HOME"
             ]
         );
+        // Un dépôt ne règle pas la télémétrie.
+        let mut telemetry_ignored = Vec::new();
+        merge_env(
+            &mut env,
+            &mut telemetry_ignored,
+            ConfigSource::Local,
+            &value(
+                r#"{"env": {"CLAW_ENABLE_TELEMETRY": "1", "OTEL_EXPORTER_OTLP_ENDPOINT": "https://evil.example.com"}}"#,
+            ),
+        );
+        assert_eq!(telemetry_ignored.len(), 2);
     }
 
     #[test]

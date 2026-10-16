@@ -124,7 +124,14 @@ fn main() {
     // Clés définies dans le compte mais absentes de l'environnement reçu.
     user_env::adopt();
     apply_settings_env();
+    runtime::telemetry::install(
+        VERSION,
+        Box::new(tools::http_post_json),
+        Box::new(|model, usage| models::estimated_cost_usd(model, *usage)),
+    );
     let result = run();
+    // Ce que la télémétrie n'a pas encore envoyé part maintenant.
+    runtime::telemetry::shutdown();
     // Les serveurs de dev et autres commandes de fond ne survivent pas à Claw.
     runtime::bash_tasks::kill_all();
     runtime::stop_all_containers();
@@ -263,12 +270,13 @@ fn run_job_worker(id: &str) -> Result<(), Box<dyn std::error::Error>> {
             let _ = fs::remove_file(&cli.session.path);
             cli.session.path = target;
             cli.persist_session()?;
-            runtime::cron::bind_session(Some(&cli.session.path));
+            session_bound(&cli.session.path);
         }
     }
     let session_path = cli.session.path.display().to_string();
     jobs::update_state(id, |state| state.session_path = Some(session_path.clone()));
     tools::set_question_asker(Some(jobs::question_asker(id)));
+    runtime::telemetry::session_started("background");
     cli.session_hook_start("startup");
     let mut next = if initial.turns == 0 && !job.prompt.trim().is_empty() {
         Some(match &job.worktree {
@@ -745,6 +753,15 @@ fn keybindings_command() -> String {
     lines.join("\n")
 }
 
+/// La conversation active change : ses tâches planifiées reviennent, et la
+/// télémétrie la désigne par son identifiant.
+fn session_bound(path: &Path) {
+    runtime::cron::bind_session(Some(path));
+    if let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) {
+        runtime::telemetry::set_session(id);
+    }
+}
+
 /// Réglage `env` des fichiers de config (`~/.claw/settings.json`,
 /// `.claw/settings.json`…), appliqué avant le démarrage des autres threads.
 fn apply_settings_env() {
@@ -1055,6 +1072,7 @@ fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             if json {
                 println!("{}", jobs::list_json(all, cwd.as_deref()));
             } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
+                runtime::telemetry::session_started("agents_view");
                 run_agent_view(model.unwrap_or_else(default_model), permission_mode, cwd)?;
             } else {
                 println!("{}", agent_view::plain_list(cwd.as_deref()));
@@ -1112,6 +1130,7 @@ fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             let prompt = prompt_from(prompt, io::stdin())?;
             install_interrupt_handler();
             let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode)?;
+            runtime::telemetry::session_started("fresh");
             cli.session_hook_start("startup");
             let result = cli.run_turn_with_output(&prompt, output_format);
             cli.session_hook_end("exit");
@@ -2836,6 +2855,7 @@ fn run_repl(
             let _ = credits::account_status(false);
         });
     }
+    runtime::telemetry::session_started(if resume.is_some() { "resume" } else { "fresh" });
     match resume {
         Some(path) => {
             // La session vide créée au démarrage est remplacée par la session reprise.
@@ -3101,7 +3121,7 @@ impl LiveCli {
             last_turn_interrupted: false,
         };
         cli.persist_session()?;
-        runtime::cron::bind_session(Some(&cli.session.path));
+        session_bound(&cli.session.path);
         Ok(cli)
     }
 
@@ -3460,7 +3480,7 @@ impl LiveCli {
             None,
         )?;
         self.session = handle;
-        runtime::cron::bind_session(Some(&self.session.path));
+        session_bound(&self.session.path);
         Ok(())
     }
 
@@ -4104,7 +4124,7 @@ impl LiveCli {
 
         self.session_hook_end("clear");
         self.session = create_managed_session_handle()?;
-        runtime::cron::bind_session(Some(&self.session.path));
+        session_bound(&self.session.path);
         self.runtime = build_runtime(
             Session::new(),
             self.model.clone(),
@@ -4156,7 +4176,7 @@ impl LiveCli {
             None,
         )?;
         self.session = handle;
-        runtime::cron::bind_session(Some(&self.session.path));
+        session_bound(&self.session.path);
         self.session_hook_start("resume");
         println!(
             "{}",
@@ -4243,7 +4263,7 @@ impl LiveCli {
                     None,
                 )?;
                 self.session = handle;
-                runtime::cron::bind_session(Some(&self.session.path));
+                session_bound(&self.session.path);
                 println!(
                     "Session changée\n  Session active   {}\n  Fichier          {}\n  Messages         {}",
                     self.session.id,
@@ -7478,6 +7498,7 @@ fn build_runtime_with_ui(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone_from(&model);
+    runtime::telemetry::set_model(&model);
     tools::advisors::set_resolver(|| models::advisor_models(&active_model()));
     // Sous-agents et modèles consultés comptent aussi dans les crédits du jour.
     tools::set_request_observer(credits::note_request);

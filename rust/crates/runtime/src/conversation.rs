@@ -860,13 +860,19 @@ fn authorize_after_hook(
     input: &str,
     prompter: Option<&mut dyn PermissionPrompter>,
 ) -> PermissionOutcome {
-    match decision {
+    let outcome = match decision {
         Some(HookPermissionDecision::Allow) => policy.authorize_preapproved(tool_name, input),
         Some(HookPermissionDecision::Ask) => {
             policy.authorize_with_prompt(tool_name, input, prompter)
         }
         None => policy.authorize(tool_name, input, prompter),
-    }
+    };
+    crate::telemetry::tool_decision(
+        tool_name,
+        input,
+        matches!(outcome, PermissionOutcome::Allow),
+    );
+    outcome
 }
 
 struct NotifyingPrompter<'a> {
@@ -901,6 +907,7 @@ impl PermissionPrompter for NotifyingPrompter<'_> {
                 request.tool_name
             ),
         );
+        crate::telemetry::note_asked();
         let decision = self.inner.decide(request);
         if matches!(&decision, PermissionPromptDecision::Deny { reason } if crate::permissions::is_not_run(reason))
         {
@@ -1333,7 +1340,15 @@ where
         images: Vec<crate::attachments::ImageAttachment>,
         prompter: Option<&mut dyn PermissionPrompter>,
     ) -> Result<TurnSummary, RuntimeError> {
-        let result = self.run_turn_inner(user_input.into(), images, prompter);
+        let user_input = user_input.into();
+        let started = std::time::Instant::now();
+        if !self.subagent {
+            crate::telemetry::user_prompt(&user_input);
+        }
+        let result = self.run_turn_inner(user_input, images, prompter);
+        if !self.subagent {
+            crate::telemetry::active_time(started.elapsed());
+        }
         // Après une escalade, le tour suivant repart avec le modèle habituel.
         self.api_client.restore_model();
         // Fin du tour, réussi ou non : ce qui a été fait est enregistré.
@@ -1508,6 +1523,7 @@ where
                 system_prompt: self.system_prompt.clone(),
                 messages: self.session.messages.clone(),
             };
+            let request_started = std::time::Instant::now();
             let events = match self.api_client.stream(request) {
                 Ok(events) => events,
                 // Contexte trop long malgré l'estimation : on compacte et on réessaie une fois.
@@ -1519,7 +1535,10 @@ where
                         messages: self.session.messages.clone(),
                     })?
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    crate::telemetry::api_error(&error.to_string(), request_started.elapsed());
+                    return Err(error);
+                }
             };
             let (assistant_message, usage) = match build_assistant_message(events) {
                 Ok(built) => built,
@@ -1550,6 +1569,7 @@ where
             };
             if let Some(usage) = usage {
                 self.usage_tracker.record(usage);
+                crate::telemetry::api_request(&usage, request_started.elapsed(), self.subagent);
             }
             // Suite d'une réponse coupée : elle complète le message coupé.
             let assistant_message = self.join_cut_reply(assistant_message, &mut assistant_messages);
@@ -1965,6 +1985,7 @@ where
         let Some((output, is_error)) = tool_result_parts(message) else {
             return;
         };
+        crate::telemetry::tool_result(tool_name, input, !is_error && !refused);
         let output = output.to_string();
         // Ni l'échec d'un outil ni le résultat d'une commande : rien ne dit
         // que le modèle tourne en rond.

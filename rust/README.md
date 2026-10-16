@@ -1228,6 +1228,42 @@ claw agents                                             # la vue des sessions
   (la ligne reprend la dernière action ou le début de la réponse) ; l'ouverture d'une session
   arrête son processus d'arrière-plan pendant que vous y travaillez.
 
+### Télémétrie OpenTelemetry
+
+Comme le suivi d'usage de Claude Code, Claw peut envoyer ses compteurs et ses événements à
+votre collecteur OpenTelemetry (Grafana, Honeycomb, Datadog…), par exemple pour suivre
+l'usage d'une équipe. Rien n'est mesuré ni envoyé sans activation explicite :
+
+```bash
+export CLAW_ENABLE_TELEMETRY=1            # ou CLAUDE_CODE_ENABLE_TELEMETRY=1
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer%20votre-jeton"   # si besoin
+```
+
+- **Compteurs** (`claw_code.*`) : `session.count` (`start_type` : `fresh`, `resume`,
+  `background`, `agents_view`), `token.usage` (`input`, `output`, `cacheRead`,
+  `cacheCreation`, par modèle), `cost.usage` (estimation en dollars, nulle pour les modèles
+  gratuits), `lines_of_code.count` (`added`, `removed`), `commit.count`,
+  `pull_request.count`, `code_edit_tool.decision` (outil, `accept`/`reject`, source,
+  langage), `active_time.total` (temps de travail de Claw).
+- **Événements** : `user_prompt` (longueur ; le texte seulement avec
+  `OTEL_LOG_USER_PROMPTS=1`), `api_request` (modèle, tokens, coût, durée, `main` ou
+  `subagent`), `api_error`, `tool_result` (paramètres seulement avec
+  `OTEL_LOG_TOOL_DETAILS=1`), `tool_decision`. Chacun porte `session.id`, `prompt.id` et
+  `user.id` (identifiant anonyme gardé dans `~/.claw/telemetry-id`).
+- **Réglages** : `OTEL_METRICS_EXPORTER` et `OTEL_LOGS_EXPORTER` (`otlp`, `console`, `none`),
+  adresses et en-têtes par signal (`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`…),
+  `OTEL_METRIC_EXPORT_INTERVAL` (60 s), `OTEL_LOGS_EXPORT_INTERVAL` (5 s),
+  `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative`, `OTEL_RESOURCE_ATTRIBUTES`
+  (`team.id=core,department=r-d`), `OTEL_METRICS_INCLUDE_VERSION=true`.
+  `CLAW_OTEL_METRIC_PREFIX=claude_code` reprend les noms de Claude Code, pour réutiliser ses
+  tableaux de bord.
+- Claw envoie en OTLP `http/json` seulement (pas gRPC ni protobuf) : visez le port HTTP du
+  collecteur (4318). Ce qui attend part aussi à la fermeture de Claw.
+- Un fichier de projet (`.claw/settings.json`) ne peut pas activer la télémétrie ni choisir
+  son adresse (`OTEL_*`) : un dépôt cloné ne décide pas où partent vos données d'usage.
+
 ### Travail de l'agent
 
 - **Parallélisme** : plusieurs sous-agents, lectures ou recherches demandés dans un même message

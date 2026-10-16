@@ -36,6 +36,7 @@ pub use bash::stop_all_containers;
 mod session;
 pub mod settings;
 pub mod team;
+pub mod telemetry;
 pub mod typography;
 mod usage;
 pub mod workflow;
