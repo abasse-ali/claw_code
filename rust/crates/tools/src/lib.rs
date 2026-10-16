@@ -21,6 +21,38 @@ pub fn page_viewer_available() -> bool {
     page_view::find_browser().is_some()
 }
 
+/// Regard d'un modèle qui lit les images pour un modèle qui n'en lit pas
+/// (`LookAtImage`) : identifiant de l'image, question, réponse.
+type ImageLooker = dyn Fn(&str, &str) -> Result<String, String> + Send + Sync;
+static IMAGE_LOOKER: Mutex<Option<std::sync::Arc<ImageLooker>>> = Mutex::new(None);
+
+/// L'application donne le regard de `LookAtImage` (son lecteur d'images).
+pub fn set_image_looker(
+    looker: impl Fn(&str, &str) -> Result<String, String> + Send + Sync + 'static,
+) {
+    *IMAGE_LOOKER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::sync::Arc::new(looker));
+}
+
+#[derive(Debug, Deserialize)]
+struct LookAtImageInput {
+    image: String,
+    question: String,
+}
+
+fn run_look_at_image(input: &LookAtImageInput) -> Result<String, String> {
+    if input.question.trim().is_empty() {
+        return Err("the question is empty: ask one precise thing about the image".to_string());
+    }
+    let looker = IMAGE_LOOKER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .ok_or("LookAtImage is not available here")?;
+    looker(&input.image, &input.question)
+}
+
 /// Captures prises par le dernier appel de `Screenshot` sur ce fil, à joindre
 /// à son résultat.
 #[must_use]
@@ -515,6 +547,21 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "LookAtImage",
+            description:
+                "Look again at an image of this conversation that you received as a description (you cannot see images: a model that can see them looks for you and answers). Ask one precise question per call: the exact text at a place, a color, the state of a control, the position, size or alignment of elements, a detail the description does not give or that you doubt. Use it before relying on a detail that matters for your work.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "image": { "type": "string", "description": "The image id, given in the header of its description." },
+                    "question": { "type": "string", "description": "One precise question about what the image shows." }
+                },
+                "required": ["image", "question"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "WebSearch",
             description: "Search the web for current information and return cited results.",
             input_schema: json!({
@@ -903,6 +950,9 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "ViewPage" => from_value::<page_view::ViewPageInput>(input)
             .and_then(|input| page_view::view_page(&input))
             .and_then(to_pretty_json),
+        "LookAtImage" => {
+            from_value::<LookAtImageInput>(input).and_then(|input| run_look_at_image(&input))
+        }
         "Screenshot" => from_value::<screenshot::ScreenshotInput>(input)
             .and_then(|input| screenshot::take(&input))
             .and_then(to_pretty_json),
@@ -4964,6 +5014,23 @@ mod tests {
             "Get-ChildItem".to_string()
         };
         assert_eq!(super::powershell_script("Get-ChildItem"), expected);
+    }
+
+    #[test]
+    fn look_at_image_asks_the_looker_given_by_the_application() {
+        super::set_image_looker(|image, question| Ok(format!("{image} -> {question}")));
+        let answer = execute_tool(
+            "LookAtImage",
+            &json!({ "image": "ab12cd34", "question": "quel texte sur le bouton ?" }),
+        )
+        .expect("réponse");
+        assert_eq!(answer, "ab12cd34 -> quel texte sur le bouton ?");
+        let error = execute_tool(
+            "LookAtImage",
+            &json!({ "image": "ab12cd34", "question": "  " }),
+        )
+        .expect_err("question vide");
+        assert!(error.contains("question is empty"), "{error}");
     }
 
     /// Avec un vrai navigateur (`CLAW_TEST_BROWSER=1`) : une page piégée, prise

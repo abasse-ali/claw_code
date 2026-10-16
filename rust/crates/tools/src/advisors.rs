@@ -244,7 +244,20 @@ pub fn ask_about_image(
     image: &api::ImageSource,
     max_tokens: u32,
 ) -> Result<Opinion, String> {
-    ask_with(models, Patience::SHORT, |model| MessageRequest {
+    ask_about_image_within(models, system, prompt, image, max_tokens, Patience::SHORT)
+}
+
+/// La même chose, avec la patience donnée : une description détaillée, section
+/// par section, prend plus de temps qu'un conseil.
+pub fn ask_about_image_within(
+    models: &[String],
+    system: &str,
+    prompt: &str,
+    image: &api::ImageSource,
+    max_tokens: u32,
+    patience: Patience,
+) -> Result<Opinion, String> {
+    ask_with(models, patience, |model| MessageRequest {
         messages: vec![InputMessage {
             role: "user".to_string(),
             content: vec![

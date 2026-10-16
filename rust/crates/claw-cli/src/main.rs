@@ -5049,6 +5049,8 @@ fn build_runtime_with_ui(
     tools::advisors::set_resolver(|| models::advisor_models(&active_model()));
     // Sous-agents et modèles consultés comptent aussi dans les crédits du jour.
     tools::set_request_observer(credits::note_request);
+    // Un modèle qui ne lit pas les images peut les regarder à nouveau.
+    tools::set_image_looker(image_reader::look);
     let session_fallbacks = env::current_dir()
         .ok()
         .and_then(|cwd| ConfigLoader::default_for(&cwd).load().ok())
@@ -6174,6 +6176,13 @@ impl ApiClient for DefaultRuntimeClient {
             && self.team_last.as_deref().is_none_or(|last| last == primary);
         self.team_last = Some(primary.clone());
         image_reader::prepare(&primary, &messages, &mut |notice| self.notify(notice));
+        // `LookAtImage` sert au modèle qui reçoit des images en descriptions.
+        let tools = tools.map(|mut list| {
+            if !image_reader::lookable(&primary, &messages) {
+                list.retain(|definition| definition.name != "LookAtImage");
+            }
+            list
+        });
         let build = move |model: &str| MessageRequest {
             model: model.to_string(),
             max_tokens: max_tokens_for_model(model),

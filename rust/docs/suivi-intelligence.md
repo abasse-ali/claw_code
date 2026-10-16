@@ -184,6 +184,8 @@ Les sessions réelles de l'utilisateur sont dans `D:\Mes_Projets\test_claw\.claw
 
 | (commit « Linux : arrêter une commande arrête aussi ses sous-processus », 16 octobre 2026) | Sous Ubuntu 24.04, `kill -KILL -<pid>` (procps 4) lit `-<pid>` comme un signal : rien n'était tué et la réponse était 0. Les descendants des commandes arrêtées (délai dépassé, tâche de fond, hook trop lent) survivaient, et les tests du crate runtime finissaient par geler la machine Linux de la CI sans laisser de journal. Forme `kill -s KILL -- -<pid>`, hooks dans leur propre groupe, essai sous Linux ; CI : durée maximale par job, limites de mémoire et de processus, tests Windows à la demande |
 
+| (commit « Lecteur d'images : description en deux regards, LookAtImage », 16 octobre 2026) | Pour un modèle qui ne lit pas les images : description en six sections (nature, disposition avec positions approximatives, chaque élément avec texte exact, position, couleurs, taille et état, transcription intégrale, données, défauts), « unclear: » plutôt que deviner, 8 000 jetons ; relue contre l'image par un autre lecteur qui corrige et complète (une relecture coupée qui perd des sections est écartée) ; outil `LookAtImage` (identifiant de l'image et question précise) pour regarder à nouveau un détail. Essai réel : 3 requêtes gratuites, description de 5 000 caractères en 139 s, regard ciblé exact (texte et couleur d'un bloc de code coupé) |
+
 État des tests après T1-33 : 664 tests Rust (le test de temps
 `waiting_for_a_task_returns_once_it_is_done` peut échouer quand la machine est très chargée ;
 il passe seul), analyse statique à zéro sous Windows et
