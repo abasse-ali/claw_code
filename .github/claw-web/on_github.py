@@ -213,7 +213,7 @@ class Actor:
                     pass
             current = self.call("GET", "/pages") or {}
         except GitHubError as error:
-            return False, "Mise en ligne non faite : " + pages_problem(error)
+            return False, "Mise en ligne non faite : " + pages_problem(error, self.repo, self.base, folder)
         owner, name = self.repo.split("/")
         url = current.get("html_url") or f"https://{owner}.github.io/{name}/"
         where = "dossier `docs/`" if folder == "docs" else "racine du dépôt"
@@ -253,7 +253,7 @@ def permissions_text(accepted):
     return " ou ".join(choices)
 
 
-def pages_problem(error):
+def pages_problem(error, repo, base, folder):
     said = f" (GitHub : « {error.reason[:160]} »)" if error.reason else ""
     if error.status == 422 and any(word in error.reason.lower() for word in ("plan", "private")):
         return ("GitHub Pages refuse ce dépôt privé avec un compte GitHub gratuit. Rendez-le public "
@@ -265,5 +265,8 @@ def pages_problem(error):
         return ("le jeton du moteur (secret CLAW_REPO_TOKEN, le jeton de l'appli) n'a pas les autorisations "
                 f"que GitHub demande pour activer Pages : {wanted}. Ajoutez-les dans les réglages du jeton "
                 "(https://github.com/settings/personal-access-tokens, « Repository permissions ») ; sa "
-                f"valeur ne change pas{said}.")
+                f"valeur ne change pas{said}. Sans Administration : activez Pages une fois vous-même "
+                f"(https://github.com/{repo}/settings/pages, « Deploy from a branch », `{base}`, "
+                f"`{'/docs' if folder == 'docs' else '/ (root)'}`) ; Claw republiera ensuite avec la seule "
+                "autorisation Pages.")
     return f"GitHub Pages : {error.reason or error}"
