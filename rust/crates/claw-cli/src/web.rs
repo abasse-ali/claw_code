@@ -678,6 +678,10 @@ struct Worker {
     runtime: WebRuntime,
     /// Objectif de `/goal`, poursuivi d'un message à l'autre.
     goal: Option<crate::GoalState>,
+    /// Résultats de sous-tâches, joints à la prochaine demande.
+    pending_context: Vec<String>,
+    /// Le dernier tour a été interrompu (bouton Arrêter).
+    interrupted: bool,
 }
 
 fn web_ui(app: &WebApp, mode: PermissionMode) -> RuntimeUi {
@@ -822,11 +826,35 @@ impl Worker {
     }
 
     fn run(mut self, commands: &mpsc::Receiver<WorkerCommand>) {
+        crate::session_bound(&self.session.path);
+        // Joignable par les autres sessions (SendMessage), sous le nom du
+        // dossier suivi de « -web ».
+        runtime::peers::register(
+            &format!("{}-web", crate::peer_name()),
+            "web",
+            self.permission_mode.as_str(),
+        );
         self.session_hook_start("startup");
         self.publish_status(false);
-        for command in commands {
+        loop {
+            // Entre deux messages : tâches planifiées, Monitors, messages des
+            // autres sessions et sous-tâches finies passent aussi.
+            let command = match commands.recv_timeout(Duration::from_millis(500)) {
+                Ok(command) => Some(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            if command.is_none() && !crate::idle_wakeup() {
+                continue;
+            }
             self.publish_status(true);
-            if let Err(error) = self.handle(command) {
+            let result = if let Some(command) = command {
+                self.handle(command)
+            } else {
+                self.wake_up();
+                Ok(())
+            };
+            if let Err(error) = result {
                 self.app.publish(WebEvent::Error {
                     hint: error_hint(&error).to_string(),
                     message: error,
@@ -834,6 +862,188 @@ impl Worker {
             }
             self.publish_status(false);
         }
+    }
+
+    /// Ce qui arrive entre deux messages, dans l'ordre du terminal.
+    fn wake_up(&mut self) {
+        self.deliver_subtasks();
+        self.deliver_monitor_events();
+        self.deliver_peer_messages(Vec::new());
+        self.run_due_tasks();
+    }
+
+    /// Sous-tâches finies : le résultat est montré et rejoint la prochaine demande.
+    fn deliver_subtasks(&mut self) {
+        for subtask in crate::extra_commands::take_finished_subtasks() {
+            match subtask.result {
+                Some(Ok(report)) => {
+                    self.info(format!(
+                        "※ Sous-tâche {} terminée · {}\n\n{report}",
+                        subtask.id, subtask.task
+                    ));
+                    self.pending_context.push(format!(
+                        "[Result of sub-task {} \"{}\", run by a forked sub-agent]\n{report}",
+                        subtask.id, subtask.task
+                    ));
+                }
+                Some(Err(error)) => {
+                    self.info(format!("Sous-tâche {} en échec : {error}", subtask.id));
+                }
+                None => {}
+            }
+        }
+    }
+
+    /// Sorties des Monitors : le modèle les reçoit comme un tour.
+    fn deliver_monitor_events(&mut self) {
+        if !tools::monitors::has_events() {
+            return;
+        }
+        if let Some(events) = tools::monitors::take_events() {
+            let first: String = events
+                .lines()
+                .nth(1)
+                .unwrap_or_default()
+                .chars()
+                .take(90)
+                .collect();
+            self.info(format!("› Monitor : {first}"));
+            self.run_turn(&events);
+        }
+    }
+
+    /// Messages des autres sessions (et ceux libérés par `/peers accept`).
+    fn deliver_peer_messages(&mut self, mut released: Vec<runtime::peers::Message>) {
+        let (mut messages, held) =
+            runtime::peers::take_messages(crate::inbound_setting().as_deref());
+        messages.append(&mut released);
+        for message in &messages {
+            let first: String = message
+                .text
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(90)
+                .collect();
+            self.info(format!("› Message de @{} : {first}", message.from_name));
+        }
+        if held > 0 {
+            self.info(format!(
+                "{held} message(s) d'une autre session retenu(s) (crossSessionInbound ou mode de permission) : /peers pour les voir, /peers accept pour les délivrer"
+            ));
+        }
+        if !messages.is_empty() {
+            self.run_turn(&runtime::peers::render_for_model(&messages));
+        }
+    }
+
+    /// Tâches planifiées échues : chacune passe comme un tour.
+    fn run_due_tasks(&mut self) {
+        while let Some(task) = runtime::cron::take_due() {
+            let kind = if task.self_paced {
+                "boucle".to_string()
+            } else if task.recurring {
+                task.cron.clone()
+            } else {
+                "rappel".to_string()
+            };
+            self.info(format!("↻ Tâche planifiée {} · {kind}", task.id));
+            let _ = runtime::cron::take_stop_requested();
+            self.run_turn(&crate::scheduled_prompt(&task));
+            if task.self_paced {
+                self.self_paced_follow_up(&task.prompt, task.fallback);
+            }
+            if self.interrupted {
+                break;
+            }
+        }
+    }
+
+    fn self_paced_follow_up(&self, request: &str, was_fallback: bool) {
+        match crate::self_paced_follow_up(request, was_fallback) {
+            Ok(note) => self.info(format!("↻ {note}")),
+            Err(error) => self.info(format!("Boucle : {error}")),
+        }
+    }
+
+    /// `/bg [demande]` : la conversation continue dans une session en
+    /// arrière-plan, au même endroit ; la page repart d'une conversation vide.
+    fn send_to_background(&mut self, prompt: Option<&str>) -> Result<(), String> {
+        let prompt = prompt.unwrap_or_default().trim().to_string();
+        if self.runtime.session().messages.is_empty() && prompt.is_empty() {
+            self.info("Envoyez d'abord un message (ou /bg <demande>) : une session vide n'a rien à poursuivre.");
+            return Ok(());
+        }
+        self.persist();
+        let name = crate::jobs::name_from_prompt(
+            &crate::first_user_text(self.runtime.session()).unwrap_or_else(|| prompt.clone()),
+        );
+        let job = crate::jobs::dispatch(&crate::jobs::Dispatch {
+            prompt,
+            name: Some(name),
+            command: None,
+            model: self.model.clone(),
+            permission_mode: self.permission_mode.as_str().to_string(),
+            origin: std::env::current_dir().map_err(|error| error.to_string())?,
+            session_path: Some(self.session.path.clone()),
+            in_place: true,
+        })?;
+        self.new_conversation()?;
+        self.info(format!(
+            "Conversation envoyée en arrière-plan : {} ({}). Suivez-la dans le panneau Agents.",
+            job.name, job.id
+        ));
+        Ok(())
+    }
+
+    /// `/fork [demande]` : une copie de la conversation continue en
+    /// arrière-plan (dans son propre worktree) ; celle-ci reste dans la page.
+    fn fork_to_background(&mut self, prompt: Option<&str>) -> Result<(), String> {
+        self.persist();
+        let copy = crate::sessions_dir()
+            .map_err(|error| error.to_string())?
+            .join(format!("{}.json", crate::generate_session_id()));
+        std::fs::copy(&self.session.path, &copy).map_err(|error| error.to_string())?;
+        let prompt = prompt.unwrap_or_default().trim().to_string();
+        let base = crate::jobs::name_from_prompt(
+            &crate::first_user_text(self.runtime.session()).unwrap_or_else(|| {
+                if prompt.is_empty() {
+                    "copie".to_string()
+                } else {
+                    prompt.clone()
+                }
+            }),
+        );
+        let waiting = prompt.is_empty();
+        let job = crate::jobs::dispatch(&crate::jobs::Dispatch {
+            prompt,
+            name: Some(format!("{base} (copie)")),
+            command: None,
+            model: self.model.clone(),
+            permission_mode: self.permission_mode.as_str().to_string(),
+            origin: std::env::current_dir().map_err(|error| error.to_string())?,
+            session_path: Some(copy),
+            in_place: false,
+        })?;
+        let mut report = format!(
+            "Copie de la conversation lancée en arrière-plan : {} ({})",
+            job.name, job.id
+        );
+        if let Some(tree) = &job.worktree {
+            let _ = write!(
+                report,
+                " · worktree {} (branche {})",
+                tree.path, tree.branch
+            );
+        }
+        if waiting {
+            report.push_str(
+                "\nLa copie attend sa première demande : répondez-lui dans le panneau Agents.",
+            );
+        }
+        self.info(report);
+        Ok(())
     }
 
     fn handle(&mut self, command: WorkerCommand) -> Result<(), String> {
@@ -893,11 +1103,21 @@ impl Worker {
             app: self.app.clone(),
             mode: self.permission_mode,
         };
+        crate::share_auto_context(self.runtime.session(), prompt, &self.model);
+        runtime::peers::update(Some(self.permission_mode.as_str()), None);
+        runtime::peers::set_status("busy");
+        let mut prompt = prompt.to_string();
+        if !self.pending_context.is_empty() {
+            prompt = format!("{}\n\n{prompt}", self.pending_context.join("\n\n"));
+            self.pending_context.clear();
+        }
+        self.interrupted = false;
         self.runtime.autosave_to(&self.session.path);
         let result = self
             .runtime
             .run_turn_with_images(prompt, images, Some(&mut prompter));
         self.persist();
+        runtime::peers::set_status("idle");
         // Modèle choisi par l'utilisateur pendant le tour : il reste celui de la session.
         let chosen = self
             .app
@@ -918,8 +1138,14 @@ impl Worker {
             }
         }
         match result {
-            Ok(_) => self.app.publish(WebEvent::TurnDone),
+            Ok(_) => {
+                runtime::peers::went_idle(&crate::summary_line(&crate::last_assistant_of(
+                    self.runtime.session(),
+                )));
+                self.app.publish(WebEvent::TurnDone);
+            }
             Err(error) if runtime::interrupt::is_interruption(&error.to_string()) => {
+                self.interrupted = true;
                 self.info("■ Tour interrompu.");
                 self.app.publish(WebEvent::TurnDone);
             }
@@ -1125,7 +1351,7 @@ impl Worker {
                 self.info(report);
             }
             Some(SlashCommand::Help) => self.info(format!(
-                "{}\n\nDans l'interface web : /review /audit /archi /adr /fix /security-review /code-review /pr-comments /goal /loop /btw /recap /copy /rename /output-style /schedule /install-github-action /add-dir /branch /worktree /undo /checkpoints /hooks /think /equipe /bashes /models /mcp /model /permissions /cost /compact /clear.\nLes autres commandes s'utilisent dans le terminal.\n\n{}",
+                "{}\n\nDans l'interface web : /review /audit /archi /adr /fix /security-review /code-review /pr-comments /goal /loop /btw /recap /copy /rename /output-style /schedule /install-github-action /add-dir /branch /worktree /undo /checkpoints /hooks /think /equipe /bashes /tasks /subtask /bg /fork /peers /models /mcp /model /permissions /cost /compact /clear.\nLes autres commandes s'utilisent dans le terminal.\n\n{}",
                 render_slash_command_help(),
                 commands::render_custom_commands_help(
                     &std::env::current_dir().unwrap_or_default()
@@ -1160,6 +1386,32 @@ impl Worker {
                     },
                 }
             }
+            Some(SlashCommand::Tasks) => self.info(crate::tasks_report()),
+            Some(SlashCommand::Subtask { task }) => {
+                match task.filter(|task| !task.trim().is_empty()) {
+                    Some(task) => {
+                        let transcript = crate::extra_commands::transcript_text(
+                            self.runtime.session(),
+                            12_000,
+                        );
+                        let id =
+                            crate::extra_commands::spawn_subtask(&task, &transcript, &self.model);
+                        self.info(format!("Sous-tâche {id} lancée en arrière-plan : son résultat reviendra ici (/tasks pour la suivre)"));
+                    }
+                    None => self.info("Usage : /subtask <tâche>"),
+                }
+            }
+            Some(SlashCommand::ListAgents { args }) => {
+                let (report, released) = crate::peers_report(args.as_deref());
+                self.info(report.replace("  ⎿  ", ""));
+                if !released.is_empty() {
+                    self.deliver_peer_messages(released);
+                }
+            }
+            Some(SlashCommand::Background { prompt }) => {
+                self.send_to_background(prompt.as_deref())?;
+            }
+            Some(SlashCommand::Fork { prompt }) => self.fork_to_background(prompt.as_deref())?,
             Some(_) => self.info(
                 "Cette commande n'est disponible que dans le terminal (claw).".to_string(),
             ),
@@ -1390,54 +1642,41 @@ impl Worker {
 
     /// `/loop [intervalle] <demande>` : la demande relancée à intervalle,
     /// jusqu'au bouton Arrêter ou à la limite de passages.
+    /// `/loop` : comme dans le terminal, les passages suivants sont des tâches
+    /// planifiées ; la page reste libre entre deux passages.
     fn loop_command(&mut self, args: Option<&str>) -> Result<(), String> {
-        let (interval, request) = match crate::parse_loop_args(args) {
-            Ok(parsed) => parsed,
-            Err(usage) => {
-                self.info(usage);
-                return Ok(());
-            }
-        };
-        let request = if request.starts_with('/') {
-            let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-            let Some(invocation) = commands::resolve_custom_command(&cwd, &request) else {
-                self.info(
-                    "/loop relance une demande ou une commande personnalisée (.claw/commands).",
-                );
-                return Ok(());
-            };
-            invocation?.prompt
-        } else {
-            request
-        };
-        let max = crate::loop_max_passes();
-        self.info(format!(
-            "↻ Boucle · toutes les {} · au plus {max} passages · Arrêter pour l'interrompre",
-            crate::format_interval(interval)
-        ));
-        for pass in 1..=max {
-            self.run_turn(&crate::loop_prompt(&request, pass));
-            if runtime::interrupt::interrupt_requested() {
-                self.info("↻ Boucle arrêtée");
-                return Ok(());
-            }
-            if pass == max {
-                self.info(format!("↻ Boucle terminée : {max} passages"));
-                return Ok(());
-            }
-            self.info(format!(
-                "↻ Prochain passage dans {}",
-                crate::format_interval(interval)
-            ));
-            runtime::interrupt::clear_interrupt();
-            let deadline = std::time::Instant::now() + interval;
-            while std::time::Instant::now() < deadline {
-                if runtime::interrupt::interrupt_requested() {
-                    runtime::interrupt::clear_interrupt();
+        match crate::plan_loop(args) {
+            crate::LoopPlan::Report(text) => self.info(text.replace("  ⎿  ", "")),
+            crate::LoopPlan::SelfPaced(request) => {
+                self.info("↻ Boucle au rythme choisi par Claw · /loop stop pour l'arrêter");
+                let _ = runtime::cron::take_stop_requested();
+                self.run_turn(&format!("{request}{}", crate::self_paced_note(&request)));
+                if self.interrupted {
+                    let _ = runtime::cron::stop_loops();
                     self.info("↻ Boucle arrêtée");
                     return Ok(());
                 }
-                std::thread::sleep(Duration::from_millis(200));
+                self.self_paced_follow_up(&request, false);
+            }
+            crate::LoopPlan::Fixed {
+                request,
+                cron,
+                max,
+                header,
+                note,
+            } => {
+                self.info(header);
+                if let Some(note) = note {
+                    self.info(note);
+                }
+                self.run_turn(&request);
+                if self.interrupted {
+                    self.info("↻ Boucle arrêtée");
+                    return Ok(());
+                }
+                if let Some(note) = crate::schedule_loop_rest(&cron, &request, max)? {
+                    self.info(format!("↻ {note}"));
+                }
             }
         }
         Ok(())
@@ -1471,6 +1710,7 @@ impl Worker {
         let ended = self.runtime.hooks().session_end("clear");
         self.session = create_managed_session_handle().map_err(|error| error.to_string())?;
         self.runtime = self.build(Session::new())?;
+        crate::session_bound(&self.session.path);
         self.app.publish(WebEvent::Reset);
         self.hook_feedback(runtime::HookEvent::SessionEnd, &ended);
         self.session_hook_start("clear");
@@ -1482,6 +1722,7 @@ impl Worker {
         let session = Session::load_from_path(&handle.path).map_err(|error| error.to_string())?;
         self.runtime = self.build(session)?;
         self.session = handle;
+        crate::session_bound(&self.session.path);
         self.app.publish(WebEvent::Reset);
         for event in transcript_from_messages(&self.runtime.session().messages) {
             self.app.publish(event);
@@ -2324,6 +2565,236 @@ async fn post_sessions_clear(State(app): State<WebApp>, headers: HeaderMap) -> A
     Ok(Json(json!({ "deleted": deleted })).into_response())
 }
 
+/// Panneau « Agents » : sessions en arrière-plan de la machine, et pour
+/// cette session ses tâches planifiées, Monitors, sous-tâches et les
+/// sessions qu'elle peut joindre.
+async fn get_background(State(app): State<WebApp>, headers: HeaderMap) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    let value = tokio::task::spawn_blocking(background_json)
+        .await
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()))?;
+    Ok(Json(value).into_response())
+}
+
+fn background_json() -> Value {
+    let now = crate::jobs::now_ms();
+    let mut blocked = 0;
+    let jobs: Vec<Value> = crate::jobs::all()
+        .into_iter()
+        .take(40)
+        .map(|(job, state)| {
+            let effective = crate::jobs::effective_state(&job, &state);
+            if effective == crate::jobs::BLOCKED {
+                blocked += 1;
+            }
+            json!({
+                "id": job.id,
+                "name": job.name,
+                "state": effective,
+                "detail": crate::jobs::row_detail(&job, &state),
+                "age": crate::jobs::age(state.finished_at.unwrap_or(job.created_at), now),
+                "waiting": state.waiting_for,
+                "question": state.question,
+                "branch": job.worktree.as_ref().map(|tree| tree.branch.clone()),
+                "cwd": job.cwd,
+                "exec": job.kind == "exec",
+                "attached": state.attached,
+            })
+        })
+        .collect();
+    let tasks: Vec<Value> = runtime::cron::list()
+        .iter()
+        .map(|task| {
+            json!({
+                "id": task.id,
+                "kind": if task.self_paced {
+                    "boucle au rythme choisi".to_string()
+                } else if task.recurring {
+                    task.cron.clone()
+                } else {
+                    "une fois".to_string()
+                },
+                "next": runtime::cron::format_local(task.next_run),
+                "prompt": task.prompt.lines().next().unwrap_or_default(),
+            })
+        })
+        .collect();
+    let peers: Vec<Value> = runtime::peers::list()
+        .iter()
+        .map(|peer| {
+            json!({
+                "id": peer.id,
+                "name": peer.name,
+                "kind": peer.kind,
+                "status": peer.status,
+                "cwd": peer.cwd,
+            })
+        })
+        .collect();
+    json!({
+        "jobs": jobs,
+        "blocked": blocked,
+        "tasks": tasks,
+        "monitors": tools::monitors::lines(),
+        "subtasks": crate::extra_commands::subtask_lines(),
+        "peers": peers,
+        "me": runtime::peers::current().map(|peer| peer.name),
+        "held": runtime::peers::held_messages().len(),
+    })
+}
+
+/// Action sur les sessions en arrière-plan (fichiers, processus), hors du
+/// fil asynchrone.
+async fn blocking_action(
+    action: impl FnOnce() -> Result<String, String> + Send + 'static,
+) -> ApiResult {
+    let result = tokio::task::spawn_blocking(action)
+        .await
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()))?;
+    match result {
+        Ok(message) => Ok(Json(json!({ "message": message })).into_response()),
+        Err(error) => Err(api_error(StatusCode::BAD_REQUEST, &error)),
+    }
+}
+
+/// Nouvelle session en arrière-plan, dans son worktree (`!commande` : une
+/// commande shell), avec le modèle et le mode de la page.
+async fn post_job_dispatch(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Json(body): Json<ValueBody>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    let text = body.value.trim().to_string();
+    if text.is_empty() {
+        return Err(api_error(StatusCode::BAD_REQUEST, "demande vide"));
+    }
+    let (model, permission_mode) = {
+        let view = app
+            .view
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            view.status.model.clone(),
+            view.status.permission_mode.clone(),
+        )
+    };
+    let origin = std::env::current_dir()
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()))?;
+    blocking_action(move || {
+        let command = text
+            .strip_prefix('!')
+            .map(|command| command.trim().to_string())
+            .filter(|command| !command.is_empty());
+        let job = crate::jobs::dispatch(&crate::jobs::Dispatch {
+            prompt: if command.is_some() {
+                String::new()
+            } else {
+                text
+            },
+            name: None,
+            command,
+            model: if model.is_empty() {
+                crate::default_model()
+            } else {
+                model
+            },
+            permission_mode,
+            origin,
+            session_path: None,
+            in_place: false,
+        })?;
+        Ok(match &job.worktree {
+            Some(tree) => format!(
+                "{} lancée en arrière-plan (branche {})",
+                job.name, tree.branch
+            ),
+            None => format!("{} lancée en arrière-plan", job.name),
+        })
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct JobReplyBody {
+    id: String,
+    text: String,
+}
+
+/// Réponse à une session en arrière-plan (permission `o`/`t`/`n`, question,
+/// ou nouvelle demande) ; elle repart si elle s'était arrêtée.
+async fn post_job_reply(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Json(body): Json<JobReplyBody>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    blocking_action(move || crate::jobs::reply(&body.id, &body.text)).await
+}
+
+async fn post_job_stop(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Json(body): Json<ValueBody>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    blocking_action(move || crate::jobs::stop(&body.value)).await
+}
+
+/// Retire la session de la liste (son worktree reste s'il contient du travail).
+async fn post_job_remove(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Json(body): Json<ValueBody>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    blocking_action(move || crate::jobs::remove(&body.value)).await
+}
+
+#[derive(Deserialize)]
+struct JobLogQuery {
+    id: String,
+}
+
+/// Dernières sorties d'une session en arrière-plan.
+async fn get_job_log(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Query(query): Query<JobLogQuery>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    let job =
+        crate::jobs::find(&query.id).map_err(|error| api_error(StatusCode::NOT_FOUND, &error))?;
+    let text = crate::transcript::strip_ansi(&crate::jobs::log_tail(&job.id, 48 * 1024));
+    Ok(Json(json!({ "name": job.name, "text": text })).into_response())
+}
+
+async fn post_task_delete(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Json(body): Json<ValueBody>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    match runtime::cron::delete(&body.value) {
+        Ok(task) => {
+            Ok(Json(json!({ "message": format!("Tâche {} supprimée", task.id) })).into_response())
+        }
+        Err(error) => Err(api_error(StatusCode::BAD_REQUEST, &error)),
+    }
+}
+
+async fn post_monitor_stop(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Json(body): Json<ValueBody>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    match tools::monitors::stop(&body.value) {
+        Ok(message) => Ok(Json(json!({ "message": message })).into_response()),
+        Err(error) => Err(api_error(StatusCode::BAD_REQUEST, &error)),
+    }
+}
+
 fn router(app: WebApp) -> Router {
     Router::new()
         .route("/", get(index))
@@ -2353,6 +2824,14 @@ fn router(app: WebApp) -> Router {
         .route("/api/editor/diagnostics", post(post_editor_diagnostics))
         .route("/api/changes", get(get_changes))
         .route("/api/credits", get(get_credits))
+        .route("/api/background", get(get_background))
+        .route("/api/jobs/dispatch", post(post_job_dispatch))
+        .route("/api/jobs/reply", post(post_job_reply))
+        .route("/api/jobs/stop", post(post_job_stop))
+        .route("/api/jobs/remove", post(post_job_remove))
+        .route("/api/jobs/log", get(get_job_log))
+        .route("/api/tasks/delete", post(post_task_delete))
+        .route("/api/monitors/stop", post(post_monitor_stop))
         .with_state(app)
 }
 
@@ -2425,6 +2904,8 @@ pub(crate) fn serve(options: ServeOptions) -> Result<(), Box<dyn std::error::Err
                     session,
                     runtime,
                     goal: None,
+                    pending_context: Vec::new(),
+                    interrupted: false,
                 })
             })();
             match setup {

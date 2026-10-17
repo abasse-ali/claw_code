@@ -150,6 +150,20 @@
   .menu .foot { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 6px; }
   .menu .foot .wide { margin-bottom: 0; }
   .menu .hint-line { font-size: 11.5px; color: var(--text-3); padding: 0 10px 4px; }
+  .menu .hint-line.warn { color: var(--warn); }
+  /* panneau Agents : sessions en arrière-plan, tâches planifiées, Monitors */
+  .pill .badge { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; display: inline-grid; place-items: center; font-size: 11px; font-weight: 650; background: var(--accent-soft); color: var(--accent); }
+  .pill .badge.warn { background: var(--warn-soft); color: var(--warn); }
+  .menu.agents { width: min(460px, calc(100vw - 24px)); }
+  .menu .item.static { cursor: default; }
+  .menu .item.static:hover { background: none; }
+  .dialog.job { width: min(640px, 100%); }
+  .dialog .job-log { margin-top: 12px; max-height: 46vh; overflow: auto; padding: 10px 12px; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface-2); font-family: var(--mono); font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+  .dialog .job-question { margin-top: 12px; padding: 10px 12px; border-radius: var(--r-sm); background: var(--warn-soft); font-size: 13px; line-height: 1.45; white-space: pre-wrap; }
+  .dialog .job-question .line { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .dialog .job-reply { display: flex; gap: 8px; margin-top: 12px; }
+  .dialog .job-reply input { flex: 1; min-width: 0; height: 32px; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface-2); padding: 0 10px; outline: none; font-size: 13px; }
+  .dialog .job-reply input:focus { border-color: var(--accent); }
   /* catégories de modèles : une pastille par spécialité */
   .menu .cats { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 2px 7px; flex: none; }
   .cat { display: inline-flex; align-items: center; gap: 5px; height: 23px; padding: 0 9px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-2); font-size: 11.5px; font-weight: 550; color: var(--text-2); white-space: nowrap; transition: border-color .15s, color .15s, background .15s; }
@@ -468,7 +482,7 @@
 
   /* ------------------------------------------------------------------ petits écrans, panneau VS Code */
   @media (max-width: 720px) {
-    .project span, .pill .sub, .pill .tag, .tools .hint, .hide-narrow, #sessions-btn .label { display: none; }
+    .project span, .pill .sub, .pill .tag, .tools .hint, .hide-narrow, #sessions-btn .label, #agents-btn .label { display: none; }
     .model-pick { max-width: calc(100vw - 300px); }
     .uc-pill { padding: 0 8px; margin-left: 0; font-size: 11.5px; }
     .pill { max-width: 150px; padding: 0 9px; }
@@ -491,6 +505,7 @@
   <div class="spacer"></div>
   <button class="pill" id="credits" type="button" aria-haspopup="dialog" title="Crédits OpenRouter : voir le détail" hidden></button>
   <button class="pill" id="mode-btn" type="button" aria-haspopup="true" title="Mode de permission"></button>
+  <button class="pill" id="agents-btn" type="button" aria-haspopup="true" title="Agents : sessions en arrière-plan, tâches planifiées, Monitors"></button>
   <button class="pill" id="sessions-btn" type="button" aria-haspopup="true" title="Sessions : nouvelle session ou reprise d'une précédente"></button>
   <button class="icon-btn hide-narrow" id="theme-btn" type="button" title="Thème" aria-label="Changer de thème"></button>
 </header>
@@ -2841,6 +2856,212 @@
     if (openMenu && !openMenu.contains(event.target) && !event.target.closest(".pill, .icon-btn, .model-pick")) closeMenu();
   });
 
+  // ---------------------------------------------------------------- agents : sessions en arrière-plan
+  const JOB_STATES = {
+    working: ["au travail", "var(--accent)"],
+    blocked: ["attend une réponse", "var(--warn)"],
+    done: ["terminée", "var(--ok)"],
+    failed: ["en échec", "var(--err)"],
+    stopped: ["arrêtée", "var(--text-3)"],
+  };
+  let background = null;
+  function renderAgentsButton() {
+    const data = background || { jobs: [], tasks: [], blocked: 0, held: 0 };
+    const waiting = data.blocked + data.held;
+    const active = data.jobs.filter((job) => job.state === "working").length + data.tasks.length;
+    $("agents-btn").innerHTML = svg("bot") + '<span class="label">Agents</span>' +
+      (waiting ? '<span class="badge warn">' + waiting + "</span>" : active ? '<span class="badge">' + active + "</span>" : "") + svg("chevronDown");
+    $("agents-btn").title = waiting
+      ? waiting + " élément(s) attendent une réponse (session en arrière-plan ou message retenu)"
+      : "Agents : sessions en arrière-plan, tâches planifiées, Monitors";
+  }
+  async function loadBackground() {
+    try { background = await api("/api/background"); } catch (_) { return background; }
+    renderAgentsButton();
+    return background;
+  }
+  // Rangée de menu sans action (tâche, Monitor, sous-tâche).
+  function staticItem(title, subtitle) {
+    const item = el("div", "item static");
+    const grow = el("span", "grow");
+    grow.append(el("b", null, title));
+    if (subtitle) grow.append(el("span", null, subtitle));
+    item.append(grow);
+    item.title = title + (subtitle ? "\n" + subtitle : "");
+    return item;
+  }
+  // Bouton « Agents » : lancer une session en arrière-plan ; suivre, répondre,
+  // arrêter ; tâches planifiées, Monitors et sous-tâches de cette session.
+  function openAgentsMenu() {
+    showMenu($("agents-btn"), (menu) => {
+      menu.classList.add("agents");
+      const field = el("input", "search");
+      field.placeholder = "Nouvelle session en arrière-plan : la tâche…";
+      field.title = "Entrée : la session part dans son propre worktree, avec le modèle et le mode de cette page · !commande : une commande shell";
+      const list = el("div", "list");
+      menu.append(field, list);
+      const refresh = () => loadBackground().then((data) => { if (data && openMenu === menu) render(data); });
+      const action = async (path, body) => {
+        try {
+          const answer = await api(path, body);
+          if (answer && answer.message) toast(answer.message.split("\n")[0]);
+        } catch (error) { toast(error.message); }
+        refresh();
+      };
+      field.onkeydown = async (event) => {
+        if (event.key !== "Enter" || !field.value.trim()) return;
+        event.preventDefault();
+        field.disabled = true;
+        try {
+          toast((await api("/api/jobs/dispatch", { value: field.value.trim() })).message);
+          field.value = "";
+        } catch (error) { toast(error.message); }
+        field.disabled = false;
+        field.focus();
+        refresh();
+      };
+      const render = (data) => {
+        list.textContent = "";
+        list.append(el("div", "group", "Sessions en arrière-plan"));
+        if (!data.jobs.length) list.append(el("div", "hint-line", "Aucune session. Tapez une tâche ci-dessus, ou /bg pour y envoyer cette conversation."));
+        for (const job of data.jobs) {
+          const [label, color] = JOB_STATES[job.state] || [job.state, "var(--text-3)"];
+          const details = [label, job.age, job.branch ? "branche " + job.branch : null, job.detail].filter(Boolean).join(" · ");
+          const item = menuItem(job.name, details, () => openJobDialog(job.id));
+          const dot = el("span", "dot");
+          dot.style.background = color;
+          item.prepend(dot);
+          item.title = job.id + " · " + job.cwd + (job.question ? "\n" + job.question : "");
+          const row = el("div", "row");
+          row.append(item);
+          if (job.state === "working" || job.state === "blocked") {
+            row.append(miniButton("stop", "Arrêter cette session", () => action("/api/jobs/stop", { value: job.id })));
+          } else {
+            row.append(miniButton("trash", "Retirer de la liste (le worktree reste s'il contient du travail ; la conversation reste dans les sessions)",
+              () => action("/api/jobs/remove", { value: job.id }), "danger"));
+          }
+          list.append(row);
+        }
+        if (data.tasks.length) {
+          list.append(el("div", "group", "Tâches planifiées de cette session"));
+          for (const task of data.tasks) {
+            const row = el("div", "row");
+            row.append(staticItem(task.prompt || task.id, task.kind + " · prochain passage " + task.next),
+              miniButton("trash", "Supprimer cette tâche", () => action("/api/tasks/delete", { value: task.id }), "danger"));
+            list.append(row);
+          }
+        }
+        if (data.monitors.length) {
+          list.append(el("div", "group", "Monitors"));
+          for (const line of data.monitors) {
+            const id = (line.match(/monitor-\d+/) || [""])[0];
+            const row = el("div", "row");
+            row.append(staticItem(line.trim()));
+            if (id && !/\bfinie\b/.test(line)) row.append(miniButton("stop", "Arrêter ce Monitor", () => action("/api/monitors/stop", { value: id })));
+            list.append(row);
+          }
+        }
+        if (data.subtasks.length) {
+          list.append(el("div", "group", "Sous-tâches"));
+          for (const line of data.subtasks) list.append(staticItem(line.trim()));
+        }
+        list.append(el("div", "group", "Messages entre sessions"));
+        list.append(el("div", "hint-line", (data.me ? "Cette page : @" + data.me : "Messagerie coupée (CLAW_DISABLE_PEERS)") +
+          (data.peers.length ? " · joignables : " + data.peers.map((peer) => "@" + peer.name + " (" + peer.status + ")").join(", ") : " · aucune autre session ouverte")));
+        if (data.held) list.append(el("div", "hint-line warn", data.held + " message(s) retenu(s) : /peers pour les voir, /peers accept pour les délivrer"));
+      };
+      if (background) render(background);
+      else list.append(el("div", "group", "Chargement…"));
+      refresh();
+      const timer = setInterval(() => { if (openMenu !== menu) { clearInterval(timer); return; } refresh(); }, 3000);
+    });
+  }
+  // Fenêtre d'une session en arrière-plan : sa question, ses dernières
+  // sorties, une réponse (permission, question ou nouvelle demande).
+  function openJobDialog(id) {
+    const known = (background && background.jobs.find((job) => job.id === id)) || { id, name: id };
+    const dialog = openDialog(known.name);
+    dialog.panel.classList.add("job");
+    const chips = el("div", "chips");
+    const question = el("div", "job-question");
+    question.hidden = true;
+    const output = el("pre", "job-log", "Chargement…");
+    const form = el("div", "job-reply");
+    const field = el("input");
+    field.placeholder = "Répondre à la session, ou lui donner une nouvelle demande…";
+    const send = el("button", "btn primary", "Envoyer");
+    send.type = "button";
+    form.append(field, send);
+    const actions = el("div", "actions");
+    const stop = el("button", "btn", "Arrêter");
+    stop.type = "button";
+    const remove = el("button", "btn danger", "Retirer de la liste");
+    remove.type = "button";
+    actions.append(stop, remove);
+    dialog.panel.append(dialog.head("bot"), chips, question, output, form, actions);
+    let lastQuestion = null;
+    const reply = async (text) => {
+      if (!text.trim()) return;
+      try {
+        toast((await api("/api/jobs/reply", { id, text })).message);
+        field.value = "";
+      } catch (error) { toast(error.message); }
+      update();
+    };
+    send.onclick = () => reply(field.value);
+    field.onkeydown = (event) => { if (event.key === "Enter") { event.preventDefault(); reply(field.value); } };
+    stop.onclick = async () => {
+      try { toast((await api("/api/jobs/stop", { value: id })).message); } catch (error) { toast(error.message); }
+      update();
+    };
+    remove.onclick = async () => {
+      try { toast((await api("/api/jobs/remove", { value: id })).message.split("\n")[0]); dialog.close(); loadBackground(); } catch (error) { toast(error.message); }
+    };
+    const choice = (label, text, kind) => {
+      const button = el("button", "btn" + (kind ? " " + kind : ""), label);
+      button.type = "button";
+      button.onclick = () => reply(text);
+      return button;
+    };
+    const update = async () => {
+      const data = await loadBackground();
+      const job = data && data.jobs.find((entry) => entry.id === id);
+      if (job) {
+        const [label] = JOB_STATES[job.state] || [job.state];
+        chips.textContent = "";
+        chips.append(el("span", "chip" + (job.state === "blocked" ? " warn" : job.state === "done" ? " ok" : ""), label), el("span", "chip", job.age));
+        if (job.branch) chips.append(el("span", "chip", "branche " + job.branch));
+        if (job.exec) chips.append(el("span", "chip", "commande shell"));
+        if (job.attached) chips.append(el("span", "chip accent", "ouverte dans un terminal"));
+        stop.hidden = !(job.state === "working" || job.state === "blocked");
+        const key = job.waiting ? job.waiting + "|" + (job.question || "") : null;
+        if (key !== lastQuestion) {
+          lastQuestion = key;
+          question.textContent = "";
+          question.hidden = !key;
+          if (key) {
+            question.append(el("div", null, job.question || "La session attend une réponse."));
+            const line = el("div", "line");
+            if (job.waiting === "permission prompt") line.append(choice("Autoriser", "o", "primary"), choice("Toujours", "t"), choice("Refuser", "n", "danger"));
+            else if (job.waiting === "message approval") line.append(choice("Délivrer le message", "o", "primary"), choice("L'écarter", "n", "danger"));
+            if (line.children.length) question.append(line);
+            field.focus();
+          }
+        }
+      }
+      try {
+        const log = await api("/api/jobs/log?id=" + encodeURIComponent(id));
+        const stick = output.scrollTop + output.clientHeight >= output.scrollHeight - 8;
+        output.textContent = log.text.trim() || "(aucune sortie pour l'instant)";
+        if (stick) output.scrollTop = output.scrollHeight;
+      } catch (error) { output.textContent = error.message; }
+    };
+    update();
+    const timer = setInterval(() => { if (!dialog.panel.isConnected) { clearInterval(timer); return; } update(); }, 2000);
+    dialog.onClose = () => clearInterval(timer);
+    field.focus();
+  }
+
   // ---------------------------------------------------------------- palette (Ctrl+K)
   function openPalette() {
     closeMenu();
@@ -3206,6 +3427,7 @@
   });
   $("mode-btn").addEventListener("click", openModeMenu);
   $("sessions-btn").addEventListener("click", openSessionsMenu);
+  $("agents-btn").addEventListener("click", openAgentsMenu);
   $("credits").addEventListener("click", openCreditsDialog);
   $("theme-btn").addEventListener("click", cycleTheme);
   $("to-bottom").addEventListener("click", () => scrollToBottom(true));
@@ -3334,6 +3556,10 @@
   if (embedded) root.dataset.embed = "1";
   applyTheme();
   renderSessionsButton();
+  renderAgentsButton();
+  loadBackground();
+  // La pastille du bouton Agents suit les sessions qui attendent une réponse.
+  setInterval(() => { if (document.visibilityState === "visible") loadBackground(); }, 10000);
   $("attach-btn").innerHTML = svg("clip");
   $("slash-btn").innerHTML = svg("slash");
   $("to-bottom").innerHTML = svg("arrowDown") + "Derniers messages";

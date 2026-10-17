@@ -170,10 +170,27 @@ sombre ou claire (thème du système, de VS Code ou choisi) :
   titres et dans le texte des messages (l'extrait trouvé s'affiche), **titre** modifiable
   (crayon), effacement d'une session (corbeille) ou de toutes les précédentes, après
   confirmation ; la session en cours ne s'efface pas ;
+- **agents** (bouton à côté de « Sessions », comme le panneau des sessions en arrière-plan de
+  Claude Code) : les sessions en arrière-plan de la machine avec leur état et leur dernière
+  action ; une tâche tapée en haut en lance une nouvelle dans son propre worktree, avec le modèle
+  et le mode de la page (`!commande` pour une commande shell). Un clic ouvre la session : ses
+  dernières sorties en direct, sa question en cours avec « Autoriser », « Toujours » ou
+  « Refuser » pour une permission, et un champ pour lui répondre ou lui donner une nouvelle
+  demande ; elle s'arrête ou se retire de la liste d'un clic. Le même panneau montre les tâches
+  planifiées de la conversation (corbeille pour en supprimer une), ses Monitors (bouton pour les
+  arrêter), ses sous-tâches et les sessions joignables par message. Une pastille orange compte
+  les sessions qui attendent une réponse et les messages retenus ;
 - diagrammes Mermaid à la demande ; commandes `/review`, `/audit`, `/archi`, `/adr`, `/fix`,
   `/models`, `/credits`, `/mcp`, `/cost`, `/compact`…
+- **entre deux messages**, la page reçoit comme le terminal les passages des tâches planifiées,
+  les lignes des Monitors, les messages des autres sessions et les résultats des sous-tâches :
+  chacun s'annonce dans le fil (`↻ Tâche planifiée…`, `› Monitor : …`, `› Message de @…`) puis
+  l'agent y répond. La page est joignable par les autres sessions sous le nom du dossier suivi de
+  `-web` ;
 - les commandes de travail continu et de revue marchent aussi dans la page : `/goal` et `/loop`
-  (le bouton Arrêter met en pause l'objectif ou arrête la boucle), `/btw`, `/recap`, `/copy`
+  (le bouton Arrêter met en pause l'objectif ; `/loop stop` arrête la boucle), `/tasks`,
+  `/subtask`, `/bg` (la conversation part en arrière-plan et la page repart d'une conversation
+  vide), `/fork`, `/peers`, `/btw`, `/recap`, `/copy`
   (copie dans le presse-papiers du navigateur), `/rename`, `/output-style`, `/schedule`,
   `/install-github-action`, `/security-review`, `/code-review`, `/pr-comments`, `/branch`,
   `/worktree`, `/add-dir`, `/permissions allow|deny|ask|remove <règle>` ;
@@ -1265,7 +1282,8 @@ est remis dans la saisie après le passage.
   continuent sans terminal.
 - L'heure locale vient du système (`date +%z`, ou PowerShell sous Windows) ; `CLAW_TZ_OFFSET`
   (`+02:00`) la fixe. `CLAW_DISABLE_CRON=1` (ou `CLAUDE_CODE_DISABLE_CRON=1`) coupe tout.
-- Dans l'interface web, `/loop` garde son fonctionnement précédent (attente avec bouton Arrêter).
+- L'interface web (`claw serve`) fonctionne de la même façon : la page reste libre entre deux
+  passages, qui y arrivent comme des tours, et le panneau Agents liste les tâches planifiées.
 
 ### Sessions en arrière-plan : `claw agents`
 
@@ -1299,10 +1317,16 @@ claw agents                                             # la vue des sessions
   arrière-plan, au même endroit, et libère le terminal ; `/fork [demande]` en lance une copie
   dans son propre worktree pendant que vous continuez. La ligne d'état signale les sessions qui
   attendent une réponse.
+- **Depuis l'interface web** : le bouton « Agents » de `claw serve` montre les mêmes sessions,
+  en lance de nouvelles, ouvre leurs sorties, répond à leurs questions et permissions, les
+  arrête ou les retire ; `/bg` et `/fork` y marchent aussi.
 - **Depuis le shell** : `claw attach <id ou nom>` (sorties, puis la conversation ; `Échap` rend la
   main sans l'arrêter), `claw logs <id> [-f]`, `claw reply <id> <texte>`, `claw stop <id>`,
   `claw rm <id>`, `claw agents --json [--all] [--cwd CHEMIN]` pour les scripts (champs `id`,
   `state` : `working`, `blocked`, `done`, `failed`, `stopped`, `waitingFor`…).
+- **Sorties** : sous Windows, les lignes écrites par les commandes du système (`ping`, `dir`…)
+  dans la page de code de la console (850) sont relues avec leurs accents dans `claw logs`, la
+  vue des agents et la page.
 - **Fonctionnement** : chaque session est un processus `claw` détaché (pas de service
   permanent), dont l'état vit dans `~/.claw/jobs/<id>/` ; `CLAW_JOB_DIR` lui donne un dossier
   `tmp/`. Sans demande pendant une heure (`CLAW_JOB_IDLE_SECS`), une session non épinglée libère
@@ -1325,7 +1349,8 @@ règles de `bash` (`Bash(...)` s'applique, le mode auto la juge). Les sessions e
 reçoivent aussi leurs événements.
 
 **Messages entre sessions** : les sessions Claw ouvertes sur cette machine (terminal, `-p`,
-arrière-plan) se joignent par leur nom (le dossier, ou celui donné par `/rename` ou `--name`).
+arrière-plan, interface web) se joignent par leur nom (le dossier, ou celui donné par `/rename`
+ou `--name` ; la page de `claw serve` prend le nom du dossier suivi de `-web`).
 Le modèle les trouve avec `ListAgents` et leur écrit avec `SendMessage` : une session qui découvre
 un changement cassant prévient celle qui en dépend, une longue tâche annonce sa fin,
 `notify_when_idle` demande un avis quand l'autre session aura fini son tour.

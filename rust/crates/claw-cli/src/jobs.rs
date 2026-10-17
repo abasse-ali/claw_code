@@ -30,6 +30,9 @@ use serde::{Deserialize, Serialize};
 
 /// Un processus dont le battement date de plus que ceci est considéré arrêté.
 const ALIVE_WITHIN_MS: u64 = 8_000;
+/// Une session lancée depuis moins que ceci est « au travail » même sans
+/// battement : son processus démarre (copie du programme, relais Windows).
+const STARTING_WITHIN_MS: u64 = 20_000;
 /// Sans demande pendant ce temps, une session non épinglée libère son processus.
 const DEFAULT_IDLE_SECS: u64 = 3_600;
 
@@ -829,6 +832,26 @@ pub fn remove(reference: &str) -> Result<String, String> {
     Ok(notes.join("\n"))
 }
 
+/// Caractères 0x80 à 0xFF de la page de code OEM 850 (Windows en français et
+/// en Europe de l'Ouest), où écrivent les commandes de Windows (`ping`…).
+const OEM_850: &str = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜø£Ø×ƒáíóúñÑªº¿\u{AE}¬½¼¡«»░▒▓│┤ÁÂÀ\u{A9}╣║╗╝¢¥┐└┴┬├─┼ãÃ╚╔╩╦╠═╬¤ðÐÊËÈıÍÎÏ┘┌█▄¦Ì▀ÓßÔÒõÕµþÞÚÛÙýÝ¯´\u{AD}±‗¾¶§÷¸°¨·¹³²■\u{A0}";
+
+/// Ligne du journal : en UTF-8 (sorties de Claw) ou, sous Windows, dans la
+/// page de code de la console (sorties des commandes du système).
+fn decode_log_line(line: &[u8]) -> String {
+    match std::str::from_utf8(line) {
+        Ok(text) => text.to_string(),
+        Err(_) if cfg!(windows) => line
+            .iter()
+            .map(|byte| match byte.checked_sub(0x80) {
+                Some(index) => OEM_850.chars().nth(usize::from(index)).unwrap_or('?'),
+                None => char::from(*byte),
+            })
+            .collect(),
+        Err(_) => String::from_utf8_lossy(line).into_owned(),
+    }
+}
+
 /// Fin de `output.log` (au plus `bytes` octets), en lignes entières.
 #[must_use]
 pub fn log_tail(id: &str, bytes: u64) -> String {
@@ -842,7 +865,10 @@ pub fn log_tail(id: &str, bytes: u64) -> String {
     }
     let mut buffer = Vec::new();
     let _ = file.read_to_end(&mut buffer);
-    let text = String::from_utf8_lossy(&buffer).into_owned();
+    let text = buffer
+        .split_inclusive(|byte| *byte == b'\n')
+        .map(decode_log_line)
+        .collect::<String>();
     if start > 0 {
         text.split_once('\n')
             .map_or(text.clone(), |(_, rest)| rest.to_string())
@@ -890,6 +916,9 @@ pub fn effective_state(job: &Job, state: &JobState) -> String {
         WORKING | BLOCKED if !running => {
             if state.state == BLOCKED {
                 BLOCKED.to_string()
+            } else if now_ms().saturating_sub(state.updated_at) < STARTING_WITHIN_MS {
+                // Lancée ou relancée à l'instant : son processus démarre.
+                WORKING.to_string()
             } else {
                 // Processus disparu en plein travail (arrêt de la machine…).
                 STOPPED.to_string()
@@ -1134,7 +1163,23 @@ pub fn question_asker(id: &str) -> tools::SharedQuestionAsker {
 
 #[cfg(test)]
 mod tests {
-    use super::{age, describe_call, name_from_prompt};
+    use super::{age, decode_log_line, describe_call, name_from_prompt, OEM_850};
+
+    #[test]
+    fn log_lines_keep_utf8_and_read_the_console_code_page() {
+        assert_eq!(OEM_850.chars().count(), 128);
+        assert_eq!(decode_log_line("● prêt\n".as_bytes()), "● prêt\n");
+        // « Réponse de 127.0.0.1 : » écrit par `ping` en page de code 850.
+        let ping = b"R\x82ponse de 127.0.0.1\xff: octets=32\r\n";
+        if cfg!(windows) {
+            assert_eq!(
+                decode_log_line(ping),
+                "Réponse de 127.0.0.1\u{a0}: octets=32\r\n"
+            );
+        } else {
+            assert!(decode_log_line(ping).starts_with('R'));
+        }
+    }
 
     #[test]
     fn names_and_ages_read_well() {
