@@ -302,6 +302,40 @@
     problems.push("The page has no typography of its own: its text uses the browser's default font (Times New Roman). Choose typefaces that fit the subject");
   }
 
+  // 14b. Polices déclarées en CSS mais jamais chargées : le texte tombe sur la
+  // police de secours et toute la typographie du plan disparaît. Vu dans un
+  // essai réel : `css2=Fraunces` au lieu de `css2?family=Fraunces`, et une
+  // page dessinée pour Fraunces et DM Sans rendue en Times et Arial.
+  // `document.fonts.check` dit vrai pour toute famille inconnue : le signal
+  // sûr est la liste des faces que la page a déclarées (@font-face, feuille
+  // Google Fonts), et leur état.
+  if (document.fonts && typeof document.fonts[Symbol.iterator] === "function") {
+    const systemFonts = new Set(["serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui", "ui-serif", "ui-sans-serif",
+      "ui-monospace", "-apple-system", "blinkmacsystemfont", "segoe ui", "arial", "helvetica", "helvetica neue", "times new roman",
+      "times", "georgia", "verdana", "tahoma", "courier new", "courier", "trebuchet ms", "inherit", "initial"]);
+    const wanted = new Set();
+    for (const el of [document.body, ...document.querySelectorAll("h1, h2, h3, p, a, button, li")].filter(Boolean).slice(0, 200)) {
+      const first = css(el).fontFamily.split(",")[0].replace(/["']/g, "").trim();
+      if (first && !systemFonts.has(first.toLowerCase())) wanted.add(first);
+    }
+    const faces = new Map();
+    for (const face of document.fonts) {
+      const family = face.family.replace(/["']/g, "").trim().toLowerCase();
+      faces.set(family, (faces.get(family) || false) || face.status === "loaded");
+    }
+    const missing = [...wanted].filter((family) => faces.get(family.toLowerCase()) !== true);
+    if (missing.length) {
+      const links = [...document.querySelectorAll('link[rel~="stylesheet"][href*="fonts.googleapis.com"]')].map((link) => link.getAttribute("href"));
+      const badLink = links.find((href) => !/\/css2?\?/.test(href) || !/[?&]family=/.test(href));
+      const hint = badLink
+        ? `the Google Fonts link is malformed (${badLink.slice(0, 90)}): it must look like https://fonts.googleapis.com/css2?family=Name:wght@400;700&display=swap`
+        : links.length
+          ? "the Google Fonts link does not include these families, or the page is opened without network access: check the family names in the link"
+          : "no stylesheet loads them (add the Google Fonts <link>, or @font-face rules)";
+      problems.push(`Typefaces declared in the CSS but never loaded, so the text falls back to a default font: ${missing.map((family) => `"${family}"`).join(", ")}; ${hint}`);
+    }
+  }
+
   // 15. Focus clavier invisible (ordinateur) : rien ne change quand un lien
   // ou un bouton reçoit le focus.
   if (!mobile) {
