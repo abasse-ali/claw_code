@@ -465,6 +465,26 @@ pub struct LineEditor {
     rule_color: Option<String>,
 }
 
+/// Dictée en cours dans la saisie.
+struct Dictation {
+    recorder: crate::voice::Recorder,
+    /// Dernière répétition d'Espace (mode `hold` : sans répétition, la
+    /// touche est relâchée).
+    last_space: Instant,
+}
+
+fn recording_notice(dictation: &Dictation, hold: bool) -> String {
+    format!(
+        "● Dictée {} s · {} · Échap annule",
+        dictation.recorder.elapsed().as_secs(),
+        if hold {
+            "relâchez Espace pour finir"
+        } else {
+            "Espace ou Entrée pour finir"
+        }
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CompletionState {
     prefix: String,
@@ -491,6 +511,39 @@ impl LineEditor {
             keymap: Keymap::default(),
             stash: None,
             rule_color: None,
+        }
+    }
+
+    /// Fin d'une dictée : le texte transcrit va au curseur ; `true` si la
+    /// demande doit partir aussitôt (mode `hold` avec `autoSubmit`).
+    fn finish_dictation(
+        &mut self,
+        session: &mut EditSession,
+        stdout: &mut io::Stdout,
+        dictation: Dictation,
+        submit: bool,
+    ) -> io::Result<bool> {
+        session.notice = Some("Transcription…".to_string());
+        self.draw(session, stdout)?;
+        let result = dictation
+            .recorder
+            .finish()
+            .and_then(|audio| crate::voice::transcribe(&audio));
+        match result {
+            Ok(text) => {
+                let glued = session.text[..session.cursor]
+                    .chars()
+                    .last()
+                    .is_some_and(|character| !character.is_whitespace());
+                let text = if glued { format!(" {text}") } else { text };
+                Self::insert_active_text(session, &text);
+                session.notice = None;
+                Ok(submit)
+            }
+            Err(error) => {
+                session.notice = Some(format!("Dictée : {error}"));
+                Ok(false)
+            }
         }
     }
 
@@ -679,13 +732,52 @@ impl LineEditor {
         let mut pending: VecDeque<Event> = VecDeque::new();
         let mut burst_origin: Option<usize> = None;
         let mut pasting: Option<usize> = None;
+        // Dictée vocale (`/voice`) : réglage relu à chaque saisie.
+        let voice = crate::voice::settings();
+        let hold = voice.is_some_and(|settings| settings.mode == crate::voice::Mode::Hold);
+        let auto_submit = hold && voice.is_some_and(|settings| settings.auto_submit);
+        let mut dictation: Option<Dictation> = None;
+        let mut space_run = 0usize;
+        let mut last_space: Option<Instant> = None;
         loop {
             let event = match pending.pop_front() {
                 Some(event) => event,
                 // Une tâche planifiée échue passe entre deux saisies.
                 None => loop {
-                    if event::poll(Duration::from_millis(500))? {
+                    let wait = if dictation.is_some() {
+                        Duration::from_millis(100)
+                    } else {
+                        Duration::from_millis(500)
+                    };
+                    if event::poll(wait)? {
                         break event::read()?;
+                    }
+                    if let Some(active) = dictation.take() {
+                        // Mode `hold` : plus de répétition, la touche est relâchée.
+                        let released =
+                            hold && active.last_space.elapsed() > Duration::from_millis(400);
+                        if released || active.recorder.elapsed() >= crate::voice::MAX_RECORDING {
+                            if self.finish_dictation(
+                                &mut session,
+                                &mut stdout,
+                                active,
+                                auto_submit,
+                            )? && !session.text.trim().is_empty()
+                            {
+                                let line = session.text.clone();
+                                session.finalize_render(
+                                    &mut stdout,
+                                    &self.prompt,
+                                    self.vim_enabled,
+                                )?;
+                                return Ok(ReadOutcome::Submit(self.expand_attachments(line)));
+                            }
+                        } else {
+                            session.notice = Some(recording_notice(&active, hold));
+                            dictation = Some(active);
+                        }
+                        self.draw(&mut session, &mut stdout)?;
+                        continue;
                     }
                     if pasting.is_none() && crate::idle_wakeup() {
                         session.clear_render(&mut stdout)?;
@@ -693,6 +785,90 @@ impl LineEditor {
                     }
                 },
             };
+            // Dictée : Espace maintenu (ou frappé, mode `tap`) enregistre ;
+            // Échap annule.
+            if let (true, Event::Key(key)) = (voice.is_some(), &event) {
+                let space = key.code == KeyCode::Char(' ')
+                    && key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
+                let release = key.kind == KeyEventKind::Release;
+                if let Some(mut active) = dictation.take() {
+                    let cancel = key.code == KeyCode::Esc
+                        || (key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL));
+                    if cancel && !release {
+                        active.recorder.cancel();
+                        session.notice = Some("Dictée annulée".to_string());
+                        self.draw(&mut session, &mut stdout)?;
+                        continue;
+                    }
+                    let stop = if hold {
+                        space && release
+                    } else {
+                        !release && (space || key.code == KeyCode::Enter)
+                    };
+                    if stop {
+                        if self.finish_dictation(&mut session, &mut stdout, active, auto_submit)?
+                            && !session.text.trim().is_empty()
+                        {
+                            let line = session.text.clone();
+                            session.finalize_render(&mut stdout, &self.prompt, self.vim_enabled)?;
+                            return Ok(ReadOutcome::Submit(self.expand_attachments(line)));
+                        }
+                        self.draw(&mut session, &mut stdout)?;
+                    } else {
+                        if space {
+                            active.last_space = Instant::now();
+                        }
+                        dictation = Some(active);
+                    }
+                    continue;
+                }
+                if space && !release && pasting.is_none() && pending.is_empty() {
+                    let now = Instant::now();
+                    // Répétition du clavier : rapprochée, sauf le premier
+                    // délai (jusqu'à 700 ms) avant qu'elle commence.
+                    let rapid = key.kind == KeyEventKind::Repeat
+                        || last_space.is_some_and(|at| {
+                            let gap = now.duration_since(at);
+                            gap < Duration::from_millis(150)
+                                || (space_run == 1 && gap < Duration::from_millis(700))
+                        });
+                    last_space = Some(now);
+                    space_run = if rapid { space_run + 1 } else { 1 };
+                    let start = if hold {
+                        space_run >= 3
+                    } else {
+                        session.text.trim().is_empty()
+                    };
+                    if start {
+                        if hold {
+                            // Les espaces de la répétition ne restent pas.
+                            for _ in 1..space_run {
+                                if session.cursor > 0
+                                    && session.text[..session.cursor].ends_with(' ')
+                                {
+                                    session.cursor -= 1;
+                                    session.text.remove(session.cursor);
+                                }
+                            }
+                        }
+                        space_run = 0;
+                        match crate::voice::start() {
+                            Ok(recorder) => {
+                                let active = Dictation {
+                                    recorder,
+                                    last_space: now,
+                                };
+                                session.notice = Some(recording_notice(&active, hold));
+                                dictation = Some(active);
+                            }
+                            Err(error) => session.notice = Some(format!("Dictée : {error}")),
+                        }
+                        self.draw(&mut session, &mut stdout)?;
+                        continue;
+                    }
+                }
+            }
             let queued = !pending.is_empty() || event::poll(Duration::ZERO)?;
             let (before, before_cursor) = (session.text.clone(), session.cursor);
             let action = match event {

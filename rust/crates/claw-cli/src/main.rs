@@ -30,6 +30,7 @@ mod stream_json;
 mod transcript;
 mod turn_keys;
 mod user_env;
+mod voice;
 mod web;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -3524,6 +3525,7 @@ fn run_resume_command(
         | SlashCommand::DeepResearch { .. }
         | SlashCommand::WorkflowAuthoring
         | SlashCommand::Tui { .. }
+        | SlashCommand::Voice { .. }
         | SlashCommand::Rewind
         | SlashCommand::Sandbox { .. }
         | SlashCommand::TerminalSetup
@@ -4561,6 +4563,10 @@ impl LiveCli {
             }
             SlashCommand::Tui { mode } => {
                 self.tui_command(mode.as_deref());
+                false
+            }
+            SlashCommand::Voice { args } => {
+                println!("{}", voice::command(args.as_deref()));
                 false
             }
             SlashCommand::TerminalSetup => {

@@ -1661,6 +1661,46 @@ terminal, comme `vim` ou `htop` (rien à voir avec la taille de la fenêtre).
   - pas de mode transcription avec recherche (`Ctrl+O`, `/`) ;
   - pas de panneau de diff à côté.
 
+### Dictée vocale : `/voice`
+
+Comme la dictée de Claude Code : dans la saisie, parlez au lieu de taper ; le texte s'insère au
+curseur, à relire avant l'envoi.
+
+- **Activer** :
+  - `/voice` bascule, `/voice hold` (par défaut) ou `/voice tap` choisit le mode, `/voice off`
+    coupe ;
+  - le réglage enregistré est celui de Claude Code :
+    `"voice": { "enabled": true, "mode": "hold", "autoSubmit": false }` (l'ancien
+    `voiceEnabled` est lu aussi) ;
+  - `CLAW_VOICE=0` coupe la dictée.
+- **Dicter** :
+  - mode `hold` : maintenez `Espace` pendant que vous parlez, relâchez pour finir (une frappe
+    courte reste une espace) ;
+  - mode `tap` : `Espace` dans une saisie vide démarre, `Espace` ou `Entrée` arrête ;
+  - `Échap` annule ; deux minutes au plus ;
+  - `autoSubmit` envoie la demande dès la touche relâchée (mode `hold`).
+- **Transcription gratuite** : le premier moteur disponible, dans l'ordre :
+  - `CLAW_VOICE_COMMAND`, votre commande, qui reçoit le fichier WAV (`{file}`) et écrit le
+    texte ;
+  - whisper.cpp en local et hors ligne (`CLAW_WHISPER_MODEL`, et `CLAW_WHISPER_BIN` si
+    `whisper-cli` n'est pas dans le `PATH`) ;
+  - Groq (`GROQ_API_KEY`, palier gratuit, `whisper-large-v3-turbo`), la meilleure qualité ;
+  - sous Windows, la reconnaissance vocale du système, hors ligne et sans clé, utilisée sans
+    rien régler ;
+  - un modèle audio d'OpenRouter choisi avec `CLAW_VOICE_MODEL` (les modèles gratuits d'OpenRouter
+    ne transcrivent pas aujourd'hui) ;
+  - OpenAI (`OPENAI_API_KEY`), seulement avec `CLAW_VOICE_ENGINE=openai`.
+
+  `CLAW_VOICE_ENGINE` (`command`, `whisper`, `groq`, `windows`, `openrouter`, `openai`) en
+  impose un. La langue est celle du réglage `language` (« french », « fr »), sinon celle du
+  système.
+- **Micro** : `cpal` sous Windows et macOS, `arecord`, `parecord` ou `ffmpeg` sous Linux. Rien
+  n'est enregistré hors d'une dictée, et le son n'est gardé que le temps de la transcription.
+- **Vérifier** :
+  - `/voice status` montre le micro, le moteur et la langue, sans rien enregistrer ;
+  - `/voice test <fichier.wav>` transcrit un fichier ;
+  - `CLAW_VOICE_INPUT_FILE=<fichier.wav>` remplace le micro par un fichier (essais).
+
 ### Automatisation et éditeurs
 
 - `--output-format stream-json` : un événement JSON par ligne (init, texte, `tool_use`,

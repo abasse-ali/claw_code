@@ -3973,6 +3973,31 @@ fn request_observer() -> &'static Mutex<Option<RequestObserver>> {
 /// `observer` reçoit le modèle de chaque requête envoyée par un sous-agent ou
 /// un modèle consulté : l'application y décompte crédits et quota gratuit.
 /// Envoi d'un corps JSON (télémétrie OTLP) ; erreur hors réponse 2xx.
+/// Requête POST bloquante (dictée vocale) : statut et corps de la réponse.
+pub fn http_post(
+    url: &str,
+    headers: &[(String, String)],
+    content_type: &str,
+    body: Vec<u8>,
+    timeout: Duration,
+) -> Result<(u16, String), String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut request = client
+        .post(url)
+        .header("Content-Type", content_type)
+        .body(body);
+    for (name, value) in headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    let response = request.send().map_err(|error| error.to_string())?;
+    let status = response.status().as_u16();
+    let text = response.text().map_err(|error| error.to_string())?;
+    Ok((status, text))
+}
+
 /// Envoi OTLP de la télémétrie : HTTP (JSON ou protobuf), ou gRPC sur
 /// HTTP/2 (sans TLS pour une adresse `http://`, comme le port 4317 d'un
 /// collecteur local).

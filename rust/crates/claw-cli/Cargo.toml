@@ -31,5 +31,8 @@ vt100 = "0.15"
 [target.'cfg(windows)'.dependencies]
 crossterm_winapi = "0.9"
 
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+cpal = "0.15"
+
 [lints]
 workspace = true
