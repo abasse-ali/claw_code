@@ -185,7 +185,8 @@ impl CompatProvider {
     /// Clé lue dans l'environnement, s'il y en a une.
     #[must_use]
     pub fn api_key(&self) -> Option<String> {
-        self.api_key_env.as_deref().and_then(env_non_empty)
+        let env = self.api_key_env.as_deref()?;
+        env_non_empty(env).or_else(|| crate::key_helper::key(env))
     }
 
     /// Utilisable maintenant : serveur local, ou clé présente.

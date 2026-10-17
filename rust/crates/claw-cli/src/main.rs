@@ -127,6 +127,7 @@ fn main() {
     user_env::adopt();
     apply_settings_env();
     runtime::set_classify_all_shell(auto_mode::rules().classify_all_shell);
+    install_key_helpers();
     if let Some(theme) = env::current_dir()
         .ok()
         .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok())
@@ -780,6 +781,63 @@ fn keybindings_command() -> String {
             .to_string(),
     );
     lines.join("\n")
+}
+
+/// `apiKeyHelper` des réglages personnels (un dépôt ne peut pas en régler :
+/// ce serait lancer une commande pour fabriquer vos clés) :
+/// - `~/.claw/settings.json` : pour le fournisseur du modèle de la session ;
+/// - `~/.claude/settings.json` (Claude Code) : pour `ANTHROPIC_API_KEY` ;
+/// - `providers[].apiKeyHelper` : pour la variable `apiKeyEnv` de ce fournisseur.
+fn install_key_helpers() {
+    let config_home = ConfigLoader::default_for(".").config_home().to_path_buf();
+    let read = |path: PathBuf| {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    };
+    let claude = env::var("CLAW_NO_CLAUDE_CONFIG").map_or(true, |value| value.trim() != "1");
+    if claude {
+        if let Some(settings) = config_home
+            .parent()
+            .and_then(|home| read(home.join(".claude").join("settings.json")))
+        {
+            if let Some(command) = settings
+                .get("apiKeyHelper")
+                .and_then(serde_json::Value::as_str)
+            {
+                api::key_helper::register("ANTHROPIC_API_KEY", command);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    if let Some(home) = config_home.parent() {
+        files.extend(read(home.join(".claw.json")));
+    }
+    files.extend(read(config_home.join("settings.json")));
+    for settings in files {
+        if let Some(command) = settings
+            .get("apiKeyHelper")
+            .and_then(serde_json::Value::as_str)
+        {
+            api::key_helper::set_default(Some(command));
+        }
+        let providers = settings
+            .get("providers")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for provider in providers {
+            let env_name = provider
+                .get("apiKeyEnv")
+                .and_then(serde_json::Value::as_str);
+            let command = provider
+                .get("apiKeyHelper")
+                .and_then(serde_json::Value::as_str);
+            if let (Some(env_name), Some(command)) = (env_name, command) {
+                api::key_helper::register(env_name, command);
+            }
+        }
+    }
 }
 
 /// La saisie s'interrompt : une tâche planifiée est due, ou une sous-tâche a
@@ -8091,6 +8149,7 @@ fn build_runtime_with_ui(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone_from(&model);
     runtime::telemetry::set_model(&model);
+    api::key_helper::set_default_target(api::credential_env_for_model(&model).as_deref());
     tools::advisors::set_resolver(|| models::advisor_models(&active_model()));
     // Sous-agents et modèles consultés comptent aussi dans les crédits du jour.
     tools::set_request_observer(credits::note_request);

@@ -1091,6 +1091,14 @@ Claw lit aussi `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` 
   (Claude Code, lui, supprime au bout de 30 jours par défaut).
 - **`companyAnnouncements`** : annonces de l'équipe ; l'une d'elles, prise au hasard, s'affiche
   au démarrage.
+- **`apiKeyHelper`** : une commande fournit la clé d'API (jeton de courte durée tiré d'un coffre,
+  gestionnaire de mots de passe). Sa première ligne de sortie sert de clé quand la variable du
+  fournisseur (`OPENROUTER_API_KEY`…) est absente ; elle est gardée 5 minutes
+  (`CLAW_API_KEY_HELPER_TTL_MS`) et redemandée après un refus 401 ou 403. Réglée dans
+  `~/.claw/settings.json`, elle vaut pour le fournisseur du modèle de la session ; dans
+  `~/.claude/settings.json`, pour `ANTHROPIC_API_KEY` seulement ; `providers[].apiKeyHelper` la
+  règle par fournisseur (`apiKeyEnv`). Un fichier de projet ne peut pas en régler, et une clé
+  n'est jamais donnée à un autre fournisseur que le sien.
 
 **Compétences (skills)** : un dossier `<nom>/SKILL.md` placé dans `.claude/skills/` (ou
 `.claw/skills/`, `.codex/skills/`) du projet, d'un dossier parent ou du dossier personnel. Claw
