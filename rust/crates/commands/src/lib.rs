@@ -465,6 +465,14 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         category: SlashCommandCategory::Automation,
     },
     SlashCommandSpec {
+        name: "tui",
+        aliases: &["plein-ecran"],
+        summary: "Rendu du terminal : classique, ou plein écran (sans scintillement, défilement dans Claw)",
+        argument_hint: Some("[default|fullscreen]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
         name: "sandbox",
         aliases: &["bac-a-sable"],
         summary: "Bac à sable des commandes : état, ou conteneur docker|podman|off pour la session",
@@ -933,6 +941,9 @@ pub enum SlashCommand {
         question: Option<String>,
     },
     WorkflowAuthoring,
+    Tui {
+        mode: Option<String>,
+    },
     Rewind,
     Sandbox {
         args: Option<String>,
@@ -1120,6 +1131,9 @@ impl SlashCommand {
                 question: remainder_after_command(trimmed, command),
             },
             "workflow-authoring" => Self::WorkflowAuthoring,
+            "tui" | "plein-ecran" => Self::Tui {
+                mode: remainder_after_command(trimmed, command),
+            },
             "rewind" | "checkpoint" => Self::Rewind,
             "sandbox" | "bac-a-sable" => Self::Sandbox {
                 args: remainder_after_command(trimmed, command),
@@ -2695,6 +2709,7 @@ pub fn handle_slash_command(
         | SlashCommand::Workflows { .. }
         | SlashCommand::DeepResearch { .. }
         | SlashCommand::WorkflowAuthoring
+        | SlashCommand::Tui { .. }
         | SlashCommand::Rewind
         | SlashCommand::Sandbox { .. }
         | SlashCommand::TerminalSetup
@@ -3160,7 +3175,7 @@ mod tests {
         assert!(help.contains("/code-review [fichiers|branche|commit|PR n°]"));
         assert!(help.contains("/install-github-action [assistant|review|all]"));
         assert!(help.contains("/add-dir [dossier] [--save]"));
-        assert_eq!(slash_command_specs().len(), 84);
+        assert_eq!(slash_command_specs().len(), 85);
         assert_eq!(resume_supported_slash_commands().len(), 19);
     }
 

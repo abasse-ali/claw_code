@@ -9,6 +9,7 @@ mod clipboard;
 mod credits;
 mod doctor;
 mod extra_commands;
+mod fullscreen;
 mod git_work;
 mod github_setup;
 mod image_reader;
@@ -158,6 +159,77 @@ fn main() {
     if let Err(error) = result {
         eprintln!("{}", render_cli_error(&error.to_string()));
         std::process::exit(1);
+    }
+    let code = EXIT_CODE.load(std::sync::atomic::Ordering::SeqCst);
+    if code != 0 {
+        std::process::exit(code);
+    }
+}
+
+/// Code de sortie demandé par la session (passage du plein écran au rendu
+/// classique), rendu après le nettoyage.
+static EXIT_CODE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Fin d'une session interactive.
+enum ReplExit {
+    Done,
+    /// `/tui fullscreen` : la conversation continue en plein écran.
+    Fullscreen(PathBuf),
+    /// `/tui default` dans le plein écran : elle continue en rendu classique.
+    Classic(PathBuf),
+}
+
+/// Session interactive, en rendu classique ou plein écran (`/tui`) ; la
+/// conversation passe de l'un à l'autre.
+fn run_interactive(
+    model: &str,
+    allowed_tools: Option<&AllowedToolSet>,
+    permission_mode: PermissionMode,
+    mut resume: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut fullscreen = fullscreen::wanted();
+    loop {
+        if fullscreen {
+            // Les mêmes options, sans la reprise : la conversation est confiée à part.
+            let args: Vec<String> = env::args()
+                .skip(1)
+                .filter(|arg| !matches!(arg.as_str(), "--resume" | "--continue" | "-c"))
+                .collect();
+            match fullscreen::run(&args, resume.as_deref()) {
+                Ok(Some(session)) => {
+                    resume = Some(session);
+                    fullscreen = false;
+                    continue;
+                }
+                Ok(None) => return Ok(()),
+                Err(error) => {
+                    eprintln!("Rendu plein écran indisponible ({error}) : rendu classique.");
+                    fullscreen = false;
+                    continue;
+                }
+            }
+        }
+        match run_repl(
+            model.to_string(),
+            allowed_tools.cloned(),
+            permission_mode,
+            resume.take(),
+        )? {
+            ReplExit::Done => return Ok(()),
+            ReplExit::Fullscreen(session) => {
+                resume = Some(session);
+                fullscreen = true;
+            }
+            ReplExit::Classic(session) => {
+                if fullscreen::hand_off(&session) {
+                    EXIT_CODE.store(
+                        i32::from(fullscreen::RELAUNCH_CLASSIC),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                }
+                return Ok(());
+            }
+        }
     }
 }
 
@@ -576,7 +648,7 @@ fn attach_job(reference: &str) -> Result<(), Box<dyn std::error::Error>> {
     install_interrupt_handler();
     let mode = parse_permission_mode_arg(&job.permission_mode)
         .unwrap_or_else(|_| default_permission_mode());
-    let result = run_repl(job.model.clone(), None, mode, Some(PathBuf::from(&session)));
+    let result = run_repl(job.model.clone(), None, mode, Some(PathBuf::from(&session))).map(|_| ());
     drop(heartbeat);
     *ATTACHED_JOB
         .lock()
@@ -1666,7 +1738,10 @@ fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             permission_mode,
         } => {
             install_interrupt_handler();
-            run_repl(model, allowed_tools, permission_mode, None)?;
+            // Conversation confiée par le rendu plein écran (`/tui`).
+            let resume = env::var_os("CLAW_TUI_RESUME").map(PathBuf::from);
+            env::remove_var("CLAW_TUI_RESUME");
+            run_interactive(&model, allowed_tools.as_ref(), permission_mode, resume)?;
         }
         CliAction::StreamSession {
             model,
@@ -1713,7 +1788,7 @@ fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 latest_session()?
             };
             install_interrupt_handler();
-            run_repl(model, allowed_tools, permission_mode, target)?;
+            run_interactive(&model, allowed_tools.as_ref(), permission_mode, target)?;
         }
         CliAction::Help => print_help(),
     }
@@ -3448,6 +3523,7 @@ fn run_resume_command(
         | SlashCommand::Workflows { .. }
         | SlashCommand::DeepResearch { .. }
         | SlashCommand::WorkflowAuthoring
+        | SlashCommand::Tui { .. }
         | SlashCommand::Rewind
         | SlashCommand::Sandbox { .. }
         | SlashCommand::TerminalSetup
@@ -3479,7 +3555,7 @@ fn run_repl(
     allowed_tools: Option<AllowedToolSet>,
     permission_mode: PermissionMode,
     resume: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<ReplExit, Box<dyn std::error::Error>> {
     let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode)?;
     let mut editor = input::LineEditor::new("> ", slash_command_completion_candidates());
     editor.set_command_help(slash_command_menu_entries());
@@ -3656,6 +3732,16 @@ fn run_repl(
                     if cli.handle_repl_command(command)? {
                         cli.persist_session()?;
                     }
+                    if let Some(fullscreen) = cli.tui_switch.take() {
+                        cli.persist_session()?;
+                        cli.session_hook_end("exit");
+                        let session = cli.session.path.clone();
+                        return Ok(if fullscreen {
+                            ReplExit::Fullscreen(session)
+                        } else {
+                            ReplExit::Classic(session)
+                        });
+                    }
                     continue;
                 }
                 editor.push_history(&input);
@@ -3710,7 +3796,7 @@ fn run_repl(
         }
     }
 
-    Ok(())
+    Ok(ReplExit::Done)
 }
 
 #[derive(Debug, Clone)]
@@ -3730,6 +3816,8 @@ struct ManagedSessionSummary {
 struct LiveCli {
     /// Sorties de `!commande` à transmettre avec la prochaine demande.
     pending_context: Vec<String>,
+    /// `/tui` : passage demandé au plein écran (`true`) ou au rendu classique.
+    tui_switch: Option<bool>,
     /// Texte tapé pendant le dernier tour (lignes en file d'attente, saisie en cours).
     typeahead: turn_keys::TypeAhead,
     model: String,
@@ -3796,6 +3884,7 @@ impl LiveCli {
         )?;
         let cli = Self {
             pending_context: Vec::new(),
+            tui_switch: None,
             typeahead: turn_keys::TypeAhead::default(),
             model,
             allowed_tools,
@@ -4468,6 +4557,10 @@ impl LiveCli {
             }
             SlashCommand::WorkflowAuthoring => {
                 println!("{}", tools::workflows::AUTHORING);
+                false
+            }
+            SlashCommand::Tui { mode } => {
+                self.tui_command(mode.as_deref());
                 false
             }
             SlashCommand::TerminalSetup => {
@@ -5498,6 +5591,47 @@ impl LiveCli {
             if let Err(error) = self.run_turn(&events) {
                 eprintln!("{}", render_cli_error(&error.to_string()));
             }
+        }
+    }
+
+    /// `/tui` : rendu actuel ; `/tui fullscreen` ou `/tui default` l'enregistre
+    /// (réglage `tui`) et y fait passer la conversation.
+    fn tui_command(&mut self, mode: Option<&str>) {
+        let inside = fullscreen::inside();
+        let current = if inside { "plein écran" } else { "classique" };
+        match mode.map(str::trim).map(str::to_lowercase).as_deref() {
+            None | Some("") => println!(
+                "Rendu : {current} · /tui fullscreen (plein écran : sans scintillement, PgUp/PgDn et molette pour relire) ou /tui default"
+            ),
+            Some("fullscreen" | "plein-ecran" | "plein-écran") => {
+                if let Err(error) =
+                    extra_commands::set_user_setting("tui", serde_json::json!("fullscreen"))
+                {
+                    eprintln!("Réglage tui non enregistré : {error}");
+                }
+                if inside {
+                    println!("  ⎿  Déjà en plein écran");
+                } else if !io::stdout().is_terminal() {
+                    println!("  ⎿  Réglage enregistré ; le plein écran demande un terminal");
+                } else {
+                    println!("  ⎿  Passage au plein écran, la conversation continue…");
+                    self.tui_switch = Some(true);
+                }
+            }
+            Some("default" | "classic" | "classique") => {
+                if let Err(error) =
+                    extra_commands::set_user_setting("tui", serde_json::json!("default"))
+                {
+                    eprintln!("Réglage tui non enregistré : {error}");
+                }
+                if inside {
+                    println!("  ⎿  Retour au rendu classique, la conversation continue…");
+                    self.tui_switch = Some(false);
+                } else {
+                    println!("  ⎿  Déjà en rendu classique");
+                }
+            }
+            Some(_) => println!("Usage : /tui [default|fullscreen]"),
         }
     }
 

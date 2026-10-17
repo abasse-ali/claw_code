@@ -1628,6 +1628,39 @@ export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer%20votre-jeton"   # si be
   `CLAW.md` (commandes de build et de test, architecture, conventions).
 - Dans l'interface web, un message envoyé pendant un tour part à la fin de celui-ci.
 
+### Rendu plein écran : `/tui fullscreen`
+
+Comme le rendu plein écran de Claude Code : la session s'affiche sur l'écran alternatif du
+terminal, comme `vim` ou `htop` (rien à voir avec la taille de la fenêtre).
+
+- **Pourquoi** : pas de scintillement, même dans le terminal de VS Code, tmux ou iTerm2, car seul ce
+  qui change est redessiné ; la saisie reste en bas pendant que Claw travaille ; la mémoire reste
+  bornée (20 000 lignes d'historique).
+- **Activer** :
+  - `/tui fullscreen` enregistre le réglage `"tui": "fullscreen"` et relance la conversation en
+    plein écran, sans la perdre ;
+  - `/tui default` revient au rendu classique, `/tui` dit lequel est actif ;
+  - `CLAW_NO_FLICKER=1` (ou `CLAUDE_CODE_NO_FLICKER=1`) démarre en plein écran, et `=0` le
+    refuse ;
+  - `CLAW_DISABLE_ALTERNATE_SCREEN=1` (ou celle de Claude Code) garde toujours le rendu
+    classique, comme une entrée ou une sortie qui n'est pas un terminal.
+- **Relire la conversation** :
+  - `PgUp`/`PgDn` défilent d'une demi-page, `Ctrl+Origine` remonte au début, `Fin` ou
+    `Ctrl+Fin` revient en bas, la molette défile de trois lignes (`CLAW_SCROLL_SPEED`,
+    multiplicateur jusqu'à 20) ;
+  - tant que vous relisez, la barre du bas compte les nouvelles lignes et la vue ne bouge pas ;
+    un clic sur cette barre, `Fin` ou une touche tapée revient en bas.
+- **Souris** : la molette passe par Claw, qui capture donc la souris. Selon le terminal,
+  `Maj` + glisser garde la sélection native. `CLAW_FULLSCREEN_MOUSE=0` laisse la souris au
+  terminal (`PgUp`/`PgDn` restent).
+- **Fonctionnement** : la session tourne dans un pseudo-terminal (ConPTY sous Windows). Un
+  émulateur VT garde son écran et son historique, et Claw ne dessine que les différences, en
+  sortie synchronisée. En quittant, le dernier écran reste affiché dans le terminal.
+- **Différences avec Claude Code** :
+  - pas de sélection ni de copie dans l'application, ni de clic dans la saisie ;
+  - pas de mode transcription avec recherche (`Ctrl+O`, `/`) ;
+  - pas de panneau de diff à côté.
+
 ### Automatisation et éditeurs
 
 - `--output-format stream-json` : un événement JSON par ligne (init, texte, `tool_use`,
