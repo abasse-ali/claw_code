@@ -1684,6 +1684,7 @@ fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             output_format,
             allowed_tools,
             permission_mode,
+            resume,
         } => {
             let prompt = prompt_from(prompt, io::stdin())?;
             install_interrupt_handler();
@@ -1692,7 +1693,13 @@ fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 env::remove_var("CLAW_CHANNELS");
             }
             let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode)?;
-            runtime::telemetry::session_started("fresh");
+            // `claw -c prompt "…"` (comme `claude -c -p`) : la demande poursuit
+            // la dernière session ; sans elle, « continue » partait de rien.
+            let resumed = if resume { latest_session()? } else { None };
+            if let Some(path) = &resumed {
+                cli.resume_session(Some(path.display().to_string()))?;
+            }
+            runtime::telemetry::session_started(if resumed.is_some() { "resume" } else { "fresh" });
             runtime::peers::register(&peer_name(), "print", permission_mode.as_str());
             cli.session_hook_start("startup");
             let mut result = cli.run_turn_with_output(&prompt, output_format);
@@ -1900,6 +1907,8 @@ enum CliAction {
         output_format: CliOutputFormat,
         allowed_tools: Option<AllowedToolSet>,
         permission_mode: PermissionMode,
+        /// `-c` : la demande poursuit la dernière session du projet.
+        resume: bool,
     },
     Login,
     Logout,
@@ -2102,6 +2111,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                     output_format,
                     allowed_tools: normalize_allowed_tools(&allowed_tool_values)?,
                     permission_mode,
+                    resume: continue_session,
                 });
             }
             "--bg" | "--background" => {
@@ -2331,6 +2341,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 output_format,
                 allowed_tools,
                 permission_mode,
+                resume: continue_session,
             })
         }
         // `claw /review`, `claw /fix "cargo test"`… : prompt ponctuel spécialisé.
@@ -2344,6 +2355,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 output_format,
                 allowed_tools,
                 permission_mode,
+                resume: continue_session,
             }),
             Some(SlashCommand::Unknown(_)) => {
                 // Les arguments contenant des espaces gardent leurs guillemets ($1…$9).
@@ -2373,6 +2385,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                             allowed_tools: custom_allowed_tools(&invocation.command.allowed_tools)
                                 .or(allowed_tools),
                             permission_mode,
+                            resume: continue_session,
                         })
                     }
                     None => parse_direct_slash_cli_action(&rest),
@@ -2386,6 +2399,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             output_format,
             allowed_tools,
             permission_mode,
+            resume: continue_session,
         }),
     }
 }
@@ -11630,8 +11644,27 @@ mod tests {
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::Prompt,
+                resume: false,
             }
         );
+    }
+
+    #[test]
+    fn a_prompt_after_continue_resumes_the_last_session() {
+        // Essai réel : `claw -c prompt "continue"` repartait de rien, et le
+        // modèle demandait quoi continuer.
+        for args in [
+            vec!["-c", "prompt", "continue"],
+            vec!["--continue", "continue"],
+            vec!["-c", "-p", "continue"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            let action = parse_args(&args).expect("args should parse");
+            assert!(
+                matches!(&action, CliAction::Prompt { prompt, resume: true, .. } if prompt == "continue"),
+                "{args:?} -> {action:?}"
+            );
+        }
     }
 
     #[test]
@@ -11667,6 +11700,7 @@ mod tests {
                 output_format: CliOutputFormat::Json,
                 allowed_tools: None,
                 permission_mode: PermissionMode::Prompt,
+                resume: false,
             }
         );
     }
@@ -11687,6 +11721,7 @@ mod tests {
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::Prompt,
+                resume: false,
             }
         );
     }

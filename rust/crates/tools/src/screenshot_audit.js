@@ -309,6 +309,11 @@
     };
     const focusable = [...document.querySelectorAll("a[href], button, input:not([type=hidden]), select, textarea")].filter(shown).slice(0, 12);
     const previous = document.activeElement;
+    // Une transition (color 0.2s) rendrait encore l'ancien style au moment de
+    // la mesure : elles sont coupées le temps de l'essai.
+    const still = document.createElement("style");
+    still.textContent = "*, *::before, *::after { transition: none !important; animation: none !important; }";
+    document.head.appendChild(still);
     const silent = [];
     let tried = 0;
     for (const el of focusable) {
@@ -319,9 +324,28 @@
       if (look(el) === before) silent.push(el);
       el.blur();
     }
+    still.remove();
     if (previous && previous.focus) previous.focus({ preventScroll: true });
     if (tried >= 2 && silent.length >= Math.max(2, tried / 2)) {
       problems.push(`No visible keyboard focus: nothing changes when ${list(silent.map(name), 3)} get the focus, so a keyboard user cannot see where they are. Add :focus-visible styles (an outline or a ring)`);
+    }
+  }
+
+  // 16. Texte collé au bord de l'écran (téléphone) : l'étendue réelle des
+  // lettres, pas la boîte du paragraphe (un texte centré n'y touche pas).
+  if (mobile) {
+    const edge = 8;
+    const touching = visible.filter((el) => ownText(el) && !pinned(el) && !scroller(el)
+      && el.matches("p, h1, h2, h3, h4, li, blockquote, figcaption, label, dt, dd, span, a"))
+      .filter((el) => {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const text = range.getBoundingClientRect();
+        return text.width > 0 && text.bottom > 0 && (text.left < edge || text.right > W - edge);
+      });
+    const outer = touching.filter((el) => !touching.some((other) => other !== el && other.contains(el)));
+    if (outer.length) {
+      problems.push(`Text touches the edge of the ${W}px-wide phone screen, with no side margin: ${list(outer.map(name))}. Give the page's containers a side padding (at least 16px on phones)`);
     }
   }
 

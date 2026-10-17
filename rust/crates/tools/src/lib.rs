@@ -504,7 +504,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "url": { "type": "string", "description": "An http or https address, for example http://localhost:3000/" },
+                    "url": { "type": "string", "description": "An http or https address, for example http://localhost:3000/, or the file:/// address of an .html file of the project" },
                     "wait_ms": {
                         "type": "integer",
                         "minimum": 200,

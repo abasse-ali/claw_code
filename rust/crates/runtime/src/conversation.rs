@@ -1597,6 +1597,27 @@ where
                         .push(ConversationMessage::user_text(EMPTY_RESPONSE_NUDGE));
                     continue;
                 }
+                // Vide encore après la relance : un autre modèle reprend la fin
+                // du tour au lieu de le perdre. Vu dans un essai réel : dots-3,
+                // 594 s de raisonnement puis rien, et le site laissé à mi-chemin.
+                Err(error)
+                    if error.to_string() == EMPTY_RESPONSE_ERROR
+                        && !aids.escalated
+                        && !self.subagent
+                        && harness::enabled(Aid::Escalation) =>
+                {
+                    aids.escalated = true;
+                    let Some(model) = self.api_client.escalate() else {
+                        return Err(error);
+                    };
+                    self.api_client.notify(&format!(
+                        "Le modèle n'a rien répondu deux fois : {model} reprend la fin du tour"
+                    ));
+                    self.session.messages.push(ConversationMessage::user_text(
+                        harness::escalation_feedback(&model),
+                    ));
+                    continue;
+                }
                 Err(error) => return Err(error),
             };
             if let Some(usage) = usage {
@@ -6055,6 +6076,40 @@ mod tests {
             "verifier".to_string()
         ]));
         (runtime, observed, bash_calls)
+    }
+
+    #[test]
+    fn a_model_that_answers_nothing_twice_hands_the_turn_to_another() {
+        let _serial = crate::test_serial();
+        let empty = || {
+            vec![
+                AssistantEvent::TextDelta("\n ".to_string()),
+                AssistantEvent::MessageStop,
+            ]
+        };
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![empty(), empty(), text_step("Voici l'explication.")],
+            Vec::new(),
+        );
+        runtime.api_client.escalation = Some("fort/modele");
+        let summary = runtime
+            .run_turn("explique le module", None)
+            .expect("un autre modèle reprend le tour");
+        let observed = observed.borrow();
+        assert_eq!(observed.escalations, 1);
+        assert!(observed.notices.iter().any(|notice| notice
+            == "Le modèle n'a rien répondu deux fois : fort/modele reprend la fin du tour"));
+        assert!(summary.assistant_messages.iter().any(|message| message
+            .blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text } if text == "Voici l'explication."))));
+
+        // Sans autre modèle, l'erreur est rendue comme avant.
+        let (mut runtime, _, _) = aided_runtime(vec![empty(), empty()], Vec::new());
+        let error = runtime
+            .run_turn("explique le module", None)
+            .expect_err("aucun autre modèle");
+        assert_eq!(error.to_string(), super::EMPTY_RESPONSE_ERROR);
     }
 
     #[test]

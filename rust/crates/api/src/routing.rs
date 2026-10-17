@@ -561,8 +561,18 @@ mod tests {
     use super::{mark_model_unavailable, model_available, reset_model_cooldowns, ModelChain};
     use std::time::Duration;
 
+    /// Les mises de côté sont communes au processus : les essais qui les
+    /// vident ou les lisent passent l'un après l'autre.
+    fn cooldowns_serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn cooldown_skips_models_and_daily_free_limit_covers_all_free_models() {
+        let _serial = cooldowns_serial();
         reset_model_cooldowns();
         assert!(model_available("qwen/qwen3-coder:free"));
         mark_model_unavailable("qwen/qwen3-coder:free", Duration::from_secs(60));
@@ -616,6 +626,7 @@ mod tests {
         use super::{
             failure_is_transient as transient, model_failure_reason, upstream_failure_status,
         };
+        let _serial = cooldowns_serial();
         assert_eq!(
             upstream_failure_status(
                 "l'api a retourné 504 Gateway Timeout (504) : Upstream idle timeout exceeded"
@@ -702,6 +713,7 @@ mod tests {
 
     #[test]
     fn chain_deduplicates_and_orders_available_models_first() {
+        let _serial = cooldowns_serial();
         reset_model_cooldowns();
         let chain = ModelChain::new(
             vec![
@@ -806,6 +818,7 @@ mod tests {
 
     #[test]
     fn long_cooldowns_survive_a_restart() {
+        let _serial = cooldowns_serial();
         reset_model_cooldowns();
         let store = std::env::temp_dir().join(format!(
             "claw-cooldowns-{}-{}.json",

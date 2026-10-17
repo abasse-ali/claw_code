@@ -792,7 +792,7 @@ applique**, quel que soit le modèle.
 | Second avis | L'outil `Consult` (et `/avis <question>`) pose la même question à plusieurs autres modèles ; l'agent compare et décide | `CLAW_COUNCIL=0` |
 | Leçons | L'outil `Remember` note une leçon utile au projet dans `.claw/lessons.md` (80 au plus), relue au début de chaque session | `CLAW_LESSONS=0` |
 | Modèle de planification | En mode plan, `"plannerModel"` réfléchit à la place du modèle de la session, qui exécute ensuite le plan approuvé | `CLAW_PLANNER=0` |
-| Escalade | Au deuxième échec de la vérification, ou au deuxième recadrage, Claw vous propose de confier la suite à un autre modèle (le gratuit le plus puissant en premier) ; sans réponse en 60 s, le même modèle continue. Avec `"modelSwitch": "auto"` ou sans personne pour répondre, **le modèle gratuit le plus puissant du moment** reprend la fin du tour ; le tour suivant repart avec le modèle habituel. Sans réglage à faire, et jamais vers un modèle payant | `CLAW_ESCALATION=0` |
+| Escalade | Au deuxième échec de la vérification, ou au deuxième recadrage, Claw vous propose de confier la suite à un autre modèle (le gratuit le plus puissant en premier) ; sans réponse en 60 s, le même modèle continue. Avec `"modelSwitch": "auto"` ou sans personne pour répondre, **le modèle gratuit le plus puissant du moment** reprend la fin du tour ; le tour suivant repart avec le modèle habituel. Sans réglage à faire, et jamais vers un modèle payant. De même quand le modèle ne répond rien (ni texte ni appel) deux fois dans un tour : un autre modèle reprend au lieu de perdre le tour | `CLAW_ESCALATION=0` |
 | Erreurs de l'éditeur | Avec l'extension VS Code : quand le tour a modifié des fichiers, Claw demande à l'éditeur les erreurs qu'il y voit (compilation, types, lint) et les renvoie au modèle, deux fois au plus par tour. L'outil `EditorDiagnostics` permet aussi au modèle de les lire quand il veut | `CLAW_EDITOR_DIAGNOSTICS=0` |
 | Contrôle des exigences | Quand le tour a modifié au moins 5 lignes et que la vérification passe, le modèle liste chaque partie de la demande (chaque page, fonction, fichier ou explication demandée ; après « reprendre », la demande poursuivie) et chaque exigence de la documentation du code (cas limites compris), puis donne pour chacune sa preuve : le code qui la couvre et le test ou la commande qui montre qu'elle marche. Ce qui manque est fait tout de suite, pas annoncé ni laissé à l'utilisateur. Sa réponse finale ne peut affirmer que ce que ce contrôle a établi, et nomme ce qui n'est pas fait ou pas vérifié. Il n'invente ni tests ni résultats. Pour les genres de fonctionnalité que nomme la demande (voir « Cas limites »), Claw rappelle aussi ce qu'un ingénieur expérimenté vérifie d'office : pour une recherche, les accents et les majuscules, les espaces, la recherche vide, plusieurs mots, le `+` d'une URL. Les phrases de la demande qui laissent une action à une personne y sont citées telles quelles, avec ce qu'il faut vérifier : rien n'est fait à sa place, les autres sont refusés. Une requête de plus par tour concerné | `CLAW_CHECKLIST=0` |
 | Contexte allégé | Les résultats d'outils gardés dans la session ne répètent pas au modèle ce qu'il vient d'écrire (ancien et nouveau texte d'une modification, contenu d'un fichier écrit, état du bac à sable d'une commande, liste de tâches qu'il vient d'envoyer : il en reste le nombre de tâches faites et celle en cours) | `CLAW_LEAN_RESULTS=0` |
@@ -1569,7 +1569,8 @@ export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer%20votre-jeton"   # si be
 - **Mode plan** : en `read-only`, l'agent soumet son plan avec l'outil `ExitPlanMode` ; si vous
   l'approuvez, la session passe en `workspace-write` et l'agent l'applique dans le même tour.
   Avec `"plannerModel"`, c'est ce modèle qui prépare le plan (voir « Aides au raisonnement »).
-- **Reprise** : `claw --continue` (ou `-c`) reprend la dernière session du projet, `claw --resume`
+- **Reprise** : `claw --continue` (ou `-c`) reprend la dernière session du projet, aussi avec
+  une demande ponctuelle (`claw -c prompt "continue"`, comme `claude -c -p`), `claw --resume`
   sans argument propose la liste des sessions récentes. La session est enregistrée à chaque étape
   d'un tour, pas seulement à la fin : un tour interrompu (fenêtre fermée, plantage, coupure) se
   retrouve à la reprise, et un appel d'outil qui était en cours y est noté comme interrompu.
@@ -1771,7 +1772,9 @@ curseur, à relire avant l'envoi.
   JavaScript exécuté (un badge « Hors ligne », un message d'erreur, une zone restée vide) et ce
   que la page a écrit dans la console : erreurs, exceptions avec leur fichier et leur ligne,
   requêtes en échec, refus CORS. Pour un projet local, le modèle lance d'abord le serveur en
-  arrière-plan puis donne son adresse `http://localhost`. Limites : l'outil montre la page telle
+  arrière-plan puis donne son adresse `http://localhost` ; une page sans serveur s'ouvre par
+  l'adresse `file:///` d'un fichier `.html` du projet (jamais d'un fichier hors du dossier de
+  travail). Limites : l'outil montre la page telle
   qu'elle se charge, sans cliquer ni saisir, et ne rend pas d'image. Il n'est proposé au modèle
   que si un navigateur est installé ; `CLAW_BROWSER` désigne l'exécutable à utiliser.
 - **Captures de la page** (outil `Screenshot`) : le même navigateur prend des captures au
@@ -1785,7 +1788,10 @@ curseur, à relire avant l'envoi.
   quart de l'écran d'un téléphone, liens morts (`href="#"`, ancre vers une section absente),
   champ sans étiquette, champ rouge avant toute saisie, bouton à la police du navigateur, image
   sans `alt`, bouton sans nom, texte de remplissage (lorem ipsum, « votre texte ici »), police
-  Times par défaut, focus invisible au clavier. Au téléphone, Claw essaie le menu : des liens de
+  Times par défaut, focus invisible au clavier (mesuré page focalisée et transitions coupées :
+  sans cela, un focus bien stylé passait pour invisible), texte collé au bord de l'écran d'un
+  téléphone. Le texte réservé aux lecteurs d'écran (`.visually-hidden`) et les boutons sans
+  texte (icône du menu) ne sont pas pris pour des défauts. Au téléphone, Claw essaie le menu : des liens de
   navigation cachés sans bouton pour les ouvrir, ou un bouton qui ne les montre pas après un
   clic, sont signalés. À part, des remarques de design (`designNotes`) nomment ce qui donne un
   air générique sans être une erreur : polices de tous les jours, lignes de plus de 85

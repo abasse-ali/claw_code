@@ -39,15 +39,18 @@ const LOOK_PROMPT: &str = "An AI assistant that cannot see this image asks a que
 /// complète en deux regards prend plusieurs minutes par image : dans une
 /// boucle de mise au point d'une page, ce serait un tour de 25 minutes.
 const QUICK_PROMPT: &str = "Describe this screenshot of a web page for a developer who cannot see it and must fix it from your words.\n1. LAYOUT: the regions from top to bottom (header, hero, sections, footer), their approximate height as a share of the image, background colors (approximate hex), alignment and columns.\n2. CONTENT: every heading, button, link and label, with its exact text; pictures and illustrations, what they show or that they are missing or broken.\n3. LOOK: typefaces as they appear (serif, sans, display, weight), colors, spacing rhythm, what draws the eye first.\n4. ISSUES: everything that looks broken, cut off, overlapping, covered, cramped, misaligned, unstyled (browser-default fields or buttons), empty, generic or unfinished. Write \"none seen\" if nothing.\nPlain text, no preamble. End with one line, exactly one of: VERDICT: DEFECT - <what looks broken, in a few words> or VERDICT: OK";
-/// Jetons d'une description rapide.
-const QUICK_TOKENS: u32 = 3_000;
+/// Jetons d'une description rapide. Le raisonnement compte dedans : avec
+/// 3 000, un modèle qui raisonne ne répondait rien (voir `CRITIQUE_TOKENS`).
+const QUICK_TOKENS: u32 = 8_000;
 /// Patience d'une description rapide.
 const QUICK_PATIENCE: tools::advisors::Patience = tools::advisors::Patience {
     per_model: std::time::Duration::from_secs(120),
     total: std::time::Duration::from_secs(180),
 };
-/// Jetons et patience d'une critique de design.
-const CRITIQUE_TOKENS: u32 = 3_000;
+/// Jetons et patience d'une critique de design. Vu dans un essai réel : avec
+/// 3 000, dots-3 s'arrêtait sur la limite après 12 539 caractères de
+/// raisonnement, sans un mot de critique.
+const CRITIQUE_TOKENS: u32 = 12_000;
 const CRITIQUE_PATIENCE: tools::advisors::Patience = tools::advisors::Patience {
     per_model: std::time::Duration::from_secs(150),
     total: std::time::Duration::from_secs(240),

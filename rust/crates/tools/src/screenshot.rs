@@ -234,6 +234,14 @@ fn target(input: &ScreenshotInput) -> Result<String, String> {
                 Ok(url.to_string())
             } else if url.starts_with("localhost") || url.starts_with("127.0.0.1") {
                 Ok(format!("http://{url}"))
+            } else if let Some(path) = url
+                .starts_with("file://")
+                .then(|| crate::page_view::file_url_path(url))
+                .flatten()
+            {
+                // Une page du projet donnée par son adresse : comme `path`.
+                let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+                file_url(&cwd, Path::new(&path))
             } else {
                 Err(format!("Screenshot opens http and https pages: `{url}` is not one (for a file of the project, pass `path`; for a local server, give its http://localhost address)"))
             }
@@ -248,7 +256,7 @@ fn target(input: &ScreenshotInput) -> Result<String, String> {
 }
 
 /// Adresse `file://` d'un fichier HTML du dossier de travail `cwd` (pas ailleurs).
-fn file_url(cwd: &Path, path: &Path) -> Result<String, String> {
+pub(crate) fn file_url(cwd: &Path, path: &Path) -> Result<String, String> {
     let full = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -1094,6 +1102,12 @@ fn capture(
     devtools.call(
         "Emulation.setTouchEmulationEnabled",
         json!({ "enabled": viewport.mobile, "maxTouchPoints": if viewport.mobile { 5 } else { 1 } }),
+    )?;
+    // Sans fenêtre, la page n'a pas le focus : `:focus` ne s'appliquerait à
+    // rien, et un focus bien stylé passerait pour invisible.
+    devtools.call(
+        "Emulation.setFocusEmulationEnabled",
+        json!({ "enabled": true }),
     )?;
     if let Some(theme) = theme {
         devtools.call(
