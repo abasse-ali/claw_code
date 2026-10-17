@@ -935,6 +935,165 @@ struct Shot {
     jpeg_base64: String,
 }
 
+/// Sélecteurs de remise à zéro : ils s'appliquent à tout et ne disent pas
+/// où corriger.
+fn is_reset_selector(selector: &str) -> bool {
+    selector.split(',').map(str::trim).all(|part| {
+        matches!(
+            part,
+            "*" | "*::before"
+                | "*::after"
+                | "*:before"
+                | "*:after"
+                | "html"
+                | ":root"
+                | "::before"
+                | "::after"
+        )
+    })
+}
+
+/// Les deux règles de l'auteur les plus précises d'un élément, avec leur
+/// fichier et leur ligne : `styles.css:761 .booking-content`. `sheets` : pour
+/// chaque feuille, son adresse et, pour un `<style>` de la page, la ligne où il
+/// commence (les lignes d'une règle sont comptées dans sa feuille).
+fn author_rules(
+    matched: &Value,
+    sheets: &std::collections::BTreeMap<String, (String, u64)>,
+) -> Vec<String> {
+    let mut rules: Vec<String> = matched["matchedCSSRules"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|entry| &entry["rule"])
+        .filter(|rule| rule["origin"] == "regular")
+        .filter_map(|rule| {
+            let selector = rule["selectorList"]["text"].as_str()?.trim();
+            if selector.is_empty() || is_reset_selector(selector) {
+                return None;
+            }
+            let (url, offset) = sheets.get(rule["styleSheetId"].as_str()?)?;
+            let line = rule["selectorList"]["selectors"][0]["range"]["startLine"]
+                .as_u64()
+                .or_else(|| rule["style"]["range"]["startLine"].as_u64())?;
+            let file = url
+                .split(['?', '#'])
+                .next()
+                .and_then(|path| path.rsplit('/').next())
+                .filter(|name| !name.is_empty())
+                .map_or_else(|| "the page".to_string(), |name| name.replace("%20", " "));
+            let short: String = selector.chars().take(70).collect();
+            Some(format!("{file}:{} {short}", offset + line + 1))
+        })
+        .collect();
+    // Les règles arrivent de la moins précise à la plus précise.
+    let keep_from = rules.len().saturating_sub(2);
+    rules.drain(..keep_from);
+    rules
+}
+
+/// Règles CSS de l'auteur qui dessinent les éléments que l'audit a mis en
+/// cause (`data-claw-blame`), par défaut (`false`) ou remarque (`true`) et
+/// par rang dans sa liste. Le modèle va droit à la règle au lieu de lire le
+/// fichier par morceaux : vu dans un essai réel, la moitié des requêtes d'un
+/// tour passaient à lire et chercher dans un CSS de 1 000 lignes. Rien en cas
+/// d'échec du navigateur : les défauts restent dits sans leurs règles.
+fn blamed_rules(devtools: &mut DevTools, culprits: &[Value]) -> Vec<(bool, usize, Vec<String>)> {
+    if culprits.is_empty()
+        || devtools.call("DOM.enable", json!({})).is_err()
+        || devtools.call("CSS.enable", json!({})).is_err()
+    {
+        return Vec::new();
+    }
+    let _ = devtools.pump(Duration::from_millis(300));
+    let sheets: std::collections::BTreeMap<String, (String, u64)> = devtools
+        .events
+        .iter()
+        .filter(|event| event["method"] == "CSS.styleSheetAdded")
+        .filter_map(|event| {
+            let header = &event["params"]["header"];
+            let offset = if header["isInline"].as_bool() == Some(true) {
+                header["startLine"].as_u64().unwrap_or(0)
+            } else {
+                0
+            };
+            Some((
+                header["styleSheetId"].as_str()?.to_string(),
+                (
+                    header["sourceURL"].as_str().unwrap_or("").to_string(),
+                    offset,
+                ),
+            ))
+        })
+        .collect();
+    let mut found: Vec<(bool, usize, Vec<String>)> = Vec::new();
+    let root = devtools
+        .call("DOM.getDocument", json!({ "depth": 0 }))
+        .ok()
+        .and_then(|document| document["root"]["nodeId"].as_u64());
+    if let Some(root) = root {
+        for culprit in culprits.iter().take(40) {
+            let (Some(n), Some(index)) = (culprit["n"].as_u64(), culprit["index"].as_u64()) else {
+                continue;
+            };
+            let is_note = culprit["kind"] == "note";
+            let element = devtools
+                .call(
+                    "DOM.querySelector",
+                    json!({ "nodeId": root, "selector": format!("[data-claw-blame~=\"{n}\"]") }),
+                )
+                .ok()
+                .and_then(|found| found["nodeId"].as_u64())
+                .filter(|id| *id > 0);
+            let Some(element) = element else { continue };
+            let Ok(matched) =
+                devtools.call("CSS.getMatchedStylesForNode", json!({ "nodeId": element }))
+            else {
+                continue;
+            };
+            let rules = author_rules(&matched, &sheets);
+            if rules.is_empty() {
+                continue;
+            }
+            let index = usize::try_from(index).unwrap_or(usize::MAX);
+            match found
+                .iter_mut()
+                .find(|(kind, at, _)| *kind == is_note && *at == index)
+            {
+                Some((_, _, list)) => {
+                    for rule in rules {
+                        if !list.contains(&rule) && list.len() < 4 {
+                            list.push(rule);
+                        }
+                    }
+                }
+                None => found.push((is_note, index, rules)),
+            }
+        }
+    }
+    // La capture suivante recharge la page : ses feuilles seront annoncées
+    // de nouveau quand le domaine sera réactivé.
+    let _ = devtools.call("CSS.disable", json!({}));
+    found
+}
+
+/// Où corriger : ajoute à chaque défaut et à chaque remarque les règles CSS
+/// des éléments en cause, avec fichier et ligne.
+fn add_css_rules(
+    devtools: &mut DevTools,
+    audit: &Value,
+    problems: &mut [String],
+    notes: &mut [String],
+) {
+    let culprits = audit["culprits"].as_array().cloned().unwrap_or_default();
+    for (is_note, index, rules) in blamed_rules(devtools, &culprits) {
+        let list = if is_note { &mut *notes } else { &mut *problems };
+        if let Some(line) = list.get_mut(index) {
+            let _ = write!(line, " (CSS rules: {})", rules.join("; "));
+        }
+    }
+}
+
 fn strings(value: &Value) -> Vec<String> {
     value
         .as_array()
@@ -1146,7 +1305,7 @@ fn capture(
         .evaluate(AUDIT_SCRIPT)
         .map_err(|error| format!("the layout check failed in the page: {error}"))?;
     let mut problems = strings(&audit["problems"]);
-    let notes = strings(&audit["notes"]);
+    let mut notes = strings(&audit["notes"]);
     let mut params = json!({ "format": "jpeg", "quality": JPEG_QUALITY });
     if full_page {
         let metrics = devtools.call("Page.getLayoutMetrics", json!({}))?;
@@ -1172,6 +1331,7 @@ fn capture(
         .filter(|data| !data.is_empty())
         .ok_or("the browser returned no image")?
         .to_string();
+    add_css_rules(devtools, &audit, &mut problems, &mut notes);
     // Après la capture (l'essai change la page) : le menu d'un téléphone s'ouvre-t-il ?
     if viewport.mobile {
         if let Ok(probe) = devtools.evaluate(PROBE_SCRIPT) {
@@ -1352,10 +1512,70 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        actions, console_lines, decode_base64, file_url, target, viewports, ScreenshotInput,
+        actions, author_rules, console_lines, decode_base64, file_url, target, viewports,
+        ScreenshotInput,
     };
     use serde_json::json;
     use std::path::Path;
+
+    #[test]
+    fn the_rules_that_draw_an_element_are_given_with_their_file_and_line() {
+        let matched = json!({ "matchedCSSRules": [
+            { "rule": { "styleSheetId": "ua", "origin": "user-agent", "selectorList": { "text": "div", "selectors": [{ "range": { "startLine": 0 } }] } } },
+            { "rule": { "styleSheetId": "2", "origin": "regular", "selectorList": { "text": "*, *::before, *::after", "selectors": [{ "range": { "startLine": 0 } }] } } },
+            { "rule": { "styleSheetId": "2", "origin": "regular", "selectorList": { "text": ".section", "selectors": [{ "range": { "startLine": 40 } }] } } },
+            { "rule": { "styleSheetId": "2", "origin": "regular", "selectorList": { "text": ".booking-content", "selectors": [{ "range": { "startLine": 760 } }] } } },
+            { "rule": { "styleSheetId": "3", "origin": "regular", "selectorList": { "text": ".booking-content > *", "selectors": [{ "range": { "startLine": 2 } }] } } }
+        ]});
+        let mut sheets = std::collections::BTreeMap::new();
+        sheets.insert(
+            "2".to_string(),
+            ("file:///C:/mon%20site/styles.css?v=2".to_string(), 0),
+        );
+        // Un <style> de la page : ses lignes comptent depuis la ligne 9 du HTML.
+        sheets.insert(
+            "3".to_string(),
+            ("http://localhost:8000/index.html".to_string(), 9),
+        );
+        assert_eq!(
+            author_rules(&matched, &sheets),
+            [
+                "styles.css:761 .booking-content",
+                "index.html:12 .booking-content > *"
+            ]
+        );
+        assert!(author_rules(&json!({}), &sheets).is_empty());
+    }
+
+    /// Essai avec le vrai navigateur : `cargo test -p tools -- --ignored blamed`.
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn blamed_rules_reach_the_problems_in_a_real_browser() {
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-blame-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        std::fs::write(
+            dir.join("styles.css"),
+            "body { margin: 0; padding: 0 20px; font-family: Georgia; }\n.row {\n  display: block;\n}\n.wide {\n  width: 900px;\n  background: #eee;\n}\n",
+        )
+        .expect("css");
+        std::fs::write(
+            dir.join("index.html"),
+            "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Essai</title><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main><section><h1>Essai</h1><div class=\"row\"><p class=\"wide\">Un paragraphe beaucoup trop large pour un téléphone.</p></div></section></main></body></html>",
+        )
+        .expect("html");
+        let page = format!("claw-blame-{}/index.html", std::process::id());
+        let mut request = input(None, Some(&page));
+        request.viewports = Some(json!(["phone"]));
+        let result = super::take(&request);
+        let _ = std::fs::remove_dir_all(&dir);
+        let problems = result.expect("capture")["captures"][0]["problems"].to_string();
+        assert!(
+            problems.contains("past the edge")
+                && problems.contains("(CSS rules: styles.css:5 .wide; styles.css:2 .row)"),
+            "{problems}"
+        );
+    }
 
     fn input(url: Option<&str>, path: Option<&str>) -> ScreenshotInput {
         ScreenshotInput {

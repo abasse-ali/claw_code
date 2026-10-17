@@ -10,6 +10,21 @@
   const W = document.documentElement.clientWidth || window.innerWidth;
   const mobile = W < 900;
   const problems = [];
+  // Éléments en cause : Claw demande au navigateur les règles CSS qui les
+  // dessinent (fichier et ligne), pour que le modèle aille droit à la règle
+  // au lieu de la chercher. Vu dans un essai réel : la moitié des requêtes
+  // d'un tour passaient à lire et à chercher dans un CSS de 1 000 lignes.
+  // `blame` et `blameNote` s'appellent juste avant le `push` concerné.
+  const culprits = [];
+  const mark = (kind, index, els) => {
+    for (const el of els.filter((el) => el && el.nodeType === 1 && el !== document.documentElement).slice(0, 2)) {
+      const n = culprits.length;
+      el.setAttribute("data-claw-blame", `${el.getAttribute("data-claw-blame") || ""} ${n}`.trim());
+      culprits.push({ n, kind, index });
+    }
+  };
+  const blame = (els) => mark("problem", problems.length, els);
+  const blameNote = (els) => mark("note", notes.length, els);
   const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "META", "LINK", "BR", "HEAD", "TITLE", "OPTION"]);
   const styles = new Map();
   const css = (el) => {
@@ -143,6 +158,7 @@
     const how = pageWidth > W + 1 ? `the page scrolls sideways, ${pageWidth}px wide` : "it is cut off";
     const masked = ["hidden", "clip"].includes(css(document.body).overflowX) || ["hidden", "clip"].includes(css(document.documentElement).overflowX)
       ? " overflow-x: hidden on body or html hides the symptom, not the cause: remove it and fix the element." : "";
+    blame(outside.flatMap((el) => [el, el.parentElement]));
     problems.push(`Content goes past the edge of the ${W}px-wide screen (${how}): ${list(outside.map((el) => {
       const rect = box.get(el);
       return `${name(el)} spans x=${Math.round(rect.left)} to x=${Math.round(rect.right)}, because of ${why(el)}`;
@@ -164,6 +180,7 @@
   });
   cut = cut.filter((el) => !cut.some((other) => other !== el && el.contains(other)));
   if (cut.length) {
+    blame(cut);
     problems.push(`Text cut off, its box is too small for it: ${list(cut.map((el) => (el.scrollWidth > el.clientWidth + 1
       ? `${name(el)} shows ${el.clientWidth}px of its ${el.scrollWidth}px width`
       : `${name(el)} shows ${el.clientHeight}px of its ${el.scrollHeight}px height`)))}`);
@@ -206,11 +223,13 @@
   // 6. Sur un téléphone : texte trop petit, boutons trop petits pour le doigt, pas de viewport.
   if (mobile) {
     const tiny = visible.filter((el) => ownText(el) && parseFloat(css(el).fontSize) < 12);
+    if (tiny.length) blame(tiny);
     if (tiny.length) problems.push(`Text too small to read on a phone, under 12px: ${list(tiny.map((el) => `${name(el)} (${css(el).fontSize})`))}`);
     const targets = visible.filter((el) => el.matches("button, a[href], select, [role=button], input:not([type=hidden]):not([type=checkbox]):not([type=radio])")
       && css(el).display !== "inline" && !el.closest("p, li > span"))
       .filter((el) => box.get(el).width < 24 || box.get(el).height < 24);
     if (targets.length) {
+      blame(targets);
       problems.push(`Buttons or links too small to tap, under 24x24px: ${list(targets.map((el) => `${name(el)} (${Math.round(box.get(el).width)}x${Math.round(box.get(el).height)}px)`))}`);
     }
     if (!document.querySelector('meta[name="viewport"]')) {
@@ -253,6 +272,7 @@
     };
     return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
   };
+  const paleEls = [];
   const pale = visible.filter((el) => ownText(el) && !el.closest("[disabled], [aria-disabled=true]")).map((el) => {
     const color = parse(css(el).color);
     const under = background(el);
@@ -262,8 +282,10 @@
     const ratio = (light + 0.05) / (dark + 0.05);
     const size = parseFloat(css(el).fontSize);
     const large = size >= 24 || (Number(css(el).fontWeight) >= 700 && size >= 18.5);
+    if (ratio < (large ? 3 : 4.5)) paleEls.push(el);
     return ratio < (large ? 3 : 4.5) ? `${name(el)} (${ratio.toFixed(1)}:1)` : null;
   }).filter(Boolean);
+  if (pale.length) blame(paleEls);
   if (pale.length) problems.push(`Text with too little contrast against its background, 4.5:1 is needed (3:1 for large text): ${list(pale)}`);
 
   // 8. Page vide.
@@ -283,6 +305,7 @@
         && el.matches("h1, h2, h3, p, a, button, img, input, label")
         && box.get(el).top < rb.bottom - 2 && box.get(el).bottom > rb.top + 2);
       if (covered.length) {
+        blame([bar]);
         problems.push(`The fixed ${name(bar)} (${Math.round(rb.height)}px high) covers the top of the page, ${list(covered.map(name), 3)} sit underneath it: offset the content by the bar's height (padding-top on the body or the first section, scroll-margin-top on sections)`);
       }
     }
@@ -291,6 +314,7 @@
     const tall = bars.concat(visible.filter((el) => css(el).position === "sticky" && el.matches("header, nav, [role=banner]")))
       .find((el) => box.get(el).height > window.innerHeight * 0.25);
     if (tall) {
+      blame([tall]);
       problems.push(`On a phone, ${name(tall)} takes ${Math.round(box.get(tall).height / window.innerHeight * 100)}% of the screen height: fold its links into a menu button that opens and closes them`);
     }
   }
@@ -335,6 +359,7 @@
   const early = fields.filter((el) => !el.value && document.activeElement !== el && el.matches(":invalid")
     && (reddish(css(el).borderTopColor) || reddish(css(el).outlineColor) || /rgba?\(\s*(?:1[6-9]\d|2\d\d),\s*\d{1,2},\s*\d{1,2}/.test(css(el).boxShadow)));
   if (early.length) {
+    blame(early);
     problems.push(`Form fields shown as errors before anyone typed in them (red on empty required fields): ${list(early.map(name))}. Show errors only after the user acts: :user-invalid, or a class added on blur or submit`);
   }
   const bodyFont = css(document.body).fontFamily;
@@ -347,6 +372,7 @@
   const raw = controls.filter((el) => !pageFonts.has(css(el).fontFamily)
     && (fields.includes(el) || /\p{L}/u.test(el.innerText || el.value || "")));
   if (raw.length) {
+    blame(raw);
     problems.push(`Form fields or buttons keep the browser's default look (font ${css(raw[0]).fontFamily.split(",")[0]} instead of the page's ${bodyFont.split(",")[0]}): ${list(raw.map(name))}. Style them like the rest of the page (font: inherit, padding, border, radius; full width on phones)`);
   }
 
@@ -399,6 +425,7 @@
         : links.length
           ? "the Google Fonts link does not include these families, or the page is opened without network access: check the family names in the link"
           : "no stylesheet loads them (add the Google Fonts <link>, or @font-face rules)";
+      blame([document.body]);
       problems.push(`Typefaces declared in the CSS but never loaded, so the text falls back to a default font: ${missing.map((family) => `"${family}"`).join(", ")}; ${hint}`);
     }
   }
@@ -431,6 +458,7 @@
     still.remove();
     if (previous && previous.focus) previous.focus({ preventScroll: true });
     if (tried >= 2 && silent.length >= Math.max(2, tried / 2)) {
+      blame(silent);
       problems.push(`No visible keyboard focus: nothing changes when ${list(silent.map(name), 3)} get the focus, so a keyboard user cannot see where they are. Add :focus-visible styles (an outline or a ring)`);
     }
   }
@@ -449,6 +477,7 @@
       });
     const outer = touching.filter((el) => !touching.some((other) => other !== el && other.contains(el)));
     if (outer.length) {
+      blame([outer[0], outer[0].parentElement]);
       problems.push(`Text touches the edge of the ${W}px-wide phone screen, with no side margin: ${list(outer.map(name))}. Give the page's containers a side padding (at least 16px on phones)`);
     }
   }
@@ -467,6 +496,7 @@
     return iconWords.test(label) || el.getAttribute("aria-hidden") === "true" || twins >= 1;
   });
   if (giants.length) {
+    blame(giants);
     problems.push(`Icons drawn far larger than intended (an <svg> without a size fills its container): ${list(giants.map((el) => {
       const rect = box.get(el);
       return `${name(el)} ${Math.round(rect.width)}x${Math.round(rect.height)}px`;
@@ -520,6 +550,7 @@
     const cause = entry.hiddenText >= 40 && entry.hiddenBy
       ? `it holds ${entry.hiddenText} characters of text hidden on this screen by display: none on ${name(entry.hiddenBy)} (a media query hides one version without showing another)`
       : `${name(entry.vacant)} is empty (a script that did not fill it, or markup that was never written)`;
+    blame([entry.hiddenBy || entry.vacant || entry.section]);
     problems.push(`The section ${name(entry.section)} shows only its title "${words(entry.heading).slice(0, 40)}" on this ${W}px-wide screen: ${cause}`);
   }
 
@@ -543,6 +574,7 @@
     const parts = [];
     if (pictures.length) parts.push(`as icons or pictures: ${list(pictures.map(name), 4)}`);
     if (inline.length) parts.push(`inside text: ${list(inline.map(name), 3)}`);
+    blame(emojiHosts);
     problems.push(`Emoji in the page (${parts.join("; ")}): emoji are drawn by the device's own font, look different on every phone and computer, and belong to no design. Replace each one with an inline SVG drawn for the subject (with width, height and aria-hidden="true", or a role="img" and aria-label when it carries meaning), or remove it from the text`);
   }
 
@@ -555,32 +587,39 @@
     const families = new Set([document.body, ...document.querySelectorAll("h1, h2, h3")].filter(Boolean)
       .map((el) => css(el).fontFamily.split(",")[0].replace(/["']/g, "").trim()));
     const generic = [...families].filter((family) => common.includes(family.toLowerCase()));
+    if (generic.length) blameNote([document.body, document.querySelector("h1, h2")]);
     if (generic.length) notes.push(`Typefaces ${generic.join(" and ")} are among the most frequent defaults of generated pages: a typeface chosen for this subject would give the page its own voice`);
     // 38em, soit environ 75 caractères : la mesure confortable d'un studio.
     const wide = visible.filter((el) => el.matches("p, li") && ownText(el) && words(el).length > 140
       && box.get(el).width / parseFloat(css(el).fontSize) > 38);
+    if (wide.length) blameNote(wide);
     if (wide.length) notes.push(`Lines of text longer than about 75 characters, tiring to read: ${list(wide.map(name), 3)} (keep paragraphs under about 65ch wide)`);
     // Corps de texte sous 16px ou interligne serré : la lecture fatigue.
     const body = visible.filter((el) => el.matches("p, li") && ownText(el) && words(el).length > 60);
     const smallBody = body.filter((el) => parseFloat(css(el).fontSize) < 16);
+    if (smallBody.length >= 2) blameNote(smallBody);
     if (smallBody.length >= 2) notes.push(`Body text under 16px (${list(smallBody.map((el) => `${name(el)} ${css(el).fontSize}`), 3)}): set paragraphs at 16 to 18px`);
     const tight = body.filter((el) => {
       const line = parseFloat(css(el).lineHeight);
       return Number.isFinite(line) && line / parseFloat(css(el).fontSize) < 1.4;
     });
+    if (tight.length >= 2) blameNote(tight);
     if (tight.length >= 2) notes.push(`Body text with a tight line-height, under 1.4 (${list(tight.map(name), 3)}): use 1.5 to 1.7 for paragraphs`);
     // Un titre à peine plus grand que le texte : la hiérarchie ne se voit pas.
     const h1 = document.querySelector("h1");
     const bodySize = parseFloat(css(document.body).fontSize) || 16;
     if (h1 && shown(h1) && parseFloat(css(h1).fontSize) / bodySize < 2.2) {
+      blameNote([h1]);
       notes.push(`The h1 is only ${(parseFloat(css(h1).fontSize) / bodySize).toFixed(1)} times the body text (${css(h1).fontSize}): a first screen needs a clear focal point, at least 2.5 times the body size on desktops`);
     }
     const centered = visible.filter((el) => el.matches("p") && css(el).textAlign === "center"
       && box.get(el).height / (parseFloat(css(el).lineHeight) || parseFloat(css(el).fontSize) * 1.4) > 3.5);
+    if (centered.length) blameNote(centered);
     if (centered.length) notes.push(`Long paragraphs set centered, hard to read: ${list(centered.map(name), 3)}`);
     // Dès deux : un studio exigeant n'en garde pas une par section.
     const caps = visible.filter((el) => ownText(el) && css(el).textTransform === "uppercase" && words(el).length <= 30
       && !el.matches("button, a, th, [role=button], nav *"));
+    if (caps.length >= 2) blameNote(caps);
     if (caps.length >= 2) notes.push(`${caps.length} small labels in ALL CAPS (${list(caps.map(name), 3)}): a frequent tell of generated pages; a strong page uses a weight, a color or a size change instead`);
     let animated = false;
     try {
@@ -607,6 +646,7 @@
       const paddings = sections.map((el) => `${Math.round(parseFloat(css(el).paddingTop) / 8)}/${Math.round(parseFloat(css(el).paddingBottom) / 8)}`);
       const distinct = new Set(paddings);
       if (distinct.size > Math.max(2, Math.ceil(sections.length / 2))) {
+        blameNote(sections);
         notes.push(`Sections have ${distinct.size} different vertical paddings for ${sections.length} sections (${sections.slice(0, 4).map((el, i) => `${name(el)}: ${Math.round(parseFloat(css(el).paddingTop))}/${Math.round(parseFloat(css(el).paddingBottom))}px`).join("; ")}): give sections of the same rank the same padding, from one spacing scale`);
       }
     }
@@ -630,6 +670,7 @@
       const carded = (first.boxShadow !== "none" || parseFloat(first.borderRadius) >= 8) && first.backgroundColor !== "rgba(0, 0, 0, 0)";
       const pictures = kids.some((kid) => kid.querySelector("img, svg, picture, video"));
       if (same && carded && !pictures && kids.length >= 3 && kids[0].matches("div, article, li, section")) {
+        blameNote([kids[0], parent]);
         notes.push(`${kids.length} identical cards in ${name(parent)} (same size, background, shadow and radius, no picture): a frequent tell of generated pages; vary the composition, give each its own illustration, or lay them out differently (a list, a split, an offset grid)`);
         break;
       }
@@ -642,6 +683,7 @@
       return after.content !== "none" && after.content !== "normal" && height > 0 && height <= 6
         && parseFloat(after.width) >= 20 && after.backgroundColor !== "rgba(0, 0, 0, 0)";
     });
+    if (underlined.length >= 2) blameNote(underlined);
     if (underlined.length >= 2) notes.push(`${underlined.length} headings carry a short decorative line underneath (${list(underlined.map(name), 3)}): a frequent tell of generated pages; the heading's size and weight should rank it on their own`);
 
     // Accent omniprésent : la couleur la plus saturée couvre plus de 15 % de
@@ -673,6 +715,7 @@
     const hoverKeys = ["color", "backgroundColor", "borderTopColor", "boxShadow", "textDecorationLine", "transform", "opacity", "outlineStyle"];
     const hoverable = [...document.querySelectorAll("a[href], button, [role=button]")].filter(shown).slice(0, 30);
     let silentHover = 0;
+    const silentHoverEls = [];
     for (const el of hoverable) {
       // Les règles :hover sont lues dans les feuilles : les comparer au
       // sélecteur de l'élément évite de simuler le pointeur.
@@ -688,9 +731,10 @@
         }
         if (hovered) break;
       }
-      if (!hovered) silentHover += 1;
+      if (!hovered) { silentHover += 1; silentHoverEls.push(el); }
     }
     if (hoverable.length >= 4 && silentHover >= hoverable.length / 2) {
+      blameNote(silentHoverEls);
       notes.push(`${silentHover} of ${hoverable.length} links and buttons have no :hover style: nothing answers the pointer, which reads as unfinished; give each interactive element hover, focus-visible and active states (a color, background or underline change, 150 to 250ms)`);
     }
   }
@@ -723,7 +767,8 @@
     const small = visible.filter((el) => el.matches("button, a[href], [role=button], input[type=submit], input[type=button]")
       && css(el).display !== "inline" && !el.closest("p, li > span, footer"))
       .filter((el) => (box.get(el).width < 44 || box.get(el).height < 44) && box.get(el).width >= 24 && box.get(el).height >= 24);
+    if (small.length >= 2) blameNote(small);
     if (small.length >= 2) notes.push(`${small.length} buttons or links are under the comfortable 44x44px tap size on a phone (${list(small.map((el) => `${name(el)} ${Math.round(box.get(el).width)}x${Math.round(box.get(el).height)}px`), 3)}): give them more padding or a min-height of 44px`);
   }
-  return { title: document.title || "", problems, notes, textLength: text.length };
+  return { title: document.title || "", problems, notes, culprits, textLength: text.length };
 })()
