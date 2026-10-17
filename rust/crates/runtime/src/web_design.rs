@@ -20,9 +20,12 @@ fn is_html(path: &str) -> bool {
 }
 
 /// Revues visuelles au plus par tour (`CLAW_DESIGN_REVIEW_ROUNDS`).
-const DEFAULT_REVIEW_ROUNDS: usize = 2;
+const DEFAULT_REVIEW_ROUNDS: usize = 3;
 /// Sous ce nombre de requêtes gratuites restantes, la revue est sautée.
 pub const MIN_FREE_REQUESTS: u64 = 25;
+/// Note sur 10 que chaque critère doit atteindre (`CLAW_DESIGN_BAR`) : 8, ce
+/// qu'un bon studio livrerait.
+const DEFAULT_DESIGN_BAR: u8 = 8;
 
 /// Revues visuelles au plus par tour.
 #[must_use]
@@ -32,6 +35,17 @@ pub fn max_review_rounds() -> usize {
         .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(DEFAULT_REVIEW_ROUNDS)
         .min(5)
+}
+
+/// Exigence de la revue : la note que chaque critère doit atteindre, de 5
+/// (un gabarit correct) à 10 (digne d'un prix).
+#[must_use]
+pub fn design_bar() -> u8 {
+    std::env::var("CLAW_DESIGN_BAR")
+        .ok()
+        .and_then(|value| value.trim().parse::<u8>().ok())
+        .unwrap_or(DEFAULT_DESIGN_BAR)
+        .clamp(5, 10)
 }
 
 /// Mots qui désignent une interface web.
@@ -162,20 +176,28 @@ pub fn is_interface_request(text: &str) -> bool {
 pub fn design_guide(request: &str, earlier: Option<&str>) -> Option<String> {
     let interface = is_interface_request(request)
         || (request.split_whitespace().count() <= 12 && earlier.is_some_and(is_interface_request));
-    interface.then(|| format!("{GUIDE_PREFIX} {DESIGN_METHOD}"))
+    interface.then(|| format!("{GUIDE_PREFIX} {}", design_method(design_bar())))
 }
 
-const DESIGN_METHOD: &str = "This request builds or reshapes a web interface. Aim for what a strong design studio would ship: distinctive, polished and fully working on phones and desktops, not a template.
+/// Méthode d'un studio exigeant : des cibles chiffrées plutôt que des
+/// conseils, les marques d'une page générée interdites, et une note à
+/// atteindre. Vu dans les essais réels : avec « change-les sans raison
+/// propre au sujet », un modèle gratuit gardait ses badges en capitales et
+/// Playfair Display en écrivant qu'il les avait évités.
+fn design_method(bar: u8) -> String {
+    format!("This request builds or reshapes a web interface. The bar is a page a top design studio would ship and sign: distinctive, polished and fully working on phones and desktops, never a template. When you finish, Claw has the page scored by an art director, 1 to 10 on seven criteria (phone, hierarchy, spacing, typography, color, identity, finish), and sends back every criterion under {bar}.
 1. Brief. In one line each: the subject, the audience, the page's main job. Use real, specific content in the user's language: no lorem ipsum, no \"Welcome to our website\", no stand-ins such as \"FB\" for a social link.
-2. Design plan, written in your reply before any code:
-- Color: 4 to 6 named hex values taken from the subject's own world (its materials, products, place), one accent used sparingly.
-- Type: one or two typefaces chosen for this subject (Google Fonts with a <link>), and a type scale (sizes, weights, line heights). Not the usual defaults: Inter, Roboto, Arial, Open Sans, Montserrat, Poppins, Lato, Playfair Display, system-ui.
-- Layout: an ASCII wireframe of the first screen and the order of the sections; text left-aligned (center only short lines); lines under 75 characters.
+2. Design plan, written in your reply before any code, with numbers:
+- Color: 4 to 6 named hex values taken from the subject's own world (its materials, products, place), one accent covering at most a tenth of the page; every text color checked at 4.5:1 against its background.
+- Type: one display face and one text face chosen for this subject (Google Fonts with a <link>), 2 or 3 weights in all; never Inter, Roboto, Arial, Open Sans, Montserrat, Poppins, Lato, Playfair Display, Space Grotesk or system-ui. A modular scale of 5 to 7 sizes with a ratio of at least 1.25: h1 at least 3rem on desktops and 2.25rem on phones, body text 16 to 18px with a line-height of 1.5 to 1.7, lines of 45 to 75 characters.
+- Space: one spacing scale on multiples of 8px (for example 8, 16, 24, 40, 64, 96) and nothing else; the same vertical padding for sections of the same rank; no empty band taller than half a screen.
+- Layout: an ASCII wireframe of the first screen and the order of the sections. Text left-aligned (center only one-line titles and short captions). Vary the composition from one section to the next (split, full width, grid, list, offset), never the same centered title over a grid each time.
 - One memorable element (a hero treatment, an illustration, a typographic idea, an interaction), with everything around it quiet and disciplined.
-Then compare the plan with these marks of a generated page, and change each one you used without a reason specific to this brief: a plain colored band with centered \"Welcome\" text as the hero; rows of identical rounded cards with the same soft shadow; a short line under every heading; ALL-CAPS badges or labels above headings; emoji or one repeated icon standing in for photos; cream with terracotta, or near-black with one acid accent; 01/02/03 markers on things that are not steps; a fade-in on every section.
-3. Build. CSS custom properties for the plan's tokens; semantic HTML (header, nav, main, section, footer); mobile first. On phones the navigation folds into a menu button that opens and closes it (aria-expanded), and a fixed header never covers content (offset the page by its height). Pictures: the user's images, or illustrations drawn for the subject with inline SVG or CSS, never broken or placeholder images. Forms: styled like the rest of the page (font: inherit), a visible label on every field, errors shown only after the user acts (:user-invalid, or on submit), a clear confirmation in the page. Visible :focus-visible styles, @media (prefers-reduced-motion: reduce), text contrast of at least 4.5:1. Watch CSS specificity: a .section rule and a .cta rule can cancel each other's spacing.
+Forbidden unless the brief asks for it, because they mark a generated page: a plain colored band with centered \"Welcome\" text as the hero; rows of identical cards with the same soft shadow; a short line under every heading; ALL-CAPS badges or small labels above headings; emoji or one repeated icon standing in for pictures; cream with terracotta, or near-black with one acid accent; 01/02/03 markers on things that are not steps; a fade-in on every section; decorative gradients everywhere. Check your plan against this list and say in one line that it uses none of them.
+3. Build. CSS custom properties for every color, size and space of the plan, and no raw values outside them (except 0 and 1px borders). Semantic HTML (header, nav, main, section, footer) with exactly one h1 and no skipped heading levels; mobile first. On phones the navigation folds into a menu button that opens and closes it (aria-expanded), and a fixed header never covers content (offset the page by its height). Every link, button and field has hover, :focus-visible and active states, with transitions of 150 to 250ms, and @media (prefers-reduced-motion: reduce) stops the motion. Tap targets of at least 44x44px on phones. Pictures: the user's images, or illustrations drawn for the subject with inline SVG (each with an explicit width and height) or CSS, never broken or placeholder images. Forms: styled like the rest of the page (font: inherit), a visible label on every field, errors shown only after the user acts (:user-invalid, or on submit), a clear confirmation in the page. Watch CSS specificity: a .section rule and a .cta rule can cancel each other's spacing.
 4. Make everything work: every link leads somewhere real (a section that exists, mailto:, tel:), every button does what its label says, forms validate and confirm, no console errors.
-5. Check it as a user would: Screenshot with full_page true at phone and desktop sizes, then again with actions that open the menu and send the form empty and filled; ViewPage for console errors. Fix every problem listed, judge the images against your plan and the marks above, improve the weakest part, and remove one decoration that does not serve the subject. When you finish, Claw reviews the page as well.";
+5. Check and critique before you answer: Screenshot with full_page true at phone and desktop sizes, then again with actions that open the menu and send the form empty and filled; ViewPage for console errors. Fix every measured problem and every design note. Then score the screenshots yourself, 1 to 10 on the seven criteria, as a strict art director would (most generated pages deserve 4 to 6; an 8 must be earned by something you can point to), and improve every criterion under {bar} before you answer. Remove one decoration that does not serve the subject.")
+}
 
 /// Fichier qui décide de l'apparence d'une page.
 #[must_use]
@@ -315,11 +337,23 @@ pub fn read_audit(output: &str) -> Audit {
 }
 
 /// Consigne du modèle qui juge les captures.
-pub const CRITIC_SYSTEM: &str = "You are the art director of a design studio known for distinctive, polished websites. You review screenshots of a page built by a junior developer and give precise, actionable direction. You judge only what you can see in the screenshots.";
+pub const CRITIC_SYSTEM: &str = "You are the art director of a design studio known for distinctive, polished websites, and you are hard to please. You review screenshots of a page built by a junior developer, score it honestly against what your studio would ship, and give precise, actionable direction. You judge only what you can see in the screenshots.";
 
-/// Ce qui est demandé au modèle qui juge les captures.
+/// Critères notés par le juge, dans l'ordre de la ligne `SCORES:`.
+pub const CRITERIA: [&str; 7] = [
+    "phone",
+    "hierarchy",
+    "spacing",
+    "typography",
+    "color",
+    "identity",
+    "finish",
+];
+
+/// Ce qui est demandé au modèle qui juge les captures : une note par
+/// critère, puis les changements qui relèvent chaque note sous `bar`.
 #[must_use]
-pub fn critique_prompt(request: &str, images: usize, audit: &Audit) -> String {
+pub fn critique_prompt(request: &str, images: usize, audit: &Audit, bar: u8) -> String {
     let measured = if audit.problems.is_empty() && audit.notes.is_empty() {
         "nothing".to_string()
     } else {
@@ -333,15 +367,58 @@ pub fn critique_prompt(request: &str, images: usize, audit: &Audit) -> String {
     };
     let brief: String = request.chars().take(1_500).collect();
     format!(
-        "The client's brief:\n\"{brief}\"\n\n{images} screenshots follow, full page: the phone view first, then the desktop view.\n\nAlready measured in the page and sent to the developer (do not repeat these):\n{measured}\n\nJudge the page on:\n1. Phone: nothing cut, covered or cramped; a menu that fits; comfortable tap targets.\n2. Hierarchy: a clear first screen, the eye knows where to go, one strong focal point.\n3. Spacing and alignment: a consistent vertical rhythm, aligned edges, enough breathing room, no crowded or empty-looking areas.\n4. Typography: typefaces that fit the subject, a clear scale, comfortable line length, nothing default-looking.\n5. Color: a harmonious palette tied to the subject, readable contrast, the accent used sparingly.\n6. Identity: does it look made for this subject, or like a template (a plain colored hero band, identical cards, emoji or icon placeholders for photos, lines under every heading, ALL-CAPS badges)?\n7. Finish: anything unstyled, broken, empty, misaligned or unfinished.\n\nReply with at most 6 changes, the most important first, one per line, each as:\nN. [area] what is wrong, as seen in the screenshots -> the exact change to make (CSS properties and values, HTML structure, copy)\nBe specific to this page; no generic advice. The developer cannot get new photos: suggest inline SVG, CSS shapes or gradients instead. If the page is already polished and distinctive with nothing important left to change, reply exactly: NO CHANGES NEEDED"
+        "The client's brief:\n\"{brief}\"\n\n{images} screenshots follow, full page: the phone view first, then the desktop view.\n\nAlready measured in the page and sent to the developer (do not repeat these):\n{measured}\n\nScore the page from 1 to 10 on each criterion, against what a top studio would ship: 5 is a competent template, 8 is what a strong studio would sign, 10 is award-level. Be strict: most generated pages deserve 4 to 6, and an 8 must be earned by something specific you can point to.\n1. phone: nothing cut, covered or cramped; a menu that fits; comfortable tap targets; text sized for a phone.\n2. hierarchy: a clear first screen with one strong focal point; the eye knows where to go next; headings, text and actions clearly ranked.\n3. spacing: one consistent vertical rhythm, aligned edges, generous but even breathing room, no crowded areas and no empty bands.\n4. typography: typefaces chosen for this subject, a clear scale with real contrast between levels, comfortable line length and leading, nothing default-looking.\n5. color: a harmonious palette tied to the subject, readable contrast, the accent used sparingly and on purpose.\n6. identity: does it look made for this subject, with a memorable idea, or like a template (a plain colored hero band, identical cards, emoji or icon placeholders for photos, lines under every heading, ALL-CAPS badges, the same layout in every section)?\n7. finish: craft in the details (alignment, consistent radii and shadows, polished icons and illustrations, states of buttons and fields); anything unstyled, broken, empty or unfinished.\n\nThe first line of your reply is exactly in this form:\nSCORES: phone=N hierarchy=N spacing=N typography=N color=N identity=N finish=N\nThen, for every criterion under {bar}, the changes that would raise it, the most important first, at most 8 in all, one per line, each as:\nN. [criterion] what is wrong, as seen in the screenshots -> the exact change to make (CSS properties and values, HTML structure, copy)\nBe specific to this page; no generic advice. The developer cannot get new photos: suggest inline SVG, CSS shapes or gradients instead. If every score is {bar} or more, write NO CHANGES NEEDED after the scores line."
     )
 }
 
-/// Changements demandés par le juge ; `None` s'il n'y a rien à changer.
+/// Notes du juge, lues sur sa ligne `SCORES:` (`typography=7`, `color: 8/10`).
 #[must_use]
-pub fn critique_changes(text: &str) -> Option<String> {
+pub fn critique_scores(text: &str) -> Vec<(String, u8)> {
+    let Some(line) = text
+        .lines()
+        .find(|line| line.to_ascii_uppercase().contains("SCORES"))
+    else {
+        return Vec::new();
+    };
+    let lower = line.to_ascii_lowercase();
+    CRITERIA
+        .iter()
+        .filter_map(|criterion| {
+            let after = &lower[lower.find(criterion)? + criterion.len()..];
+            let after =
+                after.trim_start_matches(|ch: char| ch == '=' || ch == ':' || ch.is_whitespace());
+            let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+            let score: u8 = digits.parse().ok()?;
+            (1..=10)
+                .contains(&score)
+                .then(|| ((*criterion).to_string(), score))
+        })
+        .collect()
+}
+
+/// Moyenne des notes, pour l'annoncer.
+#[must_use]
+pub fn average_score(scores: &[(String, u8)]) -> Option<f32> {
+    let count = u16::try_from(scores.len())
+        .ok()
+        .filter(|count| *count > 0)?;
+    let total: u16 = scores.iter().map(|(_, score)| u16::from(*score)).sum();
+    Some(f32::from(total) / f32::from(count))
+}
+
+/// Changements demandés par le juge, précédés de ses notes ; `None` quand
+/// chaque critère atteint `bar`. Un « rien à changer » ne compte pas tant
+/// qu'une note reste sous la barre.
+#[must_use]
+pub fn critique_changes(text: &str, bar: u8) -> Option<String> {
     let text = text.trim();
-    if text.is_empty() || text.to_ascii_uppercase().contains("NO CHANGES NEEDED") {
+    if text.is_empty() {
+        return None;
+    }
+    let scores = critique_scores(text);
+    let below: Vec<&(String, u8)> = scores.iter().filter(|(_, score)| *score < bar).collect();
+    let satisfied = text.to_ascii_uppercase().contains("NO CHANGES NEEDED");
+    if below.is_empty() && (satisfied || !scores.is_empty()) {
         return None;
     }
     let lines: Vec<&str> = text
@@ -353,12 +430,33 @@ pub fn critique_changes(text: &str) -> Option<String> {
                 .is_some_and(|first| first.is_ascii_digit())
                 || line.starts_with('-')
         })
-        .take(6)
+        .take(8)
         .collect();
-    if lines.is_empty() {
-        return Some(text.chars().take(2_000).collect());
+    let mut verdict = String::new();
+    if !scores.is_empty() {
+        let shown: Vec<String> = scores
+            .iter()
+            .map(|(criterion, score)| format!("{criterion} {score}"))
+            .collect();
+        let under: Vec<&str> = below
+            .iter()
+            .map(|(criterion, _)| criterion.as_str())
+            .collect();
+        let _ = writeln!(
+            verdict,
+            "Scores (the bar is {bar}/10 on each): {}; under the bar: {}",
+            shown.join(", "),
+            under.join(", ")
+        );
     }
-    Some(lines.join("\n"))
+    if !lines.is_empty() {
+        verdict.push_str(&lines.join("\n"));
+    } else if satisfied {
+        verdict.push_str("Raise every criterion under the bar: look at the page again with that criterion in mind and improve it.");
+    } else {
+        verdict.extend(text.chars().take(2_000));
+    }
+    Some(verdict)
 }
 
 /// Message au modèle après la revue ; `None` quand il n'y a rien à corriger.
@@ -369,47 +467,32 @@ pub fn review_feedback(
     critique: Option<(&str, &str)>,
     round: usize,
     rounds: usize,
+    bar: u8,
 ) -> Option<String> {
-    if audit.is_clean() && critique.is_none() {
+    if audit.is_clean() && audit.notes.is_empty() && critique.is_none() {
         return None;
     }
     let page = target.split_once(':').map_or(target, |(_, page)| page);
     let mut text = format!(
-        "[Claw] Claw looked at the page you built ({page}) as a user would, full page at phone and desktop sizes (review {round} of {rounds})."
+        "[Claw] Claw looked at the page you built ({page}) as a user would, full page at phone and desktop sizes (review {round} of {rounds}). The bar is a page a top studio would ship: {bar}/10 or more on every criterion."
     );
+    let bullets = |lines: &mut dyn Iterator<Item = &String>| {
+        lines
+            .map(|line| format!("- {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     if !audit.problems.is_empty() {
         text.push_str("\nMeasured problems, fix every one:\n");
-        text.push_str(
-            &audit
-                .problems
-                .iter()
-                .map(|line| format!("- {line}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
+        text.push_str(&bullets(&mut audit.problems.iter()));
     }
     if !audit.console.is_empty() {
         text.push_str("\nConsole errors:\n");
-        text.push_str(
-            &audit
-                .console
-                .iter()
-                .take(8)
-                .map(|line| format!("- {line}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
+        text.push_str(&bullets(&mut audit.console.iter().take(8)));
     }
     if !audit.notes.is_empty() {
-        text.push_str("\nDesign notes (choices that make the page look generic; keep one only if it was deliberate for this subject):\n");
-        text.push_str(
-            &audit
-                .notes
-                .iter()
-                .map(|line| format!("- {line}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
+        text.push_str("\nDesign notes, measured choices that make the page look generic or unpolished: fix each one; keep one only if the brief asks for it, and say why in your answer:\n");
+        text.push_str(&bullets(&mut audit.notes.iter()));
     }
     if let Some((model, changes)) = critique {
         let _ = write!(
@@ -418,6 +501,9 @@ pub fn review_feedback(
         );
     }
     text.push_str("\nMake these changes in the code, keep what already works, check again with Screenshot (full_page, phone and desktop), then give your answer.");
+    if round >= rounds {
+        text.push_str(" This was the last review of this turn: in your answer, give the user the scores and say plainly what is still under the bar.");
+    }
     Some(text)
 }
 
@@ -504,9 +590,10 @@ mod tests {
         );
         assert_eq!(audit.console, vec!["error: x is not defined"]);
         assert_eq!(audit.notes.len(), 1);
-        assert_eq!(critique_changes("Looks great. NO CHANGES NEEDED"), None);
+        assert_eq!(critique_changes("Looks great. NO CHANGES NEEDED", 8), None);
         let changes = critique_changes(
             "Here are my notes:\n1. [Hero] flat band -> add an SVG\n2. [Type] Inter -> Fraunces",
+            8,
         )
         .expect("changes");
         assert_eq!(changes.lines().count(), 2);
@@ -516,16 +603,74 @@ mod tests {
             Some(("vision-model", &changes)),
             1,
             2,
+            8,
         )
         .expect("feedback");
         assert!(
             feedback.contains("index.html")
                 && feedback.contains("Header covers")
                 && feedback.contains("vision-model")
+                && feedback.contains("8/10")
+                && !feedback.contains("last review")
         );
+        // Dernière revue du tour : le modèle doit dire ce qui reste sous la barre.
+        assert!(review_feedback("path:index.html", &audit, None, 2, 2, 8)
+            .expect("feedback")
+            .contains("last review"));
         assert_eq!(
-            review_feedback("path:index.html", &Audit::default(), None, 1, 2),
+            review_feedback("path:index.html", &Audit::default(), None, 1, 2, 8),
             None
+        );
+    }
+
+    #[test]
+    fn the_judge_scores_are_read_and_a_score_under_the_bar_is_never_good_enough() {
+        use super::{average_score, critique_scores, design_bar, design_guide};
+        let reply = "SCORES: phone=8 hierarchy=7 spacing=9 typography=6 color=8 identity=5 finish=8\n1. [identity] generic cards -> draw one SVG per product\n2. [typography] Inter -> Fraunces 600 for headings";
+        let scores = critique_scores(reply);
+        assert_eq!(scores.len(), 7);
+        assert_eq!(scores[3], ("typography".to_string(), 6));
+        let mean = average_score(&scores).expect("moyenne");
+        assert!((mean - 51.0 / 7.0).abs() < 0.001, "{mean}");
+        let changes = critique_changes(reply, 8).expect("sous la barre");
+        assert!(
+            changes.starts_with("Scores (the bar is 8/10 on each)")
+                && changes.contains("under the bar: hierarchy, typography, identity")
+                && changes.lines().count() == 3,
+            "{changes}"
+        );
+        // Toutes les notes à la barre : rien à changer, même sans « NO CHANGES NEEDED ».
+        assert_eq!(
+            critique_changes(
+                "SCORES: phone=8 hierarchy=9 spacing=8 typography=8 color=8 identity=8 finish=10",
+                8
+            ),
+            None
+        );
+        // « Rien à changer » avec une note sous la barre : le juge s'est satisfait trop vite.
+        let lazy = critique_changes(
+            "SCORES: phone=9 hierarchy=8 spacing=8 typography=8 color=8 identity=6 finish=8\nNO CHANGES NEEDED",
+            8,
+        )
+        .expect("identity sous la barre");
+        assert!(
+            lazy.contains("Raise every criterion under the bar"),
+            "{lazy}"
+        );
+        // Autres écritures des notes.
+        assert_eq!(
+            critique_scores("Scores: phone: 7/10, hierarchy: 8/10").len(),
+            2
+        );
+        assert!(critique_scores("No scores here").is_empty());
+        // La barre et la méthode.
+        assert_eq!(design_bar(), 8);
+        let guide = design_guide("Crée un site pour un fleuriste", None).expect("méthode");
+        assert!(
+            guide.contains("under 8")
+                && guide.contains("Forbidden unless the brief asks for it")
+                && guide.contains("multiples of 8px"),
+            "{guide}"
         );
     }
 }

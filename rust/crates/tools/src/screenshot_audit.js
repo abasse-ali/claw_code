@@ -373,19 +373,38 @@
   const notes = [];
   if (!mobile) {
     const common = ["inter", "roboto", "arial", "helvetica", "helvetica neue", "open sans", "montserrat", "poppins", "lato",
-      "system-ui", "-apple-system", "segoe ui", "nunito", "raleway", "playfair display", "source sans pro", "verdana"];
+      "system-ui", "-apple-system", "segoe ui", "nunito", "raleway", "playfair display", "source sans pro", "verdana",
+      "space grotesk", "dm sans", "work sans", "ubuntu", "georgia", "times new roman"];
     const families = new Set([document.body, ...document.querySelectorAll("h1, h2, h3")].filter(Boolean)
       .map((el) => css(el).fontFamily.split(",")[0].replace(/["']/g, "").trim()));
     const generic = [...families].filter((family) => common.includes(family.toLowerCase()));
     if (generic.length) notes.push(`Typefaces ${generic.join(" and ")} are among the most frequent defaults of generated pages: a typeface chosen for this subject would give the page its own voice`);
-    const wide = visible.filter((el) => el.matches("p, li") && ownText(el) && words(el).length > 160
-      && box.get(el).width / parseFloat(css(el).fontSize) > 42);
-    if (wide.length) notes.push(`Lines of text longer than about 85 characters, tiring to read: ${list(wide.map(name), 3)} (keep paragraphs under about 70ch wide)`);
+    // 38em, soit environ 75 caractères : la mesure confortable d'un studio.
+    const wide = visible.filter((el) => el.matches("p, li") && ownText(el) && words(el).length > 140
+      && box.get(el).width / parseFloat(css(el).fontSize) > 38);
+    if (wide.length) notes.push(`Lines of text longer than about 75 characters, tiring to read: ${list(wide.map(name), 3)} (keep paragraphs under about 65ch wide)`);
+    // Corps de texte sous 16px ou interligne serré : la lecture fatigue.
+    const body = visible.filter((el) => el.matches("p, li") && ownText(el) && words(el).length > 60);
+    const smallBody = body.filter((el) => parseFloat(css(el).fontSize) < 16);
+    if (smallBody.length >= 2) notes.push(`Body text under 16px (${list(smallBody.map((el) => `${name(el)} ${css(el).fontSize}`), 3)}): set paragraphs at 16 to 18px`);
+    const tight = body.filter((el) => {
+      const line = parseFloat(css(el).lineHeight);
+      return Number.isFinite(line) && line / parseFloat(css(el).fontSize) < 1.4;
+    });
+    if (tight.length >= 2) notes.push(`Body text with a tight line-height, under 1.4 (${list(tight.map(name), 3)}): use 1.5 to 1.7 for paragraphs`);
+    // Un titre à peine plus grand que le texte : la hiérarchie ne se voit pas.
+    const h1 = document.querySelector("h1");
+    const bodySize = parseFloat(css(document.body).fontSize) || 16;
+    if (h1 && shown(h1) && parseFloat(css(h1).fontSize) / bodySize < 2.2) {
+      notes.push(`The h1 is only ${(parseFloat(css(h1).fontSize) / bodySize).toFixed(1)} times the body text (${css(h1).fontSize}): a first screen needs a clear focal point, at least 2.5 times the body size on desktops`);
+    }
     const centered = visible.filter((el) => el.matches("p") && css(el).textAlign === "center"
       && box.get(el).height / (parseFloat(css(el).lineHeight) || parseFloat(css(el).fontSize) * 1.4) > 3.5);
     if (centered.length) notes.push(`Long paragraphs set centered, hard to read: ${list(centered.map(name), 3)}`);
-    const caps = visible.filter((el) => ownText(el) && css(el).textTransform === "uppercase" && words(el).length <= 30);
-    if (caps.length >= 4) notes.push(`${caps.length} small labels in ALL CAPS (${list(caps.map(name), 3)}): a frequent tell of generated pages`);
+    // Dès deux : un studio exigeant n'en garde pas une par section.
+    const caps = visible.filter((el) => ownText(el) && css(el).textTransform === "uppercase" && words(el).length <= 30
+      && !el.matches("button, a, th, [role=button], nav *"));
+    if (caps.length >= 2) notes.push(`${caps.length} small labels in ALL CAPS (${list(caps.map(name), 3)}): a frequent tell of generated pages; a strong page uses a weight, a color or a size change instead`);
     const pictograph = /^\p{Extended_Pictographic}[\uFE0F\u200D\p{Extended_Pictographic}]*$/u;
     const emoji = visible.filter((el) => pictograph.test(words(el)) && parseFloat(css(el).fontSize) >= 32);
     if (emoji.length) notes.push(`Emoji standing in for pictures (${list(emoji.map(name), 3)}): use the real images, or illustrations drawn for the subject (inline SVG, CSS)`);
@@ -406,6 +425,108 @@
       }
     }
     if (animated && !reduced) notes.push("The page animates but ignores prefers-reduced-motion: add a @media (prefers-reduced-motion: reduce) rule that stops the motion");
+
+    // Rythme vertical : les sections de même rang doivent partager leur
+    // marge haute et basse (une échelle d'espacement), à 8px près.
+    const sections = [...document.querySelectorAll("main > section, body > section, main > article, body > article")].filter(shown);
+    if (sections.length >= 3) {
+      const paddings = sections.map((el) => `${Math.round(parseFloat(css(el).paddingTop) / 8)}/${Math.round(parseFloat(css(el).paddingBottom) / 8)}`);
+      const distinct = new Set(paddings);
+      if (distinct.size > Math.max(2, Math.ceil(sections.length / 2))) {
+        notes.push(`Sections have ${distinct.size} different vertical paddings for ${sections.length} sections (${sections.slice(0, 4).map((el, i) => `${name(el)}: ${Math.round(parseFloat(css(el).paddingTop))}/${Math.round(parseFloat(css(el).paddingBottom))}px`).join("; ")}): give sections of the same rank the same padding, from one spacing scale`);
+      }
+    }
+
+    // Cartes identiques : plusieurs frères de même classe, même taille, même
+    // fond, même ombre et même rayon, sans image, c'est la grille de gabarit.
+    const seen = new Set();
+    for (const el of visible) {
+      const parent = el.parentElement;
+      if (!parent || seen.has(parent)) continue;
+      seen.add(parent);
+      const kids = [...parent.children].filter((kid) => shown(kid) && kid.tagName !== "SCRIPT");
+      if (kids.length < 3) continue;
+      const first = css(kids[0]);
+      const same = kids.every((kid) => {
+        const style = css(kid);
+        return kid.tagName === kids[0].tagName && kid.className === kids[0].className
+          && style.backgroundColor === first.backgroundColor && style.boxShadow === first.boxShadow
+          && style.borderRadius === first.borderRadius && Math.abs(box.get(kid).height - box.get(kids[0]).height) < 4;
+      });
+      const carded = (first.boxShadow !== "none" || parseFloat(first.borderRadius) >= 8) && first.backgroundColor !== "rgba(0, 0, 0, 0)";
+      const pictures = kids.some((kid) => kid.querySelector("img, svg, picture, video"));
+      if (same && carded && !pictures && kids.length >= 3 && kids[0].matches("div, article, li, section")) {
+        notes.push(`${kids.length} identical cards in ${name(parent)} (same size, background, shadow and radius, no picture): a frequent tell of generated pages; vary the composition, give each its own illustration, or lay them out differently (a list, a split, an offset grid)`);
+        break;
+      }
+    }
+
+    // Petit trait sous chaque titre : la décoration de gabarit par excellence.
+    const underlined = [...document.querySelectorAll("h1, h2, h3")].filter(shown).filter((h) => {
+      const after = getComputedStyle(h, "::after");
+      const height = parseFloat(after.height);
+      return after.content !== "none" && after.content !== "normal" && height > 0 && height <= 6
+        && parseFloat(after.width) >= 20 && after.backgroundColor !== "rgba(0, 0, 0, 0)";
+    });
+    if (underlined.length >= 2) notes.push(`${underlined.length} headings carry a short decorative line underneath (${list(underlined.map(name), 3)}): a frequent tell of generated pages; the heading's size and weight should rank it on their own`);
+
+    // Accent omniprésent : la couleur la plus saturée couvre plus de 15 % de
+    // la page, elle n'accentue plus rien.
+    const sat = (color) => {
+      const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+      if (!match || (match[4] !== undefined && parseFloat(match[4]) < 0.5)) return null;
+      const [r, g, b] = [match[1], match[2], match[3]].map(Number);
+      const max = Math.max(r, g, b);
+      const min = Math.min(r, g, b);
+      return max === 0 ? 0 : (max - min) / max;
+    };
+    const area = new Map();
+    const pageArea = Math.max(1, document.documentElement.scrollWidth * document.documentElement.scrollHeight);
+    for (const el of visible) {
+      const bg = css(el).backgroundColor;
+      const s = sat(bg);
+      if (s === null || s < 0.45) continue;
+      const rect = box.get(el);
+      if (rect.width * rect.height > pageArea * 0.9) continue;
+      area.set(bg, (area.get(bg) || 0) + rect.width * rect.height);
+    }
+    const [loudest] = [...area.entries()].sort((a, b) => b[1] - a[1]);
+    if (loudest && loudest[1] / pageArea > 0.15) {
+      notes.push(`The saturated color ${loudest[0]} covers about ${Math.round(loudest[1] / pageArea * 100)}% of the page: an accent used that much no longer accents anything; keep it under a tenth (buttons, a key figure, one band), with quiet neutrals elsewhere`);
+    }
+
+    // Liens et boutons sans état de survol : rien ne répond au pointeur.
+    const hoverKeys = ["color", "backgroundColor", "borderTopColor", "boxShadow", "textDecorationLine", "transform", "opacity", "outlineStyle"];
+    const hoverable = [...document.querySelectorAll("a[href], button, [role=button]")].filter(shown).slice(0, 30);
+    let silentHover = 0;
+    for (const el of hoverable) {
+      // Les règles :hover sont lues dans les feuilles : les comparer au
+      // sélecteur de l'élément évite de simuler le pointeur.
+      let hovered = false;
+      for (const sheet of document.styleSheets) {
+        let rules = [];
+        try { rules = sheet.cssRules; } catch (_) { continue; }
+        for (const rule of rules) {
+          const selectors = rule.selectorText || (rule.cssRules && [...rule.cssRules].map((r) => r.selectorText).filter(Boolean).join(","));
+          if (!selectors || !selectors.includes(":hover")) continue;
+          const plain = selectors.split(",").map((sel) => sel.replace(/:hover/g, "").replace(/::?[a-z-]+(\([^)]*\))?/g, "").trim()).filter(Boolean);
+          if (plain.some((sel) => { try { return el.matches(sel) || (sel && el.closest(sel)); } catch (_) { return false; } })) { hovered = true; break; }
+        }
+        if (hovered) break;
+      }
+      if (!hovered) silentHover += 1;
+    }
+    if (hoverable.length >= 4 && silentHover >= hoverable.length / 2) {
+      notes.push(`${silentHover} of ${hoverable.length} links and buttons have no :hover style: nothing answers the pointer, which reads as unfinished; give each interactive element hover, focus-visible and active states (a color, background or underline change, 150 to 250ms)`);
+    }
+  }
+
+  // Cibles tactiles : 24px est le minimum légal, 44px le confort attendu.
+  if (mobile) {
+    const small = visible.filter((el) => el.matches("button, a[href], [role=button], input[type=submit], input[type=button]")
+      && css(el).display !== "inline" && !el.closest("p, li > span, footer"))
+      .filter((el) => (box.get(el).width < 44 || box.get(el).height < 44) && box.get(el).width >= 24 && box.get(el).height >= 24);
+    if (small.length >= 2) notes.push(`${small.length} buttons or links are under the comfortable 44x44px tap size on a phone (${list(small.map((el) => `${name(el)} ${Math.round(box.get(el).width)}x${Math.round(box.get(el).height)}px`), 3)}): give them more padding or a min-height of 44px`);
   }
   return { title: document.title || "", problems, notes, textLength: text.length };
 })()

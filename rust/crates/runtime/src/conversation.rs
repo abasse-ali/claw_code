@@ -2740,19 +2740,40 @@ where
             }
             _ => request.to_string(),
         };
+        let bar = crate::web_design::design_bar();
         let critique = if images.is_empty() {
             None
         } else {
             self.api_client
-                .notify("Revue visuelle : un modèle qui voit juge les captures…");
+                .notify("Revue visuelle : un modèle qui voit note les captures…");
             self.api_client.critique_design(
                 crate::web_design::CRITIC_SYSTEM,
-                &crate::web_design::critique_prompt(&brief, images.len(), &audit),
+                &crate::web_design::critique_prompt(&brief, images.len(), &audit, bar),
                 &images,
             )
         };
+        // Les notes du juge, pour l'utilisateur : « 6,4/10, barre 8 ».
+        let scores = critique
+            .as_ref()
+            .map(|consultation| crate::web_design::critique_scores(&consultation.text))
+            .unwrap_or_default();
+        let graded = crate::web_design::average_score(&scores).map_or_else(String::new, |mean| {
+            let under: Vec<&str> = scores
+                .iter()
+                .filter(|(_, score)| *score < bar)
+                .map(|(criterion, _)| criterion.as_str())
+                .collect();
+            if under.is_empty() {
+                format!(", note {mean:.1}/10 (barre {bar})")
+            } else {
+                format!(
+                    ", note {mean:.1}/10 (barre {bar}, sous la barre : {})",
+                    under.join(", ")
+                )
+            }
+        });
         let verdict = critique.as_ref().and_then(|consultation| {
-            crate::web_design::critique_changes(&consultation.text)
+            crate::web_design::critique_changes(&consultation.text, bar)
                 .map(|lines| (consultation.model.clone(), lines))
         });
         let feedback = crate::web_design::review_feedback(
@@ -2763,19 +2784,27 @@ where
                 .map(|(model, lines)| (model.as_str(), lines.as_str())),
             aids.interface_rounds,
             rounds,
+            bar,
         );
         if feedback.is_some() {
             let judged = verdict.as_ref().map_or_else(String::new, |(model, lines)| {
-                format!(", {} remarque(s) de {model}", lines.lines().count())
+                format!(
+                    ", {} remarque(s) de {model}",
+                    lines
+                        .lines()
+                        .filter(|line| !line.starts_with("Scores"))
+                        .count()
+                )
             });
             self.api_client.notify(&format!(
-                "Revue visuelle : {} défaut(s) mesuré(s), {} remarque(s) de design{judged} : renvoyé(s) à l'agent",
+                "Revue visuelle : {} défaut(s) mesuré(s), {} remarque(s) de design{judged}{graded} : renvoyé(s) à l'agent",
                 audit.problems.len() + audit.console.len(),
                 audit.notes.len()
             ));
         } else {
-            self.api_client
-                .notify("Revue visuelle : rien à reprendre sur la page");
+            self.api_client.notify(&format!(
+                "Revue visuelle : rien à reprendre sur la page{graded}"
+            ));
         }
         feedback
     }
