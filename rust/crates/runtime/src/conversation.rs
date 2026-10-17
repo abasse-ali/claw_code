@@ -1537,6 +1537,28 @@ where
                     .messages
                     .push(ConversationMessage::user_text(note));
             }
+            // Revue visuelle anticipée : le budget du tour s'épuise et
+            // l'interface, modifiée, n'a jamais été revue. Le juge parle tant
+            // qu'il reste de quoi corriger ; à la limite, la conclusion part
+            // sans aucun contrôle.
+            if !wrapping_up
+                && limit > 0
+                && aids.interface_dirty
+                && aids.interface_rounds == 0
+                && iterations >= crate::web_design::early_review_at(limit)
+            {
+                self.api_client.notify(&format!(
+                    "Le tour a utilisé {} requêtes sur {limit} sans revue visuelle : revue maintenant, pour que les corrections tiennent dans le budget",
+                    iterations - 1
+                ));
+                if let Some(feedback) =
+                    self.interface_gate(&mut aids, &request_text, earlier.as_deref(), &mut prompter)
+                {
+                    self.session
+                        .messages
+                        .push(ConversationMessage::user_text(feedback));
+                }
+            }
             // Mode équipe : le rôle de cette étape, d'après l'état du travail.
             if aids.team {
                 let troubled = aids.verify_failing

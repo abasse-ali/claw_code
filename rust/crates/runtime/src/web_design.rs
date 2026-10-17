@@ -37,6 +37,16 @@ pub fn max_review_rounds() -> usize {
         .min(5)
 }
 
+/// Requête du tour à partir de laquelle une interface modifiée et jamais
+/// revue l'est sans attendre la fin du tour : aux trois cinquièmes du budget
+/// (`limit`), il reste de quoi appliquer ce que le juge demande. Vu dans un
+/// essai réel : un modèle a consommé ses 100 requêtes à se corriger seul,
+/// et la limite a emporté la revue avec elle.
+#[must_use]
+pub fn early_review_at(limit: usize) -> usize {
+    (limit * 3 / 5).max(12)
+}
+
 /// Exigence de la revue : la note que chaque critère doit atteindre, de 5
 /// (un gabarit correct) à 10 (digne d'un prix).
 #[must_use]
@@ -755,8 +765,11 @@ mod tests {
             2
         );
         assert!(critique_scores("No scores here").is_empty());
-        // La barre et la méthode.
+        // La barre, le seuil de la revue anticipée et la méthode.
         assert_eq!(design_bar(), 8);
+        assert_eq!(super::early_review_at(100), 60);
+        assert_eq!(super::early_review_at(40), 24);
+        assert_eq!(super::early_review_at(10), 12);
         let guide = design_guide("Crée un site pour un fleuriste", None).expect("méthode");
         assert!(
             guide.contains("under 8")
