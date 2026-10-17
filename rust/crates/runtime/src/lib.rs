@@ -101,9 +101,10 @@ pub use mcp_stdio::{
     mcp_server_log_path, spawn_mcp_stdio_process, JsonRpcError, JsonRpcId, JsonRpcRequest,
     JsonRpcResponse, ManagedMcpTool, McpDiscovery, McpInitializeClientInfo, McpInitializeParams,
     McpInitializeResult, McpInitializeServerInfo, McpListResourcesParams, McpListResourcesResult,
-    McpListToolsParams, McpListToolsResult, McpReadResourceParams, McpReadResourceResult,
-    McpResource, McpResourceContents, McpServerManager, McpServerManagerError, McpStdioProcess,
-    McpTool, McpToolCallContent, McpToolCallParams, McpToolCallResult, UnsupportedMcpServer,
+    McpListToolsParams, McpListToolsResult, McpNotificationSink, McpReadResourceParams,
+    McpReadResourceResult, McpResource, McpResourceContents, McpServerManager,
+    McpServerManagerError, McpStdioProcess, McpTool, McpToolCallContent, McpToolCallParams,
+    McpToolCallResult, UnsupportedMcpServer,
 };
 pub use oauth::{
     clear_oauth_credentials, code_challenge_s256, credentials_path, generate_pkce_pair,

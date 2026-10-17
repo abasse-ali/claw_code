@@ -1441,6 +1441,64 @@ return audits.filter(Boolean)
   agent), mais des commandes texte ; pas d'exécution dans le cloud ; les rapports des agents
   sont dans `.claw/agents/`.
 
+### Channels : des événements poussés dans la session
+
+Comme les channels de Claude Code : un serveur MCP pousse des événements dans la session en
+cours (résultat de CI, alerte de supervision, message d'un chat), pour que Claw réagisse là où il
+a déjà vos fichiers et le contexte de votre travail. Les événements arrivent entre deux tours ;
+la session doit rester ouverte (terminal, `claw serve` ou `--bg`).
+
+```bash
+claw --channels server:webhook                 # terminal
+claw --channels server:webhook serve           # interface web
+claw --channels server:webhook --bg "surveille la CI et corrige ce qui casse"
+```
+
+- **Récepteur de webhooks intégré**, sans Node ni Bun : déclarez-le comme serveur MCP, dans
+  `.mcp.json` ou `.claw.json` :
+
+  ```json
+  { "mcpServers": { "webhook": { "command": "claw", "args": ["channel", "webhook", "--port", "8788"] } } }
+  ```
+
+  - Il écoute sur `127.0.0.1` ; chaque `POST` devient un événement, par exemple
+    `curl -X POST localhost:8788 -d "build failed on main"`.
+  - L'outil `reply` permet au modèle de répondre ; ses réponses sortent sur `GET /events`
+    (Server-Sent Events, `curl -N localhost:8788/events`).
+  - Avec un jeton (`--token` ou `CLAW_CHANNEL_TOKEN`), chaque requête doit le présenter
+    (`Authorization: Bearer …`, en-tête `X-Claw-Token` ou `?token=`).
+  - Avec ce jeton, le channel relaie aussi les demandes de permission : elles sortent sur
+    `/events` avec un identifiant de cinq lettres, et `POST "yes abcde"` autorise, `"no abcde"`
+    refuse. L'en-tête facultatif `X-Claw-Sender` nomme l'expéditeur.
+- **Votre propre channel** : tout serveur MCP stdio qui suit le contrat de Claude Code.
+  - Il déclare la capacité `experimental["claude/channel"]` et envoie
+    `notifications/claude/channel` avec `content` et `meta`.
+  - Ses `instructions` sont données au modèle.
+  - Avec `claude/channel/permission`, il reçoit
+    `notifications/claude/channel/permission_request` et répond par
+    `notifications/claude/channel/permission`.
+  - Les serveurs écrits pour Claude Code (comme fakechat) marchent tels quels.
+- **Ce que voit le modèle** :
+  - les événements dans des balises `<channel source="webhook" chat_id="1" …>` ;
+  - une note qui les présente comme venant d'un système extérieur, pas de l'utilisateur, et
+    qui interdit d'y voir une autorisation ;
+  - dans le terminal, une ligne `← webhook : …` par événement.
+- **Relais des permissions** : une demande ouverte dans le terminal, la page ou une session en
+  arrière-plan part aussi vers les channels qui le déclarent ; la première réponse l'emporte.
+  - Le texte relayé est nettoyé (caractères invisibles retirés, 3 500 caractères au plus par
+    champ).
+  - Les jetons reconnaissables (`sk-…`, `ghp_…`…) y sont masqués.
+  - Seul un identifiant émis par Claw et encore ouvert est accepté.
+- **Activation et sécurité** :
+  - figurer dans `.mcp.json` ne suffit pas : un serveur ne pousse rien sans `--channels` ;
+  - `--dangerously-load-development-channels` est accepté comme synonyme, Claw n'ayant pas de
+    liste d'autorisation ;
+  - `"channelsEnabled": false` dans les réglages bloque tout ;
+  - les channels sont ignorés avec `-p` ;
+  - `/mcp` liste les channels actifs.
+- **Différences avec Claude Code** : seulement `server:<nom>` (les plugins de channel Telegram,
+  Discord et iMessage ne sont pas fournis) ; serveurs stdio uniquement.
+
 ### Télémétrie OpenTelemetry
 
 Comme le suivi d'usage de Claude Code, Claw peut envoyer ses compteurs et ses événements à

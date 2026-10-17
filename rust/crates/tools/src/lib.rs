@@ -1,4 +1,5 @@
 pub mod advisors;
+pub mod channels;
 pub mod input_check;
 mod mcp_bridge;
 pub mod mcp_oauth;

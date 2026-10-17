@@ -4,6 +4,7 @@ mod approval;
 mod auto_mode;
 mod bench;
 mod bench_hard;
+mod channel_server;
 mod clipboard;
 mod credits;
 mod doctor;
@@ -1049,6 +1050,7 @@ pub(crate) fn idle_wakeup() -> bool {
         || tools::monitors::has_events()
         || runtime::peers::has_messages()
         || tools::workflows::has_finished()
+        || tools::channels::has_events()
 }
 
 /// `/deep-research <question>`, `/<workflow enregistré> [arguments]` : le
@@ -1547,6 +1549,9 @@ fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         CliAction::Attach { target } => attach_job(&target)?,
+        CliAction::ChannelWebhook { port, token } => {
+            channel_server::run(&channel_server::Options { port, token })?;
+        }
         CliAction::AutoModeReport { defaults } => println!(
             "{}",
             if defaults {
@@ -1609,6 +1614,10 @@ fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let prompt = prompt_from(prompt, io::stdin())?;
             install_interrupt_handler();
+            if env::var_os("CLAW_CHANNELS").is_some() {
+                eprintln!("Channels ignorés avec -p : la session s'arrête après la réponse (utilisez le terminal, claw serve ou --bg)");
+                env::remove_var("CLAW_CHANNELS");
+            }
             let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode)?;
             runtime::telemetry::session_started("fresh");
             runtime::peers::register(&peer_name(), "print", permission_mode.as_str());
@@ -1741,6 +1750,11 @@ enum CliAction {
     AutoModeReport {
         defaults: bool,
     },
+    /// `claw channel webhook` : serveur de channel intégré (MCP stdio).
+    ChannelWebhook {
+        port: u16,
+        token: Option<String>,
+    },
     JobLogs {
         target: String,
         follow: bool,
@@ -1868,6 +1882,31 @@ impl CliOutputFormat {
     }
 }
 
+/// `claw channel webhook [--port 8788] [--token JETON]`.
+fn parse_channel_args(args: &[String]) -> Result<CliAction, String> {
+    const USAGE: &str = "usage : claw channel webhook [--port 8788] [--token JETON]";
+    if args.first().map(String::as_str) != Some("webhook") {
+        return Err(USAGE.to_string());
+    }
+    let mut port = 8788;
+    let mut token = env::var("CLAW_CHANNEL_TOKEN").ok();
+    let mut index = 1;
+    while index < args.len() {
+        let value = args.get(index + 1);
+        match args[index].as_str() {
+            "--port" => {
+                port = value
+                    .and_then(|value| value.parse::<u16>().ok())
+                    .ok_or_else(|| format!("port invalide ; {USAGE}"))?;
+            }
+            "--token" => token = Some(value.cloned().ok_or(USAGE)?),
+            _ => return Err(USAGE.to_string()),
+        }
+        index += 2;
+    }
+    Ok(CliAction::ChannelWebhook { port, token })
+}
+
 #[allow(clippy::too_many_lines)]
 fn parse_args(args: &[String]) -> Result<CliAction, String> {
     // Résolu seulement si l'action en a besoin : le modèle par défaut peut
@@ -1940,6 +1979,30 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             "--dangerously-skip-permissions" => {
                 permission_mode = PermissionMode::DangerFullAccess;
                 index += 1;
+            }
+            // Channels (comme dans Claude Code) : serveurs MCP qui poussent
+            // des événements dans la session. Transmis aux sessions lancées
+            // par celle-ci (arrière-plan, page web) par `CLAW_CHANNELS`.
+            flag @ ("--channels" | "--dangerously-load-development-channels") => {
+                let entries: Vec<String> = args[index + 1..]
+                    .iter()
+                    .take_while(|value| {
+                        value.starts_with("server:") || value.starts_with("plugin:")
+                    })
+                    .cloned()
+                    .collect();
+                if entries.is_empty() {
+                    return Err(format!(
+                        "{flag} attend server:<nom> (serveur MCP de .mcp.json ou .claw.json), par exemple {flag} server:webhook"
+                    ));
+                }
+                if let Some(plugin) = entries.iter().find(|entry| entry.starts_with("plugin:")) {
+                    return Err(format!(
+                        "{plugin} : les plugins de channel de Claude Code ne sont pas fournis avec Claw ; déclarez le serveur dans .mcp.json et passez server:<nom> (claw channel webhook pour un récepteur de webhooks)"
+                    ));
+                }
+                env::set_var("CLAW_CHANNELS", entries.join(" "));
+                index += 1 + entries.len();
             }
             "--continue" | "-c" => {
                 continue_session = true;
@@ -2086,6 +2149,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         "agents" => Ok(CliAction::Agents {
             args: join_optional_args(&rest[1..]),
         }),
+        "channel" => parse_channel_args(&rest[1..]),
         "auto-mode" => match rest.get(1).map(String::as_str) {
             Some("defaults") => Ok(CliAction::AutoModeReport { defaults: true }),
             Some("config") | None => Ok(CliAction::AutoModeReport { defaults: false }),
@@ -3421,6 +3485,9 @@ fn run_repl(
     editor.set_command_help(slash_command_menu_entries());
     transcript::set_interactive(true);
     println!("{}\n", cli.startup_banner());
+    for notice in tools::channels::take_notices() {
+        println!("  {}{notice}{}", transcript::DIM, transcript::RESET);
+    }
     // Crédits lus en arrière-plan : la ligne d'état les montre dès qu'ils arrivent.
     if credits::is_openrouter_model(&cli.model) {
         thread::spawn(|| {
@@ -3633,6 +3700,7 @@ fn run_repl(
                 cli.deliver_subtasks();
                 cli.deliver_monitor_events();
                 cli.deliver_workflow_results();
+                cli.deliver_channel_events();
                 cli.deliver_peer_messages(Vec::new());
                 cli.run_due_tasks();
                 if !text.is_empty() {
@@ -5430,6 +5498,25 @@ impl LiveCli {
             if let Err(error) = self.run_turn(&events) {
                 eprintln!("{}", render_cli_error(&error.to_string()));
             }
+        }
+    }
+
+    /// Événements des channels : le modèle les reçoit comme un tour.
+    fn deliver_channel_events(&mut self) {
+        let events = tools::channels::take_events();
+        if events.is_empty() {
+            return;
+        }
+        for event in &events {
+            println!(
+                "{}{}{}",
+                transcript::DIM,
+                tools::channels::summary(event),
+                transcript::RESET
+            );
+        }
+        if let Err(error) = self.run_turn(&tools::channels::render_for_model(&events)) {
+            eprintln!("{}", render_cli_error(&error.to_string()));
         }
     }
 
@@ -8598,7 +8685,32 @@ impl CliPermissionPrompter {
         } else {
             "Non, et dire à Claw quoi faire autrement (Échap)".to_string()
         });
-        let answer = match approval::ask(&title, &body, &question, &options) {
+        // Relayée aux channels qui le déclarent : la première réponse l'emporte.
+        let ticket = tools::channels::relay_permission(&request.tool_name, &request.input);
+        let remote = || ticket.as_deref().and_then(tools::channels::verdict);
+        let asked = approval::ask_with_remote(&title, &body, &question, &options, &remote);
+        if let Some(ticket) = &ticket {
+            tools::channels::close(ticket);
+        }
+        let answer = match asked {
+            Ok(approval::Answer::Remote(allow)) => {
+                println!(
+                    "  ⎿  {}{} à distance (channel){}",
+                    transcript::DIM,
+                    if allow { "Autorisé" } else { "Refusé" },
+                    transcript::RESET
+                );
+                return if allow {
+                    runtime::PermissionPromptDecision::Allow
+                } else {
+                    runtime::PermissionPromptDecision::Deny {
+                        reason: format!(
+                            "the user denied '{}' remotely through a channel",
+                            request.tool_name
+                        ),
+                    }
+                };
+            }
             Ok(answer) => answer,
             Err(error) => {
                 return runtime::PermissionPromptDecision::Deny {

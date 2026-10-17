@@ -460,6 +460,7 @@ struct WebPrompter {
 }
 
 impl PermissionPrompter for WebPrompter {
+    #[allow(clippy::too_many_lines)]
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
         // Mode auto : le classificateur juge ; la page n'est sollicitée que
         // s'il s'est mis en pause après plusieurs blocages.
@@ -482,14 +483,28 @@ impl PermissionPrompter for WebPrompter {
             proposal: edit_proposal(&request.tool_name, &request.input),
         });
         let deadline = std::time::Instant::now() + PERMISSION_TIMEOUT;
+        // Relayée aussi aux channels qui le déclarent : la première réponse l'emporte.
+        let ticket = tools::channels::relay_permission(&request.tool_name, &request.input);
         let reply = loop {
             match receiver.recv_timeout(Duration::from_millis(300)) {
                 Err(mpsc::RecvTimeoutError::Timeout)
                     if !runtime::interrupt::interrupt_requested()
-                        && std::time::Instant::now() < deadline => {}
+                        && std::time::Instant::now() < deadline =>
+                {
+                    if let Some(allow) = ticket.as_deref().and_then(tools::channels::verdict) {
+                        break Ok(if allow {
+                            PermissionReply::Once
+                        } else {
+                            PermissionReply::Deny(Some("refusé à distance (channel)".to_string()))
+                        });
+                    }
+                }
                 other => break other,
             }
         };
+        if let Some(ticket) = &ticket {
+            tools::channels::close(ticket);
+        }
         self.app.lock_pending().remove(&id);
 
         let (decision, label) = match reply {
@@ -835,6 +850,9 @@ impl Worker {
             self.permission_mode.as_str(),
         );
         self.session_hook_start("startup");
+        for notice in tools::channels::take_notices() {
+            self.info(notice);
+        }
         self.publish_status(false);
         loop {
             // Entre deux messages : tâches planifiées, Monitors, messages des
@@ -869,8 +887,21 @@ impl Worker {
         self.deliver_subtasks();
         self.deliver_monitor_events();
         self.deliver_workflow_results();
+        self.deliver_channel_events();
         self.deliver_peer_messages(Vec::new());
         self.run_due_tasks();
+    }
+
+    /// Événements des channels : le modèle les reçoit comme un tour.
+    fn deliver_channel_events(&mut self) {
+        let events = tools::channels::take_events();
+        if events.is_empty() {
+            return;
+        }
+        for event in &events {
+            self.info(tools::channels::summary(event));
+        }
+        self.run_turn(&tools::channels::render_for_model(&events));
     }
 
     /// Workflows finis : leur résultat passe au modèle comme un tour.

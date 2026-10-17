@@ -435,12 +435,15 @@ pub fn ensure_mcp_started(config: &RuntimeConfig) -> Vec<McpToolEntry> {
     }
     if let Some(mut previous) = slot.take() {
         previous.shutdown();
+        crate::channels::detach();
     }
     if servers.is_empty() {
+        crate::channels::attach(&mut |_| Err(String::new()), &[]);
         return Vec::new();
     }
     match McpBridge::start(servers, signature) {
-        Ok(bridge) => {
+        Ok(mut bridge) => {
+            bridge.attach_channels();
             let tools = bridge.tools.clone();
             *slot = Some(bridge);
             tools
@@ -458,6 +461,25 @@ pub(crate) fn connected_mcp_tools() -> Vec<McpToolEntry> {
         .as_ref()
         .map(|bridge| bridge.tools.clone())
         .unwrap_or_default()
+}
+
+/// Notification vers un serveur MCP stdio (relais des permissions des channels).
+pub(crate) fn notify_server(server: &str, method: &str, params: Value) -> Result<(), String> {
+    let mut slot = lock_bridge();
+    let bridge = slot
+        .as_mut()
+        .ok_or_else(|| "aucun serveur MCP n'est connecté".to_string())?;
+    let McpBridge { runtime, stdio, .. } = bridge;
+    runtime
+        .block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                stdio.notify_server(server, method, params),
+            )
+            .await
+        })
+        .map_err(|_| format!("le serveur MCP `{server}` ne lit plus ses messages"))?
+        .map_err(|error| error.to_string())
 }
 
 /// Appelle un outil MCP par le nom exposé au modèle.
@@ -569,6 +591,11 @@ pub fn mcp_status_report(config: &RuntimeConfig) -> String {
             let marker = if tool.read_only { " (lecture)" } else { "" };
             lines.push(format!("  {}{marker}  {short}", tool.name));
         }
+    }
+    let channels = crate::channels::active_lines();
+    if !channels.is_empty() {
+        lines.push(String::new());
+        lines.push(format!("Channels actifs : {}", channels.join(", ")));
     }
     lines.push(String::new());
     lines.push(
@@ -719,6 +746,26 @@ impl McpBridge {
         };
         bridge.discover_extras();
         Ok(bridge)
+    }
+
+    /// Serveurs demandés avec `--channels` : leur sortie est lue en continu.
+    fn attach_channels(&mut self) {
+        let known: Vec<String> = self
+            .stdio
+            .server_names()
+            .into_iter()
+            .filter(|name| matches!(self.servers.get(name), Some(ServerState::Connected { .. })))
+            .collect();
+        let sink = crate::channels::sink();
+        let McpBridge { runtime, stdio, .. } = self;
+        crate::channels::attach(
+            &mut |name| {
+                runtime
+                    .block_on(stdio.start_channel(name, sink.clone()))
+                    .map_err(|error| error.to_string())
+            },
+            &known,
+        );
     }
 
     fn shutdown(&mut self) {

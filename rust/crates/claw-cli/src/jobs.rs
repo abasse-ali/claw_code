@@ -624,6 +624,7 @@ pub enum NextPrompt {
 /// `claw stop`, ou une heure sans demande hors épinglage et sans tâche
 /// planifiée).
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn wait_next_prompt(id: &str) -> Option<NextPrompt> {
     let idle = std::env::var("CLAW_JOB_IDLE_SECS")
         .ok()
@@ -668,6 +669,17 @@ pub fn wait_next_prompt(id: &str) -> Option<NextPrompt> {
                 return Some(NextPrompt::Event(events));
             }
         }
+        if tools::channels::has_events() {
+            let events = tools::channels::take_events();
+            for event in &events {
+                println!("{}", tools::channels::summary(event));
+            }
+            if !events.is_empty() {
+                return Some(NextPrompt::Event(tools::channels::render_for_model(
+                    &events,
+                )));
+            }
+        }
         if tools::workflows::has_finished() {
             let text = tools::workflows::take_finished()
                 .into_iter()
@@ -708,6 +720,7 @@ pub fn wait_next_prompt(id: &str) -> Option<NextPrompt> {
         let pinned = load(id).is_some_and(|job| job.pinned);
         let scheduled = !runtime::cron::list().is_empty()
             || tools::workflows::running_count() > 0
+            || !tools::channels::active_lines().is_empty()
             || tools::monitors::lines()
                 .iter()
                 .any(|line| line.contains("en cours"));
@@ -1089,7 +1102,23 @@ impl runtime::PermissionPrompter for JobPermissionPrompter {
             state.waiting_for = Some("permission prompt".to_string());
             state.question = Some(question.clone());
         });
-        let answer = wait_message(&self.id);
+        // Relayée aussi aux channels qui le déclarent : la première réponse l'emporte.
+        let ticket = tools::channels::relay_permission(&request.tool_name, &request.input);
+        let answer = loop {
+            if let Some(message) = take_message(&self.id) {
+                break Some(message);
+            }
+            if let Some(allow) = ticket.as_deref().and_then(tools::channels::verdict) {
+                break Some(if allow { "o" } else { "n" }.to_string());
+            }
+            if take_flag(&self.id, "stop") {
+                break None;
+            }
+            thread::sleep(Duration::from_millis(400));
+        };
+        if let Some(ticket) = &ticket {
+            tools::channels::close(ticket);
+        }
         update_state(&self.id, |state| {
             state.waiting_for = None;
             state.question = None;
