@@ -349,6 +349,26 @@
     }
   }
 
+  // 17. Icône dessinée en géant : un <svg> sans taille remplit son conteneur
+  // (cinq étoiles d'avis devenues larges comme la page). Une icône se
+  // reconnaît à son nom, à aria-hidden, ou à ses sœurs de même forme.
+  const iconWords = /icon|star|logo|arrow|chevron|check|social|rating|ico-|bullet|badge/i;
+  const giants = visible.filter((el) => el.tagName.toLowerCase() === "svg").filter((el) => {
+    const rect = box.get(el);
+    if (!rect || rect.width <= 120 || rect.height <= 120) return false;
+    const label = `${el.id} ${el.getAttribute("class") || ""} ${el.parentElement ? `${el.parentElement.id} ${el.parentElement.getAttribute("class") || ""}` : ""}`;
+    const twins = el.parentElement
+      ? [...el.parentElement.children].filter((other) => other !== el && other.tagName.toLowerCase() === "svg").length
+      : 0;
+    return iconWords.test(label) || el.getAttribute("aria-hidden") === "true" || twins >= 1;
+  });
+  if (giants.length) {
+    problems.push(`Icons drawn far larger than intended (an <svg> without a size fills its container): ${list(giants.map((el) => {
+      const rect = box.get(el);
+      return `${name(el)} ${Math.round(rect.width)}x${Math.round(rect.height)}px`;
+    }))}. Give each icon a width and height (CSS on its class, or width/height attributes)`);
+  }
+
   // Remarques de design : pas des défauts, des choix à reconsidérer.
   const notes = [];
   if (!mobile) {

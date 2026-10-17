@@ -1790,7 +1790,8 @@ curseur, à relire avant l'envoi.
   sans `alt`, bouton sans nom, texte de remplissage (lorem ipsum, « votre texte ici »), police
   Times par défaut, focus invisible au clavier (mesuré page focalisée et transitions coupées :
   sans cela, un focus bien stylé passait pour invisible), texte collé au bord de l'écran d'un
-  téléphone. Le texte réservé aux lecteurs d'écran (`.visually-hidden`) et les boutons sans
+  téléphone, icône dessinée en géant (un `<svg>` sans taille remplit son conteneur : vu dans un
+  essai réel, cinq étoiles d'avis larges comme la page). Le texte réservé aux lecteurs d'écran (`.visually-hidden`) et les boutons sans
   texte (icône du menu) ne sont pas pris pour des défauts. Au téléphone, Claw essaie le menu : des liens de
   navigation cachés sans bouton pour les ouvrir, ou un bouton qui ne les montre pas après un
   clic, sont signalés. À part, des remarques de design (`designNotes`) nomment ce qui donne un
