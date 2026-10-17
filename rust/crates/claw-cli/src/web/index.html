@@ -2961,6 +2961,16 @@
             list.append(row);
           }
         }
+        if (data.workflows && data.workflows.length) {
+          list.append(el("div", "group", "Workflows"));
+          for (const line of data.workflows) {
+            const id = (line.match(/wf-[0-9a-f]+/) || [""])[0];
+            const row = el("div", "row");
+            row.append(staticItem(line.trim(), "/workflows " + id + " pour le détail"));
+            if (id && /en cours/.test(line)) row.append(miniButton("stop", "Arrêter ce workflow", () => action("/api/workflows/stop", { value: id })));
+            list.append(row);
+          }
+        }
         if (data.subtasks.length) {
           list.append(el("div", "group", "Sous-tâches"));
           for (const line of data.subtasks) list.append(staticItem(line.trim()));

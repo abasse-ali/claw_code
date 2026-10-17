@@ -392,7 +392,8 @@ traitement conseillé.
   utiliser (« rien à la racine »).
 - Remède : écrire dans `<dossier de travail>/.claw/agents/`. Si la création échoue, se rabattre
   sur le dossier temporaire du système, sans erreur pour le modèle. Aucune requête de plus.
-- État : à vérifier
+- État : corrigé (lot 19) : rapports dans `<dossier de travail>/.claw/agents/`, repli sur le
+  dossier temporaire du système (`claw-agents`) si la création échoue, sans erreur pour le modèle.
 
 ## E1-14 NotebookEdit : sans `cell_id` la dernière cellule est remplacée ou supprimée, et les erreurs ne disent pas quelles cellules existent
 - Gravité : moyenne

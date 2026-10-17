@@ -868,8 +868,17 @@ impl Worker {
     fn wake_up(&mut self) {
         self.deliver_subtasks();
         self.deliver_monitor_events();
+        self.deliver_workflow_results();
         self.deliver_peer_messages(Vec::new());
         self.run_due_tasks();
+    }
+
+    /// Workflows finis : leur résultat passe au modèle comme un tour.
+    fn deliver_workflow_results(&mut self) {
+        for finished in tools::workflows::take_finished() {
+            self.info(finished.headline);
+            self.run_turn(&finished.for_model);
+        }
     }
 
     /// Sous-tâches finies : le résultat est montré et rejoint la prochaine demande.
@@ -1351,7 +1360,7 @@ impl Worker {
                 self.info(report);
             }
             Some(SlashCommand::Help) => self.info(format!(
-                "{}\n\nDans l'interface web : /review /audit /archi /adr /fix /security-review /code-review /pr-comments /goal /loop /btw /recap /copy /rename /output-style /schedule /install-github-action /add-dir /branch /worktree /undo /checkpoints /hooks /think /equipe /bashes /tasks /subtask /bg /fork /peers /models /mcp /model /permissions /cost /compact /clear.\nLes autres commandes s'utilisent dans le terminal.\n\n{}",
+                "{}\n\nDans l'interface web : /review /audit /archi /adr /fix /security-review /code-review /pr-comments /goal /loop /btw /recap /copy /rename /output-style /schedule /install-github-action /add-dir /branch /worktree /undo /checkpoints /hooks /think /equipe /bashes /tasks /subtask /bg /fork /peers /workflows /deep-research /workflow-authoring /models /mcp /model /permissions /cost /compact /clear.\nLes autres commandes s'utilisent dans le terminal.\n\n{}",
                 render_slash_command_help(),
                 commands::render_custom_commands_help(
                     &std::env::current_dir().unwrap_or_default()
@@ -1382,11 +1391,21 @@ impl Worker {
                     }
                     None => match tools::mcp_prompt_invocation(text) {
                         Some(prompt) => self.run_turn(&prompt?),
-                        None => self.info(format!("Commande inconnue : /{name}. Tapez /help.")),
+                        None => match crate::saved_workflow_command(text) {
+                            Some(launch) => self.info(launch),
+                            None => self.info(format!("Commande inconnue : /{name}. Tapez /help.")),
+                        },
                     },
                 }
             }
             Some(SlashCommand::Tasks) => self.info(crate::tasks_report()),
+            Some(SlashCommand::Workflows { args }) => {
+                self.info(tools::workflows::report(args.as_deref()));
+            }
+            Some(SlashCommand::DeepResearch { question }) => {
+                self.info(crate::deep_research_command(question.as_deref()));
+            }
+            Some(SlashCommand::WorkflowAuthoring) => self.info(tools::workflows::AUTHORING),
             Some(SlashCommand::Subtask { task }) => {
                 match task.filter(|task| !task.trim().is_empty()) {
                     Some(task) => {
@@ -2637,6 +2656,7 @@ fn background_json() -> Value {
         "tasks": tasks,
         "monitors": tools::monitors::lines(),
         "subtasks": crate::extra_commands::subtask_lines(),
+        "workflows": tools::workflows::lines(),
         "peers": peers,
         "me": runtime::peers::current().map(|peer| peer.name),
         "held": runtime::peers::held_messages().len(),
@@ -2795,6 +2815,18 @@ async fn post_monitor_stop(
     }
 }
 
+async fn post_workflow_stop(
+    State(app): State<WebApp>,
+    headers: HeaderMap,
+    Json(body): Json<ValueBody>,
+) -> ApiResult {
+    authorize(&app, &headers, None)?;
+    match tools::workflows::stop(&body.value) {
+        Ok(message) => Ok(Json(json!({ "message": message })).into_response()),
+        Err(error) => Err(api_error(StatusCode::BAD_REQUEST, &error)),
+    }
+}
+
 fn router(app: WebApp) -> Router {
     Router::new()
         .route("/", get(index))
@@ -2832,6 +2864,7 @@ fn router(app: WebApp) -> Router {
         .route("/api/jobs/log", get(get_job_log))
         .route("/api/tasks/delete", post(post_task_delete))
         .route("/api/monitors/stop", post(post_monitor_stop))
+        .route("/api/workflows/stop", post(post_workflow_stop))
         .with_state(app)
 }
 

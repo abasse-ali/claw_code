@@ -5,6 +5,7 @@ pub mod mcp_oauth;
 pub mod monitors;
 mod questions;
 mod web_page;
+pub mod workflows;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -905,6 +906,21 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::DangerFullAccess,
         },
         ToolSpec {
+            name: "Workflow",
+            description: "Run a dynamic workflow: a JavaScript script that orchestrates many sub-agents in the background and returns one consolidated result later, between turns (you get a runId now: do not wait, poll or relaunch). Only use it when the user explicitly asks for a workflow or multi-agent orchestration (the word \"ultracode\", \"use a workflow\", \"fan out agents\") or names a saved workflow; otherwise do the work yourself or with Agent. The script must begin with `export const meta = { name: 'kebab-name', description: '...', phases: [{ title: '...' }] }` as a pure literal, then plain JavaScript where top-level await and return are allowed: `await agent(prompt, { label, phase, schema, model, agentType, isolation: 'worktree' })` runs one sub-agent with tools and resolves to its final report (a string), to a JSON value matching `schema` (a JSON Schema), or to null if it failed; `parallel([() => agent(...), ...])` runs functions concurrently (an error becomes null); `pipeline(items, stage1, stage2, ...)` sends each item through the stages independently (null drops the item); `phase(title)` groups the next agents; `log(...)` writes to the run log; the global `args` holds the `args` input. Nothing else exists in the script: no require, import, process, files or network; give that work to agents and put everything an agent needs in its prompt. Agents run with the session's permissions and cannot ask the user, so actions that need approval are refused. Keep it small on free models: each agent costs about ten requests, a run allows at most 30 agents (CLAW_WORKFLOW_MAX_AGENTS) and 3 run at once. Return a JSON-serializable value. name: a saved workflow (.claw/workflows, .claude/workflows, or the bundled deep-research). scriptPath: a script file, like the scriptPath of an earlier run. resumeFromRunId: rerun an earlier run of this session; finished agent() calls with the same inputs return their saved result.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "script": { "type": "string", "description": "Inline workflow script, starting with export const meta = {...}" },
+                    "name": { "type": "string", "description": "Saved or bundled workflow to run" },
+                    "scriptPath": { "type": "string", "description": "Path of a workflow script file" },
+                    "args": { "description": "Any JSON value exposed to the script as the global args (pass arrays and objects as JSON values, not as a JSON-encoded string)" },
+                    "resumeFromRunId": { "type": "string", "description": "Earlier run id to resume" }
+                }
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
             name: "ListAgents",
             description: "List the user's other live Claw sessions on this machine (terminal, background, -p), with the name and id to use with SendMessage, their folder and whether they are busy.",
             input_schema: json!({
@@ -1075,6 +1091,7 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "BashOutput" => from_value::<BashOutputInput>(input).and_then(run_bash_output),
         "KillShell" => from_value::<KillShellInput>(input).and_then(run_kill_shell),
         "Monitor" => from_value::<MonitorInput>(input).and_then(run_monitor),
+        "Workflow" => from_value::<WorkflowInput>(input).and_then(run_workflow),
         "ListAgents" => run_list_agents(),
         "SendMessage" => from_value::<SendMessageInput>(input).and_then(run_send_message),
         "ExitPlanMode" => from_value::<ExitPlanModeInput>(input).and_then(run_exit_plan_mode),
@@ -1827,6 +1844,65 @@ fn run_bash_output(input: BashOutputInput) -> Result<String, String> {
         runtime::bash_tasks::read_output(id)?
     };
     to_pretty_json(background_task_json(&task))
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowInput {
+    #[serde(default)]
+    script: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, rename = "scriptPath")]
+    script_path: Option<String>,
+    #[serde(default)]
+    args: Option<Value>,
+    #[serde(default, rename = "resumeFromRunId")]
+    resume_from_run_id: Option<String>,
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_workflow(input: WorkflowInput) -> Result<String, String> {
+    let launched = workflows::start(&workflows::StartRequest {
+        script: input.script,
+        name: input.name,
+        script_path: input.script_path,
+        args: input.args,
+        resume_from: input.resume_from_run_id,
+    })?;
+    to_pretty_json(launched)
+}
+
+/// Agent d'un workflow : conversation complète sans affichage ni demande
+/// d'approbation (une action non autorisée d'office est refusée) ; rend son
+/// rapport final et le fichier de sa trace.
+fn run_workflow_agent(
+    description: &str,
+    prompt: &str,
+    model: Option<&str>,
+    subagent_type: Option<&str>,
+    isolation: Option<&str>,
+) -> Result<(String, String), String> {
+    let job = prepare_agent_job(AgentInput {
+        description: description.to_string(),
+        prompt: prompt.to_string(),
+        subagent_type: subagent_type.map(str::to_string),
+        name: None,
+        model: model.map(str::to_string),
+        run_in_background: Some(true),
+        isolation: isolation.map(str::to_string),
+    })?;
+    let transcript = job.manifest.output_file.clone();
+    match run_agent_conversation(&job, false) {
+        Ok(report) => {
+            persist_agent_terminal_state(&job.manifest, "completed", Some(&report), None)?;
+            Ok((report, transcript))
+        }
+        Err(error) => {
+            let _ =
+                persist_agent_terminal_state(&job.manifest, "failed", None, Some(error.clone()));
+            Err(error)
+        }
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -2968,8 +3044,7 @@ fn prepare_agent_job(input: AgentInput) -> Result<AgentJob, String> {
     let isolated = parse_isolation(input.isolation.as_deref())?;
 
     let agent_id = make_agent_id();
-    let output_dir = agent_store_dir()?;
-    std::fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
+    let output_dir = ready_agent_store_dir()?;
     let output_file = output_dir.join(format!("{agent_id}.md"));
     let manifest_file = output_dir.join(format!("{agent_id}.json"));
     let normalized_subagent_type = normalize_subagent_type(input.subagent_type.as_deref());
@@ -4672,15 +4747,28 @@ fn canonical_tool_token(value: &str) -> String {
     canonical
 }
 
+/// Dossier des rapports des sous-agents : `<dossier de travail>/.claw/agents`
+/// (`CLAW_AGENT_STORE` le remplace).
 fn agent_store_dir() -> Result<std::path::PathBuf, String> {
     if let Ok(path) = std::env::var("CLAW_AGENT_STORE") {
         return Ok(std::path::PathBuf::from(path));
     }
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    if let Some(workspace_root) = cwd.ancestors().nth(2) {
-        return Ok(workspace_root.join(".claw-agents"));
+    Ok(cwd.join(".claw").join("agents"))
+}
+
+/// Crée le dossier des rapports ; s'il ne peut pas l'être (droits,
+/// disque), le dossier temporaire du système le remplace, sans erreur
+/// pour le modèle.
+fn ready_agent_store_dir() -> Result<std::path::PathBuf, String> {
+    let dir = agent_store_dir()?;
+    if std::fs::create_dir_all(&dir).is_ok() {
+        return Ok(dir);
     }
-    Ok(cwd.join(".claw-agents"))
+    let fallback = std::env::temp_dir().join("claw-agents");
+    std::fs::create_dir_all(&fallback)
+        .map_err(|error| format!("{} : {error}", fallback.display()))?;
+    Ok(fallback)
 }
 
 /// Envoi d'un hook `http` (fourni au runtime au démarrage) : POST du JSON de

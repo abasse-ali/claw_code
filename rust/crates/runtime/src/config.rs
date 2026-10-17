@@ -100,6 +100,7 @@ const FOREIGN_KEYS: &[&str] = &[
     "companyAnnouncements",
     "worktree",
     "crossSessionInbound",
+    "disableWorkflows",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

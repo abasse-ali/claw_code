@@ -190,7 +190,7 @@ sombre ou claire (thème du système, de VS Code ou choisi) :
 - les commandes de travail continu et de revue marchent aussi dans la page : `/goal` et `/loop`
   (le bouton Arrêter met en pause l'objectif ; `/loop stop` arrête la boucle), `/tasks`,
   `/subtask`, `/bg` (la conversation part en arrière-plan et la page repart d'une conversation
-  vide), `/fork`, `/peers`, `/btw`, `/recap`, `/copy`
+  vide), `/fork`, `/peers`, `/workflows`, `/deep-research`, `/btw`, `/recap`, `/copy`
   (copie dans le presse-papiers du navigateur), `/rename`, `/output-style`, `/schedule`,
   `/install-github-action`, `/security-review`, `/code-review`, `/pr-comments`, `/branch`,
   `/worktree`, `/add-dir`, `/permissions allow|deny|ask|remove <règle>` ;
@@ -483,7 +483,7 @@ Les équivalents gratuits des commandes de Claude Code pour travailler longtemps
 | Commande | Effet |
 |---|---|
 | `/goal <condition>` | Claw travaille jusqu'à ce que la condition soit remplie : après chaque tour, un contrôle (sans outils, hors conversation) répond « atteint » ou « pas encore, parce que… », et Claw continue avec cette raison. Pause sur `Échap`, après `CLAW_GOAL_MAX_TURNS` tours (12) ou quand deux contrôles de suite donnent la même raison. `/goal` montre l'état, `/goal reprendre` relance, `/goal clear` efface. La ligne d'état affiche `◎ objectif actif`. |
-| `/loop [intervalle] [demande]` | Dans le terminal : relance la demande (ou `/ma-commande`) entre les tours, la saisie restant libre : toutes les `5m`, `1h`… ; sans intervalle, Claw choisit l'attente ; seul, `loop.md` ou une passe d'entretien. `/loop list`, `/loop stop [id]`. Voir « Tâches planifiées ». Dans la page web : compte à rebours, bouton Arrêter. |
+| `/loop [intervalle] [demande]` | Dans le terminal : relance la demande (ou `/ma-commande`) entre les tours, la saisie restant libre : toutes les `5m`, `1h`… ; sans intervalle, Claw choisit l'attente ; seul, `loop.md` ou une passe d'entretien. `/loop list`, `/loop stop [id]`. Voir « Tâches planifiées ». Même fonctionnement dans la page web. |
 | `/schedule <horaire> <demande>` | Routine qui tourne chez GitHub, ordinateur éteint : un workflow `.github/workflows/claw-routine-<nom>.yml` lance l'action Claw selon l'horaire avec un modèle gratuit d'OpenRouter, et ouvre une pull request si des fichiers changent. Horaires : `horaire`, `quotidien[@HH:MM]`, `jours-ouvres[@HH:MM]`, `hebdo[@jour-HH:MM]` (heure UTC, ou `@09:00+02:00`), ou `"M H J M S"` en cron. `/schedule` liste, `/schedule delete <nom>` supprime. La demande est rangée à part dans `.github/claw-routines/<nom>.md`. |
 | `/btw <question>` | Question en aparté : réponse courte du modèle sans outils, qui n'entre pas dans la conversation et n'interrompt pas la tâche. |
 | `/recap` | Bilan de la session : demandes, travail fait, reste à faire, prochaine étape. Hors conversation. |
@@ -1237,6 +1237,9 @@ part, sur sa propre branche), rangé dans `.claw/worktrees/<nom>`. Ce dossier es
 | `/effort [low…max\|xhigh\|auto\|status]` | Niveau de raisonnement (alias de `/think`) |
 | `/tasks` | Ce qui tourne pour la session : commandes de fond, sous-agents, sous-tâches, tâches planifiées, sessions en arrière-plan du projet |
 | `/subtask <tâche>` | Un sous-agent reprend la conversation et travaille en arrière-plan ; son résultat revient dans la conversation dès qu'il a fini, sans interrompre votre saisie |
+| `/workflows [id]` | Exécutions des workflows de la session (phase, agents, durée), détail d'une exécution, `stop <id>`, `save <id> [nom]` ; liste les workflows enregistrés. Voir « Workflows » |
+| `/deep-research <question>` | Workflow intégré : recherches web en éventail, sources lues et recoupées, rapport cité qui revient dans la conversation |
+| `/workflow-authoring` | Référence pour écrire un workflow |
 | `/rewind` | Revient avant un message précédent (comme `Échap Échap`) |
 | `/cd <chemin>` | La session continue dans un autre dossier : ses consignes, réglages, permissions et outils s'appliquent (`/add-dir` garde au contraire le dossier actuel) |
 | `/stop` | Arrête la session en arrière-plan ouverte avec `claw attach` (conversation et worktree gardés) |
@@ -1368,6 +1371,75 @@ un changement cassant prévient celle qui en dépend, une longue tâche annonce 
   la messagerie ; une règle `deny` sur `SendMessage` et `ListAgents` empêche d'écrire.
 - Les boîtes sont des fichiers dans `~/.claw/peers/<id>/` (cette machine seulement ; pas de
   sessions sur d'autres machines ni dans le cloud).
+
+### Workflows : des agents orchestrés par un script
+
+Comme les workflows dynamiques de Claude Code : pour un travail qui se découpe en nombreuses
+parties (audit de chaque route, migration fichier par fichier, recherche recoupée), le modèle
+écrit un script qui lance des agents par phases, et Claw l'exécute en arrière-plan. Le résultat,
+unique, revient dans la conversation entre deux tours ; la saisie reste libre pendant ce temps.
+
+```javascript
+export const meta = {
+  name: 'audit-routes',
+  description: "Vérifie les contrôles d'accès de chaque route",
+  phases: [{ title: 'Inventaire' }, { title: 'Audit' }],
+}
+phase('Inventaire')
+const found = await agent('Liste les fichiers .ts de src/routes.', {
+  schema: { type: 'object', required: ['files'], properties: { files: { type: 'array', items: { type: 'string' } } } },
+})
+phase('Audit')
+const audits = await pipeline(found.files, (file) => agent(`Contrôles d'accès manquants dans ${file} ?`, { label: file }))
+return audits.filter(Boolean)
+```
+
+- **Lancer** :
+  - demandez-le : « ultracode », « utilise un workflow », ou le nom d'un workflow enregistré ;
+    le modèle appelle l'outil `Workflow`, qu'il n'utilise pas de lui-même ;
+  - `/<nom> [arguments]` lance un workflow enregistré dans `.claw/workflows/` ou
+    `.claude/workflows/` (projet), `~/.claw/workflows/` ou `~/.claude/workflows/` ; des
+    arguments `[…]` ou `{…}` sont lus comme du JSON ;
+  - `/deep-research <question>` lance le workflow intégré.
+- **API du script** :
+  - `agent(demande, options)` rend le rapport de l'agent, la valeur JSON conforme à `schema`, ou
+    `null` en cas d'échec. Options : `label`, `phase`, `schema`, `model`, `agentType`,
+    `isolation: 'worktree'`.
+  - `parallel([...])` lance des fonctions ensemble ; `pipeline(liste, étape1, étape2…)` fait
+    passer chaque élément par les étapes.
+  - `phase(titre)`, `log(...)` ; `args` contient les arguments.
+  - `/workflow-authoring` affiche la référence.
+- **Suivre** :
+  - `/workflows` liste les exécutions et les workflows enregistrés ;
+  - `/workflows <id>` montre les phases, chaque agent (en cours, fini, en échec, repris), le
+    journal et le résultat ;
+  - `/workflows stop <id>` arrête une exécution ; `/workflows save <id> [nom]` en fait une
+    commande ;
+  - `/tasks` et le panneau Agents de `claw serve` les montrent aussi.
+- **Reprendre** : l'outil `Workflow` avec `resumeFromRunId` relance une exécution ; les agents
+  déjà finis avec les mêmes entrées rendent leur résultat gardé, sans requête. Chaque exécution a
+  son dossier `.claw/workflows/runs/<id>/` (script, arguments, résultats des agents,
+  `result.json`).
+- **Sécurité** :
+  - le script tourne sous Node.js, dans un contexte `vm` vide, et `node` est lancé avec son
+    modèle de permissions : le script ne voit ni fichiers, ni réseau, ni processus ;
+  - les agents gardent les permissions de la session et ne peuvent rien demander : une action
+    à approuver leur est refusée ;
+  - l'outil `Workflow` demande l'autorisation en mode `prompt` et n'est pas permis en
+    `read-only`.
+- **Modèles gratuits** : chaque agent coûte une dizaine de requêtes.
+  - `CLAW_WORKFLOW_MAX_AGENTS` (30 par défaut) limite les agents d'une exécution ;
+  - `CLAW_WORKFLOW_MAX_CONCURRENT_AGENTS` (3) limite ceux qui tournent ensemble ;
+  - `CLAW_WORKFLOW_SUBAGENT_MODEL` (ou `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL`) impose leur
+    modèle.
+- **Ailleurs** : en mode `-p`, Claw attend la fin du workflow et passe son résultat comme un tour
+  de plus. Une session en arrière-plan reste en vie tant qu'un workflow tourne.
+- **Prérequis et désactivation** : Node.js 20 ou plus (`CLAW_WORKFLOW_NODE` pour un autre
+  chemin). `CLAW_DISABLE_WORKFLOWS=1`, `CLAUDE_CODE_DISABLE_WORKFLOWS=1` ou
+  `"disableWorkflows": true` les coupe.
+- **Différences avec Claude Code** : pas de vue plein écran `/workflows` (pause, relance d'un
+  agent), mais des commandes texte ; pas d'exécution dans le cloud ; les rapports des agents
+  sont dans `.claw/agents/`.
 
 ### Télémétrie OpenTelemetry
 

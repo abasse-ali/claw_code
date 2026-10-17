@@ -441,6 +441,30 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         category: SlashCommandCategory::Core,
     },
     SlashCommandSpec {
+        name: "workflows",
+        aliases: &[],
+        summary: "Workflows : exécutions, détail, arrêt, enregistrement ; workflows enregistrés",
+        argument_hint: Some("[id | stop <id> | save <id> [nom]]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Automation,
+    },
+    SlashCommandSpec {
+        name: "deep-research",
+        aliases: &[],
+        summary: "Workflow : recherches web en éventail, sources recoupées, rapport cité",
+        argument_hint: Some("<question>"),
+        resume_supported: false,
+        category: SlashCommandCategory::Automation,
+    },
+    SlashCommandSpec {
+        name: "workflow-authoring",
+        aliases: &[],
+        summary: "Référence pour écrire un workflow (script qui orchestre des agents)",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Automation,
+    },
+    SlashCommandSpec {
         name: "sandbox",
         aliases: &["bac-a-sable"],
         summary: "Bac à sable des commandes : état, ou conteneur docker|podman|off pour la session",
@@ -902,6 +926,13 @@ pub enum SlashCommand {
     Subtask {
         task: Option<String>,
     },
+    Workflows {
+        args: Option<String>,
+    },
+    DeepResearch {
+        question: Option<String>,
+    },
+    WorkflowAuthoring,
     Rewind,
     Sandbox {
         args: Option<String>,
@@ -1082,6 +1113,13 @@ impl SlashCommand {
             "subtask" | "sous-tache" | "sous-tâche" => Self::Subtask {
                 task: remainder_after_command(trimmed, command),
             },
+            "workflows" => Self::Workflows {
+                args: remainder_after_command(trimmed, command),
+            },
+            "deep-research" => Self::DeepResearch {
+                question: remainder_after_command(trimmed, command),
+            },
+            "workflow-authoring" => Self::WorkflowAuthoring,
             "rewind" | "checkpoint" => Self::Rewind,
             "sandbox" | "bac-a-sable" => Self::Sandbox {
                 args: remainder_after_command(trimmed, command),
@@ -2654,6 +2692,9 @@ pub fn handle_slash_command(
         | SlashCommand::Stop
         | SlashCommand::Cd { .. }
         | SlashCommand::Subtask { .. }
+        | SlashCommand::Workflows { .. }
+        | SlashCommand::DeepResearch { .. }
+        | SlashCommand::WorkflowAuthoring
         | SlashCommand::Rewind
         | SlashCommand::Sandbox { .. }
         | SlashCommand::TerminalSetup
@@ -3119,7 +3160,7 @@ mod tests {
         assert!(help.contains("/code-review [fichiers|branche|commit|PR n°]"));
         assert!(help.contains("/install-github-action [assistant|review|all]"));
         assert!(help.contains("/add-dir [dossier] [--save]"));
-        assert_eq!(slash_command_specs().len(), 81);
+        assert_eq!(slash_command_specs().len(), 84);
         assert_eq!(resume_supported_slash_commands().len(), 19);
     }
 

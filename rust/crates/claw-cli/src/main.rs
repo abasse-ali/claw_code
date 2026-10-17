@@ -148,6 +148,7 @@ fn main() {
     // Ce que la télémétrie n'a pas encore envoyé part maintenant.
     runtime::telemetry::shutdown();
     tools::monitors::stop_all();
+    tools::workflows::stop_all();
     runtime::peers::unregister();
     // Les serveurs de dev et autres commandes de fond ne survivent pas à Claw.
     runtime::bash_tasks::kill_all();
@@ -899,6 +900,13 @@ fn tasks_report() -> String {
     if !subtasks.is_empty() {
         sections.push(format!("Sous-tâches\n{}", subtasks.join("\n")));
     }
+    let workflows = tools::workflows::lines();
+    if !workflows.is_empty() {
+        sections.push(format!(
+            "Workflows (/workflows <id> pour le détail)\n{}",
+            workflows.join("\n")
+        ));
+    }
     let scheduled = runtime::cron::list();
     if !scheduled.is_empty() {
         sections.push(format!(
@@ -1040,6 +1048,53 @@ pub(crate) fn idle_wakeup() -> bool {
         || extra_commands::has_finished_subtask()
         || tools::monitors::has_events()
         || runtime::peers::has_messages()
+        || tools::workflows::has_finished()
+}
+
+/// `/deep-research <question>`, `/<workflow enregistré> [arguments]` : le
+/// workflow part en arrière-plan ; son résultat revient entre deux tours.
+fn launch_workflow(name: &str, arguments: &str) -> String {
+    let arguments = arguments.trim();
+    // `{…}` ou `[…]` : une valeur JSON ; sinon le texte tel quel.
+    let args = (!arguments.is_empty()).then(|| {
+        serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()
+            .filter(|value| value.is_object() || value.is_array())
+            .unwrap_or_else(|| serde_json::Value::String(arguments.to_string()))
+    });
+    match tools::workflows::start(&tools::workflows::StartRequest {
+        name: Some(name.to_string()),
+        args,
+        ..tools::workflows::StartRequest::default()
+    }) {
+        Ok(launched) => {
+            let id = launched["runId"].as_str().unwrap_or_default();
+            format!(
+                "↻ Workflow {} lancé en arrière-plan ({id}) : son résultat reviendra ici · /workflows {id} pour le suivre",
+                launched["workflowName"].as_str().unwrap_or(name)
+            )
+        }
+        Err(error) => format!("Workflow {name} : {error}"),
+    }
+}
+
+/// `/nom [arguments]` d'un workflow enregistré (`.claw/workflows`…).
+fn saved_workflow_command(input: &str) -> Option<String> {
+    let line = input.trim().strip_prefix('/')?;
+    let (name, arguments) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+    let workflow = tools::workflows::find_saved(name)?;
+    Some(launch_workflow(&workflow.name, arguments))
+}
+
+/// `/deep-research <question>`.
+fn deep_research_command(question: Option<&str>) -> String {
+    match question
+        .map(str::trim)
+        .filter(|question| !question.is_empty())
+    {
+        Some(question) => launch_workflow("deep-research", question),
+        None => "Usage : /deep-research <question>".to_string(),
+    }
 }
 
 /// `crossSessionInbound` : `accept`, `hold` ou `refuse`.
@@ -1558,7 +1613,29 @@ fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             runtime::telemetry::session_started("fresh");
             runtime::peers::register(&peer_name(), "print", permission_mode.as_str());
             cli.session_hook_start("startup");
-            let result = cli.run_turn_with_output(&prompt, output_format);
+            let mut result = cli.run_turn_with_output(&prompt, output_format);
+            // Un workflow lancé pendant le tour : -p attend son résultat,
+            // qui passe comme un tour de plus.
+            while result.is_ok() {
+                while tools::workflows::running_count() > 0
+                    && !runtime::interrupt::interrupt_requested()
+                {
+                    thread::sleep(Duration::from_millis(500));
+                }
+                let finished = tools::workflows::take_finished();
+                if finished.is_empty() {
+                    break;
+                }
+                for entry in &finished {
+                    eprintln!("{}", entry.headline);
+                }
+                let text = finished
+                    .into_iter()
+                    .map(|entry| entry.for_model)
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                result = cli.run_turn_with_output(&text, output_format);
+            }
             cli.session_hook_end("exit");
             result?;
         }
@@ -3304,6 +3381,9 @@ fn run_resume_command(
         | SlashCommand::Stop
         | SlashCommand::Cd { .. }
         | SlashCommand::Subtask { .. }
+        | SlashCommand::Workflows { .. }
+        | SlashCommand::DeepResearch { .. }
+        | SlashCommand::WorkflowAuthoring
         | SlashCommand::Rewind
         | SlashCommand::Sandbox { .. }
         | SlashCommand::TerminalSetup
@@ -3442,6 +3522,11 @@ fn run_repl(
                             }
                             continue;
                         }
+                        if let Some(launch) = saved_workflow_command(trimmed) {
+                            editor.push_history(&input);
+                            println!("{launch}");
+                            continue;
+                        }
                         if let Some(prompt) = tools::mcp_prompt_invocation(trimmed) {
                             editor.push_history(&input);
                             match prompt {
@@ -3547,6 +3632,7 @@ fn run_repl(
             input::ReadOutcome::Scheduled(text) => {
                 cli.deliver_subtasks();
                 cli.deliver_monitor_events();
+                cli.deliver_workflow_results();
                 cli.deliver_peer_messages(Vec::new());
                 cli.run_due_tasks();
                 if !text.is_empty() {
@@ -4302,6 +4388,18 @@ impl LiveCli {
             }
             SlashCommand::Sandbox { args } => {
                 println!("{}", sandbox_command(args.as_deref()));
+                false
+            }
+            SlashCommand::Workflows { args } => {
+                println!("{}", tools::workflows::report(args.as_deref()));
+                false
+            }
+            SlashCommand::DeepResearch { question } => {
+                println!("{}", deep_research_command(question.as_deref()));
+                false
+            }
+            SlashCommand::WorkflowAuthoring => {
+                println!("{}", tools::workflows::AUTHORING);
                 false
             }
             SlashCommand::TerminalSetup => {
@@ -5330,6 +5428,21 @@ impl LiveCli {
                 transcript::RESET
             );
             if let Err(error) = self.run_turn(&events) {
+                eprintln!("{}", render_cli_error(&error.to_string()));
+            }
+        }
+    }
+
+    /// Workflows finis : leur résultat passe au modèle comme un tour.
+    fn deliver_workflow_results(&mut self) {
+        for finished in tools::workflows::take_finished() {
+            println!(
+                "\n{}{}{}",
+                transcript::ACCENT,
+                finished.headline,
+                transcript::RESET
+            );
+            if let Err(error) = self.run_turn(&finished.for_model) {
                 eprintln!("{}", render_cli_error(&error.to_string()));
             }
         }

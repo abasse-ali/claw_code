@@ -668,6 +668,16 @@ pub fn wait_next_prompt(id: &str) -> Option<NextPrompt> {
                 return Some(NextPrompt::Event(events));
             }
         }
+        if tools::workflows::has_finished() {
+            let text = tools::workflows::take_finished()
+                .into_iter()
+                .map(|finished| finished.for_model)
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if !text.is_empty() {
+                return Some(NextPrompt::Event(text));
+            }
+        }
         if runtime::peers::has_messages() {
             let (messages, held) =
                 runtime::peers::take_messages(crate::inbound_setting().as_deref());
@@ -697,6 +707,7 @@ pub fn wait_next_prompt(id: &str) -> Option<NextPrompt> {
         }
         let pinned = load(id).is_some_and(|job| job.pinned);
         let scheduled = !runtime::cron::list().is_empty()
+            || tools::workflows::running_count() > 0
             || tools::monitors::lines()
                 .iter()
                 .any(|line| line.contains("en cours"));
