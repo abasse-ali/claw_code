@@ -273,8 +273,11 @@
   const bodyFont = css(document.body).fontFamily;
   const controls = fields.concat([...document.querySelectorAll("button, input[type=submit], input[type=button]")].filter(shown))
     .filter((el) => !el.matches("[type=checkbox], [type=radio], [type=range], [type=color], [type=file]"));
-  // Un bouton sans texte affiché (icône du menu) n'a pas de police à voir.
-  const raw = controls.filter((el) => css(el).fontFamily !== bodyFont
+  // Un bouton sans texte affiché (icône du menu) n'a pas de police à voir ;
+  // un bouton dans la police des titres de la page est un choix, pas un oubli.
+  const pageFonts = new Set([document.body, ...document.querySelectorAll("h1, h2, h3")].filter(Boolean)
+    .map((el) => css(el).fontFamily));
+  const raw = controls.filter((el) => !pageFonts.has(css(el).fontFamily)
     && (fields.includes(el) || /\p{L}/u.test(el.innerText || el.value || "")));
   if (raw.length) {
     problems.push(`Form fields or buttons keep the browser's default look (font ${css(raw[0]).fontFamily.split(",")[0]} instead of the page's ${bodyFont.split(",")[0]}): ${list(raw.map(name))}. Style them like the rest of the page (font: inherit, padding, border, radius; full width on phones)`);
