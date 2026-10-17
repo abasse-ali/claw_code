@@ -1305,6 +1305,37 @@ claw agents                                             # la vue des sessions
   (la ligne reprend la dernière action ou le début de la réponse) ; l'ouverture d'une session
   arrête son processus d'arrière-plan pendant que vous y travaillez.
 
+### Monitor et messages entre sessions
+
+**Monitor** (outil du modèle, comme dans Claude Code) : Claw lance une commande en arrière-plan
+(suivre un journal et filtrer les erreurs, attendre la fin d'une CI, surveiller un dossier) et
+chaque nouvelle ligne qu'elle écrit lui revient entre deux tours, sans bloquer la
+conversation : il réagit seulement si quelque chose mérite votre attention. Chaque surveillance
+a une échéance (5 minutes par défaut, 30 au plus), après laquelle Claw reçoit un avis et peut la
+relancer ; `KillShell monitor-1` l'arrête plus tôt, `/tasks` les liste. La commande suit les
+règles de `bash` (`Bash(...)` s'applique, le mode auto la juge). Les sessions en arrière-plan
+reçoivent aussi leurs événements.
+
+**Messages entre sessions** : les sessions Claw ouvertes sur cette machine (terminal, `-p`,
+arrière-plan) se joignent par leur nom (le dossier, ou celui donné par `/rename` ou `--name`).
+Le modèle les trouve avec `ListAgents` et leur écrit avec `SendMessage` : une session qui découvre
+un changement cassant prévient celle qui en dépend, une longue tâche annonce sa fin,
+`notify_when_idle` demande un avis quand l'autre session aura fini son tour.
+
+- Un message est du texte, jamais la conversation ni les fichiers ; il arrive entre deux tours
+  (`› Message de @api : …`) et le modèle de l'autre session le lit comme venant d'une autre
+  session, pas de vous : il n'approuve rien, ne justifie aucun changement de permissions ou de
+  configuration, et ses commandes restent du texte.
+- `crossSessionInbound` : `accept`, `hold` (retenus jusqu'à `/peers accept`) ou `refuse`. Sans
+  réglage, une session qui demande les permissions accepte, sauf d'une session qui les contourne
+  (`danger-full-access`), et inversement. Dans une session en arrière-plan, un message retenu
+  la fait passer dans « attendent une réponse » : `o` le délivre, `n` l'écarte.
+- `/list-agents` (`/peers`) montre le nom de cette session et les sessions joignables ;
+  `/peers accept|drop` traite les messages retenus. `CLAW_DISABLE_PEERS=1` retire la session de
+  la messagerie ; une règle `deny` sur `SendMessage` et `ListAgents` empêche d'écrire.
+- Les boîtes sont des fichiers dans `~/.claw/peers/<id>/` (cette machine seulement ; pas de
+  sessions sur d'autres machines ni dans le cloud).
+
 ### Télémétrie OpenTelemetry
 
 Comme le suivi d'usage de Claude Code, Claw peut envoyer ses compteurs et ses événements à

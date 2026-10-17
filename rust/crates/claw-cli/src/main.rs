@@ -146,6 +146,8 @@ fn main() {
     let result = run();
     // Ce que la télémétrie n'a pas encore envoyé part maintenant.
     runtime::telemetry::shutdown();
+    tools::monitors::stop_all();
+    runtime::peers::unregister();
     // Les serveurs de dev et autres commandes de fond ne survivent pas à Claw.
     runtime::bash_tasks::kill_all();
     runtime::stop_all_containers();
@@ -291,6 +293,7 @@ fn run_job_worker(id: &str) -> Result<(), Box<dyn std::error::Error>> {
     jobs::update_state(id, |state| state.session_path = Some(session_path.clone()));
     tools::set_question_asker(Some(jobs::question_asker(id)));
     runtime::telemetry::session_started("background");
+    runtime::peers::register(&job.name, "background", mode.as_str());
     cli.session_hook_start("startup");
     let mut next = if initial.turns == 0 && !job.prompt.trim().is_empty() {
         Some(match &job.worktree {
@@ -307,6 +310,10 @@ fn run_job_worker(id: &str) -> Result<(), Box<dyn std::error::Error>> {
             match jobs::wait_next_prompt(id) {
                 Some(jobs::NextPrompt::Message(message)) => {
                     next = Some(message);
+                    continue;
+                }
+                Some(jobs::NextPrompt::Event(text)) => {
+                    next = Some(text);
                     continue;
                 }
                 Some(jobs::NextPrompt::Task(task)) => {
@@ -778,7 +785,96 @@ fn keybindings_command() -> String {
 /// La saisie s'interrompt : une tâche planifiée est due, ou une sous-tâche a
 /// fini.
 pub(crate) fn idle_wakeup() -> bool {
-    runtime::cron::has_due() || extra_commands::has_finished_subtask()
+    runtime::cron::has_due()
+        || extra_commands::has_finished_subtask()
+        || tools::monitors::has_events()
+        || runtime::peers::has_messages()
+}
+
+/// `crossSessionInbound` : `accept`, `hold` ou `refuse`.
+pub(crate) fn inbound_setting() -> Option<String> {
+    env::current_dir()
+        .ok()
+        .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok())
+        .and_then(|config| {
+            config
+                .get("crossSessionInbound")
+                .and_then(|value| value.as_str().map(str::to_string))
+        })
+}
+
+/// Nom sous lequel les autres sessions joignent celle-ci : le dossier.
+fn peer_name() -> String {
+    env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            cwd.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "claw".to_string())
+}
+
+/// `/list-agents` (`/peers`) : sessions joignables, messages retenus ;
+/// `accept` les délivre, `drop` les oublie.
+fn peers_report(args: Option<&str>) -> (String, Vec<runtime::peers::Message>) {
+    match args.map(str::trim) {
+        Some("accept" | "accepter") => {
+            let released = runtime::peers::release_held();
+            let count = released.len();
+            (
+                format!("  ⎿  {count} message(s) retenu(s) délivré(s)"),
+                released,
+            )
+        }
+        Some("drop" | "oublier") => (
+            format!(
+                "  ⎿  {} message(s) retenu(s) oublié(s)",
+                runtime::peers::drop_held()
+            ),
+            Vec::new(),
+        ),
+        _ => {
+            let mut lines = Vec::new();
+            match runtime::peers::current() {
+                Some(me) => lines.push(format!("Cette session  @{} ({})", me.name, me.id)),
+                None => {
+                    lines.push("Messagerie entre sessions coupée (CLAW_DISABLE_PEERS)".to_string());
+                }
+            }
+            let peers = runtime::peers::list();
+            if peers.is_empty() {
+                lines.push("  Aucune autre session Claw ouverte sur cette machine.".to_string());
+            }
+            for peer in peers {
+                lines.push(format!(
+                    "  @{:<20} {}  {:<11} {:<6} {}",
+                    peer.name, peer.id, peer.kind, peer.status, peer.cwd
+                ));
+            }
+            let held = runtime::peers::held_messages();
+            if !held.is_empty() {
+                lines.push(format!(
+                    "Messages retenus : {} (/peers accept pour les délivrer, /peers drop pour les oublier)",
+                    held.len()
+                ));
+                for message in held.iter().take(5) {
+                    lines.push(format!(
+                        "  @{} : {}",
+                        message.from_name,
+                        message
+                            .text
+                            .lines()
+                            .next()
+                            .unwrap_or_default()
+                            .chars()
+                            .take(80)
+                            .collect::<String>()
+                    ));
+                }
+            }
+            (lines.join("\n"), Vec::new())
+        }
+    }
 }
 
 /// Session en arrière-plan ouverte dans ce terminal (`claw attach`), et
@@ -1158,6 +1254,10 @@ fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         CliAction::JobRemove { target } => println!("{}", jobs::remove(&target)?),
         CliAction::JobReply { target, text } => println!("{}", jobs::reply(&target, &text)?),
         CliAction::JobWorker { id } => run_job_worker(&id)?,
+        CliAction::JobLaunch { id } => {
+            env::set_var("CLAW_JOB_LAUNCH", "1");
+            jobs::spawn_worker(&id)?;
+        }
         CliAction::Skills { args } => LiveCli::print_skills(args.as_deref())?,
         CliAction::Serve {
             host,
@@ -1205,6 +1305,7 @@ fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             install_interrupt_handler();
             let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode)?;
             runtime::telemetry::session_started("fresh");
+            runtime::peers::register(&peer_name(), "print", permission_mode.as_str());
             cli.session_hook_start("startup");
             let result = cli.run_turn_with_output(&prompt, output_format);
             cli.session_hook_end("exit");
@@ -1328,6 +1429,10 @@ enum CliAction {
     },
     /// Processus d'une session en arrière-plan (lancé par Claw lui-même).
     JobWorker {
+        id: String,
+    },
+    /// Relais qui démarre ce processus sans hériter des tuyaux du lanceur.
+    JobLaunch {
         id: String,
     },
     Skills {
@@ -1690,6 +1795,10 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         }
         "__job-worker" => Ok(CliAction::JobWorker {
             id: job_target(&rest, "__job-worker")?,
+        }),
+        // Relais lancé par `Start-Process` (voir `jobs::spawn_worker`).
+        "__job-launch" => Ok(CliAction::JobLaunch {
+            id: job_target(&rest, "__job-launch")?,
         }),
         "skills" => Ok(CliAction::Skills {
             args: join_optional_args(&rest[1..]),
@@ -2954,6 +3063,7 @@ fn run_resume_command(
         | SlashCommand::ReleaseNotes
         | SlashCommand::Usage
         | SlashCommand::Insights
+        | SlashCommand::ListAgents { .. }
         | SlashCommand::Context
         | SlashCommand::Teleport { .. }
         | SlashCommand::DebugToolCall
@@ -2987,6 +3097,7 @@ fn run_repl(
         });
     }
     runtime::telemetry::session_started(if resume.is_some() { "resume" } else { "fresh" });
+    runtime::peers::register(&peer_name(), "interactive", permission_mode.as_str());
     match resume {
         Some(path) => {
             // La session vide créée au démarrage est remplacée par la session reprise.
@@ -3184,6 +3295,8 @@ fn run_repl(
             // la saisie reprend.
             input::ReadOutcome::Scheduled(text) => {
                 cli.deliver_subtasks();
+                cli.deliver_monitor_events();
+                cli.deliver_peer_messages(Vec::new());
                 cli.run_due_tasks();
                 if !text.is_empty() {
                     editor.set_initial_text(text);
@@ -3392,6 +3505,8 @@ impl LiveCli {
         live::start("Réflexion…");
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
         self.share_auto_context(input);
+        runtime::peers::update(Some(self.permission_mode.as_str()), None);
+        runtime::peers::set_status("busy");
         let (mut text, images) = take_image_attachments(input);
         if !self.pending_context.is_empty() {
             text = format!("{}\n\n{text}", self.pending_context.join("\n\n"));
@@ -3415,6 +3530,10 @@ impl LiveCli {
                 self.print_turn_footer(started.elapsed());
                 self.persist_session()?;
                 self.sync_permission_mode()?;
+                runtime::peers::set_status("idle");
+                runtime::peers::went_idle(&summary_line(&last_assistant_of(
+                    self.runtime.session(),
+                )));
                 Ok(())
             }
             Err(error) if runtime::interrupt::is_interruption(&error.to_string()) => {
@@ -3897,6 +4016,14 @@ impl LiveCli {
                 if let Some(task) = task.filter(|task| !task.trim().is_empty()) {
                     self.run_turn(&task)?;
                     return Ok(true);
+                }
+                false
+            }
+            SlashCommand::ListAgents { args } => {
+                let (report, released) = peers_report(args.as_deref());
+                println!("{report}");
+                if !released.is_empty() {
+                    self.deliver_peer_messages(released);
                 }
                 false
             }
@@ -4935,6 +5062,63 @@ impl LiveCli {
         }
     }
 
+    /// Sorties des Monitors : le modèle les reçoit comme un tour.
+    fn deliver_monitor_events(&mut self) {
+        if !tools::monitors::has_events() {
+            return;
+        }
+        if let Some(events) = tools::monitors::take_events() {
+            let first = events
+                .lines()
+                .nth(1)
+                .unwrap_or_default()
+                .chars()
+                .take(90)
+                .collect::<String>();
+            println!(
+                "{}› Monitor : {first}{}",
+                transcript::DIM,
+                transcript::RESET
+            );
+            if let Err(error) = self.run_turn(&events) {
+                eprintln!("{}", render_cli_error(&error.to_string()));
+            }
+        }
+    }
+
+    /// Messages des autres sessions (et ceux libérés par `/peers accept`).
+    fn deliver_peer_messages(&mut self, mut released: Vec<runtime::peers::Message>) {
+        let (mut messages, held) = runtime::peers::take_messages(inbound_setting().as_deref());
+        messages.append(&mut released);
+        for message in &messages {
+            println!(
+                "{}› Message de @{} : {}{}",
+                transcript::DIM,
+                message.from_name,
+                message
+                    .text
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(90)
+                    .collect::<String>(),
+                transcript::RESET
+            );
+        }
+        if held > 0 {
+            println!(
+                "  ⎿  {held} message(s) d'une autre session retenu(s) (crossSessionInbound ou mode de permission) : /peers pour les voir, /peers accept pour les délivrer"
+            );
+        }
+        if messages.is_empty() {
+            return;
+        }
+        if let Err(error) = self.run_turn(&runtime::peers::render_for_model(&messages)) {
+            eprintln!("{}", render_cli_error(&error.to_string()));
+        }
+    }
+
     /// `/cd <chemin>` : la session continue dans ce dossier (consignes,
     /// réglages, permissions et outils de ce dossier).
     fn change_directory(&mut self, path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
@@ -4959,6 +5143,7 @@ impl LiveCli {
             return Err(format!("{} n'est pas un dossier", target.display()).into());
         }
         env::set_current_dir(&target)?;
+        runtime::peers::update(None, Some(&target.display().to_string()));
         self.refresh_system_prompt()?;
         self.reload_runtime_features()?;
         println!(
@@ -4971,6 +5156,13 @@ impl LiveCli {
     /// `/tasks` : ce qui tourne en arrière-plan pour cette session.
     fn print_tasks() {
         let mut sections = vec![render_background_tasks(None)];
+        let monitors = tools::monitors::lines();
+        if !monitors.is_empty() {
+            sections.push(format!(
+                "Monitors (KillShell <id> les arrête)\n{}",
+                monitors.join("\n")
+            ));
+        }
         let subtasks = extra_commands::subtask_lines();
         if !subtasks.is_empty() {
             sections.push(format!("Sous-tâches\n{}", subtasks.join("\n")));
@@ -5970,7 +6162,10 @@ fn rename_managed_session(id: &str, title: &str) -> Result<Option<String>, Strin
 /// `/rename <titre>` ; sans titre, la session reprend son titre automatique.
 fn rename_report(id: &str, title: Option<&str>) -> String {
     match rename_managed_session(id, title.unwrap_or_default()) {
-        Ok(Some(title)) => format!("  ⎿  Session renommée : {title}"),
+        Ok(Some(title)) => {
+            runtime::peers::rename(&title);
+            format!("  ⎿  Session renommée : {title}")
+        }
         Ok(None) => "  ⎿  Titre automatique rétabli (tiré du premier message)".to_string(),
         Err(error) => format!("renommage impossible : {error}"),
     }

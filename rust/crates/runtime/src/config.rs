@@ -99,6 +99,7 @@ const FOREIGN_KEYS: &[&str] = &[
     "cleanupPeriodDays",
     "companyAnnouncements",
     "worktree",
+    "crossSessionInbound",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]

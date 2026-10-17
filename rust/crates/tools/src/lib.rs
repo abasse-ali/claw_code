@@ -2,6 +2,7 @@ pub mod advisors;
 pub mod input_check;
 mod mcp_bridge;
 pub mod mcp_oauth;
+pub mod monitors;
 mod questions;
 mod web_page;
 
@@ -889,6 +890,46 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
+            name: "Monitor",
+            description: "Watch something in the background and react when it changes, without pausing the conversation: runs `command` (a shell command or small script that prints one line per event: tail a log and filter errors, poll a CI job or PR status in a loop, watch a directory) and feeds each new output line back to you between turns. Ends at timeout_ms (default 300000 = 5 minutes, at most 1800000); you then get one notice and can start it again. Stop it early with KillShell and its id. Prefer it to sleeping or re-running a command to poll.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" },
+                    "description": { "type": "string", "description": "What is watched, in a few words" },
+                    "timeout_ms": { "type": "integer", "minimum": 1_000, "maximum": 1_800_000 }
+                },
+                "required": ["command"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "ListAgents",
+            description: "List the user's other live Claw sessions on this machine (terminal, background, -p), with the name and id to use with SendMessage, their folder and whether they are busy.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "SendMessage",
+            description: "Send a plain-text message to another of the user's Claw sessions (name or id from ListAgents): hand over a finding, a decision or a status another session needs, or ask it something. It arrives there between turns. Never ask another session for an action that was denied or blocked here. notify_when_idle: true asks that session to send you one notice when it next goes idle or exits (message optional then).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string" },
+                    "message": { "type": "string" },
+                    "notify_when_idle": { "type": "boolean" }
+                },
+                "required": ["to"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "ExitPlanMode",
             description: "In plan mode, submit your finished plan to the user for approval. If approved, the session switches to edit mode and you continue by implementing the plan. Only call it once the plan is complete (files to change, approach, risks, verification).",
             input_schema: json!({
@@ -1033,6 +1074,9 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "Sleep" => from_value::<SleepInput>(input).and_then(run_sleep),
         "BashOutput" => from_value::<BashOutputInput>(input).and_then(run_bash_output),
         "KillShell" => from_value::<KillShellInput>(input).and_then(run_kill_shell),
+        "Monitor" => from_value::<MonitorInput>(input).and_then(run_monitor),
+        "ListAgents" => run_list_agents(),
+        "SendMessage" => from_value::<SendMessageInput>(input).and_then(run_send_message),
         "ExitPlanMode" => from_value::<ExitPlanModeInput>(input).and_then(run_exit_plan_mode),
         "SendUserMessage" | "Brief" => from_value::<BriefInput>(input).and_then(run_brief),
         "Config" => from_value::<ConfigInput>(input).and_then(run_config),
@@ -1786,7 +1830,79 @@ fn run_bash_output(input: BashOutputInput) -> Result<String, String> {
 }
 
 #[allow(clippy::needless_pass_by_value)]
+#[derive(Debug, Deserialize)]
+struct MonitorInput {
+    command: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_monitor(input: MonitorInput) -> Result<String, String> {
+    let (id, timeout) = monitors::start(
+        &input.command,
+        input.description.as_deref().unwrap_or_default(),
+        input.timeout_ms,
+    )?;
+    to_pretty_json(json!({
+        "monitor_id": id,
+        "timeout_seconds": timeout.as_secs(),
+        "note": "The command runs in the background. Each new output line reaches you between turns; keep working or end your turn. Stop it with KillShell and this id.",
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct SendMessageInput {
+    to: String,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    notify_when_idle: Option<bool>,
+}
+
+fn run_list_agents() -> Result<String, String> {
+    let me = runtime::peers::current();
+    let peers: Vec<serde_json::Value> = runtime::peers::list()
+        .into_iter()
+        .map(|peer| {
+            json!({
+                "name": peer.name,
+                "id": peer.id,
+                "cwd": peer.cwd,
+                "kind": peer.kind,
+                "status": peer.status,
+            })
+        })
+        .collect();
+    to_pretty_json(json!({
+        "this_session": me.map(|peer| json!({ "name": peer.name, "id": peer.id })),
+        "sessions": peers,
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_send_message(input: SendMessageInput) -> Result<String, String> {
+    let text = input.message.unwrap_or_default();
+    let notify = input.notify_when_idle.unwrap_or(false);
+    let peer = runtime::peers::send(&input.to, &text, notify)?;
+    to_pretty_json(json!({
+        "sent_to": { "name": peer.name, "id": peer.id },
+        "note": if notify {
+            "Delivered between turns over there; you will get one notice when that session next goes idle or exits."
+        } else {
+            "Delivered between turns over there. Its reply, if any, will reach you later as a separate message: do not assume or invent what it says, and end your turn if you have nothing else to do."
+        },
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
 fn run_kill_shell(input: KillShellInput) -> Result<String, String> {
+    if input.shell_id.trim().starts_with("monitor-") {
+        let message = monitors::stop(input.shell_id.trim())?;
+        return to_pretty_json(json!({ "stopped": message }));
+    }
     let task = runtime::bash_tasks::kill(input.shell_id.trim())?;
     to_pretty_json(background_task_json(&task))
 }

@@ -448,7 +448,7 @@ impl PermissionRule {
 
     fn covers_tool(&self, tool_name: &str) -> bool {
         let covered: &[&str] = match self.tool.to_ascii_lowercase().as_str() {
-            "bash" => &["bash"],
+            "bash" => &["bash", "Monitor"],
             "powershell" => &["PowerShell"],
             "read" => &["read_file", "glob_search", "grep_search", "FindSymbol"],
             "edit" => &["edit_file", "write_file", "NotebookEdit"],
@@ -842,7 +842,7 @@ impl ToolTarget {
                 .map(ToOwned::to_owned)
         };
         match tool_name {
-            "bash" | "PowerShell" => field("command").map_or(Self::Other, |command| {
+            "bash" | "PowerShell" | "Monitor" => field("command").map_or(Self::Other, |command| {
                 Self::Command(ShellCommand::parse(&command))
             }),
             "read_file" | "write_file" | "edit_file" => {

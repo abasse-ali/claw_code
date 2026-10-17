@@ -393,6 +393,14 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         category: SlashCommandCategory::Core,
     },
     SlashCommandSpec {
+        name: "list-agents",
+        aliases: &["peers"],
+        summary: "Autres sessions Claw joignables par messages ; messages retenus (accept, drop)",
+        argument_hint: Some("[accept|drop]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
         name: "tasks",
         aliases: &[],
         summary: "Travail en arrière-plan de la session : commandes, sous-tâches, tâches planifiées, sessions",
@@ -884,6 +892,9 @@ pub enum SlashCommand {
         task: Option<String>,
     },
     Tasks,
+    ListAgents {
+        args: Option<String>,
+    },
     Stop,
     Cd {
         path: Option<String>,
@@ -1061,6 +1072,9 @@ impl SlashCommand {
                 task: remainder_after_command(trimmed, command),
             },
             "tasks" => Self::Tasks,
+            "list-agents" | "peers" => Self::ListAgents {
+                args: remainder_after_command(trimmed, command),
+            },
             "stop" => Self::Stop,
             "cd" => Self::Cd {
                 path: remainder_after_command(trimmed, command),
@@ -2636,6 +2650,7 @@ pub fn handle_slash_command(
         | SlashCommand::Fork { .. }
         | SlashCommand::Plan { .. }
         | SlashCommand::Tasks
+        | SlashCommand::ListAgents { .. }
         | SlashCommand::Stop
         | SlashCommand::Cd { .. }
         | SlashCommand::Subtask { .. }
@@ -3104,7 +3119,7 @@ mod tests {
         assert!(help.contains("/code-review [fichiers|branche|commit|PR n°]"));
         assert!(help.contains("/install-github-action [assistant|review|all]"));
         assert!(help.contains("/add-dir [dossier] [--save]"));
-        assert_eq!(slash_command_specs().len(), 80);
+        assert_eq!(slash_command_specs().len(), 81);
         assert_eq!(resume_supported_slash_commands().len(), 19);
     }
 

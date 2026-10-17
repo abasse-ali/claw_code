@@ -24,6 +24,7 @@ mod mcp_stdio;
 pub mod memory;
 mod oauth;
 mod paths;
+pub mod peers;
 mod permissions;
 pub mod project;
 mod prompt;

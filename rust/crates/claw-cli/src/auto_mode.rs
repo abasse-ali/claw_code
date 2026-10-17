@@ -349,7 +349,7 @@ fn describe(tool: &str, input: &str) -> String {
     let value = serde_json::from_str::<Value>(input).unwrap_or(Value::Null);
     let field = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_string);
     match tool {
-        "bash" | "Bash" | "PowerShell" => format!(
+        "bash" | "Bash" | "PowerShell" | "Monitor" => format!(
             "{tool} command: {}",
             field("command").unwrap_or_else(|| input.to_string())
         ),

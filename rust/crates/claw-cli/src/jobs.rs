@@ -477,6 +477,35 @@ fn worker_executable() -> io::Result<PathBuf> {
 /// Lance le processus de la session, détaché du terminal.
 pub fn spawn_worker(id: &str) -> io::Result<u32> {
     let exe = worker_executable()?;
+    #[cfg(windows)]
+    {
+        use std::io::IsTerminal;
+        // Sortie de claw lue par un script (tuyau) : sous Windows, le
+        // processus de la session hériterait de ce tuyau et le script
+        // attendrait sa fin. `Start-Process` lance un relais sans hériter de
+        // rien, qui démarre la session.
+        let piped = !(io::stdout().is_terminal() && io::stderr().is_terminal());
+        if piped && std::env::var_os("CLAW_JOB_LAUNCH").is_none() {
+            let job = load(id).ok_or_else(|| io::Error::other("session inconnue"))?;
+            let quote = |text: &str| format!("'{}'", text.replace('\'', "''"));
+            let script = format!(
+                "Start-Process -FilePath {} -ArgumentList '__job-launch',{} -WorkingDirectory {} -WindowStyle Hidden",
+                quote(&exe.display().to_string()),
+                quote(id),
+                quote(&job.cwd)
+            );
+            let status = Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .env("CLAW_JOB_LAUNCH", "1")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?;
+            if status.success() {
+                return Ok(0);
+            }
+        }
+    }
     // Écriture ordinaire placée à la fin, pas le mode « ajout » : bash de Git
     // for Windows (MSYS), qui hérite de ce fichier pour `--exec`, n'écrit pas
     // dans un fichier ouvert en ajout seul (sortie vide, code 1).
@@ -583,6 +612,8 @@ pub enum NextPrompt {
     Message(String),
     /// Tâche planifiée échue (`/loop`, `CronCreate`).
     Task(runtime::cron::ScheduledTask),
+    /// Sorties d'un Monitor ou message d'une autre session, déjà mis en forme.
+    Event(String),
 }
 
 /// Attente d'une nouvelle demande après un tour : `Some` quand elle arrive,
@@ -598,16 +629,74 @@ pub fn wait_next_prompt(id: &str) -> Option<NextPrompt> {
     let started = std::time::Instant::now();
     loop {
         if let Some(message) = take_message(id) {
+            // Réponse à un message retenu d'une autre session : o le délivre,
+            // n l'écarte.
+            if !runtime::peers::held_messages().is_empty() {
+                let answer = message.trim().to_lowercase();
+                if matches!(
+                    answer.as_str(),
+                    "o" | "oui" | "y" | "yes" | "accept" | "accepter"
+                ) {
+                    update_state(id, |state| {
+                        state.waiting_for = None;
+                        state.question = None;
+                    });
+                    let released = runtime::peers::release_held();
+                    return Some(NextPrompt::Event(runtime::peers::render_for_model(
+                        &released,
+                    )));
+                }
+                if matches!(answer.as_str(), "n" | "non" | "no" | "drop" | "refuser") {
+                    let _ = runtime::peers::drop_held();
+                    update_state(id, |state| {
+                        state.waiting_for = None;
+                        state.question = None;
+                    });
+                    continue;
+                }
+            }
             return Some(NextPrompt::Message(message));
         }
         if let Some(task) = runtime::cron::take_due() {
             return Some(NextPrompt::Task(task));
         }
+        if tools::monitors::has_events() {
+            if let Some(events) = tools::monitors::take_events() {
+                return Some(NextPrompt::Event(events));
+            }
+        }
+        if runtime::peers::has_messages() {
+            let (messages, held) =
+                runtime::peers::take_messages(crate::inbound_setting().as_deref());
+            if held > 0 {
+                let held = runtime::peers::held_messages();
+                let question = held.last().map_or_else(String::new, |message| {
+                    format!(
+                        "Message de @{} retenu ({} en attente) : {} · o pour le délivrer, n pour l'écarter",
+                        message.from_name,
+                        held.len(),
+                        message.text.lines().next().unwrap_or_default().chars().take(80).collect::<String>()
+                    )
+                });
+                update_state(id, |state| {
+                    state.waiting_for = Some("message approval".to_string());
+                    state.question = Some(question);
+                });
+            }
+            if !messages.is_empty() {
+                return Some(NextPrompt::Event(runtime::peers::render_for_model(
+                    &messages,
+                )));
+            }
+        }
         if take_flag(id, "release") || take_flag(id, "stop") {
             return None;
         }
         let pinned = load(id).is_some_and(|job| job.pinned);
-        let scheduled = !runtime::cron::list().is_empty();
+        let scheduled = !runtime::cron::list().is_empty()
+            || tools::monitors::lines()
+                .iter()
+                .any(|line| line.contains("en cours"));
         if !pinned && !scheduled && started.elapsed() >= Duration::from_secs(idle) {
             return None;
         }
