@@ -473,6 +473,56 @@
     }))}. Give each icon a width and height (CSS on its class, or width/height attributes)`);
   }
 
+  // 19. Section qui n'affiche que son titre : son contenu manque ou est
+  // caché sur cet écran. Vu dans un essai réel : le planning d'un studio,
+  // écrit en liste pour le téléphone et masqué sur ordinateur par une media
+  // query, sans version pour ordinateur ; un titre, un trait, et rien.
+  const media = "img, svg, video, canvas, iframe, picture, input, select, textarea, button";
+  const headingLike = (node) => node.closest("h1, h2, h3, h4, h5, h6");
+  const emptySections = [...document.querySelectorAll("main section, body > section, main > article")]
+    .filter((section) => shown(section) && section.querySelector("h1, h2, h3"))
+    .filter((section) => !section.querySelector("section"))
+    .map((section) => {
+      const heading = section.querySelector("h1, h2, h3");
+      // Le premier paragraphe court sous le titre est un sous-titre, pas un contenu.
+      const subtitle = heading.nextElementSibling && heading.nextElementSibling.matches("p") && words(heading.nextElementSibling).length < 140
+        ? heading.nextElementSibling : null;
+      let shownText = 0;
+      let hiddenText = 0;
+      let hiddenBy = null;
+      for (const node of section.querySelectorAll("*")) {
+        if (node === heading || headingLike(node) || node === subtitle || (subtitle && subtitle.contains(node))) continue;
+        if (!ownText(node)) continue;
+        const length = ownWords(node).length;
+        if (shown(node)) shownText += length;
+        else {
+          hiddenText += length;
+          if (!hiddenBy) {
+            for (let up = node; up && up !== section; up = up.parentElement) {
+              if (css(up).display === "none") { hiddenBy = up; break; }
+            }
+          }
+        }
+      }
+      const visibleMedia = [...section.querySelectorAll(media)].some(shown);
+      // Un conteneur prévu pour le contenu, resté vide (un script qui ne l'a
+      // pas rempli) : une liste, un corps de tableau, un bloc à id.
+      const vacant = [...section.querySelectorAll("ul, ol, dl, tbody, table, div[id], section[id] > div[class]")]
+        .find((node) => !node.firstElementChild && !node.textContent.trim() && node !== section);
+      return { section, heading, shownText, hiddenText, hiddenBy, visibleMedia, vacant };
+    })
+    // Un titre suivi d'une phrase est une section courte, pas une section
+    // vide : seuls comptent un contenu caché sur cet écran, ou un conteneur
+    // prévu pour lui et resté vide.
+    .filter((entry) => entry.shownText < 20 && !entry.visibleMedia
+      && ((entry.hiddenText >= 40 && entry.hiddenBy) || entry.vacant));
+  for (const entry of emptySections.slice(0, 3)) {
+    const cause = entry.hiddenText >= 40 && entry.hiddenBy
+      ? `it holds ${entry.hiddenText} characters of text hidden on this screen by display: none on ${name(entry.hiddenBy)} (a media query hides one version without showing another)`
+      : `${name(entry.vacant)} is empty (a script that did not fill it, or markup that was never written)`;
+    problems.push(`The section ${name(entry.section)} shows only its title "${words(entry.heading).slice(0, 40)}" on this ${W}px-wide screen: ${cause}`);
+  }
+
   // 18. Emoji dans la page : un défaut, pas une remarque. Un emoji est rendu
   // par la police du système, donc différent sur chaque appareil, et il
   // n'appartient pas au sujet ; une icône ou une image se dessine en SVG.
@@ -642,6 +692,29 @@
     }
     if (hoverable.length >= 4 && silentHover >= hoverable.length / 2) {
       notes.push(`${silentHover} of ${hoverable.length} links and buttons have no :hover style: nothing answers the pointer, which reads as unfinished; give each interactive element hover, focus-visible and active states (a color, background or underline change, 150 to 250ms)`);
+    }
+  }
+
+  // Bandes vides : une hauteur de plus d'un demi-écran sans texte, image ni
+  // champ, entre deux contenus. Les fonds et les marges ne comptent pas.
+  {
+    const spans = visible.filter((el) => ownText(el) || el.matches(media))
+      .map((el) => {
+        const rect = box.get(el);
+        return [rect.top + window.scrollY, rect.bottom + window.scrollY, el];
+      })
+      .filter(([top, bottom]) => bottom > top)
+      .sort((a, b) => a[0] - b[0]);
+    const limit = window.innerHeight * 0.5;
+    const gaps = [];
+    let reach = spans.length ? spans[0][1] : 0;
+    let before = spans.length ? spans[0][2] : null;
+    for (const [top, bottom, el] of spans.slice(1)) {
+      if (top - reach > limit) gaps.push({ from: reach, to: top, before, after: el });
+      if (bottom > reach) { reach = bottom; before = el; }
+    }
+    if (gaps.length) {
+      notes.push(`Empty bands taller than half a screen, with nothing to read or see (${gaps.slice(0, 3).map((gap) => `${Math.round(gap.to - gap.from)}px between ${name(gap.before)} and ${name(gap.after)}`).join("; ")}): tighten the padding and min-height there, or put content in the space`);
     }
   }
 

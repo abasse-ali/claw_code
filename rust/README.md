@@ -1798,7 +1798,11 @@ curseur, à relire avant l'envoi.
   essai réel, cinq étoiles d'avis larges comme la page), emoji dans la page (seul, en icône,
   ou dans une phrase : un emoji est dessiné par la police de l'appareil, différent sur chaque
   téléphone et ordinateur, et n'appartient à aucun design ; chaque icône et image se dessine en
-  SVG inline). Le texte réservé aux lecteurs d'écran (`.visually-hidden`) et les boutons sans
+  SVG inline), section qui n'affiche que son titre (du texte caché sur cet écran par une media
+  query qui masque une version sans montrer l'autre, ou une liste, un tableau, un bloc à id
+  restés vides : vu dans un essai réel, le planning d'un studio écrit pour le téléphone et vide
+  sur ordinateur), polices déclarées en CSS mais jamais chargées (avec la cause quand c'est le
+  lien Google Fonts). Le texte réservé aux lecteurs d'écran (`.visually-hidden`) et les boutons sans
   texte (icône du menu) ne sont pas pris pour des défauts. Au téléphone, Claw essaie le menu : des liens de
   navigation cachés sans bouton pour les ouvrir, ou un bouton qui ne les montre pas après un
   clic, sont signalés. À part, des remarques de design (`designNotes`) nomment ce qui donne un
@@ -1807,7 +1811,8 @@ curseur, à relire avant l'envoi.
   texte, longs paragraphes centrés, deux étiquettes en capitales ou plus, trait décoratif sous
   les titres, cartes identiques sans image, sections aux marges
   verticales toutes différentes, couleur saturée sur plus de 15 % de la page, liens et boutons
-  sans état `:hover`, cibles tactiles sous 44px au téléphone, animations sans
+  sans état `:hover`, cibles tactiles sous 44px au téléphone, bandes vides de plus d'un
+  demi-écran sans rien à lire ni à voir, animations sans
   `prefers-reduced-motion`. En revue visuelle, le modèle les corrige, et n'en garde une que si
   la demande l'exige.
 
