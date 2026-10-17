@@ -1783,7 +1783,11 @@ curseur, à relire avant l'envoi.
   vérifier (cliquer, saisir, faire défiler). Les captures suivent le résultat en images ; un
   modèle qui ne lit pas les images en reçoit la description (voir « Lecteur d'images »). Chaque
   capture porte aussi les défauts mesurés dans la page, en phrases qui disent quoi corriger :
-  contenu plus large que l'écran, textes ou boutons coupés et superposés, images cassées, texte
+  contenu plus large que l'écran, avec sa cause (largeur calculée trop grande, rangée flex qui
+  ne passe pas à la ligne, colonnes de grille trop larges, élément de grille ou de flex resté à
+  `min-width: auto`, texte sur une ligne, image, tableau, champ ou mot trop long ; et un
+  `overflow-x: hidden` sur `body` signalé comme cachant le symptôme : vu dans un essai réel, un
+  modèle a cherché six fois sans trouver, alors qu'une ligne `min-width: 0` suffisait), textes ou boutons coupés et superposés, images cassées, texte
   trop petit ou trop pâle, en-tête fixe qui couvre le titre ou une navigation qui prend plus du
   quart de l'écran d'un téléphone, liens morts (`href="#"`, ancre vers une section absente),
   champ sans étiquette, champ rouge avant toute saisie, bouton à la police du navigateur, image

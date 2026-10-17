@@ -74,12 +74,79 @@
     return (rect.right > W + 1 && rect.left < W - 1) || (rect.left < -1 && rect.right > 1);
   };
   const outside = visible.filter((el) => escapes(el) && !escapes(el.parentElement) && !scroller(el));
+  // Pourquoi cet élément déborde : sans la cause, un modèle masque le
+  // débordement (overflow-x: hidden sur body) au lieu de le réparer. Vu dans
+  // un essai réel, six séries de captures sans trouver l'origine.
+  const px = (value) => (/px$/.test(value || "") ? parseFloat(value) : NaN);
+  const why = (el) => {
+    const style = css(el);
+    const rect = box.get(el);
+    const reasons = [];
+    // Item d'une grille ou d'un flex : sa largeur calculée est celle de la
+    // piste, qui grandit jusqu'à la largeur minimale du contenu (min-width:
+    // auto par défaut). Une largeur fixe n'existe pas, le modèle la cherche en vain.
+    const parentStyle = el.parentElement && css(el.parentElement);
+    const inTrack = parentStyle && (parentStyle.display.includes("grid") || parentStyle.display.includes("flex")) && rect.width > W + 1;
+    const fixed = inTrack ? 0 : Math.max(px(style.minWidth) || 0, px(style.width) || 0);
+    if (fixed > W) reasons.push(`a computed ${fixed > (px(style.minWidth) || 0) ? "width" : "min-width"} of ${Math.round(fixed)}px, wider than the screen (a px, vw or calc() value in the CSS: use max-width: 100%, or width: auto)`);
+    const sides = (px(style.paddingLeft) || 0) + (px(style.paddingRight) || 0) + (px(style.marginLeft) || 0) + (px(style.marginRight) || 0);
+    if (rect.width <= W + 1 && rect.left + rect.width > W + 1 && sides > 0 && style.boxSizing === "content-box" && /%$/.test(el.style.width || "")) {
+      reasons.push("width: 100% plus its padding (content-box): set box-sizing: border-box");
+    }
+    const children = [...el.children].filter(shown);
+    if (style.display.includes("flex") && style.flexDirection.startsWith("row") && style.flexWrap === "nowrap" && children.length >= 2
+      && children.reduce((sum, kid) => sum + box.get(kid).width, 0) > W) {
+      reasons.push(`a flex row of ${children.length} items that does not wrap (add flex-wrap: wrap, or stack them on phones)`);
+    }
+    if (style.display.includes("grid")) {
+      const columns = style.gridTemplateColumns.split(" ").filter(Boolean);
+      const total = columns.reduce((sum, col) => sum + (px(col) || 0), 0);
+      if (columns.length >= 2 && total > W) reasons.push(`${columns.length} grid columns adding up to ${Math.round(total)}px (use a single column under 640px, or minmax(0, 1fr))`);
+    }
+    // Le descendant qui pousse le bord : texte sur une ligne, image, tableau,
+    // champ ou mot trop long.
+    // `strict` : seulement ce qui pousse vraiment le bord, pas un bloc qui ne
+    // fait que remplir une piste trop large.
+    const pushing = (strict = false) => {
+      let widest = null;
+      for (const node of el.querySelectorAll("*")) {
+        const r = box.get(node);
+        if (!r || !shown(node)) continue;
+        if (r.right > W + 1 && (!widest || r.right > box.get(widest).right)) widest = node;
+      }
+      if (!widest) return null;
+      const ws = css(widest);
+      const w = box.get(widest);
+      if (ws.whiteSpace === "nowrap" || ws.whiteSpace === "pre") return `its text ${name(widest)} is kept on one line (white-space: ${ws.whiteSpace}) and is ${Math.round(w.width)}px wide`;
+      if (widest.matches("img, svg, video, canvas, iframe")) return `its ${widest.tagName.toLowerCase()} ${name(widest)} is ${Math.round(w.width)}px wide (max-width: 100%; height: auto)`;
+      if (widest.matches("table, pre, code")) return `its ${widest.tagName.toLowerCase()} ${name(widest)} is ${Math.round(w.width)}px wide (wrap it in a block with overflow-x: auto, or lay the rows out as a list on phones)`;
+      if (widest.matches("input, select, textarea")) return `its field ${name(widest)} is ${Math.round(w.width)}px wide (fields have an intrinsic width: give them width: 100% and min-width: 0)`;
+      if (/\S{30,}/.test(words(widest))) return `its text ${name(widest)} holds a word or address longer than the screen (overflow-wrap: anywhere)`;
+      if (strict) return null;
+      return `its widest content is ${name(widest)}, ${Math.round(w.width)}px wide, reaching x=${Math.round(w.right)}`;
+    };
+    // Item d'une grille ou d'un flex : la piste grandit jusqu'à la largeur
+    // minimale du contenu (min-width: auto par défaut), et c'est là que le
+    // modèle cherche en vain une largeur fixe.
+    if (inTrack && !reasons.length) {
+      const kind = parentStyle.display.includes("grid") ? "grid" : "flex";
+      const inside = pushing(true);
+      return `its parent ${name(el.parentElement)} is a ${kind} whose track grows to the item's minimum content width (${kind} items default to min-width: auto): set min-width: 0 on ${name(el)}${kind === "grid" ? " or minmax(0, 1fr) on the track" : ""}, and shrink what cannot shrink inside${inside ? `: ${inside}` : ""}`;
+    }
+    if (reasons.length) return reasons.join("; ");
+    const inside = pushing();
+    if (inside) return inside;
+    if (rect.width > W + 1) return `the element itself is ${Math.round(rect.width)}px wide with no content that wide: a width, margin or transform in the CSS`;
+    return `it starts at x=${Math.round(rect.left)}: a left margin, padding or transform pushes it`;
+  };
   if (outside.length) {
     const how = pageWidth > W + 1 ? `the page scrolls sideways, ${pageWidth}px wide` : "it is cut off";
+    const masked = ["hidden", "clip"].includes(css(document.body).overflowX) || ["hidden", "clip"].includes(css(document.documentElement).overflowX)
+      ? " overflow-x: hidden on body or html hides the symptom, not the cause: remove it and fix the element." : "";
     problems.push(`Content goes past the edge of the ${W}px-wide screen (${how}): ${list(outside.map((el) => {
       const rect = box.get(el);
-      return `${name(el)} spans x=${Math.round(rect.left)} to x=${Math.round(rect.right)}`;
-    }))}`);
+      return `${name(el)} spans x=${Math.round(rect.left)} to x=${Math.round(rect.right)}, because of ${why(el)}`;
+    }), 4)}.${masked}`);
   } else if (pageWidth > W + 1) {
     problems.push(`The page is ${pageWidth}px wide on a ${W}px-wide screen and scrolls sideways (an empty element, a margin or a padding makes it wider)`);
   }
