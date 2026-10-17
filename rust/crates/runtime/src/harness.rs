@@ -1264,8 +1264,127 @@ pub fn syntax_check(path: &Path) -> Option<String> {
         "sh" | "bash" => {
             checker_errors("sh", &["-n", &file], parent).map(|text| last_lines(&text, 5))
         }
+        "html" | "htm" => html_structure(&std::fs::read_to_string(path).ok()?),
         _ => None,
     }
+}
+
+/// Éléments sans balise de fin.
+const VOID_ELEMENTS: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
+/// Éléments dont HTML permet d'omettre la balise de fin.
+const OPTIONAL_END: &[&str] = &[
+    "p", "li", "dt", "dd", "tr", "td", "th", "thead", "tbody", "tfoot", "option", "optgroup",
+    "colgroup", "caption", "rt", "rp", "html", "head", "body",
+];
+
+/// Balises d'une page HTML mal imbriquées : un élément fermé par la balise
+/// d'un de ses parents, une balise de fin sans ouverture, un élément jamais
+/// fermé. Vu dans un essai réel : une modification avait laissé deux
+/// `<article>` ouverts et des `</div>` orphelins, et les cartes de la page
+/// se défaisaient sans que rien ne le signale. `None` : rien à signaler (ou
+/// un gabarit, dont les balises dépendent de conditions).
+#[must_use]
+pub fn html_structure(text: &str) -> Option<String> {
+    if ["{%", "{{#", "<%", "<?php"]
+        .iter()
+        .any(|marker| text.contains(marker))
+    {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let line_at = |offset: usize| text[..offset].matches('\n').count() + 1;
+    let mut open: Vec<(String, usize)> = Vec::new();
+    let mut errors = Vec::new();
+    let mut index = 0;
+    while let Some(found) = text[index..].find('<') {
+        let start = index + found;
+        let rest = &text[start..];
+        if rest.starts_with("<!--") {
+            index = rest.find("-->").map_or(text.len(), |end| start + end + 3);
+            continue;
+        }
+        if rest.starts_with("<!") || rest.starts_with("<?") {
+            index = rest.find('>').map_or(text.len(), |end| start + end + 1);
+            continue;
+        }
+        let closing = rest.starts_with("</");
+        let name_start = start + if closing { 2 } else { 1 };
+        let name: String = text[name_start..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == ':')
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if name.is_empty() {
+            index = start + 1;
+            continue;
+        }
+        // Fin de la balise, sans s'arrêter à un `>` entre guillemets.
+        let mut cursor = name_start + name.len();
+        let mut quote: Option<u8> = None;
+        while cursor < bytes.len() {
+            match (quote, bytes[cursor]) {
+                (Some(q), byte) if byte == q => quote = None,
+                (None, b'"' | b'\'') => quote = Some(bytes[cursor]),
+                (None, b'>') => break,
+                _ => {}
+            }
+            cursor += 1;
+        }
+        let self_closing = cursor > 0 && bytes.get(cursor - 1) == Some(&b'/');
+        index = (cursor + 1).min(text.len());
+        let line = line_at(start);
+        if closing {
+            if VOID_ELEMENTS.contains(&name.as_str()) {
+                continue;
+            }
+            match open.iter().rposition(|(tag, _)| *tag == name) {
+                Some(position) => {
+                    for (tag, opened) in open.drain(position + 1..) {
+                        if !OPTIONAL_END.contains(&tag.as_str()) {
+                            errors.push(format!(
+                                "<{tag}> opened at line {opened} is not closed before </{name}> at line {line}"
+                            ));
+                        }
+                    }
+                    open.pop();
+                }
+                None if OPTIONAL_END.contains(&name.as_str()) => {}
+                None => errors.push(format!("</{name}> at line {line} closes nothing")),
+            }
+        } else if !self_closing && !VOID_ELEMENTS.contains(&name.as_str()) {
+            // Le contenu de <script> et <style> n'est pas du HTML.
+            if matches!(name.as_str(), "script" | "style" | "textarea" | "title") {
+                let end = format!("</{name}");
+                index = text[index..]
+                    .to_ascii_lowercase()
+                    .find(&end)
+                    .map_or(text.len(), |found| index + found);
+            }
+            open.push((name, line));
+        }
+    }
+    errors.extend(
+        open.iter()
+            .filter(|(tag, _)| !OPTIONAL_END.contains(&tag.as_str()))
+            .map(|(tag, opened)| format!("<{tag}> opened at line {opened} is never closed")),
+    );
+    if errors.is_empty() {
+        return None;
+    }
+    let shown = errors.len().min(6);
+    let more = errors.len() - shown;
+    Some(format!(
+        "HTML tags are not nested correctly (the page's layout breaks around them):\n{}{}",
+        errors[..shown].join("\n"),
+        if more > 0 {
+            format!("\nand {more} more")
+        } else {
+            String::new()
+        }
+    ))
 }
 
 /// Texte joint au résultat de l'outil quand le fichier écrit ne s'analyse pas.
@@ -4881,5 +5000,40 @@ mod tests {
         assert!(syntax_check(&bad).expect("erreur").contains("line 2"));
         assert_eq!(syntax_check(&dir.join("notes.txt")), None);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn html_tags_that_do_not_nest_are_reported_with_their_lines() {
+        use super::html_structure;
+        // Essai réel : une carte de produit restée ouverte, un </article> orphelin.
+        let broken = "<main>\n<div class=\"grid\">\n<article class=\"card\">\n<h3>Baguette</h3>\n</div>\n</article>\n</main>";
+        let report = html_structure(broken).expect("structure cassée");
+        assert!(
+            report.contains("<article> opened at line 3 is not closed before </div> at line 5")
+                && report.contains("</article> at line 6 closes nothing"),
+            "{report}"
+        );
+        assert!(html_structure("<section>\n<div>\n</section>")
+            .expect("div ouverte")
+            .contains("<div> opened at line 2"));
+        assert!(html_structure("<div>\n<p>texte")
+            .expect("jamais fermée")
+            .contains("<div> opened at line 1 is never closed"));
+        // Une page correcte : éléments vides, fins facultatives, SVG fermé par
+        // `/>`, `>` entre guillemets, script et style, commentaire.
+        let page = r#"<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8"><title>La <Mie></title>
+<style>.a > .b { color: red; }</style></head>
+<body><!-- <div> --><ul><li>un<li>deux</ul>
+<p>texte<p>autre
+<img src="a.png" alt="x"><br/>
+<button data-x="a>b" onclick="if (a < b) go()">Ok</button>
+<svg viewBox="0 0 10 10"><path d="M0 0L10 10"/><circle cx="5" cy="5" r="2"></circle></svg>
+<table><tr><td>1<td>2</table>
+<script>if (a < 3 && b > 1) { document.body.innerHTML = "<div>"; }</script>
+</body></html>"#;
+        assert_eq!(html_structure(page), None);
+        // Un gabarit : ses balises dépendent de conditions.
+        assert_eq!(html_structure("{% if x %}<div>{% endif %}"), None);
     }
 }
