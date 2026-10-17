@@ -1179,10 +1179,8 @@ impl StreamState {
     }
 
     fn ingest_chunk(&mut self, chunk: ChatCompletionChunk) -> Result<Vec<StreamEvent>, ApiError> {
-        // OpenRouter signale les erreurs survenues en cours de flux dans un chunk
-        // `{"error": {...}}` après l'en-tête 200 : on les remonte comme erreur d'API.
-        if let Some(error) = chunk.error {
-            return Err(error_in_body(&error));
+        if let Some(error) = provider_error(&chunk) {
+            return Err(error);
         }
 
         let mut events = Vec::new();
@@ -2172,16 +2170,47 @@ fn error_in_body(error: &Value) -> ApiError {
     }
 }
 
+/// Panne signalée dans un fragment du flux, après l'en-tête 200. `OpenRouter`
+/// envoie `{"error": {...}}`, ou seulement `finish_reason: "error"`, sans rien
+/// dire de plus : ce n'est pas la fin de la réponse, et un autre modèle doit
+/// reprendre. Vu dans un essai réel : un fournisseur de dots-3 coupait ainsi
+/// un `write_file` après son chemin, trois fois de suite.
+fn provider_error(chunk: &ChatCompletionChunk) -> Option<ApiError> {
+    if let Some(error) = &chunk.error {
+        return Some(error_in_body(error));
+    }
+    chunk
+        .choices
+        .iter()
+        .any(|choice| choice.finish_reason.as_deref() == Some("error"))
+        .then(stopped_by_provider_error)
+}
+
+/// Réponse arrêtée par le fournisseur sur `finish_reason: "error"`, sans
+/// objet d'erreur : une panne en amont (502), qu'un autre modèle peut reprendre.
+fn stopped_by_provider_error() -> ApiError {
+    error_in_body(&json!({
+        "code": 502,
+        "message": "the provider stopped the reply with finish_reason \"error\""
+    }))
+}
+
 /// Réponse sans streaming : une erreur placée dans le corps est rendue comme
 /// telle, au lieu d'un « corps illisible » qui ne dit rien.
 fn parse_chat_completion(body: &[u8]) -> Result<ChatCompletionResponse, ApiError> {
     let value: Value = serde_json::from_slice(body)?;
-    let answered = value
-        .get("choices")
-        .and_then(Value::as_array)
-        .is_some_and(|choices| !choices.is_empty());
+    let choices = value.get("choices").and_then(Value::as_array);
+    let answered = choices.is_some_and(|choices| !choices.is_empty());
     match value.get("error") {
         Some(error) if !answered && !error.is_null() => Err(error_in_body(error)),
+        _ if choices.is_some_and(|choices| {
+            choices
+                .iter()
+                .any(|choice| choice["finish_reason"].as_str() == Some("error"))
+        }) =>
+        {
+            Err(stopped_by_provider_error())
+        }
         _ => Ok(serde_json::from_value(value)?),
     }
 }
@@ -2259,6 +2288,33 @@ mod passback_tests {
         // Corps coupé : erreur de lecture, que la chaîne sait contourner.
         let cut = super::parse_chat_completion(br#"{"id":"gen-3","choi"#).expect_err("coupé");
         assert!(cut.is_broken_response() && !cut.is_fallback_worthy());
+    }
+
+    #[test]
+    fn a_reply_stopped_by_finish_reason_error_is_a_provider_failure() {
+        // Essai réel (dots-3 chez AtlasCloud) : l'appel s'arrête après son chemin.
+        let mut state = StreamState::new("x/y".to_string());
+        state
+            .ingest_chunk(chunk(json!({
+                "id": "a", "model": "x/y",
+                "choices": [{ "index": 0, "delta": { "tool_calls": [{ "index": 0, "id": "call-1", "function": { "name": "write_file", "arguments": "{\"path\": \"index.html\"" } }] }, "finish_reason": null }]
+            })))
+            .expect("début de l'appel");
+        let error = state
+            .ingest_chunk(chunk(json!({
+                "id": "a", "model": "x/y",
+                "choices": [{ "index": 0, "delta": { "content": "" }, "finish_reason": "error", "native_finish_reason": null }]
+            })))
+            .expect_err("panne du fournisseur");
+        assert!(error.is_fallback_worthy(), "{error}");
+        assert_eq!(
+            crate::upstream_failure_status(&error.to_string()),
+            Some(502)
+        );
+        let body = br#"{"id":"b","choices":[{"index":0,"finish_reason":"error","message":{"role":"assistant","content":""}}]}"#;
+        assert!(super::parse_chat_completion(body)
+            .expect_err("panne")
+            .is_fallback_worthy());
     }
 
     #[test]

@@ -27,7 +27,12 @@
       if (Number(css(node).opacity) === 0) return false;
     }
     const box = el.getBoundingClientRect();
-    return box.width > 0 && box.height > 0;
+    if (box.width <= 0 || box.height <= 0) return false;
+    // Texte réservé aux lecteurs d'écran (.sr-only, .visually-hidden) : caché
+    // exprès, ni coupé ni illisible.
+    const clipped = (style.clip && style.clip !== "auto") || /inset\(\s*50%/.test(style.clipPath || "");
+    const tiny = box.width <= 2 && box.height <= 2 && ["hidden", "clip"].includes(style.overflowX);
+    return !clipped && !tiny;
   };
   const words = (el) => (el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("alt") || "")
     .replace(/\s+/g, " ").trim();
@@ -199,5 +204,164 @@
   if (!text && !visible.some((el) => el.matches("img, svg, canvas, video, iframe"))) {
     problems.push("The page shows nothing: a blank screen (a script error, a missing build, or content that never loaded)");
   }
-  return { title: document.title || "", problems, textLength: text.length };
+
+  // 9. Barre fixe en haut : elle couvre le début de la page, ou prend trop de
+  // place sur un téléphone (ses liens restent dépliés au lieu d'un bouton menu).
+  const bars = visible.filter((el) => css(el).position === "fixed" && box.get(el).top <= 1 && box.get(el).width >= W * 0.6)
+    .filter((el, _, all) => !all.some((other) => other !== el && other.contains(el)));
+  if (window.scrollY < 2) {
+    for (const bar of bars) {
+      const rb = box.get(bar);
+      const covered = visible.filter((el) => !pinned(el) && !bar.contains(el)
+        && el.matches("h1, h2, h3, p, a, button, img, input, label")
+        && box.get(el).top < rb.bottom - 2 && box.get(el).bottom > rb.top + 2);
+      if (covered.length) {
+        problems.push(`The fixed ${name(bar)} (${Math.round(rb.height)}px high) covers the top of the page, ${list(covered.map(name), 3)} sit underneath it: offset the content by the bar's height (padding-top on the body or the first section, scroll-margin-top on sections)`);
+      }
+    }
+  }
+  if (mobile) {
+    const tall = bars.concat(visible.filter((el) => css(el).position === "sticky" && el.matches("header, nav, [role=banner]")))
+      .find((el) => box.get(el).height > window.innerHeight * 0.25);
+    if (tall) {
+      problems.push(`On a phone, ${name(tall)} takes ${Math.round(box.get(tall).height / window.innerHeight * 100)}% of the screen height: fold its links into a menu button that opens and closes them`);
+    }
+  }
+
+  // 10. Liens qui ne mènent nulle part : « # », « javascript: », section absente.
+  if (!mobile) {
+    const links = [...document.querySelectorAll("a[href]")].filter(shown);
+    const dead = links.filter((a) => {
+      const href = a.getAttribute("href").trim();
+      return href === "#" || href === "" || href.toLowerCase().startsWith("javascript:");
+    });
+    if (dead.length) {
+      problems.push(`Links that go nowhere (href="#" or javascript:): ${list(dead.map(name))}. Point each to a real page, section or address (mailto:, tel:, the real social profile), or make it a <button> if it runs an action`);
+    }
+    const missing = links.filter((a) => {
+      const href = a.getAttribute("href").trim();
+      if (!/^#[^\s#]+$/.test(href)) return false;
+      try {
+        return !document.getElementById(decodeURIComponent(href.slice(1)));
+      } catch (_) {
+        return true;
+      }
+    });
+    if (missing.length) {
+      problems.push(`Links to sections that do not exist: ${list(missing.map((a) => `${name(a)} -> ${a.getAttribute("href")}`))}`);
+    }
+  }
+
+  // 11. Formulaires : champs sans libellé, erreurs affichées avant toute
+  // saisie, champs et boutons laissés au style du navigateur.
+  const fields = [...document.querySelectorAll("input, select, textarea")]
+    .filter((el) => !["hidden", "submit", "button", "reset", "image"].includes(el.type) && shown(el));
+  const labelled = (el) => (el.labels && el.labels.length) || el.getAttribute("aria-label") || el.getAttribute("aria-labelledby") || el.closest("label") || el.getAttribute("title");
+  const unlabelled = fields.filter((el) => !labelled(el));
+  if (unlabelled.length) {
+    problems.push(`Form fields without a label (a placeholder is not one, it disappears as soon as the user types): ${list(unlabelled.map(name))}`);
+  }
+  const reddish = (value) => {
+    const color = parse(value);
+    return Boolean(color) && color.a > 0 && color.r > 150 && color.g < 110 && color.b < 110;
+  };
+  const early = fields.filter((el) => !el.value && document.activeElement !== el && el.matches(":invalid")
+    && (reddish(css(el).borderTopColor) || reddish(css(el).outlineColor) || /rgba?\(\s*(?:1[6-9]\d|2\d\d),\s*\d{1,2},\s*\d{1,2}/.test(css(el).boxShadow)));
+  if (early.length) {
+    problems.push(`Form fields shown as errors before anyone typed in them (red on empty required fields): ${list(early.map(name))}. Show errors only after the user acts: :user-invalid, or a class added on blur or submit`);
+  }
+  const bodyFont = css(document.body).fontFamily;
+  const controls = fields.concat([...document.querySelectorAll("button, input[type=submit], input[type=button]")].filter(shown))
+    .filter((el) => !el.matches("[type=checkbox], [type=radio], [type=range], [type=color], [type=file]"));
+  // Un bouton sans texte affiché (icône du menu) n'a pas de police à voir.
+  const raw = controls.filter((el) => css(el).fontFamily !== bodyFont
+    && (fields.includes(el) || /\p{L}/u.test(el.innerText || el.value || "")));
+  if (raw.length) {
+    problems.push(`Form fields or buttons keep the browser's default look (font ${css(raw[0]).fontFamily.split(",")[0]} instead of the page's ${bodyFont.split(",")[0]}): ${list(raw.map(name))}. Style them like the rest of the page (font: inherit, padding, border, radius; full width on phones)`);
+  }
+
+  // 12. Images sans texte de remplacement, boutons et liens sans nom.
+  const noAlt = [...document.images].filter((img) => !img.hasAttribute("alt") && shown(img));
+  if (noAlt.length) problems.push(`Images without an alt attribute (alt="" for a decorative one): ${list(noAlt.map((img) => `${name(img)} (${img.getAttribute("src") || ""})`))}`);
+  const nameless = [...document.querySelectorAll("button, a[href], [role=button]")].filter((el) => shown(el) && !words(el)
+    && !el.getAttribute("title") && !el.querySelector("img[alt]:not([alt='']), svg title, [aria-label]"));
+  if (nameless.length) problems.push(`Buttons or links with no text or label, a screen reader announces nothing (add aria-label): ${list(nameless.map(name))}`);
+
+  // 13. Texte de remplissage ou inachevé.
+  const filler = /lorem ipsum|dolor sit amet|\b(?:todo|tbd|placeholder)\b|your (?:text|content|title|name) here|votre (?:texte|contenu|titre) ici|ins[eé]rer .{0,20} ici|insert .{0,20} here/i;
+  const ownWords = (el) => [...el.childNodes].filter((node) => node.nodeType === 3).map((node) => node.textContent).join(" ");
+  const fillers = visible.filter((el) => ownText(el) && filler.test(ownWords(el)));
+  if (fillers.length) problems.push(`Filler or unfinished text: ${list(fillers.map(name))}. Write the real content`);
+
+  // 14. Aucune typographie choisie : la police par défaut du navigateur.
+  const mainFamily = bodyFont.split(",")[0].replace(/["']/g, "").trim().toLowerCase();
+  if (["times new roman", "times", "serif"].includes(mainFamily)) {
+    problems.push("The page has no typography of its own: its text uses the browser's default font (Times New Roman). Choose typefaces that fit the subject");
+  }
+
+  // 15. Focus clavier invisible (ordinateur) : rien ne change quand un lien
+  // ou un bouton reçoit le focus.
+  if (!mobile) {
+    const keys = ["outlineStyle", "outlineWidth", "outlineColor", "boxShadow", "backgroundColor", "borderTopColor", "textDecorationLine", "color"];
+    const look = (el) => {
+      const style = getComputedStyle(el);
+      return keys.map((key) => style[key]).join("|");
+    };
+    const focusable = [...document.querySelectorAll("a[href], button, input:not([type=hidden]), select, textarea")].filter(shown).slice(0, 12);
+    const previous = document.activeElement;
+    const silent = [];
+    let tried = 0;
+    for (const el of focusable) {
+      const before = look(el);
+      el.focus({ preventScroll: true });
+      if (document.activeElement !== el) continue;
+      tried += 1;
+      if (look(el) === before) silent.push(el);
+      el.blur();
+    }
+    if (previous && previous.focus) previous.focus({ preventScroll: true });
+    if (tried >= 2 && silent.length >= Math.max(2, tried / 2)) {
+      problems.push(`No visible keyboard focus: nothing changes when ${list(silent.map(name), 3)} get the focus, so a keyboard user cannot see where they are. Add :focus-visible styles (an outline or a ring)`);
+    }
+  }
+
+  // Remarques de design : pas des défauts, des choix à reconsidérer.
+  const notes = [];
+  if (!mobile) {
+    const common = ["inter", "roboto", "arial", "helvetica", "helvetica neue", "open sans", "montserrat", "poppins", "lato",
+      "system-ui", "-apple-system", "segoe ui", "nunito", "raleway", "playfair display", "source sans pro", "verdana"];
+    const families = new Set([document.body, ...document.querySelectorAll("h1, h2, h3")].filter(Boolean)
+      .map((el) => css(el).fontFamily.split(",")[0].replace(/["']/g, "").trim()));
+    const generic = [...families].filter((family) => common.includes(family.toLowerCase()));
+    if (generic.length) notes.push(`Typefaces ${generic.join(" and ")} are among the most frequent defaults of generated pages: a typeface chosen for this subject would give the page its own voice`);
+    const wide = visible.filter((el) => el.matches("p, li") && ownText(el) && words(el).length > 160
+      && box.get(el).width / parseFloat(css(el).fontSize) > 42);
+    if (wide.length) notes.push(`Lines of text longer than about 85 characters, tiring to read: ${list(wide.map(name), 3)} (keep paragraphs under about 70ch wide)`);
+    const centered = visible.filter((el) => el.matches("p") && css(el).textAlign === "center"
+      && box.get(el).height / (parseFloat(css(el).lineHeight) || parseFloat(css(el).fontSize) * 1.4) > 3.5);
+    if (centered.length) notes.push(`Long paragraphs set centered, hard to read: ${list(centered.map(name), 3)}`);
+    const caps = visible.filter((el) => ownText(el) && css(el).textTransform === "uppercase" && words(el).length <= 30);
+    if (caps.length >= 4) notes.push(`${caps.length} small labels in ALL CAPS (${list(caps.map(name), 3)}): a frequent tell of generated pages`);
+    const pictograph = /^\p{Extended_Pictographic}[\uFE0F\u200D\p{Extended_Pictographic}]*$/u;
+    const emoji = visible.filter((el) => pictograph.test(words(el)) && parseFloat(css(el).fontSize) >= 32);
+    if (emoji.length) notes.push(`Emoji standing in for pictures (${list(emoji.map(name), 3)}): use the real images, or illustrations drawn for the subject (inline SVG, CSS)`);
+    let animated = false;
+    try {
+      animated = document.getAnimations().length > 0 || visible.some((el) => css(el).animationName && css(el).animationName !== "none");
+    } catch (_) { /* navigateur ancien */ }
+    let reduced = false;
+    for (const sheet of document.styleSheets) {
+      let rules = [];
+      try {
+        rules = sheet.cssRules;
+      } catch (_) {
+        continue;
+      }
+      for (const rule of rules) {
+        if (rule.conditionText && rule.conditionText.includes("prefers-reduced-motion")) reduced = true;
+      }
+    }
+    if (animated && !reduced) notes.push("The page animates but ignores prefers-reduced-motion: add a @media (prefers-reduced-motion: reduce) rule that stops the motion");
+  }
+  return { title: document.title || "", problems, notes, textLength: text.length };
 })()

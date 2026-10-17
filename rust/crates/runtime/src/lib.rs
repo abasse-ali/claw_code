@@ -41,6 +41,7 @@ pub mod team;
 pub mod telemetry;
 pub mod typography;
 mod usage;
+pub mod web_design;
 pub mod workflow;
 pub mod worktree;
 

@@ -66,6 +66,8 @@ const CONSULT_EFFORT: api::ReasoningEffort = api::ReasoningEffort::Medium;
 const REASON_CHARS: usize = 90;
 /// Mise de côté d'un modèle muet ou en panne.
 const SET_ASIDE: Duration = Duration::from_secs(300);
+/// Mise de côté d'un modèle qui refuse (403).
+const REFUSED_SET_ASIDE: Duration = Duration::from_secs(7 * 24 * 3_600);
 
 type Resolver = Box<dyn Fn() -> Vec<String> + Send + Sync>;
 
@@ -119,9 +121,22 @@ fn reason(error: &ApiError) -> String {
     }
 }
 
-/// Erreur d'un modèle consulté ; une panne qui lui est propre le met de côté.
+/// Refus 403 : le modèle est réservé à certaines applications (« only
+/// available on agentic harnesses ») ou interdit à cette clé ; il le restera.
+fn refused(error: &ApiError) -> bool {
+    match error {
+        ApiError::Api { status, .. } => status.as_u16() == 403,
+        ApiError::RetriesExhausted { last_error, .. } => refused(last_error),
+        _ => false,
+    }
+}
+
+/// Erreur d'un modèle consulté ; une panne qui lui est propre le met de côté
+/// (une semaine pour un refus, qui ne passera pas).
 fn failure(model: &str, error: &ApiError) -> String {
-    if error.is_fallback_worthy() {
+    if refused(error) {
+        api::mark_model_unavailable(model, REFUSED_SET_ASIDE);
+    } else if error.is_fallback_worthy() {
         api::mark_model_unavailable(model, SET_ASIDE);
     }
     reason(error)
@@ -270,6 +285,36 @@ pub fn ask_about_image_within(
             ],
         }],
         ..request(model, system, "", max_tokens)
+    })
+}
+
+/// Comme [`ask_about_image_within`], avec plusieurs images dans la même
+/// requête (captures d'une page au téléphone et à l'ordinateur).
+pub fn ask_about_images_within(
+    models: &[String],
+    system: &str,
+    prompt: &str,
+    images: &[api::ImageSource],
+    max_tokens: u32,
+    patience: Patience,
+) -> Result<Opinion, String> {
+    ask_with(models, patience, |model| {
+        let mut content: Vec<api::InputContentBlock> = images
+            .iter()
+            .map(|image| api::InputContentBlock::Image {
+                source: image.clone(),
+            })
+            .collect();
+        content.push(api::InputContentBlock::Text {
+            text: prompt.to_string(),
+        });
+        MessageRequest {
+            messages: vec![InputMessage {
+                role: "user".to_string(),
+                content,
+            }],
+            ..request(model, system, "", max_tokens)
+        }
     })
 }
 

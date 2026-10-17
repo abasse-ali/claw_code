@@ -135,6 +135,11 @@ pub fn mark_model_unavailable(model: &str, duration: Duration) {
     with_cooldown(|map| {
         map.insert(model.to_string(), Instant::now() + duration);
     });
+    // Une longue mise de côté (refus 403, quota du jour) vaut aussi pour les
+    // prochaines sessions.
+    if duration >= PERSISTED_COOLDOWN {
+        persist_long_cooldowns();
+    }
 }
 
 /// Faux si le modèle est encore mis de côté.

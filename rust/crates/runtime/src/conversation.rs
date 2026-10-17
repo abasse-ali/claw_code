@@ -128,6 +128,17 @@ pub trait ApiClient {
         Vec::new()
     }
 
+    /// Critique de design : les captures d'une interface jugées par un modèle
+    /// qui lit les images. `None` : aucun modèle disponible.
+    fn critique_design(
+        &mut self,
+        _system: &str,
+        _prompt: &str,
+        _images: &[crate::attachments::ImageAttachment],
+    ) -> Option<Consultation> {
+        None
+    }
+
     /// Mode équipe : rôle de la prochaine requête (le client choisit le modèle
     /// le plus fort pour ce rôle).
     fn plan_step(&mut self, _step: crate::team::Step) {}
@@ -294,6 +305,9 @@ pub struct ConversationRuntime<C, T> {
     /// Captures d'écran des appels de la réponse en cours, jointes à son
     /// dernier résultat d'outil.
     tool_images: Vec<crate::attachments::ImageAttachment>,
+    /// Dernière page regardée par le modèle (`Screenshot`, `ViewPage`) :
+    /// celle que reprend la revue visuelle.
+    page_target: Option<String>,
     /// Arrêt demandé par un hook (`"continue": false`) : le tour s'arrête
     /// après les appels en cours.
     hook_stop: Option<String>,
@@ -343,6 +357,13 @@ fn file_stamp(path: &std::path::Path) -> Option<FileStamp> {
 struct TurnAids {
     /// Des fichiers ont été modifiés depuis la dernière vérification.
     dirty: bool,
+    /// Un fichier d'interface (HTML, CSS, composant) a changé depuis la
+    /// dernière revue visuelle.
+    interface_dirty: bool,
+    /// Revues visuelles faites pendant ce tour.
+    interface_rounds: usize,
+    /// Fichiers d'interface changés par une commande, déjà revus.
+    interface_commands: std::collections::BTreeSet<String>,
     /// Commandes réussies lancées par le modèle depuis sa dernière modification.
     verified_commands: Vec<String>,
     /// Commandes parties en arrière-plan depuis la dernière modification, par
@@ -985,6 +1006,7 @@ where
             project_root: None,
             environment: EnvironmentProbe::Pending,
             tool_images: Vec::new(),
+            page_target: None,
             hook_stop: None,
         }
     }
@@ -1420,6 +1442,16 @@ where
                 user_message.blocks.push(ContentBlock::Text { text });
             }
         }
+        // Interface web : la méthode d'un studio de design (plan avant le
+        // code, marques d'une page générée, plancher de qualité, vérification).
+        if !self.subagent
+            && harness::enabled(Aid::DesignGuide)
+            && report != harness::Report::Problem
+        {
+            if let Some(text) = crate::web_design::design_guide(&request_text, earlier.as_deref()) {
+                user_message.blocks.push(ContentBlock::Text { text });
+            }
+        }
         // Petit projet : tous ses fichiers en vues, au premier tour de la session.
         if !self.subagent && self.session.messages.is_empty() && harness::enabled(Aid::SmallProject)
         {
@@ -1645,6 +1677,14 @@ where
                     .or_else(|| self.persistence_gate(&mut aids))
                     .or_else(|| self.verification_gate(&mut aids, &mut prompter))
                     .or_else(|| self.editor_gate(&mut aids))
+                    .or_else(|| {
+                        self.interface_gate(
+                            &mut aids,
+                            &request_text,
+                            earlier.as_deref(),
+                            &mut prompter,
+                        )
+                    })
                     .or_else(|| {
                         self.workflow_gate(
                             &mut aids,
@@ -2003,6 +2043,12 @@ where
         notes.extend(self.tool_executor.argument_note(tool_name, input));
         // Questions déjà posées avec le menu : rien à redemander en fin de tour.
         aids.asked |= tool_name == "AskUserQuestion";
+        // Page que le modèle a regardée lui-même : la revue visuelle la reprend.
+        if matches!(tool_name, "Screenshot" | "ViewPage") && !is_error {
+            if let Some(target) = crate::web_design::page_target(input) {
+                self.page_target = Some(target);
+            }
+        }
         // Issue d'une commande du modèle : celle de `bash`, ou la fin, lue avec
         // `BashOutput`, d'une commande passée en arrière-plan pendant ce tour.
         let command_outcome = command_outcome(tool_name, input, &output, is_error, aids);
@@ -2211,6 +2257,10 @@ where
         aids.dirty = true;
         aids.editor_dirty = true;
         aids.workflow_dirty = true;
+        if json_field(input, "path").is_some_and(|path| crate::web_design::is_interface_file(&path))
+        {
+            aids.interface_dirty = true;
+        }
         aids.feedback_pending = false;
         aids.verified_commands.clear();
         // Une commande encore en cours a été lancée sur l'ancien code.
@@ -2575,6 +2625,136 @@ where
         }
         if let (Some(snapshot), Ok(cwd)) = (aids.data_snapshot.as_mut(), std::env::current_dir()) {
             snapshot.refresh_all(&cwd);
+        }
+        feedback
+    }
+
+    /// Revue visuelle : le modèle a modifié l'interface et dit avoir fini.
+    /// Claw regarde la page comme un utilisateur (captures pleine page au
+    /// téléphone et à l'ordinateur, défauts mesurés, essai du menu) et la fait
+    /// juger par un modèle qui voit ; ce qui est à reprendre repart au modèle,
+    /// quelques fois par tour au plus (`CLAW_DESIGN_REVIEW_ROUNDS`).
+    #[allow(clippy::too_many_lines)]
+    fn interface_gate(
+        &mut self,
+        aids: &mut TurnAids,
+        request: &str,
+        earlier: Option<&str>,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> Option<String> {
+        if self.subagent || interrupt_requested() || !harness::enabled(Aid::DesignReview) {
+            return None;
+        }
+        let by_commands: Vec<String> = aids
+            .command_changes
+            .iter()
+            .filter(|path| {
+                crate::web_design::is_interface_file(path)
+                    && !aids.interface_commands.contains(*path)
+            })
+            .cloned()
+            .collect();
+        if !aids.interface_dirty && by_commands.is_empty() {
+            return None;
+        }
+        aids.interface_dirty = false;
+        aids.interface_commands.extend(by_commands);
+        let rounds = crate::web_design::max_review_rounds();
+        if aids.interface_rounds >= rounds {
+            return None;
+        }
+        if self
+            .api_client
+            .free_requests_left()
+            .is_some_and(|left| left < crate::web_design::MIN_FREE_REQUESTS)
+        {
+            self.api_client
+                .notify("Revue visuelle sautée : il reste peu de requêtes gratuites aujourd'hui");
+            return None;
+        }
+        let cwd = std::env::current_dir().ok()?;
+        let changed: Vec<String> = aids
+            .originals
+            .keys()
+            .chain(&aids.command_changes)
+            .cloned()
+            .collect();
+        let target = self
+            .page_target
+            .clone()
+            .or_else(|| crate::web_design::page_from_files(&cwd, &changed))?;
+        aids.interface_rounds += 1;
+        self.api_client.notify(&format!(
+            "Revue visuelle de l'interface ({}/{rounds}) : captures au téléphone et à l'ordinateur…",
+            aids.interface_rounds
+        ));
+        let input = crate::web_design::screenshot_input(&target);
+        self.tool_executor.announce("Screenshot", &input);
+        let (message, _) = self.execute_tool_call(
+            format!("claw-design-{}", aids.interface_rounds),
+            "Screenshot".to_string(),
+            &input,
+            prompter
+                .as_mut()
+                .map(|prompt| &mut **prompt as &mut dyn PermissionPrompter),
+        );
+        // Les captures vont au juge, pas dans la conversation.
+        let images = std::mem::take(&mut self.tool_images);
+        let (output, is_error) = tool_result_parts(&message)?;
+        if is_error {
+            self.api_client.notify(&format!(
+                "Revue visuelle impossible : {}",
+                output.lines().next().unwrap_or_default()
+            ));
+            return None;
+        }
+        let audit = crate::web_design::read_audit(output);
+        // Une relance courte (« plus coloré ») se juge avec la demande qu'elle poursuit.
+        let brief = match earlier {
+            Some(earlier) if request.split_whitespace().count() <= 12 => {
+                format!(
+                    "{earlier}
+{request}"
+                )
+            }
+            _ => request.to_string(),
+        };
+        let critique = if images.is_empty() {
+            None
+        } else {
+            self.api_client
+                .notify("Revue visuelle : un modèle qui voit juge les captures…");
+            self.api_client.critique_design(
+                crate::web_design::CRITIC_SYSTEM,
+                &crate::web_design::critique_prompt(&brief, images.len(), &audit),
+                &images,
+            )
+        };
+        let verdict = critique.as_ref().and_then(|consultation| {
+            crate::web_design::critique_changes(&consultation.text)
+                .map(|lines| (consultation.model.clone(), lines))
+        });
+        let feedback = crate::web_design::review_feedback(
+            &target,
+            &audit,
+            verdict
+                .as_ref()
+                .map(|(model, lines)| (model.as_str(), lines.as_str())),
+            aids.interface_rounds,
+            rounds,
+        );
+        if feedback.is_some() {
+            let judged = verdict.as_ref().map_or_else(String::new, |(model, lines)| {
+                format!(", {} remarque(s) de {model}", lines.lines().count())
+            });
+            self.api_client.notify(&format!(
+                "Revue visuelle : {} défaut(s) mesuré(s), {} remarque(s) de design{judged} : renvoyé(s) à l'agent",
+                audit.problems.len() + audit.console.len(),
+                audit.notes.len()
+            ));
+        } else {
+            self.api_client
+                .notify("Revue visuelle : rien à reprendre sur la page");
         }
         feedback
     }

@@ -34,6 +34,25 @@ const CHECK_PROMPT: &str = "Below is a description of this image, written by ano
 
 /// Question du modèle sur une image (`LookAtImage`).
 const LOOK_PROMPT: &str = "An AI assistant that cannot see this image asks a question about it. Look at the image and answer as precisely as you can, from what is visible only: quote text exactly; give positions (region; left, center or right; top, middle or bottom; approximate share of the image), colors (named with an approximate hex code), sizes and states. If the answer is not visible or not certain, say so plainly instead of guessing.";
+/// Capture prise par un outil (`Screenshot`) : une description d'un seul
+/// regard, centrée sur ce que la page montre et ce qui cloche. La description
+/// complète en deux regards prend plusieurs minutes par image : dans une
+/// boucle de mise au point d'une page, ce serait un tour de 25 minutes.
+const QUICK_PROMPT: &str = "Describe this screenshot of a web page for a developer who cannot see it and must fix it from your words.\n1. LAYOUT: the regions from top to bottom (header, hero, sections, footer), their approximate height as a share of the image, background colors (approximate hex), alignment and columns.\n2. CONTENT: every heading, button, link and label, with its exact text; pictures and illustrations, what they show or that they are missing or broken.\n3. LOOK: typefaces as they appear (serif, sans, display, weight), colors, spacing rhythm, what draws the eye first.\n4. ISSUES: everything that looks broken, cut off, overlapping, covered, cramped, misaligned, unstyled (browser-default fields or buttons), empty, generic or unfinished. Write \"none seen\" if nothing.\nPlain text, no preamble. End with one line, exactly one of: VERDICT: DEFECT - <what looks broken, in a few words> or VERDICT: OK";
+/// Jetons d'une description rapide.
+const QUICK_TOKENS: u32 = 3_000;
+/// Patience d'une description rapide.
+const QUICK_PATIENCE: tools::advisors::Patience = tools::advisors::Patience {
+    per_model: std::time::Duration::from_secs(120),
+    total: std::time::Duration::from_secs(180),
+};
+/// Jetons et patience d'une critique de design.
+const CRITIQUE_TOKENS: u32 = 3_000;
+const CRITIQUE_PATIENCE: tools::advisors::Patience = tools::advisors::Patience {
+    per_model: std::time::Duration::from_secs(150),
+    total: std::time::Duration::from_secs(240),
+};
+
 /// Modèles essayés pour une image avant de renoncer.
 const READERS_TRIED: usize = 3;
 
@@ -190,6 +209,61 @@ pub(crate) fn model_cannot_read_images(model: &str) -> bool {
 }
 
 /// Images de la conversation, dans l'ordre.
+/// Images jointes à des résultats d'outils (captures de `Screenshot`) : une
+/// description rapide leur suffit.
+fn tool_image_keys(messages: &[InputMessage]) -> BTreeSet<String> {
+    messages
+        .iter()
+        .filter(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, InputContentBlock::ToolResult { .. }))
+        })
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            InputContentBlock::Image { source } => Some(image_key(source)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Description d'un seul regard d'une capture prise par un outil.
+fn describe_quickly(readers: &[String], source: &ImageSource) -> Result<(String, String), String> {
+    tools::advisors::ask_about_image_within(
+        readers,
+        READER_SYSTEM,
+        QUICK_PROMPT,
+        source,
+        QUICK_TOKENS,
+        QUICK_PATIENCE,
+    )
+    .map(|opinion| (opinion.model, opinion.text))
+}
+
+/// Critique de design : les captures d'une page jugées ensemble par un modèle
+/// gratuit qui lit les images (`imageReader`) ; son nom et sa réponse.
+pub(crate) fn critique(
+    current: &str,
+    system: &str,
+    prompt: &str,
+    sources: &[ImageSource],
+) -> Result<(String, String), String> {
+    let readers = Reader::configured().models(current);
+    if readers.is_empty() {
+        return Err("aucun modèle gratuit ne lit les images (imageReader)".to_string());
+    }
+    tools::advisors::ask_about_images_within(
+        &readers,
+        system,
+        prompt,
+        sources,
+        CRITIQUE_TOKENS,
+        CRITIQUE_PATIENCE,
+    )
+    .map(|opinion| (opinion.model, opinion.text))
+}
+
 fn images(messages: &[InputMessage]) -> Vec<&ImageSource> {
     messages
         .iter()
@@ -322,7 +396,11 @@ pub(crate) fn prepare(model: &str, messages: &[InputMessage], announce: &mut dyn
             .clone()
     };
     remember(model, &images(messages));
+    let quick = tool_image_keys(messages);
     prepare_with(model, messages, &dir, &readers, announce, |source| {
+        if quick.contains(&image_key(source)) {
+            return describe_quickly(&readers(), source);
+        }
         describe_thoroughly(&readers(), &|models, prompt| {
             ask_reader(models, prompt, source)
         })

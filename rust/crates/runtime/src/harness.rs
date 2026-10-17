@@ -98,6 +98,12 @@ pub enum Aid {
     /// Mode projet : cahier des charges, plan en jalons vérifiés et
     /// démonstration finale pour créer un projet complet.
     ProjectMode,
+    /// Demande d'interface web : la méthode d'un studio de design (plan avant
+    /// le code, marques d'une page générée, plancher de qualité, vérification).
+    DesignGuide,
+    /// Interface modifiée : Claw regarde la page (captures téléphone et
+    /// ordinateur, défauts mesurés) et la fait juger par un modèle qui voit.
+    DesignReview,
 }
 
 impl Aid {
@@ -139,6 +145,8 @@ impl Aid {
             Self::EntryPoint => "CLAW_ENTRY_POINT",
             Self::SmallProject => "CLAW_SMALL_PROJECT",
             Self::ProjectMode => "CLAW_PROJECT_MODE",
+            Self::DesignGuide => "CLAW_DESIGN_GUIDE",
+            Self::DesignReview => "CLAW_DESIGN_REVIEW",
         }
     }
 }

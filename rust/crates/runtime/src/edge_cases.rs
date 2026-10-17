@@ -53,7 +53,9 @@ const FEATURE_EDGE_CASES: &[(&[&str], &str)] = &[
         &[
             "date", "heures de", "heures d'", "heures sup", "heures ouvr", "heures travaill",
             "toutes les heures", "nombre d'heures", "heure de", "heure d'", "heure du", "heure en",
-            "heure locale", "quelle heure", "horaires", "horaire de", "horaire d'", "plage horaire",
+            "heure locale", "quelle heure", "horaires de travail", "horaires du personnel",
+            "horaires des employ", "gestion des horaires", "calcul des horaires", "horaire de",
+            "horaire d'", "plage horaire",
             "creneau", "decalage horaire", "calendrier", "echeance", "fuseau", "europe/",
             "jour ouvr", "jours ouvr", "ferie", "conge ", "conges ", "planning", "agenda",
             "rendez-vous", "rdv", "anniversaire", "mensuel", "hebdomadaire", "horodat", "timestamp",
@@ -342,6 +344,18 @@ mod tests {
         ] {
             assert!(kinds(everyday).is_empty(), "{everyday}");
         }
+        // Essai réel du site de boulangerie : des horaires d'ouverture affichés
+        // valaient au modèle un analyseur de dates jj/mm/aaaa sans usage.
+        assert_eq!(
+            kinds(
+                "Une page d'accueil avec présentation, produits phares, horaires et avis clients"
+            ),
+            ["Web page code"]
+        );
+        assert_eq!(
+            kinds("Calcule les horaires de travail de l'équipe"),
+            ["Dates and times"]
+        );
         // L'apostrophe des téléphones vaut l'apostrophe droite.
         assert_eq!(
             kinds("Ajoute la création d\u{2019}un compte"),

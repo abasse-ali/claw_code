@@ -659,7 +659,14 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
   l'outil, avant ses arguments. Claw ne prend pas cet appel vide pour un vrai : la réponse est
   redemandée deux fois au même modèle, puis la barre vous propose de réessayer, de changer de
   modèle ou d'arrêter. Si c'est la limite de sortie du modèle qui a coupé les arguments, rien
-  n'est exécuté et le modèle est invité à envoyer un appel plus petit. Dans tous les cas, un
+  n'est exécuté et le modèle est invité à envoyer un appel plus petit. De même quand la réponse
+  s'arrête au milieu de longs arguments (4 000 caractères ou plus, la même requête serait
+  coupée au même endroit) ou à la dernière tentative sans personne pour décider : le modèle
+  apprend après combien de caractères son appel a été coupé et comment écrire un long fichier
+  en plusieurs parties, au lieu de perdre le tour. Un fournisseur qui arrête la réponse sur
+  `finish_reason: "error"`, sans autre message, est en panne (502) : la requête repart sur un
+  autre modèle, comme après une erreur 504. Vu dans un essai réel : un `write_file` de page web
+  coupé après son chemin, trois fois de suite, puis le tour abandonné. Dans tous les cas, un
   appel sans ses arguments obligatoires (ou au JSON invalide) revient au modèle avec ce qu'il
   manque, **sans vous demander d'autorisation** pour une modification vide. Les sous-agents
   ont le même contrôle.
@@ -804,7 +811,9 @@ applique**, quel que soit le modèle.
 | Essais regroupés | Trois réponses de suite faites d'une seule lecture ou d'une seule commande (même refusée par le programme essayé) : Claw demande de regrouper ce qui est déjà prévu (plusieurs appels dans une réponse, commandes enchaînées), chaque réponse coûtant une requête du quota, et montre les trois dernières commandes réunies en un seul appel. Redit à la sixième et à la neuvième réponse isolée, trois fois au plus par tour. De même quand une réponse ne fait que mettre à jour la liste de tâches alors que du travail suit : la mise à jour part avec l'appel suivant | `CLAW_BATCH_CALLS=0` |
 | Compte rendu gardé | Après un contrôle de Claw qui n'a rien fait changer, le modèle répond parfois en quelques lignes (« la relecture confirme... ») au lieu de redonner son compte rendu. Quand cette réponse fait moins du tiers de la précédente, Claw remet le compte rendu devant elle : le dernier message, le seul que vous lisez, reste complet, et la page rouvre la réponse qu'elle avait repliée | `CLAW_KEPT_ANSWER=0` |
 | Relecture inutile | Le modèle relit un fichier qui n'a pas changé depuis sa lecture précédente (souvent juste avant de le modifier, par habitude) : la conversation ne garde que la copie la plus récente, et quand les deux lectures sont du même tour, Claw lui dit que celle-ci ne lui a rien appris pour le prix d'une requête, deux fois au plus par tour. Vu dans un essai réel : quatre requêtes sur les dix premières | `CLAW_REPEATED_READS=0` |
-| Cas limites | Quand votre demande nomme un genre de fonctionnalité (recherche ou filtre, montants, dates, CSV ou Excel, pagination, formulaires, envois de fichiers, comptes, tris, soldes et réservations, doublons, adresses e-mail et téléphones, bases SQL, clés d'API, OCR et traduction, images, appels à un service extérieur, liaison entre front et back, API JSON, code d'une page web, données gardées en JSON, fichiers texte sous Windows, scripts en ligne de commande), Claw joint pour le modèle, dès le départ, ce qu'un ingénieur expérimenté vérifie d'office pour ce genre-là (pour une recherche : accents et majuscules, « oeufs » pour « Œufs », recherche vide, plusieurs mots, le `+` d'une URL ; pour des dates : « 03/04 » est le 3 avril, une fin avant le début est refusée, le dernier jour compte), puis le rappelle, chaque point à prouver, au contrôle des exigences ou à la demande de preuves d'un problème signalé, et le relecteur le confronte au code. Chaque rappel nomme le piège précis (par exemple : `replace(" ", "")` ne retire pas l'espace insécable qu'écrit Excel) : un rappel général ne changeait rien. Les faits cités ont été vérifiés sur une vraie machine (Python 3.13 sous Windows, Pillow, OpenCV, Node), et les mots qui reconnaissent un genre évitent les faux amis (« sortie », « format », « Excellent », « erreur de connexion »). Chaque essai porte le résultat attendu : sans lui, un modèle gratuit faisait les essais qui confirmaient son code. Et une ligne qui s'applique fait partie de la demande, même si vous ne l'avez pas écrite : sans cette phrase, un modèle a lu la ligne des doublons puis l'a écartée parce que la demande « ne le dit pas explicitement ». Mesuré sur des essais réels : 9/12 devient 12/12 (recherche), 3/4 devient 4/4 (CSV), 10/12 devient 12/12 (dates et soldes), 11/12 sans l'aide devient 12/12 (doublons) | `CLAW_EDGE_CASES=0` |
+| Cas limites | Quand votre demande nomme un genre de fonctionnalité (recherche ou filtre, montants, dates, CSV ou Excel, pagination, formulaires, envois de fichiers, comptes, tris, soldes et réservations, doublons, adresses e-mail et téléphones, bases SQL, clés d'API, OCR et traduction, images, appels à un service extérieur, liaison entre front et back, API JSON, code d'une page web, données gardées en JSON, fichiers texte sous Windows, scripts en ligne de commande), Claw joint pour le modèle, dès le départ, ce qu'un ingénieur expérimenté vérifie d'office pour ce genre-là (pour une recherche : accents et majuscules, « oeufs » pour « Œufs », recherche vide, plusieurs mots, le `+` d'une URL ; pour des dates : « 03/04 » est le 3 avril, une fin avant le début est refusée, le dernier jour compte), puis le rappelle, chaque point à prouver, au contrôle des exigences ou à la demande de preuves d'un problème signalé, et le relecteur le confronte au code. Chaque rappel nomme le piège précis (par exemple : `replace(" ", "")` ne retire pas l'espace insécable qu'écrit Excel) : un rappel général ne changeait rien. Les faits cités ont été vérifiés sur une vraie machine (Python 3.13 sous Windows, Pillow, OpenCV, Node), et les mots qui reconnaissent un genre évitent les faux amis (« sortie », « format », « Excellent », « erreur de connexion », les « horaires » d'ouverture d'un site vitrine). Chaque essai porte le résultat attendu : sans lui, un modèle gratuit faisait les essais qui confirmaient son code. Et une ligne qui s'applique fait partie de la demande, même si vous ne l'avez pas écrite : sans cette phrase, un modèle a lu la ligne des doublons puis l'a écartée parce que la demande « ne le dit pas explicitement ». Mesuré sur des essais réels : 9/12 devient 12/12 (recherche), 3/4 devient 4/4 (CSV), 10/12 devient 12/12 (dates et soldes), 11/12 sans l'aide devient 12/12 (doublons) | `CLAW_EDGE_CASES=0` |
+| Méthode de design | Votre demande construit ou refait une interface web (« crée un site vitrine », « rends la page plus belle », « build a landing page » ; aussi un message court qui poursuit une telle demande, comme « plus coloré ») : Claw joint pour le modèle la méthode d'un studio de design. D'abord un brief (sujet, public, rôle de la page, vrai contenu dans votre langue), puis un plan écrit avant le code : 4 à 6 couleurs nommées tirées du monde du sujet, une ou deux polices choisies pour lui (pas Inter, Roboto, Arial, Montserrat, Poppins, Playfair Display...), une maquette ASCII du premier écran, un élément mémorable. Le plan est confronté aux marques d'une page générée (bandeau uni avec « Bienvenue » centré, rangées de cartes identiques, badges en capitales, emoji à la place des photos, fondu sur chaque section...). Viennent ensuite un plancher de qualité (menu replié au téléphone qui s'ouvre vraiment, en-tête fixe qui ne cache rien, champs de formulaire au style de la page et étiquetés, erreurs après la saisie seulement, focus visible, `prefers-reduced-motion`, contraste 4,5:1), des liens et boutons qui mènent quelque part, puis la vérification par `Screenshot` au téléphone et à l'ordinateur | `CLAW_DESIGN_GUIDE=0` |
+| Revue visuelle | Le modèle a modifié l'interface (HTML, CSS, JS, composants) et dit avoir fini : Claw regarde la page comme un utilisateur. Il prend des captures pleine page au téléphone et à l'ordinateur (la page que le modèle a regardée, sinon le `index.html` modifié), relève les défauts mesurés par `Screenshot` et les erreurs de la console, puis fait juger les captures par un modèle gratuit qui voit, en directeur artistique : six changements au plus, chacun avec ce qui ne va pas et la modification exacte (propriétés CSS, structure, texte), ou « rien à changer ». Le tout repart au modèle, qui corrige et vérifie de nouveau. Deux revues au plus par tour (`CLAW_DESIGN_REVIEW_ROUNDS`, 5 au plus) ; sautée quand il reste moins de 25 requêtes gratuites dans la journée | `CLAW_DESIGN_REVIEW=0` |
 
 **Mode équipe : le bon modèle pour chaque étape.** Au lieu d'un seul modèle pour tout, Claw
 confie chaque étape du travail au modèle gratuit le plus fort pour elle, et change de modèle
@@ -1190,7 +1199,12 @@ coupe cet import.
   n'a pu la décrire, le modèle de la session apprend qu'une image manque et peut vous demander
   de la décrire. Les images restent dans la session et repartent telles quelles si vous revenez
   à un modèle qui les lit. `"imageReader"` (ou `CLAW_IMAGE_READER`) choisit le lecteur : un
-  identifiant de modèle, ou `"off"` pour ne rien faire décrire.
+  identifiant de modèle, ou `"off"` pour ne rien faire décrire. Les captures que prennent les
+  outils (`Screenshot`) sont décrites en une passe, disposition, contenu, aspect et défauts
+  visibles puis un verdict, en 3 minutes au plus : la description complète en deux passes de
+  vos propres images prenait jusqu'à 12 minutes par capture. Un modèle qui refuse la requête
+  (erreur 403, « réservé aux harnais agentiques ») est écarté pour 7 jours, d'une session à
+  l'autre, au lieu d'être réessayé à chaque image.
 - **Raisonnement** : sans réglage, un modèle d'OpenRouter qui sait raisonner reçoit le plus haut
   niveau de réflexion qu'il accepte (`max`, ou `high` s'il raisonne par budget) : ses réponses
   sont plus lentes, mais plus réfléchies. `/think off|low|medium|high|max` (`max` : le plus haut
@@ -1760,6 +1774,24 @@ curseur, à relire avant l'envoi.
   arrière-plan puis donne son adresse `http://localhost`. Limites : l'outil montre la page telle
   qu'elle se charge, sans cliquer ni saisir, et ne rend pas d'image. Il n'est proposé au modèle
   que si un navigateur est installé ; `CLAW_BROWSER` désigne l'exécutable à utiliser.
+- **Captures de la page** (outil `Screenshot`) : le même navigateur prend des captures au
+  téléphone et à l'ordinateur (ou `tablet`, ou `LARGEURxHAUTEUR` ; la page entière avec
+  `full_page`, un thème clair ou sombre), après des `actions` qui amènent la page dans l'état à
+  vérifier (cliquer, saisir, faire défiler). Les captures suivent le résultat en images ; un
+  modèle qui ne lit pas les images en reçoit la description (voir « Lecteur d'images »). Chaque
+  capture porte aussi les défauts mesurés dans la page, en phrases qui disent quoi corriger :
+  contenu plus large que l'écran, textes ou boutons coupés et superposés, images cassées, texte
+  trop petit ou trop pâle, en-tête fixe qui couvre le titre ou une navigation qui prend plus du
+  quart de l'écran d'un téléphone, liens morts (`href="#"`, ancre vers une section absente),
+  champ sans étiquette, champ rouge avant toute saisie, bouton à la police du navigateur, image
+  sans `alt`, bouton sans nom, texte de remplissage (lorem ipsum, « votre texte ici »), police
+  Times par défaut, focus invisible au clavier. Au téléphone, Claw essaie le menu : des liens de
+  navigation cachés sans bouton pour les ouvrir, ou un bouton qui ne les montre pas après un
+  clic, sont signalés. À part, des remarques de design (`designNotes`) nomment ce qui donne un
+  air générique sans être une erreur : polices de tous les jours, lignes de plus de 85
+  caractères, longs paragraphes centrés, étiquettes en capitales, emoji à la place des images,
+  animations sans `prefers-reduced-motion`. Le modèle les reconsidère et ne garde que ce qui
+  est voulu pour le sujet.
 
 ### Bac à sable des commandes
 

@@ -9547,12 +9547,14 @@ impl DefaultRuntimeClient {
 
     /// Un appel d'outil sans arguments complets dans une réponse qui ne s'est
     /// pas terminée sur un appel d'outil : elle a été coupée. Par la limite de
-    /// sortie, l'appel est marqué et le modèle apprendra quoi faire ; sinon
-    /// c'est une erreur, et la réponse est redemandée.
+    /// sortie, après de longs arguments ou à la dernière tentative
+    /// (`retry_unfinished` faux), l'appel est marqué et le modèle apprendra
+    /// quoi faire ; sinon c'est une erreur, et la réponse est redemandée.
     fn check_cut_calls(
         tool_registry: &GlobalToolRegistry,
         events: &mut [AssistantEvent],
         stop_reason: Option<&str>,
+        retry_unfinished: bool,
     ) -> Result<(), RuntimeError> {
         let definitions = std::cell::OnceCell::new();
         let required_for = |name: &str| {
@@ -9563,7 +9565,7 @@ impl DefaultRuntimeClient {
                 .map(|definition| tool_input::required_arguments(&definition.input_schema))
                 .unwrap_or_default()
         };
-        tool_input::check_cut_calls(events, stop_reason, required_for, true)
+        tool_input::check_cut_calls(events, stop_reason, required_for, retry_unfinished)
             .map_err(RuntimeError::new)?;
         // Noms d'arguments réduits par un serveur qui refuse les schémas tels
         // quels : l'outil reçoit les siens.
@@ -9695,6 +9697,28 @@ impl ApiClient for DefaultRuntimeClient {
                 image_reader::defect(source).map(|line| (index + 1, line))
             })
             .collect()
+    }
+
+    /// Critique de design : les captures jugées par un modèle gratuit qui lit
+    /// les images (le lecteur d'images de Claw).
+    fn critique_design(
+        &mut self,
+        system: &str,
+        prompt: &str,
+        images: &[runtime::attachments::ImageAttachment],
+    ) -> Option<runtime::Consultation> {
+        let sources: Vec<api::ImageSource> = images
+            .iter()
+            .map(|image| api::ImageSource::base64(image.media_type.clone(), image.data.clone()))
+            .collect();
+        let primary = self.chain.primary().to_string();
+        match image_reader::critique(&primary, system, prompt, &sources) {
+            Ok((model, text)) => Some(runtime::Consultation { model, text }),
+            Err(error) => {
+                self.notify(&format!("Critique visuelle impossible : {error}"));
+                None
+            }
+        }
     }
 
     fn answer_superseded(&mut self) {
@@ -9879,6 +9903,9 @@ impl ApiClient for DefaultRuntimeClient {
         loop {
             answering.borrow_mut().clear();
             cut.set(false);
+            // Dernière tentative : un appel coupé est marqué, et le modèle
+            // apprend quoi envoyer à la place, au lieu de perdre le tour.
+            let retry_unfinished = retries_left > 0;
             if let (Some(_), Some(observer)) = (&continued, &self.observer) {
                 observer.reply_continues();
             }
@@ -10061,7 +10088,12 @@ impl ApiClient for DefaultRuntimeClient {
                 answer
                     .finish_line(out)
                     .map_err(|error| RuntimeError::new(error.to_string()))?;
-                Self::check_cut_calls(&self.tool_registry, &mut events, stop_reason.as_deref())?;
+                Self::check_cut_calls(
+                    &self.tool_registry,
+                    &mut events,
+                    stop_reason.as_deref(),
+                    retry_unfinished,
+                )?;
                 cut.set(tool_input::reply_cut_by_output_limit(
                     stop_reason.as_deref(),
                     &events,
@@ -10104,7 +10136,12 @@ impl ApiClient for DefaultRuntimeClient {
                         other => other,
                     })
                     .collect::<Vec<_>>();
-                Self::check_cut_calls(&self.tool_registry, &mut events, stop_reason.as_deref())?;
+                Self::check_cut_calls(
+                    &self.tool_registry,
+                    &mut events,
+                    stop_reason.as_deref(),
+                    retry_unfinished,
+                )?;
                 cut.set(tool_input::reply_cut_by_output_limit(
                     stop_reason.as_deref(),
                     &events,
