@@ -3973,24 +3973,56 @@ fn request_observer() -> &'static Mutex<Option<RequestObserver>> {
 /// `observer` reçoit le modèle de chaque requête envoyée par un sous-agent ou
 /// un modèle consulté : l'application y décompte crédits et quota gratuit.
 /// Envoi d'un corps JSON (télémétrie OTLP) ; erreur hors réponse 2xx.
-pub fn http_post_json(url: &str, headers: &[(String, String)], body: &str) -> Result<(), String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|error| error.to_string())?;
+/// Envoi OTLP de la télémétrie : HTTP (JSON ou protobuf), ou gRPC sur
+/// HTTP/2 (sans TLS pour une adresse `http://`, comme le port 4317 d'un
+/// collecteur local).
+pub fn otlp_export(export: &runtime::telemetry::Export<'_>) -> Result<(), String> {
+    let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10));
+    if export.grpc && export.url.starts_with("http://") {
+        builder = builder.http2_prior_knowledge();
+    }
+    let client = builder.build().map_err(|error| error.to_string())?;
+    let body = if export.grpc {
+        // Message gRPC : non compressé (0), longueur sur 4 octets, puis le protobuf.
+        let length = u32::try_from(export.body.len()).map_err(|error| error.to_string())?;
+        let mut framed = Vec::with_capacity(export.body.len() + 5);
+        framed.push(0);
+        framed.extend_from_slice(&length.to_be_bytes());
+        framed.extend_from_slice(export.body);
+        framed
+    } else {
+        export.body.to_vec()
+    };
     let mut request = client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .body(body.to_string());
-    for (name, value) in headers {
+        .post(export.url)
+        .header("Content-Type", export.content_type)
+        .body(body);
+    if export.grpc {
+        request = request.header("te", "trailers");
+    }
+    for (name, value) in export.headers {
         request = request.header(name.as_str(), value.as_str());
     }
     let response = request.send().map_err(|error| error.to_string())?;
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(format!("HTTP {}", response.status()))
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
     }
+    // Une erreur gRPC immédiate arrive dans les en-têtes (« trailers-only »).
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    };
+    if let Some(status) = header("grpc-status").filter(|status| status != "0") {
+        return Err(format!(
+            "gRPC {status} {}",
+            header("grpc-message").unwrap_or_default()
+        ));
+    }
+    response.bytes().map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 pub fn set_request_observer(observer: impl Fn(&str) + Send + Sync + 'static) {

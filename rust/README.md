@@ -1530,8 +1530,13 @@ export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer%20votre-jeton"   # si be
   (`team.id=core,department=r-d`), `OTEL_METRICS_INCLUDE_VERSION=true`.
   `CLAW_OTEL_METRIC_PREFIX=claude_code` reprend les noms de Claude Code, pour réutiliser ses
   tableaux de bord.
-- Claw envoie en OTLP `http/json` seulement (pas gRPC ni protobuf) : visez le port HTTP du
-  collecteur (4318). Ce qui attend part aussi à la fermeture de Claw.
+- Protocole : `OTEL_EXPORTER_OTLP_PROTOCOL` (ou `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL`,
+  `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL`) vaut `http/json` (par défaut), `http/protobuf` ou `grpc`.
+  - En HTTP, l'adresse par défaut est `http://localhost:4318` (`/v1/metrics`, `/v1/logs`).
+  - En gRPC, c'est `http://localhost:4317`. Une adresse `http://` passe en HTTP/2 sans TLS, comme
+    pour un collecteur local, et `https://` passe en HTTP/2 avec TLS.
+  - Le protobuf est encodé par Claw lui-même, sans dépendance.
+- Ce qui attend part aussi à la fermeture de Claw.
 - Un fichier de projet (`.claw/settings.json`) ne peut pas activer la télémétrie ni choisir
   son adresse (`OTEL_*`) : un dépôt cloné ne décide pas où partent vos données d'usage.
 

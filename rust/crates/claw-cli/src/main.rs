@@ -142,7 +142,7 @@ fn main() {
     }
     runtime::telemetry::install(
         VERSION,
-        Box::new(tools::http_post_json),
+        Box::new(tools::otlp_export),
         Box::new(|model, usage| models::estimated_cost_usd(model, *usage)),
     );
     let result = run();

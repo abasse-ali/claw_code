@@ -2,7 +2,8 @@
 //! compteurs (sessions, tokens, coût, lignes modifiées, commits, pull
 //! requests, décisions sur les éditions, temps actif) et des événements
 //! (demande, requête au modèle, résultat d'outil, décision) envoyés à votre
-//! collecteur au format OTLP `http/json`.
+//! collecteur en OTLP : `http/json`, `http/protobuf` ou `grpc`
+//! (`OTEL_EXPORTER_OTLP_PROTOCOL`, ou par signal).
 //!
 //! Rien n'est mesuré ni envoyé sans `CLAW_ENABLE_TELEMETRY=1` (ou
 //! `CLAUDE_CODE_ENABLE_TELEMETRY=1`). Les variables `OTEL_*` usuelles règlent
@@ -19,8 +20,26 @@ use serde_json::{json, Value};
 
 use crate::usage::TokenUsage;
 
-/// Envoi d'un lot : adresse, en-têtes, corps JSON.
-pub type Sender = Box<dyn Fn(&str, &[(String, String)], &str) -> Result<(), String> + Send + Sync>;
+/// Un envoi vers le collecteur.
+pub struct Export<'a> {
+    pub url: &'a str,
+    pub headers: &'a [(String, String)],
+    pub content_type: &'a str,
+    pub body: &'a [u8],
+    /// Appel gRPC unaire (HTTP/2, message encadré par l'envoi).
+    pub grpc: bool,
+}
+
+/// Envoi d'un lot au collecteur.
+pub type Sender = Box<dyn Fn(&Export<'_>) -> Result<(), String> + Send + Sync>;
+
+/// Protocole OTLP d'un signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Protocol {
+    HttpJson,
+    HttpProtobuf,
+    Grpc,
+}
 /// Coût estimé d'une requête (dollars).
 pub type CostEstimator = Box<dyn Fn(&str, &TokenUsage) -> Option<f64> + Send + Sync>;
 
@@ -38,6 +57,8 @@ struct Config {
     logs: Vec<Exporter>,
     metrics_endpoint: String,
     logs_endpoint: String,
+    metrics_protocol: Protocol,
+    logs_protocol: Protocol,
     metrics_headers: Vec<(String, String)>,
     logs_headers: Vec<(String, String)>,
     metric_interval: Duration,
@@ -48,7 +69,7 @@ struct Config {
     include_version: bool,
     resource: Vec<(String, String)>,
     prefix: String,
-    /// Protocole demandé autre que `http/json` (signalé une fois).
+    /// Protocole inconnu demandé (signalé une fois ; `http/json` le remplace).
     unsupported_protocol: Option<String>,
 }
 
@@ -105,13 +126,51 @@ fn exporters(name: &str, default: &str) -> Vec<Exporter> {
         .collect()
 }
 
-fn endpoint(signal: &str, path: &str) -> String {
-    if let Some(endpoint) = env(&format!("OTEL_EXPORTER_OTLP_{signal}_ENDPOINT")) {
-        return endpoint;
+/// Protocole d'un signal : `OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL`, sinon
+/// `OTEL_EXPORTER_OTLP_PROTOCOL`, sinon `http/json` ; `Err` : valeur inconnue.
+fn protocol(signal: &str) -> Result<Protocol, String> {
+    let value = env(&format!("OTEL_EXPORTER_OTLP_{signal}_PROTOCOL"))
+        .or_else(|| env("OTEL_EXPORTER_OTLP_PROTOCOL"))
+        .map(|value| value.to_lowercase());
+    match value.as_deref() {
+        None | Some("http/json") => Ok(Protocol::HttpJson),
+        Some("http/protobuf") => Ok(Protocol::HttpProtobuf),
+        Some("grpc") => Ok(Protocol::Grpc),
+        Some(other) => Err(other.to_string()),
     }
-    let base =
-        env("OTEL_EXPORTER_OTLP_ENDPOINT").unwrap_or_else(|| "http://localhost:4318".to_string());
-    format!("{}/{path}", base.trim_end_matches('/'))
+}
+
+/// `http://hote:port` d'une adresse (gRPC : le chemin est celui du service).
+fn origin(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("http", url));
+    let authority = rest.split('/').next().unwrap_or(rest);
+    format!("{scheme}://{authority}")
+}
+
+fn endpoint(signal: &str, path: &str, protocol: Protocol) -> String {
+    let service = if signal == "METRICS" {
+        "opentelemetry.proto.collector.metrics.v1.MetricsService/Export"
+    } else {
+        "opentelemetry.proto.collector.logs.v1.LogsService/Export"
+    };
+    if let Some(endpoint) = env(&format!("OTEL_EXPORTER_OTLP_{signal}_ENDPOINT")) {
+        return if protocol == Protocol::Grpc {
+            format!("{}/{service}", origin(&endpoint))
+        } else {
+            endpoint
+        };
+    }
+    let default = if protocol == Protocol::Grpc {
+        "http://localhost:4317"
+    } else {
+        "http://localhost:4318"
+    };
+    let base = env("OTEL_EXPORTER_OTLP_ENDPOINT").unwrap_or_else(|| default.to_string());
+    if protocol == Protocol::Grpc {
+        format!("{}/{service}", origin(&base))
+    } else {
+        format!("{}/{path}", base.trim_end_matches('/'))
+    }
 }
 
 fn interval(name: &str, default_ms: u64) -> Duration {
@@ -141,19 +200,22 @@ impl Config {
             }
             merged
         };
-        let unsupported_protocol = [
-            "OTEL_EXPORTER_OTLP_PROTOCOL",
-            "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
-            "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
-        ]
-        .iter()
-        .filter_map(|name| env(name))
-        .find(|protocol| protocol != "http/json");
+        let mut unsupported_protocol = None;
+        let mut checked = |signal: &str| {
+            protocol(signal).unwrap_or_else(|unknown| {
+                unsupported_protocol = Some(unknown);
+                Protocol::HttpJson
+            })
+        };
+        let metrics_protocol = checked("METRICS");
+        let logs_protocol = checked("LOGS");
         Some(Self {
             metrics: exporters("OTEL_METRICS_EXPORTER", "otlp"),
             logs: exporters("OTEL_LOGS_EXPORTER", "otlp"),
-            metrics_endpoint: endpoint("METRICS", "v1/metrics"),
-            logs_endpoint: endpoint("LOGS", "v1/logs"),
+            metrics_endpoint: endpoint("METRICS", "v1/metrics", metrics_protocol),
+            logs_endpoint: endpoint("LOGS", "v1/logs", logs_protocol),
+            metrics_protocol,
+            logs_protocol,
             metrics_headers: signal_headers("METRICS"),
             logs_headers: signal_headers("LOGS"),
             metric_interval: interval("OTEL_METRIC_EXPORT_INTERVAL", 60_000),
@@ -277,7 +339,7 @@ pub fn install(version: &str, sender: Sender, cost: CostEstimator) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cost);
     if let Some(protocol) = &telemetry.config.unsupported_protocol {
         eprintln!(
-            "[télémétrie] Claw envoie en OTLP http/json seulement ({protocol} demandé) : réglez OTEL_EXPORTER_OTLP_PROTOCOL=http/json et l'adresse HTTP du collecteur (port 4318)."
+            "[télémétrie] protocole OTLP inconnu « {protocol} » : http/json est utilisé (valeurs possibles : http/json, http/protobuf, grpc)."
         );
     }
     start_exporter();
@@ -776,24 +838,41 @@ fn logs_payload(telemetry: &Telemetry, state: &mut State) -> Option<Value> {
     }))
 }
 
-fn deliver(
-    telemetry: &Telemetry,
-    exporters: &[Exporter],
-    url: &str,
-    headers: &[(String, String)],
-    body: &Value,
-) {
+/// Un signal prêt à partir : exporteurs, protocole, adresse, en-têtes et
+/// encodage protobuf de son message.
+struct Signal<'a> {
+    exporters: &'a [Exporter],
+    protocol: Protocol,
+    url: &'a str,
+    headers: &'a [(String, String)],
+    encode: fn(&Value) -> Vec<u8>,
+}
+
+fn deliver(telemetry: &Telemetry, signal: &Signal<'_>, body: &Value) {
     let text = body.to_string();
-    for exporter in exporters {
+    for exporter in signal.exporters {
         match exporter {
             Exporter::Console => eprintln!("[télémétrie] {text}"),
             Exporter::Otlp => {
+                let (content_type, payload) = match signal.protocol {
+                    Protocol::HttpJson => ("application/json", text.as_bytes().to_vec()),
+                    Protocol::HttpProtobuf => ("application/x-protobuf", (signal.encode)(body)),
+                    Protocol::Grpc => ("application/grpc", (signal.encode)(body)),
+                };
+                let export = Export {
+                    url: signal.url,
+                    headers: signal.headers,
+                    content_type,
+                    body: &payload,
+                    grpc: signal.protocol == Protocol::Grpc,
+                };
+                let url = signal.url;
                 let sender = telemetry
                     .sender
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(send) = sender.as_ref() {
-                    if let Err(error) = send(url, headers, &text) {
+                    if let Err(error) = send(&export) {
                         static WARNED: AtomicBool = AtomicBool::new(false);
                         if !WARNED.swap(true, Ordering::SeqCst) {
                             eprintln!("[télémétrie] envoi impossible vers {url} : {error}");
@@ -824,22 +903,24 @@ fn flush_now(metrics: bool) {
     };
     let config = &telemetry.config;
     if let Some(body) = log_body {
-        deliver(
-            telemetry,
-            &config.logs,
-            &config.logs_endpoint,
-            &config.logs_headers,
-            &body,
-        );
+        let signal = Signal {
+            exporters: &config.logs,
+            protocol: config.logs_protocol,
+            url: &config.logs_endpoint,
+            headers: &config.logs_headers,
+            encode: crate::otlp_proto::logs_request,
+        };
+        deliver(telemetry, &signal, &body);
     }
     if let Some(body) = metric_body {
-        deliver(
-            telemetry,
-            &config.metrics,
-            &config.metrics_endpoint,
-            &config.metrics_headers,
-            &body,
-        );
+        let signal = Signal {
+            exporters: &config.metrics,
+            protocol: config.metrics_protocol,
+            url: &config.metrics_endpoint,
+            headers: &config.metrics_headers,
+            encode: crate::otlp_proto::metrics_request,
+        };
+        deliver(telemetry, &signal, &body);
     }
 }
 
@@ -877,7 +958,7 @@ pub fn shutdown() {
 
 #[cfg(test)]
 mod tests {
-    use super::{language_of, parse_pairs, percent_decode};
+    use super::{language_of, origin, parse_pairs, percent_decode};
 
     #[test]
     fn headers_and_languages_parse() {
@@ -891,5 +972,7 @@ mod tests {
         assert_eq!(percent_decode("a%2Cb%"), "a,b%");
         assert_eq!(language_of("src/main.rs"), "Rust");
         assert_eq!(language_of("README"), "unknown");
+        assert_eq!(origin("http://otel:4317/v1/metrics"), "http://otel:4317");
+        assert_eq!(origin("localhost:4317"), "http://localhost:4317");
     }
 }

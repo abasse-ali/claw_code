@@ -34,6 +34,7 @@ pub mod sandbox;
 pub mod security_guidance;
 pub mod skills;
 pub use bash::stop_all_containers;
+mod otlp_proto;
 mod session;
 pub mod settings;
 pub mod team;
