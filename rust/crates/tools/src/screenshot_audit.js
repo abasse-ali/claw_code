@@ -369,6 +369,29 @@
     }))}. Give each icon a width and height (CSS on its class, or width/height attributes)`);
   }
 
+  // 18. Emoji dans la page : un défaut, pas une remarque. Un emoji est rendu
+  // par la police du système, donc différent sur chaque appareil, et il
+  // n'appartient pas au sujet ; une icône ou une image se dessine en SVG.
+  // Un emoji seul dans un élément (icône) comme un emoji dans une phrase
+  // (une baguette après un titre) sont relevés ; les symboles de texte courants
+  // (flèches, puces, étoiles de notation) ne le sont pas.
+  const anyEmoji = /\p{Extended_Pictographic}/u;
+  const textSymbol = /^[\u2190-\u21FF\u2022\u2023\u25E6\u2043\u2219\u2605\u2606\u2713\u2714\u2715\u2716\u00A9\u00AE\u2122\u2026\u00B7\u2014\u2013]$/u;
+  const emojiHosts = visible.filter((el) => {
+    const own = [...el.childNodes].filter((node) => node.nodeType === 3).map((node) => node.textContent).join("");
+    if (!anyEmoji.test(own)) return false;
+    const chars = [...own.replace(/\s/g, "")].filter((ch) => anyEmoji.test(ch));
+    return chars.some((ch) => !textSymbol.test(ch));
+  });
+  if (emojiHosts.length) {
+    const pictures = emojiHosts.filter((el) => /^\p{Extended_Pictographic}[\uFE0F\u200D\p{Extended_Pictographic}]*$/u.test(words(el)));
+    const inline = emojiHosts.filter((el) => !pictures.includes(el));
+    const parts = [];
+    if (pictures.length) parts.push(`as icons or pictures: ${list(pictures.map(name), 4)}`);
+    if (inline.length) parts.push(`inside text: ${list(inline.map(name), 3)}`);
+    problems.push(`Emoji in the page (${parts.join("; ")}): emoji are drawn by the device's own font, look different on every phone and computer, and belong to no design. Replace each one with an inline SVG drawn for the subject (with width, height and aria-hidden="true", or a role="img" and aria-label when it carries meaning), or remove it from the text`);
+  }
+
   // Remarques de design : pas des défauts, des choix à reconsidérer.
   const notes = [];
   if (!mobile) {
@@ -405,9 +428,6 @@
     const caps = visible.filter((el) => ownText(el) && css(el).textTransform === "uppercase" && words(el).length <= 30
       && !el.matches("button, a, th, [role=button], nav *"));
     if (caps.length >= 2) notes.push(`${caps.length} small labels in ALL CAPS (${list(caps.map(name), 3)}): a frequent tell of generated pages; a strong page uses a weight, a color or a size change instead`);
-    const pictograph = /^\p{Extended_Pictographic}[\uFE0F\u200D\p{Extended_Pictographic}]*$/u;
-    const emoji = visible.filter((el) => pictograph.test(words(el)) && parseFloat(css(el).fontSize) >= 32);
-    if (emoji.length) notes.push(`Emoji standing in for pictures (${list(emoji.map(name), 3)}): use the real images, or illustrations drawn for the subject (inline SVG, CSS)`);
     let animated = false;
     try {
       animated = document.getAnimations().length > 0 || visible.some((el) => css(el).animationName && css(el).animationName !== "none");

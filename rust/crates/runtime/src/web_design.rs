@@ -193,7 +193,7 @@ fn design_method(bar: u8) -> String {
 - Space: one spacing scale on multiples of 8px (for example 8, 16, 24, 40, 64, 96) and nothing else; the same vertical padding for sections of the same rank; no empty band taller than half a screen.
 - Layout: an ASCII wireframe of the first screen and the order of the sections. Text left-aligned (center only one-line titles and short captions). Vary the composition from one section to the next (split, full width, grid, list, offset), never the same centered title over a grid each time.
 - One memorable element (a hero treatment, an illustration, a typographic idea, an interaction), with everything around it quiet and disciplined.
-Forbidden unless the brief asks for it, because they mark a generated page: a plain colored band with centered \"Welcome\" text as the hero; rows of identical cards with the same soft shadow; a short line under every heading; ALL-CAPS badges or small labels above headings; emoji or one repeated icon standing in for pictures; cream with terracotta, or near-black with one acid accent; 01/02/03 markers on things that are not steps; a fade-in on every section; decorative gradients everywhere. Check your plan against this list and say in one line that it uses none of them.
+Forbidden unless the brief asks for it, because they mark a generated page: a plain colored band with centered \"Welcome\" text as the hero; rows of identical cards with the same soft shadow; a short line under every heading; ALL-CAPS badges or small labels above headings; one repeated icon standing in for pictures; cream with terracotta, or near-black with one acid accent; 01/02/03 markers on things that are not steps; a fade-in on every section; decorative gradients everywhere. Check your plan against this list and say in one line that it uses none of them. Emoji are forbidden everywhere, with no exception, even if the brief sounds playful: emoji are drawn by the device's own font and look different on every phone and computer. Every icon, pictogram and illustration is an inline SVG you draw (with width, height and aria-hidden=\"true\", or role=\"img\" and an aria-label when it carries meaning), and no emoji appears in any heading, button, label or paragraph.
 3. Build. CSS custom properties for every color, size and space of the plan, and no raw values outside them (except 0 and 1px borders). Semantic HTML (header, nav, main, section, footer) with exactly one h1 and no skipped heading levels; mobile first. On phones the navigation folds into a menu button that opens and closes it (aria-expanded), and a fixed header never covers content (offset the page by its height). Every link, button and field has hover, :focus-visible and active states, with transitions of 150 to 250ms, and @media (prefers-reduced-motion: reduce) stops the motion. Tap targets of at least 44x44px on phones. Pictures: the user's images, or illustrations drawn for the subject with inline SVG (each with an explicit width and height) or CSS, never broken or placeholder images. Forms: styled like the rest of the page (font: inherit), a visible label on every field, errors shown only after the user acts (:user-invalid, or on submit), a clear confirmation in the page. Watch CSS specificity: a .section rule and a .cta rule can cancel each other's spacing.
 4. Make everything work: every link leads somewhere real (a section that exists, mailto:, tel:), every button does what its label says, forms validate and confirm, no console errors.
 5. Check and critique before you answer: Screenshot with full_page true at phone and desktop sizes, then again with actions that open the menu and send the form empty and filled; ViewPage for console errors. Fix every measured problem and every design note. Then score the screenshots yourself, 1 to 10 on the seven criteria, as a strict art director would (most generated pages deserve 4 to 6; an 8 must be earned by something you can point to), and improve every criterion under {bar} before you answer. Remove one decoration that does not serve the subject.")
@@ -213,6 +213,75 @@ pub fn is_interface_file(path: &str) -> bool {
         && !lower.ends_with(".test.ts")
         && !lower.ends_with(".test.js")
         && !lower.ends_with(".spec.ts")
+}
+
+/// Symboles de texte courants, qui ne sont pas des emoji : flèches, puces,
+/// étoiles de notation, coches, signes légaux.
+fn is_text_symbol(ch: char) -> bool {
+    matches!(ch,
+        '\u{2190}'..='\u{21FF}'
+            | '\u{2022}' | '\u{2023}' | '\u{25E6}' | '\u{2043}' | '\u{2219}'
+            | '\u{2605}' | '\u{2606}' | '\u{2713}'..='\u{2716}'
+            | '\u{A9}' | '\u{AE}' | '\u{2122}' | '\u{2026}' | '\u{B7}' | '\u{2013}' | '\u{2014}'
+            | '\u{2212}' | '\u{00D7}' | '\u{00B0}' | '\u{20AC}' | '\u{2039}' | '\u{203A}'
+            | '\u{AB}' | '\u{BB}' | '\u{2018}'..='\u{201F}')
+}
+
+/// Un emoji : pictogramme des blocs emoji d'Unicode (visages, objets,
+/// nourriture, symboles divers, drapeaux), hors symboles de texte.
+fn is_emoji(ch: char) -> bool {
+    if is_text_symbol(ch) {
+        return false;
+    }
+    matches!(ch,
+        '\u{1F300}'..='\u{1FAFF}' // pictogrammes, émoticônes, transports, symboles étendus
+            | '\u{1F000}'..='\u{1F2FF}' // mahjong, dominos, cartes, pictogrammes clos
+            | '\u{2600}'..='\u{27BF}' // symboles divers et dingbats
+            | '\u{2B00}'..='\u{2BFF}' // flèches et symboles divers (étoile 2B50)
+            | '\u{2300}'..='\u{23FF}') // techniques (sablier, montre, lecture)
+        && !matches!(ch, '\u{2605}' | '\u{2606}' | '\u{2713}'..='\u{2716}')
+}
+
+/// Emoji écrits dans un fichier d'interface, avec leur ligne : `None` s'il
+/// n'y en a pas. Les commentaires qui en parlent comptent aussi : le but est
+/// qu'il n'en reste aucun dans ce que la page affiche, et un emoji dans un
+/// commentaire finit souvent dans la page à la copie suivante.
+#[must_use]
+pub fn emoji_in_source(text: &str) -> Option<String> {
+    let mut found: Vec<(usize, String)> = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let emoji: String = line.chars().filter(|ch| is_emoji(*ch)).take(4).collect();
+        if !emoji.is_empty() {
+            found.push((index + 1, emoji));
+        }
+    }
+    if found.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = found
+        .iter()
+        .take(6)
+        .map(|(line, emoji)| format!("line {line}: {emoji}"))
+        .collect();
+    let more = found.len().saturating_sub(6);
+    Some(format!(
+        "{}{}",
+        shown.join(", "),
+        if more > 0 {
+            format!(" and {more} more line(s)")
+        } else {
+            String::new()
+        }
+    ))
+}
+
+/// Ce qui est dit au modèle quand un fichier d'interface qu'il vient
+/// d'écrire contient des emoji.
+#[must_use]
+pub fn emoji_feedback(path: &str, found: &str) -> String {
+    format!(
+        "[Claw] `{path}` contains emoji ({found}). Emoji are drawn by the device's own font, look different on every phone and computer, and belong to no design: this page must use none. Replace each one now with an inline SVG drawn for the subject (with width, height and aria-hidden=\"true\", or role=\"img\" and an aria-label when it carries meaning), or remove it from the text."
+    )
 }
 
 /// Page que le modèle a regardée avec `Screenshot` ou `ViewPage` :
@@ -367,7 +436,7 @@ pub fn critique_prompt(request: &str, images: usize, audit: &Audit, bar: u8) -> 
     };
     let brief: String = request.chars().take(1_500).collect();
     format!(
-        "The client's brief:\n\"{brief}\"\n\n{images} screenshots follow, full page: the phone view first, then the desktop view.\n\nAlready measured in the page and sent to the developer (do not repeat these):\n{measured}\n\nScore the page from 1 to 10 on each criterion, against what a top studio would ship: 5 is a competent template, 8 is what a strong studio would sign, 10 is award-level. Be strict: most generated pages deserve 4 to 6, and an 8 must be earned by something specific you can point to.\n1. phone: nothing cut, covered or cramped; a menu that fits; comfortable tap targets; text sized for a phone.\n2. hierarchy: a clear first screen with one strong focal point; the eye knows where to go next; headings, text and actions clearly ranked.\n3. spacing: one consistent vertical rhythm, aligned edges, generous but even breathing room, no crowded areas and no empty bands.\n4. typography: typefaces chosen for this subject, a clear scale with real contrast between levels, comfortable line length and leading, nothing default-looking.\n5. color: a harmonious palette tied to the subject, readable contrast, the accent used sparingly and on purpose.\n6. identity: does it look made for this subject, with a memorable idea, or like a template (a plain colored hero band, identical cards, emoji or icon placeholders for photos, lines under every heading, ALL-CAPS badges, the same layout in every section)?\n7. finish: craft in the details (alignment, consistent radii and shadows, polished icons and illustrations, states of buttons and fields); anything unstyled, broken, empty or unfinished.\n\nThe first line of your reply is exactly in this form:\nSCORES: phone=N hierarchy=N spacing=N typography=N color=N identity=N finish=N\nThen, for every criterion under {bar}, the changes that would raise it, the most important first, at most 8 in all, one per line, each as:\nN. [criterion] what is wrong, as seen in the screenshots -> the exact change to make (CSS properties and values, HTML structure, copy)\nBe specific to this page; no generic advice. The developer cannot get new photos: suggest inline SVG, CSS shapes or gradients instead. If every score is {bar} or more, write NO CHANGES NEEDED after the scores line."
+        "The client's brief:\n\"{brief}\"\n\n{images} screenshots follow, full page: the phone view first, then the desktop view.\n\nAlready measured in the page and sent to the developer (do not repeat these):\n{measured}\n\nScore the page from 1 to 10 on each criterion, against what a top studio would ship: 5 is a competent template, 8 is what a strong studio would sign, 10 is award-level. Be strict: most generated pages deserve 4 to 6, and an 8 must be earned by something specific you can point to.\n1. phone: nothing cut, covered or cramped; a menu that fits; comfortable tap targets; text sized for a phone.\n2. hierarchy: a clear first screen with one strong focal point; the eye knows where to go next; headings, text and actions clearly ranked.\n3. spacing: one consistent vertical rhythm, aligned edges, generous but even breathing room, no crowded areas and no empty bands.\n4. typography: typefaces chosen for this subject, a clear scale with real contrast between levels, comfortable line length and leading, nothing default-looking.\n5. color: a harmonious palette tied to the subject, readable contrast, the accent used sparingly and on purpose.\n6. identity: does it look made for this subject, with a memorable idea, or like a template (a plain colored hero band, identical cards, icon placeholders for photos, lines under every heading, ALL-CAPS badges, the same layout in every section)?\n7. finish: craft in the details (alignment, consistent radii and shadows, polished icons and illustrations, states of buttons and fields); anything unstyled, broken, empty or unfinished. Any emoji anywhere in the page caps finish at 4: icons and pictures must be inline SVG.\n\nThe first line of your reply is exactly in this form:\nSCORES: phone=N hierarchy=N spacing=N typography=N color=N identity=N finish=N\nThen, for every criterion under {bar}, the changes that would raise it, the most important first, at most 8 in all, one per line, each as:\nN. [criterion] what is wrong, as seen in the screenshots -> the exact change to make (CSS properties and values, HTML structure, copy)\nBe specific to this page; no generic advice. The developer cannot get new photos: suggest inline SVG, CSS shapes or gradients instead. If every score is {bar} or more, write NO CHANGES NEEDED after the scores line."
     )
 }
 
@@ -621,6 +690,29 @@ mod tests {
             review_feedback("path:index.html", &Audit::default(), None, 1, 2, 8),
             None
         );
+    }
+
+    #[test]
+    fn emoji_in_an_interface_file_are_found_but_text_symbols_are_not() {
+        use super::{emoji_feedback, emoji_in_source};
+        let page = "<h2>Nos pains \u{1F956}</h2>\n<span class=\"icon\">\u{1F4CD}</span>\n<p>Lu \u{2192} Ve, \u{2605}\u{2605}\u{2605}\u{2605}\u{2606}, \u{A9} 2026, \u{2713} fait</p>\n<li>\u{2022} point</li>\n<p>Note : \u{2B50} 4,8</p>";
+        let found = emoji_in_source(page).expect("emoji");
+        assert_eq!(
+            found,
+            "line 1: \u{1F956}, line 2: \u{1F4CD}, line 5: \u{2B50}"
+        );
+        assert!(emoji_feedback("index.html", &found).contains("inline SVG"));
+        // Flèches, étoiles de notation, coches, puces, signes légaux : du texte.
+        assert_eq!(
+            emoji_in_source("<p>\u{2192} \u{2605}\u{2606} \u{2713} \u{2022} \u{A9} \u{AE} \u{2122} \u{2026} \u{AB} \u{BB} 12 \u{20AC} 20\u{B0}</p>"),
+            None
+        );
+        assert_eq!(emoji_in_source("<svg><path d=\"M0 0\"/></svg>"), None);
+        // Au-delà de six lignes, le compte.
+        let many: String = (0..8).map(|_| "\u{1F600}\n").collect();
+        assert!(emoji_in_source(&many)
+            .expect("emoji")
+            .ends_with("and 2 more line(s)"));
     }
 
     #[test]

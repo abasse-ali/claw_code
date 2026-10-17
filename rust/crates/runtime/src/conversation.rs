@@ -2350,6 +2350,22 @@ where
                 ));
                 notes.push(harness::syntax_feedback(&path, &error));
             }
+            // Un fichier d'interface ne porte aucun emoji : du SVG seulement.
+            // Dit tout de suite, avant que la page ne soit regardée.
+            if crate::web_design::is_interface_file(&path) && harness::enabled(Aid::DesignGuide) {
+                if let Some(found) = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|text| crate::web_design::emoji_in_source(&text))
+                {
+                    let name = std::path::Path::new(&path)
+                        .file_name()
+                        .map_or_else(|| path.clone(), |name| name.to_string_lossy().to_string());
+                    self.api_client.notify(&format!(
+                        "Emoji dans {name} : à remplacer par du SVG, signalé au modèle"
+                    ));
+                    notes.push(crate::web_design::emoji_feedback(&path, &found));
+                }
+            }
         }
     }
 
