@@ -1791,7 +1791,8 @@ curseur, à relire avant l'envoi.
   que la page a écrit dans la console : erreurs, exceptions avec leur fichier et leur ligne,
   requêtes en échec, refus CORS. Pour un projet local, le modèle lance d'abord le serveur en
   arrière-plan puis donne son adresse `http://localhost` ; une page sans serveur s'ouvre par
-  l'adresse `file:///` d'un fichier `.html` du projet (jamais d'un fichier hors du dossier de
+  l'adresse `file:///` d'un fichier `.html` du projet (sous Windows, la forme de Git Bash,
+  `file:///tmp/...` ou `file:///c/Users/...`, est traduite comme les chemins des fichiers ; jamais d'un fichier hors du dossier de
   travail). Limites : l'outil montre la page telle
   qu'elle se charge, sans cliquer ni saisir, et ne rend pas d'image. Il n'est proposé au modèle
   que si un navigateur est installé ; `CLAW_BROWSER` désigne l'exécutable à utiliser.
@@ -1908,6 +1909,10 @@ curseur, à relire avant l'envoi.
   message : « clicking button#broken "Envoyer": ReferenceError: missingFunction is not
   defined ». Rien ne quitte la page pendant l'essai : une navigation est retenue et comptée
   comme une action. Un bouton qui ne fait rien est le défaut le plus fréquent d'un site généré.
+  L'onglet ou l'étape déjà choisis (`aria-selected`, `aria-current`) ne sont pas essayés, un
+  indicateur de chargement ne compte pas comme animation en boucle, et un lien d'évitement qui
+  glisse depuis le haut au focus n'est pas une transition sur la mise en page : trois faux
+  positifs vus dans un essai réel.
 
 ### Bac à sable des commandes
 
