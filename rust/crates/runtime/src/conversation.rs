@@ -368,6 +368,8 @@ struct TurnAids {
     design_guided: bool,
     /// Le plan de design de ce tour a été relu avant le code.
     plan_reviewed: bool,
+    /// Le modèle a écrit l'interface sans plan : il lui a été demandé.
+    plan_requested: bool,
     /// Le modèle a été prévenu que sa page appelle des fichiers qui manquent.
     assets_reminded: bool,
     /// Le modèle a été prévenu que ses styles n'ont pas le socle de la méthode.
@@ -2778,17 +2780,29 @@ where
         if !writes_interface {
             return None;
         }
+        // Le plan écrit dans la réponse, ou posé dans le raisonnement : beaucoup
+        // de modèles le font là.
         let plan = assistant_messages
             .iter()
             .flat_map(|message| message.blocks.iter())
             .filter_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
             .join("\n");
         if !crate::web_design::looks_like_design_plan(&plan) {
-            return None;
+            // Pas de plan du tout : le modèle l'écrit avant d'aller plus loin,
+            // et le juge le relira à l'écriture suivante. Vu dans un essai
+            // réel : le modèle est passé droit au code, sans palette.
+            if aids.plan_requested {
+                return None;
+            }
+            aids.plan_requested = true;
+            self.api_client
+                .notify("Pas de plan de design avant le code : demandé à l'agent");
+            return Some(crate::web_design::PLAN_REQUEST.to_string());
         }
         aids.plan_reviewed = true;
         if self
@@ -6357,22 +6371,34 @@ mod tests {
                 == "Revue du plan par relecteur : 1 remarque(s) transmise(s) à l'agent"));
         drop(observed);
 
-        // Sans plan (pas de palette), aucune revue.
-        let (mut runtime, observed, _) = aided_runtime_with(
-            vec![tool_step(
+        // Sans plan (pas de palette) : aucune revue, mais le plan est demandé,
+        // une fois, avec le résultat de la première écriture.
+        let write = |path: &str| {
+            tool_step(
                 "write_file",
-                r#"{"path":"site-essai.html","content":"<p>x</p>"}"#,
-            )],
+                &format!(r#"{{"path":"{path}","content":"<p>x</p>"}}"#),
+            )
+        };
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![write("site-essai.html"), write("site-essai.css")],
             Vec::new(),
             vec!["1. [identity] x -> y"],
             WRITTEN.to_string(),
         );
         let _ = runtime.run_turn("Crée un site vitrine pour un fleuriste", None);
+        let observed = observed.borrow();
         assert!(!observed
-            .borrow()
             .consults
             .iter()
             .any(|(purpose, _)| *purpose == super::ConsultPurpose::Design));
+        assert!(observed.requests[1].contains("without the design plan the method asks for"));
+        // L'historique de la requête suivante ne la porte qu'une fois.
+        assert_eq!(
+            observed.requests[2]
+                .matches("without the design plan")
+                .count(),
+            1
+        );
     }
 
     #[test]

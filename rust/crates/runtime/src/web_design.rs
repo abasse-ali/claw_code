@@ -684,6 +684,9 @@ pub fn looks_like_design_plan(text: &str) -> bool {
     colors.len() >= 3
 }
 
+/// Message joint au premier fichier d'interface écrit sans plan de design.
+pub const PLAN_REQUEST: &str = "[Claw] You started writing the page without the design plan the method asks for. Before going further, write the plan in your reply: the brief, 4 to 6 named hex colors, the two typefaces and the type scale, the spacing scale, an ASCII wireframe of the first screen, the memorable element, and one line saying it uses none of the forbidden marks. Then revise this file to follow it. An art director reviews the plan before the rest of the page is built.";
+
 /// Message joint au premier fichier d'interface écrit après le plan.
 #[must_use]
 pub fn plan_feedback(model: &str, changes: &str) -> String {

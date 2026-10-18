@@ -1350,6 +1350,25 @@ pub fn html_structure(text: &str) -> Option<String> {
             if VOID_ELEMENTS.contains(&name.as_str()) {
                 continue;
             }
+            // Ouvert et fermé sur la même ligne sous deux noms différents
+            // (`<path …></line>`, `<h2>…</div>`) : une coquille, dite en une
+            // phrase ; seule la balise ouverte est refermée. Vu dans les essais
+            // réels : la cascade de phrases qui suivait avait fait croire au
+            // modèle que `<line>` n'existait pas en SVG.
+            if open.last().is_some_and(|(tag, opened)| {
+                *opened == line && *tag != name && !OPTIONAL_END.contains(&tag.as_str())
+            }) {
+                let (tag, _) = open.pop().unwrap_or_default();
+                let hint = if SVG_SHAPES.contains(&tag.as_str()) {
+                    format!(" An SVG shape closes itself: <{tag} ... />")
+                } else {
+                    String::new()
+                };
+                errors.push(format!(
+                    "line {line}: <{tag}> is closed by </{name}>, the names differ.{hint}"
+                ));
+                continue;
+            }
             match open.iter().rposition(|(tag, _)| *tag == name) {
                 Some(position) => {
                     for (tag, opened) in open.drain(position + 1..) {
@@ -1362,24 +1381,6 @@ pub fn html_structure(text: &str) -> Option<String> {
                     open.pop();
                 }
                 None if OPTIONAL_END.contains(&name.as_str()) => {}
-                // Ouvert et fermé sur la même ligne sous deux noms différents
-                // (`<path …></line>`) : une seule phrase, la vraie faute. Vu
-                // dans un essai réel : les deux phrases séparées avaient fait
-                // croire au modèle que `<line>` n'existait pas en SVG.
-                None if open.last().is_some_and(|(tag, opened)| {
-                    *opened == line && !OPTIONAL_END.contains(&tag.as_str())
-                }) =>
-                {
-                    let (tag, _) = open.pop().unwrap_or_default();
-                    let hint = if SVG_SHAPES.contains(&tag.as_str()) {
-                        format!(" An SVG shape closes itself: <{tag} ... />")
-                    } else {
-                        String::new()
-                    };
-                    errors.push(format!(
-                        "line {line}: <{tag}> is closed by </{name}>, the names differ.{hint}"
-                    ));
-                }
                 None => errors.push(format!("</{name}> at line {line} closes nothing")),
             }
         } else if !self_closing && !VOID_ELEMENTS.contains(&name.as_str()) {
@@ -5063,6 +5064,12 @@ mod tests {
         assert_eq!(html_structure(page), None);
         // Un gabarit : ses balises dépendent de conditions.
         assert_eq!(html_structure("{% if x %}<div>{% endif %}"), None);
+        // Essai réel : `<h2>…</div>` dans un div ; une phrase, et pas de
+        // « </div> ferme rien » plus loin.
+        assert_eq!(
+            html_structure("<div class=\"card\">\n<h2>Réservez</div>\n<p>texte</p>\n</div>").expect("coquille"),
+            "HTML tags are not nested correctly (the page's layout breaks around them):\nline 2: <h2> is closed by </div>, the names differ."
+        );
         // Essai réel : `<path …></line>` dans une icône. Une phrase par ligne,
         // qui nomme les deux balises, au lieu de deux phrases trompeuses.
         let icon = "<svg>\n<g>\n<path d=\"M0 0\"></line>\n<path d=\"M1 1\"></line>\n</g>\n</svg>";
