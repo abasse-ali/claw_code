@@ -291,7 +291,13 @@ fn is_inside(path: &Path, root: &Path) -> bool {
 /// `path` (relatif à `cwd`) est dans un des dossiers où l'écriture est libre.
 #[must_use]
 pub fn is_writable_without_asking(path: &str, cwd: &Path) -> bool {
-    let target = resolve_lexically(path, cwd);
+    // Le chemin que l'outil écrira vraiment : `/c/Users/…` et `/tmp/…` (Git
+    // Bash sous Windows) sont traduits par l'outil, la permission aussi. Vu
+    // dans un essai réel : `pwd` affichait `/tmp/…/site`, le modèle a écrit
+    // là, et l'écriture dans son propre dossier lui a été refusée.
+    let translated =
+        crate::file_ops::translate_foreign_path(path).map(|path| path.display().to_string());
+    let target = resolve_lexically(translated.as_deref().unwrap_or(path), cwd);
     let canonical_target = target
         .parent()
         .and_then(|parent| parent.canonicalize().ok())
@@ -1258,6 +1264,28 @@ mod tests {
             policy.authorize("write_file", &path_input(&temp.display().to_string()), None),
             PermissionOutcome::Allow
         );
+        // Chemins de Git Bash sous Windows : traduits comme l'outil les écrira.
+        // Essai réel : `pwd` affichait `/tmp/…/site`, et l'écriture était refusée.
+        if cfg!(windows) {
+            assert_eq!(
+                policy.authorize("write_file", &path_input("/tmp/claw-essai/a.txt"), None),
+                PermissionOutcome::Allow
+            );
+            let drive_form = {
+                let text = project
+                    .join("index.html")
+                    .display()
+                    .to_string()
+                    .replace('\\', "/");
+                let (drive, rest) = text.split_once(":/").expect("lecteur");
+                format!("/{}/{rest}", drive.to_ascii_lowercase())
+            };
+            assert_eq!(
+                policy.authorize("write_file", &path_input(&drive_form), None),
+                PermissionOutcome::Allow,
+                "{drive_form}"
+            );
+        }
         let PermissionOutcome::Deny { reason } =
             policy.authorize("write_file", &path_input(elsewhere), None)
         else {

@@ -1951,7 +1951,7 @@ fn display_path(path: &Path) -> String {
 
 /// Chemins écrits « à la Unix » par un modèle sous Windows : `/c/Users/x`,
 /// `/mnt/c/x`, `/cygdrive/c/x` (lecteur) et `/tmp/x` (dossier temporaire).
-fn translate_foreign_path(path: &str) -> Option<PathBuf> {
+pub(crate) fn translate_foreign_path(path: &str) -> Option<PathBuf> {
     if !cfg!(windows) || !path.starts_with('/') {
         return None;
     }
