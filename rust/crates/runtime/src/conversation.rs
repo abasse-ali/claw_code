@@ -368,6 +368,8 @@ struct TurnAids {
     design_guided: bool,
     /// Le plan de design de ce tour a été relu avant le code.
     plan_reviewed: bool,
+    /// Le modèle a été prévenu que sa page appelle des fichiers qui manquent.
+    assets_reminded: bool,
     /// Commandes réussies lancées par le modèle depuis sa dernière modification.
     verified_commands: Vec<String>,
     /// Commandes parties en arrière-plan depuis la dernière modification, par
@@ -2861,6 +2863,22 @@ where
             .page_target
             .clone()
             .or_else(|| crate::web_design::page_from_files(&cwd, &changed))?;
+        // La page appelle des feuilles de style ou des scripts pas encore
+        // écrits : la revue attend qu'ils existent, sans perdre son tour.
+        let missing = crate::web_design::missing_local_assets(&cwd, &target);
+        if !missing.is_empty() {
+            if aids.assets_reminded {
+                return None;
+            }
+            aids.assets_reminded = true;
+            self.api_client.notify(&format!(
+                "Revue visuelle reportée : la page appelle {}, pas encore écrit(s)",
+                missing.join(", ")
+            ));
+            return Some(crate::web_design::missing_assets_feedback(
+                &target, &missing,
+            ));
+        }
         aids.interface_rounds += 1;
         self.api_client.notify(&format!(
             "Revue visuelle de l'interface ({}/{rounds}) : captures au téléphone et à l'ordinateur…",

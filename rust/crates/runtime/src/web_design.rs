@@ -375,6 +375,103 @@ pub fn page_from_files(root: &Path, changed: &[String]) -> Option<String> {
         .then(|| "path:index.html".to_string())
 }
 
+/// Feuilles de style et scripts locaux qu'une page du projet appelle et qui
+/// n'existent pas encore. Vu dans un essai réel : la revue visuelle a eu lieu
+/// sur `index.html` avant que `styles.css` et `script.js` soient écrits (le
+/// modèle avait annoncé la suite sans appeler d'outil), et une page en Times
+/// et Arial a été notée 1,9/10 pour rien, une revue sur trois perdue.
+#[must_use]
+pub fn missing_local_assets(root: &Path, target: &str) -> Vec<String> {
+    let Some(("path", page)) = target.split_once(':') else {
+        return Vec::new();
+    };
+    let page = Path::new(page);
+    let page = if page.is_absolute() {
+        page.to_path_buf()
+    } else {
+        root.join(page)
+    };
+    let Ok(html) = std::fs::read_to_string(&page) else {
+        return Vec::new();
+    };
+    let base = page.parent().unwrap_or(root);
+    let lower = html.to_ascii_lowercase();
+    let mut missing = Vec::new();
+    let mut from = 0;
+    while let Some(found) = lower[from..].find('<') {
+        let start = from + found;
+        let end = lower[start..]
+            .find('>')
+            .map_or(lower.len(), |end| start + end);
+        let tag = &lower[start..end];
+        from = end.max(start + 1);
+        let attribute = if tag.starts_with("<link") && tag.contains("stylesheet") {
+            "href"
+        } else if tag.starts_with("<script") {
+            "src"
+        } else {
+            continue;
+        };
+        // La valeur, prise dans le texte d'origine (la casse du chemin compte).
+        let Some(value) = attribute_value(&html[start..end], attribute) else {
+            continue;
+        };
+        let value = value.split(['?', '#']).next().unwrap_or_default().trim();
+        let remote = value.is_empty()
+            || value.starts_with("http:")
+            || value.starts_with("https:")
+            || value.starts_with("//")
+            || value.starts_with("data:");
+        if !remote
+            && !base.join(value.trim_start_matches('/')).is_file()
+            && !missing.contains(&value.to_string())
+        {
+            missing.push(value.to_string());
+        }
+    }
+    missing
+}
+
+/// Valeur d'un attribut dans le texte d'une balise : `href="styles.css"`.
+fn attribute_value<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let lower = tag.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(found) = lower[from..].find(name) {
+        let at = from + found;
+        from = at + name.len();
+        let before = lower[..at].chars().last();
+        if !before.is_some_and(char::is_whitespace) {
+            continue;
+        }
+        let rest = tag[at + name.len()..].trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let (quote, rest) = match rest.chars().next() {
+            Some(quote @ ('"' | '\'')) => (Some(quote), &rest[1..]),
+            _ => (None, rest),
+        };
+        let end = match quote {
+            Some(quote) => rest.find(quote),
+            None => rest.find(|ch: char| ch.is_whitespace() || ch == '>'),
+        }
+        .unwrap_or(rest.len());
+        return Some(&rest[..end]);
+    }
+    None
+}
+
+/// Ce qui est dit au modèle quand sa page appelle des fichiers qui manquent.
+#[must_use]
+pub fn missing_assets_feedback(page: &str, missing: &[String]) -> String {
+    let page = page.split_once(':').map_or(page, |(_, page)| page);
+    format!(
+        "[Claw] {page} links {}, which do not exist yet: the page cannot be reviewed without them. Write them now (complete, with the plan's styles and the page's behavior), then finish; Claw reviews the page once they exist.",
+        missing.join(", ")
+    )
+}
+
 /// Entrée de l'outil `Screenshot` pour la revue : page entière, téléphone puis ordinateur.
 #[must_use]
 pub fn screenshot_input(target: &str) -> String {
@@ -821,6 +918,34 @@ mod tests {
         assert_eq!(
             review_feedback("path:index.html", &Audit::default(), None, 1, 2, 8),
             None
+        );
+    }
+
+    #[test]
+    fn a_page_whose_styles_are_not_written_yet_is_not_reviewed() {
+        use super::{missing_assets_feedback, missing_local_assets};
+        let dir = std::env::temp_dir().join(format!("claw-assets-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("css")).expect("dossier");
+        std::fs::write(
+            dir.join("index.html"),
+            r#"<html><head><link rel="preconnect" href="https://fonts.gstatic.com"><link href="https://fonts.googleapis.com/css2?family=Fraunces" rel="stylesheet"><link rel="stylesheet" href="css/base.css"><LINK REL="stylesheet" HREF="Styles.css?v=2"><script src="script.js" defer></script><script>var x = 1;</script></head><body></body></html>"#,
+        )
+        .expect("page");
+        std::fs::write(dir.join("css").join("base.css"), "body{}").expect("css");
+        // Essai réel : styles.css et script.js pas encore écrits.
+        assert_eq!(
+            missing_local_assets(&dir, "path:index.html"),
+            ["Styles.css", "script.js"]
+        );
+        std::fs::write(dir.join("Styles.css"), "body{}").expect("css");
+        std::fs::write(dir.join("script.js"), "").expect("js");
+        assert!(missing_local_assets(&dir, "path:index.html").is_empty());
+        // Une adresse de serveur ne se lit pas sur le disque : rien à dire.
+        assert!(missing_local_assets(&dir, "url:http://localhost:8000/").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            missing_assets_feedback("path:index.html", &["styles.css".to_string()])
+                .starts_with("[Claw] index.html links styles.css, which do not exist yet")
         );
     }
 
