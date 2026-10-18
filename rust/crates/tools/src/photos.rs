@@ -831,7 +831,9 @@ mod tests {
         // Les photos suivent le résultat en images, pour que le modèle les juge.
         let images = crate::screenshot::take_captured();
         assert_eq!(images.len(), 2);
-        assert!(images.iter().all(|image| image.media_type.starts_with("image/")));
+        assert!(images
+            .iter()
+            .all(|image| image.media_type.starts_with("image/")));
         let photos = result["photos"].as_array().expect("liste");
         assert_eq!(photos.len(), 2, "{result}");
         for photo in photos {
