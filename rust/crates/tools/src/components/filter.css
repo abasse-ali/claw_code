@@ -1,0 +1,14 @@
+.filter { display: grid; gap: 1rem; }
+.filter__bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .75rem; }
+.filter__chips { display: flex; flex-wrap: wrap; gap: .5rem; }
+.filter__chip { min-height: 44px; padding: 0 1rem; border: 1px solid color-mix(in srgb, var(--ink, #1f1d1a) 18%, transparent); border-radius: 999px; background: transparent; color: inherit; font: inherit; cursor: pointer; transition: background-color .2s, color .2s, border-color .2s; }
+.filter__chip:hover { border-color: var(--accent, #8a3b12); }
+.filter__chip[aria-pressed="true"] { background: var(--ink, #1f1d1a); border-color: var(--ink, #1f1d1a); color: var(--paper, #f7f3ec); }
+.filter__search { display: flex; align-items: center; gap: .5rem; min-height: 44px; padding: 0 .9rem; border: 1px solid color-mix(in srgb, var(--ink, #1f1d1a) 18%, transparent); border-radius: 999px; color: var(--muted, #5f5a52); }
+.filter__search:focus-within { border-color: var(--accent, #8a3b12); }
+.filter__search input { width: min(14rem, 50vw); border: 0; outline: 0; background: transparent; font: inherit; color: var(--ink, #1f1d1a); }
+.filter__count { margin: 0; color: var(--muted, #5f5a52); font-size: .95rem; }
+.filter__list { margin: 0; padding: 0; list-style: none; border-top: 1px solid color-mix(in srgb, var(--ink, #1f1d1a) 12%, transparent); }
+.filter__item { padding: .9rem 0; border-bottom: 1px solid color-mix(in srgb, var(--ink, #1f1d1a) 12%, transparent); }
+.filter__item[hidden] { display: none; }
+.filter__empty button { min-height: 44px; border: 0; background: none; color: var(--accent, #8a3b12); font: inherit; text-decoration: underline; cursor: pointer; }

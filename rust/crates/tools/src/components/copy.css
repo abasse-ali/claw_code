@@ -1,0 +1,4 @@
+.copy-line { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; }
+.copy-button { display: inline-flex; align-items: center; gap: .4rem; min-height: 44px; padding: 0 .9rem; border: 1px solid color-mix(in srgb, var(--ink, #1f1d1a) 18%, transparent); border-radius: 999px; background: transparent; color: inherit; font: inherit; font-size: .95rem; cursor: pointer; transition: border-color .2s, color .2s; }
+.copy-button:hover { border-color: var(--accent, #8a3b12); color: var(--accent, #8a3b12); }
+.copy-button.is-done { border-color: #2f7d4f; color: #2f7d4f; }

@@ -191,14 +191,32 @@
 
   // 3. Éléments les uns sur les autres (hors barres fixes, sous lesquelles le contenu défile exprès).
   const candidates = visible.filter((el) => (interactive(el) || el.matches("input, textarea, img, h1, h2, h3, h4, h5, h6") || ownText(el)) && !pinned(el)).slice(0, 400);
+  // La partie visible d'un élément : un parent qui découpe (overflow) rogne
+  // une image agrandie ou décalée dans son cadre (parallaxe, zoom au survol).
+  const seen = new Map();
+  const visibleBox = (el) => {
+    if (seen.has(el)) return seen.get(el);
+    const rect = box.get(el) || el.getBoundingClientRect();
+    let { left, top, right, bottom } = rect;
+    for (let node = el.parentElement; node && node !== document.body; node = node.parentElement) {
+      const style = css(node);
+      if (style.overflowX === "visible" && style.overflowY === "visible") continue;
+      const frame = node.getBoundingClientRect();
+      if (style.overflowX !== "visible") { left = Math.max(left, frame.left); right = Math.min(right, frame.right); }
+      if (style.overflowY !== "visible") { top = Math.max(top, frame.top); bottom = Math.min(bottom, frame.bottom); }
+    }
+    const clipped = { left, top, right, bottom, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+    seen.set(el, clipped);
+    return clipped;
+  };
   const overlaps = [];
   for (let i = 0; i < candidates.length && overlaps.length < 8; i += 1) {
     for (let j = i + 1; j < candidates.length; j += 1) {
       const a = candidates[i];
       const b = candidates[j];
       if (a.contains(b) || b.contains(a)) continue;
-      const ra = box.get(a);
-      const rb = box.get(b);
+      const ra = visibleBox(a);
+      const rb = visibleBox(b);
       const width = Math.min(ra.right, rb.right) - Math.max(ra.left, rb.left);
       const height = Math.min(ra.bottom, rb.bottom) - Math.max(ra.top, rb.top);
       if (width <= 2 || height <= 2) continue;

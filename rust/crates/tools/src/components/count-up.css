@@ -1,0 +1,4 @@
+.figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 1.5rem; margin: 0; }
+.figures div { display: flex; flex-direction: column-reverse; gap: .25rem; }
+.figures dt { color: var(--muted, #5f5a52); }
+.figures dd { margin: 0; font-family: var(--font-display, serif); font-size: clamp(2.25rem, 6vw, 3.5rem); line-height: 1; font-variant-numeric: tabular-nums; }

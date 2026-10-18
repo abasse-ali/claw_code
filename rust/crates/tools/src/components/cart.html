@@ -1,0 +1,21 @@
+<!-- Un bouton par produit : data-id, data-name et data-price (en euros). -->
+<button class="cart-add" type="button" data-cart-add data-id="pivoines" data-name="Bouquet de pivoines" data-price="45">{{icon:plus}} Ajouter</button>
+
+<!-- Le bouton du panier (dans l'en-tête) et le panier lui-même. -->
+<button class="cart-button" type="button" data-dialog-open="cart" aria-label="Panier">{{icon:shopping-bag}}<span class="cart-button__count" data-cart-count hidden>0</span></button>
+
+<dialog class="dialog cart" id="cart" aria-labelledby="cart-title" data-cart data-mailto="commandes@exemple.fr">
+  <div class="dialog__box">
+    <header class="dialog__header">
+      <h2 class="dialog__title" id="cart-title">Votre commande</h2>
+      <button class="dialog__close" type="button" data-dialog-close aria-label="Fermer">{{icon:x}}</button>
+    </header>
+    <ul class="cart__lines" data-cart-lines></ul>
+    <p class="cart__empty" data-cart-empty>Le panier est vide.</p>
+    <p class="cart__total">Total <strong data-cart-total>0 €</strong></p>
+    <footer class="dialog__footer">
+      <button class="dialog__secondary" type="button" data-cart-clear>Vider</button>
+      <button class="dialog__primary" type="button" data-cart-order>Commander</button>
+    </footer>
+  </div>
+</dialog>

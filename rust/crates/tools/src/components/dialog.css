@@ -1,0 +1,21 @@
+.dialog-open { min-height: 44px; padding: 0 1.25rem; border: 1px solid currentColor; border-radius: 999px; background: transparent; color: var(--accent, #8a3b12); font: inherit; font-weight: 600; cursor: pointer; transition: background-color .2s, color .2s; }
+.dialog-open:hover { background: var(--accent, #8a3b12); color: var(--paper, #f7f3ec); }
+.dialog { width: min(100% - 2rem, 34rem); max-height: min(90vh, 44rem); padding: 0; border: 0; border-radius: calc(var(--radius, 12px) + 4px); background: var(--paper, #f7f3ec); color: var(--ink, #1f1d1a); box-shadow: 0 30px 80px -20px rgb(0 0 0 / .45); }
+.dialog::backdrop { background: rgb(20 18 16 / .55); backdrop-filter: blur(3px); }
+.dialog[open] { animation: dialog-in .22s ease-out; }
+.dialog[open]::backdrop { animation: backdrop-in .22s ease-out; }
+.dialog__box { display: grid; gap: 1rem; padding: 1.5rem; }
+.dialog__header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+.dialog__title { margin: 0; font-family: var(--font-display, serif); font-size: 1.5rem; line-height: 1.2; }
+.dialog__close { display: inline-grid; place-items: center; flex: none; width: 44px; height: 44px; margin: -.5rem -.5rem 0 0; border: 0; border-radius: 999px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.dialog__close:hover { background: color-mix(in srgb, var(--ink, #1f1d1a) 8%, transparent); }
+.dialog__body > :first-child { margin-top: 0; }
+.dialog__footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .75rem; }
+.dialog__secondary, .dialog__primary { display: inline-flex; align-items: center; min-height: 44px; padding: 0 1.25rem; border-radius: 999px; font: inherit; font-weight: 600; text-decoration: none; cursor: pointer; }
+.dialog__secondary { border: 1px solid color-mix(in srgb, var(--ink, #1f1d1a) 25%, transparent); background: transparent; color: inherit; }
+.dialog__primary { border: 0; background: var(--accent, #8a3b12); color: var(--paper, #f7f3ec); }
+.dialog__primary:hover { filter: brightness(1.08); }
+body:has(.dialog[open]) { overflow: hidden; }
+@keyframes dialog-in { from { opacity: 0; transform: translateY(12px) scale(.98); } }
+@keyframes backdrop-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .dialog[open], .dialog[open]::backdrop { animation: none; } }

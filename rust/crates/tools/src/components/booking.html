@@ -1,0 +1,30 @@
+<section class="booking" data-booking aria-labelledby="booking-title">
+  <h2 id="booking-title">Réserver une séance</h2>
+  <!-- Créneaux : jour de la semaine (0 dimanche, 1 lundi... 6 samedi), heure, nom, places. -->
+  <script type="application/json" data-booking-slots>
+    [
+      { "day": 1, "time": "18:30", "label": "Vinyasa", "places": 12 },
+      { "day": 3, "time": "12:15", "label": "Hatha", "places": 10 },
+      { "day": 6, "time": "10:00", "label": "Atelier du samedi", "places": 8 }
+    ]
+  </script>
+  <div class="booking__step">
+    <h3 class="booking__label">1. Le jour</h3>
+    <div class="booking__days" data-booking-days role="group" aria-label="Jours disponibles"></div>
+  </div>
+  <div class="booking__step">
+    <h3 class="booking__label">2. Le créneau</h3>
+    <div class="booking__slots" data-booking-slots-list role="group" aria-label="Créneaux"><p class="booking__hint">Choisissez d'abord un jour.</p></div>
+  </div>
+  <form class="booking__form" data-booking-form hidden>
+    <h3 class="booking__label">3. Vos coordonnées</h3>
+    <p class="booking__summary" data-booking-summary></p>
+    <label>Nom <input name="name" autocomplete="name" required></label>
+    <label>E-mail <input name="email" type="email" autocomplete="email" required></label>
+    <button class="booking__confirm" type="submit">Confirmer la réservation</button>
+  </form>
+  <div class="booking__done" data-booking-done hidden>
+    <p class="booking__done-title">{{icon:circle-check}} <span data-booking-done-text></span></p>
+    <button class="booking__calendar" type="button" data-booking-ics>{{icon:calendar-plus}} Ajouter à mon agenda</button>
+  </div>
+</section>

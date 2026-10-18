@@ -1,0 +1,18 @@
+.smart-form { display: grid; gap: 1.1rem; max-width: 36rem; }
+.smart-form__field { display: grid; gap: .35rem; }
+.smart-form label { font-weight: 600; }
+.smart-form__optional { color: var(--muted, #5f5a52); font-weight: 400; }
+.smart-form input, .smart-form textarea, .smart-form select { width: 100%; min-height: 48px; padding: .7rem .9rem; border: 1px solid color-mix(in srgb, var(--ink, #1f1d1a) 25%, transparent); border-radius: calc(var(--radius, 12px) - 4px); background: var(--surface, color-mix(in srgb, var(--paper, #f7f3ec) 94%, var(--ink, #1f1d1a))); color: inherit; font: inherit; transition: border-color .2s, box-shadow .2s; }
+.smart-form input:focus, .smart-form textarea:focus { outline: none; border-color: var(--accent, #8a3b12); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #8a3b12) 20%, transparent); }
+.smart-form__error { display: none; margin: 0; color: var(--error, #b42318); font-size: .9rem; }
+.smart-form__field.is-invalid input, .smart-form__field.is-invalid textarea { border-color: var(--error, #b42318); }
+.smart-form__field.is-invalid .smart-form__error { display: block; }
+.smart-form__submit { display: inline-flex; align-items: center; justify-content: center; gap: .5rem; justify-self: start; min-height: 48px; padding: 0 1.5rem; border: 0; border-radius: 999px; background: var(--accent, #8a3b12); color: var(--paper, #f7f3ec); font: inherit; font-weight: 600; cursor: pointer; transition: filter .2s, transform .2s; }
+.smart-form__submit:hover { filter: brightness(1.08); transform: translateY(-1px); }
+.smart-form__spinner { display: none; }
+.smart-form__submit[aria-busy="true"] { cursor: progress; opacity: .8; }
+.smart-form__submit[aria-busy="true"] .smart-form__spinner { display: inline-grid; animation: form-spin 1s linear infinite; }
+.smart-form__draft { margin: 0; color: var(--muted, #5f5a52); font-size: .9rem; }
+.smart-form__success { padding: 1rem 1.25rem; border-radius: var(--radius, 12px); background: color-mix(in srgb, #2f7d4f 12%, var(--paper, #f7f3ec)); }
+.smart-form__success p { display: flex; align-items: center; gap: .5rem; margin: 0; font-weight: 600; }
+@keyframes form-spin { to { transform: rotate(360deg); } }

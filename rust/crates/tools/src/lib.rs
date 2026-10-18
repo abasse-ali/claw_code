@@ -14,6 +14,7 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+mod components;
 mod icons;
 mod ornaments;
 mod page_view;
@@ -605,6 +606,18 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
+            name: "Component",
+            description: "Interactive components that work as soon as they are pasted (HTML, CSS and dependency-free JS), accessible, in the plan's colors, with icons from the icon set: nav-menu (header and phone menu), accordion (FAQ), tabs, dialog (modal), toast (confirmation messages), carousel, booking (days, slots, places left, calendar file), filter (tags and search), form (validation, sending, success), cart (basket or quote), theme-toggle (dark mode), copy, share, open-now (live opening hours), directions (route, call, map), reveal (appear on scroll), count-up (key figures), scroll-effects (reading progress, parallax), page-transitions. Use them instead of writing these by hand: every button then does what it says. Ask for several by name in one call; without names you get the list.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "names": { "type": "array", "items": { "type": "string" }, "description": "Component names, for example [\"nav-menu\", \"booking\", \"open-now\"]" }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "LookAtImage",
             description:
                 "Look again at an image of this conversation that you received as a description (you cannot see images: a model that can see them looks for you and answers). Ask one precise question per call: the exact text at a place, a color, the state of a control, the position, size or alignment of elements, a detail the description does not give or that you doubt. Use it before relying on a detail that matters for your work.",
@@ -1127,6 +1140,9 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
             .and_then(to_pretty_json),
         "Ornament" => from_value::<ornaments::OrnamentInput>(input)
             .and_then(|input| ornaments::ornament(&input))
+            .and_then(to_pretty_json),
+        "Component" => from_value::<components::ComponentInput>(input)
+            .and_then(|input| components::component_tool(&input))
             .and_then(to_pretty_json),
         "Photo" => from_value::<photos::PhotoInput>(input)
             .and_then(|input| photos::photo(&input))
@@ -3527,6 +3543,7 @@ pub const PARALLEL_SAFE_TOOLS: &[&str] = &[
     "ViewPage",
     "Icon",
     "Ornament",
+    "Component",
     "WebSearch",
     "BashOutput",
 ];
@@ -3814,6 +3831,7 @@ const READ_ONLY_ROLE_TOOLS: &[&str] = &[
     "Screenshot",
     "Icon",
     "Ornament",
+    "Component",
     "WebSearch",
     "ToolSearch",
     "Skill",

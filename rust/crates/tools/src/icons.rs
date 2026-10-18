@@ -249,6 +249,13 @@ fn markup(icon: &Icon<'_>, size: u32, stroke: f32, label: Option<&str>) -> Strin
     )
 }
 
+/// Le SVG d'une icône par son nom, pour les composants de l'outil `Component`.
+pub(crate) fn svg(name: &str, size: u32) -> Option<String> {
+    icons()
+        .find(|icon| icon.name == name)
+        .map(|icon| markup(&icon, size, 2.0, None))
+}
+
 /// Ce que l'outil `Icon` rend au modèle.
 pub(crate) fn icon(input: &IconInput) -> Result<Value, String> {
     let size = input.size.unwrap_or(24).clamp(12, 160);

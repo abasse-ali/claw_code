@@ -1,0 +1,8 @@
+.hours { display: grid; gap: 1rem; }
+.hours__status { display: inline-flex; align-items: center; gap: .5rem; justify-self: start; margin: 0; padding: .35rem .8rem; border-radius: 999px; background: color-mix(in srgb, var(--ink, #1f1d1a) 7%, transparent); font-weight: 600; }
+.hours__status::before { content: ""; width: .6rem; height: .6rem; border-radius: 999px; background: #b42318; }
+.hours__status[data-open]::before { background: #2f9e5b; box-shadow: 0 0 0 4px color-mix(in srgb, #2f9e5b 25%, transparent); }
+.hours__table { width: 100%; max-width: 28rem; border-collapse: collapse; }
+.hours__table th, .hours__table td { padding: .55rem 0; border-bottom: 1px solid color-mix(in srgb, var(--ink, #1f1d1a) 10%, transparent); text-align: left; font-weight: 400; }
+.hours__table td { text-align: right; font-variant-numeric: tabular-nums; }
+.hours__table tr.is-today th, .hours__table tr.is-today td { color: var(--accent, #8a3b12); font-weight: 700; }

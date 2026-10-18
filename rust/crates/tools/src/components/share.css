@@ -1,0 +1,2 @@
+.share-button { display: inline-flex; align-items: center; gap: .45rem; min-height: 44px; padding: 0 1.1rem; border: 1px solid color-mix(in srgb, var(--ink, #1f1d1a) 18%, transparent); border-radius: 999px; background: transparent; color: inherit; font: inherit; font-weight: 600; cursor: pointer; transition: border-color .2s, color .2s; }
+.share-button:hover { border-color: var(--accent, #8a3b12); color: var(--accent, #8a3b12); }
