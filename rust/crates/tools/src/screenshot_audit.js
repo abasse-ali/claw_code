@@ -652,6 +652,64 @@
     // script lire leurs règles, et la mesure se trompait (essai réel).
     motion = animated;
 
+    // Mouvement : ce qui s'anime, et comment. Une transition sur la mise en
+    // page (largeur, marge, position) saccade ; un retour au survol de plus
+    // d'une demi-seconde semble lent ; une boucle sans fin distrait.
+    const seconds = (text) => {
+      const values = String(text).split(",").map((part) => {
+        const value = parseFloat(part);
+        return part.trim().endsWith("ms") ? value / 1000 : value;
+      }).filter((value) => !Number.isNaN(value));
+      return values.length ? Math.max(...values) : 0;
+    };
+    const className = (el) => (typeof el.className === "string" ? el.className : "");
+    const feedback = visible.filter((el) => el.matches("a, button, [role=button], summary") || /(^|\s|-)card/i.test(className(el)));
+    const layoutProps = /^(width|height|min-width|min-height|max-width|top|left|right|bottom|inset|margin|padding)/;
+    const shaky = feedback.filter((el) => {
+      const props = css(el).transitionProperty.split(",").map((part) => part.trim());
+      const times = css(el).transitionDuration.split(",").map((part) => seconds(part));
+      return props.some((prop, index) => layoutProps.test(prop) && (times[index % times.length] || 0) > 0);
+    });
+    if (shaky.length) blameNote(shaky);
+    if (shaky.length) notes.push(`${shaky.length} links, buttons or cards animate their size or position (${list(shaky.map(name), 3)}): transitions on width, margin, top or padding stutter; animate transform and opacity instead (translateY(-2px), scale(1.02))`);
+    const slow = feedback.filter((el) => seconds(css(el).transitionDuration) > 0.6);
+    if (slow.length) blameNote(slow);
+    if (slow.length) notes.push(`${slow.length} links or buttons take more than 0.6s to react (${list(slow.map((el) => `${name(el)} ${seconds(css(el).transitionDuration)}s`), 3)}): hover and press feedback feels instant at 150 to 250ms`);
+    try {
+      const looping = document.getAnimations().filter((animation) => {
+        const timing = animation.effect && animation.effect.getTiming ? animation.effect.getTiming() : {};
+        const target = animation.effect && animation.effect.target;
+        return animation.playState === "running" && timing.iterations === Infinity && target
+          && !/spin|load|progress|busy/i.test(`${className(target)} ${target.getAttribute("role") || ""}`);
+      });
+      const targets = [...new Set(looping.map((animation) => animation.effect.target))];
+      if (targets.length >= 2) {
+        blameNote(targets);
+        notes.push(`${targets.length} animations loop forever (${list(targets.map(name), 3)}): constant motion distracts; keep at most one, slow and decorative, or stop it after a few cycles`);
+      }
+    } catch (_) { /* navigateur ancien */ }
+
+    // Apparition au defilement qui ne se declenche jamais : Claw a fait
+    // defiler toute la page avant de mesurer, et le bloc reste transparent.
+    const revealWords = /reveal|fade|animate|aos|appear|in-?view|on-?scroll|observe/i;
+    const moving = /carousel|slider|slide|swiper|tab|testimonial|modal|toast|tooltip|popover|menu|drawer|dropdown/i;
+    const unseen = elements.filter((el) => {
+      if (el.closest("nav, header, dialog, [role=dialog], [aria-hidden=true], [hidden], details:not([open]), [aria-modal]")) return false;
+      const style = css(el);
+      if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) > 0.05) return false;
+      const marks = `${className(el)} ${[...el.attributes].map((attr) => attr.name).join(" ")}`;
+      if (!revealWords.test(marks)) return false;
+      for (let node = el; node && node !== document.body; node = node.parentElement) {
+        if (moving.test(className(node))) return false;
+      }
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && ((el.innerText || "").trim().length >= 20 || el.querySelector("img, picture, svg"));
+    }).filter((el, index, all) => !all.some((other) => other !== el && other.contains(el)));
+    if (unseen.length) {
+      blame(unseen);
+      problems.push(`${unseen.length} block(s) stay invisible after the whole page was scrolled (${list(unseen.map(name), 3)}): a reveal on scroll never fires, or never removes its opacity: 0. Content must show even if the script fails: hide it only under a class the script adds (html.js .reveal), and reveal it with an IntersectionObserver (the Component tool's reveal)`);
+    }
+
     // Rythme vertical : les sections de même rang doivent partager leur
     // marge haute et basse (une échelle d'espacement), à 8px près.
     const sections = [...document.querySelectorAll("main > section, body > section, main > article, body > article")].filter(shown);
@@ -787,5 +845,18 @@
     if (small.length >= 2) blameNote(small);
     if (small.length >= 2) notes.push(`${small.length} buttons or links are under the comfortable 44x44px tap size on a phone (${list(small.map((el) => `${name(el)} ${Math.round(box.get(el).width)}x${Math.round(box.get(el).height)}px`), 3)}): give them more padding or a min-height of 44px`);
   }
-  return { title: document.title || "", problems, notes, culprits, motion, hoverLabels, textLength: text.length };
+  // Petits SVG de la page (et symboles d'un sprite) : Claw les compare au jeu
+  // d'icônes, pour signaler une icône dessinée à la main.
+  const svgIcons = [];
+  for (const svg of document.querySelectorAll("svg, symbol")) {
+    if (svgIcons.length >= 80) break;
+    if (svg.tagName.toLowerCase() === "svg") {
+      if (!shown(svg)) continue;
+      const rect = svg.getBoundingClientRect();
+      if (rect.width > 96 || rect.height > 96) continue;
+    }
+    const owner = svg.closest("a, button, label, li, p, h1, h2, h3, h4, span") || svg;
+    svgIcons.push({ where: name(owner), markup: svg.outerHTML.slice(0, 6000) });
+  }
+  return { title: document.title || "", problems, notes, culprits, motion, hoverLabels, svgIcons, textLength: text.length };
 })()

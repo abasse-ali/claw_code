@@ -1,5 +1,5 @@
 //! Outil `Icon` : des icônes SVG soignées, prêtes à coller dans une page, tirées
-//! de Lucide (1 539 icônes, licence ISC, `icons/LUCIDE_LICENSE`). Un petit
+//! de Lucide (1 539 icônes, licence ISC, `crates/runtime/src/icons/LUCIDE_LICENSE`). Un petit
 //! modèle dessine mal en SVG : vu dans les essais réels, ses icônes faites à
 //! la main valaient à la page une finition notée 5/10. Claw interdit les emoji
 //! dans une interface ; ces icônes sont du SVG, au trait, de la couleur du
@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 /// Une ligne par icône : `nom<TAB>mots-clés,…<TAB>contenu de la balise <svg>`.
-const DATA: &str = include_str!("icons/lucide.tsv");
+const DATA: &str = runtime::icon_set::LUCIDE;
 
 /// Icônes rendues par appel, au plus.
 const MAX_NAMES: usize = 24;

@@ -13,6 +13,7 @@ pub mod editor;
 mod file_ops;
 pub mod harness;
 mod hooks;
+pub mod icon_set;
 pub mod interrupt;
 mod json;
 pub mod json_repair;

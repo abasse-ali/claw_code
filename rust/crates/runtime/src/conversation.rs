@@ -2471,14 +2471,21 @@ where
             || path.to_string(),
             |name| name.to_string_lossy().to_string(),
         );
-        if let Some(found) = std::fs::read_to_string(file)
-            .ok()
-            .and_then(|text| crate::web_design::emoji_in_source(&text))
-        {
+        let text = std::fs::read_to_string(file).unwrap_or_default();
+        if let Some(found) = crate::web_design::emoji_in_source(&text) {
             self.api_client.notify(&format!(
                 "Emoji dans {name} : à remplacer par du SVG, signalé au modèle"
             ));
             notes.push(crate::web_design::emoji_feedback(path, &found));
+        }
+        // Une icône ne se dessine jamais à la main : l'outil `Icon` la donne.
+        let drawn = crate::icon_set::drawn_icons(&text);
+        if !drawn.is_empty() {
+            self.api_client.notify(&format!(
+                "Icône(s) dessinée(s) à la main dans {name} : {}, signalée(s) au modèle",
+                drawn.len()
+            ));
+            notes.push(crate::icon_set::drawn_icons_feedback(path, &drawn));
         }
         let is_stylesheet = file
             .extension()
@@ -6503,6 +6510,49 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn an_icon_drawn_by_hand_is_reported_when_the_file_is_written() {
+        let _serial = crate::test_serial();
+        let (mut runtime, observed, _) = aided_runtime(Vec::new(), Vec::new());
+        let dir = std::env::temp_dir().join(format!("claw-drawn-icon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let page = dir.join("index.html");
+        std::fs::write(
+            &page,
+            "<button>\n<svg class=\"icon-phone\" viewBox=\"0 0 24 24\"><path d=\"M2 3c1 5 6 10 11 11l2-2\"/></svg>\n</button>",
+        )
+        .expect("page");
+        let path = page.to_string_lossy().to_string();
+        let mut aids = super::TurnAids::default();
+        let mut notes = Vec::new();
+        runtime.interface_file_notes(&path, &mut aids, &mut notes);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("draws 1 icon(s) by hand")
+                && notes[0].contains("line 2")
+                && notes[0].contains("[\"phone\"]"),
+            "{}",
+            notes[0]
+        );
+        assert!(observed.borrow().notices.iter().any(|notice| notice
+            == "Icône(s) dessinée(s) à la main dans index.html : 1, signalée(s) au modèle"));
+        // La même icône prise dans le jeu ne dit rien.
+        let phone = crate::icon_set::LUCIDE
+            .lines()
+            .find(|line| line.starts_with("phone\t"))
+            .and_then(|line| line.splitn(3, '\t').nth(2))
+            .expect("phone");
+        std::fs::write(
+            &page,
+            format!("<button><svg viewBox=\"0 0 24 24\">{phone}</svg></button>"),
+        )
+        .expect("page");
+        let mut notes = Vec::new();
+        runtime.interface_file_notes(&path, &mut aids, &mut notes);
+        assert!(notes.is_empty(), "{notes:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

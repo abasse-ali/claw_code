@@ -27,6 +27,8 @@ use serde_json::{json, Value};
 const AUDIT_SCRIPT: &str = include_str!("screenshot_audit.js");
 /// Essai d'un téléphone après la capture : le bouton menu ouvre-t-il la navigation ?
 const PROBE_SCRIPT: &str = include_str!("screenshot_probe.js");
+/// Essai de chaque bouton de la page, après la capture.
+const CLICKS_SCRIPT: &str = include_str!("screenshot_clicks.js");
 
 /// Temps laissé à la page après son chargement et après chaque action.
 const DEFAULT_WAIT_MS: u64 = 1_500;
@@ -1216,6 +1218,48 @@ fn browser_measures(
     pointer_and_motion_notes(devtools, audit, notes);
 }
 
+/// Les petits SVG de la page qui ne sont pas des icônes du jeu (Lucide,
+/// Feather) : des icônes dessinées à la main, en un défaut.
+fn drawn_icons_problem(svgs: &Value) -> Option<String> {
+    let mut places: Vec<String> = Vec::new();
+    let mut drawn = Vec::new();
+    for svg in svgs.as_array()? {
+        let found = runtime::icon_set::drawn_icons(svg["markup"].as_str().unwrap_or_default());
+        if found.is_empty() {
+            continue;
+        }
+        let place = svg["where"].as_str().unwrap_or("svg").to_string();
+        if !places.contains(&place) {
+            places.push(place);
+        }
+        drawn.extend(found);
+    }
+    if drawn.is_empty() {
+        return None;
+    }
+    let names = runtime::icon_set::suggested_names(&drawn);
+    let ask = if names.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " (Icon names {})",
+            serde_json::to_string(&names).unwrap_or_default()
+        )
+    };
+    let more = places.len().saturating_sub(5);
+    places.truncate(5);
+    Some(format!(
+        "{} icon(s) drawn by hand, not taken from the icon set ({}{}): icons are never drawn by hand; replace each with the Icon tool's SVG{ask}, pasted as it is",
+        drawn.len(),
+        places.join("; "),
+        if more > 0 {
+            format!("; and {more} more")
+        } else {
+            String::new()
+        }
+    ))
+}
+
 fn strings(value: &Value) -> Vec<String> {
     value
         .as_array()
@@ -1356,16 +1400,26 @@ fn console_lines(events: &[Value]) -> Vec<String> {
     lines
 }
 
-/// Ouvre la page à une taille d'écran, joue les actions, mesure et capture.
-fn capture(
-    devtools: &mut DevTools,
-    url: &str,
-    viewport: &Viewport,
-    theme: Option<&str>,
+/// Ce que demande une série de captures, le même pour chaque taille d'écran.
+struct Session<'a> {
+    url: &'a str,
+    theme: Option<&'a str>,
     full_page: bool,
     wait: Duration,
-    actions: &[Action],
-) -> Result<Shot, String> {
+    actions: &'a [Action],
+}
+
+/// Défile toute la page puis revient en haut : les apparitions au défilement
+/// et les images différées se déclenchent, comme pour un visiteur. Sans cela,
+/// une capture pleine page montrait des sections vides.
+const SCROLL_THROUGH: &str = "(async () => { const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); const step = Math.max(200, Math.floor(innerHeight * 0.8)); for (let i = 0; i < 40 && scrollY + innerHeight < document.documentElement.scrollHeight - 2; i++) { window.scrollTo({ top: scrollY + step, behavior: 'instant' }); await wait(90); } await wait(250); window.scrollTo({ top: 0, behavior: 'instant' }); await wait(300); return true; })()";
+
+/// Ouvre la page à une taille d'écran ; rend une remarque si elle chargeait encore.
+fn open_page(
+    devtools: &mut DevTools,
+    session: &Session<'_>,
+    viewport: &Viewport,
+) -> Result<Option<String>, String> {
     // Une page vide d'abord : la même adresse à `#` se rechargerait sans charger la page.
     devtools.events.clear();
     devtools.call("Page.navigate", json!({ "url": "about:blank" }))?;
@@ -1390,12 +1444,13 @@ fn capture(
         "Emulation.setFocusEmulationEnabled",
         json!({ "enabled": true }),
     )?;
-    if let Some(theme) = theme {
+    if let Some(theme) = session.theme {
         devtools.call(
             "Emulation.setEmulatedMedia",
             json!({ "features": [{ "name": "prefers-color-scheme", "value": theme }] }),
         )?;
     }
+    let url = session.url;
     let navigation = devtools.call("Page.navigate", json!({ "url": url }))?;
     if let Some(error) = navigation["errorText"]
         .as_str()
@@ -1412,10 +1467,49 @@ fn capture(
             LOAD_LIMIT.as_secs()
         ));
     }
-    devtools.pump(wait)?;
+    devtools.pump(session.wait)?;
+    if devtools.evaluate(SCROLL_THROUGH).is_ok() {
+        devtools.pump(Duration::from_millis(600))?;
+    }
+    Ok(note)
+}
+
+/// Les boutons essayés un à un : ceux qui ne font rien, ceux qui échouent.
+fn click_problems(devtools: &mut DevTools) -> Vec<String> {
+    let Ok(result) = devtools.evaluate(CLICKS_SCRIPT) else {
+        return Vec::new();
+    };
+    let mut problems = Vec::new();
+    let dead = strings(&result["dead"]);
+    if !dead.is_empty() {
+        let more = dead.len().saturating_sub(6);
+        problems.push(format!(
+            "{} button(s) do nothing when clicked (no change in the page, no scroll, no message, nothing sent or copied): {}{}: give each one its real action (open, filter, add, copy, send, scroll to its section), or make it a link to where it leads",
+            dead.len(),
+            dead.iter().take(6).cloned().collect::<Vec<_>>().join("; "),
+            if more > 0 { format!("; and {more} more") } else { String::new() }
+        ));
+    }
+    for failure in strings(&result["failing"]).iter().take(4) {
+        problems.push(format!(
+            "clicking {failure} (an error in the page's script)"
+        ));
+    }
+    problems
+}
+
+/// Ouvre la page à une taille d'écran, joue les actions, mesure et capture ;
+/// avec `try_clicks`, essaie ensuite chaque bouton.
+fn capture(
+    devtools: &mut DevTools,
+    session: &Session<'_>,
+    viewport: &Viewport,
+    try_clicks: bool,
+) -> Result<Shot, String> {
+    let mut note = open_page(devtools, session, viewport)?;
     let mut done = Vec::new();
-    for action in actions {
-        match run_action(devtools, action, wait) {
+    for action in session.actions {
+        match run_action(devtools, action, session.wait) {
             Ok(line) => done.push(line),
             Err(error) => {
                 done.push(format!("FAILED: {error}"));
@@ -1427,9 +1521,10 @@ fn capture(
         .evaluate(AUDIT_SCRIPT)
         .map_err(|error| format!("the layout check failed in the page: {error}"))?;
     let mut problems = strings(&audit["problems"]);
+    problems.extend(drawn_icons_problem(&audit["svgIcons"]));
     let mut notes = strings(&audit["notes"]);
     let mut params = json!({ "format": "jpeg", "quality": JPEG_QUALITY });
-    if full_page {
+    if session.full_page {
         let metrics = devtools.call("Page.getLayoutMetrics", json!({}))?;
         let content = metrics["cssContentSize"]["height"]
             .as_f64()
@@ -1454,11 +1549,15 @@ fn capture(
         .ok_or("the browser returned no image")?
         .to_string();
     browser_measures(devtools, &audit, &mut problems, &mut notes);
-    // Après la capture (l'essai change la page) : le menu d'un téléphone s'ouvre-t-il ?
+    // Après la capture (les essais changent la page) : le menu d'un téléphone
+    // s'ouvre-t-il, et chaque bouton fait-il quelque chose ?
     if viewport.mobile {
         if let Ok(probe) = devtools.evaluate(PROBE_SCRIPT) {
             problems.extend(strings(&probe["problems"]));
         }
+    }
+    if try_clicks {
+        problems.extend(click_problems(devtools));
     }
     Ok(Shot {
         viewport: viewport.clone(),
@@ -1552,16 +1651,20 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
     let mut captures = Vec::new();
     let mut total = 0;
     let mut design_notes = 0;
-    for viewport in &sizes {
-        match capture(
-            &mut devtools,
-            &url,
-            viewport,
-            theme,
-            input.full_page.unwrap_or(false),
-            wait,
-            &steps,
-        ) {
+    let session = Session {
+        url: &url,
+        theme,
+        full_page: input.full_page.unwrap_or(false),
+        wait,
+        actions: &steps,
+    };
+    // Les boutons s'essaient une fois, à l'ordinateur de préférence.
+    let clicks_at = sizes
+        .iter()
+        .position(|viewport| !viewport.mobile)
+        .unwrap_or(sizes.len().saturating_sub(1));
+    for (index, viewport) in sizes.iter().enumerate() {
+        match capture(&mut devtools, &session, viewport, index == clicks_at) {
             Ok(shot) => {
                 total += shot.problems.len();
                 design_notes += shot.notes.len();
@@ -1639,6 +1742,23 @@ mod tests {
     };
     use serde_json::json;
     use std::path::Path;
+
+    #[test]
+    fn icons_drawn_by_hand_in_the_page_become_one_problem() {
+        let svgs = json!([
+            { "where": "button \"Menu\"", "markup": "<svg class=\"icon-menu\" viewBox=\"0 0 24 24\"><path d=\"M2 5h20M2 12h13M2 19h20\"/></svg>" },
+            { "where": "a \"Appeler\"", "markup": "<svg viewBox=\"0 0 24 24\"><line x1=\"18\" y1=\"6\" x2=\"6\" y2=\"18\"/><line x1=\"6\" y1=\"6\" x2=\"18\" y2=\"18\"/></svg>" }
+        ]);
+        let problem = super::drawn_icons_problem(&svgs).expect("icône dessinée");
+        assert!(
+            problem.starts_with(
+                "1 icon(s) drawn by hand, not taken from the icon set (button \"Menu\")"
+            ) && problem.contains("Icon names [\"menu\"]"),
+            "{problem}"
+        );
+        // La croix de Feather est une icône du jeu : rien à dire.
+        assert_eq!(super::drawn_icons_problem(&json!([svgs[1].clone()])), None);
+    }
 
     #[test]
     fn the_rules_that_draw_an_element_are_given_with_their_file_and_line() {
@@ -1749,6 +1869,71 @@ mod tests {
                 && problems.contains("(CSS rules: styles.css:5 .wide; styles.css:2 .row)"),
             "{problems}"
         );
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn buttons_icons_and_reveals_are_tried_in_a_real_browser() {
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-clicks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        // Un bouton mort, un bouton qui échoue, une bascule, un carrousel qui
+        // défile dans sa piste, une icône dessinée à la main, et une section
+        // qui n'apparaît qu'au défilement.
+        std::fs::write(
+            dir.join("index.html"),
+            r#"<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Essai</title>
+<style>body{margin:0;font:18px Georgia}main{padding:20px}.track{display:flex;overflow-x:auto;width:300px}.track div{flex:0 0 300px;height:80px;background:#eee}.reveal{opacity:0;transition:opacity .3s}.reveal.is-visible{opacity:1}.spacer{height:2200px}</style></head>
+<body><main><h1>Essai des boutons</h1>
+<button id="dead">Voir plus</button>
+<button id="broken" onclick="missingFunction()">Envoyer</button>
+<button id="toggle" aria-pressed="false" onclick="this.setAttribute('aria-pressed', this.getAttribute('aria-pressed') === 'true' ? 'false' : 'true')">Favori</button>
+<div class="track" id="track"><div>Un</div><div>Deux</div></div>
+<button id="next" onclick="document.getElementById('track').scrollBy({left: 300})">Suivant</button>
+<button id="call" aria-label="Appeler"><svg class="icon-phone" width="24" height="24" viewBox="0 0 24 24"><path d="M2 3c1 5 6 10 11 11l2-2"/></svg></button>
+<div class="spacer"></div>
+<section class="reveal" id="late"><h2>Section du bas</h2><p>Un texte qui apparait quand on arrive jusqu'ici en faisant defiler la page.</p></section>
+</main>
+<script>new IntersectionObserver((entries) => entries.forEach((entry) => { if (entry.isIntersecting) entry.target.classList.add('is-visible'); })).observe(document.getElementById('late'));</script>
+</body></html>"#,
+        )
+        .expect("html");
+        let page = format!("claw-clicks-{}/index.html", std::process::id());
+        let mut request = input(None, Some(&page));
+        request.viewports = Some(json!(["desktop"]));
+        let result = super::take(&request);
+        let _ = std::fs::remove_dir_all(&dir);
+        let capture = &result.expect("capture")["captures"][0];
+        let problems = capture["problems"].to_string();
+        assert!(
+            problems.contains("2 button(s) do nothing when clicked")
+                && problems.contains("button#dead \\\"Voir plus\\\""),
+            "{problems}"
+        );
+        assert!(
+            problems.contains("clicking button#broken \\\"Envoyer\\\": ")
+                && problems.contains("missingFunction"),
+            "{problems}"
+        );
+        assert!(
+            problems.contains("1 icon(s) drawn by hand")
+                && problems.contains("Icon names [\\\"phone\\\"]"),
+            "{problems}"
+        );
+        // La bascule et le carrousel font quelque chose ; la section du bas a
+        // été révélée par le défilement avant la capture.
+        let dead = capture["problems"]
+            .as_array()
+            .expect("liste")
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .find(|line| line.contains("do nothing when clicked"))
+            .expect("boutons morts");
+        assert!(
+            !dead.contains("#toggle") && !dead.contains("#next"),
+            "{dead}"
+        );
+        assert!(!problems.contains("Section du bas"), "{problems}");
     }
 
     fn input(url: Option<&str>, path: Option<&str>) -> ScreenshotInput {
