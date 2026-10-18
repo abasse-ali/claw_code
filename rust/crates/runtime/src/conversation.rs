@@ -1661,11 +1661,15 @@ where
             // l'interface, modifiée, n'a jamais été revue. Le juge parle tant
             // qu'il reste de quoi corriger ; à la limite, la conclusion part
             // sans aucun contrôle.
+            // Sans page à capturer (un module `TypeScript`, un script), rien
+            // n'est annoncé : vu dans un essai réel, l'annonce revenait à
+            // chaque modification d'un `.ts`, sans aucune revue.
             if !wrapping_up
                 && limit > 0
                 && aids.interface_dirty
                 && aids.interface_rounds == 0
                 && iterations >= crate::web_design::early_review_at(limit)
+                && self.page_to_review(&aids).is_some()
             {
                 self.api_client.notify(&format!(
                     "Le tour a utilisé {} requêtes sur {limit} sans revue visuelle : revue maintenant, pour que les corrections tiennent dans le budget",
@@ -3027,6 +3031,23 @@ where
         }
     }
 
+    /// La page que la revue visuelle capturerait : celle que l'utilisateur a
+    /// nommée, sinon une page HTML parmi les fichiers modifiés. Aucune pour
+    /// un module `TypeScript` ou un script sans page.
+    fn page_to_review(&self, aids: &TurnAids) -> Option<String> {
+        if let Some(target) = &self.page_target {
+            return Some(target.clone());
+        }
+        let cwd = std::env::current_dir().ok()?;
+        let changed: Vec<String> = aids
+            .originals
+            .keys()
+            .chain(&aids.command_changes)
+            .cloned()
+            .collect();
+        crate::web_design::page_from_files(&cwd, &changed)
+    }
+
     /// Revue visuelle : le modèle a modifié l'interface et dit avoir fini.
     /// Claw regarde la page comme un utilisateur (captures pleine page au
     /// téléphone et à l'ordinateur, défauts mesurés, essai du menu) et la fait
@@ -3076,16 +3097,7 @@ where
             return None;
         }
         let cwd = std::env::current_dir().ok()?;
-        let changed: Vec<String> = aids
-            .originals
-            .keys()
-            .chain(&aids.command_changes)
-            .cloned()
-            .collect();
-        let target = self
-            .page_target
-            .clone()
-            .or_else(|| crate::web_design::page_from_files(&cwd, &changed))?;
+        let target = self.page_to_review(aids)?;
         // La page appelle des feuilles de style ou des scripts pas encore
         // écrits : la revue attend qu'ils existent, sans perdre son tour.
         let missing = crate::web_design::missing_local_assets(&cwd, &target);
@@ -7374,6 +7386,29 @@ mod tests {
         // Sans réponse déjà donnée, l'erreur reste l'issue du tour.
         let (mut runtime, _, _) = aided_runtime(vec![], vec![]);
         assert!(runtime.run_turn("bonjour", None).is_err());
+    }
+
+    #[test]
+    fn no_visual_review_is_announced_without_a_page_to_capture() {
+        let _serial = crate::test_serial();
+        // Un module TypeScript modifié encore et encore, sans aucune page :
+        // l'essai réel annonçait « revue maintenant » à chaque modification.
+        let mut steps: Vec<Vec<AssistantEvent>> = (0..14)
+            .map(|_| tool_step("write_file", r#"{"path":"remise.ts","content":"x"}"#))
+            .collect();
+        steps.push(text_step("Module écrit."));
+        let (runtime, observed, _) = aided_runtime(steps, vec![]);
+        let mut runtime = runtime.with_turn_request_limit(20);
+        runtime.run_turn("écris remise.ts", None).expect("tour");
+        let observed = observed.borrow();
+        assert!(
+            !observed
+                .notices
+                .iter()
+                .any(|notice| notice.contains("sans revue visuelle")),
+            "{:?}",
+            observed.notices
+        );
     }
 
     #[test]
