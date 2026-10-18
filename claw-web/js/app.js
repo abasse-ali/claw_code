@@ -53,6 +53,8 @@ const state = {
   repos: null,
   branches: new Map(),
   models: null,
+  // Le moteur a le secret NVIDIA_API_KEY (null : pas encore demandé à GitHub).
+  nvidia: null,
   runs: [],
   session: null,
   pollTimer: null,
@@ -289,8 +291,30 @@ function since(date) {
 
 function modelLabel(model) {
   if (!model) return "Auto";
-  const known = (state.models || []).find((item) => item.id === model);
+  const known = [...(state.models || []), ...NVIDIA_AGENTS].find((item) => item.id === model);
   return known ? known.short : model.replace(/:free$/, "").split("/").pop();
+}
+
+/** Agents de NVIDIA essayés avec Claw : la liste `NVIDIA_MODELS` (ceux qui appellent les
+ * outils) de rust/crates/claw-cli/src/models.rs, du plus puissant au plus léger. Proposés quand
+ * le moteur a le secret NVIDIA_API_KEY. */
+const NVIDIA_AGENTS = [
+  { id: "nvidia:nvidia/nemotron-3-ultra-550b-a55b", short: "NVIDIA Nemotron 3 Ultra" },
+  { id: "nvidia:nvidia/nemotron-3-super-120b-a12b", short: "NVIDIA Nemotron 3 Super" },
+  { id: "nvidia:stepfun-ai/step-5-preview", short: "NVIDIA Step 5 Preview" },
+  { id: "nvidia:openai/gpt-oss-20b", short: "NVIDIA gpt-oss 20B" },
+];
+
+/** Le moteur a-t-il la clé NVIDIA ? Demandé une fois à GitHub (le nom du secret, jamais sa
+ * valeur) ; faux sans réponse. */
+async function engineHasNvidia() {
+  if (state.nvidia !== null) return state.nvidia;
+  try {
+    state.nvidia = Boolean(state.github) && await state.github.hasSecret(state.settings.engine, "NVIDIA_API_KEY");
+  } catch {
+    return false;
+  }
+  return state.nvidia;
 }
 
 /** État d'un passage du moteur, pour l'affichage. */
@@ -715,8 +739,16 @@ async function followRenamedBranch(repo, old, name) {
 }
 
 async function pickModel() {
-  const models = await loadModels();
+  const [models, nvidia] = await Promise.all([loadModels(), engineHasNvidia()]);
   const best = models.find((model) => model.rank === 1);
+  // Agents de NVIDIA, avec la clé du moteur : gratuits, sans quota par jour annoncé.
+  const nvidiaItems = nvidia
+    ? NVIDIA_AGENTS.map((model) => ({
+      value: model.id,
+      label: model.short,
+      detail: "gratuit chez NVIDIA, environ 40 requêtes par minute, sans quota par jour (secret NVIDIA_API_KEY du moteur)",
+    }))
+    : [];
   const detail = (model) => [
     model.rank === 1 ? "le plus puissant" : model.rank ? `n°${model.rank} pour le code` : "non retenu pour le code",
     ...model.reasons,
@@ -728,6 +760,7 @@ async function pickModel() {
     current: state.settings.model || "",
     items: [
       { value: "", label: "Auto", detail: best ? `en ce moment ${best.short}, le plus puissant des gratuits pour le code (et les suivants s'il ne répond plus)` : "le meilleur modèle gratuit pour le code" },
+      ...nvidiaItems,
       ...models.map((model) => ({ value: model.id, label: model.rank ? `${model.rank}. ${model.short}` : model.short, detail: detail(model) })),
     ],
     onPick: (value) => {
@@ -2094,16 +2127,18 @@ async function showChanges(number) {
 
 /** Étiquette des sessions et secrets du moteur (chiffrés ici pour sa clé publique) ; rend les
  * noms des secrets posés. */
-async function configureEngine(openrouterKey, shareToken) {
+async function configureEngine(openrouterKey, shareToken, nvidiaKey = "") {
   const engine = state.settings.engine;
   await state.github.ensureLabel(engine);
   const key = await state.github.secretKey(engine);
   const secrets = [];
   if (openrouterKey) secrets.push(["OPENROUTER_API_KEY", openrouterKey]);
   if (shareToken) secrets.push(["CLAW_REPO_TOKEN", state.settings.token]);
+  if (nvidiaKey) secrets.push(["NVIDIA_API_KEY", nvidiaKey]);
   for (const [name, value] of secrets) {
     await state.github.putSecret(engine, name, sealedBox(value, key.key), key.key_id);
   }
+  if (nvidiaKey) state.nvidia = true;
   return secrets.map(([name]) => name);
 }
 
@@ -2131,6 +2166,15 @@ async function engineChecks() {
     } catch (error) {
       add(false, `Secret ${name} : ${error.message}`);
     }
+  }
+  // Facultatif : son absence n'est pas une erreur (point gris).
+  try {
+    state.nvidia = await state.github.hasSecret(engine, "NVIDIA_API_KEY");
+    checks.push(state.nvidia
+      ? `<li class="ok">${escapeHtml("Secret NVIDIA_API_KEY : modèles de NVIDIA proposés")}</li>`
+      : `<li>${escapeHtml("Secret NVIDIA_API_KEY absent (facultatif : modèles de NVIDIA)")}</li>`);
+  } catch (error) {
+    add(false, `Secret NVIDIA_API_KEY : ${error.message}`);
   }
   return checks.join("");
 }
@@ -2167,11 +2211,14 @@ function showSettings(first = false, justConnected = false) {
         <label>Clé OpenRouter (pour les modèles gratuits)
           <input name="openrouter" type="password" placeholder="sk-or-…" spellcheck="false">
         </label>
+        <label>Clé NVIDIA (facultative : modèles de build.nvidia.com, sans quota par jour)
+          <input name="nvidia" type="password" placeholder="nvapi-…" spellcheck="false">
+        </label>
         <label class="check"><input name="share" type="checkbox" checked>
           <span>Donner aussi ce jeton au moteur (secret CLAW_REPO_TOKEN), pour qu'il pousse ses branches et ouvre les pull requests</span></label>
         <label class="check"><input name="keep" type="checkbox" checked>
           <span>Garder aussi la clé OpenRouter sur cet appareil, pour afficher les requêtes gratuites utilisées et restantes</span></label>
-        <p class="help">Les secrets partent chiffrés dans le navigateur, pour la clé publique du moteur. Champ vide : la clé OpenRouter gardée sur cet appareil, s'il y en a une.</p>
+        <p class="help">Les secrets partent chiffrés dans le navigateur, pour la clé publique du moteur. Champ vide : la clé OpenRouter gardée sur cet appareil, s'il y en a une ; la clé NVIDIA déjà posée ne change pas. La clé NVIDIA n'est jamais gardée sur cet appareil ; elle se crée sur build.nvidia.com (profil, Settings, API Keys).</p>
         <button class="primary" type="submit">Configurer le moteur</button>
       </form>
       <h2>Apparence</h2>
@@ -2205,6 +2252,8 @@ function showSettings(first = false, justConnected = false) {
       state.github = github;
       state.settings.token = token;
       if (state.settings.engine !== engine) state.repos = null;
+      // Autre jeton ou autre moteur : ses secrets se relisent.
+      state.nvidia = null;
       state.settings.engine = engine;
       saveSettings();
       showQuotaLabel();
@@ -2232,9 +2281,15 @@ function showSettings(first = false, justConnected = false) {
           state.quota = null;
           saveSettings();
         }
+        const nvidiaKey = form.nvidia.value.trim();
+        if (nvidiaKey && !nvidiaKey.startsWith("nvapi-")) {
+          toast("Une clé NVIDIA commence par nvapi- (build.nvidia.com, profil, Settings, API Keys)", "error");
+          return;
+        }
         // Champ vide : la clé gardée sur cet appareil, s'il y en a une.
-        const names = await configureEngine(typed || state.settings.openrouterKey || "", form.share.checked);
+        const names = await configureEngine(typed || state.settings.openrouterKey || "", form.share.checked, nvidiaKey);
         form.openrouter.value = "";
+        form.nvidia.value = "";
         toast(names.length ? `Moteur configuré (${names.join(", ")})` : "Étiquette prête ; aucun secret envoyé");
         const list = $("#view .checks");
         if (list) list.innerHTML = await engineChecks();
