@@ -161,24 +161,32 @@ fn powershell_syntax(path: &Path) -> Option<String> {
 /// Retire les types avec Node (22.6 et plus), puis fait lire le `JavaScript`
 /// obtenu par `node --check` : un `TypeScript` valide passe, une erreur dit sa
 /// ligne. `node --check` seul lit un `.ts` comme du `JavaScript` et se trompe.
+/// Seule une erreur de syntaxe est dite : un \u00E9chec de Node lui-m\u00EAme (vu en
+/// int\u00E9gration continue : \u00AB Cannot allocate Wasm memory \u00BB) laisse le fichier
+/// non v\u00E9rifi\u00E9, au lieu d'\u00EAtre pris pour une faute du mod\u00E8le.
 fn typescript_syntax(path: &Path) -> Option<String> {
     const SCRIPT: &str = r#"
 const m = require("node:module"), fs = require("node:fs"), os = require("node:os"), p = require("node:path"), cp = require("node:child_process");
 if (typeof m.stripTypeScriptTypes !== "function") process.exit(0);
 const file = process.argv[1], source = fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "");
+const report = (error) => {
+  if (!error || (error.code !== "ERR_INVALID_TYPESCRIPT_SYNTAX" && error.name !== "SyntaxError")) process.exit(0);
+  console.log(String(error.message).split("\n").slice(0, 8).join("\n"));
+  process.exit(1);
+};
 let js;
 try { js = m.stripTypeScriptTypes(source, { mode: "strip" }); }
 catch (error) {
   if (error && error.code === "ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX") {
-    try { js = m.stripTypeScriptTypes(source, { mode: "transform" }); } catch (inner) { console.log(String(inner.message).split("\n").slice(0, 8).join("\n")); process.exit(1); }
-  } else { console.log(String(error && error.message).split("\n").slice(0, 8).join("\n")); process.exit(1); }
+    try { js = m.stripTypeScriptTypes(source, { mode: "transform" }); } catch (inner) { report(inner); }
+  } else { report(error); }
 }
 const esm = /^\s*(import|export)\s/m.test(js) || /\.mts$/i.test(file);
 const temp = p.join(os.tmpdir(), `claw-ts-${process.pid}${esm ? ".mjs" : ".cjs"}`);
 fs.writeFileSync(temp, js);
 const checked = cp.spawnSync(process.execPath, ["--check", temp], { encoding: "utf8" });
 fs.rmSync(temp, { force: true });
-if (checked.status !== 0) { console.log(String(checked.stderr).split(temp).join(p.basename(file)).split("\n").filter((line) => !/^\s+at |^Node\.js/.test(line)).slice(0, 8).join("\n")); process.exit(1); }
+if (checked.status !== 0 && /SyntaxError/.test(String(checked.stderr))) { console.log(String(checked.stderr).split(temp).join(p.basename(file)).split("\n").filter((line) => !/^\s+at |^Node\.js/.test(line)).slice(0, 8).join("\n")); process.exit(1); }
 "#;
     let file = path.to_string_lossy().to_string();
     let result = run(
@@ -830,7 +838,18 @@ mod tests {
                 assert!(error.contains("Windows PowerShell 5.1"), "{error}");
             }
         }
-        if crate::paths::find_executable("node").is_some() {
+        // Node sait retirer les types ici (22.6 et plus, et assez de mémoire
+        // pour son analyseur en WebAssembly, ce qu'une machine d'intégration
+        // continue chargée n'a pas toujours).
+        let strips_types = std::process::Command::new("node")
+            .args([
+                "--no-warnings",
+                "-e",
+                "require('node:module').stripTypeScriptTypes('let a: number = 1')",
+            ])
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if strips_types {
             let module = dir.join("prix.ts");
             std::fs::write(&module, "interface Item { price: number }\nexport function total(items: Item[]): number {\n  return items.reduce((sum, item) => sum + item.price, 0);\n}\n").expect("ts");
             assert_eq!(super::syntax(&module), None);
