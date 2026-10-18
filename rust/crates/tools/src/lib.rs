@@ -589,11 +589,11 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "Photo",
-            description: "Real photos under free licences (CC0, public domain, CC BY, CC BY-SA), found by English keywords on Openverse and Wikimedia Commons and saved in the project (images/ by default), with their real width and height and a credit to put in the footer (also written to images/CREDITS.md). Use it when the subject needs pictures (a bakery's bread, a studio's room, a dish, a place) instead of icon placeholders or crude hand-drawn scenes; name what the photo shows (\"sourdough bread\", \"yoga class\"), not a mood. Check each photo with Screenshot: one that does not fit the subject is worse than none.",
+            description: "Real photos under free licences (CC0, public domain, CC BY, CC BY-SA), found by English keywords on Openverse and Wikimedia Commons and saved in the project (images/ by default), with their real width and height and a credit to put in the footer (also written to images/CREDITS.md). Use it when the subject needs pictures (a bakery's bread, a studio's room, a dish, a place) instead of icon placeholders or crude hand-drawn scenes; name what the photo shows in two or three words (\"sourdough bread\", \"yoga class\"), not a mood. Check each photo with Screenshot: one that does not fit the subject is worse than none.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "search": { "type": "string", "description": "English words naming what the photo shows: \"sourdough bread loaf\", \"yoga class studio\"" },
+                    "search": { "type": "string", "description": "Two or three English words naming what the photo shows: \"sourdough bread\", \"yoga class\", \"meditation room\" (each word must match the photo: long searches find nothing)" },
                     "count": { "type": "integer", "minimum": 1, "maximum": 4, "description": "Photos to save (default 1)" },
                     "orientation": { "type": "string", "enum": ["landscape", "portrait", "square", "any"] },
                     "folder": { "type": "string", "description": "Folder inside the project (default images)" },

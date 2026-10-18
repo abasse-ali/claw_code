@@ -59,6 +59,12 @@ pub(crate) fn take_captured() -> Vec<ImageAttachment> {
     CAPTURED.with(|captured| std::mem::take(&mut *captured.borrow_mut()))
 }
 
+/// Images jointes au résultat d'un autre outil (les photos de `Photo`) : elles
+/// suivent le résultat comme les captures.
+pub(crate) fn attach(images: Vec<ImageAttachment>) {
+    CAPTURED.with(|captured| captured.borrow_mut().extend(images));
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct ScreenshotInput {
     #[serde(default)]
