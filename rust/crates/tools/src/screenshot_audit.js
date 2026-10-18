@@ -504,16 +504,18 @@
 
   // 17. Icône dessinée en géant : un <svg> sans taille remplit son conteneur
   // (cinq étoiles d'avis devenues larges comme la page). Une icône se
-  // reconnaît à son nom, à aria-hidden, ou à ses sœurs de même forme.
-  const iconWords = /icon|star|logo|arrow|chevron|check|social|rating|ico-|bullet|badge/i;
+  // reconnaît à son système de coordonnées (une viewBox de 64 unités au plus,
+  // comme le 24x24 de Lucide) ou à son nom ; une illustration ou une vague
+  // décorative, même aria-hidden, a la sienne et n'est pas visée (essai réel :
+  // une vague de 1200px prise pour une icône).
+  const iconWords = /icon|star|logo|arrow|chevron|check|social|rating|ico-|bullet/i;
   const giants = visible.filter((el) => el.tagName.toLowerCase() === "svg").filter((el) => {
     const rect = box.get(el);
     if (!rect || rect.width <= 120 || rect.height <= 120) return false;
+    const view = el.viewBox && el.viewBox.baseVal;
+    const iconGrid = Boolean(view) && view.width > 0 && view.width <= 64 && view.height <= 64;
     const label = `${el.id} ${el.getAttribute("class") || ""} ${el.parentElement ? `${el.parentElement.id} ${el.parentElement.getAttribute("class") || ""}` : ""}`;
-    const twins = el.parentElement
-      ? [...el.parentElement.children].filter((other) => other !== el && other.tagName.toLowerCase() === "svg").length
-      : 0;
-    return iconWords.test(label) || el.getAttribute("aria-hidden") === "true" || twins >= 1;
+    return iconGrid || (iconWords.test(label) && !(view && view.width > 64));
   });
   if (giants.length) {
     blame(giants);
