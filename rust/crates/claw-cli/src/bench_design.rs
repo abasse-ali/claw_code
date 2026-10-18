@@ -154,6 +154,29 @@ fn failed(reason: impl Into<String>, seconds: f64) -> DesignScore {
     }
 }
 
+/// Pourquoi aucune page n'a été écrite : les outils appelés et le début de
+/// la réponse du modèle, pour ne pas laisser l'utilisateur deviner.
+fn no_page(answer: Option<&str>, tools: &[String]) -> String {
+    let mut reason = format!("aucune page écrite ({} appel(s) d'outil", tools.len());
+    let answer: String = answer
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if answer.is_empty() {
+        reason.push_str(", aucune réponse)");
+    } else {
+        let short: String = answer.chars().take(140).collect();
+        let cut = if answer.chars().count() > 140 {
+            "…"
+        } else {
+            ""
+        };
+        let _ = write!(reason, ") ; réponse : « {short}{cut} »");
+    }
+    reason
+}
+
 /// Un modèle construit la page du brief, puis le juge la note.
 fn measure(model: &str, timeout: Duration, progress: &mut dyn FnMut(&str)) -> DesignScore {
     let project = match Project::create("design", &[]) {
@@ -179,11 +202,10 @@ fn measure(model: &str, timeout: Duration, progress: &mut dyn FnMut(&str)) -> De
     let Some(page) = built_page(&project.root) else {
         let reason = if outcome.timed_out {
             format!("délai de {} s dépassé sans page", timeout.as_secs())
+        } else if let Some(error) = outcome.error.as_deref() {
+            bench::classify_error(error).reason
         } else {
-            outcome.error.as_deref().map_or_else(
-                || "aucune page écrite".to_string(),
-                |error| bench::classify_error(error).reason,
-            )
+            no_page(outcome.result.as_deref(), &outcome.tools)
         };
         return failed(reason, outcome.seconds);
     };
@@ -247,6 +269,11 @@ fn models_to_measure(options: &BenchOptions) -> Result<Vec<String>, String> {
     Ok(models)
 }
 
+/// Une note à la française : « 7,1 ».
+fn decimal(value: f32) -> String {
+    format!("{value:.1}").replace('.', ",")
+}
+
 /// Une ligne de résultat : « 7,1/10 · identity 6, finish 6 · 2 défauts · 540 s ».
 fn score_line(score: &DesignScore, bar: u8) -> String {
     if let Some(failure) = &score.failure {
@@ -258,7 +285,7 @@ fn score_line(score: &DesignScore, bar: u8) -> String {
         .filter(|(_, value)| *value < bar)
         .map(|(criterion, value)| format!("{criterion} {value}"))
         .collect();
-    let mut line = format!("{:.1}/10", score.mean).replace('.', ",");
+    let mut line = format!("{}/10", decimal(score.mean));
     if under.is_empty() {
         line.push_str(" · tout à la barre");
     } else {
@@ -374,13 +401,13 @@ pub(crate) fn run(
         Some((best, score)) if options.apply => {
             report.push(apply(best)?);
             report.push(format!(
-                "Note de la page : {:.1}/10. Les autres tours gardent le modèle de la session.",
-                score.mean
+                "Note de la page : {}/10. Les autres tours gardent le modèle de la session.",
+                decimal(score.mean)
             ));
         }
         Some((best, score)) => report.push(format!(
-            "Le plus beau : {best} ({:.1}/10). Pour lui confier les tours de design : /models bench --design --appliquer {best}",
-            score.mean
+            "Le plus beau : {best} ({}/10). Pour lui confier les tours de design : /models bench --design --appliquer {best}",
+            decimal(score.mean)
         )),
         None => report.push("Aucune page notée : rien à appliquer.".to_string()),
     }
@@ -426,6 +453,17 @@ mod tests {
             "{line}"
         );
         assert_eq!(score_line(&scores[2].1, 8), "non noté : aucune page écrite");
+        assert_eq!(
+            super::no_page(
+                Some("Quel style\npréférez-vous ?"),
+                &["read_file".to_string()]
+            ),
+            "aucune page écrite (1 appel(s) d'outil) ; réponse : « Quel style préférez-vous ? »"
+        );
+        assert_eq!(
+            super::no_page(None, &[]),
+            "aucune page écrite (0 appel(s) d'outil, aucune réponse)"
+        );
         // Le brief demande bien une interface : la méthode de design s'y joint.
         assert!(runtime::web_design::design_guide(DESIGN_BRIEF, None).is_some());
     }
