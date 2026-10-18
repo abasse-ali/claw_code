@@ -218,6 +218,83 @@ input:user-invalid, select:user-invalid, textarea:user-invalid { border-color: v
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } }
 Give every grid or flex container the class grid, split or row (or set min-width: 0 on its children), and every interactive element its own hover style on top of these. With a fixed header, add body { padding-top: var(--header-h); }. When a media query hides one version of a content (a schedule as a list on phones), the same media query shows the other version (a table on desktops): no section is ever empty on one screen. Never give an element a width in vw or in px wider than a phone (100vw, width: 480px): use max-width."#;
 
+/// Pièces du socle (`FOUNDATION`) absentes de toutes les feuilles de style du
+/// projet : ce qui manque, en mots que le modèle reconnaît. Vu dans un essai
+/// réel : le socle était dans la méthode, mais le modèle a écrit son CSS sans
+/// lui, et la revue a trouvé 12 liens sur 12 sans survol et un mouvement que
+/// rien n'arrêtait (finition 4/10).
+#[must_use]
+pub fn foundation_gaps(css: &str) -> Vec<&'static str> {
+    let compact: String = css
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    let pieces: [(&str, &[&str]); 6] = [
+        (":hover states on links and buttons", &[":hover"]),
+        (":focus-visible styles", &[":focus-visible"]),
+        (
+            "the prefers-reduced-motion block",
+            &["prefers-reduced-motion"],
+        ),
+        ("box-sizing: border-box", &["box-sizing:border-box"]),
+        ("min-width: 0 on grid and flex children", &["min-width:0"]),
+        (
+            "font: inherit on form controls",
+            &["font:inherit", "font-family:inherit"],
+        ),
+    ];
+    pieces
+        .iter()
+        .filter(|(_, needles)| !needles.iter().any(|needle| compact.contains(needle)))
+        .map(|(label, _)| *label)
+        .collect()
+}
+
+/// Ce qui est dit au modèle quand ses feuilles de style n'ont pas le socle.
+#[must_use]
+pub fn foundation_feedback(gaps: &[&str]) -> String {
+    format!(
+        "[Claw] The page's stylesheets lack parts of the foundation the method gives: {}. Add the foundation block from the method at the top of the stylesheet now (it is short and prevents the defects the review would send back), then go on.",
+        gaps.join(", ")
+    )
+}
+
+/// Feuilles de style du projet, lues ensemble (40 au plus, hors
+/// `node_modules` et dossiers cachés) : le socle peut être dans une autre.
+#[must_use]
+pub fn project_css(root: &Path) -> String {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+        if depth > 4 || out.len() >= 40 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "node_modules" || name == "target" {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, depth + 1, out);
+            } else if path.extension().is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("css") || ext.eq_ignore_ascii_case("scss")
+            }) {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(root, 0, &mut files);
+    files
+        .iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Méthode d'un studio exigeant : des cibles chiffrées plutôt que des
 /// conseils, les marques d'une page générée interdites, et une note à
 /// atteindre. Vu dans les essais réels : avec « change-les sans raison
@@ -919,6 +996,23 @@ mod tests {
             review_feedback("path:index.html", &Audit::default(), None, 1, 2, 8),
             None
         );
+    }
+
+    #[test]
+    fn a_stylesheet_without_the_foundation_is_noticed() {
+        use super::{foundation_feedback, foundation_gaps, FOUNDATION};
+        // Essai réel : un CSS écrit sans le socle.
+        let bare = ".hero { display: flex; }\na { color: #8a3b12; }\n@keyframes breathe { from { transform: scale(1); } }";
+        let gaps = foundation_gaps(bare);
+        assert_eq!(gaps.len(), 6, "{gaps:?}");
+        assert!(foundation_feedback(&gaps).contains(":hover states on links and buttons"));
+        // Le socle de la méthode, recopié, les couvre toutes, espaces ou pas.
+        assert!(
+            foundation_gaps(FOUNDATION).is_empty(),
+            "{:?}",
+            foundation_gaps(FOUNDATION)
+        );
+        assert!(foundation_gaps("*{box-sizing:border-box}a:hover{}:focus-visible{}@media (prefers-reduced-motion: reduce){}.grid>*{min-width: 0}button{font-family: inherit}").is_empty());
     }
 
     #[test]

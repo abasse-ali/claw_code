@@ -370,6 +370,8 @@ struct TurnAids {
     plan_reviewed: bool,
     /// Le modèle a été prévenu que sa page appelle des fichiers qui manquent.
     assets_reminded: bool,
+    /// Le modèle a été prévenu que ses styles n'ont pas le socle de la méthode.
+    foundation_noted: bool,
     /// Commandes réussies lancées par le modèle depuis sa dernière modification.
     verified_commands: Vec<String>,
     /// Commandes parties en arrière-plan depuis la dernière modification, par
@@ -2406,21 +2408,45 @@ where
                 ));
                 notes.push(harness::syntax_feedback(&path, &error));
             }
-            // Un fichier d'interface ne porte aucun emoji : du SVG seulement.
-            // Dit tout de suite, avant que la page ne soit regardée.
-            if crate::web_design::is_interface_file(&path) && harness::enabled(Aid::DesignGuide) {
-                if let Some(found) = std::fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|text| crate::web_design::emoji_in_source(&text))
-                {
-                    let name = std::path::Path::new(&path)
-                        .file_name()
-                        .map_or_else(|| path.clone(), |name| name.to_string_lossy().to_string());
-                    self.api_client.notify(&format!(
-                        "Emoji dans {name} : à remplacer par du SVG, signalé au modèle"
-                    ));
-                    notes.push(crate::web_design::emoji_feedback(&path, &found));
-                }
+            self.interface_file_notes(&path, aids, notes);
+        }
+    }
+
+    /// Contrôles d'un fichier d'interface qui vient d'être écrit, dits tout de
+    /// suite, avant que la page ne soit regardée : aucun emoji (du SVG
+    /// seulement), et, dans un tour de design, le socle de la méthode présent
+    /// dans les feuilles de style (une fois par tour, toutes feuilles lues).
+    fn interface_file_notes(&mut self, path: &str, aids: &mut TurnAids, notes: &mut Vec<String>) {
+        if !crate::web_design::is_interface_file(path) || !harness::enabled(Aid::DesignGuide) {
+            return;
+        }
+        let file = std::path::Path::new(path);
+        let name = file.file_name().map_or_else(
+            || path.to_string(),
+            |name| name.to_string_lossy().to_string(),
+        );
+        if let Some(found) = std::fs::read_to_string(file)
+            .ok()
+            .and_then(|text| crate::web_design::emoji_in_source(&text))
+        {
+            self.api_client.notify(&format!(
+                "Emoji dans {name} : à remplacer par du SVG, signalé au modèle"
+            ));
+            notes.push(crate::web_design::emoji_feedback(path, &found));
+        }
+        let is_stylesheet = file
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("css") || ext.eq_ignore_ascii_case("scss"));
+        if is_stylesheet && aids.design_guided && !aids.foundation_noted {
+            let root = std::env::current_dir().unwrap_or_default();
+            let gaps = crate::web_design::foundation_gaps(&crate::web_design::project_css(&root));
+            if gaps.len() >= 2 {
+                aids.foundation_noted = true;
+                self.api_client.notify(&format!(
+                    "Socle de la méthode absent des styles ({} pièce(s) manquante(s)) : signalé au modèle",
+                    gaps.len()
+                ));
+                notes.push(crate::web_design::foundation_feedback(&gaps));
             }
         }
     }
