@@ -279,6 +279,9 @@ impl Escalation {
 /// catalogue en cache (aucune requête), parmi les modèles disponibles. Rien
 /// sans clé `OpenRouter`, ni quand `current` est déjà le plus puissant.
 fn strongest_free_model(current: &str) -> Option<String> {
+    if let Some(stronger) = stronger_nvidia_agent(current) {
+        return Some(stronger);
+    }
     let has_key = env::var("OPENROUTER_API_KEY").is_ok_and(|key| !key.trim().is_empty());
     if !has_key {
         return None;
@@ -332,9 +335,11 @@ fn escalation_line(current_model: &str) -> String {
 /// puissant, ceux qui sont disponibles d'abord : lus dans le catalogue en
 /// cache (aucune requête). `current` et les routeurs d'`OpenRouter` sont écartés.
 pub(crate) fn free_image_readers(current: &str) -> Vec<String> {
-    load_cached_catalog().map_or_else(Vec::new, |catalog| {
-        image_readers_in(&catalog, current, api::model_available)
-    })
+    let mut readers = nvidia_image_readers(current);
+    if let Some(catalog) = load_cached_catalog() {
+        readers.extend(image_readers_in(&catalog, current, api::model_available));
+    }
+    readers
 }
 
 fn image_readers_in(
@@ -739,7 +744,21 @@ fn gemini_models_json() -> Vec<serde_json::Value> {
 /// Ajoute les modèles Gemini gratuits au menu des modèles : une catégorie
 /// « Google Gemini » juste après la première, et dans « Tous ».
 fn add_gemini_to_view(view: &mut serde_json::Value) {
-    let entries = gemini_models_json();
+    add_provider_category(view, "gemini", "Google Gemini", gemini_models_json());
+}
+
+/// Catégories des fournisseurs à clé, dans le menu des modèles.
+const PROVIDER_CATEGORIES: &[&str] = &["gemini", "nvidia"];
+
+/// Ajoute au menu des modèles la catégorie d'un fournisseur à clé : après la
+/// première catégorie et celles des fournisseurs déjà ajoutés, et ses
+/// modèles dans « Tous ». Rien sans modèle (pas de clé).
+fn add_provider_category(
+    view: &mut serde_json::Value,
+    key: &str,
+    label: &str,
+    entries: Vec<serde_json::Value>,
+) {
     if entries.is_empty() {
         return;
     }
@@ -755,12 +774,19 @@ fn add_gemini_to_view(view: &mut serde_json::Value) {
                 }
             }
         }
-        let at = categories.len().min(1);
+        let at = categories
+            .iter()
+            .rposition(|category| {
+                category["key"]
+                    .as_str()
+                    .is_some_and(|key| PROVIDER_CATEGORIES.contains(&key))
+            })
+            .map_or(categories.len().min(1), |last| last + 1);
         categories.insert(
             at,
             serde_json::json!({
-                "key": "gemini",
-                "label": "Google Gemini",
+                "key": key,
+                "label": label,
                 "models": ids,
                 "paid": [],
             }),
@@ -820,6 +846,206 @@ fn gemini_report(current_model: &str) -> String {
         "  Gratuit si       la facturation n'est pas activée sur le projet de la clé (AI Studio, Facturation) ; sinon chaque requête est payante".to_string(),
         "  Limites          par projet, visibles sur https://aistudio.google.com/rate-limit ; en offre gratuite, Google peut se servir des requêtes pour améliorer ses produits".to_string(),
         "  Payant           gemini-3.1-pro-preview et les autres modèles absents de cette liste".to_string(),
+    ]);
+    lines.join("\n")
+}
+
+// --- NVIDIA ---------------------------------------------------------------------------
+
+/// Un modèle de NVIDIA essayé avec Claw.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NvidiaModel {
+    pub id: &'static str,
+    pub name: &'static str,
+    /// Il appelle les outils : il peut travailler comme agent.
+    pub tools: bool,
+    /// Il lit les images : il peut décrire une capture ou juger un design.
+    pub images: bool,
+}
+
+/// Modèles de build.nvidia.com (gratuits pour les membres du programme pour
+/// développeurs de NVIDIA) essayés avec Claw le 18 octobre 2026, du plus
+/// puissant au plus léger. Le catalogue de NVIDIA en compte 81 ; d'autres
+/// font attendre leur première réponse de 90 s à plus de 4 min (GLM 5.3,
+/// Nemotron 3.5 Lightning, `DeepSeek` V4.1 Flash, Gemma 4 : trop pour un
+/// agent) ou ne sont pas ouverts à toutes les clés (erreur 404). Nemotron 3.5
+/// Super VL lit les images mais échoue dès qu'on lui donne des outils
+/// (erreur 500) : il ne sert que de lecteur. Un modèle qui ne lit pas les
+/// images refuse une requête qui en porte une (erreur 400).
+pub(crate) const NVIDIA_MODELS: &[NvidiaModel] = &[
+    NvidiaModel {
+        id: "nvidia/nemotron-3-ultra-550b-a55b",
+        name: "Nemotron 3 Ultra 550B",
+        tools: true,
+        images: false,
+    },
+    NvidiaModel {
+        id: "nvidia/nemotron-3-super-120b-a12b",
+        name: "Nemotron 3 Super 120B",
+        tools: true,
+        images: false,
+    },
+    NvidiaModel {
+        id: "nvidia/nemotron-3.5-super-vl-120b-a12b",
+        name: "Nemotron 3.5 Super VL 120B",
+        tools: false,
+        images: true,
+    },
+    NvidiaModel {
+        id: "stepfun-ai/step-5-preview",
+        name: "Step 5 Preview",
+        tools: true,
+        images: false,
+    },
+    NvidiaModel {
+        id: "openai/gpt-oss-20b",
+        name: "gpt-oss 20B",
+        tools: true,
+        images: false,
+    },
+];
+
+fn has_nvidia_key() -> bool {
+    env::var("NVIDIA_API_KEY").is_ok_and(|key| !key.trim().is_empty())
+}
+
+/// Modèles de NVIDIA qui travaillent comme agent (préfixe `nvidia:`), pour
+/// les bancs : vides sans clé `NVIDIA_API_KEY`.
+pub(crate) fn nvidia_agents() -> Vec<String> {
+    if !has_nvidia_key() {
+        return Vec::new();
+    }
+    NVIDIA_MODELS
+        .iter()
+        .filter(|model| model.tools)
+        .map(|model| format!("nvidia:{}", model.id))
+        .collect()
+}
+
+/// Session chez NVIDIA : le plus puissant de ses agents prend le relais d'un
+/// modèle bloqué, sur le même compte. Vu dans un essai réel : inconnu du
+/// catalogue d'`OpenRouter`, Nemotron 3 Super y passait pour le plus faible,
+/// et l'escalade allait chez `OpenRouter`, dont il restait 43 requêtes.
+/// `None` hors de NVIDIA, ou quand c'est déjà le plus puissant.
+fn stronger_nvidia_agent(current: &str) -> Option<String> {
+    let id = current.strip_prefix("nvidia:")?;
+    let strongest = NVIDIA_MODELS.iter().find(|model| model.tools)?;
+    (strongest.id != id).then(|| format!("nvidia:{}", strongest.id))
+}
+
+/// Lecteurs d'images de NVIDIA, avant ceux d'`OpenRouter` : aucun quota par
+/// jour, et une capture de site décrite en cinq secondes à l'essai.
+pub(crate) fn nvidia_image_readers(current: &str) -> Vec<String> {
+    if !has_nvidia_key() {
+        return Vec::new();
+    }
+    NVIDIA_MODELS
+        .iter()
+        .filter(|model| model.images)
+        .map(|model| format!("nvidia:{}", model.id))
+        .filter(|id| id != current)
+        .collect()
+}
+
+/// Un modèle de NVIDIA lit-il les images ? `None` hors de NVIDIA. Un modèle
+/// absent de la liste essayée est jugé à son nom (`vl`, `vision`, `omni`).
+pub(crate) fn nvidia_reads_images(model: &str) -> Option<bool> {
+    let id = model.strip_prefix("nvidia:")?;
+    Some(
+        NVIDIA_MODELS
+            .iter()
+            .find(|known| known.id == id)
+            .map_or_else(
+                || {
+                    let id = id.to_ascii_lowercase();
+                    ["-vl", "vision", "omni"]
+                        .iter()
+                        .any(|mark| id.contains(mark))
+                },
+                |known| known.images,
+            ),
+    )
+}
+
+/// Modèles de NVIDIA qui travaillent comme agent, pour le menu de la page
+/// (aucune requête) : vides sans clé `NVIDIA_API_KEY`. Le lecteur d'images
+/// n'y est pas : il ne sait pas appeler les outils.
+fn nvidia_models_json() -> Vec<serde_json::Value> {
+    if !has_nvidia_key() {
+        return Vec::new();
+    }
+    NVIDIA_MODELS
+        .iter()
+        .filter(|model| model.tools)
+        .map(|model| {
+            serde_json::json!({
+                "id": format!("nvidia:{}", model.id),
+                "name": format!("NVIDIA: {}", model.name),
+                "context": "128K",
+                "reasons": ["gratuit chez NVIDIA (build.nvidia.com), clé NVIDIA_API_KEY"],
+                "score": 0,
+                "measured": null,
+                "available": true,
+                "likeness": [],
+                "specialties": [
+                    { "key": "agentic", "label": "Agent", "detail": "appelle les outils de Claw" },
+                ],
+            })
+        })
+        .collect()
+}
+
+/// Ajoute les modèles de NVIDIA au menu des modèles, après Gemini.
+fn add_nvidia_to_view(view: &mut serde_json::Value) {
+    add_provider_category(view, "nvidia", "NVIDIA", nvidia_models_json());
+}
+
+/// `/models nvidia` : les modèles de NVIDIA essayés avec Claw et ouverts à
+/// la clé, et comment s'en servir.
+fn nvidia_report(current_model: &str) -> String {
+    let mut lines = vec!["NVIDIA (préfixe nvidia:)".to_string()];
+    if !has_nvidia_key() {
+        lines.extend([
+            "  Clé              absente : créez-la sur https://build.nvidia.com (profil, Settings, API Keys)".to_string(),
+            "  Enregistrer      $k = Read-Host 'Clé NVIDIA' -AsSecureString; [Environment]::SetEnvironmentVariable('NVIDIA_API_KEY', (New-Object System.Net.NetworkCredential('', $k)).Password.Trim(), 'User')".to_string(),
+            "                   puis rouvrez le terminal (ou VS Code) : Claw la lit au démarrage".to_string(),
+        ]);
+        return lines.join("\n");
+    }
+    // Le catalogue de NVIDIA (aucune génération) : un modèle qui en est
+    // absent n'est pas proposé.
+    let offered: Option<Vec<String>> = api::compat_providers()
+        .into_iter()
+        .find(|provider| provider.name == "nvidia")
+        .and_then(|provider| provider_models(&provider, Duration::from_secs(8)).ok());
+    lines.push(match &offered {
+        Some(models) => format!("  Clé              présente · {} modèles au catalogue de NVIDIA", models.len()),
+        None => "  Clé              présente · catalogue de NVIDIA injoignable, voici les modèles essayés".to_string(),
+    });
+    lines.push(String::new());
+    lines.push("  Agents essayés avec Claw (du plus puissant au plus léger)".to_string());
+    for model in NVIDIA_MODELS.iter().filter(|model| model.tools) {
+        if offered
+            .as_ref()
+            .is_some_and(|models| !models.iter().any(|id| id == model.id))
+        {
+            continue;
+        }
+        let full = format!("nvidia:{}", model.id);
+        let marker = if full == current_model {
+            "  ● actuel"
+        } else {
+            ""
+        };
+        lines.push(format!("    {full:<48} {}{marker}", model.name));
+    }
+    lines.extend([
+        String::new(),
+        "  Choisir          /model nvidia:nvidia/nemotron-3-super-120b-a12b (ou le menu des modèles de la page, catégorie « NVIDIA »)".to_string(),
+        "  Lecteur d'images nvidia:nvidia/nemotron-3.5-super-vl-120b-a12b décrit les captures et juge les designs en premier, sans quota par jour (il n'appelle pas les outils : jamais l'agent)".to_string(),
+        "  Mesurer          /models bench --design nvidia:".to_string(),
+        "  Limites          environ 40 requêtes par minute pour le compte (observé, non publié par NVIDIA) ; un usage en production demande une licence".to_string(),
+        "  Autres modèles   nvidia:<identifiant du catalogue> ; certains font attendre plusieurs minutes ou répondent 404 selon le compte".to_string(),
     ]);
     lines.join("\n")
 }
@@ -1359,6 +1585,9 @@ pub fn models_report(args: Option<&str>, current_model: &str) -> Result<String, 
     if matches!(args, Some("gemini" | "google")) {
         return Ok(gemini_report(current_model));
     }
+    if matches!(args, Some("nvidia" | "nim")) {
+        return Ok(nvidia_report(current_model));
+    }
     let refresh = args == Some("refresh");
     let filter = args.filter(|_| !refresh).map(str::to_ascii_lowercase);
     let (catalog, warning) = catalog(refresh)?;
@@ -1698,6 +1927,7 @@ pub fn free_coding_models_json(refresh: bool) -> Result<serde_json::Value, Strin
     let (catalog, warning) = catalog(refresh)?;
     let mut view = models_view_json(&catalog, &crate::bench::recent_results());
     add_gemini_to_view(&mut view);
+    add_nvidia_to_view(&mut view);
     view["quota"] = serde_json::json!(free_quota_line());
     view["warning"] = serde_json::json!(warning);
     view["favorites"] = serde_json::json!(favorite_models());
@@ -2450,6 +2680,122 @@ mod tests {
             .as_array()
             .is_some_and(|all| all.contains(&serde_json::json!("gemini:gemini-2.5-pro"))));
         assert_eq!(with["models"].as_array().map(Vec::len), Some(1 + ids.len()));
+    }
+
+    #[test]
+    fn nvidia_models_join_the_menu_the_benches_and_the_image_readers_with_a_key() {
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("NVIDIA_API_KEY", value),
+                    None => std::env::remove_var("NVIDIA_API_KEY"),
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("NVIDIA_API_KEY"));
+        let view = || {
+            serde_json::json!({
+                "models": [],
+                "categories": [
+                    { "key": "claude", "models": [] },
+                    { "key": "all", "models": [] },
+                ],
+            })
+        };
+        std::env::remove_var("NVIDIA_API_KEY");
+        let mut without = view();
+        super::add_nvidia_to_view(&mut without);
+        assert_eq!(without, view());
+        assert!(super::nvidia_agents().is_empty());
+        assert!(super::nvidia_image_readers("x").is_empty());
+
+        std::env::set_var("NVIDIA_API_KEY", "nvapi-factice");
+        let mut with = view();
+        // La catégorie de Gemini, déjà ajoutée (sans dépendre de sa clé, qu'un
+        // autre test change en même temps).
+        with["categories"]
+            .as_array_mut()
+            .expect("catégories")
+            .insert(1, serde_json::json!({ "key": "gemini", "models": [] }));
+        super::add_nvidia_to_view(&mut with);
+        let keys: Vec<&str> = with["categories"]
+            .as_array()
+            .expect("catégories")
+            .iter()
+            .filter_map(|category| category["key"].as_str())
+            .collect();
+        // Après Gemini, avant « Tous », qui les contient.
+        assert_eq!(keys, ["claude", "gemini", "nvidia", "all"]);
+        assert!(with["categories"][3]["models"]
+            .as_array()
+            .is_some_and(|all| all.contains(&serde_json::json!(
+                "nvidia:nvidia/nemotron-3-super-120b-a12b"
+            ))));
+        // NVIDIA sans Gemini : sa catégorie se met juste après la première.
+        let mut alone = view();
+        super::add_nvidia_to_view(&mut alone);
+        assert_eq!(alone["categories"][1]["key"], "nvidia");
+
+        let agents = super::nvidia_agents();
+        assert_eq!(agents[0], "nvidia:nvidia/nemotron-3-ultra-550b-a55b");
+        assert!(agents.iter().all(|id| id.starts_with("nvidia:")));
+        let reader = "nvidia:nvidia/nemotron-3.5-super-vl-120b-a12b";
+        assert_eq!(super::nvidia_image_readers("x"), [reader]);
+        // Le lecteur échoue avec des outils : ni agent des bancs, ni au menu.
+        assert!(!agents.iter().any(|id| id == reader));
+        assert!(!with["categories"][3]["models"]
+            .as_array()
+            .is_some_and(|all| all.contains(&serde_json::json!(reader))));
+        // Le modèle de la session ne se décrit pas ses propres images.
+        assert!(super::nvidia_image_readers(reader).is_empty());
+    }
+
+    #[test]
+    fn a_stuck_nvidia_model_hands_over_to_the_strongest_nvidia_agent() {
+        use super::stronger_nvidia_agent;
+        let ultra = "nvidia:nvidia/nemotron-3-ultra-550b-a55b";
+        assert_eq!(
+            stronger_nvidia_agent("nvidia:nvidia/nemotron-3-super-120b-a12b").as_deref(),
+            Some(ultra)
+        );
+        assert_eq!(
+            stronger_nvidia_agent("nvidia:z-ai/glm-5.3").as_deref(),
+            Some(ultra)
+        );
+        // Déjà le plus puissant : l'escalade habituelle (OpenRouter) décide.
+        assert_eq!(stronger_nvidia_agent(ultra), None);
+        assert_eq!(
+            stronger_nvidia_agent("nvidia/nemotron-3-super-120b-a12b:free"),
+            None
+        );
+    }
+
+    #[test]
+    fn nvidia_models_say_whether_they_read_images() {
+        use super::nvidia_reads_images;
+        assert_eq!(
+            nvidia_reads_images("nvidia:nvidia/nemotron-3.5-super-vl-120b-a12b"),
+            Some(true)
+        );
+        assert_eq!(
+            nvidia_reads_images("nvidia:nvidia/nemotron-3-super-120b-a12b"),
+            Some(false)
+        );
+        // Hors de la liste essayée : d'après le nom.
+        assert_eq!(
+            nvidia_reads_images("nvidia:meta/llama-3.2-90b-vision-instruct"),
+            Some(true)
+        );
+        assert_eq!(nvidia_reads_images("nvidia:z-ai/glm-5.3"), Some(false));
+        // Le même modèle chez OpenRouter n'est pas l'affaire de NVIDIA.
+        assert_eq!(
+            nvidia_reads_images("nvidia/nemotron-3-super-120b-a12b:free"),
+            None
+        );
+        assert!(crate::image_reader::model_cannot_read_images(
+            "nvidia:nvidia/nemotron-3-ultra-550b-a55b"
+        ));
     }
 
     #[test]

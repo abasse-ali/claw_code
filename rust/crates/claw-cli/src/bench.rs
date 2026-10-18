@@ -765,6 +765,11 @@ pub(crate) fn candidates(options: &BenchOptions) -> Result<Vec<String>, String> 
         ids.extend(others);
         models.extend(ids);
     }
+    // NVIDIA, avec sa clé : les modèles essayés qui appellent les outils
+    // (`--design nvidia:` ne mesure qu'eux).
+    let nvidia = super::models::nvidia_agents();
+    let has_nvidia = !nvidia.is_empty();
+    models.extend(nvidia);
     if options.include_local {
         models.extend(super::models::local_models());
     }
@@ -784,10 +789,10 @@ pub(crate) fn candidates(options: &BenchOptions) -> Result<Vec<String>, String> 
     if models.is_empty() {
         return Err(if let Some(filter) = &options.filter {
             format!("aucun modèle gratuit ne correspond à « {filter} » (voir /models)")
-        } else if has_key || options.include_local {
+        } else if has_key || has_nvidia || options.include_local {
             "aucun modèle à tester".to_string()
         } else {
-            "aucune clé OpenRouter : définissez OPENROUTER_API_KEY, ou ajoutez --local pour les modèles locaux".to_string()
+            "aucune clé OpenRouter ni NVIDIA : définissez OPENROUTER_API_KEY ou NVIDIA_API_KEY, ou ajoutez --local pour les modèles locaux".to_string()
         });
     }
     Ok(models)

@@ -3327,10 +3327,11 @@ mod tests {
     }
 
     #[test]
-    fn the_page_has_a_team_switch_and_explains_the_gemini_category() {
+    fn the_page_has_a_team_switch_and_explains_the_provider_categories() {
         assert!(super::PAGE.contains(r#"id="team-btn""#));
         assert!(super::PAGE.contains(r#"api("/api/team", { on: !status.team })"#));
         assert!(super::PAGE.contains(r#"category.key === "gemini""#));
+        assert!(super::PAGE.contains(r#"category.key === "nvidia""#));
     }
 
     #[test]
