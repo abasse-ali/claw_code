@@ -194,17 +194,15 @@ fn score(icon: &Icon<'_>, words: &[String]) -> u32 {
                 4
             } else if icon.tags.iter().any(|tag| tag == word) {
                 3
-            // Un préfixe ne compte que pour un pluriel (« tree » pour « trees ») :
-            // « bread » ne doit pas trouver « breadth ».
-            } else if icon.name.contains(word.as_str())
-                || icon
-                    .tags
-                    .iter()
-                    .any(|tag| tag.starts_with(word.as_str()) && tag.len() <= word.len() + 2)
-            {
-                1
             } else {
-                0
+                // Un préfixe ne compte que pour un pluriel (« tree » pour
+                // « trees ») : « bread » ne doit pas trouver « breadth ».
+                u32::from(
+                    icon.name.contains(word.as_str())
+                        || icon.tags.iter().any(|tag| {
+                            tag.starts_with(word.as_str()) && tag.len() <= word.len() + 2
+                        }),
+                )
             }
         })
         .sum()
