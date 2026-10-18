@@ -364,6 +364,10 @@ struct TurnAids {
     interface_rounds: usize,
     /// Fichiers d'interface changés par une commande, déjà revus.
     interface_commands: std::collections::BTreeSet<String>,
+    /// La méthode de design est jointe à la demande de ce tour.
+    design_guided: bool,
+    /// Le plan de design de ce tour a été relu avant le code.
+    plan_reviewed: bool,
     /// Commandes réussies lancées par le modèle depuis sa dernière modification.
     verified_commands: Vec<String>,
     /// Commandes parties en arrière-plan depuis la dernière modification, par
@@ -1444,12 +1448,14 @@ where
         }
         // Interface web : la méthode d'un studio de design (plan avant le
         // code, marques d'une page générée, plancher de qualité, vérification).
+        let mut design_guided = false;
         if !self.subagent
             && harness::enabled(Aid::DesignGuide)
             && report != harness::Report::Problem
         {
             if let Some(text) = crate::web_design::design_guide(&request_text, earlier.as_deref()) {
                 user_message.blocks.push(ContentBlock::Text { text });
+                design_guided = true;
             }
         }
         // Petit projet : tous ses fichiers en vues, au premier tour de la session.
@@ -1493,8 +1499,17 @@ where
                 .flatten()
                 .and_then(|cwd| harness::DataSnapshot::take(&cwd)),
             project: project_turn,
+            design_guided,
             ..TurnAids::default()
         };
+        // Tour de design : plan, code, captures et revues dépassent le budget
+        // ordinaire ; il grandit, sauf si l'utilisateur l'a réglé lui-même.
+        let turn_limit = crate::web_design::turn_request_budget(
+            design_guided,
+            self.turn_request_limit,
+            harness::TURN_REQUEST_LIMIT,
+            std::env::var_os("CLAW_TURN_REQUESTS").is_some(),
+        );
         // Mode projet : un tour long est normal, le plan en jalons fait le point.
         if aids.project.is_some() {
             aids.stall.skip_budget();
@@ -1521,7 +1536,7 @@ where
             }
             // Budget de requêtes du tour atteint : le modèle conclut et rend
             // la main, au lieu de dépenser le quota du jour en un seul tour.
-            let limit = self.turn_request_limit;
+            let limit = turn_limit;
             if !wrapping_up && limit > 0 && iterations > limit {
                 wrapping_up = true;
                 let plural = if limit > 1 { "s" } else { "" };
@@ -1788,7 +1803,7 @@ where
             // Encore des outils alors que le budget du tour est atteint : rien
             // ne tourne, chaque appel reçoit son résultat et le tour s'arrête.
             if wrapping_up {
-                let reason = harness::turn_limit_refusal(self.turn_request_limit);
+                let reason = harness::turn_limit_refusal(turn_limit);
                 for (tool_use_id, tool_name, input) in pending_tool_uses {
                     self.tool_executor.skipped(&tool_name, &input, &reason);
                     let message = ConversationMessage::tool_result(
@@ -1805,6 +1820,15 @@ where
                 );
                 break;
             }
+            // Plan de design relu avant le code : à la première écriture d'un
+            // fichier d'interface qui suit le plan, une fois par tour.
+            let mut plan_note = self.plan_review(
+                &pending_tool_uses,
+                &assistant_messages,
+                &request_text,
+                earlier.as_deref(),
+                &mut aids,
+            );
             self.autosave(&pending_tool_uses);
             if self.run_parallel_batch(
                 &pending_tool_uses,
@@ -1812,6 +1836,11 @@ where
                 &mut tool_results,
                 &mut aids,
             ) {
+                if let Some(note) = plan_note.take() {
+                    self.session
+                        .messages
+                        .push(ConversationMessage::user_text(note));
+                }
                 if self.finish_on_hook_stop() {
                     break;
                 }
@@ -1848,6 +1877,9 @@ where
                 );
                 aids.refused |= refused;
                 self.after_tool(&tool_name, &input, &mut result_message, refused, &mut aids);
+                if let Some(note) = plan_note.take() {
+                    append_tool_output(&mut result_message, &note);
+                }
                 lean_result(&tool_name, &mut result_message);
                 self.session.messages.push(result_message.clone());
                 tool_results.push(result_message);
@@ -2686,6 +2718,93 @@ where
             snapshot.refresh_all(&cwd);
         }
         feedback
+    }
+
+    /// Revue du plan de design avant le code : un autre modèle juge la
+    /// direction (identité, hiérarchie, typographie, couleur, composition)
+    /// quand le modèle s'apprête à écrire un fichier d'interface après l'avoir
+    /// posée. Changer un plan ne coûte rien ; changer une page faite coûte une
+    /// réécriture que le budget du tour ne permet pas toujours. Une fois par
+    /// tour, une requête de plus ; rien quand la méthode n'a pas été jointe.
+    fn plan_review(
+        &mut self,
+        pending: &[(String, String, String)],
+        assistant_messages: &[ConversationMessage],
+        request: &str,
+        earlier: Option<&str>,
+        aids: &mut TurnAids,
+    ) -> Option<String> {
+        if !aids.design_guided
+            || aids.plan_reviewed
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::DesignReview)
+        {
+            return None;
+        }
+        let writes_interface = pending.iter().any(|(_, name, input)| {
+            matches!(name.as_str(), "write_file" | "edit_file")
+                && json_field(input, "path")
+                    .is_some_and(|path| crate::web_design::is_interface_file(&path))
+        });
+        if !writes_interface {
+            return None;
+        }
+        let plan = assistant_messages
+            .iter()
+            .flat_map(|message| message.blocks.iter())
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !crate::web_design::looks_like_design_plan(&plan) {
+            return None;
+        }
+        aids.plan_reviewed = true;
+        if self
+            .api_client
+            .free_requests_left()
+            .is_some_and(|left| left < crate::web_design::MIN_FREE_REQUESTS)
+        {
+            return None;
+        }
+        // Une relance courte (« continue ») se juge avec la demande qu'elle poursuit.
+        let brief = match earlier {
+            Some(earlier) if request.split_whitespace().count() <= 12 => {
+                format!("{earlier}\n{request}")
+            }
+            _ => request.to_string(),
+        };
+        self.api_client
+            .notify("Revue du plan de design par un autre modèle, avant le code…");
+        let consultation = self.api_client.consult(
+            ConsultPurpose::Design,
+            crate::web_design::PLAN_CRITIC_SYSTEM,
+            &crate::web_design::plan_critique_prompt(
+                &brief,
+                &plan,
+                crate::web_design::design_bar(),
+            ),
+        )?;
+        if let Some(changes) = crate::web_design::plan_changes(&consultation.text) {
+            self.api_client.notify(&format!(
+                "Revue du plan par {} : {} remarque(s) transmise(s) à l'agent",
+                consultation.model,
+                changes.lines().count()
+            ));
+            Some(crate::web_design::plan_feedback(
+                &consultation.model,
+                &changes,
+            ))
+        } else {
+            self.api_client.notify(&format!(
+                "Revue du plan par {} : rien à redire",
+                consultation.model
+            ));
+            None
+        }
     }
 
     /// Revue visuelle : le modèle a modifié l'interface et dit avoir fini.
@@ -6143,6 +6262,73 @@ mod tests {
             "verifier".to_string()
         ]));
         (runtime, observed, bash_calls)
+    }
+
+    #[test]
+    fn a_design_plan_is_reviewed_once_before_the_first_interface_file() {
+        let _serial = crate::test_serial();
+        let plan_and_write = |path: &str| {
+            vec![
+                AssistantEvent::TextDelta(
+                    "Plan : #F5E6D3 sable, #8B4A3A ocre, #6B8E7A sauge. Typo : Fraunces et Karla."
+                        .to_string(),
+                ),
+                AssistantEvent::ToolUse {
+                    id: format!("appel-{path}"),
+                    name: "write_file".to_string(),
+                    input: format!(r#"{{"path":"{path}","content":"<p>x</p>"}}"#),
+                },
+                AssistantEvent::MessageStop,
+            ]
+        };
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                plan_and_write("site-essai.html"),
+                plan_and_write("site-essai.css"),
+            ],
+            Vec::new(),
+            vec!["1. [identity] centered hero -> a split hero with a pressed-flower SVG"],
+            WRITTEN.to_string(),
+        );
+        // Le tour s'arrête faute de réponses scriptées : seul compte ce qui précède.
+        let _ = runtime.run_turn("Crée un site vitrine pour un fleuriste", None);
+        let observed = observed.borrow();
+        let reviews: Vec<&String> = observed
+            .consults
+            .iter()
+            .filter(|(purpose, _)| *purpose == super::ConsultPurpose::Design)
+            .map(|(_, prompt)| prompt)
+            .collect();
+        assert_eq!(reviews.len(), 1, "une revue du plan par tour");
+        assert!(reviews[0].contains("#8B4A3A") && reviews[0].contains("fleuriste"));
+        assert!(
+            observed.requests[1].contains("An art director (relecteur) reviewed your design plan")
+                && observed.requests[1].contains("pressed-flower"),
+            "la critique part avec le résultat de l'écriture"
+        );
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice
+                == "Revue du plan par relecteur : 1 remarque(s) transmise(s) à l'agent"));
+        drop(observed);
+
+        // Sans plan (pas de palette), aucune revue.
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![tool_step(
+                "write_file",
+                r#"{"path":"site-essai.html","content":"<p>x</p>"}"#,
+            )],
+            Vec::new(),
+            vec!["1. [identity] x -> y"],
+            WRITTEN.to_string(),
+        );
+        let _ = runtime.run_turn("Crée un site vitrine pour un fleuriste", None);
+        assert!(!observed
+            .borrow()
+            .consults
+            .iter()
+            .any(|(purpose, _)| *purpose == super::ConsultPurpose::Design));
     }
 
     #[test]

@@ -448,6 +448,98 @@ pub fn read_audit(output: &str) -> Audit {
 /// Consigne du modèle qui juge les captures.
 pub const CRITIC_SYSTEM: &str = "You are the art director of a design studio known for distinctive, polished websites, and you are hard to please. You review screenshots of a page built by a junior developer, score it honestly against what your studio would ship, and give precise, actionable direction. You judge only what you can see in the screenshots.";
 
+/// Consigne du modèle qui relit le plan de design avant le code.
+pub const PLAN_CRITIC_SYSTEM: &str = "You are the art director of a design studio known for distinctive, polished websites, and you are hard to please. A junior designer shows you the design plan of a page before building it. You judge the direction: will it produce a page your studio would sign? Changing a plan costs nothing; changing built code costs a lot, so be demanding now.";
+
+/// Requête du juge du plan : la direction, avant le code. Vu dans un essai
+/// réel : la hiérarchie et l'identité, notées 7/10 une fois la page faite,
+/// coûtaient alors une réécriture que le budget du tour ne permettait plus.
+#[must_use]
+pub fn plan_critique_prompt(request: &str, plan: &str, bar: u8) -> String {
+    let brief: String = request.chars().take(1_500).collect();
+    let plan: String = plan.chars().take(5_000).collect();
+    format!(
+        "The client's brief:\n\"{brief}\"\n\nThe designer's plan, written before any code:\n{plan}\n\nJudge this direction against what a top studio would ship (the built page will be scored 1 to 10 on phone, hierarchy, spacing, typography, color, identity and finish, and must reach {bar} on each):\n1. identity: one memorable idea specific to this subject, or a template in disguise (a centered hero band, identical cards, the same layout in every section, generic stock imagery)?\n2. hierarchy: one clear focal point on the first screen, and an obvious next step?\n3. typography: typefaces chosen for this subject (not Inter, Roboto, Montserrat, Poppins, Playfair Display and the like), a scale with real contrast between levels?\n4. color: a palette taken from the subject's world, readable contrast, an accent used sparingly?\n5. composition: do the sections vary (split, full width, list, offset), with an even rhythm?\nReply with at most 5 changes to the plan, the most important first, one per line, each as:\nN. [criterion] what is weak in the plan -> the exact change (a typeface name, hex values, a layout, a concrete idea)\nBe specific to this subject; no generic advice. If the plan would already reach {bar}/10 on every criterion, reply exactly: PLAN OK"
+    )
+}
+
+/// Changements demandés au plan ; `None` quand le juge l'approuve.
+#[must_use]
+pub fn plan_changes(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            line.chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_digit())
+        })
+        .take(5)
+        .collect();
+    if lines.is_empty() {
+        return (!text.to_ascii_uppercase().contains("PLAN OK"))
+            .then(|| text.chars().take(1_500).collect());
+    }
+    Some(lines.join("\n"))
+}
+
+/// Le texte du tour contient un plan de design : au moins trois couleurs
+/// différentes en hexadécimal à six chiffres (`#c46b3a`), la palette que la
+/// méthode demande. Les formes courtes (`#fff`) et les numéros (`#12`) ne
+/// comptent pas : un message qui cite un ticket n'est pas un plan.
+#[must_use]
+pub fn looks_like_design_plan(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut colors = std::collections::BTreeSet::new();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'#' {
+            continue;
+        }
+        let digits = bytes[index + 1..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_hexdigit())
+            .count();
+        if digits == 6 {
+            colors.insert(text[index + 1..=index + digits].to_ascii_lowercase());
+        }
+    }
+    colors.len() >= 3
+}
+
+/// Message joint au premier fichier d'interface écrit après le plan.
+#[must_use]
+pub fn plan_feedback(model: &str, changes: &str) -> String {
+    format!(
+        "[Claw] An art director ({model}) reviewed your design plan before the code:\n{changes}\nApply these changes now: revise the plan in one line each, then build with them, in the file you just wrote and in the next ones."
+    )
+}
+
+/// Requêtes d'un tour de design, quand l'utilisateur n'a pas réglé la limite
+/// lui-même : le travail de page (plan, code, captures, deux ou trois revues)
+/// dépassait les 100 requêtes ordinaires, et la deuxième revue n'avait jamais lieu.
+pub const DESIGN_TURN_REQUESTS: usize = 160;
+
+/// Budget de requêtes d'un tour : celui d'un tour de design quand la méthode
+/// est jointe et que la limite est celle par défaut (`default`) sans réglage
+/// de l'utilisateur (`chosen_by_user`), sinon la limite réglée.
+#[must_use]
+pub fn turn_request_budget(
+    design_guided: bool,
+    configured: usize,
+    default: usize,
+    chosen_by_user: bool,
+) -> usize {
+    if design_guided && configured == default && !chosen_by_user {
+        DESIGN_TURN_REQUESTS
+    } else {
+        configured
+    }
+}
+
 /// Critères notés par le juge, dans l'ordre de la ligne `SCORES:`.
 pub const CRITERIA: [&str; 7] = [
     "phone",
@@ -730,6 +822,40 @@ mod tests {
             review_feedback("path:index.html", &Audit::default(), None, 1, 2, 8),
             None
         );
+    }
+
+    #[test]
+    fn a_design_plan_is_recognized_and_its_review_reads_the_judge() {
+        use super::{
+            looks_like_design_plan, plan_changes, plan_critique_prompt, plan_feedback,
+            turn_request_budget, DESIGN_TURN_REQUESTS,
+        };
+        let plan = "Couleurs : #F5E6D3 sable, #8B4A3A ocre, #6B8E7A sauge, #c46b3a safran. Typo : Fraunces et Karla.";
+        assert!(looks_like_design_plan(plan));
+        // Deux couleurs, ou la même trois fois, ou des numéros (#1, #12) : pas un plan.
+        assert!(!looks_like_design_plan(
+            "#fff et #000, issue #12, #123456 #123456 #123456"
+        ));
+        let prompt = plan_critique_prompt("Crée un site pour un fleuriste", plan, 8);
+        assert!(
+            prompt.contains("#8B4A3A")
+                && prompt.contains("reach 8 on each")
+                && prompt.contains("PLAN OK")
+        );
+        assert_eq!(plan_changes("PLAN OK"), None);
+        assert_eq!(plan_changes("The plan is strong. PLAN OK"), None);
+        let changes = plan_changes("Notes:\n1. [identity] centered hero -> a split hero with a pressed-flower SVG\n2. [typography] Poppins -> Fraunces 600\nGood luck").expect("changes");
+        assert_eq!(changes.lines().count(), 2);
+        assert!(plan_feedback("juge", &changes)
+            .starts_with("[Claw] An art director (juge) reviewed your design plan"));
+        // Budget : 160 pour un tour de design, sauf réglage de l'utilisateur.
+        assert_eq!(
+            turn_request_budget(true, 100, 100, false),
+            DESIGN_TURN_REQUESTS
+        );
+        assert_eq!(turn_request_budget(true, 100, 100, true), 100);
+        assert_eq!(turn_request_budget(true, 40, 100, false), 40);
+        assert_eq!(turn_request_budget(false, 100, 100, false), 100);
     }
 
     #[test]
