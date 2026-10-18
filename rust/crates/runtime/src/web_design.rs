@@ -84,6 +84,8 @@ pub fn max_continuations() -> usize {
 pub struct Graded {
     pub mean: f32,
     pub under: Vec<String>,
+    /// Les notes de chaque critère, repère du juge à la revue suivante.
+    pub scores: Vec<(String, u8)>,
 }
 
 /// Ce que décide Claw quand un tour de design touche sa limite (requêtes ou
@@ -858,7 +860,13 @@ pub const CRITERIA: [&str; 7] = [
 /// Ce qui est demandé au modèle qui juge les captures : une note par
 /// critère, puis les changements qui relèvent chaque note sous `bar`.
 #[must_use]
-pub fn critique_prompt(request: &str, images: usize, audit: &Audit, bar: u8) -> String {
+pub fn critique_prompt(
+    request: &str,
+    images: usize,
+    audit: &Audit,
+    bar: u8,
+    previous: Option<&[(String, u8)]>,
+) -> String {
     let measured = if audit.problems.is_empty() && audit.notes.is_empty() {
         "nothing".to_string()
     } else {
@@ -872,8 +880,20 @@ pub fn critique_prompt(request: &str, images: usize, audit: &Audit, bar: u8) -> 
     };
     let brief: String = request.chars().take(1_500).collect();
     let pictures = pictures_note();
+    // Les notes de la revue précédente servent de repère : vu dans un essai
+    // réel, le même juge a noté 7,9 puis 6,0 une page qui s'était améliorée.
+    let anchor = previous
+        .filter(|scores| !scores.is_empty())
+        .map_or_else(String::new, |scores| {
+            let line = scores
+                .iter()
+                .map(|(criterion, score)| format!("{criterion}={score}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("Your previous review of this page, before the developer's last changes, scored: {line}. Keep the same scale: a score moves when something visible changed, up or down; when a score moves by 2 or more, the change lines must name what you see that justifies it.\n\n")
+        });
     format!(
-        "The client's brief:\n\"{brief}\"\n\n{images} screenshots follow, full page: the phone view first, then the desktop view.\n\nAlready measured in the page and sent to the developer (do not repeat these):\n{measured}\n\nScore the page from 1 to 10 on each criterion, against what a top studio would ship: 5 is a competent template, 8 is what a strong studio would sign, 10 is award-level. Be strict: most generated pages deserve 4 to 6, and an 8 must be earned by something specific you can point to.\n1. phone: nothing cut, covered or cramped; a menu that fits; comfortable tap targets; text sized for a phone.\n2. hierarchy: a clear first screen with one strong focal point; the eye knows where to go next; headings, text and actions clearly ranked.\n3. spacing: one consistent vertical rhythm, aligned edges, generous but even breathing room, no crowded areas and no empty bands.\n4. typography: typefaces chosen for this subject, a clear scale with real contrast between levels, comfortable line length and leading, nothing default-looking.\n5. color: a harmonious palette tied to the subject, readable contrast, the accent used sparingly and on purpose.\n6. identity: does it look made for this subject, with a memorable idea, or like a template (a plain colored hero band, identical cards, icon placeholders for photos, lines under every heading, ALL-CAPS badges, the same layout in every section)?\n7. finish: craft in the details (alignment, consistent radii and shadows, polished icons and illustrations, states of buttons and fields); anything unstyled, broken, empty or unfinished. Any emoji anywhere in the page caps finish at 4: icons must be inline SVG.\n\nThe first line of your reply is exactly in this form:\nSCORES: phone=N hierarchy=N spacing=N typography=N color=N identity=N finish=N\nThen, for every criterion under {bar}, the changes that would raise it, the most important first, at most 8 in all, one per line, each as:\nN. [criterion] what is wrong, as seen in the screenshots -> the exact change to make (CSS properties and values, HTML structure, copy)\nBe specific to this page; no generic advice. {pictures} Small UI icons come from a polished line icon set (Lucide) on purpose: judge how they are sized, colored and placed, do not ask to redraw them by hand. If every score is {bar} or more, write NO CHANGES NEEDED after the scores line."
+        "The client's brief:\n\"{brief}\"\n\n{images} screenshots follow, full page: the phone view first, then the desktop view.\n\nAlready measured in the page and sent to the developer (do not repeat these):\n{measured}\n\n{anchor}Score the page from 1 to 10 on each criterion, against what a top studio would ship: 5 is a competent template, 8 is what a strong studio would sign, 10 is award-level. Be strict: most generated pages deserve 4 to 6, and an 8 must be earned by something specific you can point to.\n1. phone: nothing cut, covered or cramped; a menu that fits; comfortable tap targets; text sized for a phone.\n2. hierarchy: a clear first screen with one strong focal point; the eye knows where to go next; headings, text and actions clearly ranked.\n3. spacing: one consistent vertical rhythm, aligned edges, generous but even breathing room, no crowded areas and no empty bands.\n4. typography: typefaces chosen for this subject, a clear scale with real contrast between levels, comfortable line length and leading, nothing default-looking.\n5. color: a harmonious palette tied to the subject, readable contrast, the accent used sparingly and on purpose.\n6. identity: does it look made for this subject, with a memorable idea, or like a template (a plain colored hero band, identical cards, icon placeholders for photos, lines under every heading, ALL-CAPS badges, the same layout in every section)?\n7. finish: craft in the details (alignment, consistent radii and shadows, polished icons and illustrations, states of buttons and fields); anything unstyled, broken, empty or unfinished. Any emoji anywhere in the page caps finish at 4: icons must be inline SVG.\n\nThe first line of your reply is exactly in this form:\nSCORES: phone=N hierarchy=N spacing=N typography=N color=N identity=N finish=N\nThen, for every criterion under {bar}, the changes that would raise it, the most important first, at most 8 in all, one per line, each as:\nN. [criterion] what is wrong, as seen in the screenshots -> the exact change to make (CSS properties and values, HTML structure, copy)\nBe specific to this page; no generic advice. {pictures} Small UI icons come from a polished line icon set (Lucide) on purpose: judge how they are sized, colored and placed, do not ask to redraw them by hand. If every score is {bar} or more, write NO CHANGES NEEDED after the scores line."
     )
 }
 
@@ -1135,6 +1155,7 @@ mod tests {
         let graded = |mean: f32, under: &[&str]| Graded {
             mean,
             under: under.iter().map(ToString::to_string).collect(),
+            scores: Vec::new(),
         };
         // Aucune revue notée : pas de poursuite.
         assert_eq!(continuation(&[], 0, 0, 2, None), Continuation::Unscored);
@@ -1178,6 +1199,12 @@ mod tests {
         assert!(stop_reason(Continuation::Stalled).is_some());
         assert_eq!(stop_reason(Continuation::Reached), None);
         assert_eq!(super::max_continuations(), 2);
+        // Les notes précédentes servent de repère au juge.
+        let audit = super::Audit::default();
+        let previous = [("phone".to_string(), 7), ("identity".to_string(), 8)];
+        let anchored = super::critique_prompt("site", 2, &audit, 8, Some(&previous));
+        assert!(anchored.contains("previous review") && anchored.contains("phone=7 identity=8"));
+        assert!(!super::critique_prompt("site", 2, &audit, 8, None).contains("previous review"));
     }
 
     #[test]

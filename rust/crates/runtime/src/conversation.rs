@@ -3012,7 +3012,13 @@ where
                 .notify("Revue visuelle : un modèle qui voit note les captures…");
             self.api_client.critique_design(
                 crate::web_design::CRITIC_SYSTEM,
-                &crate::web_design::critique_prompt(&brief, images.len(), &audit, bar),
+                &crate::web_design::critique_prompt(
+                    &brief,
+                    images.len(),
+                    &audit,
+                    bar,
+                    aids.graded.last().map(|graded| graded.scores.as_slice()),
+                ),
                 &images,
             )
         };
@@ -3030,6 +3036,7 @@ where
             aids.graded.push(crate::web_design::Graded {
                 mean,
                 under: under.iter().map(ToString::to_string).collect(),
+                scores: scores.clone(),
             });
             if under.is_empty() {
                 format!(", note {mean:.1}/10 (barre {bar})")
@@ -6505,6 +6512,7 @@ mod tests {
         let graded = |mean: f32| crate::web_design::Graded {
             mean,
             under: vec!["identity".to_string()],
+            scores: Vec::new(),
         };
         let mut aids = super::TurnAids {
             design_guided: true,

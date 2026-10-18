@@ -197,7 +197,8 @@ fn measure(model: &str, timeout: Duration, progress: &mut dyn FnMut(&str)) -> De
         Err(error) => return failed(format!("capture impossible : {error}"), outcome.seconds),
     };
     let bar = runtime::web_design::design_bar();
-    let prompt = runtime::web_design::critique_prompt(DESIGN_BRIEF, images.len(), &audit, bar);
+    let prompt =
+        runtime::web_design::critique_prompt(DESIGN_BRIEF, images.len(), &audit, bar, None);
     let (judge, text) = match crate::image_reader::critique(
         model,
         runtime::web_design::CRITIC_SYSTEM,
