@@ -395,6 +395,8 @@ struct TurnAids {
     commands_run: Vec<String>,
     /// Le modèle a été renvoyé essayer ses scripts.
     scripts_asked: bool,
+    /// Le piège des guillemets de `PowerShell` passé par bash a été dit.
+    quoting_noted: bool,
     /// Poursuites accordées au tour de design resté sous la barre.
     continuations: usize,
     /// Revues notées au moment de la dernière poursuite.
@@ -2233,6 +2235,16 @@ where
         }
         if matches!(tool_name, "bash" | "PowerShell") && !is_error {
             self.data_rewritten_by_command(input, aids, &mut notes);
+        }
+        // Du PowerShell passé par bash entre guillemets doubles : bash a
+        // remplacé ses variables avant que PowerShell ne le lise.
+        if tool_name == "bash" && harness::enabled(Aid::Pitfalls) && !aids.quoting_noted {
+            if let Some(note) = json_field(input, "command")
+                .and_then(|command| crate::code_checks::bash_powershell_quoting(&command))
+            {
+                aids.quoting_noted = true;
+                notes.push(note.to_string());
+            }
         }
         if let Some(outcome) = command_outcome {
             aids.commands_run.push(outcome.command.clone());

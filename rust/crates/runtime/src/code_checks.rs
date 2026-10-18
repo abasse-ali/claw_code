@@ -713,6 +713,21 @@ fn batch_pitfalls(text: &str) -> Vec<String> {
     found
 }
 
+/// Une commande bash qui passe du `PowerShell` entre guillemets doubles avec
+/// des variables (`powershell -Command "… $_ …"`) : bash les remplace avant
+/// que `PowerShell` ne lise la commande. Vu dans un essai réel : `$_.FullName`
+/// est devenu `14377.FullName`, et le modèle a cherché quatre fois pourquoi.
+#[must_use]
+pub fn bash_powershell_quoting(command: &str) -> Option<&'static str> {
+    let pattern = Regex::new(
+        r#"(?i)\b(powershell|pwsh)(\.exe)?\b[^|;&]*?\s-(c|command)\s+"[^"]*\$[A-Za-z_?(]"#,
+    )
+    .ok()?;
+    pattern.is_match(command).then_some(
+        "[Claw] This command passed PowerShell code to bash in double quotes: bash replaced its $variables before PowerShell read it ($_ becomes the last argument of the previous command, $x becomes empty, $(...) runs in bash). Put the PowerShell code in single quotes (-Command '...'), or in a .ps1 file run with -File.",
+    )
+}
+
 /// shellcheck, quand il est installé : ses avertissements et ses erreurs.
 fn shell_pitfalls(path: &Path) -> Vec<String> {
     let file = path.to_string_lossy().to_string();
@@ -833,6 +848,26 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn powershell_code_in_double_quotes_from_bash_is_flagged() {
+        use super::bash_powershell_quoting;
+        assert!(bash_powershell_quoting(
+            "powershell -NoProfile -Command \"Get-ChildItem x | ForEach-Object { $_.FullName }\""
+        )
+        .is_some());
+        assert!(bash_powershell_quoting("pwsh -c \"$env:PATH\"").is_some());
+        // Entre guillemets simples, avec -File, ou sans variable : rien.
+        assert!(
+            bash_powershell_quoting("powershell -Command 'Get-ChildItem | % { $_.Name }'")
+                .is_none()
+        );
+        assert!(bash_powershell_quoting(
+            "powershell -NoProfile -File .\\ranger.ps1 -Path \"C:\\x\" -WhatIf"
+        )
+        .is_none());
+        assert!(bash_powershell_quoting("powershell -Command \"Get-Date\"").is_none());
     }
 
     #[test]
