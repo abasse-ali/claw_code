@@ -699,6 +699,29 @@
     if (underlined.length >= 2) blameNote(underlined);
     if (underlined.length >= 2) notes.push(`${underlined.length} headings carry a short decorative line underneath (${list(underlined.map(name), 3)}): a frequent tell of generated pages; the heading's size and weight should rank it on their own`);
 
+    // La même photo plusieurs fois (image ou fond CSS) : chaque image doit
+    // montrer autre chose. Vu dans un essai réel : une photo de cours en fond
+    // du hero, dans la section du studio et à la place des portraits.
+    const photoUses = new Map();
+    const usePhoto = (src, el) => {
+      if (!src || src.startsWith("data:") || !/\.(jpe?g|png|webp|avif)(\?|#|$)/i.test(src)) return;
+      if (!photoUses.has(src)) photoUses.set(src, []);
+      photoUses.get(src).push(el);
+    };
+    for (const img of document.querySelectorAll("img")) {
+      if (shown(img) && img.naturalWidth >= 200) usePhoto(img.currentSrc || img.src, img);
+    }
+    for (const el of visible) {
+      const found = css(el).backgroundImage.match(/url\("?([^")]+)"?\)/);
+      if (found) usePhoto(found[1], el);
+    }
+    for (const [src, els] of photoUses) {
+      if (els.length < 2) continue;
+      blameNote(els);
+      const file = decodeURIComponent(src.split(/[?#]/)[0].split("/").pop());
+      notes.push(`the same photo (${file}) appears ${els.length} times (${list(els.map(name), 3)}): each picture should show something different (the room, a class, a detail, a person); use another photo, or an Ornament where no photo fits`);
+    }
+
     // Accent omniprésent : la couleur la plus saturée couvre plus de 15 % de
     // la page, elle n'accentue plus rien.
     const sat = (color) => {

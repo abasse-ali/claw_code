@@ -457,12 +457,17 @@ pub(crate) fn ornament(input: &OrnamentInput) -> Result<Value, String> {
         "<svg xmlns=\"http://www.w3.org/2000/svg\" class=\"ornament ornament-{kind}\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {} {}\"{aspect}{opacity_attribute} aria-hidden=\"true\" focusable=\"false\">{body}</svg>",
         view.0, view.1
     );
+    // Le CSS exact de chaque sorte : vu dans un essai réel, des vagues
+    // posées dans une colonne de la grille du hero, au milieu de la photo.
     let placement = match kind.as_str() {
-        "waves" => "Place it at the bottom of the section, full width: .ornament-waves { display: block; width: 100%; height: 120px; } (the waves stretch to the width).",
-        "dots" | "lines" | "grain" | "topography" => "Use it as a background: absolutely positioned behind the content (position: absolute; inset: 0; z-index: -1; width: 100%; height: 100%), or as background-image with the data_uri.",
-        "frame" => "Put the avatar, the initial or an Icon inside: a wrapper with position: relative, the frame absolutely positioned over it.",
-        _ => "Size it with CSS (width, height: auto), and keep it decorative: aria-hidden stays.",
+        "waves" => "It is the bottom edge of a section, never a block inside a grid or a column: make it the last child of the section, give the section position: relative, then .ornament-waves { position: absolute; left: 0; bottom: -1px; width: 100%; height: 120px; pointer-events: none; } (the waves stretch to the width). Its last color should be the next section's background, so the two sections flow into each other.",
+        "dots" | "lines" | "grain" | "topography" => "It is a background, never content: inside a section with position: relative and isolation: isolate, .ornament-KIND { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; pointer-events: none; }, or background-image: url(\"data_uri\") on the section itself.",
+        "blob" => "It sits behind a title, a photo or a card, half hidden: the wrapper gets position: relative and isolation: isolate, then .ornament-blob { position: absolute; z-index: -1; width: 70%; height: auto; top: -12%; right: -10%; pointer-events: none; }; the section gets overflow: clip so the shape never widens the page.",
+        "arch" => "It frames a photo or a text: the wrapper gets position: relative; put the arch behind with position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1, or clip the photo itself with border-radius: 999px 999px 0 0 and use the arch as its colored backdrop.",
+        "frame" => "Put the avatar, the initial or an Icon inside: a wrapper with position: relative, the frame absolutely positioned over it (inset: 0; width: 100%; height: 100%).",
+        _ => "Size it with CSS (width, height: auto) as an accent beside a title or in a margin, never as the main picture of a section; aria-hidden stays.",
     };
+    let placement = placement.replace("KIND", &kind);
     Ok(json!({
         "kind": kind,
         "use": usage,
