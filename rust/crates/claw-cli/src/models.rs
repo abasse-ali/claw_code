@@ -205,6 +205,24 @@ fn scored_free_models(
     scored
 }
 
+/// Modèle des tours de design (`designModel`, `CLAW_DESIGN_MODEL`), réglé
+/// par `/models bench --design --appliquer` ; `off` le coupe.
+pub(crate) fn design_model_setting() -> Option<String> {
+    let setting = env::var("CLAW_DESIGN_MODEL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            let cwd = env::current_dir().ok()?;
+            let config = ConfigLoader::default_for(&cwd).load().ok()?;
+            config.design_model().map(ToOwned::to_owned)
+        })?;
+    let value = setting.trim();
+    match value.to_ascii_lowercase().as_str() {
+        "" | "off" | "none" | "non" | "aucun" | "false" | "0" => None,
+        _ => Some(api::resolve_model_alias(value)),
+    }
+}
+
 /// Modèle qui reprend la fin d'un tour quand l'agent n'avance plus
 /// (`escalationModel`, `CLAW_ESCALATION_MODEL`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1309,6 +1327,10 @@ fn models_report_footer() -> Vec<String> {
         "  /models bench          mesurer les modèles gratuits compatibles avec Claw sur de vraies"
             .to_string(),
         "                         tâches (≈ 15 min ; --rapide, --local, --appliquer)".to_string(),
+        "  /models bench --design la même page construite par chaque modèle, notée par un juge qui"
+            .to_string(),
+        "                         voit ; --appliquer lui confie les tours de design (designModel)"
+            .to_string(),
         String::new(),
         "Bon à savoir : chaque étape de l'agent (un appel au modèle) consomme une requête du"
             .to_string(),

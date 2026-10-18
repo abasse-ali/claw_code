@@ -58,6 +58,110 @@ pub fn design_bar() -> u8 {
         .clamp(5, 10)
 }
 
+/// Poursuites au plus d'un tour de design resté sous la barre
+/// (`CLAW_DESIGN_CONTINUE`, 0 les coupe).
+const DEFAULT_CONTINUATIONS: usize = 2;
+/// Requêtes ajoutées au tour par une poursuite.
+pub const CONTINUATION_REQUESTS: usize = 60;
+/// Requêtes gratuites gardées pour la journée : en dessous, pas de poursuite.
+pub const CONTINUATION_RESERVE: u64 = 150;
+/// Hausse de la note moyenne en dessous de laquelle une revue n'a rien
+/// gagné : la page ne progresse plus, poursuivre gaspillerait le quota.
+const MIN_GAIN: f32 = 0.2;
+
+/// Poursuites au plus d'un tour de design.
+#[must_use]
+pub fn max_continuations() -> usize {
+    std::env::var("CLAW_DESIGN_CONTINUE")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_CONTINUATIONS)
+        .min(5)
+}
+
+/// Une revue notée : la moyenne des critères, et ceux restés sous la barre.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Graded {
+    pub mean: f32,
+    pub under: Vec<String>,
+}
+
+/// Ce que décide Claw quand un tour de design touche sa limite (requêtes ou
+/// revues) : poursuivre, ou s'arrêter, et pourquoi.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Continuation {
+    /// La note monte et reste sous la barre : le tour continue.
+    Continue,
+    /// Aucune revue notée, ou aucune depuis la dernière poursuite : rien ne
+    /// dit qu'une poursuite de plus servirait.
+    Unscored,
+    /// Chaque critère a atteint la barre.
+    Reached,
+    /// La dernière revue n'a pas fait monter la note.
+    Stalled,
+    /// Toutes les poursuites permises ont servi.
+    Exhausted,
+    /// Il reste trop peu de requêtes gratuites aujourd'hui.
+    LowQuota,
+}
+
+/// Faut-il poursuivre un tour de design arrivé à sa limite ? Oui tant que la
+/// page reste sous la barre et que sa note monte d'une revue à l'autre, dans
+/// la limite des poursuites permises et du quota du jour. Une seule revue
+/// suffit : ses changements n'ont pas encore été essayés. `seen` est le
+/// nombre de revues notées à la poursuite précédente : chaque poursuite en
+/// demande une nouvelle.
+#[must_use]
+pub fn continuation(
+    graded: &[Graded],
+    seen: usize,
+    used: usize,
+    max: usize,
+    free_left: Option<u64>,
+) -> Continuation {
+    let Some(last) = graded.last().filter(|_| graded.len() > seen) else {
+        return Continuation::Unscored;
+    };
+    if last.under.is_empty() {
+        return Continuation::Reached;
+    }
+    if used >= max {
+        return Continuation::Exhausted;
+    }
+    if free_left.is_some_and(|left| left < CONTINUATION_RESERVE) {
+        return Continuation::LowQuota;
+    }
+    if let [.., before, _] = graded {
+        if last.mean < before.mean + MIN_GAIN {
+            return Continuation::Stalled;
+        }
+    }
+    Continuation::Continue
+}
+
+/// La suite des notes, pour l'utilisateur : « 6,0 puis 7,3 ».
+#[must_use]
+pub fn score_trail(graded: &[Graded]) -> String {
+    graded
+        .iter()
+        .map(|graded| format!("{:.1}", graded.mean).replace('.', ","))
+        .collect::<Vec<_>>()
+        .join(" puis ")
+}
+
+/// Ce que l'utilisateur lit quand le tour s'arrête sous la barre.
+#[must_use]
+pub fn stop_reason(decision: Continuation) -> Option<&'static str> {
+    match decision {
+        Continuation::Stalled => Some("la dernière revue n'a pas fait monter la note"),
+        Continuation::Exhausted => {
+            Some("les poursuites permises ont servi (`CLAW_DESIGN_CONTINUE`)")
+        }
+        Continuation::LowQuota => Some("il reste peu de requêtes gratuites aujourd'hui"),
+        Continuation::Continue | Continuation::Unscored | Continuation::Reached => None,
+    }
+}
+
 /// Mots qui désignent une interface web.
 const INTERFACE_WORDS: &[&str] = &[
     "site",
@@ -301,6 +405,17 @@ pub fn project_css(root: &Path) -> String {
 /// propre au sujet », un modèle gratuit gardait ses badges en capitales et
 /// Playfair Display en écrivant qu'il les avait évités.
 fn design_method(bar: u8) -> String {
+    let with_photos = crate::harness::enabled(crate::harness::Aid::Photos);
+    let photos = if with_photos {
+        " Pictures of the subject itself (the bread, the studio, the dish, the place) come from the Photo tool: free-licence photos saved in the project with their size and a credit for the footer; name what the photo shows, in English, and look at it in the page before keeping it."
+    } else {
+        ""
+    };
+    let photo_pictures = if with_photos {
+        ", photos from the Photo tool (width and height attributes, object-fit: cover in their frame, the credits in the footer)"
+    } else {
+        ""
+    };
     format!("This request builds or reshapes a web interface. The bar is a page a top design studio would ship and sign: distinctive, polished and fully working on phones and desktops, never a template. When you finish, Claw has the page scored by an art director, 1 to 10 on seven criteria (phone, hierarchy, spacing, typography, color, identity, finish), and sends back every criterion under {bar}.
 1. Brief. In one line each: the subject, the audience, the page's main job. Use real, specific content in the user's language: no lorem ipsum, no \"Welcome to our website\", no stand-ins such as \"FB\" for a social link.
 2. Design plan, written in your reply before any code, with numbers:
@@ -309,8 +424,8 @@ fn design_method(bar: u8) -> String {
 - Space: one spacing scale on multiples of 8px (for example 8, 16, 24, 40, 64, 96) and nothing else; the same vertical padding for sections of the same rank; no empty band taller than half a screen.
 - Layout: an ASCII wireframe of the first screen and the order of the sections. Text left-aligned (center only one-line titles and short captions). Vary the composition from one section to the next (split, full width, grid, list, offset), never the same centered title over a grid each time.
 - One memorable element (a hero treatment, an illustration, a typographic idea, an interaction), with everything around it quiet and disciplined.
-Forbidden unless the brief asks for it, because they mark a generated page: a plain colored band with centered \"Welcome\" text as the hero; rows of identical cards with the same soft shadow; a short line under every heading; ALL-CAPS badges or small labels above headings; one repeated icon standing in for pictures; cream with terracotta, or near-black with one acid accent; 01/02/03 markers on things that are not steps; a fade-in on every section; decorative gradients everywhere. Check your plan against this list and say in one line that it uses none of them. Emoji are forbidden everywhere, with no exception, even if the brief sounds playful: emoji are drawn by the device's own font and look different on every phone and computer. Every icon and pictogram comes from the Icon tool (polished Lucide line icons, ready-to-paste inline SVG: ask for several names in one call), and every illustration is an inline SVG you draw for the subject (with width, height and aria-hidden=\"true\", or role=\"img\" and an aria-label when it carries meaning); no emoji appears in any heading, button, label or paragraph.
-3. Build. CSS custom properties for every color, size and space of the plan, and no raw values outside them (except 0 and 1px borders). Semantic HTML (header, nav, main, section, footer) with exactly one h1 and no skipped heading levels; mobile first. On phones the navigation folds into a menu button that opens and closes it (aria-expanded), and a fixed header never covers content (offset the page by its height). Every link, button and field has hover, :focus-visible and active states, with transitions of 150 to 250ms, and @media (prefers-reduced-motion: reduce) stops the motion. Tap targets of at least 44x44px on phones. Pictures: the user's images, or illustrations drawn for the subject with inline SVG (each with an explicit width and height) or CSS, never broken or placeholder images. Forms: styled like the rest of the page (font: inherit), a visible label on every field, errors shown only after the user acts (:user-invalid, or on submit), a clear confirmation in the page. Watch CSS specificity: a .section rule and a .cta rule can cancel each other's spacing.
+Forbidden unless the brief asks for it, because they mark a generated page: a plain colored band with centered \"Welcome\" text as the hero; rows of identical cards with the same soft shadow; a short line under every heading; ALL-CAPS badges or small labels above headings; one repeated icon standing in for pictures; cream with terracotta, or near-black with one acid accent; 01/02/03 markers on things that are not steps; a fade-in on every section; decorative gradients everywhere. Check your plan against this list and say in one line that it uses none of them. Emoji are forbidden everywhere, with no exception, even if the brief sounds playful: emoji are drawn by the device's own font and look different on every phone and computer. Every icon and pictogram comes from the Icon tool (polished Lucide line icons, ready-to-paste inline SVG: ask for several names in one call); every decorative shape (an organic blob behind a title, layered waves at the edge of a hero, an arch framing a picture, a medallion around an initial, a branch, a sun, a dot, line, contour or grain texture) comes from the Ornament tool in the plan's colors: shapes drawn by hand look crude, and these are drawn from formulas.{photos} An illustration you still draw yourself stays simple and geometric (with width, height and aria-hidden=\"true\", or role=\"img\" and an aria-label when it carries meaning); no emoji appears in any heading, button, label or paragraph.
+3. Build. CSS custom properties for every color, size and space of the plan, and no raw values outside them (except 0 and 1px borders). Semantic HTML (header, nav, main, section, footer) with exactly one h1 and no skipped heading levels; mobile first. On phones the navigation folds into a menu button that opens and closes it (aria-expanded), and a fixed header never covers content (offset the page by its height). Every link, button and field has hover, :focus-visible and active states, with transitions of 150 to 250ms, and @media (prefers-reduced-motion: reduce) stops the motion. Tap targets of at least 44x44px on phones. Pictures: the user's images{photo_pictures}, Ornament shapes, or simple illustrations in inline SVG (each with an explicit width and height) or CSS, never broken or placeholder images. Forms: styled like the rest of the page (font: inherit), a visible label on every field, errors shown only after the user acts (:user-invalid, or on submit), a clear confirmation in the page. Watch CSS specificity: a .section rule and a .cta rule can cancel each other's spacing.
 {FOUNDATION}
 4. Make everything work: every link leads somewhere real (a section that exists, mailto:, tel:), every button does what its label says, forms validate and confirm, no console errors.
 5. Check and critique before you answer: Screenshot with full_page true at phone and desktop sizes, then again with actions that open the menu and send the form empty and filled; ViewPage for console errors. Fix every measured problem and every design note. Then score the screenshots yourself, 1 to 10 on the seven criteria, as a strict art director would (most generated pages deserve 4 to 6; an 8 must be earned by something you can point to), and improve every criterion under {bar} before you answer. Remove one decoration that does not serve the subject.")
@@ -630,11 +745,23 @@ pub const PLAN_CRITIC_SYSTEM: &str = "You are the art director of a design studi
 /// coûtaient alors une réécriture que le budget du tour ne permettait plus.
 #[must_use]
 pub fn plan_critique_prompt(request: &str, plan: &str, bar: u8) -> String {
+    let pictures = pictures_note();
     let brief: String = request.chars().take(1_500).collect();
     let plan: String = plan.chars().take(5_000).collect();
     format!(
-        "The client's brief:\n\"{brief}\"\n\nThe designer's plan, written before any code:\n{plan}\n\nJudge this direction against what a top studio would ship (the built page will be scored 1 to 10 on phone, hierarchy, spacing, typography, color, identity and finish, and must reach {bar} on each):\n1. identity: one memorable idea specific to this subject, or a template in disguise (a centered hero band, identical cards, the same layout in every section, generic stock imagery)?\n2. hierarchy: one clear focal point on the first screen, and an obvious next step?\n3. typography: typefaces chosen for this subject (not Inter, Roboto, Montserrat, Poppins, Playfair Display and the like), a scale with real contrast between levels?\n4. color: a palette taken from the subject's world, readable contrast, an accent used sparingly?\n5. composition: do the sections vary (split, full width, list, offset), with an even rhythm?\nReply with at most 5 changes to the plan, the most important first, one per line, each as:\nN. [criterion] what is weak in the plan -> the exact change (a typeface name, hex values, a layout, a concrete idea)\nBe specific to this subject; no generic advice. Small UI icons (phone, clock, menu) come from a polished line icon set (Lucide) on purpose: do not ask to redraw them by hand; the page's identity comes from its illustration, typography, color and composition. If the plan would already reach {bar}/10 on every criterion, reply exactly: PLAN OK"
+        "The client's brief:\n\"{brief}\"\n\nThe designer's plan, written before any code:\n{plan}\n\nJudge this direction against what a top studio would ship (the built page will be scored 1 to 10 on phone, hierarchy, spacing, typography, color, identity and finish, and must reach {bar} on each):\n1. identity: one memorable idea specific to this subject, or a template in disguise (a centered hero band, identical cards, the same layout in every section, generic stock imagery)?\n2. hierarchy: one clear focal point on the first screen, and an obvious next step?\n3. typography: typefaces chosen for this subject (not Inter, Roboto, Montserrat, Poppins, Playfair Display and the like), a scale with real contrast between levels?\n4. color: a palette taken from the subject's world, readable contrast, an accent used sparingly?\n5. composition: do the sections vary (split, full width, list, offset), with an even rhythm?\nReply with at most 5 changes to the plan, the most important first, one per line, each as:\nN. [criterion] what is weak in the plan -> the exact change (a typeface name, hex values, a layout, a concrete idea)\nBe specific to this subject; no generic advice. Small UI icons (phone, clock, menu) come from a polished line icon set (Lucide) on purpose: do not ask to redraw them by hand; the page's identity comes from its illustration, typography, color and composition. {pictures} If the plan would already reach {bar}/10 on every criterion, reply exactly: PLAN OK"
     )
+}
+
+/// Ce que le développeur peut obtenir en images, pour que les juges
+/// proposent ce qui se fait : des ornements tracés par formules, et des
+/// photos libres quand l'outil `Photo` est actif.
+fn pictures_note() -> &'static str {
+    if crate::harness::enabled(crate::harness::Aid::Photos) {
+        "The developer can fetch free-licence photos by keywords and generate clean SVG ornaments (organic blobs, layered waves, arches, medallions, branches, suns, dot, line, contour or grain textures): suggest a photo by what it should show, or an ornament by kind and place, rather than a scene drawn by hand."
+    } else {
+        "The developer cannot get new photos but can generate clean SVG ornaments (organic blobs, layered waves, arches, medallions, branches, suns, dot, line, contour or grain textures): suggest an ornament by kind and place, or CSS shapes, rather than a scene drawn by hand."
+    }
 }
 
 /// Changements demandés au plan ; `None` quand le juge l'approuve.
@@ -744,8 +871,9 @@ pub fn critique_prompt(request: &str, images: usize, audit: &Audit, bar: u8) -> 
             .join("\n")
     };
     let brief: String = request.chars().take(1_500).collect();
+    let pictures = pictures_note();
     format!(
-        "The client's brief:\n\"{brief}\"\n\n{images} screenshots follow, full page: the phone view first, then the desktop view.\n\nAlready measured in the page and sent to the developer (do not repeat these):\n{measured}\n\nScore the page from 1 to 10 on each criterion, against what a top studio would ship: 5 is a competent template, 8 is what a strong studio would sign, 10 is award-level. Be strict: most generated pages deserve 4 to 6, and an 8 must be earned by something specific you can point to.\n1. phone: nothing cut, covered or cramped; a menu that fits; comfortable tap targets; text sized for a phone.\n2. hierarchy: a clear first screen with one strong focal point; the eye knows where to go next; headings, text and actions clearly ranked.\n3. spacing: one consistent vertical rhythm, aligned edges, generous but even breathing room, no crowded areas and no empty bands.\n4. typography: typefaces chosen for this subject, a clear scale with real contrast between levels, comfortable line length and leading, nothing default-looking.\n5. color: a harmonious palette tied to the subject, readable contrast, the accent used sparingly and on purpose.\n6. identity: does it look made for this subject, with a memorable idea, or like a template (a plain colored hero band, identical cards, icon placeholders for photos, lines under every heading, ALL-CAPS badges, the same layout in every section)?\n7. finish: craft in the details (alignment, consistent radii and shadows, polished icons and illustrations, states of buttons and fields); anything unstyled, broken, empty or unfinished. Any emoji anywhere in the page caps finish at 4: icons and pictures must be inline SVG.\n\nThe first line of your reply is exactly in this form:\nSCORES: phone=N hierarchy=N spacing=N typography=N color=N identity=N finish=N\nThen, for every criterion under {bar}, the changes that would raise it, the most important first, at most 8 in all, one per line, each as:\nN. [criterion] what is wrong, as seen in the screenshots -> the exact change to make (CSS properties and values, HTML structure, copy)\nBe specific to this page; no generic advice. The developer cannot get new photos: suggest inline SVG, CSS shapes or gradients instead. Small UI icons come from a polished line icon set (Lucide) on purpose: judge how they are sized, colored and placed, do not ask to redraw them by hand. If every score is {bar} or more, write NO CHANGES NEEDED after the scores line."
+        "The client's brief:\n\"{brief}\"\n\n{images} screenshots follow, full page: the phone view first, then the desktop view.\n\nAlready measured in the page and sent to the developer (do not repeat these):\n{measured}\n\nScore the page from 1 to 10 on each criterion, against what a top studio would ship: 5 is a competent template, 8 is what a strong studio would sign, 10 is award-level. Be strict: most generated pages deserve 4 to 6, and an 8 must be earned by something specific you can point to.\n1. phone: nothing cut, covered or cramped; a menu that fits; comfortable tap targets; text sized for a phone.\n2. hierarchy: a clear first screen with one strong focal point; the eye knows where to go next; headings, text and actions clearly ranked.\n3. spacing: one consistent vertical rhythm, aligned edges, generous but even breathing room, no crowded areas and no empty bands.\n4. typography: typefaces chosen for this subject, a clear scale with real contrast between levels, comfortable line length and leading, nothing default-looking.\n5. color: a harmonious palette tied to the subject, readable contrast, the accent used sparingly and on purpose.\n6. identity: does it look made for this subject, with a memorable idea, or like a template (a plain colored hero band, identical cards, icon placeholders for photos, lines under every heading, ALL-CAPS badges, the same layout in every section)?\n7. finish: craft in the details (alignment, consistent radii and shadows, polished icons and illustrations, states of buttons and fields); anything unstyled, broken, empty or unfinished. Any emoji anywhere in the page caps finish at 4: icons must be inline SVG.\n\nThe first line of your reply is exactly in this form:\nSCORES: phone=N hierarchy=N spacing=N typography=N color=N identity=N finish=N\nThen, for every criterion under {bar}, the changes that would raise it, the most important first, at most 8 in all, one per line, each as:\nN. [criterion] what is wrong, as seen in the screenshots -> the exact change to make (CSS properties and values, HTML structure, copy)\nBe specific to this page; no generic advice. {pictures} Small UI icons come from a polished line icon set (Lucide) on purpose: judge how they are sized, colored and placed, do not ask to redraw them by hand. If every score is {bar} or more, write NO CHANGES NEEDED after the scores line."
     )
 }
 
@@ -999,6 +1127,57 @@ mod tests {
             review_feedback("path:index.html", &Audit::default(), None, 1, 2, 8),
             None
         );
+    }
+
+    #[test]
+    fn a_design_turn_goes_on_while_its_score_rises_under_the_bar() {
+        use super::{continuation, score_trail, stop_reason, Continuation, Graded};
+        let graded = |mean: f32, under: &[&str]| Graded {
+            mean,
+            under: under.iter().map(ToString::to_string).collect(),
+        };
+        // Aucune revue notée : pas de poursuite.
+        assert_eq!(continuation(&[], 0, 0, 2, None), Continuation::Unscored);
+        // Une revue sous la barre : ses changements méritent un essai.
+        let first = [graded(6.0, &["identity", "finish"])];
+        assert_eq!(
+            continuation(&first, 0, 0, 2, Some(600)),
+            Continuation::Continue
+        );
+        // Plus de revue depuis la dernière poursuite : rien de neuf.
+        assert_eq!(
+            continuation(&first, 1, 1, 2, Some(600)),
+            Continuation::Unscored
+        );
+        // La note monte : on continue ; elle stagne : on s'arrête.
+        let rising = [graded(6.0, &["identity"]), graded(7.3, &["identity"])];
+        assert_eq!(
+            continuation(&rising, 1, 1, 2, Some(600)),
+            Continuation::Continue
+        );
+        let flat = [graded(7.3, &["identity"]), graded(7.4, &["identity"])];
+        assert_eq!(
+            continuation(&flat, 1, 1, 2, Some(600)),
+            Continuation::Stalled
+        );
+        // Barre atteinte, poursuites épuisées, quota du jour trop bas.
+        let done = [graded(6.0, &["finish"]), graded(8.3, &[])];
+        assert_eq!(
+            continuation(&done, 0, 0, 2, Some(600)),
+            Continuation::Reached
+        );
+        assert_eq!(
+            continuation(&rising, 1, 2, 2, Some(600)),
+            Continuation::Exhausted
+        );
+        assert_eq!(
+            continuation(&rising, 1, 1, 2, Some(90)),
+            Continuation::LowQuota
+        );
+        assert_eq!(score_trail(&rising), "6,0 puis 7,3");
+        assert!(stop_reason(Continuation::Stalled).is_some());
+        assert_eq!(stop_reason(Continuation::Reached), None);
+        assert_eq!(super::max_continuations(), 2);
     }
 
     #[test]

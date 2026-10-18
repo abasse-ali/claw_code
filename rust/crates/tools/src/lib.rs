@@ -15,7 +15,9 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 mod icons;
+mod ornaments;
 mod page_view;
+mod photos;
 mod screenshot;
 
 /// Un navigateur est installé : les outils `ViewPage` et `Screenshot` peuvent
@@ -567,6 +569,42 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "Ornament",
+            description: "Decorative SVG ornaments drawn from formulas in the plan's colors, clean at any size: blob (organic shape behind a title or an image), waves (layered waves across the full width, the bottom edge of a hero), dots and lines (quiet background textures), topography (contour lines), grain (film grain over a flat color), arch (a frame for an image or a text), frame (a medallion around an avatar or an initial), sprig (a botanical branch), rays (a sun). Use it instead of drawing illustrations, waves or avatars by hand: hand-drawn shapes look crude. Each ornament comes as a complete <svg> with aria-hidden, and as a data URI for a CSS background.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["blob", "waves", "dots", "lines", "topography", "grain", "arch", "frame", "sprig", "rays"] },
+                    "colors": { "type": "array", "items": { "type": "string" }, "description": "The plan's colors in hexadecimal, main one first: [\"#c46b3a\", \"#e8d5c4\", \"#6b8e7a\"]" },
+                    "width": { "type": "integer", "minimum": 16, "maximum": 2400 },
+                    "height": { "type": "integer", "minimum": 16, "maximum": 2400 },
+                    "seed": { "type": "integer", "minimum": 0, "description": "Another value gives another shape of the same kind" },
+                    "count": { "type": "integer", "minimum": 1, "maximum": 36, "description": "Layers (blob, waves), rings (topography), arches, leaves (sprig), rays, or the pattern gap in pixels (dots, lines)" },
+                    "opacity": { "type": "number", "minimum": 0.05, "maximum": 1 }
+                },
+                "required": ["kind"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "Photo",
+            description: "Real photos under free licences (CC0, public domain, CC BY, CC BY-SA), found by English keywords on Openverse and Wikimedia Commons and saved in the project (images/ by default), with their real width and height and a credit to put in the footer (also written to images/CREDITS.md). Use it when the subject needs pictures (a bakery's bread, a studio's room, a dish, a place) instead of icon placeholders or crude hand-drawn scenes; name what the photo shows (\"sourdough bread\", \"yoga class\"), not a mood. Check each photo with Screenshot: one that does not fit the subject is worse than none.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "search": { "type": "string", "description": "English words naming what the photo shows: \"sourdough bread loaf\", \"yoga class studio\"" },
+                    "count": { "type": "integer", "minimum": 1, "maximum": 4, "description": "Photos to save (default 1)" },
+                    "orientation": { "type": "string", "enum": ["landscape", "portrait", "square", "any"] },
+                    "folder": { "type": "string", "description": "Folder inside the project (default images)" },
+                    "name": { "type": "string", "description": "Base file name (default: from the search words)" }
+                },
+                "required": ["search"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
             name: "LookAtImage",
             description:
                 "Look again at an image of this conversation that you received as a description (you cannot see images: a model that can see them looks for you and answers). Ask one precise question per call: the exact text at a place, a color, the state of a control, the position, size or alignment of elements, a detail the description does not give or that you doubt. Use it before relying on a detail that matters for your work.",
@@ -1086,6 +1124,12 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         }
         "Icon" => from_value::<icons::IconInput>(input)
             .and_then(|input| icons::icon(&input))
+            .and_then(to_pretty_json),
+        "Ornament" => from_value::<ornaments::OrnamentInput>(input)
+            .and_then(|input| ornaments::ornament(&input))
+            .and_then(to_pretty_json),
+        "Photo" => from_value::<photos::PhotoInput>(input)
+            .and_then(|input| photos::photo(&input))
             .and_then(to_pretty_json),
         "Screenshot" => from_value::<screenshot::ScreenshotInput>(input)
             .and_then(|input| screenshot::take(&input))
@@ -3482,6 +3526,7 @@ pub const PARALLEL_SAFE_TOOLS: &[&str] = &[
     "WebFetch",
     "ViewPage",
     "Icon",
+    "Ornament",
     "WebSearch",
     "BashOutput",
 ];
@@ -3768,6 +3813,7 @@ const READ_ONLY_ROLE_TOOLS: &[&str] = &[
     "ViewPage",
     "Screenshot",
     "Icon",
+    "Ornament",
     "WebSearch",
     "ToolSearch",
     "Skill",
@@ -5690,7 +5736,7 @@ mod tests {
     };
     use serde_json::json;
 
-    fn env_lock() -> &'static Mutex<()> {
+    pub(crate) fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }

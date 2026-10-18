@@ -50,6 +50,9 @@ pub struct BenchOptions {
     pub unassisted: bool,
     /// `--max` a été donné (les tâches difficiles mesurent un modèle par défaut).
     pub max_explicit: bool,
+    /// Banc du design : chaque modèle construit la même page, notée par le
+    /// juge qui voit (`--design`).
+    pub design: bool,
 }
 
 impl Default for BenchOptions {
@@ -63,12 +66,13 @@ impl Default for BenchOptions {
             hard: false,
             unassisted: false,
             max_explicit: false,
+            design: false,
         }
     }
 }
 
 pub const USAGE: &str =
-    "Usage : /models bench [--rapide] [--local] [--max N] [--appliquer] [--difficile [--sans-aide]] [filtre]";
+    "Usage : /models bench [--rapide] [--local] [--max N] [--appliquer] [--difficile [--sans-aide] | --design] [filtre]";
 
 /// Options de `bench …` (le premier mot `bench` est facultatif).
 pub fn parse_options(args: &str) -> Result<BenchOptions, String> {
@@ -83,6 +87,7 @@ pub fn parse_options(args: &str) -> Result<BenchOptions, String> {
             "--local" | "--locaux" => options.include_local = true,
             "--appliquer" | "--apply" => options.apply = true,
             "--difficile" | "--raisonnement" | "--hard" => options.hard = true,
+            "--design" | "--beau" => options.design = true,
             "--sans-aide" | "--baseline" => {
                 options.hard = true;
                 options.unassisted = true;
@@ -133,6 +138,9 @@ pub struct BenchResult {
     /// Les mêmes tâches sans les aides (`--sans-aide`).
     #[serde(default)]
     pub hard_unassisted: Option<HardScore>,
+    /// Design : la page construite, notée par le juge (`--design`).
+    #[serde(default)]
+    pub design: Option<crate::bench_design::DesignScore>,
 }
 
 /// Score aux tâches de raisonnement (`/models bench --difficile`).
@@ -166,6 +174,7 @@ impl BenchResult {
             skipped: 0,
             hard: None,
             hard_unassisted: None,
+            design: None,
         }
     }
 
@@ -211,6 +220,10 @@ impl BenchResult {
         };
         let measured = match &self.hard {
             Some(hard) => format!("{measured} · raisonnement {}/{}", hard.passed, hard.total),
+            None => measured,
+        };
+        let measured = match self.design.as_ref().filter(|design| design.mean > 0.0) {
+            Some(design) => format!("{measured} · design {:.1}/10", design.mean),
             None => measured,
         };
         if self.skipped > 0 {
@@ -760,6 +773,9 @@ pub fn run(args: &str, progress: &mut dyn FnMut(&str)) -> Result<String, String>
     if options.hard {
         return crate::bench_hard::run(&options, progress);
     }
+    if options.design {
+        return crate::bench_design::run(&options, progress);
+    }
     let models = candidates(&options)?;
     let python = find_python();
     let run_tasks = !options.quick && python.is_some();
@@ -829,6 +845,7 @@ pub fn run(args: &str, progress: &mut dyn FnMut(&str)) -> Result<String, String>
             skipped: 0,
             hard: None,
             hard_unassisted: None,
+            design: None,
         });
     }
 
@@ -1019,6 +1036,7 @@ mod tests {
             skipped: 0,
             hard: None,
             hard_unassisted: None,
+            design: None,
         }
     }
 

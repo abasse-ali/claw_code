@@ -85,6 +85,13 @@ pub trait ApiClient {
     /// Fin du tour : le modèle habituel reprend après une escalade.
     fn restore_model(&mut self) {}
 
+    /// Tour de design : le confie au modèle réglé pour le design
+    /// (`designModel`) jusqu'à la fin du tour ; renvoie son nom, ou `None`
+    /// s'il n'y en a pas ou que c'est déjà lui.
+    fn design_model(&mut self) -> Option<String> {
+        None
+    }
+
     /// Le modèle vient de répondre sans appeler d'outil : c'est sa réponse
     /// finale, sauf si un contrôle de Claw le renvoie au travail.
     fn answer_drafted(&mut self) {}
@@ -376,6 +383,16 @@ struct TurnAids {
     assets_reminded: bool,
     /// Le modèle a été prévenu que ses styles n'ont pas le socle de la méthode.
     foundation_noted: bool,
+    /// Notes des revues visuelles du tour, dans l'ordre.
+    graded: Vec<crate::web_design::Graded>,
+    /// Poursuites accordées au tour de design resté sous la barre.
+    continuations: usize,
+    /// Revues notées au moment de la dernière poursuite.
+    graded_at_continuation: usize,
+    /// Revues visuelles ajoutées au tour par les poursuites.
+    extra_rounds: usize,
+    /// L'arrêt sous la barre a été expliqué à l'utilisateur.
+    continuation_explained: bool,
     /// Commandes réussies lancées par le modèle depuis sa dernière modification.
     verified_commands: Vec<String>,
     /// Commandes parties en arrière-plan depuis la dernière modification, par
@@ -1464,6 +1481,13 @@ where
             if let Some(text) = crate::web_design::design_guide(&request_text, earlier.as_deref()) {
                 user_message.blocks.push(ContentBlock::Text { text });
                 design_guided = true;
+                // Le modèle réglé pour le design (`designModel`) fait le tour ;
+                // le modèle habituel reprend à la fin.
+                if let Some(model) = self.api_client.design_model() {
+                    self.api_client.notify(&format!(
+                        "Tour de design confié à {model} (designModel, mesuré par /models bench --design)"
+                    ));
+                }
             }
         }
         // Petit projet : tous ses fichiers en vues, au premier tour de la session.
@@ -1512,7 +1536,7 @@ where
         };
         // Tour de design : plan, code, captures et revues dépassent le budget
         // ordinaire ; il grandit, sauf si l'utilisateur l'a réglé lui-même.
-        let turn_limit = crate::web_design::turn_request_budget(
+        let mut turn_limit = crate::web_design::turn_request_budget(
             design_guided,
             self.turn_request_limit,
             harness::TURN_REQUEST_LIMIT,
@@ -1541,6 +1565,16 @@ where
 
             if interrupt_requested() {
                 return Err(RuntimeError::new(INTERRUPTED_MESSAGE));
+            }
+            // Tour de design resté sous la barre, dont la note monte : la
+            // limite recule, au lieu d'attendre un « continue ».
+            if !wrapping_up
+                && turn_limit > 0
+                && iterations > turn_limit
+                && aids.design_guided
+                && self.continue_design(&mut aids, "limite du tour")
+            {
+                turn_limit += crate::web_design::CONTINUATION_REQUESTS;
             }
             // Budget de requêtes du tour atteint : le modèle conclut et rend
             // la main, au lieu de dépenser le quota du jour en un seul tour.
@@ -2889,9 +2923,14 @@ where
         }
         aids.interface_dirty = false;
         aids.interface_commands.extend(by_commands);
-        let rounds = crate::web_design::max_review_rounds();
+        let mut rounds = crate::web_design::max_review_rounds() + aids.extra_rounds;
         if aids.interface_rounds >= rounds {
-            return None;
+            // Revues du tour épuisées : une de plus si la note monte encore.
+            if rounds == 0 || !self.continue_design(aids, "revues du tour") {
+                return None;
+            }
+            aids.extra_rounds += 1;
+            rounds += 1;
         }
         if self
             .api_client
@@ -2988,6 +3027,10 @@ where
                 .filter(|(_, score)| *score < bar)
                 .map(|(criterion, _)| criterion.as_str())
                 .collect();
+            aids.graded.push(crate::web_design::Graded {
+                mean,
+                under: under.iter().map(ToString::to_string).collect(),
+            });
             if under.is_empty() {
                 format!(", note {mean:.1}/10 (barre {bar})")
             } else {
@@ -3032,6 +3075,50 @@ where
             ));
         }
         feedback
+    }
+
+    /// Le tour de design touche une limite (`at` : ses requêtes, ou ses
+    /// revues) sous la barre : il continue si la note monte, dans la limite
+    /// des poursuites (`CLAW_DESIGN_CONTINUE`) et du quota du jour. Sinon,
+    /// l'utilisateur lit pourquoi il s'arrête, une fois.
+    fn continue_design(&mut self, aids: &mut TurnAids, at: &str) -> bool {
+        if self.subagent || interrupt_requested() || !harness::enabled(Aid::DesignReview) {
+            return false;
+        }
+        let max = crate::web_design::max_continuations();
+        let free_left = self.api_client.free_requests_left();
+        let decision = crate::web_design::continuation(
+            &aids.graded,
+            aids.graded_at_continuation,
+            aids.continuations,
+            max,
+            free_left,
+        );
+        let bar = crate::web_design::design_bar();
+        let trail = crate::web_design::score_trail(&aids.graded);
+        if decision == crate::web_design::Continuation::Continue {
+            aids.continuations += 1;
+            aids.graded_at_continuation = aids.graded.len();
+            let under = aids
+                .graded
+                .last()
+                .map(|graded| graded.under.join(", "))
+                .unwrap_or_default();
+            self.api_client.notify(&format!(
+                "Poursuite du design ({}/{max}, {at}) : note {trail}/10, sous la barre {bar} ({under}) ; le tour continue",
+                aids.continuations
+            ));
+            return true;
+        }
+        if let Some(reason) = crate::web_design::stop_reason(decision) {
+            if !aids.continuation_explained {
+                aids.continuation_explained = true;
+                self.api_client.notify(&format!(
+                    "Design arrêté sous la barre {bar} (note {trail}/10) : {reason}. Écrivez « continue » pour reprendre"
+                ));
+            }
+        }
+        false
     }
 
     /// Des fichiers de code ont changé par une commande (`sed -i`, `cat > f
@@ -6409,6 +6496,40 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn a_design_turn_under_the_bar_continues_while_its_score_rises() {
+        let _serial = crate::test_serial();
+        let (mut runtime, observed, _) = aided_runtime(Vec::new(), Vec::new());
+        let graded = |mean: f32| crate::web_design::Graded {
+            mean,
+            under: vec!["identity".to_string()],
+        };
+        let mut aids = super::TurnAids {
+            design_guided: true,
+            ..super::TurnAids::default()
+        };
+        // Pas encore de note : la limite reste la limite.
+        assert!(!runtime.continue_design(&mut aids, "limite du tour"));
+        aids.graded.push(graded(6.0));
+        assert!(runtime.continue_design(&mut aids, "limite du tour"));
+        // Aucune revue depuis : pas de deuxième poursuite sur la même note.
+        assert!(!runtime.continue_design(&mut aids, "limite du tour"));
+        aids.graded.push(graded(6.1));
+        assert!(!runtime.continue_design(&mut aids, "revues du tour"));
+        assert!(!runtime.continue_design(&mut aids, "revues du tour"));
+        let observed = observed.borrow();
+        assert!(observed.notices.iter().any(|notice| notice
+            == "Poursuite du design (1/2, limite du tour) : note 6,0/10, sous la barre 8 (identity) ; le tour continue"));
+        let stops: Vec<&String> = observed
+            .notices
+            .iter()
+            .filter(|notice| notice.starts_with("Design arrêté sous la barre"))
+            .collect();
+        assert_eq!(stops.len(), 1, "l'arrêt est expliqué une fois : {stops:?}");
+        assert!(stops[0].contains("6,0 puis 6,1") && stops[0].contains("pas fait monter"));
+        assert_eq!(aids.continuations, 1);
     }
 
     #[test]

@@ -198,6 +198,8 @@ pub fn tool_label(name: &str) -> &str {
         "ViewPage" => "Page vue dans le navigateur",
         "Screenshot" => "Captures de la page",
         "Icon" => "Icônes",
+        "Ornament" => "Ornement",
+        "Photo" => "Photos libres",
         "LookAtImage" => "Image regardée",
         "WebSearch" => "Recherche web",
         "TodoWrite" => "Tâches",
@@ -257,6 +259,8 @@ fn tool_argument(name: &str, input: &Value) -> Option<String> {
             })
             .filter(|names| !names.is_empty())
             .or_else(|| str_field(input, &["search", "name"]).map(ToOwned::to_owned)),
+        "Ornament" => str_field(input, &["kind"]).map(ToOwned::to_owned),
+        "Photo" => str_field(input, &["search"]).map(ToOwned::to_owned),
         "WebSearch" => str_field(input, &["query"]).map(ToOwned::to_owned),
         "Agent" => str_field(input, &["description", "subagent_type"]).map(ToOwned::to_owned),
         "Skill" => str_field(input, &["skill", "name"]).map(ToOwned::to_owned),
@@ -311,6 +315,8 @@ pub fn running_label(name: &str) -> String {
         "ViewPage" => "Ouverture de la page dans le navigateur…".to_string(),
         "Screenshot" => "Captures de la page dans le navigateur…".to_string(),
         "Icon" => "Choix des icônes…".to_string(),
+        "Ornament" => "Tracé de l'ornement…".to_string(),
+        "Photo" => "Recherche de photos libres…".to_string(),
         "LookAtImage" => "Regard sur l'image…".to_string(),
         "Consult" => "Second avis demandé à d'autres modèles…".to_string(),
         "Agent" => "Sous-agent au travail…".to_string(),

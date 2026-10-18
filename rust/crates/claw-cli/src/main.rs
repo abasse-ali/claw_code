@@ -3,6 +3,7 @@ mod agent_view;
 mod approval;
 mod auto_mode;
 mod bench;
+mod bench_design;
 mod bench_hard;
 mod channel_server;
 mod clipboard;
@@ -2625,6 +2626,9 @@ fn filter_tool_specs(
     // Les questions à choix ne se posent que si quelqu'un peut y répondre.
     let questions = tools::question_asker_available();
     definitions.retain(|definition| definition.name != "AskUserQuestion" || questions);
+    // Photos libres : coupées par `CLAW_PHOTOS=0`.
+    let photos = runtime::harness::enabled(runtime::harness::Aid::Photos);
+    definitions.retain(|definition| definition.name != "Photo" || photos);
     if allowed_tools.is_some() || !runtime::harness::enabled(runtime::harness::Aid::ToolDiet) {
         return definitions;
     }
@@ -9312,6 +9316,9 @@ struct DefaultRuntimeClient {
     escalation: models::Escalation,
     /// Chaîne habituelle, mise de côté pendant une escalade.
     saved_chain: Option<api::ModelChain>,
+    /// Chaîne de la session, mise de côté pendant un tour de design confié
+    /// à `designModel` ; elle revient à la fin du tour.
+    design_base: Option<api::ModelChain>,
     /// Présent : Claw ne change jamais de modèle sans le demander.
     model_prompter: Option<model_switch::SharedModelPrompter>,
     /// Modèles de secours configurés, proposés quand la question se pose.
@@ -9378,6 +9385,7 @@ impl DefaultRuntimeClient {
             start_notice: None,
             escalation: models::Escalation::configured(),
             saved_chain: None,
+            design_base: None,
             model_prompter: None,
             candidates: Vec::new(),
             team_step: None,
@@ -9814,12 +9822,38 @@ impl ApiClient for DefaultRuntimeClient {
         Some(model)
     }
 
+    fn design_model(&mut self) -> Option<String> {
+        if self.saved_chain.is_some() || self.design_base.is_some() {
+            return None;
+        }
+        let model = models::design_model_setting()?;
+        if model == self.chain.primary() || !api::model_available(&model) {
+            return None;
+        }
+        // Le modèle du design d'abord ; s'il tombe, la chaîne habituelle.
+        let mut models = vec![model.clone()];
+        models.extend(
+            self.chain
+                .models()
+                .iter()
+                .filter(|known| **known != model)
+                .cloned(),
+        );
+        let design = api::ModelChain::new(models, cli_client_factory());
+        self.design_base = Some(std::mem::replace(&mut self.chain, design));
+        Some(model)
+    }
+
     fn restore_model(&mut self) {
         if let Some(chain) = self.saved_chain.take() {
             self.chain = chain;
         }
         // Mode équipe : le modèle de la session reprend à la fin du tour.
         if let Some(chain) = self.team_base.take() {
+            self.chain = chain;
+        }
+        // Tour de design : de même.
+        if let Some(chain) = self.design_base.take() {
             self.chain = chain;
         }
         self.team_step = None;

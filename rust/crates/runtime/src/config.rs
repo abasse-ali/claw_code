@@ -148,6 +148,8 @@ pub struct RuntimeFeatureConfig {
     /// Modèle plus fort qui reprend un tour où l'agent n'avance plus :
     /// `escalationModel`.
     escalation_model: Option<String>,
+    /// Modèle des tours de design (interfaces web) : `designModel`.
+    design_model: Option<String>,
     /// Modèle qui décrit les images à un modèle qui n'en lit pas :
     /// `imageReader` (`"off"` pour ne rien décrire).
     image_reader: Option<String>,
@@ -472,6 +474,7 @@ impl ConfigLoader {
             advisor_models: parse_string_list(&merged_value, "advisorModels"),
             planner_model: parse_optional_string(&merged_value, "plannerModel"),
             escalation_model: parse_optional_string(&merged_value, "escalationModel"),
+            design_model: parse_optional_string(&merged_value, "designModel"),
             image_reader: parse_optional_string(&merged_value, "imageReader"),
             ultracode: merged_value
                 .as_object()
@@ -660,6 +663,12 @@ impl RuntimeConfig {
         self.feature_config.escalation_model.as_deref()
     }
 
+    /// Modèle des tours de design, s'il est réglé (`designModel`).
+    #[must_use]
+    pub fn design_model(&self) -> Option<&str> {
+        self.feature_config.design_model.as_deref()
+    }
+
     /// Modèle qui décrit les images à un modèle qui n'en lit pas (`imageReader`).
     #[must_use]
     pub fn image_reader(&self) -> Option<&str> {
@@ -779,6 +788,12 @@ impl RuntimeFeatureConfig {
     #[must_use]
     pub fn escalation_model(&self) -> Option<&str> {
         self.escalation_model.as_deref()
+    }
+
+    /// Modèle des tours de design, s'il est réglé.
+    #[must_use]
+    pub fn design_model(&self) -> Option<&str> {
+        self.design_model.as_deref()
     }
 }
 

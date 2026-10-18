@@ -104,6 +104,9 @@ pub enum Aid {
     /// Interface modifiée : Claw regarde la page (captures téléphone et
     /// ordinateur, défauts mesurés) et la fait juger par un modèle qui voit.
     DesignReview,
+    /// Outil `Photo` : photos sous licence libre (Openverse, Wikimedia
+    /// Commons) enregistrées dans le projet avec leur crédit.
+    Photos,
 }
 
 impl Aid {
@@ -147,6 +150,7 @@ impl Aid {
             Self::ProjectMode => "CLAW_PROJECT_MODE",
             Self::DesignGuide => "CLAW_DESIGN_GUIDE",
             Self::DesignReview => "CLAW_DESIGN_REVIEW",
+            Self::Photos => "CLAW_PHOTOS",
         }
     }
 }
