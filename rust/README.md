@@ -1798,7 +1798,10 @@ curseur, à relire avant l'envoi.
   modèle a cherché six fois sans trouver, alors qu'une ligne `min-width: 0` suffisait), textes ou boutons coupés et superposés, images cassées, texte
   trop petit ou trop pâle, en-tête fixe qui couvre le titre ou une navigation qui prend plus du
   quart de l'écran d'un téléphone, liens morts (`href="#"`, ancre vers une section absente),
-  champ sans étiquette, champ rouge avant toute saisie, bouton à la police du navigateur, image
+  champ sans étiquette (ou dont le `label for=` vise un autre élément de même id), id employé
+  plusieurs fois (un lien `#id`, un `label for=` et un script n'atteignent que le premier : vu
+  dans un essai réel, `section#cours` et `select#cours`), champ rouge avant toute saisie,
+  bouton à la police du navigateur, image
   sans `alt`, bouton sans nom, texte de remplissage (lorem ipsum, « votre texte ici »), police
   Times par défaut, focus invisible au clavier (mesuré page focalisée et transitions coupées :
   sans cela, un focus bien stylé passait pour invisible), texte collé au bord de l'écran d'un
@@ -1824,8 +1827,11 @@ curseur, à relire avant l'envoi.
   texte, longs paragraphes centrés, deux étiquettes en capitales ou plus, trait décoratif sous
   les titres, cartes identiques sans image, sections aux marges
   verticales toutes différentes, couleur saturée sur plus de 15 % de la page, liens et boutons
-  sans état `:hover`, cibles tactiles sous 44px au téléphone, bandes vides de plus d'un
-  demi-écran sans rien à lire ni à voir, animations sans
+  qui ne changent pas au survol (`:hover` forcé sur chacun par le protocole du navigateur, et
+  son apparence comparée : le script d'une page ouverte en `file://` ne peut pas lire les
+  règles de ses feuilles, et l'ancienne mesure y voyait à tort un site sans survol, ce qui a
+  fait ignorer au modèle les vrais défauts), cibles tactiles sous 44px au téléphone, bandes
+  vides de plus d'un demi-écran sans rien à lire ni à voir, animations sans
   `prefers-reduced-motion`. En revue visuelle, le modèle les corrige, et n'en garde une que si
   la demande l'exige.
 

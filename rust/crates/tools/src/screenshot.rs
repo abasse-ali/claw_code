@@ -1077,21 +1077,137 @@ fn blamed_rules(devtools: &mut DevTools, culprits: &[Value]) -> Vec<(bool, usize
     found
 }
 
-/// Où corriger : ajoute à chaque défaut et à chaque remarque les règles CSS
-/// des éléments en cause, avec fichier et ligne.
-fn add_css_rules(
+/// Apparence d'un élément marqué `data-claw-hover`, pour comparer avant et
+/// après le survol forcé.
+fn hover_look(devtools: &mut DevTools, index: usize) -> Option<String> {
+    devtools
+        .evaluate(&format!(
+            "(() => {{ const el = document.querySelector('[data-claw-hover=\"{index}\"]'); if (!el) return null; const s = getComputedStyle(el); return [s.color, s.backgroundColor, s.borderTopColor, s.boxShadow, s.textDecorationLine, s.transform, s.opacity, s.outlineStyle, s.filter].join('|'); }})()"
+        ))
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+}
+
+/// Survol et mouvement, mesurés par le protocole du navigateur : le script de
+/// la page ne peut pas lire les règles d'une feuille ouverte en `file://`, et
+/// concluait à tort qu'il n'y avait ni `:hover` ni `prefers-reduced-motion`.
+/// Vu dans un essai réel : un modèle a pris ces faux défauts pour des erreurs
+/// de la mesure, et ignoré du même coup les vrais. Ici, `:hover` est forcé sur
+/// chaque lien et bouton (transitions coupées) et son apparence comparée ; le
+/// texte des feuilles est lu tel quel.
+fn pointer_and_motion_notes(devtools: &mut DevTools, audit: &Value, notes: &mut Vec<String>) {
+    let labels = strings(&audit["hoverLabels"]);
+    let animated = audit["motion"].as_bool() == Some(true);
+    if (labels.len() < 4 && !animated)
+        || devtools.call("DOM.enable", json!({})).is_err()
+        || devtools.call("CSS.enable", json!({})).is_err()
+    {
+        return;
+    }
+    let _ = devtools.pump(Duration::from_millis(300));
+    let sheets: Vec<String> = devtools
+        .events
+        .iter()
+        .filter(|event| event["method"] == "CSS.styleSheetAdded")
+        .filter_map(|event| {
+            event["params"]["header"]["styleSheetId"]
+                .as_str()
+                .map(ToOwned::to_owned)
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if animated {
+        let reduced = sheets.iter().any(|id| {
+            devtools
+                .call("CSS.getStyleSheetText", json!({ "styleSheetId": id }))
+                .ok()
+                .and_then(|text| {
+                    text["text"]
+                        .as_str()
+                        .map(|text| text.contains("prefers-reduced-motion"))
+                })
+                .unwrap_or(false)
+        });
+        if !reduced {
+            notes.push("The page animates but ignores prefers-reduced-motion: add a @media (prefers-reduced-motion: reduce) rule that stops the motion".to_string());
+        }
+    }
+    if labels.len() >= 4 {
+        let root = devtools
+            .call("DOM.getDocument", json!({ "depth": 0 }))
+            .ok()
+            .and_then(|document| document["root"]["nodeId"].as_u64());
+        let _ = devtools.evaluate("(() => { const still = document.createElement('style'); still.id = 'claw-still'; still.textContent = '*, *::before, *::after { transition: none !important; animation: none !important; }'; document.head.appendChild(still); return true; })()");
+        let mut silent = Vec::new();
+        let mut tried = 0;
+        for (index, label) in labels.iter().enumerate() {
+            let node = root.and_then(|root| {
+                devtools
+                    .call(
+                        "DOM.querySelector",
+                        json!({ "nodeId": root, "selector": format!("[data-claw-hover=\"{index}\"]") }),
+                    )
+                    .ok()
+                    .and_then(|found| found["nodeId"].as_u64())
+                    .filter(|id| *id > 0)
+            });
+            let (Some(node), Some(before)) = (node, hover_look(devtools, index)) else {
+                continue;
+            };
+            if devtools
+                .call(
+                    "CSS.forcePseudoState",
+                    json!({ "nodeId": node, "forcedPseudoClasses": ["hover"] }),
+                )
+                .is_err()
+            {
+                continue;
+            }
+            let after = hover_look(devtools, index);
+            let _ = devtools.call(
+                "CSS.forcePseudoState",
+                json!({ "nodeId": node, "forcedPseudoClasses": [] }),
+            );
+            tried += 1;
+            if after.as_deref() == Some(before.as_str()) {
+                silent.push(label.clone());
+            }
+        }
+        let _ = devtools.evaluate("(() => { const still = document.getElementById('claw-still'); if (still) still.remove(); return true; })()");
+        if tried >= 4 && silent.len() * 2 >= tried {
+            let shown: Vec<&str> = silent.iter().take(3).map(String::as_str).collect();
+            notes.push(format!(
+                "{} of {tried} links and buttons do not change at all on hover ({}): nothing answers the pointer, which reads as unfinished; give each interactive element hover, focus-visible and active states (a color, background or underline change, 150 to 250ms)",
+                silent.len(),
+                shown.join("; ")
+            ));
+        }
+    }
+    let _ = devtools.call("CSS.disable", json!({}));
+}
+
+/// Mesures finies par le protocole du navigateur, après la capture : les
+/// règles CSS des éléments en cause (fichier et ligne) pour chaque défaut et
+/// chaque remarque, puis le survol et le mouvement.
+fn browser_measures(
     devtools: &mut DevTools,
     audit: &Value,
     problems: &mut [String],
-    notes: &mut [String],
+    notes: &mut Vec<String>,
 ) {
     let culprits = audit["culprits"].as_array().cloned().unwrap_or_default();
     for (is_note, index, rules) in blamed_rules(devtools, &culprits) {
-        let list = if is_note { &mut *notes } else { &mut *problems };
+        let list = if is_note {
+            &mut notes[..]
+        } else {
+            &mut *problems
+        };
         if let Some(line) = list.get_mut(index) {
             let _ = write!(line, " (CSS rules: {})", rules.join("; "));
         }
     }
+    pointer_and_motion_notes(devtools, audit, notes);
 }
 
 fn strings(value: &Value) -> Vec<String> {
@@ -1331,7 +1447,7 @@ fn capture(
         .filter(|data| !data.is_empty())
         .ok_or("the browser returned no image")?
         .to_string();
-    add_css_rules(devtools, &audit, &mut problems, &mut notes);
+    browser_measures(devtools, &audit, &mut problems, &mut notes);
     // Après la capture (l'essai change la page) : le menu d'un téléphone s'ouvre-t-il ?
     if viewport.mobile {
         if let Ok(probe) = devtools.evaluate(PROBE_SCRIPT) {
@@ -1545,6 +1661,58 @@ mod tests {
             ]
         );
         assert!(author_rules(&json!({}), &sheets).is_empty());
+    }
+
+    /// Essai avec le vrai navigateur, page ouverte en `file://` (là où le
+    /// script de la page ne peut pas lire les règles des feuilles) :
+    /// `cargo test -p tools -- --ignored hover_and_motion`.
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn hover_and_motion_are_measured_in_a_real_browser() {
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-hover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let links = "<nav><a href=\"#a\">Un</a> <a href=\"#a\">Deux</a> <a href=\"#a\">Trois</a> <a href=\"#a\">Quatre</a> <button>Cinq</button></nav>";
+        let page = |css: &str, body: &str| {
+            format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Essai</title><link rel=\"stylesheet\" href=\"{css}\"></head><body><main><section id=\"a\"><h1>Essai</h1>{links}<div class=\"pulse\">Respirer</div>{body}</section></main></body></html>")
+        };
+        let shared_css = "body { font-family: Georgia; padding: 0 24px; }\n.pulse { animation: breathe 4s infinite; }\n@keyframes breathe { from { opacity: 1; } to { opacity: .5; } }\n";
+        std::fs::write(dir.join("soigne.css"), format!("{shared_css}a, button {{ color: #333; transition: color .2s; }}\na:hover, button:hover {{ color: #a33; }}\n@media (prefers-reduced-motion: reduce) {{ .pulse {{ animation: none; }} }}\n")).expect("css");
+        std::fs::write(dir.join("brut.css"), shared_css).expect("css");
+        std::fs::write(dir.join("soigne.html"), page("soigne.css", "")).expect("html");
+        std::fs::write(
+            dir.join("brut.html"),
+            page("brut.css", "<section id=\"cours\"><h2>Cours</h2><p>Quatre cours par semaine.</p></section><form><label for=\"cours\">Cours</label><select id=\"cours\"><option>Hatha</option></select></form>"),
+        )
+        .expect("html");
+        let notes_of = |name: &str| {
+            let mut request = input(
+                None,
+                Some(&format!("claw-hover-{}/{name}", std::process::id())),
+            );
+            request.viewports = Some(json!(["desktop"]));
+            super::take(&request).expect("capture")["captures"][0].clone()
+        };
+        let careful_page = notes_of("soigne.html");
+        let plain_page = notes_of("brut.html");
+        let _ = std::fs::remove_dir_all(&dir);
+        let neat_notes = careful_page["designNotes"].to_string();
+        assert!(
+            !neat_notes.contains("on hover") && !neat_notes.contains("prefers-reduced-motion"),
+            "{neat_notes}"
+        );
+        let bare_notes = plain_page["designNotes"].to_string();
+        assert!(
+            bare_notes.contains("do not change at all on hover")
+                && bare_notes.contains("ignores prefers-reduced-motion"),
+            "{bare_notes}"
+        );
+        let problems = plain_page["problems"].to_string();
+        assert!(
+            problems.contains("label points to another element with the same id")
+                && problems.contains("Ids used more than once"),
+            "{problems}"
+        );
     }
 
     /// Essai avec le vrai navigateur : `cargo test -p tools -- --ignored blamed`.

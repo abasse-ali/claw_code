@@ -25,6 +25,9 @@
   };
   const blame = (els) => mark("problem", problems.length, els);
   const blameNote = (els) => mark("note", notes.length, els);
+  // Mesures que Claw finit par le protocole du navigateur (survol, mouvement).
+  let motion = false;
+  const hoverLabels = [];
   const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "META", "LINK", "BR", "HEAD", "TITLE", "OPTION"]);
   const styles = new Map();
   const css = (el) => {
@@ -349,8 +352,25 @@
     .filter((el) => !["hidden", "submit", "button", "reset", "image"].includes(el.type) && shown(el));
   const labelled = (el) => (el.labels && el.labels.length) || el.getAttribute("aria-label") || el.getAttribute("aria-labelledby") || el.closest("label") || el.getAttribute("title");
   const unlabelled = fields.filter((el) => !labelled(el));
-  if (unlabelled.length) {
-    problems.push(`Form fields without a label (a placeholder is not one, it disappears as soon as the user types): ${list(unlabelled.map(name))}`);
+  // Un label existe mais vise un autre élément de même id : la vraie cause.
+  // Vu dans un essai réel : section#cours et select#cours, et un modèle qui
+  // a pris le défaut pour une erreur de la mesure.
+  const misdirected = unlabelled.filter((el) => el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`));
+  if (misdirected.length) {
+    problems.push(`Form fields whose label points to another element with the same id, so the field has no label (screen readers announce nothing, a click on the label does not reach it): ${list(misdirected.map((el) => `${name(el)}: label for="${el.id}" reaches ${name(document.getElementById(el.id))} first`))}. Ids must be unique: rename one of them and its links`);
+  }
+  const bare = unlabelled.filter((el) => !misdirected.includes(el));
+  if (bare.length) {
+    problems.push(`Form fields without a label (a placeholder is not one, it disappears as soon as the user types): ${list(bare.map(name))}`);
+  }
+  // Ids en double : un lien #id et un label for= n'atteignent que le premier.
+  const seenIds = new Map();
+  for (const el of document.querySelectorAll("[id]")) {
+    if (el.id) seenIds.set(el.id, (seenIds.get(el.id) || []).concat([el]));
+  }
+  const doubled = [...seenIds.entries()].filter(([, els]) => els.length > 1);
+  if (doubled.length) {
+    problems.push(`Ids used more than once (links to #id, label for= and scripts reach only the first): ${list(doubled.map(([id, els]) => `"${id}" on ${els.slice(0, 3).map(name).join(", ")}`))}. Give each element its own id`);
   }
   const reddish = (value) => {
     const color = parse(value);
@@ -625,19 +645,10 @@
     try {
       animated = document.getAnimations().length > 0 || visible.some((el) => css(el).animationName && css(el).animationName !== "none");
     } catch (_) { /* navigateur ancien */ }
-    let reduced = false;
-    for (const sheet of document.styleSheets) {
-      let rules = [];
-      try {
-        rules = sheet.cssRules;
-      } catch (_) {
-        continue;
-      }
-      for (const rule of rules) {
-        if (rule.conditionText && rule.conditionText.includes("prefers-reduced-motion")) reduced = true;
-      }
-    }
-    if (animated && !reduced) notes.push("The page animates but ignores prefers-reduced-motion: add a @media (prefers-reduced-motion: reduce) rule that stops the motion");
+    // `prefers-reduced-motion` se lit dans le texte des feuilles, par le
+    // protocole du navigateur : une page ouverte en file:// ne laisse pas son
+    // script lire leurs règles, et la mesure se trompait (essai réel).
+    motion = animated;
 
     // Rythme vertical : les sections de même rang doivent partager leur
     // marge haute et basse (une échelle d'espacement), à 8px près.
@@ -711,31 +722,12 @@
       notes.push(`The saturated color ${loudest[0]} covers about ${Math.round(loudest[1] / pageArea * 100)}% of the page: an accent used that much no longer accents anything; keep it under a tenth (buttons, a key figure, one band), with quiet neutrals elsewhere`);
     }
 
-    // Liens et boutons sans état de survol : rien ne répond au pointeur.
-    const hoverKeys = ["color", "backgroundColor", "borderTopColor", "boxShadow", "textDecorationLine", "transform", "opacity", "outlineStyle"];
-    const hoverable = [...document.querySelectorAll("a[href], button, [role=button]")].filter(shown).slice(0, 30);
-    let silentHover = 0;
-    const silentHoverEls = [];
-    for (const el of hoverable) {
-      // Les règles :hover sont lues dans les feuilles : les comparer au
-      // sélecteur de l'élément évite de simuler le pointeur.
-      let hovered = false;
-      for (const sheet of document.styleSheets) {
-        let rules = [];
-        try { rules = sheet.cssRules; } catch (_) { continue; }
-        for (const rule of rules) {
-          const selectors = rule.selectorText || (rule.cssRules && [...rule.cssRules].map((r) => r.selectorText).filter(Boolean).join(","));
-          if (!selectors || !selectors.includes(":hover")) continue;
-          const plain = selectors.split(",").map((sel) => sel.replace(/:hover/g, "").replace(/::?[a-z-]+(\([^)]*\))?/g, "").trim()).filter(Boolean);
-          if (plain.some((sel) => { try { return el.matches(sel) || (sel && el.closest(sel)); } catch (_) { return false; } })) { hovered = true; break; }
-        }
-        if (hovered) break;
-      }
-      if (!hovered) { silentHover += 1; silentHoverEls.push(el); }
-    }
-    if (hoverable.length >= 4 && silentHover >= hoverable.length / 2) {
-      blameNote(silentHoverEls);
-      notes.push(`${silentHover} of ${hoverable.length} links and buttons have no :hover style: nothing answers the pointer, which reads as unfinished; give each interactive element hover, focus-visible and active states (a color, background or underline change, 150 to 250ms)`);
+    // Liens et boutons sans état de survol : Claw force `:hover` sur chacun
+    // par le protocole du navigateur et compare son apparence. Ils sont
+    // seulement marqués ici, avec leur nom pour la remarque.
+    for (const el of [...document.querySelectorAll("a[href], button, [role=button]")].filter(shown).slice(0, 12)) {
+      el.setAttribute("data-claw-hover", String(hoverLabels.length));
+      hoverLabels.push(name(el));
     }
   }
 
@@ -770,5 +762,5 @@
     if (small.length >= 2) blameNote(small);
     if (small.length >= 2) notes.push(`${small.length} buttons or links are under the comfortable 44x44px tap size on a phone (${list(small.map((el) => `${name(el)} ${Math.round(box.get(el).width)}x${Math.round(box.get(el).height)}px`), 3)}): give them more padding or a min-height of 44px`);
   }
-  return { title: document.title || "", problems, notes, culprits, textLength: text.length };
+  return { title: document.title || "", problems, notes, culprits, motion, hoverLabels, textLength: text.length };
 })()
