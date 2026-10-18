@@ -370,6 +370,8 @@ struct TurnAids {
     plan_reviewed: bool,
     /// Le modèle a écrit l'interface sans plan : il lui a été demandé.
     plan_requested: bool,
+    /// Un autre modèle a repris après deux réponses vides de suite.
+    empty_escalated: bool,
     /// Le modèle a été prévenu que sa page appelle des fichiers qui manquent.
     assets_reminded: bool,
     /// Le modèle a été prévenu que ses styles n'ont pas le socle de la méthode.
@@ -1616,7 +1618,13 @@ where
                 }
             };
             let (assistant_message, usage) = match build_assistant_message(events) {
-                Ok(built) => built,
+                // Une réponse avec du contenu : la relance d'une réponse vide
+                // vaut de nouveau. Vu dans un essai réel : deux réponses vides
+                // séparées par des dizaines d'autres suffisaient à perdre le tour.
+                Ok(built) => {
+                    empty_nudged = false;
+                    built
+                }
                 // Suite d'une réponse coupée restée vide (souvent tout le
                 // budget pris par le raisonnement) : la même demande repart une
                 // fois, puis la réponse coupée est rendue telle quelle.
@@ -1643,13 +1651,15 @@ where
                 // Vide encore après la relance : un autre modèle reprend la fin
                 // du tour au lieu de le perdre. Vu dans un essai réel : dots-3,
                 // 594 s de raisonnement puis rien, et le site laissé à mi-chemin.
+                // Une escalade à part de celle d'un agent bloqué : déjà faite
+                // plus tôt dans le tour, elle ne doit pas laisser le tour se perdre.
                 Err(error)
                     if error.to_string() == EMPTY_RESPONSE_ERROR
-                        && !aids.escalated
+                        && !aids.empty_escalated
                         && !self.subagent
                         && harness::enabled(Aid::Escalation) =>
                 {
-                    aids.escalated = true;
+                    aids.empty_escalated = true;
                     let Some(model) = self.api_client.escalate() else {
                         return Err(error);
                     };
@@ -6433,6 +6443,22 @@ mod tests {
             .run_turn("explique le module", None)
             .expect_err("aucun autre modèle");
         assert_eq!(error.to_string(), super::EMPTY_RESPONSE_ERROR);
+
+        // Essai réel : deux réponses vides séparées par du travail ne sont pas
+        // « vide encore après la relance » ; chacune est relancée.
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                empty(),
+                tool_step("probe", "{}"),
+                empty(),
+                text_step("Voici l'explication."),
+            ],
+            Vec::new(),
+        );
+        runtime
+            .run_turn("explique le module", None)
+            .expect("chaque vide est relancé");
+        assert_eq!(observed.borrow().escalations, 0);
     }
 
     #[test]
