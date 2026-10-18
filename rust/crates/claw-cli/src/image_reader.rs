@@ -207,8 +207,11 @@ fn save(dir: &Path, key: &str, description: &Description) {
 /// Le catalogue dit que ce modèle ne lit pas les images. Faux pour un modèle
 /// inconnu du catalogue (serveur local, autre fournisseur) : on ne sait pas.
 pub(crate) fn model_cannot_read_images(model: &str) -> bool {
-    api::model_limits(&api::resolve_model_alias(model))
-        .is_some_and(|limits| !limits.supports_images)
+    let model = api::resolve_model_alias(model);
+    if let Some(reads) = crate::models::nvidia_reads_images(&model) {
+        return !reads;
+    }
+    api::model_limits(&model).is_some_and(|limits| !limits.supports_images)
 }
 
 /// Images de la conversation, dans l'ordre.

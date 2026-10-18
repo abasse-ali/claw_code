@@ -6,7 +6,8 @@ name: Claw web
 # travaille dans le dépôt choisi, sur la branche de la session, pousse, ouvre la pull request
 # et répond dans la session. Tout se passe dans le dépôt appelant (issues, caches, journaux) :
 # ses minutes, ses secrets (OPENROUTER_API_KEY, CLAW_REPO_TOKEN, jeton qui peut lire et
-# pousser dans les dépôts des tâches), son nom de passage (« Claw <dépôt> #<session> »).
+# pousser dans les dépôts des tâches ; NVIDIA_API_KEY, facultatif, pour les modèles `nvidia:`
+# et le lecteur d'images de NVIDIA), son nom de passage (« Claw <dépôt> #<session> »).
 # Suivi : rust/docs/suivi/w1-appli-web.md.
 
 on:
@@ -15,6 +16,8 @@ on:
       OPENROUTER_API_KEY:
         required: false
       CLAW_REPO_TOKEN:
+        required: false
+      NVIDIA_API_KEY:
         required: false
     inputs:
       claw_source:
@@ -136,6 +139,7 @@ jobs:
           SESSION: ${{ inputs.session }}
           JOB_TOKEN: ${{ github.token }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           CLAW_SRC: ${{ github.workspace }}/claw-src
           PYTHONPATH: ${{ github.workspace }}/claw-src/.github/claw-web
         # `exec` : à l'annulation, le signal arrive au script, qui arrête Claw proprement.

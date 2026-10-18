@@ -225,7 +225,7 @@ est retenu ; avec `OPENROUTER_API_KEY`, le quota gratuit du jour est affiché.
   sinon ; 20 par minute) est compté **par compte**, sur la journée UTC : une nouvelle clé API
   n'y change rien, OpenRouter l'écrit dans sa documentation. Pour continuer une fois le quota
   atteint : un modèle local (`ollama:…`) ou un autre fournisseur qui a son propre quota gratuit
-  (`gemini:`, `groq:`), chacun avec sa clé. Le plan gratuit de Mistral ne permet plus de créer
+  (`gemini:`, `nvidia:`, `groq:`), chacun avec sa clé. Le plan gratuit de Mistral ne permet plus de créer
   de clé API (constaté le 10 octobre 2026) : `mistral:` demande un plan payant.
 - **La clé Google (`GEMINI_API_KEY`)** ne sert que si vous la mettez au travail : rien ne
   l'utilise d'office. `/model gemini:<modèle>` pour une session ; ou, pour épargner le quota
@@ -252,6 +252,25 @@ est retenu ; avec `OPENROUTER_API_KEY`, le quota gratuit du jour est affiché.
   `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, `gemini-2.5-pro`, `gemini-2.5-flash`,
   `gemini-2.5-flash-lite`. `gemini-3.1-pro-preview` est payant et n'est pas proposé. Exemple :
   `/model gemini:gemini-3.8-flash`.
+- **NVIDIA (`NVIDIA_API_KEY`, préfixe `nvidia:`)** : les modèles de build.nvidia.com sont
+  gratuits pour les membres du programme pour développeurs de NVIDIA (inscription gratuite, sans
+  carte), avec environ 40 requêtes par minute pour le compte (observé par les utilisateurs, non
+  publié) et aucun quota par jour annoncé ; un usage en production demande une licence. La clé se
+  crée sur build.nvidia.com (profil, Settings, API Keys) et commence par `nvapi-`. `/models nvidia`
+  liste les modèles essayés avec Claw que le catalogue de NVIDIA propose, et la page les montre
+  dans la catégorie **NVIDIA** du menu des modèles. Agents essayés le 18 octobre 2026 (appel
+  d'outil en moins d'une seconde, sauf gpt-oss 20B en 21 s) : `nvidia/nemotron-3-ultra-550b-a55b`,
+  `nvidia/nemotron-3-super-120b-a12b`, `stepfun-ai/step-5-preview`, `openai/gpt-oss-20b`. Le
+  catalogue en compte 81 ; à ce jour, d'autres font attendre leur première réponse de 90 s à plus
+  de 4 minutes (GLM 5.3, Nemotron 3.5 Lightning, `DeepSeek` V4.1 Flash, Gemma 4 : trop pour un
+  agent) ou répondent 404 selon le compte (Kimi K2.6). Un modèle qui ne lit pas les images refuse
+  une requête qui en porte une (erreur 400) : Claw sait lesquels les lisent et fait décrire les
+  images aux autres. `nvidia/nemotron-3.5-super-vl-120b-a12b` lit les images mais échoue dès
+  qu'on lui donne des outils : avec la clé, il décrit les captures et juge les designs avant les
+  lecteurs d'OpenRouter (une capture de site lue en cinq secondes à l'essai, sans quota par
+  jour), sans jamais être l'agent. `/models bench --design nvidia:` ne mesure que les modèles de
+  NVIDIA. Un modèle de NVIDIA bloqué passe la main à Nemotron 3 Ultra, sur le même compte,
+  plutôt qu'à un modèle d'OpenRouter. Exemple : `/model nvidia:nvidia/nemotron-3-super-120b-a12b`.
 - La limite de jetons de sortie suit le catalogue (sortie maximale et contexte du modèle) ;
   `/cost` indique le coût estimé (0 $ pour un modèle gratuit).
 - Chaque étape de l'agent consomme une requête du quota gratuit ; en cas de limite atteinte
@@ -625,7 +644,7 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
 - **OpenRouter** (`vendeur/modèle`, ex. `qwen/qwen3-coder:free`) et **Anthropic** (`claude-…`).
 - **Serveurs compatibles OpenAI** avec un préfixe `nom:` : `ollama:qwen2.5-coder:7b`,
   `lmstudio:…`, `llamacpp:…` (locaux, sans clé, hors ligne) ; `groq:`, `mistral:`, `deepseek:`,
-  `gemini:`, `cerebras:`, `together:`, `fireworks:` (clé `<NOM>_API_KEY`). Adresse modifiable par
+  `gemini:`, `cerebras:`, `nvidia:`, `together:`, `fireworks:` (clé `<NOM>_API_KEY`). Adresse modifiable par
   `<NOM>_BASE_URL` (et `OLLAMA_HOST`). Vos propres serveurs :
 
   ```json
@@ -1221,7 +1240,8 @@ coupe cet import.
   n'a pu la décrire, le modèle de la session apprend qu'une image manque et peut vous demander
   de la décrire. Les images restent dans la session et repartent telles quelles si vous revenez
   à un modèle qui les lit. `"imageReader"` (ou `CLAW_IMAGE_READER`) choisit le lecteur : un
-  identifiant de modèle, ou `"off"` pour ne rien faire décrire. Les captures que prennent les
+  identifiant de modèle, ou `"off"` pour ne rien faire décrire. Sans réglage, le lecteur de
+  NVIDIA passe d'abord si sa clé est là, puis ceux d'OpenRouter. Les captures que prennent les
   outils (`Screenshot`) sont décrites en une passe, disposition, contenu, aspect et défauts
   visibles puis un verdict, en 3 minutes au plus : la description complète en deux passes de
   vos propres images prenait jusqu'à 12 minutes par capture. Un modèle qui refuse la requête

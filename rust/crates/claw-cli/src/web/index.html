@@ -2651,6 +2651,8 @@
           if (claude) list.append(el("div", "hint-line", "Ressemblance de profil (outils, raisonnement, images, contexte, code, mesures de Claw), pas une égalité d'intelligence."));
           if (!query && category && category.key === "gemini") {
             list.append(el("div", "hint-line", "Offre gratuite de Google : gratuit tant que la facturation n'est pas activée sur le projet de votre clé (AI Studio). Limites par projet. /models gemini dans le terminal vérifie ce que votre clé ouvre."));
+          } else if (!query && category && category.key === "nvidia") {
+            list.append(el("div", "hint-line", "Gratuit chez NVIDIA pour les membres de son programme pour développeurs (build.nvidia.com), environ 40 requêtes par minute. Modèles essayés avec Claw ; /models nvidia dans le terminal vérifie ce que votre clé ouvre."));
           } else if (modelsCatalogAt) {
             list.append(el("div", "hint-line", "Catalogue OpenRouter lu " + relativeTime(modelsCatalogAt)));
           }

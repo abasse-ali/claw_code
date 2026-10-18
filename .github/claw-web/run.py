@@ -213,11 +213,20 @@ def start_mock():
     return process, f"http://127.0.0.1:{line.split()[1]}/v1"
 
 
+def agent_env(environ, mock=False):
+    """Environnement de Claw. Aucun jeton GitHub : il travaille, Claw publie après lui. Les clés
+    des fournisseurs passent (OPENROUTER_API_KEY, NVIDIA_API_KEY…), sauf pour le faux modèle :
+    rien ne doit pouvoir partir vers un vrai modèle, relecteurs compris."""
+    env = {key: value for key, value in environ.items()
+           if "TOKEN" not in key.upper() or key == "OPENROUTER_API_KEY"}
+    if mock:
+        env = {key: value for key, value in env.items() if not key.upper().endswith("_API_KEY")}
+    return env
+
+
 def main():
     request = (WORK / "prompt.txt").read_text(encoding="utf-8")
-    # Aucun jeton GitHub pour l'agent : il travaille, Claw publie après lui.
-    env = {key: value for key, value in os.environ.items()
-           if "TOKEN" not in key.upper() or key == "OPENROUTER_API_KEY"}
+    env = agent_env(os.environ, mock=MODEL == "mock")
     env["CLAW_NO_BROWSER"] = "1"
     # `claw-github` : l'agent demande une fusion ou une mise en ligne, faite après la poussée
     # par publish.py avec le jeton du dépôt (claw_github.py n'en a aucun).
@@ -239,8 +248,7 @@ def main():
     args = ["claw", "--permission-mode", "danger-full-access", "--output-format", "stream-json"]
     mock = None
     if MODEL == "mock":
-        # Aucune clé réelle : rien ne peut partir vers un vrai modèle, relecteurs compris.
-        env = {key: value for key, value in env.items() if not key.upper().endswith("_API_KEY")}
+        # Aucune clé réelle (retirées par agent_env) ni réglage de l'utilisateur.
         env["CLAW_NO_USER_ENV"] = "1"
         mock, base_url = start_mock()
         env["OLLAMA_BASE_URL"] = base_url
