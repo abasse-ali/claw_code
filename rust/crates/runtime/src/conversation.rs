@@ -385,6 +385,16 @@ struct TurnAids {
     foundation_noted: bool,
     /// Notes des revues visuelles du tour, dans l'ordre.
     graded: Vec<crate::web_design::Graded>,
+    /// Pièges du code déjà signalés pendant ce tour (fichier et constat).
+    pitfalls_seen: std::collections::HashSet<String>,
+    /// Langages dont les règles ont été données pendant ce tour.
+    code_languages: std::collections::BTreeSet<crate::code_guide::Language>,
+    /// Scripts écrits pendant ce tour (chemins).
+    scripts_written: std::collections::BTreeSet<String>,
+    /// Commandes lancées par le modèle pendant ce tour.
+    commands_run: Vec<String>,
+    /// Le modèle a été renvoyé essayer ses scripts.
+    scripts_asked: bool,
     /// Poursuites accordées au tour de design resté sous la barre.
     continuations: usize,
     /// Revues notées au moment de la dernière poursuite.
@@ -1490,6 +1500,17 @@ where
                 }
             }
         }
+        // Code : la méthode d'un ingénieur soigneux et les règles des langages
+        // que la demande nomme (pas pour une interface, qui a la sienne).
+        let mut code_languages = std::collections::BTreeSet::new();
+        if !self.subagent && !design_guided && harness::enabled(Aid::CodeGuide) {
+            if let Some((text, languages)) =
+                crate::code_guide::code_guide(&request_text, earlier.as_deref())
+            {
+                user_message.blocks.push(ContentBlock::Text { text });
+                code_languages.extend(languages);
+            }
+        }
         // Petit projet : tous ses fichiers en vues, au premier tour de la session.
         if !self.subagent && self.session.messages.is_empty() && harness::enabled(Aid::SmallProject)
         {
@@ -1532,6 +1553,7 @@ where
                 .and_then(|cwd| harness::DataSnapshot::take(&cwd)),
             project: project_turn,
             design_guided,
+            code_languages,
             ..TurnAids::default()
         };
         // Tour de design : plan, code, captures et revues dépassent le budget
@@ -1785,6 +1807,7 @@ where
                     .or_else(|| self.persistence_gate(&mut aids))
                     .or_else(|| self.verification_gate(&mut aids, &mut prompter))
                     .or_else(|| self.editor_gate(&mut aids))
+                    .or_else(|| self.run_scripts_gate(&mut aids))
                     .or_else(|| {
                         self.interface_gate(
                             &mut aids,
@@ -2212,6 +2235,7 @@ where
             self.data_rewritten_by_command(input, aids, &mut notes);
         }
         if let Some(outcome) = command_outcome {
+            aids.commands_run.push(outcome.command.clone());
             if outcome.passed {
                 // Un script muet qui définit `main()` sans l'appeler.
                 if harness::enabled(Aid::EntryPoint) {
@@ -2445,16 +2469,59 @@ where
             }
         }
         if let Some(path) = path.filter(|_| harness::enabled(Aid::Diagnostics)) {
+            let name = std::path::Path::new(&path)
+                .file_name()
+                .map_or_else(|| path.clone(), |name| name.to_string_lossy().to_string());
             if let Some(error) = harness::syntax_check(std::path::Path::new(&path)) {
-                let name = std::path::Path::new(&path)
-                    .file_name()
-                    .map_or_else(|| path.clone(), |name| name.to_string_lossy().to_string());
                 self.api_client.notify(&format!(
                     "Erreur de syntaxe dans {name} : signalée au modèle"
                 ));
                 notes.push(harness::syntax_feedback(&path, &error));
+            } else if harness::enabled(Aid::Pitfalls) {
+                // Les pièges du code, chacun dit une fois par tour : une
+                // modification ailleurs dans le fichier ne les répète pas.
+                let fresh: Vec<String> = crate::code_checks::pitfalls(std::path::Path::new(&path))
+                    .into_iter()
+                    .filter(|finding| aids.pitfalls_seen.insert(format!("{path}\u{1}{finding}")))
+                    .collect();
+                if !fresh.is_empty() {
+                    self.api_client.notify(&format!(
+                        "Pièges relevés dans {name} : {}, signalés au modèle",
+                        fresh.len()
+                    ));
+                    notes.push(crate::code_checks::pitfalls_feedback(&path, &fresh));
+                }
             }
             self.interface_file_notes(&path, aids, notes);
+            self.code_file_notes(&path, aids, notes);
+        }
+    }
+
+    /// Un fichier de code vient d'être écrit : les règles de son langage la
+    /// première fois dans le tour, et le script retenu pour être essayé.
+    fn code_file_notes(&mut self, path: &str, aids: &mut TurnAids, notes: &mut Vec<String>) {
+        let file = std::path::Path::new(path);
+        let Some(language) = crate::code_guide::Language::of(file) else {
+            return;
+        };
+        let name = file.file_name().map_or_else(
+            || path.to_string(),
+            |name| name.to_string_lossy().to_string(),
+        );
+        // Le JavaScript d'une page suit la méthode de design.
+        let page_script = aids.design_guided
+            && language == crate::code_guide::Language::JavaScript
+            && crate::web_design::is_interface_file(path);
+        if harness::enabled(Aid::CodeGuide)
+            && !self.subagent
+            && !page_script
+            && aids.code_languages.insert(language)
+        {
+            notes.push(crate::code_guide::rules_note(language, &name));
+        }
+        let text = std::fs::read_to_string(file).unwrap_or_default();
+        if !page_script && crate::code_guide::is_runnable_script(file, &text) {
+            aids.scripts_written.insert(path.to_string());
         }
     }
 
@@ -3686,6 +3753,50 @@ where
             "{prompt}{away}{edges}\n\n{}",
             harness::FINAL_ANSWER_RULE
         ))
+    }
+
+    /// Scripts écrits dans le tour et jamais lancés : le modèle est renvoyé
+    /// les essayer, une fois, avant de répondre. Un code jamais lancé n'est
+    /// pas fini ; un script qui ferait quelque chose d'irréversible n'est
+    /// pas lancé, et la réponse le dit.
+    fn run_scripts_gate(&mut self, aids: &mut TurnAids) -> Option<String> {
+        if self.subagent
+            || aids.scripts_asked
+            || aids.scripts_written.is_empty()
+            || interrupt_requested()
+            || !harness::enabled(Aid::RunScripts)
+            || self.permission_policy.active_mode() == crate::permissions::PermissionMode::ReadOnly
+        {
+            return None;
+        }
+        let commands: Vec<String> = aids
+            .commands_run
+            .iter()
+            .map(|command| command.to_lowercase())
+            .collect();
+        let unrun: Vec<(String, crate::code_guide::Language)> = aids
+            .scripts_written
+            .iter()
+            .filter_map(|path| {
+                let file = std::path::Path::new(path);
+                let name = file.file_name()?.to_string_lossy().to_string();
+                let language = crate::code_guide::Language::of(file)?;
+                // Un fichier supprimé depuis, ou déjà lancé, n'est plus à essayer.
+                let lowered = name.to_lowercase();
+                let run = commands.iter().any(|command| command.contains(&lowered));
+                (file.exists() && !run).then_some((name, language))
+            })
+            .collect();
+        if unrun.is_empty() {
+            return None;
+        }
+        aids.scripts_asked = true;
+        let names: Vec<&str> = unrun.iter().map(|(name, _)| name.as_str()).collect();
+        self.api_client.notify(&format!(
+            "Script(s) écrit(s) mais jamais lancé(s) : {} : Claw demande à l'agent de les essayer",
+            names.join(", ")
+        ));
+        Some(crate::code_guide::run_scripts_feedback(&unrun))
     }
 
     /// Commandes conseillées sans avoir été lancées : la réponse dit à
@@ -6510,6 +6621,50 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn a_script_gets_its_language_rules_and_must_be_run_before_the_answer() {
+        let _serial = crate::test_serial();
+        let (mut runtime, observed, _) = aided_runtime(Vec::new(), Vec::new());
+        let dir = std::env::temp_dir().join(format!("claw-run-scripts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let script = dir.join("trier.py");
+        std::fs::write(&script, "import sys\n\ndef main():\n    return 0\n\nif __name__ == '__main__':\n    sys.exit(main())\n").expect("script");
+        let module = dir.join("outils.py");
+        std::fs::write(&module, "def double(x):\n    return 2 * x\n").expect("module");
+        let path = script.to_string_lossy().to_string();
+        let mut aids = super::TurnAids::default();
+        let mut notes = Vec::new();
+        runtime.code_file_notes(&path, &mut aids, &mut notes);
+        runtime.code_file_notes(&module.to_string_lossy(), &mut aids, &mut notes);
+        // Les règles de Python une fois, le script retenu, pas le module.
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("trier.py is Python code")
+                && notes[0].contains("python trier.py --help")
+        );
+        assert_eq!(aids.scripts_written.len(), 1);
+        // Jamais lancé : le modèle est renvoyé l'essayer, une fois.
+        let feedback = runtime.run_scripts_gate(&mut aids).expect("à essayer");
+        assert!(
+            feedback.contains("You wrote trier.py in this turn but never ran it"),
+            "{feedback}"
+        );
+        assert!(runtime.run_scripts_gate(&mut aids).is_none());
+        assert!(observed
+            .borrow()
+            .notices
+            .iter()
+            .any(|notice| notice.contains("jamais lancé(s) : trier.py")));
+        // Lancé : rien à redire.
+        let mut aids = super::TurnAids {
+            scripts_written: std::iter::once(path).collect(),
+            commands_run: vec!["python Trier.py --help".to_string()],
+            ..super::TurnAids::default()
+        };
+        assert!(runtime.run_scripts_gate(&mut aids).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

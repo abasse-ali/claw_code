@@ -4,6 +4,8 @@ pub mod bash_tasks;
 mod bootstrap;
 pub mod checkpoint;
 pub mod claude_skills;
+pub mod code_checks;
+pub mod code_guide;
 mod compact;
 mod config;
 mod conversation;

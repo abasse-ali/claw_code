@@ -104,6 +104,17 @@ pub enum Aid {
     /// Interface modifiée : Claw regarde la page (captures téléphone et
     /// ordinateur, défauts mesurés) et la fait juger par un modèle qui voit.
     DesignReview,
+    /// Pièges du code écrit, dits à l'écriture du fichier : un nom jamais
+    /// défini en Python, une comparaison avec > en `PowerShell`, une variable lue
+    /// avec % dans un bloc d'un .bat…
+    Pitfalls,
+    /// Demande de code qui nomme son langage : la méthode d'un ingénieur
+    /// soigneux et les règles du langage ; aussi au premier fichier écrit
+    /// dans un langage pendant le tour.
+    CodeGuide,
+    /// Script écrit dans le tour et jamais lancé : le modèle l'essaie avant
+    /// de répondre.
+    RunScripts,
     /// Outil `Photo` : photos sous licence libre (Openverse, Wikimedia
     /// Commons) enregistrées dans le projet avec leur crédit.
     Photos,
@@ -150,6 +161,9 @@ impl Aid {
             Self::ProjectMode => "CLAW_PROJECT_MODE",
             Self::DesignGuide => "CLAW_DESIGN_GUIDE",
             Self::DesignReview => "CLAW_DESIGN_REVIEW",
+            Self::Pitfalls => "CLAW_PITFALLS",
+            Self::CodeGuide => "CLAW_CODE_GUIDE",
+            Self::RunScripts => "CLAW_RUN_SCRIPTS",
             Self::Photos => "CLAW_PHOTOS",
         }
     }
@@ -297,7 +311,7 @@ fn in_tests_dir(dir: &Path, root: &Path) -> bool {
     })
 }
 
-fn python_program() -> &'static str {
+pub(crate) fn python_program() -> &'static str {
     if cfg!(windows) || crate::paths::find_executable("python3").is_none() {
         "python"
     } else {
@@ -476,7 +490,7 @@ fn node_verify(root: &Path) -> Option<String> {
 }
 
 /// Commande de vérification rapide et sûre déduite du projet : compilation
-/// (Rust, Go, TypeScript) ou tests (Python). Les tests Node ne sont pas lancés
+/// (Rust, Go, `TypeScript`) ou tests (Python). Les tests Node ne sont pas lancés
 /// d'office : beaucoup restent en mode « surveillance » et ne rendent pas la main.
 #[must_use]
 pub fn detect_verify_commands(root: &Path) -> Vec<String> {
@@ -765,7 +779,7 @@ fn location_pattern() -> &'static regex::Regex {
 }
 
 /// Emplacements `fichier:ligne` qu'une sortie cite (trace Python, erreur Rust,
-/// TypeScript `fichier(ligne,colonne)`, Node, Go, pytest…), sans doublon, les
+/// `TypeScript` `fichier(ligne,colonne)`, Node, Go, pytest…), sans doublon, les
 /// plus utiles d'abord : dans l'ordre de la sortie (première erreur d'un
 /// compilateur, cadre le plus profond d'une pile Node), sauf pour une trace
 /// Python (« most recent call last »), lue depuis la fin, où est le cadre qui
@@ -1238,7 +1252,7 @@ fn last_lines(text: &str, count: usize) -> String {
 }
 
 /// Erreur de syntaxe du fichier qui vient d'être écrit, si un contrôle rapide
-/// existe pour ce langage (JSON intégré ; Python, JavaScript, Rust, Go, shell
+/// existe pour ce langage (JSON intégré ; Python, `JavaScript`, Rust, Go, shell
 /// avec l'outil du langage s'il est installé). `None` : rien à signaler.
 #[must_use]
 pub fn syntax_check(path: &Path) -> Option<String> {
@@ -1269,6 +1283,10 @@ pub fn syntax_check(path: &Path) -> Option<String> {
             checker_errors("sh", &["-n", &file], parent).map(|text| last_lines(&text, 5))
         }
         "html" | "htm" => html_structure(&std::fs::read_to_string(path).ok()?),
+        // PowerShell, TypeScript, feuilles de style, TOML : avec leur propre analyseur.
+        "ps1" | "psm1" | "psd1" | "ts" | "mts" | "cts" | "css" | "scss" | "less" | "toml" => {
+            crate::code_checks::syntax(path)
+        }
         _ => None,
     }
 }
