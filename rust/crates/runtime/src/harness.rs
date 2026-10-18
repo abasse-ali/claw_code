@@ -1274,6 +1274,27 @@ const VOID_ELEMENTS: &[&str] = &[
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
     "track", "wbr",
 ];
+/// Position du `>` qui ferme une balise, sans s'arrêter à un `>` entre
+/// guillemets ; la fin du texte si la balise ne se ferme pas.
+fn tag_end(bytes: &[u8], from: usize) -> usize {
+    let mut cursor = from;
+    let mut quote: Option<u8> = None;
+    while cursor < bytes.len() {
+        match (quote, bytes[cursor]) {
+            (Some(q), byte) if byte == q => quote = None,
+            (None, b'"' | b'\'') => quote = Some(bytes[cursor]),
+            (None, b'>') => break,
+            _ => {}
+        }
+        cursor += 1;
+    }
+    cursor
+}
+
+/// Formes SVG, qui se ferment d'ordinaire elles-mêmes (`<path … />`).
+const SVG_SHAPES: &[&str] = &[
+    "path", "line", "circle", "rect", "ellipse", "polyline", "polygon", "stop", "use",
+];
 /// Éléments dont HTML permet d'omettre la balise de fin.
 const OPTIONAL_END: &[&str] = &[
     "p", "li", "dt", "dd", "tr", "td", "th", "thead", "tbody", "tfoot", "option", "optgroup",
@@ -1321,18 +1342,7 @@ pub fn html_structure(text: &str) -> Option<String> {
             index = start + 1;
             continue;
         }
-        // Fin de la balise, sans s'arrêter à un `>` entre guillemets.
-        let mut cursor = name_start + name.len();
-        let mut quote: Option<u8> = None;
-        while cursor < bytes.len() {
-            match (quote, bytes[cursor]) {
-                (Some(q), byte) if byte == q => quote = None,
-                (None, b'"' | b'\'') => quote = Some(bytes[cursor]),
-                (None, b'>') => break,
-                _ => {}
-            }
-            cursor += 1;
-        }
+        let cursor = tag_end(bytes, name_start + name.len());
         let self_closing = cursor > 0 && bytes.get(cursor - 1) == Some(&b'/');
         index = (cursor + 1).min(text.len());
         let line = line_at(start);
@@ -1352,6 +1362,24 @@ pub fn html_structure(text: &str) -> Option<String> {
                     open.pop();
                 }
                 None if OPTIONAL_END.contains(&name.as_str()) => {}
+                // Ouvert et fermé sur la même ligne sous deux noms différents
+                // (`<path …></line>`) : une seule phrase, la vraie faute. Vu
+                // dans un essai réel : les deux phrases séparées avaient fait
+                // croire au modèle que `<line>` n'existait pas en SVG.
+                None if open.last().is_some_and(|(tag, opened)| {
+                    *opened == line && !OPTIONAL_END.contains(&tag.as_str())
+                }) =>
+                {
+                    let (tag, _) = open.pop().unwrap_or_default();
+                    let hint = if SVG_SHAPES.contains(&tag.as_str()) {
+                        format!(" An SVG shape closes itself: <{tag} ... />")
+                    } else {
+                        String::new()
+                    };
+                    errors.push(format!(
+                        "line {line}: <{tag}> is closed by </{name}>, the names differ.{hint}"
+                    ));
+                }
                 None => errors.push(format!("</{name}> at line {line} closes nothing")),
             }
         } else if !self_closing && !VOID_ELEMENTS.contains(&name.as_str()) {
@@ -5035,5 +5063,12 @@ mod tests {
         assert_eq!(html_structure(page), None);
         // Un gabarit : ses balises dépendent de conditions.
         assert_eq!(html_structure("{% if x %}<div>{% endif %}"), None);
+        // Essai réel : `<path …></line>` dans une icône. Une phrase par ligne,
+        // qui nomme les deux balises, au lieu de deux phrases trompeuses.
+        let icon = "<svg>\n<g>\n<path d=\"M0 0\"></line>\n<path d=\"M1 1\"></line>\n</g>\n</svg>";
+        assert_eq!(
+            html_structure(icon).expect("balises croisées"),
+            "HTML tags are not nested correctly (the page's layout breaks around them):\nline 3: <path> is closed by </line>, the names differ. An SVG shape closes itself: <path ... />\nline 4: <path> is closed by </line>, the names differ. An SVG shape closes itself: <path ... />"
+        );
     }
 }
