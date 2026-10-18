@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use crate::bench::{self, BenchOptions, BenchResult, Project};
 
 /// Le brief commun : un vrai petit site, assez riche pour départager.
-const DESIGN_BRIEF: &str = "Crée la page d'accueil d'« Atelier Sève », un fleuriste de quartier à Lyon (bouquets de saison, ateliers de composition le samedi matin, livraison à vélo dans le 4e arrondissement) : index.html, avec ses styles dans styles.css et son script dans script.js. Sections : accueil, trois bouquets de saison avec leur prix, les ateliers (dates, places, réservation), deux avis de clients, contact avec adresse, téléphone et horaires. La page doit être belle et fonctionner au téléphone comme à l'ordinateur.";
+const DESIGN_BRIEF: &str = "Crée la page d'accueil d'« Atelier Sève », un fleuriste de quartier à Lyon (bouquets de saison, ateliers de composition le samedi matin, livraison à vélo dans le 4e arrondissement) : index.html, avec ses styles dans styles.css et son script dans script.js. Sections : accueil, trois bouquets de saison avec leur prix, les ateliers (dates, places, réservation), deux avis de clients, contact avec adresse, téléphone et horaires. La page doit être belle et fonctionner au téléphone comme à l'ordinateur ; elle s'ouvre directement depuis le fichier, sans serveur.";
 /// Requêtes du tour de chaque modèle : de quoi construire et se relire.
 const DESIGN_TURN_REQUESTS: &str = "60";
 /// Requêtes estimées par modèle : le tour, puis la note du juge.

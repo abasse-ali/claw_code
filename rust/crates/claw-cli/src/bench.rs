@@ -379,6 +379,9 @@ fn parse_stream(lines: &[String]) -> (Option<String>, Option<String>, Vec<String
     (result, error, tools)
 }
 
+/// Attente au plus de la fin de la sortie, une fois claw terminé.
+const OUTPUT_DRAIN: Duration = Duration::from_secs(5);
+
 pub(crate) fn run_claw(
     project: &Path,
     model: &str,
@@ -420,14 +423,39 @@ pub(crate) fn run_claw(
             }
         }
     };
+    let (lines, timed_out) = collect_output(&mut child, started, timeout);
+    let (result, error, tools) = parse_stream(&lines);
+    RunOutcome {
+        result,
+        error,
+        tools,
+        seconds: started.elapsed().as_secs_f64(),
+        timed_out,
+    }
+}
+
+/// Les lignes de sortie de `child` jusqu'à sa fin, arrêté s'il dépasse
+/// `timeout` ; et si le délai a été dépassé. Les lignes sont lues au fil de
+/// l'eau : un serveur lancé par le modèle en arrière-plan (`python -m
+/// http.server`) hérite de la sortie et la garde ouverte après la fin de
+/// claw. Vu dans un essai réel du banc du design : la lecture attendait ce
+/// serveur, et le banc ne finissait jamais.
+fn collect_output(
+    child: &mut std::process::Child,
+    started: Instant,
+    timeout: Duration,
+) -> (Vec<String>, bool) {
     let stdout = child.stdout.take();
+    let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&collected);
     let reader = std::thread::spawn(move || {
-        stdout.map_or_else(Vec::new, |stdout| {
-            BufReader::new(stdout)
-                .lines()
-                .map_while(Result::ok)
-                .collect::<Vec<_>>()
-        })
+        if let Some(stdout) = stdout {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                sink.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(line);
+            }
+        }
     });
     let mut timed_out = false;
     loop {
@@ -442,15 +470,20 @@ pub(crate) fn run_claw(
             Ok(None) => std::thread::sleep(Duration::from_millis(200)),
         }
     }
-    let lines = reader.join().unwrap_or_default();
-    let (result, error, tools) = parse_stream(&lines);
-    RunOutcome {
-        result,
-        error,
-        tools,
-        seconds: started.elapsed().as_secs_f64(),
-        timed_out,
+    // La fin de la sortie arrive vite ; au-delà, un autre processus la tient.
+    let drained = Instant::now();
+    while !reader.is_finished() && drained.elapsed() < OUTPUT_DRAIN {
+        std::thread::sleep(Duration::from_millis(100));
     }
+    if reader.is_finished() {
+        let _ = reader.join();
+    }
+    let lines = std::mem::take(
+        &mut *collected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    (lines, timed_out)
 }
 
 /// Cause d'un échec : lisible, et passagère (disponibilité) ou durable.
@@ -1011,10 +1044,38 @@ fn update_settings(settings: &mut Value, best: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_error, compare_results, parse_options, parse_stream, update_settings,
-        BenchOptions, BenchResult,
+        classify_error, collect_output, compare_results, parse_options, parse_stream,
+        update_settings, BenchOptions, BenchResult,
     };
     use serde_json::json;
+
+    #[test]
+    fn output_held_by_a_background_process_does_not_block_the_bench() {
+        // Le shell écrit une ligne et laisse derrière lui un processus qui
+        // garde la sortie ouverte, comme un serveur lancé par le modèle.
+        // `sh` (Git pour Windows ailleurs que sous Unix) : `start /B` de cmd
+        // ne transmet pas la sortie au processus lancé depuis Rust.
+        let Some(shell) = runtime::find_executable("sh") else {
+            return;
+        };
+        let mut child = std::process::Command::new(shell)
+            .args(["-c", "echo un; sleep 20 &"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("shell");
+        let started = std::time::Instant::now();
+        let (lines, timed_out) =
+            collect_output(&mut child, started, std::time::Duration::from_secs(60));
+        assert!(!timed_out);
+        assert!(lines.iter().any(|line| line.trim() == "un"), "{lines:?}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(12),
+            "{:?}",
+            started.elapsed()
+        );
+    }
 
     fn result(
         model: &str,
