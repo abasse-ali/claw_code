@@ -1,0 +1,11 @@
+/* Transitions de vue entre les pages du même site (Chrome, Edge, Safari 18) ;
+   ailleurs, le changement de page reste instantané. */
+@view-transition { navigation: auto; }
+.page-title { view-transition-name: page-title; }
+::view-transition-old(root) { animation: page-out .2s ease-in both; }
+::view-transition-new(root) { animation: page-in .3s ease-out both; }
+@keyframes page-out { to { opacity: 0; transform: translateY(-6px); } }
+@keyframes page-in { from { opacity: 0; transform: translateY(8px); } }
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
+}

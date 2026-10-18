@@ -7,6 +7,8 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod custom;
+pub mod output_styles;
+pub mod skill_registry;
 
 pub use custom::{
     custom_command_completions, discover_custom_commands, expand_template, find_custom_command,
@@ -79,6 +81,13 @@ pub enum ExpertCommand {
     Adr,
     Fix,
     Avis,
+    SecurityReview,
+    CodeReview,
+    PrComments,
+    Simplify,
+    Verify,
+    Statusline,
+    FewerPrompts,
 }
 
 impl ExpertCommand {
@@ -91,6 +100,13 @@ impl ExpertCommand {
             Self::Adr => "adr",
             Self::Fix => "fix",
             Self::Avis => "avis",
+            Self::SecurityReview => "security-review",
+            Self::CodeReview => "code-review",
+            Self::PrComments => "pr-comments",
+            Self::Simplify => "simplify",
+            Self::Verify => "verify",
+            Self::Statusline => "statusline",
+            Self::FewerPrompts => "fewer-permission-prompts",
         }
     }
 
@@ -102,6 +118,13 @@ impl ExpertCommand {
             "adr" => Some(Self::Adr),
             "fix" => Some(Self::Fix),
             "avis" | "consult" => Some(Self::Avis),
+            "security-review" | "securite" | "sécurité" => Some(Self::SecurityReview),
+            "code-review" | "ultrareview" | "revue-multi" => Some(Self::CodeReview),
+            "pr-comments" | "commentaires-pr" => Some(Self::PrComments),
+            "simplify" | "simplifier" => Some(Self::Simplify),
+            "verify" | "verifier" | "vérifier" => Some(Self::Verify),
+            "statusline" | "ligne-etat" => Some(Self::Statusline),
+            "fewer-permission-prompts" | "moins-de-demandes" => Some(Self::FewerPrompts),
             _ => None,
         }
     }
@@ -137,8 +160,8 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "compact",
         aliases: &[],
-        summary: "Compacte l'historique de la session locale",
-        argument_hint: None,
+        summary: "Résume l'historique pour libérer le contexte (consigne facultative : ce qu'il faut garder)",
+        argument_hint: Some("[consigne]"),
         resume_supported: true,
         category: SlashCommandCategory::Core,
     },
@@ -153,8 +176,10 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "permissions",
         aliases: &[],
-        summary: "Affiche ou change le mode de permission actif",
-        argument_hint: Some("[prompt|read-only|workspace-write|danger-full-access]"),
+        summary: "Mode de permission, ou règles : allow, deny, ask, remove <règle>",
+        argument_hint: Some(
+            "[prompt|read-only|workspace-write|danger-full-access|allow|deny|ask|remove <règle>]",
+        ),
         resume_supported: false,
         category: SlashCommandCategory::Core,
     },
@@ -297,7 +322,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "undo",
-        aliases: &["rewind"],
+        aliases: &[],
         summary: "Annule les derniers tours : fichiers modifiés par l'agent et conversation",
         argument_hint: Some("[nombre de tours]"),
         resume_supported: false,
@@ -305,7 +330,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "bashes",
-        aliases: &["tasks"],
+        aliases: &[],
         summary: "Commandes lancées en arrière-plan par l'agent (état, arrêt : /bashes kill <id>)",
         argument_hint: Some("[kill <id>]"),
         resume_supported: false,
@@ -355,6 +380,230 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         name: "credits",
         aliases: &["solde"],
         summary: "Crédits OpenRouter en temps réel : solde, dépense du jour, requêtes gratuites restantes",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "plan",
+        aliases: &[],
+        summary: "Passe en mode plan ; avec une demande, la commence aussitôt",
+        argument_hint: Some("[demande]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "list-agents",
+        aliases: &["peers"],
+        summary: "Autres sessions Claw joignables par messages ; messages retenus (accept, drop)",
+        argument_hint: Some("[accept|drop]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "tasks",
+        aliases: &[],
+        summary: "Travail en arrière-plan de la session : commandes, sous-tâches, tâches planifiées, sessions",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "stop",
+        aliases: &[],
+        summary: "Arrête la session en arrière-plan ouverte dans ce terminal (claw attach)",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "cd",
+        aliases: &[],
+        summary: "Déplace la session dans un autre dossier, en gardant la conversation",
+        argument_hint: Some("<chemin>"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "subtask",
+        aliases: &["sous-tache", "sous-tâche"],
+        summary: "Sous-agent en arrière-plan qui reprend la conversation ; son résultat revient ici",
+        argument_hint: Some("<tâche>"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "rewind",
+        aliases: &["checkpoint"],
+        summary: "Revient avant un message précédent (conversation et fichiers), comme Échap Échap",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "workflows",
+        aliases: &[],
+        summary: "Workflows : exécutions, détail, arrêt, enregistrement ; workflows enregistrés",
+        argument_hint: Some("[id | stop <id> | save <id> [nom]]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Automation,
+    },
+    SlashCommandSpec {
+        name: "deep-research",
+        aliases: &[],
+        summary: "Workflow : recherches web en éventail, sources recoupées, rapport cité",
+        argument_hint: Some("<question>"),
+        resume_supported: false,
+        category: SlashCommandCategory::Automation,
+    },
+    SlashCommandSpec {
+        name: "workflow-authoring",
+        aliases: &[],
+        summary: "Référence pour écrire un workflow (script qui orchestre des agents)",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Automation,
+    },
+    SlashCommandSpec {
+        name: "tui",
+        aliases: &["plein-ecran"],
+        summary: "Rendu du terminal : classique, ou plein écran (sans scintillement, défilement dans Claw)",
+        argument_hint: Some("[default|fullscreen]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "voice",
+        aliases: &["dictee", "dictée"],
+        summary: "Dictée vocale : maintenir Espace pour parler (hold) ou Espace pour démarrer et arrêter (tap)",
+        argument_hint: Some("[hold|tap|off|status|test <fichier.wav>]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "sandbox",
+        aliases: &["bac-a-sable"],
+        summary: "Bac à sable des commandes : état, ou conteneur docker|podman|off pour la session",
+        argument_hint: Some("[docker|podman|off]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "terminal-setup",
+        aliases: &[],
+        summary: "Règle Maj+Entrée pour un saut de ligne dans le terminal de VS Code ou Cursor",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "theme",
+        aliases: &["theme-couleurs"],
+        summary: "Thème : auto, dark, light, versions daltonized et ansi",
+        argument_hint: Some("[nom]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "color",
+        aliases: &["couleur"],
+        summary: "Couleur des traits de la saisie pour la session",
+        argument_hint: Some("[couleur|default]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "reload-skills",
+        aliases: &[],
+        summary: "Relit les skills et commandes ajoutés pendant la session",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "reload-plugins",
+        aliases: &[],
+        summary: "Recharge plugins, hooks et serveurs MCP sans redémarrer",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "release-notes",
+        aliases: &["nouveautes", "nouveautés"],
+        summary: "Notes de version de Claw",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "usage",
+        aliases: &["stats"],
+        summary: "Coût, crédits et activité de la session",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "insights",
+        aliases: &[],
+        summary: "Bilan d'usage du projet en HTML : outils, commandes, échecs, pistes",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "simplify",
+        aliases: &["simplifier"],
+        summary: "Relit les changements avec quatre sous-agents (réutilisation, simplicité, efficacité, abstraction) et applique les corrections",
+        argument_hint: Some("[fichiers|branche]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "verify",
+        aliases: &["verifier", "vérifier"],
+        summary: "Vérifie qu'un changement fait ce qu'il doit en lançant l'application et en observant le résultat",
+        argument_hint: Some("[quoi vérifier]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "statusline",
+        aliases: &["ligne-etat"],
+        summary: "Configure la ligne d'état (script et réglage statusLine)",
+        argument_hint: Some("[description]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "fewer-permission-prompts",
+        aliases: &["moins-de-demandes"],
+        summary: "Propose des règles allow pour les commandes sûres et fréquentes du projet",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "background",
+        aliases: &["bg"],
+        summary: "Passe la session en arrière-plan : elle continue seule (claw agents pour la retrouver)",
+        argument_hint: Some("[demande]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "fork",
+        aliases: &[],
+        summary: "Copie la conversation dans une session en arrière-plan qui continue seule",
+        argument_hint: Some("[demande]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "keybindings",
+        aliases: &["raccourcis"],
+        summary: "Raccourcis clavier : crée ou montre ~/.claw/keybindings.json (format de Claude Code)",
         argument_hint: None,
         resume_supported: false,
         category: SlashCommandCategory::Core,
@@ -424,6 +673,46 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         category: SlashCommandCategory::Engineering,
     },
     SlashCommandSpec {
+        name: "security-review",
+        aliases: &["securite", "sécurité"],
+        summary: "Revue de sécurité des changements : failles exploitables, faux positifs écartés",
+        argument_hint: Some("[fichiers|branche|commit]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Engineering,
+    },
+    SlashCommandSpec {
+        name: "code-review",
+        aliases: &["ultrareview", "revue-multi"],
+        summary: "Revue multi-agents : relecteurs en parallèle, chaque problème vérifié avant d'être rapporté",
+        argument_hint: Some("[fichiers|branche|commit|PR n°]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Engineering,
+    },
+    SlashCommandSpec {
+        name: "pr-comments",
+        aliases: &["commentaires-pr"],
+        summary: "Commentaires d'une pull request GitHub (gh), regroupés, avec les corrections proposées",
+        argument_hint: Some("[numéro de PR]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Engineering,
+    },
+    SlashCommandSpec {
+        name: "add-dir",
+        aliases: &["ajouter-dossier"],
+        summary: "Écriture libre aussi dans un autre dossier (sans dossier : la liste)",
+        argument_hint: Some("[dossier] [--save]"),
+        resume_supported: true,
+        category: SlashCommandCategory::Workspace,
+    },
+    SlashCommandSpec {
+        name: "install-github-action",
+        aliases: &["install-github-app"],
+        summary: "Installe Claw dans GitHub : @claw dans les commentaires et revue des PR (modèles gratuits)",
+        argument_hint: Some("[assistant|review|all]"),
+        resume_supported: true,
+        category: SlashCommandCategory::Automation,
+    },
+    SlashCommandSpec {
         name: "teleport",
         aliases: &[],
         summary: "Saute à un fichier ou symbole en cherchant dans l'espace de travail",
@@ -466,6 +755,70 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
         category: SlashCommandCategory::Automation,
     },
     SlashCommandSpec {
+        name: "btw",
+        aliases: &["aparte"],
+        summary: "Question annexe sur la session, sans outils ; la réponse n'entre pas dans la conversation",
+        argument_hint: Some("<question>"),
+        resume_supported: false,
+        category: SlashCommandCategory::Session,
+    },
+    SlashCommandSpec {
+        name: "recap",
+        aliases: &["bilan"],
+        summary: "Bilan de la session : objectif, fait, état actuel, suite (non gardé dans la conversation)",
+        argument_hint: None,
+        resume_supported: false,
+        category: SlashCommandCategory::Session,
+    },
+    SlashCommandSpec {
+        name: "copy",
+        aliases: &["copier"],
+        summary: "Copie la dernière réponse (ou l'avant-dernière avec 2, etc.) dans le presse-papiers",
+        argument_hint: Some("[n]"),
+        resume_supported: true,
+        category: SlashCommandCategory::Session,
+    },
+    SlashCommandSpec {
+        name: "rename",
+        aliases: &["renommer"],
+        summary: "Renomme la session courante",
+        argument_hint: Some("<titre>"),
+        resume_supported: true,
+        category: SlashCommandCategory::Session,
+    },
+    SlashCommandSpec {
+        name: "goal",
+        aliases: &["objectif"],
+        summary: "Objectif : Claw continue tour après tour jusqu'à ce qu'un évaluateur le juge atteint",
+        argument_hint: Some("[condition|clear]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "loop",
+        aliases: &["boucle"],
+        summary: "Relance une demande entre les tours, à intervalle fixe ou choisi par Claw (/loop list, /loop stop)",
+        argument_hint: Some("[intervalle: 5m|1h] [demande] | list | stop [id]"),
+        resume_supported: false,
+        category: SlashCommandCategory::Automation,
+    },
+    SlashCommandSpec {
+        name: "output-style",
+        aliases: &["style"],
+        summary: "Style de réponse : par défaut, explicatif, apprentissage, concis, ou un style personnalisé",
+        argument_hint: Some("[nom|new <nom>]"),
+        resume_supported: true,
+        category: SlashCommandCategory::Core,
+    },
+    SlashCommandSpec {
+        name: "schedule",
+        aliases: &["routines", "routine"],
+        summary: "Routines planifiées sur GitHub Actions : Claw lance une demande selon un horaire, même ordinateur éteint",
+        argument_hint: Some("[list|<horaire> <demande>|delete <nom>]"),
+        resume_supported: true,
+        category: SlashCommandCategory::Automation,
+    },
+    SlashCommandSpec {
         name: "agents",
         aliases: &[],
         summary: "Liste les agents configurés",
@@ -487,7 +840,41 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
 pub enum SlashCommand {
     Help,
     Status,
-    Compact,
+    Compact {
+        instructions: Option<String>,
+    },
+    Btw {
+        question: Option<String>,
+    },
+    Recap,
+    Copy {
+        index: Option<String>,
+    },
+    Rename {
+        title: Option<String>,
+    },
+    Goal {
+        args: Option<String>,
+    },
+    Loop {
+        args: Option<String>,
+    },
+    OutputStyle {
+        args: Option<String>,
+    },
+    Schedule {
+        args: Option<String>,
+    },
+    InstallGithubAction {
+        args: Option<String>,
+    },
+    /// `/memory imports [allow|deny]` : imports externes de CLAUDE.md.
+    MemoryImports {
+        allow: Option<bool>,
+    },
+    AddDir {
+        args: Option<String>,
+    },
     Branch {
         action: Option<String>,
         target: Option<String>,
@@ -537,6 +924,56 @@ pub enum SlashCommand {
     },
     Credits,
     Doctor,
+    Keybindings,
+    Background {
+        prompt: Option<String>,
+    },
+    Plan {
+        task: Option<String>,
+    },
+    Tasks,
+    ListAgents {
+        args: Option<String>,
+    },
+    Stop,
+    Cd {
+        path: Option<String>,
+    },
+    Subtask {
+        task: Option<String>,
+    },
+    Workflows {
+        args: Option<String>,
+    },
+    DeepResearch {
+        question: Option<String>,
+    },
+    WorkflowAuthoring,
+    Tui {
+        mode: Option<String>,
+    },
+    Voice {
+        args: Option<String>,
+    },
+    Rewind,
+    Sandbox {
+        args: Option<String>,
+    },
+    TerminalSetup,
+    Theme {
+        name: Option<String>,
+    },
+    Color {
+        color: Option<String>,
+    },
+    ReloadSkills,
+    ReloadPlugins,
+    ReleaseNotes,
+    Usage,
+    Insights,
+    Fork {
+        prompt: Option<String>,
+    },
     Teleport {
         target: Option<String>,
     },
@@ -603,7 +1040,37 @@ impl SlashCommand {
         Some(match command {
             "help" => Self::Help,
             "status" => Self::Status,
-            "compact" => Self::Compact,
+            "compact" => Self::Compact {
+                instructions: remainder_after_command(trimmed, command),
+            },
+            "btw" | "aparte" | "aparté" => Self::Btw {
+                question: remainder_after_command(trimmed, command),
+            },
+            "recap" | "bilan" => Self::Recap,
+            "copy" | "copier" => Self::Copy {
+                index: parts.next().map(ToOwned::to_owned),
+            },
+            "rename" | "renommer" => Self::Rename {
+                title: remainder_after_command(trimmed, command),
+            },
+            "goal" | "objectif" => Self::Goal {
+                args: remainder_after_command(trimmed, command),
+            },
+            "loop" | "boucle" => Self::Loop {
+                args: remainder_after_command(trimmed, command),
+            },
+            "output-style" | "style" => Self::OutputStyle {
+                args: remainder_after_command(trimmed, command),
+            },
+            "schedule" | "routines" | "routine" => Self::Schedule {
+                args: remainder_after_command(trimmed, command),
+            },
+            "install-github-action" | "install-github-app" => Self::InstallGithubAction {
+                args: remainder_after_command(trimmed, command),
+            },
+            "add-dir" | "ajouter-dossier" => Self::AddDir {
+                args: remainder_after_command(trimmed, command),
+            },
             "branch" => Self::Branch {
                 action: parts.next().map(ToOwned::to_owned),
                 target: parts.next().map(ToOwned::to_owned),
@@ -640,10 +1107,10 @@ impl SlashCommand {
             "equipe" | "équipe" | "team" => Self::Team {
                 args: remainder_after_command(trimmed, command),
             },
-            "bashes" | "tasks" => Self::Bashes {
+            "bashes" => Self::Bashes {
                 args: remainder_after_command(trimmed, command),
             },
-            "undo" | "rewind" => Self::Undo {
+            "undo" => Self::Undo {
                 count: parts.next().map(ToOwned::to_owned),
             },
             "checkpoints" => Self::Checkpoints,
@@ -653,11 +1120,61 @@ impl SlashCommand {
             },
             "credits" | "solde" => Self::Credits,
             "doctor" | "diagnostic" => Self::Doctor,
+            "keybindings" | "raccourcis" => Self::Keybindings,
+            "plan" => Self::Plan {
+                task: remainder_after_command(trimmed, command),
+            },
+            "tasks" => Self::Tasks,
+            "list-agents" | "peers" => Self::ListAgents {
+                args: remainder_after_command(trimmed, command),
+            },
+            "stop" => Self::Stop,
+            "cd" => Self::Cd {
+                path: remainder_after_command(trimmed, command),
+            },
+            "subtask" | "sous-tache" | "sous-tâche" => Self::Subtask {
+                task: remainder_after_command(trimmed, command),
+            },
+            "workflows" => Self::Workflows {
+                args: remainder_after_command(trimmed, command),
+            },
+            "deep-research" => Self::DeepResearch {
+                question: remainder_after_command(trimmed, command),
+            },
+            "workflow-authoring" => Self::WorkflowAuthoring,
+            "tui" | "plein-ecran" => Self::Tui {
+                mode: remainder_after_command(trimmed, command),
+            },
+            "voice" | "dictee" | "dictée" => Self::Voice {
+                args: remainder_after_command(trimmed, command),
+            },
+            "rewind" | "checkpoint" => Self::Rewind,
+            "sandbox" | "bac-a-sable" => Self::Sandbox {
+                args: remainder_after_command(trimmed, command),
+            },
+            "terminal-setup" => Self::TerminalSetup,
+            "theme" | "theme-couleurs" => Self::Theme {
+                name: remainder_after_command(trimmed, command),
+            },
+            "color" | "couleur" => Self::Color {
+                color: remainder_after_command(trimmed, command),
+            },
+            "reload-skills" => Self::ReloadSkills,
+            "reload-plugins" => Self::ReloadPlugins,
+            "release-notes" | "nouveautes" | "nouveautés" => Self::ReleaseNotes,
+            "usage" | "stats" => Self::Usage,
+            "insights" => Self::Insights,
+            "background" | "bg" => Self::Background {
+                prompt: remainder_after_command(trimmed, command),
+            },
+            "fork" => Self::Fork {
+                prompt: remainder_after_command(trimmed, command),
+            },
             "model" => Self::Model {
                 model: parts.next().map(ToOwned::to_owned),
             },
             "permissions" => Self::Permissions {
-                mode: parts.next().map(ToOwned::to_owned),
+                mode: remainder_after_command(trimmed, command),
             },
             "clear" => Self::Clear {
                 confirm: parts.next() == Some("--confirm"),
@@ -670,7 +1187,16 @@ impl SlashCommand {
             "config" => Self::Config {
                 section: parts.next().map(ToOwned::to_owned),
             },
-            "memory" => Self::Memory,
+            "memory" => match (parts.next(), parts.next()) {
+                (Some("imports"), choice) => Self::MemoryImports {
+                    allow: match choice {
+                        Some("allow" | "autoriser" | "oui") => Some(true),
+                        Some("deny" | "refuser" | "non") => Some(false),
+                        _ => None,
+                    },
+                },
+                _ => Self::Memory,
+            },
             "init" => Self::Init,
             "diff" => Self::Diff,
             "version" => Self::Version,
@@ -722,37 +1248,43 @@ pub fn resume_supported_slash_commands() -> Vec<&'static SlashCommandSpec> {
 }
 
 /// Section du prompt système listant les compétences disponibles (nom et
-/// description), pour que le modèle sache quand appeler l'outil `Skill`.
+/// description), pour que le modèle sache quand appeler l'outil `Skill`. Les
+/// skills réservés à l'utilisateur (`disable-model-invocation`, réglage
+/// `skillOverrides`) n'y figurent pas.
 #[must_use]
 pub fn skills_prompt_section(cwd: &Path) -> Option<String> {
-    let skills = load_all_skills(cwd).ok()?;
-    let active = skills
-        .iter()
-        .filter(|skill| {
-            skill.shadowed_by.is_none()
-                && skill.origin == SkillOrigin::SkillsDir
-                && skill.model_invocable
-                && skill.unavailable.is_none()
-        })
+    let active = skill_registry::installed_skills(cwd)
+        .into_iter()
+        .filter(skill_registry::InstalledSkill::model_invocable)
         .take(40)
-        .map(|skill| match &skill.description {
-            // Description coupée : 40 compétences ne doivent pas noyer le prompt.
-            // Une description écrite ailleurs peut porter un tiret long ou des
-            // emoji, que ce même prompt interdit au modèle d'écrire.
-            Some(description) => format!(
-                "- {}: {}",
-                skill.name,
-                runtime::typography::cleaned(&shorten(description, 400))
-            ),
-            None => format!("- {}", skill.name),
+        .map(|skill| {
+            let paths = if skill.file.paths.is_empty() {
+                String::new()
+            } else {
+                format!(" (only for files matching {})", skill.file.paths.join(", "))
+            };
+            match skill.file.listing_text() {
+                // Description coupée : 40 compétences ne doivent pas noyer le prompt.
+                // Une description écrite ailleurs peut porter un tiret long ou des
+                // emoji, que ce même prompt interdit au modèle d'écrire.
+                Some(text) if skill.visibility != skill_registry::Visibility::NameOnly => format!(
+                    "- {}: {}{paths}",
+                    skill.file.name,
+                    runtime::typography::cleaned(&shorten(&text, 400))
+                ),
+                _ => format!("- {}{paths}", skill.file.name),
+            }
         })
         .collect::<Vec<_>>();
     if active.is_empty() {
         return None;
     }
     Some(format!(
-        "# Skills\nThese skills are installed. When a task matches one, load its instructions with the Skill tool (argument `skill` = the name) before starting:\n{}",
-        active.join("\n")
+        "# Skills
+These skills are installed. When a task matches one, load its instructions with the Skill tool (argument `skill` = the name, `args` = the arguments) before starting:
+{}",
+        active.join("
+")
     ))
 }
 
@@ -2149,7 +2681,7 @@ pub fn handle_slash_command(
     compaction: CompactionConfig,
 ) -> Option<SlashCommandResult> {
     match SlashCommand::parse(input)? {
-        SlashCommand::Compact => {
+        SlashCommand::Compact { .. } => {
             let result = compact_session(session, compaction);
             let message = if result.removed_message_count == 0 {
                 "Compaction ignorée : la session est sous le seuil de compaction.".to_string()
@@ -2169,6 +2701,41 @@ pub fn handle_slash_command(
             session: session.clone(),
         }),
         SlashCommand::Status
+        | SlashCommand::Btw { .. }
+        | SlashCommand::Recap
+        | SlashCommand::Copy { .. }
+        | SlashCommand::Rename { .. }
+        | SlashCommand::Goal { .. }
+        | SlashCommand::Loop { .. }
+        | SlashCommand::OutputStyle { .. }
+        | SlashCommand::Schedule { .. }
+        | SlashCommand::InstallGithubAction { .. }
+        | SlashCommand::MemoryImports { .. }
+        | SlashCommand::Keybindings
+        | SlashCommand::Background { .. }
+        | SlashCommand::Fork { .. }
+        | SlashCommand::Plan { .. }
+        | SlashCommand::Tasks
+        | SlashCommand::ListAgents { .. }
+        | SlashCommand::Stop
+        | SlashCommand::Cd { .. }
+        | SlashCommand::Subtask { .. }
+        | SlashCommand::Workflows { .. }
+        | SlashCommand::DeepResearch { .. }
+        | SlashCommand::WorkflowAuthoring
+        | SlashCommand::Tui { .. }
+        | SlashCommand::Voice { .. }
+        | SlashCommand::Rewind
+        | SlashCommand::Sandbox { .. }
+        | SlashCommand::TerminalSetup
+        | SlashCommand::Theme { .. }
+        | SlashCommand::Color { .. }
+        | SlashCommand::ReloadSkills
+        | SlashCommand::ReloadPlugins
+        | SlashCommand::ReleaseNotes
+        | SlashCommand::Usage
+        | SlashCommand::Insights
+        | SlashCommand::AddDir { .. }
         | SlashCommand::Branch { .. }
         | SlashCommand::Bughunter { .. }
         | SlashCommand::Worktree { .. }
@@ -2591,7 +3158,7 @@ mod tests {
         assert!(help.contains("/teleport <symbole-ou-chemin>"));
         assert!(help.contains("/debug-tool-call"));
         assert!(help.contains("/model [modèle]"));
-        assert!(help.contains("/permissions [prompt|read-only|workspace-write|danger-full-access]"));
+        assert!(help.contains("/permissions [prompt|read-only|workspace-write|danger-full-access|allow|deny|ask|remove <règle>]"));
         assert!(help.contains("/clear [--confirm]"));
         assert!(help.contains("/cost"));
         assert!(help.contains("/resume <chemin-session>"));
@@ -2613,15 +3180,27 @@ mod tests {
         assert!(help.contains("/skills"));
         assert!(help.contains("/context"));
         assert!(help.contains("/equipe [off]"));
-        assert_eq!(slash_command_specs().len(), 45);
-        assert_eq!(resume_supported_slash_commands().len(), 13);
+        assert!(help.contains("/compact [consigne]"));
+        assert!(help.contains("/loop [intervalle: 5m|1h] [demande] | list | stop [id]"));
+        assert!(help.contains("/output-style [nom|new <nom>]"));
+        assert!(help.contains("/schedule [list|<horaire> <demande>|delete <nom>]"));
+        assert!(help.contains("/btw"));
+        assert!(help.contains("/goal"));
+        assert!(help.contains("/security-review [fichiers|branche|commit]"));
+        assert!(help.contains("/code-review [fichiers|branche|commit|PR n°]"));
+        assert!(help.contains("/install-github-action [assistant|review|all]"));
+        assert!(help.contains("/add-dir [dossier] [--save]"));
+        assert_eq!(slash_command_specs().len(), 86);
+        assert_eq!(resume_supported_slash_commands().len(), 19);
     }
 
     #[test]
     fn suggests_close_slash_commands() {
-        let suggestions = suggest_slash_commands("stats", 3);
+        let suggestions = suggest_slash_commands("statu", 3);
         assert!(!suggestions.is_empty());
         assert_eq!(suggestions[0], "/status");
+        // `stats` est un alias de `/usage`, comme dans Claude Code.
+        assert_eq!(suggest_slash_commands("stats", 3)[0], "/usage");
     }
 
     #[test]

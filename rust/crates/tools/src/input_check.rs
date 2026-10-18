@@ -14,6 +14,16 @@ const ENDED_BEFORE_ARGUMENTS: &str = "claw_reply_ended_before_arguments";
 /// du modèle : l'appel n'est pas exécuté et le modèle apprend pourquoi.
 const CUT_BY_OUTPUT_LIMIT: &str = "claw_reply_cut_by_output_limit";
 
+/// Clé mise à la place des arguments d'un appel que le fournisseur a clos au
+/// milieu de ses arguments, avec le nombre de caractères reçus.
+const STOPPED_MID_ARGUMENTS: &str = "claw_reply_stopped_mid_arguments";
+
+/// Arguments reçus à partir desquels un appel clos en cours de route n'est
+/// pas redemandé : le fournisseur plafonne la taille des réponses, et la même
+/// requête est coupée au même endroit. Vu dans un essai réel : un `write_file`
+/// de page web coupé trois fois de suite, puis le tour abandonné.
+const LONG_CUT_ARGUMENTS: usize = 4_000;
+
 /// Arguments obligatoires d'un outil, d'après son schéma.
 #[must_use]
 pub fn required_arguments(schema: &Value) -> Vec<String> {
@@ -100,9 +110,11 @@ fn is_marker(input: &str, key: &str) -> bool {
 /// Repère les appels d'outils coupés d'une réponse qui ne s'est pas terminée
 /// sur un appel d'outil. Coupé par la limite de sortie, l'appel est marqué :
 /// il ne sera pas exécuté et le modèle apprendra pourquoi. Clos par le
-/// fournisseur avant ses arguments, c'est une erreur si `retry_unfinished`
-/// (la réponse sera redemandée), sinon l'appel est marqué lui aussi.
-/// `required_for` donne les arguments obligatoires d'un outil.
+/// fournisseur avant la fin de ses arguments, c'est une erreur si
+/// `retry_unfinished` (la réponse sera redemandée), sinon l'appel est marqué
+/// lui aussi ; des arguments déjà longs ne sont jamais redemandés
+/// ([`LONG_CUT_ARGUMENTS`]). `required_for` donne les arguments obligatoires
+/// d'un outil.
 ///
 /// # Errors
 ///
@@ -124,8 +136,16 @@ pub fn check_cut_calls(
         match cut_call(stop_reason, input, &required_for(name)) {
             None => {}
             Some(Cut::OutputLimit) => *input = output_limit_marker(),
+            Some(Cut::Unfinished) if input.trim().len() >= LONG_CUT_ARGUMENTS => {
+                *input = json!({ STOPPED_MID_ARGUMENTS: input.trim().chars().count() }).to_string();
+            }
             Some(Cut::Unfinished) if retry_unfinished => return Err(unfinished_error(name, input)),
-            Some(Cut::Unfinished) => *input = json!({ ENDED_BEFORE_ARGUMENTS: true }).to_string(),
+            Some(Cut::Unfinished) if matches!(input.trim(), "" | "{}") => {
+                *input = json!({ ENDED_BEFORE_ARGUMENTS: true }).to_string();
+            }
+            Some(Cut::Unfinished) => {
+                *input = json!({ STOPPED_MID_ARGUMENTS: input.trim().chars().count() }).to_string();
+            }
         }
     }
     Ok(())
@@ -464,6 +484,15 @@ pub fn problem(
             "Your reply ended before the arguments of `{tool_name}` arrived, so nothing was executed. Send the call again with its arguments."
         ));
     }
+    if let Some(received) = serde_json::from_str::<Value>(input.trim())
+        .ok()
+        .filter(|value| value.as_object().is_some_and(|object| object.len() == 1))
+        .and_then(|value| value.get(STOPPED_MID_ARGUMENTS).and_then(Value::as_u64))
+    {
+        return Some(format!(
+            "Your reply stopped after {received} characters, in the middle of the arguments of `{tool_name}`: the provider ends replies of that size, so nothing was executed and sending the same call again would be cut at the same place. Send calls well under that size: write a long file in several parts (create it with write_file and its first part, ending on a line such as <!-- more -->, then extend it with edit_file, replacing that line with the next part and the same line again, then remove it), or split it into several smaller files (one stylesheet per part of the page, for example), and keep your reasoning short."
+        ));
+    }
     let missing = match missing_arguments(input, required) {
         Ok(missing) => missing,
         Err(error) => {
@@ -649,6 +678,38 @@ mod tests {
             Ok(())
         );
         assert_eq!(input(&events), output_limit_marker());
+        // Close au milieu de longs arguments : la même requête serait coupée au
+        // même endroit, l'appel est marqué sans être redemandé.
+        let long = format!(
+            r#"{{"path":"index.html","content":"{}"#,
+            "<p>pain</p>\\n".repeat(400)
+        );
+        let mut events = vec![call(&long)];
+        assert_eq!(
+            check_cut_calls(&mut events, Some("stop"), required, true),
+            Ok(())
+        );
+        let told =
+            problem("write_file", &input(&events), &edit_arguments(), &[]).expect("appel marqué");
+        assert!(
+            told.starts_with(&format!(
+                "Your reply stopped after {} characters",
+                long.chars().count()
+            )) && told.contains("several parts"),
+            "{told}"
+        );
+        // Courts arguments : redemandés, puis marqués à la dernière tentative.
+        let mut events = vec![call(r#"{"path":"a.py","old_str"#)];
+        assert!(check_cut_calls(&mut events, Some("stop"), required, true).is_err());
+        assert_eq!(
+            check_cut_calls(&mut events, Some("stop"), required, false),
+            Ok(())
+        );
+        assert!(
+            problem("edit_file", &input(&events), &edit_arguments(), &[])
+                .expect("appel marqué")
+                .starts_with("Your reply stopped after 23 characters")
+        );
         // Réponse terminée sur un appel d'outil : rien n'est touché.
         let mut events = vec![call("{}")];
         assert_eq!(

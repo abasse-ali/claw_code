@@ -1,0 +1,24 @@
+.booking { display: grid; gap: 1.5rem; padding: clamp(1.25rem, 4vw, 2rem); border-radius: calc(var(--radius, 12px) + 4px); background: var(--surface, color-mix(in srgb, var(--paper, #f7f3ec) 94%, var(--ink, #1f1d1a))); border: 1px solid color-mix(in srgb, var(--ink, #1f1d1a) 10%, transparent); }
+.booking h2 { margin: 0; font-family: var(--font-display, serif); }
+.booking__label { margin: 0 0 .75rem; font-size: 1rem; color: var(--muted, #5f5a52); font-weight: 600; }
+.booking__days, .booking__slots { display: flex; flex-wrap: wrap; gap: .5rem; }
+.booking__day, .booking__slot { min-height: 44px; padding: .5rem 1rem; border: 1px solid color-mix(in srgb, var(--ink, #1f1d1a) 18%, transparent); border-radius: var(--radius, 12px); background: var(--paper, #f7f3ec); color: inherit; font: inherit; cursor: pointer; transition: border-color .2s, background-color .2s, color .2s, transform .2s; }
+.booking__day:hover:not(:disabled), .booking__slot:hover:not(:disabled) { border-color: var(--accent, #8a3b12); transform: translateY(-1px); }
+.booking__day[aria-pressed="true"], .booking__slot[aria-pressed="true"] { border-color: var(--accent, #8a3b12); background: var(--accent, #8a3b12); color: var(--paper, #f7f3ec); }
+.booking__slot { display: grid; gap: .1rem; text-align: left; }
+.booking__slot small { color: inherit; opacity: .75; }
+.booking__slot:disabled { opacity: .45; cursor: not-allowed; text-decoration: line-through; }
+.booking__hint { margin: 0; color: var(--muted, #5f5a52); }
+.booking__form { display: grid; gap: .9rem; max-width: 28rem; }
+.booking__form label { display: grid; gap: .35rem; font-weight: 600; }
+.booking__form input { min-height: 44px; padding: .6rem .8rem; border: 1px solid color-mix(in srgb, var(--ink, #1f1d1a) 25%, transparent); border-radius: calc(var(--radius, 12px) - 4px); background: var(--paper, #f7f3ec); font: inherit; color: inherit; }
+.booking__form input:user-invalid { border-color: var(--error, #b42318); }
+.booking__summary { margin: 0; font-weight: 600; }
+.booking__confirm, .booking__calendar { display: inline-flex; align-items: center; justify-content: center; gap: .5rem; min-height: 48px; padding: 0 1.4rem; border: 0; border-radius: 999px; background: var(--accent, #8a3b12); color: var(--paper, #f7f3ec); font: inherit; font-weight: 600; cursor: pointer; transition: filter .2s, transform .2s; }
+.booking__confirm:hover, .booking__calendar:hover { filter: brightness(1.08); transform: translateY(-1px); }
+.booking__confirm:disabled { opacity: .6; cursor: progress; }
+.booking__done { display: grid; gap: 1rem; justify-items: start; }
+.booking__done-title { display: flex; align-items: center; gap: .5rem; margin: 0; font-weight: 600; }
+.booking__done-title .icon { color: #2f7d4f; }
+.booking__calendar { background: transparent; color: var(--accent, #8a3b12); border: 1px solid currentColor; }
+.booking__form[hidden], .booking__done[hidden] { display: none; }

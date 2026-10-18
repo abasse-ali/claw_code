@@ -514,7 +514,7 @@ fn now_unix_timestamp() -> u64 {
 fn read_env_non_empty(key: &str) -> Result<Option<String>, ApiError> {
     match std::env::var(key) {
         Ok(value) if !value.is_empty() => Ok(Some(value)),
-        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(crate::key_helper::key(key)),
         Err(error) => Err(ApiError::from(error)),
     }
 }
@@ -615,6 +615,9 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     let status = response.status();
     if status.is_success() {
         return Ok(response);
+    }
+    if matches!(status.as_u16(), 401 | 403) {
+        crate::key_helper::invalidate();
     }
 
     let body = response.text().await.unwrap_or_else(|_| String::new());

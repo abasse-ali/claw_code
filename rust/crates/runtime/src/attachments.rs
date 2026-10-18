@@ -229,9 +229,42 @@ pub fn encode_base64(bytes: &[u8]) -> String {
     output
 }
 
+/// Décode du base64 standard (blancs ignorés) ; `None` sur un caractère étranger.
+#[must_use]
+pub fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    let mut output = Vec::with_capacity(text.len() / 4 * 3);
+    let mut buffer = 0_u32;
+    let mut bits = 0;
+    for byte in text.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        if byte == b'=' {
+            break;
+        }
+        let value = BASE64_ALPHABET.iter().position(|known| *known == byte)?;
+        buffer = (buffer << 6) | u32::try_from(value).ok()?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            output.push(u8::try_from((buffer >> bits) & 0xFF).ok()?);
+        }
+    }
+    Some(output)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{encode_base64, extract_image_attachments};
+    use super::{decode_base64, encode_base64, extract_image_attachments};
+
+    #[test]
+    fn decodes_what_it_encodes() {
+        for text in [&b""[..], b"f", b"fo", b"foo", b"<svg viewBox='0 0 24 24'/>"] {
+            assert_eq!(decode_base64(&encode_base64(text)).as_deref(), Some(text));
+        }
+        assert_eq!(decode_base64("Zm9v\nYmFy"), Some(b"foobar".to_vec()));
+        assert_eq!(decode_base64("Zm9v!"), None);
+    }
     use std::fs;
 
     #[test]

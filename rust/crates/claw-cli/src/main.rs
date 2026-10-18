@@ -1,13 +1,23 @@
 mod acp;
+mod agent_view;
 mod approval;
+mod auto_mode;
 mod bench;
+mod bench_design;
 mod bench_hard;
+mod channel_server;
 mod clipboard;
 mod credits;
 mod doctor;
+mod extra_commands;
+mod fullscreen;
+mod git_work;
+mod github_setup;
 mod image_reader;
 mod init;
 mod input;
+mod jobs;
+mod keybindings;
 mod likeness;
 mod live;
 mod mcp_cli;
@@ -15,10 +25,13 @@ mod model_switch;
 mod models;
 mod questions;
 mod render;
+mod routines;
+mod statusline;
 mod stream_json;
 mod transcript;
 mod turn_keys;
 mod user_env;
+mod voice;
 mod web;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -116,7 +129,31 @@ fn main() {
     ensure_home_env();
     // Clés définies dans le compte mais absentes de l'environnement reçu.
     user_env::adopt();
+    apply_settings_env();
+    runtime::set_classify_all_shell(auto_mode::rules().classify_all_shell);
+    install_key_helpers();
+    if let Some(theme) = env::current_dir()
+        .ok()
+        .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok())
+        .and_then(|config| {
+            config
+                .get("theme")
+                .and_then(|value| value.as_str().map(str::to_string))
+        })
+    {
+        render::set_theme(&theme);
+    }
+    runtime::telemetry::install(
+        VERSION,
+        Box::new(tools::otlp_export),
+        Box::new(|model, usage| models::estimated_cost_usd(model, *usage)),
+    );
     let result = run();
+    // Ce que la télémétrie n'a pas encore envoyé part maintenant.
+    runtime::telemetry::shutdown();
+    tools::monitors::stop_all();
+    tools::workflows::stop_all();
+    runtime::peers::unregister();
     // Les serveurs de dev et autres commandes de fond ne survivent pas à Claw.
     runtime::bash_tasks::kill_all();
     runtime::stop_all_containers();
@@ -125,6 +162,1168 @@ fn main() {
         eprintln!("{}", render_cli_error(&error.to_string()));
         std::process::exit(1);
     }
+    let code = EXIT_CODE.load(std::sync::atomic::Ordering::SeqCst);
+    if code != 0 {
+        std::process::exit(code);
+    }
+}
+
+/// Code de sortie demandé par la session (passage du plein écran au rendu
+/// classique), rendu après le nettoyage.
+static EXIT_CODE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Fin d'une session interactive.
+enum ReplExit {
+    Done,
+    /// `/tui fullscreen` : la conversation continue en plein écran.
+    Fullscreen(PathBuf),
+    /// `/tui default` dans le plein écran : elle continue en rendu classique.
+    Classic(PathBuf),
+}
+
+/// Session interactive, en rendu classique ou plein écran (`/tui`) ; la
+/// conversation passe de l'un à l'autre.
+fn run_interactive(
+    model: &str,
+    allowed_tools: Option<&AllowedToolSet>,
+    permission_mode: PermissionMode,
+    mut resume: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut fullscreen = fullscreen::wanted();
+    loop {
+        if fullscreen {
+            // Les mêmes options, sans la reprise : la conversation est confiée à part.
+            let args: Vec<String> = env::args()
+                .skip(1)
+                .filter(|arg| !matches!(arg.as_str(), "--resume" | "--continue" | "-c"))
+                .collect();
+            match fullscreen::run(&args, resume.as_deref()) {
+                Ok(Some(session)) => {
+                    resume = Some(session);
+                    fullscreen = false;
+                    continue;
+                }
+                Ok(None) => return Ok(()),
+                Err(error) => {
+                    eprintln!("Rendu plein écran indisponible ({error}) : rendu classique.");
+                    fullscreen = false;
+                    continue;
+                }
+            }
+        }
+        match run_repl(
+            model.to_string(),
+            allowed_tools.cloned(),
+            permission_mode,
+            resume.take(),
+        )? {
+            ReplExit::Done => return Ok(()),
+            ReplExit::Fullscreen(session) => {
+                resume = Some(session);
+                fullscreen = true;
+            }
+            ReplExit::Classic(session) => {
+                if fullscreen::hand_off(&session) {
+                    EXIT_CODE.store(
+                        i32::from(fullscreen::RELAUNCH_CLASSIC),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                }
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// `claw agents …` : options de la vue des agents.
+fn parse_agent_view_args(
+    args: &[String],
+    model: Option<String>,
+    permission_mode: PermissionMode,
+) -> Result<CliAction, String> {
+    let mut json = false;
+    let mut all = false;
+    let mut cwd = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--json" => json = true,
+            "--all" => all = true,
+            "--cwd" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "valeur manquante pour --cwd".to_string())?;
+                cwd = Some(PathBuf::from(value));
+                index += 1;
+            }
+            flag if flag.starts_with("--cwd=") => cwd = Some(PathBuf::from(&flag[6..])),
+            other => return Err(format!("option inconnue pour claw agents : {other}")),
+        }
+        index += 1;
+    }
+    let cwd = cwd.map(|path| {
+        if path.is_absolute() {
+            path
+        } else {
+            env::current_dir().map_or(path.clone(), |dir| dir.join(&path))
+        }
+    });
+    Ok(CliAction::AgentView {
+        json,
+        all,
+        cwd,
+        model,
+        permission_mode,
+    })
+}
+
+fn job_target(rest: &[String], command: &str) -> Result<String, String> {
+    rest.get(1)
+        .cloned()
+        .ok_or_else(|| format!("usage : claw {command} <identifiant ou nom de la session>"))
+}
+
+/// Texte de la dernière réponse du modèle dans une conversation.
+fn last_assistant_of(session: &Session) -> String {
+    session
+        .messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == runtime::MessageRole::Assistant)
+        .find_map(|message| {
+            let text = message
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.trim().is_empty()).then_some(text)
+        })
+        .unwrap_or_default()
+}
+
+/// Première ligne utile d'une réponse, pour la ligne de la vue des agents.
+fn summary_line(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            line.trim()
+                .trim_start_matches(['#', '*', '-', '>', ' '])
+                .trim()
+        })
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(200).collect())
+        .unwrap_or_default()
+}
+
+/// Dernière ligne d'une réponse qui se termine par une question.
+fn trailing_question(text: &str) -> Option<String> {
+    let last = text.lines().map(str::trim).rfind(|line| !line.is_empty())?;
+    last.trim_end_matches(['*', '_', ' '])
+        .ends_with('?')
+        .then(|| last.chars().take(300).collect())
+}
+
+/// Processus d'une session en arrière-plan : il traite la première demande,
+/// puis chaque réponse déposée dans sa boîte, jusqu'à être libéré.
+#[allow(clippy::too_many_lines)]
+fn run_job_worker(id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let job = jobs::load(id).ok_or("session en arrière-plan inconnue")?;
+    let _heartbeat = jobs::Heartbeat::start(id);
+    env::set_current_dir(&job.cwd)?;
+    jobs::update_state(id, |state| state.pid = Some(std::process::id()));
+    if let Some(command) = &job.command {
+        run_exec_job(id, command);
+        return Ok(());
+    }
+    let mode = parse_permission_mode_arg(&job.permission_mode)
+        .unwrap_or_else(|_| default_permission_mode());
+    let mut cli = LiveCli::new(job.model.clone(), true, None, mode)?;
+    let initial = jobs::load_state(id);
+    let existing = initial
+        .session_path
+        .clone()
+        .or_else(|| job.session_path.clone())
+        .filter(|path| Path::new(path).is_file());
+    if let Some(path) = existing {
+        let fresh = cli.session.path.clone();
+        cli.load_session_quietly(Path::new(&path))?;
+        if fresh != cli.session.path {
+            let _ = fs::remove_file(fresh);
+        }
+    } else if job.worktree.is_some() {
+        // Conversation rangée avec celles du dossier d'origine : elle reste
+        // après la suppression du worktree (`claw --resume`).
+        let sessions = Path::new(&job.origin).join(".claw").join("sessions");
+        fs::create_dir_all(&sessions)?;
+        if let Some(name) = cli.session.path.file_name() {
+            let target = sessions.join(name);
+            let _ = fs::remove_file(&cli.session.path);
+            cli.session.path = target;
+            cli.persist_session()?;
+            session_bound(&cli.session.path);
+        }
+    }
+    let session_path = cli.session.path.display().to_string();
+    jobs::update_state(id, |state| state.session_path = Some(session_path.clone()));
+    tools::set_question_asker(Some(jobs::question_asker(id)));
+    runtime::telemetry::session_started("background");
+    runtime::peers::register(&job.name, "background", mode.as_str());
+    cli.session_hook_start("startup");
+    let mut next = if initial.turns == 0 && !job.prompt.trim().is_empty() {
+        Some(match &job.worktree {
+            Some(tree) => format!("{}\n\n{}", job.prompt, jobs::isolation_note(tree)),
+            None => job.prompt.clone(),
+        })
+    } else {
+        jobs::take_message(id)
+    };
+    // Boucle au rythme choisi en cours : (demande, réveil de secours).
+    let mut self_paced: Option<(String, bool)> = None;
+    loop {
+        let Some(prompt) = next.take() else {
+            match jobs::wait_next_prompt(id) {
+                Some(jobs::NextPrompt::Message(message)) => {
+                    next = Some(message);
+                    continue;
+                }
+                Some(jobs::NextPrompt::Event(text)) => {
+                    next = Some(text);
+                    continue;
+                }
+                Some(jobs::NextPrompt::Task(task)) => {
+                    println!("\n↻ Tâche planifiée {}", task.id);
+                    if task.self_paced {
+                        self_paced = Some((task.prompt.clone(), task.fallback));
+                        let _ = runtime::cron::take_stop_requested();
+                    }
+                    next = Some(scheduled_prompt(&task));
+                    continue;
+                }
+                None => break,
+            }
+        };
+        let headline = summary_line(&prompt);
+        jobs::update_state(id, |state| {
+            state.state = jobs::WORKING.to_string();
+            state.waiting_for = None;
+            state.question = None;
+            state.finished_at = None;
+            state.detail = headline;
+        });
+        println!("\n> {}\n", prompt.trim());
+        let result = cli.run_job_turn(&prompt, id);
+        let answer = last_assistant_of(cli.runtime.session());
+        let error = result.as_ref().err().map(ToString::to_string);
+        jobs::update_state(id, |state| {
+            state.turns += 1;
+            state.finished_at = Some(jobs::now_ms());
+            state.waiting_for = None;
+            state.question = None;
+            match &error {
+                None => {
+                    state.state = jobs::DONE.to_string();
+                    state.detail = summary_line(&answer);
+                    // Une réponse qui finit par une question attend l'utilisateur.
+                    if let Some(question) = trailing_question(&answer) {
+                        state.waiting_for = Some("input needed".to_string());
+                        state.question = Some(question);
+                    }
+                }
+                Some(error) => {
+                    state.state = jobs::FAILED.to_string();
+                    state.detail = summary_line(error);
+                }
+            }
+        });
+        if let Some(error) = error {
+            eprintln!("{}", render_cli_error(&error));
+        }
+        if let Some((request, fallback)) = self_paced.take() {
+            after_self_paced_pass(&request, fallback);
+        }
+        next = jobs::take_message(id);
+    }
+    cli.session_hook_end("exit");
+    jobs::update_state(id, |state| state.pid = None);
+    Ok(())
+}
+
+/// `claw --bg --exec 'commande'` : une commande shell en arrière-plan.
+fn run_exec_job(id: &str, command: &str) {
+    jobs::update_state(id, |state| {
+        state.state = jobs::WORKING.to_string();
+        state.detail = format!("$ {command}");
+    });
+    println!("$ {command}");
+    let status = plugins::posix_shell_command(command)
+        .stdin(std::process::Stdio::null())
+        .status();
+    let tail = transcript::strip_ansi(&jobs::log_tail(id, 4 * 1024));
+    let last = tail
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    jobs::update_state(id, |state| {
+        state.finished_at = Some(jobs::now_ms());
+        state.pid = None;
+        match status {
+            Ok(status) if status.success() => {
+                state.state = jobs::DONE.to_string();
+                state.detail = if last.is_empty() {
+                    "terminée (code 0)".to_string()
+                } else {
+                    last
+                };
+            }
+            Ok(status) => {
+                state.state = jobs::FAILED.to_string();
+                state.detail = format!("code {} · {last}", status.code().unwrap_or(-1));
+            }
+            Err(error) => {
+                state.state = jobs::FAILED.to_string();
+                state.detail = format!("lancement impossible : {error}");
+            }
+        }
+    });
+}
+
+enum Follow {
+    /// L'utilisateur a rendu la main (Échap) : la session continue.
+    Detached,
+    /// La session ne travaille plus.
+    Idle,
+}
+
+/// Nouvelles sorties de la session depuis `offset`.
+fn read_new_output(id: &str, offset: &mut u64) -> String {
+    use std::io::{Read as _, Seek as _};
+    let Ok(mut file) = fs::File::open(jobs::log_path(id)) else {
+        return String::new();
+    };
+    let length = file.metadata().map_or(0, |metadata| metadata.len());
+    if length < *offset {
+        *offset = 0;
+    }
+    if file.seek(io::SeekFrom::Start(*offset)).is_err() {
+        return String::new();
+    }
+    let mut buffer = Vec::new();
+    let _ = file.read_to_end(&mut buffer);
+    *offset += u64::try_from(buffer.len()).unwrap_or(0);
+    String::from_utf8_lossy(&buffer).into_owned()
+}
+
+/// Suit les sorties d'une session au travail. Une question posée en plein
+/// tour (permission, `AskUserQuestion`) se répond ici ; Échap, ← ou Ctrl+C
+/// rendent la main sans arrêter la session.
+fn follow_job(id: &str, offset: &mut u64) -> io::Result<Follow> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let raw = |on: bool| {
+        if interactive {
+            let _ = if on {
+                crossterm::terminal::enable_raw_mode()
+            } else {
+                crossterm::terminal::disable_raw_mode()
+            };
+        }
+    };
+    raw(true);
+    let outcome = loop {
+        let text = read_new_output(id, offset);
+        if !text.is_empty() {
+            let mut out = io::stdout();
+            let text = if interactive {
+                text.replace("\r\n", "\n").replace('\n', "\r\n")
+            } else {
+                text
+            };
+            let _ = write!(out, "{text}");
+            let _ = out.flush();
+        }
+        let state = jobs::load_state(id);
+        if state.state == jobs::WORKING && state.waiting_for.is_some() {
+            raw(false);
+            print!("{}répondre >{} ", transcript::ACCENT, transcript::RESET);
+            let _ = io::stdout().flush();
+            let mut answer = String::new();
+            if io::stdin().read_line(&mut answer)? == 0 {
+                break Follow::Detached;
+            }
+            if !answer.trim().is_empty() {
+                jobs::send(id, answer.trim())?;
+                for _ in 0..50 {
+                    if jobs::load_state(id).waiting_for.is_none() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+            raw(true);
+            continue;
+        }
+        if !jobs::alive(id) || state.state != jobs::WORKING {
+            break Follow::Idle;
+        }
+        if interactive {
+            if event::poll(Duration::from_millis(300))? {
+                if let Event::Key(key) = event::read()? {
+                    let ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(key.code, KeyCode::Char('c' | 'C'));
+                    if key.kind == KeyEventKind::Press
+                        && (matches!(key.code, KeyCode::Esc | KeyCode::Left) || ctrl_c)
+                    {
+                        break Follow::Detached;
+                    }
+                }
+            }
+        } else {
+            thread::sleep(Duration::from_millis(300));
+        }
+    };
+    raw(false);
+    Ok(outcome)
+}
+
+/// `claw attach <id>` : les sorties de la session, puis sa conversation dans
+/// ce terminal (le processus d'arrière-plan s'efface). `/exit` rend la main ;
+/// la session reste dans la liste et reprend sur une réponse.
+fn attach_job(reference: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let job = jobs::find(reference)?;
+    let id = job.id.clone();
+    if jobs::load_state(&id).attached {
+        return Err(format!("{} est déjà ouverte dans un autre terminal", job.name).into());
+    }
+    let history = jobs::log_tail(&id, 48 * 1024);
+    let mut offset = fs::metadata(jobs::log_path(&id)).map_or(0, |metadata| metadata.len());
+    print!("{history}");
+    println!(
+        "\n{}── {} · {} · Échap rend la main sans arrêter la session ──{}",
+        transcript::DIM,
+        job.name,
+        id,
+        transcript::RESET
+    );
+    if jobs::alive(&id) {
+        if let Follow::Detached = follow_job(&id, &mut offset)? {
+            println!("\n  ⎿  {} continue en arrière-plan", job.name);
+            return Ok(());
+        }
+    }
+    if job.kind == "exec" {
+        println!("\n  ⎿  commande terminée");
+        return Ok(());
+    }
+    if jobs::alive(&id) {
+        jobs::set_flag(&id, "release");
+        let started = Instant::now();
+        while jobs::alive(&id) && started.elapsed() < Duration::from_secs(20) {
+            thread::sleep(Duration::from_millis(200));
+        }
+        if jobs::alive(&id) {
+            return Err("la session ne s'est pas libérée : réessayez dans un instant".into());
+        }
+    }
+    let state = jobs::load_state(&id);
+    let session = state
+        .session_path
+        .clone()
+        .or_else(|| job.session_path.clone())
+        .filter(|path| Path::new(path).is_file())
+        .ok_or("cette session n'a pas encore de conversation enregistrée")?;
+    let previous = env::current_dir()?;
+    env::set_current_dir(&job.cwd)?;
+    jobs::update_state(&id, |state| {
+        state.attached = true;
+        state.pid = Some(std::process::id());
+    });
+    let heartbeat = jobs::Heartbeat::start(&id);
+    *ATTACHED_JOB
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(id.clone());
+    STOP_ATTACHED.store(false, std::sync::atomic::Ordering::SeqCst);
+    install_interrupt_handler();
+    let mode = parse_permission_mode_arg(&job.permission_mode)
+        .unwrap_or_else(|_| default_permission_mode());
+    let result = run_repl(job.model.clone(), None, mode, Some(PathBuf::from(&session))).map(|_| ());
+    drop(heartbeat);
+    *ATTACHED_JOB
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    let stopped = STOP_ATTACHED.swap(false, std::sync::atomic::Ordering::SeqCst);
+    let answer = Session::load_from_path(Path::new(&session))
+        .map(|session| last_assistant_of(&session))
+        .unwrap_or_default();
+    jobs::update_state(&id, |state| {
+        state.attached = false;
+        state.pid = None;
+        state.state = if stopped { jobs::STOPPED } else { jobs::DONE }.to_string();
+        state.waiting_for = None;
+        state.question = None;
+        state.finished_at = Some(jobs::now_ms());
+        if !answer.trim().is_empty() {
+            state.detail = summary_line(&answer);
+        }
+    });
+    env::set_current_dir(previous)?;
+    result
+}
+
+/// `claw logs <id> [-f]`.
+fn show_job_logs(reference: &str, follow: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let job = jobs::find(reference)?;
+    let text = jobs::log_tail(&job.id, 32 * 1024);
+    if text.trim().is_empty() {
+        println!("(aucune sortie pour l'instant)");
+    } else if io::stdout().is_terminal() {
+        print!("{text}");
+    } else {
+        print!("{}", transcript::strip_ansi(&text));
+    }
+    if follow && jobs::alive(&job.id) {
+        let mut offset = fs::metadata(jobs::log_path(&job.id)).map_or(0, |metadata| metadata.len());
+        let _ = follow_job(&job.id, &mut offset)?;
+    }
+    Ok(())
+}
+
+/// `claw agents` : la vue, puis la session ouverte, puis la vue à nouveau.
+fn run_agent_view(
+    model: String,
+    permission_mode: PermissionMode,
+    filter: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let defaults = agent_view::Defaults {
+        model,
+        permission_mode: permission_mode.as_str().to_string(),
+        cwd: env::current_dir()?,
+        filter,
+    };
+    let mut selected = None;
+    loop {
+        match agent_view::run(defaults.clone(), selected.clone())? {
+            agent_view::Outcome::Exit => return Ok(()),
+            agent_view::Outcome::Attach(id) => {
+                if let Err(error) = attach_job(&id) {
+                    eprintln!("{}", render_cli_error(&error.to_string()));
+                    thread::sleep(Duration::from_secs(2));
+                }
+                selected = Some(id);
+            }
+        }
+    }
+}
+
+/// Demande par défaut d'un `/loop` sans demande.
+const LOOP_MAINTENANCE_PROMPT: &str = "Maintenance pass: 1. continue any unfinished work from this conversation; 2. tend to the current branch's pull request if there is one (review comments, failed CI runs, merge conflicts); 3. when nothing else is pending, run a cleanup pass (bug hunt or simplification) limited to code this conversation touched. Do not start new initiatives outside that scope, and only push, delete or take other irreversible actions when they continue something the conversation already authorized. If nothing needs doing, say so in one line.";
+
+/// `/loop` sans demande : `.claw/loop.md` ou `.claude/loop.md` du projet,
+/// sinon de l'utilisateur (`~/.claw/loop.md`, `~/.claude/loop.md`), sinon la
+/// passe d'entretien intégrée.
+fn default_loop_prompt() -> String {
+    let cwd = env::current_dir().unwrap_or_default();
+    let config_home = ConfigLoader::default_for(&cwd).config_home().to_path_buf();
+    let mut candidates = vec![
+        cwd.join(".claw").join("loop.md"),
+        cwd.join(".claude").join("loop.md"),
+        config_home.join("loop.md"),
+    ];
+    if let Some(home) = config_home.parent() {
+        candidates.push(home.join(".claude").join("loop.md"));
+    }
+    for path in candidates {
+        if let Ok(text) = fs::read_to_string(&path) {
+            if !text.trim().is_empty() {
+                let mut end = text.len().min(25_000);
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                return text[..end].trim().to_string();
+            }
+        }
+    }
+    LOOP_MAINTENANCE_PROMPT.to_string()
+}
+
+/// Consigne d'une boucle au rythme choisi.
+fn self_paced_note(request: &str) -> String {
+    format!(
+        "\n\n[Claw] This is a self-paced /loop. When this iteration is done, call ScheduleWakeup with delaySeconds between 60 and 3600 chosen from what you observed (short while something is still in progress, long when nothing is pending), prompt set to exactly {} and a one-line reason; or call ScheduleWakeup with stop: true when the task is complete.",
+        serde_json::to_string(request).unwrap_or_default()
+    )
+}
+
+/// Demande envoyée quand une tâche planifiée passe.
+fn scheduled_prompt(task: &runtime::cron::ScheduledTask) -> String {
+    let schedule = if task.self_paced {
+        "self-paced /loop".to_string()
+    } else if task.recurring {
+        format!("cron {}, run {}", task.cron, task.runs)
+    } else {
+        "one-time reminder".to_string()
+    };
+    let mut prompt = format!(
+        "[Claw] Scheduled task {} ({schedule}) is due: do this now. If it names a skill (/name), run it with the Skill tool.",
+        task.id
+    );
+    if task.recurring && task.runs > 1 {
+        prompt.push_str(
+            " Report only what changed since the previous run; say so briefly if nothing did.",
+        );
+    }
+    let _ = write!(prompt, "\n\n{}", task.prompt);
+    if task.self_paced {
+        prompt.push_str(&self_paced_note(&task.prompt));
+    }
+    prompt
+}
+
+/// Après un passage d'une boucle au rythme choisi : prochain réveil demandé
+/// par le modèle, arrêt, ou réveil de secours dans 20 minutes (une seule
+/// fois : sans nouveau réveil après celui-là, la boucle s'arrête).
+fn self_paced_follow_up(request: &str, was_fallback: bool) -> Result<String, String> {
+    if runtime::cron::take_stop_requested() {
+        return Ok("Boucle terminée par Claw".to_string());
+    }
+    if let Some(task) = runtime::cron::list()
+        .into_iter()
+        .find(|task| task.self_paced && task.prompt == request)
+    {
+        return Ok(format!(
+            "Prochain passage de la boucle à {} · /loop stop pour l'arrêter",
+            runtime::cron::format_local(task.next_run)
+        ));
+    }
+    if was_fallback {
+        return Ok("Boucle arrêtée : aucun nouveau passage demandé".to_string());
+    }
+    runtime::cron::schedule_fallback(request).map(|task| {
+        format!(
+            "Aucun délai choisi : prochain passage à {} · /loop stop pour l'arrêter",
+            runtime::cron::format_local(task.next_run)
+        )
+    })
+}
+
+fn after_self_paced_pass(request: &str, was_fallback: bool) {
+    match self_paced_follow_up(request, was_fallback) {
+        Ok(note) => println!("  ⎿  {}{note}{}", transcript::DIM, transcript::RESET),
+        Err(error) => eprintln!("{}", render_cli_error(&error)),
+    }
+}
+
+/// Ce que `/loop` doit faire, pour le terminal comme pour la page.
+enum LoopPlan {
+    /// Rien à lancer : le texte à montrer (liste, arrêt, erreur).
+    Report(String),
+    /// Un passage maintenant ; Claw choisit ensuite le prochain réveil.
+    SelfPaced(String),
+    /// Un passage maintenant, puis une tâche récurrente.
+    Fixed {
+        request: String,
+        cron: String,
+        max: usize,
+        header: String,
+        note: Option<String>,
+    },
+}
+
+/// `/loop 5m demande` (tâche récurrente, la saisie reste libre), `/loop
+/// demande` (Claw choisit l'intervalle), `/loop` seul (`loop.md` ou la passe
+/// d'entretien), `/loop list`, `/loop stop [id]`.
+fn plan_loop(args: Option<&str>) -> LoopPlan {
+    let args = args.map(str::trim).unwrap_or_default();
+    let (first, remainder) = args.split_once(char::is_whitespace).unwrap_or((args, ""));
+    match first.to_lowercase().as_str() {
+        "list" | "liste" => {
+            let tasks = runtime::cron::list();
+            if tasks.is_empty() {
+                return LoopPlan::Report("Aucune tâche planifiée.".to_string());
+            }
+            let mut lines = vec!["Tâches planifiées".to_string()];
+            lines.extend(tasks.iter().map(|task| format!("  {}", task.describe())));
+            return LoopPlan::Report(lines.join("\n"));
+        }
+        "stop" | "arrêter" | "arreter" => {
+            return LoopPlan::Report(if remainder.trim().is_empty() {
+                format!("  ⎿  {} boucle(s) arrêtée(s)", runtime::cron::stop_loops())
+            } else {
+                match runtime::cron::delete(remainder) {
+                    Ok(task) => format!("  ⎿  Tâche {} supprimée", task.id),
+                    Err(error) => format!("  ⎿  {error}"),
+                }
+            });
+        }
+        _ => {}
+    }
+    if runtime::cron::disabled() {
+        return LoopPlan::Report(
+            "Les tâches planifiées sont désactivées (CLAW_DISABLE_CRON).".to_string(),
+        );
+    }
+    let (interval, request) = match parse_interval(first) {
+        Some(interval) => (Some(interval), remainder.trim()),
+        None => (None, args),
+    };
+    let request = if request.is_empty() {
+        default_loop_prompt()
+    } else if request.starts_with('/') {
+        // `/loop 5m /ma-commande` : une commande personnalisée devient sa demande.
+        match custom_command_prompt(request) {
+            Some(Ok(invocation)) => invocation.prompt,
+            Some(Err(error)) => return LoopPlan::Report(error),
+            None => request.to_string(),
+        }
+    } else {
+        request.to_string()
+    };
+    let Some(interval) = interval else {
+        return LoopPlan::SelfPaced(request);
+    };
+    let (cron, minutes) = runtime::cron::interval_to_cron(interval);
+    let rounded = format_interval(Duration::from_secs(minutes * 60));
+    let max = loop_max_passes();
+    LoopPlan::Fixed {
+        header: format!(
+            "↻ Boucle · toutes les {rounded} ({cron}) · au plus {max} passages · /loop stop pour l'arrêter"
+        ),
+        note: (minutes * 60 != interval.as_secs())
+            .then(|| format!("Intervalle arrondi à {rounded} (pas d'une expression cron)")),
+        request,
+        cron,
+        max,
+    }
+}
+
+/// Après le premier passage d'une boucle à intervalle fixe : les suivants
+/// deviennent une tâche récurrente.
+fn schedule_loop_rest(cron: &str, request: &str, max: usize) -> Result<Option<String>, String> {
+    if max <= 1 {
+        return Ok(None);
+    }
+    runtime::cron::create_loop(cron, request, u32::try_from(max - 1).ok()).map(|task| {
+        Some(format!(
+            "Boucle {} · prochain passage à {} · la saisie reste libre entre les passages",
+            task.id,
+            runtime::cron::format_local(task.next_run)
+        ))
+    })
+}
+
+/// Contexte du classificateur du mode auto : les dernières demandes de
+/// l'utilisateur (sans les messages de Claw) et celle du tour.
+fn share_auto_context(session: &Session, input: &str, model: &str) {
+    let mut requests: Vec<String> = session
+        .messages
+        .iter()
+        .filter(|message| message.role == runtime::MessageRole::User)
+        .filter_map(|message| {
+            message.blocks.iter().find_map(|block| match block {
+                ContentBlock::Text { text }
+                    if !text.trim().is_empty() && !text.starts_with("[Claw]") =>
+                {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+        })
+        .collect();
+    requests.push(input.to_string());
+    let start = requests.len().saturating_sub(8);
+    auto_mode::set_context(requests[start..].to_vec(), model);
+}
+
+/// Première demande de l'utilisateur dans la conversation (nom de la session
+/// en arrière-plan) : les tours lancés par Claw (tâche planifiée, Monitor,
+/// message d'une autre session) ne comptent pas.
+fn first_user_text(session: &Session) -> Option<String> {
+    session
+        .messages
+        .iter()
+        .filter(|message| message.role == runtime::MessageRole::User)
+        .find_map(|message| {
+            message.blocks.iter().find_map(|block| match block {
+                ContentBlock::Text { text }
+                    if !text.trim().is_empty()
+                        && !text.starts_with("[Claw]")
+                        && !text.starts_with("[Result of sub-task") =>
+                {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+        })
+}
+
+/// `/tasks` : ce qui tourne en arrière-plan pour cette session (commandes de
+/// fond, Monitors, sous-tâches, tâches planifiées, sessions de ce dossier).
+fn tasks_report() -> String {
+    let mut sections = vec![render_background_tasks(None)];
+    let monitors = tools::monitors::lines();
+    if !monitors.is_empty() {
+        sections.push(format!(
+            "Monitors (KillShell <id> les arrête)\n{}",
+            monitors.join("\n")
+        ));
+    }
+    let subtasks = extra_commands::subtask_lines();
+    if !subtasks.is_empty() {
+        sections.push(format!("Sous-tâches\n{}", subtasks.join("\n")));
+    }
+    let workflows = tools::workflows::lines();
+    if !workflows.is_empty() {
+        sections.push(format!(
+            "Workflows (/workflows <id> pour le détail)\n{}",
+            workflows.join("\n")
+        ));
+    }
+    let scheduled = runtime::cron::list();
+    if !scheduled.is_empty() {
+        sections.push(format!(
+            "Tâches planifiées\n{}",
+            scheduled
+                .iter()
+                .map(|task| format!("  {}", task.describe()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    let cwd = env::current_dir().unwrap_or_default();
+    let jobs: Vec<String> = jobs::all()
+        .into_iter()
+        .filter(|(job, _)| Path::new(&job.origin).starts_with(&cwd))
+        .take(8)
+        .map(|(job, state)| {
+            format!(
+                "  {}  {:<8} {}",
+                job.id,
+                jobs::effective_state(&job, &state),
+                job.name
+            )
+        })
+        .collect();
+    if !jobs.is_empty() {
+        sections.push(format!(
+            "Sessions en arrière-plan (claw agents)\n{}",
+            jobs.join("\n")
+        ));
+    }
+    sections.join("\n\n")
+}
+
+/// `/keybindings` : crée `~/.claw/keybindings.json` s'il n'existe aucun fichier
+/// de raccourcis, puis montre les raccourcis en vigueur et les remarques.
+fn keybindings_command() -> String {
+    let mut lines = vec!["Raccourcis clavier".to_string()];
+    if !keybindings::files().iter().any(|path| path.is_file()) {
+        let path = keybindings::claw_file();
+        let created = path
+            .parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| fs::write(&path, keybindings::TEMPLATE));
+        match created {
+            Ok(()) => lines.push(format!("  Créé             {}", path.display())),
+            Err(error) => lines.push(format!(
+                "  Création impossible de {} : {error}",
+                path.display()
+            )),
+        }
+    }
+    let keymap = keybindings::Keymap::load();
+    for path in &keymap.sources {
+        lines.push(format!("  Fichier          {}", path.display()));
+    }
+    lines.push(
+        "  Format           celui de Claude Code : https://code.claude.com/docs/en/keybindings"
+            .to_string(),
+    );
+    lines.push(
+        "  Prise en compte  à la saisie suivante, sans redémarrer ; \"null\" retire un raccourci"
+            .to_string(),
+    );
+    lines.push("En vigueur".to_string());
+    lines.push(keymap.report());
+    if !keymap.warnings.is_empty() {
+        lines.push("Remarques".to_string());
+        lines.extend(keymap.warnings.iter().map(|warning| format!("  {warning}")));
+    }
+    lines.push(
+        "Toujours actifs : Ctrl+C (effacer, quitter), Ctrl+D (quitter), Ctrl+A/E/K/U/W/Y, Alt+B/F/D"
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+/// `apiKeyHelper` des réglages personnels (un dépôt ne peut pas en régler :
+/// ce serait lancer une commande pour fabriquer vos clés) :
+/// - `~/.claw/settings.json` : pour le fournisseur du modèle de la session ;
+/// - `~/.claude/settings.json` (Claude Code) : pour `ANTHROPIC_API_KEY` ;
+/// - `providers[].apiKeyHelper` : pour la variable `apiKeyEnv` de ce fournisseur.
+fn install_key_helpers() {
+    let config_home = ConfigLoader::default_for(".").config_home().to_path_buf();
+    let read = |path: PathBuf| {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+    };
+    let claude = env::var("CLAW_NO_CLAUDE_CONFIG").map_or(true, |value| value.trim() != "1");
+    if claude {
+        if let Some(settings) = config_home
+            .parent()
+            .and_then(|home| read(home.join(".claude").join("settings.json")))
+        {
+            if let Some(command) = settings
+                .get("apiKeyHelper")
+                .and_then(serde_json::Value::as_str)
+            {
+                api::key_helper::register("ANTHROPIC_API_KEY", command);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    if let Some(home) = config_home.parent() {
+        files.extend(read(home.join(".claw.json")));
+    }
+    files.extend(read(config_home.join("settings.json")));
+    for settings in files {
+        if let Some(command) = settings
+            .get("apiKeyHelper")
+            .and_then(serde_json::Value::as_str)
+        {
+            api::key_helper::set_default(Some(command));
+        }
+        let providers = settings
+            .get("providers")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for provider in providers {
+            let env_name = provider
+                .get("apiKeyEnv")
+                .and_then(serde_json::Value::as_str);
+            let command = provider
+                .get("apiKeyHelper")
+                .and_then(serde_json::Value::as_str);
+            if let (Some(env_name), Some(command)) = (env_name, command) {
+                api::key_helper::register(env_name, command);
+            }
+        }
+    }
+}
+
+/// La saisie s'interrompt : une tâche planifiée est due, ou une sous-tâche a
+/// fini.
+pub(crate) fn idle_wakeup() -> bool {
+    runtime::cron::has_due()
+        || extra_commands::has_finished_subtask()
+        || tools::monitors::has_events()
+        || runtime::peers::has_messages()
+        || tools::workflows::has_finished()
+        || tools::channels::has_events()
+}
+
+/// `/deep-research <question>`, `/<workflow enregistré> [arguments]` : le
+/// workflow part en arrière-plan ; son résultat revient entre deux tours.
+fn launch_workflow(name: &str, arguments: &str) -> String {
+    let arguments = arguments.trim();
+    // `{…}` ou `[…]` : une valeur JSON ; sinon le texte tel quel.
+    let args = (!arguments.is_empty()).then(|| {
+        serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()
+            .filter(|value| value.is_object() || value.is_array())
+            .unwrap_or_else(|| serde_json::Value::String(arguments.to_string()))
+    });
+    match tools::workflows::start(&tools::workflows::StartRequest {
+        name: Some(name.to_string()),
+        args,
+        ..tools::workflows::StartRequest::default()
+    }) {
+        Ok(launched) => {
+            let id = launched["runId"].as_str().unwrap_or_default();
+            format!(
+                "↻ Workflow {} lancé en arrière-plan ({id}) : son résultat reviendra ici · /workflows {id} pour le suivre",
+                launched["workflowName"].as_str().unwrap_or(name)
+            )
+        }
+        Err(error) => format!("Workflow {name} : {error}"),
+    }
+}
+
+/// `/nom [arguments]` d'un workflow enregistré (`.claw/workflows`…).
+fn saved_workflow_command(input: &str) -> Option<String> {
+    let line = input.trim().strip_prefix('/')?;
+    let (name, arguments) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+    let workflow = tools::workflows::find_saved(name)?;
+    Some(launch_workflow(&workflow.name, arguments))
+}
+
+/// `/deep-research <question>`.
+fn deep_research_command(question: Option<&str>) -> String {
+    match question
+        .map(str::trim)
+        .filter(|question| !question.is_empty())
+    {
+        Some(question) => launch_workflow("deep-research", question),
+        None => "Usage : /deep-research <question>".to_string(),
+    }
+}
+
+/// `crossSessionInbound` : `accept`, `hold` ou `refuse`.
+pub(crate) fn inbound_setting() -> Option<String> {
+    env::current_dir()
+        .ok()
+        .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok())
+        .and_then(|config| {
+            config
+                .get("crossSessionInbound")
+                .and_then(|value| value.as_str().map(str::to_string))
+        })
+}
+
+/// Nom sous lequel les autres sessions joignent celle-ci : le dossier.
+fn peer_name() -> String {
+    env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            cwd.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "claw".to_string())
+}
+
+/// `/list-agents` (`/peers`) : sessions joignables, messages retenus ;
+/// `accept` les délivre, `drop` les oublie.
+fn peers_report(args: Option<&str>) -> (String, Vec<runtime::peers::Message>) {
+    match args.map(str::trim) {
+        Some("accept" | "accepter") => {
+            let released = runtime::peers::release_held();
+            let count = released.len();
+            (
+                format!("  ⎿  {count} message(s) retenu(s) délivré(s)"),
+                released,
+            )
+        }
+        Some("drop" | "oublier") => (
+            format!(
+                "  ⎿  {} message(s) retenu(s) oublié(s)",
+                runtime::peers::drop_held()
+            ),
+            Vec::new(),
+        ),
+        _ => {
+            let mut lines = Vec::new();
+            match runtime::peers::current() {
+                Some(me) => lines.push(format!("Cette session  @{} ({})", me.name, me.id)),
+                None => {
+                    lines.push("Messagerie entre sessions coupée (CLAW_DISABLE_PEERS)".to_string());
+                }
+            }
+            let peers = runtime::peers::list();
+            if peers.is_empty() {
+                lines.push("  Aucune autre session Claw ouverte sur cette machine.".to_string());
+            }
+            for peer in peers {
+                lines.push(format!(
+                    "  @{:<20} {}  {:<11} {:<6} {}",
+                    peer.name, peer.id, peer.kind, peer.status, peer.cwd
+                ));
+            }
+            let held = runtime::peers::held_messages();
+            if !held.is_empty() {
+                lines.push(format!(
+                    "Messages retenus : {} (/peers accept pour les délivrer, /peers drop pour les oublier)",
+                    held.len()
+                ));
+                for message in held.iter().take(5) {
+                    lines.push(format!(
+                        "  @{} : {}",
+                        message.from_name,
+                        message
+                            .text
+                            .lines()
+                            .next()
+                            .unwrap_or_default()
+                            .chars()
+                            .take(80)
+                            .collect::<String>()
+                    ));
+                }
+            }
+            (lines.join("\n"), Vec::new())
+        }
+    }
+}
+
+/// Session en arrière-plan ouverte dans ce terminal (`claw attach`), et
+/// `/stop` demandé pendant qu'elle l'est.
+static ATTACHED_JOB: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static STOP_ATTACHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `/sandbox` : état du bac à sable ; `docker`, `podman` ou `off` choisit le
+/// conteneur pour la session.
+fn sandbox_command(args: Option<&str>) -> String {
+    match args.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(engine @ ("docker" | "podman")) => {
+            env::set_var("CLAW_SANDBOX", engine);
+            format!("Bac à sable : chaque commande shell s'exécute dans un conteneur {engine} (pour cette session ; \"sandbox\": {{\"backend\": \"{engine}\"}} dans .claw/settings.json pour le garder)")
+        }
+        Some("off" | "aucun" | "none") => {
+            env::remove_var("CLAW_SANDBOX");
+            "Bac à sable : plus de conteneur pour cette session (les réglages \"sandbox\" restent appliqués)".to_string()
+        }
+        Some(other) => format!("Option inconnue « {other} » : /sandbox [docker|podman|off]"),
+        None => {
+            let cwd = env::current_dir().unwrap_or_default();
+            let config = ConfigLoader::default_for(&cwd).load().ok();
+            let sandbox = config
+                .as_ref()
+                .map(|config| config.sandbox().clone())
+                .unwrap_or_default();
+            let container = sandbox.container().map_or_else(
+                || "aucun".to_string(),
+                |container| format!("{} ({})", container.program, container.image),
+            );
+            let status = runtime::sandbox::resolve_sandbox_status(&sandbox, &cwd);
+            format!(
+                "Bac à sable\n  Conteneur        {container}\n  Isolation Linux  {}\n  Changer          /sandbox docker|podman|off (session) · \"sandbox\" dans .claw/settings.json",
+                if status.active { "active (namespaces)" } else { "inactive" }
+            )
+        }
+    }
+}
+
+/// La conversation active change : ses tâches planifiées reviennent, et la
+/// télémétrie la désigne par son identifiant.
+fn session_bound(path: &Path) {
+    runtime::cron::bind_session(Some(path));
+    if let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) {
+        runtime::telemetry::set_session(id);
+    }
+}
+
+/// Réglage `env` des fichiers de config (`~/.claw/settings.json`,
+/// `.claw/settings.json`…), appliqué avant le démarrage des autres threads.
+fn apply_settings_env() {
+    let Ok(cwd) = env::current_dir() else {
+        return;
+    };
+    if let Ok(config) = ConfigLoader::default_for(&cwd).load() {
+        runtime::settings::apply_env(&config);
+    }
+}
+
+/// Réglages `attribution` et `includeCoAuthoredBy` du projet courant.
+fn current_attribution() -> runtime::settings::Attribution {
+    let config = env::current_dir()
+        .ok()
+        .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok())
+        .unwrap_or_else(runtime::RuntimeConfig::empty);
+    runtime::settings::attribution(&config)
 }
 
 /// La config utilisateur (`~/.claw`), les sessions et les skills se basent sur
@@ -142,6 +1341,10 @@ fn ensure_home_env() {
 /// un second Ctrl+C dans les deux secondes quitte. Pendant la saisie, l'éditeur
 /// de ligne (mode brut) reçoit Ctrl+C comme une touche : rien ne change.
 fn install_interrupt_handler() {
+    static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if INSTALLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let spawned = thread::Builder::new()
         .name("claw-ctrl-c".to_string())
         .spawn(|| {
@@ -247,8 +1450,119 @@ fn error_hint(problem: &str) -> &'static str {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+/// `--add-dir <dossier>` et `--add-dir=<dossier>` retirés des arguments.
+fn take_add_dir_flags(args: &mut Vec<String>) -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        if let Some(value) = args[index].strip_prefix("--add-dir=") {
+            directories.push(PathBuf::from(value));
+            args.remove(index);
+        } else if args[index] == "--add-dir" && index + 1 < args.len() {
+            args.remove(index);
+            directories.push(PathBuf::from(args.remove(index)));
+        } else {
+            index += 1;
+        }
+    }
+    directories
+}
+
+/// `/add-dir [dossier] [--save]` : sans dossier, la liste ; sinon le dossier
+/// devient libre en écriture pour la session (et dans
+/// `.claw/settings.local.json` avec `--save`).
+fn run_add_dir_command(args: Option<&str>) -> String {
+    let cwd = env::current_dir().unwrap_or_default();
+    let args = args.map(str::trim).unwrap_or_default();
+    if args.is_empty() {
+        let lines: Vec<String> = runtime::writable_directories(&cwd)
+            .iter()
+            .map(|directory| format!("  {}", directory.display()))
+            .collect();
+        return format!(
+            "Dossiers où l'écriture est libre (workspace-write)\n{}\n  Ajouter          /add-dir <dossier> [--save]",
+            lines.join("\n")
+        );
+    }
+    let save = args.split_whitespace().any(|word| word == "--save");
+    let path = args.replace("--save", "");
+    let path = path.trim().trim_matches('"');
+    let directory = PathBuf::from(path);
+    let directory = if directory.is_absolute() {
+        directory
+    } else {
+        cwd.join(directory)
+    };
+    if !directory.is_dir() {
+        return format!("dossier introuvable : {}", directory.display());
+    }
+    let added = runtime::add_session_directory(directory.clone());
+    let mut report = format!(
+        "Dossier ajouté\n  Dossier          {}\n  Effet            écriture libre en workspace-write{}",
+        directory.display(),
+        if added { "" } else { " (déjà présent)" }
+    );
+    if save {
+        match add_directory_setting(&cwd, &directory.display().to_string()) {
+            Ok(path) => {
+                let _ = std::fmt::Write::write_fmt(
+                    &mut report,
+                    format_args!("\n  Enregistré dans  {}", path.display()),
+                );
+            }
+            Err(error) => {
+                let _ = std::fmt::Write::write_fmt(
+                    &mut report,
+                    format_args!("\n  Non enregistré   {error}"),
+                );
+            }
+        }
+    }
+    report
+}
+
+/// Ajoute `directory` à `permissions.additionalDirectories` de `.claw/settings.local.json`.
+fn add_directory_setting(cwd: &Path, directory: &str) -> Result<PathBuf, String> {
+    edit_permission_rule(cwd, Some("additionalDirectories"), directory).map(|(path, _)| path)
+}
+
+/// Question d'un hook `prompt` : son modèle, sinon le modèle par défaut, avec
+/// les modèles de second avis en secours (quota, panne).
+fn evaluate_prompt_hook(system: &str, prompt: &str, model: Option<&str>) -> Result<String, String> {
+    let primary = model.map_or_else(default_model, resolve_model_alias);
+    let mut candidates = vec![primary.clone()];
+    candidates.extend(
+        models::advisor_models(&primary)
+            .into_iter()
+            .filter(|candidate| *candidate != primary),
+    );
+    tools::advisors::ask(&candidates, system, prompt, 2_000).map(|opinion| opinion.text)
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    // `--add-dir <dossier>` (répétable) : écriture libre aussi dans ce dossier.
+    for directory in take_add_dir_flags(&mut args) {
+        runtime::add_session_directory(directory);
+    }
+    // `--worktree [nom]` : la session travaille dans un worktree git à part,
+    // sur sa propre branche (sessions en parallèle sans conflit).
+    let worktree = match git_work::take_worktree_flag(&mut args) {
+        Some(name) => Some(git_work::enter(&name)?),
+        None => None,
+    };
+    let result = run_action(&args);
+    if let Some(session) = &worktree {
+        git_work::leave(session);
+    }
+    result
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    // Hooks `http` et `prompt` : le runtime reçoit l'envoi HTTP et le modèle.
+    runtime::set_http_hook_sender(Box::new(tools::send_hook_request));
+    runtime::set_prompt_hook_evaluator(Box::new(evaluate_prompt_hook));
     // Serveurs compatibles déclarés dans la config (`providers`) : nécessaires
     // dès l'analyse des arguments pour reconnaître `nom:modèle`.
     let startup_config = env::current_dir()
@@ -269,11 +1583,66 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     init_reasoning_effort(startup_config.as_ref());
     init_ultracode(startup_config.as_ref());
     init_team(startup_config.as_ref());
-    let args: Vec<String> = env::args().skip(1).collect();
-    match parse_args(&args)? {
+    match parse_args(args)? {
         CliAction::DumpManifests => dump_manifests(),
         CliAction::BootstrapPlan => print_bootstrap_plan(),
         CliAction::Agents { args } => LiveCli::print_agents(args.as_deref())?,
+        CliAction::Background {
+            prompt,
+            name,
+            exec,
+            model,
+            permission_mode,
+        } => {
+            let job = jobs::dispatch(&jobs::Dispatch {
+                prompt,
+                name,
+                command: exec,
+                model: model.unwrap_or_else(default_model),
+                permission_mode: permission_mode.as_str().to_string(),
+                origin: env::current_dir()?,
+                session_path: None,
+                in_place: false,
+            })?;
+            println!("{}", jobs::launch_report(&job));
+        }
+        CliAction::AgentView {
+            json,
+            all,
+            cwd,
+            model,
+            permission_mode,
+        } => {
+            if json {
+                println!("{}", jobs::list_json(all, cwd.as_deref()));
+            } else if io::stdin().is_terminal() && io::stdout().is_terminal() {
+                runtime::telemetry::session_started("agents_view");
+                run_agent_view(model.unwrap_or_else(default_model), permission_mode, cwd)?;
+            } else {
+                println!("{}", agent_view::plain_list(cwd.as_deref()));
+            }
+        }
+        CliAction::Attach { target } => attach_job(&target)?,
+        CliAction::ChannelWebhook { port, token } => {
+            channel_server::run(&channel_server::Options { port, token })?;
+        }
+        CliAction::AutoModeReport { defaults } => println!(
+            "{}",
+            if defaults {
+                auto_mode::defaults_json()
+            } else {
+                auto_mode::config_json()
+            }
+        ),
+        CliAction::JobLogs { target, follow } => show_job_logs(&target, follow)?,
+        CliAction::JobStop { target } => println!("{}", jobs::stop(&target)?),
+        CliAction::JobRemove { target } => println!("{}", jobs::remove(&target)?),
+        CliAction::JobReply { target, text } => println!("{}", jobs::reply(&target, &text)?),
+        CliAction::JobWorker { id } => run_job_worker(&id)?,
+        CliAction::JobLaunch { id } => {
+            env::set_var("CLAW_JOB_LAUNCH", "1");
+            jobs::spawn_worker(&id)?;
+        }
         CliAction::Skills { args } => LiveCli::print_skills(args.as_deref())?,
         CliAction::Serve {
             host,
@@ -316,12 +1685,47 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             output_format,
             allowed_tools,
             permission_mode,
+            resume,
         } => {
             let prompt = prompt_from(prompt, io::stdin())?;
             install_interrupt_handler();
+            if env::var_os("CLAW_CHANNELS").is_some() {
+                eprintln!("Channels ignorés avec -p : la session s'arrête après la réponse (utilisez le terminal, claw serve ou --bg)");
+                env::remove_var("CLAW_CHANNELS");
+            }
             let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode)?;
+            // `claw -c prompt "…"` (comme `claude -c -p`) : la demande poursuit
+            // la dernière session ; sans elle, « continue » partait de rien.
+            let resumed = if resume { latest_session()? } else { None };
+            if let Some(path) = &resumed {
+                cli.resume_session(Some(path.display().to_string()))?;
+            }
+            runtime::telemetry::session_started(if resumed.is_some() { "resume" } else { "fresh" });
+            runtime::peers::register(&peer_name(), "print", permission_mode.as_str());
             cli.session_hook_start("startup");
-            let result = cli.run_turn_with_output(&prompt, output_format);
+            let mut result = cli.run_turn_with_output(&prompt, output_format);
+            // Un workflow lancé pendant le tour : -p attend son résultat,
+            // qui passe comme un tour de plus.
+            while result.is_ok() {
+                while tools::workflows::running_count() > 0
+                    && !runtime::interrupt::interrupt_requested()
+                {
+                    thread::sleep(Duration::from_millis(500));
+                }
+                let finished = tools::workflows::take_finished();
+                if finished.is_empty() {
+                    break;
+                }
+                for entry in &finished {
+                    eprintln!("{}", entry.headline);
+                }
+                let text = finished
+                    .into_iter()
+                    .map(|entry| entry.for_model)
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                result = cli.run_turn_with_output(&text, output_format);
+            }
             cli.session_hook_end("exit");
             result?;
         }
@@ -343,7 +1747,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             permission_mode,
         } => {
             install_interrupt_handler();
-            run_repl(model, allowed_tools, permission_mode, None)?;
+            // Conversation confiée par le rendu plein écran (`/tui`).
+            let resume = env::var_os("CLAW_TUI_RESUME").map(PathBuf::from);
+            env::remove_var("CLAW_TUI_RESUME");
+            run_interactive(&model, allowed_tools.as_ref(), permission_mode, resume)?;
         }
         CliAction::StreamSession {
             model,
@@ -390,7 +1797,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 latest_session()?
             };
             install_interrupt_handler();
-            run_repl(model, allowed_tools, permission_mode, target)?;
+            run_interactive(&model, allowed_tools.as_ref(), permission_mode, target)?;
         }
         CliAction::Help => print_help(),
     }
@@ -403,6 +1810,56 @@ enum CliAction {
     BootstrapPlan,
     Agents {
         args: Option<String>,
+    },
+    /// `claw --bg "demande"` (ou `--exec 'commande'`).
+    Background {
+        prompt: String,
+        name: Option<String>,
+        exec: Option<String>,
+        model: Option<String>,
+        permission_mode: PermissionMode,
+    },
+    /// `claw agents [--json] [--all] [--cwd CHEMIN]`.
+    AgentView {
+        json: bool,
+        all: bool,
+        cwd: Option<PathBuf>,
+        model: Option<String>,
+        permission_mode: PermissionMode,
+    },
+    Attach {
+        target: String,
+    },
+    /// `claw auto-mode defaults|config`.
+    AutoModeReport {
+        defaults: bool,
+    },
+    /// `claw channel webhook` : serveur de channel intégré (MCP stdio).
+    ChannelWebhook {
+        port: u16,
+        token: Option<String>,
+    },
+    JobLogs {
+        target: String,
+        follow: bool,
+    },
+    JobStop {
+        target: String,
+    },
+    JobRemove {
+        target: String,
+    },
+    JobReply {
+        target: String,
+        text: String,
+    },
+    /// Processus d'une session en arrière-plan (lancé par Claw lui-même).
+    JobWorker {
+        id: String,
+    },
+    /// Relais qui démarre ce processus sans hériter des tuyaux du lanceur.
+    JobLaunch {
+        id: String,
     },
     Skills {
         args: Option<String>,
@@ -451,6 +1908,8 @@ enum CliAction {
         output_format: CliOutputFormat,
         allowed_tools: Option<AllowedToolSet>,
         permission_mode: PermissionMode,
+        /// `-c` : la demande poursuit la dernière session du projet.
+        resume: bool,
     },
     Login,
     Logout,
@@ -509,6 +1968,31 @@ impl CliOutputFormat {
     }
 }
 
+/// `claw channel webhook [--port 8788] [--token JETON]`.
+fn parse_channel_args(args: &[String]) -> Result<CliAction, String> {
+    const USAGE: &str = "usage : claw channel webhook [--port 8788] [--token JETON]";
+    if args.first().map(String::as_str) != Some("webhook") {
+        return Err(USAGE.to_string());
+    }
+    let mut port = 8788;
+    let mut token = env::var("CLAW_CHANNEL_TOKEN").ok();
+    let mut index = 1;
+    while index < args.len() {
+        let value = args.get(index + 1);
+        match args[index].as_str() {
+            "--port" => {
+                port = value
+                    .and_then(|value| value.parse::<u16>().ok())
+                    .ok_or_else(|| format!("port invalide ; {USAGE}"))?;
+            }
+            "--token" => token = Some(value.cloned().ok_or(USAGE)?),
+            _ => return Err(USAGE.to_string()),
+        }
+        index += 2;
+    }
+    Ok(CliAction::ChannelWebhook { port, token })
+}
+
 #[allow(clippy::too_many_lines)]
 fn parse_args(args: &[String]) -> Result<CliAction, String> {
     // Résolu seulement si l'action en a besoin : le modèle par défaut peut
@@ -519,6 +2003,9 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
     let mut wants_version = false;
     let mut continue_session = false;
     let mut stream_input = false;
+    let mut background = false;
+    let mut job_name: Option<String> = None;
+    let mut exec_command: Option<String> = None;
     let mut allowed_tool_values = Vec::new();
     let mut rest = Vec::new();
     let mut index = 0;
@@ -579,11 +2066,41 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 permission_mode = PermissionMode::DangerFullAccess;
                 index += 1;
             }
+            // Channels (comme dans Claude Code) : serveurs MCP qui poussent
+            // des événements dans la session. Transmis aux sessions lancées
+            // par celle-ci (arrière-plan, page web) par `CLAW_CHANNELS`.
+            flag @ ("--channels" | "--dangerously-load-development-channels") => {
+                let entries: Vec<String> = args[index + 1..]
+                    .iter()
+                    .take_while(|value| {
+                        value.starts_with("server:") || value.starts_with("plugin:")
+                    })
+                    .cloned()
+                    .collect();
+                if entries.is_empty() {
+                    return Err(format!(
+                        "{flag} attend server:<nom> (serveur MCP de .mcp.json ou .claw.json), par exemple {flag} server:webhook"
+                    ));
+                }
+                if let Some(plugin) = entries.iter().find(|entry| entry.starts_with("plugin:")) {
+                    return Err(format!(
+                        "{plugin} : les plugins de channel de Claude Code ne sont pas fournis avec Claw ; déclarez le serveur dans .mcp.json et passez server:<nom> (claw channel webhook pour un récepteur de webhooks)"
+                    ));
+                }
+                env::set_var("CLAW_CHANNELS", entries.join(" "));
+                index += 1 + entries.len();
+            }
             "--continue" | "-c" => {
                 continue_session = true;
                 index += 1;
             }
             "-p" => {
+                if background {
+                    return Err(
+                        "--bg ne se combine pas avec -p : la demande est l'argument, par exemple claw --bg \"corrige le test\""
+                            .to_string(),
+                    );
+                }
                 // Compat Claw Code : -p "prompt" = prompt ponctuel
                 let prompt = args[index + 1..].join(" ");
                 if prompt.trim().is_empty() {
@@ -595,7 +2112,26 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                     output_format,
                     allowed_tools: normalize_allowed_tools(&allowed_tool_values)?,
                     permission_mode,
+                    resume: continue_session,
                 });
+            }
+            "--bg" | "--background" => {
+                background = true;
+                index += 1;
+            }
+            "--name" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "valeur manquante pour --name".to_string())?;
+                job_name = Some(value.clone());
+                index += 2;
+            }
+            "--exec" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "valeur manquante pour --exec".to_string())?;
+                exec_command = Some(value.clone());
+                index += 2;
             }
             "--print" => {
                 // Compat Claw Code : --print rend la sortie non interactive
@@ -626,6 +2162,22 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
 
     if wants_version {
         return Ok(CliAction::Version);
+    }
+    if background {
+        let prompt = rest.join(" ");
+        if prompt.trim().is_empty() && exec_command.is_none() {
+            return Err(
+                "--bg attend une demande : claw --bg \"corrige le test qui échoue\" (ou --exec 'commande')"
+                    .to_string(),
+            );
+        }
+        return Ok(CliAction::Background {
+            prompt,
+            name: job_name,
+            exec: exec_command,
+            model,
+            permission_mode,
+        });
     }
 
     let allowed_tools = normalize_allowed_tools(&allowed_tool_values)?;
@@ -672,8 +2224,60 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
     match rest[0].as_str() {
         "dump-manifests" => Ok(CliAction::DumpManifests),
         "bootstrap-plan" => Ok(CliAction::BootstrapPlan),
+        // `claw agents` : vue des sessions en arrière-plan ; `claw agents list`
+        // garde la liste des sous-agents définis.
+        "agents"
+            if rest
+                .get(1)
+                .is_none_or(|arg| arg.starts_with("--") && arg != "--help") =>
+        {
+            parse_agent_view_args(&rest[1..], model, permission_mode)
+        }
         "agents" => Ok(CliAction::Agents {
             args: join_optional_args(&rest[1..]),
+        }),
+        "channel" => parse_channel_args(&rest[1..]),
+        "auto-mode" => match rest.get(1).map(String::as_str) {
+            Some("defaults") => Ok(CliAction::AutoModeReport { defaults: true }),
+            Some("config") | None => Ok(CliAction::AutoModeReport { defaults: false }),
+            Some(other) => Err(format!(
+                "claw auto-mode {other} : utilisez claw auto-mode defaults ou claw auto-mode config"
+            )),
+        },
+        "attach" => Ok(CliAction::Attach {
+            target: job_target(&rest, "attach")?,
+        }),
+        "logs" => {
+            let follow = rest[1..]
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "-f" | "--follow"));
+            let target = rest[1..]
+                .iter()
+                .find(|arg| !matches!(arg.as_str(), "-f" | "--follow"))
+                .cloned()
+                .ok_or_else(|| "usage : claw logs <identifiant ou nom> [-f]".to_string())?;
+            Ok(CliAction::JobLogs { target, follow })
+        }
+        "stop" | "kill" => Ok(CliAction::JobStop {
+            target: job_target(&rest, "stop")?,
+        }),
+        "rm" => Ok(CliAction::JobRemove {
+            target: job_target(&rest, "rm")?,
+        }),
+        "reply" => {
+            let target = job_target(&rest, "reply")?;
+            let text = rest[2..].join(" ");
+            if text.trim().is_empty() {
+                return Err("usage : claw reply <identifiant ou nom> <réponse>".to_string());
+            }
+            Ok(CliAction::JobReply { target, text })
+        }
+        "__job-worker" => Ok(CliAction::JobWorker {
+            id: job_target(&rest, "__job-worker")?,
+        }),
+        // Relais lancé par `Start-Process` (voir `jobs::spawn_worker`).
+        "__job-launch" => Ok(CliAction::JobLaunch {
+            id: job_target(&rest, "__job-launch")?,
         }),
         "skills" => Ok(CliAction::Skills {
             args: join_optional_args(&rest[1..]),
@@ -738,6 +2342,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 output_format,
                 allowed_tools,
                 permission_mode,
+                resume: continue_session,
             })
         }
         // `claw /review`, `claw /fix "cargo test"`… : prompt ponctuel spécialisé.
@@ -751,6 +2356,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 output_format,
                 allowed_tools,
                 permission_mode,
+                resume: continue_session,
             }),
             Some(SlashCommand::Unknown(_)) => {
                 // Les arguments contenant des espaces gardent leurs guillemets ($1…$9).
@@ -780,6 +2386,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                             allowed_tools: custom_allowed_tools(&invocation.command.allowed_tools)
                                 .or(allowed_tools),
                             permission_mode,
+                            resume: continue_session,
                         })
                     }
                     None => parse_direct_slash_cli_action(&rest),
@@ -793,6 +2400,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             output_format,
             allowed_tools,
             permission_mode,
+            resume: continue_session,
         }),
     }
 }
@@ -914,7 +2522,7 @@ fn parse_permission_mode_arg(value: &str) -> Result<PermissionMode, String> {
     normalize_permission_mode(value)
         .ok_or_else(|| {
             format!(
-                "mode de permission non pris en charge « {value} ». Utilisez prompt, read-only, workspace-write ou danger-full-access."
+                "mode de permission non pris en charge « {value} ». Utilisez prompt, read-only, workspace-write, dont-ask ou danger-full-access."
             )
         })
         .map(permission_mode_from_label)
@@ -926,6 +2534,8 @@ fn permission_mode_from_label(mode: &str) -> PermissionMode {
         "read-only" => PermissionMode::ReadOnly,
         "workspace-write" => PermissionMode::WorkspaceWrite,
         "danger-full-access" => PermissionMode::DangerFullAccess,
+        "dont-ask" => PermissionMode::DontAsk,
+        "auto" => PermissionMode::Auto,
         other => panic!("label de mode de permission non pris en charge : {other}"),
     }
 }
@@ -949,6 +2559,8 @@ fn default_permission_mode() -> PermissionMode {
             ResolvedPermissionMode::ReadOnly => PermissionMode::ReadOnly,
             ResolvedPermissionMode::WorkspaceWrite => PermissionMode::WorkspaceWrite,
             ResolvedPermissionMode::DangerFullAccess => PermissionMode::DangerFullAccess,
+            ResolvedPermissionMode::DontAsk => PermissionMode::DontAsk,
+            ResolvedPermissionMode::Auto => PermissionMode::Auto,
         })
 }
 
@@ -1014,6 +2626,9 @@ fn filter_tool_specs(
     // Les questions à choix ne se posent que si quelqu'un peut y répondre.
     let questions = tools::question_asker_available();
     definitions.retain(|definition| definition.name != "AskUserQuestion" || questions);
+    // Photos libres : coupées par `CLAW_PHOTOS=0`.
+    let photos = runtime::harness::enabled(runtime::harness::Aid::Photos);
+    definitions.retain(|definition| definition.name != "Photo" || photos);
     if allowed_tools.is_some() || !runtime::harness::enabled(runtime::harness::Aid::ToolDiet) {
         return definitions;
     }
@@ -1410,7 +3025,15 @@ fn format_permissions_report(mode: &str, rules: &PermissionRules) -> String {
         ),
         (
             "workspace-write",
-            "Édite sans demander, demande avant les commandes",
+            "Édite sans demander dans le projet, demande avant les commandes",
+        ),
+        (
+            "dont-ask",
+            "Ne demande jamais : seuls la lecture et les règles allow passent",
+        ),
+        (
+            "auto",
+            "Un classificateur juge les commandes à votre place ; le projet s'édite librement",
         ),
         ("danger-full-access", "Tout est autorisé sans demande"),
     ]
@@ -1430,6 +3053,8 @@ fn format_permissions_report(mode: &str, rules: &PermissionRules) -> String {
         "prompt" => "Lecture libre ; demande avant chaque modification ou commande",
         "read-only" => "Seuls la lecture, la recherche et les commandes sans effet s'exécutent",
         "workspace-write" => "Les fichiers du projet se modifient sans demander",
+        "dont-ask" => "Rien n'est demandé : ce qui n'est pas autorisé d'avance est refusé",
+        "auto" => "Lecture et modifications du projet libres ; commandes, chemins protégés et écritures hors du projet jugés par le classificateur",
         "danger-full-access" => "Tous les outils s'exécutent sans demander",
         _ => "Mode de permission inconnu",
     };
@@ -1460,12 +3085,38 @@ Règles (les règles deny priment toujours)
   ask              {}
 
 Suite
-  /permissions <mode>   Change de mode (alias : default, plan, acceptEdits, bypassPermissions)
-  Répondre « toujours » à une demande enregistre la règle dans .claw/settings.local.json",
+  /permissions <mode>   Change de mode (alias : default, plan, acceptEdits, dontAsk, bypassPermissions)
+  /permissions allow|deny|ask|remove <règle>   Ajoute ou retire une règle
+  /add-dir <dossier>    Écriture libre aussi dans ce dossier
+  Répondre « toujours » à une demande enregistre la règle dans .claw/settings.local.json{}",
         render_rules(&rules.allow),
         render_rules(&rules.deny),
         render_rules(&rules.ask),
+        render_auto_denials(),
     )
+}
+
+/// Refus récents du mode auto, pour `/permissions`.
+fn render_auto_denials() -> String {
+    let denials = auto_mode::recent_denials();
+    if denials.is_empty() {
+        return String::new();
+    }
+    let mut lines = vec![
+        String::new(),
+        "Refusés récemment par le mode auto".to_string(),
+    ];
+    for denial in denials.iter().rev().take(10) {
+        lines.push(format!(
+            "  {}  [{}] {} : {}",
+            denial.at, denial.rule, denial.action, denial.reason
+        ));
+    }
+    lines.push(
+        "  Pour en autoriser un : dites-le à Claw avec précision, ajoutez une règle (/permissions allow), ou une exception dans autoMode.allow (~/.claw/settings.json)"
+            .to_string(),
+    );
+    lines.join("\n")
 }
 
 fn format_permissions_switch_report(previous: &str, next: &str) -> String {
@@ -1656,7 +3307,7 @@ fn format_compact_report(removed: usize, resulting_messages: usize, skipped: boo
         format!(
             "Compaction
   Résultat         ignorée
-  Raison           la session est sous le seuil de compaction
+  Raison           rien à résumer : les derniers messages sont toujours gardés tels quels
   Messages gardés  {resulting_messages}"
         )
     } else {
@@ -1714,7 +3365,8 @@ fn run_resume_command(
             session: session.clone(),
             message: Some(render_repl_help()),
         }),
-        SlashCommand::Compact => {
+        // Sans modèle chargé, le résumé est celui de Claw : la consigne est ignorée.
+        SlashCommand::Compact { .. } => {
             let result = runtime::compact_session(
                 session,
                 CompactionConfig {
@@ -1822,7 +3474,45 @@ fn run_resume_command(
                 message: Some(handle_skills_slash_command(args.as_deref(), &cwd)?),
             })
         }
+        SlashCommand::Copy { index } => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some(copy_assistant_reply(session, index.as_deref())),
+        }),
+        SlashCommand::Rename { title } => {
+            let id = session_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or_default();
+            Ok(ResumeCommandOutcome {
+                session: session.clone(),
+                message: Some(rename_report(id, title.as_deref())),
+            })
+        }
+        SlashCommand::OutputStyle { args } => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some(apply_output_style_command(args.as_deref())?.0),
+        }),
+        SlashCommand::Schedule { args } => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some(run_schedule_command(args.as_deref(), &default_model())),
+        }),
+        SlashCommand::InstallGithubAction { args } => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some(run_install_github_action(args.as_deref(), &default_model())),
+        }),
+        SlashCommand::MemoryImports { allow } => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some(memory_imports_command(*allow)),
+        }),
+        SlashCommand::AddDir { args } => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some(run_add_dir_command(args.as_deref())),
+        }),
         SlashCommand::Bughunter { .. }
+        | SlashCommand::Btw { .. }
+        | SlashCommand::Recap
+        | SlashCommand::Goal { .. }
+        | SlashCommand::Loop { .. }
         | SlashCommand::Branch { .. }
         | SlashCommand::Worktree { .. }
         | SlashCommand::CommitPushPr { .. }
@@ -1841,6 +3531,30 @@ fn run_resume_command(
         | SlashCommand::Models { .. }
         | SlashCommand::Credits
         | SlashCommand::Doctor
+        | SlashCommand::Keybindings
+        | SlashCommand::Background { .. }
+        | SlashCommand::Fork { .. }
+        | SlashCommand::Plan { .. }
+        | SlashCommand::Tasks
+        | SlashCommand::Stop
+        | SlashCommand::Cd { .. }
+        | SlashCommand::Subtask { .. }
+        | SlashCommand::Workflows { .. }
+        | SlashCommand::DeepResearch { .. }
+        | SlashCommand::WorkflowAuthoring
+        | SlashCommand::Tui { .. }
+        | SlashCommand::Voice { .. }
+        | SlashCommand::Rewind
+        | SlashCommand::Sandbox { .. }
+        | SlashCommand::TerminalSetup
+        | SlashCommand::Theme { .. }
+        | SlashCommand::Color { .. }
+        | SlashCommand::ReloadSkills
+        | SlashCommand::ReloadPlugins
+        | SlashCommand::ReleaseNotes
+        | SlashCommand::Usage
+        | SlashCommand::Insights
+        | SlashCommand::ListAgents { .. }
         | SlashCommand::Context
         | SlashCommand::Teleport { .. }
         | SlashCommand::DebugToolCall
@@ -1861,18 +3575,23 @@ fn run_repl(
     allowed_tools: Option<AllowedToolSet>,
     permission_mode: PermissionMode,
     resume: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<ReplExit, Box<dyn std::error::Error>> {
     let mut cli = LiveCli::new(model, true, allowed_tools, permission_mode)?;
     let mut editor = input::LineEditor::new("> ", slash_command_completion_candidates());
     editor.set_command_help(slash_command_menu_entries());
     transcript::set_interactive(true);
     println!("{}\n", cli.startup_banner());
+    for notice in tools::channels::take_notices() {
+        println!("  {}{notice}{}", transcript::DIM, transcript::RESET);
+    }
     // Crédits lus en arrière-plan : la ligne d'état les montre dès qu'ils arrivent.
     if credits::is_openrouter_model(&cli.model) {
         thread::spawn(|| {
             let _ = credits::account_status(false);
         });
     }
+    runtime::telemetry::session_started(if resume.is_some() { "resume" } else { "fresh" });
+    runtime::peers::register(&peer_name(), "interactive", permission_mode.as_str());
     match resume {
         Some(path) => {
             // La session vide créée au démarrage est remplacée par la session reprise.
@@ -1940,6 +3659,13 @@ fn run_repl(
                 }
                 if let Some(command) = SlashCommand::parse(trimmed) {
                     if matches!(command, SlashCommand::Unknown(_)) {
+                        if let Some(outcome) = cli.invoke_skill(trimmed) {
+                            editor.push_history(&input);
+                            if let Err(error) = outcome {
+                                eprintln!("{}", render_cli_error(&error.to_string()));
+                            }
+                            continue;
+                        }
                         if let Some(invocation) = custom_command_prompt(trimmed) {
                             editor.push_history(&input);
                             match invocation {
@@ -1959,6 +3685,11 @@ fn run_repl(
                             }
                             continue;
                         }
+                        if let Some(launch) = saved_workflow_command(trimmed) {
+                            editor.push_history(&input);
+                            println!("{launch}");
+                            continue;
+                        }
                         if let Some(prompt) = tools::mcp_prompt_invocation(trimmed) {
                             editor.push_history(&input);
                             match prompt {
@@ -1972,8 +3703,64 @@ fn run_repl(
                             continue;
                         }
                     }
+                    if matches!(command, SlashCommand::Rewind) {
+                        match cli.rewind_prompt() {
+                            Ok(Some(request)) => editor.set_initial_text(request),
+                            Ok(None) => {}
+                            Err(error) => eprintln!("{}", render_cli_error(&error.to_string())),
+                        }
+                        continue;
+                    }
+                    if let SlashCommand::Color { color } = &command {
+                        let (message, change) = extra_commands::color_command(color.as_deref());
+                        match change {
+                            extra_commands::ColorChange::Default => editor.set_rule_color(None),
+                            extra_commands::ColorChange::Color(code) => {
+                                editor.set_rule_color(Some(code));
+                            }
+                            extra_commands::ColorChange::Unchanged => {}
+                        }
+                        println!("  ⎿  {message}");
+                        continue;
+                    }
+                    if matches!(command, SlashCommand::Stop) {
+                        let attached = ATTACHED_JOB
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone();
+                        if let Some(id) = attached {
+                            STOP_ATTACHED.store(true, std::sync::atomic::Ordering::SeqCst);
+                            cli.persist_session()?;
+                            cli.session_hook_end("stop");
+                            println!("  ⎿  Session {id} arrêtée (conversation et worktree gardés)");
+                            break;
+                        }
+                        println!("  ⎿  Aucune session en arrière-plan n'est ouverte ici : claw stop <id> en arrête une, /exit quitte");
+                        continue;
+                    }
+                    if let SlashCommand::Background { prompt } = &command {
+                        match cli.send_to_background(prompt.as_deref()) {
+                            Ok(true) => {
+                                cli.session_hook_end("background");
+                                break;
+                            }
+                            Ok(false) => {}
+                            Err(error) => eprintln!("{}", render_cli_error(&error.to_string())),
+                        }
+                        continue;
+                    }
                     if cli.handle_repl_command(command)? {
                         cli.persist_session()?;
+                    }
+                    if let Some(fullscreen) = cli.tui_switch.take() {
+                        cli.persist_session()?;
+                        cli.session_hook_end("exit");
+                        let session = cli.session.path.clone();
+                        return Ok(if fullscreen {
+                            ReplExit::Fullscreen(session)
+                        } else {
+                            ReplExit::Classic(session)
+                        });
                     }
                     continue;
                 }
@@ -1981,6 +3768,8 @@ fn run_repl(
                 // Une requête en échec (quota gratuit, réseau…) ne doit pas fermer la session.
                 if let Err(error) = cli.run_turn(&input) {
                     eprintln!("{}", render_cli_error(&error.to_string()));
+                } else {
+                    cli.continue_goal_after_turn();
                 }
             }
             input::ReadOutcome::Cancel => {}
@@ -2011,10 +3800,23 @@ fn run_repl(
                 cli.session_hook_end("exit");
                 break;
             }
+            // Tâche planifiée échue ou sous-tâche finie : elle passe, puis
+            // la saisie reprend.
+            input::ReadOutcome::Scheduled(text) => {
+                cli.deliver_subtasks();
+                cli.deliver_monitor_events();
+                cli.deliver_workflow_results();
+                cli.deliver_channel_events();
+                cli.deliver_peer_messages(Vec::new());
+                cli.run_due_tasks();
+                if !text.is_empty() {
+                    editor.set_initial_text(text);
+                }
+            }
         }
     }
 
-    Ok(())
+    Ok(ReplExit::Done)
 }
 
 #[derive(Debug, Clone)]
@@ -2034,6 +3836,8 @@ struct ManagedSessionSummary {
 struct LiveCli {
     /// Sorties de `!commande` à transmettre avec la prochaine demande.
     pending_context: Vec<String>,
+    /// `/tui` : passage demandé au plein écran (`true`) ou au rendu classique.
+    tui_switch: Option<bool>,
     /// Texte tapé pendant le dernier tour (lignes en file d'attente, saisie en cours).
     typeahead: turn_keys::TypeAhead,
     model: String,
@@ -2042,6 +3846,41 @@ struct LiveCli {
     system_prompt: Vec<String>,
     runtime: ConversationRuntime<DefaultRuntimeClient, CliToolExecutor>,
     session: SessionHandle,
+    /// Objectif de `/goal` poursuivi d'un tour à l'autre.
+    goal: Option<GoalState>,
+    /// Le dernier tour s'est arrêté sur Échap ou Ctrl+C.
+    last_turn_interrupted: bool,
+}
+
+/// Objectif de `/goal` : après chaque tour, un contrôle dit s'il est atteint ;
+/// sinon Claw continue, jusqu'à une limite de tours.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GoalState {
+    condition: String,
+    rounds: usize,
+    last_reason: Option<String>,
+    /// Contrôles successifs donnant la même raison (aucun progrès).
+    stalls: usize,
+    /// En pause (interruption, limite atteinte) : `/goal reprendre` relance.
+    paused: bool,
+}
+
+impl GoalState {
+    fn new(condition: &str) -> Self {
+        Self {
+            condition: condition.trim().to_string(),
+            rounds: 0,
+            last_reason: None,
+            stalls: 0,
+            paused: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GoalVerdict {
+    Met(String),
+    NotMet(String),
 }
 
 impl LiveCli {
@@ -2065,6 +3904,7 @@ impl LiveCli {
         )?;
         let cli = Self {
             pending_context: Vec::new(),
+            tui_switch: None,
             typeahead: turn_keys::TypeAhead::default(),
             model,
             allowed_tools,
@@ -2072,8 +3912,11 @@ impl LiveCli {
             system_prompt,
             runtime,
             session,
+            goal: None,
+            last_turn_interrupted: false,
         };
         cli.persist_session()?;
+        session_bound(&cli.session.path);
         Ok(cli)
     }
 
@@ -2135,6 +3978,13 @@ impl LiveCli {
             transcript::clip(&self.model, room)
         ));
         let mut lines = transcript::boxed(&rows, width, accent);
+        if let Some(announcement) = cwd
+            .as_ref()
+            .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok())
+            .and_then(|config| runtime::settings::company_announcement(&config))
+        {
+            lines.push(format!(" {accent}※{reset} {announcement}"));
+        }
         lines.push(String::new());
         if has_claw_md {
             lines.push(format!(
@@ -2164,9 +4014,13 @@ impl LiveCli {
 
     fn run_turn(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let started = Instant::now();
+        self.last_turn_interrupted = false;
         transcript::begin_turn();
         live::start("Réflexion…");
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
+        self.share_auto_context(input);
+        runtime::peers::update(Some(self.permission_mode.as_str()), None);
+        runtime::peers::set_status("busy");
         let (mut text, images) = take_image_attachments(input);
         if !self.pending_context.is_empty() {
             text = format!("{}\n\n{text}", self.pending_context.join("\n\n"));
@@ -2190,6 +4044,10 @@ impl LiveCli {
                 self.print_turn_footer(started.elapsed());
                 self.persist_session()?;
                 self.sync_permission_mode()?;
+                runtime::peers::set_status("idle");
+                runtime::peers::went_idle(&summary_line(&last_assistant_of(
+                    self.runtime.session(),
+                )));
                 Ok(())
             }
             Err(error) if runtime::interrupt::is_interruption(&error.to_string()) => {
@@ -2205,6 +4063,7 @@ impl LiveCli {
                     transcript::RED,
                     transcript::RESET
                 );
+                self.last_turn_interrupted = true;
                 self.persist_session()?;
                 Ok(())
             }
@@ -2235,13 +4094,61 @@ impl LiveCli {
         }
     }
 
-    /// Ligne d'état sous la saisie : mode de permission, modèle, crédits.
+    /// Ligne d'état sous la saisie : celle de la commande `statusLine` des
+    /// réglages s'il y en a une, sinon la ligne intégrée.
     fn status_line(&self) -> String {
+        if let Some(command) = statusline::load_command() {
+            if let Some(line) = statusline::run(&command, &self.status_input()) {
+                return line;
+            }
+        }
+        self.builtin_status_line()
+    }
+
+    /// Ce que reçoit la commande de ligne d'état.
+    fn status_input(&self) -> statusline::StatusInput {
+        let window = api::context_window_for_model(&self.model);
+        let used = self.runtime.estimated_context_tokens();
+        let cost = models::estimated_cost_usd(&self.model, self.runtime.usage().cumulative_usage());
+        let output_style = env::current_dir()
+            .ok()
+            .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok())
+            .and_then(|config| {
+                config
+                    .get(commands::output_styles::SETTING_KEY)
+                    .and_then(|value| value.as_str().map(ToOwned::to_owned))
+            });
+        statusline::StatusInput {
+            session_id: self.session.id.clone(),
+            transcript_path: self.session.path.display().to_string(),
+            cwd: env::current_dir()
+                .map(|cwd| cwd.display().to_string())
+                .unwrap_or_default(),
+            model: self.model.clone(),
+            permission_mode: self.permission_mode.as_str().to_string(),
+            output_style,
+            context_used_percent: usize::try_from(window)
+                .ok()
+                .filter(|window| *window > 0)
+                .map(|window| (used * 100 / window).min(100)),
+            context_window: Some(window).filter(|window| *window > 0),
+            total_cost_usd: cost,
+            goal: self.goal.as_ref().map(|goal| goal.condition.clone()),
+            version: VERSION.to_string(),
+        }
+    }
+
+    fn builtin_status_line(&self) -> String {
         let mode = match self.permission_mode {
             PermissionMode::Prompt => "⏵ demander avant d'agir",
             PermissionMode::WorkspaceWrite => "⏵⏵ éditions acceptées",
             PermissionMode::ReadOnly => "‖ mode plan",
             PermissionMode::DangerFullAccess | PermissionMode::Allow => "▲ accès complet",
+            PermissionMode::DontAsk => "⊘ sans demande (règles seules)",
+            PermissionMode::Auto if auto_mode::paused() => {
+                "⏵⏵ mode auto (en pause : Claw redemande)"
+            }
+            PermissionMode::Auto => "⏵⏵ mode auto",
         };
         let mut line = format!("  {mode} (Maj+Tab) · {}", self.model);
         let window = usize::try_from(api::context_window_for_model(&self.model)).unwrap_or(0);
@@ -2254,6 +4161,27 @@ impl LiveCli {
                 line.push_str(" · ");
                 line.push_str(&credits);
             }
+        }
+        let scheduled = runtime::cron::list().len();
+        if scheduled > 0 {
+            let plural = if scheduled > 1 { "s" } else { "" };
+            let _ = write!(line, " · ↻ {scheduled} tâche{plural} planifiée{plural}");
+        }
+        let waiting = jobs::needing_input();
+        if waiting > 0 {
+            let _ = write!(
+                line,
+                " · ✻ {waiting} agent{} en attente (claw agents)",
+                if waiting > 1 { "s" } else { "" }
+            );
+        }
+        if let Some(goal) = &self.goal {
+            let state = if goal.paused { "en pause" } else { "actif" };
+            let _ = write!(
+                line,
+                " · ◎ objectif {state} : {}",
+                transcript::clip(&goal.condition, 40)
+            );
         }
         line
     }
@@ -2314,8 +4242,12 @@ impl LiveCli {
         let next = match self.permission_mode {
             PermissionMode::Prompt => PermissionMode::WorkspaceWrite,
             PermissionMode::WorkspaceWrite => PermissionMode::ReadOnly,
+            PermissionMode::ReadOnly if !auto_mode::disabled() => PermissionMode::Auto,
             _ => PermissionMode::Prompt,
         };
+        if next == PermissionMode::Auto {
+            auto_mode::resume();
+        }
         let session = self.runtime.session().clone();
         self.runtime = build_runtime(
             session,
@@ -2358,6 +4290,7 @@ impl LiveCli {
             None,
         )?;
         self.session = handle;
+        session_bound(&self.session.path);
         Ok(())
     }
 
@@ -2549,7 +4482,17 @@ impl LiveCli {
                 false
             }
             SlashCommand::Think { level } => {
-                println!("{}", apply_think_command(level.as_deref()));
+                // Niveaux de Claude Code (/effort) : xhigh, auto, status.
+                let level = level.map(|level| level.trim().to_lowercase());
+                match level.as_deref() {
+                    Some("auto") => {
+                        api::set_reasoning_effort(None);
+                        println!("Raisonnement : auto (le réglage du modèle)");
+                    }
+                    Some("status") => println!("{}", apply_think_command(None)),
+                    Some("xhigh") => println!("{}", apply_think_command(Some("max"))),
+                    other => println!("{}", apply_think_command(other)),
+                }
                 false
             }
             SlashCommand::Team { args } => {
@@ -2578,6 +4521,126 @@ impl LiveCli {
                 println!("{}", doctor::report(&self.model, &version_summary()));
                 false
             }
+            SlashCommand::Keybindings => {
+                println!("{}", keybindings_command());
+                false
+            }
+            SlashCommand::Plan { task } => {
+                self.set_permissions(Some("read-only".to_string()))?;
+                if let Some(task) = task.filter(|task| !task.trim().is_empty()) {
+                    self.run_turn(&task)?;
+                    return Ok(true);
+                }
+                false
+            }
+            SlashCommand::ListAgents { args } => {
+                let (report, released) = peers_report(args.as_deref());
+                println!("{report}");
+                if !released.is_empty() {
+                    self.deliver_peer_messages(released);
+                }
+                false
+            }
+            SlashCommand::Tasks => {
+                Self::print_tasks();
+                false
+            }
+            SlashCommand::Cd { path } => {
+                if let Err(error) = self.change_directory(path.as_deref()) {
+                    eprintln!("{}", render_cli_error(&error.to_string()));
+                }
+                false
+            }
+            SlashCommand::Subtask { task } => {
+                match task.filter(|task| !task.trim().is_empty()) {
+                    Some(task) => {
+                        let transcript =
+                            extra_commands::transcript_text(self.runtime.session(), 12_000);
+                        let id = extra_commands::spawn_subtask(&task, &transcript, &self.model);
+                        println!("  ⎿  Sous-tâche {id} lancée en arrière-plan : son résultat reviendra ici (/tasks pour la suivre)");
+                    }
+                    None => println!("Usage : /subtask <tâche>"),
+                }
+                false
+            }
+            SlashCommand::Sandbox { args } => {
+                println!("{}", sandbox_command(args.as_deref()));
+                false
+            }
+            SlashCommand::Workflows { args } => {
+                println!("{}", tools::workflows::report(args.as_deref()));
+                false
+            }
+            SlashCommand::DeepResearch { question } => {
+                println!("{}", deep_research_command(question.as_deref()));
+                false
+            }
+            SlashCommand::WorkflowAuthoring => {
+                println!("{}", tools::workflows::AUTHORING);
+                false
+            }
+            SlashCommand::Tui { mode } => {
+                self.tui_command(mode.as_deref());
+                false
+            }
+            SlashCommand::Voice { args } => {
+                println!("{}", voice::command(args.as_deref()));
+                false
+            }
+            SlashCommand::TerminalSetup => {
+                println!("{}", extra_commands::terminal_setup());
+                false
+            }
+            SlashCommand::Theme { name } => {
+                println!("{}", extra_commands::theme_command(name.as_deref()));
+                false
+            }
+            SlashCommand::ReloadSkills => {
+                self.refresh_system_prompt()?;
+                let count = env::current_dir()
+                    .map(|cwd| commands::skill_registry::installed_skills(&cwd).len())
+                    .unwrap_or(0);
+                println!("  ⎿  Skills relus : {count} disponible(s)");
+                false
+            }
+            SlashCommand::ReloadPlugins => {
+                self.reload_runtime_features()?;
+                self.refresh_system_prompt()?;
+                println!("  ⎿  Plugins, hooks, serveurs MCP et réglages rechargés");
+                false
+            }
+            SlashCommand::ReleaseNotes => {
+                println!("{}", extra_commands::release_notes());
+                false
+            }
+            SlashCommand::Usage => {
+                self.print_cost();
+                if credits::is_openrouter_model(&self.model) {
+                    println!("{}", credits::report(false));
+                }
+                let mut activity = extra_commands::Activity::default();
+                activity.add(self.runtime.session());
+                println!("Activité de la session\n{}", activity.summary());
+                false
+            }
+            SlashCommand::Insights => {
+                match extra_commands::insights(&env::current_dir()?) {
+                    Ok((_, summary)) => println!("{summary}"),
+                    Err(error) => println!("  ⎿  {error}"),
+                }
+                false
+            }
+            SlashCommand::Fork { prompt } => {
+                if let Err(error) = self.fork_to_background(prompt.as_deref()) {
+                    eprintln!("{}", render_cli_error(&error.to_string()));
+                }
+                false
+            }
+            // Traitées par la boucle du terminal (saisie, sortie, session libérée).
+            SlashCommand::Background { .. }
+            | SlashCommand::Rewind
+            | SlashCommand::Stop
+            | SlashCommand::Color { .. } => false,
             SlashCommand::Teleport { target } => {
                 self.run_teleport(target.as_deref())?;
                 false
@@ -2586,8 +4649,69 @@ impl LiveCli {
                 self.run_debug_tool_call()?;
                 false
             }
-            SlashCommand::Compact => {
-                self.compact()?;
+            SlashCommand::Compact { instructions } => {
+                self.compact(instructions.as_deref())?;
+                false
+            }
+            SlashCommand::Btw { question } => {
+                self.run_side_question(question.as_deref());
+                false
+            }
+            SlashCommand::Recap => {
+                self.run_recap();
+                false
+            }
+            SlashCommand::Copy { index } => {
+                println!(
+                    "{}",
+                    copy_assistant_reply(self.runtime.session(), index.as_deref())
+                );
+                false
+            }
+            SlashCommand::Rename { title } => {
+                self.rename_session(title.as_deref());
+                false
+            }
+            SlashCommand::Goal { args } => {
+                self.handle_goal_command(args.as_deref())?;
+                true
+            }
+            SlashCommand::Loop { args } => {
+                self.run_loop(args.as_deref())?;
+                true
+            }
+            SlashCommand::OutputStyle { args } => {
+                match apply_output_style_command(args.as_deref()) {
+                    Ok((report, changed)) => {
+                        if changed {
+                            self.refresh_system_prompt()?;
+                        }
+                        println!("{report}");
+                    }
+                    Err(error) => eprintln!("{}", render_cli_error(&error.to_string())),
+                }
+                false
+            }
+            SlashCommand::Schedule { args } => {
+                println!("{}", run_schedule_command(args.as_deref(), &self.model));
+                false
+            }
+            SlashCommand::AddDir { args } => {
+                println!("{}", run_add_dir_command(args.as_deref()));
+                false
+            }
+            SlashCommand::MemoryImports { allow } => {
+                println!("{}", memory_imports_command(allow));
+                if allow.is_some() {
+                    self.refresh_system_prompt()?;
+                }
+                false
+            }
+            SlashCommand::InstallGithubAction { args } => {
+                println!(
+                    "{}",
+                    run_install_github_action(args.as_deref(), &self.model)
+                );
                 false
             }
             SlashCommand::Model { model } => self.set_model(model)?,
@@ -2654,26 +4778,38 @@ impl LiveCli {
                 Self::print_skills(args.as_deref())?;
                 false
             }
-            SlashCommand::Branch { .. } => {
-                eprintln!(
+            SlashCommand::Branch { action, target } => {
+                println!(
                     "{}",
-                    render_mode_unavailable("branch", "commandes git branch")
+                    git_work::branch_command(
+                        &env::current_dir()?,
+                        action.as_deref(),
+                        target.as_deref()
+                    )
                 );
                 false
             }
-            SlashCommand::Worktree { .. } => {
-                eprintln!(
+            SlashCommand::Worktree {
+                action,
+                path,
+                branch,
+            } => {
+                println!(
                     "{}",
-                    render_mode_unavailable("worktree", "commandes git worktree")
+                    git_work::worktree_command(
+                        &env::current_dir()?,
+                        action.as_deref(),
+                        path.as_deref(),
+                        branch.as_deref()
+                    )
                 );
                 false
             }
-            SlashCommand::CommitPushPr { .. } => {
-                eprintln!(
-                    "{}",
-                    render_mode_unavailable("commit-push-pr", "automatisation commit + push + PR")
-                );
-                false
+            SlashCommand::CommitPushPr { context } => {
+                if let Err(error) = self.run_commit_push_pr(context.as_deref()) {
+                    eprintln!("{}", render_cli_error(&error.to_string()));
+                }
+                true
             }
             SlashCommand::Unknown(name) => {
                 eprintln!("{}", render_unknown_repl_command(&name));
@@ -2807,6 +4943,42 @@ impl LiveCli {
         Ok(())
     }
 
+    /// Ajoute ou retire une règle de `.claw/settings.local.json`, puis
+    /// recharge les permissions de la session.
+    fn edit_rule(
+        &mut self,
+        list: Option<&str>,
+        rule: &str,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if runtime::PermissionRule::parse(rule).is_none() {
+            println!(
+                "Règle illisible : {rule}
+  Exemples         Bash(npm test:*) · Edit(src/**) · WebFetch(domain:docs.rs) · mcp__serveur"
+            );
+            return Ok(false);
+        }
+        let cwd = env::current_dir()?;
+        let (path, changed) = edit_permission_rule(&cwd, list, rule)?;
+        self.reload_runtime_features()?;
+        let action = match (list, changed) {
+            (Some(list), true) => format!("ajoutée à {list}"),
+            (Some(list), false) => format!("déjà dans {list}"),
+            (None, true) => "retirée".to_string(),
+            (None, false) => {
+                "absente de ce fichier (elle vient peut-être de .claw/settings.json ou de ~/.claw)"
+                    .to_string()
+            }
+        };
+        println!(
+            "Permissions
+  Règle            {rule}
+  Résultat         {action}
+  Fichier          {}",
+            path.display()
+        );
+        Ok(false)
+    }
+
     fn set_permissions(
         &mut self,
         mode: Option<String>,
@@ -2821,6 +4993,20 @@ impl LiveCli {
             );
             return Ok(false);
         };
+        // `/permissions allow|deny|ask|remove <règle>` : règles du projet.
+        if let Some((list, rule)) = parse_rule_command(&mode) {
+            return self.edit_rule(list, rule);
+        }
+        if matches!(mode.trim(), "rules" | "regles" | "règles" | "list") {
+            println!(
+                "{}",
+                format_permissions_report(
+                    self.permission_mode.as_str(),
+                    self.runtime.permission_policy().rules()
+                )
+            );
+            return Ok(false);
+        }
 
         let normalized = normalize_permission_mode(&mode).ok_or_else(|| {
             format!(
@@ -2866,6 +5052,7 @@ impl LiveCli {
 
         self.session_hook_end("clear");
         self.session = create_managed_session_handle()?;
+        session_bound(&self.session.path);
         self.runtime = build_runtime(
             Session::new(),
             self.model.clone(),
@@ -2917,6 +5104,7 @@ impl LiveCli {
             None,
         )?;
         self.session = handle;
+        session_bound(&self.session.path);
         self.session_hook_start("resume");
         println!(
             "{}",
@@ -3003,6 +5191,7 @@ impl LiveCli {
                     None,
                 )?;
                 self.session = handle;
+                session_bound(&self.session.path);
                 println!(
                     "Session changée\n  Session active   {}\n  Fichier          {}\n  Messages         {}",
                     self.session.id,
@@ -3104,8 +5293,18 @@ impl LiveCli {
         self.persist_session()
     }
 
-    fn compact(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let result = self.runtime.compact(CompactionConfig::default());
+    /// `/compact [consigne]` : le modèle résume l'historique (en suivant la
+    /// consigne : ce qu'il faut garder), même sous le seuil automatique.
+    fn compact(&mut self, instructions: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        live::start("Compaction de la conversation…");
+        let result = self.runtime.compact_with_model(
+            CompactionConfig {
+                max_estimated_tokens: 0,
+                ..CompactionConfig::default()
+            },
+            instructions,
+        );
+        live::stop();
         let removed = result.removed_message_count;
         let kept = result.compacted_session.messages.len();
         let skipped = removed == 0;
@@ -3121,6 +5320,523 @@ impl LiveCli {
         )?;
         self.persist_session()?;
         println!("{}", format_compact_report(removed, kept, skipped));
+        Ok(())
+    }
+
+    /// Réponse hors conversation (sans outils, non gardée), affichée sous un titre.
+    fn print_side_answer(&self, title: &str, label: &str, prompt: &str) {
+        live::start(label);
+        let answer = self.run_internal_prompt_text(prompt, false);
+        live::stop();
+        match answer {
+            Ok(text) if !text.trim().is_empty() => {
+                println!(
+                    "\n{}※ {title}{}\n{}\n{}  (hors conversation : rien n'est gardé){}\n",
+                    transcript::ACCENT,
+                    transcript::RESET,
+                    TerminalRenderer::new().markdown_to_ansi(&text),
+                    transcript::DIM,
+                    transcript::RESET
+                );
+            }
+            Ok(_) => println!("  ⎿  Réponse vide du modèle"),
+            Err(error) if runtime::interrupt::is_interruption(&error.to_string()) => {
+                println!("  ⎿  {}Interrompu{}", transcript::RED, transcript::RESET);
+            }
+            Err(error) => eprintln!("{}", render_cli_error(&error.to_string())),
+        }
+    }
+
+    /// `/btw <question>` : question en aparté, sans interrompre ni allonger la
+    /// conversation.
+    fn run_side_question(&self, question: Option<&str>) {
+        let Some(question) = question.map(str::trim).filter(|text| !text.is_empty()) else {
+            println!("Usage : /btw <question>  (réponse en aparté, hors conversation)");
+            return;
+        };
+        let prompt = format!(
+            "[Side question from the user, asked in passing. Answer it briefly from what you already know of this conversation and project, in the user's language. Do not use tools, do not continue or change the current task.]\n\n{question}"
+        );
+        self.print_side_answer("Aparté", "Réponse en aparté…", &prompt);
+    }
+
+    /// `/recap` : bilan de la session (demandes, travail fait, reste à faire).
+    fn run_recap(&self) {
+        if assistant_replies(self.runtime.session()).is_empty() {
+            println!("  ⎿  Rien à récapituler : la session vient de commencer");
+            return;
+        }
+        let prompt = "[The user asks for a recap of this session. In their language and in at most 12 short bullet points, say: what was asked, what was done (files changed, commands run and their results), what is still open, and the next step. Do not use tools and do not continue the work.]";
+        self.print_side_answer("Bilan de la session", "Bilan de la session…", prompt);
+    }
+
+    /// `/rename [titre]` : sans titre, le modèle en propose un d'après la
+    /// conversation.
+    fn rename_session(&self, title: Option<&str>) {
+        if let Some(title) = title.map(str::trim).filter(|title| !title.is_empty()) {
+            println!("{}", rename_report(&self.session.id, Some(title)));
+            return;
+        }
+        if assistant_replies(self.runtime.session()).is_empty() {
+            println!(
+                "Usage : /rename <titre>  (sans titre : titre proposé d'après la conversation)"
+            );
+            return;
+        }
+        live::start("Choix d'un titre…");
+        let proposed = self.run_internal_prompt_text(
+            "[Give this conversation a short title: 3 to 7 words, in the user's language, no quotes, no final period. Reply with the title only.]",
+            false,
+        );
+        live::stop();
+        match proposed {
+            Ok(text) => {
+                let title = text
+                    .lines()
+                    .map(|line| line.trim().trim_matches(['"', '«', '»', '*', '#', ' ']))
+                    .find(|line| !line.is_empty())
+                    .unwrap_or_default()
+                    .to_string();
+                if title.is_empty() {
+                    println!("  ⎿  Aucun titre proposé ; donnez-en un : /rename <titre>");
+                } else {
+                    println!("{}", rename_report(&self.session.id, Some(&title)));
+                }
+            }
+            Err(error) => eprintln!("{}", render_cli_error(&error.to_string())),
+        }
+    }
+
+    /// `/goal <condition>` fixe un objectif ; `/goal` montre où il en est,
+    /// `/goal reprendre` relance un objectif en pause, `/goal clear` l'efface.
+    fn handle_goal_command(
+        &mut self,
+        args: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let args = args.map(str::trim).filter(|args| !args.is_empty());
+        let Some(args) = args else {
+            println!("{}", render_goal_status(self.goal.as_ref()));
+            return Ok(());
+        };
+        match fold_command_word(args).as_str() {
+            "clear" | "stop" | "effacer" | "arreter" | "annuler" => {
+                if self.goal.take().is_some() {
+                    println!("  ⎿  Objectif effacé");
+                } else {
+                    println!("  ⎿  Aucun objectif en cours");
+                }
+                return Ok(());
+            }
+            "reprendre" | "resume" | "continuer" | "continue" => {
+                let Some(goal) = self.goal.as_mut() else {
+                    println!("  ⎿  Aucun objectif à reprendre ; fixez-en un : /goal <condition>");
+                    return Ok(());
+                };
+                goal.paused = false;
+                goal.stalls = 0;
+                goal.rounds = 0;
+                let prompt = goal_continue_prompt(&goal.condition, goal.last_reason.as_deref());
+                println!(
+                    "{}◎ Reprise de l'objectif : {}{}",
+                    transcript::ACCENT,
+                    goal.condition,
+                    transcript::RESET
+                );
+                self.run_goal_turn(&prompt);
+                return self.pursue_goal();
+            }
+            _ => {}
+        }
+        let goal = GoalState::new(args);
+        println!(
+            "{}◎ Objectif : {}{}\n{}  Claw continue tant qu'un contrôle ne le juge pas atteint (au plus {} tours) · Échap pour mettre en pause{}",
+            transcript::ACCENT,
+            goal.condition,
+            transcript::RESET,
+            transcript::DIM,
+            goal_max_rounds(),
+            transcript::RESET
+        );
+        let prompt = goal_start_prompt(&goal.condition);
+        self.goal = Some(goal);
+        self.run_goal_turn(&prompt);
+        self.pursue_goal()
+    }
+
+    /// Tour poursuivant l'objectif : une erreur (quota, réseau) le met en pause
+    /// au lieu de fermer la session.
+    fn run_goal_turn(&mut self, prompt: &str) {
+        if let Err(error) = self.run_turn(prompt) {
+            eprintln!("{}", render_cli_error(&error.to_string()));
+            self.last_turn_interrupted = true;
+        }
+    }
+
+    /// Après un tour : l'objectif est contrôlé ; tant qu'il n'est pas atteint,
+    /// Claw continue (jusqu'à la limite, une interruption ou l'absence de progrès).
+    fn pursue_goal(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let max_rounds = goal_max_rounds();
+        loop {
+            let Some(goal) = self.goal.clone().filter(|goal| !goal.paused) else {
+                return Ok(());
+            };
+            if self.last_turn_interrupted {
+                self.pause_goal("interrompu");
+                return Ok(());
+            }
+            live::start("Contrôle de l'objectif…");
+            let verdict = self.run_internal_prompt_text(&goal_check_prompt(&goal.condition), false);
+            live::stop();
+            let verdict = match verdict {
+                Ok(text) => parse_goal_verdict(&text),
+                Err(error) => {
+                    if !runtime::interrupt::is_interruption(&error.to_string()) {
+                        eprintln!("{}", render_cli_error(&error.to_string()));
+                    }
+                    self.pause_goal("contrôle impossible");
+                    return Ok(());
+                }
+            };
+            let reason = match verdict {
+                GoalVerdict::Met(reason) => {
+                    println!(
+                        "{}✓ Objectif atteint{} · {reason}\n",
+                        transcript::ACCENT,
+                        transcript::RESET
+                    );
+                    self.goal = None;
+                    return Ok(());
+                }
+                GoalVerdict::NotMet(reason) => reason,
+            };
+            let Some(goal) = self.goal.as_mut() else {
+                return Ok(());
+            };
+            goal.rounds += 1;
+            if goal.last_reason.as_deref() == Some(reason.as_str()) {
+                goal.stalls += 1;
+            } else {
+                goal.stalls = 0;
+            }
+            goal.last_reason = Some(reason.clone());
+            let (rounds, stalls) = (goal.rounds, goal.stalls);
+            let prompt = goal_continue_prompt(&goal.condition, Some(&reason));
+            if rounds >= max_rounds {
+                self.pause_goal(&format!("{max_rounds} tours sans l'atteindre"));
+                return Ok(());
+            }
+            if stalls >= 2 {
+                self.pause_goal("plus de progrès");
+                return Ok(());
+            }
+            println!(
+                "{}◎ Pas encore atteint ({rounds}/{max_rounds}) · {reason}{}",
+                transcript::DIM,
+                transcript::RESET
+            );
+            self.run_goal_turn(&prompt);
+            self.persist_session()?;
+        }
+    }
+
+    fn pause_goal(&mut self, why: &str) {
+        if let Some(goal) = self.goal.as_mut() {
+            goal.paused = true;
+            let reason = goal
+                .last_reason
+                .as_deref()
+                .map(|reason| format!("\n  Dernier contrôle  {reason}"))
+                .unwrap_or_default();
+            println!(
+                "{}◎ Objectif en pause ({why}){reason}\n  Suite            /goal reprendre · /goal clear{}\n",
+                transcript::DIM,
+                transcript::RESET
+            );
+        }
+    }
+
+    /// Un message tapé pendant qu'un objectif est actif : le contrôle reprend
+    /// après la réponse.
+    fn continue_goal_after_turn(&mut self) {
+        if self.goal.as_ref().is_some_and(|goal| !goal.paused) {
+            if let Err(error) = self.pursue_goal() {
+                eprintln!("{}", render_cli_error(&error.to_string()));
+            }
+        }
+    }
+
+    /// Sous-tâches finies : le résultat est montré et rejoint la conversation.
+    fn deliver_subtasks(&mut self) {
+        for subtask in extra_commands::take_finished_subtasks() {
+            match subtask.result {
+                Some(Ok(report)) => {
+                    println!(
+                        "\n{}※ Sous-tâche {} terminée{} · {}\n{}\n",
+                        transcript::ACCENT,
+                        subtask.id,
+                        transcript::RESET,
+                        subtask.task,
+                        TerminalRenderer::new().markdown_to_ansi(&report)
+                    );
+                    self.pending_context.push(format!(
+                        "[Result of sub-task {} \"{}\", run by a forked sub-agent]\n{report}",
+                        subtask.id, subtask.task
+                    ));
+                }
+                Some(Err(error)) => println!(
+                    "\n  ⎿  {}Sous-tâche {} en échec : {error}{}\n",
+                    transcript::RED,
+                    subtask.id,
+                    transcript::RESET
+                ),
+                None => {}
+            }
+        }
+    }
+
+    /// Sorties des Monitors : le modèle les reçoit comme un tour.
+    fn deliver_monitor_events(&mut self) {
+        if !tools::monitors::has_events() {
+            return;
+        }
+        if let Some(events) = tools::monitors::take_events() {
+            let first = events
+                .lines()
+                .nth(1)
+                .unwrap_or_default()
+                .chars()
+                .take(90)
+                .collect::<String>();
+            println!(
+                "{}› Monitor : {first}{}",
+                transcript::DIM,
+                transcript::RESET
+            );
+            if let Err(error) = self.run_turn(&events) {
+                eprintln!("{}", render_cli_error(&error.to_string()));
+            }
+        }
+    }
+
+    /// `/tui` : rendu actuel ; `/tui fullscreen` ou `/tui default` l'enregistre
+    /// (réglage `tui`) et y fait passer la conversation.
+    fn tui_command(&mut self, mode: Option<&str>) {
+        let inside = fullscreen::inside();
+        let current = if inside { "plein écran" } else { "classique" };
+        match mode.map(str::trim).map(str::to_lowercase).as_deref() {
+            None | Some("") => println!(
+                "Rendu : {current} · /tui fullscreen (plein écran : sans scintillement, PgUp/PgDn et molette pour relire) ou /tui default"
+            ),
+            Some("fullscreen" | "plein-ecran" | "plein-écran") => {
+                if let Err(error) =
+                    extra_commands::set_user_setting("tui", serde_json::json!("fullscreen"))
+                {
+                    eprintln!("Réglage tui non enregistré : {error}");
+                }
+                if inside {
+                    println!("  ⎿  Déjà en plein écran");
+                } else if !io::stdout().is_terminal() {
+                    println!("  ⎿  Réglage enregistré ; le plein écran demande un terminal");
+                } else {
+                    println!("  ⎿  Passage au plein écran, la conversation continue…");
+                    self.tui_switch = Some(true);
+                }
+            }
+            Some("default" | "classic" | "classique") => {
+                if let Err(error) =
+                    extra_commands::set_user_setting("tui", serde_json::json!("default"))
+                {
+                    eprintln!("Réglage tui non enregistré : {error}");
+                }
+                if inside {
+                    println!("  ⎿  Retour au rendu classique, la conversation continue…");
+                    self.tui_switch = Some(false);
+                } else {
+                    println!("  ⎿  Déjà en rendu classique");
+                }
+            }
+            Some(_) => println!("Usage : /tui [default|fullscreen]"),
+        }
+    }
+
+    /// Événements des channels : le modèle les reçoit comme un tour.
+    fn deliver_channel_events(&mut self) {
+        let events = tools::channels::take_events();
+        if events.is_empty() {
+            return;
+        }
+        for event in &events {
+            println!(
+                "{}{}{}",
+                transcript::DIM,
+                tools::channels::summary(event),
+                transcript::RESET
+            );
+        }
+        if let Err(error) = self.run_turn(&tools::channels::render_for_model(&events)) {
+            eprintln!("{}", render_cli_error(&error.to_string()));
+        }
+    }
+
+    /// Workflows finis : leur résultat passe au modèle comme un tour.
+    fn deliver_workflow_results(&mut self) {
+        for finished in tools::workflows::take_finished() {
+            println!(
+                "\n{}{}{}",
+                transcript::ACCENT,
+                finished.headline,
+                transcript::RESET
+            );
+            if let Err(error) = self.run_turn(&finished.for_model) {
+                eprintln!("{}", render_cli_error(&error.to_string()));
+            }
+        }
+    }
+
+    /// Messages des autres sessions (et ceux libérés par `/peers accept`).
+    fn deliver_peer_messages(&mut self, mut released: Vec<runtime::peers::Message>) {
+        let (mut messages, held) = runtime::peers::take_messages(inbound_setting().as_deref());
+        messages.append(&mut released);
+        for message in &messages {
+            println!(
+                "{}› Message de @{} : {}{}",
+                transcript::DIM,
+                message.from_name,
+                message
+                    .text
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(90)
+                    .collect::<String>(),
+                transcript::RESET
+            );
+        }
+        if held > 0 {
+            println!(
+                "  ⎿  {held} message(s) d'une autre session retenu(s) (crossSessionInbound ou mode de permission) : /peers pour les voir, /peers accept pour les délivrer"
+            );
+        }
+        if messages.is_empty() {
+            return;
+        }
+        if let Err(error) = self.run_turn(&runtime::peers::render_for_model(&messages)) {
+            eprintln!("{}", render_cli_error(&error.to_string()));
+        }
+    }
+
+    /// `/cd <chemin>` : la session continue dans ce dossier (consignes,
+    /// réglages, permissions et outils de ce dossier).
+    fn change_directory(&mut self, path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(path) = path.map(str::trim).filter(|path| !path.is_empty()) else {
+            println!(
+                "Usage : /cd <chemin>  (dossier actuel : {})",
+                env::current_dir()?.display()
+            );
+            return Ok(());
+        };
+        let target = env::current_dir()?.join(path);
+        let target =
+            fs::canonicalize(&target).map_err(|error| format!("{} : {error}", target.display()))?;
+        // Sous Windows, `canonicalize` rend un chemin `\\?\C:\…` : on garde la
+        // forme ordinaire (affichage, outils, git).
+        let target = target
+            .to_str()
+            .and_then(|text| text.strip_prefix(r"\\?\"))
+            .filter(|rest| !rest.starts_with("UNC"))
+            .map_or_else(|| target.clone(), PathBuf::from);
+        if !target.is_dir() {
+            return Err(format!("{} n'est pas un dossier", target.display()).into());
+        }
+        env::set_current_dir(&target)?;
+        runtime::peers::update(None, Some(&target.display().to_string()));
+        self.refresh_system_prompt()?;
+        self.reload_runtime_features()?;
+        println!(
+            "  ⎿  Dossier : {}\n     Consignes, réglages et permissions de ce dossier appliqués ; la conversation continue (/add-dir garde au contraire le dossier actuel)",
+            transcript::display_path(&target.display().to_string())
+        );
+        Ok(())
+    }
+
+    /// `/tasks` : ce qui tourne en arrière-plan pour cette session.
+    fn print_tasks() {
+        println!("{}", tasks_report());
+    }
+
+    /// Tâches planifiées échues : chacune passe comme un tour.
+    fn run_due_tasks(&mut self) {
+        while let Some(task) = runtime::cron::take_due() {
+            let kind = if task.self_paced {
+                "boucle".to_string()
+            } else if task.recurring {
+                task.cron.clone()
+            } else {
+                "rappel".to_string()
+            };
+            println!(
+                "{}↻ Tâche planifiée {} · {kind}{}",
+                transcript::ACCENT,
+                task.id,
+                transcript::RESET
+            );
+            let _ = runtime::cron::take_stop_requested();
+            if let Err(error) = self.run_turn(&scheduled_prompt(&task)) {
+                eprintln!("{}", render_cli_error(&error.to_string()));
+            }
+            if task.self_paced {
+                after_self_paced_pass(&task.prompt, task.fallback);
+            }
+            if self.last_turn_interrupted {
+                break;
+            }
+        }
+    }
+
+    /// `/loop` : voir `plan_loop`.
+    fn run_loop(&mut self, args: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+        let dim = transcript::DIM;
+        let reset = transcript::RESET;
+        match plan_loop(args) {
+            LoopPlan::Report(text) => println!("{text}"),
+            LoopPlan::SelfPaced(request) => {
+                println!(
+                    "{}↻ Boucle au rythme choisi par Claw · /loop stop pour l'arrêter{reset}",
+                    transcript::ACCENT
+                );
+                let _ = runtime::cron::take_stop_requested();
+                self.run_turn(&format!("{request}{}", self_paced_note(&request)))?;
+                if self.last_turn_interrupted {
+                    let _ = runtime::cron::stop_loops();
+                    println!("  ⎿  Boucle arrêtée");
+                    return Ok(());
+                }
+                after_self_paced_pass(&request, false);
+            }
+            LoopPlan::Fixed {
+                request,
+                cron,
+                max,
+                header,
+                note,
+            } => {
+                println!("{}{header}{reset}", transcript::ACCENT);
+                if let Some(note) = note {
+                    println!("  ⎿  {dim}{note}{reset}");
+                }
+                self.run_turn(&request)?;
+                if self.last_turn_interrupted {
+                    println!("  ⎿  Boucle arrêtée");
+                    return Ok(());
+                }
+                match schedule_loop_rest(&cron, &request, max) {
+                    Ok(Some(note)) => println!("  ⎿  {dim}{note}{reset}"),
+                    Ok(None) => {}
+                    Err(error) => eprintln!("{}", render_cli_error(&error)),
+                }
+            }
+        }
         Ok(())
     }
 
@@ -3217,6 +5933,7 @@ impl LiveCli {
         if message.trim().is_empty() {
             return Err("le message de commit généré est vide".into());
         }
+        let message = runtime::settings::with_attribution(&message, &current_attribution().commit);
 
         let path = write_temp_text_file("claw-commit-message.txt", &message)?;
         let output = Command::new("git")
@@ -3237,6 +5954,296 @@ impl LiveCli {
         Ok(())
     }
 
+    /// Un tour d'une session en arrière-plan : pas de terminal ; permissions
+    /// et questions attendent une réponse dans sa boîte.
+    fn run_job_turn(
+        &mut self,
+        input: &str,
+        job_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut prompter = jobs::JobPermissionPrompter {
+            id: job_id.to_string(),
+        };
+        self.share_auto_context(input);
+        let (text, images) = take_image_attachments(input);
+        self.runtime.autosave_to(&self.session.path);
+        let result = self
+            .runtime
+            .run_turn_with_images(text, images, Some(&mut prompter));
+        transcript::flush_calls();
+        self.persist_session()?;
+        result
+            .map(|_| ())
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
+    }
+
+    /// Mode auto : les dernières demandes de l'utilisateur (ses limites et
+    /// ses accords), lues par le classificateur.
+    fn share_auto_context(&self, input: &str) {
+        share_auto_context(self.runtime.session(), input, &self.model);
+    }
+
+    /// Première demande de la conversation (nom de la session).
+    fn first_user_text(&self) -> Option<String> {
+        first_user_text(self.runtime.session())
+    }
+
+    /// `/bg [demande]` : la conversation continue dans une session en
+    /// arrière-plan, au même endroit ; ce terminal se libère. `true` : quitter.
+    fn send_to_background(
+        &mut self,
+        prompt: Option<&str>,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let prompt = prompt.unwrap_or_default().trim().to_string();
+        if self.runtime.session().messages.is_empty() && prompt.is_empty() {
+            println!(
+                "  ⎿  Envoyez d'abord un message (ou /bg <demande>) : une session vide n'a rien à poursuivre."
+            );
+            return Ok(false);
+        }
+        self.persist_session()?;
+        let name =
+            jobs::name_from_prompt(&self.first_user_text().unwrap_or_else(|| prompt.clone()));
+        let job = jobs::dispatch(&jobs::Dispatch {
+            prompt,
+            name: Some(name),
+            command: None,
+            model: self.model.clone(),
+            permission_mode: self.permission_mode.as_str().to_string(),
+            origin: env::current_dir()?,
+            session_path: Some(self.session.path.clone()),
+            in_place: true,
+        })?;
+        println!("{}", jobs::launch_report(&job));
+        Ok(true)
+    }
+
+    /// `/fork [demande]` : une copie de la conversation continue en
+    /// arrière-plan (dans son propre worktree) ; cette session reste ici.
+    fn fork_to_background(
+        &mut self,
+        prompt: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.persist_session()?;
+        let copy = sessions_dir()?.join(format!("{}.json", generate_session_id()));
+        fs::copy(&self.session.path, &copy)?;
+        let base = jobs::name_from_prompt(
+            &self
+                .first_user_text()
+                .unwrap_or_else(|| prompt.unwrap_or("copie").to_string()),
+        );
+        let job = jobs::dispatch(&jobs::Dispatch {
+            prompt: prompt.unwrap_or_default().trim().to_string(),
+            name: Some(format!("{base} (copie)")),
+            command: None,
+            model: self.model.clone(),
+            permission_mode: self.permission_mode.as_str().to_string(),
+            origin: env::current_dir()?,
+            session_path: Some(copy),
+            in_place: false,
+        })?;
+        println!("{}", jobs::launch_report(&job));
+        if prompt.is_none_or(|text| text.trim().is_empty()) {
+            println!(
+                "  ⎿  La copie attend sa première demande : claw reply {} <demande>, ou Espace sur sa ligne dans claw agents",
+                job.id
+            );
+        }
+        Ok(())
+    }
+
+    /// `/nom-du-skill arguments` : skill installé (`.claw/skills`,
+    /// `.claude/skills`, `~/.claude/skills`…) ; `None` si aucun skill ne porte
+    /// ce nom.
+    fn invoke_skill(&mut self, input: &str) -> Option<Result<(), Box<dyn std::error::Error>>> {
+        let line = input.trim().strip_prefix('/')?;
+        let (name, arguments) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        let cwd = env::current_dir().ok()?;
+        let installed = commands::skill_registry::find_installed_skill(&cwd, name)?;
+        Some(self.run_skill(&installed, arguments.trim(), &cwd))
+    }
+
+    fn run_skill(
+        &mut self,
+        installed: &commands::skill_registry::InstalledSkill,
+        arguments: &str,
+        cwd: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let skill = &installed.file;
+        if !installed.user_invocable() {
+            println!(
+                "  ⎿  /{} est réservé à Claude (user-invocable: false ou skillOverrides) : demandez la tâche en langage courant.",
+                skill.name
+            );
+            return Ok(());
+        }
+        let source = skill
+            .path
+            .strip_prefix(cwd)
+            .unwrap_or(&skill.path)
+            .display()
+            .to_string();
+        let model = skill
+            .model
+            .as_deref()
+            .map(|model| format!(" · modèle {model}"))
+            .unwrap_or_default();
+        eprintln!("↳ /{} ({source}){model}", skill.name);
+        runtime::deny_for_turn(&skill.disallowed_tools);
+        let rendered = match tools::render_skill_for_session(skill, arguments) {
+            Ok(rendered) => rendered,
+            Err(error) => {
+                runtime::clear_turn_grants();
+                println!("  ⎿  {}{error}{}", transcript::RED, transcript::RESET);
+                return Ok(());
+            }
+        };
+        if skill.fork {
+            let agent = skill
+                .agent
+                .clone()
+                .unwrap_or_else(|| "general-purpose".to_string());
+            let output = tools::execute_tool(
+                "Agent",
+                &json!({
+                    "description": format!("Skill {}", skill.name),
+                    "prompt": rendered,
+                    "subagent_type": agent,
+                    "model": skill.model,
+                }),
+            );
+            runtime::clear_turn_grants();
+            let report = output.map_err(|error| error.clone()).and_then(|text| {
+                serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|value| value.get("result")?.as_str().map(ToOwned::to_owned))
+                    .ok_or_else(|| "le sous-agent n'a pas rendu de rapport".to_string())
+            });
+            match report {
+                Ok(report) => {
+                    println!(
+                        "\n{}※ /{} (sous-agent {agent}){}\n{}\n",
+                        transcript::ACCENT,
+                        skill.name,
+                        transcript::RESET,
+                        TerminalRenderer::new().markdown_to_ansi(&report)
+                    );
+                    self.pending_context.push(format!(
+                        "[Result of the /{} skill, run by a {agent} sub-agent]\n{report}",
+                        skill.name
+                    ));
+                }
+                Err(error) => eprintln!("{}", render_cli_error(&error)),
+            }
+            return Ok(());
+        }
+        let previous_effort = api::reasoning_effort();
+        let effort = skill.effort.as_deref().and_then(parse_skill_effort);
+        if effort.is_some() {
+            api::set_reasoning_effort(effort);
+        }
+        let result = self.run_turn_with_overrides(&rendered, skill.model.clone(), None);
+        if effort.is_some() {
+            api::set_reasoning_effort(previous_effort);
+        }
+        runtime::clear_turn_grants();
+        result
+    }
+
+    /// `/commit-push-pr [contexte]` : sur la branche principale, une branche
+    /// est créée d'abord ; puis commit (message généré), poussée et pull
+    /// request (avec `gh`, sinon le lien pour l'ouvrir).
+    fn run_commit_push_pr(
+        &mut self,
+        context: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let cwd = env::current_dir()?;
+        let base = git_work::default_branch(&cwd);
+        let mut branch = git_work::current_branch(&cwd)?;
+        if branch == base || branch == "HEAD" {
+            let hint = context.map_or_else(
+                || {
+                    let session = self.runtime.session();
+                    let last = recent_user_context(session, 1);
+                    last.trim_start_matches("1. ").to_string()
+                },
+                ToOwned::to_owned,
+            );
+            let name = git_work::branch_name_for(&hint);
+            runtime::worktree::git(&cwd, &["switch", "-c", &name])?;
+            println!("Branche\n  Créée            {name} (depuis {base})");
+            branch = name;
+        }
+        self.run_commit()?;
+        let ahead =
+            runtime::worktree::git(&cwd, &["rev-list", "--count", &format!("{base}..HEAD")])
+                .ok()
+                .and_then(|count| count.trim().parse::<u32>().ok())
+                .unwrap_or(1);
+        if ahead == 0 {
+            println!("Pull request\n  Résultat         ignorée\n  Raison           {branch} n'a aucun commit de plus que {base}");
+            return Ok(());
+        }
+        live::start(&format!("git push origin {branch}…"));
+        let pushed = runtime::worktree::git(&cwd, &["push", "-u", "origin", &branch]);
+        live::stop();
+        if let Err(error) = pushed {
+            return Err(format!("échec de git push : {error}").into());
+        }
+        println!("Poussée\n  Branche          origin/{branch}");
+
+        let log = git_output(&["log", "--oneline", &format!("{base}..HEAD")]).unwrap_or_default();
+        let stat = git_output(&["diff", "--stat", &format!("{base}...HEAD")]).unwrap_or_default();
+        let prompt = format!(
+            "Generate a pull request title and body for these commits. Output plain text in this format exactly:\nTITLE: <title>\nBODY:\n<body markdown: what changes and why, how it was verified>\n\nContext hint: {}\n\nCommits:\n{}\n\nDiff summary:\n{}\n\nRecent requests:\n{}",
+            context.unwrap_or("none"),
+            truncate_for_prompt(&log, 4_000),
+            truncate_for_prompt(&stat, 8_000),
+            recent_user_context(self.runtime.session(), 4)
+        );
+        live::start("Rédaction de la pull request…");
+        let draft = self.run_internal_prompt_text(&prompt, false);
+        live::stop();
+        let draft = sanitize_generated_message(&draft?);
+        let (title, body) = parse_titled_body(&draft).unwrap_or_else(|| {
+            (
+                log.lines().next().unwrap_or(branch.as_str()).to_string(),
+                draft.clone(),
+            )
+        });
+        let body = runtime::settings::with_attribution(&body, &current_attribution().pr);
+        if command_exists("gh") {
+            let body_path = write_temp_text_file("claw-pr-body.md", &body)?;
+            let output = Command::new("gh")
+                .args([
+                    "pr",
+                    "create",
+                    "--base",
+                    &base,
+                    "--head",
+                    &branch,
+                    "--title",
+                    &title,
+                    "--body-file",
+                ])
+                .arg(&body_path)
+                .current_dir(&cwd)
+                .output()?;
+            if output.status.success() {
+                let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                println!("Pull request\n  Résultat         créée\n  Titre            {title}\n  URL              {url}");
+                return Ok(());
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            println!("  ⎿  gh pr create a échoué : {stderr}");
+        }
+        let link = git_work::compare_url(&cwd, &base, &branch).unwrap_or_else(|| {
+            format!("(dépôt hors GitHub : ouvrez la PR de {branch} vers {base})")
+        });
+        println!("Pull request à ouvrir\n  Lien             {link}\n  Titre            {title}\n\n{body}");
+        Ok(())
+    }
+
     fn run_pr(&self, context: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
         let staged = git_output(&["diff", "--stat"])?;
         let prompt = format!(
@@ -3247,6 +6254,7 @@ impl LiveCli {
         let draft = sanitize_generated_message(&self.run_internal_prompt_text(&prompt, false)?);
         let (title, body) = parse_titled_body(&draft)
             .ok_or_else(|| "titre ou corps de PR généré illisible".to_string())?;
+        let body = runtime::settings::with_attribution(&body, &current_attribution().pr);
 
         if command_exists("gh") {
             let body_path = write_temp_text_file("claw-pr-body.md", &body)?;
@@ -3308,11 +6316,29 @@ fn sessions_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(path)
 }
 
+/// `cleanupPeriodDays` : sessions et points de restauration du projet plus
+/// anciens que ce nombre de jours supprimés au début d'une session. Sans ce
+/// réglage, Claw garde tout.
+fn sweep_old_sessions(current: &str) {
+    let Ok(cwd) = env::current_dir() else {
+        return;
+    };
+    let Some(days) = ConfigLoader::default_for(&cwd)
+        .load()
+        .ok()
+        .and_then(|config| runtime::settings::cleanup_period_days(&config))
+    else {
+        return;
+    };
+    let _removed = runtime::settings::sweep_old_sessions(&cwd.join(".claw"), days, Some(current));
+}
+
 fn create_managed_session_handle() -> Result<SessionHandle, Box<dyn std::error::Error>> {
     let id = generate_session_id();
     let path = sessions_dir()?.join(format!("{id}.json"));
     let handle = SessionHandle { id, path };
     activate_checkpoints(&handle);
+    sweep_old_sessions(&handle.id);
     Ok(handle)
 }
 
@@ -3408,7 +6434,7 @@ fn render_hooks_report(config: &runtime::RuntimeHookConfig) -> String {
             continue;
         }
         lines.push(format!(
-            "  {:<17} {} commande(s) · code 2 : {}",
+            "  {:<19} {} hook(s) · blocage : {}",
             event.as_str(),
             entries.len(),
             event.blocking_effect()
@@ -3424,7 +6450,16 @@ fn render_hooks_report(config: &runtime::RuntimeHookConfig) -> String {
                 .timeout_secs
                 .map(|seconds| format!(" ({seconds} s max)"))
                 .unwrap_or_default();
-            lines.push(format!("    {matcher}{}{timeout}", entry.command));
+            let kind = match &entry.kind {
+                runtime::HookKind::Command => "",
+                runtime::HookKind::Http { .. } => "http ",
+                runtime::HookKind::Prompt { .. } => "prompt ",
+            };
+            let background = if entry.run_async { " (async)" } else { "" };
+            lines.push(format!(
+                "    {matcher}{kind}{}{timeout}{background}",
+                entry.command
+            ));
         }
     }
     if lines.len() == 1 {
@@ -3597,6 +6632,415 @@ fn rename_managed_session(id: &str, title: &str) -> Result<Option<String>, Strin
     }
     save_session_titles(&titles)?;
     Ok(Some(title).filter(|title| !title.is_empty()))
+}
+
+/// `/rename <titre>` ; sans titre, la session reprend son titre automatique.
+fn rename_report(id: &str, title: Option<&str>) -> String {
+    match rename_managed_session(id, title.unwrap_or_default()) {
+        Ok(Some(title)) => {
+            runtime::peers::rename(&title);
+            format!("  ⎿  Session renommée : {title}")
+        }
+        Ok(None) => "  ⎿  Titre automatique rétabli (tiré du premier message)".to_string(),
+        Err(error) => format!("renommage impossible : {error}"),
+    }
+}
+
+/// Textes des réponses de Claw, de la plus ancienne à la plus récente.
+fn assistant_replies(session: &Session) -> Vec<String> {
+    session
+        .messages
+        .iter()
+        .filter(|message| message.role == MessageRole::Assistant)
+        .map(|message| {
+            message
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+        })
+        .filter(|text| !text.trim().is_empty())
+        .collect()
+}
+
+/// `/copy [n]` : la n-ième réponse en partant de la fin (1 = la dernière)
+/// dans le presse-papiers.
+fn copy_assistant_reply(session: &Session, index: Option<&str>) -> String {
+    let wanted = match index.map(str::trim).filter(|value| !value.is_empty()) {
+        None => 1,
+        Some(value) => match value.parse::<usize>() {
+            Ok(number) if number >= 1 => number,
+            _ => {
+                return "Usage : /copy [n] (1 = dernière réponse, 2 = l'avant-dernière…)"
+                    .to_string()
+            }
+        },
+    };
+    let replies = assistant_replies(session);
+    let Some(text) = replies.iter().rev().nth(wanted - 1) else {
+        return if replies.is_empty() {
+            "  ⎿  Aucune réponse à copier pour l'instant".to_string()
+        } else {
+            format!(
+                "  ⎿  Seulement {} réponse(s) dans cette session",
+                replies.len()
+            )
+        };
+    };
+    let size = text.chars().count();
+    if clipboard::copy_text(text.trim()) {
+        format!("  ⎿  Réponse copiée dans le presse-papiers ({size} caractères)")
+    } else {
+        // Sans outil système, la copie passe par le terminal (OSC 52).
+        format!(
+            "  ⎿  Réponse envoyée au presse-papiers du terminal ({size} caractères) ; \
+si rien n'est copié, votre terminal ne gère pas OSC 52"
+        )
+    }
+}
+
+/// `/output-style [nom|new <nom>]` : rapport, et `true` quand le style actif
+/// a changé (le prompt système est alors reconstruit).
+fn apply_output_style_command(
+    args: Option<&str>,
+) -> Result<(String, bool), Box<dyn std::error::Error>> {
+    use commands::output_styles;
+    let cwd = env::current_dir()?;
+    let loader = ConfigLoader::default_for(&cwd);
+    let config_home = loader.config_home().to_path_buf();
+    let active = loader.load().ok().and_then(|config| {
+        config
+            .get(output_styles::SETTING_KEY)
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+    });
+    let styles = output_styles::discover_styles(&cwd, &config_home);
+    let args = args.map(str::trim).filter(|args| !args.is_empty());
+    let Some(args) = args.filter(|args| !matches!(*args, "list" | "liste")) else {
+        return Ok((
+            output_styles::render_styles_report(&styles, active.as_deref()),
+            false,
+        ));
+    };
+    if let Some(name) = args
+        .strip_prefix("new ")
+        .or_else(|| args.strip_prefix("nouveau "))
+    {
+        let path = output_styles::create_style_file(&cwd, name)?;
+        return Ok((
+            format!(
+                "Style créé\n  Fichier          {}\n  Suite            décrivez le style dans ce fichier, puis /output-style {}",
+                path.display(),
+                name.trim()
+            ),
+            false,
+        ));
+    }
+    let Some(style) = output_styles::find_style(&styles, args) else {
+        return Ok((
+            format!(
+                "Style inconnu : {args}\n\n{}",
+                output_styles::render_styles_report(&styles, active.as_deref())
+            ),
+            false,
+        ));
+    };
+    let path = output_styles::persist_style(&cwd, &style.name)?;
+    Ok((
+        format!(
+            "Style de réponse\n  Actif            {} · {}\n  Enregistré dans  {}",
+            style.name,
+            style.description,
+            path.display()
+        ),
+        true,
+    ))
+}
+
+/// Action GitHub qui lance Claw dans les routines.
+fn routine_action() -> String {
+    if let Some(action) = env::var("CLAW_ROUTINE_ACTION")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return action.trim().to_string();
+    }
+    env::current_dir()
+        .ok()
+        .and_then(|cwd| ConfigLoader::default_for(cwd).load().ok())
+        .and_then(|config| {
+            config
+                .get("routineAction")
+                .and_then(|value| value.as_str().map(|value| value.trim().to_string()))
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| routines::DEFAULT_ACTION.to_string())
+}
+
+/// `/schedule` : routines du dépôt, des workflows GitHub Actions qui lancent
+/// Claw selon un horaire avec un modèle gratuit.
+fn run_schedule_command(args: Option<&str>, model: &str) -> String {
+    let action = match routines::parse_command(args) {
+        Ok(action) => action,
+        Err(error) => return error,
+    };
+    if action == routines::Action::Help {
+        return routines::usage();
+    }
+    let Ok(repo) = find_git_root() else {
+        return "Routines : lancez /schedule dans un dépôt git (une routine est un workflow GitHub Actions du dépôt)."
+            .to_string();
+    };
+    // Git rend des `/` même sous Windows : chemins affichés d'un seul tenant.
+    let repo = PathBuf::from(
+        repo.display()
+            .to_string()
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
+    match action {
+        routines::Action::Help => routines::usage(),
+        routines::Action::List => routines::render_list(&routines::list_routines(&repo)),
+        routines::Action::Create { schedule, prompt } => {
+            let model = routines::routine_model(model);
+            match routines::create_routine(&repo, &schedule, &prompt, &model, &routine_action()) {
+                Ok((name, workflow, prompt_path)) => format!(
+                    "Routine créée\n  Nom              {name}\n  Horaire          {} (cron « {} »)\n  Modèle           {}\n  Workflow         {}\n  Demande          {}\n\nPour l'activer :\n  1. git add .github && git commit -m \"Routine {name}\" && git push\n  2. gh secret set OPENROUTER_API_KEY   (clé gratuite : https://openrouter.ai/keys)\n  3. Settings › Actions › General › cochez « Allow GitHub Actions to create and approve pull requests »\n  Essai immédiat : gh workflow run claw-routine-{name}.yml",
+                    schedule.label,
+                    schedule.cron,
+                    if model.is_empty() { "meilleur modèle gratuit (choisi par l'action)" } else { model.as_str() },
+                    workflow.display(),
+                    prompt_path.display(),
+                ),
+                Err(error) => format!("routine impossible : {error}"),
+            }
+        }
+        routines::Action::Delete { name } => match routines::delete_routine(&repo, &name) {
+            Ok(removed) => {
+                let files = removed
+                    .iter()
+                    .map(|path| format!("  Supprimé         {}", path.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("Routine supprimée\n{files}\n  Suite            committez et poussez pour l'arrêter chez GitHub")
+            }
+            Err(error) => error,
+        },
+    }
+}
+
+/// `/memory imports [allow|deny]` : imports `@chemin` de CLAUDE.md qui sortent
+/// du projet (fichiers personnels par exemple), chargés seulement avec accord.
+fn memory_imports_command(allow: Option<bool>) -> String {
+    let cwd = env::current_dir().unwrap_or_default();
+    if let Some(allow) = allow {
+        return match runtime::memory::set_external_imports(&cwd, allow) {
+            Ok(path) => format!(
+                "Imports externes
+  Décision         {}
+  Enregistrée dans {}",
+                if allow {
+                    "autorisés pour ce projet"
+                } else {
+                    "refusés pour ce projet"
+                },
+                path.display()
+            ),
+            Err(error) => format!("imports externes : {error}"),
+        };
+    }
+    let _ = ProjectContext::discover(&cwd, runtime::current_date_iso());
+    let state = match runtime::memory::external_imports_approved(&cwd) {
+        Some(true) => "autorisés",
+        Some(false) => "refusés",
+        None => "pas encore décidé (non chargés)",
+    };
+    let skipped = runtime::memory::skipped_external_imports();
+    let mut lines = vec![format!(
+        "Imports externes
+  État             {state}"
+    )];
+    for path in skipped {
+        lines.push(format!("  En attente       {}", path.display()));
+    }
+    lines.push("  Changer          /memory imports allow · /memory imports deny".to_string());
+    lines.join(
+        "
+",
+    )
+}
+
+/// Champ `effort` d'un skill.
+fn parse_skill_effort(value: &str) -> Option<api::ReasoningEffort> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "low" => Some(api::ReasoningEffort::Low),
+        "medium" => Some(api::ReasoningEffort::Medium),
+        "high" => Some(api::ReasoningEffort::High),
+        "xhigh" | "max" => Some(api::ReasoningEffort::Max),
+        _ => None,
+    }
+}
+
+/// `/install-github-action [assistant|review|all] [--force]` : workflows
+/// `@claw` et revue des pull requests, avec un modèle gratuit.
+fn run_install_github_action(args: Option<&str>, model: &str) -> String {
+    let request = match github_setup::parse_request(args) {
+        Ok(request) => request,
+        Err(error) => return error,
+    };
+    let Ok(repo) = find_git_root() else {
+        return "Lancez /install-github-action dans un dépôt git hébergé sur GitHub.".to_string();
+    };
+    let repo = PathBuf::from(
+        repo.display()
+            .to_string()
+            .replace('/', std::path::MAIN_SEPARATOR_STR),
+    );
+    let model = routines::routine_model(model);
+    match github_setup::install(&repo, &request, &routine_action(), &model) {
+        Ok(outcomes) => github_setup::render_report(&outcomes, &model),
+        Err(error) => format!("installation impossible : {error}"),
+    }
+}
+
+/// Mot de commande sans accents ni majuscules (`Arrêter` → `arreter`).
+fn fold_command_word(word: &str) -> String {
+    word.trim()
+        .chars()
+        .map(|character| match character {
+            'à' | 'â' | 'À' | 'Â' => 'a',
+            'é' | 'è' | 'ê' | 'É' | 'È' | 'Ê' => 'e',
+            'î' | 'ï' => 'i',
+            'ô' => 'o',
+            'û' | 'ù' => 'u',
+            other => other.to_ascii_lowercase(),
+        })
+        .collect()
+}
+
+/// Tours au plus pour atteindre un objectif (`CLAW_GOAL_MAX_TURNS`, 12 par défaut).
+fn goal_max_rounds() -> usize {
+    env::var("CLAW_GOAL_MAX_TURNS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(12)
+        .min(200)
+}
+
+fn goal_start_prompt(condition: &str) -> String {
+    format!(
+        "[Goal set with /goal. Keep working until this condition is met, verifying it yourself (run the tests, read the files) before you stop: {condition}]\n\nWork toward this goal: {condition}"
+    )
+}
+
+fn goal_continue_prompt(condition: &str, reason: Option<&str>) -> String {
+    let reason = reason
+        .map(|reason| format!(" A check found it is not met yet: {reason}."))
+        .unwrap_or_default();
+    format!(
+        "[Goal still open: {condition}.{reason} Continue working toward it; do not repeat what already failed, try another approach if needed, and verify the result before stopping.]"
+    )
+}
+
+fn goal_check_prompt(condition: &str) -> String {
+    format!(
+        "[Goal check: do not continue the work and do not use tools. Goal: {condition}\nJudge only from the evidence in this conversation (tool results, test output, files written). On the first line answer exactly MET or NOT MET. On the second line give a one-sentence reason in the user's language; when not met, say what is missing. Without clear evidence, answer NOT MET.]"
+    )
+}
+
+/// Réponse du contrôle : `MET` / `NOT MET` sur la première ligne, la raison ensuite.
+fn parse_goal_verdict(text: &str) -> GoalVerdict {
+    let mut lines = text
+        .lines()
+        .map(|line| line.trim().trim_matches(['*', '#', '`', '_', ' ']))
+        .filter(|line| !line.is_empty());
+    let first = lines.next().unwrap_or_default();
+    let upper = first.to_uppercase().replace(['_', '-'], " ");
+    let upper = upper
+        .strip_prefix("VERDICT")
+        .map_or(upper.as_str(), |rest| rest.trim_start_matches([':', ' ']));
+    let rest_of_first = first
+        .split_once([':', '\u{2014}', '.'])
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or_default();
+    let reason = lines
+        .next()
+        .map_or(rest_of_first, str::trim)
+        .trim_start_matches(['-', '•', ' '])
+        .trim_start_matches("Reason:")
+        .trim_start_matches("Raison :")
+        .trim();
+    let reason: String = if reason.is_empty() {
+        "aucune raison donnée".to_string()
+    } else {
+        reason.chars().take(240).collect()
+    };
+    let not_met = ["NOT MET", "NON ATTEINT", "PAS ATTEINT", "UNMET"]
+        .iter()
+        .any(|marker| upper.starts_with(marker));
+    let met = ["MET", "ATTEINT", "YES", "OUI"]
+        .iter()
+        .any(|marker| upper.starts_with(marker));
+    if !not_met && met {
+        GoalVerdict::Met(reason)
+    } else {
+        GoalVerdict::NotMet(reason)
+    }
+}
+
+fn render_goal_status(goal: Option<&GoalState>) -> String {
+    let Some(goal) = goal else {
+        return "Objectif\n  Aucun objectif en cours\n\nUsage\n  /goal <condition>   Claw continue jusqu'à ce que la condition soit remplie\n  /goal reprendre     relance un objectif en pause\n  /goal clear         efface l'objectif".to_string();
+    };
+    let state = if goal.paused { "en pause" } else { "actif" };
+    let mut report = format!(
+        "Objectif\n  Condition        {}\n  État             {state}\n  Tours            {}/{}",
+        goal.condition,
+        goal.rounds,
+        goal_max_rounds()
+    );
+    if let Some(reason) = &goal.last_reason {
+        let _ = write!(report, "\n  Dernier contrôle {reason}");
+    }
+    report.push_str("\n  Suite            /goal reprendre · /goal clear");
+    report
+}
+
+/// Passages au plus d'une boucle (`CLAW_LOOP_MAX`, 50 par défaut).
+fn loop_max_passes() -> usize {
+    env::var("CLAW_LOOP_MAX")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(50)
+}
+
+fn parse_interval(token: &str) -> Option<Duration> {
+    let token = token.trim().to_lowercase();
+    let split = token.find(|character: char| !character.is_ascii_digit())?;
+    let (number, unit) = token.split_at(split);
+    let number: u64 = number.parse().ok()?;
+    let seconds = match unit {
+        "s" | "sec" => number,
+        "m" | "min" | "mn" => number.checked_mul(60)?,
+        "h" => number.checked_mul(3600)?,
+        "j" | "d" => number.checked_mul(86_400)?,
+        _ => return None,
+    };
+    Some(Duration::from_secs(seconds))
+}
+
+fn format_interval(interval: Duration) -> String {
+    let seconds = interval.as_secs();
+    if seconds.is_multiple_of(3600) {
+        format!("{} h", seconds / 3600)
+    } else if seconds.is_multiple_of(60) {
+        format!("{} min", seconds / 60)
+    } else {
+        format!("{seconds} s")
+    }
 }
 
 /// Minuscule d'un caractère, un pour un : les positions restent alignées
@@ -3940,6 +7384,8 @@ fn render_repl_help() -> String {
         "  Pour commencer       décrivez une tâche en langage courant, ou utilisez les commandes ci-dessous."
             .to_string(),
         "  Essentiel            /help · /status · /model · /permissions · /compact".to_string(),
+        "  Travail continu      /goal <condition> · /loop 5m <demande> · /schedule (routines GitHub)".to_string(),
+        "  Sans interrompre     /btw <question> (aparté) · /recap (bilan) · /copy (dernière réponse)".to_string(),
         "  Quitter              exit, /exit ou /quit".to_string(),
         "  Mode                 Maj+Tab : demander → éditions acceptées → plan".to_string(),
         "  Effacer l'écran      clear (la conversation est gardée)".to_string(),
@@ -4004,16 +7450,6 @@ fn append_repl_command_suggestions(lines: &mut Vec<String>, name: &str) {
             .into_iter()
             .map(|suggestion| format!("  {suggestion}")),
     );
-}
-
-fn render_mode_unavailable(command: &str, label: &str) -> String {
-    [
-        "Commande indisponible dans ce mode".to_string(),
-        format!("  Commande         /{command}"),
-        format!("  Fonction         {label}"),
-        "  Astuce           /help liste les commandes disponibles".to_string(),
-    ]
-    .join("\n")
 }
 
 fn status_context(
@@ -4170,6 +7606,12 @@ fn render_config_report(section: Option<&str>) -> Result<String, Box<dyn std::er
                 None => "<non défini>".to_string(),
             }
         ));
+        if section == "env" && !runtime_config.ignored_env().is_empty() {
+            lines.push(format!(
+                "  Ignorées          {} (un fichier de projet ne peut pas les fixer : ~/.claw/settings.json ou le shell)",
+                runtime_config.ignored_env().join(", ")
+            ));
+        }
         return Ok(lines.join(
             "
 ",
@@ -4217,6 +7659,29 @@ fn render_memory_report() -> Result<String, Box<dyn std::error::Error>> {
             ));
         }
     }
+    let rules = runtime::memory::path_rules();
+    if !rules.is_empty() {
+        lines.push(
+            "Règles limitées à des chemins (données au premier fichier correspondant)".to_string(),
+        );
+        for rule in rules {
+            lines.push(format!(
+                "  {} · {}",
+                rule.patterns.join(", "),
+                rule.path.display()
+            ));
+        }
+    }
+    let skipped = runtime::memory::skipped_external_imports();
+    if !skipped.is_empty() {
+        lines.push("Imports externes en attente (hors du projet, non chargés)".to_string());
+        for path in skipped {
+            lines.push(format!("  {}", path.display()));
+        }
+        lines.push(
+            "  Autoriser        /memory imports allow · refuser : /memory imports deny".to_string(),
+        );
+    }
     Ok(lines.join(
         "
 ",
@@ -4240,7 +7705,10 @@ fn normalize_permission_mode(mode: &str) -> Option<&'static str> {
         "prompt" | "default" | "ask" => Some("prompt"),
         "read-only" | "plan" => Some("read-only"),
         "workspace-write" | "acceptEdits" | "accept-edits" => Some("workspace-write"),
-        "danger-full-access" | "bypassPermissions" | "dontAsk" => Some("danger-full-access"),
+        "danger-full-access" | "bypassPermissions" => Some("danger-full-access"),
+        // `dontAsk` refuse ce qui n'est pas autorisé d'avance (et non l'inverse).
+        "dont-ask" | "dontAsk" => Some("dont-ask"),
+        "auto" => Some("auto"),
         _ => None,
     }
 }
@@ -4580,6 +8048,20 @@ fn build_system_prompt() -> Result<Vec<String>, Box<dyn std::error::Error>> {
     )?;
     if let Some(skills) = commands::skills_prompt_section(&cwd) {
         prompt.push(skills);
+    }
+    // Style de réponse choisi avec /output-style (clé `outputStyle`).
+    let loader = ConfigLoader::default_for(&cwd);
+    let configured = loader.load().ok().and_then(|config| {
+        config
+            .get(commands::output_styles::SETTING_KEY)
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+    });
+    if let Some(style) = commands::output_styles::configured_section(
+        &cwd,
+        loader.config_home(),
+        configured.as_deref(),
+    ) {
+        prompt.push(style);
     }
     Ok(prompt)
 }
@@ -5046,6 +8528,8 @@ fn build_runtime_with_ui(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone_from(&model);
+    runtime::telemetry::set_model(&model);
+    api::key_helper::set_default_target(api::credential_env_for_model(&model).as_deref());
     tools::advisors::set_resolver(|| models::advisor_models(&active_model()));
     // Sous-agents et modèles consultés comptent aussi dans les crédits du jour.
     tools::set_request_observer(credits::note_request);
@@ -5058,6 +8542,13 @@ fn build_runtime_with_ui(
         .unwrap_or_default();
     models::register_cached_limits();
     let rules = feature_config.permission_rules();
+    runtime::set_configured_directories(
+        rules
+            .additional_directories()
+            .iter()
+            .map(PathBuf::from)
+            .collect(),
+    );
     let rules = PermissionRules::from_strings(rules.allow(), rules.deny(), rules.ask());
     let policy = permission_policy(permission_mode, &tool_registry).with_rules(rules.clone());
     // Les sous-agents héritent du modèle, du mode et des règles de la session,
@@ -5115,6 +8606,7 @@ fn auto_compaction_config(model: &str) -> Option<runtime::AutoCompactionConfig> 
 }
 
 /// Prompt d'une commande spécialisée, ou message d'usage si un argument requis manque.
+#[allow(clippy::too_many_lines)]
 fn expert_command_prompt(command: ExpertCommand, args: Option<&str>) -> Result<String, String> {
     // Les consignes sont en anglais pour le modèle ; la réponse doit rester
     // dans la langue de l'utilisateur.
@@ -5176,9 +8668,108 @@ fn expert_command_prompt(command: ExpertCommand, args: Option<&str>) -> Result<S
             );
             format!("/fix - {command}\n\n{}", role("tester"))
         }
+        ExpertCommand::SecurityReview => {
+            let target = args.unwrap_or(
+                "the current uncommitted changes (`git diff` and `git diff --staged`), or the latest commit if the working tree is clean",
+            );
+            format!("/security-review - Perform a security review of {target}.\n\n{SECURITY_REVIEW_INSTRUCTIONS}")
+        }
+        ExpertCommand::CodeReview => {
+            let target = args.map_or_else(
+                || "the current uncommitted changes (`git diff` and `git diff --staged`), or the latest commit if the working tree is clean".to_string(),
+                |target| {
+                    let number = target.trim_start_matches('#');
+                    if !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()) {
+                        format!("pull request #{number} (`gh pr diff {number}`)")
+                    } else {
+                        target.to_string()
+                    }
+                },
+            );
+            format!(
+                "/code-review - Multi-agent code review of {target}.\n\n{CODE_REVIEW_INSTRUCTIONS}"
+            )
+        }
+        ExpertCommand::Simplify => {
+            let target = args.unwrap_or(
+                "the current uncommitted changes (`git diff HEAD`), or the latest commit if the working tree is clean",
+            );
+            format!(
+                "/simplify - Review {target} for cleanup opportunities and apply the fixes.\n\nIn ONE reply, start four Agent sub-agents in parallel (subagent_type general-purpose), each reviewing the same changes with one focus and reporting concrete suggestions with file:line:\n1. Reuse: logic that duplicates an existing helper, utility or library function in this codebase.\n2. Simplification: needless complexity, dead code, redundant branches, over-long functions, unclear names.\n3. Efficiency: wasted work, repeated I/O or allocations, quadratic loops, missing early exits.\n4. Abstraction level: code at the wrong layer, leaky or premature abstractions, misplaced responsibilities.\nThis is not a bug hunt (that is /code-review): do not change behavior. Then merge their findings, apply the changes worth making, keep the behavior identical, run the project's build and tests, and summarize what you changed and what you deliberately left."
+            )
+        }
+        ExpertCommand::Verify => {
+            let what = args.unwrap_or(
+                "the most recent change in this conversation (or the uncommitted changes)",
+            );
+            format!(
+                "/verify - Confirm that {what} does what it should by building the project's application, running it and observing the result, rather than relying on tests or type checks alone.\n\nFind how the project is built and started (README, CLAW.md, manifests). Build it, then exercise the changed behavior the way a user would: run the CLI with representative inputs, start the server and request the affected endpoints, or open the page (ViewPage, Screenshot) and check what it shows. Use edge cases where they matter. Stop servers you started. Report what you ran, what you observed, and whether it matches the expected behavior, with the evidence. Do not fix anything unless I ask: if something is wrong, say what and where."
+            )
+        }
+        ExpertCommand::Statusline => {
+            let wanted = args.unwrap_or(
+                "a compact line inspired by my shell prompt: current directory, git branch, model, context use",
+            );
+            let os = std::env::consts::OS;
+            format!(
+                "/statusline - Configure Claw's status line: {wanted}.\n\nHow it works: before each prompt, Claw runs the command set in the `statusLine` setting, writes a JSON object on its stdin and shows the first lines it prints (ANSI colors allowed). The JSON has: hook_event_name, session_id, transcript_path, cwd, model.id, model.display_name, workspace.current_dir, workspace.project_dir, version, permission_mode, output_style.name, context_window.used_percentage, context_window.context_window_size, cost.total_cost_usd, goal.\n\nSteps: 1. Write a small script for this system ({os}: PowerShell or Python on Windows, sh or Python elsewhere) in the Claw config folder (`~/.claw/statusline.<ext>`) that reads that JSON and prints the line; it must be fast and never fail (missing fields: print nothing for them). 2. Test it by piping a sample JSON into it. 3. Set `\"statusLine\": {{\"type\": \"command\", \"command\": \"<the command>\"}}` in `~/.claw/settings.json`, keeping every other setting. 4. Show me the line it prints."
+            )
+        }
+        ExpertCommand::FewerPrompts => {
+            let cwd = env::current_dir().map_err(|error| error.to_string())?;
+            let frequencies = extra_commands::command_frequencies(&cwd);
+            if frequencies.is_empty() {
+                return Err("Aucune commande dans les conversations enregistrées de ce projet (.claw/sessions) : rien à proposer pour l'instant.".to_string());
+            }
+            let table = frequencies
+                .iter()
+                .map(|(name, count)| format!("- {name} ({count})"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "/fewer-permission-prompts - Reduce permission prompts in this project. These shell commands (first words) and MCP tools come up most in the project's saved conversations; read-only commands already run without a prompt and are not listed:\n{table}\n\nPropose `permissions.allow` rules (format `Bash(cargo test:*)` for a command prefix, or the MCP tool name such as `mcp__server__tool`) ONLY for the ones that are safe and routine: running tests, builds, linters, formatters, type checkers, listing or inspecting packages, read-only MCP tools. Never for commands that delete, push, deploy, publish, install system-wide, change git history or touch credentials. Show the list ranked by how many prompts it saves, with a one-line reason each, ask me to confirm, then add the approved rules to `.claw/settings.json` (create it if needed and keep the existing rules)."
+            )
+        }
+        ExpertCommand::PrComments => {
+            let number = args.map(|value| value.trim_start_matches('#').to_string());
+            let target = number.as_deref().map_or_else(
+                || "the pull request of the current branch".to_string(),
+                |number| format!("pull request #{number}"),
+            );
+            let view = number.map_or_else(
+                || "gh pr view --json number,title,url,reviews,comments".to_string(),
+                |number| format!("gh pr view {number} --json number,title,url,reviews,comments"),
+            );
+            format!(
+                "/pr-comments - Collect the review comments of {target} with the GitHub CLI: `{view}`, then the inline review comments with `gh api repos/OWNER/REPO/pulls/NUMBER/comments` (`gh repo view --json nameWithOwner` gives OWNER/REPO). If `gh` is missing or not logged in, say how to fix it (install it, then `gh auth login`) and stop.\n\nThen summarize: group the comments by file and by thread, give each reviewer's point briefly with file:line, say which ones look already addressed by the current code, and for each open point propose a concrete change. Do not modify any file; end by asking which points I want you to address."
+            )
+        }
     };
     Ok(format!("{prompt}{LANGUAGE_NOTE}"))
 }
+
+/// Consignes de `/security-review`, reprises de la revue de sécurité de Claude Code.
+const SECURITY_REVIEW_INSTRUCTIONS: &str = "Look only for security vulnerabilities that these changes introduce or touch and that an attacker could realistically exploit:
+- injection: SQL, shell commands, templates, LDAP, path traversal, unsafe file names;
+- authentication and authorization: missing checks, privilege escalation, insecure direct object references, session handling;
+- secrets and sensitive data: keys or tokens in code or logs, data exposed in responses or errors;
+- unsafe deserialization, `eval`-like execution, server-side request forgery, XML external entities;
+- cross-site scripting and unsafe HTML, open redirects;
+- weak or misused cryptography (hard-coded keys, disabled certificate checks, predictable randomness for secrets);
+- CI/CD: GitHub Actions expressions with untrusted event data inside `run:` scripts, overly broad token permissions.
+
+Do not report: denial of service or resource exhaustion, missing rate limiting, generic hardening advice without a concrete exploit, issues only in tests or documentation, outdated dependencies without a reachable known vulnerability, memory-safety issues in memory-safe code, theoretical race conditions.
+
+Method: understand the context first (frameworks, existing validation and sanitizers). For each candidate, trace the untrusted input from its source to the dangerous sink, then try to disprove the finding: is the input really attacker-controlled, is it validated upstream, is the code reachable? Keep only findings you rate at least 8/10 in confidence.
+
+Report each finding with: title, severity (high, medium or low), confidence, file:line, a concrete exploit scenario (input and impact) and the fix. If nothing passes the bar, say that no high-confidence vulnerability was found and list what you checked. Do not modify any file; end by asking which findings I want you to fix.";
+
+/// Consignes de `/code-review` : relecteurs en parallèle puis vérification,
+/// l'équivalent local et gratuit de la revue multi-agents de Claude Code.
+const CODE_REVIEW_INSTRUCTIONS: &str = "1. Scope: get the diff (the target above; `git diff` and `git diff --staged` by default; `gh pr diff N` for a pull request) and list the changed files. If there is nothing to review, say so and stop.
+2. Parallel review: in a single message, call the Agent tool four times with subagent_type \"reviewer\" so the four reviews run at the same time. Sub-agents do not see this conversation: give each one the command that shows the diff and the list of changed files, and one focus: (a) correctness bugs and regressions; (b) security (injection, secrets, authorization, unsafe input); (c) error handling, resource leaks, concurrency and performance; (d) tests and maintainability (changed behavior without tests, duplication, dead code). Ask each for at most 8 verified findings, each with severity, file:line, problem, failure scenario and fix, and no style nitpicks.
+3. Verification: merge duplicate findings. Check every finding of medium severity or above against the code yourself (for many findings, verify them in parallel with Agent calls of subagent_type \"Verification\"), and classify it CONFIRMED, PLAUSIBLE or REJECTED with the reason. Drop the rejected ones.
+4. Report: confirmed then plausible findings, most severe first, each with file:line, failure scenario and suggested fix; then one line with the verdict (ready to merge, or needs changes) and how many findings were rejected during verification. Do not modify any file; end by asking which findings I want you to fix.";
 
 const PLAN_MODE_PROMPT: &str = "# Plan mode
 - The session is in read-only plan mode: file edits and commands with side effects are denied.
@@ -5252,7 +8843,32 @@ impl CliPermissionPrompter {
         } else {
             "Non, et dire à Claw quoi faire autrement (Échap)".to_string()
         });
-        let answer = match approval::ask(&title, &body, &question, &options) {
+        // Relayée aux channels qui le déclarent : la première réponse l'emporte.
+        let ticket = tools::channels::relay_permission(&request.tool_name, &request.input);
+        let remote = || ticket.as_deref().and_then(tools::channels::verdict);
+        let asked = approval::ask_with_remote(&title, &body, &question, &options, &remote);
+        if let Some(ticket) = &ticket {
+            tools::channels::close(ticket);
+        }
+        let answer = match asked {
+            Ok(approval::Answer::Remote(allow)) => {
+                println!(
+                    "  ⎿  {}{} à distance (channel){}",
+                    transcript::DIM,
+                    if allow { "Autorisé" } else { "Refusé" },
+                    transcript::RESET
+                );
+                return if allow {
+                    runtime::PermissionPromptDecision::Allow
+                } else {
+                    runtime::PermissionPromptDecision::Deny {
+                        reason: format!(
+                            "the user denied '{}' remotely through a channel",
+                            request.tool_name
+                        ),
+                    }
+                };
+            }
             Ok(answer) => answer,
             Err(error) => {
                 return runtime::PermissionPromptDecision::Deny {
@@ -5341,13 +8957,28 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
         &mut self,
         request: &runtime::PermissionRequest,
     ) -> runtime::PermissionPromptDecision {
+        let gate = auto_mode::gate(request);
+        if let Some(notice) = &gate.notice {
+            live::hide();
+            transcript::print_call(&request.tool_name, &request.input);
+            println!("  ⎿  {}{notice}{}", transcript::RED, transcript::RESET);
+        }
+        if let Some(decision) = gate.decision {
+            return decision;
+        }
         live::hide();
         transcript::print_call(&request.tool_name, &request.input);
-        if approval::interactive() {
+        let decision = if approval::interactive() {
             self.decide_with_menu(request)
         } else {
             self.decide_with_text(request)
+        };
+        if request.current_mode == PermissionMode::Auto
+            && !matches!(decision, runtime::PermissionPromptDecision::Deny { .. })
+        {
+            auto_mode::resume();
         }
+        decision
     }
 }
 
@@ -5542,8 +9173,37 @@ fn describe_permission_target(tool_name: &str, input: &str) -> String {
     })
 }
 
+/// `allow <règle>`, `deny <règle>`, `ask <règle>` ou `remove <règle>` :
+/// la liste visée (aucune pour un retrait) et la règle.
+fn parse_rule_command(args: &str) -> Option<(Option<&'static str>, &str)> {
+    let (verb, rule) = args.trim().split_once(char::is_whitespace)?;
+    let rule = rule.trim();
+    if rule.is_empty() {
+        return None;
+    }
+    let list = match verb {
+        "allow" | "autoriser" => Some("allow"),
+        "deny" | "interdire" => Some("deny"),
+        "ask" | "demander" => Some("ask"),
+        "remove" | "rm" | "retirer" => None,
+        _ => return None,
+    };
+    Some((list, rule))
+}
+
 /// Ajoute `rule` à `permissions.allow` de `.claw/settings.local.json` (créé si besoin).
 fn persist_allow_rule(cwd: &Path, rule: &str) -> Result<PathBuf, String> {
+    edit_permission_rule(cwd, Some("allow"), rule).map(|(path, _)| path)
+}
+
+/// Ajoute `rule` à la liste `list` (`allow`, `deny`, `ask`) de
+/// `.claw/settings.local.json`, ou la retire de toutes (`list` absent).
+/// Renvoie le fichier et vrai s'il a changé.
+fn edit_permission_rule(
+    cwd: &Path,
+    list: Option<&str>,
+    rule: &str,
+) -> Result<(PathBuf, bool), String> {
     let path = cwd.join(".claw").join("settings.local.json");
     let mut root = match fs::read_to_string(&path) {
         Ok(contents) if !contents.trim().is_empty() => {
@@ -5561,13 +9221,33 @@ fn persist_allow_rule(cwd: &Path, rule: &str) -> Result<PathBuf, String> {
     if !permissions.is_object() {
         *permissions = json!({});
     }
-    let allow = &mut permissions["allow"];
-    if !allow.is_array() {
-        *allow = json!([]);
-    }
-    if let Some(rules) = allow.as_array_mut() {
-        if !rules.iter().any(|existing| existing.as_str() == Some(rule)) {
-            rules.push(json!(rule));
+    let mut changed = false;
+    if let Some(list) = list {
+        let rules = &mut permissions[list];
+        if !rules.is_array() {
+            *rules = json!([]);
+        }
+        if let Some(rules) = rules.as_array_mut() {
+            if !rules.iter().any(|existing| existing.as_str() == Some(rule)) {
+                rules.push(json!(rule));
+                changed = true;
+            }
+        }
+    } else {
+        // `get_mut` et non `permissions[list]` : l'indexation créerait une
+        // liste `null`, que la lecture de la config refuse ensuite.
+        for list in ["allow", "deny", "ask", "additionalDirectories"] {
+            if let Some(rules) = permissions
+                .get_mut(list)
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                let before = rules.len();
+                rules.retain(|existing| existing.as_str() != Some(rule));
+                changed |= rules.len() != before;
+            }
+        }
+        if !changed {
+            return Ok((path, false));
         }
     }
     if let Some(parent) = path.parent() {
@@ -5575,7 +9255,7 @@ fn persist_allow_rule(cwd: &Path, rule: &str) -> Result<PathBuf, String> {
     }
     let rendered = serde_json::to_string_pretty(&root).map_err(|error| error.to_string())?;
     fs::write(&path, format!("{rendered}\n")).map_err(|error| error.to_string())?;
-    Ok(path)
+    Ok((path, changed))
 }
 
 /// Reçoit les événements d'un tour pour une interface autre que le terminal
@@ -5636,6 +9316,9 @@ struct DefaultRuntimeClient {
     escalation: models::Escalation,
     /// Chaîne habituelle, mise de côté pendant une escalade.
     saved_chain: Option<api::ModelChain>,
+    /// Chaîne de la session, mise de côté pendant un tour de design confié
+    /// à `designModel` ; elle revient à la fin du tour.
+    design_base: Option<api::ModelChain>,
     /// Présent : Claw ne change jamais de modèle sans le demander.
     model_prompter: Option<model_switch::SharedModelPrompter>,
     /// Modèles de secours configurés, proposés quand la question se pose.
@@ -5702,6 +9385,7 @@ impl DefaultRuntimeClient {
             start_notice: None,
             escalation: models::Escalation::configured(),
             saved_chain: None,
+            design_base: None,
             model_prompter: None,
             candidates: Vec::new(),
             team_step: None,
@@ -5885,12 +9569,14 @@ impl DefaultRuntimeClient {
 
     /// Un appel d'outil sans arguments complets dans une réponse qui ne s'est
     /// pas terminée sur un appel d'outil : elle a été coupée. Par la limite de
-    /// sortie, l'appel est marqué et le modèle apprendra quoi faire ; sinon
-    /// c'est une erreur, et la réponse est redemandée.
+    /// sortie, après de longs arguments ou à la dernière tentative
+    /// (`retry_unfinished` faux), l'appel est marqué et le modèle apprendra
+    /// quoi faire ; sinon c'est une erreur, et la réponse est redemandée.
     fn check_cut_calls(
         tool_registry: &GlobalToolRegistry,
         events: &mut [AssistantEvent],
         stop_reason: Option<&str>,
+        retry_unfinished: bool,
     ) -> Result<(), RuntimeError> {
         let definitions = std::cell::OnceCell::new();
         let required_for = |name: &str| {
@@ -5901,7 +9587,7 @@ impl DefaultRuntimeClient {
                 .map(|definition| tool_input::required_arguments(&definition.input_schema))
                 .unwrap_or_default()
         };
-        tool_input::check_cut_calls(events, stop_reason, required_for, true)
+        tool_input::check_cut_calls(events, stop_reason, required_for, retry_unfinished)
             .map_err(RuntimeError::new)?;
         // Noms d'arguments réduits par un serveur qui refuse les schémas tels
         // quels : l'outil reçoit les siens.
@@ -6035,6 +9721,28 @@ impl ApiClient for DefaultRuntimeClient {
             .collect()
     }
 
+    /// Critique de design : les captures jugées par un modèle gratuit qui lit
+    /// les images (le lecteur d'images de Claw).
+    fn critique_design(
+        &mut self,
+        system: &str,
+        prompt: &str,
+        images: &[runtime::attachments::ImageAttachment],
+    ) -> Option<runtime::Consultation> {
+        let sources: Vec<api::ImageSource> = images
+            .iter()
+            .map(|image| api::ImageSource::base64(image.media_type.clone(), image.data.clone()))
+            .collect();
+        let primary = self.chain.primary().to_string();
+        match image_reader::critique(&primary, system, prompt, &sources) {
+            Ok((model, text)) => Some(runtime::Consultation { model, text }),
+            Err(error) => {
+                self.notify(&format!("Critique visuelle impossible : {error}"));
+                None
+            }
+        }
+    }
+
     fn answer_superseded(&mut self) {
         if let Some(observer) = &self.observer {
             observer.answer_superseded();
@@ -6114,12 +9822,38 @@ impl ApiClient for DefaultRuntimeClient {
         Some(model)
     }
 
+    fn design_model(&mut self) -> Option<String> {
+        if self.saved_chain.is_some() || self.design_base.is_some() {
+            return None;
+        }
+        let model = models::design_model_setting()?;
+        if model == self.chain.primary() || !api::model_available(&model) {
+            return None;
+        }
+        // Le modèle du design d'abord ; s'il tombe, la chaîne habituelle.
+        let mut models = vec![model.clone()];
+        models.extend(
+            self.chain
+                .models()
+                .iter()
+                .filter(|known| **known != model)
+                .cloned(),
+        );
+        let design = api::ModelChain::new(models, cli_client_factory());
+        self.design_base = Some(std::mem::replace(&mut self.chain, design));
+        Some(model)
+    }
+
     fn restore_model(&mut self) {
         if let Some(chain) = self.saved_chain.take() {
             self.chain = chain;
         }
         // Mode équipe : le modèle de la session reprend à la fin du tour.
         if let Some(chain) = self.team_base.take() {
+            self.chain = chain;
+        }
+        // Tour de design : de même.
+        if let Some(chain) = self.design_base.take() {
             self.chain = chain;
         }
         self.team_step = None;
@@ -6217,6 +9951,9 @@ impl ApiClient for DefaultRuntimeClient {
         loop {
             answering.borrow_mut().clear();
             cut.set(false);
+            // Dernière tentative : un appel coupé est marqué, et le modèle
+            // apprend quoi envoyer à la place, au lieu de perdre le tour.
+            let retry_unfinished = retries_left > 0;
             if let (Some(_), Some(observer)) = (&continued, &self.observer) {
                 observer.reply_continues();
             }
@@ -6399,7 +10136,12 @@ impl ApiClient for DefaultRuntimeClient {
                 answer
                     .finish_line(out)
                     .map_err(|error| RuntimeError::new(error.to_string()))?;
-                Self::check_cut_calls(&self.tool_registry, &mut events, stop_reason.as_deref())?;
+                Self::check_cut_calls(
+                    &self.tool_registry,
+                    &mut events,
+                    stop_reason.as_deref(),
+                    retry_unfinished,
+                )?;
                 cut.set(tool_input::reply_cut_by_output_limit(
                     stop_reason.as_deref(),
                     &events,
@@ -6442,7 +10184,12 @@ impl ApiClient for DefaultRuntimeClient {
                         other => other,
                     })
                     .collect::<Vec<_>>();
-                Self::check_cut_calls(&self.tool_registry, &mut events, stop_reason.as_deref())?;
+                Self::check_cut_calls(
+                    &self.tool_registry,
+                    &mut events,
+                    stop_reason.as_deref(),
+                    retry_unfinished,
+                )?;
                 cut.set(tool_input::reply_cut_by_output_limit(
                     stop_reason.as_deref(),
                     &events,
@@ -6769,11 +10516,11 @@ fn render_background_tasks(args: Option<&str>) -> String {
         };
     }
     let tasks = runtime::bash_tasks::list();
-    if tasks.is_empty() {
-        return "Tâches de fond\n  Aucune commande lancée en arrière-plan.".to_string();
-    }
     let mut lines = vec!["Tâches de fond".to_string()];
-    for task in tasks {
+    if tasks.is_empty() {
+        lines.push("  Aucune commande lancée en arrière-plan.".to_string());
+    }
+    for task in &tasks {
         let state = if task.running {
             "en cours".to_string()
         } else {
@@ -6784,7 +10531,31 @@ fn render_background_tasks(args: Option<&str>) -> String {
             task.id, state, task.elapsed_secs, task.command
         ));
     }
-    lines.push("  Arrêter          /bashes kill <id>".to_string());
+    if !tasks.is_empty() {
+        lines.push("  Arrêter          /bashes kill <id>".to_string());
+    }
+    let agents = tools::recent_agent_runs(8);
+    if !agents.is_empty() {
+        lines.push(String::new());
+        lines.push("Sous-agents récents".to_string());
+        for agent in agents {
+            let state = match agent.status.as_str() {
+                "running" => "en cours",
+                "completed" => "terminé",
+                "failed" => "en échec",
+                other => other,
+            };
+            lines.push(format!(
+                "  {:<10} {:<28} {}",
+                state,
+                transcript::clip(&agent.name, 28),
+                transcript::clip(&agent.description, 50)
+            ));
+            if agent.status == "running" || agent.status == "completed" {
+                lines.push(format!("             rapport : {}", agent.output_file));
+            }
+        }
+    }
     lines.join("\n")
 }
 
@@ -7050,6 +10821,14 @@ fn slash_command_menu_entries() -> Vec<(String, String)> {
         ("/exit".to_string(), "Quitte Claw".to_string()),
     ]);
     if let Ok(cwd) = env::current_dir() {
+        for (name, description) in commands::skill_registry::user_invocable_names(&cwd) {
+            let summary = if description.is_empty() {
+                "Skill".to_string()
+            } else {
+                format!("Skill · {description}")
+            };
+            entries.push((format!("/{name}"), summary));
+        }
         for command in commands::discover_custom_commands(&cwd) {
             let summary = command
                 .description
@@ -7086,6 +10865,11 @@ fn slash_command_completion_candidates() -> Vec<String> {
     ]);
     if let Ok(cwd) = env::current_dir() {
         candidates.extend(commands::custom_command_completions(&cwd));
+        candidates.extend(
+            commands::skill_registry::user_invocable_names(&cwd)
+                .into_iter()
+                .map(|(name, _)| format!("/{name}")),
+        );
     }
     candidates.extend(
         tools::mcp_prompt_commands()
@@ -7614,6 +11398,7 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         "  /status                               Session et espace de travail",
         "  /model <nom>                          Change de modèle en cours de session",
         "  /permissions <mode>                   Règle l'accès aux outils",
+        "  /bg [demande], /fork [demande]        Passe la session (ou une copie) en arrière-plan",
         "  Ctrl+C                                Interrompt le tour en cours (/undo l'annule)",
         "  Tab                                   Complète les commandes slash",
         "  /vim                                  Active l'édition modale",
@@ -7625,7 +11410,10 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         "  claw acp                              Agent pour les éditeurs (Zed, Neovim… via ACP)",
         "  claw models [refresh|recherche]       Modèles gratuits recommandés pour le code",
         "  claw credits                          Crédits OpenRouter : solde, requêtes gratuites restantes",
-        "  claw agents                           Liste les agents configurés",
+        "  claw --bg \"tâche\" [--name NOM]       Lance une session en arrière-plan (--exec 'cmd' : commande shell)",
+        "  claw agents [--json] [--all]          Sessions en arrière-plan (vue, ou JSON pour les scripts)",
+        "  claw attach|logs|reply|stop|rm ID     Ouvre, lit, répond, arrête ou supprime une session",
+        "  claw agents list                      Liste les sous-agents configurés",
         "  claw skills                           Liste les compétences installées",
         "  claw init                             Crée CLAW.md et les fichiers locaux",
         "  claw login                            Connexion OAuth",
@@ -7639,7 +11427,7 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         "  --output-format FORMAT                Sortie non interactive : text, json ou stream-json",
         "  --input-format stream-json            Tours lus en JSON sur l'entrée standard (scripts, éditeurs)",
         "  --continue, -c                        Reprend la dernière session du projet",
-        "  --permission-mode MODE                prompt (défaut), read-only (plan), workspace-write ou danger-full-access",
+        "  --permission-mode MODE                prompt (défaut), read-only (plan), workspace-write, auto ou danger-full-access",
         "  --dangerously-skip-permissions        Désactive toutes les vérifications de permission",
         "  --allowedTools OUTILS                 Limite les outils (répétable ; alias séparés par des virgules)",
         "  --version, -V                         Version et informations de build",
@@ -7890,8 +11678,27 @@ mod tests {
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::Prompt,
+                resume: false,
             }
         );
+    }
+
+    #[test]
+    fn a_prompt_after_continue_resumes_the_last_session() {
+        // Essai réel : `claw -c prompt "continue"` repartait de rien, et le
+        // modèle demandait quoi continuer.
+        for args in [
+            vec!["-c", "prompt", "continue"],
+            vec!["--continue", "continue"],
+            vec!["-c", "-p", "continue"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            let action = parse_args(&args).expect("args should parse");
+            assert!(
+                matches!(&action, CliAction::Prompt { prompt, resume: true, .. } if prompt == "continue"),
+                "{args:?} -> {action:?}"
+            );
+        }
     }
 
     #[test]
@@ -7927,6 +11734,7 @@ mod tests {
                 output_format: CliOutputFormat::Json,
                 allowed_tools: None,
                 permission_mode: PermissionMode::Prompt,
+                resume: false,
             }
         );
     }
@@ -7947,6 +11755,7 @@ mod tests {
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::Prompt,
+                resume: false,
             }
         );
     }
@@ -8055,9 +11864,56 @@ mod tests {
             parse_args(&["init".to_string()]).expect("init should parse"),
             CliAction::Init
         );
-        assert_eq!(
+        assert!(matches!(
             parse_args(&["agents".to_string()]).expect("agents should parse"),
-            CliAction::Agents { args: None }
+            CliAction::AgentView { json: false, .. }
+        ));
+        assert!(matches!(
+            parse_args(&[
+                "agents".to_string(),
+                "--json".to_string(),
+                "--all".to_string()
+            ])
+            .expect("agents --json should parse"),
+            CliAction::AgentView {
+                json: true,
+                all: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            parse_args(&["agents".to_string(), "list".to_string()]).expect("agents list"),
+            CliAction::Agents {
+                args: Some("list".to_string())
+            }
+        );
+        assert!(matches!(
+            parse_args(&[
+                "--bg".to_string(),
+                "--name".to_string(),
+                "fix".to_string(),
+                "corrige".to_string(),
+                "le test".to_string()
+            ])
+            .expect("--bg should parse"),
+            CliAction::Background { ref prompt, ref name, .. }
+                if prompt == "corrige le test" && name.as_deref() == Some("fix")
+        ));
+        assert!(parse_args(&["--bg".to_string(), "-p".to_string(), "x".to_string()]).is_err());
+        assert_eq!(
+            parse_args(&["logs".to_string(), "-f".to_string(), "7c5d".to_string()]).expect("logs"),
+            CliAction::JobLogs {
+                target: "7c5d".to_string(),
+                follow: true
+            }
+        );
+        assert_eq!(
+            parse_args(&["reply".to_string(), "7c5d".to_string(), "oui".to_string()])
+                .expect("reply"),
+            CliAction::JobReply {
+                target: "7c5d".to_string(),
+                text: "oui".to_string()
+            }
         );
         assert_eq!(
             parse_args(&["skills".to_string()]).expect("skills should parse"),
@@ -8180,7 +12036,7 @@ mod tests {
         assert!(help.contains("/help"));
         assert!(help.contains("/status"));
         assert!(help.contains("/model [modèle]"));
-        assert!(help.contains("/permissions [prompt|read-only|workspace-write|danger-full-access]"));
+        assert!(help.contains("/permissions [prompt|read-only|workspace-write|danger-full-access|allow|deny|ask|remove <règle>]"));
         assert!(help.contains("/clear [--confirm]"));
         assert!(help.contains("/cost"));
         assert!(help.contains("/resume <chemin-session>"));
@@ -8225,8 +12081,25 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "help", "status", "compact", "clear", "cost", "config", "memory", "init", "diff",
-                "version", "export", "agents", "skills",
+                "help",
+                "status",
+                "compact",
+                "clear",
+                "cost",
+                "config",
+                "memory",
+                "init",
+                "diff",
+                "version",
+                "add-dir",
+                "install-github-action",
+                "export",
+                "copy",
+                "rename",
+                "output-style",
+                "schedule",
+                "agents",
+                "skills",
             ]
         );
     }
@@ -8310,6 +12183,34 @@ mod tests {
         let adr =
             expert_command_prompt(ExpertCommand::Adr, Some("utiliser PostgreSQL")).expect("adr");
         assert!(adr.contains("docs/adr/"));
+    }
+
+    #[test]
+    fn review_commands_name_their_scope_and_method() {
+        let security =
+            expert_command_prompt(ExpertCommand::SecurityReview, None).expect("security");
+        assert!(security.starts_with(
+            "/security-review - Perform a security review of the current uncommitted changes"
+        ));
+        assert!(security.contains("8/10") && security.contains("Do not report"));
+        assert!(security.contains("user's language"));
+
+        let multi = expert_command_prompt(ExpertCommand::CodeReview, Some("#42")).expect("multi");
+        assert!(
+            multi.contains("pull request #42 (`gh pr diff 42`)"),
+            "{multi}"
+        );
+        assert!(multi.contains("subagent_type \"reviewer\"") && multi.contains("CONFIRMED"));
+        let branch =
+            expert_command_prompt(ExpertCommand::CodeReview, Some("main..HEAD")).expect("branche");
+        assert!(branch.contains("review of main..HEAD."));
+
+        let comments =
+            expert_command_prompt(ExpertCommand::PrComments, Some("#7")).expect("comments");
+        assert!(comments.contains("pull request #7") && comments.contains("`gh pr view 7 --json"));
+        let current = expert_command_prompt(ExpertCommand::PrComments, None).expect("courante");
+        assert!(current.contains("the pull request of the current branch"));
+        assert!(current.contains("`gh pr view --json"));
     }
 
     #[test]
@@ -8440,6 +12341,45 @@ mod tests {
         assert_eq!(saved["model"], "qwen/qwen3-coder");
         assert_eq!(saved["permissions"]["deny"], json!(["Read(.env)"]));
         assert_eq!(saved["permissions"]["allow"], json!(["Bash(cargo test:*)"]));
+
+        // `/permissions ask|remove <règle>`.
+        let (_, added) =
+            super::edit_permission_rule(&root, Some("ask"), "Bash(git push:*)").expect("ask");
+        assert!(added);
+        let (path, removed) =
+            super::edit_permission_rule(&root, None, "Read(.env)").expect("retrait");
+        assert!(removed);
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("relu")).expect("json");
+        assert_eq!(saved["permissions"]["ask"], json!(["Bash(git push:*)"]));
+        assert_eq!(saved["permissions"]["deny"], json!([]));
+        assert!(
+            !super::edit_permission_rule(&root, None, "Read(.env)")
+                .expect("absente")
+                .1
+        );
+        // Retrait dans un fichier où des listes manquent : aucune liste `null` créée.
+        fs::write(
+            root.join(".claw").join("settings.local.json"),
+            r#"{"permissions":{"allow":["Bash(git status)"]}}"#,
+        )
+        .expect("réglages partiels");
+        let (path, removed) =
+            super::edit_permission_rule(&root, None, "Bash(git status)").expect("retrait");
+        assert!(removed);
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("relu")).expect("json");
+        assert_eq!(saved["permissions"], json!({ "allow": [] }));
+        assert_eq!(
+            super::parse_rule_command("deny  Bash(rm:*)"),
+            Some((Some("deny"), "Bash(rm:*)"))
+        );
+        assert_eq!(
+            super::parse_rule_command("remove WebFetch"),
+            Some((None, "WebFetch"))
+        );
+        assert_eq!(super::parse_rule_command("workspace-write"), None);
+        assert_eq!(super::parse_rule_command("allow"), None);
 
         fs::write(root.join(".claw").join("settings.local.json"), "{ broken").expect("corrupt");
         assert!(persist_allow_rule(&root, "Bash(ls:*)").is_err());
@@ -8599,6 +12539,12 @@ mod tests {
         assert_eq!(
             normalize_permission_mode("bypassPermissions"),
             Some("danger-full-access")
+        );
+        // `dontAsk` refuse ce qui n'est pas autorisé d'avance : jamais l'accès complet.
+        assert_eq!(normalize_permission_mode("dontAsk"), Some("dont-ask"));
+        assert_eq!(
+            super::permission_mode_from_label("dont-ask"),
+            PermissionMode::DontAsk
         );
         assert_eq!(normalize_permission_mode("unknown"), None);
     }
@@ -9012,6 +12958,94 @@ mod tests {
             "Raisonnement : max (le plus haut niveau que le modèle accepte)"
         );
         assert!(!runtime::workflow::ultracode());
+    }
+
+    #[test]
+    fn goal_checks_read_met_or_not_met_and_the_reason() {
+        use super::{parse_goal_verdict, GoalVerdict};
+        assert_eq!(
+            parse_goal_verdict("MET\nLes 42 tests passent."),
+            GoalVerdict::Met("Les 42 tests passent.".to_string())
+        );
+        assert_eq!(
+            parse_goal_verdict("**NOT MET**\n- Deux tests échouent encore"),
+            GoalVerdict::NotMet("Deux tests échouent encore".to_string())
+        );
+        assert_eq!(
+            parse_goal_verdict("NOT_MET: le build casse"),
+            GoalVerdict::NotMet("le build casse".to_string())
+        );
+        assert_eq!(
+            parse_goal_verdict("Verdict: MET\nTout est vert"),
+            GoalVerdict::Met("Tout est vert".to_string())
+        );
+        // Sans verdict lisible, l'objectif n'est pas tenu pour atteint.
+        assert!(matches!(
+            parse_goal_verdict("Je pense que oui, à peu près."),
+            GoalVerdict::NotMet(_)
+        ));
+        assert!(matches!(parse_goal_verdict(""), GoalVerdict::NotMet(_)));
+    }
+
+    #[test]
+    fn goal_status_and_prompts_name_the_condition() {
+        let mut goal = super::GoalState::new("  tous les tests passent ");
+        assert_eq!(goal.condition, "tous les tests passent");
+        assert!(super::render_goal_status(None).contains("Aucun objectif"));
+        goal.paused = true;
+        goal.last_reason = Some("un test échoue".to_string());
+        let status = super::render_goal_status(Some(&goal));
+        assert!(
+            status.contains("en pause") && status.contains("un test échoue"),
+            "{status}"
+        );
+        assert!(super::goal_check_prompt(&goal.condition).contains("NOT MET"));
+        assert!(
+            super::goal_continue_prompt(&goal.condition, Some("un test échoue"))
+                .contains("not met yet: un test échoue")
+        );
+        assert_eq!(super::fold_command_word(" Arrêter "), "arreter");
+    }
+
+    #[test]
+    fn loop_takes_an_optional_interval_before_the_request() {
+        use std::time::Duration;
+        assert_eq!(super::parse_interval("5m"), Some(Duration::from_secs(300)));
+        assert_eq!(super::parse_interval("2h"), Some(Duration::from_secs(7200)));
+        assert_eq!(super::parse_interval("vérifie"), None);
+        assert_eq!(super::format_interval(Duration::from_secs(300)), "5 min");
+        assert_eq!(super::format_interval(Duration::from_secs(3600)), "1 h");
+        assert_eq!(super::format_interval(Duration::from_secs(45)), "45 s");
+    }
+
+    #[test]
+    fn copy_finds_the_replies_of_claw_from_the_end() {
+        use runtime::{ContentBlock, ConversationMessage, MessageRole, Session};
+        let message = |role: MessageRole, text: &str| ConversationMessage {
+            role,
+            blocks: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+            usage: None,
+        };
+        let mut session = Session::new();
+        assert!(super::copy_assistant_reply(&session, None).contains("Aucune réponse"));
+        session.messages = vec![
+            message(MessageRole::User, "bonjour"),
+            message(MessageRole::Assistant, "première réponse"),
+            message(MessageRole::User, "encore"),
+            message(MessageRole::Assistant, "   "),
+            message(MessageRole::Assistant, "seconde réponse"),
+        ];
+        assert_eq!(
+            super::assistant_replies(&session),
+            vec![
+                "première réponse".to_string(),
+                "seconde réponse".to_string()
+            ]
+        );
+        assert!(super::copy_assistant_reply(&session, Some("3")).contains("Seulement 2"));
+        assert!(super::copy_assistant_reply(&session, Some("zéro")).starts_with("Usage"));
     }
 
     #[test]

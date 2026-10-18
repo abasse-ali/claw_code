@@ -2,8 +2,9 @@
 //! `groq:llama-3.3-70b-versatile`, `monserveur:mon-modele`…
 //!
 //! Préréglages : serveurs locaux (Ollama, LM Studio, llama.cpp - sans clé) et
-//! services en ligne (Groq, Mistral, `DeepSeek`, Gemini, Cerebras, Together,
-//! Fireworks). D'autres serveurs se déclarent dans la config (`providers`).
+//! services en ligne (Groq, Mistral, `DeepSeek`, Gemini, Cerebras, NVIDIA,
+//! Together, Fireworks). D'autres serveurs se déclarent dans la config
+//! (`providers`).
 
 use std::sync::RwLock;
 
@@ -87,6 +88,15 @@ const PRESETS: &[Preset] = &[
         base_url: "https://api.cerebras.ai/v1",
         base_url_env: "CEREBRAS_BASE_URL",
         api_key_env: "CEREBRAS_API_KEY",
+        local: false,
+    },
+    // build.nvidia.com : gratuit pour les membres du programme pour
+    // développeurs de NVIDIA (`nvidia:nvidia/nemotron-3-super-120b-a12b`).
+    Preset {
+        name: "nvidia",
+        base_url: "https://integrate.api.nvidia.com/v1",
+        base_url_env: "NVIDIA_BASE_URL",
+        api_key_env: "NVIDIA_API_KEY",
         local: false,
     },
     Preset {
@@ -185,7 +195,8 @@ impl CompatProvider {
     /// Clé lue dans l'environnement, s'il y en a une.
     #[must_use]
     pub fn api_key(&self) -> Option<String> {
-        self.api_key_env.as_deref().and_then(env_non_empty)
+        let env = self.api_key_env.as_deref()?;
+        env_non_empty(env).or_else(|| crate::key_helper::key(env))
     }
 
     /// Utilisable maintenant : serveur local, ou clé présente.
@@ -224,6 +235,15 @@ mod tests {
         assert_eq!(provider.base_url, "https://api.groq.com/openai/v1");
         assert_eq!(model, "llama-3.3-70b-versatile");
         assert!(provider.requires_key);
+
+        // L'identifiant de NVIDIA garde son `/` ; celui d'`OpenRouter`, pour le
+        // même modèle, reste à `OpenRouter`.
+        let (provider, model) =
+            split_compat_model("nvidia:nvidia/nemotron-3-super-120b-a12b").expect("nvidia");
+        assert_eq!(provider.base_url, "https://integrate.api.nvidia.com/v1");
+        assert_eq!(provider.api_key_env.as_deref(), Some("NVIDIA_API_KEY"));
+        assert_eq!(model, "nvidia/nemotron-3-super-120b-a12b");
+        assert!(split_compat_model("nvidia/nemotron-3-super-120b-a12b:free").is_none());
 
         assert!(split_compat_model("qwen/qwen3-coder:free").is_none());
         assert!(split_compat_model("inconnu:modele").is_none());

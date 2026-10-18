@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -82,7 +83,14 @@ pub struct McpInitializeResult {
     pub protocol_version: String,
     pub capabilities: JsonValue,
     pub server_info: McpInitializeServerInfo,
+    /// Consignes du serveur pour le modèle (channels notamment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
 }
+
+/// Notification d'un serveur lue par la tâche de fond d'un channel :
+/// (nom du serveur, message JSON-RPC complet).
+pub type McpNotificationSink = Arc<dyn Fn(&str, &JsonValue) + Send + Sync>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -306,6 +314,8 @@ struct ManagedMcpServer {
     bootstrap: McpClientBootstrap,
     process: Option<McpStdioProcess>,
     initialized: bool,
+    /// Réponse à `initialize` : capacités et consignes du serveur.
+    info: Option<McpInitializeResult>,
 }
 
 impl ManagedMcpServer {
@@ -314,6 +324,7 @@ impl ManagedMcpServer {
             bootstrap,
             process: None,
             initialized: false,
+            info: None,
         }
     }
 }
@@ -565,6 +576,58 @@ impl McpServerManager {
         Ok(response.result.unwrap_or(JsonValue::Null))
     }
 
+    /// Fait d'un serveur stdio un channel : sa sortie est lue en continu et
+    /// ses notifications vont à `sink` dès qu'elles arrivent ; rend ses
+    /// capacités et consignes.
+    pub async fn start_channel(
+        &mut self,
+        server_name: &str,
+        sink: McpNotificationSink,
+    ) -> Result<McpInitializeResult, McpServerManagerError> {
+        self.ensure_server_ready(server_name).await?;
+        let server = self.server_mut(server_name)?;
+        let info = server
+            .info
+            .clone()
+            .ok_or_else(|| McpServerManagerError::InvalidResponse {
+                server_name: server_name.to_string(),
+                method: "initialize",
+                details: "réponse d'initialisation absente".to_string(),
+            })?;
+        let process =
+            server
+                .process
+                .as_mut()
+                .ok_or_else(|| McpServerManagerError::InvalidResponse {
+                    server_name: server_name.to_string(),
+                    method: "initialize",
+                    details: "processus du serveur manquant".to_string(),
+                })?;
+        process.start_pump(server_name, sink)?;
+        Ok(info)
+    }
+
+    /// Notification vers un serveur déjà lancé (relais des permissions).
+    pub async fn notify_server(
+        &mut self,
+        server_name: &str,
+        method: &str,
+        params: JsonValue,
+    ) -> Result<(), McpServerManagerError> {
+        let server = self.server_mut(server_name)?;
+        let process =
+            server
+                .process
+                .as_mut()
+                .ok_or_else(|| McpServerManagerError::InvalidResponse {
+                    server_name: server_name.to_string(),
+                    method: "notification",
+                    details: "processus du serveur arrêté".to_string(),
+                })?;
+        process.notify(method, Some(params)).await?;
+        Ok(())
+    }
+
     pub async fn shutdown(&mut self) -> Result<(), McpServerManagerError> {
         let server_names = self.servers.keys().cloned().collect::<Vec<_>>();
         for server_name in server_names {
@@ -650,15 +713,16 @@ impl McpServerManager {
                 });
             }
 
-            if response.result.is_none() {
+            let Some(info) = response.result else {
                 return Err(McpServerManagerError::InvalidResponse {
                     server_name: server_name.to_string(),
                     method: "initialize",
                     details: "charge utile result manquante".to_string(),
                 });
-            }
+            };
 
             let server = self.server_mut(server_name)?;
+            server.info = Some(info);
             // Le protocole exige cette notification avant toute autre requête.
             if let Some(process) = server.process.as_mut() {
                 process.notify("notifications/initialized", None).await?;
@@ -673,8 +737,56 @@ impl McpServerManager {
 #[derive(Debug)]
 pub struct McpStdioProcess {
     child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    /// Partagé avec la tâche de fond d'un channel (réponses aux `ping`).
+    stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
+    /// Repris par la tâche de fond d'un channel.
+    stdout: Option<BufReader<ChildStdout>>,
+    /// Réponses lues par la tâche de fond d'un channel.
+    pumped: Option<tokio::sync::mpsc::UnboundedReceiver<JsonValue>>,
+}
+
+fn pumped_error() -> io::Error {
+    io::Error::other("sortie du serveur lue par la tâche du channel")
+}
+
+fn closed(what: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::UnexpectedEof,
+        format!("flux MCP stdio fermé pendant la lecture {what}"),
+    )
+}
+
+/// Prochain message : une ligne JSON, ou l'ancien encadrement `Content-Length`.
+async fn read_payload(stdout: &mut BufReader<ChildStdout>) -> io::Result<Vec<u8>> {
+    loop {
+        let mut line = String::new();
+        if stdout.read_line(&mut line).await? == 0 {
+            return Err(closed("d'une ligne"));
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some(value) = trimmed.strip_prefix("Content-Length:") else {
+            return Ok(trimmed.as_bytes().to_vec());
+        };
+        let length = value
+            .trim()
+            .parse::<usize>()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        loop {
+            let mut header = String::new();
+            if stdout.read_line(&mut header).await? == 0 {
+                return Err(closed("des en-têtes"));
+            }
+            if header.trim().is_empty() {
+                break;
+            }
+        }
+        let mut payload = vec![0_u8; length];
+        stdout.read_exact(&mut payload).await?;
+        return Ok(payload);
+    }
 }
 
 impl McpStdioProcess {
@@ -706,17 +818,62 @@ impl McpStdioProcess {
 
         Ok(Self {
             child,
-            stdin,
-            stdout: BufReader::new(stdout),
+            stdin: Arc::new(tokio::sync::Mutex::new(stdin)),
+            stdout: Some(BufReader::new(stdout)),
+            pumped: None,
         })
     }
 
+    fn stdout(&mut self) -> io::Result<&mut BufReader<ChildStdout>> {
+        self.stdout.as_mut().ok_or_else(pumped_error)
+    }
+
     pub async fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.stdin.write_all(bytes).await
+        self.stdin.lock().await.write_all(bytes).await
     }
 
     pub async fn flush(&mut self) -> io::Result<()> {
-        self.stdin.flush().await
+        self.stdin.lock().await.flush().await
+    }
+
+    /// Lecture continue de la sortie (serveur channel) : les réponses restent
+    /// pour les requêtes, les `ping` reçoivent leur réponse, les notifications
+    /// vont à `sink` dès qu'elles arrivent. À appeler dans le runtime tokio
+    /// qui garde le serveur.
+    pub fn start_pump(&mut self, server_name: &str, sink: McpNotificationSink) -> io::Result<()> {
+        if self.pumped.is_some() {
+            return Ok(());
+        }
+        let mut stdout = self.stdout.take().ok_or_else(pumped_error)?;
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        self.pumped = Some(receiver);
+        let stdin = Arc::clone(&self.stdin);
+        let server = server_name.to_string();
+        tokio::spawn(async move {
+            while let Ok(payload) = read_payload(&mut stdout).await {
+                let Ok(message) = serde_json::from_slice::<JsonValue>(&payload) else {
+                    continue;
+                };
+                match (
+                    message.get("method").and_then(JsonValue::as_str),
+                    message.get("id"),
+                ) {
+                    (Some(method), Some(id)) => {
+                        let reply = reply_to_server_request(id, method);
+                        let mut stdin = stdin.lock().await;
+                        let _ = stdin.write_all(format!("{reply}\n").as_bytes()).await;
+                        let _ = stdin.flush().await;
+                    }
+                    (Some(_), None) => sink(&server, &message),
+                    (None, _) => {
+                        if sender.send(message).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        Ok(())
     }
 
     pub async fn write_line(&mut self, line: &str) -> io::Result<()> {
@@ -727,19 +884,16 @@ impl McpStdioProcess {
 
     pub async fn read_line(&mut self) -> io::Result<String> {
         let mut line = String::new();
-        let bytes_read = self.stdout.read_line(&mut line).await?;
+        let bytes_read = self.stdout()?.read_line(&mut line).await?;
         if bytes_read == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "flux MCP stdio fermé pendant la lecture d'une ligne",
-            ));
+            return Err(closed("d'une ligne"));
         }
         Ok(line)
     }
 
     pub async fn read_available(&mut self) -> io::Result<Vec<u8>> {
         let mut buffer = vec![0_u8; 4096];
-        let read = self.stdout.read(&mut buffer).await?;
+        let read = self.stdout()?.read(&mut buffer).await?;
         buffer.truncate(read);
         Ok(buffer)
     }
@@ -754,12 +908,9 @@ impl McpStdioProcess {
         let mut content_length = None;
         loop {
             let mut line = String::new();
-            let bytes_read = self.stdout.read_line(&mut line).await?;
+            let bytes_read = self.stdout()?.read_line(&mut line).await?;
             if bytes_read == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "flux MCP stdio fermé pendant la lecture des en-têtes",
-                ));
+                return Err(closed("des en-têtes"));
             }
             if line == "\r\n" {
                 break;
@@ -780,7 +931,7 @@ impl McpStdioProcess {
             )
         })?;
         let mut payload = vec![0_u8; content_length];
-        self.stdout.read_exact(&mut payload).await?;
+        self.stdout()?.read_exact(&mut payload).await?;
         Ok(payload)
     }
 
@@ -793,42 +944,14 @@ impl McpStdioProcess {
 
     /// Lit le prochain message ; accepte aussi l'ancien encadrement `Content-Length`.
     pub async fn read_jsonrpc_message<T: DeserializeOwned>(&mut self) -> io::Result<T> {
-        loop {
-            let line = self.read_line().await?;
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let payload = if let Some(value) = trimmed.strip_prefix("Content-Length:") {
-                let length = value
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                self.read_frame_body(length).await?
-            } else {
-                trimmed.as_bytes().to_vec()
-            };
-            return serde_json::from_slice(&payload)
+        if let Some(inbox) = self.pumped.as_mut() {
+            let message = inbox.recv().await.ok_or_else(|| closed("d'une réponse"))?;
+            return serde_json::from_value(message)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
         }
-    }
-
-    async fn read_frame_body(&mut self, length: usize) -> io::Result<Vec<u8>> {
-        loop {
-            let mut header = String::new();
-            if self.stdout.read_line(&mut header).await? == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "flux MCP stdio fermé pendant la lecture des en-têtes",
-                ));
-            }
-            if header.trim().is_empty() {
-                break;
-            }
-        }
-        let mut payload = vec![0_u8; length];
-        self.stdout.read_exact(&mut payload).await?;
-        Ok(payload)
+        let payload = read_payload(self.stdout()?).await?;
+        serde_json::from_slice(&payload)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
     pub async fn send_request<T: Serialize>(
@@ -1510,6 +1633,7 @@ mod tests {
                         name: "fake-mcp".to_string(),
                         version: "0.1.0".to_string(),
                     },
+                    instructions: None,
                 })
             );
 

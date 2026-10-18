@@ -192,8 +192,13 @@ impl SystemPromptBuilder {
         sections.push(get_actions_section());
         sections.push(SYSTEM_PROMPT_DYNAMIC_BOUNDARY.to_string());
         sections.push(self.environment_section());
+        // `includeGitInstructions: false` : ni consignes git ni état du dépôt.
+        let include_git = self
+            .config
+            .as_ref()
+            .is_none_or(crate::settings::include_git_instructions);
         if let Some(project_context) = &self.project_context {
-            sections.push(render_project_context(project_context));
+            sections.push(render_project_context(project_context, include_git));
             if !project_context.instruction_files.is_empty() {
                 sections.push(render_instruction_files(&project_context.instruction_files));
             }
@@ -208,6 +213,11 @@ impl SystemPromptBuilder {
         }
         if let Some(config) = &self.config {
             sections.push(render_config_section(config));
+            if include_git {
+                sections.push(crate::settings::git_instructions_section(
+                    &crate::settings::attribution(config),
+                ));
+            }
             match config.language() {
                 Some(language) => sections.push(render_language_section(language)),
                 // Sans réglage : la langue dans laquelle l'utilisateur écrit.
@@ -266,32 +276,32 @@ fn discover_instruction_files(cwd: &Path) -> std::io::Result<Vec<ContextFile>> {
     }
     directories.reverse();
 
-    let mut files = Vec::new();
+    // (fichier, portée utilisateur) : les imports d'un fichier personnel ne
+    // demandent pas d'accord, ceux d'un fichier de projet si.
+    let mut files: Vec<(ContextFile, bool)> = Vec::new();
+    let home = crate::home_dir();
     // Instructions personnelles valables pour tous les projets (Claw et Claude Code).
-    if let Some(home) = crate::home_dir() {
+    if let Some(home) = &home {
         for candidate in [
             home.join(".claw").join("CLAW.md"),
             home.join(".claude").join("CLAUDE.md"),
         ] {
-            push_context_file(&mut files, candidate)?;
+            let mut found = Vec::new();
+            push_context_file(&mut found, candidate)?;
+            files.extend(found.into_iter().map(|file| (file, true)));
         }
     }
     // Puis du dossier racine au dossier courant : fichiers de Claw, de Claude
     // Code et `AGENTS.md` (convention partagée par Codex, Cursor…).
     for dir in directories {
-        for candidate in [
-            dir.join("CLAW.md"),
-            dir.join("CLAW.local.md"),
-            dir.join(".claw").join("CLAW.md"),
-            dir.join(".claw").join("instructions.md"),
-            dir.join("CLAUDE.md"),
-            dir.join("CLAUDE.local.md"),
-            dir.join(".claude").join("CLAUDE.md"),
-            dir.join("AGENTS.md"),
-        ] {
-            push_context_file(&mut files, candidate)?;
+        for name in crate::memory::INSTRUCTION_NAMES {
+            let mut found = Vec::new();
+            push_context_file(&mut found, dir.join(name))?;
+            files.extend(found.into_iter().map(|file| (file, false)));
         }
     }
+    // Imports `@chemin`, règles `.claude/rules`, exclusions `claudeMdExcludes`.
+    let files = crate::memory::assemble(cwd, home.as_deref(), files);
     Ok(dedupe_instruction_files(files))
 }
 
@@ -412,7 +422,7 @@ fn read_git_output(cwd: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn render_project_context(project_context: &ProjectContext) -> String {
+fn render_project_context(project_context: &ProjectContext, include_git: bool) -> String {
     let mut lines = vec!["# Project context".to_string()];
     let mut bullets = vec![
         format!("Today's date is {}.", project_context.current_date),
@@ -425,12 +435,12 @@ fn render_project_context(project_context: &ProjectContext) -> String {
         ));
     }
     lines.extend(prepend_bullets(bullets));
-    if let Some(status) = &project_context.git_status {
+    if let Some(status) = project_context.git_status.as_ref().filter(|_| include_git) {
         lines.push(String::new());
         lines.push("Git status snapshot:".to_string());
         lines.push(status.clone());
     }
-    if let Some(diff) = &project_context.git_diff {
+    if let Some(diff) = project_context.git_diff.as_ref().filter(|_| include_git) {
         lines.push(String::new());
         lines.push("Git diff snapshot:".to_string());
         lines.push(diff.clone());

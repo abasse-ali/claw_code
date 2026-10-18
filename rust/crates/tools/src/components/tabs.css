@@ -1,0 +1,8 @@
+.tabs__list { display: flex; flex-wrap: wrap; gap: .25rem; padding: .25rem; border-radius: calc(var(--radius, 12px) + 10px); background: color-mix(in srgb, var(--ink, #1f1d1a) 7%, transparent); width: fit-content; max-width: 100%; }
+.tabs__tab { min-height: 44px; padding: 0 1.1rem; border: 0; border-radius: 999px; background: transparent; color: var(--muted, #5f5a52); font: inherit; font-weight: 600; white-space: nowrap; cursor: pointer; transition: background-color .2s, color .2s; }
+.tabs__tab:hover { color: var(--ink, #1f1d1a); }
+.tabs__tab[aria-selected="true"] { background: var(--paper, #f7f3ec); color: var(--ink, #1f1d1a); box-shadow: 0 1px 3px rgb(0 0 0 / .12); }
+.tabs__panel { padding: 1.5rem 0 0; }
+.tabs__panel:not([hidden]) { animation: tab-in .25s ease-out; }
+@keyframes tab-in { from { opacity: 0; transform: translateY(6px); } }
+@media (prefers-reduced-motion: reduce) { .tabs__panel:not([hidden]) { animation: none; } }

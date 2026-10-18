@@ -17,6 +17,8 @@ pub enum Answer {
     Escape,
     /// Ctrl+C : refus et interruption du tour.
     Interrupt,
+    /// Réponse arrivée d'ailleurs (relais d'un channel) : `true` autorise.
+    Remote(bool),
 }
 
 /// Le menu interactif est possible (sinon : question en mode texte).
@@ -84,11 +86,23 @@ fn draw(out: &mut impl Write, lines: &[String], previous: usize) -> io::Result<u
 
 /// Pose la question ; `body` : lignes déjà découpées à `box_width() - 6`.
 pub fn ask(title: &str, body: &[String], question: &str, options: &[String]) -> io::Result<Answer> {
+    ask_with_remote(title, body, question, options, &|| None)
+}
+
+/// Comme [`ask`] ; `remote` est consulté pendant l'attente : une réponse
+/// venue d'ailleurs (channel) ferme la question.
+pub fn ask_with_remote(
+    title: &str,
+    body: &[String],
+    question: &str,
+    options: &[String],
+    remote: &dyn Fn() -> Option<bool>,
+) -> io::Result<Answer> {
     let body = fit_body(body, options.len());
     // L'écoute du clavier pendant le tour (Échap) rend la main le temps du choix.
     let keys = crate::turn_keys::pause();
     terminal::enable_raw_mode()?;
-    let answer = menu(&mut io::stdout(), title, &body, question, options);
+    let answer = menu(&mut io::stdout(), title, &body, question, options, remote);
     let _ = terminal::disable_raw_mode();
     drop(keys);
     answer
@@ -100,19 +114,31 @@ fn menu(
     body: &[String],
     question: &str,
     options: &[String],
+    remote: &dyn Fn() -> Option<bool>,
 ) -> io::Result<Answer> {
     let width = box_width();
     let inner = width.saturating_sub(4);
     let count = options.len().max(1);
     let mut selected = 0usize;
     let mut drawn = 0usize;
+    let mut stale = true;
     let answer = loop {
-        let lines = transcript::boxed(
-            &content(title, body, question, options, selected, inner),
-            width,
-            ACCENT,
-        );
-        drawn = draw(out, &lines, drawn)?;
+        if stale {
+            let lines = transcript::boxed(
+                &content(title, body, question, options, selected, inner),
+                width,
+                ACCENT,
+            );
+            drawn = draw(out, &lines, drawn)?;
+            stale = false;
+        }
+        if !event::poll(std::time::Duration::from_millis(250))? {
+            if let Some(allow) = remote() {
+                break Answer::Remote(allow);
+            }
+            continue;
+        }
+        stale = true;
         let Event::Key(key) = event::read()? else {
             continue;
         };

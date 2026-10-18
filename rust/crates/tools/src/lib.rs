@@ -1,9 +1,12 @@
 pub mod advisors;
+pub mod channels;
 pub mod input_check;
 mod mcp_bridge;
 pub mod mcp_oauth;
+pub mod monitors;
 mod questions;
 mod web_page;
+pub mod workflows;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -11,7 +14,11 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+mod components;
+mod icons;
+mod ornaments;
 mod page_view;
+mod photos;
 mod screenshot;
 
 /// Un navigateur est installé : les outils `ViewPage` et `Screenshot` peuvent
@@ -501,7 +508,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "url": { "type": "string", "description": "An http or https address, for example http://localhost:3000/" },
+                    "url": { "type": "string", "description": "An http or https address, for example http://localhost:3000/, or the file:/// address of an .html file of the project" },
                     "wait_ms": {
                         "type": "integer",
                         "minimum": 200,
@@ -541,6 +548,70 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                         "description": "Steps played in order before each screenshot: {\"click\": \"CSS selector\"}, {\"type\": \"text\", \"into\": \"CSS selector\"}, {\"scroll\": \"CSS selector\" or \"bottom\"}, {\"wait_ms\": 500}.",
                         "items": { "type": "object" }
                     }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "Icon",
+            description: "Polished SVG icons for a web page, ready to paste: 1539 line icons from Lucide (ISC license), drawn on a 24px grid in the text color (currentColor). Use them instead of drawing icons by hand, and never use emoji. Give `names` to get several icons in one call (\"map-pin\", \"phone\", \"clock\", \"croissant\", \"leaf\", \"calendar\", \"star\", \"menu\", \"x\", \"arrow-right\"), or `search` with English words (\"bread pastry\", \"location\") to find names. Each icon comes as a complete <svg> with width, height and aria-hidden; color and size it with CSS.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "names": { "type": "array", "items": { "type": "string" }, "description": "Icon names, for example [\"map-pin\", \"phone\", \"clock\"]" },
+                    "search": { "type": "string", "description": "Words to find icon names, in English (French words are understood too): \"bread pastry\", \"location\"" },
+                    "size": { "type": "integer", "minimum": 12, "maximum": 160, "description": "Width and height in pixels (default 24)" },
+                    "stroke_width": { "type": "number", "minimum": 0.5, "maximum": 3, "description": "Line width (default 2; 1.5 looks finer at large sizes)" },
+                    "label": { "type": "string", "description": "Text for screen readers when the icon alone carries meaning (an icon-only link)" }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "Ornament",
+            description: "Decorative SVG ornaments drawn from formulas in the plan's colors, clean at any size: blob (organic shape behind a title or an image), waves (layered waves across the full width, the bottom edge of a hero), dots and lines (quiet background textures), topography (contour lines), grain (film grain over a flat color), arch (a frame for an image or a text), frame (a medallion around an avatar or an initial), sprig (a botanical branch), rays (a sun). Use it instead of drawing illustrations, waves or avatars by hand: hand-drawn shapes look crude. Each ornament comes as a complete <svg> with aria-hidden, and as a data URI for a CSS background.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["blob", "waves", "dots", "lines", "topography", "grain", "arch", "frame", "sprig", "rays"] },
+                    "colors": { "type": "array", "items": { "type": "string" }, "description": "The plan's colors in hexadecimal, main one first: [\"#c46b3a\", \"#e8d5c4\", \"#6b8e7a\"]" },
+                    "width": { "type": "integer", "minimum": 16, "maximum": 2400 },
+                    "height": { "type": "integer", "minimum": 16, "maximum": 2400 },
+                    "seed": { "type": "integer", "minimum": 0, "description": "Another value gives another shape of the same kind" },
+                    "count": { "type": "integer", "minimum": 1, "maximum": 36, "description": "Layers (blob, waves), rings (topography), arches, leaves (sprig), rays, or the pattern gap in pixels (dots, lines)" },
+                    "opacity": { "type": "number", "minimum": 0.05, "maximum": 1 }
+                },
+                "required": ["kind"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "Photo",
+            description: "Real photos under free licences (CC0, public domain, CC BY, CC BY-SA), found by English keywords on Openverse and Wikimedia Commons and saved in the project (images/ by default), with their real width and height and a credit to put in the footer (also written to images/CREDITS.md). Use it when the subject needs pictures (a bakery's bread, a studio's room, a dish, a place) instead of icon placeholders or crude hand-drawn scenes; name what the photo shows in two or three words (\"sourdough bread\", \"yoga class\"), not a mood. Check each photo with Screenshot: one that does not fit the subject is worse than none.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "search": { "type": "string", "description": "Two or three English words naming what the photo shows: \"sourdough bread\", \"yoga class\", \"meditation room\" (each word must match the photo: long searches find nothing)" },
+                    "count": { "type": "integer", "minimum": 1, "maximum": 4, "description": "Photos to save (default 1)" },
+                    "orientation": { "type": "string", "enum": ["landscape", "portrait", "square", "any"] },
+                    "folder": { "type": "string", "description": "Folder inside the project (default images)" },
+                    "name": { "type": "string", "description": "Base file name (default: from the search words)" }
+                },
+                "required": ["search"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "Component",
+            description: "Interactive components that work as soon as they are pasted (HTML, CSS and dependency-free JS), accessible, in the plan's colors, with icons from the icon set: nav-menu (header and phone menu), accordion (FAQ), tabs, dialog (modal), toast (confirmation messages), carousel, booking (days, slots, places left, calendar file), filter (tags and search), form (validation, sending, success), cart (basket or quote), theme-toggle (dark mode), copy, share, open-now (live opening hours), directions (route, call, map), reveal (appear on scroll), count-up (key figures), scroll-effects (reading progress, parallax), page-transitions. Use them instead of writing these by hand: every button then does what it says. Ask for several by name in one call; without names you get the list.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "names": { "type": "array", "items": { "type": "string" }, "description": "Component names, for example [\"nav-menu\", \"booking\", \"open-now\"]" }
                 },
                 "additionalProperties": false
             }),
@@ -610,6 +681,57 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             // Simple liste de suivi (.claw/todos.json) : jamais de demande
             // d'autorisation, y compris en mode plan, comme dans Claude Code.
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "CronCreate",
+            description: "Schedule a prompt to run later in this session, between turns: a 5-field cron expression in local time (minute hour day-of-month month day-of-week), the prompt, and recurring (default true; false runs once then deletes itself). Use it for reminders (\"in 45 minutes check the tests\": pin the minute and hour) and polling. Recurring tasks expire after 7 days.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "cron": { "type": "string" },
+                    "prompt": { "type": "string" },
+                    "recurring": { "type": "boolean" }
+                },
+                "required": ["cron", "prompt"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "CronList",
+            description: "List this session's scheduled tasks: id, schedule, next run time, prompt.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "CronDelete",
+            description: "Cancel a scheduled task by its 8-character id.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "ScheduleWakeup",
+            description: "Self-paced /loop only: at the end of an iteration, schedule the next one in delaySeconds (60-3600, chosen from what you observed: short while something is in progress, long when nothing is pending) with the same prompt and a one-line reason, or pass stop: true when the task is complete.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "delaySeconds": { "type": "integer", "minimum": 60, "maximum": 3600 },
+                    "prompt": { "type": "string" },
+                    "reason": { "type": "string" },
+                    "stop": { "type": "boolean" }
+                },
+                "additionalProperties": false
+            }),
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
@@ -738,7 +860,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "Skill",
-            description: "Load a local skill definition and its instructions.",
+            description: "Run an installed skill: returns its instructions with the arguments filled in (and the output of its injected commands), or, for a skill with context: fork, the report of the sub-agent that ran it. Pass the user's arguments in `args`. Skills reserved to the user cannot be run this way.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -752,7 +874,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "Agent",
-            description: "Run a specialized sub-agent on a self-contained task and return its final report (field `result`). The sub-agent does not see this conversation: put every needed detail in `prompt`. Its tool calls follow the session's permissions; architect, reviewer, auditor, Explore and Plan are read-only. Set run_in_background to start it without waiting; its report is then appended to outputFile.",
+            description: "Run a specialized sub-agent on a self-contained task and return its final report (field `result`). The sub-agent does not see this conversation: put every needed detail in `prompt`. Its tool calls follow the session's permissions; architect, reviewer, auditor, Explore and Plan are read-only. Set run_in_background to start it without waiting; its report is then appended to outputFile. Set isolation to \"worktree\" for agents that edit code in parallel: each works in its own git worktree and branch.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -764,7 +886,12 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     },
                     "name": { "type": "string" },
                     "model": { "type": "string", "description": "Optional model override, e.g. an OpenRouter id such as qwen/qwen3-coder." },
-                    "run_in_background": { "type": "boolean" }
+                    "run_in_background": { "type": "boolean" },
+                    "isolation": {
+                        "type": "string",
+                        "enum": ["worktree"],
+                        "description": "worktree: run the sub-agent in its own git worktree (a separate checkout on a new branch), so several agents can edit code in parallel without conflicts. Its changes come back committed on that branch, to review and merge."
+                    }
                 },
                 "required": ["description", "prompt"],
                 "additionalProperties": false
@@ -831,6 +958,61 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "Monitor",
+            description: "Watch something in the background and react when it changes, without pausing the conversation: runs `command` (a shell command or small script that prints one line per event: tail a log and filter errors, poll a CI job or PR status in a loop, watch a directory) and feeds each new output line back to you between turns. Ends at timeout_ms (default 300000 = 5 minutes, at most 1800000); you then get one notice and can start it again. Stop it early with KillShell and its id. Prefer it to sleeping or re-running a command to poll.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" },
+                    "description": { "type": "string", "description": "What is watched, in a few words" },
+                    "timeout_ms": { "type": "integer", "minimum": 1_000, "maximum": 1_800_000 }
+                },
+                "required": ["command"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "Workflow",
+            description: "Run a dynamic workflow: a JavaScript script that orchestrates many sub-agents in the background and returns one consolidated result later, between turns (you get a runId now: do not wait, poll or relaunch). Only use it when the user explicitly asks for a workflow or multi-agent orchestration (the word \"ultracode\", \"use a workflow\", \"fan out agents\") or names a saved workflow; otherwise do the work yourself or with Agent. The script must begin with `export const meta = { name: 'kebab-name', description: '...', phases: [{ title: '...' }] }` as a pure literal, then plain JavaScript where top-level await and return are allowed: `await agent(prompt, { label, phase, schema, model, agentType, isolation: 'worktree' })` runs one sub-agent with tools and resolves to its final report (a string), to a JSON value matching `schema` (a JSON Schema), or to null if it failed; `parallel([() => agent(...), ...])` runs functions concurrently (an error becomes null); `pipeline(items, stage1, stage2, ...)` sends each item through the stages independently (null drops the item); `phase(title)` groups the next agents; `log(...)` writes to the run log; the global `args` holds the `args` input. Nothing else exists in the script: no require, import, process, files or network; give that work to agents and put everything an agent needs in its prompt. Agents run with the session's permissions and cannot ask the user, so actions that need approval are refused. Keep it small on free models: each agent costs about ten requests, a run allows at most 30 agents (CLAW_WORKFLOW_MAX_AGENTS) and 3 run at once. Return a JSON-serializable value. name: a saved workflow (.claw/workflows, .claude/workflows, or the bundled deep-research). scriptPath: a script file, like the scriptPath of an earlier run. resumeFromRunId: rerun an earlier run of this session; finished agent() calls with the same inputs return their saved result.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "script": { "type": "string", "description": "Inline workflow script, starting with export const meta = {...}" },
+                    "name": { "type": "string", "description": "Saved or bundled workflow to run" },
+                    "scriptPath": { "type": "string", "description": "Path of a workflow script file" },
+                    "args": { "description": "Any JSON value exposed to the script as the global args (pass arrays and objects as JSON values, not as a JSON-encoded string)" },
+                    "resumeFromRunId": { "type": "string", "description": "Earlier run id to resume" }
+                }
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "ListAgents",
+            description: "List the user's other live Claw sessions on this machine (terminal, background, -p), with the name and id to use with SendMessage, their folder and whether they are busy.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "SendMessage",
+            description: "Send a plain-text message to another of the user's Claw sessions (name or id from ListAgents): hand over a finding, a decision or a status another session needs, or ask it something. It arrives there between turns. Never ask another session for an action that was denied or blocked here. notify_when_idle: true asks that session to send you one notice when it next goes idle or exits (message optional then).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string" },
+                    "message": { "type": "string" },
+                    "notify_when_idle": { "type": "boolean" }
+                },
+                "required": ["to"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
             name: "ExitPlanMode",
@@ -953,11 +1135,27 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "LookAtImage" => {
             from_value::<LookAtImageInput>(input).and_then(|input| run_look_at_image(&input))
         }
+        "Icon" => from_value::<icons::IconInput>(input)
+            .and_then(|input| icons::icon(&input))
+            .and_then(to_pretty_json),
+        "Ornament" => from_value::<ornaments::OrnamentInput>(input)
+            .and_then(|input| ornaments::ornament(&input))
+            .and_then(to_pretty_json),
+        "Component" => from_value::<components::ComponentInput>(input)
+            .and_then(|input| components::component_tool(&input))
+            .and_then(to_pretty_json),
+        "Photo" => from_value::<photos::PhotoInput>(input)
+            .and_then(|input| photos::photo(&input))
+            .and_then(to_pretty_json),
         "Screenshot" => from_value::<screenshot::ScreenshotInput>(input)
             .and_then(|input| screenshot::take(&input))
             .and_then(to_pretty_json),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
         "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
+        "CronCreate" => from_value::<CronCreateInput>(input).and_then(run_cron_create),
+        "CronList" => run_cron_list(),
+        "CronDelete" => from_value::<CronDeleteInput>(input).and_then(run_cron_delete),
+        "ScheduleWakeup" => from_value::<ScheduleWakeupInput>(input).and_then(run_schedule_wakeup),
         "Remember" => from_value::<RememberInput>(input).and_then(run_remember),
         "FindSymbol" => {
             from_value::<FindSymbolInput>(input).and_then(|input| run_find_symbol(&input))
@@ -973,6 +1171,10 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "Sleep" => from_value::<SleepInput>(input).and_then(run_sleep),
         "BashOutput" => from_value::<BashOutputInput>(input).and_then(run_bash_output),
         "KillShell" => from_value::<KillShellInput>(input).and_then(run_kill_shell),
+        "Monitor" => from_value::<MonitorInput>(input).and_then(run_monitor),
+        "Workflow" => from_value::<WorkflowInput>(input).and_then(run_workflow),
+        "ListAgents" => run_list_agents(),
+        "SendMessage" => from_value::<SendMessageInput>(input).and_then(run_send_message),
         "ExitPlanMode" => from_value::<ExitPlanModeInput>(input).and_then(run_exit_plan_mode),
         "SendUserMessage" | "Brief" => from_value::<BriefInput>(input).and_then(run_brief),
         "Config" => from_value::<ConfigInput>(input).and_then(run_config),
@@ -999,8 +1201,21 @@ fn from_value<T: for<'de> Deserialize<'de>>(input: &Value) -> Result<T, String> 
 }
 
 fn run_bash(input: BashCommandInput) -> Result<String, String> {
-    serde_json::to_string_pretty(&execute_bash(input).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())
+    let watch = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| runtime::settings::CommitWatch::start(&input.command, &cwd));
+    let output =
+        serde_json::to_string_pretty(&execute_bash(input).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    Ok(
+        match watch
+            .as_ref()
+            .and_then(runtime::settings::CommitWatch::note)
+        {
+            Some(note) => format!("{output}\n\n{note}"),
+            None => output,
+        },
+    )
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -1010,12 +1225,13 @@ fn run_read_file(input: ReadFileInput) -> Result<String, String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_write_file(input: WriteFileInput) -> Result<String, String> {
-    to_pretty_json(write_file(&input.path, &input.content).map_err(io_to_string)?)
+    let output = to_pretty_json(write_file(&input.path, &input.content).map_err(io_to_string)?)?;
+    Ok(with_security_note(output, &input.path, &input.content))
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_edit_file(input: EditFileInput) -> Result<String, String> {
-    to_pretty_json(
+    let output = to_pretty_json(
         edit_file(
             &input.path,
             &input.old_string,
@@ -1023,7 +1239,17 @@ fn run_edit_file(input: EditFileInput) -> Result<String, String> {
             input.replace_all.unwrap_or(false),
         )
         .map_err(io_to_string)?,
-    )
+    )?;
+    Ok(with_security_note(output, &input.path, &input.new_string))
+}
+
+/// Motif risqué dans le texte écrit (injection, `eval`, secret…) : remarque
+/// du garde-fou de sécurité après le résultat, gardée telle quelle pour le modèle.
+fn with_security_note(output: String, path: &str, written: &str) -> String {
+    match runtime::security_guidance::review_write(path, written) {
+        Some(note) => format!("{output}\n\n{note}"),
+        None => output,
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -1044,6 +1270,88 @@ fn run_web_fetch(input: WebFetchInput) -> Result<String, String> {
 #[allow(clippy::needless_pass_by_value)]
 fn run_web_search(input: WebSearchInput) -> Result<String, String> {
     to_pretty_json(execute_web_search(&input)?)
+}
+
+#[derive(Debug, Deserialize)]
+struct CronCreateInput {
+    cron: String,
+    prompt: String,
+    #[serde(default)]
+    recurring: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CronDeleteInput {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScheduleWakeupInput {
+    #[serde(default)]
+    delay_seconds: Option<u64>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    stop: Option<bool>,
+}
+
+fn task_json(task: &runtime::cron::ScheduledTask) -> serde_json::Value {
+    json!({
+        "id": task.id,
+        "cron": task.cron,
+        "recurring": task.recurring,
+        "nextRun": runtime::cron::format_local(task.next_run),
+        "prompt": task.prompt,
+    })
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_cron_create(input: CronCreateInput) -> Result<String, String> {
+    let recurring = input.recurring.unwrap_or(true);
+    let task = runtime::cron::create(&input.cron, &input.prompt, recurring, None)?;
+    to_pretty_json(json!({
+        "scheduled": task_json(&task),
+        "note": format!(
+            "Task {} runs {} (local time), between turns. Tell the user its id and next run time.",
+            task.id,
+            if recurring { "on this schedule for up to 7 days" } else { "once" }
+        ),
+    }))
+}
+
+fn run_cron_list() -> Result<String, String> {
+    let tasks: Vec<serde_json::Value> = runtime::cron::list().iter().map(task_json).collect();
+    to_pretty_json(json!({ "tasks": tasks }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_cron_delete(input: CronDeleteInput) -> Result<String, String> {
+    let task = runtime::cron::delete(&input.id)?;
+    to_pretty_json(json!({ "deleted": task_json(&task) }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_schedule_wakeup(input: ScheduleWakeupInput) -> Result<String, String> {
+    if input.stop == Some(true) {
+        let _ = runtime::cron::stop_self_paced();
+        return to_pretty_json(json!({
+            "stopped": true,
+            "note": "The loop is over: no further iteration will run.",
+        }));
+    }
+    let prompt = input
+        .prompt
+        .filter(|prompt| !prompt.trim().is_empty())
+        .ok_or_else(|| "prompt is required (the /loop prompt to run again)".to_string())?;
+    let delay = Duration::from_secs(input.delay_seconds.unwrap_or(1_200));
+    let task = runtime::cron::schedule_wakeup(&prompt, delay)?;
+    to_pretty_json(json!({
+        "nextRun": runtime::cron::format_local(task.next_run),
+        "reason": input.reason.unwrap_or_default(),
+    }))
 }
 
 fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
@@ -1516,6 +1824,9 @@ struct AgentInput {
     name: Option<String>,
     model: Option<String>,
     run_in_background: Option<bool>,
+    /// `"worktree"` : le sous-agent travaille dans un worktree git à part.
+    #[serde(default)]
+    isolation: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1616,8 +1927,139 @@ fn run_bash_output(input: BashOutputInput) -> Result<String, String> {
     to_pretty_json(background_task_json(&task))
 }
 
+#[derive(Debug, Deserialize)]
+struct WorkflowInput {
+    #[serde(default)]
+    script: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, rename = "scriptPath")]
+    script_path: Option<String>,
+    #[serde(default)]
+    args: Option<Value>,
+    #[serde(default, rename = "resumeFromRunId")]
+    resume_from_run_id: Option<String>,
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_workflow(input: WorkflowInput) -> Result<String, String> {
+    let launched = workflows::start(&workflows::StartRequest {
+        script: input.script,
+        name: input.name,
+        script_path: input.script_path,
+        args: input.args,
+        resume_from: input.resume_from_run_id,
+    })?;
+    to_pretty_json(launched)
+}
+
+/// Agent d'un workflow : conversation complète sans affichage ni demande
+/// d'approbation (une action non autorisée d'office est refusée) ; rend son
+/// rapport final et le fichier de sa trace.
+fn run_workflow_agent(
+    description: &str,
+    prompt: &str,
+    model: Option<&str>,
+    subagent_type: Option<&str>,
+    isolation: Option<&str>,
+) -> Result<(String, String), String> {
+    let job = prepare_agent_job(AgentInput {
+        description: description.to_string(),
+        prompt: prompt.to_string(),
+        subagent_type: subagent_type.map(str::to_string),
+        name: None,
+        model: model.map(str::to_string),
+        run_in_background: Some(true),
+        isolation: isolation.map(str::to_string),
+    })?;
+    let transcript = job.manifest.output_file.clone();
+    match run_agent_conversation(&job, false) {
+        Ok(report) => {
+            persist_agent_terminal_state(&job.manifest, "completed", Some(&report), None)?;
+            Ok((report, transcript))
+        }
+        Err(error) => {
+            let _ =
+                persist_agent_terminal_state(&job.manifest, "failed", None, Some(error.clone()));
+            Err(error)
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+#[derive(Debug, Deserialize)]
+struct MonitorInput {
+    command: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_monitor(input: MonitorInput) -> Result<String, String> {
+    let (id, timeout) = monitors::start(
+        &input.command,
+        input.description.as_deref().unwrap_or_default(),
+        input.timeout_ms,
+    )?;
+    to_pretty_json(json!({
+        "monitor_id": id,
+        "timeout_seconds": timeout.as_secs(),
+        "note": "The command runs in the background. Each new output line reaches you between turns; keep working or end your turn. Stop it with KillShell and this id.",
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct SendMessageInput {
+    to: String,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    notify_when_idle: Option<bool>,
+}
+
+fn run_list_agents() -> Result<String, String> {
+    let me = runtime::peers::current();
+    let peers: Vec<serde_json::Value> = runtime::peers::list()
+        .into_iter()
+        .map(|peer| {
+            json!({
+                "name": peer.name,
+                "id": peer.id,
+                "cwd": peer.cwd,
+                "kind": peer.kind,
+                "status": peer.status,
+            })
+        })
+        .collect();
+    to_pretty_json(json!({
+        "this_session": me.map(|peer| json!({ "name": peer.name, "id": peer.id })),
+        "sessions": peers,
+    }))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_send_message(input: SendMessageInput) -> Result<String, String> {
+    let text = input.message.unwrap_or_default();
+    let notify = input.notify_when_idle.unwrap_or(false);
+    let peer = runtime::peers::send(&input.to, &text, notify)?;
+    to_pretty_json(json!({
+        "sent_to": { "name": peer.name, "id": peer.id },
+        "note": if notify {
+            "Delivered between turns over there; you will get one notice when that session next goes idle or exits."
+        } else {
+            "Delivered between turns over there. Its reply, if any, will reach you later as a separate message: do not assume or invent what it says, and end your turn if you have nothing else to do."
+        },
+    }))
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn run_kill_shell(input: KillShellInput) -> Result<String, String> {
+    if input.shell_id.trim().starts_with("monitor-") {
+        let message = monitors::stop(input.shell_id.trim())?;
+        return to_pretty_json(json!({ "stopped": message }));
+    }
     let task = runtime::bash_tasks::kill(input.shell_id.trim())?;
     to_pretty_json(background_task_json(&task))
 }
@@ -1784,6 +2226,10 @@ struct AgentOutput {
 struct AgentJob {
     manifest: AgentOutput,
     prompt: String,
+    /// Sous-agent dans un worktree git à part (processus `claw` séparé).
+    isolated: bool,
+    /// Consignes du rôle, reprises dans la demande d'un sous-agent isolé.
+    role_instructions: Option<String>,
     system_prompt: Vec<String>,
     allowed_tools: BTreeSet<String>,
     permission_mode: PermissionMode,
@@ -2340,16 +2786,117 @@ fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, String> 
 
 fn execute_skill(input: SkillInput) -> Result<SkillOutput, String> {
     let skill_path = resolve_skill_path(&input.skill)?;
-    let prompt = std::fs::read_to_string(&skill_path).map_err(|error| error.to_string())?;
-    let description = parse_skill_description(&prompt);
-
+    let dir_name = skill_path
+        .parent()
+        .and_then(std::path::Path::file_name)
+        .map_or_else(
+            || input.skill.clone(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+    let skill = runtime::skills::SkillFile::load(&skill_path, &dir_name)
+        .map_err(|error| error.to_string())?;
+    // `disable-model-invocation` : réservé à l'utilisateur (`/nom`).
+    if skill.disable_model_invocation {
+        return Err(format!(
+            "[Claw] The skill `{name}` can only be run by the user (disable-model-invocation). Do not carry out its steps another way: tell the user they can run /{name} themselves.",
+            name = skill.name
+        ));
+    }
+    let arguments = input.args.clone().unwrap_or_default();
+    let rendered = render_skill_for_session(&skill, &arguments)?;
+    let description = skill.description.clone();
+    if skill.fork {
+        // `context: fork` : le skill est la demande d'un sous-agent, dont le
+        // rapport revient comme résultat de l'outil.
+        let agent_type = skill
+            .agent
+            .clone()
+            .unwrap_or_else(|| "general-purpose".to_string());
+        let report = execute_agent(AgentInput {
+            description: format!("Skill {}", skill.name),
+            prompt: rendered,
+            subagent_type: Some(agent_type.clone()),
+            name: None,
+            model: skill.model.clone(),
+            run_in_background: None,
+            isolation: None,
+        })?;
+        return Ok(SkillOutput {
+            skill: input.skill,
+            path: skill_path.display().to_string(),
+            args: input.args,
+            description,
+            prompt: format!(
+                "[Claw] The skill ran in a {agent_type} sub-agent (context: fork). Its report:\n\n{}",
+                report.result.unwrap_or_default()
+            ),
+        });
+    }
     Ok(SkillOutput {
         skill: input.skill,
         path: skill_path.display().to_string(),
         args: input.args,
         description,
-        prompt,
+        prompt: rendered,
     })
+}
+
+/// Rend un skill pour la session en cours : `allowed-tools` accordés pour le
+/// tour, commandes injectées soumises aux permissions de la session (jamais
+/// de demande), coupées pour un skill synchronisé de claude.ai ou par le
+/// réglage `disableSkillShellExecution`.
+pub fn render_skill_for_session(
+    skill: &runtime::skills::SkillFile,
+    arguments: &str,
+) -> Result<String, String> {
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let project_dir = runtime::worktree::repo_root(&cwd).unwrap_or_else(|_| cwd.clone());
+    runtime::grant_for_turn(&skill.granted_rules(&project_dir));
+    let synced = skill
+        .path
+        .components()
+        .any(|component| component.as_os_str() == "synced");
+    let disabled_by_setting = runtime::ConfigLoader::default_for(&cwd)
+        .load()
+        .ok()
+        .and_then(|config| {
+            config
+                .get("disableSkillShellExecution")
+                .and_then(runtime::JsonValue::as_bool)
+        })
+        .unwrap_or(false);
+    let context = current_subagent_context();
+    let check = |command: &str| {
+        let mut policy = context.as_ref().map_or_else(
+            || agent_permission_policy_with(PermissionMode::Prompt, PermissionRules::default()),
+            |context| agent_permission_policy_with(context.permission_mode, context.rules.clone()),
+        );
+        match policy.authorize("bash", &json!({ "command": command }).to_string(), None) {
+            runtime::PermissionOutcome::Allow => runtime::skills::CommandCheck::Allow,
+            runtime::PermissionOutcome::Deny { reason } => {
+                runtime::skills::CommandCheck::Deny(reason)
+            }
+        }
+    };
+    let session_id = runtime::current_session_id().unwrap_or_default();
+    let effort = match api::reasoning_effort() {
+        Some(api::ReasoningEffort::Off | api::ReasoningEffort::Low) => "low",
+        Some(api::ReasoningEffort::Medium) => "medium",
+        Some(api::ReasoningEffort::Max) => "max",
+        _ => "high",
+    };
+    runtime::skills::render(
+        skill,
+        arguments,
+        &runtime::skills::RenderContext {
+            session_id: &session_id,
+            effort,
+            project_dir: &project_dir,
+            cwd: &cwd,
+            shell_disabled: synced || disabled_by_setting,
+            check: &check,
+        },
+    )
 }
 
 fn validate_todos(todos: &[TodoItem]) -> Result<(), String> {
@@ -2557,6 +3104,17 @@ where
     Ok(manifest)
 }
 
+/// Valeur de `isolation` : `worktree` ou rien.
+fn parse_isolation(value: Option<&str>) -> Result<bool, String> {
+    match value.map(str::trim) {
+        None | Some("" | "none") => Ok(false),
+        Some("worktree") => Ok(true),
+        Some(other) => Err(format!(
+            "isolation inconnue : {other} (seule valeur possible : worktree)"
+        )),
+    }
+}
+
 fn prepare_agent_job(input: AgentInput) -> Result<AgentJob, String> {
     if input.description.trim().is_empty() {
         return Err(String::from("description must not be empty"));
@@ -2564,10 +3122,10 @@ fn prepare_agent_job(input: AgentInput) -> Result<AgentJob, String> {
     if input.prompt.trim().is_empty() {
         return Err(String::from("prompt must not be empty"));
     }
+    let isolated = parse_isolation(input.isolation.as_deref())?;
 
     let agent_id = make_agent_id();
-    let output_dir = agent_store_dir()?;
-    std::fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
+    let output_dir = ready_agent_store_dir()?;
     let output_file = output_dir.join(format!("{agent_id}.md"));
     let manifest_file = output_dir.join(format!("{agent_id}.json"));
     let normalized_subagent_type = normalize_subagent_type(input.subagent_type.as_deref());
@@ -2651,6 +3209,8 @@ fn prepare_agent_job(input: AgentInput) -> Result<AgentJob, String> {
     Ok(AgentJob {
         manifest,
         prompt: input.prompt,
+        isolated,
+        role_instructions: definition.instructions.clone(),
         system_prompt,
         allowed_tools,
         permission_mode,
@@ -2702,6 +3262,32 @@ fn run_agent_conversation(job: &AgentJob, interactive: bool) -> Result<String, S
         .subagent_type
         .clone()
         .unwrap_or_else(|| String::from("general-purpose"));
+    // Hooks `SubagentStart` : leur contexte (`additionalContext`, sortie)
+    // accompagne la demande du sous-agent ; un code 2 n'arrête rien.
+    let started =
+        runtime::HookRunner::new(job.hooks.clone()).run_subagent_start(&label, &job.prompt);
+    let context = started.context().join(
+        "
+
+",
+    );
+    let job = &if context.trim().is_empty() {
+        job.clone()
+    } else {
+        AgentJob {
+            prompt: format!(
+                "{}
+
+[Contexte des hooks SubagentStart]
+{context}",
+                job.prompt
+            ),
+            ..job.clone()
+        }
+    };
+    if job.isolated {
+        return run_isolated_agent(job, &label, interactive);
+    }
     let mut runtime = build_agent_runtime(job, interactive.then(|| label.clone()))?
         .with_max_iterations(DEFAULT_AGENT_MAX_ITERATIONS);
     if interactive {
@@ -2722,6 +3308,204 @@ fn run_agent_conversation(job: &AgentJob, interactive: bool) -> Result<String, S
     }
     .map_err(|error| error.to_string())?;
     Ok(final_assistant_text(&summary))
+}
+
+/// Sous-agent isolé (`isolation: "worktree"`) : un processus `claw` à part,
+/// lancé dans un worktree git neuf, sur sa propre branche. Ses changements y
+/// sont enregistrés dans un commit à la fin ; un worktree resté intact est
+/// retiré. Plusieurs sous-agents peuvent ainsi modifier le code en parallèle.
+fn run_isolated_agent(job: &AgentJob, label: &str, interactive: bool) -> Result<String, String> {
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let suffix: String = job
+        .manifest
+        .agent_id
+        .chars()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let name = format!("agent-{}-{suffix}", job.manifest.name);
+    let worktree = runtime::worktree::create(&cwd, &name, None)?;
+    let model = job
+        .manifest
+        .model
+        .clone()
+        .unwrap_or_else(|| DEFAULT_AGENT_MODEL.to_string());
+    // Dans son worktree, le sous-agent peut modifier les fichiers sans toucher
+    // à la copie de travail de l'utilisateur.
+    let mode = match job.permission_mode {
+        PermissionMode::ReadOnly => "read-only",
+        PermissionMode::DangerFullAccess | PermissionMode::Allow => "danger-full-access",
+        PermissionMode::DontAsk => "dont-ask",
+        _ => "workspace-write",
+    };
+    if interactive {
+        eprintln!(
+            "  ↳ sous-agent {label} · {model} · {} · worktree {} ({})",
+            job.manifest.description,
+            worktree.path.display(),
+            worktree.branch
+        );
+    }
+    let exe = std::env::var_os("CLAW_AGENT_EXE")
+        .map(PathBuf::from)
+        .map_or_else(std::env::current_exe, Ok)
+        .map_err(|error| error.to_string())?;
+    let prompt = isolated_agent_prompt(job, &worktree);
+    let (output, errors, interrupted) = run_isolated_process(
+        Command::new(exe)
+            .args([
+                "--model",
+                &model,
+                "--permission-mode",
+                mode,
+                "--output-format",
+                "json",
+                "-p",
+                &prompt,
+            ])
+            .current_dir(&worktree.path)
+            .env("CLAW_NO_SPINNER", "1"),
+        interactive,
+    )?;
+    let report = if interrupted {
+        "[Claw] The isolated sub-agent was interrupted by the user.".to_string()
+    } else {
+        isolated_agent_report(&output).unwrap_or_else(|| {
+            let detail = errors
+                .lines()
+                .last()
+                .unwrap_or("no output")
+                .trim()
+                .to_string();
+            format!("[Claw] The isolated sub-agent ended without a report ({detail}).")
+        })
+    };
+    Ok(format!(
+        "{report}\n\n{}",
+        finish_isolated_worktree(
+            &cwd,
+            &worktree,
+            &job.manifest.name,
+            &job.manifest.description
+        )
+    ))
+}
+
+/// Lance le processus et attend sa fin (Échap ou Ctrl+C l'arrêtent quand le
+/// sous-agent est au premier plan) ; renvoie ses sorties et s'il a été arrêté.
+fn run_isolated_process(
+    command: &mut Command,
+    interruptible: bool,
+) -> Result<(String, String, bool), String> {
+    use std::io::Read as _;
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("lancement du sous-agent isolé impossible : {error}"))?;
+    let read_all = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_string(&mut text);
+            }
+            text
+        })
+    };
+    let stdout = read_all(
+        child
+            .stdout
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn std::io::Read + Send>),
+    );
+    let stderr = read_all(
+        child
+            .stderr
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn std::io::Read + Send>),
+    );
+    let interrupted = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break false,
+            Ok(None) if interruptible && runtime::interrupt::interrupt_requested() => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break true;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(error) => return Err(error.to_string()),
+        }
+    };
+    Ok((
+        stdout.join().unwrap_or_default(),
+        stderr.join().unwrap_or_default(),
+        interrupted,
+    ))
+}
+
+/// Demande donnée au processus du sous-agent isolé.
+fn isolated_agent_prompt(job: &AgentJob, worktree: &runtime::worktree::Worktree) -> String {
+    let role = job
+        .role_instructions
+        .as_deref()
+        .map(|instructions| format!("{instructions}\n\n"))
+        .unwrap_or_default();
+    format!(
+        "{role}{}\n\n[Claw] You are a sub-agent working in an isolated git worktree: a separate checkout of the repository on branch `{}`. Make your changes directly in this directory. Do not commit, push or switch branches: Claw commits your work when you finish. End with a short report: what you changed (files) and how you verified it.",
+        job.prompt, worktree.branch
+    )
+}
+
+/// Réponse finale du sous-agent dans la sortie `--output-format json`.
+fn isolated_agent_report(output: &str) -> Option<String> {
+    output.lines().rev().find_map(|line| {
+        let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+        if let Some(message) = value.get("message").and_then(serde_json::Value::as_str) {
+            return Some(message.to_string());
+        }
+        value
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .map(|error| format!("[Claw] The isolated sub-agent failed: {error}"))
+    })
+}
+
+/// Commit des changements du sous-agent, ou retrait du worktree resté
+/// intact ; renvoie la note pour l'agent principal.
+fn finish_isolated_worktree(
+    repo: &Path,
+    worktree: &runtime::worktree::Worktree,
+    name: &str,
+    description: &str,
+) -> String {
+    let message = format!("Sous-agent {name} : {description}");
+    let committed = runtime::worktree::commit_all(&worktree.path, &message);
+    if !runtime::worktree::has_changes(&worktree.path, &worktree.base) {
+        let target = worktree.path.display().to_string();
+        return match runtime::worktree::remove(repo, &target, true) {
+            Ok(_) => "[Claw worktree] The sub-agent changed no file; its worktree was removed."
+                .to_string(),
+            Err(error) => format!(
+                "[Claw worktree] The sub-agent changed no file (worktree {target} could not be removed: {error})."
+            ),
+        };
+    }
+    let summary = runtime::worktree::change_summary(&worktree.path, &worktree.base);
+    let warning = committed
+        .err()
+        .map(|error| {
+            format!("\nThe changes could not be committed ({error}): they are uncommitted in the worktree.")
+        })
+        .unwrap_or_default();
+    format!(
+        "[Claw worktree] The sub-agent worked in an isolated git worktree. Its changes are committed on branch `{branch}` (worktree {path}), NOT in the main working tree yet:\n{summary}{warning}\nReview them with `git diff HEAD...{branch}`, bring them in with `git merge {branch}` (or `git cherry-pick`), then remove the worktree with `git worktree remove {path}`.",
+        branch = worktree.branch,
+        path = worktree.path.display(),
+    )
 }
 
 /// Demande d'approbation d'un sous-agent, transmise à l'invite de la session
@@ -2757,6 +3541,9 @@ pub const PARALLEL_SAFE_TOOLS: &[&str] = &[
     "EditorDiagnostics",
     "WebFetch",
     "ViewPage",
+    "Icon",
+    "Ornament",
+    "Component",
     "WebSearch",
     "BashOutput",
 ];
@@ -3042,6 +3829,9 @@ const READ_ONLY_ROLE_TOOLS: &[&str] = &[
     "WebFetch",
     "ViewPage",
     "Screenshot",
+    "Icon",
+    "Ornament",
+    "Component",
     "WebSearch",
     "ToolSearch",
     "Skill",
@@ -3268,6 +4058,84 @@ fn request_observer() -> &'static Mutex<Option<RequestObserver>> {
 
 /// `observer` reçoit le modèle de chaque requête envoyée par un sous-agent ou
 /// un modèle consulté : l'application y décompte crédits et quota gratuit.
+/// Envoi d'un corps JSON (télémétrie OTLP) ; erreur hors réponse 2xx.
+/// Requête POST bloquante (dictée vocale) : statut et corps de la réponse.
+pub fn http_post(
+    url: &str,
+    headers: &[(String, String)],
+    content_type: &str,
+    body: Vec<u8>,
+    timeout: Duration,
+) -> Result<(u16, String), String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut request = client
+        .post(url)
+        .header("Content-Type", content_type)
+        .body(body);
+    for (name, value) in headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    let response = request.send().map_err(|error| error.to_string())?;
+    let status = response.status().as_u16();
+    let text = response.text().map_err(|error| error.to_string())?;
+    Ok((status, text))
+}
+
+/// Envoi OTLP de la télémétrie : HTTP (JSON ou protobuf), ou gRPC sur
+/// HTTP/2 (sans TLS pour une adresse `http://`, comme le port 4317 d'un
+/// collecteur local).
+pub fn otlp_export(export: &runtime::telemetry::Export<'_>) -> Result<(), String> {
+    let mut builder = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10));
+    if export.grpc && export.url.starts_with("http://") {
+        builder = builder.http2_prior_knowledge();
+    }
+    let client = builder.build().map_err(|error| error.to_string())?;
+    let body = if export.grpc {
+        // Message gRPC : non compressé (0), longueur sur 4 octets, puis le protobuf.
+        let length = u32::try_from(export.body.len()).map_err(|error| error.to_string())?;
+        let mut framed = Vec::with_capacity(export.body.len() + 5);
+        framed.push(0);
+        framed.extend_from_slice(&length.to_be_bytes());
+        framed.extend_from_slice(export.body);
+        framed
+    } else {
+        export.body.to_vec()
+    };
+    let mut request = client
+        .post(export.url)
+        .header("Content-Type", export.content_type)
+        .body(body);
+    if export.grpc {
+        request = request.header("te", "trailers");
+    }
+    for (name, value) in export.headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    let response = request.send().map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+    // Une erreur gRPC immédiate arrive dans les en-têtes (« trailers-only »).
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    };
+    if let Some(status) = header("grpc-status").filter(|status| status != "0") {
+        return Err(format!(
+            "gRPC {status} {}",
+            header("grpc-message").unwrap_or_default()
+        ));
+    }
+    response.bytes().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 pub fn set_request_observer(observer: impl Fn(&str) + Send + Sync + 'static) {
     *request_observer()
         .lock()
@@ -4023,15 +4891,99 @@ fn canonical_tool_token(value: &str) -> String {
     canonical
 }
 
+/// Dossier des rapports des sous-agents : `<dossier de travail>/.claw/agents`
+/// (`CLAW_AGENT_STORE` le remplace).
 fn agent_store_dir() -> Result<std::path::PathBuf, String> {
     if let Ok(path) = std::env::var("CLAW_AGENT_STORE") {
         return Ok(std::path::PathBuf::from(path));
     }
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    if let Some(workspace_root) = cwd.ancestors().nth(2) {
-        return Ok(workspace_root.join(".claw-agents"));
+    Ok(cwd.join(".claw").join("agents"))
+}
+
+/// Crée le dossier des rapports ; s'il ne peut pas l'être (droits,
+/// disque), le dossier temporaire du système le remplace, sans erreur
+/// pour le modèle.
+fn ready_agent_store_dir() -> Result<std::path::PathBuf, String> {
+    let dir = agent_store_dir()?;
+    if std::fs::create_dir_all(&dir).is_ok() {
+        return Ok(dir);
     }
-    Ok(cwd.join(".claw-agents"))
+    let fallback = std::env::temp_dir().join("claw-agents");
+    std::fs::create_dir_all(&fallback)
+        .map_err(|error| format!("{} : {error}", fallback.display()))?;
+    Ok(fallback)
+}
+
+/// Envoi d'un hook `http` (fourni au runtime au démarrage) : POST du JSON de
+/// l'événement, renvoie le statut et le corps de la réponse.
+pub fn send_hook_request(
+    url: &str,
+    headers: &BTreeMap<String, String>,
+    body: &str,
+    timeout: Duration,
+) -> Result<(u16, String), String> {
+    let client = Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut request = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .body(body.to_string());
+    for (name, value) in headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    let response = request.send().map_err(|error| error.to_string())?;
+    let status = response.status().as_u16();
+    let text = response.text().map_err(|error| error.to_string())?;
+    Ok((status, text))
+}
+
+/// Sous-agent lancé par l'outil `Agent` (d'après son manifeste).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRun {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub status: String,
+    pub created_at: String,
+    pub output_file: String,
+}
+
+/// Les `limit` derniers sous-agents, du plus récent au plus ancien (`/tasks`).
+#[must_use]
+pub fn recent_agent_runs(limit: usize) -> Vec<AgentRun> {
+    let Ok(dir) = agent_store_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut runs: Vec<AgentRun> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        })
+        .filter_map(|path| {
+            let value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+            let text = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
+            Some(AgentRun {
+                id: text("agentId")?.to_string(),
+                name: text("name").unwrap_or_default().to_string(),
+                description: text("description").unwrap_or_default().to_string(),
+                status: text("status").unwrap_or("?").to_string(),
+                created_at: text("createdAt").unwrap_or_default().to_string(),
+                output_file: text("outputFile").unwrap_or_default().to_string(),
+            })
+        })
+        .collect();
+    runs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    runs.truncate(limit);
+    runs
 }
 
 fn make_agent_id() -> String {
@@ -4775,18 +5727,6 @@ fn make_cell_id(index: usize) -> String {
     format!("cell-{}", index + 1)
 }
 
-fn parse_skill_description(contents: &str) -> Option<String> {
-    for line in contents.lines() {
-        if let Some(value) = line.strip_prefix("description:") {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -4814,7 +5754,7 @@ mod tests {
     };
     use serde_json::json;
 
-    fn env_lock() -> &'static Mutex<()> {
+    pub(crate) fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
@@ -4825,6 +5765,82 @@ mod tests {
             .expect("time")
             .as_nanos();
         std::env::temp_dir().join(format!("claw-tools-{unique}-{name}"))
+    }
+
+    #[test]
+    fn isolated_agents_take_worktree_only_and_read_the_json_report() {
+        assert_eq!(super::parse_isolation(None), Ok(false));
+        assert_eq!(super::parse_isolation(Some("worktree")), Ok(true));
+        assert!(super::parse_isolation(Some("docker")).is_err());
+        let output = "journal\n{\"message\":\"J'ai corrigé src/a.rs\",\"model\":\"m\"}\n";
+        assert_eq!(
+            super::isolated_agent_report(output).as_deref(),
+            Some("J'ai corrigé src/a.rs")
+        );
+        assert!(super::isolated_agent_report("{\"error\":\"quota\"}")
+            .expect("erreur")
+            .contains("failed: quota"));
+        assert_eq!(super::isolated_agent_report("pas de json"), None);
+    }
+
+    #[test]
+    fn an_isolated_worktree_keeps_its_changes_on_a_branch_or_disappears() {
+        use runtime::worktree::{create, git};
+        if git(&std::env::temp_dir(), &["--version"]).is_err() {
+            return;
+        }
+        let repo = temp_path("isolation");
+        fs::create_dir_all(&repo).expect("dossier");
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "test@example.invalid"],
+            vec!["config", "user.name", "test"],
+            vec!["config", "core.autocrlf", "false"],
+        ] {
+            git(&repo, &args).expect("git");
+        }
+        fs::write(repo.join("a.txt"), "1\n").expect("fichier");
+        git(&repo, &["add", "."]).expect("add");
+        git(&repo, &["commit", "-q", "-m", "départ"]).expect("commit");
+
+        let busy = create(&repo, "agent-ecrit", None).expect("worktree");
+        fs::write(busy.path.join("a.txt"), "2\n").expect("modif");
+        let note = super::finish_isolated_worktree(&repo, &busy, "ecrit", "change a.txt");
+        assert!(
+            note.contains("committed on branch `claw/agent-ecrit`"),
+            "{note}"
+        );
+        assert!(note.contains("git merge claw/agent-ecrit"), "{note}");
+        let log = git(&repo, &["log", "--format=%s", "claw/agent-ecrit", "-1"]).expect("log");
+        assert_eq!(log.trim(), "Sous-agent ecrit : change a.txt");
+        // La copie de travail principale n'a pas bougé.
+        assert_eq!(fs::read_to_string(repo.join("a.txt")).expect("lu"), "1\n");
+
+        let idle = create(&repo, "agent-lit", None).expect("worktree");
+        let note = super::finish_isolated_worktree(&repo, &idle, "lit", "lit seulement");
+        assert!(note.contains("changed no file"), "{note}");
+        assert!(!idle.path.exists());
+        assert!(git(
+            &repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/heads/claw/agent-lit"
+            ]
+        )
+        .is_err());
+
+        let _ = git(
+            &repo,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                &busy.path.display().to_string(),
+            ],
+        );
+        let _ = fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -5474,6 +6490,79 @@ setTimeout(function () { nexistepas(); }, 100);
     }
 
     #[test]
+    fn cron_tools_create_list_and_delete_tasks() {
+        let created = execute_tool(
+            "CronCreate",
+            &json!({"cron": "0 9 * * 1-5", "prompt": "check the nightly build", "recurring": true}),
+        )
+        .expect("CronCreate");
+        let id = serde_json::from_str::<serde_json::Value>(&created).expect("json")["scheduled"]
+            ["id"]
+            .as_str()
+            .expect("id")
+            .to_string();
+        let listed = execute_tool("CronList", &json!({})).expect("CronList");
+        assert!(listed.contains(&id), "{listed}");
+        assert!(execute_tool("CronCreate", &json!({"cron": "0 9 * *", "prompt": "x"})).is_err());
+        let deleted = execute_tool("CronDelete", &json!({"id": id})).expect("CronDelete");
+        assert!(deleted.contains("nightly"), "{deleted}");
+        assert!(!execute_tool("CronList", &json!({}))
+            .expect("CronList")
+            .contains(&id));
+    }
+
+    #[test]
+    fn skills_render_their_arguments_and_refuse_user_only_ones() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let workspace = temp_path("skill-render");
+        let skills = workspace.join(".claude").join("skills");
+        std::fs::create_dir_all(skills.join("fix-issue")).expect("skill dir");
+        std::fs::write(
+            skills.join("fix-issue").join("SKILL.md"),
+            "---
+description: Fix an issue
+---
+Fix GitHub issue $0 in ${CLAUDE_SKILL_DIR}.
+",
+        )
+        .expect("skill file");
+        std::fs::create_dir_all(skills.join("deploy")).expect("skill dir");
+        std::fs::write(
+            skills.join("deploy").join("SKILL.md"),
+            "---
+description: Deploy
+disable-model-invocation: true
+---
+Deploy $ARGUMENTS
+",
+        )
+        .expect("skill file");
+        let original_dir = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&workspace).expect("set cwd");
+
+        let result = execute_tool("Skill", &json!({ "skill": "fix-issue", "args": "123" }));
+        let refused = execute_tool("Skill", &json!({ "skill": "deploy", "args": "prod" }));
+        std::env::set_current_dir(original_dir).expect("restore cwd");
+
+        let output: serde_json::Value =
+            serde_json::from_str(&result.expect("Skill should succeed")).expect("valid json");
+        let prompt = output["prompt"]
+            .as_str()
+            .expect("prompt")
+            .replace('\\', "/");
+        assert!(prompt.starts_with("Fix GitHub issue 123 in "), "{prompt}");
+        assert!(prompt.ends_with("/skills/fix-issue."), "{prompt}");
+        let refused = refused.expect_err("réservé à l'utilisateur");
+        assert!(
+            refused.contains("can only be run by the user") && refused.contains("/deploy"),
+            "{refused}"
+        );
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
     fn skill_loads_local_skill_prompt() {
         let _guard = env_lock()
             .lock()
@@ -5694,6 +6783,7 @@ setTimeout(function () { nexistepas(); }, 100);
                 name: Some("ship-audit".to_string()),
                 model: None,
                 run_in_background: None,
+                isolation: None,
             },
             move |job| {
                 *captured_for_spawn
@@ -5774,6 +6864,7 @@ setTimeout(function () { nexistepas(); }, 100);
                 name: Some("complete-task".to_string()),
                 model: Some("claude-sonnet-4-6".to_string()),
                 run_in_background: None,
+                isolation: None,
             },
             |job| {
                 persist_agent_terminal_state(
@@ -5801,6 +6892,7 @@ setTimeout(function () { nexistepas(); }, 100);
                 name: Some("fail-task".to_string()),
                 model: None,
                 run_in_background: None,
+                isolation: None,
             },
             |job| {
                 persist_agent_terminal_state(
@@ -5829,6 +6921,7 @@ setTimeout(function () { nexistepas(); }, 100);
                 name: Some("spawn-error".to_string()),
                 model: None,
                 run_in_background: None,
+                isolation: None,
             },
             |_| Err(String::from("thread creation failed")),
         )

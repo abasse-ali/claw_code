@@ -103,3 +103,95 @@ fn grab(path: &Path) -> Result<(), String> {
     }
     Err(last_error.unwrap_or_else(|| NO_IMAGE.to_string()))
 }
+
+/// Copie `text` dans le presse-papiers (`/copy`). Renvoie `true` si un outil du
+/// système l'a fait ; sinon la séquence OSC 52 est envoyée au terminal, que la
+/// plupart des terminaux récents comprennent (y compris par SSH), et `false`
+/// est renvoyé pour que l'utilisateur sache que ce n'est pas garanti.
+pub fn copy_text(text: &str) -> bool {
+    use std::io::Write as _;
+    if copy_with_system_tool(text) {
+        return true;
+    }
+    let mut stdout = std::io::stdout();
+    let _ = write!(stdout, "\x1b]52;c;{}\x07", base64(text.as_bytes()));
+    let _ = stdout.flush();
+    false
+}
+
+fn pipe_into(program: &str, args: &[&str], text: &str) -> bool {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let Ok(mut child) = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let written = child
+        .stdin
+        .take()
+        .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+    written && child.wait().is_ok_and(|status| status.success())
+}
+
+#[cfg(windows)]
+fn copy_with_system_tool(text: &str) -> bool {
+    pipe_into(
+        "powershell.exe",
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; \
+             Set-Clipboard -Value ([Console]::In.ReadToEnd())",
+        ],
+        text,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn copy_with_system_tool(text: &str) -> bool {
+    pipe_into("pbcopy", &[], text)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn copy_with_system_tool(text: &str) -> bool {
+    pipe_into("wl-copy", &[], text)
+        || pipe_into("xclip", &["-selection", "clipboard"], text)
+        || pipe_into("xsel", &["--clipboard", "--input"], text)
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let triple = chunk.iter().enumerate().fold(0_u32, |acc, (index, byte)| {
+            acc | u32::from(*byte) << (16 - 8 * index)
+        });
+        for position in 0..4 {
+            if position <= chunk.len() {
+                let index = (triple >> (18 - 6 * position)) & 0x3f;
+                encoded.push(char::from(TABLE[index as usize]));
+            } else {
+                encoded.push('=');
+            }
+        }
+    }
+    encoded
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn base64_matches_the_standard_alphabet_and_padding() {
+        assert_eq!(super::base64(b""), "");
+        assert_eq!(super::base64(b"f"), "Zg==");
+        assert_eq!(super::base64(b"fo"), "Zm8=");
+        assert_eq!(super::base64(b"foo"), "Zm9v");
+        assert_eq!(super::base64("été".as_bytes()), "w6l0w6k=");
+    }
+}

@@ -98,6 +98,26 @@ pub enum Aid {
     /// Mode projet : cahier des charges, plan en jalons vérifiés et
     /// démonstration finale pour créer un projet complet.
     ProjectMode,
+    /// Demande d'interface web : la méthode d'un studio de design (plan avant
+    /// le code, marques d'une page générée, plancher de qualité, vérification).
+    DesignGuide,
+    /// Interface modifiée : Claw regarde la page (captures téléphone et
+    /// ordinateur, défauts mesurés) et la fait juger par un modèle qui voit.
+    DesignReview,
+    /// Pièges du code écrit, dits à l'écriture du fichier : un nom jamais
+    /// défini en Python, une comparaison avec > en `PowerShell`, une variable lue
+    /// avec % dans un bloc d'un .bat…
+    Pitfalls,
+    /// Demande de code qui nomme son langage : la méthode d'un ingénieur
+    /// soigneux et les règles du langage ; aussi au premier fichier écrit
+    /// dans un langage pendant le tour.
+    CodeGuide,
+    /// Script écrit dans le tour et jamais lancé : le modèle l'essaie avant
+    /// de répondre.
+    RunScripts,
+    /// Outil `Photo` : photos sous licence libre (Openverse, Wikimedia
+    /// Commons) enregistrées dans le projet avec leur crédit.
+    Photos,
 }
 
 impl Aid {
@@ -139,6 +159,12 @@ impl Aid {
             Self::EntryPoint => "CLAW_ENTRY_POINT",
             Self::SmallProject => "CLAW_SMALL_PROJECT",
             Self::ProjectMode => "CLAW_PROJECT_MODE",
+            Self::DesignGuide => "CLAW_DESIGN_GUIDE",
+            Self::DesignReview => "CLAW_DESIGN_REVIEW",
+            Self::Pitfalls => "CLAW_PITFALLS",
+            Self::CodeGuide => "CLAW_CODE_GUIDE",
+            Self::RunScripts => "CLAW_RUN_SCRIPTS",
+            Self::Photos => "CLAW_PHOTOS",
         }
     }
 }
@@ -285,7 +311,7 @@ fn in_tests_dir(dir: &Path, root: &Path) -> bool {
     })
 }
 
-fn python_program() -> &'static str {
+pub(crate) fn python_program() -> &'static str {
     if cfg!(windows) || crate::paths::find_executable("python3").is_none() {
         "python"
     } else {
@@ -464,7 +490,7 @@ fn node_verify(root: &Path) -> Option<String> {
 }
 
 /// Commande de vérification rapide et sûre déduite du projet : compilation
-/// (Rust, Go, TypeScript) ou tests (Python). Les tests Node ne sont pas lancés
+/// (Rust, Go, `TypeScript`) ou tests (Python). Les tests Node ne sont pas lancés
 /// d'office : beaucoup restent en mode « surveillance » et ne rendent pas la main.
 #[must_use]
 pub fn detect_verify_commands(root: &Path) -> Vec<String> {
@@ -753,7 +779,7 @@ fn location_pattern() -> &'static regex::Regex {
 }
 
 /// Emplacements `fichier:ligne` qu'une sortie cite (trace Python, erreur Rust,
-/// TypeScript `fichier(ligne,colonne)`, Node, Go, pytest…), sans doublon, les
+/// `TypeScript` `fichier(ligne,colonne)`, Node, Go, pytest…), sans doublon, les
 /// plus utiles d'abord : dans l'ordre de la sortie (première erreur d'un
 /// compilateur, cadre le plus profond d'une pile Node), sauf pour une trace
 /// Python (« most recent call last »), lue depuis la fin, où est le cadre qui
@@ -1226,7 +1252,7 @@ fn last_lines(text: &str, count: usize) -> String {
 }
 
 /// Erreur de syntaxe du fichier qui vient d'être écrit, si un contrôle rapide
-/// existe pour ce langage (JSON intégré ; Python, JavaScript, Rust, Go, shell
+/// existe pour ce langage (JSON intégré ; Python, `JavaScript`, Rust, Go, shell
 /// avec l'outil du langage s'il est installé). `None` : rien à signaler.
 #[must_use]
 pub fn syntax_check(path: &Path) -> Option<String> {
@@ -1256,8 +1282,160 @@ pub fn syntax_check(path: &Path) -> Option<String> {
         "sh" | "bash" => {
             checker_errors("sh", &["-n", &file], parent).map(|text| last_lines(&text, 5))
         }
+        "html" | "htm" => html_structure(&std::fs::read_to_string(path).ok()?),
+        // PowerShell, TypeScript, feuilles de style, TOML : avec leur propre analyseur.
+        "ps1" | "psm1" | "psd1" | "ts" | "mts" | "cts" | "css" | "scss" | "less" | "toml" => {
+            crate::code_checks::syntax(path)
+        }
         _ => None,
     }
+}
+
+/// Éléments sans balise de fin.
+const VOID_ELEMENTS: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
+/// Position du `>` qui ferme une balise, sans s'arrêter à un `>` entre
+/// guillemets ; la fin du texte si la balise ne se ferme pas.
+fn tag_end(bytes: &[u8], from: usize) -> usize {
+    let mut cursor = from;
+    let mut quote: Option<u8> = None;
+    while cursor < bytes.len() {
+        match (quote, bytes[cursor]) {
+            (Some(q), byte) if byte == q => quote = None,
+            (None, b'"' | b'\'') => quote = Some(bytes[cursor]),
+            (None, b'>') => break,
+            _ => {}
+        }
+        cursor += 1;
+    }
+    cursor
+}
+
+/// Formes SVG, qui se ferment d'ordinaire elles-mêmes (`<path … />`).
+const SVG_SHAPES: &[&str] = &[
+    "path", "line", "circle", "rect", "ellipse", "polyline", "polygon", "stop", "use",
+];
+/// Éléments dont HTML permet d'omettre la balise de fin.
+const OPTIONAL_END: &[&str] = &[
+    "p", "li", "dt", "dd", "tr", "td", "th", "thead", "tbody", "tfoot", "option", "optgroup",
+    "colgroup", "caption", "rt", "rp", "html", "head", "body",
+];
+
+/// Balises d'une page HTML mal imbriquées : un élément fermé par la balise
+/// d'un de ses parents, une balise de fin sans ouverture, un élément jamais
+/// fermé. Vu dans un essai réel : une modification avait laissé deux
+/// `<article>` ouverts et des `</div>` orphelins, et les cartes de la page
+/// se défaisaient sans que rien ne le signale. `None` : rien à signaler (ou
+/// un gabarit, dont les balises dépendent de conditions).
+#[must_use]
+pub fn html_structure(text: &str) -> Option<String> {
+    if ["{%", "{{#", "<%", "<?php"]
+        .iter()
+        .any(|marker| text.contains(marker))
+    {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let line_at = |offset: usize| text[..offset].matches('\n').count() + 1;
+    let mut open: Vec<(String, usize)> = Vec::new();
+    let mut errors = Vec::new();
+    let mut index = 0;
+    while let Some(found) = text[index..].find('<') {
+        let start = index + found;
+        let rest = &text[start..];
+        if rest.starts_with("<!--") {
+            index = rest.find("-->").map_or(text.len(), |end| start + end + 3);
+            continue;
+        }
+        if rest.starts_with("<!") || rest.starts_with("<?") {
+            index = rest.find('>').map_or(text.len(), |end| start + end + 1);
+            continue;
+        }
+        let closing = rest.starts_with("</");
+        let name_start = start + if closing { 2 } else { 1 };
+        let name: String = text[name_start..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == ':')
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if name.is_empty() {
+            index = start + 1;
+            continue;
+        }
+        let cursor = tag_end(bytes, name_start + name.len());
+        let self_closing = cursor > 0 && bytes.get(cursor - 1) == Some(&b'/');
+        index = (cursor + 1).min(text.len());
+        let line = line_at(start);
+        if closing {
+            if VOID_ELEMENTS.contains(&name.as_str()) {
+                continue;
+            }
+            // Ouvert et fermé sur la même ligne sous deux noms différents
+            // (`<path …></line>`, `<h2>…</div>`) : une coquille, dite en une
+            // phrase ; seule la balise ouverte est refermée. Vu dans les essais
+            // réels : la cascade de phrases qui suivait avait fait croire au
+            // modèle que `<line>` n'existait pas en SVG.
+            if open.last().is_some_and(|(tag, opened)| {
+                *opened == line && *tag != name && !OPTIONAL_END.contains(&tag.as_str())
+            }) {
+                let (tag, _) = open.pop().unwrap_or_default();
+                let hint = if SVG_SHAPES.contains(&tag.as_str()) {
+                    format!(" An SVG shape closes itself: <{tag} ... />")
+                } else {
+                    String::new()
+                };
+                errors.push(format!(
+                    "line {line}: <{tag}> is closed by </{name}>, the names differ.{hint}"
+                ));
+                continue;
+            }
+            match open.iter().rposition(|(tag, _)| *tag == name) {
+                Some(position) => {
+                    for (tag, opened) in open.drain(position + 1..) {
+                        if !OPTIONAL_END.contains(&tag.as_str()) {
+                            errors.push(format!(
+                                "<{tag}> opened at line {opened} is not closed before </{name}> at line {line}"
+                            ));
+                        }
+                    }
+                    open.pop();
+                }
+                None if OPTIONAL_END.contains(&name.as_str()) => {}
+                None => errors.push(format!("</{name}> at line {line} closes nothing")),
+            }
+        } else if !self_closing && !VOID_ELEMENTS.contains(&name.as_str()) {
+            // Le contenu de <script> et <style> n'est pas du HTML.
+            if matches!(name.as_str(), "script" | "style" | "textarea" | "title") {
+                let end = format!("</{name}");
+                index = text[index..]
+                    .to_ascii_lowercase()
+                    .find(&end)
+                    .map_or(text.len(), |found| index + found);
+            }
+            open.push((name, line));
+        }
+    }
+    errors.extend(
+        open.iter()
+            .filter(|(tag, _)| !OPTIONAL_END.contains(&tag.as_str()))
+            .map(|(tag, opened)| format!("<{tag}> opened at line {opened} is never closed")),
+    );
+    if errors.is_empty() {
+        return None;
+    }
+    let shown = errors.len().min(6);
+    let more = errors.len() - shown;
+    Some(format!(
+        "HTML tags are not nested correctly (the page's layout breaks around them):\n{}{}",
+        errors[..shown].join("\n"),
+        if more > 0 {
+            format!("\nand {more} more")
+        } else {
+            String::new()
+        }
+    ))
 }
 
 /// Texte joint au résultat de l'outil quand le fichier écrit ne s'analyse pas.
@@ -2910,30 +3088,74 @@ const NOT_DEMANDED: &[&str] = &[
     "taskkill",
 ];
 
+/// Extensions d'un fichier lancé par une commande (`python factures.py`,
+/// `.\ranger.ps1`).
+const SCRIPT_EXTENSIONS: &[&str] = &[
+    "py", "pyw", "ps1", "bat", "cmd", "sh", "bash", "zsh", "js", "mjs", "cjs", "ts", "mts", "cts",
+    "rb", "pl", "php", "lua",
+];
+
 /// Mots significatifs d'une commande simple : sans variables d'environnement
-/// ni options, `python3` et `py` ramenés à `python`.
+/// ni options, sans `./` devant un chemin, `python3` et `py` ramenés à
+/// `python`.
 fn command_words(segment: &str) -> Vec<String> {
     segment
         .split_whitespace()
         .skip_while(|word| word.contains('=') && !word.starts_with('-'))
         .filter(|word| !word.starts_with('-') && *word != "_")
-        .map(|word| match word {
+        .map(|word| match word.strip_prefix("./").unwrap_or(word) {
             "python3" | "py" => "python".to_string(),
             other => other.to_string(),
         })
         .collect()
 }
 
+/// Une commande lue comme on la tape sous Windows, avant le découpage à la
+/// manière de bash (qui masque chaque caractère protégé et chaque chaîne
+/// entre guillemets) : un `\` devant un nom sépare un chemin, et un chemin
+/// seul entre guillemets est un mot comme un autre (`".\ranger.ps1"`).
+fn as_typed(command: &str) -> String {
+    let quoted = regex::Regex::new(r#""([^"\s;&|<>()$`]+)"|'([^'\s;&|<>()$`]+)'"#).expect("regex");
+    let unquoted = quoted.replace_all(command, "$1$2");
+    let separator = regex::Regex::new(r"\\([\w.])").expect("regex");
+    separator.replace_all(&unquoted, "/$1").into_owned()
+}
+
+/// Le script que lance une commande, parmi ses trois premiers mots.
+fn launched_script(words: &[String]) -> Option<&String> {
+    words.iter().take(3).find(|word| {
+        std::path::Path::new(word.as_str())
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| SCRIPT_EXTENSIONS.contains(&extension))
+    })
+}
+
+/// Une commande conseillée a déjà tourné : ses trois premiers mots
+/// significatifs commencent une commande exécutée. Pour un script, le même
+/// programme l'a lancé, quels que soient ses arguments : l'exemple d'usage
+/// montre souvent un autre fichier d'entrée que l'essai (vu dans un essai
+/// réel : `python factures.py mes_factures.csv` après un essai sur
+/// `exemple_factures.csv`).
+fn already_ran(words: &[String], ran: &[Vec<String>]) -> bool {
+    if let Some(script) = launched_script(words) {
+        return ran
+            .iter()
+            .any(|ran| ran.first() == words.first() && ran.contains(script));
+    }
+    let key = &words[..words.len().min(3)];
+    ran.iter().any(|ran| ran.starts_with(key))
+}
+
 /// Commandes que la réponse dit à l'utilisateur de lancer (blocs de code
-/// d'un shell) et que le modèle n'a lancées à aucun moment de la session :
-/// leurs trois premiers mots significatifs ne commencent aucune commande
-/// exécutée. Les exemples à compléter et les commandes de `NOT_DEMANDED` ne
-/// comptent pas.
+/// d'un shell) et que le modèle n'a lancées à aucun moment de la session
+/// (voir `already_ran`). Les exemples à compléter et les commandes de
+/// `NOT_DEMANDED` ne comptent pas.
 #[must_use]
 pub fn untried_commands(answer: &str, executed: &[String]) -> Vec<String> {
     let ran: Vec<Vec<String>> = executed
         .iter()
-        .flat_map(|command| crate::bash::shell_segments(&command.to_ascii_lowercase()))
+        .flat_map(|command| crate::bash::shell_segments(&as_typed(&command.to_ascii_lowercase())))
         .map(|(segment, _)| command_words(&segment))
         .collect();
     let mut untried: Vec<String> = Vec::new();
@@ -2977,7 +3199,7 @@ pub fn untried_commands(answer: &str, executed: &[String]) -> Vec<String> {
         {
             continue;
         }
-        for (segment, _) in crate::bash::shell_segments(&lower) {
+        for (segment, _) in crate::bash::shell_segments(&as_typed(&lower)) {
             let words = command_words(&segment);
             let Some(program) = words.first() else {
                 continue;
@@ -2985,9 +3207,7 @@ pub fn untried_commands(answer: &str, executed: &[String]) -> Vec<String> {
             if NOT_DEMANDED.contains(&program.as_str()) {
                 continue;
             }
-            let key = &words[..words.len().min(3)];
-            let tried = ran.iter().any(|ran| ran.starts_with(key));
-            if !tried && !untried.contains(&segment) {
+            if !already_ran(&words, &ran) && !untried.contains(&segment) {
                 untried.push(segment);
             }
         }
@@ -3908,6 +4128,24 @@ mod guide_tests {
         );
         let feedback = untried_feedback(&["npm run dev".to_string(), "npm start".to_string()]);
         assert!(feedback.contains("`npm run dev`, `npm start`"));
+    }
+
+    #[test]
+    fn a_script_already_run_on_another_input_counts_as_tried() {
+        // L'essai réel avec Gemini : le mode d'emploi montre un autre fichier
+        // que l'essai, le contrôle relançait le modèle pour rien.
+        let executed = vec![
+            "python -m pytest && python factures.py exemple_factures.csv && node --test remise.test.ts".to_string(),
+            "powershell -NoProfile -File \".\\ranger.ps1\" -Dossier test -WhatIf".to_string(),
+        ];
+        let answer = "```bash\n# Génère un rapport\npython factures.py mes_factures.csv\npython3 ./factures.py mes_factures.csv -o rapport.json\nnode --test remise.test.ts\npowershell -File .\\ranger.ps1 -Dossier D:\\Photos\n```";
+        assert_eq!(untried_commands(answer, &executed), Vec::<String>::new());
+        // Un autre script, ou le même par un autre programme, reste à essayer.
+        let answer = "```bash\npython export.py factures.csv\nnode factures.py\n```";
+        assert_eq!(
+            untried_commands(answer, &executed),
+            ["python export.py factures.csv", "node factures.py"]
+        );
     }
 }
 
@@ -4873,5 +5111,53 @@ mod tests {
         assert!(syntax_check(&bad).expect("erreur").contains("line 2"));
         assert_eq!(syntax_check(&dir.join("notes.txt")), None);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn html_tags_that_do_not_nest_are_reported_with_their_lines() {
+        use super::html_structure;
+        // Essai réel : une carte de produit restée ouverte, un </article> orphelin.
+        let broken = "<main>\n<div class=\"grid\">\n<article class=\"card\">\n<h3>Baguette</h3>\n</div>\n</article>\n</main>";
+        let report = html_structure(broken).expect("structure cassée");
+        assert!(
+            report.contains("<article> opened at line 3 is not closed before </div> at line 5")
+                && report.contains("</article> at line 6 closes nothing"),
+            "{report}"
+        );
+        assert!(html_structure("<section>\n<div>\n</section>")
+            .expect("div ouverte")
+            .contains("<div> opened at line 2"));
+        assert!(html_structure("<div>\n<p>texte")
+            .expect("jamais fermée")
+            .contains("<div> opened at line 1 is never closed"));
+        // Une page correcte : éléments vides, fins facultatives, SVG fermé par
+        // `/>`, `>` entre guillemets, script et style, commentaire.
+        let page = r#"<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8"><title>La <Mie></title>
+<style>.a > .b { color: red; }</style></head>
+<body><!-- <div> --><ul><li>un<li>deux</ul>
+<p>texte<p>autre
+<img src="a.png" alt="x"><br/>
+<button data-x="a>b" onclick="if (a < b) go()">Ok</button>
+<svg viewBox="0 0 10 10"><path d="M0 0L10 10"/><circle cx="5" cy="5" r="2"></circle></svg>
+<table><tr><td>1<td>2</table>
+<script>if (a < 3 && b > 1) { document.body.innerHTML = "<div>"; }</script>
+</body></html>"#;
+        assert_eq!(html_structure(page), None);
+        // Un gabarit : ses balises dépendent de conditions.
+        assert_eq!(html_structure("{% if x %}<div>{% endif %}"), None);
+        // Essai réel : `<h2>…</div>` dans un div ; une phrase, et pas de
+        // « </div> ferme rien » plus loin.
+        assert_eq!(
+            html_structure("<div class=\"card\">\n<h2>Réservez</div>\n<p>texte</p>\n</div>").expect("coquille"),
+            "HTML tags are not nested correctly (the page's layout breaks around them):\nline 2: <h2> is closed by </div>, the names differ."
+        );
+        // Essai réel : `<path …></line>` dans une icône. Une phrase par ligne,
+        // qui nomme les deux balises, au lieu de deux phrases trompeuses.
+        let icon = "<svg>\n<g>\n<path d=\"M0 0\"></line>\n<path d=\"M1 1\"></line>\n</g>\n</svg>";
+        assert_eq!(
+            html_structure(icon).expect("balises croisées"),
+            "HTML tags are not nested correctly (the page's layout breaks around them):\nline 3: <path> is closed by </line>, the names differ. An SVG shape closes itself: <path ... />\nline 4: <path> is closed by </line>, the names differ. An SVG shape closes itself: <path ... />"
+        );
     }
 }

@@ -259,6 +259,24 @@ pub fn detect_provider_kind(model: &str) -> ProviderKind {
     ProviderKind::ClawApi
 }
 
+/// Variable de clé du fournisseur de `model` (`OPENROUTER_API_KEY`…).
+#[must_use]
+pub fn credential_env_for_model(model: &str) -> Option<String> {
+    if let Some((provider, _)) = compat::split_compat_model(model) {
+        return provider.api_key_env;
+    }
+    Some(
+        match detect_provider_kind(model) {
+            ProviderKind::ClawApi => "ANTHROPIC_API_KEY",
+            ProviderKind::OpenRouter => "OPENROUTER_API_KEY",
+            ProviderKind::OpenAi => "OPENAI_API_KEY",
+            ProviderKind::Xai => "XAI_API_KEY",
+            ProviderKind::Compat => return None,
+        }
+        .to_string(),
+    )
+}
+
 // Les identifiants OpenRouter ont la forme `fournisseur/modèle[:variante]`.
 fn is_openrouter_model_id(model: &str) -> bool {
     let trimmed = model.trim();

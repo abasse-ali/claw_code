@@ -1,0 +1,15 @@
+.cart-add { display: inline-flex; align-items: center; gap: .4rem; min-height: 44px; padding: 0 1.1rem; border: 0; border-radius: 999px; background: var(--ink, #1f1d1a); color: var(--paper, #f7f3ec); font: inherit; font-weight: 600; cursor: pointer; transition: transform .2s, filter .2s; }
+.cart-add:hover { transform: translateY(-1px); filter: brightness(1.2); }
+.cart-add.is-added { animation: cart-pop .35s ease-out; }
+.cart-button { position: relative; display: inline-grid; place-items: center; width: 44px; height: 44px; border: 0; border-radius: 999px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.cart-button:hover { background: color-mix(in srgb, var(--ink, #1f1d1a) 8%, transparent); }
+.cart-button__count { position: absolute; top: 2px; right: 0; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 999px; background: var(--accent, #8a3b12); color: var(--paper, #f7f3ec); font-size: .75rem; font-weight: 700; line-height: 20px; text-align: center; }
+.cart__lines { display: grid; gap: .75rem; margin: 0; padding: 0; list-style: none; }
+.cart__line { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: .75rem; }
+.cart__qty { display: inline-flex; align-items: center; gap: .25rem; }
+.cart__qty button, .cart__remove { display: inline-grid; place-items: center; width: 44px; height: 44px; border: 1px solid color-mix(in srgb, var(--ink, #1f1d1a) 18%, transparent); border-radius: 999px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.cart__qty button:hover, .cart__remove:hover { border-color: var(--accent, #8a3b12); color: var(--accent, #8a3b12); }
+.cart__qty output { min-width: 1.5rem; text-align: center; font-variant-numeric: tabular-nums; }
+.cart__empty { margin: 0; color: var(--muted, #5f5a52); }
+.cart__total { display: flex; justify-content: space-between; margin: 0; padding-top: .75rem; border-top: 1px solid color-mix(in srgb, var(--ink, #1f1d1a) 12%, transparent); font-size: 1.1rem; }
+@keyframes cart-pop { 50% { transform: scale(1.06); } }

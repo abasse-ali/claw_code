@@ -1,0 +1,21 @@
+<section class="filter" data-filter aria-label="Cours">
+  <div class="filter__bar">
+    <div class="filter__chips" role="group" aria-label="Filtrer par niveau">
+      <button class="filter__chip" type="button" data-filter-tag="" aria-pressed="true">Tous</button>
+      <button class="filter__chip" type="button" data-filter-tag="debutant" aria-pressed="false">Débutant</button>
+      <button class="filter__chip" type="button" data-filter-tag="confirme" aria-pressed="false">Confirmé</button>
+    </div>
+    <label class="filter__search">
+      {{icon:search}}
+      <span class="visually-hidden">Rechercher</span>
+      <input type="search" placeholder="Rechercher" data-filter-search>
+    </label>
+  </div>
+  <p class="filter__count" aria-live="polite" data-filter-count></p>
+  <ul class="filter__list">
+    <li class="filter__item" data-filter-item data-tags="debutant">Hatha doux, lundi 18 h 30</li>
+    <li class="filter__item" data-filter-item data-tags="confirme">Vinyasa dynamique, mercredi 12 h 15</li>
+    <li class="filter__item" data-filter-item data-tags="debutant confirme">Méditation guidée, samedi 10 h</li>
+  </ul>
+  <p class="filter__empty" data-filter-empty hidden>Aucun résultat. <button type="button" data-filter-reset>Tout afficher</button></p>
+</section>

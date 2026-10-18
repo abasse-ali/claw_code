@@ -1,0 +1,19 @@
+<div class="hours" data-hours>
+  <!-- Horaires : jour de la semaine (0 dimanche, 1 lundi... 6 samedi) et plages ouvertes. -->
+  <script type="application/json" data-hours-data>
+    { "2": [["09:30", "13:00"], ["14:30", "19:00"]], "3": [["09:30", "19:00"]], "4": [["09:30", "19:00"]],
+      "5": [["09:30", "19:00"]], "6": [["09:00", "18:00"]], "0": [["09:00", "12:30"]] }
+  </script>
+  <p class="hours__status" data-hours-status aria-live="polite"></p>
+  <table class="hours__table">
+    <tbody>
+      <tr data-hours-day="1"><th scope="row">Lundi</th><td>Fermé</td></tr>
+      <tr data-hours-day="2"><th scope="row">Mardi</th><td>9 h 30 - 13 h, 14 h 30 - 19 h</td></tr>
+      <tr data-hours-day="3"><th scope="row">Mercredi</th><td>9 h 30 - 19 h</td></tr>
+      <tr data-hours-day="4"><th scope="row">Jeudi</th><td>9 h 30 - 19 h</td></tr>
+      <tr data-hours-day="5"><th scope="row">Vendredi</th><td>9 h 30 - 19 h</td></tr>
+      <tr data-hours-day="6"><th scope="row">Samedi</th><td>9 h - 18 h</td></tr>
+      <tr data-hours-day="0"><th scope="row">Dimanche</th><td>9 h - 12 h 30</td></tr>
+    </tbody>
+  </table>
+</div>

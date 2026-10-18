@@ -1,0 +1,6 @@
+/* Caché seulement si le script a marqué la page (html.js) : sans lui, tout se lit. */
+.js .reveal { opacity: 0; transform: translateY(18px); transition: opacity .6s ease, transform .6s cubic-bezier(.2, .7, .2, 1); transition-delay: var(--reveal-delay, 0ms); }
+.js .reveal.is-visible { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .js .reveal { opacity: 1; transform: none; transition: none; }
+}

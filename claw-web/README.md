@@ -37,7 +37,11 @@ changement de ce dossier ; l'ancienne adresse, https://abasse-ali.github.io/claw
 3. Dans « Moteur » : collez votre clé OpenRouter (ou laissez le champ vide si elle est déjà
    gardée sur l'appareil), laissez coché « Donner aussi ce jeton au moteur », puis
    « Configurer le moteur ». L'appli pose deux secrets dans le dépôt du moteur,
-   chiffrés dans le navigateur : `OPENROUTER_API_KEY` et `CLAW_REPO_TOKEN`.
+   chiffrés dans le navigateur : `OPENROUTER_API_KEY` et `CLAW_REPO_TOKEN`. Facultatif : une clé
+   NVIDIA (`nvapi-…`, créée sur build.nvidia.com, profil, Settings, API Keys) devient le secret
+   `NVIDIA_API_KEY`. Le choix du modèle propose alors les agents de NVIDIA, gratuits et sans
+   quota par jour annoncé, et Claw fait décrire les images par le lecteur de NVIDIA. Cette clé
+   n'est jamais gardée sur l'appareil.
 4. Choisissez un dépôt et une branche, ou créez un dépôt neuf, puis décrivez la tâche. Dans un
    dépôt neuf, une demande de création (« Crée une application... ») fait passer Claw en mode
    projet : cahier des charges, plan en jalons vérifiés, démonstration finale. Les messages

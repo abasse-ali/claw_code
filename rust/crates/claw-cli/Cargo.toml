@@ -16,6 +16,7 @@ axum = "0.8"
 commands = { path = "../commands" }
 compat-harness = { path = "../compat-harness" }
 crossterm = "0.28"
+portable-pty = "0.9"
 pulldown-cmark = "0.13"
 rustyline = "15"
 runtime = { path = "../runtime" }
@@ -25,6 +26,13 @@ serde_json.workspace = true
 syntect = "5"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync", "signal"] }
 tools = { path = "../tools" }
+vt100 = "0.15"
+
+[target.'cfg(windows)'.dependencies]
+crossterm_winapi = "0.9"
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+cpal = "0.15"
 
 [lints]
 workspace = true

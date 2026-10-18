@@ -346,14 +346,62 @@ fn rendered_page(
     }
 }
 
+/// Chemin d'une adresse `file://`, décodé : `file:///C:/mon%20site/index.html`
+/// donne `C:/mon site/index.html`.
+pub(crate) fn file_url_path(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("file://")?;
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    // `/C:/…` sous Windows : sans la barre de tête.
+    let rest = match rest.as_bytes() {
+        [b'/', drive, b':', ..] if drive.is_ascii_alphabetic() => &rest[1..],
+        _ => rest,
+    };
+    let bytes = rest.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let escaped = (bytes[index] == b'%')
+            .then(|| rest.get(index + 1..index + 3))
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        if let Some(byte) = escaped {
+            decoded.push(byte);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    let path = String::from_utf8(decoded)
+        .ok()
+        .filter(|path| !path.is_empty())?;
+    // Un chemin « à la Unix » sous Windows (`/tmp/…`, `/c/Users/…`) : vu dans
+    // un essai réel, un modèle a perdu une vingtaine de requêtes à ouvrir
+    // file:///tmp/claude/… et à lancer des serveurs pour voir sa page.
+    Some(
+        runtime::translate_foreign_path(&path)
+            .map_or(path, |translated| translated.to_string_lossy().into_owned()),
+    )
+}
+
 /// Ce que `ViewPage` rend au modèle.
 pub(crate) fn view_page(input: &ViewPageInput) -> Result<Value, String> {
-    let url = input.url.trim();
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
+    let given = input.url.trim();
+    // Une page du projet sans serveur (`file:///…/index.html`) : seulement
+    // un fichier .html du dossier de travail, comme `path` de `Screenshot`.
+    let opened = if given.starts_with("file://") {
+        let path = file_url_path(given)
+            .ok_or_else(|| format!("`{given}` is not a readable file:// address"))?;
+        let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+        crate::screenshot::file_url(&cwd, std::path::Path::new(&path))?
+    } else if given.starts_with("http://") || given.starts_with("https://") {
+        given.to_string()
+    } else {
         return Err(format!(
-            "ViewPage opens http and https pages: `{url}` is not one (for a local project, start its server and give its http://localhost address)"
+            "ViewPage opens http and https pages, or file:/// addresses of the project's .html files: `{given}` is none of these (for a local project with a server, start it and give its http://localhost address)"
         ));
-    }
+    };
+    let url = opened.as_str();
     let browser = find_browser().ok_or_else(|| {
         "no Chromium-based browser found (Edge, Chrome or Chromium): install one, or set CLAW_BROWSER to its executable".to_string()
     })?;
@@ -434,7 +482,48 @@ pub(crate) fn view_page(input: &ViewPageInput) -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{console_messages, looks_like_an_error, view_page, ViewPageInput};
+    use super::{console_messages, file_url_path, looks_like_an_error, view_page, ViewPageInput};
+
+    #[test]
+    fn file_addresses_are_read_as_paths_and_kept_to_the_project() {
+        assert_eq!(
+            file_url_path("file:///C:/mon%20site/index.html").as_deref(),
+            Some("C:/mon site/index.html")
+        );
+        assert_eq!(
+            file_url_path("file:///home/ana/site/caf%C3%A9.html").as_deref(),
+            Some("/home/ana/site/café.html")
+        );
+        assert_eq!(file_url_path("file://"), None);
+        // Sous Windows, la forme de Git Bash d'un chemin mène au vrai dossier.
+        if cfg!(windows) {
+            assert_eq!(
+                file_url_path("file:///tmp/site/index.html").map(std::path::PathBuf::from),
+                Some(std::env::temp_dir().join("site/index.html"))
+            );
+            assert_eq!(
+                file_url_path("file:///c/Users/ana/index.html").as_deref(),
+                Some("C:\\Users\\ana\\index.html")
+            );
+        }
+        // Hors du dossier de travail : refusé avant d'ouvrir le navigateur.
+        let outside = std::env::temp_dir().join(format!("claw-view-{}.html", std::process::id()));
+        std::fs::write(&outside, "<p>x</p>").expect("page");
+        let address = format!(
+            "file:///{}",
+            outside
+                .to_string_lossy()
+                .replace('\\', "/")
+                .trim_start_matches('/')
+        );
+        let error = view_page(&ViewPageInput {
+            url: address,
+            wait_ms: None,
+        })
+        .expect_err("hors du projet");
+        let _ = std::fs::remove_file(&outside);
+        assert!(error.contains("outside the working directory"), "{error}");
+    }
 
     #[test]
     fn console_messages_are_read_from_the_browser_log() {
@@ -469,12 +558,17 @@ mod tests {
 
     #[test]
     fn only_web_addresses_are_opened() {
-        for refused in [
-            "file:///C:/secret.txt",
-            "javascript:alert(1)",
-            "localhost:8000",
-            "",
-        ] {
+        // Un fichier hors du projet, ou qui n'est pas une page : jamais ouvert.
+        let error = view_page(&ViewPageInput {
+            url: "file:///C:/secret.txt".to_string(),
+            wait_ms: None,
+        })
+        .expect_err("refus");
+        assert!(
+            error.contains("does not exist") || error.contains("outside the working directory"),
+            "{error}"
+        );
+        for refused in ["javascript:alert(1)", "localhost:8000", ""] {
             let error = view_page(&ViewPageInput {
                 url: refused.to_string(),
                 wait_ms: None,

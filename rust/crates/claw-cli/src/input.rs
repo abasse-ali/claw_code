@@ -3,10 +3,12 @@ use std::collections::VecDeque;
 use std::io::{self, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
-use crossterm::cursor::{MoveToColumn, MoveUp};
+use crossterm::cursor::{MoveTo, MoveToColumn, MoveUp};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::queue;
 use crossterm::terminal::{self, Clear, ClearType};
+
+use crate::keybindings::{Action, Chord, Context, Keymap, Keystroke, Resolution};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadOutcome {
@@ -19,6 +21,9 @@ pub enum ReadOutcome {
     ShowDetails(String),
     /// Échap deux fois, saisie vide : revenir avant un message précédent.
     Rewind,
+    /// Une tâche planifiée est due ; le texte en cours de saisie est rendu
+    /// pour être remis après son passage.
+    Scheduled(String),
 }
 
 /// Un collage plus long que ceci est remplacé par « [Texte collé n°1 : 40 lignes] ».
@@ -38,11 +43,14 @@ struct Frame {
     status: String,
     /// Lignes affichées à la place de la ligne d'état (menu, avis).
     below: Vec<String>,
+    /// Couleur des traits (`/color`).
+    color: Option<String>,
 }
 
 impl Frame {
     fn rule(&self) -> String {
-        format!("\x1b[38;5;240m{}\x1b[0m", "─".repeat(self.width))
+        let color = self.color.as_deref().unwrap_or("\x1b[38;5;240m");
+        format!("{color}{}\x1b[0m", "─".repeat(self.width))
     }
 
     fn below_lines(&self) -> Vec<String> {
@@ -98,6 +106,20 @@ struct YankBuffer {
     linewise: bool,
 }
 
+/// Recherche inversée dans l'historique (Ctrl+R).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HistorySearch {
+    query: String,
+    /// Entrée de l'historique affichée.
+    position: Option<usize>,
+    original: String,
+    original_cursor: usize,
+}
+
+/// États de la saisie gardés pour Ctrl+_.
+const UNDO_LIMIT: usize = 200;
+
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EditSession {
     text: String,
@@ -120,6 +142,17 @@ struct EditSession {
     last_escape: Option<Instant>,
     /// Avis affiché sous la saisie jusqu'à la touche suivante.
     notice: Option<String>,
+    /// Raccourci à plusieurs touches commencé (`ctrl+x`).
+    chord: Chord,
+    /// Recherche dans l'historique (Ctrl+R) en cours.
+    search: Option<HistorySearch>,
+    /// États précédents de la saisie (texte, curseur), pour Ctrl+_.
+    undo_stack: Vec<(String, usize)>,
+    /// La dernière modification était une lettre tapée : les lettres d'un
+    /// même mot s'annulent ensemble.
+    typing_run: bool,
+    /// La touche qui vient d'être traitée était une annulation.
+    undid: bool,
 }
 
 impl EditSession {
@@ -145,6 +178,50 @@ impl EditSession {
             menu_hidden: false,
             last_escape: None,
             notice: None,
+            chord: Chord::default(),
+            search: None,
+            undo_stack: Vec::new(),
+            typing_run: false,
+            undid: false,
+        }
+    }
+
+    /// Garde l'état d'avant une modification, pour Ctrl+_.
+    fn record_edit(&mut self, before: String, before_cursor: usize) {
+        let typed_char =
+            self.text.chars().count() == before.chars().count() + 1 && self.cursor > before_cursor;
+        let word_char = typed_char
+            && self.text[..self.cursor]
+                .chars()
+                .last()
+                .is_some_and(|ch| !ch.is_whitespace());
+        if !(word_char && self.typing_run) {
+            self.undo_stack.push((before, before_cursor));
+            if self.undo_stack.len() > UNDO_LIMIT {
+                self.undo_stack.remove(0);
+            }
+        }
+        self.typing_run = word_char;
+    }
+
+    /// Ctrl+_ : revient à l'état d'avant la dernière modification.
+    fn undo(&mut self) {
+        if let Some((text, cursor)) = self.undo_stack.pop() {
+            self.cursor = cursor.min(text.len());
+            self.text = text;
+            self.undid = true;
+            self.typing_run = false;
+        } else {
+            self.notice = Some("Rien à annuler".to_string());
+        }
+    }
+
+    /// Le curseur est sur la première (ou la dernière) ligne de la saisie.
+    fn cursor_on_edge_line(&self, top: bool) -> bool {
+        if top {
+            !self.text[..self.cursor].contains('\n')
+        } else {
+            !self.text[self.cursor..].contains('\n')
         }
     }
 
@@ -346,6 +423,7 @@ impl EditSession {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum KeyAction {
     Continue,
     Submit(String),
@@ -355,6 +433,10 @@ enum KeyAction {
     CycleMode,
     ShowDetails,
     Rewind,
+    /// Ctrl+G : saisie ouverte dans l'éditeur de texte.
+    ExternalEditor,
+    /// Ctrl+L : écran effacé, saisie redessinée.
+    Redraw,
 }
 
 pub struct LineEditor {
@@ -375,6 +457,32 @@ pub struct LineEditor {
     attachments: Vec<(String, String)>,
     paste_count: usize,
     image_count: usize,
+    /// Raccourcis en vigueur (relus à chaque saisie).
+    keymap: Keymap,
+    /// Saisie mise de côté avec Ctrl+S.
+    stash: Option<String>,
+    /// Couleur des traits de la saisie (`/color`).
+    rule_color: Option<String>,
+}
+
+/// Dictée en cours dans la saisie.
+struct Dictation {
+    recorder: crate::voice::Recorder,
+    /// Dernière répétition d'Espace (mode `hold` : sans répétition, la
+    /// touche est relâchée).
+    last_space: Instant,
+}
+
+fn recording_notice(dictation: &Dictation, hold: bool) -> String {
+    format!(
+        "● Dictée {} s · {} · Échap annule",
+        dictation.recorder.elapsed().as_secs(),
+        if hold {
+            "relâchez Espace pour finir"
+        } else {
+            "Espace ou Entrée pour finir"
+        }
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -400,7 +508,48 @@ impl LineEditor {
             attachments: Vec::new(),
             paste_count: 0,
             image_count: 0,
+            keymap: Keymap::default(),
+            stash: None,
+            rule_color: None,
         }
+    }
+
+    /// Fin d'une dictée : le texte transcrit va au curseur ; `true` si la
+    /// demande doit partir aussitôt (mode `hold` avec `autoSubmit`).
+    fn finish_dictation(
+        &mut self,
+        session: &mut EditSession,
+        stdout: &mut io::Stdout,
+        dictation: Dictation,
+        submit: bool,
+    ) -> io::Result<bool> {
+        session.notice = Some("Transcription…".to_string());
+        self.draw(session, stdout)?;
+        let result = dictation
+            .recorder
+            .finish()
+            .and_then(|audio| crate::voice::transcribe(&audio));
+        match result {
+            Ok(text) => {
+                let glued = session.text[..session.cursor]
+                    .chars()
+                    .last()
+                    .is_some_and(|character| !character.is_whitespace());
+                let text = if glued { format!(" {text}") } else { text };
+                Self::insert_active_text(session, &text);
+                session.notice = None;
+                Ok(submit)
+            }
+            Err(error) => {
+                session.notice = Some(format!("Dictée : {error}"));
+                Ok(false)
+            }
+        }
+    }
+
+    /// `/color` : couleur des traits de la saisie (`None` : par défaut).
+    pub fn set_rule_color(&mut self, color: Option<String>) {
+        self.rule_color = color;
     }
 
     /// Encadre la saisie (traits) avec cette ligne d'état dessous.
@@ -419,6 +568,7 @@ impl LineEditor {
             width: columns.saturating_sub(1).max(20),
             status: status.clone(),
             below: self.below_lines(session, columns.saturating_sub(1).max(20)),
+            color: self.rule_color.clone(),
         });
         session.render(out, &self.prompt, self.vim_enabled, frame.as_ref(), columns)
     }
@@ -483,37 +633,6 @@ impl LineEditor {
             .filter(|(_, (name, _))| name.starts_with(text.as_str()))
             .map(|(index, _)| index)
             .collect()
-    }
-
-    /// Touches du menu : flèches, Tab, Entrée, Échap. `None` : touche ordinaire.
-    fn handle_menu_key(&mut self, session: &mut EditSession, key: KeyEvent) -> Option<KeyAction> {
-        let matches = self.menu_matches(session);
-        if matches.is_empty()
-            || key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        {
-            return None;
-        }
-        let count = matches.len();
-        let selected = session.menu_index.min(count - 1);
-        let name = self.commands[matches[selected]].0.clone();
-        match key.code {
-            KeyCode::Up => session.menu_index = (selected + count - 1) % count,
-            KeyCode::Down => session.menu_index = (selected + 1) % count,
-            KeyCode::Tab => {
-                session.text = format!("{name} ");
-                session.cursor = session.text.len();
-            }
-            KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
-                session.text = name;
-                session.cursor = session.text.len();
-                return Some(Self::submit_or_toggle(session));
-            }
-            KeyCode::Esc => session.menu_hidden = true,
-            _ => return None,
-        }
-        Some(KeyAction::Continue)
     }
 
     /// Un long collage devient un repère dans la saisie ; le texte complet
@@ -597,6 +716,8 @@ impl LineEditor {
             return self.read_line_fallback();
         }
 
+        // Les raccourcis modifiés s'appliquent sans redémarrer.
+        self.keymap = Keymap::load();
         let _raw_mode = RawModeGuard::new()?;
         let mut stdout = io::stdout();
         let mut session = EditSession::new(self.vim_enabled);
@@ -611,12 +732,145 @@ impl LineEditor {
         let mut pending: VecDeque<Event> = VecDeque::new();
         let mut burst_origin: Option<usize> = None;
         let mut pasting: Option<usize> = None;
+        // Dictée vocale (`/voice`) : réglage relu à chaque saisie.
+        let voice = crate::voice::settings();
+        let hold = voice.is_some_and(|settings| settings.mode == crate::voice::Mode::Hold);
+        let auto_submit = hold && voice.is_some_and(|settings| settings.auto_submit);
+        let mut dictation: Option<Dictation> = None;
+        let mut space_run = 0usize;
+        let mut last_space: Option<Instant> = None;
         loop {
             let event = match pending.pop_front() {
                 Some(event) => event,
-                None => event::read()?,
+                // Une tâche planifiée échue passe entre deux saisies.
+                None => loop {
+                    let wait = if dictation.is_some() {
+                        Duration::from_millis(100)
+                    } else {
+                        Duration::from_millis(500)
+                    };
+                    if event::poll(wait)? {
+                        break event::read()?;
+                    }
+                    if let Some(active) = dictation.take() {
+                        // Mode `hold` : plus de répétition, la touche est relâchée.
+                        let released =
+                            hold && active.last_space.elapsed() > Duration::from_millis(400);
+                        if released || active.recorder.elapsed() >= crate::voice::MAX_RECORDING {
+                            if self.finish_dictation(
+                                &mut session,
+                                &mut stdout,
+                                active,
+                                auto_submit,
+                            )? && !session.text.trim().is_empty()
+                            {
+                                let line = session.text.clone();
+                                session.finalize_render(
+                                    &mut stdout,
+                                    &self.prompt,
+                                    self.vim_enabled,
+                                )?;
+                                return Ok(ReadOutcome::Submit(self.expand_attachments(line)));
+                            }
+                        } else {
+                            session.notice = Some(recording_notice(&active, hold));
+                            dictation = Some(active);
+                        }
+                        self.draw(&mut session, &mut stdout)?;
+                        continue;
+                    }
+                    if pasting.is_none() && crate::idle_wakeup() {
+                        session.clear_render(&mut stdout)?;
+                        return Ok(ReadOutcome::Scheduled(session.text.clone()));
+                    }
+                },
             };
+            // Dictée : Espace maintenu (ou frappé, mode `tap`) enregistre ;
+            // Échap annule.
+            if let (true, Event::Key(key)) = (voice.is_some(), &event) {
+                let space = key.code == KeyCode::Char(' ')
+                    && key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
+                let release = key.kind == KeyEventKind::Release;
+                if let Some(mut active) = dictation.take() {
+                    let cancel = key.code == KeyCode::Esc
+                        || (key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL));
+                    if cancel && !release {
+                        active.recorder.cancel();
+                        session.notice = Some("Dictée annulée".to_string());
+                        self.draw(&mut session, &mut stdout)?;
+                        continue;
+                    }
+                    let stop = if hold {
+                        space && release
+                    } else {
+                        !release && (space || key.code == KeyCode::Enter)
+                    };
+                    if stop {
+                        if self.finish_dictation(&mut session, &mut stdout, active, auto_submit)?
+                            && !session.text.trim().is_empty()
+                        {
+                            let line = session.text.clone();
+                            session.finalize_render(&mut stdout, &self.prompt, self.vim_enabled)?;
+                            return Ok(ReadOutcome::Submit(self.expand_attachments(line)));
+                        }
+                        self.draw(&mut session, &mut stdout)?;
+                    } else {
+                        if space {
+                            active.last_space = Instant::now();
+                        }
+                        dictation = Some(active);
+                    }
+                    continue;
+                }
+                if space && !release && pasting.is_none() && pending.is_empty() {
+                    let now = Instant::now();
+                    // Répétition du clavier : rapprochée, sauf le premier
+                    // délai (jusqu'à 700 ms) avant qu'elle commence.
+                    let rapid = key.kind == KeyEventKind::Repeat
+                        || last_space.is_some_and(|at| {
+                            let gap = now.duration_since(at);
+                            gap < Duration::from_millis(150)
+                                || (space_run == 1 && gap < Duration::from_millis(700))
+                        });
+                    last_space = Some(now);
+                    space_run = if rapid { space_run + 1 } else { 1 };
+                    let start = if hold {
+                        space_run >= 3
+                    } else {
+                        session.text.trim().is_empty()
+                    };
+                    if start {
+                        if hold {
+                            // Les espaces de la répétition ne restent pas.
+                            for _ in 1..space_run {
+                                if session.cursor > 0
+                                    && session.text[..session.cursor].ends_with(' ')
+                                {
+                                    session.cursor -= 1;
+                                    session.text.remove(session.cursor);
+                                }
+                            }
+                        }
+                        space_run = 0;
+                        match crate::voice::start() {
+                            Ok(recorder) => {
+                                let active = Dictation {
+                                    recorder,
+                                    last_space: now,
+                                };
+                                session.notice = Some(recording_notice(&active, hold));
+                                dictation = Some(active);
+                            }
+                            Err(error) => session.notice = Some(format!("Dictée : {error}")),
+                        }
+                        self.draw(&mut session, &mut stdout)?;
+                        continue;
+                    }
+                }
+            }
             let queued = !pending.is_empty() || event::poll(Duration::ZERO)?;
+            let (before, before_cursor) = (session.text.clone(), session.cursor);
             let action = match event {
                 Event::Paste(text) => {
                     let start = session.cursor;
@@ -645,18 +899,20 @@ impl LineEditor {
                             Self::insert_active_text(&mut session, "\t");
                             KeyAction::Continue
                         } else {
-                            let before = session.text.clone();
-                            let action = self.handle_key_event(&mut session, key);
-                            if session.text != before {
-                                session.menu_index = 0;
-                                session.menu_hidden = false;
-                            }
-                            action
+                            self.handle_key_event(&mut session, key)
                         }
                     }
                 }
                 _ => KeyAction::Continue,
             };
+            if session.text != before {
+                if !session.undid {
+                    session.record_edit(before, before_cursor);
+                }
+                session.menu_index = 0;
+                session.menu_hidden = false;
+            }
+            session.undid = false;
             // Fin de la rafale : le collage est replié s'il est long.
             let wait = if pasting.is_some() {
                 Duration::from_millis(15)
@@ -687,6 +943,32 @@ impl LineEditor {
                 KeyAction::Rewind => {
                     session.clear_render(&mut stdout)?;
                     return Ok(ReadOutcome::Rewind);
+                }
+                KeyAction::ExternalEditor => {
+                    session.clear_render(&mut stdout)?;
+                    session.rendered_cursor_row = 0;
+                    session.framed = false;
+                    let _ = terminal::disable_raw_mode();
+                    let edited = edit_in_external_editor(&session.text);
+                    let _ = terminal::enable_raw_mode();
+                    match edited {
+                        Ok(text) => {
+                            if text != session.text {
+                                let previous = std::mem::replace(&mut session.text, text);
+                                session.undo_stack.push((previous, session.cursor));
+                                session.typing_run = false;
+                            }
+                            session.cursor = session.text.len();
+                        }
+                        Err(error) => session.notice = Some(error),
+                    }
+                    self.draw(&mut session, &mut stdout)?;
+                }
+                KeyAction::Redraw => {
+                    queue!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
+                    session.rendered_cursor_row = 0;
+                    session.framed = false;
+                    self.draw(&mut session, &mut stdout)?;
                 }
                 KeyAction::Submit(line) => {
                     session.finalize_render(&mut stdout, &self.prompt, self.vim_enabled)?;
@@ -756,46 +1038,31 @@ impl LineEditor {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_key_event(&mut self, session: &mut EditSession, key: KeyEvent) -> KeyAction {
         if key.code != KeyCode::Tab {
             self.completion_state = None;
         }
         session.notice = None;
-        if let Some(action) = self.handle_menu_key(session, key) {
-            return action;
+        if session.search.is_some() {
+            return self.handle_search_key(session, key);
         }
         if key.code != KeyCode::Esc {
             session.last_escape = None;
         }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
 
-        // Alt+V (ou Ctrl+V si le terminal la laisse passer) : image du presse-papiers.
-        let alt_v = key.modifiers.contains(KeyModifiers::ALT)
-            && !key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('v' | 'V'));
-        if alt_v {
-            self.paste_image(session);
-            return KeyAction::Continue;
-        }
-
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
+        // Ctrl+C et Ctrl+D ne se changent pas : effacer ou quitter.
+        if ctrl && !alt {
             match key.code {
-                KeyCode::Char('o' | 'O') => return KeyAction::ShowDetails,
-                KeyCode::Char('v' | 'V') if !key.modifiers.contains(KeyModifiers::ALT) => {
-                    self.paste_image(session);
-                    return KeyAction::Continue;
-                }
                 KeyCode::Char('c' | 'C') => {
+                    session.chord = Chord::default();
                     return if session.has_input() {
                         KeyAction::Cancel
                     } else {
                         KeyAction::Exit
                     };
-                }
-                KeyCode::Char('j' | 'J') => {
-                    if session.mode != EditorMode::Normal && session.mode != EditorMode::Visual {
-                        Self::insert_active_text(session, "\n");
-                    }
-                    return KeyAction::Continue;
                 }
                 KeyCode::Char('d' | 'D') => {
                     if session.current_len() == 0 {
@@ -808,13 +1075,80 @@ impl LineEditor {
             }
         }
 
-        match key.code {
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                if session.mode != EditorMode::Normal && session.mode != EditorMode::Visual {
-                    Self::insert_active_text(session, "\n");
+        // Mode vim : Échap et les lettres hors insertion restent à vim.
+        let vim_owns = session.mode != EditorMode::Plain
+            && (key.code == KeyCode::Esc
+                || (session.mode != EditorMode::Insert
+                    && matches!(key.code, KeyCode::Char(_))
+                    && !ctrl
+                    && !alt));
+        if !vim_owns {
+            if let Some(stroke) = Keystroke::from_event(key) {
+                let contexts: &[Context] = if self.menu_matches(session).is_empty() {
+                    &[Context::Chat, Context::Global]
+                } else {
+                    &[Context::Autocomplete, Context::Chat, Context::Global]
+                };
+                match self.keymap.resolve(contexts, &mut session.chord, stroke) {
+                    Resolution::Action(action) => return self.run_action(session, action),
+                    Resolution::Pending => {
+                        session.notice = Some(format!(
+                            "{}… (touche suivante du raccourci)",
+                            session.chord.label()
+                        ));
+                        return KeyAction::Continue;
+                    }
+                    Resolution::Cancelled => {
+                        session.notice = Some("Raccourci annulé".to_string());
+                        return KeyAction::Continue;
+                    }
+                    Resolution::Unbound => {}
                 }
-                KeyAction::Continue
             }
+        }
+
+        // Touches d'édition, comme dans Claude Code (non personnalisables).
+        if ctrl && !alt {
+            match key.code {
+                KeyCode::Char(ch) => self.handle_ctrl_edit(session, ch.to_ascii_lowercase()),
+                KeyCode::Backspace => self.handle_ctrl_edit(session, 'w'),
+                KeyCode::Left => {
+                    self.handle_alt_edit(session, 'b');
+                }
+                KeyCode::Right => {
+                    self.handle_alt_edit(session, 'f');
+                }
+                KeyCode::Delete => {
+                    self.handle_alt_edit(session, 'd');
+                }
+                KeyCode::Enter => return Self::submit_or_toggle(session),
+                _ => {}
+            }
+            return KeyAction::Continue;
+        }
+        if alt && !ctrl {
+            match key.code {
+                KeyCode::Char(ch) => {
+                    if !self.handle_alt_edit(session, ch.to_ascii_lowercase()) {
+                        self.handle_char(session, ch);
+                    }
+                    return KeyAction::Continue;
+                }
+                KeyCode::Backspace => {
+                    self.handle_ctrl_edit(session, 'w');
+                    return KeyAction::Continue;
+                }
+                KeyCode::Enter => {
+                    if session.mode != EditorMode::Normal && session.mode != EditorMode::Visual {
+                        Self::insert_active_text(session, "\n");
+                    }
+                    return KeyAction::Continue;
+                }
+                _ => {}
+            }
+        }
+
+        match key.code {
             KeyCode::Enter => Self::submit_or_toggle(session),
             KeyCode::Esc => Self::handle_escape(session),
             KeyCode::Backspace => {
@@ -834,11 +1168,11 @@ impl LineEditor {
                 KeyAction::Continue
             }
             KeyCode::Up => {
-                self.history_up(session);
+                Self::move_up(session);
                 KeyAction::Continue
             }
             KeyCode::Down => {
-                self.history_down(session);
+                Self::move_down(session);
                 KeyAction::Continue
             }
             KeyCode::Home => {
@@ -849,17 +1183,351 @@ impl LineEditor {
                 Self::move_line_end(session);
                 KeyAction::Continue
             }
-            KeyCode::Tab => {
-                self.complete_slash_command(session);
-                KeyAction::Continue
-            }
-            KeyCode::BackTab => KeyAction::CycleMode,
+            // Ctrl+Alt : AltGr sous Windows (« @ », « # » sur un clavier AZERTY).
             KeyCode::Char(ch) => {
                 self.handle_char(session, ch);
                 KeyAction::Continue
             }
             _ => KeyAction::Continue,
         }
+    }
+
+    /// Action d'un raccourci (`keybindings.json`).
+    #[allow(clippy::too_many_lines)]
+    fn run_action(&mut self, session: &mut EditSession, action: Action) -> KeyAction {
+        let matches = self.menu_matches(session);
+        let menu = (!matches.is_empty()).then(|| {
+            let selected = session.menu_index.min(matches.len() - 1);
+            (
+                matches.len(),
+                selected,
+                self.commands[matches[selected]].0.clone(),
+            )
+        });
+        match action {
+            Action::Submit => {
+                if let Some((_, _, name)) = menu {
+                    session.text = name;
+                    session.cursor = session.text.len();
+                }
+                Self::submit_or_toggle(session)
+            }
+            Action::Newline => {
+                if session.mode != EditorMode::Normal && session.mode != EditorMode::Visual {
+                    Self::insert_active_text(session, "\n");
+                }
+                KeyAction::Continue
+            }
+            Action::Cancel => Self::handle_escape(session),
+            Action::CycleMode => KeyAction::CycleMode,
+            Action::ImagePaste => {
+                self.paste_image(session);
+                KeyAction::Continue
+            }
+            Action::ExternalEditor => KeyAction::ExternalEditor,
+            Action::Stash => {
+                self.toggle_stash(session);
+                KeyAction::Continue
+            }
+            Action::Undo => {
+                session.undo();
+                KeyAction::Continue
+            }
+            Action::Redraw => KeyAction::Redraw,
+            Action::ShowDetails => KeyAction::ShowDetails,
+            Action::HistoryPrevious => {
+                // Saisie sur plusieurs lignes : le curseur monte d'abord.
+                if session.cursor_on_edge_line(true) {
+                    self.history_up(session);
+                } else {
+                    Self::move_up(session);
+                }
+                KeyAction::Continue
+            }
+            Action::HistoryNext => {
+                if session.cursor_on_edge_line(false) {
+                    self.history_down(session);
+                } else {
+                    Self::move_down(session);
+                }
+                KeyAction::Continue
+            }
+            Action::HistorySearch => {
+                if session.mode != EditorMode::Command {
+                    session.search = Some(HistorySearch {
+                        query: String::new(),
+                        position: None,
+                        original: session.text.clone(),
+                        original_cursor: session.cursor,
+                    });
+                    self.show_search(session, true);
+                }
+                KeyAction::Continue
+            }
+            Action::AutocompleteAccept => {
+                if let Some((_, _, name)) = menu {
+                    session.text = format!("{name} ");
+                    session.cursor = session.text.len();
+                } else {
+                    self.complete_slash_command(session);
+                }
+                KeyAction::Continue
+            }
+            Action::AutocompleteDismiss => {
+                if menu.is_some() {
+                    session.menu_hidden = true;
+                    KeyAction::Continue
+                } else {
+                    Self::handle_escape(session)
+                }
+            }
+            Action::AutocompletePrevious => {
+                match menu {
+                    Some((count, selected, _)) => {
+                        session.menu_index = (selected + count - 1) % count;
+                    }
+                    None => self.history_up(session),
+                }
+                KeyAction::Continue
+            }
+            Action::AutocompleteNext => {
+                match menu {
+                    Some((count, selected, _)) => session.menu_index = (selected + 1) % count,
+                    None => self.history_down(session),
+                }
+                KeyAction::Continue
+            }
+            Action::SearchNext
+            | Action::SearchAccept
+            | Action::SearchCancel
+            | Action::SearchExecute => KeyAction::Continue,
+        }
+    }
+
+    /// Touche pendant la recherche dans l'historique : les lettres complètent
+    /// la recherche, Ctrl+R passe à une entrée plus ancienne, Tab ou Échap
+    /// gardent l'entrée, Entrée l'envoie, Ctrl+C annule.
+    fn handle_search_key(&mut self, session: &mut EditSession, key: KeyEvent) -> KeyAction {
+        let mut chord = Chord::default();
+        let resolution = Keystroke::from_event(key).map_or(Resolution::Unbound, |stroke| {
+            self.keymap
+                .resolve(&[Context::HistorySearch], &mut chord, stroke)
+        });
+        let Some(search) = session.search.as_mut() else {
+            return KeyAction::Continue;
+        };
+        match resolution {
+            Resolution::Action(Action::SearchNext) => {
+                let before = search.position.unwrap_or(self.history.len());
+                let found = self.find_in_history(&search.query, before, &session.text);
+                if let Some(index) = found {
+                    search.position = Some(index);
+                    session.text.clone_from(&self.history[index]);
+                    session.cursor = session.text.len();
+                }
+                self.show_search(session, found.is_some());
+                return KeyAction::Continue;
+            }
+            Resolution::Action(Action::SearchAccept) => {
+                session.search = None;
+                return KeyAction::Continue;
+            }
+            Resolution::Action(Action::SearchCancel) => {
+                Self::cancel_search(session);
+                return KeyAction::Continue;
+            }
+            Resolution::Action(Action::SearchExecute) => {
+                session.search = None;
+                return Self::submit_or_toggle(session);
+            }
+            _ => {}
+        }
+        let typed = match key.code {
+            KeyCode::Backspace => {
+                if search.query.pop().is_none() {
+                    Self::cancel_search(session);
+                    return KeyAction::Continue;
+                }
+                true
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    || key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                search.query.push(ch);
+                true
+            }
+            _ => false,
+        };
+        if !typed {
+            // Autre touche : l'entrée trouvée est gardée et la touche agit.
+            session.search = None;
+            return self.handle_key_event(session, key);
+        }
+        let query = search.query.clone();
+        let found = self.find_in_history(&query, self.history.len(), "");
+        if let Some(search) = session.search.as_mut() {
+            search.position = found;
+        }
+        if let Some(index) = found {
+            session.text.clone_from(&self.history[index]);
+            session.cursor = session.text.len();
+        }
+        self.show_search(session, found.is_some() || query.is_empty());
+        KeyAction::Continue
+    }
+
+    fn cancel_search(session: &mut EditSession) {
+        if let Some(search) = session.search.take() {
+            session.text = search.original;
+            session.cursor = search.original_cursor.min(session.text.len());
+        }
+    }
+
+    /// Entrée la plus récente avant `before` qui contient `query` (sans tenir
+    /// compte de la casse) et diffère de `current`.
+    fn find_in_history(&self, query: &str, before: usize, current: &str) -> Option<usize> {
+        let needle = query.to_lowercase();
+        (0..before.min(self.history.len())).rev().find(|index| {
+            let entry = &self.history[*index];
+            entry != current && entry.to_lowercase().contains(&needle)
+        })
+    }
+
+    fn show_search(&self, session: &mut EditSession, found: bool) {
+        let Some(search) = &session.search else {
+            return;
+        };
+        let next = self
+            .keymap
+            .keys_for(Action::SearchNext)
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "ctrl+r".to_string());
+        session.notice = Some(if found {
+            format!(
+                "Recherche : « {} » · {next} plus ancien · Tab garder · Entrée envoyer · Ctrl+C annuler",
+                search.query
+            )
+        } else {
+            format!("Recherche : « {} » · aucune correspondance", search.query)
+        });
+    }
+
+    /// Ctrl+S : met la saisie de côté ; sur une saisie vide, la reprend.
+    fn toggle_stash(&mut self, session: &mut EditSession) {
+        let key = self
+            .keymap
+            .keys_for(Action::Stash)
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "ctrl+s".to_string());
+        if session.text.trim().is_empty() {
+            if let Some(text) = self.stash.take() {
+                session.text = text;
+                session.cursor = session.text.len();
+                session.notice = Some("Saisie reprise".to_string());
+            } else {
+                session.notice = Some(format!("Rien de mis de côté ({key} met la saisie de côté)"));
+            }
+            return;
+        }
+        let current = std::mem::take(&mut session.text);
+        session.cursor = 0;
+        if let Some(previous) = self.stash.replace(current) {
+            session.text = previous;
+            session.cursor = session.text.len();
+        }
+        session.notice = Some(format!(
+            "Saisie mise de côté : {key} sur une saisie vide la reprend"
+        ));
+    }
+
+    /// Ctrl+A, E, K, U, W, Y (et Ctrl+Retour arrière) : déplacements et
+    /// suppressions de readline ; le texte supprimé se recolle avec Ctrl+Y.
+    fn handle_ctrl_edit(&mut self, session: &mut EditSession, ch: char) {
+        if session.mode == EditorMode::Command {
+            return;
+        }
+        let cursor = session.cursor;
+        let removed = match ch {
+            'a' => {
+                Self::move_line_start(session);
+                None
+            }
+            'e' => {
+                Self::move_line_end(session);
+                None
+            }
+            'k' => {
+                let end = line_end(&session.text, cursor);
+                Some(cursor..end)
+            }
+            'u' => {
+                let start = line_start(&session.text, cursor);
+                Some(start..cursor)
+            }
+            'w' | 'h' => {
+                let head = &session.text[..cursor];
+                let trimmed = head.trim_end_matches([' ', '\t']);
+                let start = trimmed
+                    .rfind(char::is_whitespace)
+                    .map_or(0, |index| index + 1);
+                Some(start..cursor)
+            }
+            'y' => {
+                if !self.yank_buffer.text.is_empty() {
+                    let text = self.yank_buffer.text.clone();
+                    Self::insert_active_text(session, &text);
+                }
+                None
+            }
+            _ => None,
+        };
+        if let Some(range) = removed.filter(|range| range.start < range.end) {
+            self.yank_buffer.text = session.text[range.clone()].to_string();
+            self.yank_buffer.linewise = false;
+            session.cursor = range.start;
+            session.text.drain(range);
+        }
+    }
+
+    /// Alt+B, Alt+F, Alt+D : mot précédent, mot suivant, supprimer le mot.
+    /// `false` : touche sans effet d'édition.
+    fn handle_alt_edit(&mut self, session: &mut EditSession, ch: char) -> bool {
+        if session.mode == EditorMode::Command || !matches!(ch, 'b' | 'f' | 'd') {
+            return false;
+        }
+        let text = session.text.clone();
+        let is_word = |c: char| c.is_alphanumeric();
+        let cursor = session.cursor;
+        let next_word_end = || {
+            let rest = &text[cursor..];
+            let start = rest.find(is_word).unwrap_or(rest.len());
+            let end = rest[start..]
+                .find(|c: char| !is_word(c))
+                .map_or(rest.len(), |offset| start + offset);
+            cursor + end
+        };
+        match ch {
+            'b' => {
+                let head = &text[..cursor];
+                let end = head.trim_end_matches(|c: char| !is_word(c)).len();
+                session.cursor = head[..end].rfind(|c: char| !is_word(c)).map_or(0, |index| {
+                    index + head[index..].chars().next().map_or(1, char::len_utf8)
+                });
+            }
+            'f' => session.cursor = next_word_end(),
+            _ => {
+                let end = next_word_end();
+                if end > cursor {
+                    self.yank_buffer.text = text[cursor..end].to_string();
+                    self.yank_buffer.linewise = false;
+                    session.text.drain(cursor..end);
+                }
+            }
+        }
+        true
     }
 
     fn handle_char(&mut self, session: &mut EditSession, ch: char) {
@@ -1249,6 +1917,63 @@ impl Drop for RawModeGuard {
         let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableBracketedPaste);
         let _ = terminal::disable_raw_mode();
     }
+}
+
+/// Ctrl+G : la saisie est ouverte dans `$VISUAL`, `$EDITOR` ou, à défaut,
+/// le Bloc-notes (Windows) ou `vi` ; le texte enregistré la remplace.
+fn edit_in_external_editor(text: &str) -> Result<String, String> {
+    let path = std::env::temp_dir().join(format!("claw-prompt-{}.md", std::process::id()));
+    std::fs::write(&path, text)
+        .map_err(|error| format!("Éditeur externe : fichier temporaire impossible ({error})"))?;
+    let editor = ["VISUAL", "EDITOR"]
+        .iter()
+        .find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| if cfg!(windows) { "notepad" } else { "vi" }.to_string());
+    let status = {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new("cmd")
+                .arg("/C")
+                .raw_arg(format!("{editor} \"{}\"", path.display()))
+                .status()
+        }
+        #[cfg(not(windows))]
+        {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("{editor} \"$1\""))
+                .arg("sh")
+                .arg(&path)
+                .status()
+        }
+    };
+    let edited = std::fs::read_to_string(&path);
+    let _ = std::fs::remove_file(&path);
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            return Err(format!(
+                "Éditeur externe « {editor} » : arrêt avec le code {}",
+                status.code().unwrap_or(-1)
+            ))
+        }
+        Err(error) => {
+            return Err(format!(
+                "Éditeur externe « {editor} » introuvable ({error})"
+            ))
+        }
+    }
+    let edited =
+        edited.map_err(|error| format!("Éditeur externe : relecture impossible ({error})"))?;
+    Ok(edited
+        .replace("\r\n", "\n")
+        .trim_end_matches('\n')
+        .to_string())
 }
 
 /// Certains terminaux livrent les sauts de ligne d'un collage comme des
@@ -1795,6 +2520,91 @@ mod tests {
         let _ = editor.handle_key_event(&mut session, key(KeyCode::Esc));
         let action = editor.handle_key_event(&mut session, key(KeyCode::Esc));
         assert!(matches!(action, KeyAction::Rewind));
+    }
+
+    #[test]
+    fn ctrl_s_stashes_and_restores_the_input() {
+        let mut editor = LineEditor::new("> ", vec![]);
+        let mut session = session_with("brouillon");
+        let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let _ = editor.handle_key_event(&mut session, ctrl_s);
+        assert!(session.text.is_empty());
+        let _ = editor.handle_key_event(&mut session, ctrl_s);
+        assert_eq!(session.text, "brouillon");
+    }
+
+    #[test]
+    fn ctrl_underscore_undoes_word_by_word() {
+        let mut editor = LineEditor::new("> ", vec![]);
+        let mut session = session_with("");
+        for ch in "un deux".chars() {
+            let before = (session.text.clone(), session.cursor);
+            let _ = editor.handle_key_event(&mut session, key(KeyCode::Char(ch)));
+            session.record_edit(before.0, before.1);
+        }
+        let undo = KeyEvent::new(KeyCode::Char('7'), KeyModifiers::CONTROL);
+        let _ = editor.handle_key_event(&mut session, undo);
+        assert_eq!(session.text, "un ");
+        let _ = editor.handle_key_event(&mut session, undo);
+        let _ = editor.handle_key_event(&mut session, undo);
+        assert_eq!(session.text, "");
+    }
+
+    #[test]
+    fn ctrl_r_searches_the_history() {
+        let mut editor = LineEditor::new("> ", vec![]);
+        editor.push_history("cargo test");
+        editor.push_history("git status");
+        editor.push_history("cargo build");
+        let mut session = session_with("brouillon");
+        let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        let _ = editor.handle_key_event(&mut session, ctrl_r);
+        for ch in "carg".chars() {
+            let _ = editor.handle_key_event(&mut session, key(KeyCode::Char(ch)));
+        }
+        assert_eq!(session.text, "cargo build");
+        let _ = editor.handle_key_event(&mut session, ctrl_r);
+        assert_eq!(session.text, "cargo test");
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let _ = editor.handle_key_event(&mut session, ctrl_c);
+        assert_eq!(session.text, "brouillon");
+        assert!(session.search.is_none());
+        let _ = editor.handle_key_event(&mut session, ctrl_r);
+        let _ = editor.handle_key_event(&mut session, key(KeyCode::Char('g')));
+        let _ = editor.handle_key_event(&mut session, key(KeyCode::Char('i')));
+        let action = editor.handle_key_event(&mut session, key(KeyCode::Enter));
+        assert_eq!(action, KeyAction::Submit("git status".to_string()));
+    }
+
+    #[test]
+    fn readline_keys_edit_and_chords_open_the_editor() {
+        let mut editor = LineEditor::new("> ", vec![]);
+        let mut session = session_with("git commit --amend");
+        let ctrl = |ch| KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
+        let _ = editor.handle_key_event(&mut session, ctrl('w'));
+        assert_eq!(session.text, "git commit ");
+        let _ = editor.handle_key_event(&mut session, ctrl('a'));
+        assert_eq!(session.cursor, 0);
+        let _ = editor.handle_key_event(&mut session, ctrl('k'));
+        assert!(session.text.is_empty());
+        let _ = editor.handle_key_event(&mut session, ctrl('y'));
+        assert_eq!(session.text, "git commit ");
+        let first = editor.handle_key_event(&mut session, ctrl('x'));
+        assert_eq!(first, KeyAction::Continue);
+        assert!(session
+            .notice
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("ctrl+x"));
+        let second = editor.handle_key_event(&mut session, ctrl('e'));
+        assert_eq!(second, KeyAction::ExternalEditor);
+        // AltGr (Ctrl+Alt) tape toujours son caractère.
+        let altgr = KeyEvent::new(
+            KeyCode::Char('@'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        let _ = editor.handle_key_event(&mut session, altgr);
+        assert!(session.text.ends_with('@'));
     }
 
     #[test]

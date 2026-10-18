@@ -170,8 +170,30 @@ sombre ou claire (thème du système, de VS Code ou choisi) :
   titres et dans le texte des messages (l'extrait trouvé s'affiche), **titre** modifiable
   (crayon), effacement d'une session (corbeille) ou de toutes les précédentes, après
   confirmation ; la session en cours ne s'efface pas ;
+- **agents** (bouton à côté de « Sessions », comme le panneau des sessions en arrière-plan de
+  Claude Code) : les sessions en arrière-plan de la machine avec leur état et leur dernière
+  action ; une tâche tapée en haut en lance une nouvelle dans son propre worktree, avec le modèle
+  et le mode de la page (`!commande` pour une commande shell). Un clic ouvre la session : ses
+  dernières sorties en direct, sa question en cours avec « Autoriser », « Toujours » ou
+  « Refuser » pour une permission, et un champ pour lui répondre ou lui donner une nouvelle
+  demande ; elle s'arrête ou se retire de la liste d'un clic. Le même panneau montre les tâches
+  planifiées de la conversation (corbeille pour en supprimer une), ses Monitors (bouton pour les
+  arrêter), ses sous-tâches et les sessions joignables par message. Une pastille orange compte
+  les sessions qui attendent une réponse et les messages retenus ;
 - diagrammes Mermaid à la demande ; commandes `/review`, `/audit`, `/archi`, `/adr`, `/fix`,
   `/models`, `/credits`, `/mcp`, `/cost`, `/compact`…
+- **entre deux messages**, la page reçoit comme le terminal les passages des tâches planifiées,
+  les lignes des Monitors, les messages des autres sessions et les résultats des sous-tâches :
+  chacun s'annonce dans le fil (`↻ Tâche planifiée…`, `› Monitor : …`, `› Message de @…`) puis
+  l'agent y répond. La page est joignable par les autres sessions sous le nom du dossier suivi de
+  `-web` ;
+- les commandes de travail continu et de revue marchent aussi dans la page : `/goal` et `/loop`
+  (le bouton Arrêter met en pause l'objectif ; `/loop stop` arrête la boucle), `/tasks`,
+  `/subtask`, `/bg` (la conversation part en arrière-plan et la page repart d'une conversation
+  vide), `/fork`, `/peers`, `/workflows`, `/deep-research`, `/btw`, `/recap`, `/copy`
+  (copie dans le presse-papiers du navigateur), `/rename`, `/output-style`, `/schedule`,
+  `/install-github-action`, `/security-review`, `/code-review`, `/pr-comments`, `/branch`,
+  `/worktree`, `/add-dir`, `/permissions allow|deny|ask|remove <règle>` ;
 
 Sécurité : écoute sur `127.0.0.1` uniquement (sauf `--host`), jeton secret aléatoire à chaque
 lancement exigé par toute l'API, contrôle des en-têtes `Host` et `Origin` (DNS rebinding,
@@ -203,7 +225,7 @@ est retenu ; avec `OPENROUTER_API_KEY`, le quota gratuit du jour est affiché.
   sinon ; 20 par minute) est compté **par compte**, sur la journée UTC : une nouvelle clé API
   n'y change rien, OpenRouter l'écrit dans sa documentation. Pour continuer une fois le quota
   atteint : un modèle local (`ollama:…`) ou un autre fournisseur qui a son propre quota gratuit
-  (`gemini:`, `groq:`), chacun avec sa clé. Le plan gratuit de Mistral ne permet plus de créer
+  (`gemini:`, `nvidia:`, `groq:`), chacun avec sa clé. Le plan gratuit de Mistral ne permet plus de créer
   de clé API (constaté le 10 octobre 2026) : `mistral:` demande un plan payant.
 - **La clé Google (`GEMINI_API_KEY`)** ne sert que si vous la mettez au travail : rien ne
   l'utilise d'office. `/model gemini:<modèle>` pour une session ; ou, pour épargner le quota
@@ -230,6 +252,25 @@ est retenu ; avec `OPENROUTER_API_KEY`, le quota gratuit du jour est affiché.
   `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, `gemini-2.5-pro`, `gemini-2.5-flash`,
   `gemini-2.5-flash-lite`. `gemini-3.1-pro-preview` est payant et n'est pas proposé. Exemple :
   `/model gemini:gemini-3.8-flash`.
+- **NVIDIA (`NVIDIA_API_KEY`, préfixe `nvidia:`)** : les modèles de build.nvidia.com sont
+  gratuits pour les membres du programme pour développeurs de NVIDIA (inscription gratuite, sans
+  carte), avec environ 40 requêtes par minute pour le compte (observé par les utilisateurs, non
+  publié) et aucun quota par jour annoncé ; un usage en production demande une licence. La clé se
+  crée sur build.nvidia.com (profil, Settings, API Keys) et commence par `nvapi-`. `/models nvidia`
+  liste les modèles essayés avec Claw que le catalogue de NVIDIA propose, et la page les montre
+  dans la catégorie **NVIDIA** du menu des modèles. Agents essayés le 18 octobre 2026 (appel
+  d'outil en moins d'une seconde, sauf gpt-oss 20B en 21 s) : `nvidia/nemotron-3-ultra-550b-a55b`,
+  `nvidia/nemotron-3-super-120b-a12b`, `stepfun-ai/step-5-preview`, `openai/gpt-oss-20b`. Le
+  catalogue en compte 81 ; à ce jour, d'autres font attendre leur première réponse de 90 s à plus
+  de 4 minutes (GLM 5.3, Nemotron 3.5 Lightning, `DeepSeek` V4.1 Flash, Gemma 4 : trop pour un
+  agent) ou répondent 404 selon le compte (Kimi K2.6). Un modèle qui ne lit pas les images refuse
+  une requête qui en porte une (erreur 400) : Claw sait lesquels les lisent et fait décrire les
+  images aux autres. `nvidia/nemotron-3.5-super-vl-120b-a12b` lit les images mais échoue dès
+  qu'on lui donne des outils : avec la clé, il décrit les captures et juge les designs avant les
+  lecteurs d'OpenRouter (une capture de site lue en cinq secondes à l'essai, sans quota par
+  jour), sans jamais être l'agent. `/models bench --design nvidia:` ne mesure que les modèles de
+  NVIDIA. Un modèle de NVIDIA bloqué passe la main à Nemotron 3 Ultra, sur le même compte,
+  plutôt qu'à un modèle d'OpenRouter. Exemple : `/model nvidia:nvidia/nemotron-3-super-120b-a12b`.
 - La limite de jetons de sortie suit le catalogue (sortie maximale et contexte du modèle) ;
   `/cost` indique le coût estimé (0 $ pour un modèle gratuit).
 - Chaque étape de l'agent consomme une requête du quota gratuit ; en cas de limite atteinte
@@ -241,11 +282,20 @@ est retenu ; avec `OPENROUTER_API_KEY`, le quota gratuit du jour est affiché.
 |---|---|---|
 | `prompt` (défaut) | `default` | Lecture libre ; demande avant chaque modification ou commande |
 | `read-only` | `plan` | Mode plan : lecture et commandes sans effet uniquement ; l'agent propose un plan |
-| `workspace-write` | `acceptEdits` | Modifie les fichiers sans demander ; demande avant les commandes |
+| `workspace-write` | `acceptEdits` | Modifie sans demander les fichiers du projet (et des dossiers ajoutés) ; demande avant les commandes et avant d'écrire ailleurs |
+| `dont-ask` | `dontAsk` | Ne demande jamais : lecture et règles `allow` passent, tout le reste est refusé (pour l'automatisation) |
+| `auto` | `auto` | Lecture et modifications du projet sans demande ; commandes, outils MCP, chemins protégés et écritures hors du projet jugés par un classificateur (voir « Mode auto ») |
 | `danger-full-access` | `bypassPermissions` | Tout est autorisé sans demande |
 
+En `workspace-write`, l'écriture est libre dans le dossier du projet, le dossier temporaire et
+les dossiers ajoutés : `permissions.additionalDirectories` dans la config, `claw --add-dir
+<dossier>` (répétable) ou `/add-dir <dossier>` pendant la session (`--save` l'enregistre dans
+`.claw/settings.local.json` ; `/add-dir` seul les liste). Ailleurs, Claw demande ; sans
+terminal, l'écriture est refusée avec la marche à suivre.
+
 Les commandes en lecture seule (`git status`, `git diff`, `ls`, `cat`…) ne déclenchent pas de demande.
-Dans le terminal, `Maj+Tab` passe d'un mode à l'autre (demander → éditions acceptées → plan) ; le
+Dans le terminal, `Maj+Tab` passe d'un mode à l'autre (demander → éditions acceptées → plan →
+auto) ; le
 mode actif s'affiche sous la zone de saisie. Chaque demande s'ouvre dans un encadré (commande,
 diff numéroté de la modification…) avec un choix aux flèches ou au chiffre : `1` oui, `2` oui et
 ne plus demander (la règle proposée est enregistrée dans `.claw/settings.local.json`), `3` ou
@@ -261,13 +311,65 @@ Règles dans n'importe quel fichier de config (elles s'additionnent ; `deny` pri
     "defaultMode": "default",
     "allow": ["Bash(cargo test:*)", "Bash(npm run lint)", "WebFetch(domain:docs.rs)"],
     "deny": ["Bash(git push:*)", "Read(.env)", "Edit(secrets/**)"],
-    "ask": ["Bash(git commit:*)"]
+    "ask": ["Bash(git commit:*)"],
+    "additionalDirectories": ["../bibliotheque-partagee"]
   }
 }
 ```
 
 Une commande composée (`a && b`, `a | b`, `a; b`) n'est autorisée par une règle que si chacune
 de ses parties l'est ; une substitution (`$(…)`, backticks) déclenche toujours une demande.
+
+#### Mode auto
+
+Comme dans Claude Code, `--permission-mode auto` (ou `Maj+Tab`, ou `"defaultMode": "auto"`) laisse
+Claw travailler sans demandes de routine : un second modèle, le classificateur, juge à votre
+place chaque action qui en aurait demandé une.
+
+- **Sans classificateur** : lectures, recherches, commandes en lecture seule et modifications des
+  fichiers du projet. Les règles `deny` et `ask` passent avant tout, comme ailleurs.
+- **Jugé** : commandes shell, outils MCP, écritures hors du projet et écritures dans un chemin
+  protégé (`.git/`, `.claw/`, `.claude/`, `.vscode/`, `.husky/`, `.bashrc`, `.mcp.json`…). Les règles
+  `allow` qui accordent l'exécution de code arbitraire (`Bash(*)`, `Bash(python:*)`, `npm run`…)
+  sont suspendues ; les règles précises (`Bash(cargo test:*)`) restent valables.
+- **Ce que voit le classificateur** : l'action, vos derniers messages (vos limites, comme « ne pousse
+  pas », et vos accords explicites), `CLAW.md`/`CLAUDE.md`, le dossier et ses remotes git, et
+  des règles : blocages absolus (`hard_deny` : fuite de secrets, suppression d'un chemin
+  critique), blocages levables (`soft_deny` : `curl | bash`, push forcé, `git reset --hard`,
+  `git clean`, déploiement en production, destruction d'infrastructure, changement de remote,
+  drapeaux qui désarment une sécurité…), exceptions (`allow` : build et tests du projet,
+  dépendances déclarées, commits et push vers les remotes du dépôt…). Une demande générale
+  (« fais le ménage ») ne lève pas un blocage ; une demande précise (« fais un `git reset
+  --hard` ») le lève.
+- **Blocage** : l'action ne s'exécute pas, Claw voit la raison (`[Discarding uncommitted work]…`)
+  et continue autrement. `/permissions` liste les refus récents. Après 3 blocages de suite ou
+  20 au total, le mode auto se met en pause et Claw vous demande ; une approbation le relance.
+  Une réponse illisible du classificateur vaut refus.
+- **Réglages** (personnels seulement, `~/.claw/settings.json` ou `~/.claude/settings.json` : un
+  dépôt ne peut pas élargir ce qu'accepte le classificateur) :
+
+  ```json
+  {
+    "autoMode": {
+      "environment": ["$defaults", "Dépôts de confiance : github.com/mon-equipe/*"],
+      "allow": ["$defaults", "Déployer sur l'espace de staging est permis"],
+      "soft_deny": ["$defaults", "Ne jamais lancer de migration en dehors de l'outil prévu"],
+      "hard_deny": ["$defaults"],
+      "classifyAllShell": false,
+      "model": "openrouter/modele-classificateur"
+    }
+  }
+  ```
+
+  `"$defaults"` garde les règles intégrées à cet endroit ; une liste sans `"$defaults"` les
+  remplace. `classifyAllShell` soumet toutes les commandes au classificateur, même celles d'une
+  règle `allow`. Le classificateur utilise `autoMode.model`, sinon `smallModel`, sinon le modèle
+  de la session. `"permissions": {"disableAutoMode": "disable"}` retire le mode auto.
+  `claw auto-mode defaults` affiche les règles intégrées, `claw auto-mode config` les règles
+  effectives.
+- Le mode auto vaut aussi pour les sous-agents, les sessions en arrière-plan et l'interface web.
+  Il réduit les demandes sans garantir la sûreté : gardez une règle `deny` ou `ask` pour ce
+  qui doit toujours vous être soumis.
 
 ### Agent spécialisé code & architecture
 
@@ -284,6 +386,20 @@ correction jusqu'au vert, jamais de test affaibli pour passer) et méthode d'arc
 | `/adr <décision>` | Rédige un ADR numéroté dans `docs/adr/` |
 | `/fix [commande]` | Lance les tests et corrige jusqu'à ce qu'ils passent |
 | `/avis <question>` | Second avis : la question est posée à plusieurs autres modèles, l'agent compare et tranche |
+| `/security-review [cible]` | Revue de sécurité des changements : failles exploitables seulement (injection, autorisations, secrets, désérialisation, XSS, SSRF, workflows GitHub), chaque piste remontée de la source à l'usage dangereux puis mise à l'épreuve ; seules les failles jugées sûres à 8/10 au moins sont rapportées |
+| `/code-review [cible\|n° de PR]` | Revue multi-agents, l'équivalent local et gratuit de la revue multi-agents de Claude Code : quatre relecteurs en parallèle (bugs, sécurité, erreurs et performances, tests et maintenabilité), puis chaque problème est vérifié dans le code et classé confirmé, plausible ou rejeté. `/code-review 42` relit la PR n° 42 (`gh pr diff`) |
+| `/pr-comments [n°]` | Commentaires d'une pull request (avec `gh`), regroupés par fichier et par fil, avec une correction proposée pour chaque point encore ouvert |
+
+**Garde-fou de sécurité à l'écriture** (l'équivalent du plugin `security-guidance` de Claude
+Code, inclus d'office) : quand l'agent écrit ou modifie un fichier avec un motif risqué, le
+résultat de l'écriture porte une remarque qui lui demande de corriger ou de justifier. Motifs
+suivis : expression `${{ github.event… }}` dans un workflow GitHub, `exec`/`execSync` avec une
+commande composée, `new Function`, `eval`, `dangerouslySetInnerHTML`, `document.write`,
+`innerHTML`, `pickle.load`, `os.system`, `subprocess(..., shell=True)`, `yaml.load` sans
+`SafeLoader`, requête SQL composée par concaténation ou f-string, vérification TLS coupée, secret
+en clair (clés AWS, GitHub, OpenRouter, Anthropic, Slack, clés privées). Une règle n'est signalée
+qu'une fois par fichier et par session ; l'écriture a lieu dans tous les cas.
+`"securityGuidance": false` dans les réglages ou `CLAW_SECURITY_GUIDANCE=0` le désactivent.
 
 L'outil `Agent` délègue à des sous-agents **synchrones** qui renvoient leur rapport :
 `architect`, `reviewer`, `auditor` (lecture seule), `tester` (corrige), `Explore`, `Plan`,
@@ -374,6 +490,61 @@ forme `mcp__<serveur>__<outil>` et sont aussi disponibles pour les sous-agents.
   `NotebookEdit`) pendant les n derniers tours et ramène la conversation avant eux ;
   `/checkpoints` liste les points de restauration. Les modifications faites par des commandes
   shell ne sont pas suivies.
+- **Compacter à la demande** : `/compact [consigne]` fait résumer l'historique par le modèle tout
+  de suite, même sous le seuil automatique ; la consigne dit ce qu'il faut garder
+  (`/compact garde les erreurs de build et le plan de migration`). Les hooks `PreCompact` la
+  reçoivent dans `custom_instructions`.
+
+### Travail continu, apartés et routines
+
+Les équivalents gratuits des commandes de Claude Code pour travailler longtemps sans surveiller :
+
+| Commande | Effet |
+|---|---|
+| `/goal <condition>` | Claw travaille jusqu'à ce que la condition soit remplie : après chaque tour, un contrôle (sans outils, hors conversation) répond « atteint » ou « pas encore, parce que… », et Claw continue avec cette raison. Pause sur `Échap`, après `CLAW_GOAL_MAX_TURNS` tours (12) ou quand deux contrôles de suite donnent la même raison. `/goal` montre l'état, `/goal reprendre` relance, `/goal clear` efface. La ligne d'état affiche `◎ objectif actif`. |
+| `/loop [intervalle] [demande]` | Dans le terminal : relance la demande (ou `/ma-commande`) entre les tours, la saisie restant libre : toutes les `5m`, `1h`… ; sans intervalle, Claw choisit l'attente ; seul, `loop.md` ou une passe d'entretien. `/loop list`, `/loop stop [id]`. Voir « Tâches planifiées ». Même fonctionnement dans la page web. |
+| `/schedule <horaire> <demande>` | Routine qui tourne chez GitHub, ordinateur éteint : un workflow `.github/workflows/claw-routine-<nom>.yml` lance l'action Claw selon l'horaire avec un modèle gratuit d'OpenRouter, et ouvre une pull request si des fichiers changent. Horaires : `horaire`, `quotidien[@HH:MM]`, `jours-ouvres[@HH:MM]`, `hebdo[@jour-HH:MM]` (heure UTC, ou `@09:00+02:00`), ou `"M H J M S"` en cron. `/schedule` liste, `/schedule delete <nom>` supprime. La demande est rangée à part dans `.github/claw-routines/<nom>.md`. |
+| `/btw <question>` | Question en aparté : réponse courte du modèle sans outils, qui n'entre pas dans la conversation et n'interrompt pas la tâche. |
+| `/recap` | Bilan de la session : demandes, travail fait, reste à faire, prochaine étape. Hors conversation. |
+| `/copy [n]` | Copie la dernière réponse (ou la n-ième en partant de la fin) dans le presse-papiers (PowerShell, `pbcopy`, `wl-copy`, `xclip` ou `xsel`, sinon la séquence OSC 52 du terminal, qui marche aussi par SSH). |
+| `/rename [titre]` | Titre de la session en cours ; sans titre, le modèle en propose un d'après la conversation. |
+| `/output-style [nom]` | Style des réponses : `default`, `explanatory` (explique ses choix avec des encarts « ※ Insight »), `learning` (vous fait écrire les morceaux de logique qui comptent, marqués `TODO(human)`), `concise`. `/output-style new <nom>` crée un style à vous dans `.claw/output-styles/` (fichier Markdown avec `name` et `description` en en-tête) ; ceux de `~/.claw/output-styles/` valent pour tous les projets. Le choix est enregistré dans `.claw/settings.local.json` (`"outputStyle"`). |
+
+Activer une routine créée par `/schedule` :
+
+```bash
+git add .github && git commit -m "Routine" && git push
+gh secret set OPENROUTER_API_KEY          # clé gratuite : https://openrouter.ai/keys
+# Settings › Actions › General : « Allow GitHub Actions to create and approve pull requests »
+gh workflow run claw-routine-<nom>.yml    # essai immédiat
+```
+
+L'action utilisée est `abasse-ali/claw_code/.github/actions/claw@main` ; `CLAW_ROUTINE_ACTION` ou
+la clé `"routineAction"` des réglages en choisissent une autre (fork, version figée).
+
+**Ligne d'état personnalisée** : comme dans Claude Code, la clé `statusLine` des réglages
+remplace la ligne sous la saisie par la sortie d'une commande (trois lignes au plus). La commande
+reçoit sur son entrée standard un JSON avec `session_id`, `transcript_path`, `cwd`,
+`model.id`, `workspace.current_dir`, `permission_mode`, `output_style.name`,
+`context_window.used_percentage`, `cost.total_cost_usd` et `goal`. Une commande en échec, muette
+ou plus lente que `timeout` (2 s par défaut) laisse la ligne intégrée.
+
+```json
+{ "statusLine": { "type": "command", "command": "~/.claw/statusline.sh", "timeout": 2 } }
+```
+
+```bash
+#!/bin/sh
+# ~/.claw/statusline.sh : modèle, dossier et contexte
+input=$(cat)
+model=$(printf '%s' "$input" | jq -r '.model.id')
+dir=$(printf '%s' "$input" | jq -r '.workspace.current_dir' | xargs basename)
+used=$(printf '%s' "$input" | jq -r '.context_window.used_percentage // 0')
+printf '%s · %s · contexte %s %%\n' "$model" "$dir" "$used"
+```
+
+Avec `claw --resume <session>`, `/copy`, `/rename`, `/output-style` et `/schedule` marchent aussi ;
+`/goal`, `/loop`, `/btw` et `/recap` demandent une session interactive.
 
 ### Hooks
 
@@ -393,16 +564,58 @@ format que Claude Code, ou une simple liste de commandes) :
 | Événement | Quand | Code de sortie 2 |
 |---|---|---|
 | `PreToolUse` / `PostToolUse` | avant / après un outil (`matcher` : nom d'outil, `Edit\|Write`, regex) | refuse l'appel / marque une erreur |
+| `PostToolUseFailure` | après un outil en échec (en plus de `PostToolUse`), avec `error` | marque une erreur |
+| `PermissionRequest` | avant de demander une autorisation à l'utilisateur | refuse à sa place |
 | `UserPromptSubmit` | à chaque demande ; stdout ajouté au contexte | rejette la demande |
 | `Stop` / `SubagentStop` | fin de tour de l'agent / d'un sous-agent | relance l'agent avec la raison (5 fois max) |
+| `SubagentStart` | un sous-agent démarre (`matcher` : son type) ; stdout ajouté à sa demande | - |
 | `SessionStart` / `SessionEnd` | début (`startup`, `resume`, `clear`) / fin de session | - |
-| `PreCompact` | avant une compaction (`auto`, `manual`) | - |
+| `PreCompact` | avant une compaction (`auto`, `manual`), avec la consigne de `/compact` | - |
 | `Notification` | quand une autorisation est demandée (en arrière-plan) | - |
 
-Chaque hook reçoit sur stdin un JSON (`hook_event_name`, `session_id`, `cwd`, champs de
-l'événement). La raison d'un blocage est lue sur stderr (sinon stdout). La sortie JSON de
-Claude Code est comprise (`decision: "block"`, `hookSpecificOutput.additionalContext`…). Délai
-par défaut : 60 s. Les hooks des plugins sont aussi appliqués. `/hooks` affiche la configuration.
+Chaque hook reçoit un JSON (`hook_event_name`, `session_id`, `cwd`, champs de l'événement) ;
+une commande le lit sur stdin et a aussi `CLAW_PROJECT_DIR` (et `CLAUDE_PROJECT_DIR`), la
+racine du dépôt. La raison d'un blocage est lue sur stderr (sinon stdout). Délai par défaut :
+60 s. Les hooks des plugins sont aussi appliqués. `/hooks` affiche la configuration.
+
+**Types de hooks** (champ `type`, comme dans Claude Code) :
+
+- `command` : commande shell (par défaut).
+- `http` : POST du JSON vers `url` ; `headers` accepte `${VAR}` (variable d'environnement). Une
+  réponse 2xx se lit comme la sortie d'une commande (texte ou JSON) ; un autre statut avertit.
+- `prompt` : la consigne (`prompt`, où `$ARGUMENTS` est remplacé par le JSON de l'événement) est
+  posée à un modèle gratuit (`model`, sinon le modèle par défaut, avec les modèles de second
+  avis en secours), qui répond `{"ok": true}` ou `{"ok": false, "reason": "…"}` : un garde-fou
+  en langage naturel, sans script à écrire.
+- `"async": true` sur n'importe quel hook : lancé sans attendre (journalisation, notifications),
+  son résultat est ignoré.
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "prompt",
+      "prompt": "Bloque toute commande qui supprime ou déplace des fichiers. $ARGUMENTS" }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "http", "url": "https://journal.exemple/claw",
+      "headers": { "Authorization": "Bearer ${JOURNAL_TOKEN}" }, "async": true }] }]
+  }
+}
+```
+
+**Sortie JSON** (format de Claude Code) : `decision: "block"` et `reason` ;
+`hookSpecificOutput.additionalContext` ; `systemMessage` ; pour `PreToolUse`,
+`permissionDecision` : `deny` (refus), `allow` (autorisé sans demander, seules les règles
+`deny` s'appliquent encore), `ask` (l'utilisateur confirme même si le mode l'autoriserait) et
+`updatedInput` (arguments de l'outil remplacés, par exemple une commande corrigée) ; pour
+`PermissionRequest`, `decision: {"behavior": "allow" | "deny", "message"}` ; sur
+`PreToolUse` et `PostToolUse`, `"continue": false` (avec `stopReason`) arrête l'agent : les
+appels restants de la réponse ne sont pas exécutés et le tour se termine. Les hooks
+`PreToolUse` passent désormais avant le contrôle des autorisations, comme dans Claude Code.
+
+**Règles depuis la session** : `/permissions allow <règle>`, `/permissions deny <règle>`,
+`/permissions ask <règle>` ajoutent une règle à `.claw/settings.local.json` (et l'appliquent
+aussitôt) ; `/permissions remove <règle>` la retire ; `/permissions rules` les liste.
+Exemples de règles : `Bash(npm test:*)`, `Edit(src/**)`, `WebFetch(domain:docs.rs)`,
+`mcp__serveur`.
 
 ### Commandes personnalisées
 
@@ -431,7 +644,7 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
 - **OpenRouter** (`vendeur/modèle`, ex. `qwen/qwen3-coder:free`) et **Anthropic** (`claude-…`).
 - **Serveurs compatibles OpenAI** avec un préfixe `nom:` : `ollama:qwen2.5-coder:7b`,
   `lmstudio:…`, `llamacpp:…` (locaux, sans clé, hors ligne) ; `groq:`, `mistral:`, `deepseek:`,
-  `gemini:`, `cerebras:`, `together:`, `fireworks:` (clé `<NOM>_API_KEY`). Adresse modifiable par
+  `gemini:`, `cerebras:`, `nvidia:`, `together:`, `fireworks:` (clé `<NOM>_API_KEY`). Adresse modifiable par
   `<NOM>_BASE_URL` (et `OLLAMA_HOST`). Vos propres serveurs :
 
   ```json
@@ -465,7 +678,14 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
   l'outil, avant ses arguments. Claw ne prend pas cet appel vide pour un vrai : la réponse est
   redemandée deux fois au même modèle, puis la barre vous propose de réessayer, de changer de
   modèle ou d'arrêter. Si c'est la limite de sortie du modèle qui a coupé les arguments, rien
-  n'est exécuté et le modèle est invité à envoyer un appel plus petit. Dans tous les cas, un
+  n'est exécuté et le modèle est invité à envoyer un appel plus petit. De même quand la réponse
+  s'arrête au milieu de longs arguments (4 000 caractères ou plus, la même requête serait
+  coupée au même endroit) ou à la dernière tentative sans personne pour décider : le modèle
+  apprend après combien de caractères son appel a été coupé et comment écrire un long fichier
+  en plusieurs parties, au lieu de perdre le tour. Un fournisseur qui arrête la réponse sur
+  `finish_reason: "error"`, sans autre message, est en panne (502) : la requête repart sur un
+  autre modèle, comme après une erreur 504. Vu dans un essai réel : un `write_file` de page web
+  coupé après son chemin, trois fois de suite, puis le tour abandonné. Dans tous les cas, un
   appel sans ses arguments obligatoires (ou au JSON invalide) revient au modèle avec ce qu'il
   manque, **sans vous demander d'autorisation** pour une modification vide. Les sous-agents
   ont le même contrôle.
@@ -579,7 +799,11 @@ applique**, quel que soit le modèle.
 | Aide | Ce que fait Claw | Couper |
 |---|---|---|
 | Vérification imposée | Quand le modèle dit avoir fini après avoir modifié des fichiers, Claw lance la vérification du projet (`cargo check`, `go build`, `tsc`, tests Python… ou `"verify"` ; des tests Python écrits pour pytest, qui l'importent ou ne sont que des fonctions `test_...`, sont lancés avec pytest s'il est installé, même sans fichier de réglage). En cas d'échec, la sortie repart au modèle, qui corrige (3 corrections au plus) ; si cela échoue encore, Claw l'annonce : « le travail n'est pas validé » | `CLAW_VERIFY=0` |
-| Syntaxe immédiate | Après chaque modification, contrôle de syntaxe du fichier (JSON, Python, JavaScript, Rust, Go, shell) ; l'erreur est jointe au résultat de l'outil | `CLAW_DIAGNOSTICS=0` |
+| Syntaxe immédiate | Après chaque modification, contrôle de syntaxe du fichier (JSON, Python, JavaScript, Rust, Go, shell, l'imbrication des balises HTML : un élément fermé par la balise d'un parent, une balise de fin orpheline, avec leurs lignes ; et, avec leur propre analyseur, PowerShell, TypeScript, CSS et TOML) ; l'erreur est jointe au résultat de l'outil. Un script PowerShell est lu par l'analyseur de Windows PowerShell 5.1, celui de tout Windows : la syntaxe de PowerShell 7 (`&&`, `??`, `?:`) y est une erreur, comme chez l'utilisateur, sauf si le script demande la version 7 (`#Requires -Version 7`). Un fichier TypeScript est débarrassé de ses types par Node avant d'être lu (`node --check` seul le lit comme du JavaScript et se trompe). Vu dans un essai réel : deux `<article>` restés ouverts défaisaient les cartes d'une page sans que rien ne le signale | `CLAW_DIAGNOSTICS=0` |
+| Pièges du code | Un fichier de code qui vient d'être écrit est relu pour les pièges qui font un code faux sans erreur de syntaxe, chacun avec sa ligne et sa correction, dit une fois par tour. **Python** (par l'interpréteur lui-même, `ast` et `symtable`) : un nom jamais défini, importé ni intégré (une faute de frappe, un import oublié), un `f` oublié devant une chaîne qui montre `{total}` telle quelle, un argument par défaut mutable, `is` devant un littéral, un `except:` nu ou un `except Exception: pass`, `open()` ou `read_text()` sans `encoding=` (le code de page de Windows abîme les accents), `__name__ == "main"`. **PowerShell** : `>` ou `<` dans une condition (ils redirigent vers un fichier), `$null` à droite d'une comparaison (un tableau à gauche est filtré), `=` dans une condition, un paramètre de PowerShell 7 dans un script pour 5.1, `Out-File` ou `Set-Content` sans `-Encoding` (UTF-16 ou Windows-1252 en 5.1), un `try` autour de commandes de fichiers ou de services dont le `catch` ne voit jamais les échecs. **Batch** : une étiquette introuvable, `set x = y` (le nom prend l'espace), `%var%` lu dans le bloc `( )` qui la change, un `)` dans un `echo` de bloc, `if %X%==` sans guillemets, `exit` sans `/b`, des accents sans `chcp 65001`. **Shell** : shellcheck s'il est installé. **PowerShell lancé depuis bash** : une commande `powershell -Command "…"` entre guillemets doubles avec des `$` voit ses variables remplacées par bash avant que PowerShell ne la lise (vu dans un essai réel : `$_.FullName` devenu `14377.FullName`, quatre essais perdus) ; Claw le dit au modèle, avec la correction (guillemets simples, ou `-File`). Essayé sur des scripts écrits par des professionnels (`gradlew.bat`, `Activate.ps1`, l'intégration de terminal de VS Code, l'installateur de Claw) et 40 fichiers Python : un seul constat, juste | `CLAW_PITFALLS=0` |
+| Conventions des scripts | Ce que l'interpréteur exige est imposé à l'écriture, à la création comme à chaque modification : un `.bat` ou un `.cmd` en fins de ligne CRLF et sans BOM (en LF, `cmd.exe` perd ses étiquettes et `goto` échoue ; un BOM casse la première commande), un script shell en LF (bash échoue sur CRLF : `$'\r': command not found`), un script PowerShell accentué en UTF-8 avec BOM (Windows PowerShell 5.1 lit sinon le fichier en Windows-1252). Le résultat de l'outil le dit au modèle | (toujours) |
+| Méthode de code | Votre demande écrit ou corrige du code et nomme son langage (« écris un script PowerShell », « corrige le script Python ») : Claw joint la méthode d'un ingénieur soigneux, commune à tout code (dire ce qui entre, ce qui sort et les cas qui cassent un code naïf : entrée vide ou absente, chemin avec espaces ou accents, fichier verrouillé, deuxième lancement ; ne jamais inventer une API ; une erreur jamais avalée ; aucun secret ni chemin personnel dans le code ; finir en le lançant), puis les règles du langage : Python, PowerShell (viser 5.1, `[CmdletBinding(SupportsShouldProcess)]`, `Set-StrictMode`, `$ErrorActionPreference = 'Stop'`, `-WhatIf` sur tout changement, `-LiteralPath`, `$LASTEXITCODE`), batch (`setlocal EnableDelayedExpansion`, tout entre guillemets, `!var!` dans les blocs, `if errorlevel 1`, `exit /b`), Bash (`set -euo pipefail`, guillemets, `mktemp` et `trap`), JavaScript et TypeScript (promesses toutes attendues, `process.exitCode`, mode strict sans `any`), et plus court Rust, Go, C#, Java, PHP et SQL. Le premier fichier écrit dans un langage pendant le tour reçoit aussi ses règles et la commande pour l'essayer | `CLAW_CODE_GUIDE=0` |
+| Script jamais lancé | Le modèle a écrit dans le tour un script (un `.ps1`, un `.bat`, un script shell, un fichier Python avec `__main__` ou qui lit ses arguments, un fichier JavaScript avec `process.argv`) et ne l'a lancé par aucune commande : avant de le croire fini, Claw le renvoie l'essayer sur une petite entrée sûre (`--help`, `-WhatIf`, une copie dans un dossier temporaire), lire la sortie et corriger, ou dire dans sa réponse pourquoi il ne le lance pas (supprimer de vraies données, envoyer des messages, installer). Une fois par tour, pas en lecture seule | `CLAW_RUN_SCRIPTS=0` |
 | Détection de blocage | Trois appels identiques sans effet, deux modifications ratées du même fichier, quatre échecs d'affilée, une vérification relancée alors que rien n'a changé, 40 appels dans un tour : Claw recadre le modèle | `CLAW_STALL_GUARD=0` |
 | Test réécrit | Un test (ou le script de vérification) modifié après un échec est signalé à l'utilisateur et au modèle : faire passer un contrôle en le réécrivant ne prouve rien. Seules comptent les lignes qui existaient au début du tour : corriger un test que le modèle vient d'écrire n'est pas signalé | `CLAW_TEST_GUARD=0` |
 | Carte du projet | Fichiers et principaux symboles du projet, donnés au début de la session (6 000 caractères, `CLAW_REPO_MAP_CHARS`) | `CLAW_REPO_MAP=0` |
@@ -591,7 +815,7 @@ applique**, quel que soit le modèle.
 | Second avis | L'outil `Consult` (et `/avis <question>`) pose la même question à plusieurs autres modèles ; l'agent compare et décide | `CLAW_COUNCIL=0` |
 | Leçons | L'outil `Remember` note une leçon utile au projet dans `.claw/lessons.md` (80 au plus), relue au début de chaque session | `CLAW_LESSONS=0` |
 | Modèle de planification | En mode plan, `"plannerModel"` réfléchit à la place du modèle de la session, qui exécute ensuite le plan approuvé | `CLAW_PLANNER=0` |
-| Escalade | Au deuxième échec de la vérification, ou au deuxième recadrage, Claw vous propose de confier la suite à un autre modèle (le gratuit le plus puissant en premier) ; sans réponse en 60 s, le même modèle continue. Avec `"modelSwitch": "auto"` ou sans personne pour répondre, **le modèle gratuit le plus puissant du moment** reprend la fin du tour ; le tour suivant repart avec le modèle habituel. Sans réglage à faire, et jamais vers un modèle payant | `CLAW_ESCALATION=0` |
+| Escalade | Au deuxième échec de la vérification, ou au deuxième recadrage, Claw vous propose de confier la suite à un autre modèle (le gratuit le plus puissant en premier) ; sans réponse en 60 s, le même modèle continue. Avec `"modelSwitch": "auto"` ou sans personne pour répondre, **le modèle gratuit le plus puissant du moment** reprend la fin du tour ; le tour suivant repart avec le modèle habituel. Sans réglage à faire, et jamais vers un modèle payant. De même quand le modèle ne répond rien (ni texte ni appel) deux fois dans un tour : un autre modèle reprend au lieu de perdre le tour | `CLAW_ESCALATION=0` |
 | Erreurs de l'éditeur | Avec l'extension VS Code : quand le tour a modifié des fichiers, Claw demande à l'éditeur les erreurs qu'il y voit (compilation, types, lint) et les renvoie au modèle, deux fois au plus par tour. L'outil `EditorDiagnostics` permet aussi au modèle de les lire quand il veut | `CLAW_EDITOR_DIAGNOSTICS=0` |
 | Contrôle des exigences | Quand le tour a modifié au moins 5 lignes et que la vérification passe, le modèle liste chaque partie de la demande (chaque page, fonction, fichier ou explication demandée ; après « reprendre », la demande poursuivie) et chaque exigence de la documentation du code (cas limites compris), puis donne pour chacune sa preuve : le code qui la couvre et le test ou la commande qui montre qu'elle marche. Ce qui manque est fait tout de suite, pas annoncé ni laissé à l'utilisateur. Sa réponse finale ne peut affirmer que ce que ce contrôle a établi, et nomme ce qui n'est pas fait ou pas vérifié. Il n'invente ni tests ni résultats. Pour les genres de fonctionnalité que nomme la demande (voir « Cas limites »), Claw rappelle aussi ce qu'un ingénieur expérimenté vérifie d'office : pour une recherche, les accents et les majuscules, les espaces, la recherche vide, plusieurs mots, le `+` d'une URL. Les phrases de la demande qui laissent une action à une personne y sont citées telles quelles, avec ce qu'il faut vérifier : rien n'est fait à sa place, les autres sont refusés. Une requête de plus par tour concerné | `CLAW_CHECKLIST=0` |
 | Contexte allégé | Les résultats d'outils gardés dans la session ne répètent pas au modèle ce qu'il vient d'écrire (ancien et nouveau texte d'une modification, contenu d'un fichier écrit, état du bac à sable d'une commande, liste de tâches qu'il vient d'envoyer : il en reste le nombre de tâches faites et celle en cours) | `CLAW_LEAN_RESULTS=0` |
@@ -610,7 +834,10 @@ applique**, quel que soit le modèle.
 | Essais regroupés | Trois réponses de suite faites d'une seule lecture ou d'une seule commande (même refusée par le programme essayé) : Claw demande de regrouper ce qui est déjà prévu (plusieurs appels dans une réponse, commandes enchaînées), chaque réponse coûtant une requête du quota, et montre les trois dernières commandes réunies en un seul appel. Redit à la sixième et à la neuvième réponse isolée, trois fois au plus par tour. De même quand une réponse ne fait que mettre à jour la liste de tâches alors que du travail suit : la mise à jour part avec l'appel suivant | `CLAW_BATCH_CALLS=0` |
 | Compte rendu gardé | Après un contrôle de Claw qui n'a rien fait changer, le modèle répond parfois en quelques lignes (« la relecture confirme... ») au lieu de redonner son compte rendu. Quand cette réponse fait moins du tiers de la précédente, Claw remet le compte rendu devant elle : le dernier message, le seul que vous lisez, reste complet, et la page rouvre la réponse qu'elle avait repliée | `CLAW_KEPT_ANSWER=0` |
 | Relecture inutile | Le modèle relit un fichier qui n'a pas changé depuis sa lecture précédente (souvent juste avant de le modifier, par habitude) : la conversation ne garde que la copie la plus récente, et quand les deux lectures sont du même tour, Claw lui dit que celle-ci ne lui a rien appris pour le prix d'une requête, deux fois au plus par tour. Vu dans un essai réel : quatre requêtes sur les dix premières | `CLAW_REPEATED_READS=0` |
-| Cas limites | Quand votre demande nomme un genre de fonctionnalité (recherche ou filtre, montants, dates, CSV ou Excel, pagination, formulaires, envois de fichiers, comptes, tris, soldes et réservations, doublons, adresses e-mail et téléphones, bases SQL, clés d'API, OCR et traduction, images, appels à un service extérieur, liaison entre front et back, API JSON, code d'une page web, données gardées en JSON, fichiers texte sous Windows, scripts en ligne de commande), Claw joint pour le modèle, dès le départ, ce qu'un ingénieur expérimenté vérifie d'office pour ce genre-là (pour une recherche : accents et majuscules, « oeufs » pour « Œufs », recherche vide, plusieurs mots, le `+` d'une URL ; pour des dates : « 03/04 » est le 3 avril, une fin avant le début est refusée, le dernier jour compte), puis le rappelle, chaque point à prouver, au contrôle des exigences ou à la demande de preuves d'un problème signalé, et le relecteur le confronte au code. Chaque rappel nomme le piège précis (par exemple : `replace(" ", "")` ne retire pas l'espace insécable qu'écrit Excel) : un rappel général ne changeait rien. Les faits cités ont été vérifiés sur une vraie machine (Python 3.13 sous Windows, Pillow, OpenCV, Node), et les mots qui reconnaissent un genre évitent les faux amis (« sortie », « format », « Excellent », « erreur de connexion »). Chaque essai porte le résultat attendu : sans lui, un modèle gratuit faisait les essais qui confirmaient son code. Et une ligne qui s'applique fait partie de la demande, même si vous ne l'avez pas écrite : sans cette phrase, un modèle a lu la ligne des doublons puis l'a écartée parce que la demande « ne le dit pas explicitement ». Mesuré sur des essais réels : 9/12 devient 12/12 (recherche), 3/4 devient 4/4 (CSV), 10/12 devient 12/12 (dates et soldes), 11/12 sans l'aide devient 12/12 (doublons) | `CLAW_EDGE_CASES=0` |
+| Cas limites | Quand votre demande nomme un genre de fonctionnalité (recherche ou filtre, montants, dates, CSV ou Excel, pagination, formulaires, envois de fichiers, comptes, tris, soldes et réservations, doublons, adresses e-mail et téléphones, bases SQL, clés d'API, OCR et traduction, images, appels à un service extérieur, liaison entre front et back, API JSON, code d'une page web, données gardées en JSON, fichiers texte sous Windows, scripts en ligne de commande), Claw joint pour le modèle, dès le départ, ce qu'un ingénieur expérimenté vérifie d'office pour ce genre-là (pour une recherche : accents et majuscules, « oeufs » pour « Œufs », recherche vide, plusieurs mots, le `+` d'une URL ; pour des dates : « 03/04 » est le 3 avril, une fin avant le début est refusée, le dernier jour compte), puis le rappelle, chaque point à prouver, au contrôle des exigences ou à la demande de preuves d'un problème signalé, et le relecteur le confronte au code. Chaque rappel nomme le piège précis (par exemple : `replace(" ", "")` ne retire pas l'espace insécable qu'écrit Excel) : un rappel général ne changeait rien. Les faits cités ont été vérifiés sur une vraie machine (Python 3.13 sous Windows, Pillow, OpenCV, Node), et les mots qui reconnaissent un genre évitent les faux amis (« sortie », « format », « Excellent », « erreur de connexion », les « horaires » d'ouverture d'un site vitrine). Chaque essai porte le résultat attendu : sans lui, un modèle gratuit faisait les essais qui confirmaient son code. Et une ligne qui s'applique fait partie de la demande, même si vous ne l'avez pas écrite : sans cette phrase, un modèle a lu la ligne des doublons puis l'a écartée parce que la demande « ne le dit pas explicitement ». Mesuré sur des essais réels : 9/12 devient 12/12 (recherche), 3/4 devient 4/4 (CSV), 10/12 devient 12/12 (dates et soldes), 11/12 sans l'aide devient 12/12 (doublons) | `CLAW_EDGE_CASES=0` |
+| Méthode de design | Votre demande construit ou refait une interface web (« crée un site vitrine », « rends la page plus belle », « build a landing page » ; aussi un message court qui poursuit une telle demande, comme « plus coloré ») : Claw joint pour le modèle la méthode d'un studio exigeant, avec des cibles chiffrées plutôt que des conseils. D'abord un brief (sujet, public, rôle de la page, vrai contenu dans votre langue), puis un plan écrit avant le code : 4 à 6 couleurs nommées tirées du monde du sujet (l'accent sur un dixième de la page au plus, chaque texte vérifié à 4,5:1), une police de titre et une police de texte choisies pour le sujet (jamais Inter, Roboto, Arial, Montserrat, Poppins, Playfair Display, Space Grotesk...), une échelle typographique de 5 à 7 tailles (h1 d'au moins 3rem, corps 16 à 18px, interligne 1,5 à 1,7, lignes de 45 à 75 caractères), une échelle d'espacement en multiples de 8px, une composition qui change d'une section à l'autre, une maquette ASCII du premier écran, un élément mémorable, les **interactions** que le sujet appelle, prises dans l'outil `Component` (une réservation pour des cours, les horaires en direct et l'itinéraire pour une boutique, un filtre pour un catalogue, un panier pour des produits ; deux ou trois, pas toutes), et une idée de **mouvement** mesurée (une entrée au premier écran, quelques apparitions au défilement, des chiffres qui montent, un seul effet de défilement). Seuls `transform` et `opacity` s'animent : 150 à 250 ms au survol, 400 à 700 ms pour une entrée, rien ne tourne en boucle sauf un détail lent, et aucun contenu n'attend un script pour se voir. Les marques d'une page générée (bandeau uni avec « Bienvenue » centré, cartes identiques, trait sous chaque titre, badges en capitales, emoji à la place des photos, fondu sur chaque section, dégradés partout...) sont **interdites** sauf demande du brief, et le modèle doit écrire qu'il n'en a utilisé aucune. Les emoji sont interdits sans aucune exception : chaque icône et pictogramme vient de l'outil `Icon`, chaque forme décorative de l'outil `Ornament`, chaque photo du sujet de l'outil `Photo`, et un emoji plafonne la note de finition du juge à 4. Dès qu'un fichier d'interface écrit en contient un, Claw le dit au modèle avec sa ligne, avant même de regarder la page (les flèches, puces, étoiles de notation et signes légaux ne comptent pas). Viennent ensuite un plancher de qualité (variables CSS pour chaque couleur, taille et espace ; un seul h1 ; menu replié au téléphone qui s'ouvre vraiment ; en-tête fixe qui ne cache rien ; états hover, focus-visible et active sur chaque élément interactif ; cibles de 44px au téléphone ; champs étiquetés au style de la page, erreurs après la saisie seulement ; `prefers-reduced-motion`), des liens et boutons qui mènent quelque part, puis la vérification par `Screenshot`, et une auto-notation stricte de 1 à 10 sur sept critères avant de répondre : tout critère sous la barre (`CLAW_DESIGN_BAR`, 8 par défaut) est à relever d'abord. La méthode donne aussi un **socle de code à recopier tel quel** : le lien Google Fonts au bon format (`css2?family=` : une autre forme ne charge rien, et la page tombe en Times et Arial), `box-sizing`, un conteneur, `min-width: 0` sur les éléments des grilles, la police héritée des champs, les états hover, focus-visible et active, `:user-invalid`, `[hidden]`, `prefers-reduced-motion`, et les pièges vus dans les essais (une version masquée par une media query sans l'autre, une largeur en `vw`). Les revues portent ainsi sur le design, plus sur ces réparations. Les icônes viennent de l'outil `Icon`, et ne se dessinent jamais à la main, pas même une flèche, une coche, une croix ou la flèche d'une liste déroulante en adresse `data:` (voir « Icônes jamais dessinées à la main ») ; les formes décoratives (galets, vagues, arches, médaillons, rameaux, soleils, textures de points, de lignes, de courbes de niveau ou de grain) de l'outil `Ornament`, tracées par formules aux couleurs du plan ; les photos du sujet de l'outil `Photo`. Une illustration que le modèle dessine encore lui-même reste simple et géométrique. Les juges le savent : ils proposent une photo par ce qu'elle doit montrer, ou un ornement par sa sorte et sa place, plutôt qu'une scène dessinée à la main. Vu dans les essais réels : les illustrations faites main (des arches en forme de cuillère, des avatars en goutte, une vague coupée) laissaient l'identité et la finition sous la barre. **Avant le code**, quand le modèle a posé son plan (au moins trois couleurs en hexadécimal) et s'apprête à écrire un fichier d'interface, un autre modèle juge la direction (identité, hiérarchie, typographie, couleur, composition) : cinq changements au plus, ou rien à redire, joints au résultat de l'écriture. Changer un plan ne coûte rien, changer une page faite coûte une réécriture : une requête de plus, une fois par tour. **Un tour de design a 160 requêtes** au lieu de 100, sauf si vous avez réglé la limite vous-même (`turnRequestLimit`, `CLAW_TURN_REQUESTS`) : plan, code, captures et revues dépassaient le budget ordinaire, et la deuxième revue n'avait jamais lieu. Avec `designModel` (voir `/models bench --design`), le tour de design est confié à ce modèle, et le modèle de la session reprend à la fin du tour | `CLAW_DESIGN_GUIDE=0` |
+| Revue visuelle | Le modèle a modifié l'interface (HTML, CSS, JS, composants) et dit avoir fini : Claw regarde la page comme un utilisateur. Il prend des captures pleine page au téléphone et à l'ordinateur (la page que le modèle a regardée, sinon le `index.html` modifié), relève les défauts mesurés par `Screenshot` et les erreurs de la console, puis fait **noter** les captures par un modèle gratuit qui voit, en directeur artistique difficile : une note de 1 à 10 sur sept critères (téléphone, hiérarchie, espacement, typographie, couleur, identité, finition ; 5 un gabarit correct, 8 ce qu'un bon studio signe, 10 digne d'un prix), puis, pour chaque critère sous la barre (`CLAW_DESIGN_BAR`, 8 par défaut, de 5 à 10), les changements exacts qui le relèvent (propriétés CSS, structure, texte), huit au plus. À partir de la deuxième revue, le juge reçoit ses notes précédentes comme repère : il garde la même échelle, et un écart de deux points ou plus doit être justifié par ce qu'il voit (vu dans un essai réel, le même juge avait noté 7,9 puis 6,0 une page qui s'était améliorée). Un « rien à changer » du juge ne compte pas tant qu'une note reste sous la barre, et les remarques de design mesurées sont à corriger, pas seulement à reconsidérer. Le tout repart au modèle, qui corrige et vérifie de nouveau ; vous voyez la note (« 6,4/10, barre 8, sous la barre : identité, finition »). À la dernière revue du tour, le modèle doit vous donner les notes et dire ce qui reste sous la barre. Trois revues au plus par tour (`CLAW_DESIGN_REVIEW_ROUNDS`, 5 au plus) ; sautée quand il reste moins de 25 requêtes gratuites dans la journée. Quand le tour a dépensé les trois cinquièmes de son budget de requêtes (`turnRequestLimit`) sans qu'une interface modifiée ait été revue, la revue a lieu tout de suite, pour que les corrections tiennent dans le budget : à la limite, la conclusion part sans aucun contrôle. Vu dans un essai réel : un modèle a consommé ses 100 requêtes à se corriger seul, et la limite a emporté la revue avec elle. **Poursuite jusqu'à la barre** : quand le tour touche sa limite de requêtes ou de revues avec une note sous la barre, il continue, de 60 requêtes ou d'une revue de plus, tant que la note monte d'une revue à l'autre (de 0,2 point au moins). Chaque poursuite demande une nouvelle revue notée ; deux au plus par tour (`CLAW_DESIGN_CONTINUE`, 0 les coupe, 5 au plus), aucune quand il reste moins de 150 requêtes gratuites dans la journée. Vous le voyez (« Poursuite du design (1/2, limite du tour) : note 6,0/10, sous la barre 8 (identity, finish) ; le tour continue »), et quand le tour s'arrête sous la barre, vous lisez pourquoi (« Design arrêté sous la barre 8 (note 6,0 puis 6,1/10) : la dernière revue n'a pas fait monter la note ») | `CLAW_DESIGN_REVIEW=0` |
+| Photos libres | L'outil `Photo` cherche des photos sous licence libre (CC0, domaine public, CC BY, CC BY-SA) par mots anglais, sur Openverse puis Wikimedia Commons, sans clé ni compte, et les enregistre dans le projet (`images/` par défaut) avec leur taille réelle et un crédit à mettre en pied de page, aussi écrit dans `images/CREDITS.md`. Chaque photo suit le résultat en image, comme une capture : le modèle (ou le lecteur d'images, pour un modèle qui ne les lit pas) juge si elle montre bien le sujet ; vu dans un essai réel, « yoga teacher portrait » a donné une séance de Pilates sur machine. Une recherche qui ne trouve rien est reprise avec ses trois puis ses deux premiers mots : chaque mot doit figurer dans la photo, et « yoga studio interior natural light wooden floor » ne trouvait rien là où « yoga studio interior » donnait dix photos. Ce qui vient de ces services est traité comme une donnée étrangère : un fichier n'est gardé que s'il est bien une image JPEG, PNG ou WebP de 8 Mo au plus, en `https`, écrit dans un dossier du projet et jamais ailleurs ; titres et auteurs sont nettoyés et échappés. La méthode de design demande de regarder chaque photo dans la page : une photo qui ne va pas au sujet est pire qu'aucune | `CLAW_PHOTOS=0` |
 
 **Mode équipe : le bon modèle pour chaque étape.** Au lieu d'un seul modèle pour tout, Claw
 confie chaque étape du travail au modèle gratuit le plus fort pour elle, et change de modèle
@@ -750,6 +977,7 @@ session est reprise.
   "advisorModels": ["nvidia/nemotron-3-ultra-550b-a55b:free", "cohere/north-mini-code:free"],
   "plannerModel": "nvidia/nemotron-3-ultra-550b-a55b:free",
   "escalationModel": "free",
+  "designModel": "nvidia/nemotron-3-super-120b-a12b:free",
   "ultracode": true,
   "turnRequestLimit": 100
 }
@@ -782,6 +1010,10 @@ session est reprise.
   le choix du moment, ligne « Escalade ». Claw l'annonce (« L'agent n'avance plus : … reprend la
   fin du tour ») ; s'il est indisponible, la chaîne habituelle prend le relais. `/models bench`
   mesure chaque modèle seul, sans escalade.
+- `"designModel"` (ou `CLAW_DESIGN_MODEL`) : le modèle des tours de design, ceux où la méthode de
+  design est jointe. Claw l'annonce (« Tour de design confié à … ») et le modèle de la session
+  reprend à la fin du tour ; s'il est indisponible, la chaîne habituelle prend le relais.
+  `/models bench --design --appliquer` l'écrit pour vous ; `"off"` le coupe.
 
 Les avis des autres modèles ne sont jamais des ordres : ils reviennent au modèle de la session
 comme des remarques à confronter au code. Les diagnostics d'un serveur de langage (LSP) ne sont
@@ -853,6 +1085,18 @@ les mêmes conditions (fichiers visibles seulement, même consigne, Python autor
   seule passe donne un ordre de grandeur, pas un classement fin. Ces tâches sont petites (un à
   quatre fichiers Python) ; l'écart dû au modèle se creuse sur un vrai projet.
 
+**Design** : `claw models bench --design [--max N] [--appliquer] [modèle]` cherche le modèle
+gratuit qui fait les plus belles pages. Chaque candidat (les trois mieux classés qui marchent avec
+Claw, ou ceux du filtre) construit la même page d'accueil, celle d'un fleuriste lyonnais, avec la
+méthode de design mais sans revue ni autre modèle (on mesure le modèle, pas le juge), en 60
+requêtes au plus. Claw capture la page au téléphone et à l'ordinateur et la fait noter par le
+juge qui voit, sur les sept critères de la revue visuelle ; un modèle n'est jamais jugé par
+lui-même. Le rapport classe les modèles par note, avec les critères sous la barre, les défauts
+mesurés, la durée et le juge ; chaque page est gardée (`design-bench/<modèle>/` dans le dossier
+de configuration) pour la regarder. `--appliquer` écrit le meilleur dans `designModel`. Environ
+60 requêtes et 10 à 20 minutes par modèle ; une note varie d'un essai à l'autre, un écart de
+moins d'un point ne départage pas vraiment.
+
 Mesures sur un PC portable (i7-8750H, 16 Go, GTX 1050 4 Go, Ollama 0.40) : un modèle local de
 4 milliards de paramètres (`qwen3.5:4b`) réussit la plupart des tâches mais en 1 à 10 minutes
 chacune, `qwen2.5-coder:7b` n'appelle aucun outil. En ligne, `cohere/north-mini-code:free` a
@@ -868,12 +1112,98 @@ Claw lit aussi `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `AGENTS.md` 
 `model: sonnet` prend le modèle de la session si vous n'avez pas de clé Anthropic.
 `CLAW_NO_CLAUDE_CONFIG=1` ignore ces fichiers.
 
+**Mémoire du projet** (comme dans Claude Code) :
+
+- **Imports** : `@chemin` dans `CLAUDE.md`, `CLAW.md`, `AGENTS.md` ou une règle charge ce fichier
+  en plus (`See @README`, `@docs/git.md`, `@~/.claude/mes-preferences.md`, `@Design\ Docs/api.md`
+  pour un espace). Chemin relatif au fichier qui importe, quatre niveaux d'imports au plus,
+  ignoré dans le code (`` `@x` ``, blocs). Un import d'un fichier de projet qui sort du projet
+  (un fichier personnel par exemple) n'est chargé qu'après `/memory imports allow` : un
+  fichier commité par d'autres ne peut pas faire lire au modèle des fichiers de votre machine.
+  Les imports de vos fichiers personnels (`~/.claude/CLAUDE.md`, `~/.claw/CLAW.md`) passent.
+- **Commentaires** : les blocs `<!-- … -->` sont retirés avant l'envoi au modèle (hors code).
+- **Règles** : un fichier Markdown par sujet dans `.claude/rules/` ou `.claw/rules/` (sous-dossiers
+  acceptés, liens symboliques suivis), et `~/.claude/rules/` pour tous vos projets. Sans en-tête,
+  une règle est chargée au démarrage ; avec `paths` (`"src/api/**/*.ts"`, accolades acceptées :
+  `"src/**/*.{ts,tsx}"`), elle est donnée au modèle la première fois qu'il lit ou modifie un
+  fichier correspondant.
+- **Sous-dossiers** : le `CLAUDE.md` (ou `CLAW.md`, `AGENTS.md`) d'un sous-dossier est donné au
+  modèle la première fois qu'il touche un fichier de ce sous-dossier.
+- **`claudeMdExcludes`** (réglages, aussi lu depuis `.claude/settings.json`) : globs des fichiers
+  d'instructions à ignorer, par exemple ceux d'autres équipes dans un monorepo.
+- **`/memory`** liste les fichiers chargés (imports compris), les règles par chemin et les imports
+  externes en attente ; `/memory imports allow|deny` décide pour le projet.
+
+**Réglages généraux** (mêmes noms que dans Claude Code ; sauf `env`, ils sont aussi lus depuis
+`.claude/settings.json`) :
+
+- **`env`** : variables d'environnement appliquées au démarrage, pour Claw et tout ce qu'il lance
+  (bash, hooks, serveurs MCP). Une valeur du réglage remplace celle du shell ; `""` la vide.
+  Un fichier de projet (`.claw/settings.json`, `.claw/settings.local.json`) ne peut pas fixer
+  les clés et adresses des fournisseurs (`*_API_KEY`, `*_TOKEN`, `*_BASE_URL`, proxys),
+  `PATH`, `HOME`, les dossiers temporaires ou système : un dépôt cloné ne doit pas pouvoir
+  envoyer vos clés ailleurs. Mettez-les dans `~/.claw/settings.json` ou le shell ;
+  `/config env` liste celles qui ont été ignorées.
+- **`attribution`** : texte ajouté à la fin des commits (`commit`, par défaut
+  `Assisted-by: Claw Code`) et des descriptions de PR (`pr`, par défaut `Generated with Claw Code`) ;
+  `""` retire l'un, `"attribution": false` retire les deux. L'ancien `includeCoAuthoredBy: false`
+  est toujours compris. `/commit`, `/commit-push-pr` et `/pr` l'ajoutent eux-mêmes ; quand le
+  modèle fait un commit sans cette ligne, Claw le lui signale pour qu'il corrige le commit
+  avant de le pousser. Vos consignes (`CLAW.md`, `CLAUDE.md`) l'emportent.
+- **`includeGitInstructions: false`** (ou `CLAW_DISABLE_GIT_INSTRUCTIONS=1`) retire du prompt
+  les consignes de commit et de PR et l'état git du dépôt, par exemple si vos propres skills
+  gèrent git.
+- **`cleanupPeriodDays`** : au début d'une session, les sessions et points de restauration du
+  projet plus anciens que ce nombre de jours sont supprimés. Sans ce réglage, Claw garde tout
+  (Claude Code, lui, supprime au bout de 30 jours par défaut).
+- **`companyAnnouncements`** : annonces de l'équipe ; l'une d'elles, prise au hasard, s'affiche
+  au démarrage.
+- **`apiKeyHelper`** : une commande fournit la clé d'API (jeton de courte durée tiré d'un coffre,
+  gestionnaire de mots de passe). Sa première ligne de sortie sert de clé quand la variable du
+  fournisseur (`OPENROUTER_API_KEY`…) est absente ; elle est gardée 5 minutes
+  (`CLAW_API_KEY_HELPER_TTL_MS`) et redemandée après un refus 401 ou 403. Réglée dans
+  `~/.claw/settings.json`, elle vaut pour le fournisseur du modèle de la session ; dans
+  `~/.claude/settings.json`, pour `ANTHROPIC_API_KEY` seulement ; `providers[].apiKeyHelper` la
+  règle par fournisseur (`apiKeyEnv`). Un fichier de projet ne peut pas en régler, et une clé
+  n'est jamais donnée à un autre fournisseur que le sien.
+
 **Compétences (skills)** : un dossier `<nom>/SKILL.md` placé dans `.claude/skills/` (ou
 `.claw/skills/`, `.codex/skills/`) du projet, d'un dossier parent ou du dossier personnel. Claw
 donne au modèle le nom et la description de chacune (40 au plus) ; quand une demande y
 correspond, le modèle charge ses instructions avec l'outil `Skill` et lit les fichiers qui
 l'accompagnent. `claw skills` (ou `/skills`) les liste. Une compétence marquée
 `disable-model-invocation: true` ne se lance que par `/nom`.
+
+Les skills suivent le format de Claude Code :
+
+- **`/nom arguments`** lance le skill (le nom du dossier ou le `name` du frontmatter) ; un skill
+  passe avant une commande de `commands/` de même nom. Le menu `/` et la complétion les listent.
+- **Arguments** : `$ARGUMENTS` (tout le texte), `$ARGUMENTS[0]` ou `$0` (premier argument, `$1`
+  le deuxième…), noms déclarés dans `arguments: [issue, branch]` (`$issue`, `$branch`). Les
+  guillemets groupent un argument (`/migrer "Search Bar" JS TS`) ; sans aucun emplacement, le
+  texte est ajouté en `ARGUMENTS: …` ; `\$1` reste littéral. Variables : `${CLAUDE_SKILL_DIR}`,
+  `${CLAUDE_PROJECT_DIR}`, `${CLAUDE_SESSION_ID}`, `${CLAUDE_EFFORT}` (et `${CLAW_…}`).
+- **Contexte dynamique** : `` !`git diff HEAD` `` (en début de ligne ou après un blanc) et les
+  blocs ` ```! ` sont exécutés avant l'envoi et remplacés par leur sortie. Chaque commande passe
+  les permissions de la session sans jamais demander : une commande non autorisée d'avance
+  (lecture seule, règle `allow`, `allowed-tools` du skill) annule l'invocation, comme une commande
+  en échec (le code 1 de `grep`, `diff`, `git diff`… compte comme un résultat).
+  `"disableSkillShellExecution": true` les remplace par `[shell command execution disabled by
+  policy]` ; jamais exécutées pour un skill synchronisé de claude.ai.
+- **`allowed-tools`** : outils accordés sans demande pendant le tour qui invoque le skill (ex.
+  `Bash(git add *) Bash(git commit *)`), sans restreindre les autres ; **`disallowed-tools`** :
+  outils refusés pendant ce tour. Les règles `deny` et `ask` restent prioritaires.
+- **`model`** et **`effort`** : modèle et niveau de raisonnement le temps du tour.
+- **`context: fork`** (avec `agent: Explore`, `Plan`, `general-purpose` ou un agent de
+  `.claude/agents/`) : le skill devient la demande d'un sous-agent ; son rapport s'affiche et
+  rejoint la conversation.
+- **`user-invocable: false`** : réservé au modèle ; **`when_to_use`** complète la description ;
+  **`paths`** est signalé au modèle (« only for files matching … »).
+- **`skillOverrides`** dans les réglages (aussi lu depuis `.claude/settings.json`) : `"on"`,
+  `"name-only"` (seul le nom est donné au modèle), `"user-invocable-only"` (caché au modèle),
+  `"off"` (caché partout), sans modifier le fichier du skill.
+- Invoqué par le modèle (outil `Skill`), un skill est rendu de la même façon ; un skill réservé à
+  l'utilisateur lui est refusé avec la consigne de vous proposer `/nom`.
 
 Claw importe aussi :
 
@@ -910,7 +1240,13 @@ coupe cet import.
   n'a pu la décrire, le modèle de la session apprend qu'une image manque et peut vous demander
   de la décrire. Les images restent dans la session et repartent telles quelles si vous revenez
   à un modèle qui les lit. `"imageReader"` (ou `CLAW_IMAGE_READER`) choisit le lecteur : un
-  identifiant de modèle, ou `"off"` pour ne rien faire décrire.
+  identifiant de modèle, ou `"off"` pour ne rien faire décrire. Sans réglage, le lecteur de
+  NVIDIA passe d'abord si sa clé est là, puis ceux d'OpenRouter. Les captures que prennent les
+  outils (`Screenshot`) sont décrites en une passe, disposition, contenu, aspect et défauts
+  visibles puis un verdict, en 3 minutes au plus : la description complète en deux passes de
+  vos propres images prenait jusqu'à 12 minutes par capture. Un modèle qui refuse la requête
+  (erreur 403, « réservé aux harnais agentiques ») est écarté pour 7 jours, d'une session à
+  l'autre, au lieu d'être réessayé à chaque image.
 - **Raisonnement** : sans réglage, un modèle d'OpenRouter qui sait raisonner reçoit le plus haut
   niveau de réflexion qu'il accepte (`max`, ou `high` s'il raisonne par budget) : ses réponses
   sont plus lentes, mais plus réfléchies. `/think off|low|medium|high|max` (`max` : le plus haut
@@ -920,6 +1256,345 @@ coupe cet import.
   signés conservés et renvoyés avec les appels d'outils ; pas via OpenRouter). Le raisonnement
   s'affiche à part (une ligne `∴ Réflexion (5 s)` dans le terminal, le texte complet avec
   `CLAW_SHOW_THINKING=1` ; bloc repliable dans l'interface web) ; `off` le masque.
+
+### Travail en parallèle : worktrees, branches et sous-agents isolés
+
+Comme `claude --worktree`, Claw fait travailler plusieurs sessions ou sous-agents sur le même
+dépôt sans qu'ils se marchent dessus : chacun dans un **worktree git** (une copie de travail à
+part, sur sa propre branche), rangé dans `.claw/worktrees/<nom>`. Ce dossier est ajouté à
+`.git/info/exclude` (local : rien ne change dans le dépôt).
+
+- **`claw --worktree <nom>`** (ou `-w <nom>`, nom généré s'il manque) : la session se lance dans
+  le worktree `<nom>`, sur la branche `claw/<nom>` (créé s'il n'existe pas, rouvert sinon). À la
+  fin, un worktree créé pour la session et resté intact est retiré avec sa branche ; sinon il est
+  gardé, avec les commandes pour reprendre (`claw --worktree <nom>`) ou fusionner.
+- **Sous-agents isolés** : l'outil `Agent` accepte `isolation: "worktree"`. Le sous-agent tourne
+  alors dans un processus `claw` à part, dans un worktree neuf ; à la fin, Claw enregistre ses
+  changements dans un commit sur sa branche et dit à l'agent principal comment les relire
+  (`git diff HEAD...claw/agent-…`) et les fusionner. Un sous-agent qui n'a rien changé voit son
+  worktree retiré. Plusieurs sous-agents isolés lancés dans le même message modifient le code en
+  parallèle sans conflit.
+- **`.worktreeinclude`** à la racine du dépôt (syntaxe de `.gitignore`) : les fichiers ignorés par
+  git qu'il désigne (`.env`, configuration locale…) sont copiés dans chaque nouveau worktree.
+- **`/worktree`** : `list`, `add <nom> [branche]`, `remove <nom> [--force]` (la branche `claw/…`
+  est supprimée si elle n'a rien apporté), `prune`.
+- **`/branch`** : `list`, `create <nom>` (crée et bascule), `switch <nom>`.
+- **`/commit-push-pr [contexte]`** : sur la branche principale, crée d'abord une branche
+  `claw/<sujet>` ; puis commit (message généré), `git push -u`, et pull request rédigée par le
+  modèle (`gh pr create`), ou le lien pour l'ouvrir dans GitHub si `gh` manque.
+- **`/tasks`** (alias de `/bashes`) montre aussi les derniers sous-agents : en cours, terminé ou
+  en échec, avec le fichier de leur rapport.
+
+### Autres commandes de Claude Code
+
+| Commande | Effet |
+|---|---|
+| `/plan [demande]` | Passe en mode plan ; avec une demande, la commence aussitôt |
+| `/effort [low…max\|xhigh\|auto\|status]` | Niveau de raisonnement (alias de `/think`) |
+| `/tasks` | Ce qui tourne pour la session : commandes de fond, sous-agents, sous-tâches, tâches planifiées, sessions en arrière-plan du projet |
+| `/subtask <tâche>` | Un sous-agent reprend la conversation et travaille en arrière-plan ; son résultat revient dans la conversation dès qu'il a fini, sans interrompre votre saisie |
+| `/workflows [id]` | Exécutions des workflows de la session (phase, agents, durée), détail d'une exécution, `stop <id>`, `save <id> [nom]` ; liste les workflows enregistrés. Voir « Workflows » |
+| `/deep-research <question>` | Workflow intégré : recherches web en éventail, sources lues et recoupées, rapport cité qui revient dans la conversation |
+| `/workflow-authoring` | Référence pour écrire un workflow |
+| `/rewind` | Revient avant un message précédent (comme `Échap Échap`) |
+| `/cd <chemin>` | La session continue dans un autre dossier : ses consignes, réglages, permissions et outils s'appliquent (`/add-dir` garde au contraire le dossier actuel) |
+| `/stop` | Arrête la session en arrière-plan ouverte avec `claw attach` (conversation et worktree gardés) |
+| `/sandbox [docker\|podman\|off]` | État du bac à sable ; conteneur pour la session |
+| `/theme [nom]` | `auto`, `dark`, `light`, `dark-daltonized`, `light-daltonized`, `dark-ansi`, `light-ansi` : coloration du code, fond des blocs et couleurs du Markdown ; enregistré dans `~/.claw/settings.json` (`"theme"`) |
+| `/color [couleur\|default]` | Couleur des traits de la saisie pour la session |
+| `/terminal-setup` | Dans VS Code ou Cursor, règle `Maj+Entrée` pour un saut de ligne (copie de sauvegarde du fichier des raccourcis) |
+| `/reload-skills`, `/reload-plugins` | Relit les skills, ou recharge plugins, hooks, serveurs MCP et réglages, sans redémarrer |
+| `/usage` (`/stats`) | Coût, crédits OpenRouter et activité de la session |
+| `/insights` | Bilan d'usage du projet en HTML (`.claw/insights.html`) : outils, commandes, échecs, pistes |
+| `/release-notes` | Notes de version |
+| `/simplify [cible]` | Quatre sous-agents relisent les changements (réutilisation, simplicité, efficacité, niveau d'abstraction), puis Claw applique les corrections sans changer le comportement |
+| `/verify [quoi]` | Construit et lance l'application pour constater que le changement fait ce qu'il doit |
+| `/statusline [description]` | Écrit un script de ligne d'état et règle `statusLine` |
+| `/fewer-permission-prompts` | Relève les commandes fréquentes du projet et propose des règles `allow` pour les plus sûres (tests, builds, linters) |
+
+### Tâches planifiées : `/loop` et rappels
+
+Comme dans Claude Code, une demande peut revenir toute seule pendant la session : surveiller
+un déploiement, relancer les tests, rappeler quelque chose plus tard. Les tâches passent
+**entre deux tours** : la saisie reste libre entre les passages, et un texte en cours de frappe
+est remis dans la saisie après le passage.
+
+- `/loop 5m vérifie si le déploiement est terminé` : premier passage tout de suite, puis toutes
+  les 5 minutes (intervalle arrondi au pas cron le plus proche : `7m` devient 6 minutes ;
+  `CLAW_LOOP_MAX`, 50 par défaut, limite le nombre de passages pour ménager le quota gratuit).
+- `/loop vérifie la CI et traite les commentaires` (sans intervalle) : Claw choisit lui-même
+  l'attente après chaque passage, entre 1 minute et 1 heure (outil `ScheduleWakeup`), et arrête
+  la boucle quand le travail est fini. Sans nouveau délai, un passage de secours a lieu
+  20 minutes plus tard, puis la boucle s'arrête.
+- `/loop` seul : le contenu de `.claw/loop.md` ou `.claude/loop.md` (projet), sinon
+  `~/.claw/loop.md` ou `~/.claude/loop.md`, sinon une passe d'entretien (travail en cours,
+  pull request de la branche, petit nettoyage, rien d'irréversible sans accord).
+- `/loop list` montre les tâches ; `/loop stop` arrête les boucles, `/loop stop <id>` une tâche.
+- En langage courant : « rappelle-moi dans 45 minutes de pousser la branche », « quelles tâches
+  sont planifiées ? », « annule la vérification du déploiement ». Le modèle utilise les outils
+  `CronCreate` (expression cron à cinq champs en heure locale, récurrente ou non), `CronList`
+  et `CronDelete`.
+- Règles : 50 tâches au plus par session ; une tâche récurrente expire au bout de 7 jours ; une
+  échéance manquée pendant un long tour passe une seule fois ; les tâches sont enregistrées avec
+  la conversation (`<session>.tasks.json`) et reviennent avec `--resume`. La ligne d'état
+  indique leur nombre. Une session passée en arrière-plan (`/bg`) emporte ses tâches, qui y
+  continuent sans terminal.
+- L'heure locale vient du système (`date +%z`, ou PowerShell sous Windows) ; `CLAW_TZ_OFFSET`
+  (`+02:00`) la fixe. `CLAW_DISABLE_CRON=1` (ou `CLAUDE_CODE_DISABLE_CRON=1`) coupe tout.
+- L'interface web (`claw serve`) fonctionne de la même façon : la page reste libre entre deux
+  passages, qui y arrivent comme des tours, et le panneau Agents liste les tâches planifiées.
+
+### Sessions en arrière-plan : `claw agents`
+
+Comme la vue des agents de Claude Code : plusieurs sessions travaillent seules, sans terminal
+ouvert, et une seule vue montre lesquelles avancent, lesquelles attendent une réponse et
+lesquelles ont fini.
+
+```bash
+claw --bg "corrige le test de connexion qui échoue"      # session en arrière-plan
+claw --bg --name revue "relis la PR 12 et liste les risques"
+claw --bg --exec "cargo test"                           # commande shell en arrière-plan
+claw agents                                             # la vue des sessions
+```
+
+- **La vue** (`claw agents`) groupe les sessions par état (épinglées, attendent une réponse, en
+  cours, terminées) avec leur dernière action ou leur résultat :
+  - `↑`/`↓` choisissent une session ; `Espace` ouvre l'aperçu, où une réponse se tape
+    directement (`o` ou `n` pour une permission) ;
+  - `Entrée` ou `→` ouvrent la session dans ce terminal ; `/exit` y revient ;
+  - `Ctrl+X` arrête, et `Ctrl+X` encore la supprime ; `Ctrl+R` renomme ; `Ctrl+T` épingle ;
+  - une demande tapée en bas lance une nouvelle session (`!commande` pour un shell).
+- **Isolation** : dans un dépôt git, une session lancée en arrière-plan travaille dans son
+  propre worktree (`.claw/worktrees/bg-<id>`, branche `claw/bg-<id>`) et y committe son travail.
+  `"worktree": {"bgIsolation": "none"}` dans les réglages la fait travailler sur place.
+  `claw rm` supprime un worktree resté vide ; celui qui contient des commits est gardé, avec sa
+  branche.
+- **Permissions et questions** : une session sans terminal ne refuse pas en silence. Elle passe
+  dans « attendent une réponse » ; vous répondez depuis l'aperçu, avec `claw reply <id> o`, ou en
+  l'ouvrant. Une réponse envoyée pendant qu'elle travaille attend la fin de son tour.
+- **Depuis une session** : `/bg [demande]` (ou `/background`) passe la conversation en
+  arrière-plan, au même endroit, et libère le terminal ; `/fork [demande]` en lance une copie
+  dans son propre worktree pendant que vous continuez. La ligne d'état signale les sessions qui
+  attendent une réponse.
+- **Depuis l'interface web** : le bouton « Agents » de `claw serve` montre les mêmes sessions,
+  en lance de nouvelles, ouvre leurs sorties, répond à leurs questions et permissions, les
+  arrête ou les retire ; `/bg` et `/fork` y marchent aussi.
+- **Depuis le shell** : `claw attach <id ou nom>` (sorties, puis la conversation ; `Échap` rend la
+  main sans l'arrêter), `claw logs <id> [-f]`, `claw reply <id> <texte>`, `claw stop <id>`,
+  `claw rm <id>`, `claw agents --json [--all] [--cwd CHEMIN]` pour les scripts (champs `id`,
+  `state` : `working`, `blocked`, `done`, `failed`, `stopped`, `waitingFor`…).
+- **Sorties** : sous Windows, les lignes écrites par les commandes du système (`ping`, `dir`…)
+  dans la page de code de la console (850) sont relues avec leurs accents dans `claw logs`, la
+  vue des agents et la page.
+- **Fonctionnement** : chaque session est un processus `claw` détaché (pas de service
+  permanent), dont l'état vit dans `~/.claw/jobs/<id>/` ; `CLAW_JOB_DIR` lui donne un dossier
+  `tmp/`. Sans demande pendant une heure (`CLAW_JOB_IDLE_SECS`), une session non épinglée libère
+  son processus ; une réponse la relance depuis sa conversation, qui reste dans `.claw/sessions`
+  (`claw --resume`). Sous Windows, les sessions tournent sur une copie de `claw.exe`, pour que
+  Claw reste installable pendant qu'elles travaillent.
+- **Différences avec Claude Code** : pas de superviseur ni de résumé écrit par un petit modèle
+  (la ligne reprend la dernière action ou le début de la réponse) ; l'ouverture d'une session
+  arrête son processus d'arrière-plan pendant que vous y travaillez.
+
+### Monitor et messages entre sessions
+
+**Monitor** (outil du modèle, comme dans Claude Code) : Claw lance une commande en arrière-plan
+(suivre un journal et filtrer les erreurs, attendre la fin d'une CI, surveiller un dossier) et
+chaque nouvelle ligne qu'elle écrit lui revient entre deux tours, sans bloquer la
+conversation : il réagit seulement si quelque chose mérite votre attention. Chaque surveillance
+a une échéance (5 minutes par défaut, 30 au plus), après laquelle Claw reçoit un avis et peut la
+relancer ; `KillShell monitor-1` l'arrête plus tôt, `/tasks` les liste. La commande suit les
+règles de `bash` (`Bash(...)` s'applique, le mode auto la juge). Les sessions en arrière-plan
+reçoivent aussi leurs événements.
+
+**Messages entre sessions** : les sessions Claw ouvertes sur cette machine (terminal, `-p`,
+arrière-plan, interface web) se joignent par leur nom (le dossier, ou celui donné par `/rename`
+ou `--name` ; la page de `claw serve` prend le nom du dossier suivi de `-web`).
+Le modèle les trouve avec `ListAgents` et leur écrit avec `SendMessage` : une session qui découvre
+un changement cassant prévient celle qui en dépend, une longue tâche annonce sa fin,
+`notify_when_idle` demande un avis quand l'autre session aura fini son tour.
+
+- Un message est du texte, jamais la conversation ni les fichiers ; il arrive entre deux tours
+  (`› Message de @api : …`) et le modèle de l'autre session le lit comme venant d'une autre
+  session, pas de vous : il n'approuve rien, ne justifie aucun changement de permissions ou de
+  configuration, et ses commandes restent du texte.
+- `crossSessionInbound` : `accept`, `hold` (retenus jusqu'à `/peers accept`) ou `refuse`. Sans
+  réglage, une session qui demande les permissions accepte, sauf d'une session qui les contourne
+  (`danger-full-access`), et inversement. Dans une session en arrière-plan, un message retenu
+  la fait passer dans « attendent une réponse » : `o` le délivre, `n` l'écarte.
+- `/list-agents` (`/peers`) montre le nom de cette session et les sessions joignables ;
+  `/peers accept|drop` traite les messages retenus. `CLAW_DISABLE_PEERS=1` retire la session de
+  la messagerie ; une règle `deny` sur `SendMessage` et `ListAgents` empêche d'écrire.
+- Les boîtes sont des fichiers dans `~/.claw/peers/<id>/` (cette machine seulement ; pas de
+  sessions sur d'autres machines ni dans le cloud).
+
+### Workflows : des agents orchestrés par un script
+
+Comme les workflows dynamiques de Claude Code : pour un travail qui se découpe en nombreuses
+parties (audit de chaque route, migration fichier par fichier, recherche recoupée), le modèle
+écrit un script qui lance des agents par phases, et Claw l'exécute en arrière-plan. Le résultat,
+unique, revient dans la conversation entre deux tours ; la saisie reste libre pendant ce temps.
+
+```javascript
+export const meta = {
+  name: 'audit-routes',
+  description: "Vérifie les contrôles d'accès de chaque route",
+  phases: [{ title: 'Inventaire' }, { title: 'Audit' }],
+}
+phase('Inventaire')
+const found = await agent('Liste les fichiers .ts de src/routes.', {
+  schema: { type: 'object', required: ['files'], properties: { files: { type: 'array', items: { type: 'string' } } } },
+})
+phase('Audit')
+const audits = await pipeline(found.files, (file) => agent(`Contrôles d'accès manquants dans ${file} ?`, { label: file }))
+return audits.filter(Boolean)
+```
+
+- **Lancer** :
+  - demandez-le : « ultracode », « utilise un workflow », ou le nom d'un workflow enregistré ;
+    le modèle appelle l'outil `Workflow`, qu'il n'utilise pas de lui-même ;
+  - `/<nom> [arguments]` lance un workflow enregistré dans `.claw/workflows/` ou
+    `.claude/workflows/` (projet), `~/.claw/workflows/` ou `~/.claude/workflows/` ; des
+    arguments `[…]` ou `{…}` sont lus comme du JSON ;
+  - `/deep-research <question>` lance le workflow intégré.
+- **API du script** :
+  - `agent(demande, options)` rend le rapport de l'agent, la valeur JSON conforme à `schema`, ou
+    `null` en cas d'échec. Options : `label`, `phase`, `schema`, `model`, `agentType`,
+    `isolation: 'worktree'`.
+  - `parallel([...])` lance des fonctions ensemble ; `pipeline(liste, étape1, étape2…)` fait
+    passer chaque élément par les étapes.
+  - `phase(titre)`, `log(...)` ; `args` contient les arguments.
+  - `/workflow-authoring` affiche la référence.
+- **Suivre** :
+  - `/workflows` liste les exécutions et les workflows enregistrés ;
+  - `/workflows <id>` montre les phases, chaque agent (en cours, fini, en échec, repris), le
+    journal et le résultat ;
+  - `/workflows stop <id>` arrête une exécution ; `/workflows save <id> [nom]` en fait une
+    commande ;
+  - `/tasks` et le panneau Agents de `claw serve` les montrent aussi.
+- **Reprendre** : l'outil `Workflow` avec `resumeFromRunId` relance une exécution ; les agents
+  déjà finis avec les mêmes entrées rendent leur résultat gardé, sans requête. Chaque exécution a
+  son dossier `.claw/workflows/runs/<id>/` (script, arguments, résultats des agents,
+  `result.json`).
+- **Sécurité** :
+  - le script tourne sous Node.js, dans un contexte `vm` vide, et `node` est lancé avec son
+    modèle de permissions : le script ne voit ni fichiers, ni réseau, ni processus ;
+  - les agents gardent les permissions de la session et ne peuvent rien demander : une action
+    à approuver leur est refusée ;
+  - l'outil `Workflow` demande l'autorisation en mode `prompt` et n'est pas permis en
+    `read-only`.
+- **Modèles gratuits** : chaque agent coûte une dizaine de requêtes.
+  - `CLAW_WORKFLOW_MAX_AGENTS` (30 par défaut) limite les agents d'une exécution ;
+  - `CLAW_WORKFLOW_MAX_CONCURRENT_AGENTS` (3) limite ceux qui tournent ensemble ;
+  - `CLAW_WORKFLOW_SUBAGENT_MODEL` (ou `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL`) impose leur
+    modèle.
+- **Ailleurs** : en mode `-p`, Claw attend la fin du workflow et passe son résultat comme un tour
+  de plus. Une session en arrière-plan reste en vie tant qu'un workflow tourne.
+- **Prérequis et désactivation** : Node.js 20 ou plus (`CLAW_WORKFLOW_NODE` pour un autre
+  chemin). `CLAW_DISABLE_WORKFLOWS=1`, `CLAUDE_CODE_DISABLE_WORKFLOWS=1` ou
+  `"disableWorkflows": true` les coupe.
+- **Différences avec Claude Code** : pas de vue plein écran `/workflows` (pause, relance d'un
+  agent), mais des commandes texte ; pas d'exécution dans le cloud ; les rapports des agents
+  sont dans `.claw/agents/`.
+
+### Channels : des événements poussés dans la session
+
+Comme les channels de Claude Code : un serveur MCP pousse des événements dans la session en
+cours (résultat de CI, alerte de supervision, message d'un chat), pour que Claw réagisse là où il
+a déjà vos fichiers et le contexte de votre travail. Les événements arrivent entre deux tours ;
+la session doit rester ouverte (terminal, `claw serve` ou `--bg`).
+
+```bash
+claw --channels server:webhook                 # terminal
+claw --channels server:webhook serve           # interface web
+claw --channels server:webhook --bg "surveille la CI et corrige ce qui casse"
+```
+
+- **Récepteur de webhooks intégré**, sans Node ni Bun : déclarez-le comme serveur MCP, dans
+  `.mcp.json` ou `.claw.json` :
+
+  ```json
+  { "mcpServers": { "webhook": { "command": "claw", "args": ["channel", "webhook", "--port", "8788"] } } }
+  ```
+
+  - Il écoute sur `127.0.0.1` ; chaque `POST` devient un événement, par exemple
+    `curl -X POST localhost:8788 -d "build failed on main"`.
+  - L'outil `reply` permet au modèle de répondre ; ses réponses sortent sur `GET /events`
+    (Server-Sent Events, `curl -N localhost:8788/events`).
+  - Avec un jeton (`--token` ou `CLAW_CHANNEL_TOKEN`), chaque requête doit le présenter
+    (`Authorization: Bearer …`, en-tête `X-Claw-Token` ou `?token=`).
+  - Avec ce jeton, le channel relaie aussi les demandes de permission : elles sortent sur
+    `/events` avec un identifiant de cinq lettres, et `POST "yes abcde"` autorise, `"no abcde"`
+    refuse. L'en-tête facultatif `X-Claw-Sender` nomme l'expéditeur.
+- **Votre propre channel** : tout serveur MCP stdio qui suit le contrat de Claude Code.
+  - Il déclare la capacité `experimental["claude/channel"]` et envoie
+    `notifications/claude/channel` avec `content` et `meta`.
+  - Ses `instructions` sont données au modèle.
+  - Avec `claude/channel/permission`, il reçoit
+    `notifications/claude/channel/permission_request` et répond par
+    `notifications/claude/channel/permission`.
+  - Les serveurs écrits pour Claude Code (comme fakechat) marchent tels quels.
+- **Ce que voit le modèle** :
+  - les événements dans des balises `<channel source="webhook" chat_id="1" …>` ;
+  - une note qui les présente comme venant d'un système extérieur, pas de l'utilisateur, et
+    qui interdit d'y voir une autorisation ;
+  - dans le terminal, une ligne `← webhook : …` par événement.
+- **Relais des permissions** : une demande ouverte dans le terminal, la page ou une session en
+  arrière-plan part aussi vers les channels qui le déclarent ; la première réponse l'emporte.
+  - Le texte relayé est nettoyé (caractères invisibles retirés, 3 500 caractères au plus par
+    champ).
+  - Les jetons reconnaissables (`sk-…`, `ghp_…`…) y sont masqués.
+  - Seul un identifiant émis par Claw et encore ouvert est accepté.
+- **Activation et sécurité** :
+  - figurer dans `.mcp.json` ne suffit pas : un serveur ne pousse rien sans `--channels` ;
+  - `--dangerously-load-development-channels` est accepté comme synonyme, Claw n'ayant pas de
+    liste d'autorisation ;
+  - `"channelsEnabled": false` dans les réglages bloque tout ;
+  - les channels sont ignorés avec `-p` ;
+  - `/mcp` liste les channels actifs.
+- **Différences avec Claude Code** : seulement `server:<nom>` (les plugins de channel Telegram,
+  Discord et iMessage ne sont pas fournis) ; serveurs stdio uniquement.
+
+### Télémétrie OpenTelemetry
+
+Comme le suivi d'usage de Claude Code, Claw peut envoyer ses compteurs et ses événements à
+votre collecteur OpenTelemetry (Grafana, Honeycomb, Datadog…), par exemple pour suivre
+l'usage d'une équipe. Rien n'est mesuré ni envoyé sans activation explicite :
+
+```bash
+export CLAW_ENABLE_TELEMETRY=1            # ou CLAUDE_CODE_ENABLE_TELEMETRY=1
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer%20votre-jeton"   # si besoin
+```
+
+- **Compteurs** (`claw_code.*`) : `session.count` (`start_type` : `fresh`, `resume`,
+  `background`, `agents_view`), `token.usage` (`input`, `output`, `cacheRead`,
+  `cacheCreation`, par modèle), `cost.usage` (estimation en dollars, nulle pour les modèles
+  gratuits), `lines_of_code.count` (`added`, `removed`), `commit.count`,
+  `pull_request.count`, `code_edit_tool.decision` (outil, `accept`/`reject`, source,
+  langage), `active_time.total` (temps de travail de Claw).
+- **Événements** : `user_prompt` (longueur ; le texte seulement avec
+  `OTEL_LOG_USER_PROMPTS=1`), `api_request` (modèle, tokens, coût, durée, `main` ou
+  `subagent`), `api_error`, `tool_result` (paramètres seulement avec
+  `OTEL_LOG_TOOL_DETAILS=1`), `tool_decision`. Chacun porte `session.id`, `prompt.id` et
+  `user.id` (identifiant anonyme gardé dans `~/.claw/telemetry-id`).
+- **Réglages** : `OTEL_METRICS_EXPORTER` et `OTEL_LOGS_EXPORTER` (`otlp`, `console`, `none`),
+  adresses et en-têtes par signal (`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`…),
+  `OTEL_METRIC_EXPORT_INTERVAL` (60 s), `OTEL_LOGS_EXPORT_INTERVAL` (5 s),
+  `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=cumulative`, `OTEL_RESOURCE_ATTRIBUTES`
+  (`team.id=core,department=r-d`), `OTEL_METRICS_INCLUDE_VERSION=true`.
+  `CLAW_OTEL_METRIC_PREFIX=claude_code` reprend les noms de Claude Code, pour réutiliser ses
+  tableaux de bord.
+- Protocole : `OTEL_EXPORTER_OTLP_PROTOCOL` (ou `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL`,
+  `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL`) vaut `http/json` (par défaut), `http/protobuf` ou `grpc`.
+  - En HTTP, l'adresse par défaut est `http://localhost:4318` (`/v1/metrics`, `/v1/logs`).
+  - En gRPC, c'est `http://localhost:4317`. Une adresse `http://` passe en HTTP/2 sans TLS, comme
+    pour un collecteur local, et `https://` passe en HTTP/2 avec TLS.
+  - Le protobuf est encodé par Claw lui-même, sans dépendance.
+- Ce qui attend part aussi à la fermeture de Claw.
+- Un fichier de projet (`.claw/settings.json`) ne peut pas activer la télémétrie ni choisir
+  son adresse (`OTEL_*`) : un dépôt cloné ne décide pas où partent vos données d'usage.
 
 ### Travail de l'agent
 
@@ -936,7 +1611,8 @@ coupe cet import.
 - **Mode plan** : en `read-only`, l'agent soumet son plan avec l'outil `ExitPlanMode` ; si vous
   l'approuvez, la session passe en `workspace-write` et l'agent l'applique dans le même tour.
   Avec `"plannerModel"`, c'est ce modèle qui prépare le plan (voir « Aides au raisonnement »).
-- **Reprise** : `claw --continue` (ou `-c`) reprend la dernière session du projet, `claw --resume`
+- **Reprise** : `claw --continue` (ou `-c`) reprend la dernière session du projet, aussi avec
+  une demande ponctuelle (`claw -c prompt "continue"`, comme `claude -c -p`), `claw --resume`
   sans argument propose la liste des sessions récentes. La session est enregistrée à chaque étape
   d'un tour, pas seulement à la fin : un tour interrompu (fenêtre fermée, plantage, coupure) se
   retrouve à la reprise, et un appel d'outil qui était en cours y est noté comme interrompu.
@@ -970,6 +1646,31 @@ coupe cet import.
 - Coller un texte de plusieurs lignes le garde en un seul message ; un long collage s'affiche
   `[Texte collé n°1 : 40 lignes]` et part en entier. `Alt+V` joint l'image du presse-papiers
   (`[Image n°1]`).
+- Raccourcis de Claude Code dans la saisie :
+  - `Ctrl+G` (ou `Ctrl+X Ctrl+E`) ouvre la saisie dans `$VISUAL`, `$EDITOR`, ou à défaut le
+    Bloc-notes (Windows) ou `vi` ; le texte enregistré la remplace.
+  - `Ctrl+S` met la saisie de côté ; sur une saisie vide, il la reprend.
+  - `Ctrl+_` annule la dernière modification de la saisie (mot par mot). Sur un clavier AZERTY,
+    c'est `Ctrl+8`, la touche du « _ ».
+  - `Ctrl+R` cherche dans l'historique : tapez un extrait, `Ctrl+R` passe à une entrée plus
+    ancienne, `Tab` ou `Échap` la garde, `Entrée` l'envoie, `Ctrl+C` annule.
+  - `Ctrl+L` efface l'écran et redessine la saisie.
+  - Comme dans readline : `Ctrl+A`/`Ctrl+E` (début, fin de ligne), `Ctrl+K`/`Ctrl+U`/`Ctrl+W`
+    (supprimer jusqu'à la fin, jusqu'au début, le mot précédent ; `Ctrl+Y` recolle), `Alt+B`/`Alt+F`
+    (mot précédent, suivant), `Alt+D` (supprimer le mot), `Ctrl+P`/`Ctrl+N` (historique).
+  - Dans une saisie de plusieurs lignes, les flèches haut et bas déplacent d'abord le curseur.
+- **Raccourcis personnalisés** : `/keybindings` crée `~/.claw/keybindings.json` (format de Claude
+  Code, `~/.claude/keybindings.json` est aussi lu) et liste les raccourcis en vigueur. Chaque bloc
+  donne un contexte (`Chat`, `Global`, `Autocomplete`, `HistorySearch`) et une table touches →
+  action ; `null` retire un raccourci, les accords s'écrivent `ctrl+x ctrl+e` :
+
+  ```json
+  {"bindings": [{"context": "Chat", "bindings": {"ctrl+e": "chat:externalEditor", "ctrl+s": null}}]}
+  ```
+
+  Les modifications s'appliquent à la saisie suivante. `Ctrl+C` et `Ctrl+D` ne se changent pas ;
+  une action de Claude Code que Claw n'a pas (`chat:fastMode`…) est acceptée et sans effet, une
+  faute de frappe est signalée par `/keybindings`.
 - `clear` (ou `cls`) efface l'écran, `exit` (ou `quit`) quitte.
 - `claw doctor` (ou `/doctor`) vérifie l'installation : copie de `claw` utilisée, configuration,
   modèle et secours, clé et crédits OpenRouter, Ollama, Git, shell, bac à sable, terminal.
@@ -984,6 +1685,79 @@ coupe cet import.
   `CLAW.md` (commandes de build et de test, architecture, conventions).
 - Dans l'interface web, un message envoyé pendant un tour part à la fin de celui-ci.
 
+### Rendu plein écran : `/tui fullscreen`
+
+Comme le rendu plein écran de Claude Code : la session s'affiche sur l'écran alternatif du
+terminal, comme `vim` ou `htop` (rien à voir avec la taille de la fenêtre).
+
+- **Pourquoi** : pas de scintillement, même dans le terminal de VS Code, tmux ou iTerm2, car seul ce
+  qui change est redessiné ; la saisie reste en bas pendant que Claw travaille ; la mémoire reste
+  bornée (20 000 lignes d'historique).
+- **Activer** :
+  - `/tui fullscreen` enregistre le réglage `"tui": "fullscreen"` et relance la conversation en
+    plein écran, sans la perdre ;
+  - `/tui default` revient au rendu classique, `/tui` dit lequel est actif ;
+  - `CLAW_NO_FLICKER=1` (ou `CLAUDE_CODE_NO_FLICKER=1`) démarre en plein écran, et `=0` le
+    refuse ;
+  - `CLAW_DISABLE_ALTERNATE_SCREEN=1` (ou celle de Claude Code) garde toujours le rendu
+    classique, comme une entrée ou une sortie qui n'est pas un terminal.
+- **Relire la conversation** :
+  - `PgUp`/`PgDn` défilent d'une demi-page, `Ctrl+Origine` remonte au début, `Fin` ou
+    `Ctrl+Fin` revient en bas, la molette défile de trois lignes (`CLAW_SCROLL_SPEED`,
+    multiplicateur jusqu'à 20) ;
+  - tant que vous relisez, la barre du bas compte les nouvelles lignes et la vue ne bouge pas ;
+    un clic sur cette barre, `Fin` ou une touche tapée revient en bas.
+- **Souris** : la molette passe par Claw, qui capture donc la souris. Selon le terminal,
+  `Maj` + glisser garde la sélection native. `CLAW_FULLSCREEN_MOUSE=0` laisse la souris au
+  terminal (`PgUp`/`PgDn` restent).
+- **Fonctionnement** : la session tourne dans un pseudo-terminal (ConPTY sous Windows). Un
+  émulateur VT garde son écran et son historique, et Claw ne dessine que les différences, en
+  sortie synchronisée. En quittant, le dernier écran reste affiché dans le terminal.
+- **Différences avec Claude Code** :
+  - pas de sélection ni de copie dans l'application, ni de clic dans la saisie ;
+  - pas de mode transcription avec recherche (`Ctrl+O`, `/`) ;
+  - pas de panneau de diff à côté.
+
+### Dictée vocale : `/voice`
+
+Comme la dictée de Claude Code : dans la saisie, parlez au lieu de taper ; le texte s'insère au
+curseur, à relire avant l'envoi.
+
+- **Activer** :
+  - `/voice` bascule, `/voice hold` (par défaut) ou `/voice tap` choisit le mode, `/voice off`
+    coupe ;
+  - le réglage enregistré est celui de Claude Code :
+    `"voice": { "enabled": true, "mode": "hold", "autoSubmit": false }` (l'ancien
+    `voiceEnabled` est lu aussi) ;
+  - `CLAW_VOICE=0` coupe la dictée.
+- **Dicter** :
+  - mode `hold` : maintenez `Espace` pendant que vous parlez, relâchez pour finir (une frappe
+    courte reste une espace) ;
+  - mode `tap` : `Espace` dans une saisie vide démarre, `Espace` ou `Entrée` arrête ;
+  - `Échap` annule ; deux minutes au plus ;
+  - `autoSubmit` envoie la demande dès la touche relâchée (mode `hold`).
+- **Transcription gratuite** : le premier moteur disponible, dans l'ordre :
+  - `CLAW_VOICE_COMMAND`, votre commande, qui reçoit le fichier WAV (`{file}`) et écrit le
+    texte ;
+  - whisper.cpp en local et hors ligne (`CLAW_WHISPER_MODEL`, et `CLAW_WHISPER_BIN` si
+    `whisper-cli` n'est pas dans le `PATH`) ;
+  - Groq (`GROQ_API_KEY`, palier gratuit, `whisper-large-v3-turbo`), la meilleure qualité ;
+  - sous Windows, la reconnaissance vocale du système, hors ligne et sans clé, utilisée sans
+    rien régler ;
+  - un modèle audio d'OpenRouter choisi avec `CLAW_VOICE_MODEL` (les modèles gratuits d'OpenRouter
+    ne transcrivent pas aujourd'hui) ;
+  - OpenAI (`OPENAI_API_KEY`), seulement avec `CLAW_VOICE_ENGINE=openai`.
+
+  `CLAW_VOICE_ENGINE` (`command`, `whisper`, `groq`, `windows`, `openrouter`, `openai`) en
+  impose un. La langue est celle du réglage `language` (« french », « fr »), sinon celle du
+  système.
+- **Micro** : `cpal` sous Windows et macOS, `arecord`, `parecord` ou `ffmpeg` sous Linux. Rien
+  n'est enregistré hors d'une dictée, et le son n'est gardé que le temps de la transcription.
+- **Vérifier** :
+  - `/voice status` montre le micro, le moteur et la langue, sans rien enregistrer ;
+  - `/voice test <fichier.wav>` transcrit un fichier ;
+  - `CLAW_VOICE_INPUT_FILE=<fichier.wav>` remplace le micro par un fichier (essais).
+
 ### Automatisation et éditeurs
 
 - `--output-format stream-json` : un événement JSON par ligne (init, texte, `tool_use`,
@@ -996,8 +1770,13 @@ coupe cet import.
 - `claw review-replay DEMANDE DIFF RÉPONSE` rejoue la relecture par un autre modèle sur un
   travail enregistré (trois fichiers texte), sans outil : une requête. Le banc d'essais réels
   s'en sert pour comparer deux formulations de la relecture sur le même travail.
-- **GitHub** : l'action `.github/actions/claw` et un exemple de workflow « `@claw` dans un
-  commentaire » sont décrits dans [`docs/github-action.md`](docs/github-action.md).
+- **GitHub** : `/install-github-action` (alias `/install-github-app`) écrit dans le dépôt deux
+  workflows qui utilisent un modèle gratuit : `claw-assistant.yml` (un membre du dépôt écrit
+  `@claw …` dans une issue ou une PR ; Claw répond et ouvre une PR, ou pousse sur la branche de
+  la PR commentée) et `claw-review.yml` (revue en lecture seule de chaque PR, publiée dans un
+  commentaire mis à jour à chaque poussée). `/install-github-action assistant` ou `review` pour
+  un seul, `--force` pour remplacer les fichiers existants. L'action `.github/actions/claw` est
+  décrite dans [`docs/github-action.md`](docs/github-action.md).
 - **VS Code** : l'extension `editors/vscode` (paquet `claw-code-0.3.0.vsix`, à installer avec
   « Extensions : installer depuis VSIX… ») ouvre l'agent dans un panneau (`Ctrl+Alt+K`), envoie la
   sélection (`Ctrl+Alt+L`) ou le fichier courant.
@@ -1035,9 +1814,129 @@ coupe cet import.
   JavaScript exécuté (un badge « Hors ligne », un message d'erreur, une zone restée vide) et ce
   que la page a écrit dans la console : erreurs, exceptions avec leur fichier et leur ligne,
   requêtes en échec, refus CORS. Pour un projet local, le modèle lance d'abord le serveur en
-  arrière-plan puis donne son adresse `http://localhost`. Limites : l'outil montre la page telle
+  arrière-plan puis donne son adresse `http://localhost` ; une page sans serveur s'ouvre par
+  l'adresse `file:///` d'un fichier `.html` du projet (sous Windows, la forme de Git Bash,
+  `file:///tmp/...` ou `file:///c/Users/...`, est traduite comme les chemins des fichiers ; jamais d'un fichier hors du dossier de
+  travail). Limites : l'outil montre la page telle
   qu'elle se charge, sans cliquer ni saisir, et ne rend pas d'image. Il n'est proposé au modèle
   que si un navigateur est installé ; `CLAW_BROWSER` désigne l'exécutable à utiliser.
+- **Icônes** (outil `Icon`) : 1 539 icônes au trait de [Lucide](https://lucide.dev) (licence
+  ISC, jointe dans `crates/runtime/src/icons/LUCIDE_LICENSE`), rendues en `<svg>` complet prêt à
+  coller : taille, couleur du texte (`currentColor`), `aria-hidden`, ou `role="img"` et
+  `aria-label` quand l'icône porte un sens. Plusieurs noms en un appel (`map-pin`, `phone`,
+  `clock`, `croissant`) ; une recherche par mots anglais, avec des équivalents français
+  (« téléphone », « adresse », « pain ») ; un nom inconnu reçoit les plus proches. Un petit
+  modèle dessine mal en SVG : ses icônes faites main valaient à la page une finition de 5/10.
+  Aucun emoji dans une interface : ces icônes sont du SVG.
+- **Icônes jamais dessinées à la main** : chaque petite image vectorielle d'une page (un `<svg>`
+  ou un `<symbol>` à la taille d'une icône, y compris dans un script ou une adresse `data:` d'une
+  feuille de style) est comparée aux icônes de Lucide et de [Feather](https://feathericons.com)
+  (licence MIT, jointe dans `crates/runtime/src/icons/FEATHER_LICENSE`), l'ancêtre de Lucide que
+  les modèles recopient de mémoire. La comparaison porte sur la géométrie des formes, ramenée en
+  coordonnées absolues : une ligne vaut le chemin qui passe par les mêmes points, l'ordre des
+  formes ne compte pas, une ancienne version à un point près reste une icône du jeu. Une icône
+  qui n'est dans aucun des deux est dessinée à la main : Claw le dit au modèle dès l'écriture du
+  fichier, avec sa ligne et les noms à demander à l'outil `Icon` (une classe `icon-phone` donne
+  `phone`), et `Screenshot` la relève comme un défaut. Sur les pages des essais précédents,
+  seules de vraies icônes faites main ou mal formées restent signalées (un lotus en 48 x 48, une
+  étoile bancale, un bonhomme bâton) ; les logos et ornements nommés comme tels sont laissés.
+- **Composants** (outil `Component`) : 19 composants interactifs qui marchent dès qu'ils sont
+  collés (HTML, CSS aux variables du socle de la méthode, JavaScript sans dépendance),
+  accessibles, animés avec mesure et arrêtés par `prefers-reduced-motion`, leurs icônes prises
+  dans Lucide : `nav-menu` (en-tête et menu du téléphone), `accordion` (questions),
+  `tabs`, `dialog` (fenêtre modale), `toast` (messages de confirmation), `carousel`,
+  `booking` (jours des deux semaines à venir, créneaux, places restantes, fichier `.ics` pour
+  l'agenda), `filter` (étiquettes et recherche, état dans l'adresse), `form` (erreurs après la
+  saisie, brouillon gardé, envoi à un service de formulaires ou par e-mail prérempli), `cart`
+  (panier ou devis), `theme-toggle` (mode sombre), `copy`, `share`, `open-now` (« Ouvert
+  maintenant · ferme à 19 h »), `directions` (itinéraire, appel, carte OpenStreetMap), `reveal`
+  (apparition au défilement), `count-up` (chiffres clés), `scroll-effects` (progression de
+  lecture, parallaxe en CSS seul), `page-transitions` (fondu entre les pages). Plusieurs noms
+  en un appel, en français aussi (« panier », « réservation », « horaires ») ; les composants
+  dont l'un se sert (le panier se sert de `dialog` et de `toast`) viennent avec lui. Sans
+  serveur, rien n'est perdu : un formulaire part en e-mail prérempli, une réservation reste dans
+  le navigateur, et `data-endpoint` les envoie à un service de formulaires. Tous sont essayés
+  ensemble dans un vrai navigateur, au téléphone et à l'ordinateur : aucun bouton mort, aucune
+  erreur, aucun bloc invisible.
+- **Ornements** (outil `Ornament`) : des formes décoratives SVG tracées par formules aux
+  couleurs du plan, nettes à toute taille : `blob` (galets superposés derrière un titre ou une
+  image), `waves` (vagues en couches sur toute la largeur, au bas d'un hero), `dots` et `lines`
+  (textures discrètes), `topography` (courbes de niveau), `grain` (grain sur un aplat), `arch`
+  (une à trois arches pour cadrer une image ou un texte), `frame` (médaillon autour d'un avatar
+  ou d'une initiale), `sprig` (rameau), `rays` (soleil). Chacune vient en `<svg>` complet avec
+  `aria-hidden`, et en adresse `data:` pour un fond CSS ; une autre `seed` donne une autre forme
+  de la même sorte, et seules des couleurs en hexadécimal entrent dans le SVG. Chaque sorte vient
+  avec son CSS de placement exact (les vagues en bas de section, en position absolue et pleine
+  largeur ; un galet à demi caché derrière un titre ou une photo) : vu dans un essai réel, des
+  vagues avaient été posées dans une colonne de la grille du hero, au milieu de la photo.
+- **Photos libres** (outil `Photo`) : voir « Photos libres » dans les aides (`CLAW_PHOTOS=0`
+  retire l'outil).
+- **Captures de la page** (outil `Screenshot`) : le même navigateur prend des captures au
+  téléphone et à l'ordinateur (ou `tablet`, ou `LARGEURxHAUTEUR` ; la page entière avec
+  `full_page`, un thème clair ou sombre), après des `actions` qui amènent la page dans l'état à
+  vérifier (cliquer, saisir, faire défiler). Les captures suivent le résultat en images ; un
+  modèle qui ne lit pas les images en reçoit la description (voir « Lecteur d'images »). Chaque
+  capture porte aussi les défauts mesurés dans la page, en phrases qui disent quoi corriger :
+  contenu plus large que l'écran, avec sa cause (largeur calculée trop grande, rangée flex qui
+  ne passe pas à la ligne, colonnes de grille trop larges, élément de grille ou de flex resté à
+  `min-width: auto`, texte sur une ligne, image, tableau, champ ou mot trop long ; et un
+  `overflow-x: hidden` sur `body` signalé comme cachant le symptôme : vu dans un essai réel, un
+  modèle a cherché six fois sans trouver, alors qu'une ligne `min-width: 0` suffisait), textes ou boutons coupés et superposés, images cassées, texte
+  trop petit ou trop pâle, en-tête fixe qui couvre le titre ou une navigation qui prend plus du
+  quart de l'écran d'un téléphone, liens morts (`href="#"`, ancre vers une section absente),
+  champ sans étiquette (ou dont le `label for=` vise un autre élément de même id), id employé
+  plusieurs fois (un lien `#id`, un `label for=` et un script n'atteignent que le premier : vu
+  dans un essai réel, `section#cours` et `select#cours`), champ rouge avant toute saisie,
+  bouton à la police du navigateur, image
+  sans `alt`, bouton sans nom, texte de remplissage (lorem ipsum, « votre texte ici »), police
+  Times par défaut, focus invisible au clavier (mesuré page focalisée et transitions coupées :
+  sans cela, un focus bien stylé passait pour invisible), texte collé au bord de l'écran d'un
+  téléphone, icône dessinée en géant (un `<svg>` sans taille remplit son conteneur : vu dans un
+  essai réel, cinq étoiles d'avis larges comme la page), emoji dans la page (seul, en icône,
+  ou dans une phrase : un emoji est dessiné par la police de l'appareil, différent sur chaque
+  téléphone et ordinateur, et n'appartient à aucun design ; chaque icône et image se dessine en
+  SVG inline), section qui n'affiche que son titre (du texte caché sur cet écran par une media
+  query qui masque une version sans montrer l'autre, ou une liste, un tableau, un bloc à id
+  restés vides : vu dans un essai réel, le planning d'un studio écrit pour le téléphone et vide
+  sur ordinateur), polices déclarées en CSS mais jamais chargées (avec la cause quand c'est le
+  lien Google Fonts). Chaque défaut et chaque remarque de design donnent aussi **les règles CSS
+  qui dessinent les éléments en cause, avec leur fichier et leur ligne** (« (CSS rules:
+  styles.css:761 .booking-content; styles.css:784 .form-grid) », lues dans le navigateur) : le
+  modèle va droit à la règle au lieu de lire le fichier par morceaux. Vu dans un essai réel : sur
+  environ 110 appels d'un tour, 58 étaient des lectures et des recherches dans un CSS de 1 000
+  lignes. Le texte réservé aux lecteurs d'écran (`.visually-hidden`) et les boutons sans
+  texte (icône du menu) ne sont pas pris pour des défauts. Au téléphone, Claw essaie le menu : des liens de
+  navigation cachés sans bouton pour les ouvrir, ou un bouton qui ne les montre pas après un
+  clic, sont signalés. À part, des remarques de design (`designNotes`) nomment ce qui donne un
+  air générique ou peu fini sans être une erreur : polices de tous les jours, lignes de plus de
+  75 caractères, corps de texte sous 16px ou interligne sous 1,4, h1 à peine plus grand que le
+  texte, longs paragraphes centrés, deux étiquettes en capitales ou plus, trait décoratif sous
+  les titres, cartes identiques sans image, une même photo utilisée plusieurs fois (image ou
+  fond CSS : vu dans un essai, une photo de cours en fond du hero, dans la section du studio et
+  à la place des portraits), sections aux marges
+  verticales toutes différentes, couleur saturée sur plus de 15 % de la page, liens et boutons
+  qui ne changent pas au survol (`:hover` forcé sur chacun par le protocole du navigateur, et
+  son apparence comparée : le script d'une page ouverte en `file://` ne peut pas lire les
+  règles de ses feuilles, et l'ancienne mesure y voyait à tort un site sans survol, ce qui a
+  fait ignorer au modèle les vrais défauts), cibles tactiles sous 44px au téléphone, bandes
+  vides de plus d'un demi-écran sans rien à lire ni à voir, animations sans
+  `prefers-reduced-motion`, liens, boutons ou cartes qui animent leur taille ou leur position
+  (une transition sur `width`, `margin` ou `top` saccade : `transform` et `opacity` restent
+  fluides), retours de survol de plus de 0,6 s, animations qui tournent en boucle. En revue
+  visuelle, le modèle les corrige, et n'en garde une que si la demande l'exige.
+  Avant de mesurer et de capturer, `Screenshot` fait défiler toute la page puis revient en haut :
+  les apparitions au défilement et les images différées se déclenchent, comme pour un visiteur
+  (une capture pleine page montrait sinon des sections vides), et un bloc resté transparent
+  après ce défilement est un défaut. Après la capture, à l'ordinateur, il **clique chaque bouton**
+  de la page et relève ceux qui ne font rien (ni changement de la page, ni défilement, ni
+  message, ni envoi, ni copie, ni téléchargement) et ceux qui provoquent une erreur, avec le
+  message : « clicking button#broken "Envoyer": ReferenceError: missingFunction is not
+  defined ». Rien ne quitte la page pendant l'essai : une navigation est retenue et comptée
+  comme une action. Un bouton qui ne fait rien est le défaut le plus fréquent d'un site généré.
+  L'onglet ou l'étape déjà choisis (`aria-selected`, `aria-current`) ne sont pas essayés, un
+  indicateur de chargement ne compte pas comme animation en boucle, et un lien d'évitement qui
+  glisse depuis le haut au focus n'est pas une transition sur la mise en page : trois faux
+  positifs vus dans un essai réel.
 
 ### Bac à sable des commandes
 
@@ -1139,7 +2038,7 @@ Depuis la version release :
 - Inspection des sessions sauvegardées et flux de reprise
 - Outils intégrés conscients de l'espace de travail pour le shell, la lecture/écriture/édition de fichiers, la recherche, la récupération/recherche web, les todos et les mises à jour de notebook
 - Commandes slash pour le statut, le compactage, l'inspection de config, le diff, l'export, la gestion de session et le rapport de version
-- Découverte d'agents et de skills locaux avec `claw agents` et `claw skills`
+- Découverte d'agents et de skills locaux avec `claw agents list` et `claw skills`
 - Découverte et gestion de plugins via la CLI et les surfaces de commandes slash
 - Connexion/déconnexion OAuth ainsi que sélection de modèle/fournisseur depuis la ligne de commande
 - Chargement d'instructions/config conscient de l'espace de travail (`CLAW.md`, fichiers de config, permissions, paramètres de plugins)

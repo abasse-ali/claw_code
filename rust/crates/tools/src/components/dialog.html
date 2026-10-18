@@ -1,0 +1,17 @@
+<button class="dialog-open" type="button" data-dialog-open="detail-atelier">Voir le détail</button>
+
+<dialog class="dialog" id="detail-atelier" aria-labelledby="detail-atelier-title">
+  <div class="dialog__box">
+    <header class="dialog__header">
+      <h2 class="dialog__title" id="detail-atelier-title">Atelier de composition</h2>
+      <button class="dialog__close" type="button" data-dialog-close aria-label="Fermer">{{icon:x}}</button>
+    </header>
+    <div class="dialog__body">
+      <p>Deux heures pour composer un bouquet de saison, fleurs et café compris.</p>
+    </div>
+    <footer class="dialog__footer">
+      <button class="dialog__secondary" type="button" data-dialog-close>Fermer</button>
+      <a class="dialog__primary" href="#reservation" data-dialog-close>Réserver</a>
+    </footer>
+  </div>
+</dialog>

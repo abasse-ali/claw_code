@@ -22,6 +22,10 @@ pub enum ResolvedPermissionMode {
     WorkspaceWrite,
     DangerFullAccess,
     Prompt,
+    /// `dontAsk` : rien n'est demandé, ce qui n'est pas autorisé d'avance est refusé.
+    DontAsk,
+    /// Mode auto : un classificateur décide à la place de l'utilisateur.
+    Auto,
 }
 
 /// Règles `permissions.allow|deny|ask`, concaténées sur tous les fichiers de config.
@@ -30,12 +34,25 @@ pub struct RuntimePermissionRuleConfig {
     allow: Vec<String>,
     deny: Vec<String>,
     ask: Vec<String>,
+    /// `permissions.additionalDirectories` : dossiers où l'écriture est libre
+    /// en `workspace-write`, en plus du projet.
+    additional_directories: Vec<String>,
 }
 
 impl RuntimePermissionRuleConfig {
     #[must_use]
     pub fn new(allow: Vec<String>, deny: Vec<String>, ask: Vec<String>) -> Self {
-        Self { allow, deny, ask }
+        Self {
+            allow,
+            deny,
+            ask,
+            additional_directories: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn additional_directories(&self) -> &[String] {
+        &self.additional_directories
     }
 
     #[must_use]
@@ -64,13 +81,37 @@ pub struct ConfigEntry {
 }
 
 /// Clés reprises des fichiers de Claude Code.
-const FOREIGN_KEYS: &[&str] = &["permissions", "hooks", "mcpServers"];
+/// Réglages repris des fichiers de Claude Code (`~/.claude/settings.json`,
+/// `.claude/settings.json`, `.claude/settings.local.json`) : ceux que Claw
+/// comprend de la même façon.
+const FOREIGN_KEYS: &[&str] = &[
+    "permissions",
+    "hooks",
+    "mcpServers",
+    "skillOverrides",
+    "disableSkillShellExecution",
+    "statusLine",
+    "outputStyle",
+    "claudeMdExcludes",
+    "attribution",
+    "includeCoAuthoredBy",
+    "includeGitInstructions",
+    "cleanupPeriodDays",
+    "companyAnnouncements",
+    "worktree",
+    "crossSessionInbound",
+    "disableWorkflows",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfig {
     merged: BTreeMap<String, JsonValue>,
     loaded_entries: Vec<ConfigEntry>,
     feature_config: RuntimeFeatureConfig,
+    /// Réglage `env` après les exclusions des fichiers de projet.
+    env_vars: BTreeMap<String, String>,
+    /// Variables du réglage `env` qu'un fichier de projet ne peut pas fixer.
+    ignored_env: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -107,6 +148,8 @@ pub struct RuntimeFeatureConfig {
     /// Modèle plus fort qui reprend un tour où l'agent n'avance plus :
     /// `escalationModel`.
     escalation_model: Option<String>,
+    /// Modèle des tours de design (interfaces web) : `designModel`.
+    design_model: Option<String>,
     /// Modèle qui décrit les images à un modèle qui n'en lit pas :
     /// `imageReader` (`"off"` pour ne rien décrire).
     image_reader: Option<String>,
@@ -136,13 +179,32 @@ pub struct RuntimeProviderConfig {
     pub text_tools: bool,
 }
 
-/// Une commande de hook, éventuellement filtrée par un `matcher` (nom d'outil,
-/// source de session…) et limitée par un délai en secondes.
+/// Type d'un hook (champ `type`, comme dans Claude Code).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum HookKind {
+    /// Commande shell (`command`) : charge utile sur stdin.
+    #[default]
+    Command,
+    /// Requête POST de la charge utile vers `url` (`command` contient l'URL) ;
+    /// `${VAR}` dans les en-têtes vient de l'environnement.
+    Http { headers: BTreeMap<String, String> },
+    /// Question posée à un modèle (`command` contient la consigne, où
+    /// `$ARGUMENTS` est remplacé par la charge utile) ; il répond
+    /// `{"ok": true|false, "reason": "..."}`.
+    Prompt { model: Option<String> },
+}
+
+/// Un hook, éventuellement filtré par un `matcher` (nom d'outil, source de
+/// session…) et limité par un délai en secondes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookCommandConfig {
+    /// Commande, URL (`http`) ou consigne (`prompt`).
     pub command: String,
     pub matcher: Option<String>,
     pub timeout_secs: Option<u64>,
+    pub kind: HookKind,
+    /// `"async": true` : lancé sans attendre, son résultat est ignoré.
+    pub run_async: bool,
 }
 
 impl HookCommandConfig {
@@ -152,6 +214,8 @@ impl HookCommandConfig {
             command,
             matcher: None,
             timeout_secs: None,
+            kind: HookKind::Command,
+            run_async: false,
         }
     }
 }
@@ -359,6 +423,8 @@ impl ConfigLoader {
         let mut loaded_entries = Vec::new();
         let mut mcp_servers = BTreeMap::new();
         let mut permission_rules = RuntimePermissionRuleConfig::default();
+        let mut env_vars = BTreeMap::new();
+        let mut ignored_env = Vec::new();
 
         for entry in self.discover() {
             let value = if entry.foreign {
@@ -374,6 +440,9 @@ impl ConfigLoader {
             };
             merge_mcp_servers(&mut mcp_servers, entry.source, &value, &entry.path)?;
             merge_permission_rules(&mut permission_rules, &value, &entry.path)?;
+            if !entry.foreign {
+                crate::settings::merge_env(&mut env_vars, &mut ignored_env, entry.source, &value);
+            }
             deep_merge_objects(&mut merged, &value);
             loaded_entries.push(entry);
         }
@@ -405,6 +474,7 @@ impl ConfigLoader {
             advisor_models: parse_string_list(&merged_value, "advisorModels"),
             planner_model: parse_optional_string(&merged_value, "plannerModel"),
             escalation_model: parse_optional_string(&merged_value, "escalationModel"),
+            design_model: parse_optional_string(&merged_value, "designModel"),
             image_reader: parse_optional_string(&merged_value, "imageReader"),
             ultracode: merged_value
                 .as_object()
@@ -439,6 +509,8 @@ impl ConfigLoader {
             merged,
             loaded_entries,
             feature_config,
+            env_vars,
+            ignored_env,
         })
     }
 }
@@ -450,7 +522,22 @@ impl RuntimeConfig {
             merged: BTreeMap::new(),
             loaded_entries: Vec::new(),
             feature_config: RuntimeFeatureConfig::default(),
+            env_vars: BTreeMap::new(),
+            ignored_env: Vec::new(),
         }
+    }
+
+    /// Variables du réglage `env` à appliquer (voir `settings::apply_env`).
+    #[must_use]
+    pub fn env_vars(&self) -> &BTreeMap<String, String> {
+        &self.env_vars
+    }
+
+    /// Variables du réglage `env` ignorées : un fichier de projet ne peut pas
+    /// les fixer.
+    #[must_use]
+    pub fn ignored_env(&self) -> &[String] {
+        &self.ignored_env
     }
 
     #[must_use]
@@ -576,6 +663,12 @@ impl RuntimeConfig {
         self.feature_config.escalation_model.as_deref()
     }
 
+    /// Modèle des tours de design, s'il est réglé (`designModel`).
+    #[must_use]
+    pub fn design_model(&self) -> Option<&str> {
+        self.feature_config.design_model.as_deref()
+    }
+
     /// Modèle qui décrit les images à un modèle qui n'en lit pas (`imageReader`).
     #[must_use]
     pub fn image_reader(&self) -> Option<&str> {
@@ -695,6 +788,12 @@ impl RuntimeFeatureConfig {
     #[must_use]
     pub fn escalation_model(&self) -> Option<&str> {
         self.escalation_model.as_deref()
+    }
+
+    /// Modèle des tours de design, s'il est réglé.
+    #[must_use]
+    pub fn design_model(&self) -> Option<&str> {
+        self.design_model.as_deref()
     }
 }
 
@@ -942,6 +1041,7 @@ fn merge_permission_rules(
         ("allow", &mut target.allow),
         ("deny", &mut target.deny),
         ("ask", &mut target.ask),
+        ("additionalDirectories", &mut target.additional_directories),
     ] {
         if let Some(values) = optional_string_array(permissions, key, &context)? {
             extend_unique(rules, &values);
@@ -1148,6 +1248,8 @@ fn parse_hook_item(
             command: command.to_string(),
             matcher,
             timeout_secs: timeout(object),
+            kind: HookKind::Command,
+            run_async: object.get("async").and_then(JsonValue::as_bool) == Some(true),
         });
         return Ok(());
     }
@@ -1160,17 +1262,49 @@ fn parse_hook_item(
         let Some(hook) = hook.as_object() else {
             continue;
         };
-        // Seuls les hooks de type `command` existent ici (pas `prompt`).
-        let kind = hook
-            .get("type")
-            .and_then(JsonValue::as_str)
-            .unwrap_or("command");
-        if let (Some(command), "command") = (hook.get("command").and_then(JsonValue::as_str), kind)
-        {
+        let text = |key: &str| {
+            hook.get(key)
+                .and_then(JsonValue::as_str)
+                .map(ToOwned::to_owned)
+        };
+        let kind = text("type").unwrap_or_else(|| "command".to_string());
+        // Types inconnus (`agent`…) ignorés : réglages d'une autre version.
+        let (command, kind) = match kind.as_str() {
+            "command" => (text("command"), HookKind::Command),
+            "http" => (
+                text("url"),
+                HookKind::Http {
+                    headers: hook
+                        .get("headers")
+                        .and_then(JsonValue::as_object)
+                        .map(|headers| {
+                            headers
+                                .iter()
+                                .filter_map(|(name, value)| {
+                                    value
+                                        .as_str()
+                                        .map(|value| (name.clone(), value.to_string()))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                },
+            ),
+            "prompt" => (
+                text("prompt"),
+                HookKind::Prompt {
+                    model: text("model"),
+                },
+            ),
+            _ => (None, HookKind::Command),
+        };
+        if let Some(command) = command.filter(|command| !command.trim().is_empty()) {
             entries.push(HookCommandConfig {
-                command: command.to_string(),
+                command,
                 matcher: matcher.clone(),
                 timeout_secs: timeout(hook),
+                kind,
+                run_async: hook.get("async").and_then(JsonValue::as_bool) == Some(true),
             });
         }
     }
@@ -1234,10 +1368,10 @@ fn parse_permission_mode_label(
     match mode {
         "default" | "prompt" | "ask" => Ok(ResolvedPermissionMode::Prompt),
         "plan" | "read-only" => Ok(ResolvedPermissionMode::ReadOnly),
-        "acceptEdits" | "auto" | "workspace-write" => Ok(ResolvedPermissionMode::WorkspaceWrite),
-        "dontAsk" | "bypassPermissions" | "danger-full-access" => {
-            Ok(ResolvedPermissionMode::DangerFullAccess)
-        }
+        "acceptEdits" | "workspace-write" => Ok(ResolvedPermissionMode::WorkspaceWrite),
+        "auto" => Ok(ResolvedPermissionMode::Auto),
+        "dontAsk" | "dont-ask" => Ok(ResolvedPermissionMode::DontAsk),
+        "bypassPermissions" | "danger-full-access" => Ok(ResolvedPermissionMode::DangerFullAccess),
         other => Err(ConfigError::Parse(format!(
             "{context} : mode de permission non supporté {other}"
         ))),
@@ -1555,6 +1689,47 @@ mod tests {
     use crate::sandbox::FilesystemIsolationMode;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn hooks_of_every_type_are_read() {
+        use super::{parse_optional_hooks_config, HookKind};
+        use crate::hooks::HookEvent;
+        let root = JsonValue::parse(
+            r#"{"hooks":{
+                "PreToolUse":[{"matcher":"Bash","hooks":[
+                    {"type":"command","command":"garde.sh","async":true},
+                    {"type":"http","url":"https://hooks.example/pre","headers":{"Authorization":"Bearer ${TOKEN}"},"timeout":5},
+                    {"type":"prompt","prompt":"Vérifie : $ARGUMENTS","model":"petit"},
+                    {"type":"agent","prompt":"inconnu"}
+                ]}],
+                "PermissionRequest":["approuve.sh"],
+                "EvenementFutur":["ignoré"]
+            }}"#,
+        )
+        .expect("json");
+        let config = parse_optional_hooks_config(&root).expect("hooks");
+        let pre = config.entries(HookEvent::PreToolUse);
+        assert_eq!(pre.len(), 3);
+        assert!(pre[0].run_async && pre[0].kind == HookKind::Command);
+        assert_eq!(pre[1].command, "https://hooks.example/pre");
+        assert_eq!(pre[1].timeout_secs, Some(5));
+        assert!(
+            matches!(&pre[1].kind, HookKind::Http { headers } if headers["Authorization"] == "Bearer ${TOKEN}")
+        );
+        assert_eq!(
+            pre[2].kind,
+            HookKind::Prompt {
+                model: Some("petit".to_string())
+            }
+        );
+        assert!(pre
+            .iter()
+            .all(|entry| entry.matcher.as_deref() == Some("Bash")));
+        assert_eq!(
+            config.entries(HookEvent::PermissionRequest)[0].command,
+            "approuve.sh"
+        );
+    }
 
     fn temp_dir() -> std::path::PathBuf {
         let nanos = SystemTime::now()

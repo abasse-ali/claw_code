@@ -197,6 +197,10 @@ pub fn tool_label(name: &str) -> &str {
         "WebFetch" => "Page web",
         "ViewPage" => "Page vue dans le navigateur",
         "Screenshot" => "Captures de la page",
+        "Icon" => "Icônes",
+        "Ornament" => "Ornement",
+        "Component" => "Composants",
+        "Photo" => "Photos libres",
         "LookAtImage" => "Image regardée",
         "WebSearch" => "Recherche web",
         "TodoWrite" => "Tâches",
@@ -244,6 +248,31 @@ fn tool_argument(name: &str, input: &Value) -> Option<String> {
         }
         "WebFetch" | "ViewPage" => str_field(input, &["url"]).map(ToOwned::to_owned),
         "Screenshot" => str_field(input, &["url", "path"]).map(ToOwned::to_owned),
+        "Icon" => input
+            .get("names")
+            .and_then(|names| names.as_array())
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|name| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|names| !names.is_empty())
+            .or_else(|| str_field(input, &["search", "name"]).map(ToOwned::to_owned)),
+        "Ornament" => str_field(input, &["kind"]).map(ToOwned::to_owned),
+        "Component" => input
+            .get("names")
+            .and_then(|names| names.as_array())
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|name| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|names| !names.is_empty()),
+        "Photo" => str_field(input, &["search"]).map(ToOwned::to_owned),
         "WebSearch" => str_field(input, &["query"]).map(ToOwned::to_owned),
         "Agent" => str_field(input, &["description", "subagent_type"]).map(ToOwned::to_owned),
         "Skill" => str_field(input, &["skill", "name"]).map(ToOwned::to_owned),
@@ -297,6 +326,10 @@ pub fn running_label(name: &str) -> String {
         "WebFetch" => "Lecture de la page…".to_string(),
         "ViewPage" => "Ouverture de la page dans le navigateur…".to_string(),
         "Screenshot" => "Captures de la page dans le navigateur…".to_string(),
+        "Icon" => "Choix des icônes…".to_string(),
+        "Ornament" => "Tracé de l'ornement…".to_string(),
+        "Component" => "Choix des composants…".to_string(),
+        "Photo" => "Recherche de photos libres…".to_string(),
         "LookAtImage" => "Regard sur l'image…".to_string(),
         "Consult" => "Second avis demandé à d'autres modèles…".to_string(),
         "Agent" => "Sous-agent au travail…".to_string(),

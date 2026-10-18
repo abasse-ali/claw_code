@@ -1,0 +1,8 @@
+/* Les mêmes variables que le socle, en sombre : à ajuster à la palette du plan. */
+:root[data-theme="dark"] { --paper: #161412; --ink: #f1ebe2; --muted: #b8afa3; --accent: #e08a5a; color-scheme: dark; }
+.theme-toggle { display: inline-grid; place-items: center; width: 44px; height: 44px; border: 0; border-radius: 999px; background: transparent; color: inherit; font: inherit; cursor: pointer; transition: background-color .2s, transform .3s; }
+.theme-toggle:hover { background: color-mix(in srgb, var(--ink, #1f1d1a) 8%, transparent); }
+.theme-toggle:active { transform: rotate(-20deg); }
+.theme-toggle__dark, .theme-toggle[aria-pressed="true"] .theme-toggle__light { display: none; }
+.theme-toggle[aria-pressed="true"] .theme-toggle__dark { display: inline-grid; }
+html { transition: background-color .3s, color .3s; }

@@ -1,0 +1,15 @@
+/* Effets liés au défilement, en CSS seul : là où le navigateur ne les connaît
+   pas, la page reste simplement immobile. */
+.scroll-progress { position: fixed; inset: 0 0 auto; z-index: 60; height: 3px; background: var(--accent, #8a3b12); transform-origin: 0 50%; transform: scaleX(0); pointer-events: none; }
+.hero-media { overflow: hidden; border-radius: var(--radius, 12px); }
+.hero-media img { display: block; width: 100%; height: auto; }
+@supports (animation-timeline: scroll()) {
+  .scroll-progress { animation: progress-grow linear both; animation-timeline: scroll(root); }
+  [data-parallax] { animation: parallax-drift linear both; animation-timeline: view(); animation-range: cover; scale: 1.12; }
+}
+@keyframes progress-grow { to { transform: scaleX(1); } }
+@keyframes parallax-drift { from { translate: 0 -6%; } to { translate: 0 6%; } }
+@media (prefers-reduced-motion: reduce) {
+  .scroll-progress { display: none; }
+  [data-parallax] { animation: none; scale: 1; }
+}

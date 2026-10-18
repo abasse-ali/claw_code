@@ -1,0 +1,30 @@
+<form class="smart-form" data-smart-form data-mailto="contact@exemple.fr" novalidate>
+  <div class="smart-form__field">
+    <label for="contact-name">Nom</label>
+    <input id="contact-name" name="name" autocomplete="name" required>
+    <p class="smart-form__error" data-error-for="contact-name">Indiquez votre nom.</p>
+  </div>
+  <div class="smart-form__field">
+    <label for="contact-email">E-mail</label>
+    <input id="contact-email" name="email" type="email" autocomplete="email" required>
+    <p class="smart-form__error" data-error-for="contact-email">Une adresse comme prenom@exemple.fr.</p>
+  </div>
+  <div class="smart-form__field">
+    <label for="contact-phone">Téléphone <span class="smart-form__optional">(facultatif)</span></label>
+    <input id="contact-phone" name="phone" type="tel" autocomplete="tel" pattern="[0-9 +().-]{10,}">
+    <p class="smart-form__error" data-error-for="contact-phone">Dix chiffres au moins.</p>
+  </div>
+  <div class="smart-form__field">
+    <label for="contact-message">Message</label>
+    <textarea id="contact-message" name="message" rows="5" required minlength="10"></textarea>
+    <p class="smart-form__error" data-error-for="contact-message">Quelques mots au moins.</p>
+  </div>
+  <button class="smart-form__submit" type="submit">
+    <span class="smart-form__spinner">{{icon:loader-circle}}</span>
+    <span>Envoyer</span>
+  </button>
+  <p class="smart-form__draft" data-form-draft hidden>Brouillon gardé sur cet appareil.</p>
+  <div class="smart-form__success" data-form-success hidden tabindex="-1">
+    <p>{{icon:circle-check}} Merci, votre message est parti. Réponse sous 48 heures.</p>
+  </div>
+</form>

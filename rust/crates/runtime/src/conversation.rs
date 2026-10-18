@@ -8,7 +8,7 @@ use crate::compact::{
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::harness::{self, Aid, StallGuard, VerifySetting};
-use crate::hooks::{HookEvent, HookRunResult, HookRunner};
+use crate::hooks::{HookEvent, HookPermissionDecision, HookRunResult, HookRunner};
 use crate::interrupt::{clear_interrupt, interrupt_requested, INTERRUPTED_MESSAGE};
 use crate::permissions::{
     PermissionOutcome, PermissionPolicy, PermissionPromptDecision, PermissionPrompter,
@@ -85,6 +85,13 @@ pub trait ApiClient {
     /// Fin du tour : le modèle habituel reprend après une escalade.
     fn restore_model(&mut self) {}
 
+    /// Tour de design : le confie au modèle réglé pour le design
+    /// (`designModel`) jusqu'à la fin du tour ; renvoie son nom, ou `None`
+    /// s'il n'y en a pas ou que c'est déjà lui.
+    fn design_model(&mut self) -> Option<String> {
+        None
+    }
+
     /// Le modèle vient de répondre sans appeler d'outil : c'est sa réponse
     /// finale, sauf si un contrôle de Claw le renvoie au travail.
     fn answer_drafted(&mut self) {}
@@ -126,6 +133,17 @@ pub trait ApiClient {
         _images: &[crate::attachments::ImageAttachment],
     ) -> Vec<(usize, String)> {
         Vec::new()
+    }
+
+    /// Critique de design : les captures d'une interface jugées par un modèle
+    /// qui lit les images. `None` : aucun modèle disponible.
+    fn critique_design(
+        &mut self,
+        _system: &str,
+        _prompt: &str,
+        _images: &[crate::attachments::ImageAttachment],
+    ) -> Option<Consultation> {
+        None
     }
 
     /// Mode équipe : rôle de la prochaine requête (le client choisit le modèle
@@ -294,6 +312,12 @@ pub struct ConversationRuntime<C, T> {
     /// Captures d'écran des appels de la réponse en cours, jointes à son
     /// dernier résultat d'outil.
     tool_images: Vec<crate::attachments::ImageAttachment>,
+    /// Dernière page regardée par le modèle (`Screenshot`, `ViewPage`) :
+    /// celle que reprend la revue visuelle.
+    page_target: Option<String>,
+    /// Arrêt demandé par un hook (`"continue": false`) : le tour s'arrête
+    /// après les appels en cours.
+    hook_stop: Option<String>,
 }
 
 /// Issue de la démonstration finale du mode projet.
@@ -340,6 +364,47 @@ fn file_stamp(path: &std::path::Path) -> Option<FileStamp> {
 struct TurnAids {
     /// Des fichiers ont été modifiés depuis la dernière vérification.
     dirty: bool,
+    /// Un fichier d'interface (HTML, CSS, composant) a changé depuis la
+    /// dernière revue visuelle.
+    interface_dirty: bool,
+    /// Revues visuelles faites pendant ce tour.
+    interface_rounds: usize,
+    /// Fichiers d'interface changés par une commande, déjà revus.
+    interface_commands: std::collections::BTreeSet<String>,
+    /// La méthode de design est jointe à la demande de ce tour.
+    design_guided: bool,
+    /// Le plan de design de ce tour a été relu avant le code.
+    plan_reviewed: bool,
+    /// Le modèle a écrit l'interface sans plan : il lui a été demandé.
+    plan_requested: bool,
+    /// Un autre modèle a repris après deux réponses vides de suite.
+    empty_escalated: bool,
+    /// Le modèle a été prévenu que sa page appelle des fichiers qui manquent.
+    assets_reminded: bool,
+    /// Le modèle a été prévenu que ses styles n'ont pas le socle de la méthode.
+    foundation_noted: bool,
+    /// Notes des revues visuelles du tour, dans l'ordre.
+    graded: Vec<crate::web_design::Graded>,
+    /// Pièges du code déjà signalés pendant ce tour (fichier et constat).
+    pitfalls_seen: std::collections::HashSet<String>,
+    /// Langages dont les règles ont été données pendant ce tour.
+    code_languages: std::collections::BTreeSet<crate::code_guide::Language>,
+    /// Scripts écrits pendant ce tour (chemins).
+    scripts_written: std::collections::BTreeSet<String>,
+    /// Commandes lancées par le modèle pendant ce tour.
+    commands_run: Vec<String>,
+    /// Le modèle a été renvoyé essayer ses scripts.
+    scripts_asked: bool,
+    /// Le piège des guillemets de `PowerShell` passé par bash a été dit.
+    quoting_noted: bool,
+    /// Poursuites accordées au tour de design resté sous la barre.
+    continuations: usize,
+    /// Revues notées au moment de la dernière poursuite.
+    graded_at_continuation: usize,
+    /// Revues visuelles ajoutées au tour par les poursuites.
+    extra_rounds: usize,
+    /// L'arrêt sous la barre a été expliqué à l'utilisateur.
+    continuation_explained: bool,
     /// Commandes réussies lancées par le modèle depuis sa dernière modification.
     verified_commands: Vec<String>,
     /// Commandes parties en arrière-plan depuis la dernière modification, par
@@ -801,7 +866,52 @@ const MAX_CUT_CONTINUATIONS: usize = 2;
 
 /// Résultat noté, dans la session enregistrée en cours de tour, pour un appel
 /// dont l'exécution n'est pas finie : il n'y reste que si Claw est arrêté avant.
+/// Instructions liées au fichier qu'un outil lit ou modifie (règles avec
+/// `paths`, `CLAUDE.md` du sous-dossier), chacune donnée une seule fois.
+fn path_instruction_notes(tool_name: &str, input: &str) -> Vec<String> {
+    if !matches!(
+        tool_name,
+        "read_file" | "write_file" | "edit_file" | "NotebookEdit"
+    ) {
+        return Vec::new();
+    }
+    serde_json::from_str::<serde_json::Value>(input)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("path")
+                .or_else(|| value.get("notebook_path"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .map(|path| crate::memory::instructions_for(&path))
+        .unwrap_or_default()
+}
+
+/// Résultat des appels restants quand un hook arrête l'agent (`"continue": false`).
+const HOOK_STOP_MESSAGE: &str =
+    "[Claw] Not run: a hook stopped the agent (\"continue\": false) before this call.";
+
 const INTERRUPTED_CALL_RESULT: &str = "[Claw] Claw was stopped while this call was running: its result was not recorded, and the call may have run only in part. Check the current state (files, processes) before relying on it or running it again.";
+
+/// Une erreur d'API en une ligne lisible : sans le corps JSON que le
+/// fournisseur y joint.
+fn short_error(error: &str) -> String {
+    const MAX_CHARS: usize = 160;
+    let line = error.lines().next().unwrap_or_default();
+    let line = [" : [", " : {", ": [", ": {"]
+        .iter()
+        .filter_map(|start| line.find(start))
+        .min()
+        .map_or(line, |end| &line[..end])
+        .trim();
+    if line.chars().count() > MAX_CHARS {
+        let cut: String = line.chars().take(MAX_CHARS).collect();
+        format!("{cut}…")
+    } else {
+        line.to_string()
+    }
+}
 
 /// Le dernier message est la relance d'une réponse coupée, juste après elle.
 fn after_cut_nudge(messages: &[ConversationMessage]) -> bool {
@@ -823,6 +933,29 @@ pub fn cut_reply_continued(messages: &[ConversationMessage]) -> Option<String> {
 }
 
 /// Demande l'avis des hooks `Notification` avant chaque demande d'autorisation.
+/// Autorisation d'un appel selon la décision des hooks `PreToolUse`.
+fn authorize_after_hook(
+    policy: &mut PermissionPolicy,
+    decision: Option<HookPermissionDecision>,
+    tool_name: &str,
+    input: &str,
+    prompter: Option<&mut dyn PermissionPrompter>,
+) -> PermissionOutcome {
+    let outcome = match decision {
+        Some(HookPermissionDecision::Allow) => policy.authorize_preapproved(tool_name, input),
+        Some(HookPermissionDecision::Ask) => {
+            policy.authorize_with_prompt(tool_name, input, prompter)
+        }
+        None => policy.authorize(tool_name, input, prompter),
+    };
+    crate::telemetry::tool_decision(
+        tool_name,
+        input,
+        matches!(outcome, PermissionOutcome::Allow),
+    );
+    outcome
+}
+
 struct NotifyingPrompter<'a> {
     hooks: &'a HookRunner,
     inner: &'a mut dyn PermissionPrompter,
@@ -830,6 +963,19 @@ struct NotifyingPrompter<'a> {
 
 impl PermissionPrompter for NotifyingPrompter<'_> {
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
+        // Hooks `PermissionRequest` : ils peuvent répondre à la place de
+        // l'utilisateur (autoriser ou refuser).
+        let hooked = self
+            .hooks
+            .run_permission_request(&request.tool_name, &request.input);
+        if hooked.is_denied() {
+            return PermissionPromptDecision::Deny {
+                reason: hooked.reason("refusé par un hook PermissionRequest"),
+            };
+        }
+        if hooked.permission_decision() == Some(HookPermissionDecision::Allow) {
+            return PermissionPromptDecision::Allow;
+        }
         // Une demande de ce tour est restée sans réponse : l'utilisateur est
         // absent, et chaque nouvelle demande l'attendrait encore longtemps.
         if crate::permissions::user_away() {
@@ -842,6 +988,7 @@ impl PermissionPrompter for NotifyingPrompter<'_> {
                 request.tool_name
             ),
         );
+        crate::telemetry::note_asked();
         let decision = self.inner.decide(request);
         if matches!(&decision, PermissionPromptDecision::Deny { reason } if crate::permissions::is_not_run(reason))
         {
@@ -919,6 +1066,8 @@ where
             project_root: None,
             environment: EnvironmentProbe::Pending,
             tool_images: Vec::new(),
+            page_target: None,
+            hook_stop: None,
         }
     }
 
@@ -973,6 +1122,23 @@ where
     #[must_use]
     pub fn hooks(&self) -> &HookRunner {
         &self.hook_runner
+    }
+
+    /// Retient l'arrêt demandé par un hook (le premier compte).
+    fn note_hook_stop(&mut self, result: &HookRunResult) {
+        if self.hook_stop.is_none() {
+            self.hook_stop = result.stop_reason().map(ToOwned::to_owned);
+        }
+    }
+
+    /// Fin du tour demandée par un hook : l'utilisateur est prévenu.
+    fn finish_on_hook_stop(&mut self) -> bool {
+        let Some(reason) = self.hook_stop.take() else {
+            return false;
+        };
+        self.api_client
+            .notify(&format!("Un hook arrête l'agent : {reason}"));
+        true
     }
 
     /// Signale à l'utilisateur les retours de hooks qui ne vont pas au modèle.
@@ -1183,6 +1349,26 @@ where
         true
     }
 
+    /// Plus aucun modèle ne répond après un contrôle de Claw : les notes de
+    /// Claw envoyées depuis la réponse sont retirées (la session finit sur la
+    /// réponse, comme un tour ordinaire) et la réponse est rouverte.
+    fn keep_answer_after_error(&mut self, error: &str) {
+        while self.session.messages.last().is_some_and(|message| {
+            message.role == crate::session::MessageRole::User
+                && message
+                    .blocks
+                    .iter()
+                    .all(|block| matches!(block, ContentBlock::Text { .. }))
+        }) {
+            self.session.messages.pop();
+        }
+        self.api_client.answer_kept();
+        self.api_client.notify(&format!(
+            "Le modèle n'a pas pu reprendre après un contrôle de Claw ({}) : la réponse déjà donnée reste celle du tour",
+            short_error(error)
+        ));
+    }
+
     /// La suite d'une réponse coupée par la limite de sortie complète cette
     /// réponse : la relance de Claw est retirée et les deux parties ne font
     /// plus qu'un message, celui que l'utilisateur et les contrôles lisent.
@@ -1256,11 +1442,23 @@ where
         images: Vec<crate::attachments::ImageAttachment>,
         prompter: Option<&mut dyn PermissionPrompter>,
     ) -> Result<TurnSummary, RuntimeError> {
-        let result = self.run_turn_inner(user_input.into(), images, prompter);
+        let user_input = user_input.into();
+        let started = std::time::Instant::now();
+        if !self.subagent {
+            crate::telemetry::user_prompt(&user_input);
+        }
+        let result = self.run_turn_inner(user_input, images, prompter);
+        if !self.subagent {
+            crate::telemetry::active_time(started.elapsed());
+        }
         // Après une escalade, le tour suivant repart avec le modèle habituel.
         self.api_client.restore_model();
         // Fin du tour, réussi ou non : ce qui a été fait est enregistré.
         self.autosave(&[]);
+        // Les outils accordés par un skill ne valent que pour ce tour.
+        if !self.subagent {
+            crate::permissions::clear_turn_grants();
+        }
         result
     }
 
@@ -1324,6 +1522,36 @@ where
                 user_message.blocks.push(ContentBlock::Text { text });
             }
         }
+        // Interface web : la méthode d'un studio de design (plan avant le
+        // code, marques d'une page générée, plancher de qualité, vérification).
+        let mut design_guided = false;
+        if !self.subagent
+            && harness::enabled(Aid::DesignGuide)
+            && report != harness::Report::Problem
+        {
+            if let Some(text) = crate::web_design::design_guide(&request_text, earlier.as_deref()) {
+                user_message.blocks.push(ContentBlock::Text { text });
+                design_guided = true;
+                // Le modèle réglé pour le design (`designModel`) fait le tour ;
+                // le modèle habituel reprend à la fin.
+                if let Some(model) = self.api_client.design_model() {
+                    self.api_client.notify(&format!(
+                        "Tour de design confié à {model} (designModel, mesuré par /models bench --design)"
+                    ));
+                }
+            }
+        }
+        // Code : la méthode d'un ingénieur soigneux et les règles des langages
+        // que la demande nomme (pas pour une interface, qui a la sienne).
+        let mut code_languages = std::collections::BTreeSet::new();
+        if !self.subagent && !design_guided && harness::enabled(Aid::CodeGuide) {
+            if let Some((text, languages)) =
+                crate::code_guide::code_guide(&request_text, earlier.as_deref())
+            {
+                user_message.blocks.push(ContentBlock::Text { text });
+                code_languages.extend(languages);
+            }
+        }
         // Petit projet : tous ses fichiers en vues, au premier tour de la session.
         if !self.subagent && self.session.messages.is_empty() && harness::enabled(Aid::SmallProject)
         {
@@ -1365,8 +1593,18 @@ where
                 .flatten()
                 .and_then(|cwd| harness::DataSnapshot::take(&cwd)),
             project: project_turn,
+            design_guided,
+            code_languages,
             ..TurnAids::default()
         };
+        // Tour de design : plan, code, captures et revues dépassent le budget
+        // ordinaire ; il grandit, sauf si l'utilisateur l'a réglé lui-même.
+        let mut turn_limit = crate::web_design::turn_request_budget(
+            design_guided,
+            self.turn_request_limit,
+            harness::TURN_REQUEST_LIMIT,
+            std::env::var_os("CLAW_TURN_REQUESTS").is_some(),
+        );
         // Mode projet : un tour long est normal, le plan en jalons fait le point.
         if aids.project.is_some() {
             aids.stall.skip_budget();
@@ -1391,9 +1629,19 @@ where
             if interrupt_requested() {
                 return Err(RuntimeError::new(INTERRUPTED_MESSAGE));
             }
+            // Tour de design resté sous la barre, dont la note monte : la
+            // limite recule, au lieu d'attendre un « continue ».
+            if !wrapping_up
+                && turn_limit > 0
+                && iterations > turn_limit
+                && aids.design_guided
+                && self.continue_design(&mut aids, "limite du tour")
+            {
+                turn_limit += crate::web_design::CONTINUATION_REQUESTS;
+            }
             // Budget de requêtes du tour atteint : le modèle conclut et rend
             // la main, au lieu de dépenser le quota du jour en un seul tour.
-            let limit = self.turn_request_limit;
+            let limit = turn_limit;
             if !wrapping_up && limit > 0 && iterations > limit {
                 wrapping_up = true;
                 let plural = if limit > 1 { "s" } else { "" };
@@ -1408,6 +1656,32 @@ where
                 self.session
                     .messages
                     .push(ConversationMessage::user_text(note));
+            }
+            // Revue visuelle anticipée : le budget du tour s'épuise et
+            // l'interface, modifiée, n'a jamais été revue. Le juge parle tant
+            // qu'il reste de quoi corriger ; à la limite, la conclusion part
+            // sans aucun contrôle.
+            // Sans page à capturer (un module `TypeScript`, un script), rien
+            // n'est annoncé : vu dans un essai réel, l'annonce revenait à
+            // chaque modification d'un `.ts`, sans aucune revue.
+            if !wrapping_up
+                && limit > 0
+                && aids.interface_dirty
+                && aids.interface_rounds == 0
+                && iterations >= crate::web_design::early_review_at(limit)
+                && self.page_to_review(&aids).is_some()
+            {
+                self.api_client.notify(&format!(
+                    "Le tour a utilisé {} requêtes sur {limit} sans revue visuelle : revue maintenant, pour que les corrections tiennent dans le budget",
+                    iterations - 1
+                ));
+                if let Some(feedback) =
+                    self.interface_gate(&mut aids, &request_text, earlier.as_deref(), &mut prompter)
+                {
+                    self.session
+                        .messages
+                        .push(ConversationMessage::user_text(feedback));
+                }
             }
             // Mode équipe : le rôle de cette étape, d'après l'état du travail.
             if aids.team {
@@ -1427,6 +1701,7 @@ where
                 system_prompt: self.system_prompt.clone(),
                 messages: self.session.messages.clone(),
             };
+            let request_started = std::time::Instant::now();
             let events = match self.api_client.stream(request) {
                 Ok(events) => events,
                 // Contexte trop long malgré l'estimation : on compacte et on réessaie une fois.
@@ -1438,10 +1713,28 @@ where
                         messages: self.session.messages.clone(),
                     })?
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    crate::telemetry::api_error(&error.to_string(), request_started.elapsed());
+                    // Un contrôle de Claw vient de renvoyer au travail un modèle
+                    // qui avait fini, et plus aucun modèle ne répond (quota du
+                    // jour épuisé, vu dans un essai réel avec Gemini) : la
+                    // réponse déjà donnée reste celle du tour, au lieu de le perdre.
+                    if superseded_draft.is_some() && !interrupt_requested() {
+                        self.keep_answer_after_error(&error.to_string());
+                        self.run_stop_hooks(stop_continuations, true, &assistant_messages);
+                        break;
+                    }
+                    return Err(error);
+                }
             };
             let (assistant_message, usage) = match build_assistant_message(events) {
-                Ok(built) => built,
+                // Une réponse avec du contenu : la relance d'une réponse vide
+                // vaut de nouveau. Vu dans un essai réel : deux réponses vides
+                // séparées par des dizaines d'autres suffisaient à perdre le tour.
+                Ok(built) => {
+                    empty_nudged = false;
+                    built
+                }
                 // Suite d'une réponse coupée restée vide (souvent tout le
                 // budget pris par le raisonnement) : la même demande repart une
                 // fois, puis la réponse coupée est rendue telle quelle.
@@ -1465,10 +1758,34 @@ where
                         .push(ConversationMessage::user_text(EMPTY_RESPONSE_NUDGE));
                     continue;
                 }
+                // Vide encore après la relance : un autre modèle reprend la fin
+                // du tour au lieu de le perdre. Vu dans un essai réel : dots-3,
+                // 594 s de raisonnement puis rien, et le site laissé à mi-chemin.
+                // Une escalade à part de celle d'un agent bloqué : déjà faite
+                // plus tôt dans le tour, elle ne doit pas laisser le tour se perdre.
+                Err(error)
+                    if error.to_string() == EMPTY_RESPONSE_ERROR
+                        && !aids.empty_escalated
+                        && !self.subagent
+                        && harness::enabled(Aid::Escalation) =>
+                {
+                    aids.empty_escalated = true;
+                    let Some(model) = self.api_client.escalate() else {
+                        return Err(error);
+                    };
+                    self.api_client.notify(&format!(
+                        "Le modèle n'a rien répondu deux fois : {model} reprend la fin du tour"
+                    ));
+                    self.session.messages.push(ConversationMessage::user_text(
+                        harness::escalation_feedback(&model),
+                    ));
+                    continue;
+                }
                 Err(error) => return Err(error),
             };
             if let Some(usage) = usage {
                 self.usage_tracker.record(usage);
+                crate::telemetry::api_request(&usage, request_started.elapsed(), self.subagent);
             }
             // Suite d'une réponse coupée : elle complète le message coupé.
             let assistant_message = self.join_cut_reply(assistant_message, &mut assistant_messages);
@@ -1544,6 +1861,15 @@ where
                     .or_else(|| self.persistence_gate(&mut aids))
                     .or_else(|| self.verification_gate(&mut aids, &mut prompter))
                     .or_else(|| self.editor_gate(&mut aids))
+                    .or_else(|| self.run_scripts_gate(&mut aids))
+                    .or_else(|| {
+                        self.interface_gate(
+                            &mut aids,
+                            &request_text,
+                            earlier.as_deref(),
+                            &mut prompter,
+                        )
+                    })
                     .or_else(|| {
                         self.workflow_gate(
                             &mut aids,
@@ -1604,7 +1930,7 @@ where
             // Encore des outils alors que le budget du tour est atteint : rien
             // ne tourne, chaque appel reçoit son résultat et le tour s'arrête.
             if wrapping_up {
-                let reason = harness::turn_limit_refusal(self.turn_request_limit);
+                let reason = harness::turn_limit_refusal(turn_limit);
                 for (tool_use_id, tool_name, input) in pending_tool_uses {
                     self.tool_executor.skipped(&tool_name, &input, &reason);
                     let message = ConversationMessage::tool_result(
@@ -1621,6 +1947,15 @@ where
                 );
                 break;
             }
+            // Plan de design relu avant le code : à la première écriture d'un
+            // fichier d'interface qui suit le plan, une fois par tour.
+            let mut plan_note = self.plan_review(
+                &pending_tool_uses,
+                &assistant_messages,
+                &request_text,
+                earlier.as_deref(),
+                &mut aids,
+            );
             self.autosave(&pending_tool_uses);
             if self.run_parallel_batch(
                 &pending_tool_uses,
@@ -1628,18 +1963,30 @@ where
                 &mut tool_results,
                 &mut aids,
             ) {
+                if let Some(note) = plan_note.take() {
+                    self.session
+                        .messages
+                        .push(ConversationMessage::user_text(note));
+                }
+                if self.finish_on_hook_stop() {
+                    break;
+                }
                 continue;
             }
             for (tool_use_id, tool_name, input) in pending_tool_uses {
                 // Après une interruption, chaque appel restant reçoit un résultat :
                 // un appel d'outil sans résultat rendrait la conversation invalide.
-                if interrupt_requested() {
-                    self.tool_executor
-                        .skipped(&tool_name, &input, INTERRUPTED_MESSAGE);
+                if interrupt_requested() || self.hook_stop.is_some() {
+                    let reason = if self.hook_stop.is_some() {
+                        HOOK_STOP_MESSAGE
+                    } else {
+                        INTERRUPTED_MESSAGE
+                    };
+                    self.tool_executor.skipped(&tool_name, &input, reason);
                     let message = ConversationMessage::tool_result(
                         tool_use_id,
                         tool_name,
-                        INTERRUPTED_MESSAGE.to_string(),
+                        reason.to_string(),
                         true,
                     );
                     self.session.messages.push(message.clone());
@@ -1657,6 +2004,9 @@ where
                 );
                 aids.refused |= refused;
                 self.after_tool(&tool_name, &input, &mut result_message, refused, &mut aids);
+                if let Some(note) = plan_note.take() {
+                    append_tool_output(&mut result_message, &note);
+                }
                 lean_result(&tool_name, &mut result_message);
                 self.session.messages.push(result_message.clone());
                 tool_results.push(result_message);
@@ -1666,6 +2016,9 @@ where
                 }
             }
             self.attach_tool_images(&mut tool_results);
+            if self.finish_on_hook_stop() {
+                break;
+            }
             // Mode projet : un jalon marqué fait se vérifie tout de suite.
             if let Some(note) = self.project_after_tools(&mut aids, &mut prompter) {
                 if let Some(last) = self.session.messages.last_mut() {
@@ -1722,25 +2075,36 @@ where
         Ok(user_message)
     }
 
-    /// Arguments, autorisation puis hook `PreToolUse` d'un appel d'un lot : les
-    /// messages du hook s'il peut être exécuté, sinon la raison rendue au
-    /// modèle, et vrai si c'est un refus (autorisation ou hook).
+    /// Arguments, hook `PreToolUse` puis autorisation d'un appel d'un lot :
+    /// les messages du hook et les arguments à utiliser (remplacés par un hook
+    /// avec `updatedInput`) s'il peut être exécuté, sinon la raison rendue au
+    /// modèle, et vrai si c'est un refus (hook ou autorisation).
     fn admit_tool_call(
         &mut self,
         name: &str,
         input: &str,
         prompter: &mut Option<&mut dyn PermissionPrompter>,
-    ) -> Result<Vec<String>, (String, bool)> {
+    ) -> Result<(Vec<String>, Option<String>), (String, bool)> {
         if let Some(problem) = self.tool_executor.invalid_input(name, input) {
             return Err((problem, false));
         }
+        let pre = self.hook_runner.run_pre_tool_use(name, input);
+        if pre.is_denied() {
+            let fallback = format!("hook PreToolUse : outil `{name}` refusé");
+            return Err((format_hook_message(&pre, &fallback), true));
+        }
+        self.note_hook_stop(&pre);
+        let updated = pre.updated_input().map(ToOwned::to_owned);
+        let effective = updated.as_deref().unwrap_or(input);
         let mut notifying = prompter.as_mut().map(|prompt| NotifyingPrompter {
             hooks: &self.hook_runner,
             inner: &mut **prompt,
         });
-        let outcome = self.permission_policy.authorize(
+        let outcome = authorize_after_hook(
+            &mut self.permission_policy,
+            pre.permission_decision(),
             name,
-            input,
+            effective,
             notifying
                 .as_mut()
                 .map(|prompt| prompt as &mut dyn PermissionPrompter),
@@ -1748,12 +2112,7 @@ where
         if let PermissionOutcome::Deny { reason } = outcome {
             return Err((reason, true));
         }
-        let pre = self.hook_runner.run_pre_tool_use(name, input);
-        if pre.is_denied() {
-            let fallback = format!("hook PreToolUse : outil `{name}` refusé");
-            return Err((format_hook_message(&pre, &fallback), true));
-        }
-        Ok(pre.messages().to_vec())
+        Ok((pre.messages().to_vec(), updated))
     }
 
     /// Plusieurs appels sans effet (sous-agents, lectures, recherches) : les
@@ -1779,9 +2138,13 @@ where
         let mut refused_calls = vec![false; calls.len()];
         let mut ready = Vec::new();
         let mut pre_messages = Vec::new();
+        let mut inputs: Vec<String> = calls.iter().map(|(_, _, input)| input.clone()).collect();
         for (index, (id, name, input)) in calls.iter().enumerate() {
             match self.admit_tool_call(name, input, prompter) {
-                Ok(messages) => {
+                Ok((messages, updated)) => {
+                    if let Some(updated) = updated {
+                        inputs[index] = updated;
+                    }
                     ready.push(index);
                     pre_messages.push(messages);
                 }
@@ -1801,7 +2164,7 @@ where
         // 2. Exécution simultanée des appels autorisés.
         let batch = ready
             .iter()
-            .map(|index| (calls[*index].1.clone(), calls[*index].2.clone()))
+            .map(|index| (calls[*index].1.clone(), inputs[*index].clone()))
             .collect::<Vec<_>>();
         let outputs = if batch.is_empty() {
             Vec::new()
@@ -1810,7 +2173,8 @@ where
         };
         // 3. Hooks PostToolUse et résultats, dans l'ordre d'origine.
         for ((index, outcome), pre) in ready.iter().zip(outputs).zip(pre_messages) {
-            let (id, name, input) = &calls[*index];
+            let (id, name, _) = &calls[*index];
+            let input = &inputs[*index];
             let (mut output, mut is_error) = match outcome {
                 Ok(output) => (output, false),
                 Err(error) => (error.to_string(), true),
@@ -1819,6 +2183,7 @@ where
             let post = self
                 .hook_runner
                 .run_post_tool_use(name, input, &output, is_error);
+            self.note_hook_stop(&post);
             if post.is_denied() {
                 is_error = true;
             }
@@ -1850,6 +2215,7 @@ where
     /// des modifications à vérifier, détection de blocage. Les remarques sont
     /// jointes au résultat que lira le modèle. `refused` : l'appel n'a pas
     /// tourné (refus, demande d'autorisation sans réponse, hook).
+    #[allow(clippy::too_many_lines)]
     fn after_tool(
         &mut self,
         tool_name: &str,
@@ -1861,6 +2227,7 @@ where
         let Some((output, is_error)) = tool_result_parts(message) else {
             return;
         };
+        crate::telemetry::tool_result(tool_name, input, !is_error && !refused);
         let output = output.to_string();
         // Ni l'échec d'un outil ni le résultat d'une commande : rien ne dit
         // que le modèle tourne en rond.
@@ -1878,6 +2245,12 @@ where
         notes.extend(self.tool_executor.argument_note(tool_name, input));
         // Questions déjà posées avec le menu : rien à redemander en fin de tour.
         aids.asked |= tool_name == "AskUserQuestion";
+        // Page que le modèle a regardée lui-même : la revue visuelle la reprend.
+        if matches!(tool_name, "Screenshot" | "ViewPage") && !is_error {
+            if let Some(target) = crate::web_design::page_target(input) {
+                self.page_target = Some(target);
+            }
+        }
         // Issue d'une commande du modèle : celle de `bash`, ou la fin, lue avec
         // `BashOutput`, d'une commande passée en arrière-plan pendant ce tour.
         let command_outcome = command_outcome(tool_name, input, &output, is_error, aids);
@@ -1898,7 +2271,11 @@ where
             notes.extend(self.repeated_read_note(&output, aids));
             notes.extend(self.viewed_read_note(&output, aids));
         }
-
+        // Règles `.claude/rules` liées à ce chemin et instructions du
+        // sous-dossier, données la première fois que le fichier est touché.
+        if !is_error {
+            notes.extend(path_instruction_notes(tool_name, input));
+        }
         if matches!(tool_name, "edit_file" | "write_file" | "NotebookEdit") && !is_error {
             self.after_file_change(tool_name, input, &output, aids, &mut notes);
         } else if !matches!(tool_name, "read_file" | "grep_search" | "glob_search") {
@@ -1911,7 +2288,18 @@ where
         if matches!(tool_name, "bash" | "PowerShell") && !is_error {
             self.data_rewritten_by_command(input, aids, &mut notes);
         }
+        // Du PowerShell passé par bash entre guillemets doubles : bash a
+        // remplacé ses variables avant que PowerShell ne le lise.
+        if tool_name == "bash" && harness::enabled(Aid::Pitfalls) && !aids.quoting_noted {
+            if let Some(note) = json_field(input, "command")
+                .and_then(|command| crate::code_checks::bash_powershell_quoting(&command))
+            {
+                aids.quoting_noted = true;
+                notes.push(note.to_string());
+            }
+        }
         if let Some(outcome) = command_outcome {
+            aids.commands_run.push(outcome.command.clone());
             if outcome.passed {
                 // Un script muet qui définit `main()` sans l'appeler.
                 if harness::enabled(Aid::EntryPoint) {
@@ -2082,6 +2470,10 @@ where
         aids.dirty = true;
         aids.editor_dirty = true;
         aids.workflow_dirty = true;
+        if json_field(input, "path").is_some_and(|path| crate::web_design::is_interface_file(&path))
+        {
+            aids.interface_dirty = true;
+        }
         aids.feedback_pending = false;
         aids.verified_commands.clear();
         // Une commande encore en cours a été lancée sur l'ancien code.
@@ -2141,14 +2533,104 @@ where
             }
         }
         if let Some(path) = path.filter(|_| harness::enabled(Aid::Diagnostics)) {
+            let name = std::path::Path::new(&path)
+                .file_name()
+                .map_or_else(|| path.clone(), |name| name.to_string_lossy().to_string());
             if let Some(error) = harness::syntax_check(std::path::Path::new(&path)) {
-                let name = std::path::Path::new(&path)
-                    .file_name()
-                    .map_or_else(|| path.clone(), |name| name.to_string_lossy().to_string());
                 self.api_client.notify(&format!(
                     "Erreur de syntaxe dans {name} : signalée au modèle"
                 ));
                 notes.push(harness::syntax_feedback(&path, &error));
+            } else if harness::enabled(Aid::Pitfalls) {
+                // Les pièges du code, chacun dit une fois par tour : une
+                // modification ailleurs dans le fichier ne les répète pas.
+                let fresh: Vec<String> = crate::code_checks::pitfalls(std::path::Path::new(&path))
+                    .into_iter()
+                    .filter(|finding| aids.pitfalls_seen.insert(format!("{path}\u{1}{finding}")))
+                    .collect();
+                if !fresh.is_empty() {
+                    self.api_client.notify(&format!(
+                        "Pièges relevés dans {name} : {}, signalés au modèle",
+                        fresh.len()
+                    ));
+                    notes.push(crate::code_checks::pitfalls_feedback(&path, &fresh));
+                }
+            }
+            self.interface_file_notes(&path, aids, notes);
+            self.code_file_notes(&path, aids, notes);
+        }
+    }
+
+    /// Un fichier de code vient d'être écrit : les règles de son langage la
+    /// première fois dans le tour, et le script retenu pour être essayé.
+    fn code_file_notes(&mut self, path: &str, aids: &mut TurnAids, notes: &mut Vec<String>) {
+        let file = std::path::Path::new(path);
+        let Some(language) = crate::code_guide::Language::of(file) else {
+            return;
+        };
+        let name = file.file_name().map_or_else(
+            || path.to_string(),
+            |name| name.to_string_lossy().to_string(),
+        );
+        // Le JavaScript d'une page suit la méthode de design.
+        let page_script = aids.design_guided
+            && language == crate::code_guide::Language::JavaScript
+            && crate::web_design::is_interface_file(path);
+        if harness::enabled(Aid::CodeGuide)
+            && !self.subagent
+            && !page_script
+            && aids.code_languages.insert(language)
+        {
+            notes.push(crate::code_guide::rules_note(language, &name));
+        }
+        let text = std::fs::read_to_string(file).unwrap_or_default();
+        if !page_script && crate::code_guide::is_runnable_script(file, &text) {
+            aids.scripts_written.insert(path.to_string());
+        }
+    }
+
+    /// Contrôles d'un fichier d'interface qui vient d'être écrit, dits tout de
+    /// suite, avant que la page ne soit regardée : aucun emoji (du SVG
+    /// seulement), et, dans un tour de design, le socle de la méthode présent
+    /// dans les feuilles de style (une fois par tour, toutes feuilles lues).
+    fn interface_file_notes(&mut self, path: &str, aids: &mut TurnAids, notes: &mut Vec<String>) {
+        if !crate::web_design::is_interface_file(path) || !harness::enabled(Aid::DesignGuide) {
+            return;
+        }
+        let file = std::path::Path::new(path);
+        let name = file.file_name().map_or_else(
+            || path.to_string(),
+            |name| name.to_string_lossy().to_string(),
+        );
+        let text = std::fs::read_to_string(file).unwrap_or_default();
+        if let Some(found) = crate::web_design::emoji_in_source(&text) {
+            self.api_client.notify(&format!(
+                "Emoji dans {name} : à remplacer par du SVG, signalé au modèle"
+            ));
+            notes.push(crate::web_design::emoji_feedback(path, &found));
+        }
+        // Une icône ne se dessine jamais à la main : l'outil `Icon` la donne.
+        let drawn = crate::icon_set::drawn_icons(&text);
+        if !drawn.is_empty() {
+            self.api_client.notify(&format!(
+                "Icône(s) dessinée(s) à la main dans {name} : {}, signalée(s) au modèle",
+                drawn.len()
+            ));
+            notes.push(crate::icon_set::drawn_icons_feedback(path, &drawn));
+        }
+        let is_stylesheet = file
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("css") || ext.eq_ignore_ascii_case("scss"));
+        if is_stylesheet && aids.design_guided && !aids.foundation_noted {
+            let root = std::env::current_dir().unwrap_or_default();
+            let gaps = crate::web_design::foundation_gaps(&crate::web_design::project_css(&root));
+            if gaps.len() >= 2 {
+                aids.foundation_noted = true;
+                self.api_client.notify(&format!(
+                    "Socle de la méthode absent des styles ({} pièce(s) manquante(s)) : signalé au modèle",
+                    gaps.len()
+                ));
+                notes.push(crate::web_design::foundation_feedback(&gaps));
             }
         }
     }
@@ -2448,6 +2930,348 @@ where
             snapshot.refresh_all(&cwd);
         }
         feedback
+    }
+
+    /// Revue du plan de design avant le code : un autre modèle juge la
+    /// direction (identité, hiérarchie, typographie, couleur, composition)
+    /// quand le modèle s'apprête à écrire un fichier d'interface après l'avoir
+    /// posée. Changer un plan ne coûte rien ; changer une page faite coûte une
+    /// réécriture que le budget du tour ne permet pas toujours. Une fois par
+    /// tour, une requête de plus ; rien quand la méthode n'a pas été jointe.
+    fn plan_review(
+        &mut self,
+        pending: &[(String, String, String)],
+        assistant_messages: &[ConversationMessage],
+        request: &str,
+        earlier: Option<&str>,
+        aids: &mut TurnAids,
+    ) -> Option<String> {
+        if !aids.design_guided
+            || aids.plan_reviewed
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::DesignReview)
+        {
+            return None;
+        }
+        let writes_interface = pending.iter().any(|(_, name, input)| {
+            matches!(name.as_str(), "write_file" | "edit_file")
+                && json_field(input, "path")
+                    .is_some_and(|path| crate::web_design::is_interface_file(&path))
+        });
+        if !writes_interface {
+            return None;
+        }
+        // Le plan écrit dans la réponse, ou posé dans le raisonnement : beaucoup
+        // de modèles le font là.
+        let plan = assistant_messages
+            .iter()
+            .flat_map(|message| message.blocks.iter())
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !crate::web_design::looks_like_design_plan(&plan) {
+            // Pas de plan du tout : le modèle l'écrit avant d'aller plus loin,
+            // et le juge le relira à l'écriture suivante. Vu dans un essai
+            // réel : le modèle est passé droit au code, sans palette.
+            if aids.plan_requested {
+                return None;
+            }
+            aids.plan_requested = true;
+            self.api_client
+                .notify("Pas de plan de design avant le code : demandé à l'agent");
+            return Some(crate::web_design::PLAN_REQUEST.to_string());
+        }
+        aids.plan_reviewed = true;
+        if self
+            .api_client
+            .free_requests_left()
+            .is_some_and(|left| left < crate::web_design::MIN_FREE_REQUESTS)
+        {
+            return None;
+        }
+        // Une relance courte (« continue ») se juge avec la demande qu'elle poursuit.
+        let brief = match earlier {
+            Some(earlier) if request.split_whitespace().count() <= 12 => {
+                format!("{earlier}\n{request}")
+            }
+            _ => request.to_string(),
+        };
+        self.api_client
+            .notify("Revue du plan de design par un autre modèle, avant le code…");
+        let consultation = self.api_client.consult(
+            ConsultPurpose::Design,
+            crate::web_design::PLAN_CRITIC_SYSTEM,
+            &crate::web_design::plan_critique_prompt(
+                &brief,
+                &plan,
+                crate::web_design::design_bar(),
+            ),
+        )?;
+        if let Some(changes) = crate::web_design::plan_changes(&consultation.text) {
+            self.api_client.notify(&format!(
+                "Revue du plan par {} : {} remarque(s) transmise(s) à l'agent",
+                consultation.model,
+                changes.lines().count()
+            ));
+            Some(crate::web_design::plan_feedback(
+                &consultation.model,
+                &changes,
+            ))
+        } else {
+            self.api_client.notify(&format!(
+                "Revue du plan par {} : rien à redire",
+                consultation.model
+            ));
+            None
+        }
+    }
+
+    /// La page que la revue visuelle capturerait : celle que l'utilisateur a
+    /// nommée, sinon une page HTML parmi les fichiers modifiés. Aucune pour
+    /// un module `TypeScript` ou un script sans page.
+    fn page_to_review(&self, aids: &TurnAids) -> Option<String> {
+        if let Some(target) = &self.page_target {
+            return Some(target.clone());
+        }
+        let cwd = std::env::current_dir().ok()?;
+        let changed: Vec<String> = aids
+            .originals
+            .keys()
+            .chain(&aids.command_changes)
+            .cloned()
+            .collect();
+        crate::web_design::page_from_files(&cwd, &changed)
+    }
+
+    /// Revue visuelle : le modèle a modifié l'interface et dit avoir fini.
+    /// Claw regarde la page comme un utilisateur (captures pleine page au
+    /// téléphone et à l'ordinateur, défauts mesurés, essai du menu) et la fait
+    /// juger par un modèle qui voit ; ce qui est à reprendre repart au modèle,
+    /// quelques fois par tour au plus (`CLAW_DESIGN_REVIEW_ROUNDS`).
+    #[allow(clippy::too_many_lines)]
+    fn interface_gate(
+        &mut self,
+        aids: &mut TurnAids,
+        request: &str,
+        earlier: Option<&str>,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> Option<String> {
+        if self.subagent || interrupt_requested() || !harness::enabled(Aid::DesignReview) {
+            return None;
+        }
+        let by_commands: Vec<String> = aids
+            .command_changes
+            .iter()
+            .filter(|path| {
+                crate::web_design::is_interface_file(path)
+                    && !aids.interface_commands.contains(*path)
+            })
+            .cloned()
+            .collect();
+        if !aids.interface_dirty && by_commands.is_empty() {
+            return None;
+        }
+        aids.interface_dirty = false;
+        aids.interface_commands.extend(by_commands);
+        let mut rounds = crate::web_design::max_review_rounds() + aids.extra_rounds;
+        if aids.interface_rounds >= rounds {
+            // Revues du tour épuisées : une de plus si la note monte encore.
+            if rounds == 0 || !self.continue_design(aids, "revues du tour") {
+                return None;
+            }
+            aids.extra_rounds += 1;
+            rounds += 1;
+        }
+        if self
+            .api_client
+            .free_requests_left()
+            .is_some_and(|left| left < crate::web_design::MIN_FREE_REQUESTS)
+        {
+            self.api_client
+                .notify("Revue visuelle sautée : il reste peu de requêtes gratuites aujourd'hui");
+            return None;
+        }
+        let cwd = std::env::current_dir().ok()?;
+        let target = self.page_to_review(aids)?;
+        // La page appelle des feuilles de style ou des scripts pas encore
+        // écrits : la revue attend qu'ils existent, sans perdre son tour.
+        let missing = crate::web_design::missing_local_assets(&cwd, &target);
+        if !missing.is_empty() {
+            if aids.assets_reminded {
+                return None;
+            }
+            aids.assets_reminded = true;
+            self.api_client.notify(&format!(
+                "Revue visuelle reportée : la page appelle {}, pas encore écrit(s)",
+                missing.join(", ")
+            ));
+            return Some(crate::web_design::missing_assets_feedback(
+                &target, &missing,
+            ));
+        }
+        aids.interface_rounds += 1;
+        self.api_client.notify(&format!(
+            "Revue visuelle de l'interface ({}/{rounds}) : captures au téléphone et à l'ordinateur…",
+            aids.interface_rounds
+        ));
+        let input = crate::web_design::screenshot_input(&target);
+        self.tool_executor.announce("Screenshot", &input);
+        let (message, _) = self.execute_tool_call(
+            format!("claw-design-{}", aids.interface_rounds),
+            "Screenshot".to_string(),
+            &input,
+            prompter
+                .as_mut()
+                .map(|prompt| &mut **prompt as &mut dyn PermissionPrompter),
+        );
+        // Les captures vont au juge, pas dans la conversation.
+        let images = std::mem::take(&mut self.tool_images);
+        let (output, is_error) = tool_result_parts(&message)?;
+        if is_error {
+            self.api_client.notify(&format!(
+                "Revue visuelle impossible : {}",
+                output.lines().next().unwrap_or_default()
+            ));
+            return None;
+        }
+        let audit = crate::web_design::read_audit(output);
+        // Une relance courte (« plus coloré ») se juge avec la demande qu'elle poursuit.
+        let brief = match earlier {
+            Some(earlier) if request.split_whitespace().count() <= 12 => {
+                format!(
+                    "{earlier}
+{request}"
+                )
+            }
+            _ => request.to_string(),
+        };
+        let bar = crate::web_design::design_bar();
+        let critique = if images.is_empty() {
+            None
+        } else {
+            self.api_client
+                .notify("Revue visuelle : un modèle qui voit note les captures…");
+            self.api_client.critique_design(
+                crate::web_design::CRITIC_SYSTEM,
+                &crate::web_design::critique_prompt(
+                    &brief,
+                    images.len(),
+                    &audit,
+                    bar,
+                    aids.graded.last().map(|graded| graded.scores.as_slice()),
+                ),
+                &images,
+            )
+        };
+        // Les notes du juge, pour l'utilisateur : « 6,4/10, barre 8 ».
+        let scores = critique
+            .as_ref()
+            .map(|consultation| crate::web_design::critique_scores(&consultation.text))
+            .unwrap_or_default();
+        let graded = crate::web_design::average_score(&scores).map_or_else(String::new, |mean| {
+            let under: Vec<&str> = scores
+                .iter()
+                .filter(|(_, score)| *score < bar)
+                .map(|(criterion, _)| criterion.as_str())
+                .collect();
+            aids.graded.push(crate::web_design::Graded {
+                mean,
+                under: under.iter().map(ToString::to_string).collect(),
+                scores: scores.clone(),
+            });
+            if under.is_empty() {
+                format!(", note {mean:.1}/10 (barre {bar})")
+            } else {
+                format!(
+                    ", note {mean:.1}/10 (barre {bar}, sous la barre : {})",
+                    under.join(", ")
+                )
+            }
+        });
+        let verdict = critique.as_ref().and_then(|consultation| {
+            crate::web_design::critique_changes(&consultation.text, bar)
+                .map(|lines| (consultation.model.clone(), lines))
+        });
+        let feedback = crate::web_design::review_feedback(
+            &target,
+            &audit,
+            verdict
+                .as_ref()
+                .map(|(model, lines)| (model.as_str(), lines.as_str())),
+            aids.interface_rounds,
+            rounds,
+            bar,
+        );
+        if feedback.is_some() {
+            let judged = verdict.as_ref().map_or_else(String::new, |(model, lines)| {
+                format!(
+                    ", {} remarque(s) de {model}",
+                    lines
+                        .lines()
+                        .filter(|line| !line.starts_with("Scores"))
+                        .count()
+                )
+            });
+            self.api_client.notify(&format!(
+                "Revue visuelle : {} défaut(s) mesuré(s), {} remarque(s) de design{judged}{graded} : renvoyé(s) à l'agent",
+                audit.problems.len() + audit.console.len(),
+                audit.notes.len()
+            ));
+        } else {
+            self.api_client.notify(&format!(
+                "Revue visuelle : rien à reprendre sur la page{graded}"
+            ));
+        }
+        feedback
+    }
+
+    /// Le tour de design touche une limite (`at` : ses requêtes, ou ses
+    /// revues) sous la barre : il continue si la note monte, dans la limite
+    /// des poursuites (`CLAW_DESIGN_CONTINUE`) et du quota du jour. Sinon,
+    /// l'utilisateur lit pourquoi il s'arrête, une fois.
+    fn continue_design(&mut self, aids: &mut TurnAids, at: &str) -> bool {
+        if self.subagent || interrupt_requested() || !harness::enabled(Aid::DesignReview) {
+            return false;
+        }
+        let max = crate::web_design::max_continuations();
+        let free_left = self.api_client.free_requests_left();
+        let decision = crate::web_design::continuation(
+            &aids.graded,
+            aids.graded_at_continuation,
+            aids.continuations,
+            max,
+            free_left,
+        );
+        let bar = crate::web_design::design_bar();
+        let trail = crate::web_design::score_trail(&aids.graded);
+        if decision == crate::web_design::Continuation::Continue {
+            aids.continuations += 1;
+            aids.graded_at_continuation = aids.graded.len();
+            let under = aids
+                .graded
+                .last()
+                .map(|graded| graded.under.join(", "))
+                .unwrap_or_default();
+            self.api_client.notify(&format!(
+                "Poursuite du design ({}/{max}, {at}) : note {trail}/10, sous la barre {bar} ({under}) ; le tour continue",
+                aids.continuations
+            ));
+            return true;
+        }
+        if let Some(reason) = crate::web_design::stop_reason(decision) {
+            if !aids.continuation_explained {
+                aids.continuation_explained = true;
+                self.api_client.notify(&format!(
+                    "Design arrêté sous la barre {bar} (note {trail}/10) : {reason}. Écrivez « continue » pour reprendre"
+                ));
+            }
+        }
+        false
     }
 
     /// Des fichiers de code ont changé par une commande (`sed -i`, `cat > f
@@ -3001,6 +3825,50 @@ where
             "{prompt}{away}{edges}\n\n{}",
             harness::FINAL_ANSWER_RULE
         ))
+    }
+
+    /// Scripts écrits dans le tour et jamais lancés : le modèle est renvoyé
+    /// les essayer, une fois, avant de répondre. Un code jamais lancé n'est
+    /// pas fini ; un script qui ferait quelque chose d'irréversible n'est
+    /// pas lancé, et la réponse le dit.
+    fn run_scripts_gate(&mut self, aids: &mut TurnAids) -> Option<String> {
+        if self.subagent
+            || aids.scripts_asked
+            || aids.scripts_written.is_empty()
+            || interrupt_requested()
+            || !harness::enabled(Aid::RunScripts)
+            || self.permission_policy.active_mode() == crate::permissions::PermissionMode::ReadOnly
+        {
+            return None;
+        }
+        let commands: Vec<String> = aids
+            .commands_run
+            .iter()
+            .map(|command| command.to_lowercase())
+            .collect();
+        let unrun: Vec<(String, crate::code_guide::Language)> = aids
+            .scripts_written
+            .iter()
+            .filter_map(|path| {
+                let file = std::path::Path::new(path);
+                let name = file.file_name()?.to_string_lossy().to_string();
+                let language = crate::code_guide::Language::of(file)?;
+                // Un fichier supprimé depuis, ou déjà lancé, n'est plus à essayer.
+                let lowered = name.to_lowercase();
+                let run = commands.iter().any(|command| command.contains(&lowered));
+                (file.exists() && !run).then_some((name, language))
+            })
+            .collect();
+        if unrun.is_empty() {
+            return None;
+        }
+        aids.scripts_asked = true;
+        let names: Vec<&str> = unrun.iter().map(|(name, _)| name.as_str()).collect();
+        self.api_client.notify(&format!(
+            "Script(s) écrit(s) mais jamais lancé(s) : {} : Claw demande à l'agent de les essayer",
+            names.join(", ")
+        ));
+        Some(crate::code_guide::run_scripts_feedback(&unrun))
     }
 
     /// Commandes conseillées sans avoir été lancées : la réponse dit à
@@ -3933,11 +4801,26 @@ where
             let message = ConversationMessage::tool_result(tool_use_id, tool_name, problem, true);
             return (message, false);
         }
+        // `PreToolUse` d'abord, comme dans Claude Code : un hook peut refuser,
+        // accorder (`allow`), faire confirmer (`ask`) ou corriger les arguments.
+        let pre_hook_result = self.hook_runner.run_pre_tool_use(&tool_name, input);
+        if pre_hook_result.is_denied() {
+            let deny_message = format!("hook PreToolUse : outil `{tool_name}` refusé");
+            let reason = format_hook_message(&pre_hook_result, &deny_message);
+            self.tool_executor.skipped(&tool_name, input, &reason);
+            let message = ConversationMessage::tool_result(tool_use_id, tool_name, reason, true);
+            return (message, true);
+        }
+        self.note_hook_stop(&pre_hook_result);
+        let updated = pre_hook_result.updated_input().map(ToOwned::to_owned);
+        let input = updated.as_deref().unwrap_or(input);
         let mut notifying = prompter.map(|prompt| NotifyingPrompter {
             hooks: &self.hook_runner,
             inner: prompt,
         });
-        let permission_outcome = self.permission_policy.authorize(
+        let permission_outcome = authorize_after_hook(
+            &mut self.permission_policy,
+            pre_hook_result.permission_decision(),
             &tool_name,
             input,
             notifying
@@ -3946,40 +4829,31 @@ where
         );
         match permission_outcome {
             PermissionOutcome::Allow => {
-                let pre_hook_result = self.hook_runner.run_pre_tool_use(&tool_name, input);
-                if pre_hook_result.is_denied() {
-                    let deny_message = format!("hook PreToolUse : outil `{tool_name}` refusé");
-                    let reason = format_hook_message(&pre_hook_result, &deny_message);
-                    self.tool_executor.skipped(&tool_name, input, &reason);
-                    let message =
-                        ConversationMessage::tool_result(tool_use_id, tool_name, reason, true);
-                    (message, true)
-                } else {
-                    crate::checkpoint::record_before_write(&tool_name, input);
-                    let (mut output, mut is_error) =
-                        match self.tool_executor.execute(&tool_name, input) {
-                            Ok(output) => (output, false),
-                            Err(error) => (error.to_string(), true),
-                        };
-                    self.tool_images.extend(self.tool_executor.take_images());
-                    output = merge_hook_feedback(pre_hook_result.messages(), output, false);
+                crate::checkpoint::record_before_write(&tool_name, input);
+                let (mut output, mut is_error) = match self.tool_executor.execute(&tool_name, input)
+                {
+                    Ok(output) => (output, false),
+                    Err(error) => (error.to_string(), true),
+                };
+                self.tool_images.extend(self.tool_executor.take_images());
+                output = merge_hook_feedback(pre_hook_result.messages(), output, false);
 
-                    let post_hook_result = self
-                        .hook_runner
-                        .run_post_tool_use(&tool_name, input, &output, is_error);
-                    if post_hook_result.is_denied() {
-                        is_error = true;
-                    }
-                    output = merge_hook_feedback(
-                        post_hook_result.messages(),
-                        output,
-                        post_hook_result.is_denied(),
-                    );
-
-                    let message =
-                        ConversationMessage::tool_result(tool_use_id, tool_name, output, is_error);
-                    (message, false)
+                let post_hook_result = self
+                    .hook_runner
+                    .run_post_tool_use(&tool_name, input, &output, is_error);
+                self.note_hook_stop(&post_hook_result);
+                if post_hook_result.is_denied() {
+                    is_error = true;
                 }
+                output = merge_hook_feedback(
+                    post_hook_result.messages(),
+                    output,
+                    post_hook_result.is_denied(),
+                );
+
+                let message =
+                    ConversationMessage::tool_result(tool_use_id, tool_name, output, is_error);
+                (message, false)
             }
             PermissionOutcome::Deny { reason } => {
                 self.tool_executor.skipped(&tool_name, input, &reason);
@@ -4043,6 +4917,48 @@ where
             event.as_str()
         ));
         Some(reason)
+    }
+
+    /// Compaction manuelle (`/compact [consigne]`) : la conversation est
+    /// résumée par le modèle, qui suit la consigne de l'utilisateur (ce qu'il
+    /// faut garder) ; à défaut de résumé utilisable, celui de Claw le remplace.
+    /// Les messages récents restent tels quels. La session est remplacée et le
+    /// résultat renvoyé.
+    pub fn compact_with_model(
+        &mut self,
+        config: CompactionConfig,
+        instructions: Option<&str>,
+    ) -> CompactionResult {
+        let instructions = instructions.map(str::trim).filter(|text| !text.is_empty());
+        let pre_compact = self.hook_runner.run_event(
+            HookEvent::PreCompact,
+            Some("manual"),
+            serde_json::json!({
+                "trigger": "manual",
+                "custom_instructions": instructions.unwrap_or_default(),
+            }),
+            &[],
+        );
+        self.notify_hook_feedback(HookEvent::PreCompact, &pre_compact);
+        let system = match instructions {
+            Some(focus) => format!(
+                "{MODEL_SUMMARY_PROMPT}\n\nThe user asked for this compaction with these instructions; follow them when choosing what to keep: {focus}"
+            ),
+            None => MODEL_SUMMARY_PROMPT.to_string(),
+        };
+        let client = &mut self.api_client;
+        let result = compact_session_with(&self.session, config, |messages| {
+            let transcript = render_transcript_for_summary(messages);
+            let first = client.summarize(&system, &transcript)?;
+            if summary_is_usable(&first, messages) {
+                return Some(first);
+            }
+            client.summarize(&system, &format!("{transcript}\n\n{SUMMARY_RETRY_NOTE}"))
+        });
+        if result.removed_message_count > 0 {
+            self.session = result.compacted_session.clone();
+        }
+        result
     }
 
     /// Compaction manuelle (`/compact`), précédée des hooks `PreCompact`.
@@ -4254,6 +5170,9 @@ impl ToolExecutor for StaticToolExecutor {
 }
 
 #[cfg(test)]
+// Chaque test prend d'abord le verrou commun ([`crate::test_serial`]), avant
+// les types qu'il déclare.
+#[allow(clippy::items_after_statements)]
 mod tests {
     use super::{
         ApiClient, ApiRequest, AssistantEvent, ConversationRuntime, RuntimeError,
@@ -4332,6 +5251,7 @@ mod tests {
 
     #[test]
     fn runs_user_to_tool_to_result_loop_end_to_end_and_tracks_usage() {
+        let _serial = crate::test_serial();
         let api_client = ScriptedApiClient { call_count: 0 };
         let tool_executor = StaticToolExecutor::new().register("add", |input| {
             let total = input
@@ -4384,6 +5304,7 @@ mod tests {
 
     #[test]
     fn records_denied_tool_results_when_prompt_rejects() {
+        let _serial = crate::test_serial();
         struct RejectPrompter;
         impl PermissionPrompter for RejectPrompter {
             fn decide(&mut self, _request: &PermissionRequest) -> PermissionPromptDecision {
@@ -4438,6 +5359,7 @@ mod tests {
 
     #[test]
     fn a_refused_tool_call_is_reported_to_the_interface_as_skipped() {
+        let _serial = crate::test_serial();
         use std::sync::{Arc, Mutex};
 
         struct RejectPrompter;
@@ -4518,6 +5440,7 @@ mod tests {
 
     #[test]
     fn screenshots_follow_the_last_tool_result_and_only_the_latest_are_kept() {
+        let _serial = crate::test_serial();
         /// Trois réponses à captures, la première avec un second appel après la capture.
         struct Script(usize);
         impl ApiClient for Script {
@@ -4625,6 +5548,7 @@ mod tests {
 
     #[test]
     fn a_call_with_unusable_arguments_fails_without_asking_for_permission() {
+        let _serial = crate::test_serial();
         struct NeverAsked;
         impl PermissionPrompter for NeverAsked {
             fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
@@ -4707,6 +5631,7 @@ mod tests {
     #[allow(clippy::items_after_statements)]
     #[test]
     fn an_empty_reply_is_followed_up_once_instead_of_failing() {
+        let _serial = crate::test_serial();
         struct EmptyThenText {
             calls: usize,
         }
@@ -4791,6 +5716,7 @@ mod tests {
 
     #[test]
     fn user_prompt_hooks_add_context_and_stop_hooks_can_resume_the_agent() {
+        let _serial = crate::test_serial();
         let marker = std::env::temp_dir().join(format!(
             "claw-stop-hook-{}-{}",
             std::process::id(),
@@ -4840,6 +5766,7 @@ mod tests {
 
     #[test]
     fn notification_hooks_run_when_permission_is_requested() {
+        let _serial = crate::test_serial();
         let file = std::env::temp_dir().join(format!(
             "claw-notification-{}-{}.json",
             std::process::id(),
@@ -4890,6 +5817,7 @@ mod tests {
 
     #[test]
     fn user_prompt_hooks_can_reject_a_request() {
+        let _serial = crate::test_serial();
         let hooks = RuntimeHookConfig::default().with_commands(
             crate::hooks::HookEvent::UserPromptSubmit,
             vec!["printf \"secret détecté\" >&2; exit 2".to_string()],
@@ -4916,6 +5844,7 @@ mod tests {
 
     #[test]
     fn denies_tool_use_when_pre_tool_hook_blocks() {
+        let _serial = crate::test_serial();
         struct SingleCallApiClient;
         impl ApiClient for SingleCallApiClient {
             fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
@@ -4975,8 +5904,103 @@ mod tests {
         );
     }
 
+    /// Client qui demande deux appels d'outil, puis répond par du texte ;
+    /// compte ses requêtes.
+    struct TwoToolsApiClient {
+        requests: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl ApiClient for TwoToolsApiClient {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            self.requests.set(self.requests.get() + 1);
+            if self.requests.get() > 1 {
+                return Ok(vec![
+                    AssistantEvent::TextDelta("fini".to_string()),
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            Ok(vec![
+                AssistantEvent::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: "echo".to_string(),
+                    input: r#"{"text":"original"}"#.to_string(),
+                },
+                AssistantEvent::ToolUse {
+                    id: "tool-2".to_string(),
+                    name: "echo".to_string(),
+                    input: r#"{"text":"second"}"#.to_string(),
+                },
+                AssistantEvent::MessageStop,
+            ])
+        }
+    }
+
+    fn tool_output(message: &crate::session::ConversationMessage) -> &str {
+        match &message.blocks[0] {
+            ContentBlock::ToolResult { output, .. } => output.as_str(),
+            _ => panic!("résultat d'outil attendu"),
+        }
+    }
+
+    #[test]
+    fn pre_tool_hooks_can_allow_and_rewrite_a_call() {
+        let _serial = crate::test_serial();
+        let requests = std::rc::Rc::new(std::cell::Cell::new(0));
+        let hook = r#"printf '{"hookSpecificOutput":{"permissionDecision":"allow","updatedInput":{"text":"corrigé"}}}'"#;
+        let mut runtime = ConversationRuntime::new_with_features(
+            Session::new(),
+            TwoToolsApiClient {
+                requests: requests.clone(),
+            },
+            StaticToolExecutor::new().register("echo", |input| Ok(input.to_string())),
+            // Mode `prompt` sans invite : sans le hook, l'appel serait refusé.
+            PermissionPolicy::new(PermissionMode::Prompt),
+            vec!["system".to_string()],
+            RuntimeFeatureConfig::default()
+                .with_hooks(RuntimeHookConfig::new(vec![hook.to_string()], Vec::new())),
+        );
+        let summary = runtime.run_turn("fais-le", None).expect("tour");
+        assert_eq!(summary.tool_results.len(), 2);
+        for result in &summary.tool_results {
+            assert!(
+                tool_output(result).contains("corrigé"),
+                "{}",
+                tool_output(result)
+            );
+        }
+        assert_eq!(requests.get(), 2);
+    }
+
+    #[test]
+    fn a_hook_with_continue_false_stops_the_turn() {
+        let _serial = crate::test_serial();
+        let requests = std::rc::Rc::new(std::cell::Cell::new(0));
+        let hook = r#"printf '{"continue":false,"stopReason":"arrêt demandé"}'"#;
+        let mut runtime = ConversationRuntime::new_with_features(
+            Session::new(),
+            TwoToolsApiClient {
+                requests: requests.clone(),
+            },
+            StaticToolExecutor::new().register("echo", |input| Ok(input.to_string())),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+            RuntimeFeatureConfig::default()
+                .with_hooks(RuntimeHookConfig::new(Vec::new(), vec![hook.to_string()])),
+        );
+        let summary = runtime.run_turn("fais-le", None).expect("tour");
+        assert_eq!(summary.tool_results.len(), 2);
+        assert!(tool_output(&summary.tool_results[0]).contains("original"));
+        assert!(
+            tool_output(&summary.tool_results[1]).contains("a hook stopped the agent"),
+            "{}",
+            tool_output(&summary.tool_results[1])
+        );
+        assert_eq!(requests.get(), 1, "le modèle n'est plus rappelé");
+    }
+
     #[test]
     fn appends_post_tool_hook_feedback_to_tool_result() {
+        let _serial = crate::test_serial();
         struct TwoCallApiClient {
             calls: usize,
         }
@@ -5051,6 +6075,7 @@ mod tests {
 
     #[test]
     fn reconstructs_usage_tracker_from_restored_session() {
+        let _serial = crate::test_serial();
         struct SimpleApi;
         impl ApiClient for SimpleApi {
             fn stream(
@@ -5093,6 +6118,7 @@ mod tests {
 
     #[test]
     fn compacts_session_after_turns() {
+        let _serial = crate::test_serial();
         struct SimpleApi;
         impl ApiClient for SimpleApi {
             fn stream(
@@ -5226,6 +6252,7 @@ mod tests {
 
     #[test]
     fn auto_compacts_with_a_model_summary_when_the_threshold_is_crossed() {
+        let _serial = crate::test_serial();
         let mut runtime = compacting_runtime(long_session(10), false).with_auto_compaction(Some(
             super::AutoCompactionConfig {
                 threshold_tokens: 1_000,
@@ -5250,6 +6277,7 @@ mod tests {
 
     #[test]
     fn a_summary_that_continues_the_conversation_is_asked_again_then_replaced() {
+        let _serial = crate::test_serial();
         let config = Some(super::AutoCompactionConfig {
             threshold_tokens: 1_000,
             preserve_recent_messages: 4,
@@ -5295,6 +6323,7 @@ mod tests {
 
     #[test]
     fn results_stored_before_leaning_are_leaned_when_the_session_is_opened() {
+        let _serial = crate::test_serial();
         // Session enregistrée avant l'allègement : l'ancien et le nouveau
         // texte, et le fichier entier, repartaient avec chaque requête.
         let fat = serde_json::json!({
@@ -5342,6 +6371,7 @@ mod tests {
 
     #[test]
     fn does_not_compact_below_the_threshold_or_when_disabled() {
+        let _serial = crate::test_serial();
         let mut runtime = compacting_runtime(long_session(2), false).with_auto_compaction(Some(
             super::AutoCompactionConfig {
                 threshold_tokens: 1_000_000,
@@ -5358,6 +6388,7 @@ mod tests {
 
     #[test]
     fn retries_once_after_a_context_overflow_error() {
+        let _serial = crate::test_serial();
         let mut runtime = compacting_runtime(long_session(10), true).with_auto_compaction(Some(
             super::AutoCompactionConfig {
                 threshold_tokens: usize::MAX,
@@ -5586,7 +6617,259 @@ mod tests {
     }
 
     #[test]
+    fn a_design_plan_is_reviewed_once_before_the_first_interface_file() {
+        let _serial = crate::test_serial();
+        let plan_and_write = |path: &str| {
+            vec![
+                AssistantEvent::TextDelta(
+                    "Plan : #F5E6D3 sable, #8B4A3A ocre, #6B8E7A sauge. Typo : Fraunces et Karla."
+                        .to_string(),
+                ),
+                AssistantEvent::ToolUse {
+                    id: format!("appel-{path}"),
+                    name: "write_file".to_string(),
+                    input: format!(r#"{{"path":"{path}","content":"<p>x</p>"}}"#),
+                },
+                AssistantEvent::MessageStop,
+            ]
+        };
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                plan_and_write("site-essai.html"),
+                plan_and_write("site-essai.css"),
+            ],
+            Vec::new(),
+            vec!["1. [identity] centered hero -> a split hero with a pressed-flower SVG"],
+            WRITTEN.to_string(),
+        );
+        // Le tour s'arrête faute de réponses scriptées : seul compte ce qui précède.
+        let _ = runtime.run_turn("Crée un site vitrine pour un fleuriste", None);
+        let observed = observed.borrow();
+        let reviews: Vec<&String> = observed
+            .consults
+            .iter()
+            .filter(|(purpose, _)| *purpose == super::ConsultPurpose::Design)
+            .map(|(_, prompt)| prompt)
+            .collect();
+        assert_eq!(reviews.len(), 1, "une revue du plan par tour");
+        assert!(reviews[0].contains("#8B4A3A") && reviews[0].contains("fleuriste"));
+        assert!(
+            observed.requests[1].contains("An art director (relecteur) reviewed your design plan")
+                && observed.requests[1].contains("pressed-flower"),
+            "la critique part avec le résultat de l'écriture"
+        );
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice
+                == "Revue du plan par relecteur : 1 remarque(s) transmise(s) à l'agent"));
+        drop(observed);
+
+        // Sans plan (pas de palette) : aucune revue, mais le plan est demandé,
+        // une fois, avec le résultat de la première écriture.
+        let write = |path: &str| {
+            tool_step(
+                "write_file",
+                &format!(r#"{{"path":"{path}","content":"<p>x</p>"}}"#),
+            )
+        };
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![write("site-essai.html"), write("site-essai.css")],
+            Vec::new(),
+            vec!["1. [identity] x -> y"],
+            WRITTEN.to_string(),
+        );
+        let _ = runtime.run_turn("Crée un site vitrine pour un fleuriste", None);
+        let observed = observed.borrow();
+        assert!(!observed
+            .consults
+            .iter()
+            .any(|(purpose, _)| *purpose == super::ConsultPurpose::Design));
+        assert!(observed.requests[1].contains("without the design plan the method asks for"));
+        // L'historique de la requête suivante ne la porte qu'une fois.
+        assert_eq!(
+            observed.requests[2]
+                .matches("without the design plan")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_script_gets_its_language_rules_and_must_be_run_before_the_answer() {
+        let _serial = crate::test_serial();
+        let (mut runtime, observed, _) = aided_runtime(Vec::new(), Vec::new());
+        let dir = std::env::temp_dir().join(format!("claw-run-scripts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let script = dir.join("trier.py");
+        std::fs::write(&script, "import sys\n\ndef main():\n    return 0\n\nif __name__ == '__main__':\n    sys.exit(main())\n").expect("script");
+        let module = dir.join("outils.py");
+        std::fs::write(&module, "def double(x):\n    return 2 * x\n").expect("module");
+        let path = script.to_string_lossy().to_string();
+        let mut aids = super::TurnAids::default();
+        let mut notes = Vec::new();
+        runtime.code_file_notes(&path, &mut aids, &mut notes);
+        runtime.code_file_notes(&module.to_string_lossy(), &mut aids, &mut notes);
+        // Les règles de Python une fois, le script retenu, pas le module.
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("trier.py is Python code")
+                && notes[0].contains("python trier.py --help")
+        );
+        assert_eq!(aids.scripts_written.len(), 1);
+        // Jamais lancé : le modèle est renvoyé l'essayer, une fois.
+        let feedback = runtime.run_scripts_gate(&mut aids).expect("à essayer");
+        assert!(
+            feedback.contains("You wrote trier.py in this turn but never ran it"),
+            "{feedback}"
+        );
+        assert!(runtime.run_scripts_gate(&mut aids).is_none());
+        assert!(observed
+            .borrow()
+            .notices
+            .iter()
+            .any(|notice| notice.contains("jamais lancé(s) : trier.py")));
+        // Lancé : rien à redire.
+        let mut aids = super::TurnAids {
+            scripts_written: std::iter::once(path).collect(),
+            commands_run: vec!["python Trier.py --help".to_string()],
+            ..super::TurnAids::default()
+        };
+        assert!(runtime.run_scripts_gate(&mut aids).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_icon_drawn_by_hand_is_reported_when_the_file_is_written() {
+        let _serial = crate::test_serial();
+        let (mut runtime, observed, _) = aided_runtime(Vec::new(), Vec::new());
+        let dir = std::env::temp_dir().join(format!("claw-drawn-icon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let page = dir.join("index.html");
+        std::fs::write(
+            &page,
+            "<button>\n<svg class=\"icon-phone\" viewBox=\"0 0 24 24\"><path d=\"M2 3c1 5 6 10 11 11l2-2\"/></svg>\n</button>",
+        )
+        .expect("page");
+        let path = page.to_string_lossy().to_string();
+        let mut aids = super::TurnAids::default();
+        let mut notes = Vec::new();
+        runtime.interface_file_notes(&path, &mut aids, &mut notes);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("draws 1 icon(s) by hand")
+                && notes[0].contains("line 2")
+                && notes[0].contains("[\"phone\"]"),
+            "{}",
+            notes[0]
+        );
+        assert!(observed.borrow().notices.iter().any(|notice| notice
+            == "Icône(s) dessinée(s) à la main dans index.html : 1, signalée(s) au modèle"));
+        // La même icône prise dans le jeu ne dit rien.
+        let phone = crate::icon_set::LUCIDE
+            .lines()
+            .find(|line| line.starts_with("phone\t"))
+            .and_then(|line| line.splitn(3, '\t').nth(2))
+            .expect("phone");
+        std::fs::write(
+            &page,
+            format!("<button><svg viewBox=\"0 0 24 24\">{phone}</svg></button>"),
+        )
+        .expect("page");
+        let mut notes = Vec::new();
+        runtime.interface_file_notes(&path, &mut aids, &mut notes);
+        assert!(notes.is_empty(), "{notes:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_design_turn_under_the_bar_continues_while_its_score_rises() {
+        let _serial = crate::test_serial();
+        let (mut runtime, observed, _) = aided_runtime(Vec::new(), Vec::new());
+        let graded = |mean: f32| crate::web_design::Graded {
+            mean,
+            under: vec!["identity".to_string()],
+            scores: Vec::new(),
+        };
+        let mut aids = super::TurnAids {
+            design_guided: true,
+            ..super::TurnAids::default()
+        };
+        // Pas encore de note : la limite reste la limite.
+        assert!(!runtime.continue_design(&mut aids, "limite du tour"));
+        aids.graded.push(graded(6.0));
+        assert!(runtime.continue_design(&mut aids, "limite du tour"));
+        // Aucune revue depuis : pas de deuxième poursuite sur la même note.
+        assert!(!runtime.continue_design(&mut aids, "limite du tour"));
+        aids.graded.push(graded(6.1));
+        assert!(!runtime.continue_design(&mut aids, "revues du tour"));
+        assert!(!runtime.continue_design(&mut aids, "revues du tour"));
+        let observed = observed.borrow();
+        assert!(observed.notices.iter().any(|notice| notice
+            == "Poursuite du design (1/2, limite du tour) : note 6,0/10, sous la barre 8 (identity) ; le tour continue"));
+        let stops: Vec<&String> = observed
+            .notices
+            .iter()
+            .filter(|notice| notice.starts_with("Design arrêté sous la barre"))
+            .collect();
+        assert_eq!(stops.len(), 1, "l'arrêt est expliqué une fois : {stops:?}");
+        assert!(stops[0].contains("6,0 puis 6,1") && stops[0].contains("pas fait monter"));
+        assert_eq!(aids.continuations, 1);
+    }
+
+    #[test]
+    fn a_model_that_answers_nothing_twice_hands_the_turn_to_another() {
+        let _serial = crate::test_serial();
+        let empty = || {
+            vec![
+                AssistantEvent::TextDelta("\n ".to_string()),
+                AssistantEvent::MessageStop,
+            ]
+        };
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![empty(), empty(), text_step("Voici l'explication.")],
+            Vec::new(),
+        );
+        runtime.api_client.escalation = Some("fort/modele");
+        let summary = runtime
+            .run_turn("explique le module", None)
+            .expect("un autre modèle reprend le tour");
+        let observed = observed.borrow();
+        assert_eq!(observed.escalations, 1);
+        assert!(observed.notices.iter().any(|notice| notice
+            == "Le modèle n'a rien répondu deux fois : fort/modele reprend la fin du tour"));
+        assert!(summary.assistant_messages.iter().any(|message| message
+            .blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Text { text } if text == "Voici l'explication."))));
+
+        // Sans autre modèle, l'erreur est rendue comme avant.
+        let (mut runtime, _, _) = aided_runtime(vec![empty(), empty()], Vec::new());
+        let error = runtime
+            .run_turn("explique le module", None)
+            .expect_err("aucun autre modèle");
+        assert_eq!(error.to_string(), super::EMPTY_RESPONSE_ERROR);
+
+        // Essai réel : deux réponses vides séparées par du travail ne sont pas
+        // « vide encore après la relance » ; chacune est relancée.
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                empty(),
+                tool_step("probe", "{}"),
+                empty(),
+                text_step("Voici l'explication."),
+            ],
+            Vec::new(),
+        );
+        runtime
+            .run_turn("explique le module", None)
+            .expect("chaque vide est relancé");
+        assert_eq!(observed.borrow().escalations, 0);
+    }
+
+    #[test]
     fn a_failed_verification_sends_the_model_back_to_work() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, bash_calls) = aided_runtime(
             vec![
                 tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
@@ -5628,6 +6911,7 @@ mod tests {
 
     #[test]
     fn a_short_reply_to_a_check_keeps_the_report_it_follows() {
+        let _serial = crate::test_serial();
         // Essai réel du 12 octobre : après un contrôle sans reproche, la
         // réponse finale n'était plus que « La revue confirme... ».
         let report = format!(
@@ -5668,6 +6952,7 @@ mod tests {
 
     #[test]
     fn a_reply_cut_by_the_output_limit_is_continued_and_joined() {
+        let _serial = crate::test_serial();
         CUT_REPLIES.with(|cut| cut.set(1));
         let (mut runtime, observed, _) = aided_runtime(
             vec![
@@ -5699,6 +6984,7 @@ mod tests {
 
     #[test]
     fn a_continuation_joins_the_text_even_after_a_reasoning_block() {
+        let _serial = crate::test_serial();
         use crate::session::ConversationMessage;
         // Modèles d'OpenRouter : le raisonnement arrive après le texte.
         CUT_REPLIES.with(|cut| cut.set(1));
@@ -5742,6 +7028,7 @@ mod tests {
 
     #[test]
     fn an_empty_continuation_is_asked_again_then_the_cut_reply_is_kept() {
+        let _serial = crate::test_serial();
         // Suite vide, puis suite : elle rejoint la réponse coupée, sans la
         // relance des réponses vides.
         CUT_REPLIES.with(|cut| cut.set(1));
@@ -5792,6 +7079,7 @@ mod tests {
 
     #[test]
     fn no_continuation_is_asked_at_the_last_allowed_step() {
+        let _serial = crate::test_serial();
         // Sous-agent à sa dernière étape : sa réponse, même coupée, est rendue.
         CUT_REPLIES.with(|cut| cut.set(1));
         let (runtime, observed, _) = aided_runtime(vec![text_step("Rapport : tout est")], vec![]);
@@ -5804,6 +7092,7 @@ mod tests {
 
     #[test]
     fn a_reply_still_cut_after_two_continuations_is_given_as_it_is() {
+        let _serial = crate::test_serial();
         CUT_REPLIES.with(|cut| cut.set(5));
         let (mut runtime, observed, _) = aided_runtime(
             vec![text_step("un"), text_step(" deux"), text_step(" trois")],
@@ -5827,6 +7116,7 @@ mod tests {
 
     #[test]
     fn a_problem_report_gets_a_debugging_guide_and_evidence_is_asked_before_the_answer() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, _) = aided_runtime(
             vec![
                 text_step("Problème résolu : c'était probablement le CSS."),
@@ -5866,6 +7156,7 @@ mod tests {
 
     #[test]
     fn the_evidence_of_a_reported_problem_covers_the_edge_cases_of_its_kind() {
+        let _serial = crate::test_serial();
         // Essai réel t3 : le guide du début de tour est arrivé, et l'espace
         // insécable des exports Excel est restée oubliée.
         let (mut runtime, observed, _) =
@@ -5892,6 +7183,7 @@ mod tests {
 
     #[test]
     fn images_sent_without_a_complaint_are_sorted_before_any_debugging() {
+        let _serial = crate::test_serial();
         // Un constat bref avec une capture : le modèle trie d'abord, et rien
         // n'est demandé de plus quand il n'a rien modifié.
         let (mut runtime, observed, _) =
@@ -5953,6 +7245,7 @@ mod tests {
 
     #[test]
     fn a_reply_that_stops_on_empty_titles_is_sent_back_to_do_the_work() {
+        let _serial = crate::test_serial();
         const TITLES: &str =
             "Maintenant, la page :\n\n### 2a. Composant URLInput\n\n### 2b. Page /url";
         let (mut runtime, observed, _) = aided_runtime(
@@ -5977,6 +7270,7 @@ mod tests {
 
     #[test]
     fn a_permission_request_left_unanswered_is_not_asked_again_in_the_turn() {
+        let _serial = crate::test_serial();
         struct Away(usize);
         impl PermissionPrompter for Away {
             fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
@@ -6042,6 +7336,7 @@ mod tests {
 
     #[test]
     fn commands_advised_without_being_run_send_the_model_back_to_try_them() {
+        let _serial = crate::test_serial();
         const ADVICE: &str = "Pour lancer :\n\n```bash\nnpm run dev\n```";
         let (mut runtime, observed, bash_calls) = aided_runtime(
             vec![
@@ -6062,7 +7357,74 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_sent_back_by_a_check_stays_when_the_model_stops_answering() {
+        let _serial = crate::test_serial();
+        const ADVICE: &str = "Pour lancer :\n\n```bash\nnpm run dev\n```";
+        // Le contrôle des commandes renvoie le modèle, qui ne répond plus
+        // (quota épuisé) : le tour finit sur la réponse déjà donnée.
+        let (mut runtime, observed, _) = aided_runtime(vec![text_step(ADVICE)], vec![]);
+        let summary = runtime.run_turn("comment le lancer ?", None).expect("tour");
+        assert_eq!(summary.iterations, 2);
+        assert_eq!(
+            summary
+                .assistant_messages
+                .last()
+                .map(super::message_text)
+                .as_deref(),
+            Some(ADVICE)
+        );
+        let last = runtime.session.messages.last().expect("message");
+        assert_eq!(last.role, MessageRole::Assistant);
+        let observed = observed.borrow();
+        assert_eq!((observed.superseded, observed.kept), (1, 1));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("(plus de réponse scriptée)")
+                && notice.contains("la réponse déjà donnée reste celle du tour")));
+        drop(observed);
+        // Sans réponse déjà donnée, l'erreur reste l'issue du tour.
+        let (mut runtime, _, _) = aided_runtime(vec![], vec![]);
+        assert!(runtime.run_turn("bonjour", None).is_err());
+    }
+
+    #[test]
+    fn no_visual_review_is_announced_without_a_page_to_capture() {
+        let _serial = crate::test_serial();
+        // Un module TypeScript modifié encore et encore, sans aucune page :
+        // l'essai réel annonçait « revue maintenant » à chaque modification.
+        let mut steps: Vec<Vec<AssistantEvent>> = (0..14)
+            .map(|_| tool_step("write_file", r#"{"path":"remise.ts","content":"x"}"#))
+            .collect();
+        steps.push(text_step("Module écrit."));
+        let (runtime, observed, _) = aided_runtime(steps, vec![]);
+        let mut runtime = runtime.with_turn_request_limit(20);
+        runtime.run_turn("écris remise.ts", None).expect("tour");
+        let observed = observed.borrow();
+        assert!(
+            !observed
+                .notices
+                .iter()
+                .any(|notice| notice.contains("sans revue visuelle")),
+            "{:?}",
+            observed.notices
+        );
+    }
+
+    #[test]
+    fn api_errors_are_shown_without_their_json_body() {
+        let error = "l'api a échoué après 1 tentatives : l'api a retourné 429 Too Many Requests : [{\n  \"error\": {}\n}]";
+        assert_eq!(
+            super::short_error(error),
+            "l'api a échoué après 1 tentatives : l'api a retourné 429 Too Many Requests"
+        );
+        assert_eq!(super::short_error("délai dépassé"), "délai dépassé");
+        assert!(super::short_error(&"x".repeat(400)).ends_with('…'));
+    }
+
+    #[test]
     fn a_tool_written_as_a_command_is_pointed_out_to_the_model() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, _) = aided_runtime(
             vec![
                 tool_step("bash", r#"{"command":"KillShell bash_4"}"#),
@@ -6078,6 +7440,7 @@ mod tests {
 
     #[test]
     fn questions_written_in_the_answer_are_asked_again_with_the_menu() {
+        let _serial = crate::test_serial();
         // Quelqu'un peut répondre : le modèle est renvoyé poser ses questions
         // avec l'outil, puis continue avec les réponses.
         CAN_ASK.with(|flag| flag.set(true));
@@ -6131,6 +7494,7 @@ mod tests {
 
     #[test]
     fn a_command_sent_to_the_background_verifies_nothing_until_its_end_is_read() {
+        let _serial = crate::test_serial();
         // `verifier && npm run dev` part en arrière-plan : le résultat de la
         // vérification n'a pas été montré, Claw la lance donc lui-même.
         let (mut runtime, _, bash_calls) = aided_runtime(
@@ -6206,6 +7570,7 @@ mod tests {
 
     #[test]
     fn no_verification_without_changes_or_when_the_model_already_ran_it() {
+        let _serial = crate::test_serial();
         // Aucun fichier modifié : rien à vérifier.
         let (mut runtime, _, bash_calls) = aided_runtime(vec![text_step("Bonjour.")], vec![]);
         runtime.run_turn("salut", None).expect("tour");
@@ -6227,6 +7592,7 @@ mod tests {
 
     #[test]
     fn verification_gives_up_after_a_few_corrections_and_says_so() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, bash_calls) = aided_runtime(
             vec![
                 tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
@@ -6248,6 +7614,7 @@ mod tests {
 
     #[test]
     fn a_model_going_in_circles_gets_one_reminder() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, _) = aided_runtime(
             vec![
                 tool_step("probe", "{}"),
@@ -6276,6 +7643,7 @@ mod tests {
 
     #[test]
     fn an_agent_stopping_on_failures_is_sent_back_once_to_try_another_way() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, bash_calls) = aided_runtime(
             vec![
                 tool_step("bash", r#"{"command":"npm run dev"}"#),
@@ -6313,6 +7681,7 @@ mod tests {
 
     #[test]
     fn a_success_or_a_refusal_ends_the_failure_streak() {
+        let _serial = crate::test_serial();
         // Un échec puis une commande qui réussit : rien à redire.
         let (mut runtime, observed, _) = aided_runtime(
             vec![
@@ -6352,6 +7721,7 @@ mod tests {
 
     #[test]
     fn a_short_follow_up_points_the_review_to_the_request_it_continues() {
+        let _serial = crate::test_serial();
         use super::{earlier_request, ConversationMessage};
         let request = "Ajoute une page frontend pour traduire une image depuis une URL";
         let messages = vec![
@@ -6379,6 +7749,7 @@ mod tests {
 
     #[test]
     fn after_a_compaction_a_short_follow_up_finds_the_request_claw_recorded() {
+        let _serial = crate::test_serial();
         use super::{earlier_request, ConversationMessage};
         let request = "Traduis les mangas du japonais vers le français, en trois étapes";
         let session = crate::session::Session {
@@ -6413,6 +7784,7 @@ mod tests {
 
     #[test]
     fn the_review_sees_the_answer_and_the_continued_request() {
+        let _serial = crate::test_serial();
         let (path, output) = written_file("reprise");
         let (mut runtime, observed, _) = aided_runtime_with(
             vec![
@@ -6480,6 +7852,7 @@ mod tests {
 
     #[test]
     fn ultracode_prepares_a_brief_then_an_independent_verifier_sends_problems_back() {
+        let _serial = crate::test_serial();
         let (path, output) = written_file("ultracode");
         let (mut runtime, observed, agents) = ultracode_runtime(
             vec![
@@ -6534,6 +7907,7 @@ mod tests {
 
     #[test]
     fn without_ultracode_or_for_a_short_follow_up_no_agent_is_started() {
+        let _serial = crate::test_serial();
         let (mut runtime, _, agents) = ultracode_runtime(
             vec![text_step("Bonjour, que puis-je faire ?")],
             vec![],
@@ -6553,6 +7927,7 @@ mod tests {
 
     #[test]
     fn an_analysis_answer_is_fact_checked_once_in_ultracode() {
+        let _serial = crate::test_serial();
         let long_answer = "Le module de paiement calcule les taxes dans taxes.py. ".repeat(14);
         let (mut runtime, observed, agents) = ultracode_runtime(
             vec![
@@ -6582,6 +7957,7 @@ mod tests {
 
     #[test]
     fn without_a_readable_verdict_the_model_checks_its_own_work_again() {
+        let _serial = crate::test_serial();
         let (path, output) = written_file("sans-verdict");
         let (mut runtime, observed, agents) = ultracode_runtime(
             vec![
@@ -6607,6 +7983,7 @@ mod tests {
 
     #[test]
     fn in_team_mode_each_step_is_announced_with_the_role_the_work_needs() {
+        let _serial = crate::test_serial();
         struct Off;
         impl Drop for Off {
             fn drop(&mut self) {
@@ -6646,6 +8023,7 @@ mod tests {
 
     #[test]
     fn the_session_setting_turns_ultracode_on_until_it_is_turned_off() {
+        let _serial = crate::test_serial();
         struct Off;
         impl Drop for Off {
             fn drop(&mut self) {
@@ -6696,6 +8074,7 @@ mod tests {
 
     #[test]
     fn another_model_reviews_the_changes_once() {
+        let _serial = crate::test_serial();
         let (path, output) = written_file("remarques");
         let (mut runtime, observed, _) = aided_runtime_with(
             vec![
@@ -6730,6 +8109,7 @@ mod tests {
 
     #[test]
     fn a_bare_approval_is_checked_by_a_second_reviewer() {
+        let _serial = crate::test_serial();
         // Rejoué sur un vrai travail : « VERDICT / LGTM » en 8 s, sans
         // l'analyse demandée, quand un autre relecteur y trouvait un bogue.
         let (path, output) = written_file("seconde");
@@ -6759,6 +8139,7 @@ mod tests {
 
     #[test]
     fn the_edge_cases_of_the_requested_feature_come_with_the_request() {
+        let _serial = crate::test_serial();
         // Essais réels t5 : faits d'emblée, ils évitent une reprise au contrôle.
         let (mut runtime, observed, _) = aided_runtime(vec![text_step("Fait.")], vec![]);
         runtime
@@ -6775,6 +8156,7 @@ mod tests {
 
     #[test]
     fn two_bare_approvals_are_reported_as_no_real_review() {
+        let _serial = crate::test_serial();
         // Essai réel t5b : les deux relecteurs ont répondu « VERDICT / LGTM ».
         let (path, output) = written_file("deux-nues");
         let (mut runtime, observed, _) = aided_runtime_with(
@@ -6797,6 +8179,7 @@ mod tests {
 
     #[test]
     fn an_approved_review_ends_the_turn_and_small_edits_are_not_reviewed() {
+        let _serial = crate::test_serial();
         let (path, output) = written_file("approuve");
         let (mut runtime, observed, _) = aided_runtime_with(
             vec![
@@ -6842,6 +8225,7 @@ mod tests {
 
     #[test]
     fn a_second_failed_verification_brings_advice_from_another_model() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, _) = aided_runtime_with(
             vec![
                 tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
@@ -6866,6 +8250,7 @@ mod tests {
 
     #[test]
     fn substantial_work_is_checked_against_every_requirement_once() {
+        let _serial = crate::test_serial();
         let (path, output) = written_file("exigences");
         let (mut runtime, observed, _) = aided_runtime_with(
             vec![
@@ -6907,6 +8292,7 @@ mod tests {
 
     #[test]
     fn errors_seen_by_the_connected_editor_go_back_to_the_model() {
+        let _serial = crate::test_serial();
         use crate::editor::{tests::fake_editor, tests::problem, FileDiagnostics, Severity};
         let (path, output) = written_file("editeur");
         let shown = path.to_string_lossy().to_string();
@@ -6952,6 +8338,7 @@ mod tests {
 
     #[test]
     fn a_stronger_model_takes_over_after_the_second_failed_verification() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, _) = aided_runtime_with(
             vec![
                 tool_step("write_file", r#"{"path":"notes.txt","content":"x"}"#),
@@ -7000,6 +8387,7 @@ mod tests {
 
     #[test]
     fn rewriting_lines_of_a_data_file_is_flagged_once() {
+        let _serial = crate::test_serial();
         // Essai réel t3 : un petit modèle « répare » le CSV de l'utilisateur
         // au lieu du script qui ne sait pas le lire.
         let cwd = std::env::current_dir().expect("dossier");
@@ -7090,6 +8478,7 @@ mod tests {
 
     #[test]
     fn a_command_that_loses_the_agent_s_changes_is_pointed_out() {
+        let _serial = crate::test_serial();
         // Essai réel t6 avec le petit modèle : `sed ... && rm conges.py`, puis
         // `git checkout conges.py` ; ses modifications perdues, deux fois.
         let path = scratch_file("garde");
@@ -7194,6 +8583,7 @@ mod tests {
 
     #[test]
     fn reading_a_file_already_shown_in_an_up_to_date_view_is_pointed_out() {
+        let _serial = crate::test_serial();
         // Essai réel t6 : le petit modèle relisait les fichiers qu'une vue lui
         // montrait déjà en entier.
         let path = std::env::temp_dir().join(format!(
@@ -7256,6 +8646,7 @@ mod tests {
 
     #[test]
     fn rewriting_an_existing_check_is_guarded_but_not_the_agent_s_own_new_test() {
+        let _serial = crate::test_serial();
         let folder = std::env::temp_dir().join(format!(
             "claw-garde-tests-{}",
             std::time::SystemTime::now()
@@ -7298,6 +8689,7 @@ mod tests {
 
     #[test]
     fn a_data_file_reshaped_for_the_new_code_is_pointed_out() {
+        let _serial = crate::test_serial();
         // Essai réel t7, deux fois : `"inscrits": []` ajouté à chaque atelier
         // de `donnees.json`, et un code qui plante sur l'ancien fichier.
         let path = std::env::temp_dir().join(format!(
@@ -7356,6 +8748,7 @@ mod tests {
 
     #[test]
     fn a_file_created_and_removed_in_the_same_turn_is_not_reported() {
+        let _serial = crate::test_serial();
         // Un script de travail écrit puis effacé par le modèle : voulu.
         let path = scratch_file("travail");
         let write =
@@ -7379,6 +8772,7 @@ mod tests {
 
     #[test]
     fn a_data_file_created_in_the_turn_is_the_agent_s_own() {
+        let _serial = crate::test_serial();
         // Créé puis retouché pendant le même tour : pas les données de
         // l'utilisateur, la garde ne dit rien.
         let cwd = std::env::current_dir().expect("dossier");
@@ -7406,6 +8800,7 @@ mod tests {
 
     #[test]
     fn three_single_calls_in_a_row_get_a_note_about_grouping() {
+        let _serial = crate::test_serial();
         // Essais réels t2 : sept commandes d'essai, chacune dans sa requête.
         let (mut runtime, observed, _) = aided_runtime(
             vec![
@@ -7436,6 +8831,7 @@ mod tests {
 
     #[test]
     fn single_calls_are_counted_through_failing_commands_and_noted_again() {
+        let _serial = crate::test_serial();
         // Essai réel t4 : douze commandes une par requête. Un refus du guichet
         // essayé exprès (code de sortie 1) remettait le compteur à zéro, et la
         // remarque, venue tard, n'était dite qu'une fois.
@@ -7472,6 +8868,7 @@ mod tests {
 
     #[test]
     fn a_tool_error_or_a_grouped_reply_breaks_the_series_of_single_calls() {
+        let _serial = crate::test_serial();
         let (mut runtime, observed, _) = aided_runtime(
             vec![
                 tool_step("bash", r#"{"command":"python a.py"}"#),
@@ -7507,6 +8904,7 @@ mod tests {
 
     #[test]
     fn a_task_list_sent_alone_is_told_to_travel_with_the_next_call() {
+        let _serial = crate::test_serial();
         // Essai réel t4 : sept requêtes pour la seule mise à jour de la liste.
         let open = r#"{"oldTodos":[],"newTodos":[{"content":"a","activeForm":"a","status":"in_progress"},{"content":"b","activeForm":"b","status":"pending"}]}"#;
         let done = r#"{"oldTodos":[],"newTodos":[{"content":"a","activeForm":"a","status":"completed"},{"content":"b","activeForm":"b","status":"completed"}]}"#;
@@ -7555,6 +8953,7 @@ mod tests {
 
     #[test]
     fn a_turn_that_reaches_its_request_limit_is_asked_to_conclude() {
+        let _serial = crate::test_serial();
         // Essai réel t4 (petit modèle) : 250 requêtes en 25 minutes, plus
         // aucun fichier modifié après la sixième minute, et rien pour l'arrêter.
         let (runtime, observed, bash_calls) = aided_runtime(
@@ -7590,6 +8989,7 @@ mod tests {
 
     #[test]
     fn tool_calls_made_after_the_request_limit_do_not_run() {
+        let _serial = crate::test_serial();
         let (runtime, observed, bash_calls) = aided_runtime(
             vec![
                 tool_step("bash", r#"{"command":"python essai.py 1"}"#),
@@ -7630,6 +9030,7 @@ mod tests {
 
     #[test]
     fn a_file_read_again_unchanged_is_kept_once_and_said() {
+        let _serial = crate::test_serial();
         // Essai réel t4 (petit modèle) : chaque fichier, lu au début du tour,
         // est relu juste avant d'être modifié. Quatre requêtes sur dix.
         let read = |content: &str| {
@@ -7704,6 +9105,7 @@ mod tests {
 
     #[test]
     fn the_session_is_saved_at_each_step_of_a_turn() {
+        let _serial = crate::test_serial();
         // Essai réel t4 (north) : arrêté après 25 minutes, le fichier de
         // session ne contenait rien du tour.
         let dir = std::env::temp_dir().join(format!("claw-autosave-{}", std::process::id()));
@@ -7745,6 +9147,7 @@ mod tests {
 
     #[test]
     fn only_the_latest_view_of_a_file_is_kept() {
+        let _serial = crate::test_serial();
         use crate::harness::{FILE_VIEW_END, FILE_VIEW_PREFIX, FILE_VIEW_REPLACED};
         use crate::session::ConversationMessage;
         let view = |name: &str, text: &str| {
@@ -7789,6 +9192,7 @@ mod tests {
 
     #[test]
     fn rewriting_a_test_after_a_failed_check_is_flagged_once() {
+        let _serial = crate::test_serial();
         let cwd = std::env::current_dir().expect("dossier");
         let patched = |added: &str| {
             serde_json::json!({
@@ -7963,6 +9367,7 @@ mod tests {
 
     #[test]
     fn project_mode_takes_a_new_project_through_its_milestones_when_nobody_can_answer() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         let root = project_folder("seul");
         let (mut runtime, observed, commands) = project_runtime(
@@ -8044,6 +9449,7 @@ mod tests {
 
     #[test]
     fn project_mode_has_the_user_confirm_the_specification_and_try_each_milestone() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(true));
         let root = project_folder("avec-utilisateur");
         // Cahier des charges écrit : à faire valider avant le plan.
@@ -8107,6 +9513,7 @@ mod tests {
 
     #[test]
     fn a_milestone_marked_done_whose_check_fails_goes_back_to_the_agent() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         let root = project_folder("echec");
         std::fs::write(root.join("SPEC.md"), PROJECT_SPEC).expect("spec");
@@ -8156,6 +9563,7 @@ mod tests {
 
     #[test]
     fn a_milestone_check_that_keeps_failing_is_run_three_times_at_most_in_a_turn() {
+        let _serial = crate::test_serial();
         // Session 9 de l'appli web : un outil absent de la machine, M1 renvoyé 45 fois.
         CAN_ASK.with(|flag| flag.set(false));
         let root = project_folder("echec-repete");
@@ -8197,6 +9605,7 @@ mod tests {
 
     #[test]
     fn project_mode_starts_for_a_new_project_or_when_asked_and_stops_when_told() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         let root = project_folder("activation");
         std::fs::write(root.join("app.py"), "print('bonjour')\n").expect("code");
@@ -8238,6 +9647,7 @@ mod tests {
 
     #[test]
     fn another_model_reviews_the_specification_and_the_plan_before_the_code() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         let root = project_folder("architecture");
         std::fs::write(root.join("SPEC.md"), PROJECT_SPEC).expect("spec");
@@ -8303,6 +9713,7 @@ mod tests {
 
     #[test]
     fn the_final_demo_runs_in_an_empty_copy_and_a_failure_goes_back_to_the_agent() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         let root = project_folder("demo");
         std::fs::write(root.join("SPEC.md"), PROJECT_SPEC).expect("spec");
@@ -8371,6 +9782,7 @@ mod tests {
 
     #[test]
     fn a_short_free_quota_is_told_to_the_model_and_the_user_at_the_start_of_the_turn() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         FREE_LEFT.with(|left| left.set(Some(40)));
         let root = project_folder("budget");
@@ -8402,6 +9814,7 @@ mod tests {
 
     #[test]
     fn project_mode_resumes_in_a_fresh_clone_of_a_project_with_its_plan() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         // Clone neuf du moteur de l'appli web : SPEC.md et PLAN.md, pas de .claw.
         let root = project_folder("reprise");
@@ -8453,6 +9866,7 @@ mod tests {
 
     #[test]
     fn the_notes_of_the_web_engine_do_not_start_project_mode_in_an_empty_repository() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         // Dépôt neuf de l'appli web : README et .gitignore seulement.
         let root = project_folder("note-moteur");
@@ -8472,6 +9886,7 @@ mod tests {
 
     #[test]
     fn a_plan_claw_cannot_follow_is_pointed_out_once_after_it_is_written() {
+        let _serial = crate::test_serial();
         CAN_ASK.with(|flag| flag.set(false));
         let root = project_folder("forme");
         std::fs::write(root.join("SPEC.md"), PROJECT_SPEC).expect("spec");

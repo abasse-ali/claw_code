@@ -442,8 +442,11 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
     // La marque UTF-8 (BOM) et les fins de ligne CRLF du fichier restent : un
     // script PowerShell 5.1 sans BOM est lu en Windows-1252 (accents abîmés),
     // un `.bat` en LF casse `goto`.
-    let (kept_content, kept) =
-        keep_file_conventions(content, original.as_ref().map(|(text, _)| text.as_str()));
+    let (kept_content, kept) = keep_file_conventions(
+        &absolute_path,
+        content,
+        original.as_ref().map(|(text, _)| text.as_str()),
+    );
     let content = kept_content.as_str();
     let (bytes, encoding_note) = match encode_text(content, encoding) {
         // Codage d'origine gardé : dit au modèle quand ce n'est pas de l'UTF-8.
@@ -487,9 +490,71 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
     })
 }
 
+/// Ce que le type du fichier impose, quel que soit le fichier d'avant : un
+/// `.bat` ou un `.cmd` en CRLF et sans BOM (en LF, `cmd.exe` perd ses
+/// étiquettes et `goto` échoue ; un BOM casse la première commande), un
+/// script shell en LF (bash échoue sur CRLF : `$'\r': command not found`),
+/// un script `PowerShell` accentué avec BOM (Windows `PowerShell` 5.1 lit un
+/// fichier sans BOM en Windows-1252). `None` : rien à imposer.
+fn type_conventions(path: &Path, text: &str) -> Option<(String, &'static str)> {
+    let extension = path.extension()?.to_string_lossy().to_ascii_lowercase();
+    match extension.as_str() {
+        "bat" | "cmd" => {
+            let plain = text.trim_start_matches('\u{feff}');
+            let crlf = plain.replace("\r\n", "\n").replace('\n', "\r\n");
+            (crlf != text).then_some((
+                crlf,
+                "Saved with CRLF line endings and no byte order mark, as cmd.exe needs (with LF its labels and goto break; a BOM breaks the first command).",
+            ))
+        }
+        "sh" | "bash" | "zsh" => text.contains("\r\n").then(|| {
+            (
+                text.replace("\r\n", "\n"),
+                "Saved with LF line endings: bash fails on CRLF ($'\\r': command not found).",
+            )
+        }),
+        "ps1" | "psm1" | "psd1" => (!text.starts_with('\u{feff}') && !text.is_ascii()).then(|| {
+            (
+                format!("\u{feff}{text}"),
+                "Saved in UTF-8 with a byte order mark: Windows PowerShell 5.1 reads a file without it as Windows-1252 and garbles accented text.",
+            )
+        }),
+        _ => None,
+    }
+}
+
 /// Le contenu à écrire avec la marque UTF-8 (BOM) et les fins de ligne CRLF
-/// du fichier qu'il remplace, et ce qui a été gardé.
-fn keep_file_conventions(content: &str, original: Option<&str>) -> (String, Option<String>) {
+/// du fichier qu'il remplace, puis ce que son type impose, et ce qui a été
+/// gardé ou changé.
+fn keep_file_conventions(
+    path: &Path,
+    content: &str,
+    original: Option<&str>,
+) -> (String, Option<String>) {
+    let (text, note) = keep_original_conventions(content, original);
+    match type_conventions(path, &text) {
+        Some((fixed, why)) => {
+            let note = match note {
+                Some(note)
+                    if !matches!(
+                        path.extension()
+                            .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
+                            .as_deref(),
+                        Some("sh" | "bash" | "zsh" | "bat" | "cmd")
+                    ) =>
+                {
+                    format!("{note} {why}")
+                }
+                _ => why.to_string(),
+            };
+            (fixed, Some(note))
+        }
+        None => (text, note),
+    }
+}
+
+/// Le contenu avec les conventions du fichier qu'il remplace.
+fn keep_original_conventions(content: &str, original: Option<&str>) -> (String, Option<String>) {
     let Some(original) = original else {
         return (content.to_string(), None);
     };
@@ -729,6 +794,18 @@ pub fn edit_file(
     }
     let (updated, mut match_note) = apply_edit(&original_file, old_string, new_string, replace_all)
         .map_err(|message| io::Error::new(io::ErrorKind::NotFound, message))?;
+    // Ce que le type du fichier impose (fins de ligne, BOM), même après une
+    // modification : un `.bat` modifié avec des lignes en LF reste en CRLF.
+    let updated = match type_conventions(&absolute_path, &updated) {
+        Some((fixed, why)) => {
+            match_note = Some(match match_note {
+                Some(existing) => format!("{existing} ; {why}"),
+                None => why.to_string(),
+            });
+            fixed
+        }
+        None => updated,
+    };
     // Le fichier garde son codage ; un caractère qu'il ne peut pas stocker est
     // refusé plutôt que de changer le codage en douce.
     let bytes = encode_text(&updated, encoding).map_err(|ch| {
@@ -1951,7 +2028,8 @@ fn display_path(path: &Path) -> String {
 
 /// Chemins écrits « à la Unix » par un modèle sous Windows : `/c/Users/x`,
 /// `/mnt/c/x`, `/cygdrive/c/x` (lecteur) et `/tmp/x` (dossier temporaire).
-fn translate_foreign_path(path: &str) -> Option<PathBuf> {
+#[must_use]
+pub fn translate_foreign_path(path: &str) -> Option<PathBuf> {
     if !cfg!(windows) || !path.starts_with('/') {
         return None;
     }
@@ -2293,6 +2371,55 @@ mod tests {
             .unwrap_or_default()
             .contains("CRLF line endings and UTF-8 byte order mark kept"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scripts_get_the_line_endings_and_marks_their_interpreter_needs() {
+        let dir = temp_path("scripts");
+        std::fs::create_dir_all(&dir).expect("dossier");
+        // Un .bat neuf écrit en LF, avec un BOM : CRLF, sans BOM.
+        let batch = dir.join("build.bat");
+        let written = write_file(
+            &batch.to_string_lossy(),
+            "\u{feff}@echo off\ngoto :fin\n:fin\nexit /b 0\n",
+        )
+        .expect("écrit");
+        assert_eq!(
+            std::fs::read(&batch).expect("lu"),
+            b"@echo off\r\ngoto :fin\r\n:fin\r\nexit /b 0\r\n"
+        );
+        assert!(written
+            .encoding_note
+            .unwrap_or_default()
+            .contains("cmd.exe"));
+        // Une modification en LF garde le fichier en CRLF.
+        let edited = edit_file(
+            &batch.to_string_lossy(),
+            "exit /b 0",
+            "echo fini\nexit /b 0",
+            false,
+        )
+        .expect("modifié");
+        assert_eq!(
+            std::fs::read(&batch).expect("lu"),
+            b"@echo off\r\ngoto :fin\r\n:fin\r\necho fini\r\nexit /b 0\r\n"
+        );
+        assert!(edited.match_note.unwrap_or_default().contains("CRLF"));
+        // Un script shell en CRLF, même s'il l'était : LF.
+        let shell = dir.join("run.sh");
+        std::fs::write(&shell, "#!/bin/sh\r\necho a\r\n").expect("script");
+        write_file(&shell.to_string_lossy(), "#!/bin/sh\r\necho b\r\n").expect("écrit");
+        assert_eq!(std::fs::read(&shell).expect("lu"), b"#!/bin/sh\necho b\n");
+        // Un script PowerShell accentué : avec BOM ; sans accent, rien ne change.
+        let accented = dir.join("rapport.ps1");
+        write_file(&accented.to_string_lossy(), "Write-Output \"Opération\"\n").expect("écrit");
+        assert!(std::fs::read(&accented)
+            .expect("lu")
+            .starts_with(b"\xEF\xBB\xBF"));
+        let plain = dir.join("plain.ps1");
+        write_file(&plain.to_string_lossy(), "Write-Output 'ok'\n").expect("écrit");
+        assert_eq!(std::fs::read(&plain).expect("lu"), b"Write-Output 'ok'\n");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
