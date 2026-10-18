@@ -79,9 +79,10 @@ pub use conversation::{
     ToolExecutor, TurnSummary, HOOK_CONTEXT_PREFIX, STOP_HOOK_PREFIX,
 };
 pub use file_ops::{
-    edit_file, glob_search, grep_search, preview_edit, preview_write, read_file, write_file,
-    EditFileOutput, EditPreview, GlobSearchOutput, GrepSearchInput, GrepSearchOutput,
-    ReadFileOutput, StructuredPatchHunk, TextFilePayload, WriteFileOutput,
+    edit_file, glob_search, grep_search, preview_edit, preview_write, read_file,
+    translate_foreign_path, write_file, EditFileOutput, EditPreview, GlobSearchOutput,
+    GrepSearchInput, GrepSearchOutput, ReadFileOutput, StructuredPatchHunk, TextFilePayload,
+    WriteFileOutput,
 };
 pub use hooks::{
     current_session_id, set_http_hook_sender, set_prompt_hook_evaluator,

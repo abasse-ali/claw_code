@@ -372,9 +372,16 @@ pub(crate) fn file_url_path(url: &str) -> Option<String> {
             index += 1;
         }
     }
-    String::from_utf8(decoded)
+    let path = String::from_utf8(decoded)
         .ok()
-        .filter(|path| !path.is_empty())
+        .filter(|path| !path.is_empty())?;
+    // Un chemin « à la Unix » sous Windows (`/tmp/…`, `/c/Users/…`) : vu dans
+    // un essai réel, un modèle a perdu une vingtaine de requêtes à ouvrir
+    // file:///tmp/claude/… et à lancer des serveurs pour voir sa page.
+    Some(
+        runtime::translate_foreign_path(&path)
+            .map_or(path, |translated| translated.to_string_lossy().into_owned()),
+    )
 }
 
 /// Ce que `ViewPage` rend au modèle.
@@ -488,6 +495,17 @@ mod tests {
             Some("/home/ana/site/café.html")
         );
         assert_eq!(file_url_path("file://"), None);
+        // Sous Windows, la forme de Git Bash d'un chemin mène au vrai dossier.
+        if cfg!(windows) {
+            assert_eq!(
+                file_url_path("file:///tmp/site/index.html").map(std::path::PathBuf::from),
+                Some(std::env::temp_dir().join("site/index.html"))
+            );
+            assert_eq!(
+                file_url_path("file:///c/Users/ana/index.html").as_deref(),
+                Some("C:\\Users\\ana\\index.html")
+            );
+        }
         // Hors du dossier de travail : refusé avant d'ouvrir le navigateur.
         let outside = std::env::temp_dir().join(format!("claw-view-{}.html", std::process::id()));
         std::fs::write(&outside, "<p>x</p>").expect("page");

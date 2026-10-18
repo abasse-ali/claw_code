@@ -680,8 +680,11 @@
       }).filter((value) => !Number.isNaN(value));
       return values.length ? Math.max(...values) : 0;
     };
-    const className = (el) => (typeof el.className === "string" ? el.className : "");
-    const feedback = visible.filter((el) => el.matches("a, button, [role=button], summary") || /(^|\s|-)card/i.test(className(el)));
+    // La classe d'un SVG ne se lit pas comme celle d'un element HTML.
+    const className = (el) => (typeof el.className === "string" ? el.className : (el.getAttribute && el.getAttribute("class")) || "");
+    // Un lien d'evitement (skip link) glisse depuis le haut au focus : c'est voulu.
+    const feedback = visible.filter((el) => (el.matches("a, button, [role=button], summary") || /(^|\s|-)card/i.test(className(el)))
+      && !/skip|sr-only|visually-hidden/i.test(className(el)) && box.get(el).bottom > 0);
     const layoutProps = /^(width|height|min-width|min-height|max-width|top|left|right|bottom|inset|margin|padding)/;
     const shaky = feedback.filter((el) => {
       const props = css(el).transitionProperty.split(",").map((part) => part.trim());

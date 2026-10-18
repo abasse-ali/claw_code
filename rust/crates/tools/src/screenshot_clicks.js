@@ -56,6 +56,9 @@
     .filter((el) => shown(el) && !el.disabled && el.getAttribute("aria-disabled") !== "true")
     // L'envoi d'un formulaire s'essaie avec les actions de Screenshot.
     .filter((el) => !(el.type === "submit" && el.form))
+    // L'onglet ou l'etape deja choisis ne changent rien quand on les clique.
+    .filter((el) => el.getAttribute("aria-selected") !== "true"
+      && !(el.hasAttribute("aria-current") && el.getAttribute("aria-current") !== "false"))
     .slice(0, 24);
   const dead = [];
   const failing = [];
