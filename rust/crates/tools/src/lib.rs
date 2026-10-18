@@ -14,6 +14,7 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+mod icons;
 mod page_view;
 mod screenshot;
 
@@ -550,6 +551,22 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "Icon",
+            description: "Polished SVG icons for a web page, ready to paste: 1539 line icons from Lucide (ISC license), drawn on a 24px grid in the text color (currentColor). Use them instead of drawing icons by hand, and never use emoji. Give `names` to get several icons in one call (\"map-pin\", \"phone\", \"clock\", \"croissant\", \"leaf\", \"calendar\", \"star\", \"menu\", \"x\", \"arrow-right\"), or `search` with English words (\"bread pastry\", \"location\") to find names. Each icon comes as a complete <svg> with width, height and aria-hidden; color and size it with CSS.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "names": { "type": "array", "items": { "type": "string" }, "description": "Icon names, for example [\"map-pin\", \"phone\", \"clock\"]" },
+                    "search": { "type": "string", "description": "Words to find icon names, in English (French words are understood too): \"bread pastry\", \"location\"" },
+                    "size": { "type": "integer", "minimum": 12, "maximum": 160, "description": "Width and height in pixels (default 24)" },
+                    "stroke_width": { "type": "number", "minimum": 0.5, "maximum": 3, "description": "Line width (default 2; 1.5 looks finer at large sizes)" },
+                    "label": { "type": "string", "description": "Text for screen readers when the icon alone carries meaning (an icon-only link)" }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "LookAtImage",
             description:
                 "Look again at an image of this conversation that you received as a description (you cannot see images: a model that can see them looks for you and answers). Ask one precise question per call: the exact text at a place, a color, the state of a control, the position, size or alignment of elements, a detail the description does not give or that you doubt. Use it before relying on a detail that matters for your work.",
@@ -1067,6 +1084,9 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "LookAtImage" => {
             from_value::<LookAtImageInput>(input).and_then(|input| run_look_at_image(&input))
         }
+        "Icon" => from_value::<icons::IconInput>(input)
+            .and_then(|input| icons::icon(&input))
+            .and_then(to_pretty_json),
         "Screenshot" => from_value::<screenshot::ScreenshotInput>(input)
             .and_then(|input| screenshot::take(&input))
             .and_then(to_pretty_json),
@@ -3461,6 +3481,7 @@ pub const PARALLEL_SAFE_TOOLS: &[&str] = &[
     "EditorDiagnostics",
     "WebFetch",
     "ViewPage",
+    "Icon",
     "WebSearch",
     "BashOutput",
 ];
@@ -3746,6 +3767,7 @@ const READ_ONLY_ROLE_TOOLS: &[&str] = &[
     "WebFetch",
     "ViewPage",
     "Screenshot",
+    "Icon",
     "WebSearch",
     "ToolSearch",
     "Skill",

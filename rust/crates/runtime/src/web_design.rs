@@ -189,6 +189,35 @@ pub fn design_guide(request: &str, earlier: Option<&str>) -> Option<String> {
     interface.then(|| format!("{GUIDE_PREFIX} {}", design_method(design_bar())))
 }
 
+/// Socle de code à recopier au début de la feuille de styles : il évite les
+/// défauts qu'un petit modèle fait le plus souvent, pour que les revues
+/// portent sur le design. Vu dans les essais réels : lien Google Fonts mal
+/// formé (la page rendue en Times et Arial), débordement d'un élément de
+/// grille resté à `min-width: auto`, aucun état `:hover` (finition notée
+/// 5/10), mouvement que rien n'arrête, section vide sur ordinateur.
+const FOUNDATION: &str = r#"Start the page with this foundation, copied as it is (rename the custom properties to your plan's tokens and give them its values): it prevents the defects free models make most often, so that the reviews can be about design.
+In <head>, the fonts link exactly in this form (the "?family=" matters; wrong forms load nothing and the page falls back to Times and Arial):
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Display+Name:wght@500;700&family=Text+Name:wght@400;600&display=swap" rel="stylesheet">
+At the top of the stylesheet:
+:root { --paper: #f7f3ec; --ink: #1f1d1a; --muted: #5f5a52; --accent: #8a3b12; --error: #b42318; --font-display: "Display Name", serif; --font-text: "Text Name", sans-serif; --gutter: 1.25rem; --header-h: 4rem; }
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-padding-top: var(--header-h); }
+body { margin: 0; font-family: var(--font-text); font-size: 1.0625rem; line-height: 1.6; color: var(--ink); background: var(--paper); }
+img, svg, video { max-width: 100%; height: auto; }
+.container { width: min(100% - 2 * var(--gutter), 72rem); margin-inline: auto; }
+.grid > *, .split > *, .row > * { min-width: 0; }
+input, select, textarea, button { font: inherit; color: inherit; }
+a, button, input, select, textarea, .card { transition: color .2s, background-color .2s, border-color .2s, box-shadow .2s, transform .2s; }
+a:hover { color: var(--accent); }
+button:hover, .button:hover { transform: translateY(-1px); }
+button:active, .button:active { transform: translateY(1px); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+input:user-invalid, select:user-invalid, textarea:user-invalid { border-color: var(--error); }
+[hidden] { display: none !important; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } }
+Give every grid or flex container the class grid, split or row (or set min-width: 0 on its children), and every interactive element its own hover style on top of these. With a fixed header, add body { padding-top: var(--header-h); }. When a media query hides one version of a content (a schedule as a list on phones), the same media query shows the other version (a table on desktops): no section is ever empty on one screen. Never give an element a width in vw or in px wider than a phone (100vw, width: 480px): use max-width."#;
+
 /// Méthode d'un studio exigeant : des cibles chiffrées plutôt que des
 /// conseils, les marques d'une page générée interdites, et une note à
 /// atteindre. Vu dans les essais réels : avec « change-les sans raison
@@ -203,8 +232,9 @@ fn design_method(bar: u8) -> String {
 - Space: one spacing scale on multiples of 8px (for example 8, 16, 24, 40, 64, 96) and nothing else; the same vertical padding for sections of the same rank; no empty band taller than half a screen.
 - Layout: an ASCII wireframe of the first screen and the order of the sections. Text left-aligned (center only one-line titles and short captions). Vary the composition from one section to the next (split, full width, grid, list, offset), never the same centered title over a grid each time.
 - One memorable element (a hero treatment, an illustration, a typographic idea, an interaction), with everything around it quiet and disciplined.
-Forbidden unless the brief asks for it, because they mark a generated page: a plain colored band with centered \"Welcome\" text as the hero; rows of identical cards with the same soft shadow; a short line under every heading; ALL-CAPS badges or small labels above headings; one repeated icon standing in for pictures; cream with terracotta, or near-black with one acid accent; 01/02/03 markers on things that are not steps; a fade-in on every section; decorative gradients everywhere. Check your plan against this list and say in one line that it uses none of them. Emoji are forbidden everywhere, with no exception, even if the brief sounds playful: emoji are drawn by the device's own font and look different on every phone and computer. Every icon, pictogram and illustration is an inline SVG you draw (with width, height and aria-hidden=\"true\", or role=\"img\" and an aria-label when it carries meaning), and no emoji appears in any heading, button, label or paragraph.
+Forbidden unless the brief asks for it, because they mark a generated page: a plain colored band with centered \"Welcome\" text as the hero; rows of identical cards with the same soft shadow; a short line under every heading; ALL-CAPS badges or small labels above headings; one repeated icon standing in for pictures; cream with terracotta, or near-black with one acid accent; 01/02/03 markers on things that are not steps; a fade-in on every section; decorative gradients everywhere. Check your plan against this list and say in one line that it uses none of them. Emoji are forbidden everywhere, with no exception, even if the brief sounds playful: emoji are drawn by the device's own font and look different on every phone and computer. Every icon and pictogram comes from the Icon tool (polished Lucide line icons, ready-to-paste inline SVG: ask for several names in one call), and every illustration is an inline SVG you draw for the subject (with width, height and aria-hidden=\"true\", or role=\"img\" and an aria-label when it carries meaning); no emoji appears in any heading, button, label or paragraph.
 3. Build. CSS custom properties for every color, size and space of the plan, and no raw values outside them (except 0 and 1px borders). Semantic HTML (header, nav, main, section, footer) with exactly one h1 and no skipped heading levels; mobile first. On phones the navigation folds into a menu button that opens and closes it (aria-expanded), and a fixed header never covers content (offset the page by its height). Every link, button and field has hover, :focus-visible and active states, with transitions of 150 to 250ms, and @media (prefers-reduced-motion: reduce) stops the motion. Tap targets of at least 44x44px on phones. Pictures: the user's images, or illustrations drawn for the subject with inline SVG (each with an explicit width and height) or CSS, never broken or placeholder images. Forms: styled like the rest of the page (font: inherit), a visible label on every field, errors shown only after the user acts (:user-invalid, or on submit), a clear confirmation in the page. Watch CSS specificity: a .section rule and a .cta rule can cancel each other's spacing.
+{FOUNDATION}
 4. Make everything work: every link leads somewhere real (a section that exists, mailto:, tel:), every button does what its label says, forms validate and confirm, no console errors.
 5. Check and critique before you answer: Screenshot with full_page true at phone and desktop sizes, then again with actions that open the menu and send the form empty and filled; ViewPage for console errors. Fix every measured problem and every design note. Then score the screenshots yourself, 1 to 10 on the seven criteria, as a strict art director would (most generated pages deserve 4 to 6; an 8 must be earned by something you can point to), and improve every criterion under {bar} before you answer. Remove one decoration that does not serve the subject.")
 }
@@ -776,6 +806,21 @@ mod tests {
                 && guide.contains("Forbidden unless the brief asks for it")
                 && guide.contains("multiples of 8px"),
             "{guide}"
+        );
+        // Le socle est inséré tel quel, accolades comprises, à sa place.
+        assert!(
+            guide.contains("https://fonts.googleapis.com/css2?family=Display+Name")
+                && guide.contains(".grid > *, .split > *, .row > * { min-width: 0; }")
+                && guide.contains("@media (prefers-reduced-motion: reduce) { *, *::before")
+                && guide.contains("from the Icon tool"),
+            "{guide}"
+        );
+        let foundation = guide
+            .find("Start the page with this foundation")
+            .expect("socle");
+        assert!(
+            guide.find("3. Build.").expect("étape 3") < foundation
+                && foundation < guide.find("4. Make everything work").expect("étape 4")
         );
     }
 }
