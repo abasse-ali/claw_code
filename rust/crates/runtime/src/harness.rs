@@ -3088,30 +3088,74 @@ const NOT_DEMANDED: &[&str] = &[
     "taskkill",
 ];
 
+/// Extensions d'un fichier lancé par une commande (`python factures.py`,
+/// `.\ranger.ps1`).
+const SCRIPT_EXTENSIONS: &[&str] = &[
+    "py", "pyw", "ps1", "bat", "cmd", "sh", "bash", "zsh", "js", "mjs", "cjs", "ts", "mts", "cts",
+    "rb", "pl", "php", "lua",
+];
+
 /// Mots significatifs d'une commande simple : sans variables d'environnement
-/// ni options, `python3` et `py` ramenés à `python`.
+/// ni options, sans `./` devant un chemin, `python3` et `py` ramenés à
+/// `python`.
 fn command_words(segment: &str) -> Vec<String> {
     segment
         .split_whitespace()
         .skip_while(|word| word.contains('=') && !word.starts_with('-'))
         .filter(|word| !word.starts_with('-') && *word != "_")
-        .map(|word| match word {
+        .map(|word| match word.strip_prefix("./").unwrap_or(word) {
             "python3" | "py" => "python".to_string(),
             other => other.to_string(),
         })
         .collect()
 }
 
+/// Une commande lue comme on la tape sous Windows, avant le découpage à la
+/// manière de bash (qui masque chaque caractère protégé et chaque chaîne
+/// entre guillemets) : un `\` devant un nom sépare un chemin, et un chemin
+/// seul entre guillemets est un mot comme un autre (`".\ranger.ps1"`).
+fn as_typed(command: &str) -> String {
+    let quoted = regex::Regex::new(r#""([^"\s;&|<>()$`]+)"|'([^'\s;&|<>()$`]+)'"#).expect("regex");
+    let unquoted = quoted.replace_all(command, "$1$2");
+    let separator = regex::Regex::new(r"\\([\w.])").expect("regex");
+    separator.replace_all(&unquoted, "/$1").into_owned()
+}
+
+/// Le script que lance une commande, parmi ses trois premiers mots.
+fn launched_script(words: &[String]) -> Option<&String> {
+    words.iter().take(3).find(|word| {
+        std::path::Path::new(word.as_str())
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| SCRIPT_EXTENSIONS.contains(&extension))
+    })
+}
+
+/// Une commande conseillée a déjà tourné : ses trois premiers mots
+/// significatifs commencent une commande exécutée. Pour un script, le même
+/// programme l'a lancé, quels que soient ses arguments : l'exemple d'usage
+/// montre souvent un autre fichier d'entrée que l'essai (vu dans un essai
+/// réel : `python factures.py mes_factures.csv` après un essai sur
+/// `exemple_factures.csv`).
+fn already_ran(words: &[String], ran: &[Vec<String>]) -> bool {
+    if let Some(script) = launched_script(words) {
+        return ran
+            .iter()
+            .any(|ran| ran.first() == words.first() && ran.contains(script));
+    }
+    let key = &words[..words.len().min(3)];
+    ran.iter().any(|ran| ran.starts_with(key))
+}
+
 /// Commandes que la réponse dit à l'utilisateur de lancer (blocs de code
-/// d'un shell) et que le modèle n'a lancées à aucun moment de la session :
-/// leurs trois premiers mots significatifs ne commencent aucune commande
-/// exécutée. Les exemples à compléter et les commandes de `NOT_DEMANDED` ne
-/// comptent pas.
+/// d'un shell) et que le modèle n'a lancées à aucun moment de la session
+/// (voir `already_ran`). Les exemples à compléter et les commandes de
+/// `NOT_DEMANDED` ne comptent pas.
 #[must_use]
 pub fn untried_commands(answer: &str, executed: &[String]) -> Vec<String> {
     let ran: Vec<Vec<String>> = executed
         .iter()
-        .flat_map(|command| crate::bash::shell_segments(&command.to_ascii_lowercase()))
+        .flat_map(|command| crate::bash::shell_segments(&as_typed(&command.to_ascii_lowercase())))
         .map(|(segment, _)| command_words(&segment))
         .collect();
     let mut untried: Vec<String> = Vec::new();
@@ -3155,7 +3199,7 @@ pub fn untried_commands(answer: &str, executed: &[String]) -> Vec<String> {
         {
             continue;
         }
-        for (segment, _) in crate::bash::shell_segments(&lower) {
+        for (segment, _) in crate::bash::shell_segments(&as_typed(&lower)) {
             let words = command_words(&segment);
             let Some(program) = words.first() else {
                 continue;
@@ -3163,9 +3207,7 @@ pub fn untried_commands(answer: &str, executed: &[String]) -> Vec<String> {
             if NOT_DEMANDED.contains(&program.as_str()) {
                 continue;
             }
-            let key = &words[..words.len().min(3)];
-            let tried = ran.iter().any(|ran| ran.starts_with(key));
-            if !tried && !untried.contains(&segment) {
+            if !already_ran(&words, &ran) && !untried.contains(&segment) {
                 untried.push(segment);
             }
         }
@@ -4086,6 +4128,24 @@ mod guide_tests {
         );
         let feedback = untried_feedback(&["npm run dev".to_string(), "npm start".to_string()]);
         assert!(feedback.contains("`npm run dev`, `npm start`"));
+    }
+
+    #[test]
+    fn a_script_already_run_on_another_input_counts_as_tried() {
+        // L'essai réel avec Gemini : le mode d'emploi montre un autre fichier
+        // que l'essai, le contrôle relançait le modèle pour rien.
+        let executed = vec![
+            "python -m pytest && python factures.py exemple_factures.csv && node --test remise.test.ts".to_string(),
+            "powershell -NoProfile -File \".\\ranger.ps1\" -Dossier test -WhatIf".to_string(),
+        ];
+        let answer = "```bash\n# Génère un rapport\npython factures.py mes_factures.csv\npython3 ./factures.py mes_factures.csv -o rapport.json\nnode --test remise.test.ts\npowershell -File .\\ranger.ps1 -Dossier D:\\Photos\n```";
+        assert_eq!(untried_commands(answer, &executed), Vec::<String>::new());
+        // Un autre script, ou le même par un autre programme, reste à essayer.
+        let answer = "```bash\npython export.py factures.csv\nnode factures.py\n```";
+        assert_eq!(
+            untried_commands(answer, &executed),
+            ["python export.py factures.csv", "node factures.py"]
+        );
     }
 }
 

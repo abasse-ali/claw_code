@@ -894,6 +894,25 @@ const HOOK_STOP_MESSAGE: &str =
 
 const INTERRUPTED_CALL_RESULT: &str = "[Claw] Claw was stopped while this call was running: its result was not recorded, and the call may have run only in part. Check the current state (files, processes) before relying on it or running it again.";
 
+/// Une erreur d'API en une ligne lisible : sans le corps JSON que le
+/// fournisseur y joint.
+fn short_error(error: &str) -> String {
+    const MAX_CHARS: usize = 160;
+    let line = error.lines().next().unwrap_or_default();
+    let line = [" : [", " : {", ": [", ": {"]
+        .iter()
+        .filter_map(|start| line.find(start))
+        .min()
+        .map_or(line, |end| &line[..end])
+        .trim();
+    if line.chars().count() > MAX_CHARS {
+        let cut: String = line.chars().take(MAX_CHARS).collect();
+        format!("{cut}…")
+    } else {
+        line.to_string()
+    }
+}
+
 /// Le dernier message est la relance d'une réponse coupée, juste après elle.
 fn after_cut_nudge(messages: &[ConversationMessage]) -> bool {
     let [.., cut, nudge] = messages else {
@@ -1330,6 +1349,26 @@ where
         true
     }
 
+    /// Plus aucun modèle ne répond après un contrôle de Claw : les notes de
+    /// Claw envoyées depuis la réponse sont retirées (la session finit sur la
+    /// réponse, comme un tour ordinaire) et la réponse est rouverte.
+    fn keep_answer_after_error(&mut self, error: &str) {
+        while self.session.messages.last().is_some_and(|message| {
+            message.role == crate::session::MessageRole::User
+                && message
+                    .blocks
+                    .iter()
+                    .all(|block| matches!(block, ContentBlock::Text { .. }))
+        }) {
+            self.session.messages.pop();
+        }
+        self.api_client.answer_kept();
+        self.api_client.notify(&format!(
+            "Le modèle n'a pas pu reprendre après un contrôle de Claw ({}) : la réponse déjà donnée reste celle du tour",
+            short_error(error)
+        ));
+    }
+
     /// La suite d'une réponse coupée par la limite de sortie complète cette
     /// réponse : la relance de Claw est retirée et les deux parties ne font
     /// plus qu'un message, celui que l'utilisateur et les contrôles lisent.
@@ -1672,6 +1711,15 @@ where
                 }
                 Err(error) => {
                     crate::telemetry::api_error(&error.to_string(), request_started.elapsed());
+                    // Un contrôle de Claw vient de renvoyer au travail un modèle
+                    // qui avait fini, et plus aucun modèle ne répond (quota du
+                    // jour épuisé, vu dans un essai réel avec Gemini) : la
+                    // réponse déjà donnée reste celle du tour, au lieu de le perdre.
+                    if superseded_draft.is_some() && !interrupt_requested() {
+                        self.keep_answer_after_error(&error.to_string());
+                        self.run_stop_hooks(stop_continuations, true, &assistant_messages);
+                        break;
+                    }
                     return Err(error);
                 }
             };
@@ -7294,6 +7342,49 @@ mod tests {
             .contains("commands that you have not run in this session: `npm run dev`"));
         // Une fois lancée, la même commande n'est plus signalée.
         assert_eq!(observed.superseded, 1);
+    }
+
+    #[test]
+    fn an_answer_sent_back_by_a_check_stays_when_the_model_stops_answering() {
+        let _serial = crate::test_serial();
+        const ADVICE: &str = "Pour lancer :\n\n```bash\nnpm run dev\n```";
+        // Le contrôle des commandes renvoie le modèle, qui ne répond plus
+        // (quota épuisé) : le tour finit sur la réponse déjà donnée.
+        let (mut runtime, observed, _) = aided_runtime(vec![text_step(ADVICE)], vec![]);
+        let summary = runtime.run_turn("comment le lancer ?", None).expect("tour");
+        assert_eq!(summary.iterations, 2);
+        assert_eq!(
+            summary
+                .assistant_messages
+                .last()
+                .map(super::message_text)
+                .as_deref(),
+            Some(ADVICE)
+        );
+        let last = runtime.session.messages.last().expect("message");
+        assert_eq!(last.role, MessageRole::Assistant);
+        let observed = observed.borrow();
+        assert_eq!((observed.superseded, observed.kept), (1, 1));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("(plus de réponse scriptée)")
+                && notice.contains("la réponse déjà donnée reste celle du tour")));
+        drop(observed);
+        // Sans réponse déjà donnée, l'erreur reste l'issue du tour.
+        let (mut runtime, _, _) = aided_runtime(vec![], vec![]);
+        assert!(runtime.run_turn("bonjour", None).is_err());
+    }
+
+    #[test]
+    fn api_errors_are_shown_without_their_json_body() {
+        let error = "l'api a échoué après 1 tentatives : l'api a retourné 429 Too Many Requests : [{\n  \"error\": {}\n}]";
+        assert_eq!(
+            super::short_error(error),
+            "l'api a échoué après 1 tentatives : l'api a retourné 429 Too Many Requests"
+        );
+        assert_eq!(super::short_error("délai dépassé"), "délai dépassé");
+        assert!(super::short_error(&"x".repeat(400)).ends_with('…'));
     }
 
     #[test]
