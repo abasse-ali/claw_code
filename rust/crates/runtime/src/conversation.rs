@@ -397,6 +397,9 @@ struct TurnAids {
     scripts_asked: bool,
     /// Le piège des guillemets de `PowerShell` passé par bash a été dit.
     quoting_noted: bool,
+    /// Les premiers outils du tour ont été vus : l'annonce à l'utilisateur
+    /// n'est demandée qu'une fois.
+    announce_checked: bool,
     /// Poursuites accordées au tour de design resté sous la barre.
     continuations: usize,
     /// Revues notées au moment de la dernière poursuite.
@@ -1349,6 +1352,35 @@ where
         true
     }
 
+    /// Note à joindre aux résultats des premiers outils du tour quand la
+    /// réponse qui les appelle n'a rien dit à l'utilisateur : une fois par
+    /// tour, jamais pour un sous-agent (personne ne le lit).
+    fn announce_note(
+        &mut self,
+        aids: &mut TurnAids,
+        assistant_messages: &[ConversationMessage],
+    ) -> Option<String> {
+        if aids.announce_checked || self.subagent || !harness::enabled(Aid::Announce) {
+            return None;
+        }
+        aids.announce_checked = true;
+        let said = assistant_messages
+            .last()
+            .map(message_text)
+            .unwrap_or_default();
+        // Quelques mots suffisent ; rien, ou un mot isolé, ne dit rien du plan.
+        if said.split_whitespace().count() >= 4 {
+            return None;
+        }
+        self.api_client
+            .notify("L'agent s'est mis au travail sans annoncer ce qu'il fait : Claw lui demande de le dire");
+        Some(format!(
+            "{}{}",
+            harness::ANNOUNCE_NOTE,
+            harness::language_note(self.response_language.as_deref())
+        ))
+    }
+
     /// Plus aucun modèle ne répond après un contrôle de Claw : les notes de
     /// Claw envoyées depuis la réponse sont retirées (la session finit sur la
     /// réponse, comme un tour ordinaire) et la réponse est rouverte.
@@ -1956,6 +1988,15 @@ where
                 earlier.as_deref(),
                 &mut aids,
             );
+            // Premiers outils du tour lancés sans un mot pour l'utilisateur : il
+            // annonce ce qu'il fait dans sa réponse suivante (note jointe aux
+            // résultats, aucune requête de plus).
+            if let Some(note) = self.announce_note(&mut aids, &assistant_messages) {
+                plan_note = Some(match plan_note {
+                    Some(plan) => format!("{plan}\n\n{note}"),
+                    None => note,
+                });
+            }
             self.autosave(&pending_tool_uses);
             if self.run_parallel_batch(
                 &pending_tool_uses,
@@ -5351,9 +5392,10 @@ mod tests {
             .expect("conversation should continue after denied tool");
 
         assert_eq!(summary.tool_results.len(), 1);
+        // Le refus d'abord ; la demande d'annonce de Claw peut suivre.
         assert!(matches!(
             &summary.tool_results[0].blocks[0],
-            ContentBlock::ToolResult { is_error: true, output, .. } if output == "not now"
+            ContentBlock::ToolResult { is_error: true, output, .. } if output.starts_with("not now")
         ));
     }
 
@@ -7357,6 +7399,61 @@ mod tests {
     }
 
     #[test]
+    fn a_model_that_starts_without_a_word_is_asked_to_announce_its_plan() {
+        let _serial = crate::test_serial();
+        // Premiers outils sans un mot : la note part avec leurs résultats (aucune
+        // requête de plus), une seule fois par tour.
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                tool_step("bash", r#"{"command":"ls"}"#),
+                tool_step("bash", r#"{"command":"ls src"}"#),
+                text_step("Fini."),
+            ],
+            vec![PASSING, PASSING],
+        );
+        let summary = runtime.run_turn("range le projet", None).expect("tour");
+        assert_eq!(summary.iterations, 3);
+        let observed = observed.borrow();
+        assert!(observed.requests[1].contains("You started working without telling the user"));
+        assert_eq!(
+            observed
+                .requests
+                .iter()
+                .filter(|request| request.contains("You started working without telling the user"))
+                .count(),
+            // La note reste dans l'historique ; elle n'est pas jointe une seconde fois.
+            2
+        );
+        assert!(!observed.requests[2]
+            .rsplit("ls src")
+            .next()
+            .unwrap_or_default()
+            .contains("You started working"));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("sans annoncer ce qu'il fait")));
+        drop(observed);
+
+        // Une réponse qui dit son plan avant ses outils : rien à demander.
+        let announced = vec![
+            AssistantEvent::TextDelta(
+                "Je lis les fichiers du projet, puis je les range par dossier.".to_string(),
+            ),
+            AssistantEvent::ToolUse {
+                id: "appel-bash".to_string(),
+                name: "bash".to_string(),
+                input: r#"{"command":"ls"}"#.to_string(),
+            },
+            AssistantEvent::MessageStop,
+        ];
+        let (mut runtime, observed, _) =
+            aided_runtime(vec![announced, text_step("Fini.")], vec![PASSING]);
+        runtime.run_turn("range le projet", None).expect("tour");
+        assert!(!observed.borrow().requests[1].contains("You started working"));
+    }
+
+    #[test]
     fn an_answer_sent_back_by_a_check_stays_when_the_model_stops_answering() {
         let _serial = crate::test_serial();
         const ADVICE: &str = "Pour lancer :\n\n```bash\nnpm run dev\n```";
@@ -7587,7 +7684,13 @@ mod tests {
         );
         runtime.run_turn("écris le fichier", None).expect("tour");
         assert_eq!(bash_calls.borrow().len(), 1);
-        assert!(observed.borrow().notices.is_empty());
+        // Aucune vérification imposée ; seule l'annonce est demandée (premiers
+        // outils lancés sans un mot pour l'utilisateur).
+        assert!(observed
+            .borrow()
+            .notices
+            .iter()
+            .all(|notice| notice.contains("sans annoncer ce qu'il fait")));
     }
 
     #[test]

@@ -457,7 +457,10 @@ impl ConfigLoader {
             },
             oauth: parse_optional_oauth_config(&merged_value, "merged settings.oauth")?,
             model: parse_optional_model(&merged_value),
-            language: parse_optional_language(&merged_value),
+            language: response_language_setting(
+                std::env::var("CLAW_LANGUAGE").ok(),
+                parse_optional_language(&merged_value),
+            ),
             permission_mode: parse_optional_permission_mode(&merged_value)?,
             permission_rules,
             agent_models: parse_agent_models(&merged_value),
@@ -1171,6 +1174,19 @@ fn parse_providers(root: &JsonValue) -> Result<Vec<RuntimeProviderConfig>, Confi
     Ok(parsed)
 }
 
+/// Langue des réponses : `CLAW_LANGUAGE` l'emporte sur le réglage `language`
+/// (Claw Web : la langue de l'appli, alors que le moteur entoure la demande de
+/// notes en anglais) ; vide, il ne compte pas.
+fn response_language_setting(
+    from_env: Option<String>,
+    configured: Option<String>,
+) -> Option<String> {
+    from_env
+        .map(|language| language.trim().to_string())
+        .filter(|language| !language.is_empty())
+        .or(configured)
+}
+
 fn parse_optional_language(root: &JsonValue) -> Option<String> {
     root.as_object()
         .and_then(|object| object.get("language"))
@@ -1756,6 +1772,20 @@ mod tests {
             .contains("la valeur racine des paramètres doit être un objet JSON"));
 
         fs::remove_dir_all(root).expect("nettoyage du répertoire temp");
+    }
+
+    #[test]
+    fn the_language_variable_wins_over_the_setting() {
+        use super::response_language_setting;
+        assert_eq!(
+            response_language_setting(Some("français".into()), Some("English".into())).as_deref(),
+            Some("français")
+        );
+        assert_eq!(
+            response_language_setting(Some("  ".into()), Some("English".into())).as_deref(),
+            Some("English")
+        );
+        assert_eq!(response_language_setting(None, None), None);
     }
 
     #[test]

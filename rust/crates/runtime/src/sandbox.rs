@@ -415,9 +415,18 @@ pub fn build_linux_sandbox_command(
             status.allowed_mounts.join(":"),
         ),
     ];
-    if let Ok(path) = env::var("PATH") {
-        env.push(("PATH".to_string(), path));
-    }
+    // `pip install --user` range ses commandes dans `$HOME/.local/bin`, ici le
+    // dossier personnel du bac à sable. Vu dans une session de Claw Web : l'agent
+    // installait pytest, ne le trouvait pas, puis corrigeait le PATH à la main
+    // (deux requêtes perdues). Il est en tête du PATH.
+    let local_bin = sandbox_home.join(".local").join("bin");
+    env.push((
+        "PATH".to_string(),
+        match env::var("PATH") {
+            Ok(path) if !path.is_empty() => format!("{}:{path}", local_bin.display()),
+            _ => local_bin.display().to_string(),
+        },
+    ));
 
     Some(LinuxSandboxCommand {
         program: "unshare".to_string(),
@@ -541,6 +550,17 @@ mod tests {
             assert_eq!(launcher.program, "unshare");
             assert!(launcher.args.iter().any(|arg| arg == "--mount"));
             assert!(launcher.args.iter().any(|arg| arg == "--net") == status.network_active);
+            // Les commandes de `pip install --user` du bac à sable se trouvent.
+            let path = launcher
+                .env
+                .iter()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value.clone())
+                .expect("PATH");
+            assert!(
+                path.starts_with("/workspace/.claw/sandbox/home/.local/bin"),
+                "{path}"
+            );
         }
     }
 }

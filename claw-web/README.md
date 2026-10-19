@@ -64,6 +64,15 @@ changement de ce dossier ; l'ancienne adresse, https://abasse-ali.github.io/claw
   défaut). La session qui y travaille est nommée ; son prochain passage recrée la branche à
   partir de la branche de départ.
 
+## Ce que Claw compte faire
+
+Pendant qu'il travaille, la progression de la session commence par **Ce que Claw compte faire** :
+le plan que Claw annonce, en français, avant ses premiers outils. Elle se poursuit par **En
+ce moment**, l'étape en cours. Le plan reste une fois la session finie. Pour NVIDIA, le choix du
+modèle met Nemotron 3 Super en tête : rapide et fiable sur l'offre gratuite. Nemotron 3 Ultra, le
+plus puissant, est lent (NVIDIA coupe parfois ses longues réponses) ; Claw passe alors à Nemotron 3
+Super.
+
 ## Quota du modèle choisi
 
 L'anneau du haut suit le fournisseur du modèle choisi :

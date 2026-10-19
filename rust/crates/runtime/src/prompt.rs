@@ -729,6 +729,7 @@ fn get_simple_system_section() -> String {
 
 fn get_simple_doing_tasks_section() -> String {
     let items = prepend_bullets(vec![
+        "Tell the user what you are going to do: in your first reply to a request, before your first tool call, write one to three short sentences for the user, in their language, saying what you will do and in what order (the files or parts concerned), and make the tool calls in that same reply. When you move on to a new stage of the work, say so in one sentence. These lines are for the user: short, concrete, without code.".to_string(),
         "Read relevant code before changing it and keep changes tightly scoped to the request.".to_string(),
         "Do not add speculative abstractions, compatibility shims, or unrelated cleanup.".to_string(),
         "Do not create files unless they are required to complete the task.".to_string(),
@@ -759,7 +760,7 @@ fn get_reasoning_section() -> String {
         "Go deep, not fast: when a problem is subtle (state, concurrency, caching, encoding, off-by-one, a framework convention), trace the actual execution step by step with the concrete values involved, instead of reasoning from what the code is supposed to do.".to_string(),
         "When a result surprises you (an error, an unexpected output, a failed edit), stop and explain it before trying anything else. Never repeat unchanged an action that has just failed.".to_string(),
         "A failure is information, not a dead end: read the whole error, say what it tells you, then fix the command or take another way (another tool, a smaller step, a different approach). Never hand the work back to the user (\"run this in your own terminal\") while one of your tools can still do it; ask the user only for what you truly cannot do yourself, such as a secret, a decision or an action outside this machine.".to_string(),
-        "Do, do not announce: when you say you will do something, the same reply makes the tool call that does it. Never end your turn on a plan, a heading or a list of next steps that you could carry out yourself. A tool call that you only draft in your reasoning or describe in your reply is never executed.".to_string(),
+        "Do what you announce: when you say you will do something, the same reply makes the tool call that does it. Never end your turn on a plan, a heading or a list of next steps that you could carry out yourself. A tool call that you only draft in your reasoning or describe in your reply is never executed.".to_string(),
         "Collect all the errors at once: run the type checker, compiler, linter or test suite over the whole project and fix every error it reports before running it again, instead of discovering them one build at a time.".to_string(),
         "Verify the behaviour, not only that it loads: exercise what you changed (run the test that covers it, call the endpoint, run the command with real input) and read the result. \"It builds\" or \"it imports\" only proves that it builds or imports.".to_string(),
         "Before you conclude, reread your own work as a reviewer would: does it do every part of what was asked, in every case, and did you actually see it work? Your final answer may claim only what is in the files and what a command showed you; name plainly any part that is not done or not verified.".to_string(),

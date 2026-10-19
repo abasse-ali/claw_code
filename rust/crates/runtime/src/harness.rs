@@ -118,6 +118,9 @@ pub enum Aid {
     /// Outil `Photo` : photos sous licence libre (Openverse, Wikimedia
     /// Commons) enregistrées dans le projet avec leur crédit.
     Photos,
+    /// Un modèle qui se met au travail sans dire à l'utilisateur ce qu'il
+    /// compte faire est invité à l'annoncer dans sa réponse suivante.
+    Announce,
 }
 
 impl Aid {
@@ -165,6 +168,7 @@ impl Aid {
             Self::CodeGuide => "CLAW_CODE_GUIDE",
             Self::RunScripts => "CLAW_RUN_SCRIPTS",
             Self::Photos => "CLAW_PHOTOS",
+            Self::Announce => "CLAW_ANNOUNCE",
         }
     }
 }
@@ -2745,6 +2749,11 @@ pub fn language_note(language: Option<&str>) -> String {
         None => " Write your reply to the user in the language of their request, not in the language of this note.".to_string(),
     }
 }
+
+/// Note jointe aux résultats des premiers outils d'un tour quand le modèle
+/// s'est mis au travail sans un mot pour l'utilisateur : il dit dans sa
+/// réponse suivante ce qu'il fait et ce qui vient (aucune requête de plus).
+pub const ANNOUNCE_NOTE: &str = "[Claw] You started working without telling the user what you are doing. In your next reply, before any tool call, write one to three short sentences for the user: what you are doing and what comes next, in plain words, without code. Then make your tool calls in that same reply.";
 
 /// Préfixe des messages que Claw adresse au modèle à la place de
 /// l'utilisateur (contrôles, rappels) : ils ne sont pas des demandes de sa part.
