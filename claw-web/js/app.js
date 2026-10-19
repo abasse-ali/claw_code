@@ -14,6 +14,8 @@ const STORE = "claw-web.settings.v1";
 const DEFAULT_ENGINE = "abasse-ali/claw-sessions";
 // Moteurs déplacés : les sessions de claw_code (devenu public) vivent dans un dépôt privé.
 const MOVED_ENGINES = { "abasse-ali/claw_code": "abasse-ali/claw-sessions" };
+// Code de Claw et du moteur (entrée `claw_source` du workflow) : jamais supprimé depuis l'appli.
+const CLAW_SOURCE = "abasse-ali/claw_code";
 const SETTINGS_BLOCK = /<!--\s*claw-web\s+(\{[\s\S]*?\})\s*-->/;
 const TOKEN_HELP = "https://github.com/settings/personal-access-tokens/new";
 
@@ -53,8 +55,9 @@ const state = {
   repos: null,
   branches: new Map(),
   models: null,
-  // Le moteur a le secret NVIDIA_API_KEY (null : pas encore demandé à GitHub).
-  nvidia: null,
+  // Secrets des fournisseurs à clé du moteur, { NVIDIA_API_KEY: true, … } (null : pas encore
+  // demandés à GitHub).
+  providerSecrets: null,
   runs: [],
   session: null,
   pollTimer: null,
@@ -291,37 +294,78 @@ function since(date) {
 
 function modelLabel(model) {
   if (!model) return "Auto";
-  const known = [...(state.models || []), ...NVIDIA_AGENTS].find((item) => item.id === model);
+  const keyed = KEYED_PROVIDERS.flatMap((provider) => provider.models);
+  const known = [...(state.models || []), ...keyed].find((item) => item.id === model);
   return known ? known.short : model.replace(/:free$/, "").split("/").pop();
 }
 
-/** Agents de NVIDIA essayés avec Claw : la liste `NVIDIA_MODELS` (ceux qui appellent les
- * outils) de rust/crates/claw-cli/src/models.rs, du plus puissant au plus léger. Proposés quand
- * le moteur a le secret NVIDIA_API_KEY. */
-const NVIDIA_AGENTS = [
-  { id: "nvidia:nvidia/nemotron-3-ultra-550b-a55b", short: "NVIDIA Nemotron 3 Ultra" },
-  { id: "nvidia:nvidia/nemotron-3-super-120b-a12b", short: "NVIDIA Nemotron 3 Super" },
-  { id: "nvidia:stepfun-ai/step-5-preview", short: "NVIDIA Step 5 Preview" },
-  { id: "nvidia:openai/gpt-oss-20b", short: "NVIDIA gpt-oss 20B" },
+/** Fournisseurs gratuits à clé, en plus d'OpenRouter, dans l'ordre des onglets du choix du modèle
+ * (OpenRouter, Google Gemini, NVIDIA) : leur clé devient un secret du moteur, et leurs modèles
+ * sont proposés quand le moteur a ce secret. Mêmes listes que rust/crates/claw-cli/src/models.rs :
+ * `GEMINI_FREE_TIER` et `NVIDIA_MODELS` (ceux qui appellent les outils), du plus puissant au plus
+ * léger. */
+const KEYED_PROVIDERS = [
+  {
+    key: "gemini",
+    secret: "GEMINI_API_KEY",
+    label: "Google Gemini",
+    prefix: "AIza",
+    where: "aistudio.google.com/apikey, projet sans facturation",
+    field: "Clé Google Gemini (facultative : offre gratuite de Google)",
+    detail: "offre gratuite de Google : quota par jour et par modèle, bas pour les plus récents (20 requêtes pour Gemini 3.8 Flash)",
+    models: [
+      { id: "gemini:gemini-3.8-flash", short: "Gemini 3.8 Flash" },
+      { id: "gemini:gemini-3.6-flash", short: "Gemini 3.6 Flash" },
+      { id: "gemini:gemini-3.5-flash-lite", short: "Gemini 3.5 Flash-Lite" },
+      { id: "gemini:gemini-3.1-flash-lite", short: "Gemini 3.1 Flash-Lite" },
+      { id: "gemini:gemini-2.5-pro", short: "Gemini 2.5 Pro" },
+      { id: "gemini:gemini-2.5-flash", short: "Gemini 2.5 Flash" },
+      { id: "gemini:gemini-2.5-flash-lite", short: "Gemini 2.5 Flash-Lite" },
+    ],
+  },
+  {
+    key: "nvidia",
+    secret: "NVIDIA_API_KEY",
+    label: "NVIDIA",
+    prefix: "nvapi-",
+    where: "build.nvidia.com, profil, Settings, API Keys",
+    field: "Clé NVIDIA (facultative : modèles de build.nvidia.com, sans quota par jour)",
+    detail: "gratuit chez NVIDIA, environ 40 requêtes par minute, sans quota par jour",
+    models: [
+      { id: "nvidia:nvidia/nemotron-3-ultra-550b-a55b", short: "NVIDIA Nemotron 3 Ultra" },
+      { id: "nvidia:nvidia/nemotron-3-super-120b-a12b", short: "NVIDIA Nemotron 3 Super" },
+      { id: "nvidia:stepfun-ai/step-5-preview", short: "NVIDIA Step 5 Preview" },
+      { id: "nvidia:openai/gpt-oss-20b", short: "NVIDIA gpt-oss 20B" },
+    ],
+  },
 ];
 
-/** Le moteur a-t-il la clé NVIDIA ? Demandé une fois à GitHub (le nom du secret, jamais sa
- * valeur) ; faux sans réponse. */
-async function engineHasNvidia() {
-  if (state.nvidia !== null) return state.nvidia;
-  try {
-    state.nvidia = Boolean(state.github) && await state.github.hasSecret(state.settings.engine, "NVIDIA_API_KEY");
-  } catch {
-    return false;
+/** Secrets du moteur pour les fournisseurs à clé : nom du secret, vrai s'il est posé. Demandé
+ * une fois à GitHub (le nom du secret, jamais sa valeur) ; un fournisseur sans réponse est
+ * compté absent, sans être gardé. */
+async function engineProviderSecrets() {
+  if (state.providerSecrets) return state.providerSecrets;
+  if (!state.github) return {};
+  const found = {};
+  let complete = true;
+  for (const provider of KEYED_PROVIDERS) {
+    try {
+      found[provider.secret] = await state.github.hasSecret(state.settings.engine, provider.secret);
+    } catch {
+      found[provider.secret] = false;
+      complete = false;
+    }
   }
-  return state.nvidia;
+  if (complete) state.providerSecrets = found;
+  return found;
 }
 
 /** État d'un passage du moteur, pour l'affichage. */
 function runStatus(run) {
   if (!run) return null;
   if (run.status === "queued" || run.status === "waiting" || run.status === "pending" || run.status === "requested") {
-    return { key: "queued", label: "En file d'attente" };
+    // Sur le PC, une session attend tant que le PC et Docker Desktop ne sont pas lancés.
+    return { key: "queued", label: state.settings.runner ? "En attente du PC (allumé, Docker Desktop lancé)" : "En file d'attente" };
   }
   if (run.status === "in_progress") return { key: "running", label: "Claw travaille" };
   if (run.conclusion === "success") return { key: "done", label: "Terminé" };
@@ -379,28 +423,53 @@ async function refreshRuns() {
 
 // --- Feuille de choix (dépôt, branche, modèle) ---------------------------------------------
 
-function openPicker({ title, items, current, placeholder, onPick }) {
+/** `onRemove` : les éléments `removable` ont un bouton de suppression (une corbeille), à côté.
+ * `groups` ([{ key, label, empty }]) : un onglet par groupe, pour les éléments qui ont ce
+ * `group` ; l'onglet ouvert est celui de l'élément choisi. Une recherche parcourt tous les
+ * groupes ; `empty` dit quoi faire quand un groupe n'a rien (une clé à ajouter). */
+function openPicker({ title, items, current, placeholder, onPick, onRemove, groups = [] }) {
   const sheet = $("#sheet");
+  const count = (key) => items.filter((item) => item.group === key).length;
+  let active = (items.find((item) => item.value === current && item.group) || {}).group || (groups[0] || {}).key;
   sheet.innerHTML = `
     <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
       <div class="sheet-head">
         <strong>${escapeHtml(title)}</strong>
         <button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button>
       </div>
+      ${groups.length ? `<div class="sheet-tabs" role="tablist">${groups.map((group) => `
+        <button type="button" class="sheet-tab" role="tab" data-group="${escapeHtml(group.key)}">${escapeHtml(group.label)}<small>${count(group.key)}</small></button>`).join("")}
+      </div>` : ""}
       ${items.length > 8 ? `<input class="sheet-search" type="search" placeholder="${escapeHtml(placeholder || "Rechercher")}" autocomplete="off">` : ""}
       <ul class="sheet-list"></ul>
     </div>`;
   const list = sheet.querySelector(".sheet-list");
-  // Les éléments épinglés (« Créer un dépôt ») restent en tête, quelle que soit la recherche.
+  // Les éléments épinglés (« Créer un dépôt », « Auto ») restent en tête, quelle que soit la
+  // recherche ou l'onglet.
   const draw = (filter = "") => {
+    for (const tab of sheet.querySelectorAll(".sheet-tab")) {
+      const on = tab.dataset.group === active && !filter.trim();
+      tab.classList.toggle("on", on);
+      tab.setAttribute("aria-selected", String(on));
+    }
     const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
+    const inTab = (item) => !groups.length || words.length || item.group === active;
     const shown = items.filter((item) => item.pinned
-      || words.every((word) => `${item.label} ${item.detail || ""}`.toLowerCase().includes(word)));
-    list.innerHTML = shown.slice(0, 200).map((item) => `
-      <li><button class="sheet-item${item.value === current ? " current" : ""}${item.pinned ? " pinned" : ""}" data-value="${escapeHtml(item.value)}">
+      || (inTab(item) && words.every((word) => `${item.label} ${item.detail || ""}`.toLowerCase().includes(word))));
+    const group = groups.find((entry) => entry.key === active);
+    if (!words.length && group && group.empty && count(active) === 0) {
+      list.innerHTML = shown.map((item) => itemRow(item)).join("") + `<li class="empty">${escapeHtml(group.empty)}</li>`;
+      return;
+    }
+    list.innerHTML = shown.slice(0, 200).map((item) => itemRow(item)).join("") || '<li class="empty">Rien ne correspond.</li>';
+  };
+  const itemRow = (item) => {
+      const removable = onRemove && item.removable;
+      return `
+      <li${removable ? ' class="branch-row"' : ""}><button class="sheet-item${item.value === current ? " current" : ""}${item.pinned ? " pinned" : ""}" data-value="${escapeHtml(item.value)}">
         <span class="sheet-label">${item.icon ? ICON[item.icon] : ""}<span>${escapeHtml(item.label)}</span></span>
         ${item.detail ? `<small>${escapeHtml(item.detail)}</small>` : ""}
-      </button></li>`).join("") || '<li class="empty">Rien ne correspond.</li>';
+      </button>${removable ? `<button type="button" class="icon-button" data-remove="${escapeHtml(item.value)}" aria-label="Supprimer ${escapeHtml(item.label)}">${ICON.trash}</button>` : ""}</li>`;
   };
   draw();
   const close = () => {
@@ -409,6 +478,19 @@ function openPicker({ title, items, current, placeholder, onPick }) {
   };
   sheet.onclick = (event) => {
     if (event.target === sheet || event.target.closest("[data-close]")) close();
+    const tab = event.target.closest("[data-group]");
+    if (tab) {
+      active = tab.dataset.group;
+      if (search) search.value = "";
+      draw();
+      return;
+    }
+    const remove = event.target.closest("[data-remove]");
+    if (remove) {
+      close();
+      onRemove(remove.dataset.remove);
+      return;
+    }
     const button = event.target.closest(".sheet-item");
     if (button) {
       const typed = search ? search.value.trim() : "";
@@ -437,6 +519,7 @@ async function pickRepo() {
           value: repo.full_name,
           label: repo.full_name,
           detail: `${repo.private ? "privé" : "public"} · ${since(repo.pushed_at)}`,
+          removable: !protectedRepo(repo.full_name),
         })),
       ],
       onPick: async (value, typed) => {
@@ -447,10 +530,102 @@ async function pickRepo() {
         const repo = repos.find((item) => item.full_name === value);
         useRepo(value, repo ? repo.default_branch : "main");
       },
+      onRemove: (value) => openDeleteRepo(repos.find((item) => item.full_name === value)),
     });
   } catch (error) {
     failure(error);
   }
+}
+
+/** Dépôts que l'appli ne propose jamais de supprimer : Claw Web en dépend. Rend la raison. */
+function protectedRepo(fullName) {
+  const name = (fullName || "").toLowerCase();
+  if (name === (state.settings.engine || DEFAULT_ENGINE).toLowerCase()) return "dépôt du moteur : vos sessions y vivent";
+  if (name === CLAW_SOURCE || MOVED_ENGINES[name]) return "code de Claw : le moteur en dépend";
+  return "";
+}
+
+/** Sessions de l'appli qui travaillent dans `repo` (et sur `branch`, si elle est donnée). */
+async function sessionsUsing(repo, branch = "") {
+  const sessions = await state.github.sessions(state.settings.engine);
+  return sessions.filter((issue) => settingsOf(issue).repo === repo && (!branch || branchOf(issue) === branch));
+}
+
+/** Suppression d'un dépôt : le nom complet à retaper, comme sur GitHub. */
+async function openDeleteRepo(repo) {
+  if (!repo) return;
+  const fullName = repo.full_name;
+  const reason = protectedRepo(fullName);
+  if (reason) {
+    toast(`${fullName} ne se supprime pas depuis l'appli (${reason})`, "error");
+    return;
+  }
+  let using = [];
+  try {
+    using = await sessionsUsing(fullName);
+  } catch {
+    using = [];
+  }
+  const sheet = $("#sheet");
+  sheet.innerHTML = `
+    <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="Supprimer le dépôt">
+      <div class="sheet-head">
+        <strong>Supprimer le dépôt</strong>
+        <button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button>
+      </div>
+      <form class="branch-form delete-repo" autocomplete="off">
+        <p class="help"><strong>${escapeHtml(fullName)}</strong> (${repo.private ? "privé" : "public"}) sera supprimé de GitHub avec tout son contenu : code, branches, issues, pull requests et site en ligne. GitHub permet de le restaurer pendant 90 jours (Réglages de GitHub, Repositories, Deleted repositories).</p>
+        ${using.length ? `<p class="help">${using.length > 1 ? `${using.length} sessions de l'appli travaillent` : "Une session de l'appli travaille"} dans ce dépôt : ${using.length > 1 ? "elles restent" : "elle reste"} dans la liste, sans dépôt où reprendre.</p>` : ""}
+        <label>Pour confirmer, tapez <code>${escapeHtml(fullName)}</code>
+          <input name="confirm" type="text" required spellcheck="false" autocapitalize="none" autocorrect="off" placeholder="${escapeHtml(fullName)}">
+        </label>
+        <div class="form-actions">
+          <button type="button" class="small-link" data-close>${ICON.back}<span>Annuler</span></button>
+          <button class="danger" type="submit" disabled>Supprimer le dépôt</button>
+        </div>
+      </form>
+    </div>`;
+  const form = sheet.querySelector(".delete-repo");
+  const submit = form.querySelector("button[type=submit]");
+  const close = () => {
+    sheet.hidden = true;
+    sheet.innerHTML = "";
+  };
+  form.elements.confirm.addEventListener("input", () => {
+    submit.disabled = form.elements.confirm.value.trim() !== fullName;
+  });
+  sheet.onclick = (event) => {
+    if (event.target === sheet || event.target.closest("[data-close]")) close();
+  };
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (form.elements.confirm.value.trim() !== fullName) return;
+    submit.disabled = true;
+    submit.textContent = "Suppression…";
+    try {
+      await state.github.deleteRepository(fullName);
+      if (state.repos) state.repos = state.repos.filter((item) => item.full_name !== fullName);
+      state.branches.delete(fullName);
+      if (state.settings.repo === fullName) {
+        delete state.settings.repo;
+        delete state.settings.branch;
+        saveSettings();
+        renderComposer();
+      }
+      close();
+      toast(`Dépôt ${fullName} supprimé (restaurable 90 jours sur GitHub)`);
+    } catch (error) {
+      submit.disabled = false;
+      submit.textContent = "Supprimer le dépôt";
+      if (error.status === 403) {
+        toast("GitHub refuse : le jeton n'a pas l'autorisation Administration (lecture et écriture) sur ce dépôt. Ajoutez-la au jeton à grain fin, sans changer sa valeur.", "error");
+        return;
+      }
+      failure(error);
+    }
+  });
+  sheet.hidden = false;
+  form.elements.confirm.focus();
 }
 
 function useRepo(fullName, branch) {
@@ -612,6 +787,7 @@ async function openBranches({ repo, current, title, onPick }) {
             ${name === fallback ? "<small>branche par défaut</small>" : ""}
           </button>
           <button type="button" class="icon-button" data-rename="${escapeHtml(name)}" aria-label="Renommer ${escapeHtml(name)}">${ICON.edit}</button>
+          ${name === fallback ? "" : `<button type="button" class="icon-button" data-delete="${escapeHtml(name)}" aria-label="Supprimer ${escapeHtml(name)}">${ICON.trash}</button>`}
         </li>`).join("") || '<li class="empty">Rien ne correspond.</li>';
     };
     draw();
@@ -681,6 +857,48 @@ async function openBranches({ repo, current, title, onPick }) {
       }
     });
   };
+  // Suppression d'une branche (jamais la branche par défaut : GitHub la refuse aussi).
+  const showDelete = async (name) => {
+    let using = [];
+    try {
+      using = await sessionsUsing(repo, name);
+    } catch {
+      using = [];
+    }
+    body.innerHTML = `
+      <form class="branch-form" autocomplete="off">
+        <p class="help">Supprimer la branche <code>${escapeHtml(name)}</code> de ${escapeHtml(repo)} ? Ses commits qui ne sont dans aucune autre branche ne seront plus visibles ; une pull request fermée garde un bouton « Restore branch » sur GitHub.</p>
+        ${using.length ? `<p class="help">${using.length > 1 ? `${using.length} sessions de l'appli travaillent` : "Une session de l'appli travaille"} sur cette branche : ${using.map((issue) => `n° ${escapeHtml(String(settingsOf(issue).n || issue.number))}`).join(", ")}. Son prochain passage la recréera à partir de la branche de départ, sans le travail perdu.</p>` : ""}
+        <div class="form-actions">
+          <button type="button" class="small-link" data-back>${ICON.back}<span>Retour</span></button>
+          <button class="danger" type="submit">Supprimer la branche</button>
+        </div>
+      </form>`;
+    const form = body.querySelector("form");
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const button = form.querySelector("button[type=submit]");
+      button.disabled = true;
+      button.textContent = "Suppression…";
+      try {
+        await state.github.deleteBranch(repo, name);
+        branches.splice(branches.indexOf(name), 1);
+        state.branches.set(repo, [...branches]);
+        if (state.settings.repo === repo && state.settings.branch === name) {
+          state.settings.branch = fallback || "main";
+          saveSettings();
+          renderComposer();
+        }
+        if (current === name) current = fallback;
+        toast(`Branche ${name} supprimée`);
+        showList();
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = "Supprimer la branche";
+        failure(error);
+      }
+    });
+  };
   sheet.onclick = (event) => {
     if (event.target === sheet || event.target.closest("[data-close]")) {
       close();
@@ -688,6 +906,11 @@ async function openBranches({ repo, current, title, onPick }) {
     }
     if (event.target.closest("[data-new]")) {
       showForm("");
+      return;
+    }
+    const remove = event.target.closest("[data-delete]");
+    if (remove) {
+      showDelete(remove.dataset.delete);
       return;
     }
     const rename = event.target.closest("[data-rename]");
@@ -739,16 +962,25 @@ async function followRenamedBranch(repo, old, name) {
 }
 
 async function pickModel() {
-  const [models, nvidia] = await Promise.all([loadModels(), engineHasNvidia()]);
+  const [models, secrets] = await Promise.all([loadModels(), engineProviderSecrets()]);
   const best = models.find((model) => model.rank === 1);
-  // Agents de NVIDIA, avec la clé du moteur : gratuits, sans quota par jour annoncé.
-  const nvidiaItems = nvidia
-    ? NVIDIA_AGENTS.map((model) => ({
+  // Un onglet par fournisseur : OpenRouter, puis Google Gemini et NVIDIA, dont les modèles ne
+  // sont proposés que si le moteur a leur clé (sinon l'onglet dit où la mettre).
+  const keyedItems = KEYED_PROVIDERS.filter((provider) => secrets[provider.secret])
+    .flatMap((provider) => provider.models.map((model) => ({
       value: model.id,
       label: model.short,
-      detail: "gratuit chez NVIDIA, environ 40 requêtes par minute, sans quota par jour (secret NVIDIA_API_KEY du moteur)",
-    }))
-    : [];
+      detail: `${provider.detail} (secret ${provider.secret} du moteur)`,
+      group: provider.key,
+    })));
+  const groups = [
+    { key: "openrouter", label: "OpenRouter", empty: "Aucun modèle gratuit d'OpenRouter trouvé : réessayez dans un instant." },
+    ...KEYED_PROVIDERS.map((provider) => ({
+      key: provider.key,
+      label: provider.label,
+      empty: `Pas de clé ${provider.label} dans le moteur : Réglages, Moteur, « ${provider.field} » (${provider.where}).`,
+    })),
+  ];
   const detail = (model) => [
     model.rank === 1 ? "le plus puissant" : model.rank ? `n°${model.rank} pour le code` : "non retenu pour le code",
     ...model.reasons,
@@ -758,10 +990,11 @@ async function pickModel() {
     title: "Modèle (gratuit)",
     placeholder: "Rechercher un modèle",
     current: state.settings.model || "",
+    groups,
     items: [
-      { value: "", label: "Auto", detail: best ? `en ce moment ${best.short}, le plus puissant des gratuits pour le code (et les suivants s'il ne répond plus)` : "le meilleur modèle gratuit pour le code" },
-      ...nvidiaItems,
-      ...models.map((model) => ({ value: model.id, label: model.rank ? `${model.rank}. ${model.short}` : model.short, detail: detail(model) })),
+      { value: "", label: "Auto", pinned: true, detail: best ? `en ce moment ${best.short}, le plus puissant des gratuits pour le code (et les suivants s'il ne répond plus)` : "le meilleur modèle gratuit pour le code" },
+      ...models.map((model) => ({ value: model.id, label: model.rank ? `${model.rank}. ${model.short}` : model.short, detail: detail(model), group: "openrouter" })),
+      ...keyedItems,
     ],
     onPick: (value) => {
       state.settings.model = value;
@@ -785,7 +1018,12 @@ const AIDS = {
 };
 
 /** Options du prochain passage (nouvelle tâche ou suivi), pour le moteur. */
-const aidInputs = () => ({ team: state.settings.team ? "1" : "", ultracode: state.settings.ultracode ? "1" : "" });
+const aidInputs = () => ({
+  team: state.settings.team ? "1" : "",
+  ultracode: state.settings.ultracode ? "1" : "",
+  // La machine, seulement pour le PC : un workflow des sessions d'avant ce choix la refuserait.
+  ...(state.settings.runner ? { runner: state.settings.runner } : {}),
+});
 
 function toggleAid(name) {
   state.settings[name] = !state.settings[name];
@@ -2127,18 +2365,21 @@ async function showChanges(number) {
 
 /** Étiquette des sessions et secrets du moteur (chiffrés ici pour sa clé publique) ; rend les
  * noms des secrets posés. */
-async function configureEngine(openrouterKey, shareToken, nvidiaKey = "") {
+async function configureEngine(openrouterKey, shareToken, providerKeys = {}) {
   const engine = state.settings.engine;
   await state.github.ensureLabel(engine);
   const key = await state.github.secretKey(engine);
   const secrets = [];
   if (openrouterKey) secrets.push(["OPENROUTER_API_KEY", openrouterKey]);
   if (shareToken) secrets.push(["CLAW_REPO_TOKEN", state.settings.token]);
-  if (nvidiaKey) secrets.push(["NVIDIA_API_KEY", nvidiaKey]);
+  // Clés des fournisseurs (NVIDIA, Gemini), par nom de secret.
+  for (const [name, value] of Object.entries(providerKeys)) {
+    if (value) secrets.push([name, value]);
+  }
   for (const [name, value] of secrets) {
     await state.github.putSecret(engine, name, sealedBox(value, key.key), key.key_id);
   }
-  if (nvidiaKey) state.nvidia = true;
+  state.providerSecrets = null;
   return secrets.map(([name]) => name);
 }
 
@@ -2167,14 +2408,28 @@ async function engineChecks() {
       add(false, `Secret ${name} : ${error.message}`);
     }
   }
-  // Facultatif : son absence n'est pas une erreur (point gris).
-  try {
-    state.nvidia = await state.github.hasSecret(engine, "NVIDIA_API_KEY");
-    checks.push(state.nvidia
-      ? `<li class="ok">${escapeHtml("Secret NVIDIA_API_KEY : modèles de NVIDIA proposés")}</li>`
-      : `<li>${escapeHtml("Secret NVIDIA_API_KEY absent (facultatif : modèles de NVIDIA)")}</li>`);
-  } catch (error) {
-    add(false, `Secret NVIDIA_API_KEY : ${error.message}`);
+  // Sessions sur le PC : l'exécuteur `claw-pc` doit être en ligne.
+  if (state.settings.runner) {
+    try {
+      const mine = (await state.github.runners(engine))
+        .filter((runner) => (runner.labels || []).some((label) => label.name === state.settings.runner));
+      const online = mine.find((runner) => runner.status === "online");
+      if (online) add(true, `Exécuteur du PC ${online.name} en ligne${online.busy ? ", en session" : ""}`);
+      else if (mine.length) add(false, `Exécuteur du PC ${mine[0].name} hors ligne : allumez le PC et Docker Desktop`);
+      else add(false, "Aucun exécuteur du PC : lancez claw-pc.ps1 install (.github/claw-web/pc du code de Claw)");
+    } catch (error) {
+      checks.push(`<li>${escapeHtml(error.status === 403
+        ? "État de l'exécuteur du PC inconnu : le jeton n'a pas l'autorisation Administration (lecture)"
+        : `Exécuteur du PC : ${error.message}`)}</li>`);
+    }
+  }
+  // Fournisseurs à clé, facultatifs : leur absence n'est pas une erreur (point gris).
+  state.providerSecrets = null;
+  const secrets = await engineProviderSecrets();
+  for (const provider of KEYED_PROVIDERS) {
+    checks.push(secrets[provider.secret]
+      ? `<li class="ok">${escapeHtml(`Secret ${provider.secret} : modèles ${provider.label} proposés`)}</li>`
+      : `<li>${escapeHtml(`Secret ${provider.secret} absent (facultatif : modèles ${provider.label})`)}</li>`);
   }
   return checks.join("");
 }
@@ -2211,16 +2466,23 @@ function showSettings(first = false, justConnected = false) {
         <label>Clé OpenRouter (pour les modèles gratuits)
           <input name="openrouter" type="password" placeholder="sk-or-…" spellcheck="false">
         </label>
-        <label>Clé NVIDIA (facultative : modèles de build.nvidia.com, sans quota par jour)
-          <input name="nvidia" type="password" placeholder="nvapi-…" spellcheck="false">
-        </label>
+        ${KEYED_PROVIDERS.map((provider) => `
+        <label>${escapeHtml(provider.field)}
+          <input name="${provider.key}" type="password" placeholder="${escapeHtml(provider.prefix)}…" spellcheck="false">
+        </label>`).join("")}
         <label class="check"><input name="share" type="checkbox" checked>
           <span>Donner aussi ce jeton au moteur (secret CLAW_REPO_TOKEN), pour qu'il pousse ses branches et ouvre les pull requests</span></label>
         <label class="check"><input name="keep" type="checkbox" checked>
           <span>Garder aussi la clé OpenRouter sur cet appareil, pour afficher les requêtes gratuites utilisées et restantes</span></label>
-        <p class="help">Les secrets partent chiffrés dans le navigateur, pour la clé publique du moteur. Champ vide : la clé OpenRouter gardée sur cet appareil, s'il y en a une ; la clé NVIDIA déjà posée ne change pas. La clé NVIDIA n'est jamais gardée sur cet appareil ; elle se crée sur build.nvidia.com (profil, Settings, API Keys).</p>
+        <p class="help">Les secrets partent chiffrés dans le navigateur, pour la clé publique du moteur. Champ vide : la clé OpenRouter gardée sur cet appareil, s'il y en a une ; une clé NVIDIA ou Gemini déjà posée ne change pas. Les clés NVIDIA et Gemini ne sont jamais gardées sur cet appareil : la clé NVIDIA se crée sur build.nvidia.com (profil, Settings, API Keys), la clé Gemini sur aistudio.google.com/apikey, dans un projet sans facturation (sinon chaque requête est payante).</p>
         <button class="primary" type="submit">Configurer le moteur</button>
       </form>
+      <h2>Sessions</h2>
+      <fieldset class="theme-choice runner-choice">
+        ${[["", "Sur une machine de GitHub (minutes du compte)"], ["claw-pc", "Sur mon PC (Docker Desktop, sans minutes)"]].map(([value, label]) => `
+          <label><input type="radio" name="runner" value="${value}"${(settings.runner || "") === value ? " checked" : ""}><span>${label}</span></label>`).join("")}
+      </fieldset>
+      <p class="help">Sur votre PC : installez une fois l'exécuteur (<code>.github/claw-web/pc/claw-pc.ps1 install</code> dans le code de Claw, voir son README). Le PC doit être allumé avec Docker Desktop lancé ; sinon la session attend dans la file de GitHub et part dès qu'il revient.</p>
       <h2>Apparence</h2>
       <fieldset class="theme-choice">
         ${[["", "Sombre"], ["light", "Clair"], ["system", "Comme le téléphone"]].map(([value, label]) => `
@@ -2253,7 +2515,7 @@ function showSettings(first = false, justConnected = false) {
       state.settings.token = token;
       if (state.settings.engine !== engine) state.repos = null;
       // Autre jeton ou autre moteur : ses secrets se relisent.
-      state.nvidia = null;
+      state.providerSecrets = null;
       state.settings.engine = engine;
       saveSettings();
       showQuotaLabel();
@@ -2275,21 +2537,27 @@ function showSettings(first = false, justConnected = false) {
       event.preventDefault();
       const form = event.target;
       try {
+        // Clés des fournisseurs (NVIDIA, Gemini) : une clé d'une autre forme est refusée avant
+        // tout envoi (une clé collée dans le mauvais champ).
+        const providerKeys = {};
+        for (const provider of KEYED_PROVIDERS) {
+          const value = form[provider.key].value.trim();
+          if (value && !value.startsWith(provider.prefix)) {
+            toast(`Une clé ${provider.label} commence par ${provider.prefix} (${provider.where})`, "error");
+            return;
+          }
+          providerKeys[provider.secret] = value;
+        }
         const typed = form.openrouter.value.trim();
         if (typed && form.keep.checked) {
           state.settings.openrouterKey = typed;
           state.quota = null;
           saveSettings();
         }
-        const nvidiaKey = form.nvidia.value.trim();
-        if (nvidiaKey && !nvidiaKey.startsWith("nvapi-")) {
-          toast("Une clé NVIDIA commence par nvapi- (build.nvidia.com, profil, Settings, API Keys)", "error");
-          return;
-        }
         // Champ vide : la clé gardée sur cet appareil, s'il y en a une.
-        const names = await configureEngine(typed || state.settings.openrouterKey || "", form.share.checked, nvidiaKey);
+        const names = await configureEngine(typed || state.settings.openrouterKey || "", form.share.checked, providerKeys);
         form.openrouter.value = "";
-        form.nvidia.value = "";
+        for (const provider of KEYED_PROVIDERS) form[provider.key].value = "";
         toast(names.length ? `Moteur configuré (${names.join(", ")})` : "Étiquette prête ; aucun secret envoyé");
         const list = $("#view .checks");
         if (list) list.innerHTML = await engineChecks();
@@ -2297,6 +2565,16 @@ function showSettings(first = false, justConnected = false) {
         failure(error);
       }
     });
+    for (const radio of $("#view").querySelectorAll('input[name="runner"]')) {
+      radio.addEventListener("change", async () => {
+        if (radio.value) state.settings.runner = radio.value;
+        else delete state.settings.runner;
+        saveSettings();
+        toast(radio.value ? "Sessions sur votre PC" : "Sessions sur une machine de GitHub");
+        const list = $("#view .checks");
+        if (list) list.innerHTML = await engineChecks().catch((error) => `<li class="ko">${escapeHtml(error.message)}</li>`);
+      });
+    }
     for (const radio of $("#view").querySelectorAll('input[name="theme"]')) {
       radio.addEventListener("change", () => {
         state.settings.theme = radio.value;

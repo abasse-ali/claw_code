@@ -6,8 +6,8 @@ name: Claw web
 # travaille dans le dépôt choisi, sur la branche de la session, pousse, ouvre la pull request
 # et répond dans la session. Tout se passe dans le dépôt appelant (issues, caches, journaux) :
 # ses minutes, ses secrets (OPENROUTER_API_KEY, CLAW_REPO_TOKEN, jeton qui peut lire et
-# pousser dans les dépôts des tâches ; NVIDIA_API_KEY, facultatif, pour les modèles `nvidia:`
-# et le lecteur d'images de NVIDIA), son nom de passage (« Claw <dépôt> #<session> »).
+# pousser dans les dépôts des tâches ; NVIDIA_API_KEY et GEMINI_API_KEY, facultatifs, pour les
+# modèles `nvidia:` et `gemini:` et le lecteur d'images de NVIDIA), son nom de passage (« Claw <dépôt> #<session> »).
 # Suivi : rust/docs/suivi/w1-appli-web.md.
 
 on:
@@ -18,6 +18,8 @@ on:
       CLAW_REPO_TOKEN:
         required: false
       NVIDIA_API_KEY:
+        required: false
+      GEMINI_API_KEY:
         required: false
     inputs:
       claw_source:
@@ -58,6 +60,11 @@ on:
         required: false
         type: string
         default: ""
+      runner:
+        description: "Machine (vide : une machine de GitHub ; claw-pc : l'exécuteur de votre PC, voir .github/claw-web/pc)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   # actions: read : date du passage, pour ignorer un passage lancé en double.
@@ -67,9 +74,16 @@ permissions:
 
 jobs:
   task:
-    runs-on: ubuntu-latest
+    # Sur votre PC (exécuteur auto-hébergé `claw-pc`), aucune minute de GitHub n'est comptée.
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 120
     steps:
+      # L'exécuteur du PC garde ses fichiers d'un passage à l'autre, quand une machine de GitHub
+      # repart de zéro : le dossier de travail repart vide (sinon `git clone … work` échoue).
+      - name: Dossier de travail vide
+        if: runner.environment == 'self-hosted'
+        run: find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+
       - name: Source de Claw
         uses: actions/checkout@v6
         with:
@@ -140,8 +154,13 @@ jobs:
           JOB_TOKEN: ${{ github.token }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           CLAW_SRC: ${{ github.workspace }}/claw-src
           PYTHONPATH: ${{ github.workspace }}/claw-src/.github/claw-web
+          # Réglages, mémoire et caches de Claw dans le dossier temporaire du job, vidé à chaque
+          # passage : sur l'exécuteur du PC, rien d'une session (d'un autre dépôt) ne passe à la
+          # suivante, comme sur une machine neuve de GitHub.
+          CLAW_CONFIG_HOME: ${{ runner.temp }}/claw-home
         # `exec` : à l'annulation, le signal arrive au script, qui arrête Claw proprement.
         run: exec python3 claw-src/.github/claw-web/run.py
 

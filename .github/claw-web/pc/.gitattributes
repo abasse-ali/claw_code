@@ -1,0 +1,6 @@
+# L'image Linux lit ces fichiers tels quels : un retour chariot (CRLF, réglage core.autocrlf de
+# Windows) casserait le script de démarrage (« /bin/sh^M »).
+*.sh text eol=lf
+Dockerfile text eol=lf
+# Script de Windows PowerShell : CRLF, avec son BOM (accents lus en UTF-8 par la version 5.1).
+*.ps1 text eol=crlf

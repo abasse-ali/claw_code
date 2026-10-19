@@ -747,8 +747,9 @@ fn add_gemini_to_view(view: &mut serde_json::Value) {
     add_provider_category(view, "gemini", "Google Gemini", gemini_models_json());
 }
 
-/// Catégories des fournisseurs à clé, dans le menu des modèles.
-const PROVIDER_CATEGORIES: &[&str] = &["gemini", "nvidia"];
+/// Catégories des fournisseurs, dans le menu des modèles : `OpenRouter`,
+/// puis ceux à clé (Gemini, NVIDIA), à la suite.
+const PROVIDER_CATEGORIES: &[&str] = &["openrouter", "gemini", "nvidia"];
 
 /// Ajoute au menu des modèles la catégorie d'un fournisseur à clé : après la
 /// première catégorie et celles des fournisseurs déjà ajoutés, et ses
@@ -2088,6 +2089,14 @@ fn models_view_json(
         .into_iter()
         .collect();
     categories.extend([
+        // Les modèles d'OpenRouter, rangés par fournisseur comme ceux de Gemini
+        // et de NVIDIA, qui viennent juste après (`add_provider_category`).
+        serde_json::json!({
+            "key": "openrouter",
+            "label": "OpenRouter",
+            "models": usable.iter().map(|entry| entry.0.id.as_str()).collect::<Vec<_>>(),
+            "paid": [],
+        }),
         serde_json::json!({
             "key": "programming",
             "label": "Programmation",
@@ -2279,7 +2288,20 @@ mod tests {
             .iter()
             .map(|entry| entry["key"].as_str().expect("clé").to_string())
             .collect();
-        assert_eq!(keys, ["programming", "all", "vision", "legal"]);
+        assert_eq!(
+            keys,
+            ["openrouter", "programming", "all", "vision", "legal"]
+        );
+        assert_eq!(
+            category("openrouter").expect("OpenRouter")["label"],
+            "OpenRouter"
+        );
+        assert_eq!(
+            category("openrouter").expect("OpenRouter")["models"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
         assert_eq!(
             category("vision").expect("images")["models"],
             serde_json::json!(["lab/vue:free"])
@@ -2694,11 +2716,13 @@ mod tests {
             }
         }
         let _restore = Restore(std::env::var_os("NVIDIA_API_KEY"));
+        // Comme `models_view_json` : « Proches de Claude », « OpenRouter », « Tous ».
         let view = || {
             serde_json::json!({
                 "models": [],
                 "categories": [
                     { "key": "claude", "models": [] },
+                    { "key": "openrouter", "models": [] },
                     { "key": "all", "models": [] },
                 ],
             })
@@ -2717,7 +2741,7 @@ mod tests {
         with["categories"]
             .as_array_mut()
             .expect("catégories")
-            .insert(1, serde_json::json!({ "key": "gemini", "models": [] }));
+            .insert(2, serde_json::json!({ "key": "gemini", "models": [] }));
         super::add_nvidia_to_view(&mut with);
         let keys: Vec<&str> = with["categories"]
             .as_array()
@@ -2725,17 +2749,18 @@ mod tests {
             .iter()
             .filter_map(|category| category["key"].as_str())
             .collect();
-        // Après Gemini, avant « Tous », qui les contient.
-        assert_eq!(keys, ["claude", "gemini", "nvidia", "all"]);
-        assert!(with["categories"][3]["models"]
+        // Les fournisseurs à la suite (OpenRouter, Gemini, NVIDIA), avant « Tous »,
+        // qui les contient.
+        assert_eq!(keys, ["claude", "openrouter", "gemini", "nvidia", "all"]);
+        assert!(with["categories"][4]["models"]
             .as_array()
             .is_some_and(|all| all.contains(&serde_json::json!(
                 "nvidia:nvidia/nemotron-3-super-120b-a12b"
             ))));
-        // NVIDIA sans Gemini : sa catégorie se met juste après la première.
+        // NVIDIA sans Gemini : sa catégorie suit celle d'OpenRouter.
         let mut alone = view();
         super::add_nvidia_to_view(&mut alone);
-        assert_eq!(alone["categories"][1]["key"], "nvidia");
+        assert_eq!(alone["categories"][2]["key"], "nvidia");
 
         let agents = super::nvidia_agents();
         assert_eq!(agents[0], "nvidia:nvidia/nemotron-3-ultra-550b-a55b");
@@ -2744,7 +2769,7 @@ mod tests {
         assert_eq!(super::nvidia_image_readers("x"), [reader]);
         // Le lecteur échoue avec des outils : ni agent des bancs, ni au menu.
         assert!(!agents.iter().any(|id| id == reader));
-        assert!(!with["categories"][3]["models"]
+        assert!(!with["categories"][4]["models"]
             .as_array()
             .is_some_and(|all| all.contains(&serde_json::json!(reader))));
         // Le modèle de la session ne se décrit pas ses propres images.

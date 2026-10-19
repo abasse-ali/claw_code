@@ -85,6 +85,12 @@ export class GitHub {
     });
   }
 
+  /** Supprime un dépôt (le jeton doit avoir l'autorisation Administration en écriture). GitHub
+   * permet de le restaurer pendant 90 jours. */
+  deleteRepository(fullName) {
+    return this.request("DELETE", `/repos/${fullName}`);
+  }
+
   async branches(fullName) {
     const found = [];
     for (let page = 1; page <= 3; page += 1) {
@@ -131,8 +137,23 @@ export class GitHub {
   }
 
   /** Lance un passage du moteur pour une session. */
-  dispatch(engine, ref, inputs) {
-    return this.request("POST", `/repos/${engine}/actions/workflows/${WORKFLOW}/dispatches`, { ref, inputs });
+  async dispatch(engine, ref, inputs) {
+    try {
+      return await this.request("POST", `/repos/${engine}/actions/workflows/${WORKFLOW}/dispatches`, { ref, inputs });
+    } catch (error) {
+      // Workflow du dépôt des sessions d'avant le choix de la machine : il refuse l'entrée.
+      if (error instanceof GitHubError && error.status === 422 && "runner" in inputs && /runner/.test(error.message)) {
+        throw new GitHubError(422, `Le workflow claw-web.yml de ${engine} ne connaît pas encore le choix « Sur mon PC » : `
+          + "mettez-le à jour (.github/claw-web/pc/README.md du code de Claw), ou repassez sur « Machine de GitHub » dans les réglages.");
+      }
+      throw error;
+    }
+  }
+
+  /** Exécuteurs auto-hébergés du dépôt des sessions (autorisation Administration en lecture). */
+  async runners(engine) {
+    const answer = await this.request("GET", `/repos/${engine}/actions/runners?per_page=100`);
+    return answer.runners || [];
   }
 
   workflow(engine) {
