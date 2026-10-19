@@ -64,6 +64,20 @@ changement de ce dossier ; l'ancienne adresse, https://abasse-ali.github.io/claw
   défaut). La session qui y travaille est nommée ; son prochain passage recrée la branche à
   partir de la branche de départ.
 
+## Quota du modèle choisi
+
+L'anneau du haut suit le fournisseur du modèle choisi :
+- **OpenRouter** (et « Auto ») : les requêtes gratuites restantes du jour, lues chez OpenRouter
+  avec la clé gardée sur l'appareil.
+- **Google Gemini** : la limite par jour du modèle quand elle est relevée (« 20/jour » pour
+  Gemini 3.8 Flash). Google ne donne pas le compte en direct ; la consommation exacte est sur
+  AI Studio, Rate limit.
+- **NVIDIA** : environ 40 requêtes par minute (« 40/min »), sans quota par jour.
+
+Le détail (toucher l'anneau) montre les trois fournisseurs, celui du modèle choisi d'abord ; le
+choix du modèle donne le quota de chaque onglet ; chaque réponse de Claw dit combien de requêtes
+son passage a prises, chez le fournisseur du modèle.
+
 ## Sessions sur votre PC
 
 Réglages, « Sessions » : « Sur mon PC » fait tourner les sessions sur votre PC, dans Docker

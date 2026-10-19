@@ -249,6 +249,14 @@ est retenu ; avec `OPENROUTER_API_KEY`, le quota gratuit du jour est affiché.
   catégories **OpenRouter** (ses modèles gratuits qui appellent les outils), **Google Gemini** et
   **NVIDIA** (avec leur clé), en plus des catégories par spécialité. Claw Web range son choix
   du modèle de la même façon, en onglets.
+- **Quota du fournisseur du modèle choisi** : la pastille des crédits de la page suit le modèle.
+  Avec OpenRouter, elle donne son compte du jour. Avec Gemini, elle donne les requêtes de Claw sur
+  cette machine depuis minuit, heure du Pacifique (l'heure où Google remet ses quotas à zéro), sur
+  la limite relevée du modèle (« 3 / 20 Gemini ») ; Google ne donne pas le compte en direct, le
+  compte exact est sur AI Studio. Avec NVIDIA, elle donne sa limite par minute (« 40 / min
+  NVIDIA »), sans quota par jour. Le détail (« Quotas et crédits ») montre le fournisseur du
+  modèle choisi d'abord, même sans clé OpenRouter. Le journal des requêtes de Claw compte
+  maintenant celles de Gemini et de NVIDIA, à part du compte d'OpenRouter.
 - **Choisir un modèle Gemini** : `/models gemini` liste les modèles de l'offre gratuite de Google
   que votre clé ouvre (une simple lecture du catalogue de Google, aucune génération), et la page
   les montre dans la catégorie **Google Gemini** du menu des modèles. Gratuits d'après la page
