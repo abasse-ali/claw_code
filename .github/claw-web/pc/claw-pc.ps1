@@ -6,6 +6,8 @@
 .DESCRIPTION
   install  construit l'image (Linux, Python, git, Rust, Node, Chrome, exécuteur de GitHub),
            l'inscrit auprès du dépôt des sessions et la lance ; elle redémarre avec Docker.
+  update   reconstruit l'image (après une mise à jour du code de Claw) et relance le conteneur,
+           sans nouvelle inscription ; refusé pendant une session.
   status   état du conteneur et de l'exécuteur vu par GitHub.
   stop     arrête l'exécuteur (les sessions attendent alors dans la file de GitHub).
   start    le relance.
@@ -22,7 +24,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('install', 'status', 'start', 'stop', 'remove')]
+    [ValidateSet('install', 'update', 'status', 'start', 'stop', 'remove')]
     [string]$Action = 'status',
 
     # Dépôt des sessions de Claw Web (celui que l'appli appelle « moteur »).
@@ -32,6 +34,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# Accents lisibles aussi quand la sortie est redirigée vers un fichier.
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 
 $Image = 'claw-pc-runner'
 $Container = 'claw-pc'
@@ -85,12 +89,8 @@ function Get-GitHubRunners {
     }
 }
 
-function Install-Runner {
-    Assert-Tools
-    if (Get-ContainerState) {
-        Write-Output "Le conteneur $Container existe déjà : .\claw-pc.ps1 status (ou remove, puis install)."
-        return
-    }
+# Image construite avec la dernière version de l'exécuteur de GitHub (couches en cache réutilisées).
+function Build-Image {
     $latest = Invoke-Native gh @('api', 'repos/actions/runner/releases/latest', '--jq', '.tag_name')
     if ($latest.Code -ne 0 -or $latest.Text.Trim() -notmatch '^v(\d+\.\d+\.\d+)$') {
         throw "Version de l'exécuteur de GitHub introuvable : $($latest.Text)"
@@ -99,35 +99,68 @@ function Install-Runner {
     Write-Output "Construction de l'image $Image (exécuteur $version) : plusieurs minutes la première fois..."
     & docker build --tag $Image --build-arg "RUNNER_VERSION=$version" $PSScriptRoot
     if ($LASTEXITCODE -ne 0) { throw "La construction de l'image a échoué (code $LASTEXITCODE)." }
+}
 
-    # Jeton d'inscription (une heure) : jamais affiché, passé par un fichier effacé aussitôt.
+# Conteneur lancé sur le volume de l'exécuteur ; `$Variables` (inscription) passe par un fichier
+# effacé aussitôt, jamais par la ligne de commande.
+function Start-Container {
+    param([string[]]$Variables = @())
+    $arguments = @('run', '--detach', '--name', $Container, '--restart', 'unless-stopped',
+        '--volume', "${Volume}:/home/runner/actions-runner")
+    $envFile = $null
+    try {
+        if ($Variables.Count -gt 0) {
+            $envFile = Join-Path $env:TEMP "claw-pc-$([guid]::NewGuid().ToString('N')).env"
+            [System.IO.File]::WriteAllLines($envFile, $Variables, (New-Object System.Text.UTF8Encoding($false)))
+            $arguments += @('--env-file', $envFile)
+        }
+        $started = Invoke-Native docker ($arguments + @($Image))
+        if ($started.Code -ne 0) { throw "Le lancement du conteneur a échoué : $($started.Text)" }
+    }
+    finally {
+        if ($envFile) { Remove-Item -LiteralPath $envFile -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Wait-Online {
+    for ($try = 0; $try -lt 30; $try++) {
+        Start-Sleep -Seconds 2
+        if (@(Get-GitHubRunners | Where-Object { $_.Status -eq 'online' }).Count -gt 0) { return }
+    }
+    throw "L'exécuteur n'apparaît pas en ligne : docker logs $Container"
+}
+
+function Install-Runner {
+    Assert-Tools
+    if (Get-ContainerState) {
+        Write-Output "Le conteneur $Container existe déjà : .\claw-pc.ps1 status (ou update)."
+        return
+    }
+    Build-Image
+    # Jeton d'inscription (une heure) : jamais affiché.
     $token = Invoke-Native gh @('api', '-X', 'POST', "repos/$Engine/actions/runners/registration-token", '--jq', '.token')
     if ($token.Code -ne 0 -or -not $token.Text.Trim()) {
         throw "GitHub refuse le jeton d'inscription : il faut être administrateur de $Engine."
     }
-    $envFile = Join-Path $env:TEMP "claw-pc-$([guid]::NewGuid().ToString('N')).env"
-    try {
-        $lines = @("RUNNER_URL=https://github.com/$Engine", "RUNNER_TOKEN=$($token.Text.Trim())", "RUNNER_NAME=$Label")
-        [System.IO.File]::WriteAllLines($envFile, $lines, (New-Object System.Text.UTF8Encoding($false)))
-        & docker run --detach --name $Container --restart unless-stopped --env-file $envFile `
-            --volume "${Volume}:/home/runner/actions-runner" $Image | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Le lancement du conteneur a échoué (code $LASTEXITCODE)." }
-    }
-    finally {
-        Remove-Item -LiteralPath $envFile -Force -ErrorAction SilentlyContinue
-    }
-
+    Start-Container @("RUNNER_URL=https://github.com/$Engine", "RUNNER_TOKEN=$($token.Text.Trim())", "RUNNER_NAME=$Label")
     Write-Output 'Inscription auprès de GitHub...'
-    for ($try = 0; $try -lt 30; $try++) {
-        Start-Sleep -Seconds 2
-        $online = @(Get-GitHubRunners | Where-Object { $_.Status -eq 'online' })
-        if ($online.Count -gt 0) {
-            Write-Output "Exécuteur $Label en ligne sur $Engine. Dans l'appli : Réglages, Sessions, « Sur mon PC »."
-            Write-Output 'Pour qu''il tourne dès que le PC démarre : Docker Desktop, Settings, General, « Start Docker Desktop when you sign in ».'
-            return
-        }
+    Wait-Online
+    Write-Output "Exécuteur $Label en ligne sur $Engine. Dans l'appli : Réglages, Sessions, « Sur mon PC »."
+    Write-Output 'Pour qu''il tourne dès que le PC démarre : Docker Desktop, Settings, General, « Start Docker Desktop when you sign in ».'
+}
+
+function Update-Runner {
+    Assert-Tools
+    if (-not (Get-ContainerState)) { throw "Aucun exécuteur installé : .\claw-pc.ps1 install" }
+    if (@(Get-GitHubRunners | Where-Object { $_.Busy }).Count -gt 0) {
+        throw 'Une session tourne sur ce PC : recommencez quand elle est finie.'
     }
-    throw "L'exécuteur n'apparaît pas en ligne : docker logs $Container"
+    Build-Image
+    # L'inscription reste dans le volume : le nouveau conteneur la reprend.
+    $null = Invoke-Native docker @('rm', '--force', $Container)
+    Start-Container
+    Wait-Online
+    Write-Output "Exécuteur $Label à jour et en ligne sur $Engine."
 }
 
 function Show-Status {
@@ -163,6 +196,7 @@ function Remove-Runner {
 
 switch ($Action) {
     'install' { Install-Runner }
+    'update' { Update-Runner }
     'status' { Show-Status }
     'start' {
         $null = Invoke-Native docker @('start', $Container)

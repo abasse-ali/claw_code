@@ -36,6 +36,16 @@ RUN test -n "$RUNNER_VERSION" \
     && rm -rf /var/lib/apt/lists/* \
     && chown -R runner:runner /home/runner
 
+# Chrome sans son bac à sable interne : Docker interdit les espaces de noms dont il a besoin
+# (« Failed to move to new namespace: Operation not permitted »). Le conteneur, sans privilège et
+# sous le filtre seccomp de Docker, isole déjà Chrome et Claw du PC ; Claw, qui y lance toute
+# commande, n'a rien de plus à craindre de Chrome. Claw cherche `google-chrome` dans le PATH :
+# /usr/local/bin passe avant /usr/bin.
+RUN for name in google-chrome google-chrome-stable; do \
+      printf '#!/bin/sh\nexec /opt/google/chrome/google-chrome --no-sandbox "$@"\n' > "/usr/local/bin/$name"; \
+      chmod 755 "/usr/local/bin/$name"; \
+    done
+
 # Jamais root : Chrome refuse de tourner en root sans --no-sandbox, que Claw n'ajoute pas.
 USER runner
 WORKDIR /home/runner/actions-runner
