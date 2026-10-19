@@ -12,7 +12,7 @@ import json
 import os
 import subprocess
 
-from common import ANSWER, NOTES, WORK, GitHubError, api, post_comment, run_url, stop_tree
+from common import ANSWER, NOTES, WORK, GitHubError, api, post_comment, run_url, stop_tree, usage_lines
 from on_github import Actor, load_requests
 
 REPO = os.environ["REPO"]
@@ -153,10 +153,12 @@ def main():
         quota = json.loads(read("quota.json") or "null")
     except ValueError:
         quota = None
-    if quota:
-        spent = f"{quota['run']} pour ce passage · " if quota.get("run") is not None else ""
-        footer.append(f"Requêtes gratuites : {spent}{quota['used']}/{quota['limit']} utilisées aujourd'hui "
-                      f"({quota['remaining']} restantes)")
+    # Modèle et requêtes du passage (run.py) : le pied suit le fournisseur du modèle.
+    try:
+        usage = json.loads(read("usage.json") or "null") or {}
+    except ValueError:
+        usage = {}
+    footer.extend(usage_lines(usage.get("model", ""), usage.get("requests"), quota))
     footer.append(f"[Détail du job]({run_url()})")
     parts.append("---\n" + "\n".join(f"- {line}" for line in footer))
     try:

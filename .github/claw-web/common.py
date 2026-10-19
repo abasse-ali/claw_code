@@ -25,6 +25,38 @@ LOG = "<!-- claw-web:log"
 # (réponse qui ne traite rien : échec au démarrage).
 ANSWERED = re.compile(r"<!--\s*claw-web:answered\s+(\d+|keep)\s*-->")
 
+# Requêtes par jour de l'offre gratuite de Google, relevées le 18 octobre 2026 (erreur 429 de
+# Google) ; les autres modèles Gemini ont aussi un quota par jour, non relevé.
+GEMINI_DAILY = {"gemini-3.8-flash": 20, "gemini-3.5-flash": 20}
+
+
+def provider_of(model):
+    """Fournisseur d'un modèle : « gemini », « nvidia », ou « openrouter » (« Auto » compris)."""
+    prefix, _, rest = (model or "").partition(":")
+    return prefix if rest and prefix in ("gemini", "nvidia") else "openrouter"
+
+
+def usage_lines(model, requests, quota):
+    """Pied d'une réponse : les requêtes du passage selon le fournisseur du modèle choisi. Pour
+    Gemini et NVIDIA, leurs propres limites (le compte d'OpenRouter n'en dit rien) ; le compte
+    d'OpenRouter quand c'est lui, ou quand le passage en a pris (modèle de secours)."""
+    lines = []
+    provider = provider_of(model)
+    name = (model or "").partition(":")[2]
+    count = f"{requests} requêtes dans ce passage · " if isinstance(requests, int) else ""
+    if provider == "gemini":
+        limit = GEMINI_DAILY.get(name)
+        daily = f"{limit} requêtes par jour pour ce modèle" if limit else "quota par jour et par modèle"
+        lines.append(f"Google Gemini ({name}) : {count}offre gratuite, {daily} "
+                     "(consommation sur aistudio.google.com/rate-limit)")
+    elif provider == "nvidia":
+        lines.append(f"NVIDIA ({name}) : {count}sans quota par jour, environ 40 requêtes par minute")
+    if quota and (provider == "openrouter" or quota.get("run")):
+        spent = f"{quota['run']} pour ce passage · " if quota.get("run") is not None else ""
+        lines.append(f"Requêtes gratuites : {spent}{quota['used']}/{quota['limit']} utilisées aujourd'hui "
+                     f"({quota['remaining']} restantes)")
+    return lines
+
 
 def kind_of(body):
     """« engine » (progression, journal), « answer » ou « message » (de l'utilisateur)."""

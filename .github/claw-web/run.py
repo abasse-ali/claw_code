@@ -271,6 +271,8 @@ def main():
 
     threading.Thread(target=refresh, daemon=True).start()
     result, error, stopped = "", "", False
+    # Requêtes du passage, d'après la fin de Claw (`num_turns`) ; inconnues s'il s'arrête avant.
+    requests = None
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     with open(WORK / "claw.jsonl", "w", encoding="utf-8") as log, \
@@ -293,6 +295,8 @@ def main():
                 if event.get("type") == "result":
                     result = event.get("result") or ""
                     error = event.get("error") or ""
+                    if isinstance(event.get("num_turns"), int):
+                        requests = event["num_turns"]
             status = process.wait()
         except Stopped:
             stopped = True
@@ -328,6 +332,9 @@ def main():
             progress.journal.dirty = True
         (WORK / "quota.json").write_text(json.dumps(quota), encoding="utf-8")
         print(f"Requêtes gratuites : {quota['used']}/{quota['limit']} utilisées aujourd'hui", flush=True)
+    # Modèle choisi et requêtes du passage : le pied de la réponse suit son fournisseur
+    # (Gemini et NVIDIA n'ont pas de compte à lire comme OpenRouter).
+    (WORK / "usage.json").write_text(json.dumps({"model": MODEL, "requests": requests}), encoding="utf-8")
     progress.publish(state, force=True)
     progress.publish_journal(force=True)
     (WORK / "notices.txt").write_text("\n".join(progress.notices[-2:]), encoding="utf-8")
