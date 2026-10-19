@@ -330,7 +330,9 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .todo.doing .box { border-color: var(--accent); box-shadow: inset 0 0 0 3px var(--panel), inset 0 0 0 8px var(--accent); }
 
 /* Requêtes gratuites */
-.quota-sheet { display: flex; flex-direction: column; gap: 10px; padding: 0 4px 6px; }
+/* `overflow-y` et `min-height: 0` : plus haut que l'écran (trois fournisseurs), le détail défile
+   dans le panneau au lieu d'être coupé. */
+.quota-sheet { display: flex; flex-direction: column; gap: 10px; padding: 0 4px 6px; overflow-y: auto; min-height: 0; }
 .quota-sheet p { margin: 0; }
 .quota-sheet .primary { align-self: flex-start; text-decoration: none; }
 .quota-sheet .small-link { align-self: flex-start; }
@@ -572,6 +574,15 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 }
 .sheet-tab.on { background: var(--panel-2); color: var(--text); border-color: var(--muted); }
 .sheet-tab small { margin-left: 4px; color: var(--muted); }
+.sheet-note { flex: none; margin: 0 4px 8px; }
+/* Détail du quota : une partie par fournisseur, celle du modèle choisi d'abord. */
+/* Colonne flexible, comme le détail : le bouton « Ouvrir les réglages » y reste un bloc (en ligne,
+   son rembourrage passait sur la phrase d'au-dessus). */
+.quota-provider { flex: none; display: flex; flex-direction: column; gap: 10px; }
+.quota-provider + .quota-provider { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--border); }
+.quota-provider h3 { margin: 0; font-size: .95rem; }
+.quota-provider h3 small { margin-left: 8px; color: var(--accent); font-weight: 500; font-size: .8rem; }
+.quota-meter.provider small { color: var(--muted); }
 .sheet-item {
   display: flex; flex-direction: column; align-items: flex-start; width: 100%; padding: 10px 12px; border: 0;
   border-radius: 10px; background: transparent; text-align: left; cursor: pointer;

@@ -313,6 +313,9 @@ const KEYED_PROVIDERS = [
     where: "aistudio.google.com/apikey, projet sans facturation",
     field: "Clé Google Gemini (facultative : offre gratuite de Google)",
     detail: "offre gratuite de Google : quota par jour et par modèle, bas pour les plus récents (20 requêtes pour Gemini 3.8 Flash)",
+    // Requêtes par jour relevées (erreur 429 de Google, 18 octobre 2026) ; remise à zéro à minuit,
+    // heure du Pacifique. Google ne donne pas le compte en direct.
+    perDay: { "gemini:gemini-3.8-flash": 20 },
     models: [
       { id: "gemini:gemini-3.8-flash", short: "Gemini 3.8 Flash" },
       { id: "gemini:gemini-3.6-flash", short: "Gemini 3.6 Flash" },
@@ -331,6 +334,8 @@ const KEYED_PROVIDERS = [
     where: "build.nvidia.com, profil, Settings, API Keys",
     field: "Clé NVIDIA (facultative : modèles de build.nvidia.com, sans quota par jour)",
     detail: "gratuit chez NVIDIA, environ 40 requêtes par minute, sans quota par jour",
+    // Observé par les utilisateurs, non publié par NVIDIA ; aucun quota par jour annoncé.
+    perMinute: 40,
     models: [
       { id: "nvidia:nvidia/nemotron-3-ultra-550b-a55b", short: "NVIDIA Nemotron 3 Ultra" },
       { id: "nvidia:nvidia/nemotron-3-super-120b-a12b", short: "NVIDIA Nemotron 3 Super" },
@@ -339,6 +344,51 @@ const KEYED_PROVIDERS = [
     ],
   },
 ];
+
+/** Fournisseur d'un modèle : « openrouter » (« Auto » compris), « gemini » ou « nvidia ». */
+function providerOf(model) {
+  const provider = KEYED_PROVIDERS.find((entry) => (model || "").startsWith(`${entry.key}:`));
+  return provider ? provider.key : "openrouter";
+}
+
+/** Prochain minuit d'un fuseau, en heure de l'appareil : Google remet ses quotas à zéro à minuit,
+ * heure du Pacifique (9 h à Paris l'été, 8 h une semaine par an, 9 h l'hiver). */
+function nextMidnightIn(timeZone) {
+  const now = new Date();
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone, hourCycle: "h23", hour: "2-digit", minute: "2-digit" })
+    .formatToParts(now).map((part) => [part.type, part.value]));
+  const next = new Date(now.getTime() + (24 * 60 - (Number(parts.hour) * 60 + Number(parts.minute))) * 60_000);
+  next.setSeconds(0, 0);
+  return next.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+}
+
+/** Ce qu'on sait du quota d'un fournisseur pour un modèle : `short` (anneau du haut, HTML),
+ * `label` (lecteurs d'écran) et `line` (sous l'onglet du choix du modèle). OpenRouter seul donne
+ * un compte en direct ; Gemini, sa limite par jour quand elle est relevée ; NVIDIA, par minute. */
+function providerQuota(key, model) {
+  const provider = KEYED_PROVIDERS.find((entry) => entry.key === key);
+  if (key === "gemini") {
+    const limit = provider.perDay[model];
+    return {
+      short: limit ? `<strong>${limit}</strong><small>/jour</small>` : "<span>Quota/jour</span>",
+      label: limit ? `Google Gemini : ${limit} requêtes par jour pour ce modèle` : "Google Gemini : quota par jour et par modèle",
+      line: `Offre gratuite de Google : quota par jour et par modèle (20 pour Gemini 3.8 Flash), remis à zéro à ${nextMidnightIn("America/Los_Angeles")}.`,
+    };
+  }
+  if (key === "nvidia") {
+    return {
+      short: `<strong>${provider.perMinute}</strong><small>/min</small>`,
+      label: `NVIDIA : environ ${provider.perMinute} requêtes par minute, sans quota par jour`,
+      line: `NVIDIA : environ ${provider.perMinute} requêtes par minute, aucun quota par jour.`,
+    };
+  }
+  const free = state.quota && state.quota.free;
+  return {
+    line: free
+      ? `${free.remaining} requêtes gratuites restantes aujourd'hui (sur ${free.limit}), remises à zéro à ${resetTime()}.`
+      : "Requêtes gratuites du jour : gardez une clé OpenRouter sur cet appareil pour les voir (Réglages).",
+  };
+}
 
 /** Secrets du moteur pour les fournisseurs à clé : nom du secret, vrai s'il est posé. Demandé
  * une fois à GitHub (le nom du secret, jamais sa valeur) ; un fournisseur sans réponse est
@@ -440,6 +490,7 @@ function openPicker({ title, items, current, placeholder, onPick, onRemove, grou
       ${groups.length ? `<div class="sheet-tabs" role="tablist">${groups.map((group) => `
         <button type="button" class="sheet-tab" role="tab" data-group="${escapeHtml(group.key)}">${escapeHtml(group.label)}${count(group.key) ? `<small>${count(group.key)}</small>` : ""}</button>`).join("")}
       </div>` : ""}
+      ${groups.some((group) => group.note) ? '<p class="help sheet-note"></p>' : ""}
       ${items.length > 8 ? `<input class="sheet-search" type="search" placeholder="${escapeHtml(placeholder || "Rechercher")}" autocomplete="off">` : ""}
       <ul class="sheet-list"></ul>
     </div>`;
@@ -453,6 +504,13 @@ function openPicker({ title, items, current, placeholder, onPick, onRemove, grou
       tab.setAttribute("aria-selected", String(on));
     }
     const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
+    // Quota du fournisseur de l'onglet ouvert (rien pendant une recherche, qui les mêle).
+    const note = sheet.querySelector(".sheet-note");
+    if (note) {
+      const text = words.length ? "" : ((groups.find((entry) => entry.key === active) || {}).note || "");
+      note.textContent = text;
+      note.hidden = !text;
+    }
     const inTab = (item) => !groups.length || words.length || item.group === active;
     const shown = items.filter((item) => item.pinned
       || (inTab(item) && words.every((word) => `${item.label} ${item.detail || ""}`.toLowerCase().includes(word))));
@@ -974,10 +1032,11 @@ async function pickModel() {
       group: provider.key,
     })));
   const groups = [
-    { key: "openrouter", label: "OpenRouter", empty: "Aucun modèle gratuit d'OpenRouter trouvé : réessayez dans un instant." },
+    { key: "openrouter", label: "OpenRouter", note: providerQuota("openrouter").line, empty: "Aucun modèle gratuit d'OpenRouter trouvé : réessayez dans un instant." },
     ...KEYED_PROVIDERS.map((provider) => ({
       key: provider.key,
       label: provider.label,
+      note: providerQuota(provider.key).line,
       empty: `Pas de clé ${provider.label} dans le moteur : Réglages, Moteur, « ${provider.field} » (${provider.where}).`,
     })),
   ];
@@ -1000,6 +1059,7 @@ async function pickModel() {
       state.settings.model = value;
       saveSettings();
       renderComposer();
+      showQuotaLabel();
     },
   });
 }
@@ -1060,6 +1120,15 @@ function showQuotaLabel() {
   if (!pill) return;
   pill.hidden = !state.github;
   pill.className = "quota-meter";
+  // Modèle de Gemini ou de NVIDIA : leurs limites, pas le compte d'OpenRouter.
+  const provider = providerOf(state.settings.model);
+  if (provider !== "openrouter") {
+    const quota = providerQuota(provider, state.settings.model);
+    pill.classList.add("ok", "provider");
+    pill.innerHTML = `${ICON.gauge}${quota.short}`;
+    pill.setAttribute("aria-label", quota.label);
+    return;
+  }
   const free = state.quota && state.quota.free;
   if (!free) {
     pill.classList.add("unknown");
@@ -1096,6 +1165,8 @@ async function refreshQuota(force = false) {
 /** Détail du quota gratuit du jour et des crédits ; sans clé gardée, comment l'afficher. */
 async function openQuota() {
   const sheet = $("#sheet");
+  // Clés des fournisseurs posées dans le moteur (noms seulement, demandés une fois).
+  const secrets = await engineProviderSecrets();
   const close = () => {
     sheet.hidden = true;
     sheet.innerHTML = "";
@@ -1118,6 +1189,24 @@ async function openQuota() {
     } else {
       body = `<p>${escapeHtml(state.quotaError || "OpenRouter n'a pas donné le quota gratuit de cette clé.")}</p>`;
     }
+    const chosen = providerOf(state.settings.model);
+    const missing = (key) => {
+      const provider = KEYED_PROVIDERS.find((entry) => entry.key === key);
+      return secrets[provider.secret] ? "" : `<p class="help">Pas de clé ${escapeHtml(provider.label)} dans le moteur : Réglages, Moteur.</p>`;
+    };
+    const parts = {
+      openrouter: body,
+      gemini: `<p>Offre gratuite de Google : quota par jour et par modèle, compté par projet. Relevé : 20 requêtes par jour pour Gemini 3.8 Flash.</p>
+        <p class="help">Google ne donne pas ce compte en direct : votre consommation est sur <a href="https://aistudio.google.com/rate-limit" target="_blank" rel="noopener noreferrer">AI Studio, Rate limit</a>. Remise à zéro à ${escapeHtml(nextMidnightIn("America/Los_Angeles"))} (minuit, heure du Pacifique). Chaque réponse de Claw dit combien de requêtes son passage a prises.</p>
+        ${missing("gemini")}`,
+      nvidia: `<p>Gratuit pour les membres du programme pour développeurs de NVIDIA : environ 40 requêtes par minute pour le compte, aucun quota par jour annoncé.</p>
+        <p class="help">Quand la limite par minute est atteinte, Claw attend et réessaie. Chaque réponse de Claw dit combien de requêtes son passage a prises.</p>
+        ${missing("nvidia")}`,
+    };
+    const labels = { openrouter: "OpenRouter", ...Object.fromEntries(KEYED_PROVIDERS.map((provider) => [provider.key, provider.label])) };
+    const order = [chosen, ...Object.keys(parts).filter((key) => key !== chosen)];
+    body = order.map((key) => `<section class="quota-provider" data-provider="${key}">
+        <h3>${escapeHtml(labels[key])}${key === chosen ? "<small>modèle choisi</small>" : ""}</h3>${parts[key]}</section>`).join("");
     sheet.innerHTML = `
       <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="Requêtes gratuites">
         <div class="sheet-head">
