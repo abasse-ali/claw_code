@@ -438,7 +438,7 @@ function openPicker({ title, items, current, placeholder, onPick, onRemove, grou
         <button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button>
       </div>
       ${groups.length ? `<div class="sheet-tabs" role="tablist">${groups.map((group) => `
-        <button type="button" class="sheet-tab" role="tab" data-group="${escapeHtml(group.key)}">${escapeHtml(group.label)}<small>${count(group.key)}</small></button>`).join("")}
+        <button type="button" class="sheet-tab" role="tab" data-group="${escapeHtml(group.key)}">${escapeHtml(group.label)}${count(group.key) ? `<small>${count(group.key)}</small>` : ""}</button>`).join("")}
       </div>` : ""}
       ${items.length > 8 ? `<input class="sheet-search" type="search" placeholder="${escapeHtml(placeholder || "Rechercher")}" autocomplete="off">` : ""}
       <ul class="sheet-list"></ul>

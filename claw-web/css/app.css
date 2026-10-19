@@ -562,7 +562,10 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 }
 .sheet-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; }
 /* Onglets d'une liste (fournisseurs des modèles : OpenRouter, Google Gemini, NVIDIA). */
-.sheet-tabs { display: flex; gap: 6px; padding: 0 4px 10px; overflow-x: auto; scrollbar-width: none; }
+/* `flex: none` : la barre défile en largeur ; sans cela, dans la colonne du panneau (hauteur
+   limitée), une longue liste l'écrasait presque à rien et ses textes passaient sur la recherche
+   (vu sur téléphone). */
+.sheet-tabs { flex: none; display: flex; gap: 6px; padding: 0 4px 10px; overflow-x: auto; scrollbar-width: none; }
 .sheet-tab {
   flex: none; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border); background: transparent;
   color: var(--muted); font: inherit; font-size: .85rem; white-space: nowrap; cursor: pointer;
