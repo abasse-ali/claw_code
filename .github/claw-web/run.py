@@ -77,6 +77,14 @@ def describe(name, data):
     return name
 
 
+def shorten(text, size):
+    """Une ligne de `size` caractères au plus, coupée sur un mot."""
+    text = " ".join(str(text).split())
+    if len(text) <= size:
+        return text
+    return text[: size - 1].rsplit(" ", 1)[0] + "…"
+
+
 class Progress:
     """Commentaire de progression de la session, mis à jour au fil des événements."""
 
@@ -85,6 +93,10 @@ class Progress:
         self.actions = []
         self.notices = []
         self.replies = 0
+        # Ce que Claw annonce : son plan (le texte qui accompagne ses premiers outils), puis
+        # l'étape en cours (les suivants).
+        self.plan = ""
+        self.step = ""
         self.comment_id = None
         self.dirty = True
         self.lock = threading.Lock()
@@ -100,7 +112,8 @@ class Progress:
             self.journal.add(event)
             kind = event.get("type")
             if kind == "assistant":
-                for part in (event.get("message") or {}).get("content") or []:
+                parts = (event.get("message") or {}).get("content") or []
+                for part in parts:
                     if part.get("type") == "tool_use":
                         action = describe(part.get("name", ""), part.get("input"))
                         self.actions.append(action)
@@ -108,6 +121,14 @@ class Progress:
                         self.dirty = True
                     elif part.get("type") == "text" and part.get("text", "").strip():
                         self.replies += 1
+                # Un texte qui accompagne des outils annonce ce que Claw fait.
+                said = " ".join(part.get("text", "") for part in parts if part.get("type") == "text").split()
+                if said and any(part.get("type") == "tool_use" for part in parts):
+                    if self.plan:
+                        self.step = " ".join(said)
+                    else:
+                        self.plan = " ".join(said)
+                    self.dirty = True
             elif kind == "system" and event.get("subtype") == "notice":
                 notice = " ".join(str(event.get("text", "")).split())
                 self.notices.append(notice)
@@ -125,6 +146,11 @@ class Progress:
             "unfinished": f"**Claw s'est arrêté sans conclure** après {duration}",
         }[state]
         lines = [PROGRESS, f"{head} · {len(self.actions)} action(s)"]
+        if self.plan:
+            lines.append("")
+            lines.append(f"**Ce que Claw compte faire** : {shorten(self.plan, 500)}")
+            if self.step and state == "running":
+                lines.append(f"**En ce moment** : {shorten(self.step, 300)}")
         if self.actions:
             lines.append("")
             hidden = len(self.actions) - SHOWN_ACTIONS
@@ -228,6 +254,9 @@ def main():
     request = (WORK / "prompt.txt").read_text(encoding="utf-8")
     env = agent_env(os.environ, mock=MODEL == "mock")
     env["CLAW_NO_BROWSER"] = "1"
+    # L'appli est en français, et le moteur entoure la demande de notes en anglais : la
+    # langue des réponses est fixée (annonces, étapes, réponse finale).
+    env.setdefault("CLAW_LANGUAGE", "français")
     # `claw-github` : l'agent demande une fusion ou une mise en ligne, faite après la poussée
     # par publish.py avec le jeton du dépôt (claw_github.py n'en a aucun).
     tools = WORK / "bin"

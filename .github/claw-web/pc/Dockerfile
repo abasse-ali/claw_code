@@ -8,13 +8,16 @@ FROM ubuntu:24.04
 ARG RUNNER_VERSION
 ARG NODE_VERSION=24.12.0
 
+# pytest installé, et `pip install` permis sans --break-system-packages : vu dans une session,
+# l'agent perdait deux requêtes à installer pytest, refusé par Ubuntu (PEP 668) la première fois.
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8
+    LC_ALL=C.UTF-8 \
+    PIP_BREAK_SYSTEM_PACKAGES=1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       ca-certificates curl git jq python3 python3-pip python3-venv build-essential pkg-config \
+       ca-certificates curl git jq python3 python3-pip python3-venv python3-pytest build-essential pkg-config \
        libssl-dev unzip xz-utils zstd tini fonts-liberation fonts-dejavu-core fonts-noto-core \
     && curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
     && apt-get install -y --no-install-recommends /tmp/chrome.deb \

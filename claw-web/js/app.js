@@ -337,8 +337,10 @@ const KEYED_PROVIDERS = [
     // Observé par les utilisateurs, non publié par NVIDIA ; aucun quota par jour annoncé.
     perMinute: 40,
     models: [
-      { id: "nvidia:nvidia/nemotron-3-ultra-550b-a55b", short: "NVIDIA Nemotron 3 Ultra" },
+      // Nemotron 3 Super d'abord : rapide et fiable. Ultra, le plus puissant, est lent sur
+      // l'offre gratuite (vu le 19 octobre 2026 : longues réponses coupées par NVIDIA).
       { id: "nvidia:nvidia/nemotron-3-super-120b-a12b", short: "NVIDIA Nemotron 3 Super" },
+      { id: "nvidia:nvidia/nemotron-3-ultra-550b-a55b", short: "NVIDIA Nemotron 3 Ultra", note: "le plus puissant, mais lent : NVIDIA coupe parfois ses longues réponses (Claw passe alors à Nemotron 3 Super)" },
       { id: "nvidia:stepfun-ai/step-5-preview", short: "NVIDIA Step 5 Preview" },
       { id: "nvidia:openai/gpt-oss-20b", short: "NVIDIA gpt-oss 20B" },
     ],
@@ -1028,7 +1030,7 @@ async function pickModel() {
     .flatMap((provider) => provider.models.map((model) => ({
       value: model.id,
       label: model.short,
-      detail: `${provider.detail} (secret ${provider.secret} du moteur)`,
+      detail: `${model.note ? `${model.note} · ` : ""}${provider.detail} (secret ${provider.secret} du moteur)`,
       group: provider.key,
     })));
   const groups = [
