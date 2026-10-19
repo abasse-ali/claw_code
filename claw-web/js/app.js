@@ -299,26 +299,12 @@ function modelLabel(model) {
   return known ? known.short : model.replace(/:free$/, "").split("/").pop();
 }
 
-/** Fournisseurs gratuits à clé, en plus d'OpenRouter : leur clé devient un secret du moteur, et
- * leurs modèles sont proposés quand le moteur a ce secret. Mêmes listes que
- * rust/crates/claw-cli/src/models.rs : `NVIDIA_MODELS` (ceux qui appellent les outils) et
- * `GEMINI_FREE_TIER`, du plus puissant au plus léger. */
+/** Fournisseurs gratuits à clé, en plus d'OpenRouter, dans l'ordre des onglets du choix du modèle
+ * (OpenRouter, Google Gemini, NVIDIA) : leur clé devient un secret du moteur, et leurs modèles
+ * sont proposés quand le moteur a ce secret. Mêmes listes que rust/crates/claw-cli/src/models.rs :
+ * `GEMINI_FREE_TIER` et `NVIDIA_MODELS` (ceux qui appellent les outils), du plus puissant au plus
+ * léger. */
 const KEYED_PROVIDERS = [
-  {
-    key: "nvidia",
-    secret: "NVIDIA_API_KEY",
-    label: "NVIDIA",
-    prefix: "nvapi-",
-    where: "build.nvidia.com, profil, Settings, API Keys",
-    field: "Clé NVIDIA (facultative : modèles de build.nvidia.com, sans quota par jour)",
-    detail: "gratuit chez NVIDIA, environ 40 requêtes par minute, sans quota par jour",
-    models: [
-      { id: "nvidia:nvidia/nemotron-3-ultra-550b-a55b", short: "NVIDIA Nemotron 3 Ultra" },
-      { id: "nvidia:nvidia/nemotron-3-super-120b-a12b", short: "NVIDIA Nemotron 3 Super" },
-      { id: "nvidia:stepfun-ai/step-5-preview", short: "NVIDIA Step 5 Preview" },
-      { id: "nvidia:openai/gpt-oss-20b", short: "NVIDIA gpt-oss 20B" },
-    ],
-  },
   {
     key: "gemini",
     secret: "GEMINI_API_KEY",
@@ -335,6 +321,21 @@ const KEYED_PROVIDERS = [
       { id: "gemini:gemini-2.5-pro", short: "Gemini 2.5 Pro" },
       { id: "gemini:gemini-2.5-flash", short: "Gemini 2.5 Flash" },
       { id: "gemini:gemini-2.5-flash-lite", short: "Gemini 2.5 Flash-Lite" },
+    ],
+  },
+  {
+    key: "nvidia",
+    secret: "NVIDIA_API_KEY",
+    label: "NVIDIA",
+    prefix: "nvapi-",
+    where: "build.nvidia.com, profil, Settings, API Keys",
+    field: "Clé NVIDIA (facultative : modèles de build.nvidia.com, sans quota par jour)",
+    detail: "gratuit chez NVIDIA, environ 40 requêtes par minute, sans quota par jour",
+    models: [
+      { id: "nvidia:nvidia/nemotron-3-ultra-550b-a55b", short: "NVIDIA Nemotron 3 Ultra" },
+      { id: "nvidia:nvidia/nemotron-3-super-120b-a12b", short: "NVIDIA Nemotron 3 Super" },
+      { id: "nvidia:stepfun-ai/step-5-preview", short: "NVIDIA Step 5 Preview" },
+      { id: "nvidia:openai/gpt-oss-20b", short: "NVIDIA gpt-oss 20B" },
     ],
   },
 ];
@@ -422,32 +423,53 @@ async function refreshRuns() {
 
 // --- Feuille de choix (dépôt, branche, modèle) ---------------------------------------------
 
-/** `onRemove` : les éléments `removable` ont un bouton de suppression (une corbeille), à côté. */
-function openPicker({ title, items, current, placeholder, onPick, onRemove }) {
+/** `onRemove` : les éléments `removable` ont un bouton de suppression (une corbeille), à côté.
+ * `groups` ([{ key, label, empty }]) : un onglet par groupe, pour les éléments qui ont ce
+ * `group` ; l'onglet ouvert est celui de l'élément choisi. Une recherche parcourt tous les
+ * groupes ; `empty` dit quoi faire quand un groupe n'a rien (une clé à ajouter). */
+function openPicker({ title, items, current, placeholder, onPick, onRemove, groups = [] }) {
   const sheet = $("#sheet");
+  const count = (key) => items.filter((item) => item.group === key).length;
+  let active = (items.find((item) => item.value === current && item.group) || {}).group || (groups[0] || {}).key;
   sheet.innerHTML = `
     <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
       <div class="sheet-head">
         <strong>${escapeHtml(title)}</strong>
         <button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button>
       </div>
+      ${groups.length ? `<div class="sheet-tabs" role="tablist">${groups.map((group) => `
+        <button type="button" class="sheet-tab" role="tab" data-group="${escapeHtml(group.key)}">${escapeHtml(group.label)}<small>${count(group.key)}</small></button>`).join("")}
+      </div>` : ""}
       ${items.length > 8 ? `<input class="sheet-search" type="search" placeholder="${escapeHtml(placeholder || "Rechercher")}" autocomplete="off">` : ""}
       <ul class="sheet-list"></ul>
     </div>`;
   const list = sheet.querySelector(".sheet-list");
-  // Les éléments épinglés (« Créer un dépôt ») restent en tête, quelle que soit la recherche.
+  // Les éléments épinglés (« Créer un dépôt », « Auto ») restent en tête, quelle que soit la
+  // recherche ou l'onglet.
   const draw = (filter = "") => {
+    for (const tab of sheet.querySelectorAll(".sheet-tab")) {
+      const on = tab.dataset.group === active && !filter.trim();
+      tab.classList.toggle("on", on);
+      tab.setAttribute("aria-selected", String(on));
+    }
     const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
+    const inTab = (item) => !groups.length || words.length || item.group === active;
     const shown = items.filter((item) => item.pinned
-      || words.every((word) => `${item.label} ${item.detail || ""}`.toLowerCase().includes(word)));
-    list.innerHTML = shown.slice(0, 200).map((item) => {
+      || (inTab(item) && words.every((word) => `${item.label} ${item.detail || ""}`.toLowerCase().includes(word))));
+    const group = groups.find((entry) => entry.key === active);
+    if (!words.length && group && group.empty && count(active) === 0) {
+      list.innerHTML = shown.map((item) => itemRow(item)).join("") + `<li class="empty">${escapeHtml(group.empty)}</li>`;
+      return;
+    }
+    list.innerHTML = shown.slice(0, 200).map((item) => itemRow(item)).join("") || '<li class="empty">Rien ne correspond.</li>';
+  };
+  const itemRow = (item) => {
       const removable = onRemove && item.removable;
       return `
       <li${removable ? ' class="branch-row"' : ""}><button class="sheet-item${item.value === current ? " current" : ""}${item.pinned ? " pinned" : ""}" data-value="${escapeHtml(item.value)}">
         <span class="sheet-label">${item.icon ? ICON[item.icon] : ""}<span>${escapeHtml(item.label)}</span></span>
         ${item.detail ? `<small>${escapeHtml(item.detail)}</small>` : ""}
       </button>${removable ? `<button type="button" class="icon-button" data-remove="${escapeHtml(item.value)}" aria-label="Supprimer ${escapeHtml(item.label)}">${ICON.trash}</button>` : ""}</li>`;
-    }).join("") || '<li class="empty">Rien ne correspond.</li>';
   };
   draw();
   const close = () => {
@@ -456,6 +478,13 @@ function openPicker({ title, items, current, placeholder, onPick, onRemove }) {
   };
   sheet.onclick = (event) => {
     if (event.target === sheet || event.target.closest("[data-close]")) close();
+    const tab = event.target.closest("[data-group]");
+    if (tab) {
+      active = tab.dataset.group;
+      if (search) search.value = "";
+      draw();
+      return;
+    }
     const remove = event.target.closest("[data-remove]");
     if (remove) {
       close();
@@ -935,13 +964,23 @@ async function followRenamedBranch(repo, old, name) {
 async function pickModel() {
   const [models, secrets] = await Promise.all([loadModels(), engineProviderSecrets()]);
   const best = models.find((model) => model.rank === 1);
-  // Modèles des fournisseurs dont le moteur a la clé (NVIDIA, Gemini), juste après « Auto ».
+  // Un onglet par fournisseur : OpenRouter, puis Google Gemini et NVIDIA, dont les modèles ne
+  // sont proposés que si le moteur a leur clé (sinon l'onglet dit où la mettre).
   const keyedItems = KEYED_PROVIDERS.filter((provider) => secrets[provider.secret])
     .flatMap((provider) => provider.models.map((model) => ({
       value: model.id,
       label: model.short,
       detail: `${provider.detail} (secret ${provider.secret} du moteur)`,
+      group: provider.key,
     })));
+  const groups = [
+    { key: "openrouter", label: "OpenRouter", empty: "Aucun modèle gratuit d'OpenRouter trouvé : réessayez dans un instant." },
+    ...KEYED_PROVIDERS.map((provider) => ({
+      key: provider.key,
+      label: provider.label,
+      empty: `Pas de clé ${provider.label} dans le moteur : Réglages, Moteur, « ${provider.field} » (${provider.where}).`,
+    })),
+  ];
   const detail = (model) => [
     model.rank === 1 ? "le plus puissant" : model.rank ? `n°${model.rank} pour le code` : "non retenu pour le code",
     ...model.reasons,
@@ -951,10 +990,11 @@ async function pickModel() {
     title: "Modèle (gratuit)",
     placeholder: "Rechercher un modèle",
     current: state.settings.model || "",
+    groups,
     items: [
-      { value: "", label: "Auto", detail: best ? `en ce moment ${best.short}, le plus puissant des gratuits pour le code (et les suivants s'il ne répond plus)` : "le meilleur modèle gratuit pour le code" },
+      { value: "", label: "Auto", pinned: true, detail: best ? `en ce moment ${best.short}, le plus puissant des gratuits pour le code (et les suivants s'il ne répond plus)` : "le meilleur modèle gratuit pour le code" },
+      ...models.map((model) => ({ value: model.id, label: model.rank ? `${model.rank}. ${model.short}` : model.short, detail: detail(model), group: "openrouter" })),
       ...keyedItems,
-      ...models.map((model) => ({ value: model.id, label: model.rank ? `${model.rank}. ${model.short}` : model.short, detail: detail(model) })),
     ],
     onPick: (value) => {
       state.settings.model = value;

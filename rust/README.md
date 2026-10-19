@@ -245,6 +245,10 @@ est retenu ; avec `OPENROUTER_API_KEY`, le quota gratuit du jour est affiché.
   annonce (`retryDelay`, unité comprise). Un quota du jour épuisé (`…PerDay…`) n'est ni attendu
   ni réessayé, même si Google y joint un court délai : le modèle est mis de côté jusqu'à minuit,
   heure du Pacifique (9 h à Paris), l'heure où Google remet ses quotas à zéro.
+- **Modèles rangés par fournisseur** : le menu des modèles de la page a, à la suite, les
+  catégories **OpenRouter** (ses modèles gratuits qui appellent les outils), **Google Gemini** et
+  **NVIDIA** (avec leur clé), en plus des catégories par spécialité. Claw Web range son choix
+  du modèle de la même façon, en onglets.
 - **Choisir un modèle Gemini** : `/models gemini` liste les modèles de l'offre gratuite de Google
   que votre clé ouvre (une simple lecture du catalogue de Google, aucune génération), et la page
   les montre dans la catégorie **Google Gemini** du menu des modèles. Gratuits d'après la page

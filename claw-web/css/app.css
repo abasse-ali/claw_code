@@ -561,6 +561,14 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
   background: var(--bg); color: var(--text); font: inherit;
 }
 .sheet-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; }
+/* Onglets d'une liste (fournisseurs des modèles : OpenRouter, Google Gemini, NVIDIA). */
+.sheet-tabs { display: flex; gap: 6px; padding: 0 4px 10px; overflow-x: auto; scrollbar-width: none; }
+.sheet-tab {
+  flex: none; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border); background: transparent;
+  color: var(--muted); font: inherit; font-size: .85rem; white-space: nowrap; cursor: pointer;
+}
+.sheet-tab.on { background: var(--panel-2); color: var(--text); border-color: var(--muted); }
+.sheet-tab small { margin-left: 4px; color: var(--muted); }
 .sheet-item {
   display: flex; flex-direction: column; align-items: flex-start; width: 100%; padding: 10px 12px; border: 0;
   border-radius: 10px; background: transparent; text-align: left; cursor: pointer;
