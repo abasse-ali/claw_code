@@ -456,10 +456,38 @@ pub fn register_configured_providers(config: &runtime::RuntimeConfig) {
     );
 }
 
+/// Secours d'un modèle de NVIDIA ou de Gemini, du même fournisseur et sur la même
+/// clé, quand aucune liste n'est réglée. Vu dans une vraie session de Claw Web
+/// (Nemotron 3 Ultra seul) : le serveur de NVIDIA coupait ses longues réponses,
+/// et faute d'autre modèle, Claw relançait le même jusqu'à six fois par étape,
+/// 42 minutes pour 16 actions. NVIDIA : ses autres agents essayés, dans l'ordre.
+/// Gemini : les autres modèles de l'offre gratuite, chacun avec son propre
+/// quota du jour (20 requêtes pour Gemini 3.8 Flash). `None` hors de ces deux.
+fn provider_fallbacks(primary: &str) -> Option<Vec<String>> {
+    if let Some(id) = primary.strip_prefix("nvidia:") {
+        return Some(
+            NVIDIA_FALLBACK_ORDER
+                .iter()
+                .filter(|model| **model != id)
+                .map(|model| format!("nvidia:{model}"))
+                .collect(),
+        );
+    }
+    let id = primary.strip_prefix("gemini:")?;
+    Some(
+        GEMINI_FREE_TIER
+            .iter()
+            .filter(|(model, _)| *model != id)
+            .map(|(model, _)| format!("gemini:{model}"))
+            .collect(),
+    )
+}
+
 /// Chaîne de modèles d'une session : le principal, puis `CLAW_FALLBACK_MODELS`
 /// (liste séparée par des virgules) ou `fallbackModels` de la config. Sans liste
 /// et pour un modèle gratuit d'`OpenRouter`, les meilleurs modèles gratuits du
-/// classement servent de secours. `CLAW_FALLBACK=0` désactive la bascule.
+/// classement servent de secours ; pour NVIDIA et Gemini, voir
+/// `provider_fallbacks`. `CLAW_FALLBACK=0` désactive la bascule.
 pub fn model_chain(primary: &str, configured: &[String]) -> Vec<String> {
     let mut chain = vec![primary.to_string()];
     if env::var("CLAW_FALLBACK").is_ok_and(|value| value.trim() == "0") {
@@ -480,6 +508,10 @@ pub fn model_chain(primary: &str, configured: &[String]) -> Vec<String> {
     if explicit.is_empty() {
         if primary.contains('/') && primary.ends_with(":free") {
             chain.extend(ranked_free_coding_models(4));
+        } else if let Some(siblings) = provider_fallbacks(primary) {
+            chain.extend(siblings);
+            // En dernier recours, deux modèles gratuits d'OpenRouter (avec sa clé).
+            chain.extend(ranked_free_coding_models(2));
         }
     } else {
         // « free » : les meilleurs modèles gratuits d'OpenRouter pour le code, à
@@ -912,6 +944,22 @@ pub(crate) const NVIDIA_MODELS: &[NvidiaModel] = &[
     },
 ];
 
+/// Ordre des secours de NVIDIA : les agents rapides d'abord. Nemotron 3 Ultra,
+/// le plus puissant, est lent sur l'offre gratuite : vu le 19 octobre 2026 dans
+/// une session de Claw Web, NVIDIA coupait ses longues réponses.
+const NVIDIA_FALLBACK_ORDER: &[&str] = &[
+    "nvidia/nemotron-3-super-120b-a12b",
+    "stepfun-ai/step-5-preview",
+    "nvidia/nemotron-3-ultra-550b-a55b",
+    "openai/gpt-oss-20b",
+];
+
+/// Ce qu'il faut savoir d'un agent de NVIDIA avant de le choisir.
+fn nvidia_caveat(id: &str) -> Option<&'static str> {
+    (id == "nvidia/nemotron-3-ultra-550b-a55b")
+        .then_some("lent sur l'offre gratuite : NVIDIA coupe parfois ses longues réponses (Claw passe alors à Nemotron 3 Super)")
+}
+
 fn has_nvidia_key() -> bool {
     env::var("NVIDIA_API_KEY").is_ok_and(|key| !key.trim().is_empty())
 }
@@ -989,7 +1037,9 @@ fn nvidia_models_json() -> Vec<serde_json::Value> {
                 "id": format!("nvidia:{}", model.id),
                 "name": format!("NVIDIA: {}", model.name),
                 "context": "128K",
-                "reasons": ["gratuit chez NVIDIA (build.nvidia.com), clé NVIDIA_API_KEY"],
+                "reasons": std::iter::once("gratuit chez NVIDIA (build.nvidia.com), clé NVIDIA_API_KEY")
+                    .chain(nvidia_caveat(model.id))
+                    .collect::<Vec<_>>(),
                 "score": 0,
                 "measured": null,
                 "available": true,
@@ -1044,7 +1094,10 @@ fn nvidia_report(current_model: &str) -> String {
         } else {
             ""
         };
-        lines.push(format!("    {full:<48} {}{marker}", model.name));
+        let caveat = nvidia_caveat(model.id)
+            .map(|caveat| format!(" · {caveat}"))
+            .unwrap_or_default();
+        lines.push(format!("    {full:<48} {}{caveat}{marker}", model.name));
     }
     lines.extend([
         String::new(),
@@ -2780,6 +2833,44 @@ mod tests {
             .is_some_and(|all| all.contains(&serde_json::json!(reader))));
         // Le modèle de la session ne se décrit pas ses propres images.
         assert!(super::nvidia_image_readers(reader).is_empty());
+    }
+
+    #[test]
+    fn nvidia_and_gemini_models_fall_back_on_their_own_provider() {
+        use super::provider_fallbacks;
+        // Nemotron 3 Ultra seul relançait le même modèle six fois par étape.
+        assert_eq!(
+            provider_fallbacks("nvidia:nvidia/nemotron-3-ultra-550b-a55b").expect("NVIDIA"),
+            [
+                "nvidia:nvidia/nemotron-3-super-120b-a12b",
+                "nvidia:stepfun-ai/step-5-preview",
+                "nvidia:openai/gpt-oss-20b",
+            ]
+        );
+        // Les agents rapides d'abord ; Ultra, lent, après eux.
+        assert_eq!(
+            provider_fallbacks("nvidia:openai/gpt-oss-20b").expect("NVIDIA"),
+            [
+                "nvidia:nvidia/nemotron-3-super-120b-a12b",
+                "nvidia:stepfun-ai/step-5-preview",
+                "nvidia:nvidia/nemotron-3-ultra-550b-a55b",
+            ]
+        );
+        assert!(super::nvidia_caveat("nvidia/nemotron-3-ultra-550b-a55b").is_some());
+        assert!(super::nvidia_caveat("nvidia/nemotron-3-super-120b-a12b").is_none());
+        // Le lecteur d'images n'appelle pas les outils : jamais un secours d'agent.
+        assert!(!provider_fallbacks("nvidia:openai/gpt-oss-20b")
+            .expect("NVIDIA")
+            .iter()
+            .any(|model| model.contains("-vl-")));
+        // Chaque modèle Gemini a son propre quota du jour : les autres prennent la suite.
+        let gemini = provider_fallbacks("gemini:gemini-3.8-flash").expect("Gemini");
+        assert_eq!(gemini[0], "gemini:gemini-3.6-flash");
+        assert!(!gemini.contains(&"gemini:gemini-3.8-flash".to_string()));
+        assert_eq!(gemini.len(), super::GEMINI_FREE_TIER.len() - 1);
+        // OpenRouter a ses propres secours ; un modèle local n'en reçoit pas.
+        assert_eq!(provider_fallbacks("qwen/qwen3-coder:free"), None);
+        assert_eq!(provider_fallbacks("ollama:qwen2.5-coder:7b"), None);
     }
 
     #[test]
