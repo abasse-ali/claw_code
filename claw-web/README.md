@@ -37,16 +37,40 @@ changement de ce dossier ; l'ancienne adresse, https://abasse-ali.github.io/claw
 3. Dans « Moteur » : collez votre clé OpenRouter (ou laissez le champ vide si elle est déjà
    gardée sur l'appareil), laissez coché « Donner aussi ce jeton au moteur », puis
    « Configurer le moteur ». L'appli pose deux secrets dans le dépôt du moteur,
-   chiffrés dans le navigateur : `OPENROUTER_API_KEY` et `CLAW_REPO_TOKEN`. Facultatif : une clé
-   NVIDIA (`nvapi-…`, créée sur build.nvidia.com, profil, Settings, API Keys) devient le secret
-   `NVIDIA_API_KEY`. Le choix du modèle propose alors les agents de NVIDIA, gratuits et sans
-   quota par jour annoncé, et Claw fait décrire les images par le lecteur de NVIDIA. Cette clé
-   n'est jamais gardée sur l'appareil.
+   chiffrés dans le navigateur : `OPENROUTER_API_KEY` et `CLAW_REPO_TOKEN`. Facultatif, deux
+   autres fournisseurs gratuits, dont les clés ne sont jamais gardées sur l'appareil :
+   - une clé NVIDIA (`nvapi-…`, créée sur build.nvidia.com, profil, Settings, API Keys) devient
+     le secret `NVIDIA_API_KEY` : le choix du modèle propose les agents de NVIDIA, sans quota par
+     jour annoncé, et Claw fait décrire les images par le lecteur de NVIDIA ;
+   - une clé Google Gemini (`AIza…`, créée sur aistudio.google.com/apikey, dans un projet sans
+     facturation, sinon chaque requête est payante) devient le secret `GEMINI_API_KEY` : le
+     choix du modèle propose les modèles de l'offre gratuite de Google (quota par jour et par
+     modèle, bas pour les plus récents).
+   Une clé collée dans le mauvais champ est refusée avant tout envoi.
 4. Choisissez un dépôt et une branche, ou créez un dépôt neuf, puis décrivez la tâche. Dans un
    dépôt neuf, une demande de création (« Crée une application... ») fait passer Claw en mode
    projet : cahier des charges, plan en jalons vérifiés, démonstration finale. Les messages
    de suivi le poursuivent (une nouvelle session aussi, quand `SPEC.md` et `PLAN.md` sont dans
    le dépôt) ; « sans mode projet » l'arrête pour la session.
+
+## Supprimer un dépôt ou une branche
+
+- **Dépôt** : la corbeille d'un dépôt, dans le choix du dépôt. Il faut retaper son nom complet,
+  comme sur GitHub ; les sessions qui y travaillent sont annoncées. GitHub permet de le
+  restaurer pendant 90 jours (Réglages de GitHub, Repositories, Deleted repositories). Le jeton
+  doit avoir l'autorisation Administration en lecture et écriture. Le dépôt du moteur et le code
+  de Claw ne sont jamais proposés : Claw Web en dépend.
+- **Branche** : la corbeille d'une branche, dans le choix de la branche (jamais la branche par
+  défaut). La session qui y travaille est nommée ; son prochain passage recrée la branche à
+  partir de la branche de départ.
+
+## Sessions sur votre PC
+
+Réglages, « Sessions » : « Sur mon PC » fait tourner les sessions sur votre PC, dans Docker
+Desktop, sans minutes GitHub Actions ; les vérifications du moteur montrent si l'exécuteur du
+PC est en ligne. Installation une fois : `.github/claw-web/pc/claw-pc.ps1 install` dans le code de
+Claw (voir `.github/claw-web/pc/README.md`). Le PC éteint, la session attend dans la file de
+GitHub et part dès qu'il revient.
 
 ## Fusionner, mettre en ligne
 

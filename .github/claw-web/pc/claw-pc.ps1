@@ -156,7 +156,10 @@ function Update-Runner {
         throw 'Une session tourne sur ce PC : recommencez quand elle est finie.'
     }
     Build-Image
-    # L'inscription reste dans le volume : le nouveau conteneur la reprend.
+    # Arrêt propre d'abord : l'exécuteur ferme sa connexion à GitHub. Supprimé d'un coup, il la
+    # laisse ouverte, et le nouveau conteneur attend plusieurs minutes (« A session for this
+    # runner already exists »). L'inscription reste dans le volume : le nouveau la reprend.
+    $null = Invoke-Native docker @('stop', '--time', '60', $Container)
     $null = Invoke-Native docker @('rm', '--force', $Container)
     Start-Container
     Wait-Online
