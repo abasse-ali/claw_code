@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 use regex::Regex;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+/// `PowerShell` : son démarrage (.NET) peut dépasser `TIMEOUT` sur une machine chargée.
+const POWERSHELL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Constats au plus par fichier : les premiers suffisent à corriger.
 const MAX_FINDINGS: usize = 10;
 
@@ -37,6 +39,19 @@ impl Run {
 
 /// Lance un outil de contrôle ; `None` s'il est absent ou trop lent.
 fn run(program: &str, args: &[&str], envs: &[(&str, &str)], cwd: Option<&Path>) -> Option<Run> {
+    run_within(TIMEOUT, program, args, envs, cwd)
+}
+
+/// `run` avec son propre délai : `PowerShell` met parfois plus de dix secondes à
+/// démarrer sur une machine chargée (vu sur les machines Ubuntu de GitHub, où le
+/// contrôle restait muet et le test échouait au hasard).
+fn run_within(
+    timeout: Duration,
+    program: &str,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    cwd: Option<&Path>,
+) -> Option<Run> {
     let executable = crate::paths::find_executable(program)?;
     let mut command = Command::new(executable);
     command
@@ -67,7 +82,7 @@ fn run(program: &str, args: &[&str], envs: &[(&str, &str)], cwd: Option<&Path>) 
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() > TIMEOUT => {
+            Ok(None) if started.elapsed() > timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return None;
@@ -136,7 +151,8 @@ fn powershell_syntax(path: &Path) -> Option<String> {
         .find(|program| crate::paths::find_executable(program).is_some())?;
     let file = path.to_string_lossy().to_string();
     let script = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; $errors = $null; [void][System.Management.Automation.Language.Parser]::ParseFile($env:CLAW_PS_FILE, [ref]$null, [ref]$errors); foreach ($e in $errors) { 'line ' + $e.Extent.StartLineNumber + ': ' + $e.Message }";
-    let result = run(
+    let result = run_within(
+        POWERSHELL_TIMEOUT,
         program,
         &["-NoProfile", "-NonInteractive", "-Command", script],
         &[("CLAW_PS_FILE", file.as_str())],
