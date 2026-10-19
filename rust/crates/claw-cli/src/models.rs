@@ -695,6 +695,12 @@ pub fn providers_report(current_model: &str) -> String {
 
 // --- Google Gemini --------------------------------------------------------------------
 
+/// Requêtes par jour de l'offre gratuite de Google, relevées le 18 octobre 2026
+/// (erreur 429 de Google) ; les autres modèles Gemini ont aussi un quota par
+/// jour, non relevé. Remise à zéro à minuit, heure du Pacifique.
+pub(crate) const GEMINI_DAILY_REQUESTS: &[(&str, u32)] =
+    &[("gemini-3.8-flash", 20), ("gemini-3.5-flash", 20)];
+
 /// Modèles Gemini de l'offre gratuite de Google (« Free of charge » sur la page
 /// des tarifs, relevée le 10 octobre 2026), du plus récent au plus ancien.
 /// Gemini 3.1 Pro Preview n'y figure pas : il est payant. Ils ne sont gratuits

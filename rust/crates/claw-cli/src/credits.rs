@@ -34,9 +34,20 @@ fn is_free_model(model: &str) -> bool {
     model.ends_with(":free") || model == "openrouter/free"
 }
 
+/// Modèle d'un fournisseur gratuit à clé, hors `OpenRouter` : Gemini, NVIDIA.
+fn is_keyed_model(model: &str) -> bool {
+    model.starts_with("gemini:") || model.starts_with("nvidia:")
+}
+
 /// Une requête vient de partir vers `model` (une étape de l'agent).
 pub fn note_request(model: &str) {
     if !is_openrouter_model(model) {
+        // Gemini et NVIDIA : au journal aussi, pour compter leurs requêtes du jour
+        // (quota par jour de Google) ; le compte d'`OpenRouter` n'en dit rien.
+        if is_keyed_model(model) {
+            log_request(model);
+            GENERATION.fetch_add(1, Ordering::SeqCst);
+        }
         return;
     }
     if is_free_model(model) {
@@ -173,6 +184,51 @@ impl DayUsage {
         #[allow(clippy::cast_precision_loss)]
         Some(recent as f64 * 3_600.0 / window as f64)
     }
+}
+
+/// Entrées du journal vers un fournisseur à clé (Gemini, NVIDIA) : (modèle, heure).
+fn keyed_entries(journal: &str) -> Vec<(String, u64)> {
+    journal
+        .lines()
+        .filter_map(|line| {
+            let entry: serde_json::Value = serde_json::from_str(line).ok()?;
+            let model = entry.get("m")?.as_str()?;
+            if !is_keyed_model(model) {
+                return None;
+            }
+            Some((model.to_string(), entry.get("t")?.as_u64()?))
+        })
+        .collect()
+}
+
+/// Requêtes de Claw vers Gemini et NVIDIA sur 26 heures (journaux d'hier et
+/// d'aujourd'hui, qui suivent l'UTC), avec leurs heures : la page compte celles
+/// d'après minuit, heure du Pacifique, l'heure où Google remet ses quotas à zéro.
+/// S'y ajoutent les quotas par jour relevés pour Gemini.
+fn keyed_json(now: u64) -> serde_json::Value {
+    let since = now.saturating_sub(26 * 3_600);
+    let mut times: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    for day in [(now / 86_400).saturating_sub(1), now / 86_400] {
+        let Some(journal) = usage_path(day).and_then(|path| std::fs::read_to_string(path).ok())
+        else {
+            continue;
+        };
+        for (model, time) in keyed_entries(&journal) {
+            if time >= since {
+                times.entry(model).or_default().push(time);
+            }
+        }
+    }
+    serde_json::json!({
+        "requests": times
+            .into_iter()
+            .map(|(model, times)| serde_json::json!({ "model": model, "times": times }))
+            .collect::<Vec<_>>(),
+        "gemini_daily": crate::models::GEMINI_DAILY_REQUESTS
+            .iter()
+            .map(|(id, limit)| (format!("gemini:{id}"), serde_json::json!(limit)))
+            .collect::<serde_json::Map<_, _>>(),
+    })
 }
 
 fn day_usage() -> DayUsage {
@@ -501,9 +557,16 @@ fn session_requests() -> (u64, u64) {
 #[must_use]
 pub fn json(fresh: bool) -> serde_json::Value {
     let (session_free, session_paid) = session_requests();
+    // Gemini et NVIDIA, même sans clé `OpenRouter` : la page montre le quota du
+    // fournisseur du modèle choisi.
+    let keyed = keyed_json(now_secs());
     match account_status(fresh) {
-        None => serde_json::json!({ "available": false, "reason": "aucune clé OpenRouter" }),
-        Some(Err(error)) => serde_json::json!({ "available": false, "reason": error }),
+        None => {
+            serde_json::json!({ "available": false, "reason": "aucune clé OpenRouter", "keyed": keyed })
+        }
+        Some(Err(error)) => {
+            serde_json::json!({ "available": false, "reason": error, "keyed": keyed })
+        }
         Some(Ok(status)) => {
             let status = live(&status);
             let usage = day_usage();
@@ -537,12 +600,20 @@ pub fn json(fresh: bool) -> serde_json::Value {
                 "by_model": usage.by_model.iter().map(|(model, requests)| serde_json::json!({
                     "model": model,
                     "requests": requests,
-                    "free": is_free_model(model),
+                    // Gemini et NVIDIA : offres gratuites, hors du compte d'OpenRouter.
+                    "free": is_free_model(model) || is_keyed_model(model),
                 })).collect::<Vec<_>>(),
-                "counted": usage.total(),
+                // Les requêtes vers OpenRouter seules : comparées à son propre compte.
+                "counted": usage
+                    .by_model
+                    .iter()
+                    .filter(|(model, _)| !is_keyed_model(model))
+                    .map(|(_, requests)| requests)
+                    .sum::<u64>(),
                 "pace": pace,
                 "low": remaining.is_some_and(|left| left < LOW_FREE_REQUESTS),
                 "text": short_line(&status),
+                "keyed": keyed,
             })
         }
     }
@@ -551,10 +622,29 @@ pub fn json(fresh: bool) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        dollars, duration_text, exhausted_at, is_openrouter_model, low_quota_threshold,
-        pace_sentence, short_line, DayUsage,
+        dollars, duration_text, exhausted_at, is_keyed_model, is_openrouter_model, keyed_entries,
+        low_quota_threshold, pace_sentence, short_line, DayUsage,
     };
     use api::{AccountStatus, FreeModelQuota};
+
+    #[test]
+    fn gemini_and_nvidia_requests_are_read_from_the_journal_with_their_time() {
+        let journal = "{\"t\":100,\"m\":\"gemini:gemini-3.8-flash\"}\n\
+                       {\"t\":110,\"m\":\"qwen/qwen3-coder:free\"}\n\
+                       {\"t\":120,\"m\":\"nvidia:nvidia/nemotron-3-super-120b-a12b\"}\n\
+                       abîmée\n\
+                       {\"m\":\"gemini:gemini-3.8-flash\"}\n";
+        assert_eq!(
+            keyed_entries(journal),
+            [
+                ("gemini:gemini-3.8-flash".to_string(), 100),
+                ("nvidia:nvidia/nemotron-3-super-120b-a12b".to_string(), 120),
+            ]
+        );
+        assert!(is_keyed_model("gemini:gemini-2.5-pro"));
+        // Le même modèle chez OpenRouter reste à OpenRouter.
+        assert!(!is_keyed_model("nvidia/nemotron-3-super-120b-a12b:free"));
+    }
 
     #[test]
     fn formats_amounts_and_the_one_line_summary() {

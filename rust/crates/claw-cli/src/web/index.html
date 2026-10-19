@@ -1977,8 +1977,90 @@
   }
   let lastCreditsText = "";
   let lastCredits = null;
+  // Fournisseur d'un modèle : Gemini et NVIDIA ont leur propre quota, pas celui d'OpenRouter.
+  function providerOfModel(id) {
+    if ((id || "").startsWith("gemini:")) return "gemini";
+    if ((id || "").startsWith("nvidia:")) return "nvidia";
+    return "openrouter";
+  }
+  // Dernier minuit, heure du Pacifique (secondes Unix) : Google y remet ses quotas à zéro.
+  function lastPacificMidnight() {
+    const now = new Date();
+    const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", hourCycle: "h23", hour: "2-digit", minute: "2-digit", second: "2-digit" })
+      .formatToParts(now).map((part) => [part.type, part.value]));
+    return Math.floor(now.getTime() / 1000) - (Number(parts.hour) * 3600 + Number(parts.minute) * 60 + Number(parts.second));
+  }
+  // Requêtes de Claw sur cette machine vers ce modèle depuis minuit, heure du Pacifique.
+  function keyedUsed(data, model) {
+    const entry = (((data && data.keyed) || {}).requests || []).find((item) => item.model === model);
+    const since = lastPacificMidnight();
+    return entry ? entry.times.filter((time) => time >= since).length : 0;
+  }
+  function keyedLimit(data, model) {
+    return (((data && data.keyed) || {}).gemini_daily || {})[model] || 0;
+  }
+  // Pastille d'un modèle de Gemini (requêtes du jour sur sa limite) ou de NVIDIA (par minute).
+  function keyedPill(data, model) {
+    const used = keyedUsed(data, model);
+    if (providerOfModel(model) === "gemini") {
+      const limit = keyedLimit(data, model);
+      return {
+        html: svg("coins") + '<span class="free"><b>' + used + "</b> <span class=\"sub\">" + (limit ? "/ " + limit + " Gemini" : "Gemini aujourd'hui") + "</span></span>",
+        title: "Google Gemini (" + model + ") : " + used + " requête(s) de Claw sur cette machine depuis minuit, heure du Pacifique"
+          + (limit ? " ; " + limit + " par jour pour ce modèle (offre gratuite)" : " ; quota par jour et par modèle") + ". Compte exact : aistudio.google.com/rate-limit",
+        low: limit > 0 && used >= limit,
+        warn: limit > 0 && used >= limit * 0.8,
+      };
+    }
+    return {
+      html: svg("coins") + '<span class="free"><b>40</b> <span class="sub">/ min NVIDIA</span></span>',
+      title: "NVIDIA (" + model + ") : environ 40 requêtes par minute, aucun quota par jour ; " + used + " requête(s) de Claw sur cette machine depuis minuit, heure du Pacifique",
+      low: false,
+      warn: false,
+    };
+  }
+  // Détail du quota du modèle choisi, quand il est de Gemini ou de NVIDIA.
+  function keyedQuotaBlock(data, model) {
+    const used = keyedUsed(data, model);
+    const box = el("div", "quota");
+    const line = el("div", "line");
+    const reset = new Date((lastPacificMidnight() + 86400) * 1000).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+    if (providerOfModel(model) === "gemini") {
+      const limit = keyedLimit(data, model);
+      line.append(el("span", null, "Google Gemini, " + modelName(model) + " (modèle choisi)"), el("b", null, limit ? used + " / " + limit : String(used)));
+      box.append(line);
+      if (limit) {
+        const bar = el("div", "bar" + (used >= limit * 0.85 ? " low" : ""));
+        const fill = el("i");
+        fill.style.width = Math.min(100, (used / limit) * 100) + "%";
+        bar.append(fill);
+        box.append(bar);
+      }
+      box.append(el("div", "note", used + " requête(s) de Claw sur cette machine depuis minuit, heure du Pacifique ; remise à zéro à " + reset + ". "
+        + (limit ? limit + " requêtes par jour pour ce modèle (offre gratuite de Google). " : "Quota par jour et par modèle (offre gratuite de Google). ")
+        + "Compte exact, toutes applications confondues : aistudio.google.com/rate-limit."));
+    } else {
+      line.append(el("span", null, "NVIDIA, " + modelName(model) + " (modèle choisi)"), el("b", null, "≈ 40 / min"));
+      box.append(line, el("div", "note", "Aucun quota par jour annoncé ; environ 40 requêtes par minute pour le compte. "
+        + used + " requête(s) de Claw sur cette machine depuis minuit, heure du Pacifique."));
+    }
+    return box;
+  }
   function renderCredits(data) {
     const node = $("credits");
+    // Modèle de Gemini ou de NVIDIA : son quota, même sans clé OpenRouter.
+    if (data && providerOfModel(status.model) !== "openrouter") {
+      lastCredits = data;
+      if (creditsDialog) creditsDialog(data);
+      const pill = keyedPill(data, status.model);
+      node.innerHTML = pill.html;
+      lastCreditsText = pill.html;
+      node.title = pill.title + "\nCliquer pour le détail";
+      node.classList.toggle("low", pill.low);
+      node.classList.toggle("warn", pill.warn);
+      node.hidden = false;
+      return;
+    }
     if (!data || !data.available) { node.hidden = true; return; }
     lastCredits = data;
     if (creditsDialog) creditsDialog(data);
@@ -2107,7 +2189,7 @@
   let creditsDialog = null;
   function openCreditsDialog() {
     if (creditsDialog) return;
-    const dialog = openDialog("Crédits OpenRouter");
+    const dialog = openDialog("Quotas et crédits");
     const panel = dialog.panel;
     dialog.onClose = () => { creditsDialog = null; };
     const refresh = async (button) => {
@@ -2118,6 +2200,12 @@
     creditsDialog = (data) => {
       panel.textContent = "";
       panel.append(dialog.head("coins"));
+      // Modèle de Gemini ou de NVIDIA : son quota d'abord ; OpenRouter ensuite, s'il y en a un.
+      if (providerOfModel(status.model) !== "openrouter") panel.append(keyedQuotaBlock(data, status.model));
+      if (!data.available) {
+        panel.append(el("div", "note source", "OpenRouter : " + (data.reason || "aucun chiffre")));
+        return;
+      }
 
       const low = typeof data.balance === "number" && data.balance < 1;
       const big = el("div", "big" + (low ? " low" : ""));
@@ -3162,7 +3250,10 @@
     $("project-path").title = $("project-path").textContent;
     const emptyProject = $("empty-project");
     if (emptyProject) emptyProject.textContent = basename(next.cwd) || "ce projet";
-    if (modelChanged) renderModelButton();
+    if (modelChanged) {
+      renderModelButton();
+      if (lastCredits) renderCredits(lastCredits);
+    }
     renderModeButton();
     renderUltracode();
     renderTeam();
