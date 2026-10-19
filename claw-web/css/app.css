@@ -543,6 +543,8 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
   padding: 11px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit;
 }
 .form-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.form-actions .danger { margin-top: 0; }
+.form-actions .danger:disabled { opacity: .5; cursor: default; }
 .drawer-open .scrim { display: block; position: fixed; inset: 0; z-index: 15; background: rgba(0, 0, 0, .45); }
 
 /* Feuille de choix */
