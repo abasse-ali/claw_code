@@ -307,6 +307,7 @@ function openCloudRunner() {
           <li>Console d'Oracle, sur le compte et dans la région du futur serveur : profil (en haut à droite), <em>Mon profil</em>, <em>Clés d'API</em>, <em>Ajouter une clé d'API</em>. Choisissez « Générer une paire de clés d'API », <em>Télécharger la clé privée</em>, puis <em>Ajouter</em>.</li>
           <li>Copiez l'<em>Aperçu du fichier de configuration</em> affiché ensuite et collez-le ci-dessous ; choisissez le fichier de clé privée téléchargé (.pem).</li>
           <li>Un réseau avec un sous-réseau public doit exister dans cette région (assistant VCN, « Créer un VCN avec connectivité Internet »).</li>
+          <li>Le jeton GitHub de l'appli doit avoir, en lecture et écriture, les autorisations Actions, Secrets, Variables et Administration, sur ${escapeHtml(CLAW_SOURCE)} et ${escapeHtml(engine)} (réglages du jeton à grain fin sur GitHub ; sa valeur ne change pas).</li>
         </ol>
         <label class="field"><span>Aperçu du fichier de configuration</span>
           <textarea name="oci-config" rows="6" spellcheck="false" autocomplete="off" placeholder="[DEFAULT]&#10;user=ocid1.user…&#10;fingerprint=…&#10;tenancy=ocid1.tenancy…&#10;region=eu-marseille-1"></textarea></label>
@@ -384,11 +385,14 @@ function openCloudRunner() {
     }
     button.disabled = true;
     try {
+      // Droits du jeton vérifiés avant de poser les secrets : ce que fera le robot avec lui
+      // (variables du dépôt du code de Claw, inscription d'un exécuteur dans celui des sessions).
+      await state.github.setVariable(CLAW_SOURCE, "ORACLE_ROBOT_ENGINE", engine);
+      await state.github.registrationToken(engine);
       const sealing = await state.github.secretKey(CLAW_SOURCE);
       for (const [name, value] of [["OCI_CONFIG", config.trim()], ["OCI_KEY", key.trim()], ["CLAW_ADMIN_TOKEN", state.settings.token]]) {
         await state.github.putSecret(CLAW_SOURCE, name, sealedBox(value, sealing.key), sealing.key_id);
       }
-      await state.github.setVariable(CLAW_SOURCE, "ORACLE_ROBOT_ENGINE", engine);
       await state.github.setVariable(CLAW_SOURCE, "ORACLE_ROBOT", "on");
       await state.github.setWorkflowEnabled(CLAW_SOURCE, "oracle-a1.yml", true);
       await state.github.runWorkflow(CLAW_SOURCE, "oracle-a1.yml");
@@ -397,9 +401,7 @@ function openCloudRunner() {
       toast("Robot démarré : premier essai dans quelques minutes, puis toutes les 10 minutes");
       await showRobot();
     } catch (error) {
-      toast(error.status === 403 || error.status === 404
-        ? `GitHub refuse : le jeton de l'appli doit pouvoir régler les secrets et variables de ${CLAW_SOURCE}`
-        : error.message);
+      toast(error.message, "error");
     } finally {
       button.disabled = false;
     }
@@ -2829,6 +2831,7 @@ function showSettings(first = false, justConnected = false) {
           autorisations des dépôts en lecture et écriture : Actions, Contents, Issues, Pull requests, Secrets.
           Pour créer des dépôts depuis l'appli : « All repositories » et Administration en lecture et écriture.
           Pour mettre un site en ligne (GitHub Pages) : Pages en lecture et écriture.
+          Pour le serveur gratuit et son robot : Administration et Variables en lecture et écriture.
           Il reste dans ce navigateur seulement.</p>
         <label>Dépôt du moteur
           <input name="engine" type="text" value="${escapeHtml(settings.engine || DEFAULT_ENGINE)}" spellcheck="false">

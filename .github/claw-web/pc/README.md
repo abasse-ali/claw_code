@@ -65,7 +65,10 @@ expirer avant la création), et donne à l'instance le script de démarrage de `
 - **Démarrer** : dans l'appli, « Serveur gratuit dans le nuage », partie « Robot de réessai ».
   Créez une clé d'API dans la console d'Oracle (profil, *Mon profil*, *Clés d'API*, *Ajouter une
   clé d'API*, « Générer une paire de clés d'API », *Télécharger la clé privée*, *Ajouter*), puis
-  collez l'aperçu du fichier de configuration et choisissez le fichier `.pem`. L'appli pose
+  collez l'aperçu du fichier de configuration et choisissez le fichier `.pem`. Le jeton de
+  l'appli doit avoir, en lecture et écriture, les autorisations Actions, Secrets, Variables et
+  Administration sur les deux dépôts : l'appli le vérifie d'abord (une variable posée, un jeton
+  d'inscription demandé) et nomme l'autorisation qui manque. Puis elle pose
   chiffrés les secrets `OCI_CONFIG`, `OCI_KEY` et `CLAW_ADMIN_TOKEN` (son jeton GitHub, pour
   inscrire l'exécuteur), règle les variables `ORACLE_ROBOT=on` et `ORACLE_ROBOT_ENGINE`, active le
   workflow et lance un premier essai.

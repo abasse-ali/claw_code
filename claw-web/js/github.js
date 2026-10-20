@@ -443,6 +443,10 @@ function explain(status, reason, path) {
     if (path === "/user/repos") {
       return "Le jeton ne peut pas créer de dépôt : dans ses réglages sur GitHub, choisissez « All repositories » et l'autorisation Administration en lecture et écriture (le jeton garde la même valeur)";
     }
+    const repo = (path.match(/^\/repos\/([^/]+\/[^/]+)/) || [])[1] || "ce dépôt";
+    const grant = "ajoutez-la au jeton à grain fin sur GitHub (sa valeur ne change pas)";
+    if (path.includes("/actions/variables")) return `Le jeton n'a pas l'autorisation Variables (lecture et écriture) sur ${repo} : ${grant}`;
+    if (path.endsWith("/registration-token")) return `Le jeton n'a pas l'autorisation Administration (lecture et écriture) sur ${repo} : ${grant}`;
     if (path.includes("/secrets")) return "Le jeton n'a pas le droit de gérer les secrets du moteur (autorisation Secrets)";
     if (path.includes("/dispatches") || path.includes("/actions/")) return "Le jeton n'a pas accès aux Actions du moteur (autorisation Actions)";
     return `Accès refusé ou introuvable (${reason}) : vérifiez les dépôts et autorisations du jeton`;
