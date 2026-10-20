@@ -58,6 +58,75 @@ def usage_lines(model, requests, quota):
     return lines
 
 
+def french_number(value):
+    """1743 -> « 1 743 » (espace fine insécable, comme en français)."""
+    return f"{value:,}".replace(",", " ")
+
+
+SHORTSTAT = re.compile(r"(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?")
+
+
+def french_shortstat(text):
+    """Le bilan de `git diff --stat` en français : « 10 fichiers modifiés, +1 743 lignes,
+    −287 lignes ». Un texte inconnu est rendu tel quel."""
+    found = SHORTSTAT.search(text or "")
+    if not found:
+        return (text or "").strip()
+    files, added, removed = (int(group or 0) for group in found.groups())
+    parts = [f"{french_number(files)} fichier{'s' if files > 1 else ''} modifié{'s' if files > 1 else ''}"]
+    if added:
+        parts.append(f"+{french_number(added)} ligne{'s' if added > 1 else ''}")
+    if removed:
+        parts.append(f"−{french_number(removed)} ligne{'s' if removed > 1 else ''}")
+    return ", ".join(parts)
+
+
+# Lignes de signature qu'un modèle ajoute par habitude de commit (vu en session :
+# « Assisted-by: Claw Code ») : elles ne disent rien à l'utilisateur.
+SIGNATURE = re.compile(r"^\s*(assisted-by|co-authored-by|generated-by|generated with)\b.*$", re.I)
+
+
+def clean_answer(text):
+    """La réponse de Claw sans ses lignes de signature finales."""
+    lines = (text or "").rstrip().splitlines()
+    while lines and (SIGNATURE.match(lines[-1]) or not lines[-1].strip()):
+        lines.pop()
+    return "\n".join(lines)
+
+
+SETTING_HINT = re.compile(r"\s*\((?:réglage|setting)\s+`[^`]*`\)")
+
+
+def clean_notice(notice):
+    """Un avis de Claw pour l'utilisateur : sur une ligne, sans le nom du réglage technique."""
+    return SETTING_HINT.sub("", " ".join(str(notice).split()))
+
+
+# Erreurs connues, dites en clair ; le message brut reste en dessous, pour qui veut le détail.
+ERRORS = (
+    (re.compile(r"aucun contenu|empty response|no content", re.I),
+     "le modèle n'a rien répondu, plusieurs fois de suite"),
+    (re.compile(r"\b429\b|rate.?limit|too many requests|quota", re.I),
+     "le quota du modèle est épuisé pour le moment"),
+    (re.compile(r"\b40[13]\b|unauthori[sz]ed|invalid api key|clé.*(invalide|absente)", re.I),
+     "la clé du fournisseur du modèle est refusée ou absente"),
+    (re.compile(r"timed? ?out|délai dépassé|deadline", re.I),
+     "le modèle a mis trop de temps à répondre"),
+    (re.compile(r"\b50[0234]\b|overloaded|surcharg|service unavailable|bad gateway", re.I),
+     "le service du modèle est en panne ou surchargé"),
+    (re.compile(r"context|too long|trop long", re.I),
+     "la conversation est devenue trop longue pour le modèle"),
+)
+
+
+def explain_error(error):
+    """L'erreur d'un passage en clair (`None` si elle est inconnue)."""
+    for pattern, meaning in ERRORS:
+        if pattern.search(error or ""):
+            return meaning
+    return None
+
+
 def kind_of(body):
     """« engine » (progression, journal), « answer » ou « message » (de l'utilisateur)."""
     body = (body or "").strip()

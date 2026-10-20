@@ -12,7 +12,8 @@ import json
 import os
 import subprocess
 
-from common import ANSWER, NOTES, WORK, GitHubError, api, post_comment, run_url, stop_tree, usage_lines
+from common import (ANSWER, NOTES, WORK, GitHubError, api, clean_answer, clean_notice, explain_error,
+                    french_shortstat, post_comment, run_url, stop_tree, usage_lines)
 from on_github import Actor, load_requests
 
 REPO = os.environ["REPO"]
@@ -62,7 +63,7 @@ def stop_leftover_agent():
 
 def main():
     stop_leftover_agent()
-    result, error = read("result.md"), read("error.txt")
+    result, error = clean_answer(read("result.md")), read("error.txt")
     finished = OUTCOME == "success" and bool(result)
     footer, notes = [], []
     # Le travail est sur GitHub (poussé, ou rien à pousser) : les demandes de l'agent
@@ -77,8 +78,7 @@ def main():
         remote = f"origin/{BRANCH}" if git("rev-parse", "--verify", "--quiet", f"origin/{BRANCH}",
                                            check=False) else f"origin/{BASE}"
         ahead = int(git("rev-list", "--count", f"{remote}..HEAD") or "0")
-        stat = git("diff", "--stat", f"origin/{BASE}...HEAD", check=False).splitlines()
-        summary = stat[-1].strip() if stat else ""
+        summary = french_shortstat(git("diff", "--shortstat", f"origin/{BASE}...HEAD", check=False))
         if ahead == 0:
             notes.append("Aucune modification de fichier dans ce passage.")
             pushed = True
@@ -135,13 +135,20 @@ def main():
         # Claw s'est arrêté sans réponse finale, sans erreur : ses derniers avis disent pourquoi.
         text = ("**La tâche n'est pas finie** : Claw s'est arrêté sans réponse finale. Envoyez "
                 "« continue » pour la reprendre.")
-        notices = read("notices.txt")
+        # Sans redire « n'a pas conclu » : la phrase au-dessus le dit déjà.
+        notices = [clean_notice(line) for line in read("notices.txt").splitlines()
+                   if line.strip() and "n'a pas conclu" not in line]
         if notices:
-            text += "\n\n" + "\n".join(f"> {line}" for line in notices.splitlines())
+            text += "\n\n" + "\n".join(f"> {line}" for line in notices)
     else:
-        text = "**La tâche s'est arrêtée sur une erreur.**"
+        # L'erreur en clair d'abord ; le message brut, court, pour qui veut le détail.
+        meaning = explain_error(error)
+        text = (f"**La tâche s'est arrêtée** : {meaning}." if meaning
+                else "**La tâche s'est arrêtée sur une erreur.**")
+        text += (" Le travail déjà fait est gardé : envoyez « continue » pour reprendre, "
+                 "ou choisissez un autre modèle.")
         if error:
-            text += f"\n\n```\n{error[-1500:]}\n```"
+            text += f"\n\nDétail technique :\n\n```\n{error[-600:]}\n```"
         if result:
             text += f"\n\n{result}"
     processed = read("answered.txt")

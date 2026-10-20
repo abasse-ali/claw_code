@@ -18,8 +18,8 @@ import threading
 import time
 import urllib.request
 
-from common import (PROGRESS, WORK, GitHubError, edit_comment, output, post_comment, run_url,
-                    stop_tree)
+from common import (PROGRESS, WORK, GitHubError, clean_notice, edit_comment, output, post_comment,
+                    run_url, stop_tree)
 from journal import Journal
 
 SESSION = os.environ["SESSION"]
@@ -93,10 +93,12 @@ class Progress:
         self.actions = []
         self.notices = []
         self.replies = 0
-        # Ce que Claw annonce : son plan (le texte qui accompagne ses premiers outils), puis
-        # l'étape en cours (les suivants).
+        # Ce que Claw annonce : son plan (le texte qui précède ses premiers outils), puis
+        # l'étape en cours (les suivants). Claw envoie le texte et chaque appel d'outil dans
+        # des événements séparés : le dernier texte attend l'outil qui le suit (`said`).
         self.plan = ""
         self.step = ""
+        self.said = ""
         self.comment_id = None
         self.dirty = True
         self.lock = threading.Lock()
@@ -118,22 +120,25 @@ class Progress:
                         action = describe(part.get("name", ""), part.get("input"))
                         self.actions.append(action)
                         print(f"[action] {action}", flush=True)
+                        # Un texte suivi d'outils annonce ce que Claw fait.
+                        if self.said:
+                            if self.plan:
+                                self.step = self.said
+                            else:
+                                self.plan = self.said
+                            self.said = ""
                         self.dirty = True
                     elif part.get("type") == "text" and part.get("text", "").strip():
                         self.replies += 1
-                # Un texte qui accompagne des outils annonce ce que Claw fait.
-                said = " ".join(part.get("text", "") for part in parts if part.get("type") == "text").split()
-                if said and any(part.get("type") == "tool_use" for part in parts):
-                    if self.plan:
-                        self.step = " ".join(said)
-                    else:
-                        self.plan = " ".join(said)
-                    self.dirty = True
+                        self.said = " ".join(part["text"].split())
+                        self.dirty = True
             elif kind == "system" and event.get("subtype") == "notice":
-                notice = " ".join(str(event.get("text", "")).split())
-                self.notices.append(notice)
+                notice = clean_notice(event.get("text", ""))
                 print(f"[avis] {notice}", flush=True)
-                self.dirty = True
+                # Le même avis deux fois de suite ne se répète pas dans la progression.
+                if notice and (not self.notices or self.notices[-1] != notice):
+                    self.notices.append(notice)
+                    self.dirty = True
 
     def body(self, state):
         elapsed = int(time.time() - self.started)
@@ -146,11 +151,20 @@ class Progress:
             "unfinished": f"**Claw s'est arrêté sans conclure** après {duration}",
         }[state]
         lines = [PROGRESS, f"{head} · {len(self.actions)} action(s)"]
-        if self.plan:
+        plan, step = self.plan, self.step
+        # Pendant le travail, le dernier texte se montre sans attendre l'outil suivant (une
+        # annonce demandée par Claw arrive seule). Fini, un texte sans outil après lui est la
+        # réponse, pas un plan.
+        if self.said and state == "running":
+            if plan:
+                step = self.said
+            else:
+                plan = self.said
+        if plan:
             lines.append("")
-            lines.append(f"**Ce que Claw compte faire** : {shorten(self.plan, 500)}")
-            if self.step and state == "running":
-                lines.append(f"**En ce moment** : {shorten(self.step, 300)}")
+            lines.append(f"**Ce que Claw compte faire** : {shorten(plan, 500)}")
+            if step and state == "running":
+                lines.append(f"**En ce moment** : {shorten(step, 300)}")
         if self.actions:
             lines.append("")
             hidden = len(self.actions) - SHOWN_ACTIONS
