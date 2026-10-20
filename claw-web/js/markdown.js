@@ -17,6 +17,9 @@ function inline(text) {
     codes.push(`<code>${code}</code>`);
     return `\u0000${codes.length - 1}\u0000`;
   });
+  // Typographie française : espace insécable avant « : ; ! ? » et dans les guillemets, pour
+  // qu'un signe ne parte jamais seul en début de ligne.
+  html = html.replace(/ ([:;!?»])/g, " $1").replace(/« /g, "« ");
   html = html.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
     (_, label, url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`);
   html = html.replace(/(^|[\s(])(https?:\/\/[^\s<)]+[^\s<).,;:!?])/g,
