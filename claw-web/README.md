@@ -37,9 +37,9 @@ changement de ce dossier ; l'ancienne adresse, https://abasse-ali.github.io/claw
 
    Modifier ces réglages garde la valeur du jeton : rien à refaire dans l'appli.
 2. Ouvrez l'appli, collez le jeton, enregistrez.
-3. Dans « Moteur » : collez votre clé OpenRouter (ou laissez le champ vide si elle est déjà
-   gardée sur l'appareil), laissez coché « Donner aussi ce jeton au moteur », puis
-   « Configurer le moteur ». L'appli pose deux secrets dans le dépôt du moteur,
+3. Dans « Moteur », « Clés des modèles » : collez votre clé OpenRouter (ou laissez le champ
+   vide si elle est déjà gardée sur l'appareil), laissez activé « Donner le jeton au moteur »,
+   puis « Configurer le moteur ». L'appli pose deux secrets dans le dépôt du moteur,
    chiffrés dans le navigateur : `OPENROUTER_API_KEY` et `CLAW_REPO_TOKEN`. Facultatif, deux
    autres fournisseurs gratuits, dont les clés ne sont jamais gardées sur l'appareil :
    - une clé NVIDIA (`nvapi-…`, créée sur build.nvidia.com, profil, Settings, API Keys) devient
@@ -133,10 +133,11 @@ son passage a prises, chez le fournisseur du modèle.
 
 ## Sessions sur votre machine : serveur gratuit ou PC
 
-Réglages, « Sessions » : « Sur ma machine » fait tourner les sessions sans minutes GitHub
+Réglages, « Sessions » : « Ma machine » fait tourner les sessions sans minutes GitHub
 Actions, sur un serveur gratuit d'Oracle Cloud allumé jour et nuit, ou sur votre PC dans Docker
-Desktop ; une session part sur la machine libre. Les vérifications du moteur montrent chaque
-exécuteur, en ligne ou non, et en session.
+Desktop ; une session part sur la machine libre. La ligne « Ma machine » dit celles qui sont
+en ligne ; les vérifications du moteur (« Moteur prêt », à déplier) montrent chaque exécuteur,
+en ligne ou non, et en session.
 
 - **Serveur gratuit** (offre « Always Free » d'Oracle : 2 cœurs ARM, 12 Go de mémoire, 200 Go
   de disque, sans limite de durée), tout depuis le téléphone : « Serveur gratuit dans le nuage »

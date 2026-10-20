@@ -9,7 +9,7 @@ GitHub : aucune minute n'est comptée. Deux machines possibles, qui peuvent coex
   nuit, sans votre PC : `claw-cloud.sh` ;
 - **votre PC**, dans Docker Desktop : `claw-pc.ps1`.
 
-Les deux portent l'étiquette `claw-pc`, celle que choisit l'appli (Réglages, Sessions, « Sur ma
+Les deux portent l'étiquette `claw-pc`, celle que choisit l'appli (Réglages, Sessions, « Ma
 machine ») : une session part sur celle qui est libre.
 
 ## Serveur gratuit d'Oracle Cloud
@@ -31,7 +31,7 @@ Tout se fait depuis le téléphone, sans PC :
    *Management*, collez le script dans *Initialization script* (cloud-init). Créez l'instance.
 4. Le serveur installe seul Docker, inscrit l'exécuteur `claw-cloud` dans les premières minutes
    (tant que le jeton est valable), puis construit l'image complète : il apparaît en ligne dans
-   l'appli au bout de 15 à 25 minutes. Choisissez « Sur ma machine » dans Sessions.
+   l'appli au bout de 15 à 25 minutes. Choisissez « Ma machine » dans Sessions.
 
 Ce qu'il faut savoir :
 
@@ -184,4 +184,4 @@ jobs:
     secrets: inherit
 ```
 
-Sans l'entrée `runner`, l'appli dit que le workflow ne connaît pas encore « Sur ma machine ».
+Sans l'entrée `runner`, l'appli dit que le workflow ne connaît pas encore « Ma machine ».

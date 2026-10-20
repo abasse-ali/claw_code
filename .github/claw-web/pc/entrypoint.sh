@@ -2,7 +2,7 @@
 # Démarrage de l'exécuteur de Claw Web (PC ou serveur). Au premier démarrage, il s'inscrit auprès
 # du dépôt des sessions avec le jeton d'inscription (une heure) que donne claw-pc.ps1 ou
 # claw-cloud.sh ; ses identifiants restent ensuite dans le volume, et un redémarrage de Docker le
-# relance seul. L'étiquette claw-pc est celle que choisit l'appli (« Sur ma machine ») : le PC et
+# relance seul. L'étiquette claw-pc est celle que choisit l'appli (« Ma machine ») : le PC et
 # le serveur la portent tous deux, et une session va à celui qui est libre.
 set -eu
 cd /home/runner/actions-runner

@@ -202,7 +202,7 @@ install() {
   fi
   build full "$IMAGE"
   start_container
-  say "Exécuteur $NAME en ligne (étiquette $LABELS). Dans l'appli : Réglages, Sessions, « Sur ma machine »."
+  say "Exécuteur $NAME en ligne (étiquette $LABELS). Dans l'appli : Réglages, Sessions, « Ma machine »."
 }
 
 update() {
