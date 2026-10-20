@@ -67,6 +67,17 @@ changement de ce dossier ; l'ancienne adresse, https://abasse-ali.github.io/claw
   défaut). La session qui y travaille est nommée ; son prochain passage recrée la branche à
   partir de la branche de départ.
 
+## La conversation
+
+Vos messages sont en bulle à droite ; les réponses de Claw, sans cadre, sur toute la largeur,
+avec leurs titres, et les remarques du moteur (travail inachevé, par exemple) en encadré. Chaque
+passage tient en une ligne : son état (en cours, fini, arrêté, erreur), sa durée et son nombre
+d'actions ; un toucher déplie son journal, dont les 30 dernières étapes sont en vue (les
+précédentes se déplient à leur tour). Sous une réponse, la pull request, les fichiers modifiés et
+le job sont en pastilles, le modèle et les requêtes à déplier. « Relancer » et « Mettre en
+ligne » restent sous la conversation ; le job, la session sur GitHub, « Archiver » et
+« Supprimer » sont dans le menu « ••• ».
+
 ## Ce que Claw compte faire
 
 Pendant qu'il travaille, la progression de la session commence par **Ce que Claw compte faire** :

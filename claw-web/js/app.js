@@ -2082,22 +2082,92 @@ function wireAttempts(view) {
   }
 }
 
+/** État d'un passage d'après la première ligne de sa progression (« **Claw a fini** en … »). */
+function runKind(head) {
+  if (/travaille/.test(head)) return "running";
+  if (/a fini/.test(head)) return "done";
+  if (/été arrêté/.test(head)) return "stopped";
+  if (/erreur/.test(head)) return "failed";
+  return "unfinished";
+}
+
+/** Le Markdown d'une réponse, une ligne entièrement en gras (« **Résultat** ») devenue un titre,
+ * hors des blocs de code. */
+function answerTitles(markdown) {
+  return String(markdown).split(/(^\s*```[\s\S]*?^\s*```)/m)
+    .map((part, index) => (index % 2 ? part : part.replace(/^\*\*([^*\n]+)\*\*[ \t]*$/gm, "# $1"))).join("");
+}
+
+/** Pied d'une réponse du moteur (après « --- ») : pull request, branche et job en pastilles,
+ * modèle et requêtes à déplier. */
+function answerFoot(foot) {
+  const chips = [];
+  const lines = [];
+  for (const raw of foot.split("\n")) {
+    const item = raw.replace(/^\s*[-*]\s+/, "").trim();
+    if (!item) continue;
+    let match = item.match(/^Pull request : (https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+))\s*$/);
+    if (match) {
+      chips.push(`<a class="foot-chip" href="${escapeHtml(match[1])}" target="_blank" rel="noopener noreferrer">${ICON.pull}<span>PR #${match[2]}</span></a>`);
+      continue;
+    }
+    match = item.match(/^Branche `[^`]+` : (\d+) fichiers? \S+, \+([\d\s ]+) lignes?, [−-]([\d\s ]+) lignes?$/);
+    if (match) {
+      chips.push(`<span class="foot-chip">${ICON.diff}<span>${match[1]} fichier${match[1] === "1" ? "" : "s"} `
+        + `<b class="add">+${escapeHtml(match[2].trim())}</b> <b class="del">−${escapeHtml(match[3].trim())}</b></span></span>`);
+      continue;
+    }
+    match = item.match(/^\[Détail du job\]\((https:\/\/github\.com\/\S+)\)$/);
+    if (match) {
+      chips.push(`<a class="foot-chip" href="${escapeHtml(match[1])}" target="_blank" rel="noopener noreferrer">${ICON.external}<span>Job</span></a>`);
+      continue;
+    }
+    lines.push(item);
+  }
+  if (!chips.length && !lines.length) return "";
+  return `<footer class="answer-foot">
+    ${chips.length ? `<div class="foot-chips">${chips.join("")}</div>` : ""}
+    ${lines.length ? `<details class="foot-more"><summary>${ICON.gauge}<span>Modèle et requêtes</span></summary>${renderMarkdown(lines.map((line) => `- ${line}`).join("\n"))}</details>` : ""}
+  </footer>`;
+}
+
+/** Réponse de Claw : son texte (titres, remarques du moteur en encadré), puis le pied. */
+function answerHtml(body) {
+  const text = String(body || "").replace(/\r\n/g, "\n");
+  const cut = text.lastIndexOf("\n---\n");
+  const main = cut >= 0 ? text.slice(0, cut) : text;
+  return `<article class="message claw">
+    <div class="who"><span class="logo" aria-hidden="true"></span><span>Claw</span></div>
+    <div class="answer">${renderMarkdown(answerTitles(main))}</div>
+    ${cut >= 0 ? answerFoot(text.slice(cut + 5)) : ""}
+  </article>`;
+}
+
 function messageHtml(comment, isLastProgress, answer = "") {
   const body = comment.body || "";
   if (body.startsWith(LOG)) return "";
   if (body.includes(PROGRESS)) {
     const run = runOf(body);
     const events = run ? journalOf(run) : [];
+    const head = body.split("\n").find((line) => line.startsWith("**Claw")) || "";
+    const kind = runKind(head);
     if (events.length) {
-      const head = body.split("\n").find((line) => line.startsWith("**Claw")) || "";
-      return `<div class="progress-card journal">${renderMarkdown(head)}${transcriptHtml(events, { key: `run${run}`, live: isLastProgress, answer })}</div>`;
+      // « · 161 action(s) » : le compte est déjà dans la pastille du journal.
+      // Durée insécable : « 12 min 05 s » ne se coupe pas.
+      const title = renderMarkdown(head.replace(/\s*·\s*\d+\s+action\(s\)\s*$/, "")).replace(/^<p>|<\/p>$/g, "")
+        .replace(/(\d+) (min|s)\b/g, "$1 $2").replace(/(min) (\d)/g, "$1 $2");
+      return `<div class="run-card ${kind}">${transcriptHtml(events, { key: `run${run}`, live: isLastProgress, answer, title, kind })}</div>`;
     }
-    return `<div class="progress-card${isLastProgress ? "" : " old"}">${renderMarkdown(body)}</div>`;
+    return `<div class="progress-card ${kind}${isLastProgress ? "" : " old"}">${renderMarkdown(body)}</div>`;
   }
-  if (body.includes(ANSWER)) {
-    return `<article class="message claw"><div class="who">Claw</div>${renderMarkdown(body)}</article>`;
-  }
-  return `<article class="message user"><div class="who">${escapeHtml(comment.user ? comment.user.login : "Vous")}</div>${messageBody(body)}</article>`;
+  if (body.includes(ANSWER)) return answerHtml(body);
+  return userMessageHtml(comment.user ? comment.user.login : "", body);
+}
+
+/** Message de l'utilisateur en bulle ; le nom seulement quand c'est quelqu'un d'autre. */
+function userMessageHtml(login, body) {
+  const other = login && state.user && login !== state.user.login;
+  return `<article class="message user">${other ? `<div class="who">${escapeHtml(login)}</div>` : ""}${messageBody(body)}</article>`;
 }
 
 /** Onglets d'une session : la discussion, ses modifications (les fichiers sont dans le menu). */
@@ -2150,7 +2220,7 @@ function renderSessionView() {
         ${sessionTabs(session.number, "discussion")}
       </header>
       <div class="messages">
-        <article class="message user"><div class="who">${escapeHtml(session.issue.user ? session.issue.user.login : "Vous")}</div>${messageBody(taskOf(session.issue))}</article>
+        ${userMessageHtml(session.issue.user ? session.issue.user.login : "", taskOf(session.issue))}
         ${discussionBlocks(comments).map((block) => (block.message ? messageHtml(block.message, false)
           : attemptsHtml(block, (comment) => comment === lastProgress && !answered))).join("")}
       </div>
@@ -2161,18 +2231,28 @@ function renderSessionView() {
         ${!active && status && status.key === "failed" && !answered ? `<span>Le dernier passage a échoué.</span>` : ""}
         <span class="run-actions">
           ${active && run ? `<button class="small-link stop" data-action="stop">${ICON.stop}<span>Arrêter</span></button>` : ""}
-          ${run ? `<a href="${escapeHtml(run.html_url)}" target="_blank" rel="noopener noreferrer" class="small-link">${ICON.external}<span>Job</span></a>` : ""}
           ${!active && !unsent ? `<button class="small-link" data-action="retry">${ICON.retry}<span>Relancer</span></button>` : ""}
           ${!active ? `<button class="small-link" data-action="publish-site">${ICON.globe}<span>Mettre en ligne</span></button>` : ""}
-          ${session.issue.state === "open" ? `<button class="small-link" data-action="archive">${ICON.archive}<span>Archiver</span></button>` : ""}
-          ${!active ? `<button class="small-link" data-action="delete">${ICON.trash}<span>Supprimer</span></button>` : ""}
-          <a href="${escapeHtml(session.issue.html_url)}" target="_blank" rel="noopener noreferrer" class="small-link">${ICON.external}<span>Session</span></a>
+          <details class="more-menu">
+            <summary class="small-link" aria-label="Autres actions"><span class="dots" aria-hidden="true">•••</span></summary>
+            <div class="menu-list">
+              ${run ? `<a href="${escapeHtml(run.html_url)}" target="_blank" rel="noopener noreferrer" class="menu-item">${ICON.external}<span>Job sur GitHub</span></a>` : ""}
+              <a href="${escapeHtml(session.issue.html_url)}" target="_blank" rel="noopener noreferrer" class="menu-item">${ICON.external}<span>Session sur GitHub</span></a>
+              ${session.issue.state === "open" ? `<button class="menu-item" data-action="archive">${ICON.archive}<span>Archiver</span></button>` : ""}
+              ${!active ? `<button class="menu-item danger-item" data-action="delete">${ICON.trash}<span>Supprimer</span></button>` : ""}
+            </div>
+          </details>
         </span>
       </div>
     </section>`;
   for (const details of view.querySelectorAll("details[data-key]")) {
     if (opened.has(details.dataset.key)) details.open = opened.get(details.dataset.key);
   }
+  // Menu « ••• » : se ferme en touchant ailleurs dans la session, ou après un choix.
+  const menu = view.querySelector(".more-menu");
+  view.querySelector(".session").addEventListener("click", (event) => {
+    if (menu && menu.open && (!event.target.closest(".more-menu") || event.target.closest(".menu-item"))) menu.open = false;
+  });
   wireAttempts(view);
   for (const retry of view.querySelectorAll('[data-action="retry"]')) {
     retry.addEventListener("click", async () => {
