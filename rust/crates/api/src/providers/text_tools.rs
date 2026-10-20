@@ -239,9 +239,19 @@ const INVOKE_TAG: &str = "<invoke name=\"";
 const INVOKE_CLOSE: &str = "</invoke>";
 const PARAMETER_TAG: &str = "<parameter name=\"";
 const PARAMETER_CLOSE: &str = "</parameter>";
+/// Format XML de Qwen3-Coder, repris par Nemotron : `<tool_call><function=nom>
+/// <parameter=clé>valeur</parameter></function></tool_call>`. Vu le 20 octobre
+/// 2026 dans une session de Claw Web : Nemotron 3 Ultra l'écrivait dans son
+/// texte, et l'utilisateur lisait la balise au lieu de voir l'appel.
+const FUNCTION_TAG: &str = "<function=";
+const FUNCTION_CLOSE: &str = "</function>";
+const FUNCTION_PARAMETER_TAG: &str = "<parameter=";
+/// Débuts d'appel écrit en XML.
+const CALL_TAGS: [&str; 2] = [INVOKE_TAG, FUNCTION_TAG];
 
 /// Appels écrits à la manière de Claude, `<invoke name="outil"><parameter
-/// name="p">valeur</parameter></invoke>`, dans une balise d'enveloppe
+/// name="p">valeur</parameter></invoke>`, ou de Qwen3-Coder,
+/// `<function=outil><parameter=p>valeur</parameter></function>`, dans une balise d'enveloppe
 /// quelconque (`<function_calls>`, `<dots_function_call>`…) : certains modèles
 /// les écrivent dans leur texte, voire dans leur raisonnement, au lieu d'un
 /// appel natif. Retenus seulement s'ils terminent le texte, hors bloc de
@@ -257,22 +267,24 @@ pub fn salvage_invoke_calls(
         if let Some(calls) = invoke_run(&text[position..], tools) {
             return Some((wrapper_start(&text[..position]), calls));
         }
-        from = position + INVOKE_TAG.len();
+        from = position + 1;
     }
     None
 }
 
-/// Premier `<invoke name="` à partir de `from` qui n'est ni dans un bloc de
-/// code ni dans du code en ligne (un exemple n'est pas un appel).
+/// Premier début d'appel (`<invoke name="`, `<function=`) à partir de `from`
+/// qui n'est ni dans un bloc de code ni dans du code en ligne (un exemple
+/// n'est pas un appel).
 fn invoke_outside_code(text: &str, from: usize) -> Option<usize> {
     let mut from = from;
     loop {
-        let position = from + text.get(from..)?.find(INVOKE_TAG)?;
+        let rest = text.get(from..)?;
+        let position = from + CALL_TAGS.iter().filter_map(|tag| rest.find(tag)).min()?;
         let before = &text[..position];
         if before.matches("```").count().is_multiple_of(2) && !before.ends_with('`') {
             return Some(position);
         }
-        from = position + INVOKE_TAG.len();
+        from = position + 1;
     }
 }
 
@@ -290,15 +302,44 @@ fn invoke_run(text: &str, tools: &[ToolDefinition]) -> Option<Vec<(String, Value
         if rest.is_empty() || (invented && !calls.is_empty()) {
             return (!calls.is_empty()).then_some(calls);
         }
-        let (name, after) = rest.strip_prefix(INVOKE_TAG)?.split_once("\">")?;
-        let tool = tools.iter().find(|tool| tool.name == name)?;
-        let end = after.find(INVOKE_CLOSE)?;
-        calls.push((
-            name.to_string(),
-            invoke_arguments(&after[..end], &tool.input_schema)?,
-        ));
-        rest = &after[end + INVOKE_CLOSE.len()..];
+        if let Some(tail) = rest.strip_prefix(INVOKE_TAG) {
+            let (name, after) = tail.split_once("\">")?;
+            let tool = tools.iter().find(|tool| tool.name == name)?;
+            let end = after.find(INVOKE_CLOSE)?;
+            calls.push((
+                name.to_string(),
+                invoke_arguments(&after[..end], &tool.input_schema)?,
+            ));
+            rest = &after[end + INVOKE_CLOSE.len()..];
+        } else {
+            let (name, after) = rest.strip_prefix(FUNCTION_TAG)?.split_once('>')?;
+            let name = name.trim();
+            let tool = tools.iter().find(|tool| tool.name == name)?;
+            let end = after.find(FUNCTION_CLOSE)?;
+            calls.push((
+                name.to_string(),
+                function_arguments(&after[..end], &tool.input_schema)?,
+            ));
+            rest = &after[end + FUNCTION_CLOSE.len()..];
+        }
     }
+}
+
+/// Paramètres au format de Qwen3-Coder : `<parameter=clé>valeur</parameter>`.
+fn function_arguments(body: &str, schema: &Value) -> Option<Value> {
+    let mut arguments = serde_json::Map::new();
+    let mut rest = body.trim_start();
+    while !rest.is_empty() {
+        let (name, after) = rest.strip_prefix(FUNCTION_PARAMETER_TAG)?.split_once('>')?;
+        let name = name.trim();
+        let end = after.find(PARAMETER_CLOSE)?;
+        arguments.insert(
+            name.to_string(),
+            parameter_value(schema, name, &after[..end]),
+        );
+        rest = after[end + PARAMETER_CLOSE.len()..].trim_start();
+    }
+    Some(Value::Object(arguments))
 }
 
 fn invoke_arguments(body: &str, schema: &Value) -> Option<Value> {
@@ -390,9 +431,14 @@ fn wrapper_start(before: &str) -> usize {
 /// une balise en cours d'écriture (`<function_ca`), ou une balise d'enveloppe
 /// complète qui peut précéder un appel.
 fn invoke_reserve(pending: &str) -> usize {
-    let partial = (1..INVOKE_TAG.len())
-        .rev()
-        .find(|length| pending.ends_with(&INVOKE_TAG[..*length]))
+    let partial = CALL_TAGS
+        .iter()
+        .filter_map(|tag| {
+            (1..tag.len())
+                .rev()
+                .find(|length| pending.ends_with(&tag[..*length]))
+        })
+        .max()
         .unwrap_or(0);
     let before = &pending[..pending.len() - partial];
     if partial == 0 {
@@ -577,6 +623,45 @@ mod tests {
         // Suivi d'un texte : ce n'est pas la fin de la réponse, donc pas un appel.
         let followed = "<invoke name=\"bash\"><parameter name=\"command\">ls</parameter></invoke>\nEnsuite je lirai le fichier.";
         assert!(salvage_invoke_calls(followed, &tools).is_none());
+    }
+
+    #[test]
+    fn salvages_qwen_style_function_calls_written_in_text() {
+        let tools = invoke_tools();
+        // Le texte exact de Nemotron 3 Ultra dans une session de Claw Web.
+        let text = "<tool_call>\n<function=bash>\n<parameter=command>\ngrep -n \"Math\\.round\" README.md\n</parameter>\n<parameter=timeout>\n5000\n</parameter>\n</function>\n</tool_call>";
+        let (start, calls) = salvage_invoke_calls(text, &tools).expect("appel récupéré");
+        assert_eq!(start, 0);
+        assert_eq!(
+            calls,
+            vec![(
+                "bash".to_string(),
+                json!({"command": "grep -n \"Math\\.round\" README.md", "timeout": 5000})
+            )]
+        );
+        // Texte avant, deux appels ; un exemple dans un bloc de code n'est pas un appel.
+        let two = "Je lis puis je cherche.\n<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=bash>\n<parameter=command>\npwd\n</parameter>\n</function>\n</tool_call>";
+        let (start, calls) = salvage_invoke_calls(two, &tools).expect("deux appels");
+        assert_eq!(two[..start].trim_end(), "Je lis puis je cherche.");
+        assert_eq!(calls.len(), 2);
+        let fenced = "Format :\n```\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n```";
+        assert!(salvage_invoke_calls(fenced, &tools).is_none());
+        let unknown = "<function=rm_rf>\n<parameter=path>\n/\n</parameter>\n</function>";
+        assert!(salvage_invoke_calls(unknown, &tools).is_none());
+
+        // En flux : la balise est retenue dès son début, même coupée en morceaux.
+        let mut filter = InvokeFilter::default();
+        let mut shown = String::new();
+        for piece in [
+            "Je cherche.\n<tool_ca",
+            "ll>\n<func",
+            "tion=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>",
+        ] {
+            shown.push_str(&filter.push(piece));
+        }
+        let (raw, held_from) = filter.finish();
+        assert_eq!(shown.trim_end(), "Je cherche.");
+        assert!(raw[held_from..].starts_with("<tool_call>\n<function=bash>"));
     }
 
     #[test]
