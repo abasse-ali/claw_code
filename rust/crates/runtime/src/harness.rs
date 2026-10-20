@@ -122,6 +122,9 @@ pub enum Aid {
     /// compte faire, ou qui enchaîne les outils sans un mot, le dit dans une
     /// réponse en texte seul (outils coupés le temps d'une requête).
     Announce,
+    /// Une question sur le travail de l'agent (« tu fais quoi ? », « pourquoi
+    /// tu as fait ça ? ») reçoit une réponse, et rien d'autre : pas d'outils.
+    WorkQuestions,
 }
 
 impl Aid {
@@ -170,6 +173,7 @@ impl Aid {
             Self::RunScripts => "CLAW_RUN_SCRIPTS",
             Self::Photos => "CLAW_PHOTOS",
             Self::Announce => "CLAW_ANNOUNCE",
+            Self::WorkQuestions => "CLAW_WORK_QUESTIONS",
         }
     }
 }
@@ -427,8 +431,49 @@ fn holds_tests(dir: &Path) -> bool {
         })
 }
 
+/// Environnement virtuel du projet (`.venv`, `venv`) : son Python, en chemin
+/// relatif au projet, et s'il porte pytest. Vu dans une session de Claw Web :
+/// la vérification lancée avec le Python du système échouait (dépendances
+/// installées dans `.venv`), et l'agent les installait dans le Python du
+/// système pour la faire passer.
+fn project_venv(root: &Path) -> Option<(String, bool)> {
+    for name in [".venv", "venv"] {
+        let dir = root.join(name);
+        if !dir.join("pyvenv.cfg").is_file() {
+            continue;
+        }
+        let (program, sites) = if cfg!(windows) {
+            (
+                format!("{name}/Scripts/python.exe"),
+                vec![dir.join("Lib").join("site-packages")],
+            )
+        } else {
+            let sites = std::fs::read_dir(dir.join("lib"))
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|entry| entry.path().join("site-packages"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (format!("./{name}/bin/python"), sites)
+        };
+        if !root.join(program.trim_start_matches("./")).exists() {
+            continue;
+        }
+        let pytest = sites.iter().any(|site| site.join("pytest").is_dir());
+        return Some((program, pytest));
+    }
+    None
+}
+
 fn python_verify(root: &Path) -> Option<String> {
-    let python = python_program();
+    let venv = project_venv(root);
+    let python = venv.as_ref().map_or_else(
+        || python_program().to_string(),
+        |(program, _)| program.clone(),
+    );
+    let python = python.as_str();
     let in_test_dirs = ["tests", "test"]
         .iter()
         .any(|dir| holds_tests(&root.join(dir)));
@@ -464,7 +509,11 @@ fn python_verify(root: &Path) -> Option<String> {
     // Des tests écrits pour pytest, sans réglage : `unittest` n'y trouverait
     // aucun test (essai réel t4 : « aucun test n'a été trouvé ; le travail
     // n'est pas vérifié », pour douze tests pytest qui passaient).
-    if pytest_configured || (tests_written_for_pytest(root) && pytest_installed(python)) {
+    let pytest_here = || {
+        venv.as_ref()
+            .map_or_else(|| pytest_installed(python), |(_, pytest)| *pytest)
+    };
+    if pytest_configured || (tests_written_for_pytest(root) && pytest_here()) {
         return Some(format!("{python} -m pytest -q -x"));
     }
     if has_test_files(root) {
@@ -2626,7 +2675,7 @@ pub fn checklist_prompt(request: &str, earlier: Option<&str>, away: bool) -> Str
 
 /// Fin des messages que Claw renvoie au modèle après un contrôle : la réponse
 /// qui suivra est celle que l'utilisateur lira, elle doit répondre à sa demande.
-pub const FINAL_ANSWER_RULE: &str = "When this is dealt with, end with your final answer to the user's original request. The user reads only that last message and has not seen this note: it must stand on its own, written as the report the system prompt describes under \"Final answer\" (the outcome first, what was wrong and why, what you changed, how it was verified, what is left for the user), cover everything they asked for, including any explanation or instructions they requested (such as how to install, run or test the result), claim only what the files and your command outputs show, be complete without padding, and not refer to this note.";
+pub const FINAL_ANSWER_RULE: &str = "When this is dealt with, end with your final answer to the user's original request. The user reads only that last message and has not seen this note: it must stand on its own, written as the report the system prompt describes under \"Final answer\" (the outcome first, what was wrong and why, what you changed, how it was verified, what is left for the user), cover everything they asked for, including any explanation or instructions they requested (such as how to install, run or test the result), claim only what the files and your command outputs show, be complete without padding, and not refer to this note. It answers the user's own message: what Claw's checks raised is not theirs (never write that the user raised it); mention those fixes in one sentence at most, as your own findings.";
 
 // --- Persévérance ----------------------------------------------------------------------
 
@@ -2822,6 +2871,80 @@ pub fn update_note(steps: u32) -> String {
         "[Claw] You have worked through {steps} rounds of tool calls without a word for the user. Reply now with one to three short sentences for the user, in plain words and without code: where the work stands and what comes next. Tools are off for this one reply; you go on with the work right after."
     )
 }
+
+/// Tournures d'une question sur le travail de l'agent (texte sans accents, en
+/// minuscules).
+const WORK_QUESTIONS: &[&str] = &[
+    "tu fais quoi",
+    "que fais-tu",
+    "que fais tu",
+    "qu'est-ce que tu fais",
+    "qu'est ce que tu fais",
+    "tu es en train de faire quoi",
+    "tu as fait quoi",
+    "t'as fait quoi",
+    "qu'as-tu fait",
+    "qu'est-ce que tu as fait",
+    "qu'est ce que tu as fait",
+    "pourquoi tu as fait",
+    "pourquoi as-tu fait",
+    "pourquoi tu fais",
+    "pourquoi tu as change",
+    "pourquoi tu as touche",
+    "tu en es ou",
+    "t'en es ou",
+    "ou en es-tu",
+    "ou en es tu",
+    "il se passe quoi",
+    "qu'est-ce qui se passe",
+    "qu'est ce qui se passe",
+    "c'est quoi ce travail",
+    "c'est quoi tout ca",
+    "explique ce que tu fais",
+    "explique-moi ce que tu fais",
+    "what are you doing",
+    "what did you do",
+    "what have you done",
+    "why did you",
+    "what's going on",
+    "where are you at",
+];
+
+/// Verbes d'une demande de travail en tête de phrase : « Pourquoi tu as
+/// supprimé le fichier ? Remets-le » demande du travail, pas seulement une
+/// réponse.
+const WORK_ORDERS: &[&str] = &[
+    "ajoute", "arrete", "change", "continue", "corrige", "cree", "efface", "enleve", "fais",
+    "lance", "mets", "modifie", "publie", "refais", "remets", "remplace", "reprends", "supprime",
+    "teste", "add", "change", "continue", "create", "fix", "make", "remove", "run", "stop", "undo",
+];
+
+/// Le message de l'utilisateur est une question sur le travail de l'agent
+/// (ce qu'il fait, ce qu'il a fait, pourquoi), sans demande de travail.
+/// Vu le 20 octobre 2026 dans une session de Claw Web : à « Tu fais quoi !? »,
+/// l'agent a relancé tous les tests, écrit un nouveau fichier et répondu sur
+/// les remarques de son relecteur, en 65 actions, sans jamais répondre.
+#[must_use]
+pub fn asks_about_the_work(words: &str) -> bool {
+    let text = crate::team::without_accents(&words.to_lowercase()).replace('\u{2019}', "'");
+    if text.split_whitespace().count() > 20 {
+        return false;
+    }
+    let ordered = text
+        .split(['.', '!', '?', ',', ';', '\n'])
+        .filter_map(|sentence| sentence.split_whitespace().next())
+        .any(|first| {
+            let verb = first.split('-').next().unwrap_or(first);
+            WORK_ORDERS.contains(&verb) || first.contains("-le") || first.contains("-les")
+        });
+    !ordered
+        && WORK_QUESTIONS
+            .iter()
+            .any(|question| text.contains(question))
+}
+
+/// Note jointe à une question sur le travail : réponse en texte seul.
+pub const WORK_QUESTION_NOTE: &str = "[Claw] The user's message is a question about your work (what you are doing, what you did, or why), not a new task. Answer it now, directly and honestly, from the conversation and what you already know: what you did, why, and where things stand. Tools are off for this reply, and you do no work in this turn: if something should be done next, propose it in one sentence and let the user decide.";
 
 /// Après l'annonce en texte seul : le travail reprend, outils rendus.
 pub const GO_ON_NOTE: &str = "[Claw] Thank you. Go on with the work now.";
@@ -3715,7 +3838,7 @@ pub fn review_findings(answer: &str) -> Option<String> {
 #[must_use]
 pub fn review_feedback(findings: &str) -> String {
     format!(
-        "[Claw] Another model reviewed your changes and raised these points:\n{findings}\n\nCheck each point against the code and the user's request. Fix the ones that are real problems; ignore a point that is wrong and say why in one sentence. Do not rewrite what already works. {FINAL_ANSWER_RULE}"
+        "[Claw] Another model reviewed your changes and raised these points (they come from Claw's reviewer, not from the user, who does not see them):\n{findings}\n\nCheck each point against the code and the user's request. Fix the ones that are real problems; ignore a point that is wrong and say why in one sentence. Do not rewrite what already works. {FINAL_ANSWER_RULE}"
     )
 }
 
@@ -4262,6 +4385,36 @@ mod guide_tests {
 }
 
 #[cfg(test)]
+mod work_question_tests {
+    use super::asks_about_the_work;
+
+    #[test]
+    fn a_question_about_the_work_is_told_apart_from_a_work_order() {
+        for question in [
+            "Tu fais quoi !?",
+            "Qu’est-ce que tu fais ?",
+            "Pourquoi tu as fait ça ?",
+            "T'en es où ?",
+            "Où en es-tu avec le site ?",
+            "Il se passe quoi là ?",
+            "What are you doing?",
+        ] {
+            assert!(asks_about_the_work(question), "{question}");
+        }
+        for order in [
+            "Continue",
+            "Améliore le site",
+            "Corrige le formulaire, tu fais quoi avec les dates ?",
+            "Pourquoi tu as supprimé le fichier ? Remets-le",
+            "Fais quoi tu veux mais ajoute un pied de page",
+            "Tu fais quoi d'habitude pour tester une page ? Ajoute un test pour la page d'accueil, avec les cas limites et les erreurs de saisie de l'utilisateur, puis lance-le",
+        ] {
+            assert!(!asks_about_the_work(order), "{order}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod invented_turn_tests {
     use super::invented_turn;
 
@@ -4400,6 +4553,45 @@ mod tests {
         }
         let _ = fs::remove_dir_all(written);
         let _ = fs::remove_dir_all(functions);
+
+        // Un venv dans le projet, pytest dedans : la vérification passe par
+        // son Python (vu en session : l'agent installait sinon les
+        // dépendances dans le Python du système pour la faire passer).
+        let venv = temp_dir("pytest-venv");
+        fs::create_dir_all(venv.join("tests")).expect("dossier");
+        fs::write(
+            venv.join("tests").join("test_app.py"),
+            "import pytest\n\ndef test_a():\n    assert True\n",
+        )
+        .expect("fichier");
+        fs::write(venv.join(".venv").join("pyvenv.cfg"), "home = /usr/bin\n")
+            .or_else(|_| {
+                fs::create_dir_all(venv.join(".venv"))?;
+                fs::write(venv.join(".venv").join("pyvenv.cfg"), "home = /usr/bin\n")
+            })
+            .expect("pyvenv.cfg");
+        let (program, site) = if cfg!(windows) {
+            (
+                ".venv/Scripts/python.exe",
+                venv.join(".venv").join("Lib").join("site-packages"),
+            )
+        } else {
+            (
+                "./.venv/bin/python",
+                venv.join(".venv/lib/python3.12/site-packages"),
+            )
+        };
+        let interpreter = venv.join(program.trim_start_matches("./"));
+        fs::create_dir_all(interpreter.parent().expect("dossier")).expect("dossier");
+        fs::write(&interpreter, "").expect("python du venv");
+        fs::create_dir_all(site.join("pytest")).expect("pytest du venv");
+        let chosen = detect_verify_commands(&venv);
+        assert_eq!(
+            chosen[0],
+            format!("{program} -m pytest -q -x"),
+            "{chosen:?}"
+        );
+        let _ = fs::remove_dir_all(venv);
 
         let pytest = temp_dir("pytest");
         fs::write(pytest.join("conftest.py"), "").expect("fichier");

@@ -214,6 +214,13 @@ fn cooldown_for(error: &ApiError) -> Duration {
         reset.max(Duration::from_secs(30))
     } else if api_status(error) == Some(403) {
         Duration::from_secs(24 * 3_600)
+    } else if api_status(error) == Some(404) && !text.contains("no endpoints found") {
+        // Modèle introuvable chez son fournisseur (vu le 20 octobre 2026 :
+        // Nemotron 3 Super chez NVIDIA, « Function not found for account ») :
+        // il ne revient pas dans cinq minutes, et chaque étape repassait par lui.
+        // Le « no endpoints found » d'OpenRouter dépend de la requête (images,
+        // outils) : il garde la mise de côté ordinaire.
+        Duration::from_secs(6 * 3_600)
     } else if text.contains("perday") {
         // Les quotas du jour de Google repartent à minuit, heure du Pacifique.
         Duration::from_secs(secs_until_pacific_midnight(now_epoch_secs()) + 60)
@@ -751,6 +758,21 @@ mod tests {
             super::cooldown_for(&restricted),
             Duration::from_secs(24 * 3_600)
         );
+        // Introuvable chez NVIDIA : mis de côté six heures ; un « no endpoints
+        // found » d'OpenRouter (selon la requête), cinq minutes.
+        let missing = api_error(
+            404,
+            r#"{"status":404,"title":"Not Found","detail":"Function 'ac74': Not found for account 'x'"}"#,
+        );
+        assert_eq!(
+            super::cooldown_for(&missing),
+            Duration::from_secs(6 * 3_600)
+        );
+        let no_endpoint = api_error(
+            404,
+            r#"{"error":{"message":"No endpoints found that support image input"}}"#,
+        );
+        assert_eq!(super::cooldown_for(&no_endpoint), Duration::from_secs(300));
 
         let reset_ms = (super::now_epoch_secs() + 40) * 1_000;
         let per_minute = api_error(

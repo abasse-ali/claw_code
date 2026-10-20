@@ -407,6 +407,9 @@ struct TurnAids {
     silent_steps: u32,
     /// Annonce à demander à la requête suivante (en texte seul).
     announce_due: Option<String>,
+    /// Le message est une question sur le travail : la réponse en texte seul
+    /// est la réponse du tour (pas de reprise du travail).
+    work_question: bool,
     /// Poursuites accordées au tour de design resté sous la barre.
     continuations: usize,
     /// Revues notées au moment de la dernière poursuite.
@@ -1663,6 +1666,19 @@ where
         // Ultracode : un agent au contexte vierge étudie la demande avant le
         // travail ; à la fin, un vérificateur indépendant remplace le contrôle
         // des exigences que le modèle faisait sur son propre travail.
+        // Question sur le travail (« tu fais quoi ? ») : la première requête
+        // part sans outils, et sa réponse termine le tour.
+        if !self.subagent
+            && harness::enabled(Aid::WorkQuestions)
+            && harness::asks_about_the_work(crate::project::own_words(&request_text))
+        {
+            aids.work_question = true;
+            aids.announce_due = Some(format!(
+                "{}{}",
+                harness::WORK_QUESTION_NOTE,
+                harness::language_note(self.response_language.as_deref())
+            ));
+        }
         aids.checklisted = aids.ultracode;
         if aids.ultracode {
             self.explore_stage(&request_text, earlier.as_deref(), &mut aids, &mut prompter);
@@ -1880,7 +1896,7 @@ where
 
             // L'annonce est faite (texte seul) : ce n'est pas la réponse du
             // tour, le travail reprend avec les outils.
-            if announcing && pending_tool_uses.is_empty() {
+            if announcing && pending_tool_uses.is_empty() && !aids.work_question {
                 self.session.messages.push(ConversationMessage::user_text(
                     harness::GO_ON_NOTE.to_string(),
                 ));
@@ -7600,6 +7616,36 @@ mod tests {
         assert_eq!(observed.requests.len(), 3);
         assert!(!observed.requests[2].contains("You started working"));
         assert!(!observed.requests[2].contains("Go on with the work"));
+    }
+
+    #[test]
+    fn a_question_about_the_work_gets_an_answer_and_no_work() {
+        let _serial = crate::test_serial();
+        // Vu dans une session de Claw Web : à « Tu fais quoi !? », 65 actions
+        // et une réponse sur autre chose. La première requête part sans outils,
+        // et sa réponse termine le tour.
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                text_step("J'ai repris la refonte du site : les formulaires ne s'ouvraient pas, je les ai réparés. Je m'arrête là, dites-moi si je continue."),
+                tool_step("bash", r#"{"command":"ls"}"#),
+            ],
+            vec![PASSING],
+        );
+        let request = "Tu fais quoi !?\n\n[Claw] Earlier conversation of this session, for context:\n\nAméliore le site";
+        let summary = runtime.run_turn(request, None).expect("tour");
+        assert_eq!(summary.iterations, 1, "une seule requête : la réponse");
+        let observed = observed.borrow();
+        assert_eq!(observed.text_only, vec![0]);
+        assert!(observed.requests[0].contains("The user's message is a question about your work"));
+        assert!(!observed.requests[0].contains("Go on with the work"));
+        drop(observed);
+
+        // Une demande de travail ordinaire : outils dès la première requête.
+        let (mut runtime, observed, _) = aided_runtime(vec![text_step("Fait.")], vec![]);
+        runtime
+            .run_turn("Corrige le formulaire", None)
+            .expect("tour");
+        assert!(observed.borrow().text_only.is_empty());
     }
 
     #[test]
