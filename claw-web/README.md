@@ -136,7 +136,11 @@ L'anneau du haut suit le fournisseur du modèle choisi :
 - **Google Gemini** : la limite par jour du modèle quand elle est relevée (« 20/jour » pour
   Gemini 3.8 Flash). Google ne donne pas le compte en direct ; la consommation exacte est sur
   AI Studio, Rate limit.
-- **NVIDIA** : environ 40 requêtes par minute (« 40/min »), sans quota par jour.
+- **NVIDIA** : les requêtes encore libres dans la minute, sur environ 40 (« 28/min »), en
+  direct : le moteur note dans le journal l'heure de chaque requête de Claw, et l'appli compte
+  celles de la dernière minute dans les sessions en cours (la session ouverte, ou les autres
+  relues toutes les 20 s). L'anneau se remplit à mesure que la minute glisse ; « 40/min » quand
+  rien ne tourne. Pas de quota par jour.
 
 Le détail (toucher l'anneau) montre les trois fournisseurs, celui du modèle choisi d'abord ; le
 choix du modèle donne le quota de chaque onglet ; chaque réponse de Claw dit combien de requêtes
