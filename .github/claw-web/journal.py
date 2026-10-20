@@ -12,6 +12,7 @@ import collections
 import gzip
 import hashlib
 import json
+import time
 import urllib.parse
 import urllib.request
 
@@ -187,6 +188,9 @@ class Journal:
         elif kind == "system" and event.get("subtype") == "notice":
             self._push({"k": "notice", "t": " ".join(str(event.get("text", "")).split())})
         elif kind == "assistant":
+            # Une réponse du modèle, une requête : son heure, pour le compteur par minute de
+            # l'appli (NVIDIA : environ 40 requêtes par minute). L'appli ne l'affiche pas.
+            self._push({"k": "req", "at": int(time.time())})
             for part in message.get("content") or []:
                 what = part.get("type")
                 if what == "thinking" and str(part.get("thinking", "")).strip():

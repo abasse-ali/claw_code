@@ -74,6 +74,13 @@ const state = {
   quota: null,
   quotaError: "",
   quotaLoading: false,
+  // Requêtes à NVIDIA des passages suivis (numéro du passage : heures, en secondes), d'après
+  // leur journal : le compteur du haut en tire les requêtes de la dernière minute.
+  liveRequests: new Map(),
+  // Sessions en cours suivies hors de leur page, pour ce compteur (numéro : { settings, logs }).
+  watched: new Map(),
+  meterTimer: null,
+  requestTimer: null,
   // Liste des sessions du tiroir, et sessions cochées pour être effacées.
   drawerSessions: [],
   selecting: false,
@@ -1396,6 +1403,22 @@ function showQuotaLabel() {
   pill.className = "quota-meter";
   // Modèle de Gemini ou de NVIDIA : leurs limites, pas le compte d'OpenRouter.
   const provider = providerOf(state.settings.model);
+  clearTimeout(state.meterTimer);
+  if (provider === "nvidia") {
+    // Requêtes encore libres dans la minute, d'après le journal des passages suivis ; l'anneau
+    // se vide avec elles et se remplit à mesure que la minute glisse.
+    const limit = KEYED_PROVIDERS.find((entry) => entry.key === "nvidia").perMinute;
+    const used = requestsLastMinute();
+    const left = Math.max(0, limit - used);
+    const share = left / limit;
+    pill.classList.add(share > 0.5 ? "ok" : share > 0.1 ? "warn" : "low", "provider");
+    pill.innerHTML = `<svg class="ring" viewBox="0 0 20 20" aria-hidden="true"><circle class="track" cx="10" cy="10" r="7.5"/>`
+      + `<circle class="level" cx="10" cy="10" r="7.5" pathLength="100" stroke-dasharray="${Math.round(share * 100)} 100" transform="rotate(-90 10 10)"/></svg>`
+      + `<strong>${left}</strong><small>/min</small>`;
+    pill.setAttribute("aria-label", `NVIDIA : environ ${left} requêtes libres sur ${limit} dans la minute`);
+    if (used) state.meterTimer = setTimeout(showQuotaLabel, 5000);
+    return;
+  }
   if (provider !== "openrouter") {
     const quota = providerQuota(provider, state.settings.model);
     pill.classList.add("ok", "provider");
@@ -1464,6 +1487,7 @@ async function openQuota() {
       body = `<p>${escapeHtml(state.quotaError || "OpenRouter n'a pas donné le quota gratuit de cette clé.")}</p>`;
     }
     const chosen = providerOf(state.settings.model);
+    const nvidiaUsed = requestsLastMinute();
     const missing = (key) => {
       const provider = KEYED_PROVIDERS.find((entry) => entry.key === key);
       return secrets[provider.secret] ? "" : `<p class="help">Pas de clé ${escapeHtml(provider.label)} dans le moteur : Réglages, Moteur.</p>`;
@@ -1473,8 +1497,8 @@ async function openQuota() {
       gemini: `<p>Offre gratuite de Google : quota par jour et par modèle, compté par projet. Relevé : 20 requêtes par jour pour Gemini 3.8 Flash.</p>
         <p class="help">Google ne donne pas ce compte en direct : votre consommation est sur <a href="https://aistudio.google.com/rate-limit" target="_blank" rel="noopener noreferrer">AI Studio, Rate limit</a>. Remise à zéro à ${escapeHtml(nextMidnightIn("America/Los_Angeles"))} (minuit, heure du Pacifique). Chaque réponse de Claw dit combien de requêtes son passage a prises.</p>
         ${missing("gemini")}`,
-      nvidia: `<p>Gratuit pour les membres du programme pour développeurs de NVIDIA : environ 40 requêtes par minute pour le compte, aucun quota par jour annoncé.</p>
-        <p class="help">Quand la limite par minute est atteinte, Claw attend et réessaie. Chaque réponse de Claw dit combien de requêtes son passage a prises.</p>
+      nvidia: `<p>${nvidiaUsed ? `Dernière minute : ${nvidiaUsed} requête${nvidiaUsed > 1 ? "s" : ""} de Claw, environ ${Math.max(0, 40 - nvidiaUsed)} encore libres sur 40.` : "Aucune requête de Claw dans la dernière minute : environ 40 libres."}</p>
+        <p class="help">Compté d'après le journal des sessions en cours, publié toutes les 20 à 30 secondes. Gratuit pour les membres du programme pour développeurs de NVIDIA : environ 40 requêtes par minute pour le compte, aucun quota par jour annoncé. Quand la limite est atteinte, Claw attend et réessaie. Chaque réponse de Claw dit combien de requêtes son passage a prises.</p>
         ${missing("nvidia")}`,
     };
     const labels = { openrouter: "OpenRouter", ...Object.fromEntries(KEYED_PROVIDERS.map((provider) => [provider.key, provider.label])) };
@@ -1960,7 +1984,8 @@ async function showHome() {
     await numberOldSessions(sessions);
     const recent = view.querySelector(".recent");
     if (recent) {
-      recent.innerHTML = sessions.filter((issue) => issue.state === "open").slice(0, 8).map(sessionItem).join("")
+      // Pas `map(sessionItem)` : l'indice passé en second deviendrait « à cocher ».
+      recent.innerHTML = sessions.filter((issue) => issue.state === "open").slice(0, 8).map((issue) => sessionItem(issue)).join("")
         || '<li class="empty">Décrivez une tâche ci-dessous : Claw la fera dans le dépôt choisi et proposera une pull request.</li>';
     }
   } catch (error) {
@@ -2374,6 +2399,7 @@ async function pollSession(force = false) {
   session.issue = issue;
   session.comments = comments;
   session.settings = settingsOf(issue);
+  noteRequests(session);
   const run = latestRun(session.settings.repo, session.number);
   session.step = "";
   if (run && run.status === "in_progress") {
@@ -2420,6 +2446,66 @@ async function pollSession(force = false) {
   if (state.session === session && !document.hidden) {
     state.pollTimer = setTimeout(() => pollSession().catch(failure), session.active ? 4000 : 30000);
   }
+}
+
+/** Heures des requêtes de chaque passage d'une session qui travaille avec un modèle de NVIDIA,
+ * d'après son journal (événements « req » du moteur, une par réponse du modèle). */
+function noteRequests(session) {
+  if (providerOf(session.settings && session.settings.model) !== "nvidia") return;
+  const byRun = new Map();
+  for (const log of session.logs.values()) {
+    const times = log.events.filter((event) => event.k === "req" && event.at).map((event) => event.at);
+    if (times.length) byRun.set(log.run, [...(byRun.get(log.run) || []), ...times]);
+  }
+  for (const [run, times] of byRun) state.liveRequests.set(run, times);
+  showQuotaLabel();
+}
+
+/** Requêtes envoyées à NVIDIA dans la dernière minute par les passages suivis ; les passages
+ * sans requête depuis dix minutes sont oubliés. */
+function requestsLastMinute() {
+  const now = Date.now() / 1000;
+  let count = 0;
+  for (const [run, times] of state.liveRequests) {
+    if (times.every((at) => now - at > 600)) state.liveRequests.delete(run);
+    else count += times.filter((at) => now - at < 60).length;
+  }
+  return count;
+}
+
+/** Hors de la page d'une session (la sienne s'en charge) : les sessions en cours relues toutes
+ * les 20 s, pour le compteur par minute de NVIDIA ; une fois par minute sinon. */
+async function watchRequests() {
+  clearTimeout(state.requestTimer);
+  let busy = false;
+  if (state.github && !document.hidden && !state.session && providerOf(state.settings.model) === "nvidia") {
+    try {
+      const engine = state.settings.engine;
+      await refreshRuns();
+      const running = state.runs.filter((entry) => entry.status === "in_progress")
+        .map((entry) => Number((String(entry.display_title || "").match(/#(\d+)$/) || [])[1])).filter(Boolean);
+      for (const number of state.watched.keys()) if (!running.includes(number)) state.watched.delete(number);
+      for (const number of running) {
+        busy = true;
+        let watched = state.watched.get(number);
+        if (!watched) {
+          watched = { settings: settingsOf(await state.github.issue(engine, number)), logs: new Map(), comments: [] };
+          state.watched.set(number, watched);
+        }
+        const since = watched.comments.reduce((last, comment) => (comment.updated_at > last ? comment.updated_at : last), "");
+        const fresh = await state.github.comments(engine, number, since);
+        const byId = new Map(watched.comments.map((comment) => [comment.id, comment]));
+        for (const comment of fresh) byId.set(comment.id, comment);
+        // Seuls les journaux servent ici : le reste n'est pas gardé.
+        watched.comments = [...byId.values()].filter((comment) => (comment.body || "").startsWith(LOG));
+        await readJournals(watched, watched.comments);
+        noteRequests(watched);
+      }
+    } catch {
+      // GitHub injoignable : le compteur garde ce qu'il sait, nouvel essai au tour suivant.
+    }
+  }
+  state.requestTimer = setTimeout(() => watchRequests().catch(() => {}), busy ? 20_000 : 60_000);
 }
 
 /** Décode les parties du journal détaillé nouvelles ou modifiées. */
@@ -3063,6 +3149,7 @@ function showSettings(first = false, justConnected = false) {
       saveSettings();
       showQuotaLabel();
       refreshQuota();
+      watchRequests().catch(() => {});
       toast(`Connecté en tant que ${state.user.login}`);
       $("#settings-button").classList.add("active");
       showSettings(false, true);
@@ -3297,6 +3384,7 @@ async function boot() {
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && state.session) pollSession().catch(failure);
     if (!document.hidden) refreshQuota();
+    if (!document.hidden) watchRequests().catch(() => {});
   });
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("sw.js").catch(() => {});
@@ -3308,6 +3396,7 @@ async function boot() {
       state.github = github;
       showQuotaLabel();
       refreshQuota();
+      watchRequests().catch(() => {});
       const engine = await github.repository(state.settings.engine).catch(() => null);
       if (engine) state.engineRef = engine.default_branch || "main";
       if (moved) announceMove(moved, Boolean(engine));

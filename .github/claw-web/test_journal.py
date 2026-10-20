@@ -1,8 +1,10 @@
 """Journal d'un passage : les photos trouvées par l'agent deviennent des vignettes de l'appli,
-les outils de design sont dits en quelques mots (journal.Journal, run.describe)."""
+les outils de design sont dits en quelques mots, chaque requête au modèle a son heure
+(journal.Journal, run.describe)."""
 
 import json
 import os
+import time
 import unittest
 
 os.environ.setdefault("GITHUB_REPOSITORY", "o/claw-sessions")
@@ -85,6 +87,21 @@ class JournalPhotosTest(unittest.TestCase):
             {"type": "tool_result", "tool_name": "Icon", "content": json.dumps({"icons": [{"svg": "<svg/>"}]})}]}})
         # Le SVG est pour le modèle : le journal n'en garde rien.
         self.assertEqual((log.events[-1]["i"], log.events[-1]["r"]), ({"names": ["wallet"]}, {}))
+
+
+class JournalRequestsTest(unittest.TestCase):
+    def test_each_model_reply_is_one_request_with_its_time(self):
+        log = Journal()
+        before = int(time.time())
+        log.add({"type": "assistant", "message": {"content": [{"type": "text", "text": "Je lis le plan."}]}})
+        log.add({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "read_file", "input": {"path": "PLAN.md"}}]}})
+        log.add({"type": "user", "message": {"content": [{"type": "tool_result", "content": "…"}]}})
+        requests = [event for event in log.events if event["k"] == "req"]
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(all(before <= event["at"] <= int(time.time()) for event in requests))
+        # L'heure précède ce que dit la réponse : le reste du journal ne bouge pas.
+        self.assertEqual([event["k"] for event in log.events], ["req", "text", "req", "tool"])
 
 
 if __name__ == "__main__":
