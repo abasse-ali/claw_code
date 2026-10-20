@@ -250,8 +250,10 @@ function eventHtml(event, key, lastTodo) {
       return `<details class="ev think" data-key="${key}"><summary>${ICONS.think}<span class="verb">Réflexion</span>`
         + `<span class="target">${escapeHtml(String(event.t || "").replace(/\s+/g, " ").slice(0, 120))}</span></summary>`
         + `<div class="ev-body think-text">${escapeHtml(event.t || "")}</div></details>`;
-    case "text":
-      return `<div class="ev text">${renderMarkdown(event.t || "")}</div>`;
+    case "text": {
+      const text = withoutCallMarkup(event.t);
+      return text ? `<div class="ev text">${renderMarkdown(text)}</div>` : "";
+    }
     case "notice":
       // « nvidia:nvidia/nemotron-3-super-120b-a12b » devient « nemotron-3-super-120b-a12b ».
       return `<div class="ev notice">${escapeHtml(String(event.t || "").replace(/\b(?:nvidia|gemini|ollama):(?:[\w.-]+\/)?([\w.:-]+)/g, "$1"))}</div>`;
@@ -267,6 +269,33 @@ function eventHtml(event, key, lastTodo) {
     default:
       return "";
   }
+}
+
+/** Un appel d'outil écrit en texte par le modèle (`<tool_call>`, `<function=…>`, `<invoke …>`),
+ * jamais exécuté : retiré du texte montré. */
+export function withoutCallMarkup(text) {
+  return String(text || "")
+    .replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/g, "")
+    .replace(/<function_calls>[\s\S]*?(?:<\/function_calls>|$)/g, "")
+    .replace(/<invoke\b[\s\S]*?(?:<\/invoke>|$)/g, "")
+    .replace(/<function=[\s\S]*?(?:<\/function>|$)/g, "")
+    .trim();
+}
+
+/** Les réponses que Claw a fait reprendre : un rapport (« **Résultat** »), ou un long texte suivi
+ * d'une remarque de ses vérifications, quand un autre texte vient après. Le journal les replie. */
+function draftAnswers(events, repeated) {
+  const drafts = new Set();
+  const lastText = events.map((event, index) => event.k === "text" && !repeated.has(index)).lastIndexOf(true);
+  const answered = repeated.size > 0;
+  events.forEach((event, index) => {
+    if (event.k !== "text" || repeated.has(index) || (index === lastText && !answered)) return;
+    const text = String(event.t || "").trim();
+    const next = events.slice(index + 1).find((later) => later.k !== "req" && later.k !== "think");
+    const later = events.slice(index + 1).some((other) => other.k === "text");
+    if ((later || answered) && (/^\*\*Résultat/.test(text) || (next && next.k === "notice" && text.length > 300))) drafts.add(index);
+  });
+  return drafts;
 }
 
 /** Les textes de la fin du passage (après sa dernière action) que la réponse publiée reprend :
@@ -302,8 +331,16 @@ export function transcriptHtml(events, { key, live, answer = "", title = "Journa
   const tools = events.filter((event) => event.k === "tool").length;
   const lastTodo = events.map((event) => event.k === "tool" && event.n === "TodoWrite").lastIndexOf(true);
   const repeated = repeatedInAnswer(events, answer);
-  const rows = events.map((event, index) => (repeated.has(index) ? ""
-    : eventHtml(event, `${key}:${index}`, live && index === lastTodo))).filter(Boolean);
+  const drafts = draftAnswers(events, repeated);
+  const rows = events.map((event, index) => {
+    if (repeated.has(index)) return "";
+    if (drafts.has(index)) {
+      return `<details class="ev draft" data-key="${key}:${index}"><summary>${ICONS.edit}<span class="verb">Première réponse</span>`
+        + `<span class="target">reprise après les vérifications de Claw</span></summary>`
+        + `<div class="ev-body ev text">${renderMarkdown(withoutCallMarkup(event.t))}</div></details>`;
+    }
+    return eventHtml(event, `${key}:${index}`, live && index === lastTodo);
+  }).filter(Boolean);
   // Long journal : les dernières étapes en vue, les précédentes à déplier.
   const older = rows.length > RECENT_STEPS + 10 ? rows.splice(0, rows.length - RECENT_STEPS) : [];
   const earlier = older.length
