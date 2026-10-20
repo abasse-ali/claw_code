@@ -226,6 +226,80 @@ function openPhoto({ photo, credit, source }) {
   sheet.hidden = false;
 }
 
+/** Script de démarrage d'un serveur Linux (cloud-init) : il installe l'exécuteur des sessions
+ * (claw-cloud.sh) avec un jeton d'inscription valable une heure. */
+function cloudInitScript(engine, token, expires) {
+  const until = expires ? new Date(expires).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }) : "dans une heure";
+  return [
+    "#!/bin/bash",
+    `# Claw Web : exécuteur des sessions de ${engine} (jeton d'inscription valable jusqu'à ${until}).`,
+    `curl -fsSL https://raw.githubusercontent.com/${CLAW_SOURCE}/main/.github/claw-web/pc/claw-cloud.sh -o /usr/local/bin/claw-cloud`,
+    "chmod 755 /usr/local/bin/claw-cloud",
+    `claw-cloud install --repo ${engine} --token ${token}`,
+    "",
+  ].join("\n");
+}
+
+/** Serveur gratuit dans le nuage (Oracle Cloud, offre « Always Free ») : les étapes, et le
+ * script de démarrage à coller, préparé avec un jeton d'inscription neuf. */
+function openCloudRunner() {
+  const engine = state.settings.engine;
+  const sheet = $("#sheet");
+  sheet.innerHTML = `
+    <div class="sheet-panel cloud-panel" role="dialog" aria-modal="true" aria-label="Serveur gratuit dans le nuage">
+      <div class="sheet-head"><strong>Serveur gratuit dans le nuage</strong><button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button></div>
+      <div class="cloud-steps">
+        <p class="help">Un serveur d'Oracle Cloud, gratuit sans limite de durée (offre « Always Free » : 2 cœurs ARM, 12 Go de mémoire, 200 Go de disque), fait tourner vos sessions jour et nuit, sans votre PC et sans minutes de GitHub.</p>
+        <ol>
+          <li>Créez un compte sur <a href="https://signup.cloud.oracle.com/" target="_blank" rel="noopener noreferrer">signup.cloud.oracle.com</a>. Oracle demande une carte pour vérifier votre identité ; rien n'est prélevé tant que vous restez dans l'offre gratuite.</li>
+          <li>Préparez le script ci-dessous (il contient un jeton d'inscription valable une heure), puis copiez-le.</li>
+          <li>Dans la console d'Oracle : Compute, Instances, <em>Create instance</em>. Image : <strong>Ubuntu 24.04</strong>. Shape : <strong>Ampere VM.Standard.A1.Flex</strong>, 2 OCPU et 12 Go. Dans <em>Advanced options</em>, <em>Management</em>, collez le script dans <em>Initialization script</em> (cloud-init). Créez l'instance.</li>
+          <li>Comptez 15 à 25 minutes : le serveur installe tout seul Docker et l'exécuteur, puis apparaît en ligne dans « Moteur » ci-dessus. Choisissez « Sur ma machine » dans Sessions.</li>
+        </ol>
+        <button type="button" class="primary" data-action="cloud-script">Préparer le script</button>
+        <div class="cloud-script" hidden>
+          <pre class="io-v"></pre>
+          <button type="button" class="secondary" data-action="cloud-copy">Copier le script</button>
+        </div>
+        <p class="help">Si Oracle répond « Out of capacity », réessayez plus tard ou dans un autre domaine de disponibilité. Oracle peut arrêter un serveur gratuit resté inactif sept jours : relancez-le depuis la console (Instances, <em>Start</em>) ; passer le compte en « Pay As You Go » l'évite, sans frais tant que vous restez dans l'offre gratuite. Jeton expiré avant l'installation : préparez un nouveau script et, dans la console d'Oracle (Instances, <em>Run command</em> ou Cloud Shell), lancez <code>sudo claw-cloud register --repo ${escapeHtml(engine)} --token NOUVEAU_JETON</code>.</p>
+      </div>
+    </div>`;
+  sheet.onclick = (event) => {
+    if (event.target === sheet || event.target.closest("[data-close]")) {
+      sheet.hidden = true;
+      sheet.innerHTML = "";
+    }
+  };
+  let script = "";
+  sheet.querySelector('[data-action="cloud-script"]').addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const answer = await state.github.registrationToken(engine);
+      script = cloudInitScript(engine, answer.token, answer.expires_at);
+      const box = sheet.querySelector(".cloud-script");
+      box.querySelector("pre").textContent = script;
+      box.hidden = false;
+      button.textContent = "Préparer un nouveau script";
+    } catch (error) {
+      toast(error.status === 403
+        ? "GitHub refuse le jeton d'inscription : le jeton de l'appli doit avoir l'autorisation Administration (écriture) du dépôt des sessions"
+        : error.message);
+    } finally {
+      button.disabled = false;
+    }
+  });
+  sheet.querySelector('[data-action="cloud-copy"]').addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(script);
+      toast("Script copié : collez-le dans Initialization script, chez Oracle");
+    } catch {
+      toast("Copie refusée par le navigateur : sélectionnez le script à la main");
+    }
+  });
+  sheet.hidden = false;
+}
+
 /** Capture d'écran de l'agent, entière (rangée sur la branche des fichiers du moteur) ; sa
  * vignette s'affiche le temps qu'elle arrive, ou seule quand elle n'a pas pu être rangée. */
 async function openShot({ shot, thumb, label }) {
@@ -484,7 +558,7 @@ function runStatus(run) {
   if (!run) return null;
   if (run.status === "queued" || run.status === "waiting" || run.status === "pending" || run.status === "requested") {
     // Sur le PC, une session attend tant que le PC et Docker Desktop ne sont pas lancés.
-    return { key: "queued", label: state.settings.runner ? "En attente du PC (allumé, Docker Desktop lancé)" : "En file d'attente" };
+    return { key: "queued", label: state.settings.runner ? "En attente d'une machine (serveur, ou PC allumé avec Docker Desktop)" : "En file d'attente" };
   }
   if (run.status === "in_progress") return { key: "running", label: "Claw travaille" };
   if (run.conclusion === "success") return { key: "done", label: "Terminé" };
@@ -2579,19 +2653,25 @@ async function engineChecks() {
       add(false, `Secret ${name} : ${error.message}`);
     }
   }
-  // Sessions sur le PC : l'exécuteur `claw-pc` doit être en ligne.
+  // Sessions sur vos machines (PC, serveur dans le nuage) : un exécuteur `claw-pc` en ligne.
   if (state.settings.runner) {
     try {
       const mine = (await state.github.runners(engine))
         .filter((runner) => (runner.labels || []).some((label) => label.name === state.settings.runner));
-      const online = mine.find((runner) => runner.status === "online");
-      if (online) add(true, `Exécuteur du PC ${online.name} en ligne${online.busy ? ", en session" : ""}`);
-      else if (mine.length) add(false, `Exécuteur du PC ${mine[0].name} hors ligne : allumez le PC et Docker Desktop`);
-      else add(false, "Aucun exécuteur du PC : lancez claw-pc.ps1 install (.github/claw-web/pc du code de Claw)");
+      const online = mine.filter((runner) => runner.status === "online");
+      const offline = mine.filter((runner) => runner.status !== "online").map((runner) => runner.name);
+      if (online.length) {
+        add(true, `Exécuteur${online.length > 1 ? "s" : ""} en ligne : ${online.map((runner) => `${runner.name}${runner.busy ? " (en session)" : ""}`).join(", ")}`
+          + (offline.length ? ` ; hors ligne : ${offline.join(", ")}` : ""));
+      } else if (mine.length) {
+        add(false, `Exécuteur${mine.length > 1 ? "s" : ""} hors ligne : ${offline.join(", ")} (serveur arrêté, ou PC éteint)`);
+      } else {
+        add(false, "Aucun exécuteur : installez le serveur gratuit (bouton ci-dessous) ou celui du PC (claw-pc.ps1)");
+      }
     } catch (error) {
       checks.push(`<li>${escapeHtml(error.status === 403
-        ? "État de l'exécuteur du PC inconnu : le jeton n'a pas l'autorisation Administration (lecture)"
-        : `Exécuteur du PC : ${error.message}`)}</li>`);
+        ? "État des exécuteurs inconnu : le jeton n'a pas l'autorisation Administration (lecture)"
+        : `Exécuteurs : ${error.message}`)}</li>`);
     }
   }
   // Fournisseurs à clé, facultatifs : leur absence n'est pas une erreur (point gris).
@@ -2650,10 +2730,11 @@ function showSettings(first = false, justConnected = false) {
       </form>
       <h2>Sessions</h2>
       <fieldset class="theme-choice runner-choice">
-        ${[["", "Sur une machine de GitHub (minutes du compte)"], ["claw-pc", "Sur mon PC (Docker Desktop, sans minutes)"]].map(([value, label]) => `
+        ${[["", "Sur une machine de GitHub (minutes du compte)"], ["claw-pc", "Sur ma machine : serveur gratuit ou PC (sans minutes)"]].map(([value, label]) => `
           <label><input type="radio" name="runner" value="${value}"${(settings.runner || "") === value ? " checked" : ""}><span>${label}</span></label>`).join("")}
       </fieldset>
-      <p class="help">Sur votre PC : installez une fois l'exécuteur (<code>.github/claw-web/pc/claw-pc.ps1 install</code> dans le code de Claw, voir son README). Le PC doit être allumé avec Docker Desktop lancé ; sinon la session attend dans la file de GitHub et part dès qu'il revient.</p>
+      <p class="help">Sur votre machine : un serveur gratuit d'Oracle Cloud, allumé jour et nuit (bouton ci-dessous), ou votre PC avec Docker Desktop (<code>.github/claw-web/pc/claw-pc.ps1 install</code> dans le code de Claw). Une session part sur celle qui est libre ; sans aucune machine en ligne, elle attend dans la file de GitHub.</p>
+      <button type="button" class="secondary" data-action="cloud-runner">Serveur gratuit dans le nuage</button>
       <h2>Apparence</h2>
       <fieldset class="theme-choice">
         ${[["", "Sombre"], ["light", "Clair"], ["system", "Comme le téléphone"]].map(([value, label]) => `
@@ -2736,12 +2817,13 @@ function showSettings(first = false, justConnected = false) {
         failure(error);
       }
     });
+    $("#view").querySelector('[data-action="cloud-runner"]')?.addEventListener("click", openCloudRunner);
     for (const radio of $("#view").querySelectorAll('input[name="runner"]')) {
       radio.addEventListener("change", async () => {
         if (radio.value) state.settings.runner = radio.value;
         else delete state.settings.runner;
         saveSettings();
-        toast(radio.value ? "Sessions sur votre PC" : "Sessions sur une machine de GitHub");
+        toast(radio.value ? "Sessions sur votre machine" : "Sessions sur une machine de GitHub");
         const list = $("#view .checks");
         if (list) list.innerHTML = await engineChecks().catch((error) => `<li class="ko">${escapeHtml(error.message)}</li>`);
       });

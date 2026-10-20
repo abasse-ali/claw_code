@@ -156,6 +156,11 @@ export class GitHub {
     return answer.runners || [];
   }
 
+  /** Jeton d'inscription d'un nouvel exécuteur (une heure ; autorisation Administration en écriture). */
+  registrationToken(engine) {
+    return this.request("POST", `/repos/${engine}/actions/runners/registration-token`);
+  }
+
   workflow(engine) {
     return this.request("GET", `/repos/${engine}/actions/workflows/${WORKFLOW}`);
   }
