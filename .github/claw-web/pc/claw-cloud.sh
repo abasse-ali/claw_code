@@ -1,14 +1,17 @@
 #!/bin/bash
 # Exécuteur de Claw Web sur un serveur Linux toujours allumé (le serveur gratuit d'Oracle Cloud, ou
-# tout serveur Ubuntu 22.04/24.04, processeur ARM ou Intel/AMD) : les sessions y tournent jour et
-# nuit, sans minutes de GitHub et sans votre PC. L'équivalent de claw-pc.ps1, pour Linux ; voir
-# README.md. À lancer en root (sudo), ou tel quel comme script de démarrage du serveur (cloud-init).
+# tout serveur Ubuntu, Debian, Oracle Linux, processeur ARM ou Intel/AMD) : les sessions y tournent
+# jour et nuit, sans minutes de GitHub et sans votre PC. L'équivalent de claw-pc.ps1, pour Linux ;
+# voir README.md. À lancer en root (sudo), ou tel quel comme script de démarrage du serveur
+# (cloud-init).
 #
-#   claw-cloud.sh install  --repo propriétaire/claw-sessions --token JETON
+#   claw-cloud.sh install  --repo propriétaire/claw-sessions --token JETON [--shared]
 #                          installe Docker, inscrit l'exécuteur auprès du dépôt des sessions (le
 #                          jeton d'inscription, valable une heure, vient de l'appli : Réglages,
 #                          Sessions, « Serveur dans le nuage »), construit l'image et la lance ;
-#                          elle redémarre avec le serveur.
+#                          elle redémarre avec le serveur. --shared : serveur qui fait déjà tourner
+#                          autre chose ; Claw y prend au plus la moitié du processeur et de la
+#                          mémoire, avec une priorité basse (--cpus N et --memory 6g pour régler).
 #   claw-cloud.sh register --repo propriétaire/claw-sessions --token JETON
 #                          nouvelle inscription (jeton expiré pendant l'installation, ou exécuteur
 #                          supprimé dans GitHub).
@@ -25,19 +28,25 @@ set -euo pipefail
 
 SOURCE="${CLAW_CLOUD_SOURCE:-https://raw.githubusercontent.com/abasse-ali/claw_code/main/.github/claw-web/pc}"
 HOME_DIR=/opt/claw-cloud
+# Limites du conteneur (serveur partagé), gardées pour les mises à jour.
+LIMITS_FILE="$HOME_DIR/limits"
 IMAGE=claw-cloud-runner
 BASE_IMAGE=claw-cloud-base
 CONTAINER=claw-cloud
 VOLUME=claw-cloud-runner
 NAME="${CLAW_CLOUD_NAME:-claw-cloud}"
 LABELS="${CLAW_CLOUD_LABELS:-claw-pc}"
+# Place libre conseillée pour l'image (Linux, Python, Rust, Node, navigateur) et les sessions.
+DISK_NEEDED_MB=10000
 
 say() { printf '[claw-cloud] %s\n' "$*"; }
 fail() { say "ERREUR : $*" >&2; exit 1; }
 
 usage() {
   cat <<'AIDE'
-claw-cloud.sh install  --repo propriétaire/claw-sessions --token JETON   (installation complète)
+claw-cloud.sh install  --repo propriétaire/claw-sessions --token JETON [--shared]
+                       (installation complète ; --shared sur un serveur qui fait déjà tourner
+                       autre chose : Claw y prend au plus la moitié du processeur et de la mémoire)
 claw-cloud.sh register --repo propriétaire/claw-sessions --token JETON   (nouvelle inscription)
 claw-cloud.sh update | status | stop | start | remove
 Le jeton d'inscription (une heure) vient de l'appli : Réglages, Sessions, « Serveur dans le nuage ».
@@ -49,21 +58,64 @@ need_root() {
   [ "$(id -u)" -eq 0 ] || fail "à lancer en root : sudo $0 $*"
 }
 
-# Docker (paquet d'Ubuntu), lancé avec le serveur.
+# Architecture au sens de Docker (amd64, arm64), lue dans le noyau : vaut pour toute distribution.
+docker_arch() {
+  case "$(uname -m)" in
+    aarch64 | arm64) echo arm64 ;;
+    *) echo amd64 ;;
+  esac
+}
+
+# Docker, lancé avec le serveur : paquets d'Ubuntu ou de Debian, ou Docker CE sur Oracle Linux
+# (dont la commande `docker` n'est souvent que Podman, qui ne garde pas un conteneur en vie
+# d'un redémarrage à l'autre).
 ensure_docker() {
+  if command -v docker >/dev/null 2>&1 && docker --version 2>/dev/null | grep -qi podman; then
+    fail "la commande docker de ce serveur est Podman : installez Docker (Docker CE), puis recommencez."
+  fi
   if ! command -v docker >/dev/null 2>&1; then
     say "Installation de Docker..."
-    apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io curl jq ca-certificates >/dev/null
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get update -qq
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io curl ca-certificates >/dev/null
+    elif command -v dnf >/dev/null 2>&1; then
+      dnf install -y -q dnf-plugins-core curl >/dev/null
+      dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo >/dev/null
+      dnf install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin >/dev/null
+    else
+      fail "ni apt-get ni dnf : installez Docker à la main, puis recommencez."
+    fi
   fi
-  # BuildKit (paquet docker-buildx) : sans lui, l'ancien constructeur de Docker ne donne pas
+  # BuildKit (docker-buildx) : sans lui, l'ancien constructeur de Docker ne donne pas
   # l'architecture au Dockerfile (vu à l'essai sur Ubuntu 24.04) ; elle est aussi passée à la main.
-  if ! docker buildx version >/dev/null 2>&1; then
+  if ! docker buildx version >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker-buildx >/dev/null 2>&1 || true
   fi
-  command -v jq >/dev/null 2>&1 || { apt-get update -qq; apt-get install -y -qq jq >/dev/null; }
   systemctl enable --now docker >/dev/null 2>&1 || true
   docker info >/dev/null 2>&1 || fail "Docker ne répond pas (systemctl status docker)."
+}
+
+# Place libre là où Docker range ses images.
+check_disk() {
+  local root free
+  root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
+  [ -d "$root" ] || root=/
+  free="$(df -Pm "$root" | awk 'NR == 2 {print $4}')"
+  if [ -n "$free" ] && [ "$free" -lt "$DISK_NEEDED_MB" ]; then
+    say "Attention : ${free} Mo libres pour Docker, environ ${DISK_NEEDED_MB} Mo conseillés."
+  fi
+}
+
+# Serveur partagé : la moitié des processeurs et de la mémoire au plus, priorité basse.
+shared_limits() {
+  local cpus memory_mb
+  cpus="$(nproc)"
+  memory_mb="$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)"
+  awk -v c="$cpus" -v m="$memory_mb" 'BEGIN {
+    half = c / 2; if (half < 1) half = 1
+    mem = int(m / 2); if (mem < 2048) mem = 2048
+    printf "--cpus=%s --memory=%dm --cpu-shares=256", half, mem
+  }'
 }
 
 # Fichiers de l'image (Dockerfile, démarrage), pris dans le code de Claw.
@@ -76,7 +128,8 @@ fetch_sources() {
 
 runner_version() {
   local tag
-  tag="$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | jq -r .tag_name)"
+  tag="$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest \
+    | grep -o '"tag_name": *"v[0-9.]*"' | grep -o 'v[0-9.]*' | head -n 1)"
   [[ "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || fail "version de l'exécuteur de GitHub introuvable ($tag)."
   printf '%s' "${BASH_REMATCH[1]}"
 }
@@ -84,9 +137,9 @@ runner_version() {
 build() {
   local target="$1" tag="$2" version
   version="$(runner_version)"
-  say "Construction de l'image $tag (exécuteur $version, étape $target)..."
+  say "Construction de l'image $tag (exécuteur $version, $(docker_arch), étape $target)..."
   docker build --quiet --target "$target" --tag "$tag" --build-arg "RUNNER_VERSION=$version" \
-    --build-arg "TARGETARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)" "$HOME_DIR" >/dev/null \
+    --build-arg "TARGETARCH=$(docker_arch)" "$HOME_DIR" >/dev/null \
     || fail "la construction de l'image a échoué (docker build --target $target $HOME_DIR)."
 }
 
@@ -119,8 +172,13 @@ register() {
 }
 
 start_container() {
+  local limits=()
+  if [ -s "$LIMITS_FILE" ]; then
+    read -r -a limits < "$LIMITS_FILE"
+    say "Limites du conteneur : ${limits[*]}"
+  fi
   docker rm --force "$CONTAINER" >/dev/null 2>&1 || true
-  docker run --detach --name "$CONTAINER" --restart unless-stopped \
+  docker run --detach --name "$CONTAINER" --restart unless-stopped "${limits[@]}" \
     --volume "$VOLUME:/home/runner/actions-runner" "$IMAGE" >/dev/null \
     || fail "le lancement du conteneur a échoué."
   sleep 5
@@ -131,7 +189,11 @@ install() {
   need_root install
   local repo="$1" token="$2"
   ensure_docker
+  check_disk
   fetch_sources
+  if [ -n "$container_limits" ]; then
+    printf '%s\n' "$container_limits" > "$LIMITS_FILE"
+  fi
   if docker volume inspect "$VOLUME" >/dev/null 2>&1 \
      && docker run --rm --volume "$VOLUME:/data" --entrypoint test "$BASE_IMAGE" -f /data/.runner 2>/dev/null; then
     say "Exécuteur déjà inscrit : inscription gardée."
@@ -165,6 +227,7 @@ status() {
     return
   fi
   say "Conteneur $CONTAINER : $state$(busy && printf ' (session en cours)' || true)"
+  [ -s "$LIMITS_FILE" ] && say "Limites : $(cat "$LIMITS_FILE")"
   docker logs --tail 8 "$CONTAINER" 2>&1 | sed 's/^/  /'
 }
 
@@ -174,6 +237,7 @@ remove() {
   docker rm --force "$CONTAINER" >/dev/null 2>&1 || true
   docker volume rm "$VOLUME" >/dev/null 2>&1 || true
   docker image rm "$IMAGE" "$BASE_IMAGE" >/dev/null 2>&1 || true
+  rm -f "$LIMITS_FILE"
   say "Exécuteur supprimé du serveur. Retirez-le aussi dans GitHub : Settings, Actions, Runners."
 }
 
@@ -181,14 +245,26 @@ action="${1:-status}"
 shift || true
 repo=""
 token=""
+container_limits=""
+cpus=""
+memory=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) repo="${2:-}"; shift 2 ;;
     --token) token="${2:-}"; shift 2 ;;
+    --shared) container_limits="$(shared_limits)"; shift ;;
+    --cpus) cpus="${2:-}"; shift 2 ;;
+    --memory) memory="${2:-}"; shift 2 ;;
     -h|--help) usage 0 ;;
     *) fail "option inconnue : $1" ;;
   esac
 done
+if [ -n "$cpus$memory" ]; then
+  [[ -z "$cpus" || "$cpus" =~ ^[0-9]+(\.[0-9]+)?$ ]] || fail "--cpus attend un nombre (1, 1.5)."
+  [[ -z "$memory" || "$memory" =~ ^[0-9]+[mMgG]$ ]] || fail "--memory attend une taille (6g, 4096m)."
+  container_limits="${cpus:+--cpus=$cpus} ${memory:+--memory=$memory} --cpu-shares=256"
+  container_limits="${container_limits# }"
+fi
 
 case "$action" in
   install) install "$repo" "$token" ;;
