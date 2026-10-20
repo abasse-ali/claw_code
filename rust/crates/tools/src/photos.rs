@@ -430,7 +430,7 @@ fn le24(bytes: &[u8], at: usize) -> Option<u32> {
 
 /// Largeur et hauteur réelles de l'image, lues dans son en-tête : la page
 /// les donne à `<img>` pour que rien ne saute au chargement.
-fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
+pub(crate) fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
     match image_kind(bytes)? {
         "png" => {
             let word = |at: usize| -> Option<u32> {

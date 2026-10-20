@@ -46,6 +46,10 @@ const MAX_ACTIONS: usize = 12;
 const FULL_PAGE_SCREENS: f64 = 3.0;
 /// Qualité JPEG des captures : nettes pour un lecteur, légères dans la conversation.
 const JPEG_QUALITY: u8 = 80;
+/// Aperçu du premier écran de chaque capture (vignette de Claw Web) : 160
+/// pixels de large, quelques kilo-octets.
+const PREVIEW_WIDTH: f64 = 160.0;
+const PREVIEW_QUALITY: u8 = 60;
 /// Messages de console rendus par capture.
 const MAX_CONSOLE: usize = 20;
 const MAX_CONSOLE_CHARS: usize = 300;
@@ -941,6 +945,8 @@ struct Shot {
     actions: Vec<String>,
     note: Option<String>,
     jpeg_base64: String,
+    /// Aperçu du premier écran (vignette), quand le navigateur l'a rendu.
+    preview_base64: Option<String>,
 }
 
 /// Sélecteurs de remise à zéro : ils s'appliquent à tout et ne disent pas
@@ -1548,6 +1554,23 @@ fn capture(
         .filter(|data| !data.is_empty())
         .ok_or("the browser returned no image")?
         .to_string();
+    // Le premier écran, réduit : la vignette que Claw Web montre à l'utilisateur.
+    let preview_base64 = devtools
+        .call(
+            "Page.captureScreenshot",
+            json!({
+                "format": "jpeg",
+                "quality": PREVIEW_QUALITY,
+                "captureBeyondViewport": true,
+                "clip": {
+                    "x": 0, "y": 0, "width": viewport.width, "height": viewport.height,
+                    "scale": PREVIEW_WIDTH / f64::from(viewport.width),
+                },
+            }),
+        )
+        .ok()
+        .and_then(|preview| preview["data"].as_str().map(ToOwned::to_owned))
+        .filter(|data| !data.is_empty());
     browser_measures(devtools, &audit, &mut problems, &mut notes);
     // Après la capture (les essais changent la page) : le menu d'un téléphone
     // s'ouvre-t-il, et chaque bouton fait-il quelque chose ?
@@ -1568,6 +1591,7 @@ fn capture(
         actions: done,
         note,
         jpeg_base64,
+        preview_base64,
     })
 }
 
@@ -1589,6 +1613,23 @@ fn shots_dir() -> Option<PathBuf> {
         }
     }
     Some(dir)
+}
+
+/// Enregistre une capture et son aperçu du premier écran dans le dossier des
+/// captures : leurs chemins, quand l'écriture a réussi.
+fn save_shot(dir: &Path, stamp: u128, shot: &Shot) -> (Option<PathBuf>, Option<PathBuf>) {
+    let label = shot.viewport.label.replace(' ', "-");
+    let write = |name: String, data: &str| {
+        let path = dir.join(name);
+        std::fs::write(&path, decode_base64(data)?).ok()?;
+        Some(path)
+    };
+    let file = write(format!("{stamp}-{label}.jpg"), &shot.jpeg_base64);
+    let preview = shot
+        .preview_base64
+        .as_deref()
+        .and_then(|data| write(format!("{stamp}-{label}-preview.jpg"), data));
+    (file, preview)
 }
 
 /// Décode du base64 standard (les captures du navigateur).
@@ -1668,13 +1709,9 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
             Ok(shot) => {
                 total += shot.problems.len();
                 design_notes += shot.notes.len();
-                let file = dir.as_ref().and_then(|dir| {
-                    let name = format!("{stamp}-{}.jpg", shot.viewport.label.replace(' ', "-"));
-                    let path = dir.join(name);
-                    let bytes = decode_base64(&shot.jpeg_base64)?;
-                    std::fs::write(&path, bytes).ok()?;
-                    Some(path)
-                });
+                let (file, preview) = dir
+                    .as_ref()
+                    .map_or((None, None), |dir| save_shot(dir, stamp, &shot));
                 images.push(ImageAttachment {
                     media_type: "image/jpeg".to_string(),
                     data: shot.jpeg_base64,
@@ -1698,6 +1735,9 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
                 }
                 if let Some(file) = file {
                     entry["file"] = json!(file.display().to_string());
+                }
+                if let Some(preview) = preview {
+                    entry["preview"] = json!(preview.display().to_string());
                 }
                 captures.push(entry);
             }
@@ -1822,6 +1862,15 @@ mod tests {
         let careful_page = notes_of("soigne.html");
         let plain_page = notes_of("brut.html");
         let _ = std::fs::remove_dir_all(&dir);
+        // L'aperçu du premier écran (vignette de Claw Web) : un petit JPEG de
+        // 160 pixels de large, à côté de la capture.
+        let preview = std::fs::read(careful_page["preview"].as_str().expect("aperçu"))
+            .expect("fichier de l'aperçu");
+        assert!(preview.starts_with(&[0xFF, 0xD8, 0xFF]) && preview.len() < 30_000);
+        assert_eq!(
+            crate::photos::image_size(&preview).map(|(width, _)| width),
+            Some(160)
+        );
         let neat_notes = careful_page["designNotes"].to_string();
         assert!(
             !neat_notes.contains("on hover") && !neat_notes.contains("prefers-reduced-motion"),
