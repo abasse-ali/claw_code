@@ -307,6 +307,12 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .cloud-panel { overflow-y: auto; min-height: 0; }
 .cloud-steps ol { margin: .4em 0 .8em; padding-left: 1.3em; display: flex; flex-direction: column; gap: .5em; }
 .cloud-steps code { overflow-wrap: anywhere; }
+.cloud-subtitle { margin: 18px 0 4px; font-size: 1rem; }
+.cloud-steps .field { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
+.cloud-steps textarea { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font: .8rem ui-monospace, "Cascadia Code", Consolas, monospace; resize: vertical; }
+.cloud-steps input[type="file"] { color: var(--text); max-width: 100%; }
+.robot-state { margin: 8px 0; color: var(--text); }
+.cloud-steps [data-action="robot-stop"] { margin-top: 8px; }
 .cloud-script { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
 .cloud-script pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .78rem; max-height: 40vh; overflow-y: auto; }
 .ev .verb { flex: none; font-weight: 500; }

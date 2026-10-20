@@ -142,6 +142,10 @@ exécuteur, en ligne ou non, et en session.
   sessions). Le serveur installe seul Docker et l'exécuteur, en ligne au bout de 15 à 25 minutes.
 - **PC** : `.github/claw-web/pc/claw-pc.ps1 install` dans le code de Claw. Le PC éteint, la
   session attend dans la file de GitHub et part dès qu'il revient.
+- **Robot de réessai** : quand Oracle manque de place (« Out of capacity »), la même fenêtre
+  démarre un robot qui réessaie toutes les 10 minutes, gratuitement sur GitHub, puis installe Claw
+  dès qu'une machine se libère, et s'éteint seul. Il lui faut une clé d'API d'Oracle (aperçu de
+  la configuration et fichier `.pem`), posée chiffrée en secret du dépôt du code de Claw.
 
 Détails, commandes et limites (machine inactive sept jours arrêtée par Oracle, « Out of capacity
 ») : `.github/claw-web/pc/README.md`.

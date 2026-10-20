@@ -1,0 +1,41 @@
+name: Robot du serveur Oracle
+
+# Robot de réessai du serveur gratuit de Claw Web : toutes les 10 minutes, tant que l'appli l'a
+# allumé (variable ORACLE_ROBOT = on), il essaie de créer l'instance Ampere A1 d'Oracle Cloud
+# qui fera tourner les sessions, puis s'éteint (ORACLE_ROBOT = done). Dépôt public : minutes
+# gratuites. Les secrets (OCI_CONFIG, OCI_KEY, CLAW_ADMIN_TOKEN) sont posés par l'appli, chiffrés
+# dans le navigateur ; le journal ne montre ni identifiant, ni adresse, ni jeton.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oracle-a1
+  cancel-in-progress: false
+
+jobs:
+  launch:
+    name: Essai de création
+    if: vars.ORACLE_ROBOT == 'on'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/claw-web/oracle
+
+      - name: Kit d'Oracle
+        run: python3 -m pip install --quiet --disable-pip-version-check oci==2.189.0
+
+      - name: Essai
+        env:
+          OCI_CONFIG: ${{ secrets.OCI_CONFIG }}
+          OCI_KEY: ${{ secrets.OCI_KEY }}
+          CLAW_ADMIN_TOKEN: ${{ secrets.CLAW_ADMIN_TOKEN }}
+          ENGINE: ${{ vars.ORACLE_ROBOT_ENGINE }}
+        run: python3 .github/claw-web/oracle/a1_robot.py
