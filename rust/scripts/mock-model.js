@@ -172,6 +172,11 @@ function reply(body) {
   if (!(body.tools && body.tools.length) && reviewing) {
     return { text: "Step 1.\n- the request, sentence by sentence\nStep 2.\n- handled\n\nVERDICT\nLGTM" };
   }
+  // Outils coupés pour cette réponse (annonce demandée par Claw) : quelques mots,
+  // comme un vrai fournisseur, qui ne peut alors appeler aucun outil.
+  if (body.tool_choice === "none") {
+    return { text: "Je regarde le projet, puis je fais ce qui est demandé." };
+  }
   const questions = questionsReply(messages);
   if (questions) return questions;
   const directive = lastDirective(messages);
