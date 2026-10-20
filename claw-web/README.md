@@ -71,10 +71,20 @@ le plan que Claw annonce, en français, avant ses premiers outils. Elle se pours
 ce moment**, l'étape en cours. Le plan reste une fois la session finie. Un modèle qui se met au
 travail sans un mot (Nemotron 3 Super ne met son plan que dans son raisonnement) reçoit une requête
 sans outils : il ne peut y répondre que par ce plan, puis le travail reprend. Il en reçoit une
-autre après 20 étapes muettes, pour dire où il en est. Pour NVIDIA, le choix du modèle met
-Nemotron 3 Super en tête : rapide et fiable sur l'offre gratuite. Nemotron 3 Ultra, le plus
-puissant, est lent (NVIDIA coupe parfois ses longues réponses) ; Claw passe alors à Nemotron 3
-Super.
+autre après 20 étapes muettes, pour dire où il en est. Pour NVIDIA, le choix du modèle propose
+Nemotron 3 Super (recommandé), Nemotron 3 Ultra et Nemotron 3.5 Lightning ; un modèle de NVIDIA
+indisponible passe la main au suivant, dans cet ordre. Step 5 Preview n'est plus proposé : en
+secours de Super (introuvable chez NVIDIA le 20 octobre 2026), il a écrit de faux messages de
+l'utilisateur et suivi les tâches qu'il y inventait. Claw écarte maintenant toute réponse de ce
+genre avant de la montrer ou de l'exécuter.
+
+## Photos trouvées par Claw
+
+Quand l'agent cherche des photos (outil `Photo`), le journal du passage les montre en petites
+vignettes sous la ligne « Photos », même celles qu'il écarte ensuite. Un toucher ouvre la photo en
+grand, avec son titre, son auteur, sa licence et un lien vers sa page. Le moteur télécharge la
+petite version chez la source (Flickr, Wikimedia Commons) et la glisse dans le journal ; seule la
+grande version est chargée chez la source, la seule image extérieure que la page autorise.
 
 ## Réponses lisibles
 

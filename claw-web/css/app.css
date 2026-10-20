@@ -288,6 +288,12 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .ev > summary, .ev-line { display: flex; align-items: center; gap: 7px; padding: 5px 0; min-width: 0; }
 .ev-line { padding-left: 12px; }
 .ev svg { width: 16px; height: 16px; color: var(--muted); }
+/* Photos trouvées par l'agent : petites vignettes toujours visibles, d'un toucher en grand. */
+.photo-pills { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 6px 35px; }
+.photo-pill { width: 52px; height: 52px; padding: 0; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: var(--panel-2); cursor: zoom-in; flex: none; }
+.photo-pill img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.photo-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.photo-credit { margin: 8px 0 0; overflow-wrap: anywhere; }
 .ev .verb { flex: none; font-weight: 500; }
 .ev .target { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
 .ev.failed .verb, .ev.failed svg { color: var(--error); }

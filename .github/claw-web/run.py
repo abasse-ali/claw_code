@@ -74,6 +74,18 @@ def describe(name, data):
         return "Liste de tâches mise à jour"
     if name == "Agent":
         return f"Sous-agent : {short(str(data.get('description', '')))}"
+    # Outils de design : ce qu'ils cherchent ou tracent, pas leur seul nom.
+    names = lambda: ", ".join(str(item) for item in (data.get("names") or [data.get("name") or ""]))  # noqa: E731
+    if name == "Photo":
+        return f"Photos : « {short(str(data.get('search', '')))} »"
+    if name == "Icon":
+        return f"Icônes : {short(names())}"
+    if name == "Ornament":
+        return f"Ornement : {short(str(data.get('kind', '')))}"
+    if name == "Component":
+        return f"Composants : {short(names())}"
+    if name == "Screenshot":
+        return f"Capture de la page : {short(relative(str(data.get('url') or data.get('path') or '')))}"
     return name
 
 

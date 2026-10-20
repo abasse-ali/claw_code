@@ -12,12 +12,23 @@ import collections
 import gzip
 import hashlib
 import json
+import urllib.parse
+import urllib.request
 
 LOG = "<!-- claw-web:log"
 DATA = "<!-- claw-web:data"
 # Taille d'une partie (base64), sous la limite de 65 536 caractères d'un commentaire.
 PAGE_CHARS = 60_000
 DIFF_LINES = 60
+# Photos trouvées par l'agent (outil Photo) : leur petite version (carré de Flickr, miniature
+# de Commons) est téléchargée ici et glissée dans le journal, la grande version reste chez sa
+# source, la seule image extérieure que l'appli autorise (Content-Security-Policy).
+MAX_PHOTOS = 4
+THUMB_BYTES = 20_000
+# Vignettes d'une même recherche, encodées : une partie du journal tient en 60 000 caractères.
+THUMBS_BUDGET = 40_000
+THUMB_TIMEOUT = 5
+IMAGE_KINDS = ((b"\xff\xd8\xff", "image/jpeg"), (b"\x89PNG\r\n\x1a\n", "image/png"))
 
 
 def excerpt(text, size, tail=False):
@@ -34,6 +45,66 @@ def without_claw_notes(output):
         return ""
     at = output.find("\n[Claw] ")
     return output if at < 0 else output[:at].rstrip()
+
+
+def photo_link(url):
+    """Une adresse https chez une source de photos connue (Flickr, Wikimedia), ou « »."""
+    try:
+        parsed = urllib.parse.urlparse(str(url or ""))
+    except ValueError:
+        return ""
+    host = parsed.hostname or ""
+    known = host == "upload.wikimedia.org" or host.endswith(".staticflickr.com")
+    return parsed.geturl() if parsed.scheme == "https" and known else ""
+
+
+def image_kind(data):
+    """Le type d'une image d'après ses premiers octets (JPEG, PNG, WebP), ou « »."""
+    for magic, kind in IMAGE_KINDS:
+        if data.startswith(magic):
+            return kind
+    return "image/webp" if data[:4] == b"RIFF" and data[8:12] == b"WEBP" else ""
+
+
+def fetch_small(url):
+    """La petite version d'une photo, en adresse `data:` ; « » si elle ne vient pas vite, est
+    trop lourde ou n'est pas une image."""
+    request = urllib.request.Request(url, headers={"User-Agent": "claw-web/1.0 (vignettes de Claw Web)"})
+    try:
+        with urllib.request.urlopen(request, timeout=THUMB_TIMEOUT) as response:
+            data = response.read(THUMB_BYTES + 1)
+    except (OSError, ValueError):
+        return ""
+    kind = image_kind(data)
+    if not kind or len(data) > THUMB_BYTES:
+        return ""
+    return f"data:{kind};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def photos(value, fetch=fetch_small):
+    """Les photos trouvées par l'outil Photo, pour des vignettes : petite version glissée dans
+    le journal, grande version chez sa source, titre, auteur, licence et page d'origine."""
+    found = []
+    budget = THUMBS_BUDGET
+    for photo in (value.get("photos") or [])[:MAX_PHOTOS]:
+        if not isinstance(photo, dict):
+            continue
+        small = photo_link(photo.get("web_thumbnail"))
+        thumb = fetch(small) if small else ""
+        if not thumb or len(thumb) > budget:
+            continue
+        budget -= len(thumb)
+        source = str(photo.get("source") or "")
+        found.append({
+            "t": thumb,
+            "u": photo_link(photo.get("web_original")),
+            "title": excerpt(photo.get("title", ""), 90),
+            "by": excerpt(photo.get("creator", ""), 60),
+            "lic": excerpt(photo.get("license", ""), 30),
+            "src": source if source.startswith("https://") else "",
+            "path": excerpt(photo.get("path", ""), 120),
+        })
+    return found
 
 
 def patch(hunks):
@@ -55,8 +126,9 @@ def patch(hunks):
 class Journal:
     """Les événements d'un passage, en bref, répartis en parties publiables."""
 
-    def __init__(self, relative=lambda text: str(text)):
+    def __init__(self, relative=lambda text: str(text), fetch=fetch_small):
         self.relative = relative
+        self.fetch = fetch
         self.events = []
         self.waiting = collections.deque()
         # Indice du premier événement de chaque partie : une partie pleine reste fermée.
@@ -127,6 +199,15 @@ class Journal:
             return {"target": excerpt(data.get("url") or data.get("query") or "", 300)}
         if name == "Agent":
             return {"desc": excerpt(data.get("description", ""), 300)}
+        if name == "Photo":
+            return {"search": excerpt(data.get("search", ""), 120)}
+        if name in ("Icon", "Component"):
+            names = data.get("names") or [data.get("name") or ""]
+            return {"names": [excerpt(item, 40) for item in names[:20] if isinstance(item, str)]}
+        if name == "Ornament":
+            return {"kind": excerpt(data.get("kind", ""), 40)}
+        if name == "Screenshot":
+            return {"target": excerpt(rel(data.get("url") or data.get("path") or ""), 300)}
         return {"raw": excerpt(rel(json.dumps(data, ensure_ascii=False)), 600)}
 
     def _result(self, name, content):
@@ -158,6 +239,11 @@ class Journal:
             text = value.get("content") or "\n".join(value.get("filenames") or [])
             return {"out": excerpt(rel(text), 1200), "count": value.get("numFiles")}
         if name == "TodoWrite":
+            return {}
+        if name == "Photo":
+            return {"photos": photos(value, self.fetch)}
+        if name in ("Icon", "Ornament", "Component"):
+            # Du SVG et du CSS pour le modèle : rien à lire pour l'utilisateur.
             return {}
         return {"out": excerpt(rel(json.dumps(value, ensure_ascii=False)), 800)}
 

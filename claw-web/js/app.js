@@ -6,7 +6,7 @@
 import { ANSWER, GitHub, GitHubError, LABEL, PROGRESS } from "./github.js";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 import { sealedBox } from "./sealed-box.js";
-import { LOG, changesHtml, decodeLog, transcriptHtml } from "./transcript.js";
+import { LOG, changesHtml, decodeLog, photoLink, photoView, transcriptHtml } from "./transcript.js";
 import { highlightLines, languageOf } from "./highlight.js";
 import { accountStatus, freeModels, resetTime } from "./openrouter.js";
 
@@ -204,6 +204,28 @@ function openImage(path) {
   sheet.hidden = false;
 }
 
+/** Photo trouvée par l'agent, en grand, avec son crédit et sa page d'origine. */
+function openPhoto({ photo, credit, source }) {
+  const url = photoView(photo);
+  if (!url) return;
+  const origin = photoLink(source) || (String(source || "").startsWith("https://") ? source : "");
+  const sheet = $("#sheet");
+  sheet.innerHTML = `
+    <div class="sheet-panel image-panel" role="dialog" aria-modal="true" aria-label="Photo">
+      <div class="sheet-head"><strong>Photo trouvée par Claw</strong><button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button></div>
+      <img class="full-image" alt="" src="${escapeHtml(url)}" referrerpolicy="no-referrer">
+      ${credit ? `<p class="help photo-credit">${escapeHtml(credit)}</p>` : ""}
+      ${origin ? `<p class="help"><a href="${escapeHtml(origin)}" target="_blank" rel="noopener noreferrer">Voir la page de la photo</a></p>` : ""}
+    </div>`;
+  sheet.onclick = (event) => {
+    if (event.target === sheet || event.target.closest("[data-close]")) {
+      sheet.hidden = true;
+      sheet.innerHTML = "";
+    }
+  };
+  sheet.hidden = false;
+}
+
 /** Image choisie, réduite si besoin (2000 px au plus de côté, JPEG) : { name, base64, url }. */
 async function prepareImage(file) {
   const keep = ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type) && file.size <= 1_500_000;
@@ -340,9 +362,11 @@ const KEYED_PROVIDERS = [
       // Nemotron 3 Super d'abord : rapide et fiable. Ultra, le plus puissant, est lent sur
       // l'offre gratuite (vu le 19 octobre 2026 : longues réponses coupées par NVIDIA).
       { id: "nvidia:nvidia/nemotron-3-super-120b-a12b", short: "NVIDIA Nemotron 3 Super" },
-      { id: "nvidia:nvidia/nemotron-3-ultra-550b-a55b", short: "NVIDIA Nemotron 3 Ultra", note: "le plus puissant, mais lent : NVIDIA coupe parfois ses longues réponses (Claw passe alors à Nemotron 3 Super)" },
-      { id: "nvidia:stepfun-ai/step-5-preview", short: "NVIDIA Step 5 Preview" },
-      { id: "nvidia:openai/gpt-oss-20b", short: "NVIDIA gpt-oss 20B" },
+      { id: "nvidia:nvidia/nemotron-3-ultra-550b-a55b", short: "NVIDIA Nemotron 3 Ultra", note: "le plus puissant ; parfois lent, NVIDIA coupe alors ses longues réponses (Claw passe à un autre modèle de NVIDIA)" },
+      // Revu le 20 octobre 2026 : Lightning répond en moins d'une seconde et fait le travail.
+      // Step 5 Preview (faux messages de l'utilisateur, tâches inventées) et gpt-oss 20B (en
+      // échec) ne sont plus proposés.
+      { id: "nvidia:nvidia/nemotron-3.5-lightning-30b-a3b", short: "NVIDIA Nemotron 3.5 Lightning", note: "très rapide ; moins soigné que Super et Ultra" },
     ],
   },
 ];
@@ -1958,6 +1982,8 @@ function renderSessionView() {
   view.querySelector(".messages").addEventListener("click", (event) => {
     const thumb = event.target.closest(".thumb[data-image]");
     if (thumb) openImage(thumb.dataset.image);
+    const photo = event.target.closest(".photo-pill[data-photo]");
+    if (photo) openPhoto(photo.dataset);
   });
   loadThumbs();
   view.querySelector('[data-action="archive"]')?.addEventListener("click", async () => {

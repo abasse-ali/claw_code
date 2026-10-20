@@ -21,7 +21,26 @@ const ICONS = {
   tool: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 6.5a4 4 0 0 0-5.3 5.3L4 17l3 3 5.2-5.2a4 4 0 0 0 5.3-5.3l-2.5 2.5-2.5-2.5z"/></svg>',
   think: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l1.8 4.7 4.7 1.8-4.7 1.8L12 16.5l-1.8-4.7L5.5 10l4.7-1.8z"/><path d="M18.5 15.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>',
   check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  image: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M20.5 16l-5-5-8.5 8.5"/></svg>',
 };
+
+// Photos trouvées par l'agent (outil Photo) : la vignette est dans le journal (adresse `data:`,
+// glissée par le moteur), la grande version chez sa source, seules images extérieures que la
+// Content-Security-Policy de la page autorise.
+const knownPhotoHost = (host) => host === "upload.wikimedia.org" || host.endsWith(".staticflickr.com");
+
+/** Une adresse https chez une source de photos connue (Flickr, Wikimedia), ou « ». */
+export function photoLink(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    return parsed.protocol === "https:" && knownPhotoHost(parsed.hostname) ? parsed.href : "";
+  } catch {
+    return "";
+  }
+}
+
+/** Une vignette glissée dans le journal (image JPEG, PNG ou WebP en `data:`), ou « ». */
+const thumbData = (text) => (/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(String(text || "")) ? text : "");
 
 const plural = (count, word) => `${count} ${word}${count > 1 ? "s" : ""}`;
 
@@ -64,6 +83,11 @@ function describe(name, input) {
     case "WebFetch": case "ViewPage": return ["globe", "Page web", value.target || ""];
     case "WebSearch": return ["globe", "Recherche web", value.target || ""];
     case "Agent": return ["bot", "Sous-agent", value.desc || ""];
+    case "Photo": return ["image", "Photos", value.search ? `« ${value.search} »` : ""];
+    case "Icon": return ["tool", "Icônes", (value.names || []).join(", ")];
+    case "Ornament": return ["tool", "Ornement", value.kind || ""];
+    case "Component": return ["tool", "Composants", (value.names || []).join(", ")];
+    case "Screenshot": return ["globe", "Capture de la page", value.target || ""];
     case "TodoWrite": {
       const todos = value.todos || [];
       return ["list", "Tâches", `${todos.filter((todo) => todo[0] === "completed").length}/${todos.length} terminées`];
@@ -127,6 +151,23 @@ function unifiedDiffHtml(patch, language) {
   return `<div class="diff">${diffRows(hunks, language).join("")}</div>`;
 }
 
+/** Ce que la vue en grand d'une photo peut montrer : sa grande version, sinon sa vignette. */
+export const photoView = (url) => photoLink(url) || thumbData(url);
+
+/** Vignettes des photos trouvées par l'agent : toujours visibles, d'un toucher en grand. */
+function photosHtml(photos) {
+  const pills = photos.map((photo) => {
+    const thumb = thumbData(photo.t);
+    if (!thumb) return "";
+    const credit = [photo.title, photo.by && `par ${photo.by}`, photo.lic].filter(Boolean).join(" · ");
+    return `<button type="button" class="photo-pill" data-photo="${escapeHtml(photoLink(photo.u) || thumb)}"`
+      + ` data-credit="${escapeHtml(credit)}" data-source="${escapeHtml(String(photo.src || "").startsWith("https://") ? photo.src : "")}"`
+      + ` title="${escapeHtml(credit)}" aria-label="${escapeHtml(`Voir la photo ${photo.title || ""}`.trim())}">`
+      + `<img src="${escapeHtml(thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"></button>`;
+  }).join("");
+  return pills ? `<div class="photo-pills">${pills}</div>` : "";
+}
+
 function toolHtml(event, key, openTodo) {
   const [icon, verb, target] = describe(event.n, event.i);
   const result = event.r;
@@ -156,9 +197,15 @@ function toolHtml(event, key, openTodo) {
     body = `<pre class="io-v">${escapeHtml(input.raw)}</pre>`;
   }
   const state = !result ? " running" : event.e ? " failed" : "";
+  const photos = event.n === "Photo" && result && Array.isArray(result.photos) ? result.photos : null;
+  if (photos) {
+    side = plural(photos.length, "photo");
+    body = "";
+  }
   const summary = `${ICONS[icon] || ICONS.tool}<span class="verb">${escapeHtml(verb)}</span>`
     + `<span class="target">${escapeHtml(target)}</span>`
     + `<span class="side">${!result ? '<span class="spinner" aria-label="en cours"></span>' : side}</span>`;
+  if (photos) return `<div class="ev tool photos${state}"><div class="ev-line">${summary}</div>${photosHtml(photos)}</div>`;
   if (!body) return `<div class="ev tool${state}"><div class="ev-line">${summary}</div></div>`;
   return `<details class="ev tool${state}" data-key="${key}"${openTodo ? " open" : ""}><summary>${summary}</summary><div class="ev-body">${body}</div></details>`;
 }
@@ -174,7 +221,8 @@ function eventHtml(event, key, lastTodo) {
     case "text":
       return `<div class="ev text">${renderMarkdown(event.t || "")}</div>`;
     case "notice":
-      return `<div class="ev notice">${escapeHtml(event.t || "")}</div>`;
+      // « nvidia:nvidia/nemotron-3-super-120b-a12b » devient « nemotron-3-super-120b-a12b ».
+      return `<div class="ev notice">${escapeHtml(String(event.t || "").replace(/\b(?:nvidia|gemini|ollama):(?:[\w.-]+\/)?([\w.:-]+)/g, "$1"))}</div>`;
     case "tool":
       return toolHtml(event, key, lastTodo);
     case "quota":
