@@ -31,6 +31,26 @@ class ProgressTest(unittest.TestCase):
         self.assertIn("Ce que Claw compte faire", done)
         self.assertNotIn("En ce moment", done)
 
+    def test_claw_s_separate_events_show_the_plan(self):
+        # Le format réel de Claw : un événement par bloc (texte, puis chaque outil). Vu en
+        # session : le plan n'était jamais montré.
+        progress = run.Progress()
+        progress.event(reply("Je lis le projet, puis j'ajoute la fonction."))
+        # L'annonce se montre tout de suite, avant l'outil suivant.
+        self.assertIn("**Ce que Claw compte faire** : Je lis le projet, puis j'ajoute la fonction.", progress.body("running"))
+        progress.event(reply("", ("read_file", "stats.py")))
+        progress.event(reply("", ("read_file", "app.py")))
+        progress.event(reply("Le projet est lu : j'écris le test."))
+        body = progress.body("running")
+        self.assertIn("**Ce que Claw compte faire** : Je lis le projet, puis j'ajoute la fonction.", body)
+        self.assertIn("**En ce moment** : Le projet est lu : j'écris le test.", body)
+        progress.event(reply("", ("write_file", "test_stats.py")))
+        progress.event(reply("La fonction et son test sont prêts."))
+        # Fini : le dernier texte, sans outil après lui, est la réponse.
+        done = progress.body("done")
+        self.assertIn("Je lis le projet", done)
+        self.assertNotIn("sont prêts", done)
+
     def test_a_reply_without_tools_is_not_a_plan(self):
         progress = run.Progress()
         progress.event(reply("Voici la réponse à votre question."))

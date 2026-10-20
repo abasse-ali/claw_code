@@ -27,6 +27,68 @@ function inline(text) {
   return html.replace(/\u0000(\d+)\u0000/g, (_, index) => codes[Number(index)]);
 }
 
+const LIST_ITEM = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
+const indentOf = (line) => line.match(/^\s*/)[0].replace(/\t/g, "    ").length;
+const numberedItem = (match) => /\d/.test(match[2]);
+
+/** Liste commençant à la ligne `index`, ses sous-listes rangées d'après le retrait. */
+function list(lines, start) {
+  let index = start;
+  const first = lines[index].match(LIST_ITEM);
+  const level = indentOf(lines[index]);
+  const ordered = numberedItem(first);
+  const sameList = (line) => {
+    const match = line.match(LIST_ITEM);
+    return Boolean(match) && indentOf(line) === level && numberedItem(match) === ordered;
+  };
+  const nextFilled = (from) => {
+    let next = from;
+    while (next < lines.length && !lines[next].trim()) next += 1;
+    return next;
+  };
+  const items = [];
+  while (index < lines.length) {
+    // Ligne vide entre deux éléments : la même liste continue.
+    if (!lines[index].trim()) {
+      const next = nextFilled(index);
+      if (next < lines.length && sameList(lines[next])) index = next;
+      else break;
+    }
+    if (!sameList(lines[index])) break;
+    let text = lines[index].match(LIST_ITEM)[3];
+    const inside = [];
+    index += 1;
+    while (index < lines.length) {
+      const line = lines[index];
+      if (!line.trim()) {
+        const next = nextFilled(index);
+        if (next < lines.length && indentOf(lines[next]) > level && !/^\s*```/.test(lines[next])) {
+          index = next;
+          continue;
+        }
+        break;
+      }
+      if (indentOf(line) <= level || /^\s*```/.test(line)) break;
+      if (LIST_ITEM.test(line)) {
+        const nested = list(lines, index);
+        inside.push(nested.html);
+        index = nested.index;
+        continue;
+      }
+      // Suite de l'élément : lignes en retrait qui ne commencent pas un autre élément.
+      if (inside.length) inside.push(`<div>${inline(line.trim())}</div>`);
+      else text += ` ${line.trim()}`;
+      index += 1;
+    }
+    items.push(`<li>${inline(text)}${inside.join("")}</li>`);
+  }
+  const from = ordered ? Number.parseInt(first[2], 10) : 1;
+  const html = ordered
+    ? `<ol${from === 1 ? "" : ` start="${from}"`}>${items.join("")}</ol>`
+    : `<ul>${items.join("")}</ul>`;
+  return { html, index };
+}
+
 const isTableRow = (line) => /^\s*\|.*\|\s*$/.test(line);
 const isTableRule = (line) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line);
 const cells = (line) => line.trim().replace(/^\||\|$/g, "").split("|").map((cell) => inline(cell.trim()));
@@ -91,21 +153,11 @@ export function renderMarkdown(source) {
     }
     const bullet = /^\s*[-*+]\s+/;
     const numbered = /^\s*\d+[.)]\s+/;
-    if (bullet.test(line) || numbered.test(line)) {
-      const ordered = numbered.test(line);
-      const pattern = ordered ? numbered : bullet;
-      const items = [];
-      while (index < lines.length && pattern.test(lines[index])) {
-        let item = lines[index].replace(pattern, "");
-        index += 1;
-        // Suite de l'élément : lignes en retrait qui ne commencent pas un autre élément.
-        while (index < lines.length && /^\s{2,}\S/.test(lines[index]) && !pattern.test(lines[index])) {
-          item += ` ${lines[index].trim()}`;
-          index += 1;
-        }
-        items.push(`<li>${inline(item)}</li>`);
-      }
-      out.push(ordered ? `<ol>${items.join("")}</ol>` : `<ul>${items.join("")}</ul>`);
+    if (LIST_ITEM.test(line)) {
+      const found = list(lines, index);
+      out.push(found.html);
+      // Toujours avancer, même sur une liste vide (élément au retrait inattendu).
+      index = Math.max(found.index, index + 1);
       continue;
     }
     const paragraph = [];

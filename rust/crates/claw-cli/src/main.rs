@@ -9279,6 +9279,8 @@ trait TurnObserver: Send + Sync {
     /// La réponse qui vient continue la précédente, coupée par la limite de
     /// sortie : l'interface l'y raccorde.
     fn reply_continues(&self) {}
+    /// La réponse du modèle est reçue en entier.
+    fn reply_done(&self) {}
 }
 
 type SharedObserver = Arc<dyn TurnObserver>;
@@ -9891,6 +9893,7 @@ impl ApiClient for DefaultRuntimeClient {
             .take()
             .and_then(|step| self.apply_team_step(step, &request.messages));
         let messages = convert_messages(&request.messages);
+        let text_only = request.text_only;
         let mut system =
             (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n"));
         if let Some(note) = role_note {
@@ -9923,7 +9926,14 @@ impl ApiClient for DefaultRuntimeClient {
             messages: messages_for_model(model, &messages, passback),
             system: system.clone(),
             tools: tools.clone(),
-            tool_choice: enable_tools.then_some(ToolChoice::Auto),
+            // Annonce demandée par Claw : les outils restent décrits (un
+            // historique d'appels sans eux est refusé par certains
+            // fournisseurs), mais la réponse est en texte seul.
+            tool_choice: enable_tools.then_some(if text_only {
+                ToolChoice::None
+            } else {
+                ToolChoice::Auto
+            }),
             stream: true,
         };
         let emit = self.emit_output;
@@ -10207,6 +10217,7 @@ impl ApiClient for DefaultRuntimeClient {
                             AssistantEvent::Usage(_) | AssistantEvent::MessageStop => {}
                         }
                     }
+                    observer.reply_done();
                 }
                 Ok(events)
             });

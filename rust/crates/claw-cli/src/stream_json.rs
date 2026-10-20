@@ -112,6 +112,12 @@ impl TurnObserver for StreamJsonObserver {
             &json!({ "type": "system", "subtype": "notice", "session_id": self.session_id, "text": text }),
         );
     }
+
+    // Un texte sans appel d'outil (l'annonce de ce que fait l'agent) part dès
+    // la fin de la réponse, pas une requête plus tard.
+    fn reply_done(&self) {
+        self.flush();
+    }
 }
 
 /// Sans terminal interactif, une demande d'autorisation est refusée et signalée

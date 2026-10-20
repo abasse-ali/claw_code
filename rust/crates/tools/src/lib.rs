@@ -4195,7 +4195,11 @@ impl ApiClient for ProviderRuntimeClient {
         let system =
             (!request.system_prompt.is_empty()).then(|| request.system_prompt.join("\n\n"));
         let tools = (!tools.is_empty()).then_some(tools);
-        let tool_choice = (!self.allowed_tools.is_empty()).then_some(ToolChoice::Auto);
+        let tool_choice = (!self.allowed_tools.is_empty()).then_some(if request.text_only {
+            ToolChoice::None
+        } else {
+            ToolChoice::Auto
+        });
         let build = move |model: &str| MessageRequest {
             model: model.to_string(),
             max_tokens: max_tokens_for_model(model),
@@ -7151,7 +7155,9 @@ Deploy $ARGUMENTS
             SubagentToolExecutor::new(BTreeSet::from([String::from("read_file")])),
             agent_permission_policy(),
             vec![String::from("system prompt")],
-        );
+        )
+        // Comme un vrai sous-agent : personne ne le lit, aucune annonce demandée.
+        .as_subagent();
 
         let summary = runtime
             .run_turn("Inspect the delegated file", None)

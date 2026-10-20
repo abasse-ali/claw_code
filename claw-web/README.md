@@ -68,10 +68,23 @@ changement de ce dossier ; l'ancienne adresse, https://abasse-ali.github.io/claw
 
 Pendant qu'il travaille, la progression de la session commence par **Ce que Claw compte faire** :
 le plan que Claw annonce, en français, avant ses premiers outils. Elle se poursuit par **En
-ce moment**, l'étape en cours. Le plan reste une fois la session finie. Pour NVIDIA, le choix du
-modèle met Nemotron 3 Super en tête : rapide et fiable sur l'offre gratuite. Nemotron 3 Ultra, le
-plus puissant, est lent (NVIDIA coupe parfois ses longues réponses) ; Claw passe alors à Nemotron 3
+ce moment**, l'étape en cours. Le plan reste une fois la session finie. Un modèle qui se met au
+travail sans un mot (Nemotron 3 Super ne met son plan que dans son raisonnement) reçoit une requête
+sans outils : il ne peut y répondre que par ce plan, puis le travail reprend. Il en reçoit une
+autre après 20 étapes muettes, pour dire où il en est. Pour NVIDIA, le choix du modèle met
+Nemotron 3 Super en tête : rapide et fiable sur l'offre gratuite. Nemotron 3 Ultra, le plus
+puissant, est lent (NVIDIA coupe parfois ses longues réponses) ; Claw passe alors à Nemotron 3
 Super.
+
+## Réponses lisibles
+
+La réponse de Claw est un compte rendu pour une personne : étiquettes en français (Résultat, Ce
+qui n'allait pas, Ce que j'ai fait, Vérification, Ce qu'il reste à faire), les changements tels
+que vous les verrez, sans liste de sélecteurs CSS ni de noms de fonctions, et sans ligne de
+signature (une ligne « Assisted-by » finale est retirée par le moteur). Les listes imbriquées
+s'affichent en retrait. Le pied de la réponse dit le bilan de la branche en français (« 10
+fichiers modifiés, +1 743 lignes, −287 lignes »), et une erreur est d'abord dite en clair (« le
+quota du modèle est épuisé pour le moment »), le message brut en dessous.
 
 ## Quota du modèle choisi
 
