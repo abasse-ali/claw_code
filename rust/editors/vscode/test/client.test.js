@@ -52,7 +52,11 @@ function get(port, path) {
   // CLAW_NO_USER_ENV : l'essai ne reprend pas les clés du compte de la machine.
   // Les clés vides : celles du terminal qui lance l'essai n'atteignent pas les
   // vrais fournisseurs (une relecture partirait sinon vers un vrai modèle).
+  // CLAW_ANNOUNCE=0 : les réponses scriptées appellent leurs outils sans un mot,
+  // et la demande d'annonce de Claw (une requête de plus) décalerait le script ;
+  // l'annonce a ses propres essais dans le runtime.
   const env = {
+    CLAW_ANNOUNCE: "0",
     OLLAMA_BASE_URL: mock.baseUrl,
     CLAW_CONFIG_HOME: path.join(root, "claw-home"),
     CLAW_NO_CLAUDE_CONFIG: "1",
@@ -408,8 +412,11 @@ function get(port, path) {
   const described = fs.existsSync(path.join(cwd, ".claw", "image-descriptions"))
     ? fs.readdirSync(path.join(cwd, ".claw", "image-descriptions")).length
     : 0;
+  // Deux regards du lecteur (description, puis relecture de cette description
+  // devant l'image), comme le fait Claw depuis le lot 168b5f1.
   check("une image est décrite par un modèle qui les lit, et le modèle de la session reçoit la description",
-    toReader.length === 1 && JSON.stringify(toReader[0].messages).includes("image_url")
+    toReader.length === 2 && toReader.every((request) => JSON.stringify(request.messages).includes("image_url"))
+      && JSON.stringify(toReader[1].messages).includes("check the description against it")
       && !toBlind.includes("image_url") && toBlind.includes("Image described by mock/vision:free")
       && toBlind.includes("Réponse du modèle factice") && described === 1
       && blindEvents.some((event) => event.type === "notice" && /ne lit pas les images : il reçoit à la place la description de 1 image par mock\/vision:free/.test(event.text))
@@ -417,7 +424,7 @@ function get(port, path) {
     JSON.stringify([toReader.length, described, toBlind.slice(0, 300), blindEvents.filter((event) => ["notice", "error"].includes(event.type)).map((event) => event.text || event.message)]).slice(0, 900));
   await blindTurn("Et maintenant ?");
   check("la description d'une image n'est demandée qu'une fois",
-    requestsTo("mock/vision:free").length === 1
+    requestsTo("mock/vision:free").length === 2
       && JSON.stringify((requestsTo("mock/texte:free").pop() || {}).messages || []).includes("Image described by mock/vision:free"),
     String(requestsTo("mock/vision:free").length));
   blind.stop();
@@ -503,15 +510,16 @@ function get(port, path) {
 
   const always = await startAsking("ollama:coupe");
   await always.instance.send("Crée ce fichier [mock:write notes/jamais.txt=rien]");
-  await wait("question sur le modèle", () => of(always.seen, "model_question").length > 0, 160);
-  const stuckQuestion = of(always.seen, "model_question")[0] || {};
-  if (stuckQuestion.id !== undefined) await always.instance.request("POST", "/api/model-question", { id: stuckQuestion.id, decision: "stop" });
-  await wait("fin du tour arrêté", () => of(always.seen, "turn_done").length > 0, 160);
-  check("des appels toujours coupés : deux nouveaux essais, puis la question à l'utilisateur, sans rien autoriser",
-    /s'arrêtent avant la fin des appels d'outils/.test(stuckQuestion.reason || "") && of(always.seen, "permission").length === 0
+  await wait("fin du tour", () => of(always.seen, "turn_done").length > 0, 160);
+  // Depuis le lot 24 : au dernier essai, l'appel coupé revient au modèle comme
+  // une erreur (rien d'exécuté), sans interrompre l'utilisateur.
+  const cutResult = of(always.seen, "tool_result").find((event) => event.name === "write_file") || {};
+  check("des appels toujours coupés : deux nouveaux essais, puis l'appel rendu au modèle comme une erreur, sans rien autoriser",
+    cutResult.is_error === true && /ended before the arguments of `write_file`/.test(cutResult.output || "")
+      && of(always.seen, "permission").length === 0 && of(always.seen, "model_question").length === 0
       && of(always.seen, "notice").filter((event) => /coupée avant la fin d'un appel d'outil/.test(event.text)).length === 2
       && !fs.existsSync(path.join(cwd, "notes", "jamais.txt")),
-    JSON.stringify([stuckQuestion, of(always.seen, "notice").map((event) => event.text), of(always.seen, "permission").length]).slice(0, 600));
+    JSON.stringify([cutResult, of(always.seen, "notice").map((event) => event.text), of(always.seen, "permission").length]).slice(0, 600));
   always.instance.stop();
 
   const limited = await startAsking("ollama:limite");
