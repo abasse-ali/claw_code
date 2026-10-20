@@ -9947,6 +9947,9 @@ impl ApiClient for DefaultRuntimeClient {
         // la même requête est relancée. Quand c'est le fournisseur du modèle qui
         // lâche en cours de réponse (504, surcharge), elle repart sur un autre modèle.
         let mut retries_left = BROKEN_STREAM_RETRIES;
+        // Réponse qui invente un message de l'utilisateur : redemandée une fois
+        // au même modèle, puis au suivant de la chaîne.
+        let mut invented_retries = 1;
         let mut switches_left = api::UPSTREAM_SWITCHES;
         // Essais automatiques du même modèle déjà faits pour cette requête.
         let mut auto_retries = 0_u32;
@@ -10165,6 +10168,9 @@ impl ApiClient for DefaultRuntimeClient {
                 {
                     events.push(AssistantEvent::MessageStop);
                 }
+                if invents_a_turn(&events) {
+                    return Err(RuntimeError::new(INVENTED_TURN_ERROR));
+                }
 
                 if events
                     .iter()
@@ -10204,6 +10210,9 @@ impl ApiClient for DefaultRuntimeClient {
                     stop_reason.as_deref(),
                     &events,
                 ));
+                if invents_a_turn(&events) {
+                    return Err(RuntimeError::new(INVENTED_TURN_ERROR));
+                }
                 if let Some(observer) = &self.observer {
                     for event in &events {
                         match event {
@@ -10217,7 +10226,6 @@ impl ApiClient for DefaultRuntimeClient {
                             AssistantEvent::Usage(_) | AssistantEvent::MessageStop => {}
                         }
                     }
-                    observer.reply_done();
                 }
                 Ok(events)
             });
@@ -10227,6 +10235,34 @@ impl ApiClient for DefaultRuntimeClient {
                 notify(&notice);
             }
             match result {
+                // Réponse qui joue le rôle de l'utilisateur ou de Claw : jamais
+                // montrée ni exécutée. Vu le 20 octobre 2026 : Step 5 Preview
+                // suivait ensuite les tâches qu'il y avait inventées.
+                Err(error) if error.to_string() == INVENTED_TURN_ERROR => {
+                    if emit {
+                        transcript::discard_calls();
+                    }
+                    if let Some(observer) = &self.observer {
+                        observer.reply_discarded();
+                    }
+                    let failed = answering.borrow().clone();
+                    if invented_retries > 0 {
+                        invented_retries -= 1;
+                        notify("Le modèle a écrit un faux message de l'utilisateur : réponse écartée, nouvel essai");
+                    } else if let Some(next) = self.chain.switch_after_failure(&failed) {
+                        invented_retries = 1;
+                        notify(&format!(
+                            "{failed} invente encore des messages de l'utilisateur : la requête repart sur {next}"
+                        ));
+                    } else {
+                        return Err(RuntimeError::new(format!(
+                            "{failed} invente des messages de l'utilisateur, et aucun autre modèle ne peut reprendre"
+                        )));
+                    }
+                    if emit {
+                        live::show("Réflexion…");
+                    }
+                }
                 Err(error) if retries_left > 0 && is_broken_stream(&error.to_string()) => {
                     retries_left -= 1;
                     if emit {
@@ -10364,6 +10400,10 @@ impl ApiClient for DefaultRuntimeClient {
                 }
                 Ok(events) => {
                     self.reply_cut = cut.get();
+                    // La réponse est gardée : l'interface peut la montrer.
+                    if let Some(observer) = &self.observer {
+                        observer.reply_done();
+                    }
                     return Ok(events);
                 }
             }
@@ -10483,6 +10523,21 @@ fn active_model() -> String {
 const BROKEN_STREAM_RETRIES: u32 = 2;
 /// La réponse s'est interrompue côté réseau (et non par l'utilisateur ou par
 /// un refus du fournisseur) : la même requête peut être relancée.
+/// Erreur interne d'une réponse qui invente un message de l'utilisateur.
+const INVENTED_TURN_ERROR: &str = "réponse du modèle qui invente un message de l'utilisateur";
+
+/// La réponse joue-t-elle le rôle de l'utilisateur ou de Claw ?
+fn invents_a_turn(events: &[AssistantEvent]) -> bool {
+    let text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            AssistantEvent::TextDelta(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    runtime::harness::invented_turn(&text)
+}
+
 fn is_broken_stream(error: &str) -> bool {
     if runtime::interrupt::is_interruption(error) {
         return false;

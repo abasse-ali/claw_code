@@ -906,8 +906,12 @@ pub(crate) struct NvidiaModel {
 /// développeurs de NVIDIA) essayés avec Claw le 18 octobre 2026, du plus
 /// puissant au plus léger. Le catalogue de NVIDIA en compte 81 ; d'autres
 /// font attendre leur première réponse de 90 s à plus de 4 min (GLM 5.3,
-/// Nemotron 3.5 Lightning, `DeepSeek` V4.1 Flash, Gemma 4 : trop pour un
-/// agent) ou ne sont pas ouverts à toutes les clés (erreur 404). Nemotron 3.5
+/// `DeepSeek` V4.1 Flash, Gemma 4 : trop pour un agent) ou ne sont pas
+/// ouverts à toutes les clés (erreur 404, Kimi K2.6). Revu le 20 octobre
+/// 2026 : Nemotron 3.5 Lightning répond maintenant en moins d'une seconde et
+/// fait le travail ; Step 5 Preview, en secours d'une session de Claw Web, a
+/// écrit de faux messages de l'utilisateur puis suivi les tâches qu'il y
+/// inventait, et gpt-oss 20B échouait : ils ne sont plus proposés. Nemotron 3.5
 /// Super VL lit les images mais échoue dès qu'on lui donne des outils
 /// (erreur 500) : il ne sert que de lecteur. Un modèle qui ne lit pas les
 /// images refuse une requête qui en porte une (erreur 400).
@@ -931,27 +935,23 @@ pub(crate) const NVIDIA_MODELS: &[NvidiaModel] = &[
         images: true,
     },
     NvidiaModel {
-        id: "stepfun-ai/step-5-preview",
-        name: "Step 5 Preview",
-        tools: true,
-        images: false,
-    },
-    NvidiaModel {
-        id: "openai/gpt-oss-20b",
-        name: "gpt-oss 20B",
+        id: "nvidia/nemotron-3.5-lightning-30b-a3b",
+        name: "Nemotron 3.5 Lightning 30B",
         tools: true,
         images: false,
     },
 ];
 
-/// Ordre des secours de NVIDIA : les agents rapides d'abord. Nemotron 3 Ultra,
-/// le plus puissant, est lent sur l'offre gratuite : vu le 19 octobre 2026 dans
-/// une session de Claw Web, NVIDIA coupait ses longues réponses.
+/// Ordre des secours de NVIDIA. Le 20 octobre 2026, Nemotron 3 Super était
+/// introuvable (erreur 404) et la même petite tâche a été faite pour de vrai
+/// par les deux autres : Ultra en 126 s, tout en français, compte rendu net ;
+/// Lightning en 107 s, une correction de plus et des phrases en anglais.
+/// Ultra passe donc avant Lightning, bien qu'il ait été lent le 19 octobre
+/// (longues réponses coupées par NVIDIA).
 const NVIDIA_FALLBACK_ORDER: &[&str] = &[
     "nvidia/nemotron-3-super-120b-a12b",
-    "stepfun-ai/step-5-preview",
     "nvidia/nemotron-3-ultra-550b-a55b",
-    "openai/gpt-oss-20b",
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
 ];
 
 /// Ce qu'il faut savoir d'un agent de NVIDIA avant de le choisir.
@@ -2851,26 +2851,30 @@ mod tests {
             provider_fallbacks("nvidia:nvidia/nemotron-3-ultra-550b-a55b").expect("NVIDIA"),
             [
                 "nvidia:nvidia/nemotron-3-super-120b-a12b",
-                "nvidia:stepfun-ai/step-5-preview",
-                "nvidia:openai/gpt-oss-20b",
+                "nvidia:nvidia/nemotron-3.5-lightning-30b-a3b",
             ]
         );
-        // Les agents rapides d'abord ; Ultra, lent, après eux.
+        // Super introuvable (20 octobre 2026) : Ultra, puis Lightning ; jamais
+        // Step 5 Preview, qui inventait des messages de l'utilisateur.
+        let from_super =
+            provider_fallbacks("nvidia:nvidia/nemotron-3-super-120b-a12b").expect("NVIDIA");
         assert_eq!(
-            provider_fallbacks("nvidia:openai/gpt-oss-20b").expect("NVIDIA"),
+            from_super,
             [
-                "nvidia:nvidia/nemotron-3-super-120b-a12b",
-                "nvidia:stepfun-ai/step-5-preview",
                 "nvidia:nvidia/nemotron-3-ultra-550b-a55b",
+                "nvidia:nvidia/nemotron-3.5-lightning-30b-a3b",
             ]
         );
+        assert!(!from_super.iter().any(|model| model.contains("step-5")));
         assert!(super::nvidia_caveat("nvidia/nemotron-3-ultra-550b-a55b").is_some());
         assert!(super::nvidia_caveat("nvidia/nemotron-3-super-120b-a12b").is_none());
         // Le lecteur d'images n'appelle pas les outils : jamais un secours d'agent.
-        assert!(!provider_fallbacks("nvidia:openai/gpt-oss-20b")
-            .expect("NVIDIA")
-            .iter()
-            .any(|model| model.contains("-vl-")));
+        assert!(
+            !provider_fallbacks("nvidia:nvidia/nemotron-3.5-lightning-30b-a3b")
+                .expect("NVIDIA")
+                .iter()
+                .any(|model| model.contains("-vl-"))
+        );
         // Chaque modèle Gemini a son propre quota du jour : les autres prennent la suite.
         let gemini = provider_fallbacks("gemini:gemini-3.8-flash").expect("Gemini");
         assert_eq!(gemini[0], "gemini:gemini-3.6-flash");
@@ -2889,7 +2893,7 @@ mod tests {
         // Le plus puissant des agents rapides : Super, jamais Ultra (lent, il
         // coupait ses longues réponses).
         assert_eq!(
-            stronger_nvidia_agent("nvidia:stepfun-ai/step-5-preview").as_deref(),
+            stronger_nvidia_agent("nvidia:nvidia/nemotron-3.5-lightning-30b-a3b").as_deref(),
             Some(super_)
         );
         assert_eq!(

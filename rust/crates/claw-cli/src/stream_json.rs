@@ -30,6 +30,16 @@ pub(crate) struct StreamJsonObserver {
     session_id: String,
     text: Mutex<String>,
     thinking: Mutex<String>,
+    /// Blocs de la réponse en cours (raisonnement, texte, appels d'outils),
+    /// publiés quand elle est gardée : une réponse écartée (flux coupé, faux
+    /// message de l'utilisateur) n'est jamais montrée.
+    pending: Mutex<Vec<Value>>,
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl StreamJsonObserver {
@@ -38,6 +48,7 @@ impl StreamJsonObserver {
             session_id: session_id.to_string(),
             text: Mutex::new(String::new()),
             thinking: Mutex::new(String::new()),
+            pending: Mutex::new(Vec::new()),
         }
     }
 
@@ -51,49 +62,43 @@ impl StreamJsonObserver {
         emit(&event);
     }
 
-    /// Publie le texte (et le raisonnement) accumulés depuis le dernier événement.
-    pub(crate) fn flush(&self) {
-        let thinking = std::mem::take(
-            &mut *self
-                .thinking
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
+    /// Range le raisonnement et le texte reçus dans les blocs de la réponse.
+    fn stage(&self) {
+        let thinking = std::mem::take(&mut *locked(&self.thinking));
+        let text = std::mem::take(&mut *locked(&self.text));
+        let mut pending = locked(&self.pending);
         if !thinking.is_empty() {
-            self.assistant(json!({ "type": "thinking", "thinking": thinking }));
+            pending.push(json!({ "type": "thinking", "thinking": thinking }));
         }
-        let text = std::mem::take(
-            &mut *self
-                .text
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
         if !text.is_empty() {
-            self.assistant(json!({ "type": "text", "text": text }));
+            pending.push(json!({ "type": "text", "text": text }));
+        }
+    }
+
+    /// Publie les blocs de la réponse en cours, dans l'ordre reçu.
+    pub(crate) fn flush(&self) {
+        self.stage();
+        let blocks = std::mem::take(&mut *locked(&self.pending));
+        for block in blocks {
+            self.assistant(block);
         }
     }
 }
 
 impl TurnObserver for StreamJsonObserver {
     fn text_delta(&self, text: &str) {
-        self.text
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push_str(text);
+        locked(&self.text).push_str(text);
     }
 
     fn thinking_delta(&self, text: &str) {
-        self.thinking
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push_str(text);
+        locked(&self.thinking).push_str(text);
     }
 
     fn tool_call(&self, name: &str, input: &str) {
-        self.flush();
+        self.stage();
         let input = serde_json::from_str::<Value>(input)
             .unwrap_or_else(|_| Value::String(input.to_string()));
-        self.assistant(json!({ "type": "tool_use", "name": name, "input": input }));
+        locked(&self.pending).push(json!({ "type": "tool_use", "name": name, "input": input }));
     }
 
     fn tool_result(&self, name: &str, output: &str, is_error: bool) {
@@ -113,10 +118,17 @@ impl TurnObserver for StreamJsonObserver {
         );
     }
 
-    // Un texte sans appel d'outil (l'annonce de ce que fait l'agent) part dès
-    // la fin de la réponse, pas une requête plus tard.
+    // La réponse est gardée : ses blocs partent, avant l'exécution de ses
+    // outils (une annonce sans outil part dès sa fin, pas une requête plus tard).
     fn reply_done(&self) {
         self.flush();
+    }
+
+    // Réponse abandonnée puis redemandée : rien d'elle n'est publié.
+    fn reply_discarded(&self) {
+        locked(&self.text).clear();
+        locked(&self.thinking).clear();
+        locked(&self.pending).clear();
     }
 }
 
@@ -192,5 +204,27 @@ mod tests {
         );
         assert_eq!(user_text_from_line("   "), Ok(None));
         assert!(user_text_from_line("pas du json").is_err());
+    }
+
+    #[test]
+    fn a_discarded_reply_is_never_published() {
+        use super::StreamJsonObserver;
+        use crate::TurnObserver;
+        let observer = StreamJsonObserver::new("essai");
+        observer.text_delta("user\nFais autre chose");
+        observer.tool_call("bash", r#"{"command":"ls"}"#);
+        observer.reply_discarded();
+        assert!(super::locked(&observer.pending).is_empty());
+        // La réponse suivante, gardée, garde son ordre : texte puis appel.
+        observer.thinking_delta("Je regarde.");
+        observer.text_delta("Je lis le projet.");
+        observer.tool_call("read_file", r#"{"path":"a.py"}"#);
+        let kinds: Vec<String> = super::locked(&observer.pending)
+            .iter()
+            .map(|block| block["type"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(kinds, ["thinking", "text", "tool_use"]);
+        observer.reply_done();
+        assert!(super::locked(&observer.pending).is_empty());
     }
 }
