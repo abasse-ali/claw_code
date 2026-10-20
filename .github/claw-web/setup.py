@@ -127,6 +127,29 @@ def conversation(issue, notes):
     return "\n\n".join(pending), text.strip(), images, last, retry
 
 
+# « Continue » et ses pareils, seuls dans le message.
+BARE_CONTINUE = re.compile(
+    r"^\s*(continue[rsz]?|continuons|on continue|vas[- ]y|go( on)?|reprends?|reprendre|poursuis|"
+    r"poursuivre|la suite|suite|next|keep going|encore)\s*[.!?…]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def bare_continue_note(request, history, retry):
+    """Note pour un « Continue » sans conversation qui précède (session neuve) : rien ne dit quoi
+    continuer. Vu le 20 octobre 2026 (session 13) : l'agent s'est inventé une refonte du site,
+    117 minutes et 161 actions que personne n'avait demandées."""
+    if history or retry or not BARE_CONTINUE.match(request or ""):
+        return ""
+    return (
+        "\n\n[Claw] This session has no earlier conversation: the user's message only says to go on, "
+        "and nothing tells what to continue. Do not invent a task. Look at the repository without "
+        "changing anything (README, PLAN.md or other notes, recent commits with git log), then answer "
+        "in a few sentences: what the project is, what looks finished or unfinished, and the next step "
+        "you propose. Change no file in this pass: the user will reply with what to do."
+    )
+
+
 def already_answered(notes):
     """Ce passage arrive après la réponse à ses messages : lancé deux fois (plusieurs appuis,
     appli rechargée), il attendait son tour pendant que le premier travaillait. Une relance
@@ -245,6 +268,7 @@ def main():
     # Les mots de l'utilisateur d'abord : Claw ne décide le mode projet que sur ce qui
     # précède la première ligne `[Claw]`.
     request, history, images, processed, retry = conversation(issue, notes)
+    request += bare_continue_note(request, history, retry)
     # Pour la réponse : jusqu'où elle répond (les messages arrivés pendant le passage auront
     # le leur).
     (WORK / "answered.txt").write_text(str(processed), encoding="utf-8")

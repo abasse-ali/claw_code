@@ -31,6 +31,17 @@ class ConversationTest(unittest.TestCase):
         request, history, _, last, retry = setup.conversation(ISSUE, [])
         self.assertEqual((request, history, last, retry), ("Fais une appli de budget", "", 0, False))
 
+    def test_a_bare_continue_without_conversation_asks_for_a_report_not_invented_work(self):
+        # Session 13 : « Continue » dans une session neuve, et une refonte inventée.
+        for words in ("Continue", "continue.", "Vas-y", "On continue !", "la suite"):
+            note = setup.bare_continue_note(words, "", False)
+            self.assertIn("Do not invent a task", note, words)
+            self.assertTrue(note.startswith("\n\n[Claw] "), words)
+        # Avec une conversation qui précède, une relance, ou une vraie demande : rien.
+        self.assertEqual(setup.bare_continue_note("Continue", "Fais une appli de budget", False), "")
+        self.assertEqual(setup.bare_continue_note("Continue", "", True), "")
+        self.assertEqual(setup.bare_continue_note("Continue le formulaire d'ajout", "", False), "")
+
     def test_new_message(self):
         notes = [progress(1), answer(2, 0, "Appli faite."), message(10, "Ajoute un export CSV")]
         request, history, _, last, retry = setup.conversation(ISSUE, notes)
