@@ -222,6 +222,8 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .message p:last-child { margin-bottom: 0; }
 .message h3, .message h4, .message h5, .message h6 { margin: .9em 0 .4em; font-size: 1rem; }
 .message ul, .message ol { margin: .3em 0 .7em; padding-left: 1.3em; }
+.message li + li { margin-top: .3em; }
+.message li > ul, .message li > ol { margin: .25em 0 .1em; padding-left: 1.1em; }
 .message blockquote, .progress-card blockquote { margin: .4em 0; padding: 4px 10px; border-left: 3px solid var(--border); color: var(--muted); }
 code { font: .88em ui-monospace, "Cascadia Code", Consolas, monospace; background: var(--panel-2); padding: 1px 5px; border-radius: 5px; }
 pre { overflow-x: auto; background: var(--code-bg); padding: 12px; border-radius: 10px; }
