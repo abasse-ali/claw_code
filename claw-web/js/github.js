@@ -156,6 +156,36 @@ export class GitHub {
     return answer.runners || [];
   }
 
+  /** Valeur d'une variable d'Actions du dépôt, ou null. */
+  async variable(repo, name) {
+    try {
+      return (await this.request("GET", `/repos/${repo}/actions/variables/${name}`)).value;
+    } catch (error) {
+      if (error.status === 404) return null;
+      throw error;
+    }
+  }
+
+  /** Règle une variable d'Actions du dépôt (créée au besoin). */
+  async setVariable(repo, name, value) {
+    try {
+      await this.request("PATCH", `/repos/${repo}/actions/variables/${name}`, { name, value });
+    } catch (error) {
+      if (error.status !== 404) throw error;
+      await this.request("POST", `/repos/${repo}/actions/variables`, { name, value });
+    }
+  }
+
+  /** Active ou désactive un workflow d'un dépôt : désactivé, il ne se lance plus du tout. */
+  setWorkflowEnabled(repo, file, enabled) {
+    return this.request("PUT", `/repos/${repo}/actions/workflows/${file}/${enabled ? "enable" : "disable"}`);
+  }
+
+  /** Lance un workflow d'un dépôt (par son fichier) sur une branche. */
+  runWorkflow(repo, file, ref = "main") {
+    return this.request("POST", `/repos/${repo}/actions/workflows/${file}/dispatches`, { ref });
+  }
+
   /** Jeton d'inscription d'un nouvel exécuteur (une heure ; autorisation Administration en écriture). */
   registrationToken(engine) {
     return this.request("POST", `/repos/${engine}/actions/runners/registration-token`);

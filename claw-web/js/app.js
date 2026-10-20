@@ -246,6 +246,37 @@ function existingServerCommand(engine, token) {
   return `curl -fsSL https://raw.githubusercontent.com/${CLAW_SOURCE}/main/.github/claw-web/pc/claw-cloud.sh | sudo bash -s -- install --repo ${engine} --token ${token} --shared`;
 }
 
+/** L'aperçu du fichier de configuration que montre Oracle à la création d'une clé d'API :
+ * les champs qui manquent (vide : complet). */
+function ociConfigMissing(text) {
+  const values = Object.fromEntries(String(text || "").split(/\r?\n/)
+    .map((line) => line.split("#")[0].trim())
+    .filter((line) => line.includes("=") && !line.startsWith("["))
+    .map((line) => [line.slice(0, line.indexOf("=")).trim(), line.slice(line.indexOf("=") + 1).trim()]));
+  return ["user", "fingerprint", "tenancy", "region"].filter((name) => !values[name]);
+}
+
+/** État du robot de réessai, lu dans les variables du dépôt du code de Claw. */
+async function robotState() {
+  const [switch_, raw] = await Promise.all([
+    state.github.variable(CLAW_SOURCE, "ORACLE_ROBOT"),
+    state.github.variable(CLAW_SOURCE, "ORACLE_ROBOT_STATE"),
+  ]);
+  let last = null;
+  try {
+    last = raw ? JSON.parse(raw) : null;
+  } catch {
+    last = null;
+  }
+  const ago = last && last.t ? Math.max(0, Math.round((Date.now() - Date.parse(last.t)) / 60000)) : null;
+  const when = ago === null ? "" : ago < 1 ? "à l'instant" : `il y a ${ago} min`;
+  if (switch_ === "done") return { on: false, text: "Serveur créé par le robot : l'exécuteur s'installe (15 à 25 minutes), puis apparaît en ligne dans « Moteur »." };
+  if (switch_ === "on") {
+    return { on: true, text: last ? `Robot en marche : dernier essai ${when}. ${last.detail || ""}` : "Robot en marche : premier essai dans quelques minutes." };
+  }
+  return { on: false, text: last && last.outcome === "error" ? `Robot arrêté : ${last.detail || ""}` : "" };
+}
+
 /** Serveur gratuit dans le nuage (Oracle Cloud, offre « Always Free ») : les étapes, et le
  * script de démarrage à coller, préparé avec un jeton d'inscription neuf. */
 function openCloudRunner() {
@@ -270,6 +301,20 @@ function openCloudRunner() {
           <pre class="io-v cloud-command"></pre>
           <button type="button" class="secondary" data-action="cloud-copy-command">Copier la commande</button>
         </div>
+        <h3 class="cloud-subtitle">Robot de réessai</h3>
+        <p class="help">Oracle manque de place ? Le robot réessaie toutes les 10 minutes, gratuitement sur GitHub et sans votre PC, puis installe Claw dès qu'une machine se libère. Il s'éteint seul une fois le serveur créé.</p>
+        <ol>
+          <li>Console d'Oracle, sur le compte et dans la région du futur serveur : profil (en haut à droite), <em>Mon profil</em>, <em>Clés d'API</em>, <em>Ajouter une clé d'API</em>. Choisissez « Générer une paire de clés d'API », <em>Télécharger la clé privée</em>, puis <em>Ajouter</em>.</li>
+          <li>Copiez l'<em>Aperçu du fichier de configuration</em> affiché ensuite et collez-le ci-dessous ; choisissez le fichier de clé privée téléchargé (.pem).</li>
+          <li>Un réseau avec un sous-réseau public doit exister dans cette région (assistant VCN, « Créer un VCN avec connectivité Internet »).</li>
+        </ol>
+        <label class="field"><span>Aperçu du fichier de configuration</span>
+          <textarea name="oci-config" rows="6" spellcheck="false" autocomplete="off" placeholder="[DEFAULT]&#10;user=ocid1.user…&#10;fingerprint=…&#10;tenancy=ocid1.tenancy…&#10;region=eu-marseille-1"></textarea></label>
+        <label class="field"><span>Clé privée (.pem)</span><input type="file" name="oci-key" accept=".pem,text/plain,application/x-pem-file"></label>
+        <p class="help">La configuration, la clé et le jeton GitHub de l'appli (pour inscrire l'exécuteur) partent chiffrés dans le navigateur, en secrets du dépôt du code de Claw (${escapeHtml(CLAW_SOURCE)}) ; rien n'est gardé sur cet appareil.</p>
+        <p class="help robot-state" hidden></p>
+        <button type="button" class="primary" data-action="robot-start">Démarrer le robot</button>
+        <button type="button" class="secondary" data-action="robot-stop" hidden>Arrêter le robot</button>
         <p class="help">Si Oracle répond « Out of capacity » (manque de capacité) : demandez 1 OCPU et 6 Go, réessayez à d'autres heures (nuit, matin), ou passez le compte en « Pay As You Go » (Facturation, <em>Upgrade</em>) : ces comptes obtiennent bien plus facilement ces machines, et rien n'est facturé tant que vous ne créez que des ressources « Toujours gratuit » (créez une alerte de budget à 1 €, Facturation, <em>Budgets</em>). Certaines régions, comme Marseille, n'ont qu'un domaine de disponibilité. Oracle peut arrêter un serveur gratuit resté inactif sept jours : relancez-le depuis la console (Instances, <em>Start</em>) ; passer le compte en « Pay As You Go » l'évite, sans frais tant que vous restez dans l'offre gratuite. Jeton expiré avant l'installation : préparez un nouveau script et, dans la console d'Oracle (Instances, <em>Run command</em> ou Cloud Shell), lancez <code>sudo claw-cloud register --repo ${escapeHtml(engine)} --token NOUVEAU_JETON</code>.</p>
       </div>
     </div>`;
@@ -307,6 +352,66 @@ function openCloudRunner() {
       toast("Script copié : collez-le dans Initialization script, chez Oracle");
     } catch {
       toast("Copie refusée par le navigateur : sélectionnez le script à la main");
+    }
+  });
+  const showRobot = async () => {
+    try {
+      const robot = await robotState();
+      const line = sheet.querySelector(".robot-state");
+      if (!line) return;
+      line.textContent = robot.text;
+      line.hidden = !robot.text;
+      sheet.querySelector('[data-action="robot-start"]').hidden = robot.on;
+      sheet.querySelector('[data-action="robot-stop"]').hidden = !robot.on;
+    } catch {
+      // État illisible (jeton sans accès aux variables) : les boutons restent.
+    }
+  };
+  showRobot();
+  sheet.querySelector('[data-action="robot-start"]').addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    const config = sheet.querySelector('textarea[name="oci-config"]').value;
+    const file = sheet.querySelector('input[name="oci-key"]').files[0];
+    const missing = ociConfigMissing(config);
+    if (missing.length) {
+      toast(`Aperçu de configuration incomplet : il manque ${missing.join(", ")}`);
+      return;
+    }
+    const key = file ? await file.text() : "";
+    if (!key.includes("PRIVATE KEY")) {
+      toast("Choisissez le fichier de clé privée téléchargé chez Oracle (.pem)");
+      return;
+    }
+    button.disabled = true;
+    try {
+      const sealing = await state.github.secretKey(CLAW_SOURCE);
+      for (const [name, value] of [["OCI_CONFIG", config.trim()], ["OCI_KEY", key.trim()], ["CLAW_ADMIN_TOKEN", state.settings.token]]) {
+        await state.github.putSecret(CLAW_SOURCE, name, sealedBox(value, sealing.key), sealing.key_id);
+      }
+      await state.github.setVariable(CLAW_SOURCE, "ORACLE_ROBOT_ENGINE", engine);
+      await state.github.setVariable(CLAW_SOURCE, "ORACLE_ROBOT", "on");
+      await state.github.setWorkflowEnabled(CLAW_SOURCE, "oracle-a1.yml", true);
+      await state.github.runWorkflow(CLAW_SOURCE, "oracle-a1.yml");
+      sheet.querySelector('textarea[name="oci-config"]').value = "";
+      sheet.querySelector('input[name="oci-key"]').value = "";
+      toast("Robot démarré : premier essai dans quelques minutes, puis toutes les 10 minutes");
+      await showRobot();
+    } catch (error) {
+      toast(error.status === 403 || error.status === 404
+        ? `GitHub refuse : le jeton de l'appli doit pouvoir régler les secrets et variables de ${CLAW_SOURCE}`
+        : error.message);
+    } finally {
+      button.disabled = false;
+    }
+  });
+  sheet.querySelector('[data-action="robot-stop"]').addEventListener("click", async () => {
+    try {
+      await state.github.setVariable(CLAW_SOURCE, "ORACLE_ROBOT", "off");
+      await state.github.setWorkflowEnabled(CLAW_SOURCE, "oracle-a1.yml", false);
+      toast("Robot arrêté");
+      await showRobot();
+    } catch (error) {
+      toast(error.message);
     }
   });
   sheet.querySelector('[data-action="cloud-copy-command"]').addEventListener("click", async () => {

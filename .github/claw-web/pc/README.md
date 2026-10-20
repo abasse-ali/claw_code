@@ -53,6 +53,30 @@ Ce qu'il faut savoir :
   `sudo claw-cloud register --repo abasse-ali/claw-sessions --token NOUVEAU_JETON`.
 - Le journal de l'installation est dans `/var/log/cloud-init-output.log`.
 
+### Robot de réessai
+
+Quand Oracle manque de place, le robot réessaie à votre place : toutes les 10 minutes, le
+workflow `oracle-a1.yml` du dépôt public du code de Claw (minutes gratuites, sans votre PC) essaie
+de créer l'instance, en 2 OCPU et 12 Go puis en 1 OCPU et 6 Go
+(`.github/claw-web/oracle/a1_robot.py`). Il trouve seul le sous-réseau public et l'image Ubuntu
+24.04 pour ARM, demande à GitHub un jeton d'inscription neuf au moment même (il ne peut donc pas
+expirer avant la création), et donne à l'instance le script de démarrage de `claw-cloud.sh`.
+
+- **Démarrer** : dans l'appli, « Serveur gratuit dans le nuage », partie « Robot de réessai ».
+  Créez une clé d'API dans la console d'Oracle (profil, *Mon profil*, *Clés d'API*, *Ajouter une
+  clé d'API*, « Générer une paire de clés d'API », *Télécharger la clé privée*, *Ajouter*), puis
+  collez l'aperçu du fichier de configuration et choisissez le fichier `.pem`. L'appli pose
+  chiffrés les secrets `OCI_CONFIG`, `OCI_KEY` et `CLAW_ADMIN_TOKEN` (son jeton GitHub, pour
+  inscrire l'exécuteur), règle les variables `ORACLE_ROBOT=on` et `ORACLE_ROBOT_ENGINE`, active le
+  workflow et lance un premier essai.
+- **Fin** : l'instance créée (ou une A1 déjà là), le robot passe `ORACLE_ROBOT` à `done` et
+  désactive son workflow. Une erreur qui se répéterait (clé refusée, pas de sous-réseau public,
+  refus d'Oracle) l'éteint aussi (`off`) : l'appli affiche la raison. Une panne passagère
+  d'Oracle, un refus pour trop de demandes : il réessaie au tour suivant.
+- **Arrêter** : bouton « Arrêter le robot » de l'appli.
+- Le journal d'un dépôt public est lisible de tous : le robot n'y écrit ni identifiant Oracle, ni
+  adresse, ni jeton. L'état qu'il laisse à l'appli est dans la variable `ORACLE_ROBOT_STATE`.
+
 Commandes sur le serveur (`sudo claw-cloud …`) :
 
 | Commande | Effet |
