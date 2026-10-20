@@ -774,9 +774,9 @@ fn get_reasoning_section() -> String {
 /// Forme de la réponse finale : un compte rendu que l'utilisateur lit seul.
 fn get_final_answer_section() -> String {
     let items = prepend_bullets(vec![
-        "Start with the outcome in one or two sentences: what now works, what you found, or what blocks you.".to_string(),
+        "Start with the result in one or two sentences: what now works, what you found, or what blocks you.".to_string(),
         "What was wrong: when you fixed or investigated something, name each problem and explain its root cause: why it happened, what it affected, and the evidence that showed it, in the words the user would use.".to_string(),
-        "What you did: the solution applied to each problem, why this solution rather than another when the choice mattered, and the files concerned. Group this by problem, not by file and not in the order you worked.".to_string(),
+        "What you did: the solution applied to each problem, why this solution rather than another when the choice mattered, and the main files concerned. Group this by problem, not by file and not in the order you worked.".to_string(),
         "Verification: the commands you ran and what they showed. Say plainly what you did not or could not verify.".to_string(),
         "What is left: what the user has to do next (the exact command to run), decisions that wait for them, risks and known limits. Leave this part out when there is nothing.".to_string(),
     ]);
@@ -784,6 +784,7 @@ fn get_final_answer_section() -> String {
         "# Final answer".to_string(),
         "End every task with one final answer written for the user, who reads only that message and did not follow your steps. Write it as a report in plain language:".to_string(),
         items.join("\n"),
+        "Write this report for a person, not for a program: speak to the user directly (\"you\", never \"the user\"), and describe each change as they will see or use it (the page, the feature, the behaviour), not as code: no lists of CSS selectors, function or variable names, line numbers or settings keys, the diff already holds them. Give each part a short bold label that you write in the user's language (in French: Résultat, Ce qui n'allait pas, Ce que j'ai fait, Vérification, Ce qu'il reste à faire); never reuse the English words of these instructions as labels. No signature, attribution or \"Assisted-by\" line.".to_string(),
         "When the user asks you to explain, analyse, compare, review, design or advise, the answer is the work itself: answer in depth, as the best senior engineer would. Ground each point in what you read (files, functions, lines), explain the mechanisms and the reasons behind them, weigh the options with their trade-offs, point out the risks and edge cases, and end with a clear recommendation. Use headings, lists, tables and short code excerpts where they make it clearer.".to_string(),
         "Scale the length to the substance: a simple question gets a direct answer in a few sentences; real work or analysis gets a complete report, each part under a short bold label written in the user's language. Never pad, restate the request or narrate your steps, no file contents, no second or third report; but never cut an explanation the user needs to understand or check the result.".to_string(),
     ]
@@ -847,7 +848,7 @@ mod tests {
         assert!(prompt
             .contains("# Final answer\nEnd every task with one final answer written for the user"));
         for part in [
-            "Start with the outcome",
+            "Start with the result",
             "What was wrong:",
             "What you did:",
             "Verification:",
@@ -855,6 +856,11 @@ mod tests {
         ] {
             assert!(prompt.contains(part), "partie absente : {part}");
         }
+        // Un compte rendu pour une personne : étiquettes dans sa langue, pas de
+        // liste de sélecteurs ni de signature (vu dans une vraie session).
+        assert!(prompt.contains("never reuse the English words of these instructions as labels"));
+        assert!(prompt.contains("no lists of CSS selectors, function or variable names"));
+        assert!(prompt.contains("No signature, attribution or \"Assisted-by\" line."));
         // Une méthode de réflexion précède les consignes de travail.
         assert!(prompt.contains("# Thinking it through\n - Take the time to think before you act."));
         assert!(prompt.contains("find the root cause before changing anything"));

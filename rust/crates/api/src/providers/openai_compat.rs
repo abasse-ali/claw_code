@@ -1933,6 +1933,7 @@ fn openai_tool_choice(tool_choice: &ToolChoice) -> Value {
             "type": "function",
             "function": { "name": name },
         }),
+        ToolChoice::None => Value::String("none".to_string()),
     }
 }
 
@@ -2723,6 +2724,12 @@ mod tests {
                 name: "weather".to_string(),
             }),
             json!({"type": "function", "function": {"name": "weather"}})
+        );
+        // Annonce de Claw : outils décrits, réponse en texte seul.
+        assert_eq!(openai_tool_choice(&ToolChoice::None), json!("none"));
+        assert_eq!(
+            serde_json::to_value(ToolChoice::None).expect("json"),
+            json!({"type": "none"})
         );
     }
 

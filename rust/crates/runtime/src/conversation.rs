@@ -22,6 +22,9 @@ use crate::usage::{TokenUsage, UsageTracker};
 pub struct ApiRequest {
     pub system_prompt: Vec<String>,
     pub messages: Vec<ConversationMessage>,
+    /// Réponse en texte seul : les outils restent décrits, mais le modèle ne
+    /// peut pas les appeler (annonce de ce qu'il fait à l'utilisateur).
+    pub text_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -397,9 +400,13 @@ struct TurnAids {
     scripts_asked: bool,
     /// Le piège des guillemets de `PowerShell` passé par bash a été dit.
     quoting_noted: bool,
-    /// Les premiers outils du tour ont été vus : l'annonce à l'utilisateur
-    /// n'est demandée qu'une fois.
+    /// Les premiers outils du tour ont été vus : l'annonce de départ n'est
+    /// demandée qu'une fois.
     announce_checked: bool,
+    /// Étapes d'outils d'affilée sans un mot pour l'utilisateur.
+    silent_steps: u32,
+    /// Annonce à demander à la requête suivante (en texte seul).
+    announce_due: Option<String>,
     /// Poursuites accordées au tour de design resté sous la barre.
     continuations: usize,
     /// Revues notées au moment de la dernière poursuite.
@@ -510,6 +517,8 @@ struct TurnAids {
     viewed_reads: std::collections::BTreeSet<String>,
     /// Remarques déjà faites pendant ce tour pour un fichier relu à l'identique.
     repeated_read_notes: u32,
+    /// Lectures entières de longs fichiers pendant ce tour, par fichier.
+    whole_reads: std::collections::HashMap<String, u32>,
     /// Mode projet : ce que Claw suit pendant le tour.
     project: Option<project::Turn>,
     /// Requêtes au modèle faites pendant le tour.
@@ -1352,31 +1361,41 @@ where
         true
     }
 
-    /// Note à joindre aux résultats des premiers outils du tour quand la
-    /// réponse qui les appelle n'a rien dit à l'utilisateur : une fois par
-    /// tour, jamais pour un sous-agent (personne ne le lit).
+    /// Demande d'annonce quand la réponse qui appelle des outils n'a rien dit
+    /// à l'utilisateur : aux premiers outils du tour, puis après
+    /// [`harness::SILENT_STEPS_BEFORE_UPDATE`] étapes muettes d'affilée.
+    /// Jamais pour un sous-agent (personne ne le lit). L'annonce elle-même se
+    /// voit : aucun avis de plus.
     fn announce_note(
         &mut self,
         aids: &mut TurnAids,
         assistant_messages: &[ConversationMessage],
     ) -> Option<String> {
-        if aids.announce_checked || self.subagent || !harness::enabled(Aid::Announce) {
+        if self.subagent || !announcements_on() || !harness::enabled(Aid::Announce) {
             return None;
         }
-        aids.announce_checked = true;
         let said = assistant_messages
             .last()
             .map(message_text)
             .unwrap_or_default();
         // Quelques mots suffisent ; rien, ou un mot isolé, ne dit rien du plan.
         if said.split_whitespace().count() >= 4 {
+            aids.announce_checked = true;
+            aids.silent_steps = 0;
             return None;
         }
-        self.api_client
-            .notify("L'agent s'est mis au travail sans annoncer ce qu'il fait : Claw lui demande de le dire");
+        aids.silent_steps += 1;
+        let note = if !aids.announce_checked {
+            harness::ANNOUNCE_NOTE.to_string()
+        } else if aids.silent_steps >= harness::SILENT_STEPS_BEFORE_UPDATE {
+            harness::update_note(aids.silent_steps)
+        } else {
+            return None;
+        };
+        aids.announce_checked = true;
+        aids.silent_steps = 0;
         Some(format!(
-            "{}{}",
-            harness::ANNOUNCE_NOTE,
+            "{note}{}",
             harness::language_note(self.response_language.as_deref())
         ))
     }
@@ -1727,11 +1746,23 @@ where
                     !aids.originals.is_empty(),
                 ));
             }
+            // Le modèle travaille sans un mot pour l'utilisateur : cette requête
+            // part sans outils, il ne peut que dire où il en est.
+            let announcing = match aids.announce_due.take() {
+                Some(note) if !wrapping_up => {
+                    self.session
+                        .messages
+                        .push(ConversationMessage::user_text(note));
+                    true
+                }
+                _ => false,
+            };
             self.auto_compact(false);
             self.autosave(&[]);
             let request = ApiRequest {
                 system_prompt: self.system_prompt.clone(),
                 messages: self.session.messages.clone(),
+                text_only: announcing,
             };
             let request_started = std::time::Instant::now();
             let events = match self.api_client.stream(request) {
@@ -1743,7 +1774,14 @@ where
                     self.api_client.stream(ApiRequest {
                         system_prompt: self.system_prompt.clone(),
                         messages: self.session.messages.clone(),
+                        text_only: announcing,
                     })?
+                }
+                // L'annonce ne passe pas (fournisseur qui refuse une requête
+                // sans outils) : le travail reprend sans elle.
+                Err(_) if announcing && !interrupt_requested() => {
+                    self.session.messages.pop();
+                    continue;
                 }
                 Err(error) => {
                     crate::telemetry::api_error(&error.to_string(), request_started.elapsed());
@@ -1766,6 +1804,11 @@ where
                 Ok(built) => {
                     empty_nudged = false;
                     built
+                }
+                // Annonce restée vide : le travail reprend sans elle.
+                Err(error) if announcing && error.to_string() == EMPTY_RESPONSE_ERROR => {
+                    self.session.messages.pop();
+                    continue;
                 }
                 // Suite d'une réponse coupée restée vide (souvent tout le
                 // budget pris par le raisonnement) : la même demande repart une
@@ -1834,6 +1877,15 @@ where
 
             self.session.messages.push(assistant_message.clone());
             assistant_messages.push(assistant_message);
+
+            // L'annonce est faite (texte seul) : ce n'est pas la réponse du
+            // tour, le travail reprend avec les outils.
+            if announcing && pending_tool_uses.is_empty() {
+                self.session.messages.push(ConversationMessage::user_text(
+                    harness::GO_ON_NOTE.to_string(),
+                ));
+                continue;
+            }
 
             if pending_tool_uses.is_empty() {
                 aids.single_call_streak = 0;
@@ -1988,14 +2040,10 @@ where
                 earlier.as_deref(),
                 &mut aids,
             );
-            // Premiers outils du tour lancés sans un mot pour l'utilisateur : il
-            // annonce ce qu'il fait dans sa réponse suivante (note jointe aux
-            // résultats, aucune requête de plus).
+            // Outils lancés sans un mot pour l'utilisateur : la requête suivante
+            // lui fait dire ce qu'il fait (au départ, puis de temps en temps).
             if let Some(note) = self.announce_note(&mut aids, &assistant_messages) {
-                plan_note = Some(match plan_note {
-                    Some(plan) => format!("{plan}\n\n{note}"),
-                    None => note,
-                });
+                aids.announce_due = Some(note);
             }
             self.autosave(&pending_tool_uses);
             if self.run_parallel_batch(
@@ -2687,6 +2735,7 @@ where
         let (path, length) = harness::read_result(output)?;
         let read = &output[..length];
         let stub = harness::repeated_read_stub(&path);
+        let span = harness::read_span(read);
         let mut repeated = false;
         for message in &mut self.session.messages {
             for block in &mut message.blocks {
@@ -2697,10 +2746,45 @@ where
                     ..
                 } = block
                 {
-                    if tool_name == "read_file" && earlier.starts_with(read) {
+                    if tool_name != "read_file" {
+                        continue;
+                    }
+                    if earlier.starts_with(read) {
                         earlier.replace_range(..length, &stub);
                         repeated = true;
+                        continue;
                     }
+                    // Le même fichier relu après un changement (en entier, ou les
+                    // mêmes lignes) : seule la lecture la plus récente reste. Vu
+                    // dans une vraie session : les copies périmées de `base.html`
+                    // s'accumulaient, 62 000 jetons par requête en moyenne.
+                    let Some((new_path, start, lines, whole)) = span.as_ref() else {
+                        continue;
+                    };
+                    let Some((old_path, old_start, old_lines, _)) = harness::read_span(earlier)
+                    else {
+                        continue;
+                    };
+                    let Some((_, old_length)) = harness::read_result(earlier) else {
+                        continue;
+                    };
+                    if old_path == *new_path
+                        && (*whole || (old_start == *start && old_lines == *lines))
+                    {
+                        earlier.replace_range(..old_length, &harness::superseded_read_stub(&path));
+                    }
+                }
+            }
+        }
+        // Long fichier relu en entier plusieurs fois dans le tour : lire les
+        // lignes utiles suffit. Une fois par fichier et par tour.
+        let mut long_note = None;
+        if let Some((_, _, lines, true)) = span.as_ref() {
+            if read.len() > harness::LONG_READ_CHARS {
+                let count = aids.whole_reads.entry(path.clone()).or_insert(0);
+                *count += 1;
+                if *count == harness::LONG_READS_BEFORE_NOTE {
+                    long_note = Some(harness::long_reread_note(&path, *lines, *count));
                 }
             }
         }
@@ -2711,7 +2795,7 @@ where
             aids.repeated_read_notes += 1;
             return Some(harness::repeated_read_note(&path));
         }
-        None
+        long_note
     }
 
     /// Le modèle lit un fichier qu'une vue encore à jour montre déjà en entier
@@ -5211,6 +5295,26 @@ impl ToolExecutor for StaticToolExecutor {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// Annonces dans les tests du runtime : coupées, car les modèles scriptés
+    /// se mettent au travail sans un mot ; les tests de l'annonce les rallument
+    /// (chaque test a son propre fil).
+    static TEST_ANNOUNCEMENTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Annonces demandées au modèle muet (toujours, hors des tests du runtime).
+fn announcements_on() -> bool {
+    #[cfg(test)]
+    {
+        TEST_ANNOUNCEMENTS.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
+#[cfg(test)]
 // Chaque test prend d'abord le verrou commun ([`crate::test_serial`]), avant
 // les types qu'il déclare.
 #[allow(clippy::items_after_statements)]
@@ -6461,6 +6565,8 @@ mod tests {
     struct Observed {
         /// Messages reçus à chaque appel du modèle (texte de débogage).
         requests: Vec<String>,
+        /// Rang des requêtes parties en texte seul (outils coupés).
+        text_only: Vec<usize>,
         notices: Vec<String>,
         announced: Vec<String>,
         /// Demandes faites à un autre modèle (relecture, conseil).
@@ -6478,6 +6584,22 @@ mod tests {
         team_steps: Vec<String>,
     }
 
+    /// Rallume les annonces le temps d'un test.
+    struct AnnouncementsOn;
+
+    impl AnnouncementsOn {
+        fn new() -> Self {
+            super::TEST_ANNOUNCEMENTS.with(|on| on.set(true));
+            Self
+        }
+    }
+
+    impl Drop for AnnouncementsOn {
+        fn drop(&mut self) {
+            super::TEST_ANNOUNCEMENTS.with(|on| on.set(false));
+        }
+    }
+
     /// Modèle scripté : une réponse par appel.
     struct StepsApiClient {
         steps: std::collections::VecDeque<Vec<AssistantEvent>>,
@@ -6490,10 +6612,13 @@ mod tests {
 
     impl ApiClient for StepsApiClient {
         fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
-            self.observed
-                .borrow_mut()
-                .requests
-                .push(format!("{:?}", request.messages));
+            let mut observed = self.observed.borrow_mut();
+            if request.text_only {
+                let rank = observed.requests.len();
+                observed.text_only.push(rank);
+            }
+            observed.requests.push(format!("{:?}", request.messages));
+            drop(observed);
             self.steps
                 .pop_front()
                 .ok_or_else(|| RuntimeError::new("plus de réponse scriptée"))
@@ -7401,38 +7526,44 @@ mod tests {
     #[test]
     fn a_model_that_starts_without_a_word_is_asked_to_announce_its_plan() {
         let _serial = crate::test_serial();
-        // Premiers outils sans un mot : la note part avec leurs résultats (aucune
-        // requête de plus), une seule fois par tour.
+        // Premiers outils sans un mot : la requête suivante part en texte seul
+        // (vu dans une vraie session : Nemotron 3 Super ne mettait son plan que
+        // dans son raisonnement et ignorait une note jointe aux résultats).
         let (mut runtime, observed, _) = aided_runtime(
             vec![
                 tool_step("bash", r#"{"command":"ls"}"#),
+                text_step("Je regarde les fichiers du projet, puis je les range par dossier."),
                 tool_step("bash", r#"{"command":"ls src"}"#),
                 text_step("Fini."),
             ],
             vec![PASSING, PASSING],
         );
+        let _announce = AnnouncementsOn::new();
         let summary = runtime.run_turn("range le projet", None).expect("tour");
-        assert_eq!(summary.iterations, 3);
+        assert_eq!(summary.iterations, 4);
         let observed = observed.borrow();
-        assert!(observed.requests[1].contains("You started working without telling the user"));
+        assert_eq!(
+            observed.text_only,
+            vec![1],
+            "seule l'annonce part sans outils"
+        );
+        assert!(observed.requests[1].contains("You started working without a word for the user"));
+        // L'annonce n'est pas la réponse du tour : le travail reprend.
+        assert!(observed.requests[2].contains("Go on with the work now"));
+        assert!(observed.requests[2].contains("puis je les range par dossier"));
         assert_eq!(
             observed
                 .requests
                 .iter()
-                .filter(|request| request.contains("You started working without telling the user"))
+                .filter(|request| request.contains("You started working without a word"))
                 .count(),
-            // La note reste dans l'historique ; elle n'est pas jointe une seconde fois.
-            2
+            // La note reste dans l'historique ; elle n'est pas redemandée.
+            3
         );
-        assert!(!observed.requests[2]
-            .rsplit("ls src")
-            .next()
-            .unwrap_or_default()
-            .contains("You started working"));
         assert!(observed
             .notices
             .iter()
-            .any(|notice| notice.contains("sans annoncer ce qu'il fait")));
+            .all(|notice| !notice.contains("annoncer")));
         drop(observed);
 
         // Une réponse qui dit son plan avant ses outils : rien à demander.
@@ -7449,8 +7580,57 @@ mod tests {
         ];
         let (mut runtime, observed, _) =
             aided_runtime(vec![announced, text_step("Fini.")], vec![PASSING]);
+        let _announce = AnnouncementsOn::new();
         runtime.run_turn("range le projet", None).expect("tour");
+        assert!(observed.borrow().text_only.is_empty());
         assert!(!observed.borrow().requests[1].contains("You started working"));
+
+        // Annonce restée vide : le travail reprend sans elle, sans relance.
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                tool_step("bash", r#"{"command":"ls"}"#),
+                vec![AssistantEvent::MessageStop],
+                text_step("Fini."),
+            ],
+            vec![PASSING],
+        );
+        let _announce = AnnouncementsOn::new();
+        runtime.run_turn("range le projet", None).expect("tour");
+        let observed = observed.borrow();
+        assert_eq!(observed.requests.len(), 3);
+        assert!(!observed.requests[2].contains("You started working"));
+        assert!(!observed.requests[2].contains("Go on with the work"));
+    }
+
+    #[test]
+    fn a_model_silent_for_many_steps_is_asked_where_the_work_stands() {
+        let _serial = crate::test_serial();
+        let steps_before = crate::harness::SILENT_STEPS_BEFORE_UPDATE as usize;
+        // Une annonce au départ, puis des outils sans un mot : un point d'étape
+        // après la limite, en texte seul.
+        let mut steps = vec![tool_step("bash", r#"{"command":"ls"}"#)];
+        steps.push(text_step(
+            "Je lis le projet, puis je corrige la page d'accueil.",
+        ));
+        for step in 0..steps_before {
+            let input = format!(r#"{{"command":"ls dossier-{step}"}}"#);
+            steps.push(tool_step("bash", &input));
+        }
+        steps.push(text_step(
+            "La page d'accueil est corrigée ; il reste le pied de page.",
+        ));
+        steps.push(text_step("Fini."));
+        let checks = vec![PASSING; steps_before + 1];
+        let (mut runtime, observed, _) = aided_runtime(steps, checks);
+        let _announce = AnnouncementsOn::new();
+        runtime.run_turn("corrige le site", None).expect("tour");
+        let observed = observed.borrow();
+        // Requêtes : outils, annonce, les étapes muettes, puis le point d'étape.
+        let update = steps_before + 2;
+        assert_eq!(observed.text_only, vec![1, update]);
+        assert!(observed.requests[update].contains(&format!(
+            "You have worked through {steps_before} rounds of tool calls without a word"
+        )));
     }
 
     #[test]
@@ -9183,7 +9363,9 @@ mod tests {
                 1
             );
             assert!(observed.requests[2].contains("An earlier read of `services.py` was here"));
-            // Contenu différent (le fichier a changé) : une lecture normale.
+            // Contenu différent (le fichier a changé) : une lecture normale, sans
+            // reproche ; l'ancienne version laisse la place à la nouvelle (vu dans
+            // une vraie session : les copies périmées s'accumulaient).
             assert_eq!(
                 observed.requests[3]
                     .matches("has not changed since you read it")
@@ -9193,6 +9375,14 @@ mod tests {
             assert_eq!(
                 observed.requests[3]
                     .matches("def emprunter(): pass")
+                    .count(),
+                0
+            );
+            assert!(observed.requests[3]
+                .contains("An older read of `services.py` was here. You read the file again later, after it changed"));
+            assert_eq!(
+                observed.requests[3]
+                    .matches("def emprunter(): return 1")
                     .count(),
                 1
             );
@@ -9204,6 +9394,43 @@ mod tests {
         let last = observed.requests.last().expect("requêtes");
         assert_eq!(last.matches("has not changed since you read it").count(), 1);
         assert_eq!(last.matches("def emprunter(): return 1").count(), 1);
+    }
+
+    #[test]
+    fn a_long_file_read_whole_again_and_again_gets_a_note_and_one_copy() {
+        let _serial = crate::test_serial();
+        // Vraie session de Claw Web : `base.html` (52 Ko) relu 28 fois en un tour.
+        let read = |version: usize| {
+            let content = format!(
+                "<!-- version {version} -->\n{}",
+                "<p>ligne</p>\n".repeat(1_200)
+            );
+            serde_json::json!({ "type": "text", "file": {
+                "filePath": std::env::current_dir().expect("dossier").join("base.html").to_string_lossy(),
+                "content": content, "numLines": 1_201, "startLine": 1, "totalLines": 1_201 } })
+            .to_string()
+        };
+        let mut steps: Vec<Vec<AssistantEvent>> = (0..3)
+            .map(|_| tool_step("read_file", r#"{"path":"base.html"}"#))
+            .collect();
+        steps.push(text_step("Lu."));
+        let (mut runtime, observed, _) = aided_runtime(steps, vec![]);
+        let mut outputs = std::collections::VecDeque::from(vec![read(1), read(2), read(3)]);
+        runtime.tool_executor = std::mem::take(&mut runtime.tool_executor)
+            .register("read_file", move |_| {
+                Ok(outputs.pop_front().expect("lecture"))
+            });
+        runtime.run_turn("refais la page", None).expect("tour");
+        let observed = observed.borrow();
+        let last = observed.requests.last().expect("requêtes");
+        // Une seule copie du fichier (la dernière), et la remarque à la troisième lecture.
+        assert_eq!(
+            last.matches("<p>ligne</p>").count(),
+            1_200,
+            "une seule copie gardée"
+        );
+        assert!(last.contains("<!-- version 3 -->") && !last.contains("<!-- version 1 -->"));
+        assert!(last.contains("is long (1201 lines) and you have now read it whole 3 times"));
     }
 
     #[test]

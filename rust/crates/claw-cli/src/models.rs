@@ -981,11 +981,19 @@ pub(crate) fn nvidia_agents() -> Vec<String> {
 /// modèle bloqué, sur le même compte. Vu dans un essai réel : inconnu du
 /// catalogue d'`OpenRouter`, Nemotron 3 Super y passait pour le plus faible,
 /// et l'escalade allait chez `OpenRouter`, dont il restait 43 requêtes.
+/// Nemotron 3 Ultra n'est pas choisi : lent sur l'offre gratuite, il coupait
+/// ses longues réponses (vu en session). Nemotron 3 Super bloqué passe donc à
+/// l'escalade habituelle (`OpenRouter`, s'il y reste un modèle disponible).
 /// `None` hors de NVIDIA, ou quand c'est déjà le plus puissant.
 fn stronger_nvidia_agent(current: &str) -> Option<String> {
     let id = current.strip_prefix("nvidia:")?;
-    let strongest = NVIDIA_MODELS.iter().find(|model| model.tools)?;
-    (strongest.id != id).then(|| format!("nvidia:{}", strongest.id))
+    let strongest = NVIDIA_MODELS
+        .iter()
+        .position(|model| model.tools && nvidia_caveat(model.id).is_none())?;
+    match NVIDIA_MODELS.iter().position(|model| model.id == id) {
+        Some(rank) if rank <= strongest => None,
+        _ => Some(format!("nvidia:{}", NVIDIA_MODELS[strongest].id)),
+    }
 }
 
 /// Lecteurs d'images de NVIDIA, avant ceux d'`OpenRouter` : aucun quota par
@@ -2877,15 +2885,19 @@ mod tests {
     fn a_stuck_nvidia_model_hands_over_to_the_strongest_nvidia_agent() {
         use super::stronger_nvidia_agent;
         let ultra = "nvidia:nvidia/nemotron-3-ultra-550b-a55b";
+        let super_ = "nvidia:nvidia/nemotron-3-super-120b-a12b";
+        // Le plus puissant des agents rapides : Super, jamais Ultra (lent, il
+        // coupait ses longues réponses).
         assert_eq!(
-            stronger_nvidia_agent("nvidia:nvidia/nemotron-3-super-120b-a12b").as_deref(),
-            Some(ultra)
+            stronger_nvidia_agent("nvidia:stepfun-ai/step-5-preview").as_deref(),
+            Some(super_)
         );
         assert_eq!(
             stronger_nvidia_agent("nvidia:z-ai/glm-5.3").as_deref(),
-            Some(ultra)
+            Some(super_)
         );
         // Déjà le plus puissant : l'escalade habituelle (OpenRouter) décide.
+        assert_eq!(stronger_nvidia_agent(super_), None);
         assert_eq!(stronger_nvidia_agent(ultra), None);
         assert_eq!(
             stronger_nvidia_agent("nvidia/nemotron-3-super-120b-a12b:free"),

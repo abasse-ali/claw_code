@@ -119,7 +119,8 @@ pub enum Aid {
     /// Commons) enregistrées dans le projet avec leur crédit.
     Photos,
     /// Un modèle qui se met au travail sans dire à l'utilisateur ce qu'il
-    /// compte faire est invité à l'annoncer dans sa réponse suivante.
+    /// compte faire, ou qui enchaîne les outils sans un mot, le dit dans une
+    /// réponse en texte seul (outils coupés le temps d'une requête).
     Announce,
 }
 
@@ -2257,6 +2258,59 @@ pub fn read_result(output: &str) -> Option<(String, usize)> {
     Some((path, values.byte_offset()))
 }
 
+/// Lignes montrées par un résultat de `read_file` : (fichier, première ligne,
+/// nombre de lignes, fichier entier).
+#[must_use]
+pub fn read_span(output: &str) -> Option<(String, usize, usize, bool)> {
+    let value = serde_json::Deserializer::from_str(output)
+        .into_iter::<Value>()
+        .next()?
+        .ok()?;
+    let file = value.get("file")?;
+    let number = |key: &str| {
+        file.get(key)
+            .and_then(Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok())
+    };
+    let (start, lines, total) = (
+        number("startLine")?,
+        number("numLines")?,
+        number("totalLines")?,
+    );
+    Some((
+        file.get("filePath")?.as_str()?.to_string(),
+        start,
+        lines,
+        start <= 1 && lines >= total,
+    ))
+}
+
+/// Ce qui reste d'une lecture qu'une lecture plus récente du même fichier
+/// (entière, ou des mêmes lignes) remplace, le fichier ayant changé entre-temps.
+#[must_use]
+pub fn superseded_read_stub(path: &str) -> String {
+    format!(
+        "[Claw] (An older read of `{}` was here. You read the file again later, after it changed: that later read is the one kept.)",
+        shown_path(path)
+    )
+}
+
+/// Au-delà, un fichier relu en entier pèse sur chaque requête suivante.
+pub const LONG_READ_CHARS: usize = 12_000;
+/// Lectures entières d'un même long fichier, dans un tour, avant la remarque.
+pub const LONG_READS_BEFORE_NOTE: u32 = 3;
+
+/// Remarque au modèle qui relit en entier un long fichier : vu dans une vraie
+/// session de Claw Web, `base.html` (52 Ko) relu 28 fois en un tour, chaque
+/// requête pesant en moyenne 62 000 jetons et prenant 22 s.
+#[must_use]
+pub fn long_reread_note(path: &str, lines: usize, reads: u32) -> String {
+    format!(
+        "[Claw] `{}` is long ({lines} lines) and you have now read it whole {reads} times in this turn. To check or prepare a change, read only the lines around it (`offset` and `limit`), or find them with grep_search: the views after your edits already show the changed lines. A whole read adds the full file to every following request and makes each step slower.",
+        shown_path(path)
+    )
+}
+
 /// Remarque au modèle qui lit un fichier déjà montré en entier dans une vue
 /// encore à jour (petit projet au premier tour, fichier après une modification).
 #[must_use]
@@ -2750,10 +2804,27 @@ pub fn language_note(language: Option<&str>) -> String {
     }
 }
 
-/// Note jointe aux résultats des premiers outils d'un tour quand le modèle
-/// s'est mis au travail sans un mot pour l'utilisateur : il dit dans sa
-/// réponse suivante ce qu'il fait et ce qui vient (aucune requête de plus).
-pub const ANNOUNCE_NOTE: &str = "[Claw] You started working without telling the user what you are doing. In your next reply, before any tool call, write one to three short sentences for the user: what you are doing and what comes next, in plain words, without code. Then make your tool calls in that same reply.";
+/// Demande faite au modèle qui s'est mis au travail sans un mot pour
+/// l'utilisateur : la requête suivante part sans outils, il ne peut répondre
+/// que par du texte, puis le travail reprend. Vu dans une vraie session :
+/// Nemotron 3 Super ne mettait son plan que dans son raisonnement (en anglais),
+/// et une note jointe aux résultats des outils restait sans effet.
+pub const ANNOUNCE_NOTE: &str = "[Claw] You started working without a word for the user. Reply now with one to three short sentences for the user, in plain words and without code: what you are doing and what comes next. Tools are off for this one reply; you go on with the work right after.";
+
+/// Étapes d'outils d'affilée sans un mot pour l'utilisateur avant que Claw
+/// lui demande où en est le travail (une requête de plus, en texte seul).
+pub const SILENT_STEPS_BEFORE_UPDATE: u32 = 20;
+
+/// Point d'étape demandé après [`SILENT_STEPS_BEFORE_UPDATE`] étapes muettes.
+#[must_use]
+pub fn update_note(steps: u32) -> String {
+    format!(
+        "[Claw] You have worked through {steps} rounds of tool calls without a word for the user. Reply now with one to three short sentences for the user, in plain words and without code: where the work stands and what comes next. Tools are off for this one reply; you go on with the work right after."
+    )
+}
+
+/// Après l'annonce en texte seul : le travail reprend, outils rendus.
+pub const GO_ON_NOTE: &str = "[Claw] Thank you. Go on with the work now.";
 
 /// Préfixe des messages que Claw adresse au modèle à la place de
 /// l'utilisateur (contrôles, rappels) : ils ne sont pas des demandes de sa part.

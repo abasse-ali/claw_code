@@ -136,7 +136,11 @@ pub struct ToolDefinition {
 pub enum ToolChoice {
     Auto,
     Any,
-    Tool { name: String },
+    Tool {
+        name: String,
+    },
+    /// Outils décrits mais interdits pour cette réponse : du texte seulement.
+    None,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
