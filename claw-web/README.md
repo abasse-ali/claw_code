@@ -86,6 +86,14 @@ grand, avec son titre, son auteur, sa licence et un lien vers sa page. Le moteur
 petite version chez la source (Flickr, Wikimedia Commons) et la glisse dans le journal ; seule la
 grande version est chargée chez la source, la seule image extérieure que la page autorise.
 
+Les captures d'écran de l'agent (outil `Screenshot`) s'affichent de la même façon : une vignette
+du premier écran sous la ligne « Capture de la page », avec une pastille rouge quand des
+problèmes y ont été relevés. Un toucher ouvre la capture entière (jusqu'à trois écrans de haut), à
+faire défiler. Le moteur range ces captures sur la branche `claw-web-fichiers` du dépôt des
+sessions, dans `uploads/session-<numéro>/`, que l'appli efface avec la session ; il lui faut pour
+cela le droit d'écriture sur ce dépôt (`contents: write` dans le workflow de `claw-sessions`,
+jamais donné à l'agent). Sans ce droit, seule la vignette reste.
+
 ## Réponses lisibles
 
 La réponse de Claw est un compte rendu pour une personne : étiquettes en français (Résultat, Ce

@@ -1909,6 +1909,9 @@ curseur, à relire avant l'envoi.
   `full_page`, un thème clair ou sombre), après des `actions` qui amènent la page dans l'état à
   vérifier (cliquer, saisir, faire défiler). Les captures suivent le résultat en images ; un
   modèle qui ne lit pas les images en reçoit la description (voir « Lecteur d'images »). Chaque
+  capture est aussi gardée en JPEG (`file`), avec un aperçu de son premier écran de 160 pixels de
+  large (`preview`, quelques kilo-octets) : Claw Web en fait une vignette dans le journal du
+  passage, et montre la capture entière d'un toucher. Chaque
   capture porte aussi les défauts mesurés dans la page, en phrases qui disent quoi corriger :
   contenu plus large que l'écran, avec sa cause (largeur calculée trop grande, rangée flex qui
   ne passe pas à la ligne, colonnes de grille trop larges, élément de grille ou de flex resté à

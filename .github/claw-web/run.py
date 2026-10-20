@@ -9,6 +9,7 @@ actions et les avis de Claw vont aussi au journal du job. Un job annulé (SIGINT
 reçus grâce à `exec` dans le workflow) arrête l'agent et le dit dans la progression.
 """
 
+import base64
 import json
 import os
 import signal
@@ -18,8 +19,8 @@ import threading
 import time
 import urllib.request
 
-from common import (PROGRESS, WORK, GitHubError, clean_notice, edit_comment, output, post_comment,
-                    run_url, stop_tree)
+from common import (FILES_BRANCH, PROGRESS, WORK, GitHubError, api, clean_notice, edit_comment, output,
+                    post_comment, run_url, stop_tree)
 from journal import Journal
 
 SESSION = os.environ["SESSION"]
@@ -50,6 +51,66 @@ def stop(signum, frame):
 def relative(text):
     """`/home/runner/.../work/app/main.py` devient `app/main.py`."""
     return str(text).replace(ROOT + os.sep, "").replace(ROOT, ".")
+
+
+class ShotStore:
+    """Range les captures entières de l'outil Screenshot sur la branche des fichiers du moteur,
+    dans le dossier de la session (`uploads/session-<numéro>/`, effacé avec elle par l'appli) :
+    l'appli les montre en grand d'un toucher sur leur vignette. Sans droit d'écriture (ancien
+    workflow de claw-sessions), rien n'est rangé et seules les vignettes restent."""
+
+    MAX_BYTES = 3_000_000
+
+    def __init__(self, token=JOB_TOKEN, engine=ENGINE, session=SESSION, run_id=None, call=api):
+        self.token, self.engine, self.session, self.call = token, engine, session, call
+        self.run_id = run_id or os.environ.get("GITHUB_RUN_ID", "local")
+        self.count = 0
+        self.ready = None
+
+    def _branch(self):
+        """La branche des fichiers existe (créée depuis la branche par défaut au besoin)."""
+        if self.ready is None:
+            try:
+                self.call("GET", f"/repos/{self.engine}/branches/{FILES_BRANCH}", self.token)
+                self.ready = True
+            except GitHubError as error:
+                if error.status != 404:
+                    self.ready = False
+                    return False
+                try:
+                    default = self.call("GET", f"/repos/{self.engine}", self.token)["default_branch"]
+                    head = self.call("GET", f"/repos/{self.engine}/git/ref/heads/{default}", self.token)
+                    self.call("POST", f"/repos/{self.engine}/git/refs", self.token,
+                              {"ref": f"refs/heads/{FILES_BRANCH}", "sha": head["object"]["sha"]})
+                    self.ready = True
+                except (GitHubError, KeyError, TypeError):
+                    self.ready = False
+        return self.ready
+
+    def __call__(self, local, screen):
+        try:
+            with open(local, "rb") as file:
+                data = file.read(self.MAX_BYTES + 1)
+        except OSError:
+            return ""
+        if not data.startswith(b"\xff\xd8\xff") or len(data) > self.MAX_BYTES or not self._branch():
+            return ""
+        self.count += 1
+        label = "".join(c if c.isalnum() else "-" for c in screen.lower()).strip("-")[:30] or "page"
+        name = f"uploads/session-{self.session}/{self.run_id}-{self.count}-{label}.jpg"
+        try:
+            self.call("PUT", f"/repos/{self.engine}/contents/{name}", self.token, {
+                "message": f"Capture de la session {self.session}",
+                "content": base64.b64encode(data).decode("ascii"),
+                "branch": FILES_BRANCH,
+            })
+        except GitHubError as error:
+            print(f"Capture non rangée : {error}", flush=True)
+            # Écriture refusée : inutile de réessayer pour chaque capture.
+            if error.status in (401, 403, 404):
+                self.ready = False
+            return ""
+        return name
 
 
 def describe(name, data):
@@ -114,7 +175,7 @@ class Progress:
         self.comment_id = None
         self.dirty = True
         self.lock = threading.Lock()
-        self.journal = Journal(relative)
+        self.journal = Journal(relative, store=ShotStore())
         self.journal_at = 0.0
         self.log_comments = {}
         # Un envoi à la fois (le fil de rafraîchissement et la fin du passage) : jamais deux
