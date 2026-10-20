@@ -240,6 +240,12 @@ function cloudInitScript(engine, token, expires) {
   ].join("\n");
 }
 
+/** Commande pour un serveur déjà créé (connexion SSH ou Cloud Shell) : l'exécuteur y prend au plus
+ * la moitié du processeur et de la mémoire, le reste au service qui y tourne déjà. */
+function existingServerCommand(engine, token) {
+  return `curl -fsSL https://raw.githubusercontent.com/${CLAW_SOURCE}/main/.github/claw-web/pc/claw-cloud.sh | sudo bash -s -- install --repo ${engine} --token ${token} --shared`;
+}
+
 /** Serveur gratuit dans le nuage (Oracle Cloud, offre « Always Free ») : les étapes, et le
  * script de démarrage à coller, préparé avec un jeton d'inscription neuf. */
 function openCloudRunner() {
@@ -253,15 +259,18 @@ function openCloudRunner() {
         <ol>
           <li>Créez un compte sur <a href="https://signup.cloud.oracle.com/" target="_blank" rel="noopener noreferrer">signup.cloud.oracle.com</a>. Oracle demande une carte pour vérifier votre identité ; rien n'est prélevé tant que vous restez dans l'offre gratuite.</li>
           <li>Préparez le script ci-dessous (il contient un jeton d'inscription valable une heure), puis copiez-le.</li>
-          <li>Dans la console d'Oracle : Compute, Instances, <em>Create instance</em>. Image : <strong>Ubuntu 24.04</strong>. Shape : <strong>Ampere VM.Standard.A1.Flex</strong>, 2 OCPU et 12 Go. Dans <em>Advanced options</em>, <em>Management</em>, collez le script dans <em>Initialization script</em> (cloud-init). Créez l'instance.</li>
+          <li>Dans la console d'Oracle : Compute, Instances, <em>Create instance</em>. Image : <strong>Ubuntu 24.04</strong>. Shape : <strong>Ampere VM.Standard.A1.Flex</strong>, 2 OCPU et 12 Go (1 OCPU et 6 Go si Oracle manque de place ; une machine <em>E2.1.Micro</em>, 1 Go de mémoire, ne suffit pas). Dans <em>Advanced options</em>, <em>Management</em>, collez le script dans <em>Initialization script</em> (cloud-init). Créez l'instance.</li>
           <li>Comptez 15 à 25 minutes : le serveur installe tout seul Docker et l'exécuteur, puis apparaît en ligne dans « Moteur » ci-dessus. Choisissez « Sur ma machine » dans Sessions.</li>
         </ol>
         <button type="button" class="primary" data-action="cloud-script">Préparer le script</button>
         <div class="cloud-script" hidden>
           <pre class="io-v"></pre>
           <button type="button" class="secondary" data-action="cloud-copy">Copier le script</button>
+          <p class="help">Serveur déjà créé (Ubuntu, Debian ou Oracle Linux, 4 Go de mémoire au moins) : lancez plutôt cette commande, en SSH ou dans Cloud Shell. Claw y prend au plus la moitié du processeur et de la mémoire.</p>
+          <pre class="io-v cloud-command"></pre>
+          <button type="button" class="secondary" data-action="cloud-copy-command">Copier la commande</button>
         </div>
-        <p class="help">Si Oracle répond « Out of capacity », réessayez plus tard ou dans un autre domaine de disponibilité. Oracle peut arrêter un serveur gratuit resté inactif sept jours : relancez-le depuis la console (Instances, <em>Start</em>) ; passer le compte en « Pay As You Go » l'évite, sans frais tant que vous restez dans l'offre gratuite. Jeton expiré avant l'installation : préparez un nouveau script et, dans la console d'Oracle (Instances, <em>Run command</em> ou Cloud Shell), lancez <code>sudo claw-cloud register --repo ${escapeHtml(engine)} --token NOUVEAU_JETON</code>.</p>
+        <p class="help">Si Oracle répond « Out of capacity » (manque de capacité) : demandez 1 OCPU et 6 Go, réessayez à d'autres heures (nuit, matin), ou passez le compte en « Pay As You Go » (Facturation, <em>Upgrade</em>) : ces comptes obtiennent bien plus facilement ces machines, et rien n'est facturé tant que vous ne créez que des ressources « Toujours gratuit » (créez une alerte de budget à 1 €, Facturation, <em>Budgets</em>). Certaines régions, comme Marseille, n'ont qu'un domaine de disponibilité. Oracle peut arrêter un serveur gratuit resté inactif sept jours : relancez-le depuis la console (Instances, <em>Start</em>) ; passer le compte en « Pay As You Go » l'évite, sans frais tant que vous restez dans l'offre gratuite. Jeton expiré avant l'installation : préparez un nouveau script et, dans la console d'Oracle (Instances, <em>Run command</em> ou Cloud Shell), lancez <code>sudo claw-cloud register --repo ${escapeHtml(engine)} --token NOUVEAU_JETON</code>.</p>
       </div>
     </div>`;
   sheet.onclick = (event) => {
@@ -271,14 +280,17 @@ function openCloudRunner() {
     }
   };
   let script = "";
+  let command = "";
   sheet.querySelector('[data-action="cloud-script"]').addEventListener("click", async (event) => {
     const button = event.currentTarget;
     button.disabled = true;
     try {
       const answer = await state.github.registrationToken(engine);
       script = cloudInitScript(engine, answer.token, answer.expires_at);
+      command = existingServerCommand(engine, answer.token);
       const box = sheet.querySelector(".cloud-script");
       box.querySelector("pre").textContent = script;
+      box.querySelector(".cloud-command").textContent = command;
       box.hidden = false;
       button.textContent = "Préparer un nouveau script";
     } catch (error) {
@@ -295,6 +307,14 @@ function openCloudRunner() {
       toast("Script copié : collez-le dans Initialization script, chez Oracle");
     } catch {
       toast("Copie refusée par le navigateur : sélectionnez le script à la main");
+    }
+  });
+  sheet.querySelector('[data-action="cloud-copy-command"]').addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(command);
+      toast("Commande copiée : lancez-la sur le serveur (SSH ou Cloud Shell)");
+    } catch {
+      toast("Copie refusée par le navigateur : sélectionnez la commande à la main");
     }
   });
   sheet.hidden = false;

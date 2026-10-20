@@ -35,8 +35,15 @@ Tout se fait depuis le téléphone, sans PC :
 
 Ce qu'il faut savoir :
 
-- « Out of capacity » à la création : les machines gratuites manquent parfois dans la région ;
-  réessayez plus tard, ou dans un autre domaine de disponibilité.
+- « Out of capacity » (manque de capacité) à la création : les machines ARM gratuites manquent
+  dans la région. Certaines régions, comme Marseille, n'ont qu'un domaine de disponibilité. Dans
+  l'ordre : demandez 1 OCPU et 6 Go (agrandissement possible ensuite, instance arrêtée) ;
+  réessayez à d'autres heures ; passez le compte en « Pay As You Go » (Facturation, *Upgrade*),
+  dont les comptes obtiennent bien plus facilement ces machines, sans frais tant que vous ne
+  créez que des ressources « Toujours gratuit » (créez une alerte de budget à 1 €).
+- Une machine **E2.1.Micro** (AMD, 1 Go de mémoire, l'autre offre gratuite) ne suffit pas :
+  Chrome, Rust et les tests des sessions demandent plusieurs Go. Elle ne prend rien sur
+  l'allocation ARM : une instance A1 reste gratuite à côté.
 - Oracle peut arrêter une machine gratuite restée inactive sept jours (processeur, réseau et
   mémoire sous 20 %). Relancez-la depuis la console (Instances, *Start*) ; passer le compte en
   « Pay As You Go » l'évite, sans frais tant que vous restez dans l'offre gratuite.
@@ -56,8 +63,19 @@ Commandes sur le serveur (`sudo claw-cloud …`) :
 | `stop` / `start` | arrête ou relance l'exécuteur ; les sessions attendent dans la file de GitHub |
 | `remove` | supprime conteneur, volume et images (retirez aussi l'exécuteur dans GitHub : Settings, Actions, Runners) |
 
-Le même script marche sur tout serveur Ubuntu 22.04 ou 24.04, processeur ARM ou Intel/AMD :
-`sudo bash claw-cloud.sh install --repo propriétaire/claw-sessions --token JETON`.
+Le même script marche sur tout serveur Ubuntu, Debian ou Oracle Linux (Docker CE installé par
+`dnf` ; une commande `docker` qui n'est que Podman est refusée), processeur ARM ou Intel/AMD,
+4 Go de mémoire au moins. Sur un **serveur déjà en service**, l'appli donne une commande à lancer
+en SSH ou dans Cloud Shell, en mode partagé :
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/abasse-ali/claw_code/main/.github/claw-web/pc/claw-cloud.sh \
+  | sudo bash -s -- install --repo propriétaire/claw-sessions --token JETON --shared
+```
+
+`--shared` limite le conteneur à la moitié des processeurs et de la mémoire, avec une priorité
+basse : le service qui tourne déjà garde la main. `--cpus 1 --memory 4g` règle les limites à la
+main ; elles sont gardées pour les mises à jour (`/opt/claw-cloud/limits`).
 
 ## Votre PC (Docker Desktop)
 
