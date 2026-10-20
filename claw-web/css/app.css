@@ -303,6 +303,12 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .shot-panel { display: flex; flex-direction: column; min-height: 0; }
 .shot-scroll { overflow-y: auto; min-height: 0; border-radius: 10px; }
 .full-image.tall { width: 100%; max-height: none; object-fit: initial; display: block; }
+/* Serveur gratuit dans le nuage : étapes, puis le script à coller chez Oracle. */
+.cloud-panel { overflow-y: auto; min-height: 0; }
+.cloud-steps ol { margin: .4em 0 .8em; padding-left: 1.3em; display: flex; flex-direction: column; gap: .5em; }
+.cloud-steps code { overflow-wrap: anywhere; }
+.cloud-script { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
+.cloud-script pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .78rem; max-height: 40vh; overflow-y: auto; }
 .ev .verb { flex: none; font-weight: 500; }
 .ev .target { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
 .ev.failed .verb, .ev.failed svg { color: var(--error); }
@@ -654,8 +660,10 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
   padding: 11px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font: inherit;
 }
 .help { margin: 0; font-size: .85rem; color: var(--muted); }
-.primary, .danger { align-self: flex-start; padding: 10px 16px; border-radius: 10px; border: 0; cursor: pointer; font-weight: 500; }
+.primary, .danger, .secondary { align-self: flex-start; padding: 10px 16px; border-radius: 10px; border: 0; cursor: pointer; font-weight: 500; }
 .primary { background: var(--accent); color: var(--accent-text); }
+.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
+.secondary:focus-visible, .primary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .danger { margin-top: 28px; background: transparent; border: 1px solid var(--error); color: var(--error); }
 .checks { list-style: none; padding: 0; margin: 0 0 16px; display: flex; flex-direction: column; gap: 4px; font-size: .9rem; }
 .checks li::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; background: var(--muted); vertical-align: middle; }

@@ -118,13 +118,23 @@ Le détail (toucher l'anneau) montre les trois fournisseurs, celui du modèle ch
 choix du modèle donne le quota de chaque onglet ; chaque réponse de Claw dit combien de requêtes
 son passage a prises, chez le fournisseur du modèle.
 
-## Sessions sur votre PC
+## Sessions sur votre machine : serveur gratuit ou PC
 
-Réglages, « Sessions » : « Sur mon PC » fait tourner les sessions sur votre PC, dans Docker
-Desktop, sans minutes GitHub Actions ; les vérifications du moteur montrent si l'exécuteur du
-PC est en ligne. Installation une fois : `.github/claw-web/pc/claw-pc.ps1 install` dans le code de
-Claw (voir `.github/claw-web/pc/README.md`). Le PC éteint, la session attend dans la file de
-GitHub et part dès qu'il revient.
+Réglages, « Sessions » : « Sur ma machine » fait tourner les sessions sans minutes GitHub
+Actions, sur un serveur gratuit d'Oracle Cloud allumé jour et nuit, ou sur votre PC dans Docker
+Desktop ; une session part sur la machine libre. Les vérifications du moteur montrent chaque
+exécuteur, en ligne ou non, et en session.
+
+- **Serveur gratuit** (offre « Always Free » d'Oracle : 2 cœurs ARM, 12 Go de mémoire, 200 Go
+  de disque, sans limite de durée), tout depuis le téléphone : « Serveur gratuit dans le nuage »
+  donne les étapes et prépare le script de démarrage à coller chez Oracle, avec un jeton
+  d'inscription valable une heure (il faut l'autorisation Administration en écriture du dépôt des
+  sessions). Le serveur installe seul Docker et l'exécuteur, en ligne au bout de 15 à 25 minutes.
+- **PC** : `.github/claw-web/pc/claw-pc.ps1 install` dans le code de Claw. Le PC éteint, la
+  session attend dans la file de GitHub et part dès qu'il revient.
+
+Détails, commandes et limites (machine inactive sept jours arrêtée par Oracle, « Out of capacity
+») : `.github/claw-web/pc/README.md`.
 
 ## Fusionner, mettre en ligne
 
