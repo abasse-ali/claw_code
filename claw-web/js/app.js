@@ -45,6 +45,10 @@ const ICON = {
   diff: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v8M8 8h8M8 18h8"/><rect x="3.5" y="2.5" width="17" height="19" rx="2"/></svg>',
   image: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.6-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9"/></svg>',
   gauge: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 17a8.5 8.5 0 1 1 15 0"/><path d="M12 13l4-4"/><circle cx="12" cy="13" r="1.2"/></svg>',
+  server: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="13" width="16" height="7" rx="1.5"/><path d="M8 7.5h.01M8 16.5h.01"/></svg>',
+  cloud: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.1 4.5 4.5 0 0 0 7 18Z"/></svg>',
+  key: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l2 2M14 9l2 2"/></svg>',
+  chevron: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>',
 };
 
 const state = {
@@ -270,7 +274,7 @@ async function robotState() {
   }
   const ago = last && last.t ? Math.max(0, Math.round((Date.now() - Date.parse(last.t)) / 60000)) : null;
   const when = ago === null ? "" : ago < 1 ? "à l'instant" : `il y a ${ago} min`;
-  if (switch_ === "done") return { on: false, text: "Serveur créé par le robot : l'exécuteur s'installe (15 à 25 minutes), puis apparaît en ligne dans « Moteur »." };
+  if (switch_ === "done") return { on: false, text: "Serveur créé par le robot : l'exécuteur s'installe (15 à 25 minutes), puis apparaît en ligne sous « Ma machine » (Sessions)." };
   if (switch_ === "on") {
     return { on: true, text: last ? `Robot en marche : dernier essai ${when}. ${last.detail || ""}` : "Robot en marche : premier essai dans quelques minutes." };
   }
@@ -291,7 +295,7 @@ function openCloudRunner() {
           <li>Créez un compte sur <a href="https://signup.cloud.oracle.com/" target="_blank" rel="noopener noreferrer">signup.cloud.oracle.com</a>. Oracle demande une carte pour vérifier votre identité ; rien n'est prélevé tant que vous restez dans l'offre gratuite.</li>
           <li>Préparez le script ci-dessous (il contient un jeton d'inscription valable une heure), puis copiez-le.</li>
           <li>Dans la console d'Oracle : Compute, Instances, <em>Create instance</em>. Image : <strong>Ubuntu 24.04</strong>. Shape : <strong>Ampere VM.Standard.A1.Flex</strong>, 2 OCPU et 12 Go (1 OCPU et 6 Go si Oracle manque de place ; une machine <em>E2.1.Micro</em>, 1 Go de mémoire, ne suffit pas). Dans <em>Advanced options</em>, <em>Management</em>, collez le script dans <em>Initialization script</em> (cloud-init). Créez l'instance.</li>
-          <li>Comptez 15 à 25 minutes : le serveur installe tout seul Docker et l'exécuteur, puis apparaît en ligne dans « Moteur » ci-dessus. Choisissez « Sur ma machine » dans Sessions.</li>
+          <li>Comptez 15 à 25 minutes : le serveur installe tout seul Docker et l'exécuteur, puis apparaît en ligne sous « Ma machine », dans Sessions : choisissez-la.</li>
         </ol>
         <button type="button" class="primary" data-action="cloud-script">Préparer le script</button>
         <div class="cloud-script" hidden>
@@ -2758,6 +2762,7 @@ async function configureEngine(openrouterKey, shareToken, providerKeys = {}) {
 async function engineChecks() {
   const engine = state.settings.engine;
   const checks = [];
+  state.machinesOnline = null;
   const add = (ok, label) => checks.push(`<li class="${ok ? "ok" : "ko"}">${escapeHtml(label)}</li>`);
   try {
     const repo = await state.github.repository(engine);
@@ -2787,6 +2792,7 @@ async function engineChecks() {
         .filter((runner) => (runner.labels || []).some((label) => label.name === state.settings.runner));
       const online = mine.filter((runner) => runner.status === "online");
       const offline = mine.filter((runner) => runner.status !== "online").map((runner) => runner.name);
+      state.machinesOnline = online.map((runner) => runner.name);
       if (online.length) {
         add(true, `Exécuteur${online.length > 1 ? "s" : ""} en ligne : ${online.map((runner) => `${runner.name}${runner.busy ? " (en session)" : ""}`).join(", ")}`
           + (offline.length ? ` ; hors ligne : ${offline.join(", ")}` : ""));
@@ -2812,72 +2818,149 @@ async function engineChecks() {
   return checks.join("");
 }
 
+const MACHINE_NOTE = "Serveur gratuit ou PC : aucune minute";
+
+/** Après les vérifications : la ligne de synthèse du moteur (dépliée s'il y a un point à
+ * régler) et les machines en ligne sous « Ma machine ». */
+function showEngineState() {
+  const view = $("#view");
+  const summary = view.querySelector(".engine-state > summary");
+  if (!summary) return;
+  const failed = view.querySelectorAll(".checks li.ko").length;
+  const passed = view.querySelectorAll(".checks li.ok").length;
+  summary.querySelector(".state").className = `row-icon state ${failed ? "ko" : "ok"}`;
+  summary.querySelector(".row-main").innerHTML = failed
+    ? `<span class="row-title">${failed} point${failed > 1 ? "s" : ""} à régler</span><span class="row-sub">Touchez pour le détail</span>`
+    : `<span class="row-title">Moteur prêt</span><span class="row-sub">${passed} vérifications au vert</span>`;
+  if (failed) view.querySelector(".engine-state").open = true;
+  const machine = view.querySelector('.choice input[value="claw-pc"]')?.closest(".choice")?.querySelector(".row-sub");
+  if (machine) {
+    const online = state.settings.runner ? state.machinesOnline : null;
+    machine.textContent = !online ? MACHINE_NOTE
+      : online.length ? `Aucune minute ; en ligne : ${online.join(", ")}` : "Aucune minute ; aucune machine en ligne";
+  }
+}
+
 function showSettings(first = false, justConnected = false) {
   state.session = null;
   $("#composer").hidden = true;
   const settings = state.settings;
+  const login = (state.user && state.user.login) || "";
+  const engine = settings.engine || DEFAULT_ENGINE;
+  // Une ligne de carte : icône facultative, titre, sous-titre.
+  const text = (title, sub) => `<span class="row-main"><span class="row-title">${title}</span>${sub ? `<span class="row-sub">${sub}</span>` : ""}</span>`;
+  const field = (title, sub, input) => `<label class="field-row">${text(title, sub)}${input}</label>`;
+  const toggle = (name, title, sub) => `<label class="row switch-row">${text(title, sub)}<input name="${name}" type="checkbox" role="switch" checked></label>`;
+  // « Clé Google Gemini (facultative : offre gratuite de Google) » : titre et note.
+  const providerField = (provider) => {
+    const [title, note = ""] = provider.field.split(/ \((.*)\)$/);
+    return field(escapeHtml(title), escapeHtml(note.charAt(0).toUpperCase() + note.slice(1)),
+      `<input name="${provider.key}" type="password" placeholder="${escapeHtml(provider.prefix)}…" spellcheck="false">`);
+  };
+  const perms = [
+    ["Toujours", ["Actions", "Contents", "Issues", "Pull requests", "Secrets"]],
+    ["Serveur gratuit et robot", ["Administration", "Variables"]],
+    ["Créer des dépôts", ["All repositories", "Administration"]],
+    ["Mettre un site en ligne", ["Pages"]],
+  ];
   $("#view").innerHTML = `
     <section class="settings">
       ${state.github ? `<a class="back" href="#/">${ICON.back}<span>Accueil</span></a>` : ""}
       <h1>Réglages</h1>
       ${first ? '<p class="intro">Claw travaille sur vos dépôts GitHub depuis GitHub Actions. Pour commencer, donnez à l\'appli un jeton GitHub.</p>' : ""}
       ${justConnected ? `<div class="ready"><p>Connecté. Configurez le moteur ci-dessous une fois, puis décrivez votre première tâche depuis l'accueil.</p><a class="primary" href="#/">Aller à l'accueil</a></div>` : ""}
-      <form class="settings-form" autocomplete="off">
-        <label>Jeton GitHub
-          <input name="token" type="password" placeholder="github_pat_…" value="${escapeHtml(settings.token || "")}" spellcheck="false">
-        </label>
-        <p class="help">Créez un <a href="${TOKEN_HELP}" target="_blank" rel="noopener noreferrer">jeton à grain fin</a> :
-          dépôts : le moteur et ceux où Claw travaillera ;
-          autorisations des dépôts en lecture et écriture : Actions, Contents, Issues, Pull requests, Secrets.
-          Pour créer des dépôts depuis l'appli : « All repositories » et Administration en lecture et écriture.
-          Pour mettre un site en ligne (GitHub Pages) : Pages en lecture et écriture.
-          Pour le serveur gratuit et son robot : Administration et Variables en lecture et écriture.
-          Il reste dans ce navigateur seulement.</p>
-        <label>Dépôt du moteur
-          <input name="engine" type="text" value="${escapeHtml(settings.engine || DEFAULT_ENGINE)}" spellcheck="false">
-        </label>
-        <button class="primary" type="submit">Enregistrer</button>
-      </form>
+
+      <h2 class="group-title">Compte GitHub</h2>
+      <div class="group">
+        ${state.github ? `<div class="row account">
+          <span class="avatar" aria-hidden="true">${escapeHtml(login.charAt(0).toUpperCase() || "?")}</span>
+          ${text(escapeHtml(login), `Moteur : ${escapeHtml(engine)}`)}
+          <span class="pill ok">Connecté</span>
+        </div>` : ""}
+        <details class="disclosure"${state.github ? "" : " open"}>
+          <summary class="row"><span class="row-icon">${ICON.key}</span>${text("Jeton et dépôt du moteur", "")}${ICON.chevron}</summary>
+          <form class="settings-form" autocomplete="off">
+            ${field("Jeton GitHub", "Jeton à grain fin ; il reste dans ce navigateur",
+              `<input name="token" type="password" placeholder="github_pat_…" value="${escapeHtml(settings.token || "")}" spellcheck="false">`)}
+            ${field("Dépôt du moteur", "Où vivent les sessions (propriétaire/nom)",
+              `<input name="engine" type="text" value="${escapeHtml(engine)}" spellcheck="false">`)}
+            <div class="row-actions"><button class="primary" type="submit">Enregistrer</button></div>
+          </form>
+        </details>
+      </div>
+      <details class="group-foot more"${state.github ? "" : " open"}>
+        <summary>Autorisations du jeton</summary>
+        <p>Créez un <a href="${TOKEN_HELP}" target="_blank" rel="noopener noreferrer">jeton à grain fin</a> pour le moteur et les dépôts où Claw travaillera. Ses autorisations, toutes en lecture et écriture :</p>
+        <dl class="perms">${perms.map(([when, names]) => `<dt>${when}</dt><dd>${names.map((name) => `<span class="perm">${name}</span>`).join("")}</dd>`).join("")}</dl>
+        <p>Modifier ces autorisations sur GitHub garde la valeur du jeton : rien à refaire ici.</p>
+      </details>
       ${state.github ? `
-      <h2>Moteur</h2>
-      <ul class="checks"><li>Vérification…</li></ul>
-      <form class="engine-form" autocomplete="off">
-        <label>Clé OpenRouter (pour les modèles gratuits)
-          <input name="openrouter" type="password" placeholder="sk-or-…" spellcheck="false">
-        </label>
-        ${KEYED_PROVIDERS.map((provider) => `
-        <label>${escapeHtml(provider.field)}
-          <input name="${provider.key}" type="password" placeholder="${escapeHtml(provider.prefix)}…" spellcheck="false">
-        </label>`).join("")}
-        <label class="check"><input name="share" type="checkbox" checked>
-          <span>Donner aussi ce jeton au moteur (secret CLAW_REPO_TOKEN), pour qu'il pousse ses branches et ouvre les pull requests</span></label>
-        <label class="check"><input name="keep" type="checkbox" checked>
-          <span>Garder aussi la clé OpenRouter sur cet appareil, pour afficher les requêtes gratuites utilisées et restantes</span></label>
-        <p class="help">Les secrets partent chiffrés dans le navigateur, pour la clé publique du moteur. Champ vide : la clé OpenRouter gardée sur cet appareil, s'il y en a une ; une clé NVIDIA ou Gemini déjà posée ne change pas. Les clés NVIDIA et Gemini ne sont jamais gardées sur cet appareil : la clé NVIDIA se crée sur build.nvidia.com (profil, Settings, API Keys), la clé Gemini sur aistudio.google.com/apikey, dans un projet sans facturation (sinon chaque requête est payante).</p>
-        <button class="primary" type="submit">Configurer le moteur</button>
-      </form>
-      <h2>Sessions</h2>
-      <fieldset class="theme-choice runner-choice">
-        ${[["", "Sur une machine de GitHub (minutes du compte)"], ["claw-pc", "Sur ma machine : serveur gratuit ou PC (sans minutes)"]].map(([value, label]) => `
-          <label><input type="radio" name="runner" value="${value}"${(settings.runner || "") === value ? " checked" : ""}><span>${label}</span></label>`).join("")}
-      </fieldset>
-      <p class="help">Sur votre machine : un serveur gratuit d'Oracle Cloud, allumé jour et nuit (bouton ci-dessous), ou votre PC avec Docker Desktop (<code>.github/claw-web/pc/claw-pc.ps1 install</code> dans le code de Claw). Une session part sur celle qui est libre ; sans aucune machine en ligne, elle attend dans la file de GitHub.</p>
-      <button type="button" class="secondary" data-action="cloud-runner">Serveur gratuit dans le nuage</button>
-      <h2>Apparence</h2>
-      <fieldset class="theme-choice">
-        ${[["", "Sombre"], ["light", "Clair"], ["system", "Comme le téléphone"]].map(([value, label]) => `
+
+      <h2 class="group-title">Moteur</h2>
+      <div class="group">
+        <details class="disclosure engine-state">
+          <summary class="row"><span class="row-icon state"></span>${text("Vérification…", "")}${ICON.chevron}</summary>
+          <ul class="checks"><li>Vérification…</li></ul>
+        </details>
+        <details class="disclosure"${justConnected ? " open" : ""}>
+          <summary class="row"><span class="row-icon">${ICON.key}</span>${text("Clés des modèles", ["OpenRouter", ...KEYED_PROVIDERS.map((provider) => provider.label)].join(", "))}${ICON.chevron}</summary>
+          <form class="engine-form" autocomplete="off">
+            ${field("Clé OpenRouter", "Modèles gratuits", '<input name="openrouter" type="password" placeholder="sk-or-…" spellcheck="false">')}
+            ${KEYED_PROVIDERS.map(providerField).join("")}
+            ${toggle("share", "Donner le jeton au moteur", "Secret CLAW_REPO_TOKEN : il pousse ses branches et ouvre les pull requests")}
+            ${toggle("keep", "Garder la clé OpenRouter ici", "Pour afficher les requêtes gratuites restantes")}
+            <div class="row-actions"><button class="primary" type="submit">Configurer le moteur</button></div>
+          </form>
+        </details>
+      </div>
+      <div class="group-foot">
+        <p>Les clés partent chiffrées depuis le navigateur. Un champ vide garde la clé déjà posée.</p>
+        <details class="more">
+          <summary>Où créer ces clés</summary>
+          <p>NVIDIA : build.nvidia.com (profil, Settings, API Keys). Gemini : aistudio.google.com/apikey, dans un projet sans facturation (sinon chaque requête est payante). Les clés NVIDIA et Gemini ne sont jamais gardées sur cet appareil ; la clé OpenRouter seulement si « Garder la clé OpenRouter ici » est activé.</p>
+        </details>
+      </div>
+
+      <h2 class="group-title">Sessions</h2>
+      <div class="group runner-choice" role="radiogroup" aria-label="Machine des sessions">
+        ${[["", ICON.globe, "Machine de GitHub", "Prend les minutes GitHub Actions du compte"],
+          ["claw-pc", ICON.server, "Ma machine", MACHINE_NOTE]].map(([value, icon, title, sub]) => `
+          <label class="row choice"><span class="row-icon">${icon}</span>${text(title, sub)}<input type="radio" name="runner" value="${value}"${(settings.runner || "") === value ? " checked" : ""}></label>`).join("")}
+      </div>
+      <div class="group">
+        <button type="button" class="row link-row" data-action="cloud-runner"><span class="row-icon">${ICON.cloud}</span>${text("Serveur gratuit dans le nuage", "Oracle Cloud, allumé jour et nuit")}${ICON.chevron}</button>
+      </div>
+      <div class="group-foot">
+        <p>Une session part sur la machine libre ; sans machine en ligne, elle attend dans la file de GitHub. Sur le PC : <code>.github/claw-web/pc/claw-pc.ps1 install</code>, avec Docker Desktop.</p>
+      </div>
+
+      <h2 class="group-title">Apparence</h2>
+      <div class="segmented" role="radiogroup" aria-label="Thème">
+        ${[["", "Sombre"], ["light", "Clair"], ["system", "Auto"]].map(([value, label]) => `
           <label><input type="radio" name="theme" value="${value}"${(settings.theme || "") === value ? " checked" : ""}><span>${label}</span></label>`).join("")}
-      </fieldset>
-      <h2>Requêtes gratuites</h2>
-      <form class="quota-form" autocomplete="off">
-        <label>Clé OpenRouter gardée sur cet appareil
-          <input name="key" type="password" placeholder="${settings.openrouterKey ? "clé enregistrée" : "sk-or-…"}" spellcheck="false">
-        </label>
-        <p class="help">Elle sert seulement à lire chez OpenRouter les requêtes gratuites du jour et les crédits, affichés près du choix du modèle. Elle reste dans ce navigateur. Conseil : créez pour l'appli une clé avec une limite de crédit de 0 $ (réglage « Credit limit » de la clé sur openrouter.ai) : elle ne peut rien dépenser.</p>
-        <button class="primary" type="submit">Enregistrer la clé</button>
-        ${settings.openrouterKey ? '<button class="small-link" type="button" data-action="forget-key">Effacer la clé de cet appareil</button>' : ""}
+      </div>
+      <div class="group-foot"><p>Auto : comme le téléphone.</p></div>
+
+      <h2 class="group-title">Requêtes gratuites</h2>
+      <form class="group quota-form" autocomplete="off">
+        ${field("Clé OpenRouter de cet appareil", settings.openrouterKey ? "Enregistrée" : "Aucune",
+          `<input name="key" type="password" placeholder="${settings.openrouterKey ? "clé enregistrée" : "sk-or-…"}" spellcheck="false">`)}
+        <div class="row-actions">
+          <button class="primary" type="submit">Enregistrer la clé</button>
+          ${settings.openrouterKey ? '<button class="small-link" type="button" data-action="forget-key">Effacer la clé de cet appareil</button>' : ""}
+        </div>
       </form>
-      <button class="danger" data-action="forget">Effacer le jeton de cet appareil</button>` : ""}
+      <div class="group-foot">
+        <p>Sert seulement à lire chez OpenRouter les requêtes gratuites du jour et les crédits, affichés près du choix du modèle.</p>
+        <details class="more">
+          <summary>Conseil</summary>
+          <p>Créez pour l'appli une clé avec une limite de crédit de 0 $ (réglage « Credit limit » de la clé sur openrouter.ai) : elle ne peut rien dépenser.</p>
+        </details>
+      </div>
+
+      <div class="group danger-group">
+        <button type="button" class="row danger-row" data-action="forget">Effacer le jeton de cet appareil</button>
+      </div>` : ""}
     </section>`;
   $("#view .settings-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -2909,9 +2992,15 @@ function showSettings(first = false, justConnected = false) {
   });
   const engineForm = $("#view .engine-form");
   if (engineForm) {
-    engineChecks().then((html) => {
+    engineChecks().then(async (html) => {
       const list = $("#view .checks");
       if (list) list.innerHTML = html;
+      showEngineState();
+      // Clé d'un fournisseur déjà posée : le champ le dit (vide, elle reste).
+      const found = await engineProviderSecrets();
+      for (const provider of KEYED_PROVIDERS) {
+        if (found[provider.secret] && engineForm[provider.key]) engineForm[provider.key].placeholder = "Clé posée : vide, elle reste";
+      }
     }).catch(failure);
     engineForm.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -2941,6 +3030,7 @@ function showSettings(first = false, justConnected = false) {
         toast(names.length ? `Moteur configuré (${names.join(", ")})` : "Étiquette prête ; aucun secret envoyé");
         const list = $("#view .checks");
         if (list) list.innerHTML = await engineChecks();
+        showEngineState();
       } catch (error) {
         failure(error);
       }
@@ -2951,9 +3041,10 @@ function showSettings(first = false, justConnected = false) {
         if (radio.value) state.settings.runner = radio.value;
         else delete state.settings.runner;
         saveSettings();
-        toast(radio.value ? "Sessions sur votre machine" : "Sessions sur une machine de GitHub");
+        toast(radio.value ? "Sessions sur votre machine (serveur gratuit ou PC)" : "Sessions sur une machine de GitHub");
         const list = $("#view .checks");
         if (list) list.innerHTML = await engineChecks().catch((error) => `<li class="ko">${escapeHtml(error.message)}</li>`);
+        showEngineState();
       });
     }
     for (const radio of $("#view").querySelectorAll('input[name="theme"]')) {

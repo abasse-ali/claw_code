@@ -14,7 +14,7 @@
   remove   le désinscrit de GitHub, puis supprime le conteneur, l'image et le volume.
 
   Il faut Docker Desktop lancé et la commande gh connectée (gh auth login) avec un compte
-  administrateur du dépôt des sessions. Dans l'appli, Réglages, « Sessions » : « Sur mon PC ».
+  administrateur du dépôt des sessions. Dans l'appli, Réglages, « Sessions » : « Ma machine ».
 
 .EXAMPLE
   .\claw-pc.ps1 install
@@ -145,7 +145,7 @@ function Install-Runner {
     Start-Container @("RUNNER_URL=https://github.com/$Engine", "RUNNER_TOKEN=$($token.Text.Trim())", "RUNNER_NAME=$Label")
     Write-Output 'Inscription auprès de GitHub...'
     Wait-Online
-    Write-Output "Exécuteur $Label en ligne sur $Engine. Dans l'appli : Réglages, Sessions, « Sur mon PC »."
+    Write-Output "Exécuteur $Label en ligne sur $Engine. Dans l'appli : Réglages, Sessions, « Ma machine »."
     Write-Output 'Pour qu''il tourne dès que le PC démarre : Docker Desktop, Settings, General, « Start Docker Desktop when you sign in ».'
 }
 
