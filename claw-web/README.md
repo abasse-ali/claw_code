@@ -31,8 +31,11 @@ changement de ce dossier ; l'ancienne adresse, https://abasse-ali.github.io/claw
    - pour mettre un site en ligne depuis l'appli (« Mettre en ligne », GitHub Pages) :
      **Pages** en lecture et écriture ;
    - pour créer des dépôts depuis l'appli (« Créer un dépôt » dans le choix du dépôt) :
-     **All repositories** et **Administration** en lecture et écriture. Modifier ces réglages
-     garde la valeur du jeton : rien à refaire dans l'appli.
+     **All repositories** et **Administration** en lecture et écriture ;
+   - pour le serveur gratuit et son robot de réessai : **Administration** et **Variables** en
+     lecture et écriture, sur le dépôt des sessions et celui du code de Claw.
+
+   Modifier ces réglages garde la valeur du jeton : rien à refaire dans l'appli.
 2. Ouvrez l'appli, collez le jeton, enregistrez.
 3. Dans « Moteur » : collez votre clé OpenRouter (ou laissez le champ vide si elle est déjà
    gardée sur l'appareil), laissez coché « Donner aussi ce jeton au moteur », puis
@@ -145,7 +148,9 @@ exécuteur, en ligne ou non, et en session.
 - **Robot de réessai** : quand Oracle manque de place (« Out of capacity »), la même fenêtre
   démarre un robot qui réessaie toutes les 10 minutes, gratuitement sur GitHub, puis installe Claw
   dès qu'une machine se libère, et s'éteint seul. Il lui faut une clé d'API d'Oracle (aperçu de
-  la configuration et fichier `.pem`), posée chiffrée en secret du dépôt du code de Claw.
+  la configuration et fichier `.pem`), posée chiffrée en secret du dépôt du code de Claw, et le
+  jeton de l'appli avec les autorisations Variables et Administration (l'appli les vérifie avant
+  de poser les secrets, et nomme celle qui manque).
 
 Détails, commandes et limites (machine inactive sept jours arrêtée par Oracle, « Out of capacity
 ») : `.github/claw-web/pc/README.md`.
