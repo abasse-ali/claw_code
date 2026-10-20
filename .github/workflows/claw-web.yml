@@ -69,7 +69,10 @@ on:
 permissions:
   # actions: read : date du passage, pour ignorer un passage lancé en double.
   actions: read
-  contents: read
+  # contents: write : les captures d'écran de l'agent rangées sur la branche des fichiers du
+  # dépôt des sessions (claw-web-fichiers), que l'appli montre en grand. L'agent ne reçoit
+  # jamais ce jeton (run.agent_env).
+  contents: write
   issues: write
 
 jobs:

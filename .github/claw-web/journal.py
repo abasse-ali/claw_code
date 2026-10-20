@@ -81,6 +81,45 @@ def fetch_small(url):
     return f"data:{kind};base64,{base64.b64encode(data).decode('ascii')}"
 
 
+def local_thumb(path):
+    """Un petit fichier image de la machine (aperçu d'une capture) en adresse `data:`, ou « »."""
+    try:
+        with open(str(path or ""), "rb") as file:
+            data = file.read(THUMB_BYTES + 1)
+    except OSError:
+        return ""
+    kind = image_kind(data)
+    if not kind or len(data) > THUMB_BYTES:
+        return ""
+    return f"data:{kind};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def shots(value, store=None):
+    """Les captures de l'outil Screenshot : l'aperçu du premier écran glissé dans le journal,
+    la capture entière rangée par `store` (chemin local -> chemin dans la branche des fichiers),
+    l'écran et le nombre de problèmes relevés."""
+    found = []
+    budget = THUMBS_BUDGET
+    for capture in (value.get("captures") or [])[:MAX_PHOTOS]:
+        if not isinstance(capture, dict) or not capture.get("file"):
+            continue
+        thumb = local_thumb(capture.get("preview"))
+        if len(thumb) > budget:
+            thumb = ""
+        budget -= len(thumb)
+        stored = store(capture["file"], str(capture.get("screen") or "")) if store else ""
+        if not thumb and not stored:
+            continue
+        problems = capture.get("problems")
+        found.append({
+            "t": thumb,
+            "p": stored,
+            "screen": excerpt(capture.get("screen", ""), 40),
+            "n": len(problems) if isinstance(problems, list) else 0,
+        })
+    return found
+
+
 def photos(value, fetch=fetch_small):
     """Les photos trouvées par l'outil Photo, pour des vignettes : petite version glissée dans
     le journal, grande version chez sa source, titre, auteur, licence et page d'origine."""
@@ -126,9 +165,11 @@ def patch(hunks):
 class Journal:
     """Les événements d'un passage, en bref, répartis en parties publiables."""
 
-    def __init__(self, relative=lambda text: str(text), fetch=fetch_small):
+    def __init__(self, relative=lambda text: str(text), fetch=fetch_small, store=None):
         self.relative = relative
         self.fetch = fetch
+        # Range une capture entière (chemin local, écran) ; « » quand elle n'a pas pu l'être.
+        self.store = store
         self.events = []
         self.waiting = collections.deque()
         # Indice du premier événement de chaque partie : une partie pleine reste fermée.
@@ -242,6 +283,8 @@ class Journal:
             return {}
         if name == "Photo":
             return {"photos": photos(value, self.fetch)}
+        if name == "Screenshot":
+            return {"shots": shots(value, self.store), "found": value.get("problemsFound", 0)}
         if name in ("Icon", "Ornament", "Component"):
             # Du SVG et du CSS pour le modèle : rien à lire pour l'utilisateur.
             return {}
