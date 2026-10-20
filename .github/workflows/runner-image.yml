@@ -1,0 +1,76 @@
+name: Image de l'exécuteur
+
+# L'image de l'exécuteur de Claw Web (.github/claw-web/pc : PC et serveur gratuit d'Oracle),
+# construite et essayée sur processeur Intel/AMD et sur processeur ARM (le serveur gratuit
+# d'Oracle) : outils présents, et une vraie capture d'écran par le navigateur. Machines ARM de
+# GitHub gratuites pour un dépôt public. Rien n'est inscrit auprès de GitHub.
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/claw-web/pc/**"
+      - ".github/workflows/runner-image.yml"
+  pull_request:
+    paths:
+      - ".github/claw-web/pc/**"
+      - ".github/workflows/runner-image.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: Image (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            os: ubuntu-latest
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Scripts sans fin de ligne Windows
+        run: |
+          if grep -l $'\r' .github/claw-web/pc/*.sh .github/claw-web/pc/Dockerfile; then
+            echo "::error::fin de ligne Windows (CRLF) : le script ne tournerait pas sous Linux"
+            exit 1
+          fi
+          bash -n .github/claw-web/pc/claw-cloud.sh
+          sh -n .github/claw-web/pc/entrypoint.sh
+
+      - name: Construction
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(gh api repos/actions/runner/releases/latest --jq .tag_name | sed 's/^v//')"
+          docker build --tag claw-runner --build-arg "RUNNER_VERSION=$version" .github/claw-web/pc
+
+      - name: Outils et capture d'écran
+        run: |
+          docker run --rm --entrypoint bash claw-runner -c '
+            set -e
+            test "$(uname -m)" = "$([ "${{ matrix.arch }}" = arm64 ] && echo aarch64 || echo x86_64)"
+            node --version
+            python3 -m pytest --version
+            cargo --version
+            ./config.sh --version
+            google-chrome --version
+            printf "<!doctype html><title>Essai</title><h1 style=\"font:48px serif\">Claw</h1>" > /tmp/page.html
+            cd /tmp
+            google-chrome --headless=new --disable-gpu --screenshot=/tmp/page.png --window-size=390,844 file:///tmp/page.html
+            size=$(stat -c %s /tmp/page.png)
+            echo "capture : $size octets"
+            test "$size" -gt 1000
+          '
