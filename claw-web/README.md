@@ -104,6 +104,16 @@ s'affichent en retrait. Le pied de la réponse dit le bilan de la branche en fra
 fichiers modifiés, +1 743 lignes, −287 lignes »), et une erreur est d'abord dite en clair (« le
 quota du modèle est épuisé pour le moment »), le message brut en dessous.
 
+Deux messages courts ont un traitement à part :
+
+- **Une question sur le travail** (« Tu fais quoi !? », « Pourquoi tu as fait ça ? », « Où en
+  es-tu ? ») reçoit une réponse, et rien d'autre : Claw ne reprend aucun travail dans ce passage.
+- **« Continue » dans une session neuve**, sans conversation qui précède : rien ne dit quoi
+  continuer. Claw regarde le dépôt sans rien modifier, dit où en est le projet et propose la
+  suite ; vous répondez avec ce qu'il faut faire. Vu dans la session 13 : un tel « Continue »
+  avait lancé une refonte du site que personne n'avait demandée. Pour poursuivre un travail,
+  écrivez « continue » dans la session où il a commencé.
+
 ## Quota du modèle choisi
 
 L'anneau du haut suit le fournisseur du modèle choisi :
