@@ -355,6 +355,12 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .run-state.unfinished { color: var(--warn); background: color-mix(in srgb, var(--warn) 18%, transparent); }
 .run-title { flex: 1; min-width: 0; line-height: 1.35; }
 .run-title strong { font-weight: 600; }
+.run-sub { display: block; margin-top: 2px; font-size: .8rem; color: var(--muted); }
+/* Passage lancé, avant sa première progression : « Claw se prépare » et l'étape en cours. */
+.run-card.preparing { padding: 10px 12px; }
+.preparing-row { display: flex; align-items: center; gap: 10px; font-size: .9rem; }
+/* Première réponse que Claw a fait reprendre : repliée dans le journal. */
+.ev.draft > summary .verb { color: var(--muted); font-weight: 500; }
 .ev { font-size: .88rem; min-width: 0; }
 .ev > summary, .ev-line { display: flex; align-items: center; gap: 8px; padding: 6px 0; min-width: 0; }
 /* Une étape dépliable a son chevron à droite : les icônes restent alignées d'une ligne à l'autre. */
@@ -517,6 +523,7 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
   display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 0; border-radius: 9px;
   background: none; color: var(--text); font: inherit; font-size: .9rem; text-align: left; text-decoration: none; cursor: pointer;
 }
+.menu-list.from-left { right: auto; left: 0; }
 .menu-item:hover, .menu-item:focus-visible { background: var(--panel-2); }
 .menu-item svg { width: 16px; height: 16px; color: var(--muted); }
 .menu-item.danger-item, .menu-item.danger-item svg { color: var(--error); }

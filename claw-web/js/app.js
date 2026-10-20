@@ -6,7 +6,7 @@
 import { ANSWER, GitHub, GitHubError, LABEL, PROGRESS } from "./github.js";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 import { sealedBox } from "./sealed-box.js";
-import { LOG, changesHtml, decodeLog, photoLink, photoView, transcriptHtml } from "./transcript.js";
+import { LOG, changesHtml, decodeLog, photoLink, photoView, transcriptHtml, withoutCallMarkup } from "./transcript.js";
 import { highlightLines, languageOf } from "./highlight.js";
 import { accountStatus, freeModels, resetTime } from "./openrouter.js";
 
@@ -1645,11 +1645,14 @@ async function startSession(text, textarea) {
     const block = `<!-- claw-web ${JSON.stringify({ repo, base: branch, model: model || "", n, branch: work })} -->`;
     const issue = await state.github.createIssue(engine, title, `${text}${images}\n\n${block}`);
     state.attachments = [];
+    textarea.value = "";
+    // La session s'affiche aussitôt (sa tâche, « Claw se prépare ») ; le passage part ensuite.
+    state.dispatchedAt = Date.now();
+    state.session = { number: issue.number, issue, comments: [], settings: settingsOf(issue), pull: null, step: "", signature: "", logs: new Map() };
+    location.hash = `#/session/${issue.number}`;
     await state.github.dispatch(engine, state.engineRef,
       { repo, base: branch || "main", session: String(issue.number), model: model || "", ...aidInputs() });
     state.dispatchedAt = Date.now();
-    textarea.value = "";
-    location.hash = `#/session/${issue.number}`;
   } catch (error) {
     failure(error);
   } finally {
@@ -1664,12 +1667,21 @@ async function followUpSession(text, textarea) {
   renderSending(true);
   try {
     const images = await uploadAttachments();
-    await state.github.comment(state.settings.engine, session.number, `${text}${images}`);
+    const posted = await state.github.comment(state.settings.engine, session.number, `${text}${images}`);
     state.attachments = [];
-    await dispatchSession(session);
     textarea.value = "";
     textarea.dispatchEvent(new Event("input"));
-    await pollSession(true);
+    // Le message et « Claw se prépare » paraissent aussitôt, sans attendre GitHub.
+    if (posted && state.session === session && !session.comments.some((comment) => comment.id === posted.id)) {
+      session.comments.push(posted);
+    }
+    state.dispatchedAt = Date.now();
+    if (state.session === session) {
+      renderSessionView();
+      window.scrollTo({ top: document.body.scrollHeight });
+    }
+    await dispatchSession(session);
+    await pollSession();
   } catch (error) {
     failure(error);
   } finally {
@@ -2183,10 +2195,31 @@ function messageHtml(comment, isLastProgress, answer = "") {
         .replace(/(\d+) (min|s)\b/g, "$1 $2").replace(/(min) (\d)/g, "$1 $2");
       return `<div class="run-card ${kind}">${transcriptHtml(events, { key: `run${run}`, live: isLastProgress, answer, title, kind })}</div>`;
     }
-    return `<div class="progress-card ${kind}${isLastProgress ? "" : " old"}">${renderMarkdown(body)}</div>`;
+    return `<div class="progress-card ${kind}${isLastProgress ? "" : " old"}">${renderMarkdown(withoutCallMarkup(body))}</div>`;
   }
   if (body.includes(ANSWER)) return answerHtml(body);
   return userMessageHtml(comment.user ? comment.user.login : "", body);
+}
+
+/** Étapes du moteur avant le travail de Claw, en clair. */
+const PREPARING_STEPS = {
+  "Compiler Claw": "Compilation de Claw : la première fois sur une machine, ou après une mise à jour de Claw, quelques minutes",
+  "Installer Rust": "Installation de Rust, pour compiler Claw",
+  "Source de Claw": "Lecture du code de Claw",
+  "Binaire de Claw en cache": "Claw déjà compilé : récupération",
+  "Session et dépôt de la tâche": "Préparation du dépôt de la tâche",
+  "Claw au travail": "Claw démarre",
+};
+
+/** Carte « Claw se prépare » : le passage lancé, avant sa première progression. */
+function preparingHtml(run, status, step) {
+  const detail = !run ? "Lancement du passage"
+    : status && status.key === "queued" ? status.label
+      : PREPARING_STEPS[step] || step || (status ? status.label : "");
+  return `<div class="run-card preparing"><div class="preparing-row">
+    <span class="run-state running"><span class="spinner" aria-label="en cours"></span></span>
+    <span class="run-title"><strong>Claw se prépare</strong><span class="run-sub">${escapeHtml(detail)}</span></span>
+  </div></div>`;
 }
 
 /** Message de l'utilisateur en bulle ; le nom seulement quand c'est quelqu'un d'autre. */
@@ -2231,6 +2264,9 @@ function renderSessionView() {
   const lastAnswer = [...comments].reverse().find((comment) => kindOf(comment.body) === "answer");
   const unsent = !active && Boolean(lastMessage) && (!lastAnswer || lastAnswer.created_at < lastMessage.created_at)
     && (!run || run.created_at < lastMessage.created_at);
+  // Passage lancé, pas encore de progression pour le dernier message : Claw se prépare (file
+  // d'attente, compilation…), dit dans la conversation plutôt que tout en bas.
+  const preparing = active && (!lastProgress || (lastMessage && lastProgress.created_at < lastMessage.created_at));
   view.innerHTML = `
     <section class="session">
       <header class="session-head">
@@ -2248,11 +2284,12 @@ function renderSessionView() {
         ${userMessageHtml(session.issue.user ? session.issue.user.login : "", taskOf(session.issue))}
         ${discussionBlocks(comments).map((block) => (block.message ? messageHtml(block.message, false)
           : attemptsHtml(block, (comment) => comment === lastProgress && !answered))).join("")}
+        ${preparing ? preparingHtml(run, status, session.step) : ""}
       </div>
       ${unsent ? `<div class="unsent">Ce message n'a pas encore été envoyé à Claw (aucun passage lancé depuis).
         <button class="small-link primary-link" data-action="retry">${ICON.retry}<span>Lancer le passage</span></button></div>` : ""}
       <div class="run-status ${active ? "active" : status ? status.key : ""}">
-        ${active ? `<span class="spinner" aria-hidden="true"></span><span>${run ? escapeHtml(status.label) : "Lancement du passage"}${step}</span>` : ""}
+        ${active && !preparing ? `<span class="spinner" aria-hidden="true"></span><span>${run ? escapeHtml(status.label) : "Lancement du passage"}${step}</span>` : ""}
         ${!active && status && status.key === "failed" && !answered ? `<span>Le dernier passage a échoué.</span>` : ""}
         <span class="run-actions">
           ${active && run ? `<button class="small-link stop" data-action="stop">${ICON.stop}<span>Arrêter</span></button>` : ""}
@@ -2275,6 +2312,13 @@ function renderSessionView() {
   }
   // Menu « ••• » : se ferme en touchant ailleurs dans la session, ou après un choix.
   const menu = view.querySelector(".more-menu");
+  menu?.addEventListener("toggle", () => {
+    if (!menu.open) return;
+    const list = menu.querySelector(".menu-list");
+    list.classList.remove("from-left");
+    // Bouton trop à gauche pour la largeur du menu : il s'ouvre vers la droite.
+    if (menu.getBoundingClientRect().right - list.offsetWidth < 8) list.classList.add("from-left");
+  });
   view.querySelector(".session").addEventListener("click", (event) => {
     if (menu && menu.open && (!event.target.closest(".more-menu") || event.target.closest(".menu-item"))) menu.open = false;
   });
@@ -2367,6 +2411,10 @@ async function showSession(number) {
   if (!state.session || state.session.number !== number) {
     view.innerHTML = '<section class="session"><p class="empty">Chargement de la session…</p></section>';
     state.session = { number, issue: null, comments: [], settings: {}, pull: null, step: "", signature: "", logs: new Map() };
+  } else if (state.session.issue) {
+    // Déjà connue (session à peine créée, retour sur la page) : montrée avant la relecture.
+    renderSessionView();
+    renderComposer();
   }
   try {
     await pollSession(true);

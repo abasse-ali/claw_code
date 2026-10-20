@@ -78,6 +78,14 @@ le job sont en pastilles, le modèle et les requêtes à déplier. « Relancer �
 ligne » restent sous la conversation ; le job, la session sur GitHub, « Archiver » et
 « Supprimer » sont dans le menu « ••• ».
 
+Votre message paraît dès son envoi, et une nouvelle session s'ouvre dès sa création ; jusqu'à
+la première progression, la carte « Claw se prépare » dit l'étape en cours (file d'attente,
+compilation de Claw, préparation du dépôt). Claw n'est compilé qu'après une mise à jour de son
+code, une fois par type de processeur (le serveur ARM, le PC ou les machines de GitHub) :
+quelques minutes, puis il est gardé en cache. Une première réponse que les vérifications de Claw
+lui ont fait reprendre reste repliée dans le journal (« Première réponse »), sous la réponse
+définitive ; un appel d'outil que le modèle a écrit en texte n'est pas montré.
+
 ## Ce que Claw compte faire
 
 Pendant qu'il travaille, la progression de la session commence par **Ce que Claw compte faire** :
