@@ -151,6 +151,32 @@ function unifiedDiffHtml(patch, language) {
   return `<div class="diff">${diffRows(hunks, language).join("")}</div>`;
 }
 
+/** Chemin d'une capture rangée sur la branche des fichiers du moteur, ou « ». */
+const shotPath = (path) => (/^uploads\/session-\d+\/[A-Za-z0-9._-]+\.jpg$/.test(String(path || "")) ? path : "");
+
+/** Écran d'une capture, en français : « phone 390x844 » devient « téléphone 390 x 844 ». */
+function screenName(screen) {
+  const [kind, size] = String(screen || "").split(" ");
+  const names = { phone: "téléphone", mobile: "téléphone", tablet: "tablette", desktop: "ordinateur" };
+  return [names[kind] || kind, (size || "").replace("x", " x ")].filter(Boolean).join(" ");
+}
+
+/** Vignettes des captures d'écran : un toucher ouvre la capture entière. */
+function shotsHtml(shots) {
+  const pills = shots.map((shot) => {
+    const thumb = thumbData(shot.t);
+    const path = shotPath(shot.p);
+    if (!thumb && !path) return "";
+    const label = `Capture ${screenName(shot.screen)}${shot.n ? ` · ${plural(shot.n, "problème")}` : ""}`;
+    return `<button type="button" class="photo-pill shot" data-shot="${escapeHtml(path)}" data-thumb="${escapeHtml(thumb)}"`
+      + ` data-label="${escapeHtml(label)}" title="${escapeHtml(label)}" aria-label="${escapeHtml(`Voir la ${label.toLowerCase()}`)}">`
+      + (thumb ? `<img src="${escapeHtml(thumb)}" alt="">` : ICONS.image)
+      + (shot.n ? `<span class="shot-flag">${shot.n}</span>` : "")
+      + "</button>";
+  }).join("");
+  return pills ? `<div class="photo-pills">${pills}</div>` : "";
+}
+
 /** Ce que la vue en grand d'une photo peut montrer : sa grande version, sinon sa vignette. */
 export const photoView = (url) => photoLink(url) || thumbData(url);
 
@@ -202,10 +228,16 @@ function toolHtml(event, key, openTodo) {
     side = plural(photos.length, "photo");
     body = "";
   }
+  const shots = event.n === "Screenshot" && result && Array.isArray(result.shots) ? result.shots : null;
+  if (shots) {
+    side = result.found ? `<span class="del">${plural(result.found, "problème")}</span>` : plural(shots.length, "capture");
+    body = "";
+  }
   const summary = `${ICONS[icon] || ICONS.tool}<span class="verb">${escapeHtml(verb)}</span>`
     + `<span class="target">${escapeHtml(target)}</span>`
     + `<span class="side">${!result ? '<span class="spinner" aria-label="en cours"></span>' : side}</span>`;
   if (photos) return `<div class="ev tool photos${state}"><div class="ev-line">${summary}</div>${photosHtml(photos)}</div>`;
+  if (shots) return `<div class="ev tool photos${state}"><div class="ev-line">${summary}</div>${shotsHtml(shots)}</div>`;
   if (!body) return `<div class="ev tool${state}"><div class="ev-line">${summary}</div></div>`;
   return `<details class="ev tool${state}" data-key="${key}"${openTodo ? " open" : ""}><summary>${summary}</summary><div class="ev-body">${body}</div></details>`;
 }

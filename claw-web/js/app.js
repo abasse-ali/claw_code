@@ -226,6 +226,49 @@ function openPhoto({ photo, credit, source }) {
   sheet.hidden = false;
 }
 
+/** Capture d'écran de l'agent, entière (rangée sur la branche des fichiers du moteur) ; sa
+ * vignette s'affiche le temps qu'elle arrive, ou seule quand elle n'a pas pu être rangée. */
+async function openShot({ shot, thumb, label }) {
+  const sheet = $("#sheet");
+  const preview = /^data:image\/(?:jpeg|png|webp);base64,/.test(thumb || "") ? thumb : "";
+  sheet.innerHTML = `
+    <div class="sheet-panel image-panel shot-panel" role="dialog" aria-modal="true" aria-label="Capture d'écran">
+      <div class="sheet-head"><strong>${escapeHtml(label || "Capture d'écran")}</strong><button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button></div>
+      <div class="shot-scroll"><img class="full-image tall" alt="" src="${escapeHtml(preview)}"${preview ? "" : " hidden"}></div>
+      <p class="help shot-state">${shot ? "Chargement de la capture entière…" : "Seul l'aperçu du premier écran a été gardé."}</p>
+    </div>`;
+  sheet.onclick = (event) => {
+    if (event.target === sheet || event.target.closest("[data-close]")) {
+      sheet.hidden = true;
+      sheet.innerHTML = "";
+    }
+  };
+  sheet.hidden = false;
+  if (!shot) return;
+  try {
+    let url = state.images.get(shot);
+    if (!url) {
+      const blob = await state.github.rawFile(state.settings.engine, shot, FILES_BRANCH);
+      // En adresse data: (la Content-Security-Policy refuse les images blob:).
+      url = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+      state.images.set(shot, url);
+    }
+    const image = sheet.querySelector(".full-image");
+    if (!image) return;
+    image.src = url;
+    image.hidden = false;
+    sheet.querySelector(".shot-state")?.remove();
+  } catch {
+    const note = sheet.querySelector(".shot-state");
+    if (note) note.textContent = "La capture entière n'a pas pu être chargée : voici l'aperçu du premier écran.";
+  }
+}
+
 /** Image choisie, réduite si besoin (2000 px au plus de côté, JPEG) : { name, base64, url }. */
 async function prepareImage(file) {
   const keep = ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type) && file.size <= 1_500_000;
@@ -1638,6 +1681,15 @@ async function openDeleteSessions(issues) {
       } catch (error) {
         problems.push(`images de la session ${numberOf(issue)} : ${error.message}`);
       }
+      // Captures d'écran rangées par le moteur, dans le dossier de la session.
+      try {
+        const listing = await state.github.contents(engine, `uploads/session-${issue.number}`, FILES_BRANCH);
+        for (const file of Array.isArray(listing) ? listing : []) {
+          await state.github.deleteFile(engine, file.path, "Capture d'une session supprimée", FILES_BRANCH);
+        }
+      } catch (error) {
+        if (!(error instanceof GitHubError) || error.status !== 404) problems.push(`captures de la session ${numberOf(issue)} : ${error.message}`);
+      }
       try {
         await state.github.deleteIssue(issue.node_id);
         erased += 1;
@@ -1984,6 +2036,8 @@ function renderSessionView() {
     if (thumb) openImage(thumb.dataset.image);
     const photo = event.target.closest(".photo-pill[data-photo]");
     if (photo) openPhoto(photo.dataset);
+    const shot = event.target.closest(".photo-pill[data-shot]");
+    if (shot) openShot(shot.dataset);
   });
   loadThumbs();
   view.querySelector('[data-action="archive"]')?.addEventListener("click", async () => {
