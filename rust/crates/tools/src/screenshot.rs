@@ -2056,7 +2056,11 @@ mod tests {
             assert!(target(&input(Some(refused), None)).is_err(), "{refused}");
         }
         assert!(target(&input(None, None)).is_err());
-        assert!(target(&input(Some("http://x/"), Some("a.html"))).is_err());
+        // Les deux : l'adresse web l'emporte (au lieu d'un refus qui coûtait une requête).
+        assert_eq!(
+            target(&input(Some("http://x/"), Some("a.html"))).as_deref(),
+            Ok("http://x/")
+        );
         // Un fichier du projet s'ouvre ; un fichier à côté du projet, ou qui
         // n'est pas une page, est refusé (sans dépendre du dossier courant).
         let base = std::env::temp_dir().join(format!("claw-shot-test-{}", std::process::id()));
