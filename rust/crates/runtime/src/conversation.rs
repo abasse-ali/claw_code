@@ -1446,6 +1446,22 @@ where
         ));
     }
 
+    /// Réponse d'un tour arrêté à sa limite de requêtes alors que le modèle
+    /// appelait encore des outils : son dernier compte rendu de ce tour, avec
+    /// une ligne qui dit pourquoi il s'arrête là. `None` si aucune réponse du
+    /// tour n'en est un.
+    fn answer_at_limit(assistant_messages: &[ConversationMessage], limit: usize) -> Option<String> {
+        let report = assistant_messages
+            .iter()
+            .rev()
+            .map(message_text)
+            .find(|text| harness::looks_like_report(text))?;
+        Some(format!(
+            "{}\n\n_(Claw : le tour s'est arrêté à sa limite de {limit} requêtes avant que l'agent conclue ; ce compte rendu est son dernier. Écrivez « continue » pour poursuivre.)_",
+            report.trim_end()
+        ))
+    }
+
     /// Un compte rendu final suivi seulement d'appels de rangement (`Remember`,
     /// `TodoWrite`, `ExitPlanMode` hors mode plan) : les appels sont faits sans
     /// revenir au modèle et retirés de la réponse, qui devient celle du tour
@@ -2148,6 +2164,16 @@ where
                 self.api_client.notify(
                     "L'agent n'a pas conclu : le tour s'arrête là, sans autre appel d'outil",
                 );
+                // Le tour finissait sans réponse : le dernier compte rendu de
+                // l'agent la remplace (vu le 21 octobre 2026 sur Nemotron
+                // Lightning, t6 et t8 : un compte rendu complet, puis des appels
+                // jusqu'à la limite, et une réponse finale vide).
+                if let Some(answer) = Self::answer_at_limit(&assistant_messages, turn_limit) {
+                    let message =
+                        ConversationMessage::assistant(vec![ContentBlock::Text { text: answer }]);
+                    self.session.messages.push(message.clone());
+                    assistant_messages.push(message);
+                }
                 break;
             }
             // Plan de design relu avant le code : à la première écriture d'un
@@ -9663,6 +9689,48 @@ mod tests {
             .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
             .count();
         assert_eq!(calls, results);
+    }
+
+    #[test]
+    fn a_turn_stopped_at_its_limit_answers_with_the_last_report() {
+        let _serial = crate::test_serial();
+        // Vu sur Nemotron Lightning : un compte rendu complet, puis des appels
+        // jusqu'à la limite, et aucune réponse finale.
+        let report = format!(
+            "**Résultat**\nLe projet est prêt.\n\n**Ce que j'ai fait**\n{}\n\n**Vérification**\nLes tests passent.",
+            "J'ai écrit les commandes et leurs tests. ".repeat(10)
+        );
+        let mut with_call = text_step(&report);
+        with_call.insert(
+            1,
+            AssistantEvent::ToolUse {
+                id: "appel-bash".to_string(),
+                name: "bash".to_string(),
+                input: r#"{"command":"python -m pytest"}"#.to_string(),
+            },
+        );
+        let (runtime, _, _) = aided_runtime(
+            vec![
+                with_call,
+                tool_step("bash", r#"{"command":"python -m pytest -v"}"#),
+                tool_step("bash", r#"{"command":"ls"}"#),
+            ],
+            vec![PASSING, PASSING],
+        );
+        let mut runtime = runtime.with_turn_request_limit(2);
+        let summary = runtime.run_turn("crée le projet", None).expect("tour");
+        let last = summary.assistant_messages.last().expect("réponse");
+        let text = super::message_text(last);
+        assert!(text.starts_with("**Résultat**"), "{text}");
+        assert!(text.contains("limite de 2 requêtes"));
+        assert_eq!(
+            runtime
+                .session()
+                .messages
+                .last()
+                .map(|message| message.role),
+            Some(crate::session::MessageRole::Assistant)
+        );
     }
 
     #[test]
