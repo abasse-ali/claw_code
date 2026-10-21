@@ -435,6 +435,10 @@ fn describe(tool_name: &str, input: &str) -> (String, String) {
                     "apply_patch" => "Apply a patch",
                     "move_file" => "Move a file",
                     "delete_file" => "Delete a file",
+                    "replace_in_files" => "Replace text in files",
+                    "run_tests" => "Run the tests",
+                    "git_commit" => "Commit changes",
+                    "http_request" => "Send an HTTP request",
                     _ => "Use a tool",
                 }
                 .to_string()

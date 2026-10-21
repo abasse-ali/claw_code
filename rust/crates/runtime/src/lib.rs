@@ -6,6 +6,7 @@ pub mod checkpoint;
 pub mod claude_skills;
 pub mod code_checks;
 pub mod code_guide;
+mod code_tools;
 mod compact;
 mod config;
 mod conversation;
@@ -63,6 +64,11 @@ pub use bash::{
     BashCommandOutput,
 };
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
+pub use code_tools::{
+    detect_test_command, file_outline, git_commit, git_read, read_many_files, run_tests,
+    summarize_tests, FileOutlineInput, GitCommitInput, GitInput, ReadManyFilesInput, RunTestsInput,
+    TestSummary,
+};
 pub use compact::{
     compact_session, compact_session_with, estimate_session_tokens, format_compact_summary,
     get_compact_continuation_message, render_transcript_for_summary, should_compact,
@@ -89,8 +95,9 @@ pub use file_ops::{
 };
 pub use file_tools::{
     apply_patch, changes_listed_files, delete_file, edits_one_file, list_directory, move_file,
-    multi_edit_file, patch_paths, writes_files, written_paths, ChangedFile, EditOperation,
-    FilesChangedOutput, ListDirectoryOutput, MoveFileOutput, MultiEditOutput,
+    multi_edit_file, patch_paths, replace_in_files, writes_files, written_paths, ChangedFile,
+    EditOperation, FilesChangedOutput, ListDirectoryOutput, MoveFileOutput, MultiEditOutput,
+    ReplaceInFilesInput,
 };
 pub use hooks::{
     current_session_id, set_http_hook_sender, set_prompt_hook_evaluator,

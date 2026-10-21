@@ -839,6 +839,20 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
   - Chaque fichier passe par les mêmes gardes qu'après `edit_file` (données, tests, vue du
     fichier). Un appel qui touche plusieurs chemins est jugé sur le moins sûr d'entre eux par les
     permissions.
+- **Outils de développeur** :
+  - `read_many_files` lit plusieurs fichiers (ou des motifs `src/**/*.ts`) en un appel.
+  - `file_outline` donne le plan d'un fichier avec les numéros de ligne : classes, fonctions,
+    méthodes, règles CSS, sections HTML, titres Markdown, tables SQL…
+  - `replace_in_files` remplace un texte ou une regex dans tout un dossier, avec `preview`
+    pour voir les diffs sans écrire, et passe par `/undo` et les gardes.
+  - `run_tests` trouve la commande de test du projet (cargo, npm/pnpm/yarn avec Jest, Vitest ou
+    Mocha, pytest, go, Maven, Gradle, dotnet, phpunit, rspec, make), la lance et résume les
+    réussites et les échecs avec leurs messages. Il compte comme une vérification, comme
+    `cargo test` dans `bash`.
+  - `git` lit le dépôt (`status`, `diff`, `log`, `show`, `blame`, `branches`) ; `git_commit`
+    valide, sans pousser.
+  - `http_request` envoie une requête (méthode, en-têtes, corps JSON) pour tester une API ou un
+    serveur lancé en arrière-plan.
 
 ### Aides au raisonnement
 

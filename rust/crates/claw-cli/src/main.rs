@@ -9275,6 +9275,23 @@ fn describe_permission_target(tool_name: &str, input: &str) -> String {
             "Correctif        {}",
             runtime::patch_paths(field("patch").unwrap_or_default()).join(", ")
         )),
+        "replace_in_files" => Some(format!(
+            "Remplacement     « {} » → « {} »{}",
+            field("pattern").unwrap_or_default(),
+            field("replacement").unwrap_or_default(),
+            field("glob").map_or(String::new(), |glob| format!(" dans {glob}"))
+        )),
+        "run_tests" => Some(format!(
+            "Tests            {}",
+            field("command").unwrap_or("commande trouvée d'après le projet")
+        )),
+        "git_commit" => field("message").map(|message| format!("Commit           {message}")),
+        "http_request" => field("url").map(|url| {
+            format!(
+                "Requête HTTP     {} {url}",
+                field("method").unwrap_or("GET")
+            )
+        }),
         "NotebookEdit" => field("notebook_path").map(|path| format!("Notebook         {path}")),
         "WebFetch" | "ViewPage" => field("url").map(|url| format!("URL              {url}")),
         "Screenshot" => field("url")

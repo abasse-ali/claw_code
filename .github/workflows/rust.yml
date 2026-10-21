@@ -63,6 +63,10 @@ jobs:
           git config --global init.defaultBranch main
       - name: Compilation
         run: cargo build --workspace --all-targets --locked
+      - name: Erreurs de compilation (temporaire, branche outils-codage)
+        if: failure()
+        run: |
+          cargo build --workspace --all-targets --locked --message-format=short 2>&1 | grep -E ': (error|warning)' | grep -v 'warning: unused' | head -40 | sed 's/^/::error::/' || true
       # Les tests changent le dossier courant du processus : un seul fil.
       # Un test bloqué arrête l'étape au bout de 15 minutes (les tests en prennent 2) :
       # le journal reste lisible, ce qui n'est pas le cas d'une exécution annulée.

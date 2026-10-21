@@ -316,6 +316,26 @@ pub fn is_writable_without_asking(path: &str, cwd: &Path) -> bool {
     })
 }
 
+/// Chemins d'un appel qui en touche plusieurs (lus ou écrits), chacun jugé à part ; `None`
+/// pour les autres outils.
+fn several_paths(tool_name: &str, input: &str) -> Option<Vec<String>> {
+    match tool_name {
+        "apply_patch" | "move_file" | "replace_in_files" => {
+            Some(crate::file_tools::written_paths(tool_name, input))
+        }
+        "read_many_files" => Some(
+            serde_json::from_str::<Value>(input)
+                .ok()
+                .and_then(|value| value.get("paths").and_then(Value::as_array).cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|path| path.as_str().map(ToOwned::to_owned))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
 /// Appel qui écrit un fichier hors des dossiers autorisés.
 fn writes_outside_workspace(tool_name: &str, target: &ToolTarget, cwd: &Path) -> Option<String> {
     if !crate::file_tools::writes_files(tool_name) {
@@ -454,7 +474,7 @@ impl PermissionRule {
 
     fn covers_tool(&self, tool_name: &str) -> bool {
         let covered: &[&str] = match self.tool.to_ascii_lowercase().as_str() {
-            "bash" => &["bash", "Monitor"],
+            "bash" => &["bash", "Monitor", "run_tests"],
             "powershell" => &["PowerShell"],
             "read" => &[
                 "read_file",
@@ -462,6 +482,8 @@ impl PermissionRule {
                 "grep_search",
                 "FindSymbol",
                 "list_directory",
+                "read_many_files",
+                "file_outline",
             ],
             "edit" => &[
                 "edit_file",
@@ -471,6 +493,7 @@ impl PermissionRule {
                 "apply_patch",
                 "move_file",
                 "delete_file",
+                "replace_in_files",
             ],
             "write" => &["write_file"],
             "glob" => &["glob_search"],
@@ -478,7 +501,7 @@ impl PermissionRule {
             "agent" | "task" => &["Agent"],
             // ViewPage charge aussi une page du web : une règle qui limite
             // WebFetch le limite aussi.
-            "webfetch" => &["WebFetch", "ViewPage", "Screenshot"],
+            "webfetch" => &["WebFetch", "ViewPage", "Screenshot", "http_request"],
             _ => {
                 return self.tool.eq_ignore_ascii_case(tool_name)
                     || (self.tool.starts_with("mcp__")
@@ -618,10 +641,9 @@ impl PermissionPolicy {
     /// les règles n'accordent pas d'eux-mêmes (refusé, ou à demander) : un
     /// chemin sûr ne fait pas passer les autres.
     fn narrowest_target(&mut self, tool_name: &str, input: &str) -> ToolTarget {
-        if !matches!(tool_name, "apply_patch" | "move_file") {
+        let Some(paths) = several_paths(tool_name, input) else {
             return ToolTarget::from_input(tool_name, input);
-        }
-        let paths = crate::file_tools::written_paths(tool_name, input);
+        };
         for path in &paths {
             let target = ToolTarget::Path(path.clone());
             if !matches!(
@@ -762,13 +784,9 @@ impl PermissionPolicy {
     /// les règles `deny` peuvent encore l'interdire.
     #[must_use]
     pub fn authorize_preapproved(&self, tool_name: &str, input: &str) -> PermissionOutcome {
-        let targets = if matches!(tool_name, "apply_patch" | "move_file") {
-            crate::file_tools::written_paths(tool_name, input)
-                .into_iter()
-                .map(ToolTarget::Path)
-                .collect()
-        } else {
-            vec![ToolTarget::from_input(tool_name, input)]
+        let targets = match several_paths(tool_name, input) {
+            Some(paths) => paths.into_iter().map(ToolTarget::Path).collect(),
+            None => vec![ToolTarget::from_input(tool_name, input)],
         };
         let denied = targets
             .iter()
@@ -913,16 +931,20 @@ impl ToolTarget {
             "read_file" | "write_file" | "edit_file" | "MultiEdit" | "delete_file" => {
                 field("path").map_or(Self::Other, Self::Path)
             }
-            "apply_patch" | "move_file" => crate::file_tools::written_paths(tool_name, input)
-                .into_iter()
-                .next()
-                .map_or(Self::Other, Self::Path),
+            "apply_patch" | "move_file" | "replace_in_files" | "read_many_files" => {
+                several_paths(tool_name, input)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .next()
+                    .map_or(Self::Other, Self::Path)
+            }
+            "file_outline" => field("path").map_or(Self::Other, Self::Path),
             "list_directory" => Self::Path(field("path").unwrap_or_else(|| ".".to_string())),
             "NotebookEdit" => field("notebook_path").map_or(Self::Other, Self::Path),
             "glob_search" | "grep_search" => {
                 Self::Path(field("path").unwrap_or_else(|| ".".to_string()))
             }
-            "WebFetch" | "ViewPage" => field("url").map_or(Self::Other, Self::Url),
+            "WebFetch" | "ViewPage" | "http_request" => field("url").map_or(Self::Other, Self::Url),
             "Screenshot" => field("url")
                 .map(Self::Url)
                 .or_else(|| field("path").map(Self::Path))
@@ -1749,6 +1771,29 @@ mod tests {
             policy.authorize("MultiEdit", &path_input("src/a.rs"), None),
             PermissionOutcome::Allow
         );
+        // Lire plusieurs fichiers : une règle Read qui en interdit un refuse l'appel.
+        let mut reader = policy_for_reads();
+        assert!(matches!(
+            reader.authorize(
+                "read_many_files",
+                &json!({ "paths": ["src/a.rs", "config/.env"] }).to_string(),
+                None
+            ),
+            PermissionOutcome::Deny { .. }
+        ));
+        assert_eq!(
+            reader.authorize(
+                "read_many_files",
+                &json!({ "paths": ["src/a.rs"] }).to_string(),
+                None
+            ),
+            PermissionOutcome::Allow
+        );
+    }
+
+    fn policy_for_reads() -> PermissionPolicy {
+        policy(PermissionMode::WorkspaceWrite, &[], &["Read(.env)"], &[])
+            .with_tool_requirement("read_many_files", PermissionMode::ReadOnly)
     }
 
     #[test]

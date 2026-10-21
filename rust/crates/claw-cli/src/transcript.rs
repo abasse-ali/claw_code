@@ -197,6 +197,13 @@ pub fn tool_label(name: &str) -> &str {
         "list_directory" => "Dossier",
         "move_file" => "Déplacement",
         "delete_file" => "Suppression",
+        "read_many_files" => "Lecture de fichiers",
+        "file_outline" => "Plan du fichier",
+        "replace_in_files" => "Remplacement",
+        "run_tests" => "Tests",
+        "git" => "Git",
+        "git_commit" => "Commit",
+        "http_request" => "Requête HTTP",
         "glob_search" | "Glob" => "Fichiers",
         "grep_search" | "Grep" => "Recherche",
         "WebFetch" => "Page web",
@@ -240,6 +247,37 @@ fn tool_argument(name: &str, input: &Value) -> Option<String> {
         "write_file" | "Write" | "edit_file" | "Edit" | "NotebookEdit" | "MultiEdit"
         | "delete_file" => path_field(input),
         "list_directory" => Some(display_path(str_field(input, &["path"]).unwrap_or("."))),
+        "file_outline" => path_field(input),
+        "read_many_files" => input.get("paths").and_then(Value::as_array).map(|paths| {
+            paths
+                .iter()
+                .filter_map(Value::as_str)
+                .map(display_path)
+                .collect::<Vec<_>>()
+                .join(", ")
+        }),
+        "replace_in_files" => str_field(input, &["pattern"]).map(|pattern| {
+            format!(
+                "\"{pattern}\" → \"{}\"{}",
+                str_field(input, &["replacement"]).unwrap_or_default(),
+                str_field(input, &["glob"]).map_or(String::new(), |glob| format!(" dans {glob}"))
+            )
+        }),
+        "run_tests" => Some(
+            str_field(input, &["command"])
+                .or_else(|| str_field(input, &["filter"]))
+                .unwrap_or("tests du projet")
+                .to_string(),
+        ),
+        "git" => str_field(input, &["action"]).map(|action| {
+            match str_field(input, &["path"]).or_else(|| str_field(input, &["ref"])) {
+                Some(target) => format!("{action} {target}"),
+                None => action.to_string(),
+            }
+        }),
+        "git_commit" => str_field(input, &["message"]).map(ToOwned::to_owned),
+        "http_request" => str_field(input, &["url"])
+            .map(|url| format!("{} {url}", str_field(input, &["method"]).unwrap_or("GET"))),
         "move_file" => Some(format!(
             "{} → {}",
             display_path(str_field(input, &["source"]).unwrap_or("?")),
@@ -344,6 +382,11 @@ pub fn running_label(name: &str) -> String {
         "move_file" => "Déplacement…".to_string(),
         "delete_file" => "Suppression…".to_string(),
         "list_directory" => "Lecture du dossier…".to_string(),
+        "read_many_files" | "file_outline" => "Lecture…".to_string(),
+        "replace_in_files" => "Remplacement…".to_string(),
+        "run_tests" => "Tests en cours…".to_string(),
+        "git" | "git_commit" => "Git…".to_string(),
+        "http_request" => "Requête HTTP…".to_string(),
         "glob_search" | "Glob" | "grep_search" | "Grep" | "WebSearch" | "ToolSearch" => {
             "Recherche…".to_string()
         }
@@ -454,7 +497,22 @@ fn render_result(name: &str, output: &str, is_error: bool, limits: &Limits) -> S
         "write_file" | "Write" => write_result(&parsed, limits),
         "edit_file" | "Edit" => edit_result(&parsed, limits),
         "MultiEdit" => multi_edit_result(&parsed, limits),
-        "apply_patch" | "delete_file" => files_result(&parsed, limits),
+        "apply_patch" | "delete_file" | "replace_in_files" => files_result(&parsed, limits),
+        "run_tests" => tests_result(&parsed, limits),
+        "http_request" => vec![format!(
+            "{} {}{}",
+            parsed.get("status").and_then(Value::as_u64).unwrap_or(0),
+            str_field(&parsed, &["statusText"]).unwrap_or_default(),
+            parsed
+                .get("timeMs")
+                .and_then(Value::as_u64)
+                .map_or(String::new(), |ms| format!(" {DIM}({ms} ms){RESET}"))
+        )],
+        "git_commit" => vec![format!(
+            "Commit {BOLD}{}{RESET} sur {}",
+            str_field(&parsed, &["commit"]).unwrap_or("?"),
+            str_field(&parsed, &["branch"]).unwrap_or("?")
+        )],
         "move_file" => vec![format!(
             "Déplacé {BOLD}{}{RESET} → {BOLD}{}{RESET}",
             display_path(str_field(&parsed, &["source"]).unwrap_or("?")),
@@ -869,8 +927,13 @@ fn multi_edit_result(parsed: &Value, limits: &Limits) -> Vec<String> {
 /// Fichiers créés, modifiés, déplacés ou supprimés (`apply_patch`, `delete_file`).
 fn files_result(parsed: &Value, limits: &Limits) -> Vec<String> {
     let mut out = Vec::new();
+    // Aperçu de replace_in_files : les mêmes diffs, rien d'écrit.
+    let preview = parsed.get("preview").and_then(Value::as_bool) == Some(true);
+    if preview {
+        out.push(format!("{DIM}Aperçu : rien n'est écrit{RESET}"));
+    }
     for file in parsed
-        .get("files")
+        .get(if preview { "matches" } else { "files" })
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -897,6 +960,42 @@ fn files_result(parsed: &Value, limits: &Limits) -> Vec<String> {
     }
     if out.is_empty() {
         out.push(format!("{DIM}Aucun fichier changé{RESET}"));
+    }
+    out
+}
+
+fn tests_result(parsed: &Value, limits: &Limits) -> Vec<String> {
+    let passed = parsed.get("passed").and_then(Value::as_u64);
+    let failed = parsed.get("failed").and_then(Value::as_u64).unwrap_or(0);
+    let ok = parsed.get("succeeded").and_then(Value::as_bool) == Some(true);
+    let mut head = if ok {
+        format!("{GREEN}Tests réussis{RESET}")
+    } else {
+        format!("{RED}Tests en échec{RESET}")
+    };
+    if let Some(passed) = passed {
+        let _ = write!(head, " {DIM}({passed} réussis, {failed} en échec){RESET}");
+    }
+    let mut out = vec![head];
+    for failure in parsed
+        .get("failures")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(limits.lines.max(3))
+    {
+        out.push(format!(
+            "{RED}✗{RESET} {}",
+            str_field(failure, &["name"]).unwrap_or("?")
+        ));
+        if let Some(message) = str_field(failure, &["message"]) {
+            out.extend(
+                message
+                    .lines()
+                    .take(3)
+                    .map(|line| format!("  {DIM}{line}{RESET}")),
+            );
+        }
     }
     out
 }

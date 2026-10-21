@@ -361,7 +361,7 @@ fn describe(tool: &str, input: &str) -> String {
                 .unwrap_or_default(),
             input.chars().take(1_200).collect::<String>()
         ),
-        "apply_patch" | "move_file" => format!(
+        "apply_patch" | "move_file" | "replace_in_files" => format!(
             "{tool} on {}: {}",
             runtime::written_paths(tool, input).join(", "),
             input.chars().take(1_500).collect::<String>()

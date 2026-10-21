@@ -139,6 +139,21 @@ def describe(name, data):
         return f"Déplacement de `{short(source, 60)}` vers `{short(target, 60)}`"
     if name == "list_directory":
         return f"Dossier `{short(path or '.')}`"
+    if name == "file_outline":
+        return f"Plan de `{short(path)}`"
+    if name == "read_many_files":
+        paths = [relative(str(item)) for item in (data.get("paths") or [])]
+        return f"Lecture de {len(paths)} fichiers" if len(paths) != 1 else f"Lecture de `{short(paths[0])}`"
+    if name == "replace_in_files":
+        return f"Remplacement de `{short(str(data.get('pattern', '')), 50)}` dans le projet"
+    if name == "run_tests":
+        return f"Tests : `{short(str(data.get('command') or data.get('filter') or 'tests du projet'))}`"
+    if name == "git":
+        return f"Git : {short(str(data.get('action', '')))}"
+    if name == "git_commit":
+        return f"Commit : {short(str(data.get('message', '')))}"
+    if name == "http_request":
+        return f"Requête : {short(str(data.get('method') or 'GET'))} {short(str(data.get('url', '')), 70)}"
     if name in ("bash", "PowerShell"):
         command = relative(" ".join(str(data.get("command", "")).split()))
         return f"Commande : `{short(command)}`"
