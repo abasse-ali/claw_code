@@ -1346,7 +1346,11 @@ async function searchCatalogue(provider) {
   const engine = state.settings.engine;
   const ref = state.engineRef || "main";
   const started = Date.now();
-  await state.github.dispatch(engine, ref, { repo: engine, base: ref, session: CATALOGUE_SESSION, model: provider });
+  // Sur la machine des sessions (la vôtre si elle est choisie), comme un passage.
+  await state.github.dispatch(engine, ref, {
+    repo: engine, base: ref, session: CATALOGUE_SESSION, model: provider,
+    ...(state.settings.runner ? { runner: state.settings.runner } : {}),
+  });
   const title = runTitle(engine, CATALOGUE_SESSION);
   let run = null;
   while (Date.now() - started < 25 * 60 * 1000) {

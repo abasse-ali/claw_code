@@ -81,7 +81,9 @@ jobs:
   # classé va sur la branche des fichiers (catalogue/<fournisseur>.json) ; aucune session.
   catalogue:
     if: inputs.session == 'catalogue-modeles'
-    runs-on: ubuntu-latest
+    # Même machine que les sessions : celle de l'utilisateur quand il en a une (vu le
+    # 21 octobre 2026 : les machines de GitHub refusées au dépôt privé, limite de dépense).
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - name: Scripts du moteur
