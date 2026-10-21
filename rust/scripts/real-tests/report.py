@@ -75,6 +75,16 @@ def main():
     runs = Path(sys.argv[1])
     results = [report(folder) for folder in sorted(runs.iterdir()) if folder.is_dir()] if runs.exists() else []
     rows = [result for result in results if result]
+    # Le résumé en dernier : la fin du journal suffit pour relever les notes.
+    for row in rows:
+        section(f"Résumé {row['scenario']}")
+        print(f"note {row.get('score')}/{row.get('max')} ; {row.get('requests')} requêtes, "
+              f"{row.get('tool_calls')} outils, {row.get('seconds')} s, modèle {row.get('model')}")
+        for check in row.get("checks") or []:
+            if isinstance(check, dict) and not check.get("ok"):
+                print(f"  NON {check.get('name')}")
+        for notice in row.get("notices") or []:
+            print(f"  notice : {notice}")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary and rows:
         with open(summary, "a", encoding="utf-8") as handle:
