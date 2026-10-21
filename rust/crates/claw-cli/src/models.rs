@@ -607,20 +607,25 @@ pub(crate) fn advisor_models(current: &str) -> Vec<String> {
         })
         .unwrap_or_default();
     let has_key = std::env::var("OPENROUTER_API_KEY").is_ok_and(|key| !key.trim().is_empty());
-    let models = if !configured.is_empty() {
-        configured
-    } else if has_key {
-        catalog(false)
-            .map(|(catalog, _)| {
-                preferred_free_models(&catalog)
-                    .into_iter()
-                    .filter(|model| model != current)
-                    .take(4)
-                    .collect()
-            })
-            .unwrap_or_default()
+    let models = if configured.is_empty() {
+        // NVIDIA d'abord : aucun quota par jour.
+        let mut models = nvidia_reviewers(current);
+        if has_key {
+            models.extend(
+                catalog(false)
+                    .map(|(catalog, _)| {
+                        preferred_free_models(&catalog)
+                            .into_iter()
+                            .filter(|model| model != current)
+                            .take(4)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+            );
+        }
+        models
     } else {
-        Vec::new()
+        configured
     };
     *cache = Some((
         std::time::Instant::now(),
@@ -997,6 +1002,18 @@ fn stronger_nvidia_agent(current: &str) -> Option<String> {
         Some(rank) if rank <= strongest => None,
         _ => Some(format!("nvidia:{}", NVIDIA_MODELS[strongest].id)),
     }
+}
+
+/// Relecteurs de NVIDIA (relecture, diagnostic, second avis), du plus
+/// puissant au plus léger, sans le modèle de la session : sans eux, une
+/// session chez NVIDIA seulement n'avait aucun autre modèle, et le petit
+/// modèle relisait son propre travail (vu le 21 octobre 2026 : Nemotron
+/// Lightning, réservations de t4 fausses et relecture qui les laisse passer).
+pub(crate) fn nvidia_reviewers(current: &str) -> Vec<String> {
+    nvidia_agents()
+        .into_iter()
+        .filter(|id| id != current)
+        .collect()
 }
 
 /// Lecteurs d'images de NVIDIA, avant ceux d'`OpenRouter` : aucun quota par
@@ -2844,6 +2861,11 @@ mod tests {
             .is_some_and(|all| all.contains(&serde_json::json!(reader))));
         // Le modèle de la session ne se décrit pas ses propres images.
         assert!(super::nvidia_image_readers(reader).is_empty());
+        // Relecteurs : le plus puissant d'abord, jamais le modèle de la session.
+        let lightning = "nvidia:nvidia/nemotron-3.5-lightning-30b-a3b";
+        let reviewers = super::nvidia_reviewers(lightning);
+        assert_eq!(reviewers[0], "nvidia:nvidia/nemotron-3-ultra-550b-a55b");
+        assert!(!reviewers.iter().any(|id| id == lightning));
     }
 
     #[test]

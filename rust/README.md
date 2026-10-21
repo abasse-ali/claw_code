@@ -1027,8 +1027,10 @@ session est reprise.
   `permissions.allow` ; sinon Claw annonce « Vérification non lancée […] : le travail n'est pas
   vérifié ».
 - `"advisorModels"` : modèles consultés pour la relecture, le conseil et le second avis, du
-  préféré au moins préféré. Sans réglage et avec une clé OpenRouter : les meilleurs modèles
-  gratuits autres que celui de la session (`claw doctor` les affiche, ligne « Autres avis »). Un
+  préféré au moins préféré. Sans réglage : avec une clé NVIDIA, ses modèles autres que celui de
+  la session, du plus puissant au plus léger (aucun quota par jour : Nemotron Ultra relit le
+  travail de Lightning) ; avec une clé OpenRouter, ensuite, les meilleurs modèles gratuits
+  autres que celui de la session (`claw doctor` les affiche, ligne « Autres avis »). Un
   conseiller surchargé, muet pendant 20 s, trop long à finir (50 s) ou qui répond sans texte
   laisse la place au suivant ; une consultation dure 90 s au plus.
 - `"plannerModel"` : un modèle fort pour réfléchir, un modèle gratuit pour exécuter. Claw l'annonce
