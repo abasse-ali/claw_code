@@ -1446,6 +1446,59 @@ where
         ));
     }
 
+    /// Un compte rendu final suivi seulement d'appels de rangement (`Remember`,
+    /// `TodoWrite`, `ExitPlanMode` hors mode plan) : les appels sont faits sans
+    /// revenir au modèle et retirés de la réponse, qui devient celle du tour
+    /// (les contrôles de fin s'appliquent comme d'habitude). Vu le 21 octobre
+    /// 2026 sur Nemotron Lightning (essai t4) : cinq comptes rendus d'affilée,
+    /// chacun suivi d'un tel appel, une requête chacun.
+    fn settle_answer(
+        &mut self,
+        mut message: ConversationMessage,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> ConversationMessage {
+        if self.subagent || !harness::enabled(Aid::SettledAnswer) {
+            return message;
+        }
+        let plan_mode =
+            self.permission_policy.active_mode() == crate::permissions::PermissionMode::ReadOnly;
+        let calls: Vec<(String, String, String)> = message
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::ToolUse { id, name, input } => {
+                    Some((id.clone(), name.clone(), input.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let housekeeping = |name: &str| {
+            matches!(name, "Remember" | "TodoWrite") || (name == "ExitPlanMode" && !plan_mode)
+        };
+        if calls.is_empty()
+            || !calls.iter().all(|(_, name, _)| housekeeping(name))
+            || !harness::looks_like_report(&message_text(&message))
+        {
+            return message;
+        }
+        for (id, name, input) in calls {
+            if name != "ExitPlanMode" {
+                let _ = self.execute_tool_call(
+                    id,
+                    name,
+                    &input,
+                    prompter
+                        .as_mut()
+                        .map(|prompt| &mut **prompt as &mut dyn PermissionPrompter),
+                );
+            }
+        }
+        message
+            .blocks
+            .retain(|block| !matches!(block, ContentBlock::ToolUse { .. }));
+        message
+    }
+
     /// La suite d'une réponse coupée par la limite de sortie complète cette
     /// réponse : la relance de Claw est retirée et les deux parties ne font
     /// plus qu'un message, celui que l'utilisateur et les contrôles lisent.
@@ -1921,6 +1974,7 @@ where
             }
             // Suite d'une réponse coupée : elle complète le message coupé.
             let assistant_message = self.join_cut_reply(assistant_message, &mut assistant_messages);
+            let assistant_message = self.settle_answer(assistant_message, &mut prompter);
             let pending_tool_uses = assistant_message
                 .blocks
                 .iter()
@@ -7671,6 +7725,60 @@ mod tests {
             .requests
             .iter()
             .all(|request| !request.contains("You went back to work")));
+    }
+
+    #[test]
+    fn a_report_followed_only_by_housekeeping_calls_is_the_answer() {
+        let _serial = crate::test_serial();
+        let report = format!(
+            "**Résultat**\nLa commande `chercher` marche.\n\n**Ce que j'ai fait**\n{}\n\n**Vérification**\nLes tests passent.",
+            "J'ai ajouté la recherche sans accents ni majuscules. ".repeat(8)
+        );
+        let reply = |calls: &[(&str, &str)]| {
+            let mut events = vec![AssistantEvent::TextDelta(report.clone())];
+            for (name, input) in calls {
+                events.push(AssistantEvent::ToolUse {
+                    id: format!("appel-{name}"),
+                    name: (*name).to_string(),
+                    input: (*input).to_string(),
+                });
+            }
+            events.push(AssistantEvent::MessageStop);
+            events
+        };
+        // Vu sur Nemotron Lightning : le compte rendu, puis Remember et
+        // ExitPlanMode hors mode plan. Une seule requête, et la réponse reste.
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                reply(&[
+                    ("Remember", r#"{"note":"recherche faite"}"#),
+                    ("ExitPlanMode", r#"{"plan":"fini"}"#),
+                ]),
+                text_step("Le travail est terminé."),
+            ],
+            vec![],
+        );
+        let summary = runtime.run_turn("ajoute chercher", None).expect("tour");
+        assert_eq!(summary.iterations, 1);
+        assert_eq!(observed.borrow().requests.len(), 1);
+        let last = runtime.session().messages.last().expect("réponse");
+        assert!(super::message_text(last).starts_with("**Résultat**"));
+        assert!(!last
+            .blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolUse { .. })));
+        drop(observed);
+
+        // Un vrai appel après le compte rendu (une commande) : le travail continue.
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                reply(&[("bash", r#"{"command":"python -m pytest"}"#)]),
+                text_step("Les tests passent toujours, rien à changer."),
+            ],
+            vec![PASSING],
+        );
+        runtime.run_turn("ajoute chercher", None).expect("tour");
+        assert!(observed.borrow().requests.len() >= 2);
     }
 
     #[test]

@@ -3253,6 +3253,16 @@ pub fn configure_subagents(context: SubagentContext, prompter: Option<SubagentPr
         .unwrap_or_else(std::sync::PoisonError::into_inner) = prompter;
 }
 
+/// La session a commencé en mode plan (lecture seule) : `ExitPlanMode` n'est
+/// utile que là. Ailleurs, les petits modèles l'appellent pour finir leur
+/// réponse (vu le 21 octobre 2026 sur Nemotron Lightning : trois appels
+/// d'affilée, « Not in plan mode » chaque fois).
+#[must_use]
+pub fn plan_mode_active() -> bool {
+    current_subagent_context()
+        .is_some_and(|context| context.permission_mode == PermissionMode::ReadOnly)
+}
+
 fn current_subagent_context() -> Option<SubagentContext> {
     subagent_context_slot()
         .lock()

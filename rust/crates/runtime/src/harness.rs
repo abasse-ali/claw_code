@@ -125,6 +125,10 @@ pub enum Aid {
     /// Une question sur le travail de l'agent (« tu fais quoi ? », « pourquoi
     /// tu as fait ça ? ») reçoit une réponse, et rien d'autre : pas d'outils.
     WorkQuestions,
+    /// Un compte rendu final suivi seulement d'appels de rangement
+    /// (`Remember`, `TodoWrite`, `ExitPlanMode` hors mode plan) : les appels
+    /// sont faits sans revenir au modèle, et le compte rendu est la réponse.
+    SettledAnswer,
 }
 
 impl Aid {
@@ -174,6 +178,7 @@ impl Aid {
             Self::Photos => "CLAW_PHOTOS",
             Self::Announce => "CLAW_ANNOUNCE",
             Self::WorkQuestions => "CLAW_WORK_QUESTIONS",
+            Self::SettledAnswer => "CLAW_SETTLED_ANSWER",
         }
     }
 }
@@ -2930,6 +2935,43 @@ pub const ANNOUNCE_NOTE: &str = "[Claw] You started working without a word for t
 /// Étapes d'outils d'affilée sans un mot pour l'utilisateur avant que Claw
 /// lui demande où en est le travail (une requête de plus, en texte seul).
 pub const SILENT_STEPS_BEFORE_UPDATE: u32 = 20;
+
+/// Intitulés d'un compte rendu final (ceux que demande le prompt système, et
+/// ceux que les petits modèles écrivent à leur place).
+const REPORT_LABELS: [&str; 12] = [
+    "résultat",
+    "ce qui n'allait pas",
+    "ce que j'ai fait",
+    "vérification",
+    "ce qu'il reste à faire",
+    "final answer",
+    "résumé",
+    "summary",
+    "result",
+    "what was done",
+    "changements effectués",
+    "modifications apportées",
+];
+
+/// Le texte est un compte rendu final : assez long, avec au moins deux
+/// intitulés de [`REPORT_LABELS`] en début de ligne (`## Résultat`,
+/// `**Ce que j'ai fait**`...).
+#[must_use]
+pub fn looks_like_report(text: &str) -> bool {
+    if text.chars().count() < 400 {
+        return false;
+    }
+    let labels = text
+        .lines()
+        .map(|line| {
+            line.trim_start_matches(|ch: char| ch == '#' || ch == '*' || ch.is_whitespace())
+                .to_lowercase()
+                .replace('’', "'")
+        })
+        .filter(|line| REPORT_LABELS.iter().any(|label| line.starts_with(label)))
+        .count();
+    labels >= 2
+}
 
 /// Étapes muettes après une réponse reprise (contrôle de Claw) avant que Claw
 /// demande ce qui se passe. Une seule vérification avant de conclure ne vaut

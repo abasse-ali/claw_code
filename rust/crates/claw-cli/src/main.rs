@@ -2637,6 +2637,7 @@ fn filter_tool_specs(
     definitions.retain(|definition| match definition.name.as_str() {
         name if SELDOM_USED_TOOLS.contains(&name) => false,
         "BashOutput" | "KillShell" => background,
+        "ExitPlanMode" => tools::plan_mode_active(),
         // Sans navigateur installé, l'outil ne pourrait rien montrer.
         "ViewPage" | "Screenshot" => tools::page_viewer_available(),
         "PowerShell" => !posix_shell,
