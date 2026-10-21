@@ -11,14 +11,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 const MAX_TURNS: usize = 100;
-const FILE_TOOLS: &[(&str, &str)] = &[
-    ("write_file", "path"),
-    ("edit_file", "path"),
-    ("NotebookEdit", "notebook_path"),
-];
 
 /// Contenu d'un fichier avant sa première modification dans un tour.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,51 +89,59 @@ impl CheckpointStore {
     }
 
     /// À appeler juste avant l'exécution d'un outil : enregistre le contenu
-    /// actuel du fichier ciblé s'il s'agit d'une écriture.
+    /// actuel de chaque fichier qu'il va écrire, déplacer ou supprimer.
     pub fn record_before_write(&mut self, tool_name: &str, input: &str, cwd: &Path) {
-        let Some(field) = FILE_TOOLS
-            .iter()
-            .find(|(name, _)| *name == tool_name)
-            .map(|(_, field)| *field)
-        else {
-            return;
-        };
-        let Some(raw_path) = serde_json::from_str::<Value>(input).ok().and_then(|value| {
-            value
-                .get(field)
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        }) else {
-            return;
-        };
-        let path = normalize(&cwd.join(raw_path));
-        let Some(turn) = self.turns.last_mut() else {
-            return;
-        };
-        if turn.files.iter().any(|snapshot| snapshot.path == path) {
+        let paths = crate::file_tools::written_paths(tool_name, input);
+        if paths.is_empty() || self.turns.is_empty() {
             return;
         }
-        let snapshot = match std::fs::read(&path) {
-            Ok(bytes) => match String::from_utf8(bytes) {
-                Ok(text) => FileSnapshot {
-                    path,
-                    content: Some(text),
-                    binary: false,
+        let mut changed = false;
+        for raw_path in paths {
+            changed |= self.record_path(normalize(&cwd.join(raw_path)));
+        }
+        if changed {
+            self.save();
+        }
+    }
+
+    /// Enregistre un fichier du tour en cours ; faux s'il l'était déjà.
+    fn record_path(&mut self, path: PathBuf) -> bool {
+        let Some(turn) = self.turns.last_mut() else {
+            return false;
+        };
+        if turn.files.iter().any(|snapshot| snapshot.path == path) {
+            return false;
+        }
+        let snapshot = if path.is_dir() {
+            // Un dossier (déplacé, supprimé vide) : pas de contenu à restaurer.
+            FileSnapshot {
+                path,
+                content: None,
+                binary: true,
+            }
+        } else {
+            match std::fs::read(&path) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(text) => FileSnapshot {
+                        path,
+                        content: Some(text),
+                        binary: false,
+                    },
+                    Err(_) => FileSnapshot {
+                        path,
+                        content: None,
+                        binary: true,
+                    },
                 },
                 Err(_) => FileSnapshot {
                     path,
                     content: None,
-                    binary: true,
+                    binary: false,
                 },
-            },
-            Err(_) => FileSnapshot {
-                path,
-                content: None,
-                binary: false,
-            },
+            }
         };
         turn.files.push(snapshot);
-        self.save();
+        true
     }
 
     /// Annule les `count` derniers tours : restaure les fichiers (le plus ancien
@@ -318,6 +320,36 @@ mod tests {
         assert_eq!(report.message_index, 0);
         assert_eq!(report.request, "modifie lib.rs");
         assert!(reloaded.undo(1).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn undo_brings_back_moved_deleted_and_patched_files() {
+        let dir = temp_dir("move-delete");
+        fs::write(dir.join("a.txt"), "a").expect("a");
+        fs::write(dir.join("b.txt"), "b").expect("b");
+        let mut store = CheckpointStore::open(dir.join("store.json"));
+        store.begin_turn(0, "range les fichiers");
+        store.record_before_write(
+            "move_file",
+            r#"{"source":"a.txt","destination":"docs/a.txt"}"#,
+            &dir,
+        );
+        fs::create_dir_all(dir.join("docs")).expect("docs");
+        fs::rename(dir.join("a.txt"), dir.join("docs/a.txt")).expect("move");
+        store.record_before_write("delete_file", r#"{"path":"b.txt"}"#, &dir);
+        fs::remove_file(dir.join("b.txt")).expect("delete");
+        store.record_before_write(
+            "apply_patch",
+            r#"{"patch":"*** Begin Patch\n*** Add File: c.txt\n+c\n*** End Patch"}"#,
+            &dir,
+        );
+        fs::write(dir.join("c.txt"), "c\n").expect("add");
+        store.undo(1).expect("undo");
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).expect("a"), "a");
+        assert!(!dir.join("docs/a.txt").exists());
+        assert_eq!(fs::read_to_string(dir.join("b.txt")).expect("b"), "b");
+        assert!(!dir.join("c.txt").exists());
         let _ = fs::remove_dir_all(dir);
     }
 

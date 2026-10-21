@@ -582,10 +582,50 @@ pub fn api_error(error: &str, duration: Duration) {
     );
 }
 
+/// Lignes ajoutées et retirées par un `MultiEdit` ou un `apply_patch`.
+fn written_line_counts(tool: &str, input: &str) -> (usize, usize) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(input) else {
+        return (0, 0);
+    };
+    if tool == "MultiEdit" {
+        let count = |edit: &serde_json::Value, key: &str| {
+            edit.get(key)
+                .and_then(serde_json::Value::as_str)
+                .map_or(0, |text| text.lines().count())
+        };
+        return value
+            .get("edits")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .fold((0, 0), |(added, removed), edit| {
+                (
+                    added + count(edit, "new_string"),
+                    removed + count(edit, "old_string"),
+                )
+            });
+    }
+    let patch = value
+        .get("patch")
+        .or_else(|| value.get("input"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    patch.lines().fold((0, 0), |(added, removed), line| {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            (added + 1, removed)
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            (added, removed + 1)
+        } else {
+            (added, removed)
+        }
+    })
+}
+
 /// Nom des outils d'édition dans les compteurs (ceux de Claude Code).
 fn edit_tool_name(tool: &str) -> Option<&'static str> {
     match tool {
-        "edit_file" | "Edit" => Some("Edit"),
+        "edit_file" | "Edit" | "apply_patch" => Some("Edit"),
+        "MultiEdit" => Some("MultiEdit"),
         "write_file" | "Write" => Some("Write"),
         "NotebookEdit" => Some("NotebookEdit"),
         _ => None,
@@ -708,6 +748,10 @@ pub fn tool_result(tool: &str, input: &str, success: bool) {
             lines_changed(added, removed, &model);
         }
         "write_file" | "Write" => lines_changed(lines(input_field(input, "content")), 0, &model),
+        "MultiEdit" | "apply_patch" => {
+            let (added, removed) = written_line_counts(tool, input);
+            lines_changed(added, removed, &model);
+        }
         "bash" | "Bash" | "PowerShell" => {
             let command = input_field(input, "command").unwrap_or_default();
             // `--amend` modifie un commit existant : il ne compte pas.

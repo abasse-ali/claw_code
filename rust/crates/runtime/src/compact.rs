@@ -329,9 +329,6 @@ fn heading(line: &str) -> Option<String> {
     titled.then(|| title.to_lowercase())
 }
 
-/// Outils qui écrivent un fichier.
-const WRITING_TOOLS: [&str; 3] = ["write_file", "edit_file", "NotebookEdit"];
-
 /// Les fichiers écrits ou modifiés par les appels réussis de ces messages,
 /// dans l'ordre des appels.
 fn changed_files(messages: &[ConversationMessage]) -> Vec<String> {
@@ -350,17 +347,27 @@ fn changed_files(messages: &[ConversationMessage]) -> Vec<String> {
     messages
         .iter()
         .flat_map(|message| &message.blocks)
-        .filter_map(|block| match block {
+        .flat_map(|block| match block {
             ContentBlock::ToolUse { id, name, input }
-                if WRITING_TOOLS.contains(&name.as_str()) && succeeded.contains(&id.as_str()) =>
+                if crate::file_tools::writes_files(name) && succeeded.contains(&id.as_str()) =>
             {
-                let value: serde_json::Value = serde_json::from_str(input).ok()?;
-                ["path", "file_path", "filePath", "notebook_path"]
-                    .iter()
-                    .find_map(|key| value.get(*key)?.as_str())
-                    .map(str::to_string)
+                let paths = crate::file_tools::written_paths(name, input);
+                if paths.is_empty() {
+                    // Arguments sous un autre nom (`file_path`, `filePath`).
+                    serde_json::from_str::<serde_json::Value>(input)
+                        .ok()
+                        .and_then(|value| {
+                            ["file_path", "filePath"]
+                                .iter()
+                                .find_map(|key| value.get(*key)?.as_str().map(str::to_string))
+                        })
+                        .into_iter()
+                        .collect()
+                } else {
+                    paths
+                }
             }
-            _ => None,
+            _ => Vec::new(),
         })
         .collect()
 }

@@ -318,7 +318,7 @@ pub fn is_writable_without_asking(path: &str, cwd: &Path) -> bool {
 
 /// Appel qui écrit un fichier hors des dossiers autorisés.
 fn writes_outside_workspace(tool_name: &str, target: &ToolTarget, cwd: &Path) -> Option<String> {
-    if !matches!(tool_name, "write_file" | "edit_file" | "NotebookEdit") {
+    if !crate::file_tools::writes_files(tool_name) {
         return None;
     }
     match target {
@@ -456,8 +456,22 @@ impl PermissionRule {
         let covered: &[&str] = match self.tool.to_ascii_lowercase().as_str() {
             "bash" => &["bash", "Monitor"],
             "powershell" => &["PowerShell"],
-            "read" => &["read_file", "glob_search", "grep_search", "FindSymbol"],
-            "edit" => &["edit_file", "write_file", "NotebookEdit"],
+            "read" => &[
+                "read_file",
+                "glob_search",
+                "grep_search",
+                "FindSymbol",
+                "list_directory",
+            ],
+            "edit" => &[
+                "edit_file",
+                "write_file",
+                "NotebookEdit",
+                "MultiEdit",
+                "apply_patch",
+                "move_file",
+                "delete_file",
+            ],
             "write" => &["write_file"],
             "glob" => &["glob_search"],
             "grep" => &["grep_search"],
@@ -595,9 +609,44 @@ impl PermissionPolicy {
         input: &str,
         prompter: Option<&mut dyn PermissionPrompter>,
     ) -> PermissionOutcome {
+        let target = self.narrowest_target(tool_name, input);
+        self.authorize_target(tool_name, input, target, prompter)
+    }
+
+    /// Cible jugée pour l'appel. Un appel qui écrit plusieurs chemins
+    /// (`apply_patch`, `move_file`) est jugé sur le premier que le mode et
+    /// les règles n'accordent pas d'eux-mêmes (refusé, ou à demander) : un
+    /// chemin sûr ne fait pas passer les autres.
+    fn narrowest_target(&mut self, tool_name: &str, input: &str) -> ToolTarget {
+        if !matches!(tool_name, "apply_patch" | "move_file") {
+            return ToolTarget::from_input(tool_name, input);
+        }
+        let paths = crate::file_tools::written_paths(tool_name, input);
+        for path in &paths {
+            let target = ToolTarget::Path(path.clone());
+            if !matches!(
+                self.authorize_target(tool_name, input, target.clone(), None),
+                PermissionOutcome::Allow
+            ) {
+                return target;
+            }
+        }
+        paths
+            .into_iter()
+            .next()
+            .map_or(ToolTarget::Other, ToolTarget::Path)
+    }
+
+    #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+    fn authorize_target(
+        &mut self,
+        tool_name: &str,
+        input: &str,
+        target: ToolTarget,
+        prompter: Option<&mut dyn PermissionPrompter>,
+    ) -> PermissionOutcome {
         let current_mode = self.active_mode;
         let required_mode = self.required_mode_for(tool_name);
-        let target = ToolTarget::from_input(tool_name, input);
 
         let denials = TURN_DENIALS
             .lock()
@@ -635,7 +684,7 @@ impl PermissionPolicy {
             // chemins protégés (classificateur).
             let protected = current_mode == PermissionMode::Auto
                 && matches!(&target, ToolTarget::Path(path) if is_protected_path(path))
-                && matches!(tool_name, "write_file" | "edit_file" | "NotebookEdit");
+                && crate::file_tools::writes_files(tool_name);
             if !protected
                 && (matches!(
                     current_mode,
@@ -713,8 +762,18 @@ impl PermissionPolicy {
     /// les règles `deny` peuvent encore l'interdire.
     #[must_use]
     pub fn authorize_preapproved(&self, tool_name: &str, input: &str) -> PermissionOutcome {
-        let target = ToolTarget::from_input(tool_name, input);
-        match self.first_match_any(&self.rules.deny, tool_name, &target) {
+        let targets = if matches!(tool_name, "apply_patch" | "move_file") {
+            crate::file_tools::written_paths(tool_name, input)
+                .into_iter()
+                .map(ToolTarget::Path)
+                .collect()
+        } else {
+            vec![ToolTarget::from_input(tool_name, input)]
+        };
+        let denied = targets
+            .iter()
+            .find_map(|target| self.first_match_any(&self.rules.deny, tool_name, target));
+        match denied {
             Some(rule) => PermissionOutcome::Deny {
                 reason: format!(
                     "l'outil '{tool_name}' est interdit par la règle de permission `{}`",
@@ -851,9 +910,14 @@ impl ToolTarget {
             "bash" | "PowerShell" | "Monitor" => field("command").map_or(Self::Other, |command| {
                 Self::Command(ShellCommand::parse(&command))
             }),
-            "read_file" | "write_file" | "edit_file" => {
+            "read_file" | "write_file" | "edit_file" | "MultiEdit" | "delete_file" => {
                 field("path").map_or(Self::Other, Self::Path)
             }
+            "apply_patch" | "move_file" => crate::file_tools::written_paths(tool_name, input)
+                .into_iter()
+                .next()
+                .map_or(Self::Other, Self::Path),
+            "list_directory" => Self::Path(field("path").unwrap_or_else(|| ".".to_string())),
             "NotebookEdit" => field("notebook_path").map_or(Self::Other, Self::Path),
             "glob_search" | "grep_search" => {
                 Self::Path(field("path").unwrap_or_else(|| ".".to_string()))
@@ -1168,7 +1232,7 @@ fn suggest_rule(tool_name: &str, target: &ToolTarget) -> Option<String> {
             };
             Some(format!("{tool}({prefix}:*)"))
         }
-        ToolTarget::Path(_) if matches!(tool_name, "edit_file" | "write_file" | "NotebookEdit") => {
+        ToolTarget::Path(_) if crate::file_tools::writes_files(tool_name) => {
             Some("Edit".to_string())
         }
         ToolTarget::Url(url) => Some(format!("WebFetch(domain:{})", url_host(url))),
@@ -1624,6 +1688,65 @@ mod tests {
         ));
         assert_eq!(
             policy.authorize("write_file", &path_input("src/main.rs"), None),
+            PermissionOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn calls_that_write_several_paths_are_judged_on_each_of_them() {
+        let elsewhere = if cfg!(windows) {
+            "C:/Windows/claw-essai/hors.txt"
+        } else {
+            "/etc/claw-essai/hors.txt"
+        };
+        let mut policy = policy(
+            PermissionMode::WorkspaceWrite,
+            &[],
+            &["Edit(secrets/**)"],
+            &[],
+        )
+        .with_tool_requirement("apply_patch", PermissionMode::WorkspaceWrite)
+        .with_tool_requirement("move_file", PermissionMode::WorkspaceWrite)
+        .with_tool_requirement("MultiEdit", PermissionMode::WorkspaceWrite)
+        .with_tool_requirement("delete_file", PermissionMode::WorkspaceWrite);
+        let patch = |paths: &[&str]| {
+            let body: String = paths
+                .iter()
+                .map(|path| format!("*** Update File: {path}\n-a\n+b\n"))
+                .collect();
+            json!({ "patch": format!("*** Begin Patch\n{body}*** End Patch") }).to_string()
+        };
+        assert_eq!(
+            policy.authorize("apply_patch", &patch(&["src/a.rs", "src/b.rs"]), None),
+            PermissionOutcome::Allow
+        );
+        // Un chemin interdit parmi d'autres : tout l'appel est refusé.
+        assert!(matches!(
+            policy.authorize(
+                "apply_patch",
+                &patch(&["src/a.rs", "secrets/key.pem"]),
+                None
+            ),
+            PermissionOutcome::Deny { .. }
+        ));
+        assert!(matches!(
+            policy.authorize_preapproved("apply_patch", &patch(&["src/a.rs", "secrets/k"])),
+            PermissionOutcome::Deny { .. }
+        ));
+        // Déplacer vers l'extérieur du projet : demandé, avec ce chemin.
+        let mut prompter = RecordingPrompter::denying();
+        let moved = json!({ "source": "src/a.rs", "destination": elsewhere }).to_string();
+        assert!(matches!(
+            policy.authorize("move_file", &moved, Some(&mut prompter)),
+            PermissionOutcome::Deny { .. }
+        ));
+        assert_eq!(prompter.seen.len(), 1);
+        assert!(matches!(
+            policy.authorize("delete_file", &path_input("secrets/key.pem"), None),
+            PermissionOutcome::Deny { .. }
+        ));
+        assert_eq!(
+            policy.authorize("MultiEdit", &path_input("src/a.rs"), None),
             PermissionOutcome::Allow
         );
     }

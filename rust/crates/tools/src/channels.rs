@@ -432,6 +432,9 @@ fn describe(tool_name: &str, input: &str) -> (String, String) {
                     "bash" | "Bash" | "PowerShell" | "Monitor" => "Run shell command",
                     "write_file" | "Write" => "Write a file",
                     "edit_file" | "Edit" | "MultiEdit" => "Edit a file",
+                    "apply_patch" => "Apply a patch",
+                    "move_file" => "Move a file",
+                    "delete_file" => "Delete a file",
                     _ => "Use a tool",
                 }
                 .to_string()

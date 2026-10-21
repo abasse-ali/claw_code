@@ -1179,6 +1179,14 @@
       case "read_file": return ["file", "Lecture", displayPath(v.path)];
       case "write_file": return ["filePlus", "Écriture", displayPath(v.path)];
       case "edit_file": return ["edit", "Modification", displayPath(v.path)];
+      case "MultiEdit": return ["edit", "Modifications", displayPath(v.path) + (Array.isArray(v.edits) ? "  · " + v.edits.length : "")];
+      case "apply_patch": {
+        const paths = String(v.patch || "").split("\n").map((line) => line.match(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/)).filter(Boolean).map((match) => displayPath(match[1].trim()));
+        return ["edit", "Correctif", paths.join(", ")];
+      }
+      case "list_directory": return ["search", "Dossier", displayPath(v.path || ".")];
+      case "move_file": return ["edit", "Déplacement", displayPath(v.source) + " → " + displayPath(v.destination)];
+      case "delete_file": return ["edit", "Suppression", displayPath(v.path)];
       case "NotebookEdit": return ["edit", "Notebook", displayPath(v.notebook_path)];
       case "glob_search": return ["search", "Fichiers", v.pattern || ""];
       case "grep_search": return ["search", "Recherche", (v.pattern || "") + (v.path ? "  · " + displayPath(v.path) : "")];
@@ -1322,11 +1330,11 @@
     foldLong(holder, box, lines.length, "lignes");
     return lines.length;
   }
-  // Au résultat, le correctif porte le fichier entier d'avant (lignes « - »)
-  // et d'après (lignes « + ») : la modification se redessine avec ses vrais
-  // numéros de ligne, et une écriture qui remplace un fichier devient un
-  // avant / après de ses seules lignes changées. Un résultat allégé (session
-  // reprise) laisse la vue tirée de l'appel.
+  // Au résultat, le correctif porte les lignes changées et trois lignes de
+  // contexte : la modification se redessine avec ses vrais numéros de ligne,
+  // et une écriture qui remplace un fichier devient un avant / après de ses
+  // seules lignes changées. Un résultat allégé (session reprise) laisse la
+  // vue tirée de l'appel.
   function refineDiff(entry, value) {
     if (!value || typeof value !== "object") return;
     if (value.type === "create") {
@@ -1391,6 +1399,13 @@
       parts.diff = holder;
       parts.summary = changeSummary(showDiff(holder, diffGroups(value.old_string, value.new_string), false));
       toggleStep(parts.step, true);
+    } else if (name === "MultiEdit" && value && Array.isArray(value.edits)) {
+      const holder = el("div", "diff-holder");
+      parts.body.append(holder);
+      parts.diff = holder;
+      const groups = value.edits.flatMap((edit) => diffGroups(String(edit.old_string || ""), String(edit.new_string || "")));
+      parts.summary = changeSummary(showDiff(holder, groups, false));
+      toggleStep(parts.step, true);
     } else if (name === "write_file" && value && value.content !== undefined) {
       const holder = el("div", "diff-holder");
       parts.body.append(holder);
@@ -1443,6 +1458,22 @@
         pre.innerHTML = highlight(file.content, String(file.filePath || "").split(".").pop());
         box.append(el("div", "note", "Lignes " + file.startLine + "–" + last + " sur " + file.totalLines), pre);
         return { box, summary: file.totalLines + " lignes" };
+      }
+      if (Array.isArray(value.files) && value.files.every((file) => file && file.filePath)) {
+        const words = { create: "Fichier créé", update: "Fichier modifié", delete: "Fichier supprimé", move: "Fichier déplacé" };
+        for (const file of value.files) {
+          const from = file.movedFrom ? displayPath(file.movedFrom) + " → " : "";
+          box.append(el("div", "note", (words[file.type] || "Fichier modifié") + " : " + from + displayPath(file.filePath)));
+        }
+        return { box, summary: value.files.length + " fichier" + (value.files.length > 1 ? "s" : "") };
+      }
+      if (typeof value.tree === "string") {
+        box.append(el("pre", null, value.tree || "(vide)"));
+        return { box, summary: (value.directories || 0) + " dossiers, " + (value.files || 0) + " fichiers" };
+      }
+      if (typeof value.source === "string" && typeof value.destination === "string") {
+        box.append(el("div", "note", "Déplacé : " + displayPath(value.source) + " → " + displayPath(value.destination)));
+        return { box, summary: "" };
       }
       if (value.filePath && (value.structuredPatch || value.content !== undefined)) {
         box.append(el("div", "note", (value.type === "create" ? "Fichier créé : " : "Fichier modifié : ") + displayPath(value.filePath)));

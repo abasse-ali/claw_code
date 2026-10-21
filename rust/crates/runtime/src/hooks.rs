@@ -507,6 +507,8 @@ fn tool_alias(name: &str) -> Option<&'static str> {
         "read_file" => "Read",
         "write_file" => "Write",
         "edit_file" => "Edit",
+        "MultiEdit" => "MultiEdit",
+        "list_directory" => "LS",
         "glob_search" => "Glob",
         "grep_search" => "Grep",
         "Agent" => "Task",

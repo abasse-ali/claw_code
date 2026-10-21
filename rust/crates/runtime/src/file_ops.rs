@@ -181,7 +181,7 @@ fn shorten_line(line: &str) -> String {
 
 /// Codage d'un fichier texte, gardé quand Claw le réécrit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TextEncoding {
+pub(crate) enum TextEncoding {
     Utf8,
     /// UTF-8 avec ce nombre d'octets invalides, lus comme U+FFFD.
     Utf8Lossy(usize),
@@ -194,7 +194,7 @@ enum TextEncoding {
 }
 
 impl TextEncoding {
-    const fn name(self) -> &'static str {
+    pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Utf8 | Self::Utf8Lossy(_) => "UTF-8",
             Self::Windows1252 => "Windows-1252",
@@ -293,7 +293,7 @@ fn utf8_census(mut bytes: &[u8]) -> (usize, usize) {
 
 /// Octets de `text` dans `encoding`, ou le premier caractère que ce codage ne
 /// peut pas représenter.
-fn encode_text(text: &str, encoding: TextEncoding) -> Result<Vec<u8>, char> {
+pub(crate) fn encode_text(text: &str, encoding: TextEncoding) -> Result<Vec<u8>, char> {
     match encoding {
         TextEncoding::Utf8 | TextEncoding::Utf8Lossy(_) => Ok(text.as_bytes().to_vec()),
         TextEncoding::Windows1252 => text
@@ -329,7 +329,7 @@ fn windows_1252_byte(ch: char) -> Option<u8> {
         .and_then(|index| u8::try_from(0x80 + index).ok())
 }
 
-fn describe_char(ch: char) -> String {
+pub(crate) fn describe_char(ch: char) -> String {
     format!("'{ch}' (U+{:04X})", u32::from(ch))
 }
 
@@ -340,7 +340,7 @@ pub(crate) fn read_any_text(path: &Path) -> Option<String> {
 }
 
 /// Texte d'un fichier et son codage ; un fichier binaire est une erreur claire.
-fn read_text(path: &Path) -> io::Result<(String, TextEncoding)> {
+pub(crate) fn read_text(path: &Path) -> io::Result<(String, TextEncoding)> {
     // Un fichier énorme (journal, export) ne tient pas en mémoire deux fois.
     let size = fs::metadata(path)?.len();
     if size > MAX_TEXT_FILE_BYTES {
@@ -504,7 +504,7 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
 /// script shell en LF (bash échoue sur CRLF : `$'\r': command not found`),
 /// un script `PowerShell` accentué avec BOM (Windows `PowerShell` 5.1 lit un
 /// fichier sans BOM en Windows-1252). `None` : rien à imposer.
-fn type_conventions(path: &Path, text: &str) -> Option<(String, &'static str)> {
+pub(crate) fn type_conventions(path: &Path, text: &str) -> Option<(String, &'static str)> {
     let extension = path.extension()?.to_string_lossy().to_ascii_lowercase();
     match extension.as_str() {
         "bat" | "cmd" => {
@@ -649,7 +649,7 @@ fn is_elision_line(line: &str) -> bool {
 }
 
 /// Première ligne d'élision du texte : son numéro (à partir de 1) et son texte.
-fn elision_in(text: &str) -> Option<(usize, String)> {
+pub(crate) fn elision_in(text: &str) -> Option<(usize, String)> {
     text.lines()
         .enumerate()
         .find(|(_, line)| is_elision_line(line))
@@ -695,7 +695,7 @@ fn placeholder_check(
 }
 
 /// Erreur d'un outil d'écriture qui a reçu un dossier.
-fn not_a_file(path: &str, tool: &str) -> io::Error {
+pub(crate) fn not_a_file(path: &str, tool: &str) -> io::Error {
     let shown = path.trim_end_matches(['/', '\\']);
     io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -929,7 +929,7 @@ pub fn preview_edit(
 /// plus en plus tolérante (fins de ligne, espaces de fin, indentation) : les
 /// modèles recopient souvent mal les blancs. Une occurrence ambiguë est refusée
 /// sauf `replace_all`.
-fn apply_edit(
+pub(crate) fn apply_edit(
     original: &str,
     old_string: &str,
     new_string: &str,
@@ -2017,7 +2017,7 @@ const PATCH_MAX_CELLS: usize = 4_000_000;
 /// diff qui retirait tout l'ancien fichier et ajoutait tout le nouveau faisait
 /// voir chaque petite modification comme le fichier effacé puis réécrit, dans
 /// l'appli comme pour le modèle, à qui « lignes 1 à 860 » était rapporté).
-fn make_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
+pub(crate) fn make_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
     let old: Vec<&str> = original.lines().collect();
     let new: Vec<&str> = updated.lines().collect();
     if old.is_empty() {
@@ -2163,7 +2163,7 @@ fn line_ops<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<LineOp<'a>> {
 
 /// Chemin montré au modèle : sans le préfixe `\\?\` que `canonicalize` ajoute
 /// sous Windows (`\\?\D:\projet` devient `D:\projet`), qui déroute les modèles.
-fn display_path(path: &Path) -> String {
+pub(crate) fn display_path(path: &Path) -> String {
     let text = path.to_string_lossy();
     match text.strip_prefix(r"\\?\") {
         Some(rest) if !rest.starts_with("UNC") => rest.to_string(),
@@ -2345,7 +2345,7 @@ fn missing_path_message(path: &str, root: &Path) -> String {
     message
 }
 
-fn normalize_path(path: &str) -> io::Result<PathBuf> {
+pub(crate) fn normalize_path(path: &str) -> io::Result<PathBuf> {
     let root = std::env::current_dir()?;
     let candidate = candidate_path(path, &root);
     match candidate.canonicalize() {
@@ -2364,7 +2364,7 @@ fn normalize_path(path: &str) -> io::Result<PathBuf> {
     }
 }
 
-fn normalize_path_allow_missing(path: &str) -> io::Result<PathBuf> {
+pub(crate) fn normalize_path_allow_missing(path: &str) -> io::Result<PathBuf> {
     let root = std::env::current_dir()?;
     let mut candidate = candidate_path(path, &root);
     // Racine inventée (`/workspace/nouveau.py`) : le fichier est créé dans le

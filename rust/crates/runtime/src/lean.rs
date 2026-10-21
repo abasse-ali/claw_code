@@ -20,7 +20,8 @@ pub fn lean_tool_output(tool_name: &str, output: &str) -> Option<String> {
     };
     let rest = &output[values.byte_offset()..];
     let lean = match tool_name {
-        "edit_file" => lean_edit(&fields)?,
+        "edit_file" | "MultiEdit" => lean_edit(&fields)?,
+        "apply_patch" | "delete_file" => lean_files(&fields)?,
         "write_file" => lean_write(&fields)?,
         "bash" | "PowerShell" => lean_command(&fields)?,
         "TodoWrite" => lean_todos(&fields)?,
@@ -67,6 +68,29 @@ fn lean_edit(fields: &Map<String, Value>) -> Option<Map<String, Value>> {
     if let Some(note) = fields.get("matchNote").filter(|note| !note.is_null()) {
         lean.insert("matchNote".to_string(), note.clone());
     }
+    Some(lean)
+}
+
+/// Fichiers changés par `apply_patch` ou `delete_file` : pour chacun, son
+/// chemin, ce qui lui est arrivé et où, sans les lignes ni le fichier d'avant.
+fn lean_files(fields: &Map<String, Value>) -> Option<Map<String, Value>> {
+    let files = fields.get("files")?.as_array()?;
+    let lean_files: Vec<Value> = files
+        .iter()
+        .filter_map(Value::as_object)
+        .map(|file| {
+            let mut lean = Map::new();
+            for key in ["filePath", "type", "movedFrom", "matchNote"] {
+                if let Some(value) = file.get(key).filter(|value| !value.is_null()) {
+                    lean.insert(key.to_string(), value.clone());
+                }
+            }
+            lean.insert("structuredPatch".to_string(), hunk_positions(file));
+            Value::Object(lean)
+        })
+        .collect();
+    let mut lean = Map::new();
+    lean.insert("files".to_string(), Value::Array(lean_files));
     Some(lean)
 }
 
@@ -177,6 +201,37 @@ mod tests {
             .next()
             .expect("un résultat")
             .expect("JSON valide")
+    }
+
+    #[test]
+    fn patch_results_keep_paths_and_positions_but_not_the_files() {
+        let original = "x\n".repeat(400);
+        let output = json!({ "files": [
+            { "filePath": "/p/a.py", "type": "update", "originalFile": original,
+              "structuredPatch": [{ "oldStart": 3, "oldLines": 1, "newStart": 3, "newLines": 1,
+                                    "lines": ["-x", "+y"] }] },
+            { "filePath": "/p/b.py", "type": "delete", "originalFile": "z\n",
+              "structuredPatch": [] }
+        ]});
+        let lean = lean_tool_output("apply_patch", &output.to_string()).expect("allégé");
+        assert!(
+            !lean.contains("originalFile") && !lean.contains("\"-x\""),
+            "{lean}"
+        );
+        let files = &parsed(&lean)["files"];
+        assert_eq!(files[0]["type"], "update");
+        assert_eq!(files[0]["structuredPatch"][0]["oldStart"], 3);
+        assert_eq!(files[1]["filePath"], "/p/b.py");
+        let deleted = json!({ "files": [{ "filePath": "/p/c.txt", "type": "delete",
+            "originalFile": "long\n".repeat(100), "structuredPatch": [] }] });
+        assert!(!lean_tool_output("delete_file", &deleted.to_string())
+            .expect("allégé")
+            .contains("originalFile"));
+        let multi = json!({ "filePath": "/p/m.rs", "edits": 2, "originalFile": original,
+            "structuredPatch": [], "userModified": false });
+        assert!(!lean_tool_output("MultiEdit", &multi.to_string())
+            .expect("allégé")
+            .contains("originalFile"));
     }
 
     #[test]

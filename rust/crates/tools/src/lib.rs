@@ -433,6 +433,87 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
+            name: "MultiEdit",
+            description: "Make several replacements in one existing file with a single call. Each edit works like edit_file: `old_string` copied exactly from the file (with its indentation) and unique unless `replace_all` is true, `new_string` its replacement. The edits apply in order, each to the text the earlier ones leave, and either all succeed or nothing is written. Prefer it to several edit_file calls on the same file. A first edit with an empty `old_string` creates the file.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_string": { "type": "string" },
+                                "new_string": { "type": "string" },
+                                "replace_all": { "type": "boolean" }
+                            },
+                            "required": ["old_string", "new_string"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["path", "edits"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "apply_patch",
+            description: "Add, update, delete or rename files with one patch, in this format:\n*** Begin Patch\n*** Update File: src/app.py\n@@ def total(items):\n-    return sum(items)\n+    return round(sum(items), 2)\n*** Add File: src/util.py\n+def helper():\n+    return 1\n*** Delete File: old.py\n*** End Patch\nIn an update every line starts with a space (unchanged: give about 3 lines of context around each change), - (removed) or + (added); a `@@` line may name a line just above the change. `*** Move to: new/path` right after `*** Update File:` renames the file. If one change does not match the files, nothing is written.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "patch": { "type": "string", "description": "The whole patch, from *** Begin Patch to *** End Patch" }
+                },
+                "required": ["patch"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "list_directory",
+            description: "Show a directory as a tree (directories first, with file sizes), `depth` levels deep (default 3, at most 8; path defaults to the project). Dependency and cache directories (node_modules, .git, .venv, target...) are shown but not opened. Use it to see how a project is laid out; use glob_search to find files by name pattern.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "depth": { "type": "integer", "minimum": 1, "maximum": 8 }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "move_file",
+            description: "Move or rename a file or a directory in the workspace. A destination that is an existing directory receives the item under its own name; missing parent directories are created. An existing destination file is replaced only with `overwrite: true`. Prefer it to mv in bash: Claw records the move so /undo can reverse it.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string" },
+                    "destination": { "type": "string" },
+                    "overwrite": { "type": "boolean" }
+                },
+                "required": ["source", "destination"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "delete_file",
+            description: "Delete one file, or an empty directory, in the workspace. Prefer it to rm in bash: Claw keeps the file's content so /undo can bring it back. To delete several files, call it once for each.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
             name: "glob_search",
             description: "Find files by glob pattern (for example `src/**/*.ts`), newest first, at most 100. Dependency, cache and tool folders (node_modules, .git, .venv, __pycache__...) and build output that git ignores (dist, build, target...) are skipped unless the pattern or path names them; when nothing is found, the result's `note` lists what was skipped.",
             input_schema: json!({
@@ -1126,6 +1207,11 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "read_file" => from_value::<ReadFileInput>(input).and_then(run_read_file),
         "write_file" => from_value::<WriteFileInput>(input).and_then(run_write_file),
         "edit_file" => from_value::<EditFileInput>(input).and_then(run_edit_file),
+        "MultiEdit" => from_value::<MultiEditInput>(input).and_then(run_multi_edit),
+        "apply_patch" => from_value::<ApplyPatchInput>(input).and_then(run_apply_patch),
+        "list_directory" => from_value::<ListDirectoryInput>(input).and_then(run_list_directory),
+        "move_file" => from_value::<MoveFileInput>(input).and_then(run_move_file),
+        "delete_file" => from_value::<DeleteFileInput>(input).and_then(run_delete_file),
         "glob_search" => from_value::<GlobSearchInputValue>(input).and_then(run_glob_search),
         "grep_search" => from_value::<GrepSearchInput>(input).and_then(run_grep_search),
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
@@ -1241,6 +1327,58 @@ fn run_edit_file(input: EditFileInput) -> Result<String, String> {
         .map_err(io_to_string)?,
     )?;
     Ok(with_security_note(output, &input.path, &input.new_string))
+}
+
+fn run_multi_edit(input: MultiEditInput) -> Result<String, String> {
+    let output =
+        to_pretty_json(runtime::multi_edit_file(&input.path, &input.edits).map_err(io_to_string)?)?;
+    let written = input
+        .edits
+        .iter()
+        .map(|edit| edit.new_string.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(with_security_note(output, &input.path, &written))
+}
+
+fn run_apply_patch(input: ApplyPatchInput) -> Result<String, String> {
+    let output = to_pretty_json(runtime::apply_patch(&input.patch).map_err(io_to_string)?)?;
+    let added = input
+        .patch
+        .lines()
+        .filter(|line| !line.starts_with("+++"))
+        .filter_map(|line| line.strip_prefix('+'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let path = runtime::patch_paths(&input.patch)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    Ok(with_security_note(output, &path, &added))
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_list_directory(input: ListDirectoryInput) -> Result<String, String> {
+    to_pretty_json(
+        runtime::list_directory(input.path.as_deref(), input.depth).map_err(io_to_string)?,
+    )
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_move_file(input: MoveFileInput) -> Result<String, String> {
+    to_pretty_json(
+        runtime::move_file(
+            &input.source,
+            &input.destination,
+            input.overwrite.unwrap_or(false),
+        )
+        .map_err(io_to_string)?,
+    )
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn run_delete_file(input: DeleteFileInput) -> Result<String, String> {
+    to_pretty_json(runtime::delete_file(&input.path).map_err(io_to_string)?)
 }
 
 /// Motif risqué dans le texte écrit (injection, `eval`, secret…) : remarque
@@ -1654,6 +1792,36 @@ struct EditFileInput {
     old_string: String,
     new_string: String,
     replace_all: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MultiEditInput {
+    path: String,
+    edits: Vec<runtime::EditOperation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplyPatchInput {
+    #[serde(alias = "input", alias = "diff")]
+    patch: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListDirectoryInput {
+    path: Option<String>,
+    depth: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MoveFileInput {
+    source: String,
+    destination: String,
+    overwrite: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteFileInput {
+    path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3535,6 +3703,7 @@ impl PermissionPrompter for SlotPrompter<'_> {
 pub const PARALLEL_SAFE_TOOLS: &[&str] = &[
     "Agent",
     "read_file",
+    "list_directory",
     "glob_search",
     "grep_search",
     "FindSymbol",
@@ -3809,7 +3978,7 @@ fn canonical_agent_tool_name(name: &str) -> String {
     match name {
         "Read" => "read_file",
         "Write" => "write_file",
-        "Edit" | "MultiEdit" => "edit_file",
+        "Edit" => "edit_file",
         "Bash" => "bash",
         "Glob" => "glob_search",
         "Grep" => "grep_search",
@@ -3823,6 +3992,7 @@ fn canonical_agent_tool_name(name: &str) -> String {
 const READ_ONLY_ROLE_TOOLS: &[&str] = &[
     "bash",
     "read_file",
+    "list_directory",
     "glob_search",
     "grep_search",
     "FindSymbol",
@@ -3843,8 +4013,13 @@ const READ_ONLY_ROLE_TOOLS: &[&str] = &[
 const TESTER_TOOLS: &[&str] = &[
     "bash",
     "read_file",
+    "list_directory",
     "write_file",
     "edit_file",
+    "MultiEdit",
+    "apply_patch",
+    "move_file",
+    "delete_file",
     "glob_search",
     "grep_search",
     "FindSymbol",
@@ -3863,6 +4038,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         "tester" => TESTER_TOOLS.to_vec(),
         "Explore" => vec![
             "read_file",
+            "list_directory",
             "glob_search",
             "grep_search",
             "FindSymbol",
@@ -3874,6 +4050,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         ],
         "Plan" => vec![
             "read_file",
+            "list_directory",
             "glob_search",
             "grep_search",
             "FindSymbol",
@@ -3888,6 +4065,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         "Verification" => vec![
             "bash",
             "read_file",
+            "list_directory",
             "glob_search",
             "grep_search",
             "FindSymbol",
@@ -3903,6 +4081,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         ],
         "claw-guide" => vec![
             "read_file",
+            "list_directory",
             "glob_search",
             "grep_search",
             "FindSymbol",
@@ -3925,8 +4104,13 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         _ => vec![
             "bash",
             "read_file",
+            "list_directory",
             "write_file",
             "edit_file",
+            "MultiEdit",
+            "apply_patch",
+            "move_file",
+            "delete_file",
             "glob_search",
             "grep_search",
             "WebFetch",
@@ -4474,7 +4658,8 @@ fn resolve_name_among(name: &str, known: &[String]) -> Option<String> {
     let short = match normalized.as_str() {
         "read" => "read_file",
         "write" => "write_file",
-        "edit" | "multiedit" | "multi_edit" => "edit_file",
+        "edit" => "edit_file",
+        "multiedit" | "multi_edit" => "MultiEdit",
         "glob" => "glob_search",
         "grep" => "grep_search",
         _ => "",
@@ -4495,15 +4680,20 @@ const TOOL_SYNONYMS: &[(&str, &str)] = &[
     ("run_command", "bash"),
     ("shell", "bash"),
     ("terminal", "bash"),
-    ("list_dir", "glob_search"),
-    ("list_directory", "glob_search"),
-    ("list_files", "glob_search"),
-    ("ls", "glob_search"),
+    ("list_dir", "list_directory"),
+    ("list_files", "list_directory"),
+    ("ls", "list_directory"),
+    ("tree", "list_directory"),
     ("find_files", "glob_search"),
     ("str_replace_editor", "edit_file"),
     ("str_replace", "edit_file"),
     ("replace_in_file", "edit_file"),
-    ("apply_diff", "edit_file"),
+    ("apply_diff", "apply_patch"),
+    ("patch", "apply_patch"),
+    ("rename_file", "move_file"),
+    ("mv", "move_file"),
+    ("remove_file", "delete_file"),
+    ("rm", "delete_file"),
     ("create_file", "write_file"),
     ("write_to_file", "write_file"),
     ("search_files", "grep_search"),

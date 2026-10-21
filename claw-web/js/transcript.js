@@ -78,6 +78,11 @@ function describe(name, input) {
     case "read_file": return ["file", "Lecture", value.path || ""];
     case "write_file": return ["filePlus", "Écriture", value.path || ""];
     case "edit_file": case "NotebookEdit": return ["edit", "Modification", value.path || ""];
+    case "MultiEdit": return ["edit", "Modifications", value.path || ""];
+    case "apply_patch": return ["edit", "Correctif", (value.paths || []).join(", ")];
+    case "list_directory": return ["search", "Dossier", value.path || "."];
+    case "move_file": return ["edit", "Déplacement", `${value.from || ""} → ${value.to || ""}`];
+    case "delete_file": return ["edit", "Suppression", value.path || ""];
     case "glob_search": return ["search", "Fichiers", value.pattern || ""];
     case "grep_search": return ["search", "Recherche", (value.pattern || "") + (value.path ? ` · ${value.path}` : "")];
     case "WebFetch": case "ViewPage": return ["globe", "Page web", value.target || ""];
@@ -314,9 +319,23 @@ function toolHtml(event, key, openTodo) {
       ${result && result.bg ? '<span class="io-note">Lancée en arrière-plan</span>' : ""}
     </div>`;
     if (result && result.code) side = `<span class="del">${escapeHtml(result.code)}</span>`;
-  } else if ((event.n === "write_file" || event.n === "edit_file") && result && Array.isArray(result.lines)) {
+  } else if (["write_file", "edit_file", "MultiEdit"].includes(event.n) && result && Array.isArray(result.lines)) {
     side = counts(result.add, result.del);
     body = journalDiffHtml(result.lines, result.more, languageOf(input.path || input.file_path || target));
+  } else if ((event.n === "apply_patch" || event.n === "delete_file") && result && Array.isArray(result.files)) {
+    // Chaque fichier du correctif : ce qui lui arrive, puis ses lignes changées.
+    const words = { create: "Créé", update: "Modifié", delete: "Supprimé", move: "Déplacé" };
+    side = counts(result.files.reduce((sum, file) => sum + (file.add || 0), 0),
+      result.files.reduce((sum, file) => sum + (file.del || 0), 0));
+    body = result.files.map((file) => {
+      const from = file.from ? `${escapeHtml(file.from)} → ` : "";
+      const head = `<div class="io-note">${escapeHtml(words[file.kind] || "Modifié")} : ${from}${escapeHtml(file.path || "")}</div>`;
+      const lines = file.kind !== "delete" && Array.isArray(file.lines) && file.lines.length
+        ? journalDiffHtml(file.lines, file.more, languageOf(file.path || "")) : "";
+      return head + lines;
+    }).join("");
+  } else if (event.n === "move_file" && result && result.to) {
+    body = `<div class="io-note">${escapeHtml(result.from || "")} → ${escapeHtml(result.to)}</div>`;
   } else if (event.n === "read_file" && result && result.count) {
     side = plural(result.count, "ligne");
   } else if (event.n === "TodoWrite") {

@@ -122,8 +122,23 @@ def describe(name, data):
         return f"Lecture de `{short(path)}`"
     if name == "write_file":
         return f"Écriture de `{short(path)}`"
-    if name in ("edit_file", "NotebookEdit"):
+    if name in ("edit_file", "NotebookEdit", "MultiEdit"):
         return f"Modification de `{short(path)}`"
+    if name == "apply_patch":
+        text = str(data.get("patch") or data.get("input") or "")
+        paths = [relative(line.split(":", 1)[1].strip()) for line in text.splitlines()
+                 if line.startswith(("*** Add File:", "*** Update File:", "*** Delete File:"))]
+        if len(paths) == 1:
+            return f"Correctif de `{short(paths[0])}`"
+        return f"Correctif de {len(paths)} fichiers" if paths else "Correctif"
+    if name == "delete_file":
+        return f"Suppression de `{short(path)}`"
+    if name == "move_file":
+        source = relative(str(data.get("source") or ""))
+        target = relative(str(data.get("destination") or ""))
+        return f"Déplacement de `{short(source, 60)}` vers `{short(target, 60)}`"
+    if name == "list_directory":
+        return f"Dossier `{short(path or '.')}`"
     if name in ("bash", "PowerShell"):
         command = relative(" ".join(str(data.get("command", "")).split()))
         return f"Commande : `{short(command)}`"
