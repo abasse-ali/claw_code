@@ -177,3 +177,25 @@ jobs:
           path: ${{ runner.temp }}/claw-real-tests
           retention-days: 14
           if-no-files-found: ignore
+
+  # Les résumés de tous les scénarios dans un seul journal court.
+  bilan:
+    needs: essai
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: rust/scripts/real-tests
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: essai-*-${{ github.run_id }}
+          path: ${{ runner.temp }}/essais
+          merge-multiple: true
+
+      - name: Bilan
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python3 rust/scripts/real-tests/report.py --summary "$RUNNER_TEMP/essais"

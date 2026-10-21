@@ -70,11 +70,23 @@ def report(run_dir):
     return result
 
 
+def load(run_dir):
+    result_file = run_dir / "result.json"
+    return json.loads(result_file.read_text(encoding="utf-8")) if result_file.exists() else None
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    runs = Path(sys.argv[1])
-    results = [report(folder) for folder in sorted(runs.iterdir()) if folder.is_dir()] if runs.exists() else []
+    # --summary : seulement les résumés (job « bilan » du workflow, qui réunit tous les essais).
+    brief = "--summary" in sys.argv[1:]
+    runs = Path(next(arg for arg in sys.argv[1:] if arg != "--summary"))
+    folders = sorted(folder for folder in runs.iterdir() if folder.is_dir()) if runs.exists() else []
+    results = [load(folder) if brief else report(folder) for folder in folders]
     rows = [result for result in results if result]
+    if brief and rows:
+        total = sum(row.get("score") or 0 for row in rows)
+        most = sum(row.get("max") or 0 for row in rows)
+        print(f"Total : {total}/{most} sur {len(rows)} essais")
     # Le résumé en dernier : la fin du journal suffit pour relever les notes.
     for row in rows:
         section(f"Résumé {row['scenario']}")
