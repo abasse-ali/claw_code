@@ -39,6 +39,13 @@ class CatalogTest(unittest.TestCase):
         self.assertIn("outil appelé en 3 s", fast["reasons"])
         self.assertIn("répond sans appeler l'outil", mute["reasons"])
 
+    def test_models_claw_set_aside_stay_unusable(self):
+        step = catalog.entry("nvidia:stepfun-ai/step-5-preview", "Step 5", "", ["stepfun-ai/step-5-preview"],
+                             tools=True, probe={"ok": True, "tools": True, "seconds": 6.0})
+        self.assertFalse(step["tools"])
+        self.assertIn("faux messages", step["status"])
+        self.assertEqual(catalog.ranked([step])[0]["id"], step["id"])
+
     def test_gemini_paid_models_are_marked(self):
         result = {"ok": False, "tools": False, "seconds": 1,
                   "error": "429 Quota exceeded for metric generate_content_free_tier_requests, limit: 0"}
