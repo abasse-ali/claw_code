@@ -294,6 +294,7 @@ pub(crate) fn replacement(source: &ImageSource, number: usize, total: usize) -> 
     } else {
         "Image described".to_string()
     };
+    let pixels = pixel_note(source);
     match descriptions().get(&image_key(source)) {
         Some(description) => {
             let (defect, body) = split_verdict(&description.text);
@@ -302,13 +303,61 @@ pub(crate) fn replacement(source: &ImageSource, number: usize, total: usize) -> 
                 format!("[Claw] The image reader saw a defect in this image: {line}. Treat it as evidence of a problem to fix, not as a design to copy.\n")
             });
             format!(
-                "{warning}[{place} by {} because the current model cannot read images (image id {}). To look again at any part of it, call LookAtImage with this id and one precise question.]\n{body}",
+                "{warning}[{place} by {} because the current model cannot read images (image id {}). To look again at any part of it, call LookAtImage with this id and one precise question.]\n{body}{pixels}",
                 description.model,
                 image_id(source)
             )
         }
-        None if total > 1 => format!("[Image {number} of {total}] {IMAGE_NOT_SENT}"),
-        None => IMAGE_NOT_SENT.to_string(),
+        None if total > 1 => format!("[Image {number} of {total}] {IMAGE_NOT_SENT}{pixels}"),
+        None => format!("{IMAGE_NOT_SENT}{pixels}"),
+    }
+}
+
+/// Fichiers lisibles d'une image, calculés de ses pixels (`image_text`) et gardés à côté de sa
+/// description : le texte (dimensions, palette, grille, zones, formes) et le SVG des zones, en
+/// chemins relatifs au projet. `None` pour ce qui n'est pas une image (aucune signature connue)
+/// ou si le dossier n'est pas accessible.
+fn pixel_files(source: &ImageSource) -> Option<(String, Option<String>)> {
+    let bytes = runtime::attachments::decode_base64(&source.data)?;
+    let format = crate::image_text::format_of(&bytes);
+    if format == "unknown" {
+        return None;
+    }
+    let dir = cache_dir()?;
+    let key = image_key(source);
+    let text_name = format!("{key}.pixels.txt");
+    let svg_name = format!("{key}.svg");
+    if !dir.join(&text_name).exists() {
+        std::fs::create_dir_all(&dir).ok()?;
+        match crate::image_text::represent(&bytes) {
+            Ok((text, svg)) => {
+                std::fs::write(dir.join(&svg_name), svg).ok()?;
+                std::fs::write(dir.join(&text_name), text).ok()?;
+            }
+            Err(error) => {
+                let text = format!(
+                    "IMAGE: {format}, {} bytes. Its pixels could not be read here: {error}.\n",
+                    bytes.len()
+                );
+                std::fs::write(dir.join(&text_name), text).ok()?;
+            }
+        }
+    }
+    let shown = |name: &str| format!(".claw/image-descriptions/{name}");
+    Some((
+        shown(&text_name),
+        dir.join(&svg_name).exists().then(|| shown(&svg_name)),
+    ))
+}
+
+/// Ce qu'il faut dire au modèle des fichiers d'une image (vide sans fichier).
+fn pixel_note(source: &ImageSource) -> String {
+    match pixel_files(source) {
+        Some((text, Some(svg))) => format!(
+            "\n[Claw] This image rendered as text from its pixels, exact and not guessed: read `{text}` (size, palette with hex colors and names, a color grid of the layout, the color regions with their position in % and pixels, a brightness drawing of shapes and text lines), and `{svg}` (the color regions as simple SVG rectangles, to redraw or compare)."
+        ),
+        Some((text, None)) => format!("\n[Claw] What could be read of this image's file: `{text}`."),
+        None => String::new(),
     }
 }
 

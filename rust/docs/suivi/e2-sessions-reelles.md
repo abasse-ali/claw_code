@@ -573,6 +573,28 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
     permissions jugent un appel à plusieurs chemins sur le moins sûr d'entre eux.
 - État : corrigé (lot 47).
 
+## E2-19 Une image n'arrive au modèle texte que par l'avis d'un autre modèle
+- Gravité : moyenne
+- Session et messages : demande de l'utilisateur du 21 octobre 2026 (« dans la description des
+  images je veux une représentation des images en fichier lisible pour les modèles qui ne
+  lisent pas du png, jpeg »).
+- Ce qui s'est passé : un modèle qui ne lit pas les images en recevait la description par un
+  modèle lecteur. C'est un avis, qui peut se tromper sur une couleur, une position ou un texte.
+  Quand aucun lecteur ne répondait (erreur 429), le modèle ne recevait rien.
+- Ce que Claw a fait : « Image not sent ».
+- Remède : `claw-cli/src/image_text.rs`. Décodage PNG (tous types et profondeurs, transparence
+  posée sur du blanc) et JPEG de base, sans dépendance (le registre des crates n'est pas
+  joignable partout). Il produit deux fichiers à côté de la description, dans
+  `.claw/image-descriptions/` :
+  - `<image>.pixels.txt` : dimensions, palette (code, nom, part), grille de couleurs de
+    64 colonnes, zones de couleur avec leur cadre en % et en pixels, et dessin de la luminosité
+    qui montre les formes et les lignes de texte ;
+  - `<image>.svg` : les zones en rectangles.
+  La description dit au modèle de les lire, avec ou sans lecteur. Comparé à PIL sur seize
+  images (PNG exacts ; JPEG à moins de 0,4 d'écart moyen, différence de lissage de la
+  chrominance) et sur une capture de la session 18 (585 x 2334 en 20 ms).
+- État : corrigé (lot 47). JPEG progressif et GIF/WebP : le fichier dit qu'ils ne sont pas lus.
+
 ## Relevés sans constat : défauts de ces sessions déjà traités dans le code actuel
 
 À ne pas refaire. Chacun a été vérifié dans le code.

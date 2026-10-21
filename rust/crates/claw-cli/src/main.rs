@@ -14,6 +14,7 @@ mod fullscreen;
 mod git_work;
 mod github_setup;
 mod image_reader;
+mod image_text;
 mod init;
 mod input;
 mod jobs;
