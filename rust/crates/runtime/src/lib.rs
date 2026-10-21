@@ -1,3 +1,4 @@
+pub mod ascii_art;
 pub mod attachments;
 mod bash;
 pub mod bash_tasks;

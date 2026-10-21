@@ -20,6 +20,7 @@ mod ornaments;
 mod page_view;
 mod photos;
 mod screenshot;
+mod wireframe;
 
 /// Un navigateur est installé : les outils `ViewPage` et `Screenshot` peuvent
 /// montrer une page.
@@ -620,6 +621,42 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "Wireframe",
+            description: "Draw the ASCII wireframe of a screen, aligned to the character: describe its regions from top to bottom (`rows`), each with a `label`, text `lines`, and optional side-by-side `columns` (boxes with a `label`, `lines` and a `weight`: 2 makes a column twice as wide). Long text wraps inside its box and nothing overflows. Draw one wireframe per screen size (for example width 64 for a desktop, 36 for a phone). Paste the output as it is inside a ``` block: never draw a wireframe or a boxed diagram by hand, and never retouch the output.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "Line above the frame, for example: First screen, desktop" },
+                    "width": { "type": "integer", "minimum": 30, "maximum": 120 },
+                    "rows": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string" },
+                                "lines": { "type": "array", "items": { "type": "string" } },
+                                "columns": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": { "type": "string" },
+                                            "lines": { "type": "array", "items": { "type": "string" } },
+                                            "weight": { "type": "integer", "minimum": 1, "maximum": 6 }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "required": ["rows"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
             name: "glob_search",
@@ -1341,6 +1378,7 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "http_request" => {
             from_value::<HttpRequestInput>(input).and_then(|input| run_http_request(&input))
         }
+        "Wireframe" => from_value::<WireframeInput>(input).and_then(run_wireframe),
         "glob_search" => from_value::<GlobSearchInputValue>(input).and_then(run_glob_search),
         "grep_search" => from_value::<GrepSearchInput>(input).and_then(run_grep_search),
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
@@ -2802,6 +2840,69 @@ fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String>
 }
 
 #[derive(Debug, Deserialize)]
+struct WireframeColumnInput {
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    lines: Vec<String>,
+    #[serde(default)]
+    weight: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireframeRowInput {
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    lines: Vec<String>,
+    #[serde(default)]
+    columns: Vec<WireframeColumnInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireframeInput {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    width: Option<usize>,
+    rows: Vec<WireframeRowInput>,
+}
+
+/// Le wireframe dessiné par Claw (outil `Wireframe`).
+#[allow(clippy::needless_pass_by_value)]
+fn run_wireframe(input: WireframeInput) -> Result<String, String> {
+    let frame = wireframe::Wireframe {
+        title: input.title,
+        width: input.width.unwrap_or(64),
+        rows: input
+            .rows
+            .into_iter()
+            .map(|row| wireframe::Row {
+                label: row.label,
+                lines: row.lines,
+                columns: row
+                    .columns
+                    .into_iter()
+                    .map(|column| wireframe::Column {
+                        label: column.label,
+                        lines: column.lines,
+                        weight: column.weight.unwrap_or(1),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    };
+    let width = frame.width.clamp(30, 120);
+    let drawing = wireframe::render(&frame)
+        .map_err(|error| format!("[Claw] Wireframe was not drawn: {error}"))?;
+    to_pretty_json(json!({
+        "wireframe": drawing,
+        "width": width,
+        "note": "Paste the wireframe exactly as it is, inside a ``` block: every border is aligned; do not retouch it.",
+    }))
+}
+
+#[derive(Debug, Deserialize)]
 struct HttpRequestInput {
     url: String,
     #[serde(default)]
@@ -3958,6 +4059,7 @@ impl PermissionPrompter for SlotPrompter<'_> {
 /// Outils sans effet de bord, exécutables en parallèle.
 pub const PARALLEL_SAFE_TOOLS: &[&str] = &[
     "Agent",
+    "Wireframe",
     "read_file",
     "list_directory",
     "read_many_files",
@@ -4249,6 +4351,7 @@ fn canonical_agent_tool_name(name: &str) -> String {
 // (git log, git diff…), le mode read-only du sous-agent bloque le reste.
 const READ_ONLY_ROLE_TOOLS: &[&str] = &[
     "bash",
+    "Wireframe",
     "read_file",
     "list_directory",
     "read_many_files",
@@ -4317,6 +4420,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "StructuredOutput",
         ],
         "Plan" => vec![
+            "Wireframe",
             "read_file",
             "list_directory",
             "read_many_files",
@@ -4380,6 +4484,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         ],
         _ => vec![
             "bash",
+            "Wireframe",
             "read_file",
             "list_directory",
             "read_many_files",
@@ -4998,6 +5103,9 @@ const TOOL_SYNONYMS: &[(&str, &str)] = &[
     ("curl", "http_request"),
     ("fetch_url", "http_request"),
     ("api_request", "http_request"),
+    ("wireframe", "Wireframe"),
+    ("draw_wireframe", "Wireframe"),
+    ("ascii_wireframe", "Wireframe"),
     ("codebase_search", "grep_search"),
     ("search", "grep_search"),
     ("rg", "grep_search"),
@@ -7180,6 +7288,39 @@ Deploy $ARGUMENTS
         assert!(refused.is_err());
         // CLAW_NO_CLAUDE_CONFIG=1 coupe l'import.
         assert!(disabled.is_err());
+    }
+
+    #[test]
+    fn wireframe_tool_draws_aligned_boxes() {
+        let output = execute_tool(
+            "Wireframe",
+            &json!({
+                "title": "Premier écran, téléphone",
+                "width": 36,
+                "rows": [
+                    { "label": "En-tête : Budget · menu" },
+                    { "label": "Solde net", "lines": ["1 234,56 € en très grand, barre verte"] },
+                    { "columns": [
+                        { "label": "Revenus", "lines": ["+ 2 500 €"] },
+                        { "label": "Dépenses", "lines": ["- 850 €"], "weight": 1 }
+                    ] }
+                ]
+            }),
+        )
+        .expect("dessin");
+        let value: serde_json::Value = serde_json::from_str(&output).expect("json");
+        let drawing = value["wireframe"].as_str().expect("texte");
+        let frame: Vec<&str> = drawing.lines().skip(1).collect();
+        assert!(
+            frame
+                .iter()
+                .all(|line| runtime::ascii_art::display_width(line) == 36),
+            "{drawing}"
+        );
+        assert!(
+            runtime::ascii_art::misaligned(&format!("```\n{drawing}\n```"), 3).is_empty(),
+            "{drawing}"
+        );
     }
 
     #[test]

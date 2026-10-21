@@ -380,6 +380,8 @@ struct TurnAids {
     plan_reviewed: bool,
     /// Le modèle a écrit l'interface sans plan : il lui a été demandé.
     plan_requested: bool,
+    /// Wireframe du plan mal aligné : signalé une fois par tour.
+    wireframe_flagged: bool,
     /// Un autre modèle a repris après deux réponses vides de suite.
     empty_escalated: bool,
     /// Le modèle a été prévenu que sa page appelle des fichiers qui manquent.
@@ -3225,6 +3227,18 @@ where
             self.api_client
                 .notify("Pas de plan de design avant le code : demandé à l'agent");
             return Some(crate::web_design::PLAN_REQUEST.to_string());
+        }
+        // Un wireframe dessiné à la main, aux bords décalés : à redessiner avec l'outil avant
+        // que le juge relise le plan (vu le 21 octobre 2026 : bords et textes qui débordent).
+        if !aids.wireframe_flagged {
+            let problems = crate::ascii_art::misaligned(&plan, 6);
+            if !problems.is_empty() {
+                aids.wireframe_flagged = true;
+                self.api_client.notify(
+                    "Wireframe du plan mal aligné : redessin demandé avec l'outil Wireframe",
+                );
+                return Some(crate::ascii_art::feedback(&problems));
+            }
         }
         aids.plan_reviewed = true;
         if self

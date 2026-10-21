@@ -301,6 +301,16 @@ pub fn pitfalls(path: &Path) -> Vec<String> {
             .map(|text| batch_pitfalls(&text))
             .unwrap_or_default(),
         "sh" | "bash" => shell_pitfalls(path),
+        // Wireframes et schémas en cadres d'un document : leurs traits doivent se rejoindre.
+        "md" | "markdown" | "mdx" | "txt" => read(path)
+            .map(|text| crate::ascii_art::misaligned(&text, 6))
+            .map(|problems| {
+                problems
+                    .into_iter()
+                    .map(|problem| format!("{problem}: the ASCII drawing is misaligned; redraw it with the Wireframe tool and paste its output as it is"))
+                    .collect()
+            })
+            .unwrap_or_default(),
         _ => Vec::new(),
     };
     found.into_iter().take(MAX_FINDINGS).collect()

@@ -270,6 +270,8 @@ class Journal:
             return {"path": rel(data.get("path") or data.get("file_path") or data.get("notebook_path") or "")}
         if name == "move_file":
             return {"from": rel(data.get("source") or ""), "to": rel(data.get("destination") or "")}
+        if name == "Wireframe":
+            return {"title": excerpt(str(data.get("title") or ""), 120)}
         if name == "read_many_files":
             return {"paths": [rel(str(path)) for path in (data.get("paths") or [])[:20]]}
         if name == "file_outline":
@@ -350,6 +352,8 @@ class Journal:
                     entry["from"] = rel(item["movedFrom"])
                 files.append(entry)
             return {"files": files}
+        if name == "Wireframe":
+            return {"out": excerpt(str(value.get("wireframe") or ""), 4000)}
         if name == "run_tests":
             failures = [f"✗ {item.get('name', '')}: {str(item.get('message') or '').splitlines()[0] if item.get('message') else ''}"
                         for item in (value.get("failures") or [])[:10] if isinstance(item, dict)]

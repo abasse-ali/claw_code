@@ -139,6 +139,8 @@ def describe(name, data):
         return f"Déplacement de `{short(source, 60)}` vers `{short(target, 60)}`"
     if name == "list_directory":
         return f"Dossier `{short(path or '.')}`"
+    if name == "Wireframe":
+        return f"Wireframe : {short(str(data.get('title') or 'écran'))}"
     if name == "file_outline":
         return f"Plan de `{short(path)}`"
     if name == "read_many_files":

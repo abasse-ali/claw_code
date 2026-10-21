@@ -204,6 +204,7 @@ pub fn tool_label(name: &str) -> &str {
         "git" => "Git",
         "git_commit" => "Commit",
         "http_request" => "Requête HTTP",
+        "Wireframe" => "Wireframe",
         "glob_search" | "Glob" => "Fichiers",
         "grep_search" | "Grep" => "Recherche",
         "WebFetch" => "Page web",
@@ -499,6 +500,11 @@ fn render_result(name: &str, output: &str, is_error: bool, limits: &Limits) -> S
         "MultiEdit" => multi_edit_result(&parsed, limits),
         "apply_patch" | "delete_file" | "replace_in_files" => files_result(&parsed, limits),
         "run_tests" => tests_result(&parsed, limits),
+        "Wireframe" => str_field(&parsed, &["wireframe"])
+            .unwrap_or_default()
+            .lines()
+            .map(ToOwned::to_owned)
+            .collect(),
         "http_request" => vec![format!(
             "{} {}{}",
             parsed.get("status").and_then(Value::as_u64).unwrap_or(0),
