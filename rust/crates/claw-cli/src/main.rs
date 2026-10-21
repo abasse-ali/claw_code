@@ -8412,7 +8412,41 @@ fn describe_tool_progress(name: &str, input: &str) -> String {
         }
         "read_file" | "Read" => format!("lecture de {}", extract_tool_path(&parsed)),
         "write_file" | "Write" => format!("écriture de {}", extract_tool_path(&parsed)),
-        "edit_file" | "Edit" => format!("modification de {}", extract_tool_path(&parsed)),
+        "edit_file" | "Edit" | "MultiEdit" => {
+            format!("modification de {}", extract_tool_path(&parsed))
+        }
+        "apply_patch" => {
+            let paths = runtime::patch_paths(
+                parsed
+                    .get("patch")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default(),
+            );
+            match paths.len() {
+                0 => "correctif".to_string(),
+                1 => format!("correctif de {}", paths[0]),
+                count => format!("correctif de {count} fichiers"),
+            }
+        }
+        "list_directory" => format!(
+            "dossier {}",
+            parsed
+                .get("path")
+                .and_then(|value| value.as_str())
+                .unwrap_or(".")
+        ),
+        "move_file" => format!(
+            "déplacement de {} vers {}",
+            parsed
+                .get("source")
+                .and_then(|value| value.as_str())
+                .unwrap_or("?"),
+            parsed
+                .get("destination")
+                .and_then(|value| value.as_str())
+                .unwrap_or("?")
+        ),
+        "delete_file" => format!("suppression de {}", extract_tool_path(&parsed)),
         "glob_search" | "Glob" => {
             let pattern = parsed
                 .get("pattern")
@@ -9078,6 +9112,89 @@ fn permission_box_content(tool_name: &str, input: &str) -> (String, Vec<String>,
                 )
             }
         }
+        "MultiEdit" => {
+            let raw = field("path").unwrap_or("?");
+            let edits = value
+                .get("edits")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut body = vec![bold(transcript::display_path(raw))];
+            for edit in edits.iter().take(4) {
+                let text = |key: &str| {
+                    edit.get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                body.extend(transcript::render_diff(
+                    &text("old_string"),
+                    &text("new_string"),
+                    None,
+                    None,
+                    6,
+                    width,
+                ));
+            }
+            if edits.len() > 4 {
+                body.push(dim(format!("… {} modifications de plus", edits.len() - 4)));
+            }
+            (
+                "Modifier un fichier".to_string(),
+                body,
+                "Appliquer ces modifications ?".to_string(),
+            )
+        }
+        "apply_patch" => {
+            let patch = field("patch").unwrap_or_default();
+            let mut body: Vec<String> = runtime::patch_paths(patch)
+                .into_iter()
+                .map(|path| bold(transcript::display_path(&path)))
+                .collect();
+            body.extend(
+                patch
+                    .lines()
+                    .filter(|line| !line.starts_with("*** "))
+                    .take(14)
+                    .map(|line| {
+                        let color = if line.starts_with('+') {
+                            transcript::GREEN
+                        } else if line.starts_with('-') {
+                            transcript::RED
+                        } else {
+                            transcript::DIM
+                        };
+                        format!(
+                            "{color}{}{}",
+                            line.chars().take(width).collect::<String>(),
+                            transcript::RESET
+                        )
+                    }),
+            );
+            (
+                "Appliquer un correctif".to_string(),
+                body,
+                "Appliquer ce correctif ?".to_string(),
+            )
+        }
+        "move_file" => (
+            "Déplacer un fichier".to_string(),
+            vec![
+                bold(transcript::display_path(field("source").unwrap_or("?"))),
+                format!(
+                    "→ {}",
+                    bold(transcript::display_path(
+                        field("destination").unwrap_or("?")
+                    ))
+                ),
+            ],
+            "Déplacer ?".to_string(),
+        ),
+        "delete_file" => (
+            "Supprimer un fichier".to_string(),
+            vec![bold(transcript::display_path(field("path").unwrap_or("?")))],
+            "Supprimer ce fichier ?".to_string(),
+        ),
         "WebFetch" => {
             let mut body: Vec<String> = wrap(field("url").unwrap_or("?"))
                 .into_iter()
@@ -9144,9 +9261,19 @@ fn describe_permission_target(tool_name: &str, input: &str) -> String {
         "bash" | "PowerShell" => {
             field("command").map(|command| format!("Commande         {command}"))
         }
-        "read_file" | "write_file" | "edit_file" => {
+        "read_file" | "write_file" | "edit_file" | "MultiEdit" | "delete_file" => {
             field("path").map(|path| format!("Fichier          {path}"))
         }
+        "list_directory" => Some(format!("Dossier          {}", field("path").unwrap_or("."))),
+        "move_file" => Some(format!(
+            "Déplacement     {} → {}",
+            field("source").unwrap_or("?"),
+            field("destination").unwrap_or("?")
+        )),
+        "apply_patch" => Some(format!(
+            "Correctif        {}",
+            runtime::patch_paths(field("patch").unwrap_or_default()).join(", ")
+        )),
         "NotebookEdit" => field("notebook_path").map(|path| format!("Notebook         {path}")),
         "WebFetch" | "ViewPage" => field("url").map(|url| format!("URL              {url}")),
         "Screenshot" => field("url")

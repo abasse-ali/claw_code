@@ -661,14 +661,18 @@ fn lean_stored_results(session: &mut Session) {
 /// Contenu d'un fichier avant sa première modification du tour par les outils
 /// du modèle (garde des modifications perdues).
 fn remember_turn_start(tool_name: &str, input: &str, aids: &mut TurnAids) {
-    if !matches!(tool_name, "edit_file" | "write_file")
+    if !crate::file_tools::writes_files(tool_name)
+        || tool_name == "NotebookEdit"
         || !(harness::enabled(Aid::LostEdits)
             || harness::enabled(Aid::DataGuard)
             || harness::enabled(Aid::TestGuard))
     {
         return;
     }
-    if let Some(path) = edited_path(input) {
+    for written in crate::file_tools::written_paths(tool_name, input) {
+        let Some(path) = edited_path(&serde_json::json!({ "path": written }).to_string()) else {
+            continue;
+        };
         aids.turn_start_files
             .entry(path)
             .or_insert_with_key(|path| std::fs::read_to_string(path).ok());
@@ -691,6 +695,28 @@ fn edited_path(input: &str) -> Option<std::path::PathBuf> {
         }
     }
     Some(clean)
+}
+
+/// Résultat d'`apply_patch` ou de `delete_file` : pour chaque fichier changé,
+/// une entrée `{"path"}` et sa part du résultat, de la forme de celui d'`edit_file`.
+fn changed_file_results(output: &str) -> Vec<(String, String)> {
+    let mut values = serde_json::Deserializer::from_str(output).into_iter::<serde_json::Value>();
+    let Some(Ok(value)) = values.next() else {
+        return Vec::new();
+    };
+    value
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|file| {
+            let path = file.get("filePath")?.as_str()?;
+            Some((
+                serde_json::json!({ "path": path }).to_string(),
+                file.to_string(),
+            ))
+        })
+        .collect()
 }
 
 /// Même texte, aux fins de ligne près (Git peut les changer en restaurant).
@@ -724,7 +750,7 @@ fn lone_call_note(
     let alone = aids.calls_in_reply == 1 && !is_error && harness::enabled(Aid::BatchCalls);
     let observation = matches!(
         tool_name,
-        "read_file" | "grep_search" | "glob_search" | "bash" | "PowerShell"
+        "read_file" | "grep_search" | "glob_search" | "list_directory" | "bash" | "PowerShell"
     );
     if !alone || !observation {
         aids.single_call_streak = 0;
@@ -889,7 +915,7 @@ const MAX_CUT_CONTINUATIONS: usize = 2;
 fn path_instruction_notes(tool_name: &str, input: &str) -> Vec<String> {
     if !matches!(
         tool_name,
-        "read_file" | "write_file" | "edit_file" | "NotebookEdit"
+        "read_file" | "write_file" | "edit_file" | "MultiEdit" | "delete_file" | "NotebookEdit"
     ) {
         return Vec::new();
     }
@@ -2359,10 +2385,8 @@ where
             self.note_not_run(&output, aids);
             return;
         }
-        if matches!(
-            tool_name,
-            "edit_file" | "write_file" | "NotebookEdit" | "bash" | "PowerShell"
-        ) {
+        if crate::file_tools::writes_files(tool_name) || matches!(tool_name, "bash" | "PowerShell")
+        {
             aids.project_changes += 1;
         }
         let mut notes = Vec::new();
@@ -2402,9 +2426,22 @@ where
         if !is_error {
             notes.extend(path_instruction_notes(tool_name, input));
         }
-        if matches!(tool_name, "edit_file" | "write_file" | "NotebookEdit") && !is_error {
+        if matches!(
+            tool_name,
+            "edit_file" | "write_file" | "MultiEdit" | "NotebookEdit"
+        ) && !is_error
+        {
             self.after_file_change(tool_name, input, &output, aids, &mut notes);
-        } else if !matches!(tool_name, "read_file" | "grep_search" | "glob_search") {
+        } else if crate::file_tools::changes_listed_files(tool_name) && !is_error {
+            // Chaque fichier changé, comme après un edit_file sur lui.
+            self.drop_stale_file_views();
+            for (file_input, file_output) in changed_file_results(&output) {
+                self.after_file_change("edit_file", &file_input, &file_output, aids, &mut notes);
+            }
+        } else if !matches!(
+            tool_name,
+            "read_file" | "grep_search" | "glob_search" | "list_directory"
+        ) {
             // Une commande ou un autre outil a pu changer des fichiers.
             self.drop_stale_file_views();
         }
@@ -2641,7 +2678,9 @@ where
         }
         // Le fichier tel qu'il est maintenant : une relecture de moins, et
         // une seule vue à jour par fichier dans la conversation.
-        if matches!(tool_name, "edit_file" | "write_file") && harness::enabled(Aid::FileView) {
+        if matches!(tool_name, "edit_file" | "write_file" | "MultiEdit")
+            && harness::enabled(Aid::FileView)
+        {
             if let Some(marker) = harness::file_view_marker(output) {
                 replace_file_views(&mut self.session, &marker, harness::FILE_VIEW_REPLACED);
                 self.file_views.remove(&marker);
@@ -3117,9 +3156,10 @@ where
             return None;
         }
         let writes_interface = pending.iter().any(|(_, name, input)| {
-            matches!(name.as_str(), "write_file" | "edit_file")
-                && json_field(input, "path")
-                    .is_some_and(|path| crate::web_design::is_interface_file(&path))
+            crate::file_tools::writes_files(name)
+                && crate::file_tools::written_paths(name, input)
+                    .iter()
+                    .any(|path| crate::web_design::is_interface_file(path))
         });
         if !writes_interface {
             return None;

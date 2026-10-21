@@ -265,8 +265,19 @@ class Journal:
         if name in ("bash", "PowerShell"):
             return {"cmd": excerpt(rel(data.get("command", "")), 1500),
                     "desc": excerpt(data.get("description", ""), 200)}
-        if name in ("read_file", "write_file", "edit_file", "NotebookEdit"):
+        if name in ("read_file", "write_file", "edit_file", "NotebookEdit", "MultiEdit", "delete_file",
+                    "list_directory"):
             return {"path": rel(data.get("path") or data.get("file_path") or data.get("notebook_path") or "")}
+        if name == "move_file":
+            return {"from": rel(data.get("source") or ""), "to": rel(data.get("destination") or "")}
+        if name == "apply_patch":
+            text = str(data.get("patch") or data.get("input") or "")
+            paths = []
+            for line in text.splitlines():
+                for marker in ("*** Add File:", "*** Update File:", "*** Delete File:", "*** Move to:"):
+                    if line.startswith(marker) and line[len(marker):].strip() not in paths:
+                        paths.append(line[len(marker):].strip())
+            return {"paths": [rel(path) for path in paths[:20]]}
         if name in ("grep_search", "glob_search"):
             return {"pattern": excerpt(data.get("pattern", ""), 300), "path": rel(data.get("path") or "")}
         if name == "TodoWrite":
@@ -307,10 +318,25 @@ class Journal:
                     "err": excerpt(rel(str(value.get("stderr") or "")), 800, tail=True),
                     "code": str(value.get("returnCodeInterpretation") or ""),
                     "bg": bool(value.get("backgroundTaskId"))}
-        if name in ("write_file", "edit_file"):
+        if name in ("write_file", "edit_file", "MultiEdit"):
             result = patch(value.get("structuredPatch"))
             result["kind"] = value.get("type") or "update"
             return result
+        if name in ("apply_patch", "delete_file"):
+            files = []
+            for item in (value.get("files") or [])[:12]:
+                if not isinstance(item, dict):
+                    continue
+                entry = patch(item.get("structuredPatch"))
+                entry.update({"path": rel(item.get("filePath") or ""), "kind": item.get("type") or "update"})
+                if item.get("movedFrom"):
+                    entry["from"] = rel(item["movedFrom"])
+                files.append(entry)
+            return {"files": files}
+        if name == "list_directory":
+            return {"out": excerpt(str(value.get("tree") or ""), 1500), "count": value.get("files")}
+        if name == "move_file":
+            return {"from": rel(value.get("source") or ""), "to": rel(value.get("destination") or "")}
         if name == "read_file":
             file = value.get("file") if isinstance(value.get("file"), dict) else {}
             return {"count": file.get("numLines") or len(str(file.get("content") or "").splitlines())}

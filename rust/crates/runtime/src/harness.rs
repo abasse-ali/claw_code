@@ -1157,7 +1157,7 @@ impl StallGuard {
             .then(|| serde_json::from_str::<Value>(input).ok())
             .flatten()
             .and_then(|value| value.get("command").and_then(Value::as_str).map(squeeze));
-        let wrote = matches!(tool_name, "edit_file" | "write_file" | "NotebookEdit") && !is_error;
+        let wrote = crate::file_tools::writes_files(tool_name) && !is_error;
         // Un fichier modifié, ou une commande qui n'est pas une vérification
         // (elle a pu changer l'état du projet) : les vérifications sont à refaire.
         if wrote
@@ -1192,7 +1192,7 @@ impl StallGuard {
         }
 
         // Une modification dont le texte à remplacer est introuvable, deux fois.
-        if matches!(tool_name, "edit_file" | "Edit") && is_error {
+        if matches!(tool_name, "edit_file" | "Edit" | "MultiEdit") && is_error {
             let path = serde_json::from_str::<Value>(input)
                 .ok()
                 .and_then(|value| {
@@ -3240,6 +3240,11 @@ const TOOL_NAMES: &[&str] = &[
     "read_file",
     "write_file",
     "edit_file",
+    "MultiEdit",
+    "apply_patch",
+    "list_directory",
+    "move_file",
+    "delete_file",
     "glob_search",
     "grep_search",
     "TodoWrite",

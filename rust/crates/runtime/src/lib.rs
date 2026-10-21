@@ -13,6 +13,7 @@ pub mod cron;
 mod edge_cases;
 pub mod editor;
 mod file_ops;
+mod file_tools;
 pub mod harness;
 mod hooks;
 pub mod icon_set;
@@ -85,6 +86,11 @@ pub use file_ops::{
     translate_foreign_path, write_file, EditFileOutput, EditPreview, GlobSearchOutput,
     GrepSearchInput, GrepSearchOutput, ReadFileOutput, StructuredPatchHunk, TextFilePayload,
     WriteFileOutput,
+};
+pub use file_tools::{
+    apply_patch, changes_listed_files, delete_file, edits_one_file, list_directory, move_file,
+    multi_edit_file, patch_paths, writes_files, written_paths, ChangedFile, EditOperation,
+    FilesChangedOutput, ListDirectoryOutput, MoveFileOutput, MultiEditOutput,
 };
 pub use hooks::{
     current_session_id, set_http_hook_sender, set_prompt_hook_evaluator,

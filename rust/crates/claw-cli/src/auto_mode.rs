@@ -353,13 +353,18 @@ fn describe(tool: &str, input: &str) -> String {
             "{tool} command: {}",
             field("command").unwrap_or_else(|| input.to_string())
         ),
-        "write_file" | "edit_file" | "NotebookEdit" => format!(
+        "write_file" | "edit_file" | "NotebookEdit" | "MultiEdit" | "delete_file" => format!(
             "{tool} on {}: {}",
             field("path")
                 .or_else(|| field("file_path"))
                 .or_else(|| field("notebook_path"))
                 .unwrap_or_default(),
             input.chars().take(1_200).collect::<String>()
+        ),
+        "apply_patch" | "move_file" => format!(
+            "{tool} on {}: {}",
+            runtime::written_paths(tool, input).join(", "),
+            input.chars().take(1_500).collect::<String>()
         ),
         _ => format!("{tool}: {}", input.chars().take(1_500).collect::<String>()),
     }

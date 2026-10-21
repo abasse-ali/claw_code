@@ -192,6 +192,11 @@ pub fn tool_label(name: &str) -> &str {
         "read_file" | "Read" => "Lecture",
         "write_file" | "Write" => "Écriture",
         "edit_file" | "Edit" => "Modification",
+        "MultiEdit" => "Modifications",
+        "apply_patch" => "Correctif",
+        "list_directory" => "Dossier",
+        "move_file" => "Déplacement",
+        "delete_file" => "Suppression",
         "glob_search" | "Glob" => "Fichiers",
         "grep_search" | "Grep" => "Recherche",
         "WebFetch" => "Page web",
@@ -232,7 +237,24 @@ fn tool_argument(name: &str, input: &Value) -> Option<String> {
                 (None, None) => path,
             }
         }),
-        "write_file" | "Write" | "edit_file" | "Edit" | "NotebookEdit" => path_field(input),
+        "write_file" | "Write" | "edit_file" | "Edit" | "NotebookEdit" | "MultiEdit"
+        | "delete_file" => path_field(input),
+        "list_directory" => Some(display_path(str_field(input, &["path"]).unwrap_or("."))),
+        "move_file" => Some(format!(
+            "{} → {}",
+            display_path(str_field(input, &["source"]).unwrap_or("?")),
+            display_path(str_field(input, &["destination"]).unwrap_or("?"))
+        )),
+        "apply_patch" => {
+            let paths = runtime::patch_paths(str_field(input, &["patch"]).unwrap_or_default());
+            (!paths.is_empty()).then(|| {
+                paths
+                    .iter()
+                    .map(|path| display_path(path))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+        }
         "glob_search" | "Glob" | "grep_search" | "Grep" => {
             str_field(input, &["pattern"]).map(|pattern| {
                 let pattern = if matches!(name, "grep_search" | "Grep") {
@@ -317,9 +339,11 @@ pub fn running_label(name: &str) -> String {
     match name {
         "bash" | "Bash" | "PowerShell" => "Exécution…".to_string(),
         "read_file" | "Read" => "Lecture…".to_string(),
-        "write_file" | "Write" | "edit_file" | "Edit" | "NotebookEdit" => {
-            "Modification…".to_string()
-        }
+        "write_file" | "Write" | "edit_file" | "Edit" | "NotebookEdit" | "MultiEdit"
+        | "apply_patch" => "Modification…".to_string(),
+        "move_file" => "Déplacement…".to_string(),
+        "delete_file" => "Suppression…".to_string(),
+        "list_directory" => "Lecture du dossier…".to_string(),
         "glob_search" | "Glob" | "grep_search" | "Grep" | "WebSearch" | "ToolSearch" => {
             "Recherche…".to_string()
         }
@@ -429,6 +453,14 @@ fn render_result(name: &str, output: &str, is_error: bool, limits: &Limits) -> S
         "read_file" | "Read" => read_result(&parsed, limits),
         "write_file" | "Write" => write_result(&parsed, limits),
         "edit_file" | "Edit" => edit_result(&parsed, limits),
+        "MultiEdit" => multi_edit_result(&parsed, limits),
+        "apply_patch" | "delete_file" => files_result(&parsed, limits),
+        "move_file" => vec![format!(
+            "Déplacé {BOLD}{}{RESET} → {BOLD}{}{RESET}",
+            display_path(str_field(&parsed, &["source"]).unwrap_or("?")),
+            display_path(str_field(&parsed, &["destination"]).unwrap_or("?"))
+        )],
+        "list_directory" => list_directory_result(&parsed, limits),
         "glob_search" | "Glob" => glob_result(&parsed, limits),
         "grep_search" | "Grep" => grep_result(&parsed, limits),
         "TodoWrite" => todo_result(&parsed),
@@ -736,6 +768,165 @@ pub fn expand_to_lines(
         file[line_start..line_end].to_string(),
         with_replacement,
     ))
+}
+
+/// Les passages d'un `structuredPatch`, numérotés et colorés.
+fn hunk_lines(value: &Value, max: usize) -> Vec<String> {
+    let width = content_width();
+    let mut out = Vec::new();
+    let hunks = value
+        .get("structuredPatch")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for (index, hunk) in hunks.iter().enumerate() {
+        if index > 0 {
+            out.push(format!("{DIM}   ⋯{RESET}"));
+        }
+        let mut old_no = hunk.get("oldStart").and_then(Value::as_u64).unwrap_or(1);
+        let mut new_no = hunk.get("newStart").and_then(Value::as_u64).unwrap_or(1);
+        let lines = hunk
+            .get("lines")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str);
+        for line in lines {
+            let mut chars = line.chars();
+            let sign = chars.next().unwrap_or(' ');
+            let text: String = chars.as_str().chars().take(width).collect();
+            match sign {
+                '+' => {
+                    out.push(format!("{GREEN}{new_no:>4} + {text}{RESET}"));
+                    new_no += 1;
+                }
+                '-' => {
+                    out.push(format!("{RED}{old_no:>4} - {text}{RESET}"));
+                    old_no += 1;
+                }
+                '\\' => {}
+                _ => {
+                    out.push(format!("{DIM}{new_no:>4}   {text}{RESET}"));
+                    old_no += 1;
+                    new_no += 1;
+                }
+            }
+        }
+    }
+    if out.len() > max {
+        let more = out.len() - max;
+        out.truncate(max);
+        out.push(format!("{DIM}… +{more} lignes{RESET}"));
+    }
+    out
+}
+
+/// Lignes ajoutées et retirées d'un `structuredPatch`, en mots.
+fn hunk_changes(value: &Value) -> String {
+    let (mut added, mut removed) = (0u64, 0u64);
+    for line in value
+        .get("structuredPatch")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|hunk| hunk.get("lines").and_then(Value::as_array))
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if line.starts_with('+') {
+            added += 1;
+        } else if line.starts_with('-') {
+            removed += 1;
+        }
+    }
+    let mut parts = Vec::new();
+    if added > 0 {
+        parts.push(plural(added, "ajout"));
+    }
+    if removed > 0 {
+        parts.push(plural(removed, "suppression"));
+    }
+    parts.join(", ")
+}
+
+fn multi_edit_result(parsed: &Value, limits: &Limits) -> Vec<String> {
+    let path = display_path(str_field(parsed, &["filePath", "path"]).unwrap_or("?"));
+    let edits = parsed.get("edits").and_then(Value::as_u64).unwrap_or(0);
+    let changes = hunk_changes(parsed);
+    let mut summary = format!(
+        "Modifié {BOLD}{path}{RESET} {DIM}({}",
+        plural(edits, "modification")
+    );
+    if !changes.is_empty() {
+        let _ = write!(summary, " · {changes}");
+    }
+    summary.push_str(&format!("){RESET}"));
+    let mut out = vec![summary];
+    out.extend(hunk_lines(parsed, limits.diff));
+    out
+}
+
+/// Fichiers créés, modifiés, déplacés ou supprimés (`apply_patch`, `delete_file`).
+fn files_result(parsed: &Value, limits: &Limits) -> Vec<String> {
+    let mut out = Vec::new();
+    for file in parsed
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let path = display_path(str_field(file, &["filePath"]).unwrap_or("?"));
+        let kind = str_field(file, &["type"]).unwrap_or("update");
+        let changes = hunk_changes(file);
+        let mut line = match kind {
+            "create" => format!("Créé {BOLD}{path}{RESET}"),
+            "delete" => format!("Supprimé {BOLD}{path}{RESET}"),
+            "move" => format!(
+                "Déplacé {BOLD}{}{RESET} → {BOLD}{path}{RESET}",
+                display_path(str_field(file, &["movedFrom"]).unwrap_or("?"))
+            ),
+            _ => format!("Modifié {BOLD}{path}{RESET}"),
+        };
+        if !changes.is_empty() {
+            let _ = write!(line, " {DIM}({changes}){RESET}");
+        }
+        out.push(line);
+        if kind != "delete" {
+            out.extend(hunk_lines(file, limits.diff));
+        }
+    }
+    if out.is_empty() {
+        out.push(format!("{DIM}Aucun fichier changé{RESET}"));
+    }
+    out
+}
+
+fn list_directory_result(parsed: &Value, limits: &Limits) -> Vec<String> {
+    let directories = parsed
+        .get("directories")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let files = parsed.get("files").and_then(Value::as_u64).unwrap_or(0);
+    let tree = str_field(parsed, &["tree"]).unwrap_or_default();
+    let mut out = vec![format!(
+        "{}, {}",
+        plural(directories, "dossier"),
+        plural(files, "fichier")
+    )];
+    let lines: Vec<&str> = tree.lines().collect();
+    out.extend(
+        lines
+            .iter()
+            .take(limits.lines)
+            .map(|line| format!("{DIM}{line}{RESET}")),
+    );
+    if lines.len() > limits.lines {
+        out.push(format!(
+            "{DIM}… +{} lignes{RESET}",
+            lines.len() - limits.lines
+        ));
+    }
+    out
 }
 
 fn edit_result(parsed: &Value, limits: &Limits) -> Vec<String> {

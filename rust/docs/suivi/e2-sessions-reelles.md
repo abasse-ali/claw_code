@@ -551,6 +551,28 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
 - État : corrigé (lot 47). Diff vérifié hors du moteur sur 2 000 modifications au hasard
   (chacune réappliquée à l'ancien texte), test `edit_file_patch_holds_only_the_changed_lines_and_their_context`.
 
+## E2-18 Outils de fichiers que les modèles connaissent, et que Claw n'avait pas
+- Gravité : moyenne
+- Session et messages : demande de l'utilisateur du 21 octobre 2026, après E2-17 (« rajoute
+  tous les outils de codage utiles pour les modèles »).
+- Ce qui s'est passé : Claw n'offrait que `edit_file` (un remplacement par appel) et
+  `write_file`. `MultiEdit` était redirigé vers `edit_file`, qui refusait ses arguments
+  (`edits`). `apply_patch`, le format des modèles d'OpenAI et de beaucoup de modèles ouverts,
+  n'existait pas. `list_directory` et `ls` menaient à `glob_search`. Déplacer et supprimer
+  passaient par `mv` et `rm` dans `bash`, hors de `/undo` et sans contrôle des chemins.
+- Ce que Claw a fait : rien, faute d'outil.
+- Remède : cinq outils, dans `runtime/src/file_tools.rs`.
+  - `MultiEdit` : plusieurs remplacements, tous ou aucun.
+  - `apply_patch` : ajout, modification, déplacement et suppression en un correctif, rien
+    d'écrit si un passage manque ; espaces recopiés de travers tolérés ; diff unifié refusé avec
+    le bon format.
+  - `list_directory` : arborescence sans dépendances ni caches.
+  - `move_file`, `delete_file` : chemin exact, jamais un fichier au nom voisin.
+  - Partout comme `edit_file` : points de reprise pour chaque chemin touché, gardes de données
+    et de tests par fichier, résultat allégé pour le modèle, journal et Claw Web. Les
+    permissions jugent un appel à plusieurs chemins sur le moins sûr d'entre eux.
+- État : corrigé (lot 47).
+
 ## Relevés sans constat : défauts de ces sessions déjà traités dans le code actuel
 
 À ne pas refaire. Chacun a été vérifié dans le code.

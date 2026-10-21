@@ -518,7 +518,8 @@ forme `mcp__<serveur>__<outil>` et sont aussi disponibles pour les sous-agents.
   bouton « Arrêter » ou touche `Échap` dans l'interface web. Les commandes shell en cours sont
   arrêtées avec leurs sous-processus.
 - **Annuler** : `/undo [n]` restaure les fichiers modifiés par l'agent (`write_file`, `edit_file`,
-  `NotebookEdit`) pendant les n derniers tours et ramène la conversation avant eux ;
+  `MultiEdit`, `apply_patch`, `NotebookEdit`), déplacés (`move_file`) ou supprimés
+  (`delete_file`) pendant les n derniers tours et ramène la conversation avant eux ;
   `/checkpoints` liste les points de restauration. Les modifications faites par des commandes
   shell ne sont pas suivies.
 - **Compacter à la demande** : `/compact [consigne]` fait résumer l'historique par le modèle tout
@@ -825,6 +826,19 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
   Claw relance le modèle une fois au lieu de terminer le tour sans rien dire.
 - Les descriptions de `edit_file` et `write_file` disent quand utiliser l'un ou l'autre : une
   modification courte et exacte d'un fichier existant, ou le contenu complet d'un fichier.
+- **Outils de fichiers** pour les habitudes de chaque famille de modèles :
+  - `MultiEdit` fait plusieurs remplacements dans un fichier en un appel : tous, ou aucun s'il en
+    manque un.
+  - `apply_patch` prend un correctif au format des modèles d'OpenAI et de beaucoup de modèles
+    ouverts (`*** Begin Patch`, `*** Update File:`, lignes ` `, `-`, `+`). Il ajoute, modifie,
+    renomme et supprime des fichiers en un appel, et n'écrit rien si un passage ne correspond pas.
+    Les espaces de fin ou d'indentation recopiés de travers sont tolérés.
+  - `list_directory` montre l'arborescence d'un dossier, sans ouvrir les dépendances ni les caches.
+  - `move_file` et `delete_file` déplacent et suppriment avec les mêmes permissions et le même
+    `/undo` que les modifications.
+  - Chaque fichier passe par les mêmes gardes qu'après `edit_file` (données, tests, vue du
+    fichier). Un appel qui touche plusieurs chemins est jugé sur le moins sûr d'entre eux par les
+    permissions.
 
 ### Aides au raisonnement
 
@@ -2078,7 +2092,7 @@ Depuis la version release :
 
 - REPL interactif et exécution de prompts ponctuels
 - Inspection des sessions sauvegardées et flux de reprise
-- Outils intégrés conscients de l'espace de travail pour le shell, la lecture/écriture/édition de fichiers, la recherche, la récupération/recherche web, les todos et les mises à jour de notebook
+- Outils intégrés conscients de l'espace de travail pour le shell, la lecture/écriture/édition de fichiers (remplacements multiples, correctifs, déplacement, suppression, arborescence), la recherche, la récupération/recherche web, les todos et les mises à jour de notebook
 - Commandes slash pour le statut, le compactage, l'inspection de config, le diff, l'export, la gestion de session et le rapport de version
 - Découverte d'agents et de skills locaux avec `claw agents list` et `claw skills`
 - Découverte et gestion de plugins via la CLI et les surfaces de commandes slash
