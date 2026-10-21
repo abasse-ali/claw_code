@@ -44,7 +44,7 @@ fn missing_arguments(input: &str, required: &[String]) -> Result<Vec<String>, St
     let value = if trimmed.is_empty() {
         Value::Object(Map::new())
     } else {
-        serde_json::from_str(trimmed).map_err(|error| error.to_string())?
+        serde_json::from_str(trimmed).map_err(|error| json_problem(trimmed, &error))?
     };
     let object = value
         .as_object()
@@ -54,6 +54,32 @@ fn missing_arguments(input: &str, required: &[String]) -> Result<Vec<String>, St
         .filter(|name| object.get(*name).is_none_or(Value::is_null))
         .cloned()
         .collect())
+}
+
+/// L'erreur de lecture du JSON, avec l'extrait où elle se trouve et ce qu'il
+/// faut y changer : « line 1 column 22 » seul ne dit rien à un petit modèle.
+fn json_problem(text: &str, error: &serde_json::Error) -> String {
+    let Some(line) = text.lines().nth(error.line().saturating_sub(1)) else {
+        return error.to_string();
+    };
+    let chars: Vec<char> = line.chars().collect();
+    let at = error.column().saturating_sub(1).min(chars.len());
+    let start = at.saturating_sub(30);
+    let end = (at + 10).min(chars.len());
+    let near: String = chars[start..end].iter().collect();
+    let around: String = chars[at.saturating_sub(3)..(at + 2).min(chars.len())]
+        .iter()
+        .collect();
+    let hint = if around.contains('\\') {
+        " (a backslash inside a JSON string is written twice: \"\\\\d+\", \"C:\\\\dir\\\\file\")"
+    } else if around.contains('\'') {
+        " (JSON strings and keys use double quotes)"
+    } else if error.to_string().contains("control character") {
+        " (inside a JSON string write a line break as \\n and a tab as \\t)"
+    } else {
+        ""
+    };
+    format!("{error}; problem near: {near}{hint}")
 }
 
 /// Ce qui est arrivé à un appel d'outil inexécutable dans une réponse qui ne
@@ -619,6 +645,15 @@ mod tests {
         let broken =
             problem("edit_file", r#"{"path": "a.py", "#, &required).expect("JSON invalide");
         assert!(broken.starts_with("invalid tool input JSON: "));
+        // Ce que la réparation ne sait pas refaire : l'extrait fautif est montré.
+        let broken = problem("grep_search", r#"{"pattern": "a" "b"}"#, &[]).expect("JSON invalide");
+        assert!(
+            broken.contains(r#"problem near: {"pattern": "a" "b"}"#),
+            "{broken}"
+        );
+        let escape =
+            problem("grep_search", r#"{"pattern": "\d+"}"#, &[]).expect("échappement invalide");
+        assert!(escape.contains("a backslash inside a JSON string is written twice"));
         let cut = problem("write_file", &output_limit_marker(), &required).expect("appel coupé");
         assert!(cut.contains("reached the output limit before the arguments of `write_file`"));
         // Un outil sans argument obligatoire accepte un appel vide.

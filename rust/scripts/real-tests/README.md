@@ -54,10 +54,12 @@ d'essais qui en a au-dessus de lui.
 
 Sur GitHub, le workflow « Essais réels » (`.github/workflows/real-tests.yml`, lancé à la
 main) fait tourner le banc avec un modèle de NVIDIA (secret `NVIDIA_API_KEY` du dépôt) :
-scénarios au choix (« tous » pour le banc entier), un essai après l'autre. `report.py` écrit
-dans le journal du job la note de chaque point, les notices et les remarques de Claw, la
-réponse finale et la trace de la session ; la clé est retirée des fichiers des essais avant
-leur dépôt en artefact.
+scénarios au choix (« tous » pour le banc entier). Claw est compilé une fois, puis chaque
+scénario a son job, trois à la fois par défaut (`parallel`), pour rester sous la limite de
+requêtes de NVIDIA. Lancé sur une branche (`ref`), il essaie le Claw de cette branche.
+`report.py` écrit dans le journal du job la note de chaque point, les notices et les
+remarques de Claw, la réponse finale et la trace de la session ; la clé est retirée des
+fichiers des essais avant leur dépôt en artefact.
 
 Règles : modèles gratuits seulement ; peu d'essais, ciblés (chaque étape de l'agent coûte une
 requête du quota gratuit) ; les vraies clés sont lues par Claw et ne sont jamais affichées.

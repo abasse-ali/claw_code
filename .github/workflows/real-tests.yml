@@ -1,11 +1,12 @@
 name: Essais réels
 
 # Banc d'essais réels de Claw (rust/scripts/real-tests) avec de vrais modèles de NVIDIA, lancé
-# à la main : chaque scénario est noté par sa vérification cachée. Le résumé, la note détaillée,
-# les remarques de Claw et la trace de chaque session vont dans le journal du job, pour lire
-# le comportement du modèle sans rien télécharger. La clé (secret NVIDIA_API_KEY) n'est jamais
-# écrite : GitHub la masque dans le journal, et elle est retirée des fichiers des essais avant
-# leur dépôt en artefact (une commande de l'agent pourrait l'avoir affichée).
+# à la main : chaque scénario est noté par sa vérification cachée. Claw est compilé une fois,
+# puis chaque scénario a son job : son journal (résumé, note détaillée, remarques de Claw,
+# trace de la session) se lit dès que ce scénario est fini, sans attendre les autres. La clé
+# (secret NVIDIA_API_KEY) n'est jamais écrite : GitHub la masque dans le journal, et elle est
+# retirée des fichiers des essais avant leur dépôt en artefact (une commande de l'agent
+# pourrait l'avoir affichée).
 
 on:
   workflow_dispatch:
@@ -34,19 +35,26 @@ on:
         required: false
         default: "1500"
         type: string
+      parallel:
+        description: Scénarios lancés en même temps (NVIDIA limite à une quarantaine de requêtes par minute)
+        required: false
+        default: "3"
+        type: string
 
 permissions:
   contents: read
 
-# Un banc à la fois : NVIDIA limite à une quarantaine de requêtes par minute.
+# Un banc à la fois, pour rester sous la limite de requêtes de NVIDIA.
 concurrency:
   group: real-tests
   cancel-in-progress: false
 
 jobs:
-  essais:
+  claw:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 30
+    outputs:
+      scenarios: ${{ steps.list.outputs.scenarios }}
     steps:
       - uses: actions/checkout@v6
 
@@ -59,6 +67,25 @@ jobs:
             exit 1
           fi
 
+      - name: Scénarios
+        id: list
+        env:
+          SCENARIOS: ${{ inputs.scenarios }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+          from pathlib import Path
+          known = sorted(path.name for path in Path("rust/scripts/real-tests/scenarios").iterdir() if path.is_dir())
+          asked = os.environ["SCENARIOS"].split()
+          chosen = known if asked == ["tous"] else asked
+          unknown = [name for name in chosen if name not in known]
+          if unknown or not chosen:
+              print(f"::error::Scénarios inconnus : {' '.join(unknown) or '(aucun)'}. Connus : {' '.join(known)}")
+              sys.exit(1)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"scenarios={json.dumps(chosen)}\n")
+          EOF
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -68,14 +95,42 @@ jobs:
         working-directory: rust
         run: cargo build --locked -p claw-cli
 
-      # Les projets des scénarios se vérifient avec pytest.
-      - name: Outils des scénarios
-        run: python3 -m pip install --quiet --break-system-packages pytest
+      - uses: actions/upload-artifact@v7
+        with:
+          name: claw-${{ github.run_id }}
+          path: rust/target/debug/claw
+          retention-days: 1
 
-      - name: Essais
+  essai:
+    needs: claw
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.parallel) }}
+      matrix:
+        scenario: ${{ fromJSON(needs.claw.outputs.scenarios) }}
+    name: ${{ matrix.scenario }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: claw-${{ github.run_id }}
+          path: ${{ runner.temp }}/claw-bin
+
+      # Les projets des scénarios se vérifient avec pytest. Installé pour tout le
+      # système : les commandes de Claw ont leur propre dossier personnel (bac à
+      # sable), où un pytest de ~/.local serait introuvable.
+      - name: Outils des scénarios
+        run: |
+          chmod +x "$RUNNER_TEMP/claw-bin/claw"
+          sudo python3 -m pip install --quiet --break-system-packages pytest
+
+      - name: Essai
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-          SCENARIOS: ${{ inputs.scenarios }}
+          SCENARIO: ${{ matrix.scenario }}
           MODEL: ${{ inputs.model }}
           LABEL: ${{ inputs.label }}
           TIMEOUT: ${{ inputs.timeout }}
@@ -87,24 +142,17 @@ jobs:
           git config --global user.name claw-bench
           git config --global user.email bench@localhost
           git config --global init.defaultBranch main
-          if [ "$SCENARIOS" = "tous" ]; then
-            SCENARIOS=$(ls rust/scripts/real-tests/scenarios)
-          fi
-          for scenario in $SCENARIOS; do
-            echo "::group::Essai $scenario"
-            python3 rust/scripts/real-tests/run.py "$scenario" --model "$MODEL" --label "${LABEL:-nvidia}" \
-              --timeout "$TIMEOUT" --claw "$GITHUB_WORKSPACE/rust/target/debug/claw" || echo "::warning::$scenario : le lanceur a échoué"
-            echo "::endgroup::"
-          done
+          python3 rust/scripts/real-tests/run.py "$SCENARIO" --model "$MODEL" --label "${LABEL:-nvidia}" \
+            --timeout "$TIMEOUT" --claw "$RUNNER_TEMP/claw-bin/claw" || echo "::warning::$SCENARIO : le lanceur a échoué"
 
-      - name: Résultats et traces
+      - name: Résultat et trace
         if: always()
         env:
           RUNS: ${{ runner.temp }}/claw-real-tests
           PYTHONIOENCODING: utf-8
         run: python3 rust/scripts/real-tests/report.py "$RUNS"
 
-      - name: Retirer la clé des fichiers des essais
+      - name: Retirer la clé des fichiers de l'essai
         if: always()
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
@@ -125,7 +173,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: essais-reels-${{ github.run_id }}
+          name: essai-${{ matrix.scenario }}-${{ github.run_id }}
           path: ${{ runner.temp }}/claw-real-tests
           retention-days: 14
           if-no-files-found: ignore

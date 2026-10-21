@@ -5,6 +5,8 @@ use std::sync::Mutex;
 use glob::{MatchOptions, Pattern};
 use serde_json::Value;
 
+use crate::harness::CLAW_NOTE_PREFIX;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PermissionMode {
     ReadOnly,
@@ -654,12 +656,7 @@ impl PermissionPolicy {
             // elles pourraient autoriser des modifications.
             if current_mode == PermissionMode::ReadOnly {
                 return PermissionOutcome::Deny {
-                    reason: format!(
-                        "l'outil '{tool_name}' nécessite la permission {} ; le mode actuel est {} \
-                         (lecture seule : explorez et proposez un plan sans modifier)",
-                        required_mode.as_str(),
-                        current_mode.as_str()
-                    ),
+                    reason: read_only_refusal(tool_name, &target),
                 };
             }
             if self.all_segments_allowed(tool_name, &target) {
@@ -700,7 +697,10 @@ impl PermissionPolicy {
                         "écriture hors du projet ({path}) : ajoutez le dossier avec /add-dir ou --add-dir, ou dans permissions.additionalDirectories"
                     ),
                     None => format!(
-                        "l'outil '{tool_name}' nécessite une approbation pour passer de {} à {}",
+                        "{CLAW_NOTE_PREFIX} {tool_name} was not run: it needs the user's approval \
+                         (from {} to {}) and nobody can answer in this session. Do not retry it, \
+                         even in another form or with another tool: continue without it and say \
+                         at the end what is waiting for approval.",
                         current_mode.as_str(),
                         required_mode.as_str()
                     ),
@@ -978,6 +978,20 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "where",
     "echo",
     "date",
+    "cd",
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "find",
+    "tree",
+    "stat",
+    "file",
+    "sort",
+    "cut",
+    "diff",
+    "git blame",
+    "git grep",
     "git status",
     "git diff",
     "git log",
@@ -995,7 +1009,77 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "Get-ChildItem",
     "Get-Content",
     "Get-Location",
+    "Select-String",
 ];
+
+/// Ce que dit au modèle un refus en lecture seule : les commandes qui passent.
+const READ_ONLY_SUMMARY: &str = "ls, cat, head, tail, wc, grep, find (without -exec or -delete), \
+    tree, diff, git status, git diff, git log, git show, git grep";
+
+/// Début du refus d'un outil en lecture seule : le runtime y ajoute la suite
+/// propre à l'agent principal (mode plan) ou au sous-agent.
+pub const READ_ONLY_REFUSAL: &str = "this session is read-only";
+
+/// Refus en lecture seule qui nomme ce qui ne passe pas et ce qui passe, pour
+/// que le modèle ne réessaie pas la même chose sous une autre forme.
+fn read_only_refusal(tool_name: &str, target: &ToolTarget) -> String {
+    let what = match target {
+        ToolTarget::Command(command) if command.has_substitution => {
+            "this command uses $(...) or backticks, which may run anything".to_string()
+        }
+        ToolTarget::Command(command) => command
+            .segments
+            .iter()
+            .find(|segment| !is_read_only_segment(segment))
+            .map_or_else(
+                || "this command may change files".to_string(),
+                |segment| format!("\"{}\" may change files", segment.text.trim()),
+            ),
+        _ => format!("{tool_name} changes files"),
+    };
+    format!(
+        "{CLAW_NOTE_PREFIX} {tool_name} was not run: {READ_ONLY_REFUSAL} and {what}. Commands \
+         allowed here: {READ_ONLY_SUMMARY}. To read and search, use read_file, grep_search and \
+         glob_search. Do not retry it in another form or with another tool."
+    )
+}
+
+/// Une option qui fait écrire un fichier ou lancer une commande à une
+/// commande de [`READ_ONLY_COMMANDS`] (`find -exec`, `sort -o`, `rg --pre`).
+fn has_unsafe_option(segment: &str) -> bool {
+    let tokens: Vec<&str> = segment
+        .split_whitespace()
+        .map(|token| token.trim_matches(|ch| ch == '"' || ch == '\''))
+        .collect();
+    let Some((program, options)) = tokens.split_first() else {
+        return false;
+    };
+    match *program {
+        "find" => options.iter().any(|option| {
+            matches!(
+                *option,
+                "-delete"
+                    | "-exec"
+                    | "-execdir"
+                    | "-ok"
+                    | "-okdir"
+                    | "-fprint"
+                    | "-fprint0"
+                    | "-fprintf"
+                    | "-fls"
+            )
+        }),
+        "sort" => options.iter().any(|option| {
+            option.starts_with('-') && !option.starts_with("--") && option.contains('o')
+        }),
+        "tree" => options.contains(&"-o"),
+        "rg" => options.iter().any(|option| option.starts_with("--pre")),
+        "git" => options
+            .iter()
+            .any(|option| *option == "-O" || option.starts_with("--open-files-in-pager")),
+        _ => false,
+    }
+}
 
 fn is_read_only_command(target: &ToolTarget) -> bool {
     let ToolTarget::Command(command) = target else {
@@ -1009,6 +1093,7 @@ fn is_read_only_command(target: &ToolTarget) -> bool {
 fn is_read_only_segment(segment: &CommandSegment) -> bool {
     !segment.redirects_output
         && !segment.text.contains("--output")
+        && !has_unsafe_option(&segment.text)
         && READ_ONLY_COMMANDS
             .iter()
             .any(|safe| command_pattern_matches(&format!("{safe}:*"), &segment.text))
@@ -1462,12 +1547,65 @@ mod tests {
 
         assert!(matches!(
             policy.authorize("write_file", "{}", None),
-            PermissionOutcome::Deny { reason } if reason.contains("nécessite la permission workspace-write")
+            PermissionOutcome::Deny { reason } if reason.contains("write_file was not run: this session is read-only and write_file changes files")
         ));
-        assert!(matches!(
-            policy.authorize("bash", "{}", None),
-            PermissionOutcome::Deny { reason } if reason.contains("nécessite la permission danger-full-access")
+        let PermissionOutcome::Deny { reason } =
+            policy.authorize("bash", r#"{"command":"cd src && npm test"}"#, None)
+        else {
+            panic!("refusé en lecture seule");
+        };
+        assert!(reason.starts_with(
+            "[Claw] bash was not run: this session is read-only and \"npm test\" may change files."
         ));
+        assert!(reason.contains("Commands allowed here: ls, cat"));
+        assert!(reason.contains("use read_file, grep_search and glob_search"));
+    }
+
+    #[test]
+    fn searching_commands_pass_in_read_only_mode_but_not_their_writing_options() {
+        let mut policy = policy(PermissionMode::ReadOnly, &[], &[], &[]);
+        for command in [
+            "cd src && grep -rn \"def load\" . | sort | head -20",
+            "find . -name '*.py' -not -path './.git/*'",
+            "rg -n TODO src && git grep -n parse && git blame -L 10,20 app.py",
+            "diff a.txt b.txt; stat app.py; file data.bin; tree -L 2; cut -d, -f1 data.csv",
+        ] {
+            assert_eq!(
+                policy.authorize("bash", &bash(command), None),
+                PermissionOutcome::Allow,
+                "{command}"
+            );
+        }
+        for command in [
+            "find . -name '*.pyc' -delete",
+            "find . -name '*.py' -exec sed -i s/a/b/ {} +",
+            "sort -o data.txt data.txt",
+            "rg --pre ./run.sh pattern",
+            "tree -o out.txt",
+            "git grep -O vim pattern",
+            "grep x a.txt > b.txt",
+        ] {
+            assert!(
+                matches!(
+                    policy.authorize("bash", &bash(command), None),
+                    PermissionOutcome::Deny { .. }
+                ),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_call_nobody_can_approve_says_to_continue_without_it() {
+        let mut policy = PermissionPolicy::new(PermissionMode::WorkspaceWrite)
+            .with_tool_requirement("bash", PermissionMode::DangerFullAccess);
+        let PermissionOutcome::Deny { reason } =
+            policy.authorize("bash", r#"{"command":"npm install"}"#, None)
+        else {
+            panic!("refusé sans personne pour répondre");
+        };
+        assert!(reason.starts_with("[Claw] bash was not run: it needs the user's approval"));
+        assert!(reason.contains("Do not retry it, even in another form"));
     }
 
     #[test]

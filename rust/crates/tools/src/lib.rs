@@ -2335,10 +2335,10 @@ fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
     let client = build_http_client()?;
     let request_url = normalize_fetch_url(&input.url)?;
     let response = client
-        .get(request_url)
+        .get(&request_url)
         .header(reqwest::header::ACCEPT, web_page::ACCEPT)
         .send()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| fetch_failure(&request_url, &error))?;
 
     let status = response.status();
     let final_url = response.url().to_string();
@@ -2359,7 +2359,12 @@ fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
         content_type: &content_type,
         body: &body,
     };
-    let result = web_page::render(&fetched, &input.prompt, input.offset);
+    let mut result = web_page::render(&fetched, &input.prompt, input.offset);
+    // Une page d'erreur se lit comme une page : dit d'abord, sinon « Page not
+    // found » ou une page de blocage passe pour le contenu demandé.
+    if code >= 400 {
+        result = format!("{}\n{result}", error_status_note(code, &code_text));
+    }
 
     Ok(WebFetchOutput {
         bytes: body.len(),
@@ -2513,19 +2518,156 @@ fn build_http_client() -> Result<Client, String> {
         .map_err(|error| error.to_string())
 }
 
+/// Hôte d'une machine locale ou d'un réseau privé : jamais passé en https
+/// (un serveur de développement n'en a pas), et cité avec l'état des tâches de
+/// fond quand rien n'y répond.
+fn is_local_host(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    is_local_name(host) || host == "host.docker.internal"
+}
+
+/// Nom sans point, adresse IP, ou nom en `.local` / `.localhost`.
+fn is_local_name(host: &str) -> bool {
+    let last = host.rsplit('.').next().unwrap_or_default();
+    !host.contains('.')
+        || host.parse::<std::net::IpAddr>().is_ok()
+        || last.eq_ignore_ascii_case("local")
+        || last.eq_ignore_ascii_case("localhost")
+}
+
+/// L'adresse à demander : schéma ajouté quand il manque (`docs.python.org/3/`,
+/// `localhost:8000`), `0.0.0.0` (ce qu'affichent Flask, uvicorn ou Vite)
+/// lu comme `127.0.0.1`, et https pour un site public seulement.
 fn normalize_fetch_url(url: &str) -> Result<String, String> {
-    let parsed = reqwest::Url::parse(url).map_err(|error| error.to_string())?;
-    if parsed.scheme() == "http" {
-        let host = parsed.host_str().unwrap_or_default();
-        if host != "localhost" && host != "127.0.0.1" && host != "::1" {
-            let mut upgraded = parsed;
-            upgraded
-                .set_scheme("https")
-                .map_err(|()| String::from("failed to upgrade URL to https"))?;
-            return Ok(upgraded.to_string());
-        }
+    let trimmed = url.trim();
+    let with_scheme = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        let authority = trimmed.split(['/', '?', '#']).next().unwrap_or_default();
+        let host = authority
+            .rsplit_once(':')
+            .map_or(authority, |(host, _)| host);
+        let scheme = if is_local_name(host) { "http" } else { "https" };
+        format!("{scheme}://{trimmed}")
+    };
+    let mut parsed = reqwest::Url::parse(&with_scheme).map_err(|error| {
+        format!("[Claw] \"{url}\" is not a web address ({error}). Write it in full, such as https://docs.python.org/3/ or http://localhost:8000/.")
+    })?;
+    if parsed.host_str() == Some("0.0.0.0") {
+        let _ = parsed.set_host(Some("127.0.0.1"));
+    }
+    if parsed.scheme() == "http" && !is_local_host(&parsed) {
+        parsed
+            .set_scheme("https")
+            .map_err(|()| String::from("failed to upgrade URL to https"))?;
     }
     Ok(parsed.to_string())
+}
+
+/// Ce que dit `WebFetch` quand la requête n'a pas abouti : la cause, que
+/// reqwest garde dans `source()` (« error sending request » seul ne dit rien),
+/// et pour une adresse locale l'état des commandes lancées en fond.
+fn fetch_failure(url: &str, error: &reqwest::Error) -> String {
+    let mut causes = Vec::new();
+    let mut source: Option<&dyn std::error::Error> = Some(error);
+    while let Some(current) = source {
+        causes.push(current.to_string());
+        source = current.source();
+    }
+    let chain = causes.join(" | ").to_lowercase();
+    let parsed = reqwest::Url::parse(url).ok();
+    let place = parsed
+        .as_ref()
+        .and_then(|url| {
+            Some(format!(
+                "{}:{}",
+                url.host_str()?,
+                url.port_or_known_default()?
+            ))
+        })
+        .unwrap_or_else(|| url.to_string());
+    let local = parsed.as_ref().is_some_and(is_local_host);
+    if error.is_timeout() || chain.contains("timed out") {
+        return format!(
+            "[Claw] No answer from {url} within 20 s, so nothing was fetched.{}",
+            if local {
+                background_servers()
+            } else {
+                String::new()
+            }
+        );
+    }
+    if chain.contains("refused") {
+        if local {
+            return format!(
+                "[Claw] Nothing answers on {place} (connection refused): no server is listening on that port.{} Start the server in the background (bash with run_in_background), read its output with BashOutput, fix what stops it, then fetch again. Do not give this address to the user before it answers.",
+                background_servers()
+            );
+        }
+        return format!("[Claw] {place} refused the connection: nothing was fetched.");
+    }
+    if chain.contains("dns") || chain.contains("lookup") || chain.contains("name or service") {
+        return format!(
+            "[Claw] The host of {url} was not found (DNS lookup failed). Do not guess addresses: find the right one with WebSearch."
+        );
+    }
+    if chain.contains("certificate") || chain.contains("tls") || chain.contains("ssl") {
+        return format!(
+            "[Claw] The secure connection to {url} failed ({}). If it is a local server without https, write the address with http://.",
+            causes.last().map_or("TLS error", String::as_str)
+        );
+    }
+    format!(
+        "[Claw] Could not fetch {url}: {}.",
+        causes
+            .last()
+            .map_or_else(|| error.to_string(), Clone::clone)
+    )
+}
+
+/// Les commandes lancées en fond, pour un serveur local qui ne répond pas :
+/// arrêté sur une erreur, ou jamais lancé.
+fn background_servers() -> String {
+    let tasks = runtime::bash_tasks::list();
+    if tasks.is_empty() {
+        return " No command runs in the background in this session.".to_string();
+    }
+    let described: Vec<String> = tasks
+        .iter()
+        .map(|task| {
+            let state = if task.running {
+                format!("running for {} s", task.elapsed_secs)
+            } else {
+                match task.exit_code {
+                    Some(code) => format!("exited with code {code}"),
+                    None => "stopped".to_string(),
+                }
+            };
+            format!(
+                "{} \"{}\" {state}",
+                task.id,
+                task.command.chars().take(80).collect::<String>()
+            )
+        })
+        .collect();
+    format!(" Background commands: {}.", described.join("; "))
+}
+
+/// La phrase mise devant une page d'erreur (code 400 et plus).
+fn error_status_note(code: u16, text: &str) -> String {
+    let meaning = match code {
+        401 | 403 => "access to this address is refused",
+        404 | 410 => "this address does not exist",
+        429 => "too many requests were sent to this server",
+        500..=599 => "the server failed while answering",
+        _ => "the request was not accepted",
+    };
+    format!(
+        "[Claw] The server answered {code} {text}: {meaning}. The text below is its error page, not the content you wanted. Check the address, or look for the right page with WebSearch."
+    )
 }
 
 fn build_search_url(query: &str) -> Result<reqwest::Url, String> {
@@ -3298,16 +3440,113 @@ fn run_agent_conversation(job: &AgentJob, interactive: bool) -> Result<String, S
         );
     }
 
-    let summary = if interactive {
+    let outcome = if interactive {
         // Plusieurs sous-agents peuvent tourner en parallèle : l'invite partagée
         // n'est verrouillée que le temps de chaque demande d'autorisation.
         let mut labeled = SlotPrompter { label: &label };
         runtime.run_turn(job.prompt.clone(), Some(&mut labeled))
     } else {
         runtime.run_turn(job.prompt.clone(), None)
+    };
+    // Sans rapport (erreur du fournisseur en route, outils appelés au lieu de
+    // conclure), ce que le sous-agent a fait revient au parent, sans requête
+    // de plus (E1-12 : jusqu'à 32 requêtes perdues, et la même tâche relancée).
+    match outcome {
+        Ok(summary) => {
+            let report = final_assistant_text(&summary);
+            if report.trim().is_empty() {
+                if let Some(notes) = agent_work_notes(
+                    runtime.session(),
+                    &label,
+                    "ended without writing its report",
+                ) {
+                    return Ok(notes);
+                }
+            }
+            Ok(report)
+        }
+        Err(error) => {
+            let error = error.to_string();
+            Err(agent_work_notes(
+                runtime.session(),
+                &label,
+                &format!("stopped before writing its report ({error})"),
+            )
+            .unwrap_or(error))
+        }
     }
-    .map_err(|error| error.to_string())?;
-    Ok(final_assistant_text(&summary))
+}
+
+/// Ce qu'un sous-agent a fait avant de s'arrêter sans rapport : son dernier
+/// texte, les fichiers lus et modifiés, les recherches et les commandes,
+/// puis la consigne de partir de là. `None` s'il n'a rien fait.
+fn agent_work_notes(session: &Session, label: &str, reason: &str) -> Option<String> {
+    let mut last_text = String::new();
+    let (mut read, mut changed, mut searches, mut commands) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for message in &session.messages {
+        for block in &message.blocks {
+            match block {
+                ContentBlock::Text { text }
+                    if message.role == MessageRole::Assistant && !text.trim().is_empty() =>
+                {
+                    last_text = text.trim().to_string();
+                }
+                ContentBlock::ToolUse { name, input, .. } => {
+                    let input: Value = serde_json::from_str(input).unwrap_or(Value::Null);
+                    let field = |key: &str| {
+                        input
+                            .get(key)
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()
+                    };
+                    let list = match name.as_str() {
+                        "read_file" => Some((&mut read, field("path"))),
+                        "write_file" | "edit_file" => Some((&mut changed, field("path"))),
+                        "grep_search" | "glob_search" => Some((&mut searches, field("pattern"))),
+                        "bash" | "PowerShell" => {
+                            Some((&mut commands, field("command").chars().take(120).collect()))
+                        }
+                        _ => None,
+                    };
+                    if let Some((list, item)) = list {
+                        if !item.is_empty() && !list.contains(&item) {
+                            list.push(item);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if last_text.is_empty() && read.is_empty() && changed.is_empty() && commands.is_empty() {
+        return None;
+    }
+    let mut notes = String::new();
+    if !last_text.is_empty() {
+        notes.push_str(&last_text);
+        notes.push_str("\n\n");
+    }
+    for (title, list) in [
+        ("Files read", &read),
+        ("Files changed", &changed),
+        ("Searches", &searches),
+        ("Commands run", &commands),
+    ] {
+        if !list.is_empty() {
+            notes.push_str(title);
+            notes.push_str(": ");
+            notes.push_str(&list.join(", "));
+            notes.push('\n');
+        }
+    }
+    notes.push_str("\n[Claw] The sub-agent ");
+    notes.push_str(label);
+    notes.push(' ');
+    notes.push_str(reason);
+    notes.push_str(". What it had done so far is above. Do not start the same task again as it is: continue from these notes yourself, or delegate a smaller part.");
+    Some(notes)
 }
 
 /// Sous-agent isolé (`isolation: "worktree"`) : un processus `claw` à part,
@@ -5772,6 +6011,46 @@ mod tests {
     }
 
     #[test]
+    fn a_sub_agent_stopped_without_a_report_hands_back_what_it_did() {
+        use runtime::{ContentBlock, ConversationMessage};
+        let call = |name: &str, input: &str| ContentBlock::ToolUse {
+            id: "appel".to_string(),
+            name: name.to_string(),
+            input: input.to_string(),
+        };
+        let mut session = Session::new();
+        session.messages.extend([
+            ConversationMessage::user_text("Trouve où les montants sont arrondis".to_string()),
+            ConversationMessage::assistant(vec![
+                ContentBlock::Text {
+                    text: "Je cherche l'arrondi.".to_string(),
+                },
+                call("grep_search", r#"{"pattern":"round("}"#),
+            ]),
+            ConversationMessage::assistant(vec![
+                call("read_file", r#"{"path":"stats.py"}"#),
+                call("read_file", r#"{"path":"stats.py"}"#),
+                call("bash", r#"{"command":"python -m pytest -q"}"#),
+            ]),
+        ]);
+        let notes = super::agent_work_notes(
+            &session,
+            "Explore",
+            "stopped before writing its report (erreur 429)",
+        )
+        .expect("travail rendu");
+        assert!(notes.starts_with("Je cherche l'arrondi."));
+        assert!(notes.contains("Files read: stats.py\n"));
+        assert!(notes.contains("Searches: round("));
+        assert!(notes.contains("Commands run: python -m pytest -q"));
+        assert!(notes.contains(
+            "[Claw] The sub-agent Explore stopped before writing its report (erreur 429). What it had done so far is above. Do not start the same task again as it is"
+        ));
+        // Rien de fait : l'erreur reste telle quelle.
+        assert!(super::agent_work_notes(&Session::new(), "Explore", "stopped").is_none());
+    }
+
+    #[test]
     fn isolated_agents_take_worktree_only_and_read_the_json_report() {
         assert_eq!(super::parse_isolation(None), Ok(false));
         assert_eq!(super::parse_isolation(Some("worktree")), Ok(true));
@@ -5967,6 +6246,61 @@ mod tests {
         )
         .expect_err("invalid URL should fail");
         assert!(error.contains("relative URL without a base") || error.contains("invalid"));
+    }
+
+    #[test]
+    fn web_fetch_completes_addresses_and_keeps_local_servers_on_http() {
+        let normalized = |url: &str| super::normalize_fetch_url(url).expect("adresse");
+        assert_eq!(
+            normalized("docs.python.org/3/"),
+            "https://docs.python.org/3/"
+        );
+        assert_eq!(
+            normalized("localhost:8000/api"),
+            "http://localhost:8000/api"
+        );
+        assert_eq!(normalized("http://0.0.0.0:8000/"), "http://127.0.0.1:8000/");
+        assert_eq!(
+            normalized("http://192.168.1.20:3000/"),
+            "http://192.168.1.20:3000/"
+        );
+        assert_eq!(normalized("http://monposte:8080/"), "http://monposte:8080/");
+        assert_eq!(normalized("http://example.com/a"), "https://example.com/a");
+    }
+
+    #[test]
+    fn web_fetch_says_when_nothing_listens_or_the_page_is_an_error() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("port libre")
+            .local_addr()
+            .expect("adresse")
+            .port();
+        let error = execute_tool(
+            "WebFetch",
+            &json!({ "url": format!("http://127.0.0.1:{port}/"), "prompt": "page" }),
+        )
+        .expect_err("rien n'écoute");
+        assert!(
+            error.contains(&format!(
+                "Nothing answers on 127.0.0.1:{port} (connection refused)"
+            )),
+            "{error}"
+        );
+        assert!(error.contains("BashOutput"));
+
+        let server = TestServer::spawn(Arc::new(|_: &str| {
+            HttpResponse::text(404, "Not Found", "Page not found")
+        }));
+        let result = execute_tool(
+            "WebFetch",
+            &json!({ "url": format!("http://{}/docs", server.addr()), "prompt": "docs" }),
+        )
+        .expect("une page d'erreur est rendue");
+        let output: serde_json::Value = serde_json::from_str(&result).expect("json");
+        let text = output["result"].as_str().expect("texte");
+        assert!(text
+            .starts_with("[Claw] The server answered 404 Not Found: this address does not exist."));
+        assert!(text.contains("Page not found"));
     }
 
     #[test]

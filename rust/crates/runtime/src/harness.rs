@@ -1122,14 +1122,67 @@ pub(crate) fn fingerprint(text: &str) -> u64 {
     hasher.finish()
 }
 
-fn is_failure(tool_name: &str, output: &str, is_error: bool) -> bool {
+fn is_failure(tool_name: &str, input: &str, output: &str, is_error: bool) -> bool {
     if is_error {
         return true;
     }
     matches!(tool_name, "bash" | "PowerShell") && {
         let result = read_bash_output(output);
-        !result.passed
+        !result.passed && !clean_refusal(input, output)
     }
+}
+
+/// Ce qui montre qu'une commande a planté ou n'a pas pu se lancer, et non
+/// qu'un programme a refusé proprement une saisie.
+const CRASH_SIGNS: [&str; 16] = [
+    "Traceback (most recent call last)",
+    "panicked at",
+    "command not found",
+    "No such file or directory",
+    "is not recognized as",
+    "Segmentation fault",
+    "Permission denied",
+    "SyntaxError",
+    "ModuleNotFoundError",
+    "ImportError",
+    "Exception in thread",
+    "Unhandled",
+    "Cannot find module",
+    "npm ERR!",
+    "fatal:",
+    "error[E",
+];
+
+/// Une commande qui n'est pas une vérification et qui s'arrête sur un refus
+/// propre : code 1 ou 2, sortie courte, sans trace d'exception ni commande
+/// introuvable. C'est le plus souvent l'essai voulu d'un cas d'erreur (membre
+/// inconnu, date impossible, commande mal écrite), dont le refus est le
+/// résultat attendu : ce n'est pas un échec de plus d'affilée (vu le 21 octobre
+/// 2026, essai t4 sur Nemotron Ultra : quatre refus voulus pris pour un
+/// enlisement, et le modèle prié d'arrêter pour diagnostiquer).
+fn clean_refusal(input: &str, output: &str) -> bool {
+    let command = serde_json::from_str::<Value>(input)
+        .ok()
+        .and_then(|value| value.get("command").and_then(Value::as_str).map(squeeze))
+        .unwrap_or_default();
+    if command.is_empty() || is_check_command(&command) {
+        return false;
+    }
+    let Some(Ok(value)) = serde_json::Deserializer::from_str(output)
+        .into_iter::<Value>()
+        .next()
+    else {
+        return false;
+    };
+    let text = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or_default();
+    if !matches!(
+        text("returnCodeInterpretation"),
+        "exit_code:1" | "exit_code:2"
+    ) {
+        return false;
+    }
+    let combined = format!("{}\n{}", text("stdout"), text("stderr"));
+    combined.chars().count() <= 800 && !CRASH_SIGNS.iter().any(|sign| combined.contains(sign))
 }
 
 impl StallGuard {
@@ -1146,7 +1199,7 @@ impl StallGuard {
         output: &str,
         is_error: bool,
     ) -> Option<Reminder> {
-        let failed = is_failure(tool_name, output, is_error);
+        let failed = is_failure(tool_name, input, output, is_error);
         if failed {
             self.consecutive_failures += 1;
         } else {
@@ -2284,6 +2337,15 @@ pub fn turn_limit_note(limit: usize) -> String {
     )
 }
 
+/// Dernière étape d'un sous-agent : son rapport, sans outil (E1-12 : à la
+/// limite, tout son travail se perdait dans une erreur).
+#[must_use]
+pub fn subagent_limit_note(steps: usize) -> String {
+    format!(
+        "[Claw] You have used your {steps} steps, the limit for a sub-agent. Do not call any tool (a call made in your next reply will not run). Write your final report now: what you established, with files and lines, and what remains unchecked."
+    )
+}
+
 /// Résultat d'un appel d'outil demandé après ce message : il n'a pas tourné.
 #[must_use]
 pub fn turn_limit_refusal(limit: usize) -> String {
@@ -2868,6 +2930,17 @@ pub const ANNOUNCE_NOTE: &str = "[Claw] You started working without a word for t
 /// Étapes d'outils d'affilée sans un mot pour l'utilisateur avant que Claw
 /// lui demande où en est le travail (une requête de plus, en texte seul).
 pub const SILENT_STEPS_BEFORE_UPDATE: u32 = 20;
+
+/// Étapes muettes après une réponse reprise (contrôle de Claw) avant que Claw
+/// demande ce qui se passe. Une seule vérification avant de conclure ne vaut
+/// pas une requête de plus : vu le 21 octobre 2026 (essai t4 sur Nemotron
+/// Ultra), l'annonce demandée après une commande a reçu le rapport final, puis
+/// « continuez » une réponse vide de sens à sa place.
+pub const RESUMED_SILENT_STEPS: u32 = 2;
+
+/// Demandée quand le modèle, renvoyé au travail après sa réponse, s'y remet
+/// sans un mot pendant [`RESUMED_SILENT_STEPS`] étapes.
+pub const RESUMED_NOTE: &str = "[Claw] You went back to work after your answer without a word for the user. Reply now with one to three short sentences for the user, in plain words and without code: what you are checking or changing, and why. Tools are off for this one reply; you go on with the work right after.";
 
 /// Point d'étape demandé après [`SILENT_STEPS_BEFORE_UPDATE`] étapes muettes.
 #[must_use]
@@ -5115,6 +5188,59 @@ mod tests {
             .observe("bash", r#"{"command":"cargo build"}"#, failing, false)
             .expect("quatre échecs");
         assert!(other.to_model.contains("4 tool calls in a row have failed"));
+
+        // Des cas d'erreur essayés exprès : un refus propre n'est pas un échec.
+        let mut guard = StallGuard::default();
+        for (command, stdout, code) in [
+            (
+                "python biblio.py reserver Zoé L1",
+                "Refusé : Zoé n'est pas membre\n",
+                1,
+            ),
+            (
+                "python biblio.py reserver Awa L99",
+                "Refusé : le livre L99 n'existe pas\n",
+                1,
+            ),
+            (
+                "python biblio.py reserver",
+                "Utilisation : python biblio.py reserver MEMBRE LIVRE\n",
+                2,
+            ),
+            (
+                "python conges.py 31/02/2026 01/03/2026",
+                "Erreur : date impossible\n",
+                1,
+            ),
+            ("grep -n absent app.py", "", 1),
+        ] {
+            let input = serde_json::json!({ "command": command }).to_string();
+            let output = serde_json::json!({
+                "stdout": stdout, "stderr": "", "returnCodeInterpretation": format!("exit_code:{code}")
+            })
+            .to_string();
+            assert!(
+                guard.observe("bash", &input, &output, false).is_none(),
+                "{command}"
+            );
+        }
+        // Un plantage, lui, compte.
+        let mut guard = StallGuard::default();
+        let crash = serde_json::json!({
+            "stdout": "", "stderr": "Traceback (most recent call last):\n  File \"app.py\"\nKeyError: 'x'",
+            "returnCodeInterpretation": "exit_code:1"
+        })
+        .to_string();
+        for index in 0..3 {
+            let input =
+                serde_json::json!({ "command": format!("python app.py {index}") }).to_string();
+            assert!(guard.observe("bash", &input, &crash, false).is_none());
+        }
+        assert!(guard
+            .observe("bash", r#"{"command":"python app.py 4"}"#, &crash, false)
+            .is_some_and(|reminder| reminder
+                .to_model
+                .contains("4 tool calls in a row have failed")));
 
         // Un résultat différent remet le compteur de répétition à zéro.
         let mut guard = StallGuard::default();

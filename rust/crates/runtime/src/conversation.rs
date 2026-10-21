@@ -405,6 +405,9 @@ struct TurnAids {
     announce_checked: bool,
     /// Étapes d'outils d'affilée sans un mot pour l'utilisateur.
     silent_steps: u32,
+    /// Le travail a repris après une réponse (contrôle de Claw) et le modèle
+    /// n'a encore rien dit depuis.
+    resumed: bool,
     /// Annonce à demander à la requête suivante (en texte seul).
     announce_due: Option<String>,
     /// Le message est une question sur le travail : la réponse en texte seul
@@ -1398,18 +1401,22 @@ where
         // Quelques mots suffisent ; rien, ou un mot isolé, ne dit rien du plan.
         if said.split_whitespace().count() >= 4 {
             aids.announce_checked = true;
+            aids.resumed = false;
             aids.silent_steps = 0;
             return None;
         }
         aids.silent_steps += 1;
         let note = if !aids.announce_checked {
             harness::ANNOUNCE_NOTE.to_string()
+        } else if aids.resumed && aids.silent_steps >= harness::RESUMED_SILENT_STEPS {
+            harness::RESUMED_NOTE.to_string()
         } else if aids.silent_steps >= harness::SILENT_STEPS_BEFORE_UPDATE {
             harness::update_note(aids.silent_steps)
         } else {
             return None;
         };
         aids.announce_checked = true;
+        aids.resumed = false;
         aids.silent_steps = 0;
         Some(format!(
             "{note}{}",
@@ -1673,6 +1680,17 @@ where
             harness::TURN_REQUEST_LIMIT,
             std::env::var_os("CLAW_TURN_REQUESTS").is_some(),
         );
+        // Étapes bornées (un sous-agent en a 32) : le modèle conclut à la
+        // dernière, au lieu que le tour échoue et que tout son travail se perde
+        // (E1-12 : jusqu'à 32 requêtes sans rien rendre).
+        if self.max_iterations != usize::MAX {
+            let last = self.max_iterations.saturating_sub(1).max(1);
+            turn_limit = if turn_limit == 0 {
+                last
+            } else {
+                turn_limit.min(last)
+            };
+        }
         // Mode projet : un tour long est normal, le plan en jalons fait le point.
         if aids.project.is_some() {
             aids.stall.skip_budget();
@@ -1726,10 +1744,17 @@ where
             if !wrapping_up && limit > 0 && iterations > limit {
                 wrapping_up = true;
                 let plural = if limit > 1 { "s" } else { "" };
-                self.api_client.notify(&format!(
-                    "Ce tour a utilisé {limit} requête{plural}, la limite d'un tour (réglage `turnRequestLimit`) : Claw demande à l'agent de conclure. Écrivez « continue » pour poursuivre"
-                ));
-                let mut note = harness::turn_limit_note(limit);
+                let mut note = if self.subagent {
+                    self.api_client.notify(&format!(
+                        "Le sous-agent a utilisé ses {limit} étapes : Claw lui demande son rapport"
+                    ));
+                    harness::subagent_limit_note(limit)
+                } else {
+                    self.api_client.notify(&format!(
+                        "Ce tour a utilisé {limit} requête{plural}, la limite d'un tour (réglage `turnRequestLimit`) : Claw demande à l'agent de conclure. Écrivez « continue » pour poursuivre"
+                    ));
+                    harness::turn_limit_note(limit)
+                };
                 if aids.project.is_some() {
                     note.push_str(project::WRAP_UP_NOTE);
                 }
@@ -2028,9 +2053,12 @@ where
                     aids.feedback_pending = true;
                     superseded_draft = Some(answer);
                     // Le travail reprend après la réponse : s'il s'y remet sans un
-                    // mot, le modèle redit ce qu'il fait (vu le 20 octobre 2026,
-                    // session 15 : des tests relancés en silence après sa réponse).
-                    aids.announce_checked = false;
+                    // mot pendant quelques étapes, le modèle redit ce qu'il fait
+                    // (vu le 20 octobre 2026, session 15 : des tests relancés en
+                    // silence après sa réponse). La réponse a déjà parlé à
+                    // l'utilisateur : pas d'annonce de départ.
+                    aids.announce_checked = true;
+                    aids.resumed = true;
                     aids.silent_steps = 0;
                 }
                 self.session
@@ -2234,9 +2262,25 @@ where
                 .map(|prompt| prompt as &mut dyn PermissionPrompter),
         );
         if let PermissionOutcome::Deny { reason } = outcome {
-            return Err((reason, true));
+            return Err((self.refusal_for_model(reason), true));
         }
         Ok((pre.messages().to_vec(), updated))
+    }
+
+    /// Un refus en lecture seule dit aussi la suite : en mode plan, faire
+    /// approuver le plan pour pouvoir modifier ; pour un sous-agent (relecture,
+    /// audit), dire dans son rapport ce qu'il n'a pas pu lancer.
+    fn refusal_for_model(&self, reason: String) -> String {
+        if !reason.contains(crate::permissions::READ_ONLY_REFUSAL) {
+            return reason;
+        }
+        if self.subagent {
+            format!("{reason} Put in your report what you could not run.")
+        } else {
+            format!(
+                "{reason} When your plan is complete, submit it with ExitPlanMode: the user's approval lets you edit."
+            )
+        }
     }
 
     /// Plusieurs appels sans effet (sous-agents, lectures, recherches) : les
@@ -5018,6 +5062,7 @@ where
                 (message, false)
             }
             PermissionOutcome::Deny { reason } => {
+                let reason = self.refusal_for_model(reason);
                 self.tool_executor.skipped(&tool_name, input, &reason);
                 let message =
                     ConversationMessage::tool_result(tool_use_id, tool_name, reason, true);
@@ -7569,27 +7614,51 @@ mod tests {
         let _serial = crate::test_serial();
         const ADVICE: &str = "Pour lancer :\n\n```bash\nnpm run dev\n```";
         // Annonce au départ, puis une réponse qui conseille une commande jamais
-        // lancée : le modèle, renvoyé l'essayer, s'y remet sans un mot. La
-        // requête suivante lui fait dire ce qu'il fait, comme au départ.
+        // lancée : le modèle, renvoyé l'essayer, s'y remet sans un mot pendant
+        // deux étapes. La requête suivante lui fait dire ce qu'il fait.
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                tool_step("bash", r#"{"command":"ls"}"#),
+                text_step("Je regarde le projet, puis je dis comment le lancer."),
+                text_step(ADVICE),
+                tool_step("bash", r#"{"command":"npm install"}"#),
+                tool_step("bash", r#"{"command":"npm run dev"}"#),
+                text_step("J'essaie la commande conseillée avant de la donner."),
+                text_step(ADVICE),
+            ],
+            vec![PASSING, PASSING, PASSING],
+        );
+        let _announce = AnnouncementsOn::new();
+        let summary = runtime.run_turn("comment le lancer ?", None).expect("tour");
+        assert_eq!(summary.iterations, 7);
+        let observed = observed.borrow();
+        assert_eq!(observed.superseded, 1);
+        // L'annonce du départ, puis celle de la reprise : en texte seul.
+        assert_eq!(observed.text_only, vec![1, 5]);
+        assert!(observed.requests[5].contains("You went back to work after your answer"));
+        drop(observed);
+
+        // Une seule commande avant de conclure : rien à annoncer, la réponse
+        // qui suit est la réponse du tour (essai t4 du 21 octobre 2026).
         let (mut runtime, observed, _) = aided_runtime(
             vec![
                 tool_step("bash", r#"{"command":"ls"}"#),
                 text_step("Je regarde le projet, puis je dis comment le lancer."),
                 text_step(ADVICE),
                 tool_step("bash", r#"{"command":"npm run dev"}"#),
-                text_step("J'essaie la commande conseillée avant de la donner."),
                 text_step(ADVICE),
             ],
             vec![PASSING, PASSING],
         );
         let _announce = AnnouncementsOn::new();
         let summary = runtime.run_turn("comment le lancer ?", None).expect("tour");
-        assert_eq!(summary.iterations, 6);
+        assert_eq!(summary.iterations, 5);
         let observed = observed.borrow();
-        assert_eq!(observed.superseded, 1);
-        // L'annonce du départ, puis celle de la reprise : en texte seul.
-        assert_eq!(observed.text_only, vec![1, 4]);
-        assert!(observed.requests[4].contains("You started working without a word for the user"));
+        assert_eq!(observed.text_only, vec![1]);
+        assert!(observed
+            .requests
+            .iter()
+            .all(|request| !request.contains("You went back to work")));
     }
 
     #[test]
@@ -7868,6 +7937,36 @@ mod tests {
         static TASK_REPLY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
         /// `AskUserQuestion` montre les questions sans attendre (appli web).
         static ASK_LATER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    #[test]
+    fn a_sub_agent_at_its_step_limit_writes_its_report_instead_of_failing() {
+        let _serial = crate::test_serial();
+        // E1-12 : à la 33e étape, le tour échouait et le parent ne recevait
+        // qu'une erreur. La dernière étape demande maintenant le rapport ; un
+        // appel d'outil à sa place ne tourne pas, et le tour finit sans erreur.
+        let steps = (0..5)
+            .map(|step| tool_step("bash", &format!(r#"{{"command":"ls dossier-{step}"}}"#)))
+            .collect();
+        let (runtime, observed, bash_calls) = aided_runtime(steps, vec![PASSING; 5]);
+        let mut runtime = runtime.as_subagent().with_max_iterations(4);
+        let summary = runtime
+            .run_turn("explore le projet", None)
+            .expect("rapport, pas d'erreur");
+        assert_eq!(summary.iterations, 4);
+        assert_eq!(
+            bash_calls.borrow().len(),
+            3,
+            "l'appel de la dernière étape ne tourne pas"
+        );
+        let observed = observed.borrow();
+        assert!(
+            observed.requests[3].contains("You have used your 3 steps, the limit for a sub-agent")
+        );
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("Le sous-agent a utilisé ses 3 étapes")));
     }
 
     #[test]
