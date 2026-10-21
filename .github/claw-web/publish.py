@@ -13,7 +13,7 @@ import os
 import subprocess
 
 from common import (ANSWER, NOTES, WORK, GitHubError, api, clean_answer, clean_notice, explain_error,
-                    french_shortstat, post_comment, run_url, stop_tree, usage_lines)
+                    french_shortstat, post_comment, questions_block, run_url, stop_tree, usage_lines)
 from on_github import Actor, load_requests
 
 REPO = os.environ["REPO"]
@@ -64,7 +64,12 @@ def stop_leftover_agent():
 def main():
     stop_leftover_agent()
     result, error = clean_answer(read("result.md")), read("error.txt")
-    finished = OUTCOME == "success" and bool(result)
+    # Questions sur lesquelles Claw a fini le passage : l'utilisateur y répond d'un toucher.
+    try:
+        asked = questions_block(json.loads(read("questions.json") or "[]"))
+    except ValueError:
+        asked = ""
+    finished = OUTCOME == "success" and bool(result or asked)
     footer, notes = [], []
     # Le travail est sur GitHub (poussé, ou rien à pousser) : les demandes de l'agent
     # (`claw-github`) peuvent être faites.
@@ -99,7 +104,8 @@ def main():
                 owner = REPO.split("/")[0]
                 found = api("GET", f"/repos/{REPO}/pulls?state=open&head={owner}:{BRANCH}", REPO_TOKEN)
                 pull = found[0] if found else None
-                if pull is None and finished:
+                # Des questions attendent l'utilisateur : la tâche n'est pas finie.
+                if pull is None and finished and not asked:
                     pull = api("POST", f"/repos/{REPO}/pulls", REPO_TOKEN, {
                         "title": f"Claw : {TITLE}",
                         "head": BRANCH,
@@ -126,7 +132,7 @@ def main():
             notes.extend(Actor(REPO, BASE, BRANCH, REPO_TOKEN, TITLE).carry_out(requests))
 
     if finished:
-        text = result
+        text = "\n\n".join(part for part in (result, asked) if part)
     elif OUTCOME == "cancelled":
         text = "**La tâche a été arrêtée** (passage annulé)."
         if result:

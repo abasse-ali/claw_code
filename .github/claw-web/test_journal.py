@@ -89,19 +89,91 @@ class JournalPhotosTest(unittest.TestCase):
         self.assertEqual((log.events[-1]["i"], log.events[-1]["r"]), ({"names": ["wallet"]}, {}))
 
 
+def block(reply, part):
+    """Un bloc d'une réponse du modèle, publié à part par Claw sous le numéro de la réponse."""
+    return {"type": "assistant", "message": {"id": reply, "content": [part]}}
+
+
+def text(reply, words):
+    return block(reply, {"type": "text", "text": words})
+
+
+def tool(reply, path="PLAN.md"):
+    return block(reply, {"type": "tool_use", "name": "read_file", "input": {"path": path}})
+
+
+RESULT = {"type": "user", "message": {"content": [{"type": "tool_result", "content": "…"}]}}
+
+
 class JournalRequestsTest(unittest.TestCase):
     def test_each_model_reply_is_one_request_with_its_time(self):
         log = Journal()
         before = int(time.time())
-        log.add({"type": "assistant", "message": {"content": [{"type": "text", "text": "Je lis le plan."}]}})
-        log.add({"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "name": "read_file", "input": {"path": "PLAN.md"}}]}})
-        log.add({"type": "user", "message": {"content": [{"type": "tool_result", "content": "…"}]}})
+        # Une réponse (texte et appel, publiés à part), puis une seconde : deux requêtes, et
+        # non une par bloc (le compteur de l'appli se vidait deux à trois fois trop vite).
+        log.add(block("reply-1", {"type": "thinking", "thinking": "Read the plan first."}))
+        log.add(text("reply-1", "Je lis le plan."))
+        log.add(tool("reply-1"))
+        log.add(RESULT)
+        log.add(text("reply-2", "Le plan est lu."))
         requests = [event for event in log.events if event["k"] == "req"]
         self.assertEqual(len(requests), 2)
         self.assertTrue(all(before <= event["at"] <= int(time.time()) for event in requests))
         # L'heure précède ce que dit la réponse : le reste du journal ne bouge pas.
+        self.assertEqual([event["k"] for event in log.events], ["req", "think", "text", "tool", "req", "text"])
+
+    def test_blocks_without_a_reply_number_are_each_a_request(self):
+        log = Journal()
+        log.add({"type": "assistant", "message": {"content": [{"type": "text", "text": "Je lis le plan."}]}})
+        log.add({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "read_file", "input": {"path": "PLAN.md"}}]}})
         self.assertEqual([event["k"] for event in log.events], ["req", "text", "req", "tool"])
+
+
+class JournalDraftsTest(unittest.TestCase):
+    """Réponse que les contrôles de Claw lui font reprendre (vu le 20 octobre 2026, session 15 :
+    deux « Résultat » presque identiques à la suite)."""
+
+    def kinds(self, log):
+        return [event["k"] for event in log.events if event["k"] not in ("req", "think")]
+
+    def test_an_answer_sent_back_by_a_check_becomes_a_draft(self):
+        log = Journal()
+        log.add({"type": "system", "subtype": "init", "model": "nvidia:nemotron"})
+        log.add(text("reply-1", "Je lance les tests."))
+        log.add(tool("reply-1"))
+        log.add(RESULT)
+        log.add(text("reply-2", "**Résultat** : tout passe. Lancez `python app.py`."))
+        log.add({"type": "system", "subtype": "notice",
+                 "text": "La réponse conseille des commandes jamais lancées : Claw demande à l'agent de les essayer"})
+        log.add({"type": "system", "subtype": "answer_superseded"})
+        log.add(tool("reply-3", "app.py"))
+        log.add(RESULT)
+        log.add(text("reply-4", "**Résultat** : tout passe, `python app.py` aussi."))
+        self.assertEqual(self.kinds(log), ["init", "text", "tool", "draft", "notice", "tool", "text"])
+        # Le journal le dit : l'appli ne devine rien d'après le texte.
+        self.assertTrue(log.events[0]["drafts"])
+        self.assertTrue(log.dirty)
+
+    def test_an_answer_kept_after_a_mere_acknowledgment_is_the_answer_again(self):
+        log = Journal()
+        log.add(text("reply-1", "**Résultat** : la page est corrigée."))
+        log.add({"type": "system", "subtype": "answer_superseded"})
+        log.add(text("reply-2", "Vérifié."))
+        log.add({"type": "system", "subtype": "answer_kept"})
+        self.assertEqual(self.kinds(log), ["text", "text"])
+        # Un contrôle suivant fait reprendre les deux.
+        log.add({"type": "system", "subtype": "answer_superseded"})
+        self.assertEqual(self.kinds(log), ["draft", "draft"])
+
+    def test_a_check_after_a_reply_with_tools_folds_nothing(self):
+        # Une réponse qui appelle des outils n'est pas la réponse du tour : son annonce reste.
+        log = Journal()
+        log.add(text("reply-1", "Je lis le plan."))
+        log.add(tool("reply-1"))
+        log.add(RESULT)
+        log.add({"type": "system", "subtype": "answer_superseded"})
+        self.assertEqual(self.kinds(log), ["text", "tool"])
 
 
 if __name__ == "__main__":

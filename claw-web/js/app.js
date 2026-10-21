@@ -63,9 +63,13 @@ const state = {
   // demandés à GitHub).
   providerSecrets: null,
   runs: [],
+  // Dépôt du moteur dont `runs` est la liste.
+  runsEngine: "",
   session: null,
   pollTimer: null,
-  dispatchedAt: 0,
+  // Dernier passage demandé par l'appli : { session, at, before } (`before` : le dernier passage
+  // connu de la session à ce moment-là). GitHub met quelques secondes à lister le nouveau.
+  launch: null,
   sending: false,
   // Images jointes au prochain message, et images déjà lues (chemin : adresse data:).
   attachments: [],
@@ -744,11 +748,15 @@ const contextLabel = (tokens) => (tokens >= 1000000 ? `${Math.round(tokens / 100
   .replace(".", ",");
 
 async function refreshRuns() {
+  const engine = state.settings.engine;
   try {
-    state.runs = await state.github.runs(state.settings.engine);
+    state.runs = await state.github.runs(engine);
+    state.runsEngine = engine;
   } catch (error) {
     if (!(error instanceof GitHubError)) throw error;
-    state.runs = [];
+    // Liste illisible un instant (réseau, GitHub) : celle d'avant reste. Vide, une session
+    // croirait n'avoir aucun passage et dirait son dernier message pas envoyé.
+    if (state.runsEngine !== engine) state.runs = [];
   }
 }
 
@@ -1647,12 +1655,16 @@ async function startSession(text, textarea) {
     state.attachments = [];
     textarea.value = "";
     // La session s'affiche aussitôt (sa tâche, « Claw se prépare ») ; le passage part ensuite.
-    state.dispatchedAt = Date.now();
+    launching(issue.number, repo);
     state.session = { number: issue.number, issue, comments: [], settings: settingsOf(issue), pull: null, step: "", signature: "", logs: new Map() };
     location.hash = `#/session/${issue.number}`;
-    await state.github.dispatch(engine, state.engineRef,
-      { repo, base: branch || "main", session: String(issue.number), model: model || "", ...aidInputs() });
-    state.dispatchedAt = Date.now();
+    try {
+      await state.github.dispatch(engine, state.engineRef,
+        { repo, base: branch || "main", session: String(issue.number), model: model || "", ...aidInputs() });
+    } catch (error) {
+      launchFailed(state.session);
+      throw error;
+    }
   } catch (error) {
     failure(error);
   } finally {
@@ -1675,7 +1687,7 @@ async function followUpSession(text, textarea) {
     if (posted && state.session === session && !session.comments.some((comment) => comment.id === posted.id)) {
       session.comments.push(posted);
     }
-    state.dispatchedAt = Date.now();
+    launching(session.number, session.settings.repo);
     if (state.session === session) {
       renderSessionView();
       window.scrollTo({ top: document.body.scrollHeight });
@@ -1691,14 +1703,33 @@ async function followUpSession(text, textarea) {
 }
 
 async function dispatchSession(session) {
-  await state.github.dispatch(state.settings.engine, state.engineRef, {
-    repo: session.settings.repo,
-    base: session.settings.base || "main",
-    session: String(session.number),
-    model: state.settings.model || "",
-    ...aidInputs(),
-  });
-  state.dispatchedAt = Date.now();
+  launching(session.number, session.settings.repo);
+  try {
+    await state.github.dispatch(state.settings.engine, state.engineRef, {
+      repo: session.settings.repo,
+      base: session.settings.base || "main",
+      session: String(session.number),
+      model: state.settings.model || "",
+      ...aidInputs(),
+    });
+  } catch (error) {
+    launchFailed(session);
+    throw error;
+  }
+}
+
+/** Passage demandé pour la session `number` : tant que GitHub ne l'a pas listé (quelques
+ * secondes), elle l'attend (« Claw se prépare ») au lieu de dire son message pas envoyé. */
+function launching(number, repo) {
+  const known = latestRun(repo, number);
+  state.launch = { session: number, at: Date.now(), before: known ? known.id : null };
+}
+
+/** Lancement refusé ou coupé : la session ne l'attend plus et redit son message pas envoyé
+ * (« Lancer le passage »). */
+function launchFailed(session) {
+  if (state.launch && session && state.launch.session === session.number) state.launch = null;
+  if (session && state.session === session && session.issue) renderSessionView();
 }
 
 function renderSending(sending) {
@@ -2168,14 +2199,91 @@ function answerFoot(foot) {
   </footer>`;
 }
 
-/** Réponse de Claw : son texte (titres, remarques du moteur en encadré), puis le pied. */
+// Questions qui finissent une réponse de Claw (outil AskUserQuestion) : en données pour l'appli,
+// puis en texte, jusqu'à la marque de fin, pour GitHub et pour l'historique de l'agent.
+const QUESTIONS_BLOCK = /<!--\s*claw-web:questions\s+(\[[\s\S]*?\])\s*-->[\s\S]*?<!--\s*claw-web:questions-end\s*-->/;
+
+/** Les questions d'un bloc, chacune avec au moins deux réponses proposées ; null sinon. */
+function questionsOf(data) {
+  try {
+    const list = JSON.parse(data).filter((question) => question && question.question
+      && Array.isArray(question.options) && question.options.filter((option) => option && option.label).length >= 2);
+    return list.length ? list : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Les questions de Claw et leurs réponses proposées, à toucher (comme dans Claude Code) ;
+ * désactivées tant que wireQuestions ne les ouvre pas. */
+function questionsHtml(questions) {
+  const several = questions.length > 1 || questions.some((question) => question.multi_select);
+  return `<div class="questions">
+    ${questions.map((question) => `
+      <div class="question" role="group" aria-label="${escapeHtml(question.question)}" data-topic="${escapeHtml(question.header || question.question)}"${question.multi_select ? " data-multi" : ""}>
+        <p class="question-text">${question.header ? `<span class="question-head">${escapeHtml(question.header)}</span>` : ""}${escapeHtml(question.question)}</p>
+        ${question.options.filter((option) => option && option.label).map((option) => `
+          <button type="button" class="choice" data-label="${escapeHtml(option.label)}" disabled>
+            <strong>${escapeHtml(option.label)}</strong>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}
+          </button>`).join("")}
+      </div>`).join("")}
+    ${several ? `<button type="button" class="small-link primary-link send-choices" disabled>${ICON.send}<span>Envoyer les réponses</span></button>` : ""}
+    <p class="choices-hint">Ou répondez avec vos mots, en bas.</p>
+  </div>`;
+}
+
+/** Questions de la dernière réponse, tant que rien ne l'a suivie : une question seule part d'un
+ * toucher ; plusieurs (ou à choix multiple) avec « Envoyer les réponses ». */
+function wireQuestions(view, open) {
+  const answers = view.querySelectorAll(".messages .message.claw");
+  const block = answers.length ? answers[answers.length - 1].querySelector(".questions") : null;
+  if (!open || !block || block.closest(".attempt[hidden]")) return;
+  block.classList.add("open");
+  const questions = [...block.querySelectorAll(".question")];
+  const choices = [...block.querySelectorAll(".choice")];
+  const send = block.querySelector(".send-choices");
+  const answer = (text) => {
+    if (state.sending) return;
+    for (const choice of choices) choice.disabled = true;
+    if (send) send.disabled = true;
+    // Un champ à part : un brouillon tapé en bas reste où il est.
+    followUpSession(text, document.createElement("textarea"));
+  };
+  for (const choice of choices) {
+    choice.disabled = false;
+    choice.addEventListener("click", () => {
+      if (!send) {
+        choice.classList.add("chosen");
+        answer(choice.dataset.label);
+        return;
+      }
+      const question = choice.closest(".question");
+      if (!question.hasAttribute("data-multi")) {
+        for (const other of question.querySelectorAll(".choice")) if (other !== choice) other.classList.remove("chosen");
+      }
+      choice.classList.toggle("chosen");
+      send.disabled = !questions.every((each) => each.querySelector(".choice.chosen"));
+    });
+  }
+  send?.addEventListener("click", () => answer(questions.map((question) => `${question.dataset.topic} : `
+    + [...question.querySelectorAll(".choice.chosen")].map((choice) => choice.dataset.label).join(", ")).join("\n")));
+}
+
+/** Réponse de Claw : son texte (titres, remarques du moteur en encadré), ses questions à
+ * toucher, puis le pied. */
 function answerHtml(body) {
   const text = String(body || "").replace(/\r\n/g, "\n");
   const cut = text.lastIndexOf("\n---\n");
   const main = cut >= 0 ? text.slice(0, cut) : text;
+  const block = main.match(QUESTIONS_BLOCK);
+  const questions = block && questionsOf(block[1]);
+  const content = questions
+    ? renderMarkdown(answerTitles(main.slice(0, block.index))) + questionsHtml(questions)
+      + renderMarkdown(answerTitles(main.slice(block.index + block[0].length)))
+    : renderMarkdown(answerTitles(main));
   return `<article class="message claw">
     <div class="who"><span class="logo" aria-hidden="true"></span><span>Claw</span></div>
-    <div class="answer">${renderMarkdown(answerTitles(main))}</div>
+    <div class="answer">${content}</div>
     ${cut >= 0 ? answerFoot(text.slice(cut + 5)) : ""}
   </article>`;
 }
@@ -2248,12 +2356,17 @@ function renderSessionView() {
   const session = state.session;
   const view = $("#view");
   const settings = session.settings;
-  const run = latestRun(settings.repo, session.number);
+  const known = latestRun(settings.repo, session.number);
+  // Passage demandé depuis l'appli que GitHub ne liste pas encore (le dernier connu est celui
+  // d'avant) : la session l'attend, une minute et demie au plus, sans montrer l'ancien.
+  const launch = state.launch && state.launch.session === session.number && Date.now() - state.launch.at < 90_000
+    ? state.launch : null;
+  const waiting = Boolean(launch) && (!known || known.id === launch.before);
+  const run = waiting ? null : known;
   const status = runStatus(run);
   const comments = session.comments;
   const lastProgress = [...comments].reverse().find((comment) => (comment.body || "").includes(PROGRESS));
   const answered = comments.length && (comments[comments.length - 1].body || "").includes(ANSWER);
-  const waiting = !run && Date.now() - state.dispatchedAt < 90_000;
   const active = waiting || (status && (status.key === "queued" || status.key === "running"));
   const step = session.step ? ` · ${escapeHtml(session.step)}` : "";
   const pull = session.pull;
@@ -2323,12 +2436,25 @@ function renderSessionView() {
     if (menu && menu.open && (!event.target.closest(".more-menu") || event.target.closest(".menu-item"))) menu.open = false;
   });
   wireAttempts(view);
+  // Questions de la dernière réponse : ouvertes tant que rien ne l'a suivie.
+  wireQuestions(view, Boolean(answered) && !active);
   for (const retry of view.querySelectorAll('[data-action="retry"]')) {
     retry.addEventListener("click", async () => {
       // Un seul passage par appui : le bouton se désactive aussitôt (plusieurs appuis lançaient
       // plusieurs passages).
       for (const button of view.querySelectorAll('[data-action="retry"]')) button.disabled = true;
       try {
+        // « Lancer le passage » : un passage parti entre-temps, que GitHub ne listait pas encore,
+        // n'est pas lancé une seconde fois.
+        if (retry.closest(".unsent")) {
+          await refreshRuns();
+          const latest = latestRun(settings.repo, session.number);
+          if (latest && latest.created_at >= lastMessage.created_at) {
+            toast("Ce message avait déjà son passage");
+            await pollSession(true);
+            return;
+          }
+        }
         await dispatchSession(session);
         toast("Passage lancé");
         await pollSession(true);

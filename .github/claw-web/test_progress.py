@@ -56,6 +56,24 @@ class ProgressTest(unittest.TestCase):
         progress.event(reply("Voici la réponse à votre question."))
         self.assertNotIn("Ce que Claw compte faire", progress.body("done"))
 
+    def test_an_answer_sent_back_by_a_check_is_not_the_current_step(self):
+        # Vu le 20 octobre 2026 (session 15) : la réponse reprise devenait « En ce moment »
+        # pendant les essais que Claw lui faisait faire.
+        progress = run.Progress()
+        progress.event(reply("Je lance les tests, puis la démo.", ("read_file", "PLAN.md")))
+        progress.event(reply("**Résultat** : le projet est complet."))
+        progress.event({"type": "system", "subtype": "answer_superseded"})
+        progress.event(reply("", ("read_file", "README.md")))
+        body = progress.body("running")
+        self.assertIn("**Ce que Claw compte faire** : Je lance les tests, puis la démo.", body)
+        self.assertNotIn("Résultat", body)
+
+    def test_the_questions_that_end_the_pass_are_kept_for_the_answer(self):
+        progress = run.Progress()
+        questions = [{"question": "Je corrige ?", "options": [{"label": "Oui"}, {"label": "Non"}]}]
+        progress.event({"type": "system", "subtype": "questions", "questions": questions})
+        self.assertEqual(progress.questions, questions)
+
     def test_a_long_plan_is_cut_on_a_word(self):
         self.assertEqual(run.shorten("un deux trois quatre", 12), "un deux…")
         self.assertEqual(run.shorten("court", 12), "court")

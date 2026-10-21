@@ -2837,6 +2837,11 @@ fn is_question_line(line: &str) -> bool {
     false
 }
 
+/// Résultat de `AskUserQuestion` quand l'interface montre les questions sans
+/// attendre (appli web : l'utilisateur répond d'un toucher, au message
+/// suivant) : Claw finit le tour sur elles.
+pub const QUESTIONS_DEFERRED: &str = "[Claw] The user now sees your questions with clickable answers and will reply in their next message: this turn ends here.";
+
 /// Message adressé au modèle qui a écrit ses questions dans sa réponse alors
 /// que l'utilisateur peut y répondre d'un clic.
 pub const QUESTIONS_FEEDBACK: &str = "[Claw] Your reply ends with questions for the user, written as text. The user has read your reply: do not repeat it. Call the AskUserQuestion tool now with those questions (at most 4, each with 2 to 4 short concrete options, the one you recommend first), so the user answers with one click. When the answers come back, continue the task with them.";

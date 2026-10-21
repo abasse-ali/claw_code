@@ -177,6 +177,12 @@ class Journal:
         self.bounds = [0]
         self.sent = {}
         self.dirty = False
+        # Réponse du modèle en cours (`message.id` de Claw) et son texte (indice dans events).
+        self.reply = None
+        self.reply_text = None
+        # Textes repliés par le dernier contrôle de Claw, et ceux qu'il a fait garder ensuite.
+        self.folded = []
+        self.kept = []
 
     # --- Lecture des événements de Claw (`--output-format stream-json`) ----------------
 
@@ -184,24 +190,52 @@ class Journal:
         kind = event.get("type")
         message = event.get("message") if isinstance(event.get("message"), dict) else {}
         if kind == "system" and event.get("subtype") == "init":
-            self._push({"k": "init", "model": event.get("model", "")})
+            # `drafts` : ce journal marque lui-même les réponses reprises (l'appli n'a rien
+            # à deviner).
+            self._push({"k": "init", "model": event.get("model", ""), "drafts": True})
+            self.reply = self.reply_text = None
+            self.folded, self.kept = [], []
         elif kind == "system" and event.get("subtype") == "notice":
             self._push({"k": "notice", "t": " ".join(str(event.get("text", "")).split())})
+        elif kind == "system" and event.get("subtype") == "answer_superseded":
+            # Un contrôle de Claw renvoie le modèle au travail : sa réponse (avec celle qu'un
+            # contrôle précédent avait fait garder) devient un brouillon, replié par l'appli.
+            self.folded = [index for index in [*self.kept, self.reply_text] if index is not None]
+            self.kept = []
+            for index in self.folded:
+                self.events[index]["k"] = "draft"
+            self.dirty = True
+        elif kind == "system" and event.get("subtype") == "answer_kept":
+            # Ce qui a suivi le contrôle n'en était qu'un accusé de réception : la réponse
+            # repliée redevient la réponse.
+            for index in self.folded:
+                self.events[index]["k"] = "text"
+            self.kept, self.folded = self.folded, []
+            self.dirty = True
         elif kind == "assistant":
             # Une réponse du modèle, une requête : son heure, pour le compteur par minute de
             # l'appli (NVIDIA : environ 40 requêtes par minute). L'appli ne l'affiche pas.
-            self._push({"k": "req", "at": int(time.time())})
+            # Claw publie chaque bloc d'une réponse à part, sous le numéro de la réponse.
+            reply = message.get("id")
+            if reply is None or reply != self.reply:
+                self._push({"k": "req", "at": int(time.time())})
+                self.reply_text = None
+            self.reply = reply
             for part in message.get("content") or []:
                 what = part.get("type")
                 if what == "thinking" and str(part.get("thinking", "")).strip():
                     self._push({"k": "think", "t": excerpt(part["thinking"].strip(), 600)})
                 elif what == "text" and str(part.get("text", "")).strip():
                     self._push({"k": "text", "t": excerpt(part["text"].strip(), 8000)})
+                    self.reply_text = len(self.events) - 1
                 elif what == "tool_use":
                     name = part.get("name", "")
                     entry = {"k": "tool", "n": name, "i": self._input(name, part.get("input"))}
                     self._push(entry)
                     self.waiting.append(entry)
+                    # Une réponse qui appelle des outils n'est pas la réponse du tour : son
+                    # texte annonce le travail, aucun contrôle ne le reprend.
+                    self.reply_text = None
         elif kind == "user":
             # Les résultats arrivent dans l'ordre des appels.
             for part in message.get("content") or []:
@@ -253,6 +287,10 @@ class Journal:
             return {"kind": excerpt(data.get("kind", ""), 40)}
         if name == "Screenshot":
             return {"target": excerpt(rel(data.get("url") or data.get("path") or ""), 300)}
+        if name == "AskUserQuestion":
+            questions = data.get("questions") if isinstance(data.get("questions"), list) else [data]
+            return {"q": [excerpt(question.get("question", ""), 200) for question in questions[:4]
+                          if isinstance(question, dict)]}
         return {"raw": excerpt(rel(json.dumps(data, ensure_ascii=False)), 600)}
 
     def _result(self, name, content):

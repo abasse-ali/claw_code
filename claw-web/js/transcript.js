@@ -87,7 +87,14 @@ function describe(name, input) {
     case "Icon": return ["tool", "Icônes", (value.names || []).join(", ")];
     case "Ornament": return ["tool", "Ornement", value.kind || ""];
     case "Component": return ["tool", "Composants", (value.names || []).join(", ")];
-    case "Screenshot": return ["globe", "Capture de la page", value.target || ""];
+    case "Screenshot": {
+      // Le site publié, ou la copie de travail de la session (fichier, serveur local) : pas la
+      // même version de l'appli (vu le 21 octobre 2026, l'ancienne prise pour la nouvelle).
+      const target = String(value.target || "");
+      const local = !/^https?:\/\//.test(target) || /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?:[:/]|$)/.test(target);
+      return ["globe", local ? "Capture de la session" : "Capture en ligne", target.replace(/^https?:\/\//, "")];
+    }
+    case "AskUserQuestion": return ["list", "Questions", (value.q || []).join(" · ")];
     case "TodoWrite": {
       const todos = value.todos || [];
       return ["list", "Tâches", `${todos.filter((todo) => todo[0] === "completed").length}/${todos.length} terminées`];
@@ -254,6 +261,9 @@ function eventHtml(event, key, lastTodo) {
       const text = withoutCallMarkup(event.t);
       return text ? `<div class="ev text">${renderMarkdown(text)}</div>` : "";
     }
+    // Réponse qu'un contrôle de Claw lui a fait reprendre (marquée par le moteur).
+    case "draft":
+      return draftHtml(event, key);
     case "notice":
       // « nvidia:nvidia/nemotron-3-super-120b-a12b » devient « nemotron-3-super-120b-a12b ».
       return `<div class="ev notice">${escapeHtml(String(event.t || "").replace(/\b(?:nvidia|gemini|ollama):(?:[\w.-]+\/)?([\w.:-]+)/g, "$1"))}</div>`;
@@ -282,10 +292,20 @@ export function withoutCallMarkup(text) {
     .trim();
 }
 
-/** Les réponses que Claw a fait reprendre : un rapport (« **Résultat** »), ou un long texte suivi
- * d'une remarque de ses vérifications, quand un autre texte vient après. Le journal les replie. */
+/** Une réponse que Claw a fait reprendre, repliée comme dans son interface locale (la remarque
+ * qui suit dit pourquoi). */
+function draftHtml(event, key) {
+  return `<details class="ev draft" data-key="${key}"><summary>${ICONS.edit}<span class="verb">Réponse provisoire</span>`
+    + `<span class="target">reprise par Claw</span></summary>`
+    + `<div class="ev-body ev text">${renderMarkdown(withoutCallMarkup(event.t))}</div></details>`;
+}
+
+/** Les réponses que Claw a fait reprendre, dans un journal d'avant le 21 octobre 2026 (le moteur
+ * les marque depuis, `draft`) : un rapport (« **Résultat** »), ou un long texte suivi d'une
+ * remarque de ses vérifications, quand un autre texte vient après. Le journal les replie. */
 function draftAnswers(events, repeated) {
   const drafts = new Set();
+  if (events.some((event) => event.k === "init" && event.drafts)) return drafts;
   const lastText = events.map((event, index) => event.k === "text" && !repeated.has(index)).lastIndexOf(true);
   const answered = repeated.size > 0;
   events.forEach((event, index) => {
@@ -334,11 +354,7 @@ export function transcriptHtml(events, { key, live, answer = "", title = "Journa
   const drafts = draftAnswers(events, repeated);
   const rows = events.map((event, index) => {
     if (repeated.has(index)) return "";
-    if (drafts.has(index)) {
-      return `<details class="ev draft" data-key="${key}:${index}"><summary>${ICONS.edit}<span class="verb">Première réponse</span>`
-        + `<span class="target">reprise après les vérifications de Claw</span></summary>`
-        + `<div class="ev-body ev text">${renderMarkdown(withoutCallMarkup(event.t))}</div></details>`;
-    }
+    if (drafts.has(index)) return draftHtml(event, `${key}:${index}`);
     return eventHtml(event, `${key}:${index}`, live && index === lastTodo);
   }).filter(Boolean);
   // Long journal : les dernières étapes en vue, les précédentes à déplier.

@@ -1,9 +1,15 @@
 """Textes publiés dans la session, lisibles par l'utilisateur (common : bilan git en français,
 signature retirée, avis sans réglage technique, erreurs dites en clair)."""
 
+import json
+import os
 import unittest
 
-import common
+os.environ.setdefault("GITHUB_REPOSITORY", "o/claw-sessions")
+os.environ.setdefault("JOB_TOKEN", "t")
+
+import common  # noqa: E402
+import setup  # noqa: E402
 
 
 class AnswerTextTest(unittest.TestCase):
@@ -38,6 +44,30 @@ class AnswerTextTest(unittest.TestCase):
         self.assertEqual(common.explain_error("HTTP 429 Too Many Requests"),
                          "le quota du modèle est épuisé pour le moment")
         self.assertIsNone(common.explain_error("erreur inconnue"))
+
+    def test_claw_s_questions_end_its_answer_as_data_and_as_text(self):
+        # Vu le 21 octobre 2026 : « Voulez-vous que je corrige ces problèmes ? », à taper. Les
+        # questions de Claw (AskUserQuestion) deviennent des choix à toucher dans l'appli.
+        block = common.questions_block([
+            {"question": "Quelle version capturer ?", "header": "Version", "multi_select": False, "options": [
+                {"label": "Celle de la session (Recommandé)", "description": "Pas encore en ligne"},
+                {"label": "Celle en ligne --> main", "description": ""}]},
+            {"question": "Une seule réponse proposée ?", "options": [{"label": "Oui"}]},
+        ])
+        data = json.loads(common.QUESTIONS.search(block).group(1))
+        self.assertEqual([question["header"] for question in data], ["Version"])
+        self.assertEqual(data[0]["options"][1]["label"], "Celle en ligne --> main")
+        self.assertNotIn("-->", block.split("-->", 1)[0].replace("<!--", ""))
+        self.assertIn("**Quelle version capturer ?**\n- Celle de la session (Recommandé) : Pas encore en ligne", block)
+        self.assertTrue(block.endswith(common.QUESTIONS_END))
+        self.assertEqual(common.questions_block([]), "")
+        self.assertEqual(common.questions_block("pas une liste"), "")
+
+    def test_the_agent_reads_its_questions_back_as_text(self):
+        body = (f"{common.ANSWER}\nLe design a trois défauts.\n\n"
+                + common.questions_block([{"question": "Je les corrige ?", "options": [{"label": "Oui"}, {"label": "Non"}]}])
+                + "\n\n---\n- [Détail du job](u)")
+        self.assertEqual(setup.answer_text(body), "Le design a trois défauts.\n\n**Je les corrige ?**\n- Oui\n- Non")
 
 
 if __name__ == "__main__":

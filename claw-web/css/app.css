@@ -230,6 +230,27 @@ label.check { cursor: pointer; }
 .message.claw > .who { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: .88rem; font-weight: 600; color: var(--text); }
 .message.claw > .who .logo { width: 22px; height: 22px; }
 .answer { line-height: 1.62; }
+/* Questions de Claw : chaque réponse proposée se touche, comme dans Claude Code. Fermées (une
+   réponse plus ancienne, un passage en cours), elles restent lisibles. */
+.questions { display: grid; gap: 14px; margin: 14px 0 4px; }
+.question { display: grid; gap: 8px; min-width: 0; }
+.question-text { margin: 0; font-weight: 600; line-height: 1.45; }
+.question-head {
+  display: inline-block; margin-right: 8px; padding: 1px 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel); color: var(--muted); font-size: .75rem; font-weight: 600; vertical-align: 1px;
+}
+.choice {
+  display: grid; gap: 2px; width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--panel); color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+.choice strong { font-size: .95rem; font-weight: 600; }
+.choice small { color: var(--muted); font-size: .82rem; line-height: 1.4; }
+.choice:disabled { cursor: default; }
+.questions:not(.open) .choice { opacity: .65; }
+.choice.chosen { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.send-choices { justify-self: start; }
+.choices-hint { margin: 0; color: var(--muted); font-size: .8rem; }
+.questions:not(.open) .send-choices, .questions:not(.open) .choices-hint { display: none; }
 .answer h3 { margin: 1.3em 0 .45em; font-size: 1.08rem; font-weight: 650; letter-spacing: -.005em; }
 .answer > h3:first-child { margin-top: 0; }
 .message .answer blockquote {
@@ -359,7 +380,7 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 /* Passage lancé, avant sa première progression : « Claw se prépare » et l'étape en cours. */
 .run-card.preparing { padding: 10px 12px; }
 .preparing-row { display: flex; align-items: center; gap: 10px; font-size: .9rem; }
-/* Première réponse que Claw a fait reprendre : repliée dans le journal. */
+/* Réponse que Claw a fait reprendre (« Réponse provisoire ») : repliée dans le journal. */
 .ev.draft > summary .verb { color: var(--muted); font-weight: 500; }
 .ev { font-size: .88rem; min-width: 0; }
 .ev > summary, .ev-line { display: flex; align-items: center; gap: 8px; padding: 6px 0; min-width: 0; }

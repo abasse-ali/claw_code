@@ -3,16 +3,23 @@
 //!
 //! ```text
 //! {"type":"system","subtype":"init","session_id":…,"model":…,"tools":[…]}
-//! {"type":"assistant","message":{"content":[{"type":"text","text":…}]}}
-//! {"type":"assistant","message":{"content":[{"type":"tool_use","name":…,"input":{…}}]}}
+//! {"type":"assistant","message":{"id":"reply-1","content":[{"type":"text","text":…}]}}
+//! {"type":"assistant","message":{"id":"reply-1","content":[{"type":"tool_use","name":…,"input":{…}}]}}
 //! {"type":"user","message":{"content":[{"type":"tool_result","tool_name":…,"content":…}]}}
+//! {"type":"system","subtype":"answer_superseded"}
 //! {"type":"result","subtype":"success","result":…,"num_turns":…,"usage":{…}}
 //! ```
+//! Chaque bloc d'une réponse du modèle part à part ; `message.id` est le même
+//! pour tous les blocs d'une réponse (une requête au modèle). Une réponse sans
+//! outil qu'un contrôle de Claw fait reprendre est suivie d'un
+//! `answer_superseded` ; `answer_kept` dit qu'elle redevient la réponse.
 //! Avec `--input-format stream-json`, chaque ligne de l'entrée standard
 //! (`{"type":"user","message":{"content":"…"}}`) est un nouveau tour.
 
+#[cfg(not(test))]
 use std::io::Write;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use runtime::{PermissionPromptDecision, PermissionPrompter, PermissionRequest};
 use serde_json::{json, Value};
@@ -21,9 +28,34 @@ use crate::TurnObserver;
 
 /// Écrit une ligne JSON sur la sortie standard (verrouillée).
 pub(crate) fn emit(value: &Value) {
-    let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "{value}");
-    let _ = stdout.flush();
+    // Essais : les événements sont gardés pour être relus, rien n'est écrit.
+    #[cfg(test)]
+    EMITTED.with(|emitted| emitted.borrow_mut().push(value.clone()));
+    #[cfg(not(test))]
+    {
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{value}");
+        let _ = stdout.flush();
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static EMITTED: std::cell::RefCell<Vec<Value>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Questions de l'agent (`AskUserQuestion`) montrées sans attendre, avec
+/// `CLAW_DEFERRED_QUESTIONS=1` (moteur de l'appli web) : elles partent dans un
+/// événement `{"type":"system","subtype":"questions"}`, l'utilisateur y répond
+/// d'un toucher au message suivant, et le tour s'arrête sur elles. Sans la
+/// variable, personne ne répond (script, CI) : l'outil n'est pas proposé.
+pub(crate) fn deferred_asker() -> Option<tools::SharedQuestionAsker> {
+    (std::env::var("CLAW_DEFERRED_QUESTIONS").as_deref() == Ok("1")).then(|| {
+        Arc::new(|questions: &[tools::UserQuestion]| {
+            emit(&json!({ "type": "system", "subtype": "questions", "questions": questions }));
+            Ok(Vec::new())
+        }) as tools::SharedQuestionAsker
+    })
 }
 
 pub(crate) struct StreamJsonObserver {
@@ -34,6 +66,8 @@ pub(crate) struct StreamJsonObserver {
     /// publiés quand elle est gardée : une réponse écartée (flux coupé, faux
     /// message de l'utilisateur) n'est jamais montrée.
     pending: Mutex<Vec<Value>>,
+    /// Réponses publiées, pour le numéro (`message.id`) de la suivante.
+    replies: AtomicUsize,
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -49,17 +83,22 @@ impl StreamJsonObserver {
             text: Mutex::new(String::new()),
             thinking: Mutex::new(String::new()),
             pending: Mutex::new(Vec::new()),
+            replies: AtomicUsize::new(0),
         }
     }
 
-    fn assistant(&self, content: Value) {
+    fn assistant(&self, reply: &str, content: Value) {
         let mut event = json!({
             "type": "assistant",
             "session_id": self.session_id,
-            "message": { "role": "assistant" },
+            "message": { "role": "assistant", "id": reply },
         });
         event["message"]["content"] = Value::Array(vec![content]);
         emit(&event);
+    }
+
+    fn system(&self, subtype: &str) {
+        emit(&json!({ "type": "system", "subtype": subtype, "session_id": self.session_id }));
     }
 
     /// Range le raisonnement et le texte reçus dans les blocs de la réponse.
@@ -75,12 +114,17 @@ impl StreamJsonObserver {
         }
     }
 
-    /// Publie les blocs de la réponse en cours, dans l'ordre reçu.
+    /// Publie les blocs de la réponse en cours, dans l'ordre reçu, sous le
+    /// numéro de cette réponse.
     pub(crate) fn flush(&self) {
         self.stage();
         let blocks = std::mem::take(&mut *locked(&self.pending));
+        if blocks.is_empty() {
+            return;
+        }
+        let reply = format!("reply-{}", self.replies.fetch_add(1, Ordering::Relaxed) + 1);
         for block in blocks {
-            self.assistant(block);
+            self.assistant(&reply, block);
         }
     }
 }
@@ -122,6 +166,17 @@ impl TurnObserver for StreamJsonObserver {
     // outils (une annonce sans outil part dès sa fin, pas une requête plus tard).
     fn reply_done(&self) {
         self.flush();
+    }
+
+    // Un contrôle de Claw renvoie le modèle au travail : sa dernière réponse,
+    // déjà publiée, est provisoire (l'appli web la replie).
+    fn answer_superseded(&self) {
+        self.flush();
+        self.system("answer_superseded");
+    }
+
+    fn answer_kept(&self) {
+        self.system("answer_kept");
     }
 
     // Réponse abandonnée puis redemandée : rien d'elle n'est publié.
@@ -226,5 +281,82 @@ mod tests {
         assert_eq!(kinds, ["thinking", "text", "tool_use"]);
         observer.reply_done();
         assert!(super::locked(&observer.pending).is_empty());
+    }
+
+    #[test]
+    fn the_blocks_of_a_reply_share_its_number_and_a_reply_sent_back_is_said() {
+        use super::StreamJsonObserver;
+        use crate::TurnObserver;
+        super::EMITTED.with(|emitted| emitted.borrow_mut().clear());
+        let observer = StreamJsonObserver::new("essai");
+        // Une réponse (une requête au modèle) : trois blocs, un seul numéro.
+        observer.thinking_delta("Je regarde.");
+        observer.text_delta("Je lance les tests.");
+        observer.tool_call("bash", r#"{"command":"pytest"}"#);
+        observer.reply_done();
+        // La réponse finale, qu'un contrôle fait reprendre, puis garder.
+        observer.text_delta("Tout passe.");
+        observer.reply_done();
+        observer.answer_superseded();
+        observer.answer_kept();
+        let emitted = super::EMITTED.with(std::cell::RefCell::take);
+        let shape: Vec<(&str, &str)> = emitted
+            .iter()
+            .map(|event| {
+                let kind = event["type"].as_str().unwrap_or_default();
+                let detail = event["message"]["id"]
+                    .as_str()
+                    .or_else(|| event["subtype"].as_str())
+                    .unwrap_or_default();
+                (kind, detail)
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("assistant", "reply-1"),
+                ("assistant", "reply-1"),
+                ("assistant", "reply-1"),
+                ("assistant", "reply-2"),
+                ("system", "answer_superseded"),
+                ("system", "answer_kept"),
+            ]
+        );
+    }
+
+    #[test]
+    fn questions_are_shown_for_later_only_for_the_web_app() {
+        use tools::{QuestionOption, UserQuestion};
+        std::env::remove_var("CLAW_DEFERRED_QUESTIONS");
+        assert!(super::deferred_asker().is_none());
+        std::env::set_var("CLAW_DEFERRED_QUESTIONS", "1");
+        let ask = super::deferred_asker().expect("appli web");
+        std::env::remove_var("CLAW_DEFERRED_QUESTIONS");
+        super::EMITTED.with(|emitted| emitted.borrow_mut().clear());
+        let question = UserQuestion {
+            question: "Quelle version capturer ?".to_string(),
+            header: "Version".to_string(),
+            options: vec![
+                QuestionOption {
+                    label: "Celle de la session (Recommandé)".to_string(),
+                    description: "Les fichiers de la branche, pas encore en ligne".to_string(),
+                },
+                QuestionOption {
+                    label: "Celle en ligne".to_string(),
+                    description: String::new(),
+                },
+            ],
+            multi_select: false,
+        };
+        // Aucune réponse tout de suite : elle viendra au message suivant.
+        assert_eq!(ask(&[question]), Ok(Vec::new()));
+        let emitted = super::EMITTED.with(std::cell::RefCell::take);
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0]["subtype"], "questions");
+        assert_eq!(emitted[0]["questions"][0]["header"], "Version");
+        assert_eq!(
+            emitted[0]["questions"][0]["options"][1]["label"],
+            "Celle en ligne"
+        );
     }
 }
