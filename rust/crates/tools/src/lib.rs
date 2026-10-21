@@ -6930,8 +6930,17 @@ Deploy $ARGUMENTS
             registry.resolve_tool_name("Read").as_deref(),
             Some("read_file")
         );
+        // MultiEdit est un outil de Claw depuis le 21 octobre 2026.
         assert_eq!(
             registry.resolve_tool_name("MultiEdit").as_deref(),
+            Some("MultiEdit")
+        );
+        assert_eq!(
+            registry.resolve_tool_name("multi_edit").as_deref(),
+            Some("MultiEdit")
+        );
+        assert_eq!(
+            registry.resolve_tool_name("Edit").as_deref(),
             Some("edit_file")
         );
         assert_eq!(
