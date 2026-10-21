@@ -119,11 +119,13 @@ jobs:
           name: claw-${{ github.run_id }}
           path: ${{ runner.temp }}/claw-bin
 
-      # Les projets des scénarios se vérifient avec pytest.
+      # Les projets des scénarios se vérifient avec pytest. Installé pour tout le
+      # système : les commandes de Claw ont leur propre dossier personnel (bac à
+      # sable), où un pytest de ~/.local serait introuvable.
       - name: Outils des scénarios
         run: |
           chmod +x "$RUNNER_TEMP/claw-bin/claw"
-          python3 -m pip install --quiet --break-system-packages pytest
+          sudo python3 -m pip install --quiet --break-system-packages pytest
 
       - name: Essai
         env:
