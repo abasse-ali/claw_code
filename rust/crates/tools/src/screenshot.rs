@@ -262,7 +262,16 @@ fn target(input: &ScreenshotInput) -> Result<String, String> {
             let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
             file_url(&cwd, Path::new(path))
         }
-        (Some(_), Some(_)) => Err("give either url or path, not both".to_string()),
+        // Les deux donnés (vu le 21 octobre 2026, une requête perdue) : l'adresse web si c'en
+        // est une, sinon le fichier du projet.
+        (Some(url), Some(path)) => {
+            if url.starts_with("http://") || url.starts_with("https://") {
+                Ok(url.to_string())
+            } else {
+                let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+                file_url(&cwd, Path::new(path))
+            }
+        }
         (None, None) => Err("give the page to capture: url (http://localhost:3000/ for a local server) or path (an .html file of the project)".to_string()),
     }
 }
@@ -2047,7 +2056,11 @@ mod tests {
             assert!(target(&input(Some(refused), None)).is_err(), "{refused}");
         }
         assert!(target(&input(None, None)).is_err());
-        assert!(target(&input(Some("http://x/"), Some("a.html"))).is_err());
+        // Les deux : l'adresse web l'emporte (au lieu d'un refus qui coûtait une requête).
+        assert_eq!(
+            target(&input(Some("http://x/"), Some("a.html"))).as_deref(),
+            Ok("http://x/")
+        );
         // Un fichier du projet s'ouvre ; un fichier à côté du projet, ou qui
         // n'est pas une page, est refusé (sans dépendre du dossier courant).
         let base = std::env::temp_dir().join(format!("claw-shot-test-{}", std::process::id()));

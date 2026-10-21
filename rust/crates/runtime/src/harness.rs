@@ -3252,6 +3252,7 @@ const TOOL_NAMES: &[&str] = &[
     "git",
     "git_commit",
     "http_request",
+    "Wireframe",
     "glob_search",
     "grep_search",
     "TodoWrite",

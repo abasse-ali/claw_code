@@ -611,6 +611,30 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
   comme `bash` et `WebFetch`. `run_tests` compte comme une vérification pour les gardes.
 - État : corrigé (lot 47).
 
+## E2-21 Wireframes ASCII aux bords décalés, qui débordent
+- Gravité : moyenne
+- Session et messages : session Claw Web n° 18, plans de design des passages 39609156598 et
+  39623024959 ; retour de l'utilisateur du 21 octobre 2026 (« Le Layout - Wireframe ASCII
+  DOIT ÊTRE BIEN FAIT SANS DÉBORDEMENT »).
+- Ce qui s'est passé : les modèles dessinaient les wireframes en comptant les colonnes. Bords
+  droits trop longs ou trop courts, `│` sous rien, montants coupés (`│ 1 250,00 €│`) : le
+  dessin déborde à l'affichage. La vérification les trouve tous dans les deux plans (douze
+  endroits dans le premier).
+- Ce que Claw a fait : rien ; le juge du plan ne regardait pas le dessin.
+- Remède :
+  - outil `Wireframe` (`tools/src/wireframe.rs`) : le modèle décrit les zones (lignes du
+    cadre, colonnes et leur poids, libellés, textes) et le dessin est calculé. Chaque bord
+    tombe à sa place, un texte trop long passe à la ligne (largeur d'affichage, accents et
+    caractères larges comptés justes), rien ne dépasse ; trop de colonnes pour la largeur est
+    dit au lieu d'un dessin cassé ;
+  - `runtime/src/ascii_art.rs` : un dessin en cadres est juste quand chaque trait vertical et
+    chaque coin rejoignent la ligne du dessus ou du dessous. Un plan au dessin faux est renvoyé
+    au modèle (ligne, colonne, caractère) avec la consigne de le redessiner avec l'outil, avant
+    la revue du juge ; un `.md` ou `.txt` écrit au dessin faux aussi, comme les autres pièges
+    du code ;
+  - la méthode de design demande le wireframe dessiné par l'outil, collé tel quel.
+- État : corrigé (lot 47).
+
 ## Relevés sans constat : défauts de ces sessions déjà traités dans le code actuel
 
 À ne pas refaire. Chacun a été vérifié dans le code.

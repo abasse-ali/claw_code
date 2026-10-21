@@ -853,6 +853,10 @@ texte est remplacée par sa sortie (ex. `` !`git diff --stat` ``) ; `@chemin` jo
     valide, sans pousser.
   - `http_request` envoie une requête (méthode, en-têtes, corps JSON) pour tester une API ou un
     serveur lancé en arrière-plan.
+  - `Wireframe` dessine le wireframe ASCII d'un écran à partir de ses zones et colonnes :
+    bords alignés au caractère, textes repliés, rien ne déborde. Un dessin en cadres fait à la
+    main dans un plan de design ou un `.md` est vérifié (chaque trait doit rejoindre le
+    suivant) et renvoyé au modèle s'il est faux.
 
 ### Aides au raisonnement
 
