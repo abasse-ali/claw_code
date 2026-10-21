@@ -495,7 +495,7 @@ traitement conseillé.
   3. Erreur d'un moteur configuré : se rabattre sur DuckDuckGo au lieu d'échouer, et prévenir
      l'utilisateur (pas le modèle) du réglage à corriger.
   Aucune requête de modèle de plus.
-- État : à vérifier
+- État : corrigé (lot 47) : page refusée (code autre que 200, contrôle anti-robot) redemandée une fois après 2 s, puis dite comme un refus et non « aucun résultat » ; filtre de domaines qui retire tout : le nombre et les premières adresses ; moteur configuré en panne remplacé par `DuckDuckGo`, ce qui est dit dans le résultat. L'avis à l'utilisateur sur le réglage reste à faire.
 
 ## E1-17 Lecture seule : `grep`, `find` et `cd` sont refusés, par un message en français qui parle de « proposer un plan »
 - Gravité : haute

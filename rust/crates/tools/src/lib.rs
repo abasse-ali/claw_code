@@ -2377,8 +2377,9 @@ fn execute_web_fetch(input: &WebFetchInput) -> Result<WebFetchOutput, String> {
 }
 
 /// Moteur de recherche : API configurée (`SearXNG`, Brave, Tavily) sinon la page
-/// HTML de `DuckDuckGo`. Renvoie les résultats et le nom du moteur utilisé.
-fn search_hits(client: &Client, query: &str) -> Result<(Vec<SearchHit>, &'static str), String> {
+/// HTML de `DuckDuckGo`. Renvoie les résultats et le moteur utilisé ; un moteur
+/// configuré en panne laisse la place à `DuckDuckGo`, et le dit.
+fn search_hits(client: &Client, query: &str) -> Result<(Vec<SearchHit>, String), String> {
     let env = |name: &str| {
         std::env::var(name)
             .ok()
@@ -2397,77 +2398,139 @@ fn search_hits(client: &Client, query: &str) -> Result<(Vec<SearchHit>, &'static
             })
             .collect::<Vec<_>>()
     };
+    let mut failed = None;
     if let Some(base) = env("CLAW_SEARXNG_URL") {
         let url = format!("{}/search", base.trim_end_matches('/'));
-        let response: Value = client
+        match client
             .get(url)
             .query(&[("q", query), ("format", "json")])
             .send()
             .and_then(reqwest::blocking::Response::error_for_status)
-            .and_then(reqwest::blocking::Response::json)
-            .map_err(|error| {
-                format!("SearXNG : {error} (activez le format json dans settings.yml)")
-            })?;
-        return Ok((
-            hits_from(
-                response.get("results").and_then(Value::as_array),
-                "title",
-                "url",
-            ),
-            "SearXNG",
-        ));
-    }
-    if let Some(key) = env("BRAVE_API_KEY") {
-        let response: Value = client
+            .and_then(reqwest::blocking::Response::json::<Value>)
+        {
+            Ok(response) => {
+                return Ok((
+                    hits_from(
+                        response.get("results").and_then(Value::as_array),
+                        "title",
+                        "url",
+                    ),
+                    "SearXNG".to_string(),
+                ))
+            }
+            Err(error) => failed = Some(format!("SearXNG failed ({error})")),
+        }
+    } else if let Some(key) = env("BRAVE_API_KEY") {
+        match client
             .get("https://api.search.brave.com/res/v1/web/search")
             .query(&[("q", query), ("count", "10")])
             .header("X-Subscription-Token", key)
             .header("Accept", "application/json")
             .send()
             .and_then(reqwest::blocking::Response::error_for_status)
-            .and_then(reqwest::blocking::Response::json)
-            .map_err(|error| format!("Brave Search : {error}"))?;
-        let results = response
-            .get("web")
-            .and_then(|web| web.get("results"))
-            .and_then(Value::as_array);
-        return Ok((hits_from(results, "title", "url"), "Brave"));
-    }
-    if let Some(key) = env("TAVILY_API_KEY") {
-        let response: Value = client
+            .and_then(reqwest::blocking::Response::json::<Value>)
+        {
+            Ok(response) => {
+                let results = response
+                    .get("web")
+                    .and_then(|web| web.get("results"))
+                    .and_then(Value::as_array);
+                return Ok((hits_from(results, "title", "url"), "Brave".to_string()));
+            }
+            Err(error) => failed = Some(format!("Brave Search failed ({error})")),
+        }
+    } else if let Some(key) = env("TAVILY_API_KEY") {
+        match client
             .post("https://api.tavily.com/search")
             .json(&json!({ "api_key": key, "query": query, "max_results": 8 }))
             .send()
             .and_then(reqwest::blocking::Response::error_for_status)
-            .and_then(reqwest::blocking::Response::json)
-            .map_err(|error| format!("Tavily : {error}"))?;
-        return Ok((
-            hits_from(
-                response.get("results").and_then(Value::as_array),
-                "title",
-                "url",
-            ),
-            "Tavily",
-        ));
+            .and_then(reqwest::blocking::Response::json::<Value>)
+        {
+            Ok(response) => {
+                return Ok((
+                    hits_from(
+                        response.get("results").and_then(Value::as_array),
+                        "title",
+                        "url",
+                    ),
+                    "Tavily".to_string(),
+                ))
+            }
+            Err(error) => failed = Some(format!("Tavily failed ({error})")),
+        }
     }
+    let hits = duckduckgo_hits(client, query)?;
+    let engine = match failed {
+        Some(reason) => format!("DuckDuckGo; {reason}, so DuckDuckGo was used instead"),
+        None => "DuckDuckGo".to_string(),
+    };
+    Ok((hits, engine))
+}
+
+/// Une page de contrôle anti-robot ou de limite de débit, et non une page de
+/// résultats : elle n'en contient aucun, et la rendre comme « aucun
+/// résultat » ferait conclure que le sujet n'existe pas.
+fn is_bot_check(html: &str) -> bool {
+    let lower = html.to_lowercase();
+    [
+        "anomaly",
+        "captcha",
+        "unusual traffic",
+        "bots use duckduckgo",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+/// La page HTML de `DuckDuckGo`, une nouvelle fois après 2 s si elle est
+/// refusée (code autre que 200, page de contrôle).
+fn duckduckgo_hits(client: &Client, query: &str) -> Result<Vec<SearchHit>, String> {
     let search_url = build_search_url(query)?;
-    let response = client
-        .get(search_url)
-        .send()
-        .map_err(|error| error.to_string())?;
-    let final_url = response.url().clone();
-    let html = response.text().map_err(|error| error.to_string())?;
-    let mut hits = extract_search_hits(&html);
-    if hits.is_empty() && final_url.host_str().is_some() {
-        hits = extract_search_hits_from_generic_links(&html);
+    for attempt in 0..2 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        let response = client
+            .get(search_url.clone())
+            .send()
+            .map_err(|error| fetch_failure(search_url.as_str(), &error))?;
+        let status = response.status();
+        let final_url = response.url().clone();
+        let html = response.text().map_err(|error| error.to_string())?;
+        if status.as_u16() != 200 || is_bot_check(&html) {
+            if attempt == 0 {
+                continue;
+            }
+            let why = if status.as_u16() == 200 {
+                "bot check".to_string()
+            } else {
+                format!("HTTP {status}")
+            };
+            return Err(format!(
+                "[Claw] The search engine refused this request ({why}, rate limit or bot check), so this is not \"no results\". Do not answer from memory as if you had searched: fetch a known documentation address with WebFetch, or tell the user that the web search is unavailable right now."
+            ));
+        }
+        let mut hits = extract_search_hits(&html);
+        if hits.is_empty() && final_url.host_str().is_some() {
+            hits = extract_search_hits_from_generic_links(&html);
+        }
+        return Ok(hits);
     }
-    Ok((hits, "DuckDuckGo"))
+    unreachable!("la boucle rend toujours au second essai")
 }
 
 fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String> {
     let started = Instant::now();
     let client = build_http_client()?;
     let (mut hits, engine) = search_hits(&client, &input.query)?;
+    let found = hits.len();
+    let first_found = hits
+        .iter()
+        .take(3)
+        .map(|hit| hit.url.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
 
     if let Some(allowed) = input.allowed_domains.as_ref() {
         hits.retain(|hit| host_matches_list(&hit.url, allowed));
@@ -2479,7 +2542,13 @@ fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String>
     dedupe_hits(&mut hits);
     hits.truncate(8);
 
-    let summary = if hits.is_empty() {
+    let summary = if hits.is_empty() && found > 0 {
+        // Des résultats existaient : c'est le filtre qui a tout retiré.
+        format!(
+            "[Claw] {found} results were found for {:?} but none passed allowed_domains / blocked_domains. The first ones were: {first_found}. Widen allowed_domains or drop it.",
+            input.query
+        )
+    } else if hits.is_empty() {
         format!(
             "No web search results matched the query {:?} ({engine}).",
             input.query
@@ -6567,6 +6636,52 @@ setTimeout(function () { nexistepas(); }, 100);
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["title"], "Reqwest docs");
         assert_eq!(content[0]["url"], "https://docs.rs/reqwest");
+    }
+
+    #[test]
+    fn web_search_says_when_the_engine_refuses_or_the_filter_removes_everything() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let server = TestServer::spawn(Arc::new(|_: &str| {
+            HttpResponse::html(
+                202,
+                "Accepted",
+                "<html><body><form action=\"/anomaly.js\">Unfortunately, bots use DuckDuckGo too.</form></body></html>",
+            )
+        }));
+        std::env::set_var(
+            "CLAW_WEB_SEARCH_BASE_URL",
+            format!("http://{}/search", server.addr()),
+        );
+        let error = execute_tool("WebSearch", &json!({ "query": "tokio select" }))
+            .expect_err("recherche refusée");
+        std::env::remove_var("CLAW_WEB_SEARCH_BASE_URL");
+        assert!(
+            error.starts_with("[Claw] The search engine refused this request (HTTP 202"),
+            "{error}"
+        );
+        assert!(error.contains("Do not answer from memory"));
+
+        let server = TestServer::spawn(Arc::new(|_: &str| {
+            HttpResponse::html(
+                200,
+                "OK",
+                r#"<html><body><a class="result__a" href="https://example.com/a">A</a></body></html>"#,
+            )
+        }));
+        std::env::set_var(
+            "CLAW_WEB_SEARCH_BASE_URL",
+            format!("http://{}/search", server.addr()),
+        );
+        let result = execute_tool(
+            "WebSearch",
+            &json!({ "query": "tokio select", "allowed_domains": ["docs.rs"] }),
+        )
+        .expect("recherche faite");
+        std::env::remove_var("CLAW_WEB_SEARCH_BASE_URL");
+        assert!(result.contains("1 results were found"), "{result}");
+        assert!(result.contains("https://example.com/a"));
     }
 
     #[test]
