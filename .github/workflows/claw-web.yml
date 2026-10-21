@@ -76,7 +76,33 @@ permissions:
   issues: write
 
 jobs:
+  # Bouton « Rechercher tous les modèles gratuits » du choix du modèle : l'appli lance la
+  # session réservée `catalogue-modeles`, le champ `model` portant le fournisseur. Le catalogue
+  # classé va sur la branche des fichiers (catalogue/<fournisseur>.json) ; aucune session.
+  catalogue:
+    if: inputs.session == 'catalogue-modeles'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Scripts du moteur
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.claw_source }}
+          ref: ${{ inputs.claw_ref }}
+          token: ${{ secrets.CLAW_REPO_TOKEN || github.token }}
+          path: claw-src
+          sparse-checkout: .github/claw-web
+          persist-credentials: false
+      - name: Catalogue des modèles gratuits
+        env:
+          PROVIDERS: ${{ inputs.model }}
+          JOB_TOKEN: ${{ github.token }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python3 claw-src/.github/claw-web/models_catalog.py
+
   task:
+    if: inputs.session != 'catalogue-modeles'
     # Sur votre PC (exécuteur auto-hébergé `claw-pc`), aucune minute de GitHub n'est comptée.
     runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 120

@@ -8,7 +8,7 @@ import { escapeHtml, renderMarkdown } from "./markdown.js";
 import { sealedBox } from "./sealed-box.js";
 import { LOG, changesHtml, decodeLog, photoLink, photoView, transcriptHtml, withoutCallMarkup } from "./transcript.js";
 import { highlightLines, languageOf } from "./highlight.js";
-import { accountStatus, freeModels, resetTime } from "./openrouter.js";
+import { accountStatus, allFreeModels, freeModels, resetTime } from "./openrouter.js";
 
 const STORE = "claw-web.settings.v1";
 const DEFAULT_ENGINE = "abasse-ali/claw-sessions";
@@ -766,10 +766,12 @@ async function refreshRuns() {
  * `groups` ([{ key, label, empty }]) : un onglet par groupe, pour les éléments qui ont ce
  * `group` ; l'onglet ouvert est celui de l'élément choisi. Une recherche parcourt tous les
  * groupes ; `empty` dit quoi faire quand un groupe n'a rien (une clé à ajouter). */
-function openPicker({ title, items, current, placeholder, onPick, onRemove, groups = [] }) {
+function openPicker({ title, items, current, placeholder, onPick, onRemove, groups = [], tab = "" }) {
   const sheet = $("#sheet");
-  const count = (key) => items.filter((item) => item.group === key).length;
-  let active = (items.find((item) => item.value === current && item.group) || {}).group || (groups[0] || {}).key;
+  // Les actions d'un onglet (« Rechercher tous les modèles gratuits ») ne comptent pas.
+  const count = (key) => items.filter((item) => item.group === key && !item.action).length;
+  let active = (groups.some((group) => group.key === tab) && tab)
+    || (items.find((item) => item.value === current && item.group) || {}).group || (groups[0] || {}).key;
   sheet.innerHTML = `
     <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
       <div class="sheet-head">
@@ -1308,18 +1310,145 @@ async function followRenamedBranch(repo, old, name) {
   return moved;
 }
 
-async function pickModel() {
+// --- Catalogue complet des modèles gratuits ------------------------------------------------
+
+/** Session réservée : le moteur y dresse le catalogue d'un fournisseur (models_catalog.py). */
+const CATALOGUE_SESSION = "catalogue-modeles";
+const CATALOGUE_ACTION = "__catalogue__:";
+const UNUSABLE = "__inutilisable__:";
+const catalogueKey = (provider) => `claw-web-catalogue-${provider}`;
+
+function storedCatalogue(provider) {
+  try {
+    return JSON.parse(localStorage.getItem(catalogueKey(provider)) || "null");
+  } catch {
+    return null;
+  }
+}
+
+function keepCatalogue(provider, data) {
+  try {
+    localStorage.setItem(catalogueKey(provider), JSON.stringify(data));
+  } catch {
+    // Navigation privée : le catalogue sert pour cette ouverture seulement.
+  }
+}
+
+/** Tous les modèles gratuits d'un fournisseur, classés pour le code. OpenRouter : son catalogue
+ * public, lu ici. NVIDIA et Gemini : le moteur, qui a leurs clés, essaie chaque modèle (répond-il,
+ * appelle-t-il un outil, en combien de temps) et range le résultat sur la branche des fichiers. */
+async function searchCatalogue(provider) {
+  if (provider === "openrouter") {
+    const data = { provider, at: Math.floor(Date.now() / 1000), error: "", models: await allFreeModels() };
+    keepCatalogue(provider, data);
+    return data;
+  }
+  const engine = state.settings.engine;
+  const ref = state.engineRef || "main";
+  const started = Date.now();
+  await state.github.dispatch(engine, ref, { repo: engine, base: ref, session: CATALOGUE_SESSION, model: provider });
+  const title = runTitle(engine, CATALOGUE_SESSION);
+  let run = null;
+  while (Date.now() - started < 25 * 60 * 1000) {
+    await new Promise((resolve) => setTimeout(resolve, 10000));
+    run = (await state.github.runs(engine))
+      .find((item) => item.display_title === title && Date.parse(item.created_at) >= started - 60000) || null;
+    if (run && run.status === "completed") break;
+  }
+  if (!run || run.status !== "completed") throw new Error("La recherche des modèles prend trop de temps : réessayez plus tard.");
+  let data = null;
+  try {
+    const file = await state.github.contents(engine, `catalogue/${provider}.json`, FILES_BRANCH);
+    const bytes = Uint8Array.from(atob(String(file.content || "").replace(/\s/g, "")), (character) => character.charCodeAt(0));
+    data = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    data = null;
+  }
+  if (!data || data.at * 1000 < started - 120000) {
+    throw new Error(`La recherche a échoué dans le moteur (${run.conclusion}) : le workflow claw-web.yml du moteur est-il à jour ?`);
+  }
+  keepCatalogue(provider, data);
+  return data;
+}
+
+/** Lance la recherche, dit où elle en est, puis rouvre le choix du modèle sur ses résultats. */
+async function runCatalogueSearch(provider, label) {
+  if (state.catalogueSearch) {
+    toast(`Recherche déjà en cours (${state.catalogueSearch}) : un instant.`);
+    return;
+  }
+  state.catalogueSearch = label;
+  toast(provider === "openrouter"
+    ? "Recherche de tous les modèles gratuits d'OpenRouter…"
+    : `Recherche de tous les modèles gratuits de ${label} : le moteur essaie chacun, 2 à 10 minutes. Vous pouvez continuer.`);
+  try {
+    const data = await searchCatalogue(provider);
+    const usable = data.models.filter((model) => model.tools !== false && model.status === "ok").length;
+    toast(`${label} : ${data.models.length} modèles gratuits trouvés, ${usable} utilisables par Claw.${data.error ? ` Erreur : ${data.error}` : ""}`,
+      data.error ? "error" : "info");
+    await pickModel(provider);
+  } catch (error) {
+    failure(error);
+  } finally {
+    state.catalogueSearch = null;
+  }
+}
+
+/** Modèles d'un catalogue, comme éléments du choix : utilisables numérotés d'abord, puis ceux
+ * avec lesquels Claw ne peut pas travailler (sans outils, en échec, hors de l'offre gratuite). */
+function catalogueItems(provider, data) {
+  let rank = 0;
+  return (data.models || []).map((model) => {
+    const usable = model.tools !== false && model.status === "ok";
+    if (usable) rank += 1;
+    return {
+      value: usable ? model.id : `${UNUSABLE}${model.id}`,
+      label: usable ? `${rank}. ${model.short}` : `${model.short} · inutilisable`,
+      detail: [
+        usable ? (rank === 1 ? "le plus puissant pour le code" : "") : model.status,
+        model.tools === null || model.tools === undefined ? (usable ? "non essayé" : "") : "",
+        ...(model.reasons || []),
+        model.context ? `contexte ${contextLabel(model.context)}` : "",
+      ].filter(Boolean).join(" · "),
+      group: provider,
+    };
+  });
+}
+
+/** Ligne « Rechercher tous les modèles gratuits » en tête d'un onglet. */
+function catalogueAction(provider, data, slow) {
+  const when = data ? new Date(data.at * 1000).toLocaleString("fr-FR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
+  const usable = data ? data.models.filter((model) => model.tools !== false && model.status === "ok").length : 0;
+  return {
+    value: `${CATALOGUE_ACTION}${provider}`,
+    label: data ? "Relancer la recherche de tous les modèles gratuits" : "Rechercher tous les modèles gratuits",
+    detail: data
+      ? `dernière recherche le ${when} : ${data.models.length} modèles, ${usable} utilisables, classés pour le code`
+      : `tout le catalogue gratuit, classé pour le code${slow ? " ; le moteur essaie chaque modèle (2 à 10 min)" : ""}`,
+    group: provider,
+    icon: "spark",
+    action: true,
+  };
+}
+
+async function pickModel(tab) {
   const [models, secrets] = await Promise.all([loadModels(), engineProviderSecrets()]);
   const best = models.find((model) => model.rank === 1);
+  const openrouterCatalogue = storedCatalogue("openrouter");
   // Un onglet par fournisseur : OpenRouter, puis Google Gemini et NVIDIA, dont les modèles ne
-  // sont proposés que si le moteur a leur clé (sinon l'onglet dit où la mettre).
+  // sont proposés que si le moteur a leur clé (sinon l'onglet dit où la mettre). Après une
+  // recherche, l'onglet montre tout le catalogue gratuit du fournisseur, classé pour le code.
   const keyedItems = KEYED_PROVIDERS.filter((provider) => secrets[provider.secret])
-    .flatMap((provider) => provider.models.map((model) => ({
-      value: model.id,
-      label: model.short,
-      detail: `${model.note ? `${model.note} · ` : ""}${provider.detail} (secret ${provider.secret} du moteur)`,
-      group: provider.key,
-    })));
+    .flatMap((provider) => {
+      const data = storedCatalogue(provider.key);
+      const listed = data ? catalogueItems(provider.key, data) : provider.models.map((model) => ({
+        value: model.id,
+        label: model.short,
+        detail: `${model.note ? `${model.note} · ` : ""}${provider.detail} (secret ${provider.secret} du moteur)`,
+        group: provider.key,
+      }));
+      return [catalogueAction(provider.key, data, true), ...listed];
+    });
   const groups = [
     { key: "openrouter", label: "OpenRouter", note: providerQuota("openrouter").line, empty: "Aucun modèle gratuit d'OpenRouter trouvé : réessayez dans un instant." },
     ...KEYED_PROVIDERS.map((provider) => ({
@@ -1335,16 +1464,30 @@ async function pickModel() {
     model.context ? `contexte ${contextLabel(model.context)}` : "",
   ].filter(Boolean).join(" · ");
   openPicker({
+    tab,
     title: "Modèle (gratuit)",
     placeholder: "Rechercher un modèle",
     current: state.settings.model || "",
     groups,
     items: [
       { value: "", label: "Auto", pinned: true, detail: best ? `en ce moment ${best.short}, le plus puissant des gratuits pour le code (et les suivants s'il ne répond plus)` : "le meilleur modèle gratuit pour le code" },
-      ...models.map((model) => ({ value: model.id, label: model.rank ? `${model.rank}. ${model.short}` : model.short, detail: detail(model), group: "openrouter" })),
+      catalogueAction("openrouter", openrouterCatalogue, false),
+      ...(openrouterCatalogue
+        ? catalogueItems("openrouter", openrouterCatalogue)
+        : models.map((model) => ({ value: model.id, label: model.rank ? `${model.rank}. ${model.short}` : model.short, detail: detail(model), group: "openrouter" }))),
       ...keyedItems,
     ],
     onPick: (value) => {
+      if (value.startsWith(CATALOGUE_ACTION)) {
+        const provider = value.slice(CATALOGUE_ACTION.length);
+        const group = groups.find((entry) => entry.key === provider);
+        runCatalogueSearch(provider, group ? group.label : provider);
+        return;
+      }
+      if (value.startsWith(UNUSABLE)) {
+        toast("Claw ne peut pas travailler avec ce modèle : il n'appelle pas d'outils, échoue ou n'est pas gratuit (voir le détail).", "error");
+        return;
+      }
       state.settings.model = value;
       saveSettings();
       renderComposer();
@@ -1602,7 +1745,7 @@ function renderComposer() {
   });
   composer.querySelector('[data-action="repo"]')?.addEventListener("click", pickRepo);
   composer.querySelector('[data-action="branch"]')?.addEventListener("click", pickBranch);
-  composer.querySelector('[data-action="model"]').addEventListener("click", pickModel);
+  composer.querySelector('[data-action="model"]').addEventListener("click", () => pickModel());
   const picker = composer.querySelector(".file-input");
   composer.querySelector(".attach").addEventListener("click", () => picker.click());
   picker.addEventListener("change", async () => {

@@ -149,6 +149,39 @@ export async function freeModels() {
   return { ranked, others };
 }
 
+/** Tout le catalogue gratuit d'OpenRouter, outils ou non, classé pour le code : ceux qui
+ * appellent des outils d'abord (les seuls avec lesquels Claw peut travailler), du plus puissant
+ * au moins puissant ; un modèle qui ne se présente pas comme bon en code passe après les autres
+ * de même puissance. Même forme que le catalogue du moteur (models_catalog.py). */
+export async function allFreeModels() {
+  const get = async (url) => {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) throw new Error(`OpenRouter : ${response.status}`);
+    return (await response.json()).data || [];
+  };
+  const [catalog, programming] = await Promise.all([
+    get(`${API}/models`),
+    get(`${API}/models?category=programming`).catch(() => []),
+  ]);
+  const ranking = programming.map((model) => model.id);
+  return catalog.filter((model) => isFree(model) && !model.id.startsWith("openrouter/"))
+    .map((model) => {
+      const { score, reasons } = power(model, ranking);
+      const code = goodAtCode(model, ranking);
+      const tools = hasTools(model);
+      return {
+        id: model.id,
+        short: shortName(model),
+        score: score - (code ? 0 : 15),
+        reasons: code ? reasons : [...reasons, "pas présenté comme bon en code"],
+        context: model.context_length || 0,
+        tools,
+        status: tools ? "ok" : "n'appelle pas d'outils",
+      };
+    })
+    .sort((left, right) => (Number(right.tools) - Number(left.tools)) || (right.score - left.score));
+}
+
 /** Requêtes gratuites du jour (utilisées, limite, restantes) et crédits, avec la clé donnée. */
 export async function accountStatus(key) {
   const headers = { Authorization: `Bearer ${key}` };
