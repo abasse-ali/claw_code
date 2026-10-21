@@ -1,0 +1,131 @@
+name: Essais réels
+
+# Banc d'essais réels de Claw (rust/scripts/real-tests) avec de vrais modèles de NVIDIA, lancé
+# à la main : chaque scénario est noté par sa vérification cachée. Le résumé, la note détaillée,
+# les remarques de Claw et la trace de chaque session vont dans le journal du job, pour lire
+# le comportement du modèle sans rien télécharger. La clé (secret NVIDIA_API_KEY) n'est jamais
+# écrite : GitHub la masque dans le journal, et elle est retirée des fichiers des essais avant
+# leur dépôt en artefact (une commande de l'agent pourrait l'avoir affichée).
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: "Scénarios, séparés par des espaces (t1-inventaire … t8-materiel), ou « tous »"
+        required: true
+        default: "t1-inventaire"
+        type: string
+      model:
+        description: Modèle de NVIDIA
+        required: true
+        default: nvidia:nvidia/nemotron-3-ultra-550b-a55b
+        type: choice
+        options:
+          - nvidia:nvidia/nemotron-3-ultra-550b-a55b
+          - nvidia:nvidia/nemotron-3-super-120b-a12b
+          - nvidia:nvidia/nemotron-3.5-lightning-30b-a3b
+      label:
+        description: Étiquette des essais (dans leur nom)
+        required: false
+        default: ""
+        type: string
+      timeout:
+        description: Durée maximale d'un essai, en secondes
+        required: false
+        default: "1500"
+        type: string
+
+permissions:
+  contents: read
+
+# Un banc à la fois : NVIDIA limite à une quarantaine de requêtes par minute.
+concurrency:
+  group: real-tests
+  cancel-in-progress: false
+
+jobs:
+  essais:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Clé NVIDIA présente
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: |
+          if [ -z "$NVIDIA_API_KEY" ]; then
+            echo "::error::Secret NVIDIA_API_KEY absent : Settings > Secrets and variables > Actions > New repository secret."
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Compiler Claw
+        working-directory: rust
+        run: cargo build --locked -p claw-cli
+
+      # Les projets des scénarios se vérifient avec pytest.
+      - name: Outils des scénarios
+        run: python3 -m pip install --quiet --break-system-packages pytest
+
+      - name: Essais
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          SCENARIOS: ${{ inputs.scenarios }}
+          MODEL: ${{ inputs.model }}
+          LABEL: ${{ inputs.label }}
+          TIMEOUT: ${{ inputs.timeout }}
+          # Hors du dépôt : le modèle ne doit lire ni le dépôt ni ses fichiers d'instructions.
+          CLAW_REAL_TESTS_DIR: ${{ runner.temp }}/claw-real-tests
+          CLAW_LANGUAGE: français
+          PYTHONIOENCODING: utf-8
+        run: |
+          git config --global user.name claw-bench
+          git config --global user.email bench@localhost
+          git config --global init.defaultBranch main
+          if [ "$SCENARIOS" = "tous" ]; then
+            SCENARIOS=$(ls rust/scripts/real-tests/scenarios)
+          fi
+          for scenario in $SCENARIOS; do
+            echo "::group::Essai $scenario"
+            python3 rust/scripts/real-tests/run.py "$scenario" --model "$MODEL" --label "${LABEL:-nvidia}" \
+              --timeout "$TIMEOUT" --claw "$GITHUB_WORKSPACE/rust/target/debug/claw" || echo "::warning::$scenario : le lanceur a échoué"
+            echo "::endgroup::"
+          done
+
+      - name: Résultats et traces
+        if: always()
+        env:
+          RUNS: ${{ runner.temp }}/claw-real-tests
+          PYTHONIOENCODING: utf-8
+        run: python3 rust/scripts/real-tests/report.py "$RUNS"
+
+      - name: Retirer la clé des fichiers des essais
+        if: always()
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          RUNS: ${{ runner.temp }}/claw-real-tests
+        run: |
+          python3 - <<'EOF'
+          import os
+          from pathlib import Path
+          key = os.environ["NVIDIA_API_KEY"].encode()
+          runs = Path(os.environ["RUNS"])
+          for path in runs.rglob("*") if runs.exists() and key else []:
+              if path.is_file() and not path.is_symlink():
+                  data = path.read_bytes()
+                  if key in data:
+                      path.write_bytes(data.replace(key, b"***"))
+          EOF
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: essais-reels-${{ github.run_id }}
+          path: ${{ runner.temp }}/claw-real-tests
+          retention-days: 14
+          if-no-files-found: ignore

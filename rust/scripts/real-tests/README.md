@@ -52,6 +52,13 @@ diff Git du dépôt entier (le 12 octobre, un petit modèle y a lu les pièges d
 les `CLAW.md`, `CLAUDE.md` ou `AGENTS.md` des dossiers parents : `run.py` refuse un dossier
 d'essais qui en a au-dessus de lui.
 
+Sur GitHub, le workflow « Essais réels » (`.github/workflows/real-tests.yml`, lancé à la
+main) fait tourner le banc avec un modèle de NVIDIA (secret `NVIDIA_API_KEY` du dépôt) :
+scénarios au choix (« tous » pour le banc entier), un essai après l'autre. `report.py` écrit
+dans le journal du job la note de chaque point, les notices et les remarques de Claw, la
+réponse finale et la trace de la session ; la clé est retirée des fichiers des essais avant
+leur dépôt en artefact.
+
 Règles : modèles gratuits seulement ; peu d'essais, ciblés (chaque étape de l'agent coûte une
 requête du quota gratuit) ; les vraies clés sont lues par Claw et ne sont jamais affichées.
 Les constats et les scores sont consignés dans `rust/docs/suivi/t1-tests-reels.md`.
