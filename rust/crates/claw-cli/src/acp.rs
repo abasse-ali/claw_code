@@ -95,10 +95,12 @@ struct ToolCalls {
 
 fn tool_kind(name: &str) -> &'static str {
     match name {
-        "read_file" | "BashOutput" | "ReadMcpResource" | "ListMcpResources" | "list_directory" => {
-            "read"
-        }
-        "write_file" | "edit_file" | "NotebookEdit" | "MultiEdit" | "apply_patch" => "edit",
+        "read_file" | "BashOutput" | "ReadMcpResource" | "ListMcpResources" | "list_directory"
+        | "read_many_files" | "file_outline" | "git" => "read",
+        "write_file" | "edit_file" | "NotebookEdit" | "MultiEdit" | "apply_patch"
+        | "replace_in_files" | "git_commit" => "edit",
+        "run_tests" => "execute",
+        "http_request" => "fetch",
         "move_file" => "move",
         "delete_file" => "delete",
         "bash" | "PowerShell" | "REPL" | "KillShell" => "execute",

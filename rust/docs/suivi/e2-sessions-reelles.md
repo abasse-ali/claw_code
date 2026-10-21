@@ -595,6 +595,22 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
   chrominance) et sur une capture de la session 18 (585 x 2334 en 20 ms).
 - État : corrigé (lot 47). JPEG progressif et GIF/WebP : le fichier dit qu'ils ne sont pas lus.
 
+## E2-20 Les gestes courants d'un développeur passaient par bash, à la main
+- Gravité : moyenne
+- Session et messages : demande de l'utilisateur du 21 octobre 2026 (« replace_in_files,
+  read_many_files, file_outline, run_tests + git, et tout ce qui pourrait aider Claw à coder
+  comme un professionnel full stack »).
+- Ce qui s'est passé : lire trois fichiers coûtait trois requêtes. Renommer dans tout le
+  projet voulait un `sed` hors de `/undo`. Lire les échecs de tests demandait de relire des
+  centaines de lignes de sortie. Tester une API passait par `curl` et ses guillemets.
+- Ce que Claw a fait : rien, faute d'outil.
+- Remède : `runtime/src/code_tools.rs` (`read_many_files`, `file_outline`, `run_tests`,
+  `git`, `git_commit`), `replace_in_files` dans `file_tools.rs` (mêmes gardes et `/undo` que
+  `apply_patch`), `http_request` dans `tools`. Permissions : chaque chemin lu ou écrit est jugé
+  (`Read(.env)` refuse un `read_many_files` qui le touche) ; `run_tests` et `http_request`
+  comme `bash` et `WebFetch`. `run_tests` compte comme une vérification pour les gardes.
+- État : corrigé (lot 47).
+
 ## Relevés sans constat : défauts de ces sessions déjà traités dans le code actuel
 
 À ne pas refaire. Chacun a été vérifié dans le code.

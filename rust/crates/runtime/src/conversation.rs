@@ -750,7 +750,15 @@ fn lone_call_note(
     let alone = aids.calls_in_reply == 1 && !is_error && harness::enabled(Aid::BatchCalls);
     let observation = matches!(
         tool_name,
-        "read_file" | "grep_search" | "glob_search" | "list_directory" | "bash" | "PowerShell"
+        "read_file"
+            | "grep_search"
+            | "glob_search"
+            | "list_directory"
+            | "read_many_files"
+            | "file_outline"
+            | "git"
+            | "bash"
+            | "PowerShell"
     );
     if !alone || !observation {
         aids.single_call_streak = 0;
@@ -828,6 +836,29 @@ fn command_outcome(
             command,
             passed: result.passed,
             output: output.to_string(),
+        });
+    }
+    // Les tests lancés par `run_tests` : une vérification comme `cargo test` dans bash.
+    if tool_name == "run_tests" {
+        let value = serde_json::Deserializer::from_str(output)
+            .into_iter::<serde_json::Value>()
+            .next()?
+            .ok()?;
+        if value
+            .get("note")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|note| note.contains("background"))
+        {
+            return None;
+        }
+        return Some(CommandOutcome {
+            command: value.get("command")?.as_str()?.to_string(),
+            passed: value.get("succeeded").and_then(serde_json::Value::as_bool) == Some(true),
+            output: value
+                .get("output")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
         });
     }
     if tool_name != "BashOutput" {
@@ -2440,7 +2471,14 @@ where
             }
         } else if !matches!(
             tool_name,
-            "read_file" | "grep_search" | "glob_search" | "list_directory"
+            "read_file"
+                | "grep_search"
+                | "glob_search"
+                | "list_directory"
+                | "read_many_files"
+                | "file_outline"
+                | "git"
+                | "http_request"
         ) {
             // Une commande ou un autre outil a pu changer des fichiers.
             self.drop_stale_file_views();

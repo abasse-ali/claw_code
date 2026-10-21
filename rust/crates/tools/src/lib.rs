@@ -514,6 +514,114 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
+            name: "read_many_files",
+            description: "Read several files in one call, each as read_file would (first `max_lines` lines, 400 by default). `paths` takes file paths and glob patterns (src/**/*.ts). Prefer it to several read_file calls when you need to look at a few related files: one request instead of one per file.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "paths": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                    "max_lines": { "type": "integer", "minimum": 1, "maximum": 2000 }
+                },
+                "required": ["paths"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "file_outline",
+            description: "List the definitions of one file with their line numbers, without reading it whole: classes, functions and methods (Python, JavaScript/TypeScript, Rust, Go, Java, C#, C/C++, PHP, Ruby, Kotlin, Swift...), CSS rules and @media, HTML sections, ids and headings, Markdown headings, SQL tables, YAML keys, TOML sections. Use it to find where to read or edit in a long file, then read_file with offset.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "replace_in_files",
+            description: "Replace a text in every file of a folder at once (renaming a function, a variable, a CSS class, a URL across the project). `pattern` is matched exactly, or as a regex with `regex: true` ($1 in `replacement` for groups); `glob` limits the files (**/*.ts), `path` the folder. Dependency and cache folders and binary files are skipped. `preview: true` shows the diff of each file without writing. Each file keeps its encoding and line endings; /undo can reverse it.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string" },
+                    "replacement": { "type": "string" },
+                    "regex": { "type": "boolean" },
+                    "path": { "type": "string" },
+                    "glob": { "type": "string" },
+                    "ignore_case": { "type": "boolean" },
+                    "preview": { "type": "boolean" }
+                },
+                "required": ["pattern", "replacement"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "run_tests",
+            description: "Run the project's tests and get a summary: how many passed and failed, and for each failure its name and message. Without `command`, the test command is found from the project (cargo test, npm/pnpm/yarn test with Jest, Vitest or Mocha, pytest, go test, Maven, Gradle, dotnet test, phpunit, rspec, make test). `filter` runs only the tests whose name contains it; `path` tests a sub-project. Run it after each change that could break something, and before saying the work is done.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" },
+                    "filter": { "type": "string" },
+                    "path": { "type": "string" },
+                    "timeout_seconds": { "type": "integer", "minimum": 10, "maximum": 3600 }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "git",
+            description: "Read the git repository, structured: `status` (branch, ahead/behind, staged, modified, untracked and conflicting files), `diff` (with `staged`, a `ref` such as HEAD~1 or main, a `path`), `log` (last commits, `limit`, `path`), `show` (one commit, `ref`), `blame` (`path` and `lines` such as \"10,40\"), `branches`. It changes nothing; commit with git_commit, and use bash for checkout, merge or push.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["status", "diff", "log", "show", "blame", "branches"] },
+                    "path": { "type": "string" },
+                    "ref": { "type": "string" },
+                    "staged": { "type": "boolean" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
+                    "lines": { "type": "string" }
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "git_commit",
+            description: "Commit changes with a message: all changes (git add -A), or only `paths`. Write the message as a short summary line of what changed and why. It does not push.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "message": { "type": "string" },
+                    "paths": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["message"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "http_request",
+            description: "Send an HTTP request and see the response: status, main headers and body (JSON pretty-printed). Use it to test an API or a server you started (http://localhost:3000/api/items), with any method, headers and body (a JSON object is sent as JSON). For reading a web page as text, use WebFetch.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string" },
+                    "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+                    "headers": { "type": "object", "description": "Header names and values, for example {\"Authorization\": \"Bearer ...\"}" },
+                    "body": { "type": "string", "description": "Request body: JSON text is sent as application/json, anything else as is" },
+                    "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 120 }
+                },
+                "required": ["url"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
             name: "glob_search",
             description: "Find files by glob pattern (for example `src/**/*.ts`), newest first, at most 100. Dependency, cache and tool folders (node_modules, .git, .venv, __pycache__...) and build output that git ignores (dist, build, target...) are skipped unless the pattern or path names them; when nothing is found, the result's `note` lists what was skipped.",
             input_schema: json!({
@@ -1212,6 +1320,27 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         "list_directory" => from_value::<ListDirectoryInput>(input).and_then(run_list_directory),
         "move_file" => from_value::<MoveFileInput>(input).and_then(run_move_file),
         "delete_file" => from_value::<DeleteFileInput>(input).and_then(run_delete_file),
+        "read_many_files" => from_value::<runtime::ReadManyFilesInput>(input)
+            .and_then(|input| runtime::read_many_files(&input).map_err(io_to_string))
+            .and_then(to_pretty_json),
+        "file_outline" => from_value::<runtime::FileOutlineInput>(input)
+            .and_then(|input| runtime::file_outline(&input.path).map_err(io_to_string))
+            .and_then(to_pretty_json),
+        "replace_in_files" => from_value::<runtime::ReplaceInFilesInput>(input)
+            .and_then(|input| runtime::replace_in_files(&input).map_err(io_to_string))
+            .and_then(to_pretty_json),
+        "run_tests" => from_value::<runtime::RunTestsInput>(input)
+            .and_then(|input| runtime::run_tests(&input).map_err(io_to_string))
+            .and_then(to_pretty_json),
+        "git" => from_value::<runtime::GitInput>(input)
+            .and_then(|input| runtime::git_read(&input).map_err(io_to_string))
+            .and_then(to_pretty_json),
+        "git_commit" => from_value::<runtime::GitCommitInput>(input)
+            .and_then(|input| runtime::git_commit(&input).map_err(io_to_string))
+            .and_then(to_pretty_json),
+        "http_request" => {
+            from_value::<HttpRequestInput>(input).and_then(|input| run_http_request(&input))
+        }
         "glob_search" => from_value::<GlobSearchInputValue>(input).and_then(run_glob_search),
         "grep_search" => from_value::<GrepSearchInput>(input).and_then(run_grep_search),
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
@@ -2672,6 +2801,133 @@ fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String>
     })
 }
 
+#[derive(Debug, Deserialize)]
+struct HttpRequestInput {
+    url: String,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    headers: Option<BTreeMap<String, Value>>,
+    #[serde(default)]
+    body: Option<Value>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+/// Une requête HTTP quelconque (tester une API) : statut, en-têtes utiles, corps.
+fn run_http_request(input: &HttpRequestInput) -> Result<String, String> {
+    let url = reqwest::Url::parse(input.url.trim()).map_err(|error| {
+        format!("[Claw] http_request was not executed: `{}` is not a valid URL ({error}). Write it in full, for example http://localhost:3000/api/items.", input.url)
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(
+            "[Claw] http_request was not executed: only http and https URLs are supported."
+                .to_string(),
+        );
+    }
+    let method = input
+        .method
+        .as_deref()
+        .unwrap_or("GET")
+        .trim()
+        .to_ascii_uppercase();
+    let method =
+        reqwest::Method::from_bytes(method.as_bytes()).map_err(|error| error.to_string())?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(
+            input.timeout_seconds.unwrap_or(30).clamp(1, 120),
+        ))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .user_agent("claw-http-request/0.1")
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut request = client.request(method.clone(), url.clone());
+    let mut has_type = false;
+    for (name, value) in input.headers.iter().flatten() {
+        has_type |= name.eq_ignore_ascii_case("content-type");
+        let value = value
+            .as_str()
+            .map_or_else(|| value.to_string(), str::to_string);
+        request = request.header(name.as_str(), value);
+    }
+    match &input.body {
+        None | Some(Value::Null) => {}
+        Some(Value::String(text)) => {
+            let json_text = matches!(text.trim_start().chars().next(), Some('{' | '['))
+                && serde_json::from_str::<Value>(text).is_ok();
+            if json_text && !has_type {
+                request = request.header("content-type", "application/json");
+            }
+            request = request.body(text.clone());
+        }
+        Some(other) => {
+            if !has_type {
+                request = request.header("content-type", "application/json");
+            }
+            request = request.body(other.to_string());
+        }
+    }
+    let started = Instant::now();
+    let response = request.send().map_err(|error| {
+        let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1" | "0.0.0.0"));
+        format!(
+            "[Claw] http_request failed: {error}.{}",
+            if local && error.is_connect() {
+                " Nothing answers at this address: is the server running (start it with bash, run_in_background: true) and on this port?"
+            } else {
+                ""
+            }
+        )
+    })?;
+    let elapsed = started.elapsed().as_millis();
+    let status = response.status();
+    let mut headers = serde_json::Map::new();
+    for name in [
+        "content-type",
+        "content-length",
+        "location",
+        "set-cookie",
+        "cache-control",
+        "access-control-allow-origin",
+        "www-authenticate",
+    ] {
+        let values: Vec<String> = response
+            .headers()
+            .get_all(name)
+            .iter()
+            .filter_map(|value| value.to_str().ok().map(str::to_string))
+            .collect();
+        if !values.is_empty() {
+            headers.insert(name.to_string(), json!(values.join(", ")));
+        }
+    }
+    let final_url = response.url().to_string();
+    let bytes = response.bytes().map_err(|error| error.to_string())?;
+    let text = String::from_utf8_lossy(&bytes);
+    let body = match serde_json::from_slice::<Value>(&bytes) {
+        Ok(value) => serde_json::to_string_pretty(&value).unwrap_or_else(|_| text.to_string()),
+        Err(_) => text.to_string(),
+    };
+    const BODY_LIMIT: usize = 20_000;
+    let shown: String = body.chars().take(BODY_LIMIT).collect();
+    let mut output = json!({
+        "status": status.as_u16(),
+        "statusText": status.canonical_reason().unwrap_or(""),
+        "method": method.as_str(),
+        "url": final_url,
+        "timeMs": elapsed,
+        "headers": headers,
+        "body": shown,
+    });
+    if body.chars().count() > BODY_LIMIT {
+        output["note"] = json!(format!(
+            "body cut at {BODY_LIMIT} characters out of {}",
+            body.chars().count()
+        ));
+    }
+    to_pretty_json(output)
+}
+
 fn build_http_client() -> Result<Client, String> {
     Client::builder()
         .timeout(Duration::from_secs(20))
@@ -3704,6 +3960,8 @@ pub const PARALLEL_SAFE_TOOLS: &[&str] = &[
     "Agent",
     "read_file",
     "list_directory",
+    "read_many_files",
+    "file_outline",
     "glob_search",
     "grep_search",
     "FindSymbol",
@@ -3993,6 +4251,9 @@ const READ_ONLY_ROLE_TOOLS: &[&str] = &[
     "bash",
     "read_file",
     "list_directory",
+    "read_many_files",
+    "file_outline",
+    "git",
     "glob_search",
     "grep_search",
     "FindSymbol",
@@ -4014,6 +4275,11 @@ const TESTER_TOOLS: &[&str] = &[
     "bash",
     "read_file",
     "list_directory",
+    "read_many_files",
+    "file_outline",
+    "run_tests",
+    "git",
+    "http_request",
     "write_file",
     "edit_file",
     "MultiEdit",
@@ -4039,6 +4305,8 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         "Explore" => vec![
             "read_file",
             "list_directory",
+            "read_many_files",
+            "file_outline",
             "glob_search",
             "grep_search",
             "FindSymbol",
@@ -4051,6 +4319,8 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         "Plan" => vec![
             "read_file",
             "list_directory",
+            "read_many_files",
+            "file_outline",
             "glob_search",
             "grep_search",
             "FindSymbol",
@@ -4066,6 +4336,11 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "bash",
             "read_file",
             "list_directory",
+            "read_many_files",
+            "file_outline",
+            "run_tests",
+            "git",
+            "http_request",
             "glob_search",
             "grep_search",
             "FindSymbol",
@@ -4082,6 +4357,8 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         "claw-guide" => vec![
             "read_file",
             "list_directory",
+            "read_many_files",
+            "file_outline",
             "glob_search",
             "grep_search",
             "FindSymbol",
@@ -4105,12 +4382,19 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "bash",
             "read_file",
             "list_directory",
+            "read_many_files",
+            "file_outline",
             "write_file",
             "edit_file",
             "MultiEdit",
             "apply_patch",
+            "replace_in_files",
             "move_file",
             "delete_file",
+            "run_tests",
+            "git",
+            "git_commit",
+            "http_request",
             "glob_search",
             "grep_search",
             "WebFetch",
@@ -4697,6 +4981,23 @@ const TOOL_SYNONYMS: &[(&str, &str)] = &[
     ("create_file", "write_file"),
     ("write_to_file", "write_file"),
     ("search_files", "grep_search"),
+    ("read_files", "read_many_files"),
+    ("read_multiple_files", "read_many_files"),
+    ("outline", "file_outline"),
+    ("list_symbols", "file_outline"),
+    ("document_symbols", "file_outline"),
+    ("search_replace", "replace_in_files"),
+    ("find_and_replace", "replace_in_files"),
+    ("replace_all", "replace_in_files"),
+    ("test", "run_tests"),
+    ("run_test", "run_tests"),
+    ("git_status", "git"),
+    ("git_diff", "git"),
+    ("git_log", "git"),
+    ("commit", "git_commit"),
+    ("curl", "http_request"),
+    ("fetch_url", "http_request"),
+    ("api_request", "http_request"),
     ("codebase_search", "grep_search"),
     ("search", "grep_search"),
     ("rg", "grep_search"),
@@ -6879,6 +7180,56 @@ Deploy $ARGUMENTS
         assert!(refused.is_err());
         // CLAW_NO_CLAUDE_CONFIG=1 coupe l'import.
         assert!(disabled.is_err());
+    }
+
+    #[test]
+    fn http_request_reports_status_headers_and_json_body() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("port");
+        let port = listener.local_addr().expect("adresse").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("connexion");
+            let mut request = vec![0u8; 4096];
+            let read = stream.read(&mut request).expect("requête");
+            let text = String::from_utf8_lossy(&request[..read]).to_string();
+            let body = "{\"id\":7,\"name\":\"Café\"}";
+            let answer = format!(
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(answer.as_bytes()).expect("réponse");
+            text
+        });
+        let output = execute_tool(
+            "http_request",
+            &json!({
+                "url": format!("http://127.0.0.1:{port}/api/items"),
+                "method": "post",
+                "body": "{\"name\":\"Café\"}"
+            }),
+        )
+        .expect("requête");
+        let request = server.join().expect("serveur");
+        assert!(request.starts_with("POST /api/items"), "{request}");
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("content-type: application/json"),
+            "{request}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&output).expect("json");
+        assert_eq!(value["status"], 201);
+        assert_eq!(value["headers"]["content-type"], "application/json");
+        assert!(
+            value["body"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("\"name\": \"Café\""),
+            "{output}"
+        );
+        let refused = execute_tool("http_request", &json!({ "url": "ftp://example.com" }))
+            .expect_err("refus");
+        assert!(refused.contains("only http and https"), "{refused}");
     }
 
     #[test]

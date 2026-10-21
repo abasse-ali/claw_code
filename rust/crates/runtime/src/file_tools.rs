@@ -35,6 +35,7 @@ pub fn writes_files(tool_name: &str) -> bool {
             | "apply_patch"
             | "move_file"
             | "delete_file"
+            | "replace_in_files"
     )
 }
 
@@ -49,7 +50,10 @@ pub fn edits_one_file(tool_name: &str) -> bool {
 /// forme d'un résultat d'`edit_file`.
 #[must_use]
 pub fn changes_listed_files(tool_name: &str) -> bool {
-    matches!(tool_name, "apply_patch" | "delete_file")
+    matches!(
+        tool_name,
+        "apply_patch" | "delete_file" | "replace_in_files"
+    )
 }
 
 /// Chemins, tels que le modèle les a écrits, que l'appel crée, modifie,
@@ -77,6 +81,18 @@ pub fn written_paths(tool_name: &str, input: &str) -> Vec<String> {
         "apply_patch" => field("patch")
             .or_else(|| field("input"))
             .map(|patch| patch_paths(&patch))
+            .unwrap_or_default(),
+        // Les fichiers où le motif apparaît (aperçu : aucun n'est écrit).
+        "replace_in_files" => serde_json::from_value::<ReplaceInFilesInput>(value.clone())
+            .ok()
+            .filter(|input| !input.preview)
+            .and_then(|input| replace_scan(&input).ok())
+            .map(|(_, found, _)| {
+                found
+                    .into_iter()
+                    .map(|(path, _, _)| path.to_string_lossy().into_owned())
+                    .collect()
+            })
             .unwrap_or_default(),
         _ => Vec::new(),
     }
@@ -906,6 +922,190 @@ pub fn move_file(source: &str, destination: &str, overwrite: bool) -> io::Result
     })
 }
 
+// ------------------------------------------------------------ replace_in_files
+
+/// Arguments de `replace_in_files`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReplaceInFilesInput {
+    pub pattern: String,
+    pub replacement: String,
+    /// `pattern` est une expression régulière (`$1` dans `replacement`) ; sinon un texte exact.
+    #[serde(default)]
+    pub regex: bool,
+    /// Dossier (ou fichier) où chercher ; le projet par défaut.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Filtre des fichiers, par exemple `**/*.ts` ou `*.css`.
+    #[serde(default)]
+    pub glob: Option<String>,
+    #[serde(default, alias = "-i", alias = "case_insensitive")]
+    pub ignore_case: bool,
+    /// Montrer ce qui changerait, sans rien écrire.
+    #[serde(default)]
+    pub preview: bool,
+}
+
+/// Fichiers changés au plus en un appel, et fichiers examinés.
+const REPLACE_MAX_FILES: usize = 200;
+const REPLACE_SCAN_FILES: usize = 20_000;
+const REPLACE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+fn replace_matcher(input: &ReplaceInFilesInput) -> Result<regex::Regex, String> {
+    if input.pattern.is_empty() {
+        return Err("[Claw] replace_in_files was not executed: `pattern` is empty.".to_string());
+    }
+    let source = if input.regex {
+        input.pattern.clone()
+    } else {
+        regex::escape(&input.pattern)
+    };
+    regex::RegexBuilder::new(&source)
+        .case_insensitive(input.ignore_case)
+        .multi_line(true)
+        .build()
+        .map_err(|error| {
+            format!(
+                "[Claw] replace_in_files was not executed: the pattern is not a valid regex ({error}). Set regex to false to replace the text exactly as written."
+            )
+        })
+}
+
+type Found = Vec<(PathBuf, String, TextEncoding)>;
+
+/// Fichiers texte du dossier où le motif apparaît, avec leur texte et leur codage ; et le
+/// nombre de fichiers examinés.
+fn replace_scan(input: &ReplaceInFilesInput) -> io::Result<(regex::Regex, Found, usize)> {
+    let matcher = replace_matcher(input).map_err(invalid)?;
+    let root = normalize_path(
+        input
+            .path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or("."),
+    )?;
+    let filter = match input
+        .glob
+        .as_deref()
+        .map(str::trim)
+        .filter(|glob| !glob.is_empty())
+    {
+        Some(glob) => Some(glob::Pattern::new(glob).map_err(|error| {
+            invalid(format!(
+                "[Claw] replace_in_files was not executed: the glob `{glob}` is invalid ({error})."
+            ))
+        })?),
+        None => None,
+    };
+    let candidates: Vec<PathBuf> = if root.is_file() {
+        vec![root.clone()]
+    } else {
+        walkdir::WalkDir::new(&root)
+            .into_iter()
+            .filter_entry(|entry| {
+                !(entry.file_type().is_dir()
+                    && entry.depth() > 0
+                    && UNLISTED_DIRS.contains(&entry.file_name().to_string_lossy().as_ref()))
+            })
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .take(REPLACE_SCAN_FILES)
+            .map(walkdir::DirEntry::into_path)
+            .collect()
+    };
+    let scanned = candidates.len();
+    let mut found = Vec::new();
+    for path in candidates {
+        if let Some(filter) = &filter {
+            let relative = path.strip_prefix(&root).unwrap_or(&path);
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if !filter.matches_path(relative) && !filter.matches(&name) {
+                continue;
+            }
+        }
+        if fs::metadata(&path).map_or(true, |meta| meta.len() > REPLACE_MAX_BYTES) {
+            continue;
+        }
+        // Fichier binaire (un octet nul) : jamais modifié.
+        if fs::read(&path).map_or(true, |bytes| bytes.contains(&0)) {
+            continue;
+        }
+        let Ok((text, encoding)) = read_text(&path) else {
+            continue;
+        };
+        if matcher.is_match(&text) {
+            found.push((path, text, encoding));
+            if found.len() > REPLACE_MAX_FILES {
+                return Err(invalid(format!(
+                    "[Claw] replace_in_files was not executed: the pattern is in more than {REPLACE_MAX_FILES} files. Narrow it with `path` or `glob`."
+                )));
+            }
+        }
+    }
+    Ok((matcher, found, scanned))
+}
+
+/// Remplace `pattern` par `replacement` dans tous les fichiers texte du dossier (filtrés par
+/// `glob`), chacun avec son codage et ses conventions. Avec `preview`, rend le diff de chaque
+/// fichier (`matches`) sans rien écrire ; sinon les fichiers changés (`files`).
+pub fn replace_in_files(input: &ReplaceInFilesInput) -> io::Result<serde_json::Value> {
+    let (matcher, found, scanned) = replace_scan(input)?;
+    if found.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "[Claw] replace_in_files changed nothing: `{}` is in none of the {scanned} files searched{}. Check the text (exact spelling, case) with grep_search.",
+                input.pattern,
+                if input.glob.is_some() { " (with this glob)" } else { "" }
+            ),
+        ));
+    }
+    let mut replacements = 0usize;
+    let mut files = Vec::new();
+    for (path, original, encoding) in found {
+        replacements += matcher.find_iter(&original).count();
+        let updated = if input.regex {
+            matcher
+                .replace_all(&original, input.replacement.as_str())
+                .into_owned()
+        } else {
+            matcher
+                .replace_all(&original, regex::NoExpand(&input.replacement))
+                .into_owned()
+        };
+        if updated == original {
+            continue;
+        }
+        let (written, note) = if input.preview {
+            (updated, None)
+        } else {
+            store_text(&path, updated, encoding)?
+        };
+        files.push(ChangedFile {
+            file_path: display_path(&path),
+            kind: "update".to_string(),
+            moved_from: None,
+            structured_patch: make_patch(&original, &written),
+            original_file: (!input.preview).then_some(original),
+            match_note: note,
+        });
+    }
+    let key = if input.preview { "matches" } else { "files" };
+    let mut output = serde_json::json!({
+        "replacements": replacements,
+        "filesSearched": scanned,
+    });
+    output[key] = serde_json::json!(files);
+    if input.preview {
+        output["preview"] = serde_json::json!(true);
+        output["note"] =
+            serde_json::json!("nothing was written: call again without preview to apply");
+    }
+    Ok(output)
+}
+
 // ------------------------------------------------------------ list_directory
 
 /// Dossiers montrés sans leur contenu : dépendances, caches, sorties de build.
@@ -1214,6 +1414,85 @@ mod tests {
         assert!(!std::path::Path::new(&inside).exists());
         let not_empty = delete_file(&path_of(&dir, ".")).expect_err("dossier plein");
         assert!(not_empty.to_string().contains("directory"), "{not_empty}");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn replace_in_files_changes_every_file_or_previews() {
+        let dir = temp_dir("replace");
+        fs::create_dir_all(dir.join("src")).expect("src");
+        fs::create_dir_all(dir.join("node_modules/lib")).expect("deps");
+        fs::write(
+            dir.join("src/a.ts"),
+            "const total = sum(items);\nconsole.log(total);\n",
+        )
+        .expect("a");
+        fs::write(
+            dir.join("src/b.ts"),
+            "export const totalTtc = total * 1.2;\n",
+        )
+        .expect("b");
+        fs::write(dir.join("src/c.css"), ".total { color: red }\n").expect("c");
+        fs::write(dir.join("node_modules/lib/x.ts"), "total\n").expect("x");
+        let input = |preview: bool| super::ReplaceInFilesInput {
+            pattern: r"\btotal\b".to_string(),
+            replacement: "amount".to_string(),
+            regex: true,
+            path: Some(dir.to_string_lossy().into_owned()),
+            glob: Some("**/*.ts".to_string()),
+            ignore_case: false,
+            preview,
+        };
+        let preview = super::replace_in_files(&input(true)).expect("aperçu");
+        assert_eq!(preview["replacements"], 3);
+        assert_eq!(preview["matches"].as_array().map(Vec::len), Some(2));
+        assert!(preview.get("files").is_none());
+        assert_eq!(
+            fs::read_to_string(dir.join("src/a.ts")).expect("a"),
+            "const total = sum(items);\nconsole.log(total);\n"
+        );
+        let paths = super::written_paths(
+            "replace_in_files",
+            &serde_json::json!({
+                "pattern": r"\btotal\b", "replacement": "amount", "regex": true,
+                "path": dir.to_string_lossy(), "glob": "**/*.ts"
+            })
+            .to_string(),
+        );
+        assert_eq!(paths.len(), 2);
+        let applied = super::replace_in_files(&input(false)).expect("remplacé");
+        assert_eq!(applied["files"].as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            fs::read_to_string(dir.join("src/a.ts")).expect("a"),
+            "const amount = sum(items);\nconsole.log(amount);\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("src/b.ts")).expect("b"),
+            "export const totalTtc = amount * 1.2;\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("src/c.css")).expect("c"),
+            ".total { color: red }\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("node_modules/lib/x.ts")).expect("x"),
+            "total\n"
+        );
+        // Texte exact : les caractères spéciaux ne sont pas une regex.
+        let literal = super::ReplaceInFilesInput {
+            pattern: "* 1.2".to_string(),
+            replacement: "* 1.25 $1".to_string(),
+            regex: false,
+            path: Some(dir.join("src").to_string_lossy().into_owned()),
+            glob: None,
+            ignore_case: false,
+            preview: false,
+        };
+        super::replace_in_files(&literal).expect("exact");
+        assert_eq!(
+            fs::read_to_string(dir.join("src/b.ts")).expect("b"),
+            "export const totalTtc = amount * 1.25 $1;\n"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

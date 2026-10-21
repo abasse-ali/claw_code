@@ -83,6 +83,13 @@ function describe(name, input) {
     case "list_directory": return ["search", "Dossier", value.path || "."];
     case "move_file": return ["edit", "Déplacement", `${value.from || ""} → ${value.to || ""}`];
     case "delete_file": return ["edit", "Suppression", value.path || ""];
+    case "read_many_files": return ["file", "Lecture", (value.paths || []).join(", ")];
+    case "file_outline": return ["file", "Plan du fichier", value.path || ""];
+    case "replace_in_files": return ["edit", value.preview ? "Aperçu du remplacement" : "Remplacement", `${value.pattern || ""} → ${value.replacement || ""}${value.glob ? ` · ${value.glob}` : ""}`];
+    case "run_tests": return ["terminal", "Tests", value.cmd || "tests du projet"];
+    case "git": return ["terminal", "Git", `${value.action || ""}${value.target ? ` ${value.target}` : ""}`];
+    case "git_commit": return ["terminal", "Commit", value.message || ""];
+    case "http_request": return ["globe", "Requête HTTP", value.target || ""];
     case "glob_search": return ["search", "Fichiers", value.pattern || ""];
     case "grep_search": return ["search", "Recherche", (value.pattern || "") + (value.path ? ` · ${value.path}` : "")];
     case "WebFetch": case "ViewPage": return ["globe", "Page web", value.target || ""];
@@ -322,7 +329,7 @@ function toolHtml(event, key, openTodo) {
   } else if (["write_file", "edit_file", "MultiEdit"].includes(event.n) && result && Array.isArray(result.lines)) {
     side = counts(result.add, result.del);
     body = journalDiffHtml(result.lines, result.more, languageOf(input.path || input.file_path || target));
-  } else if ((event.n === "apply_patch" || event.n === "delete_file") && result && Array.isArray(result.files)) {
+  } else if (["apply_patch", "delete_file", "replace_in_files"].includes(event.n) && result && Array.isArray(result.files)) {
     // Chaque fichier du correctif : ce qui lui arrive, puis ses lignes changées.
     const words = { create: "Créé", update: "Modifié", delete: "Supprimé", move: "Déplacé" };
     side = counts(result.files.reduce((sum, file) => sum + (file.add || 0), 0),

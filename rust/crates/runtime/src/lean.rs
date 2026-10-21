@@ -21,7 +21,7 @@ pub fn lean_tool_output(tool_name: &str, output: &str) -> Option<String> {
     let rest = &output[values.byte_offset()..];
     let lean = match tool_name {
         "edit_file" | "MultiEdit" => lean_edit(&fields)?,
-        "apply_patch" | "delete_file" => lean_files(&fields)?,
+        "apply_patch" | "delete_file" | "replace_in_files" => lean_files(&fields)?,
         "write_file" => lean_write(&fields)?,
         "bash" | "PowerShell" => lean_command(&fields)?,
         "TodoWrite" => lean_todos(&fields)?,

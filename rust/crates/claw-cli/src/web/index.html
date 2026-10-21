@@ -1187,6 +1187,13 @@
       case "list_directory": return ["search", "Dossier", displayPath(v.path || ".")];
       case "move_file": return ["edit", "Déplacement", displayPath(v.source) + " → " + displayPath(v.destination)];
       case "delete_file": return ["edit", "Suppression", displayPath(v.path)];
+      case "read_many_files": return ["file", "Lecture", (v.paths || []).map(displayPath).join(", ")];
+      case "file_outline": return ["file", "Plan du fichier", displayPath(v.path)];
+      case "replace_in_files": return ["edit", v.preview ? "Aperçu du remplacement" : "Remplacement", (v.pattern || "") + " → " + (v.replacement || "")];
+      case "run_tests": return ["terminal", "Tests", v.command || v.filter || "tests du projet"];
+      case "git": return ["terminal", "Git", (v.action || "") + (v.path ? " " + displayPath(v.path) : v.ref ? " " + v.ref : "")];
+      case "git_commit": return ["terminal", "Commit", v.message || ""];
+      case "http_request": return ["globe", "Requête HTTP", (v.method || "GET") + " " + (v.url || "")];
       case "NotebookEdit": return ["edit", "Notebook", displayPath(v.notebook_path)];
       case "glob_search": return ["search", "Fichiers", v.pattern || ""];
       case "grep_search": return ["search", "Recherche", (v.pattern || "") + (v.path ? "  · " + displayPath(v.path) : "")];

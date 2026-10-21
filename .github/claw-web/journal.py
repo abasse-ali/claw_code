@@ -270,6 +270,23 @@ class Journal:
             return {"path": rel(data.get("path") or data.get("file_path") or data.get("notebook_path") or "")}
         if name == "move_file":
             return {"from": rel(data.get("source") or ""), "to": rel(data.get("destination") or "")}
+        if name == "read_many_files":
+            return {"paths": [rel(str(path)) for path in (data.get("paths") or [])[:20]]}
+        if name == "file_outline":
+            return {"path": rel(data.get("path") or "")}
+        if name == "replace_in_files":
+            return {"pattern": excerpt(str(data.get("pattern") or ""), 200),
+                    "replacement": excerpt(str(data.get("replacement") or ""), 200),
+                    "glob": excerpt(str(data.get("glob") or ""), 100), "preview": bool(data.get("preview"))}
+        if name == "run_tests":
+            return {"cmd": excerpt(rel(str(data.get("command") or data.get("filter") or "")), 300)}
+        if name == "git":
+            return {"action": str(data.get("action") or ""),
+                    "target": rel(str(data.get("path") or data.get("ref") or ""))}
+        if name == "git_commit":
+            return {"message": excerpt(str(data.get("message") or ""), 300)}
+        if name == "http_request":
+            return {"target": excerpt(f"{data.get('method') or 'GET'} {data.get('url') or ''}", 300)}
         if name == "apply_patch":
             text = str(data.get("patch") or data.get("input") or "")
             paths = []
@@ -322,9 +339,9 @@ class Journal:
             result = patch(value.get("structuredPatch"))
             result["kind"] = value.get("type") or "update"
             return result
-        if name in ("apply_patch", "delete_file"):
+        if name in ("apply_patch", "delete_file", "replace_in_files"):
             files = []
-            for item in (value.get("files") or [])[:12]:
+            for item in (value.get("files") or value.get("matches") or [])[:12]:
                 if not isinstance(item, dict):
                     continue
                 entry = patch(item.get("structuredPatch"))
@@ -333,6 +350,18 @@ class Journal:
                     entry["from"] = rel(item["movedFrom"])
                 files.append(entry)
             return {"files": files}
+        if name == "run_tests":
+            failures = [f"✗ {item.get('name', '')}: {str(item.get('message') or '').splitlines()[0] if item.get('message') else ''}"
+                        for item in (value.get("failures") or [])[:10] if isinstance(item, dict)]
+            head = (f"{value.get('passed')} réussis, {value.get('failed') or 0} en échec"
+                    if value.get("passed") is not None else ("réussis" if value.get("succeeded") else "en échec"))
+            return {"out": excerpt("\n".join([head, *failures]) + "\n\n" + str(value.get("output") or ""), 1500, tail=True),
+                    "code": "" if value.get("succeeded") else "échec"}
+        if name == "git":
+            return {"out": excerpt(rel(json.dumps(value, ensure_ascii=False, indent=1)), 1200)}
+        if name == "http_request":
+            return {"out": excerpt(str(value.get("body") or ""), 1200),
+                    "count": f"{value.get('status')} {value.get('statusText') or ''}".strip()}
         if name == "list_directory":
             return {"out": excerpt(str(value.get("tree") or ""), 1500), "count": value.get("files")}
         if name == "move_file":
