@@ -46,6 +46,16 @@ VERIFIED = {
     "gemini:gemini-2.5-flash-lite",
 }
 
+# Modèles que l'essai d'un seul outil laisse passer, mais que les vraies sessions de Claw ont
+# écartés (rust/crates/claw-cli/src/models.rs) : marqués inutilisables, avec la raison.
+KNOWN_ISSUES = {
+    "nvidia:stepfun-ai/step-5-preview":
+        "écarté par Claw (20 octobre 2026) : écrit de faux messages de l'utilisateur et suit des tâches inventées",
+    "nvidia:openai/gpt-oss-20b": "écarté par Claw (20 octobre 2026) : en échec dans les vraies sessions",
+    "nvidia:nvidia/nemotron-3.5-super-vl-120b-a12b":
+        "lit les images, mais échoue avec les outils d'une vraie session (erreur 500) : Claw s'en sert comme lecteur d'images",
+}
+
 CODING_SPECIALIZATION = ["coding agent", "agentic coding", "coding model", "code model",
                          "code generation", "software engineering", "for coding"]
 CODE_BENCHMARKS = ["swe-bench", "terminal-bench", "livecodebench", "humaneval", "aider", "codeforces"]
@@ -185,6 +195,8 @@ def score(model_id, description, ranking, context=0, probe=None):
 
 def entry(model_id, short, description, ranking, context=0, tools=None, probe=None, status="ok"):
     value, reasons = score(model_id, description, ranking, context, probe)
+    if model_id in KNOWN_ISSUES:
+        tools, status = False, KNOWN_ISSUES[model_id]
     return {"id": model_id, "short": short, "score": value, "reasons": reasons, "context": context,
             "tools": tools, "status": status,
             "seconds": round(probe["seconds"], 1) if probe and probe.get("seconds") else None}
