@@ -808,6 +808,86 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
   la même chose que l'agent (« auto-checkout to next in line ») ; c'est la phrase citée qui
   lui fait lire juste.
 
+## Banc NVIDIA du 21 octobre 2026
+
+Le banc tourne sur GitHub (workflow « Essais réels », un job par scénario, trois à la fois),
+avec les modèles de NVIDIA (clé `NVIDIA_API_KEY` du dépôt). Référence : Claw au commit
+cb1b321 (`main`), branche `banc-parallele` pour le workflow seul.
+
+| Scénario | Ultra 550B | Lightning 30B |
+|---|---|---|
+| t1-inventaire | 6/6 | 6/6 (12 requêtes) |
+| t2-notes | 8/8 | 7/8 (25) |
+| t3-rapport | 4/4 | 4/4 (12) |
+| t4-bibliotheque | 10/12, puis 12/12 | 7/12 (62) |
+| t5-recettes-web | 12/12 | 9/12 (74) |
+| t6-conges | 11/12 | 11/12 (72) |
+| t7-ateliers | 12/12 | 11/12 (26) |
+| t8-materiel | 12/12 | 6/12 (62) |
+| Total | 77/78 | 61/78 |
+
+Ultra est au plafond ; Lightning, le plus petit, est le banc des compensations.
+
+### T1-38 Des refus voulus comptés comme des échecs d'affilée
+- Preuve : Ultra, t4 (premier essai) : le modèle essaie exprès un membre inconnu, un livre
+  inconnu, une commande incomplète ; chaque refus (code 1 ou 2, une ligne) compte comme un
+  échec, et au quatrième Claw lui dit d'arrêter pour diagnostiquer.
+- État : corrigé (lot 47) : une commande qui n'est pas une vérification et s'arrête sur un
+  refus propre (code 1 ou 2, sortie courte, sans trace d'exception ni commande introuvable)
+  n'est plus un échec d'affilée. Un plantage, lui, compte toujours.
+
+### T1-39 Une annonce demandée après une seule vérification
+- Preuve : Ultra, t2 et t4 : renvoyé au travail par le contrôle des exigences, le modèle lance
+  une commande ; Claw lui demande aussitôt d'annoncer ce qu'il fait, reçoit le compte rendu
+  final, dit « continuez », et la dernière réponse devient « Le travail est terminé ».
+- État : corrigé (lot 47) : après une réponse reprise par un contrôle, l'annonce n'est
+  demandée qu'après deux étapes muettes d'affilée, avec sa propre note.
+
+### T1-40 Le pytest du banc introuvable dans les commandes de Claw
+- Preuve : t2 et t4 sur GitHub : `No module named pytest`, puis `pip install pytest`, deux ou
+  trois requêtes par essai. Les commandes de Claw ont leur propre dossier personnel (bac à
+  sable) ; le pytest installé dans `~/.local` du runner y est invisible.
+- État : corrigé (banc) : pytest installé pour tout le système.
+
+### T1-41 Le serveur arrêté avant la revue visuelle
+- Preuve : Ultra, t5 : `pkill -f "serveur.py 8765"` avant la réponse, puis « Revue visuelle
+  impossible : ERR_CONNECTION_REFUSED », sautée sans un mot au modèle.
+- État : corrigé (lot 47) : une fois par tour, le modèle est prié de relancer le serveur en
+  fond, et la revue se refait sans compter ce tour-ci.
+
+### T1-42 Un compte rendu final suivi d'appels de rangement, encore et encore
+- Preuve : Lightning, t4 : cinq comptes rendus d'affilée, chacun suivi de `Remember`,
+  `ExitPlanMode` ou d'un dernier pytest, une requête chacun ; en t6, `ExitPlanMode` trois fois
+  hors du mode plan (« Not in plan mode »), et en t1 aussi.
+- État : corrigé (lot 47) : un compte rendu dont les seuls appels sont du rangement
+  (`Remember`, `TodoWrite`, `ExitPlanMode` hors mode plan) est la réponse du tour : les appels
+  sont faits sans revenir au modèle (`CLAW_SETTLED_ANSWER=0` pour le témoin). `ExitPlanMode`
+  n'est plus proposé hors du mode plan.
+
+### T1-43 Le guide des dates imposait le jour en premier contre la demande
+- Preuve : Lightning, t8 : la demande dit « date de retour prévue (AAAA-MM-JJ) » ; le guide
+  des cas limites disait `strptime(..., "%d/%m/%Y")`, et le modèle l'a suivi : tous les prêts
+  refusés, 6/12.
+- État : corrigé (lot 47) : le format donné par la demande ou le projet d'abord, le jour en
+  premier seulement quand aucun format n'est donné ; les essais du guide sont écrits en mots.
+
+### T1-44 Chez NVIDIA seul, le petit modèle relisait son propre travail
+- Preuve : sans `advisorModels` ni clé OpenRouter, aucun relecteur : la relecture de secours
+  (T1-35) faisait relire Lightning par Lightning ; en t4, le livre rendu passait d'office au
+  premier de la file (T1-18) et la relecture le laissait passer.
+- État : corrigé (lot 47) : les modèles de NVIDIA autres que celui de la session relisent, du
+  plus puissant au plus léger, avant ceux d'OpenRouter ; ils servent aussi au diagnostic et au
+  second avis.
+
+### T1-45 Des lecteurs d'images essayés sans leur clé
+- Preuve : Ultra, t5 : « 2 images n'ont pas pu lui être décrites (... identifiants OpenRouter
+  manquants) », deux modèles OpenRouter essayés sans clé.
+- État : corrigé (lot 47) : un lecteur sans la clé de son fournisseur n'est plus essayé.
+
+Restent ouverts, vus sur Lightning : des messages intermédiaires en anglais (t1, t3, t4) ; des
+exigences que la demande ne dit pas, manquées malgré le guide (t5 : accents et encodage de
+l'adresse ; t7 : la même personne écrite autrement) ; le livre rendu mis de côté (T1-18).
+
 ## Améliorations
 
 Lot T1 (en cours le 12 octobre 2026), dans cet ordre : T1-08 (garde des données), T1-03 et
