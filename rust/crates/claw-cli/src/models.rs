@@ -339,6 +339,9 @@ pub(crate) fn free_image_readers(current: &str) -> Vec<String> {
     if let Some(catalog) = load_cached_catalog() {
         readers.extend(image_readers_in(&catalog, current, api::model_available));
     }
+    // Sans la clé de leur fournisseur, ils échouent à coup sûr (vu le 21 octobre
+    // 2026 : des modèles OpenRouter essayés sans clé, et leur erreur dans l'avis).
+    readers.retain(|model| api::has_credentials_for_model(model));
     readers
 }
 

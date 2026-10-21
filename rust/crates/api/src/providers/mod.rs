@@ -277,6 +277,13 @@ pub fn credential_env_for_model(model: &str) -> Option<String> {
     )
 }
 
+/// La clé du fournisseur de `model` est là (ou il n'en demande pas) : un
+/// modèle de secours sans clé ne ferait qu'ajouter une erreur à l'avis.
+#[must_use]
+pub fn has_credentials_for_model(model: &str) -> bool {
+    credential_env_for_model(model).is_none_or(|env| openai_compat::has_api_key(&env))
+}
+
 // Les identifiants OpenRouter ont la forme `fournisseur/modèle[:variante]`.
 fn is_openrouter_model_id(model: &str) -> bool {
     let trimmed = model.trim();

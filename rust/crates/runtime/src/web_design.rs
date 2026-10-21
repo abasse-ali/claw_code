@@ -668,6 +668,17 @@ pub fn missing_assets_feedback(page: &str, missing: &[String]) -> String {
     )
 }
 
+/// La page à revoir ne répond plus : son serveur a été arrêté avant la réponse
+/// (vu le 21 octobre 2026, essai t5 sur Nemotron Ultra : `pkill` du serveur,
+/// puis revue visuelle impossible et sautée sans un mot au modèle).
+#[must_use]
+pub fn server_down_feedback(page: &str) -> String {
+    let page = page.split_once(':').map_or(page, |(_, page)| page);
+    format!(
+        "[Claw] Claw is about to look at {page} as a user would, but nothing answers there (connection refused): the server was stopped or never started. Start it again in the background (bash with run_in_background: true), check that the page answers, then give your final answer. Leave it running: Claw stops background commands when it ends."
+    )
+}
+
 /// Entrée de l'outil `Screenshot` pour la revue : page entière, téléphone puis ordinateur.
 #[must_use]
 pub fn screenshot_input(target: &str) -> String {
@@ -1252,6 +1263,12 @@ mod tests {
             missing_assets_feedback("path:index.html", &["styles.css".to_string()])
                 .starts_with("[Claw] index.html links styles.css, which do not exist yet")
         );
+        // Serveur arrêté avant la revue : l'adresse est dite, et la relance en fond.
+        let down = super::server_down_feedback("url:http://127.0.0.1:8765/");
+        assert!(down.starts_with(
+            "[Claw] Claw is about to look at http://127.0.0.1:8765/ as a user would, but nothing answers there"
+        ));
+        assert!(down.contains("run_in_background: true"));
     }
 
     #[test]

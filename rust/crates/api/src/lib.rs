@@ -32,7 +32,8 @@ pub use providers::reasoning::{
 pub use providers::text_tools::UNREADABLE_CALL;
 pub use providers::{
     auto_compaction_threshold, context_window_for_model, credential_env_for_model,
-    detect_provider_kind, max_tokens_for_model, resolve_model_alias, ProviderKind,
+    detect_provider_kind, has_credentials_for_model, max_tokens_for_model, resolve_model_alias,
+    ProviderKind,
 };
 pub use routing::{
     failure_is_transient, mark_model_unavailable, model_available, model_failure_reason,

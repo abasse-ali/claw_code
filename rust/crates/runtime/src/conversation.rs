@@ -384,6 +384,8 @@ struct TurnAids {
     empty_escalated: bool,
     /// Le modèle a été prévenu que sa page appelle des fichiers qui manquent.
     assets_reminded: bool,
+    /// Le modèle a été prié de relancer le serveur de la page à revoir.
+    server_reminded: bool,
     /// Le modèle a été prévenu que ses styles n'ont pas le socle de la méthode.
     foundation_noted: bool,
     /// Notes des revues visuelles du tour, dans l'ordre.
@@ -3338,6 +3340,16 @@ where
         // Les captures vont au juge, pas dans la conversation.
         let images = std::mem::take(&mut self.tool_images);
         let (output, is_error) = tool_result_parts(&message)?;
+        // Serveur arrêté avant la réponse : relancé par le modèle, une fois par
+        // tour, et la revue se refait sans compter ce tour-ci.
+        if is_error && output.contains("ERR_CONNECTION_REFUSED") && !aids.server_reminded {
+            aids.server_reminded = true;
+            aids.interface_rounds -= 1;
+            aids.interface_dirty = true;
+            self.api_client
+                .notify("Revue visuelle : la page ne répond plus, Claw fait relancer son serveur");
+            return Some(crate::web_design::server_down_feedback(&target));
+        }
         if is_error {
             self.api_client.notify(&format!(
                 "Revue visuelle impossible : {}",
