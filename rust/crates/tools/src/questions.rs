@@ -167,6 +167,11 @@ pub(crate) fn run_ask_user_question(input: &Value) -> Result<String, String> {
         );
     };
     let answers = ask(&questions)?;
+    // Interface qui montre les questions sans attendre (appli web) : les réponses
+    // viendront au message suivant, le tour s'arrête sur elles.
+    if answers.is_empty() {
+        return Ok(runtime::harness::QUESTIONS_DEFERRED.to_string());
+    }
     serde_json::to_string_pretty(&json!({
         "answers": answers,
         "note": "These are the user's choices. Continue the task with them; do not ask the same questions again.",
@@ -261,6 +266,14 @@ mod tests {
         assert!(run_ask_user_question(&input)
             .expect_err("écartées")
             .contains("dismissed"));
+
+        // Questions montrées sans attendre (appli web) : la réponse viendra au
+        // message suivant, le tour s'arrête.
+        set_question_asker(Some(Arc::new(|_| Ok(Vec::new()))));
+        assert_eq!(
+            run_ask_user_question(&input).expect("posées"),
+            runtime::harness::QUESTIONS_DEFERRED
+        );
         set_question_asker(None);
     }
 }

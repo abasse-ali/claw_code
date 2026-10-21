@@ -457,6 +457,9 @@ struct TurnAids {
     /// L'agent a posé ses questions avec le menu à choix pendant ce tour, ou
     /// Claw le lui a déjà demandé.
     asked: bool,
+    /// Questions montrées sans attendre (appli web) : le tour finit avec ce
+    /// lot d'outils, la réponse viendra au message suivant.
+    questions_deferred: bool,
     /// Ce que dit le message de l'utilisateur (problème signalé, images à
     /// trier) : méthode jointe à sa demande, preuves demandées avant de conclure.
     report: harness::Report,
@@ -1154,6 +1157,17 @@ where
         self.api_client
             .notify(&format!("Un hook arrête l'agent : {reason}"));
         true
+    }
+
+    /// Questions montrées sans attendre (appli web) : le tour s'arrête sur
+    /// elles, l'utilisateur y répond d'un toucher au message suivant.
+    fn finish_on_deferred_questions(&mut self, aids: &TurnAids) -> bool {
+        if aids.questions_deferred {
+            self.api_client.notify(
+                "Questions posées à l'utilisateur : Claw attend ses réponses, au message suivant",
+            );
+        }
+        aids.questions_deferred
     }
 
     /// Signale à l'utilisateur les retours de hooks qui ne vont pas au modèle.
@@ -2013,6 +2027,11 @@ where
                     self.api_client.answer_superseded();
                     aids.feedback_pending = true;
                     superseded_draft = Some(answer);
+                    // Le travail reprend après la réponse : s'il s'y remet sans un
+                    // mot, le modèle redit ce qu'il fait (vu le 20 octobre 2026,
+                    // session 15 : des tests relancés en silence après sa réponse).
+                    aids.announce_checked = false;
+                    aids.silent_steps = 0;
                 }
                 self.session
                     .messages
@@ -2073,7 +2092,7 @@ where
                         .messages
                         .push(ConversationMessage::user_text(note));
                 }
-                if self.finish_on_hook_stop() {
+                if self.finish_on_hook_stop() || self.finish_on_deferred_questions(&aids) {
                     break;
                 }
                 continue;
@@ -2121,7 +2140,7 @@ where
                 }
             }
             self.attach_tool_images(&mut tool_results);
-            if self.finish_on_hook_stop() {
+            if self.finish_on_hook_stop() || self.finish_on_deferred_questions(&aids) {
                 break;
             }
             // Mode projet : un jalon marqué fait se vérifie tout de suite.
@@ -2350,6 +2369,8 @@ where
         notes.extend(self.tool_executor.argument_note(tool_name, input));
         // Questions déjà posées avec le menu : rien à redemander en fin de tour.
         aids.asked |= tool_name == "AskUserQuestion";
+        aids.questions_deferred |=
+            tool_name == "AskUserQuestion" && output.contains(harness::QUESTIONS_DEFERRED);
         // Page que le modèle a regardée lui-même : la revue visuelle la reprend.
         if matches!(tool_name, "Screenshot" | "ViewPage") && !is_error {
             if let Some(target) = crate::web_design::page_target(input) {
@@ -6775,7 +6796,11 @@ mod tests {
                 Ok(TASK_REPLY.with(|reply| reply.borrow().clone()))
             })
             .register("AskUserQuestion", |_| {
-                Ok(r#"{"answers":[{"question":"Continuer ?","answer":"Oui"}]}"#.to_string())
+                Ok(if ASK_LATER.with(std::cell::Cell::get) {
+                    crate::harness::QUESTIONS_DEFERRED.to_string()
+                } else {
+                    r#"{"answers":[{"question":"Continuer ?","answer":"Oui"}]}"#.to_string()
+                })
             })
             .register("bash", move |input| {
                 recorded.borrow_mut().push(input.to_string());
@@ -7540,6 +7565,34 @@ mod tests {
     }
 
     #[test]
+    fn a_model_sent_back_to_work_by_a_check_says_again_what_it_does() {
+        let _serial = crate::test_serial();
+        const ADVICE: &str = "Pour lancer :\n\n```bash\nnpm run dev\n```";
+        // Annonce au départ, puis une réponse qui conseille une commande jamais
+        // lancée : le modèle, renvoyé l'essayer, s'y remet sans un mot. La
+        // requête suivante lui fait dire ce qu'il fait, comme au départ.
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                tool_step("bash", r#"{"command":"ls"}"#),
+                text_step("Je regarde le projet, puis je dis comment le lancer."),
+                text_step(ADVICE),
+                tool_step("bash", r#"{"command":"npm run dev"}"#),
+                text_step("J'essaie la commande conseillée avant de la donner."),
+                text_step(ADVICE),
+            ],
+            vec![PASSING, PASSING],
+        );
+        let _announce = AnnouncementsOn::new();
+        let summary = runtime.run_turn("comment le lancer ?", None).expect("tour");
+        assert_eq!(summary.iterations, 6);
+        let observed = observed.borrow();
+        assert_eq!(observed.superseded, 1);
+        // L'annonce du départ, puis celle de la reprise : en texte seul.
+        assert_eq!(observed.text_only, vec![1, 4]);
+        assert!(observed.requests[4].contains("You started working without a word for the user"));
+    }
+
+    #[test]
     fn a_model_that_starts_without_a_word_is_asked_to_announce_its_plan() {
         let _serial = crate::test_serial();
         // Premiers outils sans un mot : la requête suivante part en texte seul
@@ -7813,6 +7866,42 @@ mod tests {
     thread_local! {
         /// Réponse de `BashOutput` dans `aided_runtime`.
         static TASK_REPLY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+        /// `AskUserQuestion` montre les questions sans attendre (appli web).
+        static ASK_LATER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    #[test]
+    fn questions_shown_for_later_end_the_turn() {
+        let _serial = crate::test_serial();
+        // Appli web : les questions partent avec leurs réponses à toucher et
+        // l'utilisateur répond au message suivant. Le tour finit sur elles, sans
+        // autre requête ni contrôle de fin.
+        CAN_ASK.with(|flag| flag.set(true));
+        ASK_LATER.with(|flag| flag.set(true));
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                text_step(ASKING),
+                tool_step(
+                    "AskUserQuestion",
+                    r#"{"questions":[{"question":"Continuer ?","options":[{"label":"Oui"},{"label":"Non"}]}]}"#,
+                ),
+                text_step("Jamais demandé."),
+            ],
+            vec![],
+        );
+        let summary = runtime.run_turn("propose puis attends", None);
+        CAN_ASK.with(|flag| flag.set(false));
+        ASK_LATER.with(|flag| flag.set(false));
+        let summary = summary.expect("tour");
+        assert_eq!(summary.iterations, 2);
+        let observed = observed.borrow();
+        assert_eq!(observed.requests.len(), 2);
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("Claw attend ses réponses")));
+        // La proposition reste la réponse du tour.
+        assert_eq!(observed.superseded, 0);
     }
 
     #[test]

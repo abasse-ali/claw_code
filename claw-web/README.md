@@ -80,11 +80,25 @@ ligne » restent sous la conversation ; le job, la session sur GitHub, « Archiv
 
 Votre message paraît dès son envoi, et une nouvelle session s'ouvre dès sa création ; jusqu'à
 la première progression, la carte « Claw se prépare » dit l'étape en cours (file d'attente,
-compilation de Claw, préparation du dépôt). Claw n'est compilé qu'après une mise à jour de son
-code, une fois par type de processeur (le serveur ARM, le PC ou les machines de GitHub) :
-quelques minutes, puis il est gardé en cache. Une première réponse que les vérifications de Claw
-lui ont fait reprendre reste repliée dans le journal (« Première réponse »), sous la réponse
-définitive ; un appel d'outil que le modèle a écrit en texte n'est pas montré.
+compilation de Claw, préparation du dépôt). GitHub met quelques secondes à lister un passage
+lancé : la session l'attend, au lieu de dire le message pas envoyé. « Ce message n'a pas encore
+été envoyé à Claw » ne paraît que si le lancement a vraiment échoué (la raison s'affiche) ;
+« Lancer le passage » ne relance pas un passage déjà parti. Claw n'est compilé qu'après une mise
+à jour de son code Rust, une fois par type de processeur (le serveur ARM, le PC ou les machines
+de GitHub) : quelques minutes, puis il est gardé en cache.
+
+Une réponse que les contrôles de Claw lui font reprendre (une commande conseillée jamais
+lancée, par exemple) est repliée dans le journal dès que Claw la reprend (« Réponse
+provisoire »), sous la réponse définitive : le moteur la marque (pour un journal d'avant le
+21 octobre 2026, l'appli la reconnaît à son texte). Claw, renvoyé au travail, redit d'abord en
+une phrase ce qu'il fait. Un appel d'outil que le modèle a écrit en texte n'est pas montré.
+
+Quand quelque chose d'essentiel n'est pas clair (quelle page, quelle version), Claw pose ses
+questions avec des réponses proposées, comme Claude Code : le passage s'arrête sur elles, et un
+toucher sur une réponse l'envoie (plusieurs questions : une réponse chacune, puis « Envoyer
+les réponses ») ; on peut aussi répondre avec ses mots. Dans le journal, une capture d'écran dit
+ce qu'elle montre : « Capture en ligne » (le site publié) ou « Capture de la session » (les
+fichiers de la branche, pas encore en ligne).
 
 ## Ce que Claw compte faire
 

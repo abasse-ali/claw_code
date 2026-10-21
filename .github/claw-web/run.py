@@ -172,6 +172,8 @@ class Progress:
         self.plan = ""
         self.step = ""
         self.said = ""
+        # Questions de Claw à l'utilisateur (AskUserQuestion), publiées avec sa réponse.
+        self.questions = []
         self.comment_id = None
         self.dirty = True
         self.lock = threading.Lock()
@@ -212,6 +214,14 @@ class Progress:
                 if notice and (not self.notices or self.notices[-1] != notice):
                     self.notices.append(notice)
                     self.dirty = True
+            elif kind == "system" and event.get("subtype") == "answer_superseded":
+                # Réponse que Claw fait reprendre : ni un plan ni l'étape en cours.
+                self.said = ""
+                self.dirty = True
+            elif kind == "system" and event.get("subtype") == "questions":
+                # Le passage finit sur ces questions : l'utilisateur y répond d'un toucher.
+                self.questions = event.get("questions") or []
+                print(f"[questions] {len(self.questions)} question(s) à l'utilisateur", flush=True)
 
     def body(self, state):
         elapsed = int(time.time() - self.started)
@@ -341,6 +351,9 @@ def main():
     request = (WORK / "prompt.txt").read_text(encoding="utf-8")
     env = agent_env(os.environ, mock=MODEL == "mock")
     env["CLAW_NO_BROWSER"] = "1"
+    # Questions de Claw (AskUserQuestion) montrées dans l'appli, avec des réponses à toucher :
+    # le passage s'arrête sur elles, la réponse de l'utilisateur lance le suivant.
+    env["CLAW_DEFERRED_QUESTIONS"] = "1"
     # L'appli est en français, et le moteur entoure la demande de notes en anglais : la
     # langue des réponses est fixée (annonces, étapes, réponse finale).
     env.setdefault("CLAW_LANGUAGE", "français")
@@ -433,7 +446,7 @@ def main():
     # requêtes du tour, par exemple) ; ce n'est pas une erreur.
     if stopped:
         state = "stopped"
-    elif status == 0 and result:
+    elif status == 0 and (result or progress.questions):
         state = "done"
     elif status == 0 and not error:
         state = "unfinished"
@@ -455,6 +468,7 @@ def main():
     progress.publish_journal(force=True)
     (WORK / "notices.txt").write_text("\n".join(progress.notices[-2:]), encoding="utf-8")
     (WORK / "result.md").write_text(result or "", encoding="utf-8")
+    (WORK / "questions.json").write_text(json.dumps(progress.questions, ensure_ascii=False), encoding="utf-8")
     (WORK / "error.txt").write_text(error or "", encoding="utf-8")
     output("status", str(status))
     sys.exit(130 if stopped else status)

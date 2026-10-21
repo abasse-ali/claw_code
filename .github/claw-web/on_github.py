@@ -103,6 +103,15 @@ def describe(state):
         error = f" ({pages['error']})" if pages["error"] else ""
         lines.append(f"- GitHub Pages: enabled, built from {pages['branch']}, {folder}, at {pages['url']}; "
                      f"last build: {pages['status'] or 'unknown'}{error}.")
+        # Vu le 21 octobre 2026 : « des captures de la nouvelle version » prises sur le site
+        # en ligne, qui montrait l'ancienne.
+        if pages["branch"] != branch:
+            lines.append(f"- What is online: the site shows {pages['branch']} as last published. The work of "
+                         f"this session ({branch}, with your changes in this pass) is not online until it is "
+                         f"merged into {pages['branch']}. To show the user this session's version "
+                         "(screenshots, a review), use your working copy: Screenshot with `path`, or a local "
+                         "server, not the site address. Say in your answer which version each screenshot "
+                         "shows; if the user's words could mean either version, ask them.")
     if state["private"] and not isinstance(pages, dict):
         lines.append("- The repository is private: GitHub Pages refuses private repositories on a free "
                      "GitHub account (GitHub Pro allows them). Only the user can make the repository "

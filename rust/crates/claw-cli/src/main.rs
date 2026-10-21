@@ -4315,7 +4315,7 @@ impl LiveCli {
                     Box::new(stream_json::StreamJsonPrompter) as tools::SubagentPrompter
                 }),
                 model_prompter: None,
-                question_asker: None,
+                question_asker: stream_json::deferred_asker(),
             }),
         )?;
         stream_json::emit(&json!({
@@ -4338,7 +4338,7 @@ impl LiveCli {
                     "type": "result",
                     "subtype": "success",
                     "session_id": self.session.id,
-                    "result": final_assistant_text(&summary),
+                    "result": stream_result_text(&summary),
                     "num_turns": summary.iterations,
                     "duration_ms": elapsed,
                     "model": self.model,
@@ -10821,17 +10821,46 @@ fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
     summary
         .assistant_messages
         .last()
-        .map(|message| {
-            message
+        .map(assistant_text)
+        .unwrap_or_default()
+}
+
+fn assistant_text(message: &ConversationMessage) -> String {
+    message
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Réponse de la ligne `result` en stream-json : celle de `final_assistant_text`,
+/// sauf pour un tour qui finit sur des questions posées sans texte (appli web) :
+/// la réponse sans outil écrite juste avant, dont Claw a fait poser les questions.
+fn stream_result_text(summary: &runtime::TurnSummary) -> String {
+    let mut replies = summary.assistant_messages.iter().rev();
+    let Some(last) = replies.next() else {
+        return String::new();
+    };
+    let text = assistant_text(last);
+    let asked = last.blocks.iter().any(
+        |block| matches!(block, ContentBlock::ToolUse { name, .. } if name == "AskUserQuestion"),
+    );
+    if !asked || !text.trim().is_empty() {
+        return text;
+    }
+    replies
+        .next()
+        .filter(|reply| {
+            !reply
                 .blocks
                 .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("")
+                .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
         })
+        .map(assistant_text)
         .unwrap_or_default()
 }
 
@@ -11542,6 +11571,47 @@ mod tests {
         describe_permission_target, expert_command_prompt, parse_permission_answer,
         persist_allow_rule, ExpertCommand, PermissionAnswer,
     };
+
+    #[test]
+    fn a_turn_ending_on_questions_keeps_the_answer_written_before_them() {
+        use runtime::{ContentBlock, ConversationMessage, TokenUsage, TurnSummary};
+        let text = |words: &str| ContentBlock::Text {
+            text: words.to_string(),
+        };
+        let call = |name: &str| ContentBlock::ToolUse {
+            id: "appel".to_string(),
+            name: name.to_string(),
+            input: "{}".to_string(),
+        };
+        let summary = |messages: Vec<Vec<ContentBlock>>| TurnSummary {
+            assistant_messages: messages
+                .into_iter()
+                .map(ConversationMessage::assistant)
+                .collect(),
+            tool_results: Vec::new(),
+            iterations: 0,
+            usage: TokenUsage::default(),
+        };
+        // Questions posées sans texte après une réponse (appli web) : cette réponse.
+        let asked = summary(vec![
+            vec![call("read_file")],
+            vec![text("Le design a trois défauts. Je les corrige ?")],
+            vec![call("AskUserQuestion")],
+        ]);
+        assert_eq!(
+            super::stream_result_text(&asked),
+            "Le design a trois défauts. Je les corrige ?"
+        );
+        // Questions dès le départ, après des outils : rien d'autre à publier qu'elles.
+        let direct = summary(vec![
+            vec![text("Je lis le projet."), call("read_file")],
+            vec![call("AskUserQuestion")],
+        ]);
+        assert_eq!(super::stream_result_text(&direct), "");
+        // Un tour ordinaire : sa dernière réponse, même vide.
+        let cut = summary(vec![vec![text("Fini.")], vec![call("bash")]]);
+        assert_eq!(super::stream_result_text(&cut), "");
+    }
 
     #[test]
     fn notices_of_a_json_turn_are_kept_for_its_result() {

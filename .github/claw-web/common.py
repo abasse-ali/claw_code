@@ -24,6 +24,36 @@ LOG = "<!-- claw-web:log"
 # Dans une réponse : le dernier message traité (identifiant de commentaire), ou « keep »
 # (réponse qui ne traite rien : échec au démarrage).
 ANSWERED = re.compile(r"<!--\s*claw-web:answered\s+(\d+|keep)\s*-->")
+# Questions de Claw (outil AskUserQuestion) à la fin de sa réponse : en données pour l'appli,
+# qui en fait des choix à toucher, puis en texte, jusqu'à QUESTIONS_END, pour GitHub et pour
+# l'historique de l'agent.
+QUESTIONS = re.compile(r"<!--\s*claw-web:questions\s+(\[.*?\])\s*-->\n?", re.S)
+QUESTIONS_END = "<!-- claw-web:questions-end -->"
+
+
+def questions_block(questions):
+    """Les questions de Claw et leurs réponses proposées, pour la fin de sa réponse ; « »
+    sans question valable (une question a au moins deux réponses proposées)."""
+    kept, lines = [], []
+    for question in questions if isinstance(questions, list) else []:
+        if not isinstance(question, dict) or not str(question.get("question") or "").strip():
+            continue
+        options = [{"label": str(option["label"]).strip(), "description": str(option.get("description") or "").strip()}
+                   for option in question.get("options") or []
+                   if isinstance(option, dict) and str(option.get("label") or "").strip()]
+        if len(options) < 2:
+            continue
+        kept.append({"question": str(question["question"]).strip(), "header": str(question.get("header") or "").strip(),
+                     "options": options, "multi_select": bool(question.get("multi_select"))})
+        lines.append(f"**{kept[-1]['question']}**")
+        lines.extend(f"- {option['label']}" + (f" : {option['description']}" if option["description"] else "")
+                     for option in options)
+        lines.append("")
+    if not kept:
+        return ""
+    # Un « --> » dans un texte fermerait le commentaire HTML avant la fin des données.
+    data = json.dumps(kept, ensure_ascii=False).replace("-->", "--\\u003e")
+    return f"<!-- claw-web:questions {data} -->\n" + "\n".join(lines).strip() + f"\n{QUESTIONS_END}"
 
 # Requêtes par jour de l'offre gratuite de Google, relevées le 18 octobre 2026 (erreur 429 de
 # Google) ; les autres modèles Gemini ont aussi un quota par jour, non relevé.

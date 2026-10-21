@@ -75,6 +75,9 @@ class StateTest(unittest.TestCase):
         self.assertIn("Pull request #5 (claw/x into main): open, not merged yet. u5", text)
         self.assertIn("built from main, docs/ folder, at https://o.github.io/r/; last build: errored (Page build failed.)", text)
         self.assertNotIn("private", text)
+        # Le site montre main, pas la branche de la session : ses captures, c'est la copie de travail.
+        self.assertIn("What is online: the site shows main as last published", text)
+        self.assertIn("Screenshot with `path`", text)
 
     def test_unreadable_parts_are_said(self):
         fake = FakeGitHub({

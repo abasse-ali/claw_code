@@ -17,8 +17,9 @@ from pathlib import Path
 
 import urllib.request
 
-from common import (ANSWER, ANSWERED, API, FILES_BRANCH, NOTES, WORK, GitHubError, answer_marks, answered_up_to, api,
-                    comments, images_of, kind_of, output, post_comment, run_url, settings, task_text)
+from common import (ANSWER, ANSWERED, API, FILES_BRANCH, NOTES, QUESTIONS, QUESTIONS_END, WORK, GitHubError, answer_marks,
+                    answered_up_to, api, comments, images_of, kind_of, output, post_comment, run_url, settings,
+                    task_text)
 from on_github import STATE_FILE, describe, read_state
 
 REPO = os.environ.get("REPO", "").strip()
@@ -63,8 +64,9 @@ ENGINE_NOTES = ("Aucune modification de fichier", "Travail inachevé gardé", "M
 
 def answer_text(body):
     """Le texte d'une réponse de Claw, sans le pied (après le dernier `---` : lien de la pull
-    request, du job) ni les remarques du moteur."""
+    request, du job) ni les remarques du moteur ; ses questions y restent en texte."""
     text = ANSWERED.sub("", body.replace(ANSWER, "")).rsplit("\n---\n", 1)[0].split(NOTES, 1)[0]
+    text = QUESTIONS.sub("", text).replace(QUESTIONS_END, "")
     lines = text.rstrip().splitlines()
     while lines and (not lines[-1].strip() or (lines[-1].startswith("> ") and lines[-1][2:].startswith(ENGINE_NOTES))):
         lines.pop()
@@ -145,8 +147,9 @@ def bare_continue_note(request, history, retry):
         "\n\n[Claw] This session has no earlier conversation: the user's message only says to go on, "
         "and nothing tells what to continue. Do not invent a task. Look at the repository without "
         "changing anything (README, PLAN.md or other notes, recent commits with git log), then answer "
-        "in a few sentences: what the project is, what looks finished or unfinished, and the next step "
-        "you propose. Change no file in this pass: the user will reply with what to do."
+        "in a few sentences: what the project is and what looks finished or unfinished. Then ask the "
+        "user what to do next with AskUserQuestion (2 to 4 next steps, the one you recommend first): "
+        "they answer with one tap. Change no file in this pass."
     )
 
 
@@ -296,8 +299,11 @@ def main():
         f"\n\n[Claw] You are working in the repository {REPO}, on the branch {branch} "
         f"(created from {BASE}). When you finish, Claw commits your changes on this branch, "
         "pushes them and proposes them as a pull request (or updates the open one): do not "
-        "commit, push or open the pull request yourself. Nobody can answer questions during "
-        "this task: make reasonable choices and state them in your final answer."
+        "commit, push or open the pull request yourself. The user cannot answer during this "
+        "task, but AskUserQuestion shows them your questions with answers to tap: it ends this pass, "
+        "and their answer starts the next one. Ask before doing the work when something essential is "
+        "unclear (which page, which version, which of several readings of the request); for small "
+        "choices, make a reasonable one and state it in your final answer."
     )
     state = github_state(token, branch)
     if state:
