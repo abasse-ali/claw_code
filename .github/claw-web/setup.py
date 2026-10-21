@@ -328,7 +328,13 @@ def main():
         "the tables, feature lists or summaries of your earlier answers in this session: say only what "
         "is new or changed. State facts about the repository, its branches, pull request or site only "
         "after checking them (the GitHub state above, git, the files, or fetching the page): never "
-        "guess. When the user reports that something does not work, check it yourself first."
+        "guess. When the user reports that something does not work, check it yourself first. "
+        "The user reads your answer on their phone or computer, not on the machine where you work: "
+        "give every address they may open (the site, a page of it, the pull request, a file on "
+        "GitHub) as a full https link written as [what it is](https://...), never inside backticks. "
+        "A local address (localhost, 127.0.0.1, 0.0.0.0) only exists on this machine, which stops "
+        "with the task: never give it to the user to open. To show the site, give its GitHub Pages "
+        "address from the GitHub state above, or publish it with `claw-github pages`."
     )
     (WORK / "prompt.txt").write_text(request, encoding="utf-8")
     output("branch", branch)

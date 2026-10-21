@@ -95,6 +95,8 @@ button, .chip, .topbar, .brand, .meta-link, .session-item, .sheet-item, .small-l
 }
 
 a { color: var(--accent); }
+/* Adresse de la machine de Claw (serveur lancé pendant la tâche) : lisible, pas un lien. */
+.local-address::after { content: " (machine de Claw)"; color: var(--muted); font-size: .85em; }
 
 button { font: inherit; color: inherit; }
 
