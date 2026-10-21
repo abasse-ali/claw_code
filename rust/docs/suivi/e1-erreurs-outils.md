@@ -276,7 +276,7 @@ traitement conseillé.
   4. Message quand rien n'est réparable, avec l'extrait fautif :
      `[Claw] The arguments of grep_search were not valid JSON, so nothing was executed. Problem near: "pattern": "\d+" (a backslash must be written twice inside a JSON string: "\\d+"). Send the call again.`
   Aucune requête de plus.
-- État : à vérifier
+- État : corrigé (lot 47) : guillemets simples, clés sans guillemets et barre oblique inverse seule réparés ; un chemin aux barres lues comme des échappements retrouve ses barres ; une erreur de JSON montre l'extrait fautif et ce qu'il faut y changer. Reste le point 3 (appel tronqué clos sur `tool_use`), jamais vu chez un fournisseur.
 
 ## E1-10 glob_search : motifs courants qui rendent zéro fichier sans explication, et erreur de motif brute
 - Gravité : haute
@@ -374,7 +374,7 @@ traitement conseillé.
   au parent ce qui existe, sans nouvelle requête : le dernier texte du sous-agent, la liste
   des fichiers lus et des commandes lancées, et :
   `[Claw] The sub-agent Explore stopped before writing its report (provider error 429 at step 14 of 32). What it had done so far is above. Do not start the same task again as it is: continue from these notes yourself, or delegate a smaller part.`
-- État : à vérifier
+- État : corrigé (lot 47) : à sa limite, le sous-agent reçoit une dernière requête sans outils pour écrire son rapport ; sans rapport (panne, réponse vide), le parent reçoit son dernier texte, les fichiers lus et changés, les recherches et les commandes, avec la consigne de ne pas relancer la même tâche.
 
 ## E1-13 Agent : les rapports sont écrits dans le grand-parent du projet, et l'échec de ce dossier est une erreur brute
 - Gravité : moyenne
@@ -463,7 +463,7 @@ traitement conseillé.
   4. Code 400 et plus : mettre en tête
      `[Claw] The server answered 404 Not Found: this address does not exist. The text below is its error page, not the content you wanted. Check the address, or look for the page with WebSearch.`
   Aucune requête de plus.
-- État : à vérifier
+- État : corrigé (lot 47) : schéma ajouté quand il manque, `0.0.0.0` lu comme `127.0.0.1`, https seulement pour un site public ; connexion refusée (avec l'état des commandes de fond), nom introuvable, délai et TLS expliqués ; page d'erreur 4xx et 5xx annoncée comme telle.
 
 ## E1-16 WebSearch : une recherche bloquée par le moteur est rendue comme « aucun résultat »
 - Gravité : moyenne
@@ -528,7 +528,7 @@ traitement conseillé.
   3. Refus sans personne pour répondre, sur le modèle de celui de `stream_json.rs:134` :
      `[Claw] bash was not run: this command needs the user's approval and nobody can answer in this session. Do not retry it, even in another form: continue without it and say at the end what is waiting for approval.`
   Aucune requête de plus.
-- État : à vérifier
+- État : corrigé (lot 47) : `cd`, `grep`, `rg`, `find` (sans `-exec` ni `-delete`), `tree`, `stat`, `file`, `sort` (sans `-o`), `cut`, `diff`, `git blame`, `git grep` passent ; le refus nomme la commande, ce qui passe et l'outil à prendre, puis la suite (plan à faire approuver, ou rapport du sous-agent) ; l'appel que personne ne peut approuver : continuer sans lui et le dire à la fin.
 
 ## E1-18 edit_file : quatre échecs fréquents dont le message laisse le modèle refaire une requête
 - Gravité : haute
