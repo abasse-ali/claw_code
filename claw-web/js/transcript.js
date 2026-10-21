@@ -110,26 +110,124 @@ function todosHtml(todos) {
     </div>`).join("")}</div>`;
 }
 
+// Mots d'une ligne pour la comparaison fine : lettres et chiffres d'un bloc, espaces d'un bloc,
+// chaque autre signe seul.
+const WORD = /[\p{L}\p{N}_]+|\s+|[^\p{L}\p{N}_\s]/gu;
+
+/** Ce qui change entre une ligne effacée et la ligne écrite à sa place : plages de caractères
+ * `[début, fin)` dans chacune, ou `null` quand les deux lignes ont trop peu en commun pour que
+ * le détail aide (ligne réécrite). Plus longue suite commune de mots ; un blanc seul entre deux
+ * changements est pris avec eux. */
+export function changedRanges(before, after) {
+  const a = before.match(WORD) || [];
+  const b = after.match(WORD) || [];
+  if (!a.length || !b.length || a.length * b.length > 250000) return null;
+  const width = b.length + 1;
+  const table = new Uint16Array((a.length + 1) * width);
+  for (let i = a.length - 1; i >= 0; i -= 1) {
+    for (let j = b.length - 1; j >= 0; j -= 1) {
+      table[i * width + j] = a[i] === b[j]
+        ? table[(i + 1) * width + j + 1] + 1
+        : Math.max(table[(i + 1) * width + j], table[i * width + j + 1]);
+    }
+  }
+  const keptA = new Array(a.length).fill(false);
+  const keptB = new Array(b.length).fill(false);
+  for (let i = 0, j = 0; i < a.length && j < b.length;) {
+    if (a[i] === b[j]) { keptA[i] = keptB[j] = true; i += 1; j += 1; }
+    else if (table[(i + 1) * width + j] >= table[i * width + j + 1]) i += 1;
+    else j += 1;
+  }
+  const visible = (list, kept) => list.reduce((sum, word, k) => sum + (kept === null || kept[k] ? word.replace(/\s/g, "").length : 0), 0);
+  const common = visible(a, keptA);
+  if (common * 2 < Math.max(visible(a, null), visible(b, null))) return null;
+  const ranges = (list, kept) => {
+    const out = [];
+    let pos = 0;
+    list.forEach((word, k) => {
+      const end = pos + word.length;
+      const blankBetween = kept[k] && /^\s+$/.test(word) && k > 0 && !kept[k - 1] && k + 1 < list.length && !kept[k + 1];
+      if (!kept[k] || blankBetween) {
+        if (out.length && out[out.length - 1][1] === pos) out[out.length - 1][1] = end;
+        else out.push([pos, end]);
+      }
+      pos = end;
+    });
+    return out;
+  };
+  return [ranges(a, keptA), ranges(b, keptB)];
+}
+
+/** Entoure de `<mark>` les plages `[début, fin)` du texte d'un HTML coloré (le texte compte,
+ * pas les balises ; une entité vaut un caractère). Une plage qui traverse une balise de
+ * couleur est fermée avant et rouverte après, pour garder un HTML bien imbriqué. */
+export function markRanges(html, ranges) {
+  if (!ranges || !ranges.length) return html;
+  let out = "";
+  let pos = 0;
+  let next = 0;
+  let open = false;
+  for (let i = 0; i < html.length;) {
+    while (next < ranges.length && pos >= ranges[next][1]) {
+      if (open) { out += "</mark>"; open = false; }
+      next += 1;
+    }
+    if (html[i] === "<") {
+      const end = html.indexOf(">", i) + 1 || html.length;
+      out += open ? `</mark>${html.slice(i, end)}<mark>` : html.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (!open && next < ranges.length && pos >= ranges[next][0]) { out += "<mark>"; open = true; }
+    const length = html[i] === "&" ? html.indexOf(";", i) - i + 1 || 1 : 1;
+    out += html.slice(i, i + length);
+    i += length;
+    pos += 1;
+  }
+  if (open) out += "</mark>";
+  return out.replace(/<mark><\/mark>/g, "");
+}
+
 /** Lignes de différence (`+`, `-`, ` `), numérotées depuis le début de chaque passage, colorées
- * dans le langage du fichier (ligne par ligne). */
-function diffRows(hunks, language = "") {
+ * dans le langage du fichier (ligne par ligne). Une ligne effacée suivie de sa remplaçante
+ * (la n-ième effacée avec la n-ième écrite) n'a de surligné que ce qui change : un mot
+ * remplacé ne fait pas croire à une ligne réécrite. */
+export function diffRows(hunks, language = "") {
   const rows = [];
   hunks.forEach(({ oldStart, newStart, lines }, index) => {
     if (index) rows.push('<div class="dl gap">⋯</div>');
     let oldNo = oldStart || 1;
     let newNo = newStart || 1;
-    for (const line of lines) {
+    const marks = new Map();
+    for (let k = 0; k < lines.length;) {
+      if (lines[k][0] !== "-") { k += 1; continue; }
+      const dels = [];
+      const adds = [];
+      while (k < lines.length && (lines[k][0] === "-" || lines[k][0] === "\\")) {
+        if (lines[k][0] === "-") dels.push(k);
+        k += 1;
+      }
+      while (k < lines.length && (lines[k][0] === "+" || lines[k][0] === "\\")) {
+        if (lines[k][0] === "+") adds.push(k);
+        k += 1;
+      }
+      for (let n = 0; n < Math.min(dels.length, adds.length); n += 1) {
+        const ranges = changedRanges(lines[dels[n]].slice(1), lines[adds[n]].slice(1));
+        if (ranges) { marks.set(dels[n], ranges[0]); marks.set(adds[n], ranges[1]); }
+      }
+    }
+    lines.forEach((line, k) => {
       const kind = line[0];
-      const text = highlight(line.slice(1), language) || " ";
+      const text = markRanges(highlight(line.slice(1), language), marks.get(k)) || " ";
       if (kind === "+") rows.push(`<div class="dl add"><span class="no">${newNo++}</span><span class="tx">${text}</span></div>`);
       else if (kind === "-") rows.push(`<div class="dl del"><span class="no">${oldNo++}</span><span class="tx">${text}</span></div>`);
-      else if (kind === "\\") continue;
+      else if (kind === "\\") return;
       else {
         rows.push(`<div class="dl"><span class="no">${newNo}</span><span class="tx">${text}</span></div>`);
         oldNo += 1;
         newNo += 1;
       }
-    }
+    });
   });
   return rows;
 }

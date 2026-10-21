@@ -17,6 +17,8 @@
   --add-text: #a6e3a1;
   --del-bg: rgba(248, 81, 73, .14);
   --del-text: #f5a59b;
+  --add-mark: rgba(63, 185, 80, .38);
+  --del-mark: rgba(248, 81, 73, .38);
   --merged: #b48ef0;
   --shadow: rgba(0, 0, 0, .4);
   color-scheme: dark;
@@ -40,6 +42,8 @@
   --add-text: #1a6e33;
   --del-bg: rgba(207, 34, 46, .1);
   --del-text: #a82a1c;
+  --add-mark: rgba(46, 160, 67, .3);
+  --del-mark: rgba(207, 34, 46, .24);
   --merged: #7c4dce;
   --shadow: rgba(0, 0, 0, .15);
   color-scheme: light;
@@ -62,6 +66,8 @@
   --add-text: #1a6e33;
   --del-bg: rgba(207, 34, 46, .1);
   --del-text: #a82a1c;
+  --add-mark: rgba(46, 160, 67, .3);
+  --del-mark: rgba(207, 34, 46, .24);
   --merged: #7c4dce;
   --shadow: rgba(0, 0, 0, .15);
   color-scheme: light;
@@ -460,6 +466,9 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .dl.add .tx { color: var(--add-text); }
 .dl.del { background: var(--del-bg); }
 .dl.del .tx { color: var(--del-text); }
+.dl mark { color: inherit; border-radius: 2px; }
+.dl.add mark { background: var(--add-mark); }
+.dl.del mark { background: var(--del-mark); }
 .dl.gap { justify-content: center; padding: 2px 0; color: var(--muted); }
 .add { color: var(--ok); }
 .del { color: var(--error); }
