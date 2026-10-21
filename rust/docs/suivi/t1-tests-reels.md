@@ -810,23 +810,33 @@ sur le Python du Microsoft Store non plus (aucun détour par `/tmp`).
 
 ## Banc NVIDIA du 21 octobre 2026
 
-Le banc tourne sur GitHub (workflow « Essais réels », un job par scénario, trois à la fois),
-avec les modèles de NVIDIA (clé `NVIDIA_API_KEY` du dépôt). Référence : Claw au commit
-cb1b321 (`main`), branche `banc-parallele` pour le workflow seul.
+Le banc tourne sur GitHub ([workflow « Essais réels »](https://github.com/abasse-ali/claw_code/actions/workflows/real-tests.yml),
+un job par scénario, trois à la fois), avec les modèles de NVIDIA (clé `NVIDIA_API_KEY` du
+dépôt). Référence : Claw au commit cb1b321 (`main`), branche
+[`banc-parallele`](https://github.com/abasse-ali/claw_code/tree/banc-parallele) pour le
+workflow seul. Lot 47 : branche
+[`lot47-modeles-faibles`](https://github.com/abasse-ali/claw_code/tree/lot47-modeles-faibles)
+([ses changements](https://github.com/abasse-ali/claw_code/compare/main...lot47-modeles-faibles)).
+Chaque colonne renvoie au passage qui l'a produite (journaux et traces de chaque scénario,
+essais en artefacts pendant 14 jours).
 
-| Scénario | Ultra 550B | Lightning 30B |
-|---|---|---|
-| t1-inventaire | 6/6 | 6/6 (12 requêtes) |
-| t2-notes | 8/8 | 7/8 (25) |
-| t3-rapport | 4/4 | 4/4 (12) |
-| t4-bibliotheque | 10/12, puis 12/12 | 7/12 (62) |
-| t5-recettes-web | 12/12 | 9/12 (74) |
-| t6-conges | 11/12 | 11/12 (72) |
-| t7-ateliers | 12/12 | 11/12 (26) |
-| t8-materiel | 12/12 | 6/12 (62) |
-| Total | 77/78 | 61/78 |
+| Scénario | [Ultra, référence](https://github.com/abasse-ali/claw_code/actions/runs/39595185909) | [Lightning, référence](https://github.com/abasse-ali/claw_code/actions/runs/39596538497) | [Lightning, lot 47 (a0982fe)](https://github.com/abasse-ali/claw_code/actions/runs/39602422339) |
+|---|---|---|---|
+| t1-inventaire | 6/6 | 6/6 (12 requêtes) | 6/6 (19) |
+| t2-notes | 8/8 | 7/8 (25) | 8/8 (49) |
+| t3-rapport | 4/4 | 4/4 (12) | 4/4 (25) |
+| t4-bibliotheque | 10/12, puis 12/12 | 7/12 (62) | 7/12 (41) |
+| t5-recettes-web | 12/12 | 9/12 (74) | 10/12 (70) |
+| t6-conges | 11/12 | 11/12 (72) | 2/12 (101) |
+| t7-ateliers | 12/12 | 11/12 (26) | 12/12 (25) |
+| t8-materiel | 12/12 | 6/12 (62) | 8/12 (100) |
+| Total | 77/78 | 61/78 | 57/78 |
 
-Ultra est au plafond ; Lightning, le plus petit, est le banc des compensations.
+Ultra est au plafond ; Lightning, le plus petit, est le banc des compensations. Le premier
+passage du lot 47 perd t6 à cause de la première version de T1-43 (« le format de la demande
+ou du projet » : le modèle a pris le format ISO du projet contre « comme en France » de la
+demande), corrigée en 44a2535 ; les autres scénarios gagnent ou tiennent. Le second passage
+(44a2535) : [run 39606270807](https://github.com/abasse-ali/claw_code/actions/runs/39606270807).
 
 ### T1-38 Des refus voulus comptés comme des échecs d'affilée
 - Preuve : Ultra, t4 (premier essai) : le modèle essaie exprès un membre inconnu, un livre
