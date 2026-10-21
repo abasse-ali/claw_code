@@ -10,20 +10,36 @@ export const escapeHtml = (text) => String(text).replace(/[&<>"']/g, (character)
 const UNESCAPES = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'" };
 const unescapeHtml = (text) => text.replace(/&(?:amp|lt|gt|quot|#39);/g, (entity) => UNESCAPES[entity]);
 
+// Adresse de la machine où Claw a travaillé (un serveur lancé pendant la tâche) : elle
+// n'existe pas sur le téléphone ni sur l'ordinateur de l'utilisateur, et un lien vers elle
+// ne mènerait nulle part. Elle reste lisible, sans être un lien.
+const LOCAL_HOST = /^https?:\/\/(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1\])(?::\d+)?(?:[/?#]|$)/i;
+const link = (url, label) => (LOCAL_HOST.test(url)
+  ? `<span class="local-address" title="Adresse de la machine de Claw : elle ne s'ouvre pas d'ici">${label}</span>`
+  : `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`);
+
 /** Mise en forme d'une ligne déjà échappée : code, liens, gras, italique. */
 function inline(text) {
   const codes = [];
   let html = text.replace(/`([^`\n]+)`/g, (_, code) => {
-    codes.push(`<code>${code}</code>`);
+    // Une adresse écrite comme du code (« `https://…` », courant chez les modèles) reste
+    // un lien qu'on touche.
+    const url = code.trim();
+    codes.push(/^https?:\/\/[^\s<]+$/.test(url) ? link(url, `<code>${code}</code>`) : `<code>${code}</code>`);
     return `\u0000${codes.length - 1}\u0000`;
   });
   // Typographie française : espace insécable avant « : ; ! ? » et dans les guillemets, pour
   // qu'un signe ne parte jamais seul en début de ligne.
   html = html.replace(/ ([:;!?»])/g, " $1").replace(/« /g, "« ");
-  html = html.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
-    (_, label, url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`);
-  html = html.replace(/(^|[\s(])(https?:\/\/[^\s<)]+[^\s<).,;:!?])/g,
-    (_, before, url) => `${before}<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
+  html = html.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, url) => link(url, label));
+  // Adresse entre chevrons (`<https://…>`, échappée en `&lt;…&gt;`).
+  html = html.replace(/&lt;(https?:\/\/(?:[^\s<>&]|&amp;)+)&gt;/g, (_, url) => link(url, url));
+  // Adresse nue, aussi en gras (`**https://…**`) ou collée après « : ».
+  html = html.replace(/(^|[\s(*:])(https?:\/\/[^\s<)*]+[^\s<)*.,;:!?])/g,
+    (_, before, url) => `${before}${link(url, url)}`);
+  // Sans `https://` : une page GitHub Pages, ou une adresse en `www.`.
+  html = html.replace(/(^|[\s(*])((?:www\.[a-z0-9-]+(?:\.[a-z0-9-]+)+|[a-z0-9-]+\.github\.io)(?:\/[^\s<)*]*[^\s<)*.,;:!?])?)/gi,
+    (_, before, address) => `${before}${link(`https://${address}`, address)}`);
   html = html.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
   html = html.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, "$1<em>$2</em>");
   html = html.replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,;:!?]|$)/g, "$1<em>$2</em>");
