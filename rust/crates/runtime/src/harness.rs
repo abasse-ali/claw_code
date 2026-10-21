@@ -2141,7 +2141,7 @@ pub fn view_after_edit(tool_name: &str, tool_output: &str) -> Option<String> {
         ));
     }
     // Grand fichier : les lignes autour du changement, trouvé en comparant le
-    // fichier d'avant (le correctif le porte en entier) à celui du disque.
+    // fichier d'avant (`originalFile` du résultat) à celui du disque.
     let before = original_content(tool_output)?;
     let old: Vec<&str> = before.lines().collect();
     let prefix = old.iter().zip(&lines).take_while(|(a, b)| a == b).count();
@@ -3504,10 +3504,17 @@ const MAX_REVIEW_DIFF_CHARS: usize = 24_000;
 const DIFF_CONTEXT: usize = 3;
 
 /// Contenu d'un fichier avant sa première modification du tour, lu dans le
-/// résultat de `edit_file` ou `write_file` (lignes « - » du correctif complet).
+/// résultat de `edit_file` ou `write_file` (`originalFile` ; à défaut, lignes
+/// « - » d'un correctif complet, forme des anciens résultats).
 #[must_use]
 pub fn original_content(tool_output: &str) -> Option<String> {
     let value = first_json(tool_output)?;
+    if let Some(original) = value.get("originalFile").and_then(Value::as_str) {
+        return Some(original.to_string());
+    }
+    if value.get("type").and_then(Value::as_str) == Some("create") {
+        return Some(String::new());
+    }
     let hunks = value.get("structuredPatch")?.as_array()?;
     let mut lines = Vec::new();
     for hunk in hunks {

@@ -7419,9 +7419,14 @@ Deploy $ARGUMENTS
         let write_update_output: serde_json::Value =
             serde_json::from_str(&write_update).expect("json");
         assert_eq!(write_update_output["type"], "update");
-        // Le contenu d'origine n'est plus renvoyé au modèle (économie de contexte).
-        assert!(write_update_output["originalFile"].is_null());
-        assert!(write_update_output["structuredPatch"].is_array());
+        // Le diff ne porte que la ligne changée et son contexte ; le fichier
+        // d'avant est joint pour Claw (le modèle relit le résultat allégé).
+        assert_eq!(write_update_output["originalFile"], "alpha\nbeta\nalpha\n");
+        assert_eq!(
+            write_update_output["structuredPatch"],
+            json!([{ "oldStart": 1, "oldLines": 3, "newStart": 1, "newLines": 3,
+                     "lines": [" alpha", " beta", "-alpha", "+gamma"] }])
+        );
 
         let read_full = execute_tool("read_file", &json!({ "path": "nested/demo.txt" }))
             .expect("read full should succeed");

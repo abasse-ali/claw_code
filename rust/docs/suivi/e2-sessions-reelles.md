@@ -528,6 +528,29 @@ citée seulement pour dire si un défaut se répète). Les numéros sont ceux de
   écrite ; `triage_guide` fait d'abord décider ce qu'elles disent, et les preuves ne sont
   demandées que si des fichiers ont été modifiés ou si le lecteur a vu un défaut.
 
+## E2-17 Chaque modification est rapportée comme le fichier entier effacé puis réécrit
+- Gravité : haute
+- Session et messages : session Claw Web n° 18 de `claw-sessions` (`test_claw`, branche
+  `claw/session-1`), passages 39609156598 et 39623024959 du 21 octobre 2026, modèle
+  `nvidia/nemotron-3-ultra-550b-a55b`.
+- Ce qui s'est passé : retour de l'utilisateur, « quand il modifie un fichier il est obligé
+  d'effacer toute la ligne et de tout réécrire ». Les 77 `edit_file` des deux passages ont
+  chacun un diff qui part de la ligne 1 et retire tout le fichier : un changement de quelques
+  lignes dans `templates/base.html` est rapporté « 853 lignes retirées, 860 ajoutées ».
+  `make_patch` (`runtime/src/file_ops.rs`) ne comparait pas les textes : il mettait tout
+  l'ancien en « - » et tout le nouveau en « + ». L'appli affiche donc le fichier effacé puis
+  réécrit, et le modèle relit dans le résultat allégé `oldStart 1, oldLines 853` : il croit
+  avoir tout changé.
+- Ce que Claw a fait : rien, le défaut était dans le diff lui-même.
+- Remède : un vrai diff ligne à ligne, en passages avec trois lignes de contexte comme
+  `git diff` (début et fin communs écartés, plus longue suite commune au milieu, en bloc
+  au-delà de 4 millions de cases). Le fichier d'avant, que `original_content` (gardes, vue
+  du fichier) lisait dans les lignes « - » du diff complet, est joint au résultat
+  (`originalFile`) ; le résultat allégé que relit le modèle ne le garde pas. Claw Web
+  surligne en plus les mots changés dans une ligne remplacée (W1-38).
+- État : corrigé (lot 47). Diff vérifié hors du moteur sur 2 000 modifications au hasard
+  (chacune réappliquée à l'ancien texte), test `edit_file_patch_holds_only_the_changed_lines_and_their_context`.
+
 ## Relevés sans constat : défauts de ces sessions déjà traités dans le code actuel
 
 À ne pas refaire. Chacun a été vérifié dans le code.

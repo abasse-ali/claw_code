@@ -55,7 +55,13 @@ pub struct WriteFileOutput {
     pub content: String,
     #[serde(rename = "structuredPatch")]
     pub structured_patch: Vec<StructuredPatchHunk>,
-    #[serde(rename = "originalFile", skip_serializing, default)]
+    /// Le fichier d'avant, pour Claw (gardes, vue du fichier) : le diff ne
+    /// porte plus que les lignes changées. Retiré de ce que le modèle relit.
+    #[serde(
+        rename = "originalFile",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub original_file: Option<String>,
     #[serde(rename = "gitDiff")]
     pub git_diff: Option<serde_json::Value>,
@@ -79,7 +85,9 @@ pub struct EditFileOutput {
     pub old_string: String,
     #[serde(rename = "newString")]
     pub new_string: String,
-    #[serde(rename = "originalFile", skip_serializing, default)]
+    /// Le fichier d'avant, pour Claw (gardes, vue du fichier) : le diff ne
+    /// porte plus que les lignes changées. Retiré de ce que le modèle relit.
+    #[serde(rename = "originalFile", default)]
     pub original_file: String,
     #[serde(rename = "structuredPatch")]
     pub structured_patch: Vec<StructuredPatchHunk>,
@@ -1998,22 +2006,159 @@ fn apply_limit<T>(
     )
 }
 
-fn make_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
-    let mut lines = Vec::new();
-    for line in original.lines() {
-        lines.push(format!("-{line}"));
-    }
-    for line in updated.lines() {
-        lines.push(format!("+{line}"));
-    }
+/// Lignes de contexte gardées autour d'un changement, comme `git diff`.
+const PATCH_CONTEXT: usize = 3;
+/// Au-delà (lignes changées d'avant × d'après), la partie changée est donnée
+/// en bloc, sans chercher les lignes communes en son milieu.
+const PATCH_MAX_CELLS: usize = 4_000_000;
 
-    vec![StructuredPatchHunk {
-        old_start: 1,
-        old_lines: original.lines().count(),
-        new_start: 1,
-        new_lines: updated.lines().count(),
-        lines,
-    }]
+/// La différence entre deux textes, en passages comme `git diff` : seules les
+/// lignes changées, avec trois lignes de contexte (vu le 21 octobre 2026 : un
+/// diff qui retirait tout l'ancien fichier et ajoutait tout le nouveau faisait
+/// voir chaque petite modification comme le fichier effacé puis réécrit, dans
+/// l'appli comme pour le modèle, à qui « lignes 1 à 860 » était rapporté).
+fn make_patch(original: &str, updated: &str) -> Vec<StructuredPatchHunk> {
+    let old: Vec<&str> = original.lines().collect();
+    let new: Vec<&str> = updated.lines().collect();
+    if old.is_empty() {
+        if new.is_empty() {
+            return Vec::new();
+        }
+        return vec![StructuredPatchHunk {
+            old_start: 1,
+            old_lines: 0,
+            new_start: 1,
+            new_lines: new.len(),
+            lines: new.iter().map(|line| format!("+{line}")).collect(),
+        }];
+    }
+    let ops = line_ops(&old, &new);
+    // Positions des lignes changées, regroupées en passages quand moins de
+    // deux contextes les séparent.
+    let changed: Vec<usize> = ops
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| !matches!(op, LineOp::Same(..)))
+        .map(|(index, _)| index)
+        .collect();
+    let mut groups: Vec<(usize, usize)> = Vec::new();
+    for index in changed {
+        match groups.last_mut() {
+            Some((_, end)) if index <= *end + 2 * PATCH_CONTEXT + 1 => *end = index,
+            _ => groups.push((index, index)),
+        }
+    }
+    // Numéros de ligne (avant, après) au début de chaque opération.
+    let mut starts = Vec::with_capacity(ops.len() + 1);
+    let (mut old_no, mut new_no) = (0usize, 0usize);
+    for op in &ops {
+        starts.push((old_no, new_no));
+        match op {
+            LineOp::Same(..) => {
+                old_no += 1;
+                new_no += 1;
+            }
+            LineOp::Removed(_) => old_no += 1,
+            LineOp::Added(_) => new_no += 1,
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(first, last)| {
+            let from = first.saturating_sub(PATCH_CONTEXT);
+            let to = (last + PATCH_CONTEXT + 1).min(ops.len());
+            let mut hunk = StructuredPatchHunk {
+                old_start: starts[from].0 + 1,
+                old_lines: 0,
+                new_start: starts[from].1 + 1,
+                new_lines: 0,
+                lines: Vec::with_capacity(to - from),
+            };
+            for op in &ops[from..to] {
+                match op {
+                    LineOp::Same(line) => {
+                        hunk.old_lines += 1;
+                        hunk.new_lines += 1;
+                        hunk.lines.push(format!(" {line}"));
+                    }
+                    LineOp::Removed(line) => {
+                        hunk.old_lines += 1;
+                        hunk.lines.push(format!("-{line}"));
+                    }
+                    LineOp::Added(line) => {
+                        hunk.new_lines += 1;
+                        hunk.lines.push(format!("+{line}"));
+                    }
+                }
+            }
+            hunk
+        })
+        .collect()
+}
+
+enum LineOp<'a> {
+    Same(&'a str),
+    Removed(&'a str),
+    Added(&'a str),
+}
+
+/// Les lignes des deux textes dans l'ordre, chacune gardée, retirée ou
+/// ajoutée : début et fin communs écartés, plus longue suite commune au
+/// milieu (en bloc quand ce milieu est trop grand).
+fn line_ops<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<LineOp<'a>> {
+    let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let (mid_old, mid_new) = (
+        &old[prefix..old.len() - suffix],
+        &new[prefix..new.len() - suffix],
+    );
+    let mut ops: Vec<LineOp<'a>> = old[..prefix]
+        .iter()
+        .map(|line| LineOp::Same(line))
+        .collect();
+    if mid_old.len().saturating_mul(mid_new.len()) > PATCH_MAX_CELLS {
+        ops.extend(mid_old.iter().map(|line| LineOp::Removed(line)));
+        ops.extend(mid_new.iter().map(|line| LineOp::Added(line)));
+    } else {
+        let width = mid_new.len() + 1;
+        let mut table = vec![0u32; (mid_old.len() + 1) * width];
+        for i in (0..mid_old.len()).rev() {
+            for j in (0..mid_new.len()).rev() {
+                table[i * width + j] = if mid_old[i] == mid_new[j] {
+                    table[(i + 1) * width + j + 1] + 1
+                } else {
+                    table[(i + 1) * width + j].max(table[i * width + j + 1])
+                };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < mid_old.len() || j < mid_new.len() {
+            if i < mid_old.len() && j < mid_new.len() && mid_old[i] == mid_new[j] {
+                ops.push(LineOp::Same(mid_old[i]));
+                i += 1;
+                j += 1;
+            } else if j == mid_new.len()
+                || (i < mid_old.len() && table[(i + 1) * width + j] >= table[i * width + j + 1])
+            {
+                ops.push(LineOp::Removed(mid_old[i]));
+                i += 1;
+            } else {
+                ops.push(LineOp::Added(mid_new[j]));
+                j += 1;
+            }
+        }
+    }
+    ops.extend(
+        old[old.len() - suffix..]
+            .iter()
+            .map(|line| LineOp::Same(line)),
+    );
+    ops
 }
 
 /// Chemin montré au modèle : sans le préfixe `\\?\` que `canonicalize` ajoute
@@ -2449,6 +2594,53 @@ mod tests {
             .expect("time should move forward")
             .as_nanos();
         std::env::temp_dir().join(format!("claw-native-{name}-{unique}"))
+    }
+
+    #[test]
+    fn edit_file_patch_holds_only_the_changed_lines_and_their_context() {
+        // Vu le 21 octobre 2026 : chaque modification d'un gabarit de 860
+        // lignes était rapportée comme 853 lignes retirées et 860 ajoutées.
+        let file = temp_path("gabarit.html");
+        let lines: Vec<String> = (1..=860).map(|n| format!("<p>ligne {n}</p>")).collect();
+        std::fs::write(&file, lines.join("\n") + "\n").expect("gabarit");
+        let path = file.to_string_lossy().into_owned();
+        let output = edit_file(
+            &path,
+            "<p>ligne 400</p>",
+            "<p>ligne quatre cents</p>",
+            false,
+        )
+        .expect("modification");
+        assert_eq!(output.structured_patch.len(), 1);
+        let hunk = &output.structured_patch[0];
+        assert_eq!(
+            (
+                hunk.old_start,
+                hunk.old_lines,
+                hunk.new_start,
+                hunk.new_lines
+            ),
+            (397, 7, 397, 7)
+        );
+        assert_eq!(
+            hunk.lines
+                .iter()
+                .filter(|line| !line.starts_with(' '))
+                .collect::<Vec<_>>(),
+            ["-<p>ligne 400</p>", "+<p>ligne quatre cents</p>"]
+        );
+        // Le fichier d'avant reste joint pour Claw.
+        assert_eq!(output.original_file, lines.join("\n") + "\n");
+        // Deux changements éloignés : deux passages ; rien de changé : aucun.
+        assert_eq!(
+            super::make_patch(
+                "a\nb\nc\nd\ne\nf\ng\nh\ni\nj",
+                "A\nb\nc\nd\ne\nf\ng\nh\ni\nJ"
+            )
+            .len(),
+            2
+        );
+        assert!(super::make_patch("a\nb", "a\nb").is_empty());
     }
 
     fn grep_with(args: serde_json::Value) -> std::io::Result<super::GrepSearchOutput> {
