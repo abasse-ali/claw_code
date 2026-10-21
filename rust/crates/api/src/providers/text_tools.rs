@@ -16,6 +16,12 @@ use crate::types::ToolDefinition;
 const OPEN_TAG: &str = "<tool_call>";
 const CLOSE_TAG: &str = "</tool_call>";
 
+/// Clé des arguments d'un bloc `<tool_call>` illisible : la raison (erreur de
+/// JSON, ou `cut` pour un bloc coupé avant sa balise de fin). L'appel n'est pas
+/// exécuté, et `tools::input_check::problem` dit au modèle quoi corriger, au
+/// lieu d'un bloc jeté sans un mot.
+pub const UNREADABLE_CALL: &str = "claw_unreadable_tool_call";
+
 static TEXT_MODE_MODELS: RwLock<BTreeSet<String>> = RwLock::new(BTreeSet::new());
 
 /// Mode texte imposé (`CLAW_TOOL_MODE=text`), configuré pour le fournisseur
@@ -137,13 +143,25 @@ pub fn extract_tool_calls(text: &str) -> (String, Vec<(String, Value)>) {
     while let Some(start) = rest.find(OPEN_TAG) {
         visible.push_str(&rest[..start]);
         let after = &rest[start + OPEN_TAG.len()..];
-        let (body, next) = match after.find(CLOSE_TAG) {
-            Some(end) => (&after[..end], &after[end + CLOSE_TAG.len()..]),
+        let (body, next, closed) = match after.find(CLOSE_TAG) {
+            Some(end) => (&after[..end], &after[end + CLOSE_TAG.len()..], true),
             // Balise non refermée (sortie coupée) : on prend tout ce qui suit.
-            None => (after, ""),
+            None => (after, "", false),
         };
-        if let Some(call) = parse_call(body) {
-            calls.push(call);
+        // Un bloc coupé n'est pas refermé par la réparation : un write_file au
+        // contenu tronqué serait exécuté tel quel.
+        match parse_call(body, closed) {
+            Some(call) => calls.push(call),
+            None => {
+                if let Some(name) = call_name(body) {
+                    let reason = if closed {
+                        json_error(body)
+                    } else {
+                        "cut".to_string()
+                    };
+                    calls.push((name, json!({ UNREADABLE_CALL: reason })));
+                }
+            }
         }
         rest = next;
     }
@@ -195,8 +213,8 @@ pub fn salvage_json_tool_calls(text: &str, known_tools: &[String]) -> Option<Vec
     (!calls.is_empty()).then_some(calls)
 }
 
-fn parse_call(body: &str) -> Option<(String, Value)> {
-    let repaired = crate::providers::text_tools::lenient_json(body.trim())?;
+fn parse_call(body: &str, repair: bool) -> Option<(String, Value)> {
+    let repaired = lenient_json(body.trim(), repair)?;
     let name = repaired.get("name")?.as_str()?.to_string();
     let arguments = repaired
         .get("arguments")
@@ -218,21 +236,54 @@ fn fenced_call(text: &str) -> Option<(String, Value)> {
     let body_start = after.find('\n')? + 1;
     let body = &after[body_start..];
     let end = body.find("```")?;
-    let call = parse_call(&body[..end])?;
+    let call = parse_call(&body[..end], true)?;
     // Seulement si l'objet ressemble vraiment à un appel d'outil.
-    lenient_json(body[..end].trim())
+    lenient_json(body[..end].trim(), true)
         .filter(|value| value.get("arguments").is_some() || value.get("parameters").is_some())
         .map(|_| call)
 }
 
-/// JSON tolérant : accolades autour, virgules finales… (réparation minimale).
-fn lenient_json(text: &str) -> Option<Value> {
+/// JSON tolérant : texte autour de l'objet, puis, si `repair`, la réparation
+/// des appels natifs (retour à la ligne brut dans une chaîne, guillemets
+/// simples, virgule finale, `True`...).
+fn lenient_json(text: &str, repair: bool) -> Option<Value> {
     if let Ok(value) = serde_json::from_str::<Value>(text) {
         return Some(value);
     }
     let start = text.find('{')?;
     let end = text.rfind('}')?;
-    serde_json::from_str(&text[start..=end]).ok()
+    if let Ok(value) = serde_json::from_str(&text[start..=end]) {
+        return Some(value);
+    }
+    if !repair {
+        return None;
+    }
+    let repaired = runtime::json_repair::repair_tool_input(&text[start..])?;
+    serde_json::from_str(&repaired).ok()
+}
+
+/// Le nom d'outil d'un bloc illisible (`"name": "write_file"`), pour dire au
+/// modèle quel appel n'a pas été exécuté.
+fn call_name(body: &str) -> Option<String> {
+    let after = &body[body.find("\"name\"")? + 6..];
+    let after = after.trim_start().strip_prefix(':')?.trim_start();
+    let after = after.strip_prefix('"')?;
+    let name: String = after
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// L'erreur de lecture d'un bloc, à partir de sa première accolade.
+fn json_error(body: &str) -> String {
+    let start = body.find('{').unwrap_or(0);
+    serde_json::from_str::<Value>(body[start..].trim())
+        .err()
+        .map_or_else(
+            || "not a tool call object".to_string(),
+            |error| error.to_string(),
+        )
 }
 
 const INVOKE_TAG: &str = "<invoke name=\"";
@@ -718,6 +769,39 @@ mod tests {
         let (visible, calls) = extract_tool_calls("Voici un exemple :\n```json\n{\"a\": 1}\n```");
         assert!(calls.is_empty());
         assert!(visible.contains("exemple"));
+    }
+
+    #[test]
+    fn a_broken_call_block_is_repaired_or_handed_back_with_its_reason() {
+        use super::UNREADABLE_CALL;
+        // Retour à la ligne brut dans une chaîne : réparé comme un appel natif.
+        let (_, calls) = extract_tool_calls(
+            "Je crée le fichier.\n<tool_call>{\"name\": \"write_file\", \"arguments\": {\"path\": \"a.py\", \"content\": \"print(1)\nprint(2)\"}}</tool_call>",
+        );
+        assert_eq!(
+            calls[0],
+            (
+                "write_file".to_string(),
+                json!({"path": "a.py", "content": "print(1)\nprint(2)"})
+            )
+        );
+        // Illisible : l'appel est rendu au modèle, pas jeté.
+        let (visible, calls) = extract_tool_calls(
+            "Je crée le fichier.\n<tool_call>{\"name\": \"write_file\", \"arguments\": {\"path\" \"a.py\"}}</tool_call>",
+        );
+        assert_eq!(visible, "Je crée le fichier.");
+        assert_eq!(calls[0].0, "write_file");
+        assert!(calls[0].1[UNREADABLE_CALL]
+            .as_str()
+            .is_some_and(|reason| reason != "cut"));
+        // Coupé avant sa balise de fin : jamais refermé ni exécuté.
+        let (_, calls) = extract_tool_calls(
+            "<tool_call>{\"name\": \"write_file\", \"arguments\": {\"path\": \"a.py\", \"content\": \"def f():\n    ret",
+        );
+        assert_eq!(
+            calls[0],
+            ("write_file".to_string(), json!({ UNREADABLE_CALL: "cut" }))
+        );
     }
 
     #[test]

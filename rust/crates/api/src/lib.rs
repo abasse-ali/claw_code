@@ -29,6 +29,7 @@ pub use providers::reasoning::{
     cap_thread_reasoning, reasoning_effort, set_reasoning_effort, take_reasoning_notice,
     ReasoningEffort,
 };
+pub use providers::text_tools::UNREADABLE_CALL;
 pub use providers::{
     auto_compaction_threshold, context_window_for_model, credential_env_for_model,
     detect_provider_kind, max_tokens_for_model, resolve_model_alias, ProviderKind,

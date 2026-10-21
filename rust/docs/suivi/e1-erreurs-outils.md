@@ -236,7 +236,7 @@ traitement conseillé.
      Et, bloc sans balise de fin avec arrêt à la limite de sortie, le texte déjà prévu :
      `Your reply reached the output limit before the arguments of ...`.
   Aucune requête de plus : aujourd'hui le tour s'arrête à tort ou repart à l'aveugle.
-- État : à vérifier
+- État : corrigé (lot 47) : un bloc refermé passe par la réparation des appels natifs ; illisible, ou coupé avant sa balise de fin (jamais refermé ni exécuté), il devient un appel au nom lu dans le bloc, que `input_check::problem` rend au modèle avec la raison et quoi corriger.
 
 ## E1-09 Réparation du JSON : quatre fautes courantes non réparées, et une réparation qui exécute un appel tronqué
 - Gravité : moyenne

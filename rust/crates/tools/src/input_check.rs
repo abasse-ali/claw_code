@@ -500,6 +500,28 @@ pub fn problem(
     required: &[String],
     known: &[String],
 ) -> Option<String> {
+    // Bloc `<tool_call>` du mode texte que ni la lecture ni la réparation n'ont pu
+    // lire : rendu au modèle avec sa raison, au lieu d'être jeté sans un mot.
+    if let Some(reason) = serde_json::from_str::<Value>(input.trim())
+        .ok()
+        .filter(|value| value.as_object().is_some_and(|object| object.len() == 1))
+        .and_then(|value| {
+            value
+                .get(api::UNREADABLE_CALL)?
+                .as_str()
+                .map(str::to_string)
+        })
+    {
+        return Some(if reason == "cut" {
+            format!(
+                "[Claw] Your reply reached the output limit inside the <tool_call> block for `{tool_name}`, before its closing tag, so nothing was executed. Send a smaller call: write a long file in several parts (create it with the first part, then extend it with edit_file), and keep your reasoning short."
+            )
+        } else {
+            format!(
+                "[Claw] Your <tool_call> block for `{tool_name}` was not valid JSON ({reason}), so nothing was executed. Inside a JSON string write a line break as \\n and a double quote as \\\". Send the block again."
+            )
+        });
+    }
     if is_marker(input, CUT_BY_OUTPUT_LIMIT) {
         return Some(format!(
             "Your reply reached the output limit before the arguments of `{tool_name}` were complete, so nothing was executed. Keep your reasoning short and send a smaller call: write a long file in several parts (create it with the first part, then extend it with edit_file), or change fewer lines per edit_file call."
@@ -651,6 +673,15 @@ mod tests {
             broken.contains(r#"problem near: {"pattern": "a" "b"}"#),
             "{broken}"
         );
+        // Bloc du mode texte illisible ou coupé : la raison est dite.
+        let unreadable = json!({ api::UNREADABLE_CALL: "expected `:` at line 1 column 40" });
+        let told = problem("write_file", &unreadable.to_string(), &required).expect("illisible");
+        assert!(told.starts_with(
+            "[Claw] Your <tool_call> block for `write_file` was not valid JSON (expected `:`"
+        ));
+        let cut = json!({ api::UNREADABLE_CALL: "cut" });
+        let told = problem("write_file", &cut.to_string(), &required).expect("coupé");
+        assert!(told.contains("before its closing tag, so nothing was executed"));
         let escape =
             problem("grep_search", r#"{"pattern": "\d+"}"#, &[]).expect("échappement invalide");
         assert!(escape.contains("a backslash inside a JSON string is written twice"));
