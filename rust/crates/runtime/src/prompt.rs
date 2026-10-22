@@ -59,11 +59,35 @@ pub struct ProjectContext {
     pub repo_map: Option<String>,
     /// Leçons notées par l'agent lors des sessions précédentes.
     pub lessons: Option<String>,
+    /// Mémoire du projet relevée par Claw lui-même (`.claw/memory.md`).
+    pub memory: Option<String>,
 }
 
 /// Leçons du projet : `.claw/lessons.md`, écrites par l'outil `Remember`.
 pub const LESSONS_FILE: &str = "lessons.md";
 const MAX_LESSONS_CHARS: usize = 4_000;
+
+/// Mémoire du projet : `.claw/memory.md`, écrite par l'appli web à la fin de
+/// chaque passage (commandes qui ont marché, erreurs déjà rencontrées et leur
+/// issue, dernières demandes), gardée d'une session à l'autre pour ce dépôt.
+pub const MEMORY_FILE: &str = "memory.md";
+const MAX_MEMORY_CHARS: usize = 4_000;
+
+/// La mémoire du projet, du début (le plus utile d'abord) dans la limite du
+/// budget, en lignes entières.
+fn read_memory(cwd: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(cwd.join(".claw").join(MEMORY_FILE)).ok()?;
+    let mut kept = String::new();
+    for line in text.trim().lines() {
+        if kept.len() + line.len() + 1 > MAX_MEMORY_CHARS {
+            break;
+        }
+        kept.push_str(line);
+        kept.push('\n');
+    }
+    let kept = kept.trim_end();
+    (!kept.is_empty()).then(|| kept.to_string())
+}
 
 /// Les leçons les plus récentes (fin du fichier) dans la limite du budget.
 fn read_lessons(cwd: &Path) -> Option<String> {
@@ -96,6 +120,7 @@ impl ProjectContext {
             instruction_files,
             repo_map: None,
             lessons: None,
+            memory: None,
         })
     }
 
@@ -111,6 +136,7 @@ impl ProjectContext {
         }
         if crate::harness::enabled(crate::harness::Aid::Lessons) {
             context.lessons = read_lessons(&context.cwd);
+            context.memory = read_memory(&context.cwd);
         }
         Ok(context)
     }
@@ -208,6 +234,11 @@ impl SystemPromptBuilder {
             if let Some(lessons) = &project_context.lessons {
                 sections.push(format!(
                     "# Lessons from previous sessions\nNotes saved with the Remember tool during earlier sessions in this project. Rely on them unless the code now says otherwise.\n{lessons}"
+                ));
+            }
+            if let Some(memory) = &project_context.memory {
+                sections.push(format!(
+                    "# Project memory\nWhat Claw recorded on its own during earlier sessions on this repository: commands that worked, errors already met and how they ended, recent requests. Start from it: reuse the commands that worked, do not repeat a command or a fix that failed unless something changed, and do not redo work a recent request already did. The code wins when it says otherwise.\n{memory}"
                 ));
             }
         }
@@ -617,7 +648,7 @@ fn render_config_section(config: &RuntimeConfig) -> String {
 
 fn get_simple_intro_section(has_output_style: bool) -> String {
     format!(
-        "You are Claw, an expert software engineering and software architecture agent working in the user's workspace. You help users {} Your core strengths are writing and modifying code, auditing existing projects, reviewing and refactoring code, designing software architectures, and testing code then fixing it until it works. Use the instructions below and the tools available to you to assist the user. Answer in the language the user writes in.\n\nIMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.",
+        "You are Claw, an expert full-stack software engineer and software architect working in the user's workspace. You help users {} You master the whole stack: front end (semantic HTML, modern CSS and responsive layout, JavaScript and TypeScript, the major frameworks, accessibility), back end (APIs, databases and migrations, authentication, security), tooling, tests and deployment. You build complete applications that work, not demos: every button, link, form and route does what it says, data is saved where it should be, errors are handled and shown, and the result looks finished on a phone and on a desktop. Your core strengths are writing and modifying code, auditing existing projects, reviewing and refactoring code, designing software architectures, and testing code then fixing it until it works. Use the instructions below and the tools available to you to assist the user. Answer in the language the user writes in.\n\nIMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.",
         if has_output_style {
             "according to your \"Output Style\" below, which describes how you should respond to user queries."
         } else {
@@ -730,6 +761,7 @@ fn get_simple_system_section() -> String {
 fn get_simple_doing_tasks_section() -> String {
     let items = prepend_bullets(vec![
         "Tell the user what you are going to do: in your first reply to a request, before your first tool call, write one to three short sentences for the user, in their language, saying what you will do and in what order (the files or parts concerned), and make the tool calls in that same reply. When you move on to a new stage of the work, say so in one sentence. These lines are for the user: short, concrete, without code.".to_string(),
+        "Do exactly what is asked. When the user's message is a question (how, why, what, where, is it, can it), the task is the answer: answer that question directly, in your first sentences, from what you read in the project. Investigate only as far as the answer needs, and do not change files or start other work unless the user asked for it; if a change would help, propose it in one sentence at the end.".to_string(),
         "Read relevant code before changing it and keep changes tightly scoped to the request.".to_string(),
         "Do not add speculative abstractions, compatibility shims, or unrelated cleanup.".to_string(),
         "Do not create files unless they are required to complete the task.".to_string(),
@@ -774,19 +806,17 @@ fn get_reasoning_section() -> String {
 /// Forme de la réponse finale : un compte rendu que l'utilisateur lit seul.
 fn get_final_answer_section() -> String {
     let items = prepend_bullets(vec![
-        "Start with the result in one or two sentences: what now works, what you found, or what blocks you.".to_string(),
-        "What was wrong: when you fixed or investigated something, name each problem and explain its root cause: why it happened, what it affected, and the evidence that showed it, in the words the user would use.".to_string(),
-        "What you did: the solution applied to each problem, why this solution rather than another when the choice mattered, and the main files concerned. Group this by problem, not by file and not in the order you worked.".to_string(),
-        "Verification: the commands you ran and what they showed. Say plainly what you did not or could not verify.".to_string(),
-        "What is left: what the user has to do next (the exact command to run), decisions that wait for them, risks and known limits. Leave this part out when there is nothing.".to_string(),
+        "Start with the result in one or two sentences: the answer to the question, what now works, or what blocks you.".to_string(),
+        "Then only what the user needs to trust and use it: for a bug, its cause in a sentence and how you fixed it; the files that matter; what you verified (the command and what it showed) and what you could not verify; what is left for them to do (the exact command), if anything.".to_string(),
+        "Match the length to the work: a question gets a direct answer in a few sentences, a small change two to four sentences, a large piece of work a short summary with a few bullets. Use headings, bold labels or tables only when the content truly has that shape, never as a report template for a short answer.".to_string(),
     ]);
     [
         "# Final answer".to_string(),
-        "End every task with one final answer written for the user, who reads only that message and did not follow your steps. Write it as a report in plain language:".to_string(),
+        "End every task with one final answer written for the user, who reads only that message and did not follow your steps. Write it like a senior engineer briefing a colleague: plain, precise and short.".to_string(),
         items.join("\n"),
-        "Write this report for a person, not for a program: speak to the user directly (\"you\", never \"the user\"), and describe each change as they will see or use it (the page, the feature, the behaviour), not as code: no lists of CSS selectors, function or variable names, line numbers or settings keys, the diff already holds them. Give each part a short bold label that you write in the user's language (in French: Résultat, Ce qui n'allait pas, Ce que j'ai fait, Vérification, Ce qu'il reste à faire); never reuse the English words of these instructions as labels. No signature, attribution or \"Assisted-by\" line.".to_string(),
+        "Write it for a person, not for a program: speak to the user directly (\"you\", never \"the user\"), and describe each change as they will see or use it (the page, the feature, the behaviour), not as code: no lists of CSS selectors, function or variable names, line numbers or settings keys, the diff already holds them. When you point to code they may want to open, write it as `path:line`. Write any label in the user's language; never reuse the English words of these instructions as labels. No signature, attribution or \"Assisted-by\" line.".to_string(),
         "When the user asks you to explain, analyse, compare, review, design or advise, the answer is the work itself: answer in depth, as the best senior engineer would. Ground each point in what you read (files, functions, lines), explain the mechanisms and the reasons behind them, weigh the options with their trade-offs, point out the risks and edge cases, and end with a clear recommendation. Use headings, lists, tables and short code excerpts where they make it clearer.".to_string(),
-        "Scale the length to the substance: a simple question gets a direct answer in a few sentences; real work or analysis gets a complete report, each part under a short bold label written in the user's language. Never pad, restate the request or narrate your steps, no file contents, no second or third report; but never cut an explanation the user needs to understand or check the result.".to_string(),
+        "Never pad, restate the request, narrate your steps, paste file contents or write a second summary; but never cut an explanation the user needs to understand or check the result.".to_string(),
     ]
     .join("\n")
 }
@@ -843,19 +873,21 @@ mod tests {
     fn system_prompt_forbids_emoji_and_asks_for_one_final_answer() {
         let prompt = SystemPromptBuilder::new().render();
         assert!(prompt.contains("Never use emoji or pictographic icons"));
-        // La réponse finale est un compte rendu : résultat, cause, solution,
-        // vérification, suite.
+        // La réponse finale, comme celle de Claude Code : le résultat d'abord,
+        // puis l'essentiel, d'une longueur à la mesure du travail.
         assert!(prompt
             .contains("# Final answer\nEnd every task with one final answer written for the user"));
         for part in [
-            "Start with the result",
-            "What was wrong:",
-            "What you did:",
-            "Verification:",
-            "What is left:",
+            "Start with the result in one or two sentences: the answer to the question",
+            "what you verified (the command and what it showed)",
+            "Match the length to the work: a question gets a direct answer",
+            "never as a report template for a short answer",
         ] {
             assert!(prompt.contains(part), "partie absente : {part}");
         }
+        // Une question reçoit sa réponse, pas un chantier.
+        assert!(prompt.contains("When the user's message is a question"));
+        assert!(prompt.contains("expert full-stack software engineer"));
         // Un compte rendu pour une personne : étiquettes dans sa langue, pas de
         // liste de sélecteurs ni de signature (vu dans une vraie session).
         assert!(prompt.contains("never reuse the English words of these instructions as labels"));
@@ -1168,6 +1200,43 @@ mod tests {
         let rendered = truncate_instruction_content(&content, 4_000);
         assert!(rendered.contains("[truncated]"));
         assert!(rendered.chars().count() <= 4_000 + "\n\n[truncated]".chars().count());
+    }
+
+    #[test]
+    fn project_memory_kept_by_the_web_app_reaches_the_prompt() {
+        // L'appli web remet dans `.claw/` la mémoire du dépôt (dépôt privé des
+        // sessions) : les leçons du modèle et ce que Claw a relevé lui-même.
+        let root = temp_dir();
+        fs::create_dir_all(root.join(".claw")).expect("claw dir");
+        fs::write(
+            root.join(".claw").join(super::LESSONS_FILE),
+            "- Les tests se lancent avec `npm test` depuis `web/`.\n",
+        )
+        .expect("lessons");
+        let memory = format!(
+            "## Commandes qui ont marché\n- `npm test`\n## Erreurs déjà rencontrées\n{}",
+            "- `npm run build` : erreur\n".repeat(400)
+        );
+        fs::write(root.join(".claw").join(super::MEMORY_FILE), memory).expect("memory");
+        let kept = super::read_memory(&root).expect("mémoire lue");
+        assert!(kept.starts_with("## Commandes qui ont marché\n- `npm test`"));
+        assert!(kept.len() <= super::MAX_MEMORY_CHARS && kept.ends_with("erreur"));
+        let context = ProjectContext {
+            cwd: root.clone(),
+            lessons: super::read_lessons(&root),
+            memory: Some(kept),
+            ..ProjectContext::default()
+        };
+        let prompt = SystemPromptBuilder::new()
+            .with_project_context(context)
+            .render();
+        assert!(prompt.contains("# Lessons from previous sessions"));
+        assert!(prompt.contains("# Project memory\nWhat Claw recorded on its own"));
+        assert!(prompt.contains("do not repeat a command or a fix that failed"));
+        // Sans fichier : rien.
+        fs::remove_file(root.join(".claw").join(super::MEMORY_FILE)).expect("remove");
+        assert!(super::read_memory(&root).is_none());
+        fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
     #[test]

@@ -3,7 +3,7 @@
 Appli web de [Claw](https://github.com/abasse-ali/claw_code) (dossier `claw-web` du dépôt du
 code de Claw), l'agent de code qui travaille avec
 des modèles gratuits : choisissez un dépôt GitHub, une branche et un modèle, décrivez une tâche ;
-Claw y travaille dans GitHub Actions, pousse une branche, ouvre la pull request et vous répond.
+Claw y travaille dans GitHub Actions, sur la branche de la session, la pousse et vous répond.
 Installable sur le téléphone (« Ajouter à l'écran d'accueil »).
 
 Adresse : https://abasse-ali.github.io/claw_code/ (publiée par le workflow `pages.yml` à chaque
@@ -16,8 +16,17 @@ changement de ce dossier ; l'ancienne adresse, https://abasse-ali.github.io/claw
 - Le travail se fait dans le **dépôt du moteur**, un dépôt privé (par défaut
   `abasse-ali/claw-sessions`) : son workflow `claw-web.yml` appelle le moteur, workflow du dépôt
   public du code de Claw, qui lance Claw sur le dépôt de la tâche, sur la branche de la session,
-  puis pousse et ouvre la pull request. Les journaux et les minutes de GitHub Actions restent
-  dans le dépôt privé.
+  puis la pousse. Chaque session est une branche à part entière (`claw/session-<n>`), partie de
+  la branche choisie : aucune pull request, rien n'est fusionné sans votre demande. Les journaux
+  et les minutes de GitHub Actions restent dans le dépôt privé.
+- Claw garde une **mémoire par projet** dans le dépôt du moteur (branche `claw-web-fichiers`,
+  `memoire/<propriétaire>/<dépôt>.md`) : les leçons qu'il note, les erreurs déjà rencontrées et
+  leur issue, les commandes qui ont marché, les dernières demandes. Il la relit au début de
+  chaque tâche sur ce dépôt ; effacer le fichier la remet à zéro.
+- Option **Mode projet** (menu des options, coupée par défaut) : pour créer une application de
+  A à Z, Claw écrit un cahier des charges et un plan en jalons, puis les fait un à un, vérifiés.
+  Coupée, il répond à la demande telle quelle. Une simple question reçoit sa réponse, sans
+  toucher aux fichiers.
 - Chaque session est une issue du dépôt du moteur (étiquette `claw-web`) : la tâche, vos
   messages de suivi, la progression en direct et les réponses de Claw. Le dépôt étant privé,
   elles ne sont visibles que de vous.
@@ -73,7 +82,9 @@ Vos messages sont en bulle à droite ; les réponses de Claw, sans cadre, sur to
 avec leurs titres, et les remarques du moteur (travail inachevé, par exemple) en encadré. Chaque
 passage tient en une ligne : son état (en cours, fini, arrêté, erreur), sa durée et son nombre
 d'actions ; un toucher déplie son journal, dont les 30 dernières étapes sont en vue (les
-précédentes se déplient à leur tour). Sous une réponse, la pull request, les fichiers modifiés et
+précédentes se déplient à leur tour), et les étapes d'un passage en cours paraissent une à une.
+Les tâches de Claw restent dans un petit bloc pliable au-dessus de la saisie, ses questions dans le
+même bloc, en cartes à faire défiler à gauche et à droite. Sous une réponse, les fichiers modifiés sur la branche et
 le job sont en pastilles, le modèle et les requêtes à déplier. « Relancer » et « Mettre en
 ligne » restent sous la conversation ; le job, la session sur GitHub, « Archiver » et
 « Supprimer » sont dans le menu « ••• ».
@@ -195,17 +206,17 @@ Détails, commandes et limites (machine inactive sept jours arrêtée par Oracle
 
 ## Fusionner, mettre en ligne
 
-- « Fusionner » (à côté de la pull request ouverte, deux appuis) : la branche de la session
-  rejoint la branche de départ.
+- « Fusionner » (seulement pour une ancienne session dont la pull request est restée ouverte,
+  deux appuis) : la branche de la session rejoint la branche de départ.
 - « Mettre en ligne » : publie un site statique sur GitHub Pages (dossier `docs/` ou racine),
-  après fusion de la pull request ou depuis la branche de la session telle quelle. Sur un compte
+  depuis la branche de la session telle quelle. Sur un compte
   GitHub gratuit, GitHub Pages ne publie que les dépôts publics : l'appli le signale et propose
   de rendre le dépôt public. Claw (l'agent) n'a aucun accès à GitHub : il renvoie à ces boutons.
 
 ## Arrêter, supprimer
 
 - « Arrêter » (deux appuis) annule un passage en cours : ce qui est fait reste sur la branche
-  de la session, sans pull request ; un message de suivi reprend le travail.
+  de la session ; un message de suivi reprend le travail.
 - « Supprimer » dans une session, ou « Choisir » dans la liste des sessions (menu) pour en
   supprimer plusieurs : la session et ses messages sont effacés de GitHub, sans retour possible.
   En option, sa branche `claw/session-<n>` (une pull request ouverte est alors fermée) et ses

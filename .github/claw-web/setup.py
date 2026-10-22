@@ -21,6 +21,7 @@ from common import (ANSWER, ANSWERED, API, FILES_BRANCH, NOTES, QUESTIONS, QUEST
                     answered_up_to, api, comments, images_of, kind_of, output, post_comment, run_url, settings,
                     task_text)
 from on_github import STATE_FILE, describe, read_state
+import memory
 
 REPO = os.environ.get("REPO", "").strip()
 BASE = os.environ.get("BASE", "").strip()
@@ -32,6 +33,28 @@ REPO_TOKEN = os.environ.get("REPO_TOKEN", "").strip()
 HISTORY_MAX_CHARS = 30_000
 # État du mode projet de la session, gardé en cache entre les passages (claw-web.yml).
 STATE = Path("claw-state") / "project.json"
+
+
+def load_memory():
+    """Mémoire de Claw pour ce dépôt (memory.py), remise dans `.claw/` du clone : ses leçons et
+    ce qu'il a déjà vu (erreurs, commandes qui marchent, dernières demandes). None si illisible."""
+    try:
+        data, _ = memory.load(JOB_TOKEN, ENGINE, REPO)
+        lessons = memory.install(data, Path("work") / ".claw")
+    except (GitHubError, OSError) as error:
+        print(f"::warning::mémoire du projet non lue : {error}")
+        return None
+    if lessons or data["worked"] or data["errors"] or data["requests"]:
+        print(f"Mémoire du projet : {len(lessons)} leçon(s), {len(data['errors'])} erreur(s) connue(s), "
+              f"{len(data['worked'])} commande(s) qui marchent, {len(data['requests'])} demande(s) passée(s)")
+    return {"repo": REPO, "lessons": lessons}
+
+
+def keep_memory(seen, request):
+    """Pour run.py : le dépôt, les leçons déjà là (les nouvelles s'y ajouteront) et la demande."""
+    if seen is not None:
+        (WORK / "memory.json").write_text(json.dumps({**seen, "request": request}, ensure_ascii=False),
+                                          encoding="utf-8")
 
 
 def fail(message):
@@ -267,6 +290,7 @@ def main():
         (Path("work") / ".claw").mkdir(exist_ok=True)
         shutil.copyfile(STATE, Path("work") / ".claw" / "project.json")
         print("État du mode projet repris du passage précédent")
+    memory_data = load_memory()
 
     # Les mots de l'utilisateur d'abord : Claw ne décide le mode projet que sur ce qui
     # précède la première ligne `[Claw]`.
@@ -278,6 +302,7 @@ def main():
     # Titre du commit et de la pull request : le message traité, pas le titre de la session
     # (son premier message, parfois une simple question).
     title = next((line.strip() for line in request.splitlines() if line.strip()), "")
+    keep_memory(memory_data, title)
     # Images jointes au message : Claw les joint à la demande (`@chemin`) et les fait décrire
     # si le modèle ne lit pas les images.
     saved = fetch_images(images)

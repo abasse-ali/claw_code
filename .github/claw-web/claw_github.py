@@ -13,9 +13,9 @@ from on_github import STATE_FILE, describe, load_requests, save_requests
 
 REPO_DIR = Path(os.environ.get("CLAW_WEB_REPO_DIR") or ".")
 USAGE = """usage: claw-github <command>
-  status              the GitHub state of this repository (pull request, GitHub Pages)
-  merge               merge this session's pull request once your work is pushed
-  pages [docs|root]   publish the site on GitHub Pages once your work is pushed
+  status              the GitHub state of this repository (branch, GitHub Pages)
+  pages [docs|root]   publish this session's branch on GitHub Pages once your work is pushed
+  merge               merge this session's branch into its base: only when the user asks for it
   cancel              drop your requests"""
 
 
@@ -66,9 +66,11 @@ def main(argv):
     if command == "merge":
         requests["merge"] = True
         save_requests(requests)
-        print(f"Recorded. When you finish, Claw commits and pushes your work, then merges {branch} into "
-              f"{base} (it opens the pull request first if needed). The outcome is added under your final "
-              "answer: tell the user in one sentence that you merge it, without claiming it is done.")
+        print(f"Recorded. Each session is an independent branch: merge only because the user asked to "
+              f"bring {branch} into {base}. When you finish, Claw commits and pushes your work, then merges "
+              f"{branch} into {base} (it opens the pull request first if needed). The outcome is added "
+              "under your final answer: tell the user in one sentence that you merge it, without claiming "
+              "it is done.")
         return 0
     if command == "pages":
         folder, problem = site_folder(argv[1] if len(argv) > 1 else "")
@@ -78,12 +80,11 @@ def main(argv):
         requests["pages"] = folder
         save_requests(requests)
         where = "docs/" if folder == "docs" else "the repository root"
-        lines = [f"Recorded. When you finish, Claw publishes {where} of {base} on GitHub Pages and adds "
-                 "the site address, or the exact reason of a refusal, under your final answer: tell the "
-                 "user in one sentence that you publish it, without claiming it is online."]
-        if not requests.get("merge"):
-            lines.append(f"GitHub Pages publishes {base}, not {branch}: if the site's files changed on "
-                         f"{branch} (in this task or an unmerged pull request), also run `claw-github merge`.")
+        source = base if requests.get("merge") else branch
+        lines = [f"Recorded. When you finish, Claw pushes your work and publishes {where} of {source} on "
+                 "GitHub Pages, and adds the site address, or the exact reason of a refusal, under your "
+                 "final answer: tell the user in one sentence that you publish it, without claiming it "
+                 "is online."]
         if current and current.get("private"):
             lines.append("The repository is private: on a free GitHub account Pages will refuse it, and "
                          "only the user can make it public. Claw will still try and report the outcome.")

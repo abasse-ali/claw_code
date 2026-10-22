@@ -18,10 +18,12 @@ import sys
 import threading
 import time
 import urllib.request
+from pathlib import Path
 
 from common import (FILES_BRANCH, PROGRESS, WORK, GitHubError, api, clean_notice, edit_comment, output,
                     post_comment, run_url, stop_tree)
 from journal import Journal
+import memory
 
 SESSION = os.environ["SESSION"]
 ENGINE = os.environ["GITHUB_REPOSITORY"]
@@ -30,7 +32,9 @@ MODEL = os.environ.get("MODEL", "").strip()
 # Mise à jour du commentaire de progression au plus toutes les N secondes, du journal
 # détaillé (plus lourd) au plus toutes les LOG_EVERY secondes.
 PROGRESS_EVERY = 12
-LOG_EVERY = 24
+# 12 s : l'appli fait paraître les étapes reçues une par une entre deux publications (24 s
+# donnaient des paquets d'une dizaine de lignes d'un coup, vu le 22 octobre 2026).
+LOG_EVERY = 12
 RUN_ID = int(os.environ.get("GITHUB_RUN_ID") or 0)
 SHOWN_ACTIONS = 8
 # Racine du dépôt de la tâche : les chemins sont montrés depuis elle, pas depuis le disque du job.
@@ -339,6 +343,45 @@ class Progress:
                 print(f"::warning::journal non publié : {error}")
 
 
+def remember(state, store=None, call=api):
+    """Ajoute à la mémoire du dépôt (memory.py) ce que ce passage a appris : les leçons notées
+    par l'agent, les commandes qui ont marché ou échoué, la demande et son issue."""
+    try:
+        seen = json.loads((WORK / "memory.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    repo = seen.get("repo") if isinstance(seen, dict) else None
+    if not repo or MODEL == "mock":
+        return False
+    before = set(seen.get("lessons") or [])
+    lessons = [line for line in memory.read_lessons(Path(ROOT) / ".claw") if line not in before]
+    events = []
+    try:
+        with open(WORK / "claw.jsonl", encoding="utf-8") as log:
+            for line in log:
+                try:
+                    events.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    runs = memory.observe(events, relative)
+    store = store or ShotStore()
+    try:
+        saved = memory.save(
+            JOB_TOKEN, ENGINE, repo,
+            lambda data: memory.learn(data, runs, lessons, seen.get("request") or "", state, SESSION),
+            session=SESSION, call=call, ensure_branch=store._branch)
+    except GitHubError as error:
+        print(f"::warning::mémoire du projet non rangée : {error}")
+        return False
+    if saved:
+        failed = sum(1 for _, ok, _ in runs if not ok)
+        print(f"Mémoire du projet rangée : {len(lessons)} leçon(s) nouvelle(s), {len(runs)} commande(s) "
+              f"relevée(s) dont {failed} en échec", flush=True)
+    return saved
+
+
 def free_quota(key):
     """Requêtes gratuites du jour chez OpenRouter ({used, limit, remaining}), ou None. Une
     lecture de la clé : aucune requête de modèle, rien du quota."""
@@ -406,6 +449,14 @@ def main():
         if os.environ.get(choice, "").strip() == "1":
             env[variable] = "1"
             print(f"Option : {label}", flush=True)
+    # Mode projet : choisi dans l'appli, coupé par défaut. Coupé, un SPEC.md à la racine ne le
+    # rouvre plus (une simple question repartait sur le jalon suivant du projet, 22 octobre 2026).
+    env.pop("PROJECT", None)
+    if os.environ.get("PROJECT", "").strip() == "1":
+        env["CLAW_PROJECT_MODE"] = "start"
+        print("Option : mode projet", flush=True)
+    else:
+        env["CLAW_PROJECT_MODE"] = "0"
     args = ["claw", "--permission-mode", "danger-full-access", "--output-format", "stream-json"]
     mock = None
     if MODEL == "mock":
@@ -502,6 +553,7 @@ def main():
     (WORK / "result.md").write_text(result or "", encoding="utf-8")
     (WORK / "questions.json").write_text(json.dumps(progress.questions, ensure_ascii=False), encoding="utf-8")
     (WORK / "error.txt").write_text(error or "", encoding="utf-8")
+    remember(state)
     output("status", str(status))
     sys.exit(130 if stopped else status)
 

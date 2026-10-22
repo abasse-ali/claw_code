@@ -1,11 +1,13 @@
-"""Publie le travail d'une tâche : commit, poussée sur la branche de la session, pull request,
-puis réponse de l'agent dans la session.
+"""Publie le travail d'une tâche : commit, poussée sur la branche de la session, puis réponse de
+l'agent dans la session. Chaque session est une branche autonome (choix de l'utilisateur,
+22 octobre 2026) : aucune pull request n'est ouverte, le travail vit sur sa branche, et le site
+se publie depuis elle.
 
 Entrées (environnement) : REPO, BASE, SESSION, BRANCH, TITLE, PUBLISH (`true` si le jeton du
 dépôt est là), REPO_TOKEN, JOB_TOKEN, CLAW_OUTCOME (issue de l'étape de l'agent).
 
-Un passage inachevé (erreur, annulation) garde son travail sur la branche de la session, sans
-ouvrir de pull request : un message de suivi le reprend.
+Un passage inachevé (erreur, annulation) garde son travail sur la branche de la session : un
+message de suivi le reprend.
 """
 
 import json
@@ -101,22 +103,9 @@ def main():
                 notes.append(f"La poussée sur `{BRANCH}` a échoué : {detail}")
             else:
                 pushed = True
-                owner = REPO.split("/")[0]
-                found = api("GET", f"/repos/{REPO}/pulls?state=open&head={owner}:{BRANCH}", REPO_TOKEN)
-                pull = found[0] if found else None
-                # Des questions attendent l'utilisateur : la tâche n'est pas finie.
-                if pull is None and finished and not asked:
-                    pull = api("POST", f"/repos/{REPO}/pulls", REPO_TOKEN, {
-                        "title": f"Claw : {TITLE}",
-                        "head": BRANCH,
-                        "base": BASE,
-                        "body": "Proposé par Claw depuis l'appli web.\n\n" + (result[:3000] or TITLE),
-                    })
-                if pull is None:
-                    notes.append(f"Travail inachevé gardé sur la branche `{BRANCH}`, sans pull request "
-                                 "tant que la tâche n'est pas finie : envoyez un message pour la reprendre.")
-                else:
-                    footer.append(f"Pull request : {pull['html_url']}")
+                if not finished:
+                    notes.append(f"Travail inachevé gardé sur la branche `{BRANCH}` : envoyez un message "
+                                 "pour la reprendre.")
                 footer.append(f"Branche `{BRANCH}` : {summary}")
     except (RuntimeError, GitHubError, ValueError) as failure:
         notes.append(f"Publication impossible : {failure}")

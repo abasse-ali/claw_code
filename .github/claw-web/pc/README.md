@@ -169,6 +169,11 @@ on:
         required: false
         type: string
         default: ""
+      project:
+        description: "Mode projet (1 : activé ; vide : coupé)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   actions: read
@@ -181,6 +186,7 @@ jobs:
     with:
       # … entrées existantes
       runner: ${{ inputs.runner }}
+      project: ${{ inputs.project }}
     secrets: inherit
 ```
 

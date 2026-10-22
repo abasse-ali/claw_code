@@ -321,6 +321,9 @@ pub struct ConversationRuntime<C, T> {
     /// Arrêt demandé par un hook (`"continue": false`) : le tour s'arrête
     /// après les appels en cours.
     hook_stop: Option<String>,
+    /// Le tour répond à une question d'information : les outils qui écrivent
+    /// des fichiers sont refusés.
+    question_turn: bool,
 }
 
 /// Issue de la démonstration finale du mode projet.
@@ -1145,6 +1148,7 @@ where
             tool_images: Vec::new(),
             page_target: None,
             hook_stop: None,
+            question_turn: false,
         }
     }
 
@@ -1643,8 +1647,32 @@ where
         if let Some(text) = guide {
             user_message.blocks.push(ContentBlock::Text { text });
         }
+        // Question d'information (« comment marche le formulaire ? ») : la
+        // réponse est le travail du tour. Ni méthode de travail, ni mode
+        // projet, ni Ultracode, et les fichiers restent tels quels. Vu le
+        // 22 octobre 2026 : à une simple question, le modèle reprenait le
+        // jalon suivant du projet sans y répondre.
+        let question = !self.subagent
+            && report == harness::Report::None
+            && harness::enabled(Aid::WorkQuestions)
+            && {
+                let words = project::own_words(&request_text);
+                harness::asks_a_question(words) && !harness::asks_about_the_work(words)
+            };
+        self.question_turn = question;
+        if question {
+            user_message.blocks.push(ContentBlock::Text {
+                text: format!(
+                    "{}{}",
+                    harness::QUESTION_NOTE,
+                    harness::language_note(self.response_language.as_deref())
+                ),
+            });
+            self.api_client
+                .notify("Question : Claw y répond sans modifier les fichiers");
+        }
         // Ce qu'un ingénieur vérifie d'office pour ce genre de fonctionnalité.
-        if !self.subagent {
+        if !self.subagent && !question {
             if let Some(text) = harness::edge_case_guide(&request_text, earlier.as_deref()) {
                 user_message.blocks.push(ContentBlock::Text { text });
             }
@@ -1653,6 +1681,7 @@ where
         // code, marques d'une page générée, plancher de qualité, vérification).
         let mut design_guided = false;
         if !self.subagent
+            && !question
             && harness::enabled(Aid::DesignGuide)
             && report != harness::Report::Problem
         {
@@ -1671,7 +1700,7 @@ where
         // Code : la méthode d'un ingénieur soigneux et les règles des langages
         // que la demande nomme (pas pour une interface, qui a la sienne).
         let mut code_languages = std::collections::BTreeSet::new();
-        if !self.subagent && !design_guided && harness::enabled(Aid::CodeGuide) {
+        if !self.subagent && !question && !design_guided && harness::enabled(Aid::CodeGuide) {
             if let Some((text, languages)) =
                 crate::code_guide::code_guide(&request_text, earlier.as_deref())
             {
@@ -1687,8 +1716,11 @@ where
             }
         }
         // Mode projet : où en est le projet, et l'étape à faire.
-        let project_turn =
-            self.start_project_turn(&request_text, earlier.as_deref(), &mut user_message);
+        let project_turn = if question {
+            None
+        } else {
+            self.start_project_turn(&request_text, earlier.as_deref(), &mut user_message)
+        };
         self.session.messages.push(user_message);
 
         let mut assistant_messages = Vec::new();
@@ -1704,7 +1736,7 @@ where
         let mut superseded_draft: Option<String> = None;
         let team = !self.subagent && crate::team::team();
         let mut aids = TurnAids {
-            ultracode: !self.subagent && crate::workflow::active_for(&request_text),
+            ultracode: !self.subagent && !question && crate::workflow::active_for(&request_text),
             team,
             topic: team.then(|| crate::team::topic_of(&request_text)).flatten(),
             report,
@@ -4264,8 +4296,11 @@ where
             }
             return None;
         }
+        // Mode projet choisi d'office (option de l'appli web) : il s'ouvre au
+        // premier tour, sans attendre une demande de création.
         let starting = !state.active
             && (wish == project::Wish::Start
+                || harness::project_mode_forced()
                 || (project::creation_request(words) && project::empty_folder(&root)));
         // Projet déjà mené en mode projet (cahier des charges et plan en jalons à la racine)
         // dont l'état de Claw a disparu : clone neuf du moteur de l'appli web, `.claw`
@@ -5051,6 +5086,13 @@ where
         prompter: Option<&mut dyn PermissionPrompter>,
     ) -> (ConversationMessage, bool) {
         if let Some(problem) = self.tool_executor.invalid_input(&tool_name, input) {
+            self.tool_executor.skipped(&tool_name, input, &problem);
+            let message = ConversationMessage::tool_result(tool_use_id, tool_name, problem, true);
+            return (message, false);
+        }
+        // Tour de question : les fichiers restent tels quels.
+        if self.question_turn && crate::file_tools::writes_files(&tool_name) {
+            let problem = harness::QUESTION_WRITE_REFUSED.to_string();
             self.tool_executor.skipped(&tool_name, input, &problem);
             let message = ConversationMessage::tool_result(tool_use_id, tool_name, problem, true);
             return (message, false);
@@ -7447,11 +7489,13 @@ mod tests {
             matches!(&first.blocks[1], ContentBlock::Text { text } if text.starts_with(crate::harness::GUIDE_PREFIX))
         );
 
-        // Une demande ordinaire : ni guide ni demande de preuves.
+        // Une demande d'explication : ni guide de débogage ni demande de
+        // preuves ; c'est une question, la réponse est le travail.
         let (mut runtime, observed, _) = aided_runtime(vec![text_step("Voilà.")], vec![]);
         let summary = runtime.run_turn("explique ce fichier", None).expect("tour");
         assert_eq!(summary.iterations, 1);
-        assert!(!observed.borrow().requests[0].contains("[Claw guide]"));
+        assert!(!observed.borrow().requests[0].contains("The user is telling you"));
+        assert!(observed.borrow().requests[0].contains("The user's message is a question"));
     }
 
     #[test]
@@ -7761,6 +7805,41 @@ mod tests {
         assert_eq!(observed.requests.len(), 3);
         assert!(!observed.requests[2].contains("You started working"));
         assert!(!observed.requests[2].contains("Go on with the work"));
+    }
+
+    #[test]
+    fn a_question_gets_its_answer_and_leaves_the_files_alone() {
+        let _serial = crate::test_serial();
+        // Vu le 22 octobre 2026 dans une session de Claw Web : à une simple
+        // question, le modèle reprenait le projet sans y répondre. Une question
+        // reçoit sa réponse ; écrire un fichier est refusé pendant ce tour.
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                tool_step("write_file", r#"{"path":"notes.md","content":"x"}"#),
+                text_step("Le formulaire garde les dépenses dans le navigateur (app.js:42)."),
+                text_step("Le formulaire garde les dépenses dans le navigateur (app.js:42)."),
+            ],
+            vec![],
+        );
+        runtime
+            .run_turn("Comment le formulaire enregistre les dépenses ?", None)
+            .expect("tour");
+        let observed = observed.borrow();
+        assert!(observed.requests[0].contains("The user's message is a question, not a work order"));
+        assert!(observed.requests[1]
+            .contains("this turn answers the user's question and changes no files"));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice == "Question : Claw y répond sans modifier les fichiers"));
+        drop(observed);
+
+        // Une demande de travail : ni note ni refus.
+        let (mut runtime, observed, _) = aided_runtime(vec![text_step("Fait.")], vec![]);
+        runtime
+            .run_turn("Corrige le formulaire", None)
+            .expect("tour");
+        assert!(!observed.borrow().requests[0].contains("is a question"));
     }
 
     #[test]
@@ -10199,6 +10278,27 @@ mod tests {
             .notices
             .iter()
             .any(|notice| notice == "Mode projet arrêté pour ce dossier"));
+        // Option « Mode projet » de l'appli web (`CLAW_PROJECT_MODE=start`) :
+        // une question reçoit sa réponse sans le guide du projet, une demande
+        // de travail l'ouvre d'office, même dans un dossier qui a du code.
+        std::env::set_var("CLAW_PROJECT_MODE", "start");
+        let (mut runtime, observed, _) = project_runtime(
+            &root,
+            vec![text_step("Voici comment."), text_step("Voici comment.")],
+            "",
+            0,
+        );
+        let asked = runtime.run_turn("Comment marche le prêt d'un livre ?", None);
+        let question_request = observed.borrow().requests[0].clone();
+        let (mut runtime, observed, _) =
+            project_runtime(&root, vec![text_step("Fait."), text_step("Fait.")], "", 0);
+        let ordered = runtime.run_turn("Ajoute les amendes de retard", None);
+        std::env::remove_var("CLAW_PROJECT_MODE");
+        asked.expect("tour");
+        ordered.expect("tour");
+        assert!(!question_request.contains("Project mode"));
+        assert!(observed.borrow().requests[0].contains("Project mode is on for this folder"));
+        assert!(crate::project::ProjectState::load(&root).active);
         let _ = std::fs::remove_dir_all(&root);
     }
 
