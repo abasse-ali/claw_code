@@ -2996,6 +2996,89 @@ const QUESTION_STARTS: &[&str] = &[
     "who",
 ];
 
+/// Débuts d'un message qui demande de l'aide plutôt que du travail (« je trouve
+/// pas add disk », « je ne comprends pas comment lancer le serveur »).
+const HELP_STARTS: &[&str] = &[
+    "je trouve pas",
+    "je ne trouve pas",
+    "je trouve rien",
+    "je ne trouve rien",
+    "je comprends pas",
+    "je ne comprends pas",
+    "je sais pas",
+    "je ne sais pas",
+    "je vois pas",
+    "je ne vois pas",
+    "j'arrive pas a trouver",
+    "je n'arrive pas a trouver",
+    "y'a pas",
+    "y a pas",
+    "il y a pas",
+    "il n'y a pas",
+    "i can't find",
+    "i cannot find",
+    "i don't understand",
+    "i don't know",
+    "where is",
+    "where's",
+];
+
+/// Verbes qui demandent une information (« donne les liens », « indique-moi
+/// les étapes ») quand ils portent sur l'un des `INFO_NOUNS`.
+const GIVE_ORDERS: &[&str] = &[
+    "donne", "redonne", "indique", "envoie", "renvoie", "fournis", "montre", "rappelle", "liste",
+    "give", "send", "show", "list",
+];
+
+/// Ce qu'on demande quand on demande une information (début de mot).
+const INFO_NOUNS: &[&str] = &[
+    "lien",
+    "instruction",
+    "etape",
+    "explication",
+    "commande",
+    "adresse",
+    "url",
+    "procedure",
+    "reponse",
+    "resume",
+    "detail",
+    "idee",
+    "conseil",
+    "avis",
+    "tuto",
+    "guide",
+    "documentation",
+    "link",
+    "step",
+    "command",
+    "address",
+    "answer",
+    "summary",
+    "advice",
+    "idea",
+];
+
+/// Plaintes sur la qualité du travail : une demande de le refaire, pas une
+/// question (« les icônes c'est mal fait »).
+const QUALITY_COMPLAINTS: &[&str] = &[
+    "mal fait",
+    "moche",
+    "pas beau",
+    "pas belle",
+    "pas joli",
+    "pas terrible",
+    "pas top",
+    "c'est nul",
+    "pas encore trop",
+    "pas assez",
+    "trop petit",
+    "trop grand",
+    "trop gros",
+    "ressemble pas",
+    "ugly",
+];
+
 /// Mots de liaison devant un verbe (« et corrige-le », « then fix it »).
 const LINKING_WORDS: &[&str] = &["et", "puis", "ensuite", "alors", "and", "then", "so"];
 
@@ -3165,6 +3248,14 @@ pub fn asks_a_question(words: &str) -> bool {
     if ordered {
         return false;
     }
+    // Une plainte sur le travail ou un problème signalé : du travail, pas une question.
+    if QUALITY_COMPLAINTS
+        .iter()
+        .chain(PROBLEM_WORDS)
+        .any(|complaint| text.contains(*complaint))
+    {
+        return false;
+    }
     // « Peux-tu ajouter... ? » demande du travail ; « peux-tu m'expliquer... ? » une réponse.
     let explains = [
         "expliqu", "explain", "dire ", "me dire", "tell me", "decri", "describe",
@@ -3191,7 +3282,14 @@ pub fn asks_a_question(words: &str) -> bool {
         })
     };
     let asks = starts(QUESTION_STARTS) || first.starts_with("qu'") || first.starts_with("c'est");
-    question_mark || asks || starts(EXPLAIN_ORDERS)
+    let helps = HELP_STARTS.iter().any(|start| text.starts_with(start));
+    // « Donne les liens et les instructions » : une information, pas du travail.
+    let give = first.split('-').next().unwrap_or(first);
+    let gives = GIVE_ORDERS.contains(&give)
+        && text
+            .split(|ch: char| !ch.is_alphanumeric())
+            .any(|word| INFO_NOUNS.iter().any(|noun| word.starts_with(noun)));
+    question_mark || asks || helps || gives || starts(EXPLAIN_ORDERS)
 }
 
 /// Note jointe à une question d'information : la réponse, rien d'autre.
@@ -4677,10 +4775,16 @@ mod work_question_tests {
             "Est-ce que le site marche sur téléphone ?",
             "Le site est en ligne ?",
             "Peux-tu m'expliquer la structure du projet ?",
-            "Tu peux me dire pourquoi la page plante ?",
-            "Pourquoi, quand j'ajoute un article, la page plante ?",
+            "Tu peux me dire où est rangé le thème sombre ?",
+            "Pourquoi, quand j'ajoute un article, la liste se trie par date ?",
             "What does the cache do?",
             "Qu'est-ce qui charge les données au démarrage ?",
+            // Session 20 de Claw Web (22 octobre 2026) : 32 puis 59 actions du
+            // mode projet pour ces demandes d'information.
+            "Donne les liens et les instructions",
+            "Donne les liens et les instructions pour le mettre en ligne grâce à mon iPhone",
+            "Je trouve pas add disk",
+            "Je ne comprends pas comment lancer le serveur",
         ] {
             assert!(super::asks_a_question(question), "question : {question}");
         }
@@ -4693,6 +4797,9 @@ mod work_question_tests {
             "Le formulaire ne marche pas, répare-le",
             "Explique ce que fait le script et ensuite, corrige-le",
             "Do the migration now",
+            "Y\u{2019}a pas disk et les icônes c\u{2019}est pas encore trop ça c\u{2019}est mal fait",
+            "Donne une couleur bleue au bouton",
+            "Pourquoi la page affiche une erreur ?",
             "Crée un site de recettes avec une recherche",
             "Can you add dark mode?",
             "",
