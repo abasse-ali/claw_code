@@ -109,6 +109,17 @@ connexion par **jeton personnel** gardé dans le navigateur.
 
 ## Essais
 
+- Lot 48, session 21 de claw-sessions sur `test-claw` (exécuteur `claw-cloud`, modèle choisi
+  par le moteur : Laguna S 2.1). « Sur quel port l'application démarre en local, et quelle
+  commande la lance ? » : reconnue comme question (avis « Question : Claw y répond sans modifier
+  les fichiers »), cinq lectures puis la bonne réponse (port 5000, `python3 app.py`, `app.py:443`) ;
+  le contrôle des commandes conseillées l'a fait essayer la commande (serveur lancé, `curl`,
+  arrêté), 3 requêtes, 33 s. La mémoire du projet appariait les résultats d'outils par
+  identifiant, absent du `stream-json` de Claw : `KeyError` après la réponse, passage montré
+  inachevé (corrigé : ordre des appels, et la mémoire ne fait plus jamais échouer un passage).
+  Message de suivi « Et où sont enregistrées les données ? » : réponse directe (SQLite,
+  `finance.db`, `FINANCE_DB_PATH`, `db.py:21`, `db.py:24-25`), aucune modification, et
+  `memoire/abasse-ali/test-claw.md` créé sur `claw-web-fichiers`.
 - Moteur avec le faux modèle (session 1, sur `claw_code` lui-même) : premier passage 4 min 26 s
   compilation comprise, progression mise à jour en direct, réponse publiée ; la publication
   échouait sur `git add -A -- . ':(exclude).claw'` (git refuse de nommer un chemin ignoré) :
