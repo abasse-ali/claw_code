@@ -11,6 +11,7 @@ erreurs (22 octobre 2026).
 """
 
 import base64
+import collections
 import json
 import re
 import time
@@ -209,26 +210,31 @@ def error_line(stdout, stderr, relative):
 
 def observe(events, relative=lambda text: text):
     """Les commandes du passage, dans l'ordre : [(commande, réussie, ligne d'erreur)]. Celles
-    lancées en arrière-plan (serveurs) et celles qui ne disent rien du projet sont laissées."""
-    calls, runs = {}, []
+    lancées en arrière-plan (serveurs) et celles qui ne disent rien du projet sont laissées.
+    Les résultats suivent les appels dans l'ordre (`--output-format stream-json` ne porte pas
+    d'identifiant d'appel), comme dans journal.py."""
+    waiting, runs = collections.deque(), []
     for event in events:
         message = event.get("message") if isinstance(event.get("message"), dict) else {}
-        for part in message.get("content") or []:
+        content = message.get("content")
+        for part in content if isinstance(content, list) else []:
             if not isinstance(part, dict):
                 continue
-            if event.get("type") == "assistant" and part.get("type") == "tool_use" \
-                    and part.get("name") in ("bash", "PowerShell"):
-                data = part.get("input") if isinstance(part.get("input"), dict) else {}
-                command = " ".join(str(data.get("command") or "").split())
-                if command and not data.get("run_in_background") and not trivial(command) \
-                        and not SECRET.search(command):
-                    calls[part.get("id")] = one_line(relative(command), COMMAND_CHARS)
-            elif event.get("type") == "user" and part.get("type") == "tool_result" \
-                    and part.get("tool_use_id") in calls:
-                command = calls.pop(part["tool_use_id"])
-                raw = _text_of(part.get("content"))
+            if event.get("type") == "assistant" and part.get("type") == "tool_use":
+                command = None
+                if part.get("name") in ("bash", "PowerShell"):
+                    data = part.get("input") if isinstance(part.get("input"), dict) else {}
+                    text = " ".join(str(data.get("command") or "").split())
+                    if text and not data.get("run_in_background") and not trivial(text) \
+                            and not SECRET.search(text):
+                        command = one_line(relative(text), COMMAND_CHARS)
+                waiting.append((part.get("name"), command))
+            elif event.get("type") == "user" and part.get("type") == "tool_result" and waiting:
+                name, command = waiting.popleft()
+                if command is None or part.get("tool_name") not in (None, name):
+                    continue
                 try:
-                    result = json.loads(raw)
+                    result = json.loads(_text_of(part.get("content")))
                 except ValueError:
                     result = None
                 if not isinstance(result, dict):
@@ -238,8 +244,8 @@ def observe(events, relative=lambda text: text):
                     continue
                 code = str(result.get("returnCodeInterpretation") or "")
                 ok = not part.get("is_error") and not code
-                error = "" if ok else (error_line(result.get("stdout"), result.get("stderr"), relative)
-                                       or code)
+                error = "" if ok else (error_line(str(result.get("stdout") or ""),
+                                                  str(result.get("stderr") or ""), relative) or code)
                 runs.append((command, ok, error))
     return runs
 

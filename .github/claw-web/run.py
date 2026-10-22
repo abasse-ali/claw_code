@@ -345,7 +345,17 @@ class Progress:
 
 def remember(state, store=None, call=api):
     """Ajoute à la mémoire du dépôt (memory.py) ce que ce passage a appris : les leçons notées
-    par l'agent, les commandes qui ont marché ou échoué, la demande et son issue."""
+    par l'agent, les commandes qui ont marché ou échoué, la demande et son issue. Jamais d'échec
+    du passage pour elle : un imprévu est dit dans le journal du job (le 22 octobre 2026, une
+    erreur ici faisait passer pour inachevé un passage fini)."""
+    try:
+        return _remember(state, store, call)
+    except Exception as error:  # noqa: BLE001 - la mémoire ne doit jamais faire échouer le passage
+        print(f"::warning::mémoire du projet non rangée : {error!r}", flush=True)
+        return False
+
+
+def _remember(state, store, call):
     try:
         seen = json.loads((WORK / "memory.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
