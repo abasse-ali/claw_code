@@ -17,16 +17,28 @@ import run  # noqa: E402
 from common import GitHubError  # noqa: E402
 
 
+# Événements de `claw prompt --output-format stream-json` (rust/crates/claw-cli/src/stream_json.rs) :
+# ni identifiant d'appel ni `tool_use_id`, les résultats suivent les appels dans l'ordre.
 def bash(call_id, command, background=False):
-    return {"type": "assistant", "message": {"content": [
-        {"type": "tool_use", "id": call_id, "name": "bash",
+    return {"type": "assistant", "message": {"id": f"reply-{call_id}", "content": [
+        {"type": "tool_use", "name": "bash",
          "input": {"command": command, **({"run_in_background": True} if background else {})}}]}}
 
 
 def result(call_id, stdout="", stderr="", code=None, error=False):
-    return {"type": "user", "message": {"content": [
-        {"type": "tool_result", "tool_use_id": call_id, "is_error": error,
+    return {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_name": "bash", "is_error": error,
          "content": json.dumps({"stdout": stdout, "stderr": stderr, "returnCodeInterpretation": code})}]}}
+
+
+def read(path):
+    return {"type": "assistant", "message": {"id": "reply-r", "content": [
+        {"type": "tool_use", "name": "read_file", "input": {"path": path}}]}}
+
+
+def read_result():
+    return {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_name": "read_file", "is_error": False, "content": "{}"}]}}
 
 
 class FakeStore:
@@ -60,7 +72,11 @@ class FakeStore:
 class MemoryTest(unittest.TestCase):
     def test_commands_of_a_run_become_errors_and_commands_that_work(self):
         events = [
+            {"type": "system", "subtype": "init", "model": "m"},
+            {"type": "user", "message": {"content": "la demande"}},
+            read("app.py"),
             bash("1", "ls -la"),
+            read_result(),
             result("1", stdout="index.html"),
             bash("2", "cd web && npm run build"),
             result("2", stdout="building…", stderr="Error: Cannot find module 'vite'\n    at x", code="exit_code:1"),
@@ -171,6 +187,11 @@ class MemoryTest(unittest.TestCase):
             self.assertEqual(data["lessons"], ["- Nouvelle."])
             self.assertEqual(data["worked"][0]["cmd"], "npm test")
             self.assertEqual(data["requests"][0]["text"], "Corrige le menu")
+            # Un imprévu dans la mémoire ne fait jamais échouer le passage.
+            def broken(method, path, token, body=None):
+                raise KeyError("tool_use_id")
+
+            self.assertFalse(run.remember("done", store=Branch(), call=broken))
         finally:
             run.WORK, run.ROOT = old_work, old_root
 

@@ -41,8 +41,8 @@ def load_memory():
     try:
         data, _ = memory.load(JOB_TOKEN, ENGINE, REPO)
         lessons = memory.install(data, Path("work") / ".claw")
-    except (GitHubError, OSError) as error:
-        print(f"::warning::mémoire du projet non lue : {error}")
+    except Exception as error:  # noqa: BLE001 - sans mémoire, la tâche se fait quand même
+        print(f"::warning::mémoire du projet non lue : {error!r}")
         return None
     if lessons or data["worked"] or data["errors"] or data["requests"]:
         print(f"Mémoire du projet : {len(lessons)} leçon(s), {len(data['errors'])} erreur(s) connue(s), "
