@@ -193,6 +193,16 @@ pub fn enabled(aid: Aid) -> bool {
     !switched_off("CLAW_HARNESS") && !switched_off(aid.variable())
 }
 
+/// Mode projet choisi d'office (`CLAW_PROJECT_MODE=start`, l'option « Mode
+/// projet » de l'appli web) : il s'ouvre dès le premier tour, sans attendre
+/// une demande de création dans un dossier vide.
+#[must_use]
+pub fn project_mode_forced() -> bool {
+    enabled(Aid::ProjectMode)
+        && std::env::var("CLAW_PROJECT_MODE")
+            .is_ok_and(|value| value.trim().eq_ignore_ascii_case("start"))
+}
+
 // --- Vérification imposée ---------------------------------------------------------
 
 /// Réglage `"verify"` : automatique, coupé, ou commandes choisies.
@@ -2948,6 +2958,248 @@ pub fn asks_about_the_work(words: &str) -> bool {
             .any(|question| text.contains(question))
 }
 
+/// Débuts d'une question d'information (texte sans accents, en minuscules,
+/// apostrophe droite).
+const QUESTION_STARTS: &[&str] = &[
+    "comment",
+    "pourquoi",
+    "quel",
+    "quelle",
+    "quels",
+    "quelles",
+    "quoi",
+    "combien",
+    "quand",
+    "ou",
+    "qui",
+    "que",
+    "qu'est",
+    "qu'est-ce",
+    "est-ce",
+    "c'est",
+    "y a-t-il",
+    "y'a",
+    "existe-t-il",
+    "peut-on",
+    "puis-je",
+    "faut-il",
+    "dois-je",
+    "sais-tu",
+    "connais-tu",
+    "how",
+    "why",
+    "what",
+    "what's",
+    "which",
+    "when",
+    "where",
+    "who",
+];
+
+/// Mots de liaison devant un verbe (« et corrige-le », « then fix it »).
+const LINKING_WORDS: &[&str] = &["et", "puis", "ensuite", "alors", "and", "then", "so"];
+
+/// Demandes d'explication à l'impératif : la réponse est le travail.
+const EXPLAIN_ORDERS: &[&str] = &[
+    "explique",
+    "explique-moi",
+    "dis-moi",
+    "decris",
+    "resume",
+    "detaille",
+    "explain",
+    "describe",
+    "summarize",
+    "tell",
+];
+
+/// Verbes d'une demande de travail, à l'impératif ou après « peux-tu ».
+const BUILD_VERBS: &[&str] = &[
+    "ajoute",
+    "ajouter",
+    "arrete",
+    "branche",
+    "brancher",
+    "change",
+    "changer",
+    "code",
+    "coder",
+    "construis",
+    "construire",
+    "continue",
+    "continuer",
+    "corrige",
+    "corriger",
+    "cree",
+    "creer",
+    "deploie",
+    "deployer",
+    "developpe",
+    "developper",
+    "ecris",
+    "ecrire",
+    "efface",
+    "effacer",
+    "enleve",
+    "enlever",
+    "fais",
+    "faire",
+    "finis",
+    "finir",
+    "genere",
+    "generer",
+    "implemente",
+    "implementer",
+    "installe",
+    "installer",
+    "integre",
+    "integrer",
+    "lance",
+    "lancer",
+    "mets",
+    "mettre",
+    "modifie",
+    "modifier",
+    "optimise",
+    "optimiser",
+    "publie",
+    "publier",
+    "refais",
+    "refaire",
+    "remets",
+    "remettre",
+    "remplace",
+    "remplacer",
+    "renomme",
+    "renommer",
+    "repare",
+    "reparer",
+    "reprends",
+    "reprendre",
+    "retire",
+    "retirer",
+    "supprime",
+    "supprimer",
+    "teste",
+    "tester",
+    "termine",
+    "terminer",
+    "traduis",
+    "traduire",
+    "vas-y",
+    "add",
+    "build",
+    "change",
+    "continue",
+    "create",
+    "deploy",
+    "fix",
+    "implement",
+    "install",
+    "make",
+    "remove",
+    "rename",
+    "replace",
+    "run",
+    "stop",
+    "undo",
+    "update",
+    "write",
+];
+
+/// Tournures d'une demande polie de travail (« peux-tu ajouter... ? »).
+const POLITE_ASKS: &[&str] = &[
+    "peux-tu",
+    "peux tu",
+    "pourrais-tu",
+    "pourrais tu",
+    "tu peux",
+    "tu pourrais",
+    "veux-tu",
+    "tu veux bien",
+    "voudrais-tu",
+    "can you",
+    "could you",
+    "would you",
+    "will you",
+    "please",
+];
+
+/// Le message de l'utilisateur est une question d'information (« comment marche
+/// le formulaire ? », « explique ce script »), sans demande de travail : la
+/// réponse est le travail du tour. Vu le 22 octobre 2026 : à une simple
+/// question, le modèle reprenait tout le projet sans y répondre.
+#[must_use]
+pub fn asks_a_question(words: &str) -> bool {
+    let text = crate::team::without_accents(&words.to_lowercase()).replace('\u{2019}', "'");
+    let text = text.trim();
+    if text.is_empty() || text.split_whitespace().count() > 60 {
+        return false;
+    }
+    let sentences: Vec<Vec<&str>> = text
+        .split(['.', '!', '?', ';', '\n'])
+        .map(|sentence| {
+            sentence
+                .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ':')
+                .filter(|word| !word.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|sentence| !sentence.is_empty())
+        .collect();
+    let Some(first) = sentences.first().and_then(|sentence| sentence.first()) else {
+        return false;
+    };
+    // Un ordre de travail en tête d'une phrase ou d'une proposition : « Corrige-le »,
+    // « Ajoute un bouton », « ça ne marche pas, répare-le ».
+    let ordered = text
+        .split(['.', '!', '?', ';', '\n', ','])
+        .filter_map(|clause| {
+            clause
+                .split_whitespace()
+                .find(|word| !LINKING_WORDS.contains(word))
+        })
+        .any(|first| {
+            let verb = first.split('-').next().unwrap_or(first);
+            BUILD_VERBS.contains(&first) || BUILD_VERBS.contains(&verb)
+        });
+    if ordered {
+        return false;
+    }
+    // « Peux-tu ajouter... ? » demande du travail ; « peux-tu m'expliquer... ? » une réponse.
+    let explains = [
+        "expliqu", "explain", "dire ", "me dire", "tell me", "decri", "describe",
+    ]
+    .iter()
+    .any(|word| text.contains(*word));
+    if POLITE_ASKS.iter().any(|ask| text.contains(*ask)) && !explains {
+        return false;
+    }
+    let question_mark = text.contains('?');
+    let starts = |list: &[&str]| {
+        list.iter().any(|start| {
+            let start_words: Vec<&str> = start.split_whitespace().collect();
+            sentences.first().is_some_and(|sentence| {
+                sentence.len() >= start_words.len()
+                    && sentence[..start_words.len()].iter().zip(&start_words).all(
+                        |(word, start)| {
+                            word == start
+                                || word.split('-').next() == Some(*start)
+                                || (start.ends_with('\'') && word.starts_with(*start))
+                        },
+                    )
+            })
+        })
+    };
+    let asks = starts(QUESTION_STARTS) || first.starts_with("qu'") || first.starts_with("c'est");
+    question_mark || asks || starts(EXPLAIN_ORDERS)
+}
+
+/// Note jointe à une question d'information : la réponse, rien d'autre.
+pub const QUESTION_NOTE: &str = "[Claw guide] The user's message is a question, not a work order. Your task in this turn is to answer it exactly: read what you need in the project (files, searches, read-only commands), then answer the question itself in your first sentences, precisely and briefly, with `path:line` references where useful. Do not create, edit or delete files and do not start any other work: the file tools are refused in this turn. If a change would help, propose it in one sentence at the end and let the user decide.";
+
+/// Résultat d'un outil d'écriture refusé pendant une question.
+pub const QUESTION_WRITE_REFUSED: &str = "not now: this turn answers the user's question and changes no files. Answer the question; if a change would help, propose it in one sentence and let the user decide.";
+
 /// Note jointe à une question sur le travail : réponse en texte seul.
 pub const WORK_QUESTION_NOTE: &str = "[Claw] The user's message is a question about your work (what you are doing, what you did, or why), not a new task. Answer it now, directly and honestly, from the conversation and what you already know: what you did, why, and where things stand. Tools are off for this reply, and you do no work in this turn: if something should be done next, propose it in one sentence and let the user decide.";
 
@@ -4412,6 +4664,45 @@ mod guide_tests {
 #[cfg(test)]
 mod work_question_tests {
     use super::asks_about_the_work;
+
+    #[test]
+    fn a_question_is_told_apart_from_a_work_order() {
+        for question in [
+            "Comment fonctionne le formulaire d'ajout ?",
+            "Pourquoi tu utilises localStorage ici ?",
+            "C'est quoi la différence entre les deux pages",
+            "Quel port utilise le serveur ?",
+            "Où est défini le thème sombre ?",
+            "Explique-moi ce que fait build.sh",
+            "Est-ce que le site marche sur téléphone ?",
+            "Le site est en ligne ?",
+            "Peux-tu m'expliquer la structure du projet ?",
+            "Tu peux me dire pourquoi la page plante ?",
+            "Pourquoi, quand j'ajoute un article, la page plante ?",
+            "What does the cache do?",
+            "Qu'est-ce qui charge les données au démarrage ?",
+        ] {
+            assert!(super::asks_a_question(question), "question : {question}");
+        }
+        for order in [
+            "Ajoute un bouton pour exporter en CSV",
+            "Corrige la grille sur téléphone",
+            "Peux-tu ajouter un graphique ?",
+            "Tu peux corriger le bug du menu ?",
+            "Pourquoi le menu est cassé ? Corrige-le",
+            "Le formulaire ne marche pas, répare-le",
+            "Explique ce que fait le script et ensuite, corrige-le",
+            "Do the migration now",
+            "Crée un site de recettes avec une recherche",
+            "Can you add dark mode?",
+            "",
+        ] {
+            assert!(
+                !super::asks_a_question(order),
+                "demande de travail : {order}"
+            );
+        }
+    }
 
     #[test]
     fn a_question_about_the_work_is_told_apart_from_a_work_order() {

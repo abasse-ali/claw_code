@@ -127,16 +127,17 @@ class ActorTest(unittest.TestCase):
         self.assertFalse(any(call[1].endswith("/pages") for call in fake.calls))
 
     def test_first_publication_from_docs(self):
+        # Chaque session est une branche autonome : le site se publie depuis elle.
         fake = FakeGitHub({
-            ("GET", "/contents/docs/index.html?ref=main"): {"name": "index.html"},
+            ("GET", "/contents/docs/index.html?ref=claw%2Fx"): {"name": "index.html"},
             ("GET", "/pages"): [refused(404, "Not Found"), {"html_url": "https://o.github.io/r/"}],
             ("POST", "/pages"): {"status": None},
         })
         with mock.patch.object(on_github, "api", fake):
             notes = self.actor().carry_out({"pages": "docs"})
-        self.assertEqual(notes, ["Site mis en ligne sur GitHub Pages depuis `main` (dossier `docs/`) : "
+        self.assertEqual(notes, ["Site mis en ligne sur GitHub Pages depuis `claw/x` (dossier `docs/`) : "
                                  "https://o.github.io/r/ (visible d'ici une à deux minutes)."])
-        self.assertIn(("POST", "/repos/o/r/pages", {"source": {"branch": "main", "path": "/docs"}}), fake.calls)
+        self.assertIn(("POST", "/repos/o/r/pages", {"source": {"branch": "claw/x", "path": "/docs"}}), fake.calls)
 
     def test_publication_refusals_are_explained(self):
         for status, reason, accepted, expected in (
@@ -147,17 +148,17 @@ class ActorTest(unittest.TestCase):
                  "Pages : Pages (écriture) et Administration (écriture). Ajoutez-les"),
                 (403, "Resource not accessible by personal access token", "", "« Resource not accessible")):
             fake = FakeGitHub({
-                ("GET", "/contents/index.html?ref=main"): {"name": "index.html"},
+                ("GET", "/contents/index.html?ref=claw%2Fx"): {"name": "index.html"},
                 ("POST", "/pages"): refused(status, reason, accepted),
             })
             with mock.patch.object(on_github, "api", fake):
                 notes = self.actor().carry_out({"pages": "root"})
             self.assertIn(expected, notes[0])
 
-    def test_site_missing_on_the_base_branch(self):
+    def test_site_missing_on_the_session_branch(self):
         with mock.patch.object(on_github, "api", FakeGitHub({})):
             notes = self.actor().carry_out({"pages": "docs"})
-        self.assertIn("`docs/index.html` n'est pas sur `main`", notes[0])
+        self.assertIn("`docs/index.html` n'est pas sur `claw/x`", notes[0])
 
 
 class CommandTest(unittest.TestCase):
@@ -195,7 +196,7 @@ class CommandTest(unittest.TestCase):
         (self.repo / "docs" / "index.html").write_text("<!doctype html>", encoding="utf-8")
         code, out = self.run_command("pages")
         self.assertEqual(code, 0)
-        self.assertIn("also run `claw-github merge`", out)
+        self.assertIn("publishes docs/ of claw/x", out)
         self.assertIn("private", out)
         self.run_command("merge")
         self.assertEqual(on_github.load_requests(), {"pages": "docs", "merge": True})

@@ -65,6 +65,11 @@ on:
         required: false
         type: string
         default: ""
+      project:
+        description: "Mode projet (1 : cahier des charges, plan en jalons vérifiés ; vide : coupé)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   # actions: read : date du passage, pour ignorer un passage lancé en double.
@@ -182,6 +187,7 @@ jobs:
           MODEL: ${{ inputs.model }}
           TEAM: ${{ inputs.team }}
           ULTRACODE: ${{ inputs.ultracode }}
+          PROJECT: ${{ inputs.project }}
           SESSION: ${{ inputs.session }}
           JOB_TOKEN: ${{ github.token }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

@@ -919,3 +919,69 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
   .greeting { font-size: 1.35rem; margin-bottom: 28px; }
   .run-actions { margin-left: 0; }
 }
+
+/* Étapes d'un passage en cours : arrivées par paquets avec le journal, montrées une par une. */
+.transcript .pending { display: none; }
+.transcript .arrived { animation: step-in .32s ease-out both; }
+@keyframes step-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .transcript .arrived { animation: none; } }
+
+/* Bloc au-dessus de la zone de saisie : tâches de Claw (pliables) et ses questions en cartes. */
+.dock { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; max-height: 46vh; overflow-y: auto; overscroll-behavior: contain; }
+.dock[hidden] { display: none; }
+.dock-card { border: 1px solid var(--border); border-radius: 14px; background: var(--panel); min-width: 0; }
+.dock-tasks > summary {
+  display: flex; align-items: center; gap: 8px; padding: 9px 12px; list-style: none; cursor: pointer; min-width: 0;
+}
+.dock-tasks > summary::-webkit-details-marker { display: none; }
+.dock-icon { display: inline-flex; flex: none; color: var(--muted); }
+.dock-icon svg { width: 16px; height: 16px; }
+.dock-title { display: inline-flex; align-items: baseline; gap: 6px; flex: none; font-size: .88rem; }
+.dock-count { color: var(--muted); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.dock-current { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: .84rem; }
+.dock-chevron { display: inline-flex; flex: none; color: var(--muted); transition: transform .18s ease-out; }
+.dock-chevron svg { width: 15px; height: 15px; transform: rotate(90deg); }
+.dock-tasks[open] .dock-chevron { transform: rotate(180deg); }
+.dock-tasks[open] .dock-current { visibility: hidden; }
+.dock-todos { list-style: none; margin: 0; padding: 0 12px 10px; display: grid; gap: 6px; }
+.dock-todos li { display: flex; align-items: flex-start; gap: 8px; font-size: .86rem; line-height: 1.4; min-width: 0; }
+.dock-todos li span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.dock-todos .box {
+  flex: none; display: inline-grid; place-items: center; width: 16px; height: 16px; margin-top: 2px;
+  border: 1.5px solid var(--border); border-radius: 5px;
+}
+.dock-todos .box svg { width: 12px; height: 12px; }
+.dock-todos li.done { color: var(--muted); }
+.dock-todos li.done span:last-child { text-decoration: line-through; }
+.dock-todos li.done .box { border-color: var(--ok); background: var(--ok); color: #fff; }
+.dock-todos li.doing .box { border-color: var(--accent); }
+.dock-todos li.doing { font-weight: 600; }
+.dock-questions { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px 12px; }
+.dock-head { display: flex; align-items: center; gap: 8px; font-size: .88rem; min-width: 0; }
+.dock-head strong { flex: 1; min-width: 0; }
+.dock-nav { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.dock-nav .attempt-step { width: 30px; height: 30px; }
+.q-card { display: grid; gap: 8px; min-width: 0; animation: step-in .2s ease-out; }
+.q-card[hidden] { display: none; }
+.dock-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dock-foot .choices-hint { margin: 0; color: var(--muted); font-size: .8rem; }
+
+/* Bouton d'un onglet du choix (« Rechercher tous les modèles gratuits ») : un vrai bouton, au-dessus
+   de la liste, jamais une ligne parmi les modèles. */
+.sheet-action { flex: none; display: flex; flex-direction: column; gap: 6px; margin: 0 4px 10px; }
+.sheet-action[hidden] { display: none; }
+.sheet-action-button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 10px 16px;
+  border: 0; border-radius: 12px; background: var(--accent); color: var(--accent-text); font: inherit; font-weight: 600;
+  cursor: pointer; transition: transform .15s ease-out, filter .15s ease-out;
+}
+.sheet-action-button svg { width: 17px; height: 17px; }
+.sheet-action-button:hover { filter: brightness(1.06); }
+.sheet-action-button:active { transform: scale(.98); }
+.sheet-action-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sheet-action small { color: var(--muted); font-size: .8rem; line-height: 1.35; }
+.questions-moved {
+  display: flex; align-items: center; gap: 8px; margin: 12px 0 2px; padding: 9px 12px; border: 1px dashed var(--border);
+  border-radius: 12px; color: var(--muted); font-size: .86rem;
+}
+.questions-moved svg { width: 16px; height: 16px; flex: none; }
