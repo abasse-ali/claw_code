@@ -49,6 +49,8 @@ const ICON = {
   cloud: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.1 4.5 4.5 0 0 0 7 18Z"/></svg>',
   key: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l2 2M14 9l2 2"/></svg>',
   chevron: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>',
+  tasks: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6h10M10 12h10M10 18h10"/><path d="M3.5 6l1.5 1.5L8 4.5M3.5 12l1.5 1.5L8 10.5M3.5 18l1.5 1.5L8 16.5"/></svg>',
+  check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
 };
 
 const state = {
@@ -94,6 +96,12 @@ const state = {
   explorer: null,
   // Page montrée de chaque groupe de réponses relancées ({index, count}).
   attemptPages: new Map(),
+  // Brouillons de la zone de saisie, par session (« home » : nouvelle tâche).
+  drafts: new Map(),
+  // Étapes du journal déjà montrées, par passage : les suivantes paraissent une par une.
+  revealed: new Map(),
+  // Bloc au-dessus de la zone de saisie : questions de Claw (carte montrée, choix faits).
+  dockQuestions: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -766,7 +774,7 @@ async function refreshRuns() {
  * `groups` ([{ key, label, empty }]) : un onglet par groupe, pour les éléments qui ont ce
  * `group` ; l'onglet ouvert est celui de l'élément choisi. Une recherche parcourt tous les
  * groupes ; `empty` dit quoi faire quand un groupe n'a rien (une clé à ajouter). */
-function openPicker({ title, items, current, placeholder, onPick, onRemove, groups = [], tab = "" }) {
+function openPicker({ title, items, current, placeholder, onPick, onRemove, onAction, groups = [], tab = "" }) {
   const sheet = $("#sheet");
   // Les actions d'un onglet (« Rechercher tous les modèles gratuits ») ne comptent pas.
   const count = (key) => items.filter((item) => item.group === key && !item.action).length;
@@ -780,6 +788,10 @@ function openPicker({ title, items, current, placeholder, onPick, onRemove, grou
       </div>
       ${groups.length ? `<div class="sheet-tabs" role="tablist">${groups.map((group) => `
         <button type="button" class="sheet-tab" role="tab" data-group="${escapeHtml(group.key)}">${escapeHtml(group.label)}${count(group.key) ? `<small>${count(group.key)}</small>` : ""}</button>`).join("")}
+      </div>` : ""}
+      ${groups.some((group) => group.action) ? `<div class="sheet-action" hidden>
+        <button type="button" class="sheet-action-button">${ICON.spark}<span></span></button>
+        <small></small>
       </div>` : ""}
       ${groups.some((group) => group.note) ? '<p class="help sheet-note"></p>' : ""}
       ${items.length > 8 ? `<input class="sheet-search" type="search" placeholder="${escapeHtml(placeholder || "Rechercher")}" autocomplete="off">` : ""}
@@ -801,6 +813,16 @@ function openPicker({ title, items, current, placeholder, onPick, onRemove, grou
       const text = words.length ? "" : ((groups.find((entry) => entry.key === active) || {}).note || "");
       note.textContent = text;
       note.hidden = !text;
+    }
+    // Bouton de l'onglet ouvert (« Rechercher tous les modèles gratuits »), hors de la liste.
+    const actionBox = sheet.querySelector(".sheet-action");
+    if (actionBox) {
+      const action = words.length ? null : (groups.find((entry) => entry.key === active) || {}).action;
+      actionBox.hidden = !action;
+      if (action) {
+        actionBox.querySelector("span").textContent = action.label;
+        actionBox.querySelector("small").textContent = action.detail || "";
+      }
     }
     const inTab = (item) => !groups.length || words.length || item.group === active;
     const shown = items.filter((item) => item.pinned
@@ -827,6 +849,11 @@ function openPicker({ title, items, current, placeholder, onPick, onRemove, grou
   };
   sheet.onclick = (event) => {
     if (event.target === sheet || event.target.closest("[data-close]")) close();
+    if (event.target.closest(".sheet-action-button")) {
+      close();
+      onAction?.(active);
+      return;
+    }
     const tab = event.target.closest("[data-group]");
     if (tab) {
       active = tab.dataset.group;
@@ -1314,8 +1341,6 @@ async function followRenamedBranch(repo, old, name) {
 
 /** Session réservée : le moteur y dresse le catalogue d'un fournisseur (models_catalog.py). */
 const CATALOGUE_SESSION = "catalogue-modeles";
-const CATALOGUE_ACTION = "__catalogue__:";
-const UNUSABLE = "__inutilisable__:";
 const catalogueKey = (provider) => `claw-web-catalogue-${provider}`;
 
 function storedCatalogue(provider) {
@@ -1398,40 +1423,38 @@ async function runCatalogueSearch(provider, label) {
   }
 }
 
-/** Modèles d'un catalogue, comme éléments du choix : utilisables numérotés d'abord, puis ceux
- * avec lesquels Claw ne peut pas travailler (sans outils, en échec, hors de l'offre gratuite). */
+/** Modèles d'un catalogue avec lesquels Claw peut travailler, comme éléments du choix, du plus
+ * puissant pour le code au moins puissant. Les autres (sans outils, en échec, hors de l'offre
+ * gratuite, écartés par Claw) ne sont pas proposés. */
 function catalogueItems(provider, data) {
-  let rank = 0;
-  return (data.models || []).map((model) => {
-    const usable = model.tools !== false && model.status === "ok";
-    if (usable) rank += 1;
-    return {
-      value: usable ? model.id : `${UNUSABLE}${model.id}`,
-      label: usable ? `${rank}. ${model.short}` : `${model.short} · inutilisable`,
+  return (data.models || [])
+    .filter((model) => model.tools !== false && model.status === "ok")
+    .map((model, index) => ({
+      value: model.id,
+      label: `${index + 1}. ${model.short}`,
       detail: [
-        usable ? (rank === 1 ? "le plus puissant pour le code" : "") : model.status,
-        model.tools === null || model.tools === undefined ? (usable ? "non essayé" : "") : "",
+        index === 0 ? "le plus puissant pour le code" : "",
+        model.tools === null || model.tools === undefined ? "non essayé" : "",
         ...(model.reasons || []),
         model.context ? `contexte ${contextLabel(model.context)}` : "",
       ].filter(Boolean).join(" · "),
       group: provider,
-    };
-  });
+    }));
 }
 
-/** Ligne « Rechercher tous les modèles gratuits » en tête d'un onglet. */
-function catalogueAction(provider, data, slow) {
-  const when = data ? new Date(data.at * 1000).toLocaleString("fr-FR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
-  const usable = data ? data.models.filter((model) => model.tools !== false && model.status === "ok").length : 0;
+/** Bouton « Rechercher tous les modèles gratuits » d'un onglet, et ce qu'il dit sous lui. */
+function catalogueAction(data, slow) {
+  if (!data) {
+    return {
+      label: "Rechercher tous les modèles gratuits",
+      detail: `tout le catalogue gratuit, classé pour le code${slow ? " ; le moteur essaie chaque modèle (2 à 10 min)" : ""}`,
+    };
+  }
+  const when = new Date(data.at * 1000).toLocaleString("fr-FR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const usable = data.models.filter((model) => model.tools !== false && model.status === "ok").length;
   return {
-    value: `${CATALOGUE_ACTION}${provider}`,
-    label: data ? "Relancer la recherche de tous les modèles gratuits" : "Rechercher tous les modèles gratuits",
-    detail: data
-      ? `dernière recherche le ${when} : ${data.models.length} modèles, ${usable} utilisables, classés pour le code`
-      : `tout le catalogue gratuit, classé pour le code${slow ? " ; le moteur essaie chaque modèle (2 à 10 min)" : ""}`,
-    group: provider,
-    icon: "spark",
-    action: true,
+    label: "Relancer la recherche",
+    detail: `le ${when} : ${usable} modèle${usable > 1 ? "s" : ""} utilisable${usable > 1 ? "s" : ""} sur ${data.models.length}, classés pour le code`,
   };
 }
 
@@ -1451,15 +1474,17 @@ async function pickModel(tab) {
         detail: `${model.note ? `${model.note} · ` : ""}${provider.detail} (secret ${provider.secret} du moteur)`,
         group: provider.key,
       }));
-      return [catalogueAction(provider.key, data, true), ...listed];
+      return listed;
     });
   const groups = [
-    { key: "openrouter", label: "OpenRouter", note: providerQuota("openrouter").line, empty: "Aucun modèle gratuit d'OpenRouter trouvé : réessayez dans un instant." },
+    { key: "openrouter", label: "OpenRouter", note: providerQuota("openrouter").line, empty: "Aucun modèle gratuit d'OpenRouter trouvé : réessayez dans un instant.",
+      action: catalogueAction(openrouterCatalogue, false) },
     ...KEYED_PROVIDERS.map((provider) => ({
       key: provider.key,
       label: provider.label,
       note: providerQuota(provider.key).line,
       empty: `Pas de clé ${provider.label} dans le moteur : Réglages, Moteur, « ${provider.field} » (${provider.where}).`,
+      action: secrets[provider.secret] ? catalogueAction(storedCatalogue(provider.key), true) : null,
     })),
   ];
   const detail = (model) => [
@@ -1475,23 +1500,16 @@ async function pickModel(tab) {
     groups,
     items: [
       { value: "", label: "Auto", pinned: true, detail: best ? `en ce moment ${best.short}, le plus puissant des gratuits pour le code (et les suivants s'il ne répond plus)` : "le meilleur modèle gratuit pour le code" },
-      catalogueAction("openrouter", openrouterCatalogue, false),
       ...(openrouterCatalogue
         ? catalogueItems("openrouter", openrouterCatalogue)
         : models.map((model) => ({ value: model.id, label: model.rank ? `${model.rank}. ${model.short}` : model.short, detail: detail(model), group: "openrouter" }))),
       ...keyedItems,
     ],
+    onAction: (provider) => {
+      const group = groups.find((entry) => entry.key === provider);
+      runCatalogueSearch(provider, group ? group.label : provider);
+    },
     onPick: (value) => {
-      if (value.startsWith(CATALOGUE_ACTION)) {
-        const provider = value.slice(CATALOGUE_ACTION.length);
-        const group = groups.find((entry) => entry.key === provider);
-        runCatalogueSearch(provider, group ? group.label : provider);
-        return;
-      }
-      if (value.startsWith(UNUSABLE)) {
-        toast("Claw ne peut pas travailler avec ce modèle : il n'appelle pas d'outils, échoue ou n'est pas gratuit (voir le détail).", "error");
-        return;
-      }
       state.settings.model = value;
       saveSettings();
       renderComposer();
@@ -1511,12 +1529,19 @@ const AIDS = {
     label: "Ultracode",
     detail: "Un agent neuf étudie la demande avant le travail, un vérificateur indépendant contrôle le résultat (une à trois dizaines de requêtes de plus)",
   },
+  project: {
+    label: "Mode projet",
+    detail: "Pour créer une application de A à Z : cahier des charges, plan en jalons vérifiés, tests d'acceptation. Coupé, Claw répond à la demande telle quelle",
+  },
 };
 
 /** Options du prochain passage (nouvelle tâche ou suivi), pour le moteur. */
 const aidInputs = () => ({
   team: state.settings.team ? "1" : "",
   ultracode: state.settings.ultracode ? "1" : "",
+  // Le mode projet, seulement allumé (coupé par défaut) : un workflow des sessions d'avant ce
+  // choix refuserait l'entrée.
+  ...(state.settings.project ? { project: "1" } : {}),
   // La machine, seulement pour le PC : un workflow des sessions d'avant ce choix la refuserait.
   ...(state.settings.runner ? { runner: state.settings.runner } : {}),
 });
@@ -1533,7 +1558,7 @@ function drawAids() {
   if (!button) return;
   const on = Object.keys(AIDS).filter((name) => state.settings[name]);
   button.classList.toggle("on", on.length > 0);
-  button.setAttribute("aria-label", on.length ? `Options actives : ${on.map((name) => AIDS[name].label).join(" et ")}` : "Options Équipe et Ultracode");
+  button.setAttribute("aria-label", on.length ? `Options actives : ${on.map((name) => AIDS[name].label).join(", ")}` : "Options : Équipe, Ultracode, Mode projet");
   for (const item of document.querySelectorAll("#composer .aid-menu [data-aid]")) {
     item.setAttribute("aria-checked", String(Boolean(state.settings[item.dataset.aid])));
   }
@@ -1694,6 +1719,17 @@ async function openQuota() {
 
 // --- Zone de saisie --------------------------------------------------------------------------
 
+/** Clé du brouillon de la zone de saisie : la session ouverte, ou une nouvelle tâche. */
+const draftKey = () => (state.session ? `session:${state.session.number}` : "home");
+
+/** Oublie le brouillon envoyé. */
+function clearDraft(key = draftKey()) {
+  state.drafts.delete(key);
+}
+
+/** La zone de saisie. Construite une fois par session : une mise à jour de la session (toutes
+ * les quelques secondes pendant un passage) ne fait que rafraîchir ses pastilles, sans toucher
+ * au texte en cours ni fermer le clavier (vu le 22 octobre 2026 : le message tapé s'effaçait). */
 function renderComposer() {
   const composer = $("#composer");
   const session = state.session;
@@ -1702,8 +1738,24 @@ function renderComposer() {
   const branch = followUp ? branchOf(session.issue) : state.settings.branch;
   composer.hidden = !state.github || location.hash.startsWith("#/reglages") || location.hash.includes("/modifications")
     || location.hash.includes("/fichiers");
+  const key = draftKey();
+  if (composer.dataset.key === key && composer.querySelector("textarea")) {
+    const chip = (action, text) => {
+      const label = composer.querySelector(`[data-action="${action}"] span`);
+      if (label && label.textContent !== text) label.textContent = text;
+    };
+    chip("repo", repo || "Choisir un dépôt");
+    chip("branch", branch || "branche");
+    chip("model", modelLabel(state.settings.model));
+    drawAids();
+    renderDock();
+    composer.refresh?.();
+    return;
+  }
+  composer.dataset.key = key;
   // En suivi de session, le dépôt et la branche sont dans l'en-tête : seul le modèle se choisit.
   composer.innerHTML = `
+    <div class="dock" hidden></div>
     <div class="chips">
       ${followUp ? "" : `
       <button class="chip" data-action="repo">${ICON.repo}<span>${escapeHtml(repo || "Choisir un dépôt")}</span></button>
@@ -1726,12 +1778,19 @@ function renderComposer() {
     </form>`;
   const textarea = composer.querySelector("textarea");
   const send = composer.querySelector(".send");
+  textarea.value = state.drafts.get(key) || "";
   const resize = () => {
     textarea.style.height = "auto";
     textarea.style.height = `${Math.min(textarea.scrollHeight, 220)}px`;
-    send.disabled = state.sending || (!textarea.value.trim() && !state.attachments.length) || (!followUp && !repo);
+    const target = state.session ? state.session.settings.repo : state.settings.repo;
+    send.disabled = state.sending || (!textarea.value.trim() && !state.attachments.length) || (!followUp && !target);
   };
-  textarea.addEventListener("input", resize);
+  composer.refresh = resize;
+  textarea.addEventListener("input", () => {
+    if (textarea.value) state.drafts.set(key, textarea.value);
+    else state.drafts.delete(key);
+    resize();
+  });
   textarea.addEventListener("keydown", (event) => {
     // Entrée envoie sur un clavier d'ordinateur ; Maj+Entrée va à la ligne.
     const touch = window.matchMedia("(pointer: coarse)").matches;
@@ -1773,6 +1832,7 @@ function renderComposer() {
   composer.querySelector(".aids").addEventListener("click", () => setAidMenu(composer.querySelector(".aid-menu").hidden));
   for (const item of composer.querySelectorAll(".aid-menu [data-aid]")) item.addEventListener("click", () => toggleAid(item.dataset.aid));
   drawAids();
+  renderDock();
   refreshQuota();
   resize();
   // Tout de suite, pas au rappel de l'observateur : le défilement vers le bas suit.
@@ -1801,6 +1861,7 @@ async function startSession(text, textarea) {
     const issue = await state.github.createIssue(engine, title, `${text}${images}\n\n${block}`);
     state.attachments = [];
     textarea.value = "";
+    clearDraft("home");
     // La session s'affiche aussitôt (sa tâche, « Claw se prépare ») ; le passage part ensuite.
     launching(issue.number, repo);
     state.session = { number: issue.number, issue, comments: [], settings: settingsOf(issue), pull: null, step: "", signature: "", logs: new Map() };
@@ -1828,6 +1889,7 @@ async function followUpSession(text, textarea) {
     const images = await uploadAttachments();
     const posted = await state.github.comment(state.settings.engine, session.number, `${text}${images}`);
     state.attachments = [];
+    if (textarea.isConnected) clearDraft(`session:${session.number}`);
     textarea.value = "";
     textarea.dispatchEvent(new Event("input"));
     // Le message et « Claw se prépare » paraissent aussitôt, sans attendre GitHub.
@@ -2258,6 +2320,33 @@ function attemptsHtml(group, isLive) {
   </div>`;
 }
 
+/** Les étapes arrivées d'un coup avec le journal paraissent une par une, réparties sur le temps
+ * qui sépare deux publications du journal (une toutes les 12 s environ). */
+function revealSteps(view) {
+  clearTimeout(state.revealTimer);
+  const next = () => {
+    const step = view.querySelector(".transcript .ev.pending, .transcript [data-step].pending");
+    if (!step || !step.isConnected) return;
+    const transcript = step.closest(".transcript");
+    const key = transcript ? transcript.dataset.key : "";
+    const index = Number(step.dataset.step);
+    step.classList.remove("pending");
+    step.classList.add("arrived");
+    if (key) state.revealed.set(key, Math.max(state.revealed.get(key) || 0, index + 1));
+    const count = transcript?.querySelector(":scope > summary .side[data-actions]");
+    if (count && step.matches(".ev.tool, .ev.tool *, [data-step].tool")) {
+      const actions = Number(count.dataset.actions) + 1;
+      count.dataset.actions = String(actions);
+      count.textContent = `${actions} action${actions > 1 ? "s" : ""}`;
+    }
+    const atBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 160;
+    if (atBottom) window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+    const left = view.querySelectorAll(".transcript .pending").length;
+    if (left) state.revealTimer = setTimeout(next, Math.max(300, Math.min(1500, 10000 / left)));
+  };
+  if (view.querySelector(".transcript .pending")) state.revealTimer = setTimeout(next, 150);
+}
+
 /** Montre la page voisine (`step` : -1 ou 1) d'un groupe de passages. */
 function showAttempt(container, step) {
   const pages = [...container.querySelectorAll(":scope > .attempt")];
@@ -2362,7 +2451,7 @@ function questionsOf(data) {
 }
 
 /** Les questions de Claw et leurs réponses proposées, à toucher (comme dans Claude Code) ;
- * désactivées tant que wireQuestions ne les ouvre pas. */
+ * dans la réponse, à lire ; on y répond dans le bloc au-dessus de la zone de saisie. */
 function questionsHtml(questions) {
   const several = questions.length > 1 || questions.some((question) => question.multi_select);
   return `<div class="questions">
@@ -2379,53 +2468,200 @@ function questionsHtml(questions) {
   </div>`;
 }
 
-/** Questions de la dernière réponse, tant que rien ne l'a suivie : une question seule part d'un
- * toucher ; plusieurs (ou à choix multiple) avec « Envoyer les réponses ». */
-function wireQuestions(view, open) {
-  const answers = view.querySelectorAll(".messages .message.claw");
-  const block = answers.length ? answers[answers.length - 1].querySelector(".questions") : null;
-  if (!open || !block || block.closest(".attempt[hidden]")) return;
-  block.classList.add("open");
-  const questions = [...block.querySelectorAll(".question")];
-  const choices = [...block.querySelectorAll(".choice")];
-  const send = block.querySelector(".send-choices");
+/** Questions de la dernière réponse de Claw (son identifiant et la liste), ou null. */
+function lastQuestions(comments) {
+  const answer = [...comments].reverse().find((comment) => kindOf(comment.body) === "answer");
+  if (!answer) return null;
+  const block = String(answer.body || "").match(QUESTIONS_BLOCK);
+  const questions = block && questionsOf(block[1]);
+  return questions ? { id: answer.id, questions } : null;
+}
+
+/** Liste de tâches la plus récente de la session (outil TodoWrite du dernier passage qui en a
+ * une) : [[état, texte], …], ou null. */
+function latestTodos(session) {
+  const runs = [...new Set([...session.logs.values()].map((log) => log.run))].sort((a, b) => b - a);
+  for (const run of runs) {
+    const events = journalOf(run);
+    const last = [...events].reverse().find((event) => event.k === "tool" && event.n === "TodoWrite"
+      && event.i && Array.isArray(event.i.todos) && event.i.todos.length);
+    if (last) return last.i.todos;
+  }
+  return null;
+}
+
+const DOCK_TASKS_KEY = "claw-web-dock-tasks";
+
+/** Le bloc pliable au-dessus de la zone de saisie : la liste de tâches de Claw (persistante,
+ * repliée sur la tâche en cours), et ses questions en cartes à feuilleter (‹ ›, glissement),
+ * comme les réponses relancées. Redessiné seulement quand son contenu change : un choix en
+ * cours n'est pas perdu à la mise à jour de la session. */
+function renderDock() {
+  const dock = document.querySelector("#composer .dock");
+  if (!dock) return;
+  const session = state.session;
+  const todos = session ? latestTodos(session) : null;
+  const open = session ? session.openQuestions : null;
+  const signature = JSON.stringify([session && session.number, todos, open && open.id]);
+  if (dock.dataset.signature === signature) return;
+  dock.dataset.signature = signature;
+  if (!open || !state.dockQuestions || state.dockQuestions.id !== open.id) {
+    state.dockQuestions = open ? { id: open.id, index: 0, chosen: open.questions.map(() => []) } : null;
+  }
+  const parts = [];
+  if (todos) {
+    const done = todos.filter(([status]) => status === "completed").length;
+    const current = todos.find(([status]) => status === "in_progress") || todos.find(([status]) => status !== "completed");
+    let unfolded = false;
+    try {
+      unfolded = localStorage.getItem(DOCK_TASKS_KEY) === "open";
+    } catch {
+      unfolded = false;
+    }
+    parts.push(`<details class="dock-card dock-tasks"${unfolded ? " open" : ""}>
+      <summary>
+        <span class="dock-icon">${ICON.tasks}</span>
+        <span class="dock-title"><strong>Tâches</strong><span class="dock-count">${done}/${todos.length}</span></span>
+        <span class="dock-current">${escapeHtml(current ? current[1] : "Toutes terminées")}</span>
+        <span class="dock-chevron">${ICON.chevron}</span>
+      </summary>
+      <ul class="dock-todos">${todos.map(([status, text]) => `
+        <li class="${status === "completed" ? "done" : status === "in_progress" ? "doing" : ""}">
+          <span class="box">${status === "completed" ? ICON.check : ""}</span><span>${escapeHtml(text)}</span>
+        </li>`).join("")}</ul>
+    </details>`);
+  }
+  if (open) {
+    const several = open.questions.length > 1 || open.questions.some((question) => question.multi_select);
+    parts.push(`<section class="dock-card dock-questions" aria-label="Questions de Claw">
+      <header class="dock-head">
+        <span class="dock-icon">${ICON.chat}</span>
+        <strong>${open.questions.length > 1 ? "Questions de Claw" : "Question de Claw"}</strong>
+        ${open.questions.length > 1 ? `<span class="dock-nav">
+          <button type="button" class="attempt-step" data-card="-1" aria-label="Question précédente">${ICON.back}</button>
+          <span class="dock-pos"></span>
+          <button type="button" class="attempt-step next" data-card="1" aria-label="Question suivante">${ICON.back}</button>
+        </span>` : ""}
+      </header>
+      <div class="q-cards">${open.questions.map((question, index) => `
+        <div class="q-card" data-card-index="${index}"${question.multi_select ? " data-multi" : ""} hidden>
+          <p class="question-text">${question.header ? `<span class="question-head">${escapeHtml(question.header)}</span>` : ""}${escapeHtml(question.question)}</p>
+          ${question.options.filter((option) => option && option.label).map((option) => `
+            <button type="button" class="choice" data-label="${escapeHtml(option.label)}">
+              <strong>${escapeHtml(option.label)}</strong>${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}
+            </button>`).join("")}
+        </div>`).join("")}</div>
+      <footer class="dock-foot">
+        ${several ? `<button type="button" class="small-link primary-link send-choices" disabled>${ICON.send}<span>Envoyer les réponses</span></button>` : ""}
+        <span class="choices-hint">Ou répondez avec vos mots, en dessous.</span>
+      </footer>
+    </section>`);
+  }
+  dock.innerHTML = parts.join("");
+  dock.hidden = !parts.length;
+  dock.querySelector(".dock-tasks")?.addEventListener("toggle", (event) => {
+    try {
+      localStorage.setItem(DOCK_TASKS_KEY, event.currentTarget.open ? "open" : "closed");
+    } catch {
+      // Navigation privée : le bloc reste comme il est pour cette page.
+    }
+  });
+  if (open) wireDockQuestions(dock.querySelector(".dock-questions"), open);
+  updateComposerSpace();
+}
+
+/** Cartes des questions : une à la fois, ‹ › ou glissement ; une question seule part d'un
+ * toucher ; plusieurs avec « Envoyer les réponses », une fois chacune répondue. */
+function wireDockQuestions(card, open) {
+  const pick = state.dockQuestions;
+  const cards = [...card.querySelectorAll(".q-card")];
+  const send = card.querySelector(".send-choices");
+  const several = Boolean(send);
+  const show = (index) => {
+    pick.index = Math.max(0, Math.min(cards.length - 1, index));
+    cards.forEach((each, at) => {
+      each.hidden = at !== pick.index;
+      for (const choice of each.querySelectorAll(".choice")) {
+        choice.classList.toggle("chosen", pick.chosen[at].includes(choice.dataset.label));
+      }
+    });
+    const position = card.querySelector(".dock-pos");
+    if (position) {
+      const answered = pick.chosen.filter((labels) => labels.length).length;
+      position.textContent = `${pick.index + 1}/${cards.length}${answered ? ` · ${answered} répondue${answered > 1 ? "s" : ""}` : ""}`;
+      card.querySelector('[data-card="-1"]').disabled = pick.index === 0;
+      card.querySelector('[data-card="1"]').disabled = pick.index === cards.length - 1;
+    }
+    if (send) send.disabled = state.sending || !pick.chosen.every((labels) => labels.length);
+  };
   const answer = (text) => {
     if (state.sending) return;
-    for (const choice of choices) choice.disabled = true;
+    for (const choice of card.querySelectorAll(".choice")) choice.disabled = true;
     if (send) send.disabled = true;
     // Un champ à part : un brouillon tapé en bas reste où il est.
     followUpSession(text, document.createElement("textarea"));
   };
-  for (const choice of choices) {
-    choice.disabled = false;
-    choice.addEventListener("click", () => {
-      if (!send) {
-        choice.classList.add("chosen");
-        answer(choice.dataset.label);
-        return;
-      }
-      const question = choice.closest(".question");
-      if (!question.hasAttribute("data-multi")) {
-        for (const other of question.querySelectorAll(".choice")) if (other !== choice) other.classList.remove("chosen");
-      }
-      choice.classList.toggle("chosen");
-      send.disabled = !questions.every((each) => each.querySelector(".choice.chosen"));
-    });
+  for (const button of card.querySelectorAll("[data-card]")) {
+    button.addEventListener("click", () => show(pick.index + Number(button.dataset.card)));
   }
-  send?.addEventListener("click", () => answer(questions.map((question) => `${question.dataset.topic} : `
-    + [...question.querySelectorAll(".choice.chosen")].map((choice) => choice.dataset.label).join(", ")).join("\n")));
+  cards.forEach((each, at) => {
+    for (const choice of each.querySelectorAll(".choice")) {
+      choice.addEventListener("click", () => {
+        if (!several) {
+          choice.classList.add("chosen");
+          answer(choice.dataset.label);
+          return;
+        }
+        const labels = pick.chosen[at];
+        const known = labels.indexOf(choice.dataset.label);
+        if (each.hasAttribute("data-multi")) {
+          if (known >= 0) labels.splice(known, 1);
+          else labels.push(choice.dataset.label);
+          show(at);
+          return;
+        }
+        pick.chosen[at] = [choice.dataset.label];
+        show(at);
+        // Question répondue : la suivante encore sans réponse vient d'elle-même.
+        const next = pick.chosen.findIndex((each, position) => position > at && !each.length);
+        if (next >= 0) setTimeout(() => show(next), 220);
+      });
+    }
+  });
+  send?.addEventListener("click", () => answer(open.questions.map((question, at) => `${question.header || question.question} : `
+    + pick.chosen[at].join(", ")).join("\n")));
+  let start = null;
+  card.addEventListener("touchstart", (event) => {
+    const touch = event.touches[0];
+    start = event.touches.length === 1 ? { x: touch.clientX, y: touch.clientY } : null;
+  }, { passive: true });
+  card.addEventListener("touchend", (event) => {
+    if (!start) return;
+    const touch = event.changedTouches[0];
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    start = null;
+    if (Math.abs(dx) > 50 && Math.abs(dx) > 2 * Math.abs(dy)) show(pick.index + (dx < 0 ? 1 : -1));
+  }, { passive: true });
+  show(pick.index);
 }
 
 /** Réponse de Claw : son texte (titres, remarques du moteur en encadré), ses questions à
  * toucher, puis le pied. */
-function answerHtml(body) {
+function answerHtml(body, id = 0) {
   const text = String(body || "").replace(/\r\n/g, "\n");
   const cut = text.lastIndexOf("\n---\n");
   const main = cut >= 0 ? text.slice(0, cut) : text;
   const block = main.match(QUESTIONS_BLOCK);
   const questions = block && questionsOf(block[1]);
+  // Questions encore ouvertes : elles sont dans le bloc au-dessus de la zone de saisie, une
+  // ligne le dit ici (en double, elles prenaient tout l'écran).
+  const docked = questions && state.session && state.session.openQuestions && state.session.openQuestions.id === id;
+  const asked = docked
+    ? `<p class="questions-moved">${ICON.chat}<span>${questions.length > 1 ? `${questions.length} questions` : "Une question"} : répondez dans le bloc en bas de l'écran.</span></p>`
+    : questions && questionsHtml(questions);
   const content = questions
-    ? renderMarkdown(answerTitles(main.slice(0, block.index))) + questionsHtml(questions)
+    ? renderMarkdown(answerTitles(main.slice(0, block.index))) + asked
       + renderMarkdown(answerTitles(main.slice(block.index + block[0].length)))
     : renderMarkdown(answerTitles(main));
   return `<article class="message claw">
@@ -2448,11 +2684,16 @@ function messageHtml(comment, isLastProgress, answer = "") {
       // Durée insécable : « 12 min 05 s » ne se coupe pas.
       const title = renderMarkdown(head.replace(/\s*·\s*\d+\s+action\(s\)\s*$/, "")).replace(/^<p>|<\/p>$/g, "")
         .replace(/(\d+) (min|s)\b/g, "$1 $2").replace(/(min) (\d)/g, "$1 $2");
-      return `<div class="run-card ${kind}">${transcriptHtml(events, { key: `run${run}`, live: isLastProgress, answer, title, kind })}</div>`;
+      // Passage en cours : ce qui était déjà là à l'ouverture est montré d'un coup, ce qui arrive
+      // ensuite paraît une étape à la fois.
+      const key = `run${run}`;
+      if (!state.revealed.has(key) || !isLastProgress) state.revealed.set(key, events.length);
+      const shown = Math.min(state.revealed.get(key), events.length);
+      return `<div class="run-card ${kind}">${transcriptHtml(events, { key, live: isLastProgress, answer, title, kind, shown })}</div>`;
     }
     return `<div class="progress-card ${kind}${isLastProgress ? "" : " old"}">${renderMarkdown(withoutCallMarkup(body))}</div>`;
   }
-  if (body.includes(ANSWER)) return answerHtml(body);
+  if (body.includes(ANSWER)) return answerHtml(body, comment.id);
   return userMessageHtml(comment.user ? comment.user.login : "", body);
 }
 
@@ -2527,6 +2768,9 @@ function renderSessionView() {
   // Passage lancé, pas encore de progression pour le dernier message : Claw se prépare (file
   // d'attente, compilation…), dit dans la conversation plutôt que tout en bas.
   const preparing = active && (!lastProgress || (lastMessage && lastProgress.created_at < lastMessage.created_at));
+  // Questions de la dernière réponse, tant que rien ne l'a suivie : dans le bloc au-dessus de la
+  // zone de saisie, en cartes à feuilleter.
+  session.openQuestions = answered && !active ? lastQuestions(comments) : null;
   view.innerHTML = `
     <section class="session">
       <header class="session-head">
@@ -2583,8 +2827,8 @@ function renderSessionView() {
     if (menu && menu.open && (!event.target.closest(".more-menu") || event.target.closest(".menu-item"))) menu.open = false;
   });
   wireAttempts(view);
-  // Questions de la dernière réponse : ouvertes tant que rien ne l'a suivie.
-  wireQuestions(view, Boolean(answered) && !active);
+  revealSteps(view);
+  renderDock();
   for (const retry of view.querySelectorAll('[data-action="retry"]')) {
     retry.addEventListener("click", async () => {
       // Un seul passage par appui : le bouton se désactive aussitôt (plusieurs appuis lançaient
@@ -2748,9 +2992,13 @@ async function pollSession(force = false) {
       })
       .catch(() => {});
   }
+  // L'attente d'un passage lancé depuis l'appli (90 s au plus) change l'affichage d'elle-même.
+  const launchWaiting = Boolean(state.launch && state.launch.session === session.number
+    && Date.now() - state.launch.at < 90_000);
   const signature = JSON.stringify([
     issue.updated_at, issue.state, comments.map((comment) => [comment.id, comment.updated_at]),
     run && [run.id, run.status, run.conclusion], session.step, session.pull && [session.pull.state, session.pull.merged_at],
+    launchWaiting,
   ]);
   // Fin du passage suivi : le quota gratuit a bougé ; pendant le passage, il se relit chaque minute.
   if (session.active && run && run.status === "completed") refreshQuota(true);
@@ -2761,8 +3009,6 @@ async function pollSession(force = false) {
     renderSessionView();
     renderComposer();
     if (atBottom || force) window.scrollTo({ top: document.body.scrollHeight });
-  } else {
-    renderSessionView();
   }
   if (state.session === session && !document.hidden) {
     state.pollTimer = setTimeout(() => pollSession().catch(failure), session.active ? 4000 : 30000);
@@ -3125,10 +3371,12 @@ async function openPublish(session) {
     // Dossier du site sur une branche : docs/ s'il a un index.html, sinon la racine.
     const folderOf = async (ref) => ((await state.github.fileExists(repo, "docs/index.html", ref)) ? "/docs"
       : (await state.github.fileExists(repo, "index.html", ref)) ? "/" : null);
+    // Chaque session est une branche autonome : le site se publie depuis elle, sans fusion dans
+    // main. Une ancienne session avec sa pull request ouverte garde le choix de la fusionner.
     const choices = [];
-    if (open) choices.push({ value: "merge", label: `Fusionner la pull request n° ${pull.number}, puis publier ${base}`, ref: branch, recommended: true });
-    if (sessionBranch && open) choices.push({ value: "branch", label: `Publier ${branch} telle quelle, sans fusion`, ref: branch });
-    if (!open) choices.push({ value: "base", label: `Publier ${base}`, ref: base, recommended: true });
+    if (sessionBranch) choices.push({ value: "branch", label: `Publier la branche de la session, ${branch}`, ref: branch, recommended: true });
+    if (open) choices.push({ value: "merge", label: `Fusionner la pull request n° ${pull.number}, puis publier ${base}`, ref: branch });
+    if (!sessionBranch) choices.push({ value: "base", label: `Publier ${base}`, ref: base, recommended: true });
     for (const choice of choices) choice.folder = await folderOf(choice.ref);
     if (sheet.hidden) return;
     sheet.querySelector(".sheet-panel").innerHTML = `

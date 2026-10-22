@@ -472,23 +472,30 @@ const STATE_ICONS = {
 /** Le journal d'un passage : déplié pendant le passage, replié ensuite (une ligne avec l'état du
  * passage, `title`, et le nombre d'actions). `answer` : la réponse publiée du passage, que le
  * journal ne répète pas. */
-export function transcriptHtml(events, { key, live, answer = "", title = "Journal du passage", kind = "" }) {
-  const tools = events.filter((event) => event.k === "tool").length;
+/** Marque la ligne d'une étape : son rang, et « pending » tant que l'appli ne l'a pas encore
+ * fait paraître (les étapes d'un passage en cours arrivent par paquets, montrées une par une). */
+function marked(html, index, pending) {
+  return html.replace(/class="/, `data-step="${index}" class="${pending ? "pending " : ""}`);
+}
+
+export function transcriptHtml(events, { key, live, answer = "", title = "Journal du passage", kind = "", shown = events.length }) {
   const lastTodo = events.map((event) => event.k === "tool" && event.n === "TodoWrite").lastIndexOf(true);
   const repeated = repeatedInAnswer(events, answer);
   const drafts = draftAnswers(events, repeated);
   const rows = events.map((event, index) => {
     if (repeated.has(index)) return "";
-    if (drafts.has(index)) return draftHtml(event, `${key}:${index}`);
-    return eventHtml(event, `${key}:${index}`, live && index === lastTodo);
+    const html = drafts.has(index) ? draftHtml(event, `${key}:${index}`)
+      : eventHtml(event, `${key}:${index}`, live && index === lastTodo);
+    return html ? marked(html, index, index >= shown) : "";
   }).filter(Boolean);
+  const tools = events.filter((event, index) => event.k === "tool" && index < shown).length;
   // Long journal : les dernières étapes en vue, les précédentes à déplier.
   const older = rows.length > RECENT_STEPS + 10 ? rows.splice(0, rows.length - RECENT_STEPS) : [];
   const earlier = older.length
     ? `<details class="earlier" data-key="${key}:earlier"><summary>${plural(older.length, "étape")} plus tôt</summary>${older.join("")}</details>`
     : "";
   return `<details class="transcript" data-key="${key}"${live ? " open" : ""}>
-    <summary>${kind ? `<span class="run-state ${kind}">${STATE_ICONS[kind] || ""}</span>` : ""}<span class="run-title">${title}</span><span class="side">${plural(tools, "action")}</span></summary>
+    <summary>${kind ? `<span class="run-state ${kind}">${STATE_ICONS[kind] || ""}</span>` : ""}<span class="run-title">${title}</span><span class="side" data-actions="${tools}">${plural(tools, "action")}</span></summary>
     <div class="events">${earlier}${rows.join("")}</div>
   </details>`;
 }
