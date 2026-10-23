@@ -3915,8 +3915,35 @@ async function announceMove(engine, reachable) {
   }
 }
 
+/** Fenêtre ouverte (feuille de choix, tiroir des sessions) : la page derrière reste figée.
+ * Sur iPhone, `overflow: hidden` ne suffit pas (le défilement passait au fond, retour du
+ * 23 octobre 2026) : la page est fixée à sa position, puis rendue à la même place. */
+function watchScrollLock() {
+  let lockedAt = null;
+  const overlays = ["#sheet", "#drawer"].map((selector) => $(selector)).filter(Boolean);
+  const update = () => {
+    const open = overlays.some((element) => !element.hidden);
+    const body = document.body;
+    if (open && lockedAt === null) {
+      lockedAt = window.scrollY;
+      document.documentElement.classList.add("scroll-locked");
+      Object.assign(body.style, { position: "fixed", top: `-${lockedAt}px`, left: "0", right: "0", width: "100%" });
+    } else if (!open && lockedAt !== null) {
+      const top = lockedAt;
+      lockedAt = null;
+      document.documentElement.classList.remove("scroll-locked");
+      Object.assign(body.style, { position: "", top: "", left: "", right: "", width: "" });
+      window.scrollTo({ top, behavior: "instant" });
+    }
+  };
+  const observer = new MutationObserver(update);
+  for (const element of overlays) observer.observe(element, { attributes: true, attributeFilter: ["hidden"] });
+  update();
+}
+
 async function boot() {
   applyTheme();
+  watchScrollLock();
   const moved = MOVED_ENGINES[state.settings.engine];
   if (moved) {
     state.settings.engine = moved;
