@@ -380,13 +380,14 @@ def _remember(state, store, call):
     try:
         saved = memory.save(
             JOB_TOKEN, ENGINE, repo,
-            lambda data: memory.learn(data, runs, lessons, seen.get("request") or "", state, SESSION),
+            lambda data: memory.learn(data, runs, lessons, seen.get("request") or "", state, SESSION,
+                                      files=memory.edited_files(events, relative)),
             session=SESSION, call=call, ensure_branch=store._branch)
     except GitHubError as error:
         print(f"::warning::mémoire du projet non rangée : {error}")
         return False
     if saved:
-        failed = sum(1 for _, ok, _ in runs if not ok)
+        failed = sum(1 for run in runs if not run[1])
         print(f"Mémoire du projet rangée : {len(lessons)} leçon(s) nouvelle(s), {len(runs)} commande(s) "
               f"relevée(s) dont {failed} en échec", flush=True)
     return saved

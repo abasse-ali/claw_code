@@ -8,7 +8,7 @@
 //! inventée est signalée.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 /// Données de Lucide : nom, mots-clés, formes de l'icône (une par ligne).
 pub const LUCIDE: &str = include_str!("icons/lucide.tsv");
@@ -584,9 +584,11 @@ fn meaning(attributes: &[(String, String)], inner: &str) -> Vec<String> {
     words
 }
 
-/// Ce qui exempte une petite image vectorielle : un logo, un ornement ou une
-/// illustration nommés comme tels, un texte, une image, ou un renvoi à un
-/// symbole (`<use href="#…">`, contrôlé là où il est défini).
+/// Ce qui exempte une petite image vectorielle : un ornement de l'outil
+/// `Ornament`, un texte, une image, ou un renvoi à un symbole (`<use
+/// href="#…">`, contrôlé là où il est défini). Un logo, une marque ou un
+/// drapeau ne le sont plus : ils se récupèrent (paquet officiel, fichier de la
+/// marque), jamais ne se dessinent (demande de l'utilisateur, 23 octobre 2026).
 fn exempt(attributes: &[(String, String)], inner: &str) -> bool {
     let names: String = ["class", "classname", "id", "aria-label", "role"]
         .iter()
@@ -595,16 +597,7 @@ fn exempt(attributes: &[(String, String)], inner: &str) -> bool {
         .join(" ")
         .to_ascii_lowercase();
     let lower = inner.to_ascii_lowercase();
-    [
-        "logo",
-        "brand",
-        "wordmark",
-        "ornament",
-        "illustration",
-        "flag",
-    ]
-    .iter()
-    .any(|word| names.contains(word))
+    ["ornament"].iter().any(|word| names.contains(word))
         || ["<text", "<image", "<foreignobject"]
             .iter()
             .any(|tag| lower.contains(tag))
@@ -726,11 +719,14 @@ fn scan(markup: &str) -> Vec<(usize, DrawnIcon)> {
         if exempt(&attributes, inner) {
             continue;
         }
-        let Some(found_strokes) = strokes(inner) else {
-            continue;
-        };
-        if from_the_set(&found_strokes) {
-            continue;
+        let broken = broken_path(inner);
+        if !broken {
+            let Some(found_strokes) = strokes(inner) else {
+                continue;
+            };
+            if from_the_set(&found_strokes) || was_fetched(&found_strokes) {
+                continue;
+            }
         }
         let words = meaning(&attributes, inner);
         let label =
@@ -743,6 +739,11 @@ fn scan(markup: &str) -> Vec<(usize, DrawnIcon)> {
                     None => format!("<{kind}>"),
                 },
             };
+        let label = if broken {
+            format!("{label} with broken path data")
+        } else {
+            label
+        };
         found.push((
             start,
             DrawnIcon {
@@ -753,6 +754,71 @@ fn scan(markup: &str) -> Vec<(usize, DrawnIcon)> {
         ));
     }
     found
+}
+
+/// Un `<path>` dont les données ne commencent pas par un déplacement (`M`) :
+/// le navigateur ne le dessine pas. Vu le 22 octobre 2026 : une icône de
+/// Lucide recopiée de travers (`d="9 18h6"`), « corrigée » ensuite d'une
+/// lettre à la main au lieu d'être reprise de l'outil.
+fn broken_path(inner: &str) -> bool {
+    let lower = inner.to_ascii_lowercase();
+    let mut at = 0;
+    while let Some(offset) = lower[at..].find("<path") {
+        let start = at + offset + 1;
+        let end = lower[start..]
+            .find('>')
+            .map_or(lower.len(), |end| start + end);
+        at = end;
+        let attributes = attributes(&inner[start..end]);
+        if let Some(data) = attribute(&attributes, "d") {
+            let data = data.trim_start();
+            if !data.is_empty() && !data.starts_with(['M', 'm']) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Formes des SVG que l'agent a récupérés pendant la session (téléchargés,
+/// lus dans un paquet, donnés par un outil) : ce ne sont pas des dessins.
+fn fetched() -> &'static Mutex<HashSet<String>> {
+    static FETCHED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    FETCHED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn was_fetched(candidate: &[Stroke]) -> bool {
+    fetched()
+        .lock()
+        .is_ok_and(|known| known.contains(&fingerprint(candidate)))
+}
+
+/// Retient les SVG d'un texte récupéré (sortie de `curl`, fichier d'un paquet,
+/// page lue) : une icône, un logo ou un drapeau qui en vient n'est pas dessiné
+/// à la main. Le texte peut être du JSON (guillemets échappés).
+pub fn learn_fetched(text: &str) {
+    let text = text.replace("\\\"", "\"").replace("\\n", "\n");
+    let lower = text.to_ascii_lowercase();
+    let mut learned = Vec::new();
+    for (open, close) in [("<svg", "</svg"), ("<symbol", "</symbol")] {
+        let mut at = 0;
+        while let Some(offset) = lower[at..].find(open) {
+            let start = at + offset;
+            let Some(tag_end) = lower[start..].find('>').map(|end| start + end) else {
+                break;
+            };
+            let inner_end = lower[tag_end..]
+                .find(close)
+                .map_or(lower.len(), |end| tag_end + end);
+            if let Some(found) = strokes(&text[tag_end + 1..inner_end]) {
+                learned.push(fingerprint(&found));
+            }
+            at = tag_end + 1;
+        }
+    }
+    if let Ok(mut known) = fetched().lock() {
+        known.extend(learned);
+    }
 }
 
 /// Les icônes dessinées à la main dans le texte d'un fichier d'interface
@@ -815,7 +881,7 @@ pub fn drawn_icons_feedback(path: &str, icons: &[DrawnIcon]) -> String {
         )
     };
     format!(
-        "[Claw] {path} draws {} icon(s) by hand ({}{}). Icons are never drawn by hand, not even a simple arrow, check, cross or menu: hand-drawn icons look uneven and crude, and Claw compares every small inline SVG with the icon set. Replace each with the Icon tool's SVG pasted as it is ({ask}); size and color it with CSS. A decorative shape comes from the Ornament tool.",
+        "[Claw] {path} draws {} icon(s) by hand ({}{}). An SVG is never drawn or retouched by hand, not even a simple arrow, check, cross or menu, and not a logo, favicon or flag either: hand-drawn shapes look uneven and crude, and Claw compares every small inline SVG with the icon set. Replace each icon with the Icon tool's SVG pasted as it is ({ask}); size and color it with CSS. A broken icon is fetched again from the Icon tool, never patched. A brand logo or a flag comes from its official file (for example the simple-icons or flag-icons package, installed with npm or downloaded with curl); the project's own logo is its existing file, or an Icon tool icon with the name in text. A decorative shape comes from the Ornament tool.",
         icons.len(),
         places.join("; "),
         if more > 0 {
@@ -896,15 +962,17 @@ mod tests {
     fn hand_drawn_icons_are_found_with_their_line_and_meaning() {
         let page = "<header>\n<button aria-label=\"Menu\">\n<svg class=\"icon icon-menu\" viewBox=\"0 0 24 24\"><path d=\"M2 5h20M2 12h13M2 19h20\"/></svg>\n</button>\n<svg class=\"logo\" viewBox=\"0 0 32 32\"><path d=\"M1 2 L30 30\"/></svg>\n<svg viewBox=\"0 0 1440 120\"><path d=\"M0 40 C 200 0 400 80 1440 40\"/></svg>\n<a class=\"social\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 20 20\"><title>Téléphone phone</title><path d=\"M2 3c1 5 6 10 11 11l2-2\"/></svg></a>\n</header>";
         let found = drawn_icons(page);
-        assert_eq!(found.len(), 2, "{found:?}");
+        // Le logo dessiné à la main est signalé lui aussi.
+        assert_eq!(found.len(), 3, "{found:?}");
         assert_eq!(found[0].line, 3);
         assert_eq!(found[0].label, "<svg class=\"icon icon-menu\">");
         assert!(found[0].words.contains(&"menu".to_string()));
-        assert_eq!(found[1].line, 7);
+        assert_eq!(found[1].label, "<svg class=\"logo\">");
+        assert_eq!(found[2].line, 7);
         assert_eq!(suggested_names(&found), ["menu", "phone"]);
         let feedback = drawn_icons_feedback("index.html", &found);
         assert!(
-            feedback.contains("draws 2 icon(s) by hand")
+            feedback.contains("draws 3 icon(s) by hand")
                 && feedback.contains("line 3 <svg class=\"icon icon-menu\">")
                 && feedback.contains("[\"menu\",\"phone\"]"),
             "{feedback}"
@@ -925,5 +993,22 @@ mod tests {
             chevron.replace('<', "%3C").replace('>', "%3E")
         );
         assert!(drawn_icons(&css).is_empty(), "{css}");
+    }
+
+    #[test]
+    fn a_broken_icon_is_reported_and_a_fetched_logo_passes() {
+        // Session 20 (22 octobre 2026) : `d="9 18h6"`, sans le `M` du départ.
+        let broken = "<svg viewBox=\"0 0 24 24\"><path d=\"9 18h6\"/><path d=\"M10 22h4\"/></svg>";
+        let found = drawn_icons(broken);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].label.ends_with("with broken path data"));
+        let feedback = drawn_icons_feedback("index.html", &found);
+        assert!(feedback.contains("fetched again from the Icon tool, never patched"));
+        // Un logo téléchargé (sortie de curl, ou fichier d'un paquet lu en
+        // JSON) n'est pas un dessin ; le même tracé inventé l'est.
+        let logo = "<svg role=\"img\" viewBox=\"0 0 24 24\"><path d=\"M3 3 L21 3 L12 21 Z M8 7 L16 7\"/></svg>";
+        assert_eq!(drawn_icons(logo).len(), 1);
+        super::learn_fetched(&serde_json::json!({ "content": logo }).to_string());
+        assert!(drawn_icons(logo).is_empty());
     }
 }
