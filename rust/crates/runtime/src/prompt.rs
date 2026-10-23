@@ -238,7 +238,7 @@ impl SystemPromptBuilder {
             }
             if let Some(memory) = &project_context.memory {
                 sections.push(format!(
-                    "# Project memory\nWhat Claw recorded on its own during earlier sessions on this repository: commands that worked, errors already met and how they ended, recent requests. Start from it: reuse the commands that worked, do not repeat a command or a fix that failed unless something changed, and do not redo work a recent request already did. The code wins when it says otherwise.\n{memory}"
+                    "# Project memory\nWhat Claw recorded on its own during earlier sessions on this repository: defects the user reported, errors already met and what fixed them, commands it went round in circles on, commands that worked, recent requests. Start from it: when an error you meet is listed with its fix, apply that fix; reuse the commands that worked; do not repeat a command or a fix that failed unless something changed, and do not redo work a recent request already did. A defect the user reported more than once means the earlier fixes did not work: find the real cause, take another approach, and see the result yourself before you say it is fixed. The code wins when it says otherwise.\n{memory}"
                 ));
             }
         }
@@ -769,6 +769,7 @@ fn get_simple_doing_tasks_section() -> String {
         "If an approach fails, diagnose the failure before switching tactics.".to_string(),
         "When you learn something about this project that would have saved you time (a build or test quirk, a convention, where something lives, a pitfall), or when the user corrects you, save it in one line with the Remember tool so later sessions start with it. Do not use it as a log of what you just changed. Never save secrets, and skip what CLAW.md already says.".to_string(),
         "Be careful not to introduce security vulnerabilities such as command injection, XSS, or SQL injection.".to_string(),
+        "Never draw an SVG by hand and never retouch the path data of one: not an icon, a logo, a favicon, a flag or an illustration. Take what already exists: icons from the Icon tool, decorative shapes from the Ornament tool, a brand logo or a flag from its official file (for example the simple-icons or flag-icons package, installed with npm or downloaded with curl), the project's own logo from its existing file. A broken icon is fetched again, never patched.".to_string(),
         "Report outcomes faithfully: if verification fails or was not run, say so explicitly.".to_string(),
         "Judge the result itself, not only that the program runs: open what it produces (the page, the file, the image, the response body) and compare it with what the user asked for. A 200 status, a passing test or a clean exit says nothing about a wrong output; a result that is useless to the user is a defect to fix, not a \"known limitation\".".to_string(),
         "When you need the user to choose between options, to answer questions or to validate a proposal before you continue, and the AskUserQuestion tool is available, call it instead of writing the questions in your reply: the user then answers with one click. Present what you propose first (briefly), then ask.".to_string(),
@@ -888,6 +889,7 @@ mod tests {
         // Une question reçoit sa réponse, pas un chantier.
         assert!(prompt.contains("When the user's message is a question"));
         assert!(prompt.contains("expert full-stack software engineer"));
+        assert!(prompt.contains("Never draw an SVG by hand and never retouch the path data of one"));
         // Un compte rendu pour une personne : étiquettes dans sa langue, pas de
         // liste de sélecteurs ni de signature (vu dans une vraie session).
         assert!(prompt.contains("never reuse the English words of these instructions as labels"));

@@ -399,6 +399,9 @@ struct TurnAids {
     code_languages: std::collections::BTreeSet<crate::code_guide::Language>,
     /// Scripts écrits pendant ce tour (chemins).
     scripts_written: std::collections::BTreeSet<String>,
+    /// Fichiers SVG écrits pendant ce tour : relus, ils ne comptent pas comme
+    /// des SVG récupérés.
+    svg_written: std::collections::BTreeSet<String>,
     /// Commandes lancées par le modèle pendant ce tour.
     commands_run: Vec<String>,
     /// Le modèle a été renvoyé essayer ses scripts.
@@ -908,6 +911,44 @@ fn append_tool_output(message: &mut ConversationMessage, note: &str) {
 
 /// Champ texte du JSON qui ouvre `text` (un résultat d'outil peut être suivi
 /// d'un message de hook).
+/// Le résultat de cet outil apporte des SVG récupérés, pas dessinés par le
+/// modèle : un outil d'icônes ou d'ornements, une page lue sur le web, un
+/// fichier d'un paquet, un SVG du projet qu'il n'a pas écrit, la sortie d'un
+/// téléchargement ou d'un gestionnaire de paquets (pas sa propre page servie
+/// en local).
+fn fetches_svg(tool_name: &str, input: &str, aids: &TurnAids) -> bool {
+    match tool_name {
+        "WebFetch" | "http_request" | "Ornament" | "Icon" => true,
+        "read_file" => json_field(input, "path").is_some_and(|path| {
+            let lower = path.to_ascii_lowercase().replace('\\', "/");
+            lower.contains("node_modules/")
+                || lower.contains("vendor/")
+                || (lower.ends_with(".svg") && !aids.svg_written.contains(&path))
+        }),
+        "bash" | "PowerShell" => json_field(input, "command").is_some_and(|command| {
+            let local = ["localhost", "127.0.0.1", "0.0.0.0"]
+                .iter()
+                .any(|host| command.contains(host));
+            !local
+                && [
+                    "curl ",
+                    "wget ",
+                    "npm ",
+                    "npx ",
+                    "pnpm ",
+                    "yarn ",
+                    "node_modules",
+                    "pip ",
+                    "git clone",
+                    "Invoke-WebRequest",
+                ]
+                .iter()
+                .any(|word| command.contains(word))
+        }),
+        _ => false,
+    }
+}
+
 fn json_field(text: &str, key: &str) -> Option<String> {
     serde_json::Deserializer::from_str(text)
         .into_iter::<serde_json::Value>()
@@ -2456,6 +2497,19 @@ where
         }
         let mut notes = Vec::new();
         notes.extend(self.tool_executor.argument_note(tool_name, input));
+        // SVG récupérés (téléchargés, lus dans un paquet, donnés par un outil) :
+        // ce ne sont pas des dessins à la main.
+        if crate::file_tools::writes_files(tool_name) {
+            if let Some(path) = json_field(input, "path").filter(|path| {
+                std::path::Path::new(path)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+            }) {
+                aids.svg_written.insert(path);
+            }
+        } else if !is_error && fetches_svg(tool_name, input, aids) {
+            crate::icon_set::learn_fetched(&output);
+        }
         // Questions déjà posées avec le menu : rien à redemander en fin de tour.
         aids.asked |= tool_name == "AskUserQuestion";
         aids.questions_deferred |=
@@ -2831,7 +2885,12 @@ where
     /// seulement), et, dans un tour de design, le socle de la méthode présent
     /// dans les feuilles de style (une fois par tour, toutes feuilles lues).
     fn interface_file_notes(&mut self, path: &str, aids: &mut TurnAids, notes: &mut Vec<String>) {
-        if !crate::web_design::is_interface_file(path) || !harness::enabled(Aid::DesignGuide) {
+        let svg_file = std::path::Path::new(path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"));
+        if !(crate::web_design::is_interface_file(path) || svg_file)
+            || !harness::enabled(Aid::DesignGuide)
+        {
             return;
         }
         let file = std::path::Path::new(path);

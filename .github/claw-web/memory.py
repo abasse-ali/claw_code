@@ -15,6 +15,7 @@ import collections
 import json
 import re
 import time
+import unicodedata
 import urllib.parse
 
 from common import FILES_BRANCH, GitHubError, api
@@ -27,6 +28,26 @@ MAX_LESSONS = 80
 MAX_WORKED = 12
 MAX_ERRORS = 12
 MAX_REQUESTS = 8
+MAX_DEFECTS = 8
+# Échecs d'affilée d'une même commande dans un passage : au-delà, l'agent tournait en rond.
+STUCK_AFTER = 3
+WRITE_TOOLS = {"write_file", "edit_file", "MultiEdit", "NotebookEdit", "apply_patch", "move_file",
+               "delete_file", "replace_in_files"}
+# Un message de l'utilisateur qui dit qu'un défaut reste (sans accents, en minuscules).
+COMPLAINTS = (
+    "mal fait", "moche", "marche pas", "marche plus", "fonctionne pas", "fonctionne plus", "toujours pas",
+    "pas encore", "toujours le meme", "toujours la meme", "bug", "casse", "erreur", "n'importe quoi",
+    "pas bon", "pas ca", "pas beau", "pas terrible", "affiche pas", "affiche rien", "s'affiche pas",
+    "rien ne", "manque", "y'a pas", "y a pas", "il n'y a pas", "plante", "bloque", "doesn't work",
+    "not working", "broken", "wrong", "still",
+)
+# Mots qui ne disent pas de quoi on parle, pour rapprocher deux plaintes.
+STOP_WORDS = {
+    "encore", "toujours", "trop", "tres", "plus", "moins", "c'est", "cest", "elle", "elles", "ils",
+    "avec", "sans", "dans", "pour", "mais", "donc", "alors", "comme", "quand", "fait", "faire", "marche",
+    "fonctionne", "rien", "tout", "tous", "toute", "toutes", "cette", "celle", "celui", "bien", "mal",
+    "pas", "les", "des", "une", "sur", "sous", "aussi", "meme", "moche", "erreur", "page", "site",
+}
 COMMAND_CHARS = 200
 ERROR_CHARS = 180
 STATES = {"done": "fini", "failed": "erreur", "unfinished": "inachevé", "stopped": "arrêté"}
@@ -55,7 +76,7 @@ def path_of(repo):
 
 
 def empty():
-    return {"v": VERSION, "lessons": [], "worked": [], "errors": [], "requests": []}
+    return {"v": VERSION, "lessons": [], "worked": [], "errors": [], "requests": [], "defects": []}
 
 
 def parse(text):
@@ -70,7 +91,7 @@ def parse(text):
         return data
     if not isinstance(stored, dict):
         return data
-    for key in ("lessons", "worked", "errors", "requests"):
+    for key in ("lessons", "worked", "errors", "requests", "defects"):
         value = stored.get(key)
         if isinstance(value, list):
             data[key] = [item for item in value if isinstance(item, (dict if key != "lessons" else str))]
@@ -86,15 +107,42 @@ def times(count):
     return f"{count} fois" if count > 1 else "1 fois"
 
 
+def files_text(files):
+    shown = ", ".join(f"`{name}`" for name in files[:4])
+    return shown + (f" et {len(files) - 4} autre(s)" if len(files) > 4 else "")
+
+
 def memory_text(data):
-    """Ce que Claw a relevé lui-même, pour l'agent (`.claw/memory.md`) : erreurs d'abord."""
+    """Ce que Claw a relevé lui-même, pour l'agent (`.claw/memory.md`) : les défauts que
+    l'utilisateur a signalés, puis les erreurs et ce qui les a réglées, puis ce qui marche."""
     parts = []
+    if data.get("defects"):
+        parts.append("## Défauts signalés par l'utilisateur")
+        for item in data["defects"]:
+            sessions = ", ".join(str(session) for session in item.get("sessions", []))
+            line = f"- « {item.get('text', '')} » (le {item.get('last', '?')}, session(s) {sessions})"
+            if item.get("files"):
+                line += f" ; fichiers changés en réponse : {files_text(item['files'])}"
+            if item.get("n", 1) > 1:
+                line += (f". Signalé {item['n']} fois : les corrections précédentes n'ont pas suffi. Ne refais "
+                         "pas la même chose : cherche la vraie cause, change d'approche, et regarde le résultat "
+                         "toi-même (capture d'écran, commande) avant de dire que c'est réglé")
+            parts.append(line)
     if data["errors"]:
         parts.append("## Erreurs déjà rencontrées (ne pas refaire le même essai sans raison nouvelle)")
         for item in data["errors"]:
-            issue = "réglée ensuite" if item.get("fixed") else "pas encore réglée"
-            parts.append(f"- `{item['cmd']}` → {item.get('error') or 'échec'} "
-                         f"({times(item.get('n', 1))}, {issue}, dernière le {item.get('last', '?')})")
+            if item.get("fixed") and item.get("fix"):
+                issue = f"réglée par : {item['fix']}"
+            elif item.get("fixed"):
+                issue = "réglée ensuite"
+            else:
+                issue = "pas encore réglée"
+            line = (f"- `{item['cmd']}` → {item.get('error') or 'échec'} "
+                    f"({times(item.get('n', 1))}, {issue}, dernière le {item.get('last', '?')})")
+            if item.get("stuck") and not item.get("fixed"):
+                line += (f". Bloquée {item['stuck']} fois d'affilée : ne la relance pas telle quelle ; lis "
+                         "l'erreur entière, trouves-en la cause et prends une autre voie")
+            parts.append(line)
     if data["worked"]:
         parts.append("## Commandes qui ont marché")
         for item in data["worked"]:
@@ -103,8 +151,10 @@ def memory_text(data):
         parts.append("## Dernières demandes sur ce dépôt (les plus récentes d'abord)")
         for item in reversed(data["requests"]):
             state = STATES.get(item.get("state"), item.get("state") or "?")
-            parts.append(f"- {item.get('date', '?')}, session {item.get('session', '?')} : "
-                         f"{item.get('text', '')} ({state})")
+            line = f"- {item.get('date', '?')}, session {item.get('session', '?')} : {item.get('text', '')} ({state})"
+            if item.get("files"):
+                line += f" ; fichiers changés : {files_text(item['files'])}"
+            parts.append(line)
     return "\n".join(parts) + ("\n" if parts else "")
 
 
@@ -208,12 +258,25 @@ def error_line(stdout, stderr, relative):
     return one_line(chosen, ERROR_CHARS)
 
 
+def _fix_text(pending):
+    """Ce qui s'est passé entre l'échec d'une commande et sa réussite."""
+    steps = []
+    if pending["files"]:
+        steps.append(f"modification de {files_text(pending['files'])}")
+    steps.extend(f"`{command}`" for command in pending["commands"][:3])
+    return one_line(" ; ".join(steps) + (" ; puis la même commande" if steps else "relancée telle quelle"),
+                    ERROR_CHARS)
+
+
 def observe(events, relative=lambda text: text):
-    """Les commandes du passage, dans l'ordre : [(commande, réussie, ligne d'erreur)]. Celles
-    lancées en arrière-plan (serveurs) et celles qui ne disent rien du projet sont laissées.
-    Les résultats suivent les appels dans l'ordre (`--output-format stream-json` ne porte pas
-    d'identifiant d'appel), comme dans journal.py."""
+    """Les commandes du passage, dans l'ordre : [(commande, réussie, ligne d'erreur, solution)].
+    La solution d'une commande qui réussit après avoir échoué : les fichiers changés et les
+    commandes réussies entre les deux. Celles lancées en arrière-plan (serveurs) et celles qui
+    ne disent rien du projet sont laissées. Les résultats suivent les appels dans l'ordre
+    (`--output-format stream-json` ne porte pas d'identifiant d'appel), comme dans journal.py."""
     waiting, runs = collections.deque(), []
+    # Commandes en échec, pas encore réussies : ce qui est fait depuis.
+    pending = {}
     for event in events:
         message = event.get("message") if isinstance(event.get("message"), dict) else {}
         content = message.get("content")
@@ -222,12 +285,17 @@ def observe(events, relative=lambda text: text):
                 continue
             if event.get("type") == "assistant" and part.get("type") == "tool_use":
                 command = None
+                data = part.get("input") if isinstance(part.get("input"), dict) else {}
                 if part.get("name") in ("bash", "PowerShell"):
-                    data = part.get("input") if isinstance(part.get("input"), dict) else {}
                     text = " ".join(str(data.get("command") or "").split())
                     if text and not data.get("run_in_background") and not trivial(text) \
                             and not SECRET.search(text):
                         command = one_line(relative(text), COMMAND_CHARS)
+                elif part.get("name") in WRITE_TOOLS and data.get("path"):
+                    path = relative(str(data["path"]))
+                    for steps in pending.values():
+                        if path not in steps["files"]:
+                            steps["files"].append(path)
                 waiting.append((part.get("name"), command))
             elif event.get("type") == "user" and part.get("type") == "tool_result" and waiting:
                 name, command = waiting.popleft()
@@ -246,13 +314,78 @@ def observe(events, relative=lambda text: text):
                 ok = not part.get("is_error") and not code
                 error = "" if ok else (error_line(str(result.get("stdout") or ""),
                                                   str(result.get("stderr") or ""), relative) or code)
-                runs.append((command, ok, error))
+                fix = ""
+                if ok:
+                    if command in pending:
+                        fix = _fix_text(pending.pop(command))
+                    for other, steps in pending.items():
+                        if command not in steps["commands"]:
+                            steps["commands"].append(command)
+                else:
+                    pending.setdefault(command, {"files": [], "commands": []})
+                runs.append((command, ok, error, fix))
     return runs
 
 
-def learn(data, runs, new_lessons, request="", state="", session="", today=None):
-    """Ajoute à la mémoire ce que ce passage a appris (sur place) et la rend."""
+def edited_files(events, relative=lambda text: text):
+    """Les fichiers que l'agent a changés pendant le passage, dans l'ordre."""
+    files = []
+    for event in events:
+        message = event.get("message") if isinstance(event.get("message"), dict) else {}
+        content = message.get("content")
+        if event.get("type") != "assistant" or not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "tool_use" and part.get("name") in WRITE_TOOLS:
+                data = part.get("input") if isinstance(part.get("input"), dict) else {}
+                path = relative(str(data.get("path") or ""))
+                if path and path not in files:
+                    files.append(path)
+    return files
+
+
+def fold(text):
+    text = unicodedata.normalize("NFD", str(text or "").lower().replace("\u2019", "'"))
+    return "".join(char for char in text if unicodedata.category(char) != "Mn")
+
+
+def complains(request):
+    """Le message de l'utilisateur dit qu'un défaut est là, ou reste."""
+    text = fold(request)
+    return any(marker in text for marker in COMPLAINTS)
+
+
+def subject_words(text):
+    return {word for word in re.findall(r"[a-z0-9']{4,}", fold(text)) if word not in STOP_WORDS}
+
+
+def _remember_defect(data, request, session, files, today):
+    """Range une plainte de l'utilisateur ; la rapproche d'une plainte déjà notée sur le même
+    sujet (un mot en commun qui dit de quoi on parle : « icônes », « disk »)."""
+    words = subject_words(request)
+    defects = data.setdefault("defects", [])
+    same = next((item for item in reversed(defects) if words & subject_words(item.get("text", ""))), None)
+    if same is None:
+        same = {"text": request, "n": 0, "sessions": []}
+        defects.append(same)
+    else:
+        defects.remove(same)
+        defects.append(same)
+        same["text"] = request
+    same["n"] = same.get("n", 0) + 1
+    if str(session) not in same["sessions"]:
+        same["sessions"] = (same["sessions"] + [str(session)])[-6:]
+    same["last"] = today
+    same["files"] = files[:8]
+    data["defects"] = defects[-MAX_DEFECTS:]
+
+
+def learn(data, runs, new_lessons, request="", state="", session="", today=None, files=None):
+    """Ajoute à la mémoire ce que ce passage a appris (sur place) et la rend : les leçons, les
+    erreurs et ce qui les a réglées, les commandes sur lesquelles l'agent a tourné en rond, ce
+    qui a marché, la demande, et la plainte qu'elle porte, rapprochée des précédentes."""
     today = today or time.strftime("%Y-%m-%d", time.gmtime())
+    files = list(files or [])
     known = {lesson.lower() for lesson in data["lessons"]}
     for lesson in new_lessons:
         if lesson.lower() not in known:
@@ -263,8 +396,12 @@ def learn(data, runs, new_lessons, request="", state="", session="", today=None)
     errors = {item["cmd"]: item for item in data["errors"] if item.get("cmd")}
     order_worked = [item["cmd"] for item in data["worked"] if item.get("cmd")]
     order_errors = [item["cmd"] for item in data["errors"] if item.get("cmd")]
-    for command, ok, error in runs:
+    streak = collections.Counter()
+    for run in runs:
+        command, ok, error = run[:3]
+        fix = run[3] if len(run) > 3 else ""
         if ok:
+            streak[command] = 0
             item = worked.setdefault(command, {"cmd": command, "n": 0})
             item["n"] = item.get("n", 0) + 1
             item["last"] = today
@@ -273,12 +410,18 @@ def learn(data, runs, new_lessons, request="", state="", session="", today=None)
             order_worked.insert(0, command)
             if command in errors:
                 errors[command]["fixed"] = True
+                if fix:
+                    errors[command]["fix"] = fix
+                errors[command].pop("stuck", None)
         else:
+            streak[command] += 1
             item = errors.setdefault(command, {"cmd": command, "n": 0})
             item["n"] = item.get("n", 0) + 1
             item["last"] = today
             item["error"] = error
             item["fixed"] = False
+            if streak[command] >= STUCK_AFTER:
+                item["stuck"] = max(item.get("stuck", 0), streak[command])
             if command in order_errors:
                 order_errors.remove(command)
             order_errors.insert(0, command)
@@ -286,8 +429,13 @@ def learn(data, runs, new_lessons, request="", state="", session="", today=None)
     data["errors"] = [errors[command] for command in order_errors][:MAX_ERRORS]
     request = one_line(request, 140)
     if request:
-        data["requests"].append({"date": today, "session": str(session), "text": request, "state": state})
+        entry = {"date": today, "session": str(session), "text": request, "state": state}
+        if files:
+            entry["files"] = files[:8]
+        data["requests"].append(entry)
         data["requests"] = data["requests"][-MAX_REQUESTS:]
+        if complains(request):
+            _remember_defect(data, request, session, files, today)
     return data
 
 

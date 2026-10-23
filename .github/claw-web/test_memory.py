@@ -93,10 +93,11 @@ class MemoryTest(unittest.TestCase):
         ]
         runs = memory.observe(events)
         self.assertEqual(runs, [
-            ("cd web && npm run build", False, "Error: Cannot find module 'vite'"),
-            ("cd web && npm install", True, ""),
-            ("cd web && npm run build", True, ""),
-            ("npm test", False, "FAIL tests/app.test.js"),
+            ("cd web && npm run build", False, "Error: Cannot find module 'vite'", ""),
+            ("cd web && npm install", True, "", ""),
+            # Ce qui l'a réglée : ce qui s'est passé entre l'échec et la réussite.
+            ("cd web && npm run build", True, "", "`cd web && npm install` ; puis la même commande"),
+            ("npm test", False, "FAIL tests/app.test.js", ""),
         ])
         data = memory.learn(memory.empty(), runs, ["- Les tests sont dans web/tests."],
                             "Corrige la grille", "done", "18", today="2026-10-22")
@@ -108,7 +109,7 @@ class MemoryTest(unittest.TestCase):
         text = memory.memory_text(data)
         self.assertTrue(text.startswith("## Erreurs déjà rencontrées"))
         self.assertIn("- `npm test` → FAIL tests/app.test.js (1 fois, pas encore réglée, dernière le 2026-10-22)", text)
-        self.assertIn("réglée ensuite", text)
+        self.assertIn("réglée par : `cd web && npm install` ; puis la même commande", text)
         self.assertIn("- 2026-10-22, session 18 : Corrige la grille (fini)", text)
 
         # Un passage suivant : la même commande échoue encore, elle compte deux fois.
@@ -116,6 +117,55 @@ class MemoryTest(unittest.TestCase):
                      today="2026-10-23")
         self.assertEqual((data["errors"][0]["n"], data["errors"][0]["error"]), (2, "FAIL again"))
         self.assertEqual(len(data["requests"]), 2)
+
+    def test_a_loop_on_the_same_failure_and_the_edit_that_ends_it_are_kept(self):
+        def edit(path):
+            return {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "edit_file", "input": {"path": path}}]}}
+
+        def edited():
+            return {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_name": "edit_file", "content": "{}"}]}}
+
+        events = []
+        for index in range(3):
+            events += [bash(str(index), "python3 -m pytest -q"),
+                       result(str(index), stdout="E   ImportError: cannot import name 'total'", code="exit_code:1")]
+        runs = memory.observe(events)
+        data = memory.learn(memory.empty(), runs, [], "Corrige les tests", "unfinished", "7", today="2026-10-23")
+        self.assertEqual(data["errors"][0]["stuck"], 3)
+        text = memory.memory_text(data)
+        self.assertIn("Bloquée 3 fois d'affilée : ne la relance pas telle quelle", text)
+        # Le passage suivant trouve : une modification de money.py, puis la même commande passe.
+        events = [bash("a", "python3 -m pytest -q"), result("a", stderr="ImportError", code="exit_code:1"),
+                  edit("money.py"), edited(),
+                  bash("b", "python3 -m pytest -q"), result("b", stdout="54 passed")]
+        runs = memory.observe(events)
+        self.assertEqual(runs[-1][3], "modification de `money.py` ; puis la même commande")
+        memory.learn(data, runs, [], "Continue", "done", "8", today="2026-10-23",
+                     files=memory.edited_files(events))
+        item = data["errors"][0]
+        self.assertEqual((item["fixed"], item.get("stuck")), (True, None))
+        self.assertIn("réglée par : modification de `money.py`", memory.memory_text(data))
+        self.assertEqual(data["requests"][-1]["files"], ["money.py"])
+
+    def test_a_defect_reported_again_tells_the_agent_the_last_fix_did_not_work(self):
+        # Session 20 (22 octobre 2026) : les icônes, signalées deux fois.
+        data = memory.empty()
+        memory.learn(data, [], [], "Les icônes c'est mal fait", "done", "20", today="2026-10-22",
+                     files=["templates/index.html"])
+        memory.learn(data, [], [], "Ajoute un export CSV", "done", "20", today="2026-10-22")
+        memory.learn(data, [], [], "Y\u2019a pas disk et les icônes c\u2019est pas encore trop ça", "done", "21",
+                     today="2026-10-23", files=["templates/index.html"])
+        self.assertEqual(len(data["defects"]), 1)
+        defect = data["defects"][0]
+        self.assertEqual((defect["n"], defect["sessions"]), (2, ["20", "21"]))
+        text = memory.memory_text(data)
+        self.assertTrue(text.startswith("## Défauts signalés par l'utilisateur"))
+        self.assertIn("Signalé 2 fois : les corrections précédentes n'ont pas suffi", text)
+        # Un autre sujet reste à part.
+        memory.learn(data, [], [], "Le formulaire ne marche pas", "done", "22", today="2026-10-23")
+        self.assertEqual(len(data["defects"]), 2)
 
     def test_the_memory_goes_to_dot_claw_and_back_to_the_sessions_repository(self):
         folder = Path(tempfile.mkdtemp())
