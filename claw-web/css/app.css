@@ -721,6 +721,9 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 /* Feuille de choix */
 .sheet { position: fixed; inset: 0; z-index: 30; display: flex; align-items: flex-end; justify-content: center; background: rgba(0, 0, 0, .5); }
 .sheet[hidden] { display: none; }
+/* Le défilement d'une fenêtre ne passe jamais à la page derrière (rebond compris). */
+html.scroll-locked, html.scroll-locked body { overflow: hidden; overscroll-behavior: none; }
+.sheet, .drawer, .sheet-panel, .sheet-panel * { overscroll-behavior: contain; }
 .sheet-panel {
   width: 100%; max-width: 560px; max-height: 78vh; display: flex; flex-direction: column;
   background: var(--panel); border-radius: 18px 18px 0 0; padding: 12px 12px calc(12px + env(safe-area-inset-bottom));
