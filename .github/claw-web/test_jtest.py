@@ -312,6 +312,36 @@ class PublicSessionsTest(unittest.TestCase):
         self.assertIn("est public", posted[0]["body"])
 
 
+class PhoneTest(unittest.TestCase):
+    """« faut que ça marche sur mon tel » : l'appli web finie part en JTest sans que l'agent
+    l'ait demandé, sur le serveur ARM ; rien pour un script, ni hors du serveur."""
+
+    def test_a_web_app_for_the_phone_goes_to_jtest(self):
+        import importlib
+
+        env = {"REPO": "o/app", "BASE": "main", "SESSION": "7", "BRANCH": "claw/session-2",
+               "GITHUB_REPOSITORY": "o/s", "JOB_TOKEN": "t", "RUNNER_ENVIRONMENT": "self-hosted",
+               "RUNNER_ARCH": "ARM64"}
+        with mock.patch.dict(os.environ, env):
+            publish = importlib.import_module("publish")
+            words = {"user_words.txt": "faut que ça marche sur mon tel. fais au mieux"}
+            changed = "index.html\nstyle.css\napp.js"
+            with mock.patch.object(publish, "read", lambda name: words.get(name, "")), \
+                    mock.patch.object(publish, "git", lambda *args, **kwargs: changed):
+                self.assertTrue(publish.wants_phone_test({}))
+                # Déjà demandée par l'agent : pas une seconde fois.
+                self.assertFalse(publish.wants_phone_test({"jtest": {}}))
+                words["user_words.txt"] = "ajoute une fonction de tri au script"
+                self.assertFalse(publish.wants_phone_test({}))
+                words["user_words.txt"] = "je veux le voir sur mon iPhone"
+                changed = "scraper.py"
+                self.assertFalse(publish.wants_phone_test({}))
+            with mock.patch.dict(os.environ, {"RUNNER_ENVIRONMENT": "github-hosted"}), \
+                    mock.patch.object(publish, "read", lambda name: "sur mon téléphone"), \
+                    mock.patch.object(publish, "git", lambda *args, **kwargs: "index.html"):
+                self.assertFalse(publish.wants_phone_test({}))
+
+
 class RequestTest(unittest.TestCase):
     def setUp(self):
         self.folder = Path(tempfile.mkdtemp())

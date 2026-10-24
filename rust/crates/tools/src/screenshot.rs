@@ -89,6 +89,9 @@ pub(crate) struct ScreenshotInput {
     /// Liste d'actions, ou la même liste écrite en texte JSON.
     #[serde(default)]
     actions: Option<Value>,
+    /// `localStorage` posé avant chaque chargement de la page : { clé: valeur }.
+    #[serde(default)]
+    storage: Option<Value>,
 }
 
 /// Une action avant la capture : un seul de ses champs est rempli.
@@ -1680,6 +1683,48 @@ fn color_scheme(theme: Option<&str>) -> Result<Option<&'static str>, String> {
     }
 }
 
+/// Script qui pose `storage` dans le `localStorage` de la page avant ses propres
+/// scripts : une appli qui garde ses données dans le navigateur se montre avec des
+/// données, sans que le modèle retouche ses fichiers pour en injecter. Vu le
+/// 24 octobre 2026 (session de test de Claw Web) : le modèle modifiait `index.html`
+/// et écrivait des pages de test dans /tmp pour voir sa liste de dépenses remplie.
+/// Une valeur qui n'est pas du texte est enregistrée en JSON.
+fn storage_script(storage: Option<&Value>) -> Result<Option<String>, String> {
+    let Some(storage) = storage else {
+        return Ok(None);
+    };
+    let parsed;
+    let storage = match storage {
+        Value::String(text) => {
+            parsed = serde_json::from_str::<Value>(text).map_err(|error| {
+                format!("storage must be an object such as {{\"expenses\": [...]}}: {error}")
+            })?;
+            &parsed
+        }
+        other => other,
+    };
+    let Some(entries) = storage.as_object() else {
+        return Err(
+            "storage must be an object such as {\"expenses\": [...]}: key, then the value to store"
+                .to_string(),
+        );
+    };
+    let items: serde_json::Map<String, Value> = entries
+        .iter()
+        .map(|(key, value)| {
+            let text = match value {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            (key.clone(), Value::String(text))
+        })
+        .collect();
+    Ok(Some(format!(
+        "(() => {{ try {{ const items = {}; for (const key of Object.keys(items)) localStorage.setItem(key, items[key]); }} catch (error) {{}} }})();",
+        Value::Object(items)
+    )))
+}
+
 /// Ce que `Screenshot` rend au modèle ; les captures partent à part (`take_captured`).
 pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
     let url = target(input)?;
@@ -1692,6 +1737,12 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
     let mut devtools = DevTools::connect(port, &path)?;
     for domain in ["Page.enable", "Runtime.enable", "Log.enable"] {
         devtools.call(domain, json!({}))?;
+    }
+    if let Some(script) = storage_script(input.storage.as_ref())? {
+        devtools.call(
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({ "source": script }),
+        )?;
     }
     let dir = shots_dir();
     let stamp = std::time::SystemTime::now()
@@ -2003,7 +2054,89 @@ mod tests {
             full_page: None,
             wait_ms: None,
             actions: None,
+            storage: None,
         }
+    }
+
+    #[test]
+    fn storage_becomes_a_script_that_fills_local_storage() {
+        assert_eq!(super::storage_script(None), Ok(None));
+        let script = super::storage_script(Some(&json!({
+            "theme": "sombre",
+            "expenses": [{ "amount": 12.5, "label": "Pain" }]
+        })))
+        .expect("script")
+        .expect("présent");
+        assert!(script.contains("localStorage.setItem"), "{script}");
+        assert!(script.contains(r#""theme":"sombre""#), "{script}");
+        // Une valeur qui n'est pas du texte est enregistrée en JSON.
+        assert!(
+            script.contains(r#""expenses":"[{\"amount\":12.5,\"label\":\"Pain\"}]""#),
+            "{script}"
+        );
+        // Écrit en texte JSON, comme un modèle le fait souvent.
+        assert!(super::storage_script(Some(&json!("{\"a\": \"b\"}")))
+            .expect("texte")
+            .is_some());
+        assert!(super::storage_script(Some(&json!([1, 2]))).is_err());
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn line_icons_of_a_sprite_drawn_filled_are_found_in_a_real_browser() {
+        let cwd = std::env::current_dir().expect("dossier");
+        let sprite = "<svg style=\"display:none\"><symbol id=\"plus\" viewBox=\"0 0 24 24\"><path d=\"M5 12h14\"/><path d=\"M12 5v14\"/></symbol><symbol id=\"trash\" viewBox=\"0 0 24 24\"><path d=\"M3 6h18\"/><path d=\"M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6\"/></symbol></svg>";
+        let page = |name: &str, css: &str| {
+            let dir = cwd.join(format!("claw-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Icônes</title><style>body {{ font-family: Georgia; padding: 20px; }} .icon {{ width: 24px; height: 24px; }} {css}</style></head><body>{sprite}<main><h1>Budget</h1><p>Ajouter <svg class=\"icon\"><use href=\"#plus\"></use></svg> ou supprimer <svg class=\"icon\"><use href=\"#trash\"></use></svg></p></main></body></html>"),
+            )
+            .expect("html");
+            let mut request = input(
+                None,
+                Some(&format!("claw-{name}-{}/index.html", std::process::id())),
+            );
+            request.viewports = Some(json!(["phone"]));
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let blobs = page("taches", "");
+        assert!(
+            blobs.contains("Line icons drawn as filled shapes"),
+            "{blobs}"
+        );
+        let fixed = page(
+            "traits",
+            ".icon { fill: none; stroke: currentColor; stroke-width: 2; }",
+        );
+        assert!(
+            !fixed.contains("Line icons drawn as filled shapes"),
+            "{fixed}"
+        );
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn a_page_shows_the_data_given_in_storage_in_a_real_browser() {
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-storage-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        std::fs::write(
+            dir.join("index.html"),
+            "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Vide</title></head><body><main><h1>Dépenses</h1></main><script>const list = JSON.parse(localStorage.getItem('expenses') || '[]'); document.title = list.length + ' dépense(s)';</script></body></html>",
+        )
+        .expect("html");
+        let page = format!("claw-storage-{}/index.html", std::process::id());
+        let mut request = input(None, Some(&page));
+        request.viewports = Some(json!(["phone"]));
+        request.storage = Some(json!({ "expenses": [{ "amount": 3 }, { "amount": 4 }] }));
+        let result = super::take(&request);
+        let _ = std::fs::remove_dir_all(&dir);
+        let capture = result.expect("capture")["captures"][0].clone();
+        assert_eq!(capture["title"], json!("2 dépense(s)"), "{capture}");
     }
 
     #[test]

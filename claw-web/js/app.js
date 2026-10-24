@@ -2933,7 +2933,7 @@ function renderSessionView() {
         <button class="small-link primary-link" data-action="retry">${ICON.retry}<span>Lancer le passage</span></button></div>` : ""}
       <div class="run-status ${active ? "active" : status ? status.key : ""}">
         ${active && !preparing ? `<span class="spinner" aria-hidden="true"></span><span>${run ? escapeHtml(status.label) : "Lancement du passage"}${step}</span>` : ""}
-        ${!active && status && status.key === "failed" && !answered ? `<span>Le dernier passage a échoué.</span>` : ""}
+        ${!active && status && status.key === "failed" && !answered ? `<span>Le dernier passage a échoué${session.failure ? ` : ${escapeHtml(session.failure)}` : "."}</span>` : ""}
         <span class="run-actions">
           ${active && run ? `<button class="small-link stop" data-action="stop">${ICON.stop}<span>Arrêter</span></button>` : ""}
           ${!active && !unsent ? `<button class="small-link" data-action="retry">${ICON.retry}<span>Relancer</span></button>` : ""}
@@ -3100,6 +3100,25 @@ async function showSession(number) {
   }
 }
 
+/** Pourquoi un passage a échoué, en clair, d'après ses jobs (« » si rien de sûr). Vu le
+ * 24 octobre 2026 : un passage sur une machine de GitHub échouait en deux secondes, sans
+ * journal ni commentaire, GitHub n'ayant donné aucune machine (minutes du dépôt privé
+ * épuisées) ; la session disait seulement « Le dernier passage a échoué ». */
+async function failureOf(engine, run) {
+  const jobs = await state.github.jobs(engine, run.id);
+  const job = jobs.find((each) => each.conclusion === "failure");
+  if (!job) return "";
+  const steps = job.steps || [];
+  if (!job.runner_name && !steps.length) {
+    return (job.labels || []).includes("claw-pc")
+      ? "votre machine n'a pas pris le passage. Vérifiez qu'elle est en ligne (Réglages, Sessions), puis relancez."
+      : "GitHub n'a donné aucune machine à ce passage, sans doute faute de minutes GitHub Actions pour ce dépôt privé "
+        + "(quota du mois épuisé, ou facturation bloquée). Choisissez « Ma machine » dans Réglages, Sessions, puis relancez.";
+  }
+  const step = steps.find((each) => each.conclusion === "failure");
+  return step ? `étape « ${step.name} » en échec (détail dans le job sur GitHub, menu •••).` : "";
+}
+
 /** Relit la session (messages, passage, pull request) et ne redessine que si elle a changé. */
 async function pollSession(force = false) {
   const session = state.session;
@@ -3136,6 +3155,16 @@ async function pollSession(force = false) {
       session.step = "";
     }
   }
+  // Passage en échec : pourquoi, lu une fois par passage dans ses jobs.
+  if (run && run.status === "completed" && run.conclusion === "failure") {
+    if (session.failedRun !== run.id) {
+      session.failedRun = run.id;
+      session.failure = await failureOf(engine, run).catch(() => "");
+    }
+  } else {
+    session.failedRun = null;
+    session.failure = "";
+  }
   try {
     session.pull = session.settings.repo ? await state.github.pull(session.settings.repo, branchOf(issue)) : null;
   } catch {
@@ -3157,7 +3186,7 @@ async function pollSession(force = false) {
     && Date.now() - state.launch.at < 90_000);
   const signature = JSON.stringify([
     issue.updated_at, issue.state, comments.map((comment) => [comment.id, comment.updated_at]),
-    run && [run.id, run.status, run.conclusion], session.step, session.pull && [session.pull.state, session.pull.merged_at],
+    run && [run.id, run.status, run.conclusion], session.step, session.failure, session.pull && [session.pull.state, session.pull.merged_at],
     launchWaiting,
   ]);
   // Fin du passage suivi : le quota gratuit a bougé ; pendant le passage, il se relit chaque minute.

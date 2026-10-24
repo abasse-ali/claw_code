@@ -301,7 +301,7 @@ pub(crate) fn icon(input: &IconInput) -> Result<Value, String> {
             result["matches"] = json!(matches);
         }
     }
-    result["note"] = json!("Lucide icons (ISC license). Paste each svg as is: it takes the text color (currentColor), so color and size it with CSS (color, width, height). Keep aria-hidden on a decorative icon; give `label` when the icon alone carries meaning. Credit the set once in the page source, for example <!-- Icons: Lucide, ISC license -->.");
+    result["note"] = json!("Lucide icons (ISC license). Paste each svg as is: it takes the text color (currentColor), so color and size it with CSS (color, width, height). Keep aria-hidden on a decorative icon; give `label` when the icon alone carries meaning. To reuse them as a sprite (<symbol> and <use>), copy the svg's fill=\"none\" stroke=\"currentColor\" stroke-width stroke-linecap stroke-linejoin onto each <symbol>: without them the lines are drawn as black blobs. Credit the set once in the page source, for example <!-- Icons: Lucide, ISC license -->.");
     Ok(result)
 }
 

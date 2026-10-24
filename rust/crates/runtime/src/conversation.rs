@@ -529,6 +529,8 @@ struct TurnAids {
     open_tasks: Vec<(String, String)>,
     /// Renvois déjà faits pendant ce tour pour une liste laissée ouverte.
     open_task_rounds: u32,
+    /// Données de test laissées dans une page : déjà renvoyé faire le ménage.
+    test_data_sent_back: bool,
     /// Lectures de fichiers de ce tour (empreinte du résultat).
     reads_seen: std::collections::BTreeSet<u64>,
     /// Fichiers lus alors qu'une vue à jour les montrait, déjà signalés.
@@ -2110,6 +2112,7 @@ where
                     .empty_titles_gate(&mut aids, &answer)
                     .or_else(|| self.persistence_gate(&mut aids))
                     .or_else(|| self.open_tasks_gate(&mut aids, &answer))
+                    .or_else(|| self.test_data_gate(&mut aids))
                     .or_else(|| self.verification_gate(&mut aids, &mut prompter))
                     .or_else(|| self.editor_gate(&mut aids))
                     .or_else(|| self.run_scripts_gate(&mut aids))
@@ -4351,6 +4354,39 @@ where
             "La liste de tâches de l'agent n'est pas finie : Claw le renvoie faire les tâches restantes avant de conclure",
         );
         Some(harness::open_tasks_feedback(&aids.open_tasks))
+    }
+
+    /// Données de test laissées dans une page : un fichier modifié pendant le
+    /// tour écrit encore des données d'essai dans le stockage du navigateur
+    /// quand la page se charge. Le modèle est renvoyé les retirer, une fois.
+    fn test_data_gate(&mut self, aids: &mut TurnAids) -> Option<String> {
+        if aids.test_data_sent_back
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::Pitfalls)
+        {
+            return None;
+        }
+        let left: Vec<String> = aids
+            .edited_files
+            .keys()
+            .filter(|path| {
+                std::fs::read_to_string(path)
+                    .is_ok_and(|text| !crate::code_checks::injected_test_data(&text).is_empty())
+            })
+            .map(|path| path.display().to_string())
+            .collect();
+        if left.is_empty() {
+            return None;
+        }
+        aids.test_data_sent_back = true;
+        self.api_client.notify(
+            "Des données de test restent dans le projet : Claw renvoie l'agent les retirer avant de conclure",
+        );
+        Some(format!(
+            "[Claw] Before your final answer: {} still write(s) test or debug data into the browser storage as the page loads. Each time the user opens the app, it would replace their own data. Remove it now (the Screenshot tool's `storage` shows a page with sample data without touching the project), check the page still works, then answer.",
+            left.join(", ")
+        ))
     }
 
     /// Dossier que suit le mode projet.

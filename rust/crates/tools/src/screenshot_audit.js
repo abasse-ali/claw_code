@@ -543,6 +543,35 @@
     }))}. Give each icon a width and height (CSS on its class, or width/height attributes)`);
   }
 
+  // 17 bis. Icône à traits dessinée remplie : une icône de Lucide mise dans un
+  // sprite (<symbol> puis <use>) perd les fill="none" et stroke de son <svg> ;
+  // sans eux, ses traits deviennent des taches noires, et un « + » (deux traits
+  // ouverts) ne se voit plus du tout. Vu le 24 octobre 2026 (session de test de
+  // Claw Web) : toute une appli de budget aux icônes en taches. Une icône à traits
+  // se reconnaît à ses tracés ouverts (sans Z) ou à ses <line>/<polyline> : les
+  // icônes pleines (Font Awesome) ferment leurs tracés.
+  const lineArt = (root) => {
+    const shapes = [...root.querySelectorAll("path, line, polyline, circle, rect, polygon, ellipse")];
+    if (!shapes.length || shapes.some((shape) => (shape.getAttribute("fill") || "").trim() && shape.getAttribute("fill") !== "none")) return false;
+    const open = shapes.filter((shape) => shape.matches("line, polyline")
+      || (shape.matches("path") && !/z\s*$/i.test((shape.getAttribute("d") || "").trim())));
+    return open.length * 2 >= shapes.length;
+  };
+  const blobs = visible.filter((el) => el.tagName.toLowerCase() === "svg").filter((el) => {
+    const rect = box.get(el);
+    if (!rect || rect.width > 64 || rect.height > 64) return false;
+    const use = el.querySelector("use");
+    const ref = use && (use.getAttribute("href") || use.getAttribute("xlink:href") || "");
+    const art = ref && ref.startsWith("#") ? document.getElementById(ref.slice(1)) : el;
+    if (!art || !lineArt(art)) return false;
+    const style = getComputedStyle(use || el);
+    return style.fill !== "none" && (style.stroke === "none" || parseFloat(style.strokeWidth) === 0);
+  });
+  if (blobs.length) {
+    blame(blobs);
+    problems.push(`Line icons drawn as filled shapes (black blobs, or nothing for a "+" made of open lines): ${list(blobs.map((el) => name(el)))}. They lost fill="none" and stroke="currentColor" (a <symbol> sprite drops the attributes of the icon's <svg>): give them back, on each <symbol> or in CSS (.icon { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; })`);
+  }
+
   // 19. Section qui n'affiche que son titre : son contenu manque ou est
   // caché sur cet écran. Vu dans un essai réel : le planning d'un studio,
   // écrit en liste pour le téléphone et masqué sur ordinateur par une media

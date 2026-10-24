@@ -12,6 +12,7 @@ message de suivi le reprend.
 
 import json
 import os
+import re
 import subprocess
 
 from common import (ANSWER, MCP_TOKEN_FILE, NOTES, WORK, GitHubError, api, clean_answer, clean_notice, explain_error,
@@ -62,6 +63,25 @@ def stop_leftover_agent():
 
     if alive():
         stop_tree(pid, alive=alive)
+
+
+# Un utilisateur qui veut se servir du résultat sur son téléphone (« faut que ça marche sur
+# mon tel »).
+PHONE_WORDS = re.compile(r"\b(t[ée]l[ée]phone|t[ée]l|portable|mobile|iphone|android|smartphone)\b", re.I)
+WEB_FILES = re.compile(r"(^|/)(index\.html?|package\.json)$", re.M)
+
+
+def wants_phone_test(requests):
+    """JTest à lancer sans que l'agent l'ait demandé : l'utilisateur parle de son téléphone, le
+    passage a écrit un site ou une appli web, et la session tourne sur le serveur ARM où JTest
+    tourne aussi. Vu le 24 octobre 2026 (session de test, « faut que ça marche sur mon tel ») :
+    l'appli finie, aucun lien pour l'ouvrir sur le téléphone, l'agent arrêté à sa limite de
+    requêtes sans avoir lancé JTest."""
+    if "jtest" in requests or not PHONE_WORDS.search(read("user_words.txt")):
+        return False
+    if os.environ.get("RUNNER_ENVIRONMENT") != "self-hosted" or os.environ.get("RUNNER_ARCH") != "ARM64":
+        return False
+    return bool(WEB_FILES.search(git("diff", "--name-only", f"origin/{BASE}...HEAD", check=False)))
 
 
 def launch_jtest(options):
@@ -138,6 +158,8 @@ def main():
             notes.append(launch_jtest(requests["jtest"]))
         else:
             notes.append("JTest non lancé : le travail de ce passage n'est pas sur GitHub.")
+    elif PUBLISH and finished and pushed and wants_phone_test(requests):
+        notes.append("Vous voulez l'utiliser sur votre téléphone : " + launch_jtest(None))
 
     if finished:
         text = "\n\n".join(part for part in (result, asked) if part)

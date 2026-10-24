@@ -191,6 +191,26 @@ class MemoryTest(unittest.TestCase):
         self.assertIn("- Le serveur de dev écoute sur le port 5173.", text)
         self.assertEqual(len(memory.parse(text)["requests"]), 2)
 
+    def test_what_only_names_files_absent_from_the_checkout_is_not_shown(self):
+        # Une branche vide du dépôt d'un script : ses tests et ses demandes n'y sont pas.
+        folder = Path(tempfile.mkdtemp())
+        (folder / "index.html").write_text("<h1>Budget</h1>", encoding="utf-8")
+        data = memory.empty()
+        data["errors"] = [{"cmd": "python3 -m pytest tests/test_cdiscount_client.py", "error": "1 failed", "n": 1},
+                          {"cmd": "npm test", "error": "no test", "n": 1}]
+        data["worked"] = [{"cmd": "python3 scraper.py --dry-run", "n": 2},
+                          {"cmd": "python3 -m http.server 8080", "n": 1},
+                          {"cmd": "node --check app.js && open https://ex.fr/a.html", "n": 1}]
+        data["requests"] = [{"text": "Script Amazon", "files": ["scraper.py", "amazon_client.py"], "session": 1},
+                            {"text": "Page budget", "files": ["index.html"], "session": 2},
+                            {"text": "Une question", "session": 3}]
+        memory.install(data, folder / ".claw")
+        text = (folder / ".claw" / "memory.md").read_text(encoding="utf-8")
+        for absent in ("test_cdiscount_client", "scraper.py", "Script Amazon", "app.js"):
+            self.assertNotIn(absent, text)
+        for kept in ("npm test", "http.server 8080", "Page budget", "Une question"):
+            self.assertIn(kept, text)
+
     def test_a_memory_changed_meanwhile_by_another_session_is_merged(self):
         store = FakeStore(conflict=True)
         saved = memory.save("t", "o/claw-sessions", "o/site",

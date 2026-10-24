@@ -358,6 +358,9 @@ def main():
     # Les mots de l'utilisateur d'abord : Claw ne décide le mode projet que sur ce qui
     # précède la première ligne `[Claw]`.
     request, history, images, processed, retry = conversation(issue, notes)
+    # Les mots de l'utilisateur seuls (sans les notes de Claw) : publish.py y cherche s'il veut
+    # essayer le résultat sur son téléphone.
+    (WORK / "user_words.txt").write_text(request.split("\n\n[Claw]")[0], encoding="utf-8")
     request += bare_continue_note(request, history, retry)
     # Pour la réponse : jusqu'où elle répond (les messages arrivés pendant le passage auront
     # le leur).
@@ -424,7 +427,11 @@ def main():
         "A local address (localhost, 127.0.0.1, 0.0.0.0) only exists on this machine, which stops "
         "with the task: never give it to the user to open. To show the site, give its GitHub Pages "
         "address from the GitHub state above, publish it with `claw-github pages`, or run it on Claw's server "
-        "for the user's phone with JTest (`mcp__claw-remote__jtest`, or `claw-github jtest`)."
+        "for the user's phone with JTest (`mcp__claw-remote__jtest`, or `claw-github jtest`). "
+        "Write it for the person who asked, in their words: when they wrote in everyday language "
+        "(no technical terms), say what they can now do and how, step by step, without code names "
+        "(files, CSS classes, functions, versions) unless they asked for them; what you could not "
+        "check, say it plainly too."
     )
     (WORK / "prompt.txt").write_text(request, encoding="utf-8")
     hand_token_to_mcp()
