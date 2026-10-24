@@ -2914,9 +2914,7 @@ pub fn announced_work(answer: &str) -> Option<String> {
         .map(str::trim)
         .filter(|sentence| !sentence.is_empty())
         .find(|sentence| {
-            let lower = sentence
-                .trim_start_matches(|ch: char| matches!(ch, '-' | '*' | ' '))
-                .to_lowercase();
+            let lower = sentence.trim_start_matches(['-', '*', ' ']).to_lowercase();
             ABOUT_TO_WORK
                 .iter()
                 .any(|phrase| lower.starts_with(phrase) || lower.contains(&format!(", {phrase}")))

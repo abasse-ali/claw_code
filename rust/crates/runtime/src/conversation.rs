@@ -8568,7 +8568,9 @@ mod tests {
         let (path, output) = written_file("reprise");
         let (mut runtime, observed, _) = aided_runtime_with(
             vec![
-                text_step("Je m'y mets."),
+                // Une annonce sans fichier écrit serait renvoyée au travail
+                // (`announced_work_gate`) : le premier tour finit sur une question.
+                text_step("Une question avant de commencer : quel format d'image ?"),
                 tool_step("write_file", r#"{"path":"total.py","content":"x"}"#),
                 text_step("Fait : l'onglet Depuis une URL est en place."),
                 text_step("Chaque exigence est couverte."),
