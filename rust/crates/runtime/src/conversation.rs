@@ -525,6 +525,10 @@ struct TurnAids {
     batch_notes: u32,
     /// Remarques déjà faites pendant ce tour pour une liste de tâches envoyée seule.
     todo_alone_notes: u32,
+    /// Tâches pas finies de la dernière liste écrite pendant ce tour.
+    open_tasks: Vec<(String, String)>,
+    /// Renvois déjà faits pendant ce tour pour une liste laissée ouverte.
+    open_task_rounds: u32,
     /// Lectures de fichiers de ce tour (empreinte du résultat).
     reads_seen: std::collections::BTreeSet<u64>,
     /// Fichiers lus alors qu'une vue à jour les montrait, déjà signalés.
@@ -2105,6 +2109,7 @@ where
                 let feedback = self
                     .empty_titles_gate(&mut aids, &answer)
                     .or_else(|| self.persistence_gate(&mut aids))
+                    .or_else(|| self.open_tasks_gate(&mut aids, &answer))
                     .or_else(|| self.verification_gate(&mut aids, &mut prompter))
                     .or_else(|| self.editor_gate(&mut aids))
                     .or_else(|| self.run_scripts_gate(&mut aids))
@@ -2536,6 +2541,11 @@ where
         // Un seul appel par réponse (observations à la suite, liste de tâches
         // seule) : ce qui est déjà prévu se regroupe.
         notes.extend(lone_call_note(tool_name, input, &output, is_error, aids));
+        if tool_name == "TodoWrite" && !is_error {
+            if let Some(open) = harness::open_todos(&output) {
+                aids.open_tasks = open;
+            }
+        }
         if tool_name == "read_file" && !is_error {
             notes.extend(self.repeated_read_note(&output, aids));
             notes.extend(self.viewed_read_note(&output, aids));
@@ -4315,6 +4325,32 @@ where
             "Les derniers essais ont échoué : Claw demande à l'agent de chercher une autre voie avant de conclure",
         );
         Some(harness::persistence_feedback(aids.failure_streak))
+    }
+
+    /// Liste de tâches laissée ouverte : le modèle conclut alors que la
+    /// liste écrite pendant le tour (`TodoWrite`) garde des tâches pas faites,
+    /// que l'utilisateur voit inachevées sous la réponse. Il est renvoyé les
+    /// faire, ou dire pourquoi et mettre la liste à jour, deux fois au plus
+    /// par tour. Une réponse qui pose ses questions attend l'utilisateur, et
+    /// la liste avec elle. Vu le 24 octobre 2026 dans Claw Web : réponse
+    /// finale sous « Relancer tous les tests » en cours et « Commiter les
+    /// changements » à faire.
+    fn open_tasks_gate(&mut self, aids: &mut TurnAids, answer: &str) -> Option<String> {
+        if aids.open_tasks.is_empty()
+            || aids.open_task_rounds >= harness::MAX_OPEN_TASK_ROUNDS
+            || aids.questions_deferred
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::OpenTasks)
+            || harness::ends_with_questions(answer)
+        {
+            return None;
+        }
+        aids.open_task_rounds += 1;
+        self.api_client.notify(
+            "La liste de tâches de l'agent n'est pas finie : Claw le renvoie faire les tâches restantes avant de conclure",
+        );
+        Some(harness::open_tasks_feedback(&aids.open_tasks))
     }
 
     /// Dossier que suit le mode projet.
@@ -9597,6 +9633,68 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn a_final_answer_with_open_tasks_is_sent_back_to_finish_them() {
+        let _serial = crate::test_serial();
+        // Vu le 24 octobre 2026 dans Claw Web : réponse finale sous une liste
+        // à 2/4, « Relancer tous les tests » en cours, « Commiter » à faire.
+        let open = r#"{"oldTodos":[],"newTodos":[{"content":"Corriger le bug","activeForm":"a","status":"completed"},{"content":"Relancer tous les tests","activeForm":"b","status":"in_progress"},{"content":"Commiter les changements","activeForm":"c","status":"pending"}]}"#;
+        let done = r#"{"oldTodos":[],"newTodos":[{"content":"Corriger le bug","activeForm":"a","status":"completed"},{"content":"Relancer tous les tests","activeForm":"b","status":"completed"},{"content":"Commiter les changements","activeForm":"c","status":"completed"}]}"#;
+        let todo = |id: &str| AssistantEvent::ToolUse {
+            id: id.to_string(),
+            name: "TodoWrite".to_string(),
+            input: r#"{"todos":[]}"#.to_string(),
+        };
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                vec![
+                    todo("liste-1"),
+                    AssistantEvent::ToolUse {
+                        id: "lecture".to_string(),
+                        name: "read_file".to_string(),
+                        input: r#"{"path":"a.py"}"#.to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ],
+                text_step("Le bug est corrigé."),
+                vec![
+                    todo("liste-2"),
+                    AssistantEvent::ToolUse {
+                        id: "tests".to_string(),
+                        name: "bash".to_string(),
+                        input: r#"{"command":"python -m pytest"}"#.to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ],
+                text_step("Le bug est corrigé, les tests passent et c'est commité."),
+            ],
+            vec![PASSING],
+        );
+        let mut outputs = std::collections::VecDeque::from(vec![open, done]);
+        runtime.tool_executor = std::mem::take(&mut runtime.tool_executor)
+            .register("TodoWrite", move |_| {
+                Ok(outputs.pop_front().unwrap_or(done).to_string())
+            })
+            .register("read_file", |_| Ok("print(1)".to_string()));
+        let summary = runtime.run_turn("corrige le bug", None).expect("tour");
+        let observed = observed.borrow();
+        // La première conclusion est renvoyée avec les deux tâches ouvertes ;
+        // la liste finie, la seconde est la réponse (puis sa mise au propre,
+        // comme après tout renvoi).
+        assert_eq!(observed.requests.len(), 5);
+        let sent_back = &observed.requests[2];
+        assert!(sent_back.contains("2 unfinished task(s)"));
+        assert!(sent_back.contains("- Relancer tous les tests (in progress)"));
+        assert!(sent_back.contains("- Commiter les changements (not started)"));
+        assert!(!sent_back.contains("- Corriger le bug"));
+        assert_eq!(
+            observed.requests[4].matches("unfinished task(s)").count(),
+            1
+        );
+        let last = super::message_text(summary.assistant_messages.last().expect("réponse"));
+        assert!(last.contains("c'est commité"));
     }
 
     #[test]

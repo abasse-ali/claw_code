@@ -27,6 +27,7 @@ const ICON = {
   branch: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="7" r="2"/><path d="M6 7v10M18 9c0 5-6 4-12 8"/></svg>',
   model: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2.5v3.5M15 2.5v3.5M9 18v3.5M15 18v3.5M2.5 9H6M2.5 15H6M18 9h3.5M18 15h3.5"/></svg>',
   send: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5"/></svg>',
+  down: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5.5 12.5 12 19l6.5-6.5"/></svg>',
   plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
   close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>',
   external: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>',
@@ -2582,7 +2583,9 @@ function renderDock() {
   const session = state.session;
   const todos = session ? latestTodos(session) : null;
   const open = session ? session.openQuestions : null;
-  const signature = JSON.stringify([session && session.number, todos, open && open.id]);
+  // Plus aucun passage ne travaille : une tâche « en cours » ne l'est plus.
+  const live = Boolean(session && session.live);
+  const signature = JSON.stringify([session && session.number, todos, open && open.id, live]);
   if (dock.dataset.signature === signature) return;
   dock.dataset.signature = signature;
   if (!open || !state.dockQuestions || state.dockQuestions.id !== open.id) {
@@ -2592,21 +2595,25 @@ function renderDock() {
   if (todos) {
     const done = todos.filter(([status]) => status === "completed").length;
     const current = todos.find(([status]) => status === "in_progress") || todos.find(([status]) => status !== "completed");
+    const left = todos.length - done;
+    const summary = !current ? "Toutes terminées"
+      : live ? current[1]
+        : `Arrêtée : ${left} tâche${left > 1 ? "s" : ""} pas faite${left > 1 ? "s" : ""}`;
     let unfolded = false;
     try {
       unfolded = localStorage.getItem(DOCK_TASKS_KEY) === "open";
     } catch {
       unfolded = false;
     }
-    parts.push(`<details class="dock-card dock-tasks"${unfolded ? " open" : ""}>
+    parts.push(`<details class="dock-card dock-tasks${current && !live ? " stopped" : ""}"${unfolded ? " open" : ""}>
       <summary>
         <span class="dock-icon">${ICON.tasks}</span>
         <span class="dock-title"><strong>Tâches</strong><span class="dock-count">${done}/${todos.length}</span></span>
-        <span class="dock-current">${escapeHtml(current ? current[1] : "Toutes terminées")}</span>
+        <span class="dock-current">${escapeHtml(summary)}</span>
         <span class="dock-chevron">${ICON.chevron}</span>
       </summary>
       <ul class="dock-todos">${todos.map(([status, text]) => `
-        <li class="${status === "completed" ? "done" : status === "in_progress" ? "doing" : ""}">
+        <li class="${status === "completed" ? "done" : status === "in_progress" && live ? "doing" : ""}">
           <span class="box">${status === "completed" ? ICON.check : ""}</span><span>${escapeHtml(text)}</span>
         </li>`).join("")}</ul>
     </details>`);
@@ -2759,6 +2766,8 @@ function messageHtml(comment, isLastProgress, answer = "") {
     const events = run ? journalOf(run) : [];
     const head = body.split("\n").find((line) => line.startsWith("**Claw")) || "";
     const kind = runKind(head);
+    // Passage qui travaille encore : sa durée avance à chaque seconde.
+    const ticking = kind === "running" && isLastProgress && Boolean(state.session && state.session.live);
     if (events.length) {
       // « · 161 action(s) » : le compte est déjà dans la pastille du journal.
       // Durée insécable : « 12 min 05 s » ne se coupe pas.
@@ -2769,12 +2778,42 @@ function messageHtml(comment, isLastProgress, answer = "") {
       const key = `run${run}`;
       if (!state.revealed.has(key) || !isLastProgress) state.revealed.set(key, events.length);
       const shown = Math.min(state.revealed.get(key), events.length);
-      return `<div class="run-card ${kind}">${transcriptHtml(events, { key, live: isLastProgress, answer, title, kind, shown })}</div>`;
+      const clocked = ticking ? liveClock(title, comment) : title;
+      return `<div class="run-card ${kind}">${transcriptHtml(events, { key, live: isLastProgress, answer, title: clocked, kind, shown })}</div>`;
     }
-    return `<div class="progress-card ${kind}${isLastProgress ? "" : " old"}">${renderMarkdown(withoutCallMarkup(body))}</div>`;
+    const card = renderMarkdown(withoutCallMarkup(body));
+    return `<div class="progress-card ${kind}${isLastProgress ? "" : " old"}">${ticking ? liveClock(card, comment) : card}</div>`;
   }
   if (body.includes(ANSWER)) return answerHtml(body, comment.id);
   return userMessageHtml(comment.user ? comment.user.login : "", body);
+}
+
+/** Durée lisible, comme celle du moteur : « 45 s », « 3 min 05 s » (insécable). */
+const clockText = (seconds) => (seconds >= 60
+  ? `${Math.floor(seconds / 60)}\u00a0min\u00a0${String(seconds % 60).padStart(2, "0")}\u00a0s`
+  : `${seconds}\u00a0s`);
+
+/** « depuis 3 min 05 s » d'un passage en cours, qui avance ensuite à chaque seconde : le
+ * moteur ne réécrit sa progression que toutes les 20 à 30 s, et la durée restait figée
+ * entre deux (retour du 24 octobre 2026). Le début du passage se déduit de la durée écrite
+ * et de l'heure de cette écriture (la dernière modification du commentaire). */
+function liveClock(html, comment) {
+  return html.replace(/depuis (?:(\d+)[\s\u00a0]min[\s\u00a0](\d+)|(\d+))[\s\u00a0]s\b/, (match, minutes, seconds, alone) => {
+    const elapsed = alone !== undefined ? Number(alone) : Number(minutes) * 60 + Number(seconds);
+    const since = Date.parse(comment.updated_at || comment.created_at) - elapsed * 1000;
+    if (!Number.isFinite(since)) return match;
+    const now = Math.max(elapsed, Math.floor((Date.now() - since) / 1000));
+    return `depuis <span class="clock" data-since="${since}">${clockText(now)}</span>`;
+  });
+}
+
+/** Les durées des passages en cours, à la seconde (rien quand l'appli est en arrière-plan). */
+function tickClocks() {
+  if (document.hidden) return;
+  for (const clock of document.querySelectorAll(".clock[data-since]")) {
+    const text = clockText(Math.max(0, Math.floor((Date.now() - Number(clock.dataset.since)) / 1000)));
+    if (clock.textContent !== text) clock.textContent = text;
+  }
 }
 
 /** Étapes du moteur avant le travail de Claw, en clair. */
@@ -2839,6 +2878,7 @@ function renderSessionView() {
   const talk = comments.filter((comment) => !(comment.body || "").startsWith(JTEST_MARK));
   const answered = talk.length && (talk[talk.length - 1].body || "").includes(ANSWER);
   const active = waiting || (status && (status.key === "queued" || status.key === "running"));
+  session.live = Boolean(active);
   const step = session.step ? ` · ${escapeHtml(session.step)}` : "";
   const pull = session.pull;
   const pullBadge = pull ? (pull.merged_at ? "fusionnée" : pull.state === "open" ? "ouverte" : "fermée") : "";
@@ -4096,6 +4136,38 @@ async function announceMove(engine, reachable) {
   }
 }
 
+/** Flèche « Revenir en bas » d'une session, au-dessus de la zone de saisie, quand la fin de
+ * la discussion n'est plus à l'écran (comme dans l'appli Claude ; demandée le 24 octobre
+ * 2026). */
+function watchBottomButton() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "to-bottom";
+  button.setAttribute("aria-label", "Revenir en bas");
+  button.innerHTML = ICON.down;
+  button.hidden = true;
+  document.body.append(button);
+  button.addEventListener("click", () => window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }));
+  let queued = false;
+  const update = () => {
+    queued = false;
+    const composer = $("#composer");
+    const far = document.body.scrollHeight - (window.innerHeight + window.scrollY) > 320;
+    button.hidden = !(far && state.session && composer && !composer.hidden
+      && !document.documentElement.classList.contains("scroll-locked"));
+  };
+  const later = () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(update);
+  };
+  window.addEventListener("scroll", later, { passive: true });
+  window.addEventListener("resize", later);
+  window.addEventListener("hashchange", later);
+  if ("ResizeObserver" in window) new ResizeObserver(later).observe($("#view"));
+  later();
+}
+
 /** Fenêtre ouverte (feuille de choix, tiroir des sessions) : la page derrière reste figée.
  * Sur iPhone, `overflow: hidden` ne suffit pas (le défilement passait au fond, retour du
  * 23 octobre 2026) : la page est fixée à sa position, puis rendue à la même place. */
@@ -4135,6 +4207,8 @@ async function boot() {
   window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", applyTheme);
   blockZoom();
   watchComposer();
+  watchBottomButton();
+  setInterval(tickClocks, 1000);
   setupDrawerSelection();
   $("#menu").innerHTML = ICON.menu;
   $("#settings-button").innerHTML = ICON.gear;

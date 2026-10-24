@@ -342,6 +342,13 @@ pre[data-lang]::before {
 }
 hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
 .table { overflow-x: auto; }
+/* Une colonne ne descend jamais sous son mot le plus long : « overflow-wrap: anywhere » des
+   messages la réduisait à une lettre par ligne sur iPhone (« Ch / ec / kli / st », retour
+   du 24 octobre 2026). Trop large pour l'écran, le tableau défile de côté. */
+.table th, .table td { overflow-wrap: normal; word-break: normal; }
+/* Le code et les adresses, eux, se coupent où il faut : un long nom de fonction ne fait pas
+   déborder le tableau. */
+.table td code, .table td a { overflow-wrap: anywhere; }
 table { border-collapse: collapse; font-size: .9rem; }
 th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
 
@@ -915,12 +922,23 @@ html.scroll-locked, html.scroll-locked body { overflow: hidden; overscroll-behav
   box-shadow: 0 6px 24px var(--shadow); font-size: .92rem;
 }
 .toast.error { border-color: var(--error); }
+/* Flèche « Revenir en bas » : au-dessus de la zone de saisie (et de son bloc de tâches). */
+.to-bottom {
+  position: fixed; left: 50%; bottom: calc(var(--composer-space, 150px) + 14px); transform: translateX(-50%); z-index: 5;
+  display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border-radius: 50%;
+  border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+  box-shadow: 0 4px 16px var(--shadow); cursor: pointer;
+}
+.to-bottom svg { width: 20px; height: 20px; stroke-width: 2; }
+.to-bottom[hidden] { display: none; }
 .toast[hidden] { display: none; }
 
 @media (max-width: 520px) {
   .home { padding-top: 6vh; }
   .greeting { font-size: 1.35rem; margin-bottom: 28px; }
   .run-actions { margin-left: 0; }
+  .answer table { font-size: .84rem; }
+  .answer th, .answer td { padding: 6px 8px; }
 }
 
 /* Étapes d'un passage en cours : arrivées par paquets avec le journal, montrées une par une. */
@@ -959,6 +977,8 @@ html.scroll-locked, html.scroll-locked body { overflow: hidden; overscroll-behav
 .dock-todos li.done .box { border-color: var(--ok); background: var(--ok); color: #fff; }
 .dock-todos li.doing .box { border-color: var(--accent); }
 .dock-todos li.doing { font-weight: 600; }
+/* Plus aucun passage ne travaille et la liste n'est pas finie : elle le dit. */
+.dock-tasks.stopped .dock-current { color: var(--warn); }
 .dock-questions { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px 12px; }
 .dock-head { display: flex; align-items: center; gap: 8px; font-size: .88rem; min-width: 0; }
 .dock-head strong { flex: 1; min-width: 0; }
