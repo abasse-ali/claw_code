@@ -1,0 +1,27 @@
+name: Limite de sortie de NVIDIA
+
+# Quelles valeurs de max_tokens le service de NVIDIA accepte pour un modèle, et si un long appel
+# d'outil arrive entier (rust/scripts/image-check/limit_probe.py). La clé reste dans
+# l'environnement : jamais écrite, et GitHub la masque dans le journal.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["sonde-*"]
+    paths:
+      - "rust/scripts/image-check/limit_probe.py"
+      - ".github/workflows/limit-probe.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Sonde
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: python3 rust/scripts/image-check/limit_probe.py nvidia/nemotron-3-ultra-550b-a55b 16384 32768 65536
