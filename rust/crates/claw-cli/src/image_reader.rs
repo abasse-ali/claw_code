@@ -17,7 +17,7 @@ const IMAGE_NOT_SENT: &str =
 
 const READER_SYSTEM: &str = "You describe images for a software engineering assistant that cannot see them: it works only from your words, as if it had seen the image itself. Be exact, exhaustive and concrete, and never guess at what is not visible.";
 
-const READER_PROMPT: &str = "Describe this image for an AI assistant that cannot see it. It will work only from your text, so it must be able to answer any question about the image, and even redraw it, from your description alone. Be exhaustive, exact and concrete. Never guess: write \"unclear:\" before anything you cannot read or see with certainty.\n\nWrite these sections, in this order, with these headings:\n1. KIND: what the image is (a screenshot of a web page, an app, an editor or a terminal; a photo; a diagram; a chart; a design mockup; a document) and what it is for; its orientation and approximate proportions (for example \"portrait phone screen, about 1:2\").\n2. LAYOUT: the regions from top to bottom and from left to right (top bar, sidebar, main area, footer, dialogs, overlays), with the approximate position and size of each as a share of the image (for example \"top bar: full width, top 7%\"); the theme (dark or light) and the main background colors.\n3. ELEMENTS: every visible element, in reading order, one line each: its kind (heading, paragraph, button, link, tab, input, checkbox, toggle, icon, image, badge, table, list item, code block, menu, toast, scrollbar...), its exact text in quotes, its position (region; left, center or right; top, middle or bottom), its colors (text and background, named with an approximate hex code), its relative size and weight, and its state (selected, active, disabled, checked, focused, hovered, error, loading, empty). Describe icons by their shape and likely meaning. Give alignment, spacing and grouping when they matter.\n4. TEXT: every piece of text in the image, copied exactly (spelling, case, punctuation, numbers, units), including small, faint, cut-off and placeholder text, keeping its line breaks. Code, logs and terminal output go in code blocks with their exact indentation.\n5. DATA: for a table, every row and column; for a chart, its type, its axes with units and ranges, every series and every value you can read, its legend; for a diagram, every node and every arrow with its label and direction. Write \"none\" when there is no such content.\n6. ISSUES: anything that looks wrong, broken or unfinished: error messages, elements that overlap or are cut off, text that does not fit, misalignment, blurry or pixelated areas, empty or missing content, unreadable colors, elements outside the screen. Write \"none seen\" if there are none.\n\nWrite plain text, without any preamble.\nEnd with one last line, exactly one of these two:\nVERDICT: DEFECT - <what looks broken, stuck, empty or wrong, in a few words>\nwhen the image shows an application, a web page, a terminal or a document with an error, a failure, an empty or stuck area or a wrong result;\nVERDICT: OK\notherwise (a design, a mockup, a diagram, or a screen that looks right).";
+const READER_PROMPT: &str = "Describe this image for an AI assistant that cannot see it. It will work only from your text, so it must be able to answer any question about the image, and even redraw it, from your description alone. Be exhaustive, exact and concrete. Never guess: write \"unclear:\" before anything you cannot read or see with certainty.\n\nWrite these sections, in this order, with these headings:\n1. KIND: what the image is (a screenshot of a web page, an app, an editor or a terminal; a photo; a diagram; a chart; a design mockup; a document) and what it is for; its orientation and approximate proportions (for example \"portrait phone screen, about 1:2\").\n2. LAYOUT: the regions from top to bottom and from left to right (top bar, sidebar, main area, footer, dialogs, overlays), with the approximate position and size of each as a share of the image (for example \"top bar: full width, top 7%\"); the theme (dark or light) and the main background colors.\n3. ELEMENTS: every visible element, in reading order, one line each: its kind (heading, paragraph, button, link, tab, input, checkbox, toggle, icon, image, badge, table, list item, code block, menu, toast, scrollbar...), its exact text in quotes, its position (region; left, center or right; top, middle or bottom), its colors (text and background, named with an approximate hex code), its relative size and weight, and its state (selected, active, disabled, checked, focused, hovered, error, loading, empty). Describe icons by their shape and likely meaning. Give alignment, spacing and grouping when they matter.\n4. TEXT: every piece of text in the image, copied exactly (spelling, case, punctuation, numbers, units), including small, faint, cut-off and placeholder text, keeping its line breaks. Code, logs and terminal output go in code blocks with their exact indentation.\n5. DATA: for a table, every row and column; for a chart, its type, its axes with units and ranges, every series and every value you can read, its legend; for a diagram, every node and every arrow with its label and direction. Write \"none\" when there is no such content.\n6. ISSUES: anything that looks wrong, broken or unfinished: error messages, elements that overlap or are cut off, text that does not fit, misalignment, blurry or pixelated areas, empty or missing content, unreadable colors, elements outside the screen. Check each of these one by one and report every one you see, even if the screen otherwise looks tidy: icons drawn as solid black or filled blobs instead of clear line pictograms, or a button with no visible icon or text; progress bars, gauges or charts that do not match the numbers next to them (an empty bar beside a non-zero amount, a full bar at 0); words split in the middle across two lines (a word broken into two pieces on two lines); text cut off, or hidden under another element; a floating button, bar or banner covering content; elements overlapping or misaligned; dates, numbers or currencies in a format foreign to the page's language (a month-first date or a $ price on a page written in French); placeholder, sample, debug or test content shown to the user; a style that clashes with the rest (a monospace or all-caps label among normal text, a browser-default control); a label that says something different from what the value is (a total labelled as something it is not). One line per problem, each with where it is. Write \"none seen\" if there are none.\n\nWrite plain text, without any preamble.\nEnd with one last line, exactly one of these two:\nVERDICT: DEFECT - <what looks broken, stuck, empty or wrong, in a few words>\nwhen the image shows an application, a web page, a terminal or a document with an error, a failure, an empty or stuck area, a wrong result, or any problem listed under ISSUES;\nVERDICT: OK\notherwise (a design, a mockup, a diagram, or a screen that looks right).";
 
 /// Début de la dernière ligne d'une description : le verdict du lecteur.
 const VERDICT: &str = "VERDICT:";
@@ -30,7 +30,7 @@ const LOOK_TOKENS: u32 = 3_000;
 
 /// Second regard : un autre lecteur compare la description à l'image, la
 /// corrige et la complète.
-const CHECK_PROMPT: &str = "Below is a description of this image, written by another model for an AI assistant that cannot see it. Look at the image carefully and check the description against it, section by section and element by element: missing elements, text not copied exactly, wrong positions, colors, sizes or states, invented details, issues not reported.\nThen write the complete corrected description: every section in full (KIND, LAYOUT, ELEMENTS, TEXT, DATA, ISSUES), keeping what was right, fixing every error and adding everything that was missing. Write only the corrected description, not a list of changes, and end with the VERDICT line, as the original does.";
+const CHECK_PROMPT: &str = "Below is a description of this image, written by another model for an AI assistant that cannot see it. Look at the image carefully and check the description against it, section by section and element by element: missing elements, text not copied exactly, wrong positions, colors, sizes or states, invented details, issues not reported. Look for problems again yourself, as if the first description had found none: Check each of these one by one and report every one you see, even if the screen otherwise looks tidy: icons drawn as solid black or filled blobs instead of clear line pictograms, or a button with no visible icon or text; progress bars, gauges or charts that do not match the numbers next to them (an empty bar beside a non-zero amount, a full bar at 0); words split in the middle across two lines (a word broken into two pieces on two lines); text cut off, or hidden under another element; a floating button, bar or banner covering content; elements overlapping or misaligned; dates, numbers or currencies in a format foreign to the page's language (a month-first date or a $ price on a page written in French); placeholder, sample, debug or test content shown to the user; a style that clashes with the rest (a monospace or all-caps label among normal text, a browser-default control); a label that says something different from what the value is (a total labelled as something it is not). Add every problem it missed to ISSUES; the VERDICT is DEFECT whenever ISSUES lists at least one.\nThen write the complete corrected description: every section in full (KIND, LAYOUT, ELEMENTS, TEXT, DATA, ISSUES), keeping what was right, fixing every error and adding everything that was missing. Write only the corrected description, not a list of changes, and end with the VERDICT line, as the original does.";
 
 /// Question du modèle sur une image (`LookAtImage`).
 const LOOK_PROMPT: &str = "An AI assistant that cannot see this image asks a question about it. Look at the image and answer as precisely as you can, from what is visible only: quote text exactly; give positions (region; left, center or right; top, middle or bottom; approximate share of the image), colors (named with an approximate hex code), sizes and states. If the answer is not visible or not certain, say so plainly instead of guessing.";
@@ -38,7 +38,7 @@ const LOOK_PROMPT: &str = "An AI assistant that cannot see this image asks a que
 /// regard, centrée sur ce que la page montre et ce qui cloche. La description
 /// complète en deux regards prend plusieurs minutes par image : dans une
 /// boucle de mise au point d'une page, ce serait un tour de 25 minutes.
-const QUICK_PROMPT: &str = "Describe this screenshot of a web page for a developer who cannot see it and must fix it from your words.\n1. LAYOUT: the regions from top to bottom (header, hero, sections, footer), their approximate height as a share of the image, background colors (approximate hex), alignment and columns.\n2. CONTENT: every heading, button, link and label, with its exact text; pictures and illustrations, what they show or that they are missing or broken.\n3. LOOK: typefaces as they appear (serif, sans, display, weight), colors, spacing rhythm, what draws the eye first.\n4. ISSUES: everything that looks broken, cut off, overlapping, covered, cramped, misaligned, unstyled (browser-default fields or buttons), empty, generic or unfinished. Write \"none seen\" if nothing.\nPlain text, no preamble. End with one line, exactly one of: VERDICT: DEFECT - <what looks broken, in a few words> or VERDICT: OK";
+const QUICK_PROMPT: &str = "Describe this screenshot of a web page for a developer who cannot see it and must fix it from your words.\n1. LAYOUT: the regions from top to bottom (header, hero, sections, footer), their approximate height as a share of the image, background colors (approximate hex), alignment and columns.\n2. CONTENT: every heading, button, link and label, with its exact text; pictures and illustrations, what they show or that they are missing or broken.\n3. LOOK: typefaces as they appear (serif, sans, display, weight), colors, spacing rhythm, what draws the eye first.\n4. ISSUES: everything that looks broken, cut off, overlapping, covered, cramped, misaligned, unstyled (browser-default fields or buttons), empty, generic or unfinished. Check each of these one by one and report every one you see, even if the screen otherwise looks tidy: icons drawn as solid black or filled blobs instead of clear line pictograms, or a button with no visible icon or text; progress bars, gauges or charts that do not match the numbers next to them (an empty bar beside a non-zero amount, a full bar at 0); words split in the middle across two lines (a word broken into two pieces on two lines); text cut off, or hidden under another element; a floating button, bar or banner covering content; elements overlapping or misaligned; dates, numbers or currencies in a format foreign to the page's language (a month-first date or a $ price on a page written in French); placeholder, sample, debug or test content shown to the user; a style that clashes with the rest (a monospace or all-caps label among normal text, a browser-default control); a label that says something different from what the value is (a total labelled as something it is not). One line per problem, each with where it is. Write \"none seen\" if nothing.\nPlain text, no preamble. End with one line, exactly one of: VERDICT: DEFECT - <the worst problem, in a few words> (whenever ISSUES lists at least one problem) or VERDICT: OK (only when ISSUES is \"none seen\")";
 /// Jetons d'une description rapide. Le raisonnement compte dedans : avec
 /// 3 000, un modèle qui raisonne ne répondait rien (voir `CRITIQUE_TOKENS`).
 const QUICK_TOKENS: u32 = 8_000;
@@ -368,10 +368,64 @@ fn strip_prefix_ignoring_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str
         .map(|_| &text[prefix.len()..])
 }
 
+/// Titre de section d'une description (`6. ISSUES:`, `**ISSUES**`) : son nom en capitales.
+fn section_name(line: &str) -> Option<&str> {
+    let name = line
+        .trim()
+        .trim_start_matches(|ch: char| ch.is_ascii_digit() || matches!(ch, '.' | '#' | '*' | ' '))
+        .split(|ch: char| matches!(ch, ':' | '*'))
+        .next()?
+        .trim();
+    [
+        "KIND", "LAYOUT", "ELEMENTS", "TEXT", "DATA", "ISSUES", "CONTENT", "LOOK",
+    ]
+    .iter()
+    .find(|section| name.eq_ignore_ascii_case(section))
+    .copied()
+}
+
+/// Premier problème de la section ISSUES d'une description, s'il y en a un.
+fn first_issue(body: &str) -> Option<String> {
+    let mut lines = body
+        .lines()
+        .skip_while(|line| section_name(line) != Some("ISSUES"));
+    let heading = lines.next()?;
+    let inline = heading.split_once(':').map_or("", |(_, rest)| rest);
+    std::iter::once(inline)
+        .chain(lines.take_while(|line| section_name(line).is_none()))
+        .map(|line| {
+            line.trim()
+                .trim_start_matches(|ch: char| matches!(ch, '-' | '*' | ' ' | '\u{2022}'))
+                .trim()
+        })
+        .find(|line| {
+            let lower = line.to_ascii_lowercase();
+            !line.is_empty()
+                && !lower.starts_with("none")
+                && !lower.starts_with("no issue")
+                && !lower.starts_with("nothing")
+        })
+        .map(|line| line.chars().take(200).collect())
+}
+
 /// Le défaut que le lecteur a vu (sa dernière ligne, `VERDICT: DEFECT - ...`),
 /// et la description sans sa ligne de verdict. Une description faite avant
-/// les verdicts n'en a pas : aucun défaut connu, texte entier.
+/// les verdicts n'en a pas : aucun défaut connu, texte entier. Un verdict « OK »
+/// écrit sous une section ISSUES qui relève des problèmes ne les efface pas : le
+/// premier devient le défaut (essai du 24 octobre 2026 : des mots coupés en plein
+/// milieu dans un tableau relevés, puis « VERDICT: OK », et le modèle aveugle ne
+/// l'apprenait pas).
 fn split_verdict(text: &str) -> (Option<String>, &str) {
+    let (defect, body) = stated_verdict(text);
+    match defect {
+        Some(line) => (Some(line), body),
+        None if body.len() != text.len() => (first_issue(body), body),
+        None => (None, body),
+    }
+}
+
+/// Le verdict tel que le lecteur l'a écrit.
+fn stated_verdict(text: &str) -> (Option<String>, &str) {
     let trimmed = text.trim_end();
     let (body, last) = match trimmed.rfind('\n') {
         Some(at) => (trimmed[..at].trim_end(), &trimmed[at + 1..]),
@@ -536,7 +590,7 @@ fn has_all_sections(text: &str) -> bool {
 
 /// La ligne de verdict qui termine `text`, s'il en a une.
 fn verdict_line(text: &str) -> Option<&str> {
-    let (_, body) = split_verdict(text);
+    let (_, body) = stated_verdict(text);
     (body.len() != text.len()).then(|| text.trim_end().rsplit('\n').next().unwrap_or("").trim())
 }
 
@@ -1004,6 +1058,25 @@ mod tests {
         );
         // Une maquette, ou une description faite avant les verdicts.
         assert_eq!(split_verdict("A mockup.\nVERDICT: OK"), (None, "A mockup."));
+        assert_eq!(
+            split_verdict("1. KIND: a page.\n6. ISSUES: none seen\nVERDICT: OK").0,
+            None
+        );
+        // Des problèmes relevés, puis « OK » : le premier devient le défaut.
+        assert_eq!(
+            split_verdict(
+                "1. KIND: a phone screen.\n6. ISSUES:\n- \"Chec\" and \"klist\" are split across two lines in the table header.\n- Otherwise, no error messages.\n\nVERDICT: OK"
+            )
+            .0
+            .as_deref(),
+            Some("\"Chec\" and \"klist\" are split across two lines in the table header.")
+        );
+        assert_eq!(
+            split_verdict("LAYOUT: a list.\n**ISSUES**: The bottom row is cut off.\nVERDICT: OK")
+                .0
+                .as_deref(),
+            Some("The bottom row is cut off.")
+        );
         assert_eq!(
             split_verdict("Un terminal.\nAucune erreur."),
             (None, "Un terminal.\nAucune erreur.")

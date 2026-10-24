@@ -17,6 +17,7 @@ on:
     branches: ["lot55-*"]
     paths:
       - "rust/scripts/image-check/**"
+      - "rust/crates/claw-cli/src/image_reader.rs"
       - ".github/workflows/image-check.yml"
 
 permissions:
