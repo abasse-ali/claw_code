@@ -1,0 +1,79 @@
+name: Routines de Claw web
+
+# Programmateur des routines de l'appli web de Claw (outils MCP `create_trigger`, `send_later`,
+# `subscribe_pr_activity`, `watch_url` du serveur claw-remote), appelé toutes les heures par le
+# workflow claw-routines.yml du dépôt des sessions (privé, par exemple abasse-ali/claw-sessions) :
+#
+#   on:
+#     schedule:
+#       - cron: "17 * * * *"
+#     workflow_dispatch:
+#   permissions:
+#     actions: read
+#     contents: write
+#     issues: write
+#   jobs:
+#     routines:
+#       uses: abasse-ali/claw_code/.github/workflows/claw-routines.yml@main
+#       with:
+#         runner: ${{ vars.CLAW_RUNNER }}
+#       secrets: inherit
+#
+# Il déclenche les routines dues, relève l'activité des pull requests suivies et les adresses
+# surveillées, écrit dans les sessions concernées et lance leurs passages (secret
+# CLAW_REPO_TOKEN : le jeton du job ne peut pas lancer de workflow). Toutes les heures : c'est le
+# plus petit intervalle des routines, comme dans Claude Code, et une minute d'Actions par heure
+# au plus (aucune sur « Ma machine » : variable CLAW_RUNNER = claw-pc).
+
+on:
+  workflow_call:
+    secrets:
+      CLAW_REPO_TOKEN:
+        required: false
+    inputs:
+      claw_source:
+        description: Dépôt du code de Claw (scripts du moteur)
+        required: false
+        type: string
+        default: abasse-ali/claw_code
+      claw_ref:
+        description: Branche du code de Claw
+        required: false
+        type: string
+        default: main
+      runner:
+        description: "Machine (vide : une machine de GitHub ; claw-pc : votre serveur ou votre PC)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  actions: read
+  # Routines et suivis rangés sur la branche des fichiers (claw-web-fichiers).
+  contents: write
+  # Messages des routines dans les sessions.
+  issues: write
+
+concurrency:
+  group: claw-routines
+  cancel-in-progress: false
+
+jobs:
+  routines:
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - name: Scripts du moteur
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.claw_source }}
+          ref: ${{ inputs.claw_ref }}
+          token: ${{ secrets.CLAW_REPO_TOKEN || github.token }}
+          path: claw-src
+          sparse-checkout: .github/claw-web
+          persist-credentials: false
+      - name: Routines dues et suivis
+        env:
+          JOB_TOKEN: ${{ github.token }}
+          REPO_TOKEN: ${{ secrets.CLAW_REPO_TOKEN }}
+        run: python3 claw-src/.github/claw-web/routines.py

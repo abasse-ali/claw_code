@@ -180,10 +180,16 @@ jobs:
           REPO_TOKEN: ${{ secrets.CLAW_REPO_TOKEN }}
         run: python3 claw-src/.github/claw-web/setup.py
 
+      # Le jeton du dépôt n'est pas dans cette étape : setup.py le laisse dans un fichier que
+      # run.py lit puis efface avant l'agent, pour les outils MCP du moteur (mcp_server.py).
       - name: Claw au travail
         id: claw
         if: steps.setup.outputs.skip != 'true'
         env:
+          REPO: ${{ inputs.repo }}
+          BASE: ${{ inputs.base }}
+          BRANCH: ${{ steps.setup.outputs.branch }}
+          RUNNER: ${{ inputs.runner }}
           MODEL: ${{ inputs.model }}
           TEAM: ${{ inputs.team }}
           ULTRACODE: ${{ inputs.ultracode }}

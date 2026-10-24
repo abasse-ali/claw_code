@@ -112,7 +112,14 @@ function describe(name, input) {
       const todos = value.todos || [];
       return ["list", "Tâches", `${todos.filter((todo) => todo[0] === "completed").length}/${todos.length} terminées`];
     }
-    default: return ["tool", name, String(value.raw || "").slice(0, 140)];
+    default: {
+      // Outils MCP du moteur : « GitHub : Lire une issue #12 », titre posé par le journal.
+      if (value.title && String(name).startsWith("mcp__")) {
+        const [group, ...rest] = String(value.title).split(" : ");
+        return [group === "GitHub" ? "branch" : group === "Documents" ? "file" : "bot", group, rest.join(" : ")];
+      }
+      return ["tool", name, String(value.raw || "").slice(0, 140)];
+    }
   }
 }
 

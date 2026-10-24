@@ -16,6 +16,8 @@ import time
 import urllib.parse
 import urllib.request
 
+from mcp_server import describe_call
+
 LOG = "<!-- claw-web:log"
 DATA = "<!-- claw-web:data"
 # Taille d'une partie (base64), sous la limite de 65 536 caractères d'un commentaire.
@@ -317,6 +319,11 @@ class Journal:
             return {"kind": excerpt(data.get("kind", ""), 40)}
         if name == "Screenshot":
             return {"target": excerpt(rel(data.get("url") or data.get("path") or ""), 300)}
+        if name.startswith("mcp__"):
+            # Outils MCP du moteur (GitHub, sessions, documents) : leur titre en français.
+            title = describe_call(name, data)
+            if title:
+                return {"title": title, "raw": excerpt(rel(json.dumps(data, ensure_ascii=False)), 600)}
         if name == "AskUserQuestion":
             questions = data.get("questions") if isinstance(data.get("questions"), list) else [data]
             return {"q": [excerpt(question.get("question", ""), 200) for question in questions[:4]
