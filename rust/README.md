@@ -2030,6 +2030,13 @@ conteneurs sont arrêtés à l'interruption, au délai dépassé et à la fin de
 - Testé en CI avec Docker et Podman : `CLAW_TEST_CONTAINER=docker cargo test -p runtime --test
   container_sandbox -- --ignored --test-threads=1`.
 
+**Clés des modèles hors des commandes.** Les commandes que Claw lance pour le modèle (bash,
+PowerShell, tests), avec ou sans bac à sable, ne voient jamais les clés qu'il tient pour parler
+aux modèles et aux moteurs de recherche (`OPENROUTER_API_KEY`, `NVIDIA_API_KEY`,
+`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY`…) : un dépôt piégé qui
+fait lancer `env`, ou un script qui les envoie à un serveur, n'a rien à lire. Un projet qui
+appelle lui-même un de ces fournisseurs : `CLAW_COMMAND_KEYS=1` les laisse passer.
+
 ### Langue des réponses
 
 `"language": "français"` dans la config (par exemple `~/.claw/settings.json`) fixe la langue des

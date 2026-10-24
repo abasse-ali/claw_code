@@ -1497,6 +1497,53 @@ I    1900    1700    1609      44444  ?         197609 21:06:00 /usr/bin/sleep";
     }
 
     #[test]
+    fn commands_never_see_the_model_keys() {
+        let _serial = crate::test_serial();
+        // Un dépôt piégé qui fait lancer `env` ne lit pas la clé du fournisseur.
+        let previous = std::env::var_os("NVIDIA_API_KEY");
+        std::env::set_var("NVIDIA_API_KEY", "nvapi-secret");
+        std::env::set_var("CLAW_ESSAI_VISIBLE", "oui");
+        let read = |command: &str| {
+            execute_bash(foreground(command, Some(5_000)))
+                .expect("la commande bash devrait s'exécuter")
+                .stdout
+        };
+        let hidden = read("printf '[%s][%s]' \"$NVIDIA_API_KEY\" \"$CLAW_ESSAI_VISIBLE\"");
+        std::env::set_var("CLAW_COMMAND_KEYS", "1");
+        let kept = read("printf '[%s]' \"$NVIDIA_API_KEY\"");
+        std::env::remove_var("CLAW_COMMAND_KEYS");
+        std::env::remove_var("CLAW_ESSAI_VISIBLE");
+        match previous {
+            Some(value) => std::env::set_var("NVIDIA_API_KEY", value),
+            None => std::env::remove_var("NVIDIA_API_KEY"),
+        }
+        assert_eq!(hidden, "[][oui]");
+        assert_eq!(kept, "[nvapi-secret]");
+    }
+
+    #[test]
+    fn a_tool_result_never_shows_a_model_key() {
+        let _serial = crate::test_serial();
+        // `cat /proc/$PPID/environ` montrerait la clé que Claw tient.
+        let previous = std::env::var_os("OPENROUTER_API_KEY");
+        std::env::set_var("OPENROUTER_API_KEY", "sk-or-v1-0123456789abcdef");
+        let message = crate::session::ConversationMessage::tool_result(
+            "lecture",
+            "bash",
+            "HOME=/home/a\u{0}OPENROUTER_API_KEY=sk-or-v1-0123456789abcdef\u{0}",
+            false,
+        );
+        match previous {
+            Some(value) => std::env::set_var("OPENROUTER_API_KEY", value),
+            None => std::env::remove_var("OPENROUTER_API_KEY"),
+        }
+        let crate::session::ContentBlock::ToolResult { output, .. } = &message.blocks[0] else {
+            panic!("résultat d'outil attendu");
+        };
+        assert_eq!(output, "HOME=/home/a\u{0}OPENROUTER_API_KEY=***\u{0}");
+    }
+
+    #[test]
     fn executes_simple_command() {
         let output = execute_bash(BashCommandInput {
             command: String::from("printf 'hello'"),

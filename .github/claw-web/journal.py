@@ -16,6 +16,7 @@ import time
 import urllib.parse
 import urllib.request
 
+from common import hide_secrets
 from mcp_server import describe_call
 
 LOG = "<!-- claw-web:log"
@@ -401,8 +402,9 @@ class Journal:
     # --- Parties à publier ---------------------------------------------------------------
 
     def _packed(self, start, end):
-        data = json.dumps({"v": 1, "events": self.events[start:end]}, ensure_ascii=False,
-                          separators=(",", ":")).encode("utf-8")
+        # Compressé, le journal échappe à la relecture du commentaire : ses secrets partent avant.
+        data = hide_secrets(json.dumps({"v": 1, "events": self.events[start:end]}, ensure_ascii=False,
+                                       separators=(",", ":"))).encode("utf-8")
         return base64.b64encode(gzip.compress(data, 9)).decode("ascii")
 
     def bodies(self, run_id):

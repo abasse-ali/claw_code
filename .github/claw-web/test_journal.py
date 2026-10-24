@@ -2,15 +2,19 @@
 les outils de design sont dits en quelques mots, chaque requête au modèle a son heure
 (journal.Journal, run.describe)."""
 
+import base64
+import gzip
 import json
 import os
 import time
 import unittest
+from unittest import mock
 
 os.environ.setdefault("GITHUB_REPOSITORY", "o/claw-sessions")
 os.environ.setdefault("JOB_TOKEN", "t")
 os.environ.setdefault("SESSION", "1")
 
+import common  # noqa: E402
 import journal  # noqa: E402
 import run  # noqa: E402
 from journal import Journal  # noqa: E402
@@ -174,6 +178,32 @@ class JournalDraftsTest(unittest.TestCase):
         log.add(RESULT)
         log.add({"type": "system", "subtype": "answer_superseded"})
         self.assertEqual(self.kinds(log), ["text", "tool"])
+
+
+class SecretsTest(unittest.TestCase):
+    """Ce que l'agent affiche (une commande `env`, un fichier lu) part dans la session sans les
+    secrets du job : GitHub ne les masque que dans les journaux des jobs."""
+
+    SECRET = "nvapi-0123456789abcdef"
+
+    def test_the_journal_and_comments_never_carry_a_job_secret(self):
+        environ = {"NVIDIA_API_KEY": self.SECRET, "REPO_TOKEN": "github_pat_11ABCDEFG0123456789",
+                   "CLAW_MAX_TOKENS": "8000", "HOME": "/home/runner"}
+        with mock.patch.dict(os.environ, environ):
+            log = Journal()
+            log.add(text("reply-1", f"Variables : NVIDIA_API_KEY={self.SECRET}"))
+            body = log.bodies(1)[0][1]
+            packed = body.split("<!-- claw-web:data ", 1)[1].rsplit("-->", 1)[0].strip()
+            data = gzip.decompress(base64.b64decode(packed)).decode("utf-8")
+            self.assertNotIn(self.SECRET, data)
+            self.assertIn("NVIDIA_API_KEY=***", data)
+            self.assertEqual(common.hide_secrets("jeton github_pat_11ABCDEFG0123456789, 8000 jetons, /home/runner"),
+                             "jeton ***, 8000 jetons, /home/runner")
+            sent = []
+            with mock.patch.object(common, "api", lambda *args: sent.append(args) or {"id": 1}):
+                common.post_comment("t", "o/s", 1, f"clé {self.SECRET}")
+                common.edit_comment("t", "o/s", 1, f"clé {self.SECRET}")
+            self.assertEqual([args[3]["body"] for args in sent], ["clé ***", "clé ***"])
 
 
 if __name__ == "__main__":

@@ -310,16 +310,23 @@ tester sur mon iPhone ») : après sa réponse, le lien arrive dans la session.
   Streamlit, site statique, dans la racine ou un dossier `app/`, `web/`, `frontend/`…), installe
   ses dépendances et le lance. Le lien vient d'un tunnel Cloudflare gratuit
   (`https://….trycloudflare.com`) : rien à ouvrir ni à régler chez Oracle.
-- Un programme qui n'est pas un site (Python, Node, Rust…) s'ouvre dans un terminal web : la carte
-  donne l'identifiant et le mot de passe ; le programme se relance d'Entrée quand il se termine.
+- **Réservé à vous.** L'adresse du tunnel est publique, mais elle mène à une porte (sur le
+  serveur) qui ne laisse passer que la clé de cette JTest : une clé aléatoire par lancement,
+  écrite seulement dans la carte de la session, dans le dépôt privé des sessions. Le bouton
+  « Ouvrir sur le téléphone » la porte ; la porte la change en cookie (24 heures au plus, la
+  durée du test) et l'enlève de l'adresse. Sans elle, ou avec l'adresse seule, la page dit
+  « Accès réservé ». La clé n'est jamais montrée à l'agent ni au fournisseur du modèle, et
+  JTest refuse de démarrer si le dépôt des sessions est public.
+- Un programme qui n'est pas un site (Python, Node, Rust…) s'ouvre dans un terminal web, derrière
+  la même porte (son mot de passe, la porte le donne elle-même) ; le programme se relance
+  d'Entrée quand il se termine.
 - La carte JTest de la session : « Ouvrir sur le téléphone », l'heure jusqu'à laquelle il reste en
   ligne (4 heures par défaut, 24 au plus), « Arrêter » (deux appuis), « Relancer ». Un échec dit
   pourquoi, avec le journal de l'installation.
 - Un projet particulier : un fichier `jtest.json` à la racine, par exemple
   `{"command": "npm run dev -- --port {port}", "install": ["npm ci"], "path": "/admin"}`.
-- Au plus trois JTest en ligne à la fois sur le serveur (la plus ancienne s'arrête). Le lien est
-  public mais introuvable sans lui ; ne le partagez pas pour un projet privé. Les programmes lancés
-  n'ont ni jeton ni clé.
+- Au plus trois JTest en ligne à la fois sur le serveur (la plus ancienne s'arrête). Les
+  programmes lancés n'ont ni jeton ni clé.
 
 Il faut le serveur gratuit d'Oracle (« Sessions sur votre machine » ci-dessous) : JTest tourne
 sur l'exécuteur `claw-pc` à processeur ARM, et le site y reste en ligne après le passage.

@@ -210,7 +210,8 @@ impl ConversationMessage {
             blocks: vec![ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.into(),
                 tool_name: tool_name.into(),
-                output: output.into(),
+                // Aucune clé de fournisseur ne part au modèle, quel que soit l'outil.
+                output: crate::bash_tasks::hide_key_values(&output.into()),
                 is_error,
             }],
             usage: None,

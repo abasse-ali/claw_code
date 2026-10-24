@@ -1,11 +1,16 @@
-"""Essais de JTest (jtest.py) : détection du projet, lancement réel d'un site local avec un faux
-tunnel, arrêt, commentaire de la session, outil `jtest` et demande après la poussée.
+"""Essais de JTest (jtest.py, jtest_gate.py) : détection du projet, lancement réel d'un site local
+avec un faux tunnel derrière la porte à clé, arrêt, commentaire de la session, outil `jtest` et
+demande après la poussée.
 
     cd .github/claw-web && python -m unittest test_jtest
 """
 
+import asyncio
+import http.client
 import json
 import os
+import socket
+import threading
 import tempfile
 import time
 import unittest
@@ -17,6 +22,7 @@ from unittest import mock
 import claw_github
 import common
 import jtest
+import jtest_gate
 import mcp_remote
 import on_github
 from fakes import FakeGitHub
@@ -90,16 +96,19 @@ class DetectTest(unittest.TestCase):
 class CommentTest(unittest.TestCase):
     def test_states_and_parsing(self):
         online = {"state": "online", "url": "https://a-b.trycloudflare.com/", "label": "Vite", "until_text": "13:00 UTC",
-                  "branch": "claw/session-3"}
+                  "branch": "claw/session-3", "key": "k" * 43}
         body = jtest.comment_body(online)
-        self.assertIn("[ouvrir sur le téléphone](https://a-b.trycloudflare.com/)", body)
+        # La clé n'est que dans les données de l'appli (commentaire HTML), pas dans le texte.
+        visible = jtest.COMMENT.sub("", body)
+        self.assertIn("accès réservé : ouvrez-le depuis Claw Web", visible)
+        self.assertNotIn("k" * 43, visible)
         self.assertEqual(jtest.parse_comment(body), online)
         self.assertEqual(common.kind_of(body), "engine")
         failed = jtest.comment_body({"state": "failed", "reason": "l'installation a échoué.", "log": "npm ERR! x"})
         self.assertIn("n'a pas pu démarrer : l'installation a échoué.", failed)
         self.assertIn("npm ERR! x", failed)
-        terminal = jtest.comment_body({**online, "user": "jtest", "password": "p4ss"})
-        self.assertIn("mot de passe `p4ss`", terminal)
+        self.assertEqual(jtest.public_data({**online, "user": "jtest", "password": "p4ss"}),
+                         {key: value for key, value in online.items() if key != "key"})
 
 
 class StartStopTest(unittest.TestCase):
@@ -109,7 +118,8 @@ class StartStopTest(unittest.TestCase):
         home = Path(tempfile.mkdtemp())
         site = project({"index.html": "<h1>JTest</h1>"})
         fake = home / "fake-cloudflared"
-        fake.write_text("#!/bin/sh\necho 'INF |  https://essai-jtest.trycloudflare.com  |' >&2\nexec sleep 600\n")
+        fake.write_text("#!/bin/sh\necho \"args: $*\" >&2\necho 'INF |  https://essai-jtest.trycloudflare.com  |' >&2\n"
+                        "exec sleep 600\n")
         fake.chmod(0o755)
 
         def clone(repo, branch, token, target):
@@ -123,7 +133,22 @@ class StartStopTest(unittest.TestCase):
                 self.assertEqual(data["state"], "online")
                 self.assertEqual(data["url"], "https://essai-jtest.trycloudflare.com/")
                 self.assertEqual((data["label"], data["until"]), ("Site statique", "2026-10-24T09:30:00Z"))
+                self.assertGreaterEqual(len(data["key"]), 43)
                 state = jtest.load_state("12")
+                self.assertNotIn("key", state)
+                config = home / "12" / "gate.json"
+                self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+                # Le tunnel mène à la porte : sans la clé, accès réservé ; avec, le site.
+                self.assertIn(f"--url http://127.0.0.1:{state['gate']} ", (home / "12" / "tunnel.log").read_text())
+                status, headers, body = fetch(state["gate"], "/")
+                self.assertEqual(status, 403)
+                self.assertIn("Claw Web", body)
+                status, headers, _ = fetch(state["gate"], f"/?claw_key={data['key']}")
+                self.assertEqual((status, headers["location"]), (302, "/"))
+                cookie = headers["set-cookie"].split(";")[0]
+                status, _, body = fetch(state["gate"], "/", {"Cookie": cookie})
+                self.assertEqual(status, 200)
+                self.assertIn("JTest", body)
                 with urllib.request.urlopen(f"http://127.0.0.1:{state['port']}/", timeout=5) as response:
                     self.assertIn(b"JTest", response.read())
                 self.assertEqual(len(jtest.live_sessions()), 1)
@@ -146,6 +171,145 @@ class StartStopTest(unittest.TestCase):
             with self.assertRaises(jtest.JTestError) as caught:
                 jtest.start("13", "o/app", "main", {}, "t", now=NOW)
         self.assertIn("ne répond pas", str(caught.exception))
+
+
+def fetch(port, target, headers=None, method="GET", body=None):
+    """Une requête à la porte : (statut, en-têtes en minuscules, corps)."""
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        connection.request(method, target, body=body, headers=headers or {})
+        response = connection.getresponse()
+        return (response.status, {name.lower(): value for name, value in response.getheaders()},
+                response.read().decode("utf-8", "replace"))
+    finally:
+        connection.close()
+
+
+class GateTest(unittest.TestCase):
+    """La porte devant le projet : rien sans la clé ; la clé devient un cookie ; requêtes,
+    corps et WebSocket transmis sans la clé ; identifiants du terminal ajoutés par elle."""
+
+    KEY = "c" * 43
+
+    def setUp(self):
+        self.seen = []
+        self.upstream = socket.socket()
+        self.upstream.bind(("127.0.0.1", 0))
+        self.upstream.listen(8)
+        threading.Thread(target=self.serve_upstream, daemon=True).start()
+        self.port = jtest.free_port()
+        config = {"listen": self.port, "upstream": self.upstream.getsockname()[1], "key": self.KEY, "hours": 1,
+                  "basic": "jtest:secret"}
+        self.loop = asyncio.new_event_loop()
+        threading.Thread(target=self.loop.run_until_complete, args=(jtest_gate.serve(config),), daemon=True).start()
+        self.assertTrue(jtest.wait_http(self.port, timeout=10))
+
+    def serve_upstream(self):
+        while True:
+            try:
+                connection, _ = self.upstream.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.answer, args=(connection,), daemon=True).start()
+
+    def answer(self, connection):
+        with connection:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    return
+                data += chunk
+            head, _, rest = data.partition(b"\r\n\r\n")
+            self.seen.append(head.decode())
+            if b"Upgrade: websocket" in head:
+                connection.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+                echo = rest or connection.recv(4096)
+                connection.sendall(b"echo:" + echo)
+                return
+            length = int(next((line.split(":")[1] for line in head.decode().split("\r\n")
+                               if line.lower().startswith("content-length:")), "0"))
+            while len(rest) < length:
+                rest += connection.recv(4096)
+            body = b"ok " + rest
+            connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nKeep-Alive: timeout=5\r\n"
+                               + f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+
+    def tearDown(self):
+        self.upstream.close()
+        self.loop.call_soon_threadsafe(self.loop.stop)
+
+    def test_nothing_passes_without_the_key(self):
+        for target, headers in (("/", {}), ("/app.js", {}), ("/?claw_key=faux", {}),
+                                ("/", {"Cookie": "claw_jtest=faux"}), ("/", {"Cookie": f"autre={self.KEY}"})):
+            status, _, body = fetch(self.port, target, headers)
+            self.assertEqual(status, 403, target)
+            self.assertIn("Accès réservé", body)
+        self.assertEqual(self.seen, [])
+
+    def test_the_key_becomes_a_cookie_and_leaves_the_address(self):
+        status, headers, _ = fetch(self.port, f"/page?x=1&claw_key={self.KEY}&y=2")
+        self.assertEqual((status, headers["location"]), (302, "/page?x=1&y=2"))
+        cookie = headers["set-cookie"]
+        for attribute in ("HttpOnly", "Secure", "SameSite=Lax", "Max-Age=3600"):
+            self.assertIn(attribute, cookie)
+        self.assertEqual(headers["cache-control"], "no-store")
+        self.assertEqual(self.seen, [])
+
+    def test_requests_pass_with_the_cookie_without_it_reaching_the_project(self):
+        cookie = f"theme=sombre; claw_jtest={self.KEY}"
+        status, headers, body = fetch(self.port, "/api", {"Cookie": cookie, "Content-Type": "application/json"},
+                                      method="POST", body=b'{"a": 1}')
+        self.assertEqual((status, body), (200, 'ok {"a": 1}'))
+        self.assertEqual(headers["connection"], "close")
+        self.assertNotIn("keep-alive", headers)
+        head = self.seen[-1]
+        self.assertTrue(head.startswith("POST /api HTTP/1.1"))
+        self.assertNotIn(self.KEY, head)
+        self.assertIn("Cookie: theme=sombre", head)
+        self.assertIn("Connection: close", head)
+        self.assertIn("Authorization: Basic anRlc3Q6c2VjcmV0", head)
+
+    def test_a_websocket_passes_once_checked(self):
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as client:
+            client.sendall(b"GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                           + f"Cookie: claw_jtest={self.KEY}\r\n\r\n".encode())
+            answer = b""
+            while b"\r\n\r\n" not in answer:
+                answer += client.recv(4096)
+            self.assertTrue(answer.startswith(b"HTTP/1.1 101"))
+            client.sendall(b"bonjour")
+            echo = answer.partition(b"\r\n\r\n")[2]
+            while b"bonjour" not in echo:
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                echo += chunk
+            self.assertEqual(echo, b"echo:bonjour")
+        self.assertIn("Upgrade: websocket", self.seen[-1])
+
+    def test_decide(self):
+        self.assertEqual(jtest_gate.decide("GET", "/", [], self.KEY), ("refuse", None))
+        self.assertEqual(jtest_gate.decide("GET", f"/?claw_key={self.KEY}", [], self.KEY), ("login", "/"))
+        self.assertEqual(jtest_gate.decide("GET", "/a", [("Cookie", f"claw_jtest={self.KEY}")], self.KEY),
+                         ("pass", None))
+        self.assertEqual(jtest_gate.decide("GET", "/a", [("Cookie", f"claw_jtest={self.KEY}x")], self.KEY),
+                         ("refuse", None))
+
+
+class PublicSessionsTest(unittest.TestCase):
+    def test_a_public_sessions_repository_gets_no_jtest(self):
+        fake = FakeGitHub()
+        fake.add_session(7, "Appli", {"repo": "o/app", "base": "main", "n": 3, "branch": "claw/session-3"})
+        fake.extra[("GET", f"/repos/{fake.engine}")] = {"full_name": fake.engine, "private": False}
+        env = {"SESSION_INPUT": "jtest-7", "GITHUB_REPOSITORY": fake.engine, "REPO": "o/app",
+               "BRANCH": "claw/session-3", "JOB_TOKEN": "j"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(common, "api", fake), \
+                mock.patch.object(jtest, "start", side_effect=AssertionError("lancé")):
+            self.assertEqual(jtest.main(), 1)
+        posted = [body for method, path, body in fake.calls if method == "POST" and path.endswith("/comments")]
+        self.assertEqual(len(posted), 1)
+        self.assertIn("est public", posted[0]["body"])
 
 
 class RequestTest(unittest.TestCase):
@@ -181,8 +345,14 @@ class RequestTest(unittest.TestCase):
     def test_status_reads_the_session(self):
         self.assertEqual(self.call(action="status")["state"], "none")
         self.fake.add_comment(7, jtest.comment_body({"state": "online", "url": "https://x.trycloudflare.com/",
-                                                     "label": "Vite", "until_text": "13:00 UTC"}))
-        self.assertEqual(self.call(action="status")["url"], "https://x.trycloudflare.com/")
+                                                     "label": "Vite", "until_text": "13:00 UTC", "key": "s" * 43,
+                                                     "user": "jtest", "password": "p4ss"}))
+        status = self.call(action="status")
+        self.assertEqual(status["url"], "https://x.trycloudflare.com/")
+        # L'agent (et le fournisseur du modèle) ne voient jamais la clé ni les identifiants.
+        self.assertNotIn("s" * 43, json.dumps(status))
+        self.assertNotIn("p4ss", json.dumps(status))
+        self.assertIn("Reserved to the user", status["access"])
 
     def test_claw_github_jtest(self):
         with mock.patch.object(claw_github, "state", lambda: {"branch": "claw/session-3", "base": "main"}):

@@ -249,12 +249,32 @@ def comments(token, repo, issue):
         page += 1
 
 
+# Variables du job qui portent un secret : clés des fournisseurs, jetons, mots de passe.
+SECRET_NAME = re.compile(r"(API_KEY|TOKEN|SECRET|PASSWORD)$", re.I)
+
+
+def secret_values(environ=None):
+    """Les valeurs secrètes du job, les plus longues d'abord (assez longues pour n'être que ça)."""
+    environ = os.environ if environ is None else environ
+    found = {value.strip() for name, value in environ.items() if SECRET_NAME.search(name) and len(value.strip()) >= 12}
+    return sorted(found, key=len, reverse=True)
+
+
+def hide_secrets(text, environ=None):
+    """`text` sans aucune valeur secrète du job : ce que l'agent a lu ou affiché (une commande
+    `env`, un fichier de configuration) part dans la session sans elles. GitHub ne masque les
+    secrets que dans les journaux des jobs, pas dans les commentaires."""
+    for value in secret_values(environ):
+        text = text.replace(value, "***")
+    return text
+
+
 def post_comment(token, repo, issue, body):
-    return api("POST", f"/repos/{repo}/issues/{issue}/comments", token, {"body": body})
+    return api("POST", f"/repos/{repo}/issues/{issue}/comments", token, {"body": hide_secrets(body)})
 
 
 def edit_comment(token, repo, comment_id, body):
-    return api("PATCH", f"/repos/{repo}/issues/comments/{comment_id}", token, {"body": body})
+    return api("PATCH", f"/repos/{repo}/issues/comments/{comment_id}", token, {"body": hide_secrets(body)})
 
 
 def settings(body):
