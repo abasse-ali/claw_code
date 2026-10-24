@@ -773,6 +773,10 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                         "type": "array",
                         "description": "Steps played in order before each screenshot: {\"click\": \"CSS selector\"}, {\"type\": \"text\", \"into\": \"CSS selector\"}, {\"scroll\": \"CSS selector\" or \"bottom\"}, {\"wait_ms\": 500}.",
                         "items": { "type": "object" }
+                    },
+                    "storage": {
+                        "type": "object",
+                        "description": "localStorage set before the page loads, {key: value} (a value that is not a string is stored as JSON): to see a page that keeps its data in the browser filled with sample data, without editing the project's files to inject it."
                     }
                 },
                 "additionalProperties": false
