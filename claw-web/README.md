@@ -204,6 +204,100 @@ en ligne ou non, et en session.
 Détails, commandes et limites (machine inactive sept jours arrêtée par Oracle, « Out of capacity
 ») : `.github/claw-web/pc/README.md`.
 
+## Outils MCP
+
+Pendant une session, Claw a les outils de Claude Code sur le web, servis par le moteur sous forme
+de trois serveurs MCP (liste complète dans le menu, « Outils MCP », avec un filtre) :
+
+- **`github`** (54 outils, mêmes noms et paramètres que le serveur MCP officiel de GitHub) :
+  issues et leurs commentaires, sous-issues, pull requests, revues et fils de revue, branches,
+  commits, fichiers, Actions (passages, journaux des jobs, relance), vérifications (check runs),
+  versions, étiquettes, recherche, recherche de secrets dans un texte. Le moteur fait chaque
+  appel avec le jeton, que l'agent n'a jamais, et **seulement sur le dépôt de la session** (les
+  outils de découverte, comme `get_me` ou `search_repositories`, mis à part). Restent à
+  l'utilisateur : la fusion d'une autre pull request que celle de la session (celle de la session
+  est fusionnée après la poussée, quand vous le demandez, comme `claw-github merge`), la création
+  ou la copie d'un dépôt (« Créer un dépôt » dans le choix du dépôt), et l'écriture de fichiers
+  par l'API sur la branche de la session ou sur la branche de départ : Claw modifie sa copie de
+  travail, que le moteur pousse à la fin.
+- **`claw-remote`** (28 outils, ceux de `claude-code-remote`) : vos autres sessions (lister,
+  lire, leur écrire, en créer, les arrêter, archiver, renommer, étiqueter), les routines, le
+  suivi d'une pull request, la surveillance d'une adresse, la liste de vos dépôts et la copie en
+  lecture d'un autre dépôt à côté du travail, les machines, la documentation de Claw Web. Un
+  message envoyé par une session à une autre y paraît sous « Message de la session #n de
+  Claw » : la session qui le reçoit le prend pour ce qu'il est, un message d'un autre agent, pas
+  vos mots.
+- **`claw-docs`** (8 outils, ceux de `Claude_Docs`) : des documents que Claw écrit pour vous
+  (menu, « Documents »).
+
+Chaque appel paraît dans le journal du passage avec son titre en français (« GitHub : Lire une
+issue #12 »). Un refus de GitHub dit l'autorisation qui manque au jeton (`CLAW_REPO_TOKEN`).
+
+Avec Claw Code sur votre machine, les mêmes serveurs se lancent sur l'entrée standard, avec
+votre jeton (`GITHUB_TOKEN`, `GH_TOKEN` ou celui de `gh auth token`) ; à mettre dans le
+`.claw.json` du projet :
+
+```json
+{
+  "mcpServers": {
+    "github": { "command": "python3", "args": [".github/claw-web/mcp_server.py", "--stdio", "github"] },
+    "claw-remote": { "command": "python3", "args": [".github/claw-web/mcp_server.py", "--stdio", "claw-remote"],
+                     "env": { "CLAW_WEB_ENGINE": "abasse-ali/claw-sessions" } },
+    "claw-docs": { "command": "python3", "args": [".github/claw-web/mcp_server.py", "--stdio", "claw-docs"],
+                   "env": { "CLAW_WEB_ENGINE": "abasse-ali/claw-sessions" } }
+  }
+}
+```
+
+(chemin de `mcp_server.py` dans votre copie du code de Claw ; le dépôt est celui du dossier
+courant, ou `--repo propriétaire/nom`). Sur votre machine, ce que vous demandez est fait : fusion
+et création de dépôt comprises.
+
+## Documents
+
+Quand vous demandez un rapport, un plan ou des notes à garder, Claw écrit un document (menu,
+« Documents ») : des onglets en Markdown, des sections qu'il remplit une à une (« En cours : … »
+le temps de les écrire), des commentaires. Un commentaire s'ajoute sous le document ;
+« Commenter et demander à Claw » l'envoie aussi à la session qui l'a écrit, qui répond dans le
+document. Téléchargement en Markdown ou en page HTML depuis l'appli ; Claw sait aussi en faire un
+PDF ou un document Word (`export`), rangé avec le document. Les documents sont sur la branche
+`claw-web-fichiers` du dépôt des sessions, dans `documents/<identifiant>/` (`doc.json`, un
+fichier `.md` par onglet, `exports/`).
+
+## Routines et suivis
+
+Claw peut programmer un message vers une session (« chaque matin à 9 h, fais le point sur les
+issues », « relance les tests dans deux heures »), créer une session neuve à chaque fois, suivre
+une pull request (nouveaux commentaires, revues, vérifications finies, fusion : écrits dans la
+session, qui repart) ou surveiller une adresse. Menu, « Routines » : la liste, l'interrupteur de
+chacune, « Lancer maintenant » et « Supprimer » (deux appuis), et les suivis, avec « Arrêter ».
+
+Le programmateur est un workflow du dépôt des sessions qui passe toutes les heures (le plus
+petit intervalle, comme dans Claude Code) : une routine part à l'heure près. Il faut l'ajouter
+une fois au dépôt des sessions, `.github/workflows/claw-routines.yml` (la page « Routines » le
+donne s'il manque) :
+
+```yaml
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: write
+  issues: write
+jobs:
+  routines:
+    uses: abasse-ali/claw_code/.github/workflows/claw-routines.yml@main
+    with:
+      runner: ${{ vars.CLAW_RUNNER }}
+    secrets: inherit
+```
+
+Il prend une minute d'Actions par heure au plus ; aucune sur « Ma machine » (variable du dépôt
+`CLAW_RUNNER` = `claw-pc`). Les routines et les suivis sont rangés sur `claw-web-fichiers`,
+dans `routines/`.
+
 ## Fusionner, mettre en ligne
 
 - « Fusionner » (seulement pour une ancienne session dont la pull request est restée ouverte,
@@ -211,7 +305,9 @@ Détails, commandes et limites (machine inactive sept jours arrêtée par Oracle
 - « Mettre en ligne » : publie un site statique sur GitHub Pages (dossier `docs/` ou racine),
   depuis la branche de la session telle quelle. Sur un compte
   GitHub gratuit, GitHub Pages ne publie que les dépôts publics : l'appli le signale et propose
-  de rendre le dépôt public. Claw (l'agent) n'a aucun accès à GitHub : il renvoie à ces boutons.
+  de rendre le dépôt public. Claw (l'agent) n'a aucun jeton GitHub : il agit sur GitHub par les
+  outils du moteur (« Outils MCP »), et demande la fusion ou la mise en ligne de la session à
+  `claw-github`, fait après la poussée.
 
 ## Arrêter, supprimer
 
@@ -238,3 +334,7 @@ passages suivants démarrent en moins d'une minute.
   contenu) ; les messages sont affichés sans aucun HTML venu d'ailleurs.
 - Dans le moteur, l'agent travaille sans aucun jeton GitHub dans son environnement : le dépôt
   est cloné puis son adresse remise sans jeton, et la poussée a lieu après l'agent.
+- Les outils MCP du moteur tournent dans le processus du moteur, sur un port local réservé par un
+  secret du passage. Le jeton du dépôt leur arrive dans un fichier du job, lu puis effacé avant
+  que l'agent ne démarre : il n'est ni dans l'environnement de l'étape, ni sur le disque pendant
+  le travail. Ils s'en tiennent au dépôt de la session.

@@ -195,6 +195,9 @@ IMAGE_PATH = re.compile(r"uploads/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\.(?:png|jpe?g|
 
 # Fichiers échangés entre les étapes du job.
 WORK = Path(os.environ.get("RUNNER_TEMP", ".")) / "claw-web"
+# Jeton du dépôt pour les serveurs MCP du moteur (mcp_server.py) : posé par setup.py, lu puis
+# effacé par run.py avant que l'agent ne démarre, jamais dans l'environnement d'une étape.
+MCP_TOKEN_FILE = WORK / ".mcp-token"
 
 
 class GitHubError(Exception):

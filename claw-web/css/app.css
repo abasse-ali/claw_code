@@ -988,3 +988,57 @@ html.scroll-locked, html.scroll-locked body { overflow: hidden; overscroll-behav
   border-radius: 12px; color: var(--muted); font-size: .86rem;
 }
 .questions-moved svg { width: 16px; height: 16px; flex: none; }
+
+/* Outils MCP, documents et routines (js/tools.js) */
+.drawer-links { display: flex; flex-direction: column; gap: 2px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.drawer-links a { display: flex; align-items: center; gap: 10px; padding: 9px 8px; border-radius: 8px; color: var(--text); text-decoration: none; }
+.drawer-links a:hover, .drawer-links a:focus-visible { background: var(--panel-2); }
+.drawer-links svg { width: 18px; height: 18px; color: var(--muted); flex: none; }
+.tools-page .lead { color: var(--muted); margin: 0 0 12px; line-height: 1.45; }
+.tools-body { display: flex; flex-direction: column; gap: 12px; }
+.tools-filter {
+  width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel); color: var(--text); font: inherit;
+}
+.tools-group { border: 1px solid var(--border); border-radius: 12px; padding: 0 12px 12px; }
+.tools-group[hidden] { display: none; }
+.tools-group > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; padding: 12px 0 8px; cursor: pointer; list-style: none; }
+.tools-group > summary::-webkit-details-marker { display: none; }
+.tools-group > summary code { color: var(--muted); font-size: .82rem; }
+.tools-group > summary small { margin-left: auto; color: var(--muted); }
+.tools-group .about { margin: 0 0 10px; color: var(--muted); font-size: .9rem; line-height: 1.4; }
+.tool-row { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; }
+.tool-row[hidden] { display: none; }
+.tool-name { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.tool-name code { font-size: .86rem; overflow-wrap: anywhere; }
+.tool-badge { padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); font-size: .72rem; }
+.tool-title { font-size: .92rem; }
+.tool-note { color: var(--warn); font-size: .8rem; line-height: 1.35; }
+.doc-tabs .chip { text-decoration: none; color: var(--text); }
+.doc-tabs .chip.current { border-color: var(--accent); color: var(--accent); }
+.doc-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.doc-body { padding: 4px 0; }
+.doc-subtitle { font-size: 1.05rem; font-weight: 600; margin: 8px 0 0; }
+.doc-comments { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.doc-comments > li { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; }
+.doc-comments > li.resolved { opacity: .7; }
+.doc-comment { display: flex; flex-direction: column; gap: 2px; }
+.doc-comment + .doc-comment { padding-left: 12px; border-left: 2px solid var(--border); }
+.doc-comment small { color: var(--muted); }
+.doc-comment blockquote { margin: 2px 0; padding-left: 8px; border-left: 2px solid var(--accent); color: var(--muted); }
+.doc-comment-form { display: flex; flex-direction: column; gap: 8px; }
+.doc-comment-form textarea {
+  width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel); color: var(--text); font: inherit; resize: vertical;
+}
+.notice { border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--border)); border-radius: 10px; padding: 10px 12px; }
+.notice p { margin: 0 0 8px; line-height: 1.45; }
+.notice pre { margin: 0; white-space: pre; overflow-x: auto; font-size: .8rem; }
+.routine-row { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; }
+.routine-row.off .routine-prompt, .routine-row.off strong { color: var(--muted); }
+.routine-head { display: flex; align-items: center; gap: 10px; justify-content: space-between; }
+.routine-prompt { margin: 0; overflow-wrap: anywhere; line-height: 1.4; }
+.routine-row small { color: var(--muted); line-height: 1.45; }
+.routine-row small code { font-size: .8rem; }
+.routine-toggle { width: auto; padding: 0; border: 0; background: transparent; }
+.file-row .small-link { flex: none; }

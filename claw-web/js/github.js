@@ -284,6 +284,56 @@ export class GitHub {
     return this.request("GET", `/repos/${repo}/contents/${encodePath(path)}?ref=${encodeURIComponent(ref)}`);
   }
 
+  /** Un fichier JSON d'une branche : sa valeur et son sha (null, null s'il manque). */
+  async readJson(repo, path, branch) {
+    try {
+      const file = await this.contents(repo, path, branch);
+      return { value: JSON.parse(fromBase64(file.content)), sha: file.sha };
+    } catch (error) {
+      if (error instanceof GitHubError && error.status === 404) return { value: null, sha: null };
+      throw error;
+    }
+  }
+
+  /** Un fichier texte d'une branche ; null s'il manque. */
+  async readText(repo, path, branch) {
+    try {
+      return fromBase64((await this.contents(repo, path, branch)).content);
+    } catch (error) {
+      if (error instanceof GitHubError && error.status === 404) return null;
+      throw error;
+    }
+  }
+
+  /** Relit le fichier JSON, y applique `update` (qui change la valeur) et le range ; une fois de
+   * plus si le moteur l'a changé entre-temps (409). */
+  async updateJson(repo, path, branch, message, update, empty) {
+    for (let attempt = 0; ; attempt += 1) {
+      const { value, sha } = await this.readJson(repo, path, branch);
+      const next = value || empty();
+      const result = update(next);
+      try {
+        await this.request("PUT", `/repos/${repo}/contents/${encodePath(path)}`, {
+          message, branch, content: toBase64(`${JSON.stringify(next, null, 1)}\n`), ...(sha ? { sha } : {}),
+        });
+        return result;
+      } catch (error) {
+        if (attempt < 2 && error instanceof GitHubError && (error.status === 409 || error.status === 422)) continue;
+        throw error;
+      }
+    }
+  }
+
+  /** Un workflow du dépôt (par son fichier), ou null s'il manque. */
+  async workflowFile(repo, file) {
+    try {
+      return await this.request("GET", `/repos/${repo}/actions/workflows/${file}`);
+    } catch (error) {
+      if (error instanceof GitHubError && error.status === 404) return null;
+      throw error;
+    }
+  }
+
   /** Contenu brut d'un fichier d'une branche, en Blob. */
   async rawFile(repo, path, branch) {
     let response;
@@ -456,4 +506,19 @@ function explain(status, reason, path) {
     return `Accès refusé ou introuvable (${reason}) : vérifiez les dépôts et autorisations du jeton`;
   }
   return `GitHub : ${reason} (${status})`;
+}
+
+/** Base64 (API Contents) vers texte UTF-8, et l'inverse. */
+export function fromBase64(text) {
+  const bytes = Uint8Array.from(atob(String(text || "").replace(/\s/g, "")), (character) => character.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+export function toBase64(text) {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  for (let start = 0; start < bytes.length; start += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000));
+  }
+  return btoa(binary);
 }

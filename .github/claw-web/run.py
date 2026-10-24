@@ -20,9 +20,11 @@ import time
 import urllib.request
 from pathlib import Path
 
-from common import (FILES_BRANCH, PROGRESS, WORK, GitHubError, api, clean_notice, edit_comment, output,
-                    post_comment, run_url, stop_tree)
+from common import (FILES_BRANCH, MCP_TOKEN_FILE, PROGRESS, WORK, GitHubError, api, clean_notice, edit_comment,
+                    output, post_comment, run_url, stop_tree)
 from journal import Journal
+from mcp_server import Context, Host, build, describe_call
+from on_github import REQUESTS_FILE, STATE_FILE
 import memory
 
 SESSION = os.environ["SESSION"]
@@ -120,6 +122,9 @@ class ShotStore:
 def describe(name, data):
     """Une action de l'agent en quelques mots, pour l'utilisateur."""
     data = data if isinstance(data, dict) else {}
+    mcp = describe_call(name, data)
+    if mcp:
+        return mcp
     path = relative(data.get("path") or data.get("file_path") or data.get("notebook_path") or "")
     short = lambda text, size=90: (text if len(text) <= size else text[: size - 1] + "…")  # noqa: E731
     if name == "read_file":
@@ -422,12 +427,58 @@ def start_mock():
     return process, f"http://127.0.0.1:{line.split()[1]}/v1"
 
 
+def start_mcp(env):
+    """Les serveurs MCP du moteur (mcp_server.py : `github`, `claw-remote`, `claw-docs`) sur un
+    port local, déclarés à Claw dans ses réglages (`mcpServers` de CLAW_CONFIG_HOME). Le jeton du
+    dépôt est lu dans le fichier que setup.py a posé, puis effacé : il ne reste que dans ce
+    processus. None si les serveurs ne démarrent pas (Claw travaille alors sans eux)."""
+    try:
+        repo_token = MCP_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        repo_token = ""
+    MCP_TOKEN_FILE.unlink(missing_ok=True)
+    try:
+        state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state = {}
+    context = Context(
+        repo=os.environ.get("REPO", "").strip() or state.get("repo") or "",
+        base=os.environ.get("BASE", "").strip() or state.get("base") or "",
+        branch=os.environ.get("BRANCH", "").strip() or state.get("branch") or "",
+        session=SESSION, engine=ENGINE, job_token=JOB_TOKEN, repo_token=repo_token, run_id=str(RUN_ID),
+        work=Path(ROOT), requests_file=REQUESTS_FILE, model="" if MODEL == "mock" else MODEL,
+        runner=os.environ.get("RUNNER", "").strip(), repos_dir=WORK / "repos",
+        claw_src=Path(os.environ["CLAW_SRC"]) if os.environ.get("CLAW_SRC") else None,
+    )
+    try:
+        host = Host(build(context)).start()
+    except Exception as error:  # noqa: BLE001 - sans eux, la tâche se fait quand même
+        print(f"::warning::outils MCP du moteur non démarrés : {error!r}", flush=True)
+        return None
+    home = Path(env.get("CLAW_CONFIG_HOME") or WORK / "claw-home")
+    env["CLAW_CONFIG_HOME"] = str(home)
+    home.mkdir(parents=True, exist_ok=True)
+    path = home / "settings.json"
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        current = {}
+    if not isinstance(current, dict):
+        current = {}
+    current.setdefault("mcpServers", {}).update(host.config())
+    path.write_text(json.dumps(current, ensure_ascii=False, indent=1), encoding="utf-8")
+    tools = sum(len(server.tools) for server in host.servers.values())
+    print(f"Outils MCP du moteur : {', '.join(host.servers)} ({tools} outils)"
+          + ("" if repo_token else " ; GitHub sans jeton du dépôt"), flush=True)
+    return host
+
+
 def agent_env(environ, mock=False):
     """Environnement de Claw. Aucun jeton GitHub : il travaille, Claw publie après lui. Les clés
     des fournisseurs passent (OPENROUTER_API_KEY, NVIDIA_API_KEY…), sauf pour le faux modèle :
     rien ne doit pouvoir partir vers un vrai modèle, relecteurs compris."""
     env = {key: value for key, value in environ.items()
-           if "TOKEN" not in key.upper() or key == "OPENROUTER_API_KEY"}
+           if ("TOKEN" not in key.upper() or key == "OPENROUTER_API_KEY") and key != "RUNNER"}
     if mock:
         env = {key: value for key, value in env.items() if not key.upper().endswith("_API_KEY")}
     return env
@@ -482,6 +533,7 @@ def main():
     # un `pkill -f <texte>` lancé par l'agent y trouvait Claw et l'arrêtait (session 12).
     args += ["prompt", "-"]
 
+    host = start_mcp(env)
     quota_before = free_quota(env.get("OPENROUTER_API_KEY", ""))
     progress = Progress()
     progress.publish(force=True)
@@ -528,6 +580,8 @@ def main():
             status = process.wait()
     (WORK / "claw.pid").unlink(missing_ok=True)
     stop_refresh.set()
+    if host:
+        host.stop()
     if mock:
         mock.terminate()
     if stopped:

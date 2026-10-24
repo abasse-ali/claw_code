@@ -14,7 +14,7 @@ import json
 import os
 import subprocess
 
-from common import (ANSWER, NOTES, WORK, GitHubError, api, clean_answer, clean_notice, explain_error,
+from common import (ANSWER, MCP_TOKEN_FILE, NOTES, WORK, GitHubError, api, clean_answer, clean_notice, explain_error,
                     french_shortstat, post_comment, questions_block, run_url, stop_tree, usage_lines)
 from on_github import Actor, load_requests
 
@@ -65,6 +65,8 @@ def stop_leftover_agent():
 
 def main():
     stop_leftover_agent()
+    # Jeton des outils MCP : déjà effacé par run.py, sauf si l'agent n'a pas démarré.
+    MCP_TOKEN_FILE.unlink(missing_ok=True)
     result, error = clean_answer(read("result.md")), read("error.txt")
     # Questions sur lesquelles Claw a fini le passage : l'utilisateur y répond d'un toucher.
     try:

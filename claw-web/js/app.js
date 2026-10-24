@@ -9,6 +9,7 @@ import { sealedBox } from "./sealed-box.js";
 import { LOG, changesHtml, decodeLog, photoLink, photoView, transcriptHtml, withoutCallMarkup } from "./transcript.js";
 import { highlightLines, languageOf } from "./highlight.js";
 import { accountStatus, allFreeModels, freeModels, resetTime } from "./openrouter.js";
+import { extras } from "./tools.js";
 
 const STORE = "claw-web.settings.v1";
 const DEFAULT_ENGINE = "abasse-ali/claw-sessions";
@@ -41,6 +42,8 @@ const ICON = {
   chat: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14a1.5 1.5 0 0 1 1.5 1.5v9A1.5 1.5 0 0 1 19 17h-8l-4.5 3.5V17H5a1.5 1.5 0 0 1-1.5-1.5v-9A1.5 1.5 0 0 1 5 5z"/></svg>',
   folder: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5a1.5 1.5 0 0 1 1.5-1.5h4l2 2.5h8a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z"/></svg>',
   file: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>',
+  tools: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><path d="M16.75 13.5v6.5M13.5 16.75H20"/></svg>',
+  clock: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>',
   merge: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="12" r="2"/><path d="M6 7v10M6 7c0 4 4 5 10 5"/></svg>',
   diff: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v8M8 8h8M8 18h8"/><rect x="3.5" y="2.5" width="17" height="19" rx="2"/></svg>',
   image: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.6-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9"/></svg>',
@@ -1737,7 +1740,7 @@ function renderComposer() {
   const repo = followUp ? session.settings.repo : state.settings.repo;
   const branch = followUp ? branchOf(session.issue) : state.settings.branch;
   composer.hidden = !state.github || location.hash.startsWith("#/reglages") || location.hash.includes("/modifications")
-    || location.hash.includes("/fichiers");
+    || location.hash.includes("/fichiers") || /^#\/(outils|documents|document\/|routines)/.test(location.hash);
   const key = draftKey();
   if (composer.dataset.key === key && composer.querySelector("textarea")) {
     const chip = (action, text) => {
@@ -3829,6 +3832,63 @@ function showSettings(first = false, justConnected = false) {
 
 // --- Démarrage -------------------------------------------------------------------------------
 
+/** Deux appuis pour une action sans retour (pas de fenêtre de confirmation, comme le reste de
+ * l'appli). */
+function twoTaps(button, action) {
+  const label = button.querySelector("span");
+  const text = label ? label.textContent : "";
+  button.addEventListener("click", async () => {
+    if (!button.classList.contains("confirm")) {
+      button.classList.add("confirm");
+      if (label) label.textContent = "Confirmer";
+      setTimeout(() => {
+        if (!button.isConnected) return;
+        button.classList.remove("confirm");
+        if (label) label.textContent = text;
+      }, 4000);
+      return;
+    }
+    button.disabled = true;
+    try {
+      await action();
+    } catch (error) {
+      button.disabled = false;
+      failure(error);
+    }
+  });
+}
+
+/** Un message dans une session (commentaire d'un document, par exemple) et son passage. */
+async function sendToSession(number, text) {
+  const engine = state.settings.engine;
+  const issue = await state.github.issue(engine, number);
+  const settings = settingsOf(issue);
+  await state.github.comment(engine, number, text);
+  launching(Number(number), settings.repo);
+  await state.github.dispatch(engine, state.engineRef, {
+    repo: settings.repo,
+    base: settings.base || "main",
+    session: String(number),
+    model: state.settings.model || "",
+    ...aidInputs(),
+  });
+}
+
+const pages = extras({
+  icon: ICON,
+  toast,
+  failure,
+  twoTaps,
+  sendToSession,
+  github: () => state.github,
+  settings: () => state.settings,
+  engineRef: () => state.engineRef || "main",
+  leavePage() {
+    state.session = null;
+    renderComposer();
+  },
+});
+
 function route() {
   clearTimeout(state.pollTimer);
   closeDrawer();
@@ -3850,6 +3910,24 @@ function route() {
   const files = filesParams(hash);
   if (files) {
     showFiles(files);
+    return;
+  }
+  // Outils MCP du moteur, documents et routines (tools.js).
+  if (hash.startsWith("#/outils")) {
+    pages.showTools();
+    return;
+  }
+  if (hash.startsWith("#/documents")) {
+    pages.showDocuments();
+    return;
+  }
+  const document_ = hash.match(/^#\/document\/([A-Za-z0-9_-]+)/);
+  if (document_) {
+    pages.showDocument(document_[1]);
+    return;
+  }
+  if (hash.startsWith("#/routines")) {
+    pages.showRoutines();
     return;
   }
   const changes = hash.match(/^#\/session\/(\d+)\/modifications/);
@@ -3958,6 +4036,10 @@ async function boot() {
   $("#menu").innerHTML = ICON.menu;
   $("#settings-button").innerHTML = ICON.gear;
   $("#drawer .new-session").innerHTML = `${ICON.plus}<span>Nouvelle tâche</span>`;
+  for (const [link, icon] of [["outils", ICON.tools], ["documents", ICON.file], ["routines", ICON.clock]]) {
+    const item = $(`#drawer .drawer-links [href="#/${link}"]`);
+    if (item) item.insertAdjacentHTML("afterbegin", icon);
+  }
   $("#menu").addEventListener("click", openDrawer);
   $("#drawer-close").innerHTML = ICON.close;
   $("#drawer-close").addEventListener("click", closeDrawer);
