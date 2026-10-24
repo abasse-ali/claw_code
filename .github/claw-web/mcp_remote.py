@@ -28,6 +28,7 @@ from mcp_server import number as decimal
 from routines import ROUTINES, WATCHES, empty_routines, empty_watches, fire, new_id, next_run, public, schedule
 from sessions import TAG_PREFIX, SessionError, Sessions, app_link, event_of, session_number, task_event
 from jtest import parse_comment as jtest_data
+from jtest import public_data as jtest_public
 from on_github import load_requests, save_requests
 from store import BranchStore
 
@@ -277,7 +278,12 @@ def tools(ctx):
             for note in reversed(found.comments(ctx.session)):
                 data = jtest_data(note.get("body"))
                 if data:
-                    return {k: v for k, v in data.items() if k != "log"} | ({"log": data["log"][-800:]} if data.get("log") else {})
+                    # Ni la clé d'accès ni les identifiants : le test n'est ouvert qu'à l'utilisateur.
+                    shown = {k: v for k, v in jtest_public(data).items() if k != "log"}
+                    if data.get("state") == "online":
+                        shown["access"] = ("Reserved to the user: only the link in Claw Web opens it. Never give "
+                                          "this address alone: tell the user to open the JTest card of the session.")
+                    return shown | ({"log": data["log"][-800:]} if data.get("log") else {})
             return {"state": "none", "note": "No JTest in this session yet."}
         if action == "stop":
             found.jtest(ctx.session, ctx.repo, ctx.branch, stop=True)

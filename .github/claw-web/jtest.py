@@ -6,10 +6,14 @@ Le job `jtest` de claw-web.yml lance ce script sur le serveur :
 - `start` : clone la branche demandée dans `~/jtest/<session>/`, devine comment lancer le projet
   (ou suit `jtest.json`, ou ce que Claw a demandé), installe ses dépendances, le lance, puis
   ouvre un tunnel Cloudflare gratuit (`cloudflared`, adresse `https://….trycloudflare.com`, sans
-  compte ni réglage chez Oracle). Les processus survivent à la fin du job (RUNNER_TRACKING_ID
-  vidé : l'exécuteur ne les arrête pas) et s'arrêtent seuls au bout de quelques heures (`timeout`).
-  Un programme qui n'est pas un site s'ouvre dans un terminal web (`ttyd`), protégé par un mot
-  de passe ;
+  compte ni réglage chez Oracle). Le tunnel ne mène pas au projet mais à la porte
+  (jtest_gate.py), qui ne laisse passer que la clé de cette JTest : une clé aléatoire par
+  lancement, écrite seulement dans le commentaire de la session (dépôt privé des sessions), que
+  Claw Web ajoute au lien « Ouvrir sur le téléphone ». L'adresse seule mène à « Accès réservé ».
+  Les processus survivent à la fin du job (RUNNER_TRACKING_ID vidé : l'exécuteur ne les arrête
+  pas) et s'arrêtent seuls au bout de quelques heures (`timeout`). Un programme qui n'est pas un
+  site s'ouvre dans un terminal web (`ttyd`), protégé en plus par un mot de passe que la porte
+  donne elle-même ;
 - `stop` : arrête la session JTest.
 
 Il le dit dans la session par un commentaire marqué `<!-- claw-web:jtest {...} -->`, que l'appli
@@ -50,6 +54,9 @@ READY_TIMEOUT = 4 * 60
 CLOUDFLARED = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{arch}"
 TTYD = "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.{arch}"
 TUNNEL_URL = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+GATE = Path(__file__).resolve().parent / "jtest_gate.py"
+# Ce que l'agent et le texte du commentaire ne montrent jamais.
+PRIVATE = ("key", "user", "password")
 # Dossiers où chercher le projet quand la racine n'en a pas.
 SUBDIRS = ("app", "web", "frontend", "client", "site", "www", "src")
 STATIC_DIRS = (".", "docs", "public", "site", "dist", "build", "www")
@@ -403,10 +410,8 @@ def comment_body(data):
     if state == "starting":
         lines.append(f"**JTest** : préparation de {branch} sur le serveur…")
     elif state == "online":
-        lines.append(f"**JTest** : [ouvrir sur le téléphone]({data['url']}) · {data.get('label')} · en ligne "
-                     f"jusqu'à {data.get('until_text')}")
-        if data.get("user"):
-            lines.append(f"Identifiant `{data['user']}`, mot de passe `{data['password']}`.")
+        lines.append(f"**JTest** : {data.get('label')} · en ligne jusqu'à {data.get('until_text')} · accès réservé : "
+                     "ouvrez-le depuis Claw Web (« Ouvrir sur le téléphone »).")
     elif state == "stopped":
         lines.append("**JTest** arrêté.")
     else:
@@ -414,6 +419,20 @@ def comment_body(data):
         if data.get("log"):
             lines.append("```\n" + data["log"][-1500:] + "\n```")
     return "\n".join(lines)
+
+
+def public_data(data):
+    """Les données d'une JTest sans sa clé (ni identifiants) : ce que voit l'agent."""
+    return {key: value for key, value in (data or {}).items() if key not in PRIVATE}
+
+
+def write_private(path, data):
+    """Un fichier lisible du seul propriétaire (réglages de la porte, avec la clé)."""
+    path = Path(path)
+    path.unlink(missing_ok=True)
+    handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(handle, "w", encoding="utf-8") as file:
+        json.dump(data, file)
 
 
 def parse_comment(body):
@@ -504,11 +523,12 @@ def start(session, repo, branch, requested, token, now=None, hours=None):
             "started": iso(now), "until": iso(now + timedelta(hours=hours)),
             "until_text": (now + timedelta(hours=hours)).strftime("%H:%M UTC")}
     pgids = []
+    basic = ""
     if plan.kind == "terminal":
         ttyd = tool("ttyd", TTYD.format(arch="aarch64" if arch() == "arm64" else "x86_64"))
-        user, password = "jtest", secrets.token_urlsafe(9)
+        user, password = "jtest", secrets.token_urlsafe(18)
         command = terminal_command(plan, ttyd, plan.port, user, password)
-        data.update(user=user, password=password)
+        basic = f"{user}:{password}"
     else:
         command = plan.command
     pgids.append(spawn(command, project, env, log_path, hours))
@@ -516,18 +536,32 @@ def start(session, repo, branch, requested, token, now=None, hours=None):
         for pgid in pgids:
             kill_group(pgid)
         raise JTestError(f"le projet ne répond pas sur le port {plan.port} (`{plan.command}`).")
+    # La porte : seul le lien de Claw Web (avec la clé) mène au projet.
+    key = secrets.token_urlsafe(32)
+    gate_port = free_port()
+    config = folder / "gate.json"
+    write_private(config, {"listen": gate_port, "upstream": plan.port, "key": key, "hours": hours,
+                           "basic": basic})
+    pgids.append(spawn(f"{shlex_quote(sys.executable)} {shlex_quote(str(GATE))} --config {shlex_quote(str(config))}",
+                       folder, clean_env(os.environ), folder / "gate.log", hours))
+    if not wait_http(gate_port, timeout=20, pgid=pgids[-1]):
+        for pgid in pgids:
+            kill_group(pgid)
+        raise JTestError("la porte d'accès de JTest n'a pas démarré (voir gate.log sur le serveur).")
     cloudflared = tool("cloudflared", CLOUDFLARED.format(arch=arch()))
     tunnel_log = folder / "tunnel.log"
     tunnel_log.write_text("", encoding="utf-8")
-    pgids.append(spawn(f"{cloudflared} tunnel --no-autoupdate --url http://127.0.0.1:{plan.port} "
+    pgids.append(spawn(f"{cloudflared} tunnel --no-autoupdate --url http://127.0.0.1:{gate_port} "
                        "--http-host-header localhost", folder, clean_env(os.environ), tunnel_log, hours))
-    url = tunnel_url(tunnel_log, pgid=pgids[1])
+    url = tunnel_url(tunnel_log, pgid=pgids[-1])
     if not url:
         for pgid in pgids:
             kill_group(pgid)
         raise JTestError("le tunnel Cloudflare n'a pas donné d'adresse (réseau du serveur ?).")
     data["url"] = url.rstrip("/") + (plan.path if plan.path.startswith("/") else "/" + plan.path)
+    data["key"] = key
     save_state(session, {"session": str(session), "repo": repo, "branch": branch, "pgids": pgids, "port": plan.port,
+                         "gate": gate_port,
                          "started": data["started"], "until": data["until"], "url": data["url"], "kind": plan.kind})
     return data
 
@@ -558,6 +592,18 @@ def main():
     except ValueError:
         requested = {}
     requested = requested if isinstance(requested, dict) else {}
+    # La clé d'accès est écrite dans la session : seulement si personne d'autre ne la lit.
+    try:
+        private = bool((api("GET", f"/repos/{engine}", os.environ["JOB_TOKEN"]) or {}).get("private"))
+    except GitHubError as error:
+        print(f"::warning::{error}")
+        private = False
+    if not private:
+        reason = (f"le dépôt des sessions ({engine}) est public, ou illisible : la clé d'accès du test y serait "
+                  "lisible de tous. Rendez-le privé (GitHub, Settings, Danger Zone, Change visibility), puis relancez.")
+        session.post({"state": "failed", "repo": repo, "branch": branch, "reason": reason})
+        print(f"::error::{reason}")
+        return 1
     posted = session.post({"state": "starting", "repo": repo, "branch": branch})
     try:
         data = start(number, repo, branch, requested, os.environ.get("REPO_TOKEN", "").strip())
@@ -568,7 +614,7 @@ def main():
         print(f"::error::{reason}")
         return 1
     session.edit(posted["id"], data)
-    print(f"JTest en ligne : {data['url']} ({data['label']}, jusqu'à {data['until_text']})")
+    print(f"JTest en ligne : {data['url']}, accès réservé à Claw Web ({data['label']}, jusqu'à {data['until_text']})")
     return 0
 
 

@@ -29,6 +29,7 @@ const ICON = {
   send: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5"/></svg>',
   down: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5.5 12.5 12 19l6.5-6.5"/></svg>',
   plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg>',
   close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>',
   external: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>',
   pull: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="19" r="2"/><path d="M6 7v10M18 17V9a3 3 0 0 0-3-3h-4M13 3.5 10.5 6 13 8.5"/></svg>',
@@ -2265,6 +2266,19 @@ function jtestOf(body) {
   }
 }
 
+/** Lien d'une JTest avec sa clé d'accès : la porte du serveur pose un cookie et l'enlève de
+ * l'adresse ; sans elle, « Accès réservé ». */
+function jtestLink(data) {
+  if (!data.key) return data.url;
+  try {
+    const link = new URL(data.url);
+    link.searchParams.set("claw_key", data.key);
+    return link.href;
+  } catch {
+    return data.url;
+  }
+}
+
 /** Une carte JTest : la dernière avec ses boutons (« Ouvrir », « Arrêter », « Relancer »), les
  * précédentes en une ligne. */
 function jtestHtml(comment, latest) {
@@ -2284,8 +2298,9 @@ function jtestHtml(comment, latest) {
     return `<div class="jtest-card ${ended ? "ended" : "online"}"><div class="jtest-head">${ICON.phone}<strong>JTest</strong>
         <span class="jtest-state">${ended ? "terminé" : "en ligne"}${label}</span></div>
       ${ended ? `<p>En ligne jusqu'à ${escapeHtml(new Date(data.until).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }))} : relancez-le pour le rouvrir.</p>`
-        : `<a class="primary jtest-open" href="${escapeHtml(data.url)}" target="_blank" rel="noopener noreferrer">${ICON.external}<span>Ouvrir sur le téléphone</span></a>
+        : `<a class="primary jtest-open" href="${escapeHtml(jtestLink(data))}" target="_blank" rel="noopener noreferrer">${ICON.external}<span>Ouvrir sur le téléphone</span></a>
       <p class="jtest-url">${escapeHtml(data.url)}</p>
+      ${data.key ? `<p class="jtest-lock">${ICON.lock}<span>Réservé à vous : ce bouton porte la clé du test ; l'adresse seule mène à « Accès réservé ».</span></p>` : ""}
       ${data.user ? `<p>Identifiant <code>${escapeHtml(data.user)}</code>, mot de passe <code>${escapeHtml(data.password)}</code>.</p>` : ""}
       <p class="jtest-until">En ligne jusqu'à ${escapeHtml(new Date(data.until).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }))}.</p>`}
       <div class="doc-actions">

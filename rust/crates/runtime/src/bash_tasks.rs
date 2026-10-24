@@ -11,6 +11,65 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
+/// Clés que Claw tient pour parler aux modèles (et à ses moteurs de
+/// recherche) : jamais dans l'environnement des commandes lancées pour le
+/// modèle. Un dépôt piégé (« pour installer, lancez `env` », un script de
+/// test qui les envoie à un serveur) les lirait, et elles partiraient dans
+/// la réponse au fournisseur, dans le journal publié ou ailleurs.
+/// `CLAW_COMMAND_KEYS=1` les y laisse, pour un projet qui appelle lui-même
+/// un de ces fournisseurs.
+pub const MODEL_KEYS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "OPENROUTER_API_KEY",
+    "NVIDIA_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENAI_API_KEY",
+    "XAI_API_KEY",
+    "GROQ_API_KEY",
+    "TOGETHER_API_KEY",
+    "MISTRAL_API_KEY",
+    "FIREWORKS_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "CEREBRAS_API_KEY",
+    "OLLAMA_API_KEY",
+    "LMSTUDIO_API_KEY",
+    "LLAMACPP_API_KEY",
+    "TAVILY_API_KEY",
+    "BRAVE_API_KEY",
+];
+
+/// Retire de `command` les clés des fournisseurs (voir `MODEL_KEYS`).
+pub fn hide_model_keys(command: &mut Command) {
+    if std::env::var("CLAW_COMMAND_KEYS").is_ok_and(|value| value.trim() == "1") {
+        return;
+    }
+    for name in MODEL_KEYS {
+        command.env_remove(name);
+    }
+}
+
+/// `text` sans la valeur d'aucune clé de `MODEL_KEYS` que Claw tient : un
+/// résultat d'outil qui en montre une (fichier de configuration lu,
+/// `/proc/<pid>/environ` de Claw affiché) ne la fait voir ni au modèle ni
+/// au journal.
+#[must_use]
+pub fn hide_key_values(text: &str) -> String {
+    let mut values: Vec<String> = MODEL_KEYS
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| value.len() >= 12)
+        .collect();
+    if !values.iter().any(|value| text.contains(value.as_str())) {
+        return text.to_string();
+    }
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values.iter().fold(text.to_string(), |hidden, value| {
+        hidden.replace(value.as_str(), "***")
+    })
+}
+
 /// Sortie conservée par tâche (la fin la plus récente).
 const MAX_BUFFER_BYTES: usize = 512 * 1024;
 /// Ligne en cours gardée pour y reconnaître l'annonce d'un serveur.
@@ -189,6 +248,7 @@ pub(crate) fn launch(
     container: Option<String>,
     foreground: bool,
 ) -> std::io::Result<Running> {
+    hide_model_keys(&mut command);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

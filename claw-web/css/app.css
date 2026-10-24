@@ -1078,4 +1078,6 @@ html.scroll-locked, html.scroll-locked body { overflow: hidden; overscroll-behav
 .jtest-open { display: inline-flex; align-items: center; justify-content: center; gap: 8px; align-self: stretch; padding: 12px 14px; border-radius: 12px; background: var(--accent); color: var(--accent-text); font-weight: 600; text-decoration: none; }
 .jtest-open svg { color: inherit; }
 .jtest-url, .jtest-until { color: var(--muted); font-size: .85rem; }
+.jtest-card .jtest-lock { display: flex; align-items: flex-start; gap: 6px; color: var(--muted); font-size: .85rem; }
+.jtest-lock svg { width: 15px; height: 15px; margin-top: 2px; color: var(--ok); }
 .jtest-card pre { max-height: 240px; overflow: auto; font-size: .78rem; }
