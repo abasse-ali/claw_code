@@ -529,6 +529,8 @@ struct TurnAids {
     open_tasks: Vec<(String, String)>,
     /// Renvois déjà faits pendant ce tour pour une liste laissée ouverte.
     open_task_rounds: u32,
+    /// Renvois déjà faits pendant ce tour pour un travail annoncé et pas fait.
+    announced_work_rounds: u32,
     /// Données de test laissées dans une page : déjà renvoyé faire le ménage.
     test_data_sent_back: bool,
     /// Lectures de fichiers de ce tour (empreinte du résultat).
@@ -981,7 +983,10 @@ const EMPTY_RESPONSE_ERROR: &str = "le modèle n'a renvoyé aucun contenu";
 const EMPTY_RESPONSE_NUDGE: &str = "[Claw] Your last reply was empty: no text and no tool call. A tool call written only in your reasoning is never executed. If the task is not finished, continue it now by calling the tools; otherwise give the user your final answer, in their language: what you did and what the verification showed.";
 
 /// Relance d'une réponse en texte arrêtée par la limite de sortie du modèle.
-const CUT_REPLY_NUDGE: &str = "[Claw] Your reply was cut off by the output limit. Continue exactly where you stopped, without repeating anything you already wrote.";
+/// Vu le 24 octobre 2026 (session #30, Nemotron 3 Ultra) : une appli entière
+/// préparée pour un seul fichier, la réponse coupée avant l'appel d'outil, et
+/// « continue » relançait le même fichier trop long.
+const CUT_REPLY_NUDGE: &str = "[Claw] Your reply was cut off by the output limit. Continue exactly where you stopped, without repeating anything you already wrote. If you were about to write a file, it does not fit in one reply: split it into several smaller files (the page, its stylesheet, its script), or Write a first part and add the rest with Edit, one call per part.";
 
 /// Un compte rendu d'au moins cette taille est gardé quand la réponse au
 /// contrôle qui l'a suivi fait moins du tiers de sa longueur.
@@ -2110,6 +2115,7 @@ where
                 let mut asking = false;
                 let feedback = self
                     .empty_titles_gate(&mut aids, &answer)
+                    .or_else(|| self.announced_work_gate(&mut aids, &answer))
                     .or_else(|| self.persistence_gate(&mut aids))
                     .or_else(|| self.open_tasks_gate(&mut aids, &answer))
                     .or_else(|| self.test_data_gate(&mut aids))
@@ -4308,6 +4314,32 @@ where
             "La réponse s'arrête sur des titres sans contenu : Claw renvoie l'agent faire le travail annoncé",
         );
         Some(harness::empty_titles_feedback(&titles))
+    }
+
+    /// Travail annoncé et pas fait : la réponse finale dit ce que le modèle
+    /// va faire alors qu'aucun fichier n'a été écrit pendant le tour, ni par
+    /// ses outils ni par une commande. Il est renvoyé le faire, deux fois au
+    /// plus par tour. Vu le 24 octobre 2026 dans Claw Web (session #30,
+    /// Nemotron 3 Ultra) : polices et icônes choisies, puis « Maintenant je
+    /// construis la PWA complète. » comme réponse finale, et aucun fichier.
+    fn announced_work_gate(&mut self, aids: &mut TurnAids, answer: &str) -> Option<String> {
+        if aids.announced_work_rounds >= harness::MAX_ANNOUNCED_WORK_ROUNDS
+            || !aids.originals.is_empty()
+            || !aids.command_changes.is_empty()
+            || aids.questions_deferred
+            || aids.work_question
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::AnnouncedWork)
+        {
+            return None;
+        }
+        let sentence = harness::announced_work(answer)?;
+        aids.announced_work_rounds += 1;
+        self.api_client.notify(
+            "La réponse annonce le travail sans l'avoir fait : Claw renvoie l'agent le faire",
+        );
+        Some(harness::announced_work_feedback(&sentence))
     }
 
     /// Persévérance : le modèle veut s'arrêter juste après plusieurs échecs
@@ -7719,6 +7751,37 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_that_only_announces_the_work_is_sent_back_to_do_it() {
+        let _serial = crate::test_serial();
+        // Session #30 du 24 octobre 2026 : la réponse finale annonçait la PWA
+        // et aucun fichier n'existait.
+        const ANNOUNCED: &str =
+            "Maintenant je construis la PWA complète. Je vais créer un fichier HTML unique.";
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                text_step(ANNOUNCED),
+                tool_step("write_file", r#"{"path":"notes.txt","content":"ok"}"#),
+                text_step("Le fichier notes.txt est écrit."),
+                text_step("Le fichier notes.txt est écrit."),
+            ],
+            vec![],
+        );
+        runtime.run_turn("fais-moi une appli", None).expect("tour");
+        let observed = observed.borrow();
+        assert!(observed.requests[1].contains("nothing has been written in this turn"));
+        assert!(observed.requests[1].contains("Maintenant je construis la PWA complète."));
+        // Un fichier écrit : la réponse suivante n'est plus renvoyée pour ça.
+        assert!(observed.requests.iter().skip(2).all(|request| request
+            .matches("nothing has been written in this turn")
+            .count()
+            <= 1));
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("annonce le travail sans l'avoir fait")));
+    }
+
+    #[test]
     fn a_reply_that_stops_on_empty_titles_is_sent_back_to_do_the_work() {
         let _serial = crate::test_serial();
         const TITLES: &str =
@@ -8508,7 +8571,9 @@ mod tests {
         let (path, output) = written_file("reprise");
         let (mut runtime, observed, _) = aided_runtime_with(
             vec![
-                text_step("Je m'y mets."),
+                // Une annonce sans fichier écrit serait renvoyée au travail
+                // (`announced_work_gate`) : le premier tour finit sur une question.
+                text_step("Une question avant de commencer : quel format d'image ?"),
                 tool_step("write_file", r#"{"path":"total.py","content":"x"}"#),
                 text_step("Fait : l'onglet Depuis une URL est en place."),
                 text_step("Chaque exigence est couverte."),
