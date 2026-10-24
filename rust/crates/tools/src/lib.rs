@@ -406,7 +406,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_file",
-            description: "Create a text file in the workspace, or replace the whole content of one. `content` is the complete new content of the file. To change part of an existing file, use edit_file.",
+            description: "Create a text file in the workspace, or replace the whole content of one. `content` is the complete new content of the file. To change part of an existing file, use edit_file. The whole call must fit in one reply: past about 400 lines, split the work into several files (page, stylesheet, script modules) written one call each.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
