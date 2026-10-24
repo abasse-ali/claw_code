@@ -98,6 +98,7 @@ function describe(name, input) {
     case "Agent": return ["bot", "Sous-agent", value.desc || ""];
     case "Photo": return ["image", "Photos", value.search ? `« ${value.search} »` : ""];
     case "Icon": return ["tool", "Icônes", (value.names || []).join(", ")];
+    case "Font": return ["tool", "Polices", [value.display, value.text, value.mono].filter(Boolean).join(", ") || value.search || ""];
     case "Ornament": return ["tool", "Ornement", value.kind || ""];
     case "Component": return ["tool", "Composants", (value.names || []).join(", ")];
     case "Screenshot": {

@@ -110,6 +110,173 @@ pub(crate) struct IconInput {
     /// Texte pour un lecteur d'écran, quand l'icône porte un sens à elle seule.
     #[serde(default)]
     label: Option<String>,
+    /// Couleur du trait (CSS : `#0f766e`, `rgb(…)`, `teal`) ; la couleur du texte sinon.
+    #[serde(default)]
+    color: Option<String>,
+    /// `outline` (traits, par défaut), `duotone` (traits sur un aplat léger de la même
+    /// couleur, ou de `fill`).
+    #[serde(default)]
+    style: Option<String>,
+    /// Couleur de l'aplat d'une icône `duotone`.
+    #[serde(default)]
+    fill: Option<String>,
+    /// `round` (par défaut) ou `sharp` : bouts et angles des traits.
+    #[serde(default)]
+    corners: Option<String>,
+    /// Pastille derrière l'icône : sa couleur.
+    #[serde(default)]
+    background: Option<String>,
+    /// Forme de la pastille : `circle` (par défaut), `rounded` ou `square`.
+    #[serde(default)]
+    shape: Option<String>,
+    /// Rotation en degrés (une flèche vers la gauche faite d'une flèche vers la droite).
+    #[serde(default)]
+    rotate: Option<f32>,
+    /// Les icônes en sprite : une seule balise `<svg>` cachée de `<symbol>` qui gardent
+    /// leurs traits, et un `<use>` par icône.
+    #[serde(default)]
+    sprite: Option<bool>,
+}
+
+/// Allure d'une icône, réglée par l'appel.
+#[derive(Debug, Clone, Default)]
+struct Look {
+    stroke_color: Option<String>,
+    duotone: Option<String>,
+    sharp: bool,
+    badge: Option<(String, &'static str)>,
+    rotate: Option<f32>,
+}
+
+/// Une couleur CSS sûre à mettre dans un attribut (`#0f766e`, `rgb(15 118 110)`, `teal`).
+fn color(value: Option<&String>, field: &str) -> Result<Option<String>, String> {
+    let Some(value) = value
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let safe = value.len() <= 40
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || "#(),.% -/".contains(ch));
+    if safe {
+        Ok(Some(value.to_string()))
+    } else {
+        Err(format!(
+            "`{field}` must be a CSS color such as \"#0f766e\", \"rgb(15 118 110)\" or \"teal\""
+        ))
+    }
+}
+
+impl Look {
+    fn of(input: &IconInput) -> Result<Self, String> {
+        let stroke_color = color(input.color.as_ref(), "color")?;
+        let duotone = match input.style.as_deref().map(str::trim) {
+            None | Some("" | "outline" | "line") => None,
+            Some("duotone") => Some(
+                color(input.fill.as_ref(), "fill")?
+                    .or_else(|| stroke_color.clone())
+                    .unwrap_or_else(|| "currentColor".to_string()),
+            ),
+            Some(other) => {
+                return Err(format!(
+                    "`style` is \"outline\" or \"duotone\", not \"{other}\""
+                ))
+            }
+        };
+        let sharp = match input.corners.as_deref().map(str::trim) {
+            None | Some("" | "round" | "rounded") => false,
+            Some("sharp" | "square") => true,
+            Some(other) => {
+                return Err(format!(
+                    "`corners` is \"round\" or \"sharp\", not \"{other}\""
+                ))
+            }
+        };
+        let badge = match color(input.background.as_ref(), "background")? {
+            None => None,
+            Some(background) => Some((
+                background,
+                match input.shape.as_deref().map(str::trim) {
+                    None | Some("" | "circle") => "circle",
+                    Some("rounded") => "rounded",
+                    Some("square") => "square",
+                    Some(other) => {
+                        return Err(format!(
+                            "`shape` is \"circle\", \"rounded\" or \"square\", not \"{other}\""
+                        ))
+                    }
+                },
+            )),
+        };
+        let rotate = input.rotate.filter(|angle| angle.abs() > f32::EPSILON);
+        Ok(Self {
+            stroke_color,
+            duotone,
+            sharp,
+            badge,
+            rotate,
+        })
+    }
+
+    /// Attributs de trait, sur le `<svg>` ou le `<g>` qui porte le dessin.
+    fn stroke_attributes(&self, stroke: &str) -> String {
+        let (cap, join) = if self.sharp {
+            ("square", "miter")
+        } else {
+            ("round", "round")
+        };
+        format!(
+            "fill=\"none\" stroke=\"{}\" stroke-width=\"{stroke}\" stroke-linecap=\"{cap}\" stroke-linejoin=\"{join}\"",
+            self.stroke_color.as_deref().unwrap_or("currentColor")
+        )
+    }
+
+    /// Le dessin de l'icône : aplat, rotation, puis traits.
+    fn drawing(&self, inner: &str, stroke: &str) -> String {
+        let mut body = String::new();
+        if let Some(tint) = &self.duotone {
+            body.push_str(&format!(
+                "<g fill=\"{tint}\" fill-opacity=\"0.2\" stroke=\"none\">{inner}</g>"
+            ));
+        }
+        body.push_str(&format!(
+            "<g {}>{inner}</g>",
+            self.stroke_attributes(stroke)
+        ));
+        let body = match self.rotate {
+            Some(angle) => format!("<g transform=\"rotate({angle} 12 12)\">{body}</g>"),
+            None => body,
+        };
+        match &self.badge {
+            Some((background, shape)) => {
+                let radius = match *shape {
+                    "circle" => "18",
+                    "rounded" => "8",
+                    _ => "0",
+                };
+                format!("<rect x=\"-6\" y=\"-6\" width=\"36\" height=\"36\" rx=\"{radius}\" fill=\"{background}\"/>{body}")
+            }
+            None => body,
+        }
+    }
+
+    fn view_box(&self) -> &'static str {
+        if self.badge.is_some() {
+            "-6 -6 36 36"
+        } else {
+            "0 0 24 24"
+        }
+    }
+
+    fn plain(&self) -> bool {
+        self.stroke_color.is_none()
+            && self.duotone.is_none()
+            && !self.sharp
+            && self.badge.is_none()
+            && self.rotate.is_none()
+    }
 }
 
 struct Icon<'a> {
@@ -227,7 +394,11 @@ fn search(query: &str) -> Vec<Value> {
 
 /// Balise `<svg>` complète d'une icône, prête à coller.
 fn markup(icon: &Icon<'_>, size: u32, stroke: f32, label: Option<&str>) -> String {
-    let access = match label.map(str::trim).filter(|label| !label.is_empty()) {
+    styled(icon, size, stroke, label, &Look::default())
+}
+
+fn access(label: Option<&str>) -> String {
+    match label.map(str::trim).filter(|label| !label.is_empty()) {
         Some(label) => {
             let label = label
                 .replace('&', "&amp;")
@@ -236,15 +407,33 @@ fn markup(icon: &Icon<'_>, size: u32, stroke: f32, label: Option<&str>) -> Strin
             format!("role=\"img\" aria-label=\"{label}\"")
         }
         None => "aria-hidden=\"true\" focusable=\"false\"".to_string(),
-    };
-    let stroke = if (stroke.fract()).abs() < f32::EPSILON {
+    }
+}
+
+fn stroke_text(stroke: f32) -> String {
+    if (stroke.fract()).abs() < f32::EPSILON {
         format!("{stroke:.0}")
     } else {
         format!("{stroke}")
-    };
+    }
+}
+
+/// Une icône avec l'allure demandée ; telle que Lucide la dessine sans réglage.
+fn styled(icon: &Icon<'_>, size: u32, stroke: f32, label: Option<&str>, look: &Look) -> String {
+    if !look.plain() {
+        return format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" class=\"icon icon-{name}\" width=\"{size}\" height=\"{size}\" viewBox=\"{view}\" {access}>{body}</svg>",
+            name = icon.name,
+            view = look.view_box(),
+            access = access(label),
+            body = look.drawing(icon.inner, &stroke_text(stroke)),
+        );
+    }
     format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" class=\"icon icon-{name}\" width=\"{size}\" height=\"{size}\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"{stroke}\" stroke-linecap=\"round\" stroke-linejoin=\"round\" {access}>{inner}</svg>",
         name = icon.name,
+        stroke = stroke_text(stroke),
+        access = access(label),
         inner = icon.inner
     )
 }
@@ -256,10 +445,30 @@ pub(crate) fn svg(name: &str, size: u32) -> Option<String> {
         .map(|icon| markup(&icon, size, 2.0, None))
 }
 
+/// Sprite des icônes : une balise `<svg>` cachée, un `<symbol>` par icône dont le `<g>`
+/// garde les attributs de trait (sans eux, une icône de sprite se dessine en tache noire :
+/// vu le 24 octobre 2026, session de test de Claw Web).
+fn sprite(found: &[Icon<'_>], stroke: f32, look: &Look) -> String {
+    let symbols: String = found
+        .iter()
+        .map(|icon| {
+            format!(
+                "<symbol id=\"icon-{}\" viewBox=\"{}\">{}</symbol>",
+                icon.name,
+                look.view_box(),
+                look.drawing(icon.inner, &stroke_text(stroke))
+            )
+        })
+        .collect();
+    format!("<svg xmlns=\"http://www.w3.org/2000/svg\" style=\"display:none\">{symbols}</svg>")
+}
+
 /// Ce que l'outil `Icon` rend au modèle.
 pub(crate) fn icon(input: &IconInput) -> Result<Value, String> {
     let size = input.size.unwrap_or(24).clamp(12, 160);
     let stroke = input.stroke_width.unwrap_or(2.0).clamp(0.5, 3.0);
+    let look = Look::of(input)?;
+    let as_sprite = input.sprite.unwrap_or(false);
     let mut names: Vec<String> = input.names.clone().unwrap_or_default();
     if let Some(name) = &input.name {
         names.push(name.clone());
@@ -277,15 +486,29 @@ pub(crate) fn icon(input: &IconInput) -> Result<Value, String> {
     let mut result = json!({});
     if !names.is_empty() {
         let mut found = Vec::new();
+        let mut drawn = Vec::new();
         let mut missing = Vec::new();
         for name in &names {
             match icons().find(|icon| icon.name == name) {
-                Some(icon) => found.push(json!({
-                    "name": icon.name,
-                    "svg": markup(&icon, size, stroke, input.label.as_deref()),
-                })),
+                Some(icon) => {
+                    found.push(if as_sprite {
+                        json!({
+                            "name": icon.name,
+                            "use": format!("<svg class=\"icon icon-{0}\" width=\"{size}\" height=\"{size}\" {1}><use href=\"#icon-{0}\"></use></svg>", icon.name, access(input.label.as_deref())),
+                        })
+                    } else {
+                        json!({
+                            "name": icon.name,
+                            "svg": styled(&icon, size, stroke, input.label.as_deref(), &look),
+                        })
+                    });
+                    drawn.push(icon);
+                }
                 None => missing.push(json!({ "name": name, "closest": search(name).into_iter().take(5).collect::<Vec<_>>() })),
             }
+        }
+        if as_sprite && !drawn.is_empty() {
+            result["sprite"] = json!(sprite(&drawn, stroke, &look));
         }
         result["icons"] = json!(found);
         if !missing.is_empty() {
@@ -301,7 +524,11 @@ pub(crate) fn icon(input: &IconInput) -> Result<Value, String> {
             result["matches"] = json!(matches);
         }
     }
-    result["note"] = json!("Lucide icons (ISC license). Paste each svg as is: it takes the text color (currentColor), so color and size it with CSS (color, width, height). Keep aria-hidden on a decorative icon; give `label` when the icon alone carries meaning. To reuse them as a sprite (<symbol> and <use>), copy the svg's fill=\"none\" stroke=\"currentColor\" stroke-width stroke-linecap stroke-linejoin onto each <symbol>: without them the lines are drawn as black blobs. Credit the set once in the page source, for example <!-- Icons: Lucide, ISC license -->.");
+    result["note"] = json!(if as_sprite {
+        "Lucide icons (ISC license) as a sprite: paste `sprite` once, right after <body>, then each icon's `use` where it goes (size it with CSS width and height; without `color` it takes the text color). Keep the sprite as given: its <g> carries the stroke attributes, without them the lines are drawn as black blobs. Credit the set once in the page source, for example <!-- Icons: Lucide, ISC license -->."
+    } else {
+        "Lucide icons (ISC license). Paste each svg as is: without `color` it takes the text color (currentColor), so color and size it with CSS (color, width, height). Customize the look in the call: `color`, `style` \"duotone\" (with `fill`), `corners` \"sharp\", `background` (with `shape` circle, rounded or square), `rotate`, `stroke_width`, `size`; `sprite`: true gives one hidden sprite and a <use> per icon, for icons used many times. Keep aria-hidden on a decorative icon; give `label` when the icon alone carries meaning. Credit the set once in the page source, for example <!-- Icons: Lucide, ISC license -->."
+    });
     Ok(result)
 }
 
@@ -345,6 +572,50 @@ mod tests {
             .as_str()
             .expect("svg")
             .contains("role=\"img\" aria-label=\"Appeler &quot;La Mie&quot;\""));
+    }
+
+    #[test]
+    fn icons_take_the_color_style_corners_badge_and_rotation_asked() {
+        let result = icon(&request(json!({
+            "names": ["wallet"], "color": "#0f766e", "style": "duotone", "corners": "sharp",
+            "background": "#ccfbf1", "shape": "rounded", "rotate": 90
+        })))
+        .expect("icône");
+        let svg = result["icons"][0]["svg"].as_str().expect("svg");
+        assert!(svg.contains("viewBox=\"-6 -6 36 36\""), "{svg}");
+        assert!(
+            svg.contains(
+                "<rect x=\"-6\" y=\"-6\" width=\"36\" height=\"36\" rx=\"8\" fill=\"#ccfbf1\"/>"
+            ),
+            "{svg}"
+        );
+        assert!(
+            svg.contains("<g fill=\"#0f766e\" fill-opacity=\"0.2\" stroke=\"none\">"),
+            "{svg}"
+        );
+        assert!(svg.contains("stroke=\"#0f766e\" stroke-width=\"2\" stroke-linecap=\"square\" stroke-linejoin=\"miter\""), "{svg}");
+        assert!(svg.contains("transform=\"rotate(90 12 12)\""), "{svg}");
+        // Une couleur qui ouvrirait l'attribut est refusée.
+        assert!(icon(&request(
+            json!({ "names": ["wallet"], "color": "red\" onload=\"x" })
+        ))
+        .is_err());
+        assert!(icon(&request(json!({ "names": ["wallet"], "style": "3d" }))).is_err());
+    }
+
+    #[test]
+    fn a_sprite_keeps_the_stroke_of_its_symbols() {
+        let result = icon(&request(
+            json!({ "names": ["plus", "trash-2"], "sprite": true, "size": 20 }),
+        ))
+        .expect("sprite");
+        let sprite = result["sprite"].as_str().expect("sprite");
+        assert!(sprite.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\" style=\"display:none\"><symbol id=\"icon-plus\" viewBox=\"0 0 24 24\"><g fill=\"none\" stroke=\"currentColor\""), "{sprite}");
+        assert_eq!(sprite.matches("<symbol").count(), 2);
+        assert_eq!(
+            result["icons"][1]["use"],
+            json!("<svg class=\"icon icon-trash-2\" width=\"20\" height=\"20\" aria-hidden=\"true\" focusable=\"false\"><use href=\"#icon-trash-2\"></use></svg>")
+        );
     }
 
     #[test]
