@@ -3,7 +3,10 @@ use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
 const COMPACT_CONTINUATION_PREAMBLE: &str =
     "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n";
 const COMPACT_RECENT_MESSAGES_NOTE: &str = "Recent messages are preserved verbatim.";
-const COMPACT_DIRECT_RESUME_INSTRUCTION: &str = "Continue the conversation from where it left off without asking the user any further questions. Resume directly - do not acknowledge the summary, do not recap what was happening, and do not preface with continuation text.";
+// Vu le 24 octobre 2026 (session de test de Claw Web, Laguna S 2.1) : juste après
+// le résumé, le modèle redessinait ses maquettes et « réécrivait complètement »
+// le HTML, le CSS et le JavaScript qu'il venait d'écrire.
+const COMPACT_DIRECT_RESUME_INSTRUCTION: &str = "Continue the conversation from where it left off without asking the user any further questions. Resume directly - do not acknowledge the summary, do not recap what was happening, and do not preface with continuation text. The files written or edited above are on disk with their latest content, and the finished steps (plans, wireframes, icons, checks) stay done: never rewrite a file from scratch or redo a finished step because its details left the conversation; read the file and change only what the next step needs.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactionConfig {
