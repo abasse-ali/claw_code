@@ -125,6 +125,9 @@ pub enum Aid {
     /// Une question sur le travail de l'agent (« tu fais quoi ? », « pourquoi
     /// tu as fait ça ? ») reçoit une réponse, et rien d'autre : pas d'outils.
     WorkQuestions,
+    /// Le modèle conclut alors que sa liste de tâches (`TodoWrite`) en garde
+    /// de pas finies : il est renvoyé les faire, ou dire pourquoi.
+    OpenTasks,
 }
 
 impl Aid {
@@ -174,6 +177,7 @@ impl Aid {
             Self::Photos => "CLAW_PHOTOS",
             Self::Announce => "CLAW_ANNOUNCE",
             Self::WorkQuestions => "CLAW_WORK_QUESTIONS",
+            Self::OpenTasks => "CLAW_OPEN_TASKS",
         }
     }
 }
@@ -2423,6 +2427,52 @@ pub fn todos_left(output: &str) -> bool {
                 .iter()
                 .any(|todo| todo.get("status").and_then(Value::as_str) != Some("completed"))
         })
+}
+
+// --- Liste de tâches laissée ouverte -----------------------------------------------------
+
+/// Renvois au plus par tour pour une liste de tâches laissée ouverte.
+pub const MAX_OPEN_TASK_ROUNDS: u32 = 2;
+
+/// Tâches pas finies de la liste que ce résultat de `TodoWrite` enregistre,
+/// (état, texte) dans l'ordre de la liste ; `None` si le résultat ne porte
+/// pas de liste.
+#[must_use]
+pub fn open_todos(output: &str) -> Option<Vec<(String, String)>> {
+    let result = first_json(output)?;
+    let todos = result.get("newTodos")?.as_array()?;
+    Some(
+        todos
+            .iter()
+            .filter_map(|todo| {
+                let status = todo.get("status").and_then(Value::as_str)?;
+                let content = todo.get("content").and_then(Value::as_str)?;
+                (status != "completed").then(|| (status.to_string(), content.to_string()))
+            })
+            .collect(),
+    )
+}
+
+/// Remarque pour une réponse finale écrite avec des tâches encore ouvertes :
+/// l'utilisateur voit la liste inachevée sous la réponse.
+#[must_use]
+pub fn open_tasks_feedback(tasks: &[(String, String)]) -> String {
+    let list = tasks
+        .iter()
+        .map(|(status, content)| {
+            let state = if status == "in_progress" {
+                "in progress"
+            } else {
+                "not started"
+            };
+            format!("- {content} ({state})")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "[Claw] You wrote your final answer, but your task list still has {} unfinished task(s), and the user sees the list unfinished under your answer:\n{list}\nDo these tasks now, then mark them completed with `TodoWrite` in the same reply as your last tool call. A task that cannot be done or no longer applies: update the list with `TodoWrite` (mark it completed or remove it) and say why in your answer. Write your final answer only when every task in the list is completed.",
+        tasks.len()
+    )
 }
 
 // --- Script muet -------------------------------------------------------------------------
