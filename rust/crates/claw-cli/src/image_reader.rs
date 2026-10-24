@@ -47,9 +47,13 @@ const QUICK_PROMPT: &str = "Describe this screenshot of a web page for a develop
 /// 3 000, un modèle qui raisonne ne répondait rien (voir `CRITIQUE_TOKENS`).
 const QUICK_TOKENS: u32 = 8_000;
 /// Patience d'une description rapide.
+/// Vu le 24 octobre 2026 (session #30) : avec 120 s, Nemotron 3.5 Super VL
+/// laissait une capture sans description (« réponse inachevée après 120 s »),
+/// et le modèle aveugle ne la voyait pas ; l'essai image-check a mesuré
+/// jusqu'à 440 s pour trois appels.
 const QUICK_PATIENCE: tools::advisors::Patience = tools::advisors::Patience {
-    per_model: std::time::Duration::from_secs(120),
-    total: std::time::Duration::from_secs(180),
+    per_model: std::time::Duration::from_secs(200),
+    total: std::time::Duration::from_secs(300),
 };
 /// Jetons et patience d'une critique de design. Vu dans un essai réel : avec
 /// 3 000, dots-3 s'arrêtait sur la limite après 12 539 caractères de
