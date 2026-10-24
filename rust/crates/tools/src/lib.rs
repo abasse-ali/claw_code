@@ -15,6 +15,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 mod components;
+mod fonts;
 mod icons;
 mod ornaments;
 mod page_view;
@@ -793,7 +794,35 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "search": { "type": "string", "description": "Words to find icon names, in English (French words are understood too): \"bread pastry\", \"location\"" },
                     "size": { "type": "integer", "minimum": 12, "maximum": 160, "description": "Width and height in pixels (default 24)" },
                     "stroke_width": { "type": "number", "minimum": 0.5, "maximum": 3, "description": "Line width (default 2; 1.5 looks finer at large sizes)" },
-                    "label": { "type": "string", "description": "Text for screen readers when the icon alone carries meaning (an icon-only link)" }
+                    "label": { "type": "string", "description": "Text for screen readers when the icon alone carries meaning (an icon-only link)" },
+                    "color": { "type": "string", "description": "Line color as a CSS color (\"#0f766e\", \"rgb(15 118 110)\", \"teal\"); default: the text color" },
+                    "style": { "type": "string", "enum": ["outline", "duotone"], "description": "outline (default) or duotone: the lines over a light tint of the same color (or of `fill`)" },
+                    "fill": { "type": "string", "description": "Tint color of a duotone icon" },
+                    "corners": { "type": "string", "enum": ["round", "sharp"], "description": "Line ends and corners (default round)" },
+                    "background": { "type": "string", "description": "Color of a badge drawn behind the icon" },
+                    "shape": { "type": "string", "enum": ["circle", "rounded", "square"], "description": "Shape of the badge (default circle)" },
+                    "rotate": { "type": "number", "description": "Rotation in degrees" },
+                    "sprite": { "type": "boolean", "description": "Return one hidden sprite (<symbol> that keep their lines) and a <use> per icon, for icons used many times" }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "Font",
+            description: "Typefaces for a web page from a library of 54 Google Fonts chosen for interfaces (serif, sans, display, handwriting, mono), with ready-to-paste code. `search` with style or use words, French or English (\"elegant\", \"moderne et sympa\", \"finance\", \"enfants\", \"code\") returns matching fonts and tested pairs. Then give `display` (headings) and `text` (body and interface) names, optionally `mono`: you get the <link> tag with only the weights used, and CSS with font variables and a fluid type scale (--step--1 to --step-5) from `base_size` and `scale`. Use it instead of writing font names, weights and sizes by hand.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "search": { "type": "string", "description": "Style or use of the page: elegant, modern, minimal, friendly, playful, kids, warm, serious, tech, finance, editorial, retro, bold, handwritten, code (French words are understood)" },
+                    "display": { "type": "string", "description": "Font of the headings, from the library (for example \"Fraunces\")" },
+                    "text": { "type": "string", "description": "Font of the body text and interface (for example \"DM Sans\"); the same as display for a single-family page" },
+                    "mono": { "type": "string", "description": "Font for code and aligned numbers (for example \"JetBrains Mono\")" },
+                    "display_weights": { "type": "array", "items": { "type": "integer" }, "description": "Weights of the headings (default [700]; the nearest available is used)" },
+                    "text_weights": { "type": "array", "items": { "type": "integer" }, "description": "Weights of the text (default [400, 600])" },
+                    "italic": { "type": "boolean", "description": "Also load the italics of the text font" },
+                    "base_size": { "type": "number", "minimum": 14, "maximum": 22, "description": "Body text size in px (default 17)" },
+                    "scale": { "type": "number", "minimum": 1.1, "maximum": 1.6, "description": "Ratio between sizes: 1.2 calm, 1.25 balanced (default), 1.333 marked, 1.5 dramatic" }
                 },
                 "additionalProperties": false
             }),
@@ -1394,6 +1423,9 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
         }
         "Icon" => from_value::<icons::IconInput>(input)
             .and_then(|input| icons::icon(&input))
+            .and_then(to_pretty_json),
+        "Font" => from_value::<fonts::FontInput>(input)
+            .and_then(|input| fonts::fonts(&input))
             .and_then(to_pretty_json),
         "Ornament" => from_value::<ornaments::OrnamentInput>(input)
             .and_then(|input| ornaments::ornament(&input))
@@ -4075,6 +4107,7 @@ pub const PARALLEL_SAFE_TOOLS: &[&str] = &[
     "WebFetch",
     "ViewPage",
     "Icon",
+    "Font",
     "Ornament",
     "Component",
     "WebSearch",
@@ -4368,6 +4401,7 @@ const READ_ONLY_ROLE_TOOLS: &[&str] = &[
     "ViewPage",
     "Screenshot",
     "Icon",
+    "Font",
     "Ornament",
     "Component",
     "WebSearch",

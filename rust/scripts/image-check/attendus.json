@@ -1,0 +1,33 @@
+{
+  "budget-icones-taches.png": {
+    "ecran": "Appli de budget au téléphone (390 px), thème clair, juste après sa création par Claw (session de test du 24 octobre 2026).",
+    "defauts": [
+      "Les icônes à traits sont dessinées remplies : taches noires (panier, bus, cœur, maison, rond) au lieu de pictogrammes",
+      "Les barres de progression par catégorie sont vides (grises) alors que des montants sont affichés (Nourriture 25,00 €, Transports 50,00 €...)",
+      "Le bouton rond vert en bas à droite n'a pas d'icône visible et recouvre la ligne « Ajouter une dépense »",
+      "Le texte d'une dépense (« Courses ») est coupé en bas de l'écran sous le bouton"
+    ]
+  },
+  "budget-formulaire.png": {
+    "ecran": "Feuille « Ajouter une dépense » ouverte par-dessus l'appli de budget, au téléphone.",
+    "defauts": [
+      "Les libellés (MONTANT (€), CATÉGORIE, DESCRIPTION, DATE) sont dans une police à chasse fixe en capitales, qui jure avec le reste",
+      "La date est au format américain 10/24/2026 dans une appli en français"
+    ]
+  },
+  "budget-repare.png": {
+    "ecran": "Appli de budget au téléphone après la correction des icônes, une dépense « Boulangerie » de 42,00 € en Transports.",
+    "defauts": [
+      "La barre de la catégorie Transports reste vide alors qu'elle a 42,00 €",
+      "Le bouton rond vert recouvre le bout de la ligne « Ajouter une dépense »",
+      "Le budget de 200,00 € est présenté comme « reçu »"
+    ]
+  },
+  "claw-web-tableau-coupe.png": {
+    "ecran": "Claw Web au téléphone (thème sombre), une réponse de Claw avec un tableau à trois colonnes.",
+    "defauts": [
+      "Dans le tableau, les mots sont coupés en plein milieu sur deux lignes : « Chec / klist », « Statu / t », « Mone / y », « searc / h/filte / r », « appli / cabl / e », « Secre / ts »",
+      "Le texte « Ligne de détail 1 » est à moitié caché sous le bloc Tâches"
+    ]
+  }
+}

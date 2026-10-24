@@ -1505,7 +1505,9 @@ async function pickModel(tab) {
     current: state.settings.model || "",
     groups,
     items: [
-      { value: "", label: "Auto", pinned: true, detail: best ? `en ce moment ${best.short}, le plus puissant des gratuits pour le code (et les suivants s'il ne répond plus)` : "le meilleur modèle gratuit pour le code" },
+      { value: "", label: "Auto", pinned: true, detail: secrets.NVIDIA_API_KEY
+        ? "NVIDIA Nemotron 3 Ultra, le plus fort pour le code (la clé NVIDIA du moteur est posée)"
+        : best ? `en ce moment ${best.short}, le plus puissant des gratuits pour le code (et les suivants s'il ne répond plus)` : "le meilleur modèle gratuit pour le code" },
       ...(openrouterCatalogue
         ? catalogueItems("openrouter", openrouterCatalogue)
         : models.map((model) => ({ value: model.id, label: model.rank ? `${model.rank}. ${model.short}` : model.short, detail: detail(model), group: "openrouter" }))),
@@ -2607,7 +2609,8 @@ function renderDock() {
     state.dockQuestions = open ? { id: open.id, index: 0, chosen: open.questions.map(() => []) } : null;
   }
   const parts = [];
-  if (todos) {
+  // Toutes les tâches terminées : le bloc disparaît (demandé le 24 octobre 2026).
+  if (todos && todos.some(([status]) => status !== "completed")) {
     const done = todos.filter(([status]) => status === "completed").length;
     const current = todos.find(([status]) => status === "in_progress") || todos.find(([status]) => status !== "completed");
     const left = todos.length - done;

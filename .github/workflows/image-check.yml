@@ -1,0 +1,41 @@
+name: Descriptions d'images
+
+# Ce que le lecteur d'images de NVIDIA écrit, avec les consignes exactes de Claw, pour un modèle
+# qui ne lit pas les images, sur des captures aux défauts connus (rust/scripts/image-check) :
+# pour juger si ce texte suffit à trouver les problèmes. La clé (secret NVIDIA_API_KEY) reste
+# dans l'environnement : jamais écrite, et GitHub la masque dans le journal.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Lecteur d'images de NVIDIA
+        required: false
+        default: nvidia/nemotron-3.5-super-vl-120b-a12b
+        type: string
+  push:
+    branches: ["lot55-*"]
+    paths:
+      - "rust/scripts/image-check/**"
+      - "rust/crates/claw-cli/src/image_reader.rs"
+      - ".github/workflows/image-check.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  describe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - name: Descriptions
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          READER_MODEL: ${{ inputs.model || 'nvidia/nemotron-3.5-super-vl-120b-a12b' }}
+        run: python3 rust/scripts/image-check/describe.py descriptions
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: descriptions-${{ github.run_id }}
+          path: descriptions

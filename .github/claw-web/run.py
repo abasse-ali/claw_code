@@ -30,7 +30,21 @@ import memory
 SESSION = os.environ["SESSION"]
 ENGINE = os.environ["GITHUB_REPOSITORY"]
 JOB_TOKEN = os.environ["JOB_TOKEN"]
-MODEL = os.environ.get("MODEL", "").strip()
+# « Auto » (aucun modèle choisi) : NVIDIA dès que le moteur a sa clé, son modèle le plus fort
+# pour le code (77/78 au banc réel, contre 61 pour le plus petit) ; sans clé, le meilleur
+# modèle gratuit d'OpenRouter. Demandé le 24 octobre 2026 : « Les sessions doivent se faire
+# avec Nvidia ».
+NVIDIA_DEFAULT = "nvidia:nvidia/nemotron-3-ultra-550b-a55b"
+
+
+def session_model(environ):
+    chosen = environ.get("MODEL", "").strip()
+    if not chosen and environ.get("NVIDIA_API_KEY", "").strip():
+        return NVIDIA_DEFAULT
+    return chosen
+
+
+MODEL = session_model(os.environ)
 # Mise à jour du commentaire de progression au plus toutes les N secondes, du journal
 # détaillé (plus lourd) au plus toutes les LOG_EVERY secondes.
 PROGRESS_EVERY = 12
