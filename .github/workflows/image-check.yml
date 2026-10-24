@@ -16,7 +16,7 @@ on:
       tokens:
         description: Limite de sortie de chaque appel
         required: false
-        default: "8000"
+        default: "16000"
         type: string
   push:
     branches: ["lot55-*"]
@@ -38,7 +38,7 @@ jobs:
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           READER_MODEL: ${{ inputs.model || 'nvidia/nemotron-3.5-super-vl-120b-a12b' }}
-          READER_TOKENS: ${{ inputs.tokens || '8000' }}
+          READER_TOKENS: ${{ inputs.tokens || '16000' }}
         run: python3 rust/scripts/image-check/describe.py descriptions
       - uses: actions/upload-artifact@v4
         if: always()

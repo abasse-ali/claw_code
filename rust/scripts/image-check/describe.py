@@ -25,7 +25,8 @@ HERE = Path(__file__).resolve().parent
 SOURCE = HERE.parents[1] / "crates" / "claw-cli" / "src" / "image_reader.rs"
 MODEL = os.environ.get("READER_MODEL", "nvidia/nemotron-3.5-super-vl-120b-a12b")
 URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-TOKENS = int(os.environ.get("READER_TOKENS", "8000"))
+# La limite de Claw (DESCRIPTION_TOKENS de image_reader.rs), raisonnement compris.
+TOKENS = int(os.environ.get("READER_TOKENS", "16000"))
 
 
 def rust_const(name):

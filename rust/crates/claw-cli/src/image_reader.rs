@@ -23,8 +23,12 @@ const READER_PROMPT: &str = "Describe this image for an AI assistant that cannot
 const VERDICT: &str = "VERDICT:";
 
 /// Jetons accordés à une description (et à sa relecture) : une capture
-/// d'écran détaillée élément par élément en demande plusieurs milliers.
-const DESCRIPTION_TOKENS: u32 = 8_000;
+/// d'écran détaillée élément par élément en demande plusieurs milliers. Le
+/// raisonnement compte dedans : essai réel du 24 octobre 2026 (Nemotron 3.5
+/// Super VL, rust/scripts/image-check), avec 8 000, 2 appels sur 12 s'arrêtaient
+/// sur la limite après 25 000 à 30 000 caractères de raisonnement, une
+/// description coupée avant ses problèmes ; les autres prenaient jusqu'à 6 741.
+const DESCRIPTION_TOKENS: u32 = 16_000;
 /// Jetons accordés à la réponse de `LookAtImage`.
 const LOOK_TOKENS: u32 = 3_000;
 

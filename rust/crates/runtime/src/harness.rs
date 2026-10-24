@@ -128,6 +128,10 @@ pub enum Aid {
     /// Le modèle conclut alors que sa liste de tâches (`TodoWrite`) en garde
     /// de pas finies : il est renvoyé les faire, ou dire pourquoi.
     OpenTasks,
+    /// La réponse finale annonce le travail à venir (« Maintenant je
+    /// construis… ») alors que rien n'a été écrit pendant le tour : le
+    /// modèle est renvoyé le faire.
+    AnnouncedWork,
 }
 
 impl Aid {
@@ -178,6 +182,7 @@ impl Aid {
             Self::Announce => "CLAW_ANNOUNCE",
             Self::WorkQuestions => "CLAW_WORK_QUESTIONS",
             Self::OpenTasks => "CLAW_OPEN_TASKS",
+            Self::AnnouncedWork => "CLAW_ANNOUNCED_WORK",
         }
     }
 }
@@ -2845,6 +2850,89 @@ pub fn empty_titles_feedback(titles: &[String]) -> String {
     )
 }
 
+/// Renvois au plus, pendant un tour, pour un travail annoncé et pas fait.
+pub const MAX_ANNOUNCED_WORK_ROUNDS: u32 = 2;
+/// Caractères de la fin d'une réponse où chercher l'annonce.
+const ANNOUNCE_TAIL_CHARS: usize = 400;
+/// Tournures qui annoncent un travail sur le point de commencer, en
+/// minuscules, au début d'une phrase ou après une virgule.
+const ABOUT_TO_WORK: [&str; 22] = [
+    "je vais ",
+    "maintenant je ",
+    "maintenant, je ",
+    "je construis ",
+    "je commence ",
+    "je m'y mets",
+    "je m\u{2019}y mets",
+    "je passe à ",
+    "je me lance",
+    "je crée ",
+    "j'attaque ",
+    "c'est parti",
+    "place au code",
+    "i'll ",
+    "i will ",
+    "i'm going to ",
+    "i am going to ",
+    "let me ",
+    "now i ",
+    "now, i ",
+    "next, i ",
+    "next i ",
+];
+
+/// Phrase de la fin d'une réponse qui annonce un travail sur le point de
+/// commencer (« Maintenant je construis la PWA complète. »), s'il y en a
+/// une. Une réponse qui finit sur une question attend l'utilisateur : elle
+/// n'annonce rien. Le code et les citations ne comptent pas.
+#[must_use]
+pub fn announced_work(answer: &str) -> Option<String> {
+    let mut in_code = false;
+    let mut prose = String::new();
+    for line in answer.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_code = !in_code;
+            continue;
+        }
+        if !in_code && !trimmed.is_empty() && !trimmed.starts_with('>') {
+            prose.push_str(trimmed);
+            prose.push('\n');
+        }
+    }
+    let prose = prose.trim_end();
+    if prose.is_empty() || prose.ends_with('?') || ends_with_questions(prose) {
+        return None;
+    }
+    let start = prose
+        .char_indices()
+        .rev()
+        .nth(ANNOUNCE_TAIL_CHARS)
+        .map_or(0, |(index, _)| index);
+    let tail = &prose[start..];
+    tail.split_inclusive(['.', '!', '\n', ':'])
+        .map(str::trim)
+        .filter(|sentence| !sentence.is_empty())
+        .find(|sentence| {
+            let lower = sentence
+                .trim_start_matches(|ch: char| matches!(ch, '-' | '*' | ' '))
+                .to_lowercase();
+            ABOUT_TO_WORK
+                .iter()
+                .any(|phrase| lower.starts_with(phrase) || lower.contains(&format!(", {phrase}")))
+        })
+        .map(|sentence| sentence.chars().take(200).collect())
+}
+
+/// Message adressé au modèle dont la réponse annonce le travail à venir
+/// sans avoir rien écrit pendant le tour.
+#[must_use]
+pub fn announced_work_feedback(sentence: &str) -> String {
+    format!(
+        "[Claw] Your reply ends by saying what you are about to do (\"{sentence}\"), but nothing has been written in this turn: no file was created or changed. This reply is what the user receives, so the work it announces does not exist for them. Do it now with your tools. Write the files one by one, several small files rather than one huge one (the page, its stylesheet, its script); a file too long for one call is written in parts: Write the first part, then Edit to add the next. Give your final answer only once the files exist."
+    )
+}
+
 /// Lignes de la fin d'une réponse où chercher des questions à l'utilisateur.
 const QUESTION_TAIL_LINES: usize = 12;
 /// Questions à partir desquelles la réponse attend vraiment l'utilisateur :
@@ -4462,6 +4550,44 @@ mod guide_tests {
         assert!(images.starts_with(GUIDE_PREFIX));
         assert!(images.contains("This message has 3 images."));
         assert!(images.contains("not a design to copy"));
+    }
+
+    #[test]
+    fn a_reply_that_only_announces_the_work_is_told_from_a_report() {
+        use super::{announced_work, announced_work_feedback};
+        // La réponse finale de la session #30 du 24 octobre 2026 (Nemotron 3 Ultra).
+        let stopped = "Maintenant je construis la PWA complète. Je vais créer un fichier HTML unique avec CSS, JS, manifest et service worker intégrés.";
+        assert_eq!(
+            announced_work(stopped).as_deref(),
+            Some("Maintenant je construis la PWA complète.")
+        );
+        assert_eq!(
+            announced_work("Bien reçu. I'll write the server first, then the tests.").as_deref(),
+            Some("I'll write the server first, then the tests.")
+        );
+        assert!(
+            announced_work_feedback("Maintenant je construis la PWA complète.")
+                .contains("nothing has been written in this turn")
+        );
+        // Un compte rendu, une proposition qui attend l'utilisateur, du code.
+        assert_eq!(
+            announced_work("Le bug est corrigé, les tests passent."),
+            None
+        );
+        assert_eq!(
+            announced_work("Je vais faire une page par mois. Ça te va ?"),
+            None
+        );
+        assert_eq!(
+            announced_work(
+                "Voici la commande :\n```\n# je vais lancer\nnpm test\n```\nElle passe."
+            ),
+            None
+        );
+        assert_eq!(
+            announced_work("Le cache je vais pas le toucher, il marche."),
+            None
+        );
     }
 
     #[test]
