@@ -2083,6 +2083,43 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn line_icons_of_a_sprite_drawn_filled_are_found_in_a_real_browser() {
+        let cwd = std::env::current_dir().expect("dossier");
+        let sprite = "<svg style=\"display:none\"><symbol id=\"plus\" viewBox=\"0 0 24 24\"><path d=\"M5 12h14\"/><path d=\"M12 5v14\"/></symbol><symbol id=\"trash\" viewBox=\"0 0 24 24\"><path d=\"M3 6h18\"/><path d=\"M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6\"/></symbol></svg>";
+        let page = |name: &str, css: &str| {
+            let dir = cwd.join(format!("claw-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Icônes</title><style>body {{ font-family: Georgia; padding: 20px; }} .icon {{ width: 24px; height: 24px; }} {css}</style></head><body>{sprite}<main><h1>Budget</h1><p>Ajouter <svg class=\"icon\"><use href=\"#plus\"></use></svg> ou supprimer <svg class=\"icon\"><use href=\"#trash\"></use></svg></p></main></body></html>"),
+            )
+            .expect("html");
+            let mut request = input(
+                None,
+                Some(&format!("claw-{name}-{}/index.html", std::process::id())),
+            );
+            request.viewports = Some(json!(["phone"]));
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let blobs = page("taches", "");
+        assert!(
+            blobs.contains("Line icons drawn as filled shapes"),
+            "{blobs}"
+        );
+        let fixed = page(
+            "traits",
+            ".icon { fill: none; stroke: currentColor; stroke-width: 2; }",
+        );
+        assert!(
+            !fixed.contains("Line icons drawn as filled shapes"),
+            "{fixed}"
+        );
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn a_page_shows_the_data_given_in_storage_in_a_real_browser() {
         let cwd = std::env::current_dir().expect("dossier");
         let dir = cwd.join(format!("claw-storage-{}", std::process::id()));
