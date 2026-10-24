@@ -24,8 +24,11 @@ from pathlib import Path
 from common import GitHubError, settings
 from cron import CronError, iso, parse_time
 from mcp_server import ToolError, Tool, array, boolean, choice, integer, schema, string
+from mcp_server import number as decimal
 from routines import ROUTINES, WATCHES, empty_routines, empty_watches, fire, new_id, next_run, public, schedule
 from sessions import TAG_PREFIX, SessionError, Sessions, app_link, event_of, session_number, task_event
+from jtest import parse_comment as jtest_data
+from on_github import load_requests, save_requests
 from store import BranchStore
 
 SERVER = "claw-remote"
@@ -45,6 +48,7 @@ DOC_TOPICS = {
     "documents": ("## Documents",),
     "github": ("## Outils MCP", "## Fusionner, mettre en ligne"),
     "machines": ("## Sessions sur votre machine : serveur gratuit ou PC",),
+    "jtest": ("## JTest : essayer sur le téléphone",),
     "models": ("## Quota du modèle choisi", "## Ce que Claw compte faire"),
     "security": ("## Sécurité",),
     "setup": ("## Mise en route",),
@@ -259,6 +263,38 @@ def tools(ctx):
             if str(note.get("id")) == wanted:
                 return {"session_id": number, **event_of(note)}
         raise ToolError(f"No event {wanted} in session {number} (event ids come from list_events).")
+
+    # --- JTest ---------------------------------------------------------------------------------
+
+    def jtest(args):
+        action = args.get("action") or "start"
+        options = {key: args[key] for key in ("command", "install", "port", "path", "hours")
+                   if args.get(key) not in (None, "", [])}
+        if not ctx.session:
+            raise ToolError("JTest runs from a Claw Web session: there is none here.")
+        found = sessions()
+        if action == "status":
+            for note in reversed(found.comments(ctx.session)):
+                data = jtest_data(note.get("body"))
+                if data:
+                    return {k: v for k, v in data.items() if k != "log"} | ({"log": data["log"][-800:]} if data.get("log") else {})
+            return {"state": "none", "note": "No JTest in this session yet."}
+        if action == "stop":
+            found.jtest(ctx.session, ctx.repo, ctx.branch, stop=True)
+            return {"stopping": True, "note": "The JTest of this session stops within a minute."}
+        branch = str(args.get("branch") or ctx.branch)
+        if branch and branch != ctx.branch:
+            found.jtest(ctx.session, ctx.repo, branch, options or None)
+            return {"started": True, "branch": branch,
+                    "note": "Claw's server is starting it: the link arrives in this session in one to three minutes."}
+        requests = load_requests()
+        requests["jtest"] = options
+        save_requests(requests)
+        return {"recorded": True, "branch": ctx.branch,
+                "note": ("When you finish, Claw pushes this branch and runs it on its server (JTest): a link to "
+                         "open it on the user's phone is posted in this session one to three minutes later. Tell "
+                         "the user in one sentence that JTest starts and the link arrives in the session; never "
+                         "give a local address.")}
 
     # --- Routines ------------------------------------------------------------------------------
 
@@ -657,6 +693,24 @@ def tools(ctx):
              "Stop the running pass of another Claw Web session (its work so far stays on its branch). You cannot "
              "interrupt your own session.",
              schema({"session_id": string("The session number to interrupt.")}, ("session_id",)), guarded(interrupt_session)),
+        Tool("jtest", "Tester sur le téléphone (JTest)",
+             "JTest: run this session's work on Claw's server (Oracle) and give the user an https link to try it on "
+             "their phone (iPhone): websites, web apps (Vite, Next.js, Flask, FastAPI, Django, Streamlit, static "
+             "sites...) and programs (opened in a password-protected web terminal). action start (default): this "
+             "session's branch is pushed when you finish, then started; the link is posted in the session one to "
+             "three minutes later and stays online a few hours. Give command (with {port} where the port goes) "
+             "when the project needs a specific one; otherwise JTest detects it (or reads jtest.json at the "
+             "root). action status: the current JTest (link, state, error with its log). action stop: stop it. "
+             "Use it whenever the user wants to try, test or see the result on their phone, instead of any "
+             "local address.",
+             schema({"action": choice(("start", "status", "stop"), "start (default), status or stop."),
+                     "command": string("Command that serves the project, with {port} (e.g. 'npm run dev -- --port {port}')."),
+                     "install": array({"type": "string"}, "Install commands to run first (e.g. ['npm ci'])."),
+                     "port": integer("Port the command listens on, when it cannot take {port}."),
+                     "path": string("Page to open, e.g. /admin (default /)."),
+                     "hours": decimal("How long it stays online (default 4, max 24)."),
+                     "branch": string("Another, already pushed branch to run now (default: this session's).")}),
+             guarded(jtest), note="Sur le serveur Oracle, lien https pour le téléphone (tunnel Cloudflare)"),
         Tool("list_environments", "Lister les machines",
              "Where Claw Web sessions can run: GitHub's machines, and the user's own machines (self-hosted runners "
              "labelled claw-pc: free server or PC) with their state.",

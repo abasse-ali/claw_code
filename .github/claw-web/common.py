@@ -160,7 +160,8 @@ def explain_error(error):
 def kind_of(body):
     """« engine » (progression, journal), « answer » ou « message » (de l'utilisateur)."""
     body = (body or "").strip()
-    if PROGRESS in body or body.startswith(LOG):
+    # JTest (jtest.py) : l'état du site lancé pour le téléphone, pas un message.
+    if PROGRESS in body or body.startswith(LOG) or body.startswith("<!-- claw-web:jtest"):
         return "engine"
     return "answer" if ANSWER in body else "message"
 

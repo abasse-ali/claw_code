@@ -271,6 +271,10 @@ def mcp_note(branch, github):
         "send_later: they fire at the hourly tick), following a pull request (subscribe_pr_activity) or an "
         "address (watch_url), and other repositories in read-only (list_repos, add_repo).")
     lines.append(
+        "- `mcp__claw-remote__jtest` (JTest): when the user wants to try, test or see the result on their phone, "
+        "Claw pushes this branch when you finish and runs it on its server (Oracle), then posts an https link "
+        "in the session: websites, web apps and programs (in a web terminal). It replaces any local address.")
+    lines.append(
         "- `mcp__claw-docs__*`: documents the user reads in Claw Web (tabs, comments, exports to PDF or Word): "
         "make one when the user asks for a document, report or plan to keep, skeleton first, then fill it.")
     lines.append("Use them when the request calls for it (an issue to read or answer, CI logs, a review to "
@@ -419,7 +423,8 @@ def main():
         "GitHub) as a full https link written as [what it is](https://...), never inside backticks. "
         "A local address (localhost, 127.0.0.1, 0.0.0.0) only exists on this machine, which stops "
         "with the task: never give it to the user to open. To show the site, give its GitHub Pages "
-        "address from the GitHub state above, or publish it with `claw-github pages`."
+        "address from the GitHub state above, publish it with `claw-github pages`, or run it on Claw's server "
+        "for the user's phone with JTest (`mcp__claw-remote__jtest`, or `claw-github jtest`)."
     )
     (WORK / "prompt.txt").write_text(request, encoding="utf-8")
     hand_token_to_mcp()

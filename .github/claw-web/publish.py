@@ -17,6 +17,7 @@ import subprocess
 from common import (ANSWER, MCP_TOKEN_FILE, NOTES, WORK, GitHubError, api, clean_answer, clean_notice, explain_error,
                     french_shortstat, post_comment, questions_block, run_url, stop_tree, usage_lines)
 from on_github import Actor, load_requests
+from sessions import Sessions
 
 REPO = os.environ["REPO"]
 BASE = os.environ["BASE"]
@@ -61,6 +62,17 @@ def stop_leftover_agent():
 
     if alive():
         stop_tree(pid, alive=alive)
+
+
+def launch_jtest(options):
+    """JTest demandée par Claw (outil `jtest`, `claw-github jtest`) : la branche poussée est lancée
+    sur le serveur, et le lien arrive dans la session."""
+    try:
+        Sessions(ENGINE, JOB_TOKEN, REPO_TOKEN).jtest(SESSION, REPO, BRANCH, options if isinstance(options, dict) else None)
+    except GitHubError as error:
+        return f"JTest non lancé : {error.reason or error}"
+    return ("JTest lancé sur le serveur : le lien pour le téléphone arrive dans cette session d'ici une à "
+            "trois minutes.")
 
 
 def main():
@@ -112,7 +124,7 @@ def main():
     except (RuntimeError, GitHubError, ValueError) as failure:
         notes.append(f"Publication impossible : {failure}")
     requests = load_requests()
-    if requests:
+    if requests.get("merge") or requests.get("pages"):
         if not PUBLISH:
             notes.append("Fusion ou mise en ligne non faite : le moteur n'a pas le secret `CLAW_REPO_TOKEN`.")
         elif not finished:
@@ -121,6 +133,11 @@ def main():
             notes.append("Fusion ou mise en ligne non faite : les changements ne sont pas sur GitHub.")
         else:
             notes.extend(Actor(REPO, BASE, BRANCH, REPO_TOKEN, TITLE).carry_out(requests))
+    if "jtest" in requests:
+        if PUBLISH and finished and pushed:
+            notes.append(launch_jtest(requests["jtest"]))
+        else:
+            notes.append("JTest non lancé : le travail de ce passage n'est pas sur GitHub.")
 
     if finished:
         text = "\n\n".join(part for part in (result, asked) if part)

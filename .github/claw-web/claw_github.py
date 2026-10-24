@@ -16,6 +16,8 @@ USAGE = """usage: claw-github <command>
   status              the GitHub state of this repository (branch, GitHub Pages)
   pages [docs|root]   publish this session's branch on GitHub Pages once your work is pushed
   merge               merge this session's branch into its base: only when the user asks for it
+  jtest [command]     run this session's branch on Claw's server once pushed, for the user to try it on
+                      their phone through a link (optional command, e.g. "npm run dev -- --port {port}")
   cancel              drop your requests"""
 
 
@@ -71,6 +73,14 @@ def main(argv):
               f"{branch} into {base} (it opens the pull request first if needed). The outcome is added "
               "under your final answer: tell the user in one sentence that you merge it, without claiming "
               "it is done.")
+        return 0
+    if command == "jtest":
+        requests["jtest"] = {"command": " ".join(argv[1:])} if len(argv) > 1 else {}
+        save_requests(requests)
+        print(f"Recorded. When you finish, Claw pushes {branch} and runs it on its server (JTest): a link "
+              "to open it on the user's phone is posted in this session one to three minutes later. Tell "
+              "the user in one sentence that JTest starts and the link arrives in the session; never give "
+              "a local address.")
         return 0
     if command == "pages":
         folder, problem = site_folder(argv[1] if len(argv) > 1 else "")

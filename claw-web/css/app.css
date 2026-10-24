@@ -1042,3 +1042,20 @@ html.scroll-locked, html.scroll-locked body { overflow: hidden; overscroll-behav
 .routine-row small code { font-size: .8rem; }
 .routine-toggle { width: auto; padding: 0; border: 0; background: transparent; }
 .file-row .small-link { flex: none; }
+
+/* JTest : le travail de la session sur le serveur, ouvert sur le téléphone */
+.jtest-card { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); }
+.jtest-card.online { border-color: color-mix(in srgb, var(--ok) 55%, var(--border)); }
+.jtest-card.failed { border-color: color-mix(in srgb, var(--error) 55%, var(--border)); }
+.jtest-card p { margin: 0; line-height: 1.45; overflow-wrap: anywhere; }
+.jtest-card.old { flex-direction: row; align-items: center; gap: 8px; padding: 8px 12px; background: transparent; color: var(--muted); font-size: .88rem; }
+.jtest-card svg { width: 18px; height: 18px; flex: none; }
+.jtest-head { display: flex; align-items: center; gap: 8px; }
+.jtest-head svg { color: var(--accent); }
+.jtest-state { color: var(--muted); font-size: .88rem; }
+.jtest-card.online .jtest-state { color: var(--ok); }
+.jtest-card.failed .jtest-state { color: var(--error); }
+.jtest-open { display: inline-flex; align-items: center; justify-content: center; gap: 8px; align-self: stretch; padding: 12px 14px; border-radius: 12px; background: var(--accent); color: var(--accent-text); font-weight: 600; text-decoration: none; }
+.jtest-open svg { color: inherit; }
+.jtest-url, .jtest-until { color: var(--muted); font-size: .85rem; }
+.jtest-card pre { max-height: 240px; overflow: auto; font-size: .78rem; }

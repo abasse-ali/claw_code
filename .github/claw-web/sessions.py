@@ -224,6 +224,15 @@ class Sessions:
                 raise
         return inputs
 
+    def jtest(self, number, repo, branch, options=None, stop=False):
+        """Lance (ou arrête) la JTest de la session : la session réservée `jtest-<n>` du workflow
+        des sessions, sur le serveur (jtest.py)."""
+        inputs = {"repo": repo, "base": branch, "session": f"jtest-{'stop-' if stop else ''}{number}",
+                  "model": json.dumps(options, ensure_ascii=False) if options else ""}
+        self._user("POST", f"/repos/{self.engine}/actions/workflows/{WORKFLOW}/dispatches",
+                   {"ref": self.engine_ref(), "inputs": inputs})
+        return inputs
+
     def active_runs(self, issue):
         repo = settings(issue.get("body")).get("repo") or ""
         return [run for run in self.runs_of(issue["number"], repo)
