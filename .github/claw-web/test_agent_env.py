@@ -39,6 +39,14 @@ class AgentEnvTest(unittest.TestCase):
         self.assertNotIn("JOB_TOKEN", env)
         self.assertEqual(env["PATH"], "/usr/bin")
 
+    def test_auto_sessions_go_to_nvidia_when_its_key_is_there(self):
+        self.assertEqual(run.session_model({"MODEL": "", "NVIDIA_API_KEY": "nvapi-x"}), run.NVIDIA_DEFAULT)
+        self.assertEqual(run.session_model({"MODEL": ""}), "")
+        self.assertEqual(run.session_model({"MODEL": "", "NVIDIA_API_KEY": " "}), "")
+        # Un modèle choisi dans l'appli reste le sien.
+        self.assertEqual(run.session_model({"MODEL": "poolside/laguna-s-2.1:free", "NVIDIA_API_KEY": "nvapi-x"}),
+                         "poolside/laguna-s-2.1:free")
+
 
 if __name__ == "__main__":
     unittest.main()
