@@ -1090,14 +1090,15 @@ def apply_members(ctx, doc, members, lids, stamp):
             raise refuse("invalid", f"Batch member {index} must be an object. Nothing was written.")
         member = resolve_lids(member, lids)
         verb = str(member.get("op") or member.get("verb") or "").strip().lower()
-        what = member.get("object") or (member.get("ref") or {}).get("object", "") if isinstance(member.get("ref") or {}, dict) else ""
+        ref = member.get("ref") if isinstance(member.get("ref"), dict) else {}
+        what = member.get("object") or ref.get("object") or ""
         try:
             if verb == "create":
                 result = create_in(ctx, doc, member.get("object"), member.get("payload"), stamp)
             elif verb == "update":
                 result = update_in(ctx, doc, member.get("ref"), member.get("payload"), member, stamp)
             elif verb == "delete":
-                if str((member.get("ref") or {}).get("object")) == "project":
+                if str(ref.get("object")) == "project":
                     raise refuse("invalid", "A doc is deleted on its own: delete(ref={\"object\":\"project\",\"id\":…}).")
                 result = delete_in(doc, member.get("ref"))
             else:

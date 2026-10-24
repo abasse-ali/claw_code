@@ -24,7 +24,7 @@ import setup  # noqa: E402
 from mcp_server import Server  # noqa: E402
 
 ISSUE = {"body": "Fais une appli de budget\n\n<!-- claw-web {\"repo\": \"o/r\"} -->"}
-CATALOG = Path(__file__).resolve().parents[2] / "claw-web" / "mcp-tools.json"
+CATALOG = Path(__file__).resolve().parents[2] / "claw-web" / "js" / "mcp-tools.js"
 
 
 class MessagesTest(unittest.TestCase):
@@ -115,8 +115,8 @@ class CatalogTest(unittest.TestCase):
                 self.assertTrue(tool["title"] and tool["title"][0].isupper(), tool)
 
     def test_the_apps_catalog_is_up_to_date(self):
-        # Après un changement d'outil : python3 mcp_server.py --catalog > ../../claw-web/mcp-tools.json
-        self.assertEqual(json.loads(CATALOG.read_text(encoding="utf-8")), mcp_server.catalog())
+        # Après un changement d'outil : python3 mcp_server.py --catalog > ../../claw-web/js/mcp-tools.js
+        self.assertEqual(CATALOG.read_text(encoding="utf-8"), mcp_server.catalog_module())
 
 
 if __name__ == "__main__":

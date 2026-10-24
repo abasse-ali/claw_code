@@ -16,7 +16,7 @@ const SHELL = [
   "js/highlight.js",
   "js/openrouter.js",
   "js/tools.js",
-  "mcp-tools.json",
+  "js/mcp-tools.js",
   "vendor/nacl-fast.min.js",
   "manifest.webmanifest",
   "icons/icon.svg",

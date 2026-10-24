@@ -5,6 +5,7 @@
 
 import { GitHubError } from "./github.js";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
+import catalog from "./mcp-tools.js";
 
 export const FILES_BRANCH = "claw-web-fichiers";
 const ROUTINES = "routines/routines.json";
@@ -48,22 +49,11 @@ export function extras(app) {
 
   // --- Outils MCP ------------------------------------------------------------------------------
 
-  let catalog = null;
   async function showTools() {
-    const body = page("Outils MCP", '<p class="empty">Chargement…</p>',
+    const body = page("Outils MCP", "",
       "Pendant une session, Claw peut appeler ces outils, comme Claude Code sur le web. Le moteur fait chaque "
       + "appel avec le jeton, que l'agent n'a jamais, et s'en tient au dépôt de la session : la fusion et les "
       + "suppressions restent dans les boutons de l'appli.");
-    try {
-      if (!catalog) {
-        const response = await fetch("mcp-tools.json", { cache: "no-cache" });
-        if (!response.ok) throw new Error(`liste des outils introuvable (${response.status})`);
-        catalog = await response.json();
-      }
-    } catch (error) {
-      body.innerHTML = `<p class="empty">${escapeHtml(String(error.message || error))}</p>`;
-      return;
-    }
     const total = catalog.servers.reduce((sum, server) => sum + server.tools.length, 0);
     body.innerHTML = `
       <input type="search" class="tools-filter" placeholder="Filtrer les ${total} outils" aria-label="Filtrer les outils">

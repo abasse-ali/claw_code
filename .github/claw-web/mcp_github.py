@@ -695,6 +695,9 @@ def actions_run_trigger(ctx, args):
                "delete_workflow_run_logs": ("DELETE", "/logs", "Workflow run logs have been deleted")}
     if method not in actions:
         raise ToolError(f"unknown method: {method}")
+    if method == "delete_workflow_run_logs" and not ctx.local:
+        raise ToolError("In Claw Web, deleting stays with the user (the app's buttons, or GitHub): "
+                        "workflow run logs are not deleted from here.")
     run_id = whole(args, "run_id", required=True)
     verb, suffix, message = actions[method]
     gh(ctx, verb, rp(ctx, f"/actions/runs/{run_id}{suffix}"))

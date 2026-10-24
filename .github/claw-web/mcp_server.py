@@ -14,7 +14,7 @@ Pour Claw Code sur votre machine, chaque serveur se lance aussi sur l'entrée st
 (jeton dans GITHUB_TOKEN ou GH_TOKEN, ou celui de `gh auth token` ; dépôt : celui du dossier
 courant, ou `--repo propriétaire/nom` ; sessions et documents de Claw Web : `--engine
 propriétaire/claw-sessions` ou CLAW_WEB_ENGINE). `--catalog` écrit la liste des outils que
-montre l'appli (claw-web/mcp-tools.json).
+montre l'appli (claw-web/js/mcp-tools.js).
 
 Les descriptions s'adressent au modèle, en anglais, comme les autres notes du moteur ; les
 titres, en français, sont ceux du journal et du panneau « Outils MCP » de l'appli.
@@ -36,6 +36,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from common import API, GitHubError, api
+
+# Lancé par `python3 mcp_server.py --stdio …`, ce module est `__main__` : les modules d'outils
+# qui font `import mcp_server` doivent retrouver celui-ci (ses ToolError), pas une seconde copie.
+sys.modules.setdefault("mcp_server", sys.modules[__name__])
 
 PROTOCOL_VERSION = "2025-03-26"
 VERSION = "1.0"
@@ -486,9 +490,17 @@ def local_context(repo="", engine=""):
                    repo_token=token, work=work, requests_file=None, local=True)
 
 
+def catalog_module():
+    """Le catalogue en module JavaScript (claw-web/js/mcp-tools.js) : la page ne joint que
+    GitHub et OpenRouter (politique de sécurité du contenu), un module de l'appli se charge."""
+    return ("// Outils MCP du moteur, pour la page « Outils MCP » de l'appli. Produit par\n"
+            "// `python3 .github/claw-web/mcp_server.py --catalog > claw-web/js/mcp-tools.js` : ne pas modifier.\n"
+            f"export default {json.dumps(catalog(), ensure_ascii=False, indent=1)};\n")
+
+
 def main(argv):
     if argv[:1] == ["--catalog"]:
-        print(json.dumps(catalog(), ensure_ascii=False, indent=1))
+        sys.stdout.write(catalog_module())
         return 0
     if len(argv) >= 2 and argv[0] == "--stdio":
         options = dict(zip(argv[2::2], argv[3::2]))
