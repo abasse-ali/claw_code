@@ -1013,11 +1013,12 @@ d'un travail explique la cause de chaque problème (pourquoi, ce qu'il touchait,
 pourquoi telle solution plutôt qu'une autre quand le choix comptait. Une question simple garde
 une réponse directe.
 
-**Le plus haut niveau de réflexion de chaque modèle.** Sans réglage, un modèle OpenRouter qui
-sait raisonner reçoit l'effort `max` : OpenRouter le ramène au plus haut niveau que ce modèle
-accepte (`high` pour Nemotron 3 Ultra, `max` pour Inkling). Seule exception, un modèle qui ne
-raisonne que par budget de jetons reçoit `high` : avec `max`, 95 % de la place de sa réponse
-partirait en réflexion et ses appels d'outils seraient coupés. Si une réponse s'arrête quand
+**Une réflexion forte, sans excès.** Sans réglage, un modèle OpenRouter qui sait raisonner
+reçoit le plus haut niveau qu'il accepte, `high` au plus (`/think max` demande `max`). À `max`,
+la réflexion d'un modèle gratuit remplissait toute sa réponse dès qu'il écrivait un gros
+fichier : vu le 24 octobre 2026 avec Laguna S 2.1, une douzaine de minutes perdues pour une
+réponse vide, à chaque passage de Claw Web. Un modèle qui ne raisonne que par budget de jetons
+reçoit `high` aussi : avec `max`, 95 % de la place de sa réponse partirait en réflexion. Si une réponse s'arrête quand
 même à la limite de sortie sans texte ni appel (la réflexion a tout pris), ce modèle descend d'un
 cran pour la suite de la session, et Claw le dit. La limite de sortie suit le catalogue jusqu'à
 65 536 jetons : le raisonnement compte dedans. Les niveaux acceptés par chaque modèle viennent

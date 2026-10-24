@@ -134,8 +134,9 @@ async fn openrouter_reasoning_models_are_asked_to_think_hard_by_default() {
     let body = |index: usize| -> serde_json::Value {
         serde_json::from_str(&captured[index].body).expect("json")
     };
-    // « max » : OpenRouter le ramène au plus haut niveau que le modèle accepte.
-    assert_eq!(body(0)["reasoning"], json!({"effort": "max"}));
+    // Sans réglage, « high » au plus, même pour un modèle qui accepte « max » :
+    // à « max », la réflexion remplissait la réponse des modèles gratuits.
+    assert_eq!(body(0)["reasoning"], json!({"effort": "high"}));
     assert_eq!(body(0)["max_tokens"], json!(65_536));
     // Raisonnement par budget seul, ou catalogue trop ancien pour le dire :
     // « high » laisse de la place à la réponse.
@@ -188,10 +189,13 @@ async fn a_reasoning_that_fills_the_reply_lowers_the_next_effort() {
         model: "vendor/rambler:free".to_string(),
         ..sample_request(true)
     };
+    // « max » demandé par l'utilisateur (`/think max`).
+    api::set_reasoning_effort(Some(api::ReasoningEffort::Max));
     for _ in 0..2 {
         let mut stream = client.stream_message(&request).await.expect("flux");
         while stream.next_event().await.expect("événement").is_some() {}
     }
+    api::set_reasoning_effort(None);
     let notice = api::take_reasoning_notice().expect("avertissement");
     assert!(notice.contains("« high » au lieu de « max »"), "{notice}");
 
@@ -254,7 +258,7 @@ async fn a_consulting_thread_caps_the_reasoning_it_asks_for() {
         serde_json::from_str(&captured[index].body).expect("json")
     };
     assert_eq!(body(0)["reasoning"], json!({"effort": "medium"}));
-    assert_eq!(body(1)["reasoning"], json!({"effort": "max"}));
+    assert_eq!(body(1)["reasoning"], json!({"effort": "high"}));
 }
 
 #[tokio::test]

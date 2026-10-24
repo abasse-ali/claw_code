@@ -108,8 +108,12 @@ pub fn anthropic_thinking_budget() -> Option<u32> {
 
 /// Niveau demandé à un modèle compatible `OpenAI`. Sans réglage, un modèle
 /// d'`OpenRouter` qui sait raisonner reçoit le plus haut niveau qui lui
-/// convient (`strongest`, tiré du catalogue) : mieux vaut une réponse
-/// réfléchie qu'une réponse rapide. Les autres serveurs ne reçoivent rien
+/// convient (`strongest`, tiré du catalogue), « high » au plus : à « max »,
+/// la réflexion d'un modèle gratuit remplissait toute la réponse dès qu'il
+/// écrivait un gros fichier (vu le 24 octobre 2026, session de test : une
+/// douzaine de minutes perdues pour une réponse vide, à chaque passage,
+/// le repli d'un cran ne durant que le passage). « max » reste à qui le
+/// demande (`/think max`). Les autres serveurs ne reçoivent rien
 /// sans réglage, certains refusant ce paramètre. Un modèle dont la réflexion
 /// a déjà pris toute la place de la réponse reste un cran en dessous.
 #[must_use]
@@ -125,7 +129,7 @@ pub fn effort_for_request(
     let effort = match configured {
         Some(ReasoningEffort::Off) => return None,
         Some(effort) => effort,
-        None if openrouter => strongest?,
+        None if openrouter => strongest?.min(DEFAULT_CEILING),
         None => return None,
     };
     let effort = match THREAD_CAP.with(Cell::get) {
@@ -140,6 +144,9 @@ pub fn effort_for_request(
 }
 
 // --- Réflexion qui prend toute la place ---------------------------------------------
+
+/// Niveau le plus haut demandé sans réglage de l'utilisateur.
+const DEFAULT_CEILING: ReasoningEffort = ReasoningEffort::High;
 
 /// Dernier niveau envoyé à chaque modèle, et plafond appris pour la session.
 static SENT: RwLock<BTreeMap<String, ReasoningEffort>> = RwLock::new(BTreeMap::new());
@@ -308,8 +315,15 @@ mod tests {
         use super::effort_for_request;
         let model = "deepseek/deepseek-r1:free";
         let max = Some(ReasoningEffort::Max);
-        // Sans réglage : le plus haut niveau qui convient au modèle.
-        assert_eq!(effort_for_request(None, model, true, max), max);
+        // Sans réglage : le plus haut niveau qui convient au modèle, « high » au plus.
+        let high = Some(ReasoningEffort::High);
+        assert_eq!(effort_for_request(None, model, true, max), high);
+        assert_eq!(
+            effort_for_request(None, model, true, Some(ReasoningEffort::Medium)),
+            Some(ReasoningEffort::Medium)
+        );
+        // « max » demandé par l'utilisateur.
+        assert_eq!(effort_for_request(max, model, true, max), max);
         assert_eq!(
             effort_for_request(None, model, true, Some(ReasoningEffort::High)),
             Some(ReasoningEffort::High)
@@ -366,11 +380,11 @@ mod tests {
         let elsewhere = std::thread::spawn(move || effort_for_request(None, model, true, max))
             .join()
             .expect("fil");
-        assert_eq!(elsewhere, max);
+        assert_eq!(elsewhere, Some(ReasoningEffort::High));
         cap_thread_reasoning(Some(ReasoningEffort::Off));
         assert_eq!(effort_for_request(None, model, true, max), None);
         cap_thread_reasoning(None);
-        assert_eq!(effort_for_request(None, model, true, max), max);
+        assert_eq!(effort_for_request(max, model, true, max), max);
     }
 
     #[test]
@@ -401,10 +415,7 @@ mod tests {
             Some(ReasoningEffort::Low)
         );
         // Un autre modèle n'est pas concerné.
-        assert_eq!(
-            effort_for_request(None, "vendor/other:free", true, max),
-            max
-        );
+        assert_eq!(effort_for_request(max, "vendor/other:free", true, max), max);
     }
 
     #[test]
