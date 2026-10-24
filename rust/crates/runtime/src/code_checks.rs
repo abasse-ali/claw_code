@@ -311,9 +311,56 @@ pub fn pitfalls(path: &Path) -> Vec<String> {
                     .collect()
             })
             .unwrap_or_default(),
+        "html" | "htm" | "js" | "mjs" | "jsx" | "ts" | "tsx" | "vue" | "svelte" => read(path)
+            .map(|text| injected_test_data(&text))
+            .unwrap_or_default(),
         _ => Vec::new(),
     };
     found.into_iter().take(MAX_FINDINGS).collect()
+}
+
+/// Mots qui disent qu'une écriture dans le stockage n'est là que pour essayer.
+const TEST_DATA_WORDS: &[&str] = &[
+    "debug",
+    "test data",
+    "testdata",
+    "données de test",
+    "donnees de test",
+    "fake data",
+    "sample data",
+    "mock data",
+    "dummy",
+];
+
+/// Données de test ou de débogage écrites dans le stockage du navigateur au
+/// chargement d'une page (`localStorage.setItem` près d'un commentaire
+/// « debug », « test data »…) : à chaque ouverture, elles remplacent les
+/// données de l'utilisateur. Vu le 24 octobre 2026 (session de test de Claw
+/// Web) : un bloc « Debug: inject test data » laissé dans `index.html` d'une
+/// appli de budget, chaque dépense ajoutée disparaissait au rechargement.
+#[must_use]
+pub fn injected_test_data(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let marked = |line: &&str| {
+        let lower = line.to_lowercase();
+        TEST_DATA_WORDS.iter().any(|word| lower.contains(word))
+    };
+    lines
+        .iter()
+        .enumerate()
+        .find(|(index, line)| {
+            (line.contains("localStorage.setItem") || line.contains("sessionStorage.setItem"))
+                && lines[index.saturating_sub(8)..(index + 3).min(lines.len())]
+                    .iter()
+                    .any(marked)
+        })
+        .map(|(index, _)| {
+            vec![format!(
+                "line {}: test or debug data written into the browser storage as the page loads: each time the user opens the app, it replaces their own data. Remove it from the project; to see the page with sample data, give them to the Screenshot tool's `storage` instead",
+                index + 1
+            )]
+        })
+        .unwrap_or_default()
 }
 
 /// Ce qui est dit au modèle quand un fichier a des pièges.
@@ -788,6 +835,20 @@ fn shell_pitfalls(path: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_data_injected_into_a_page_is_found_and_real_storage_is_not() {
+        let page = "<body>\n  <!-- Debug: inject test data -->\n  <script>\n    var t = [{\"amount\": 2500}];\n    localStorage.setItem('expenses', JSON.stringify(t));\n  </script>\n</body>";
+        let found = super::injected_test_data(page);
+        assert_eq!(found.len(), 1);
+        assert!(
+            found[0].starts_with("line 5: test or debug data"),
+            "{found:?}"
+        );
+        // Une appli qui enregistre les données de l'utilisateur : rien à dire.
+        let app = "function save(expenses) {\n  // Enregistre les dépenses du mois\n  localStorage.setItem(key, JSON.stringify(expenses));\n}";
+        assert!(super::injected_test_data(app).is_empty());
+    }
+
     use super::{batch_pitfalls, css_structure, pitfalls_feedback, powershell_pitfalls};
 
     /// Un dossier neuf pour les fichiers d'un essai.
