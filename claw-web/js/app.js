@@ -36,6 +36,7 @@ const ICON = {
   archive: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4"/></svg>',
   stop: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>',
   trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V4h6v3"/></svg>',
+  phone: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg>',
   globe: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.5 2.6 2.5 14.4 0 17M12 3.5c-2.5 2.6-2.5 14.4 0 17"/></svg>',
   edit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>',
   spark: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 3.5l1.9 5.1 5.1 1.9-5.1 1.9L11 17.5l-1.9-5.1L4 10.5l5.1-1.9z"/><path d="M18.5 15l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></svg>',
@@ -2248,10 +2249,81 @@ async function showHome() {
   }
 }
 
+// --- JTest : le travail de la session sur le serveur d'Oracle, ouvert sur le téléphone -------
+
+const JTEST_MARK = "<!-- claw-web:jtest";
+const JTEST_DATA = /<!--\s*claw-web:jtest\s+(\{[\s\S]*?\})\s*-->/;
+
+function jtestOf(body) {
+  const found = JTEST_DATA.exec(body || "");
+  if (!found) return null;
+  try {
+    return JSON.parse(found[1]);
+  } catch {
+    return null;
+  }
+}
+
+/** Une carte JTest : la dernière avec ses boutons (« Ouvrir », « Arrêter », « Relancer »), les
+ * précédentes en une ligne. */
+function jtestHtml(comment, latest) {
+  const data = jtestOf(comment.body) || {};
+  const label = data.label ? ` · ${escapeHtml(data.label)}` : "";
+  if (!latest) {
+    const word = { online: "en ligne (remplacé)", starting: "en préparation", stopped: "arrêté", failed: "en échec" }[data.state] || "";
+    return `<div class="jtest-card old">${ICON.phone}<span>JTest ${escapeHtml(word)}${label}</span></div>`;
+  }
+  if (data.state === "starting") {
+    return `<div class="jtest-card starting"><div class="jtest-head">${ICON.phone}<strong>JTest</strong>
+      <span class="spinner" aria-hidden="true"></span></div>
+      <p>Préparation sur le serveur : clone de la branche, installation, lancement, lien sécurisé.</p></div>`;
+  }
+  if (data.state === "online") {
+    const ended = data.until && Date.parse(data.until) < Date.now();
+    return `<div class="jtest-card ${ended ? "ended" : "online"}"><div class="jtest-head">${ICON.phone}<strong>JTest</strong>
+        <span class="jtest-state">${ended ? "terminé" : "en ligne"}${label}</span></div>
+      ${ended ? `<p>En ligne jusqu'à ${escapeHtml(new Date(data.until).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }))} : relancez-le pour le rouvrir.</p>`
+        : `<a class="primary jtest-open" href="${escapeHtml(data.url)}" target="_blank" rel="noopener noreferrer">${ICON.external}<span>Ouvrir sur le téléphone</span></a>
+      <p class="jtest-url">${escapeHtml(data.url)}</p>
+      ${data.user ? `<p>Identifiant <code>${escapeHtml(data.user)}</code>, mot de passe <code>${escapeHtml(data.password)}</code>.</p>` : ""}
+      <p class="jtest-until">En ligne jusqu'à ${escapeHtml(new Date(data.until).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }))}.</p>`}
+      <div class="doc-actions">
+        ${ended ? "" : `<button class="small-link stop" data-action="jtest-stop">${ICON.stop}<span>Arrêter</span></button>`}
+        <button class="small-link" data-action="jtest">${ICON.retry}<span>Relancer</span></button>
+      </div></div>`;
+  }
+  if (data.state === "stopped") {
+    return `<div class="jtest-card stopped"><div class="jtest-head">${ICON.phone}<strong>JTest</strong>
+      <span class="jtest-state">arrêté</span></div>
+      <div class="doc-actions"><button class="small-link" data-action="jtest">${ICON.phone}<span>Relancer</span></button></div></div>`;
+  }
+  return `<div class="jtest-card failed"><div class="jtest-head">${ICON.phone}<strong>JTest</strong>
+      <span class="jtest-state">n'a pas pu démarrer</span></div>
+    <p>${escapeHtml(data.reason || "Erreur inconnue.")}</p>
+    ${data.log ? `<details class="disclosure"><summary>Journal</summary><pre class="code-view">${escapeHtml(data.log)}</pre></details>` : ""}
+    <div class="doc-actions"><button class="small-link" data-action="jtest">${ICON.retry}<span>Réessayer</span></button></div></div>`;
+}
+
+/** Lance (ou arrête) la JTest de la session : la session réservée `jtest-<n>` du moteur, sur le
+ * serveur d'Oracle. */
+async function dispatchJtest(session, stop = false) {
+  await state.github.dispatch(state.settings.engine, state.engineRef, {
+    repo: session.settings.repo,
+    base: branchOf(session.issue),
+    session: `jtest-${stop ? "stop-" : ""}${session.number}`,
+    model: "",
+  });
+  // Le commentaire de JTest arrive en une à trois minutes : la session est relue plus souvent.
+  state.jtestWatch = { session: session.number, until: Date.now() + 5 * 60_000 };
+}
+
+const jtestWatching = (number) => Boolean(state.jtestWatch && state.jtestWatch.session === number
+  && Date.now() < state.jtestWatch.until);
+
 /** « engine » (progression, journal), « answer » (réponse de Claw) ou « message ». */
 function kindOf(body) {
   const text = String(body || "").trim();
-  if (text.includes(PROGRESS) || text.startsWith(LOG)) return "engine";
+  if (text.includes(PROGRESS) || text.startsWith(LOG) || text.startsWith(JTEST_MARK)) return "engine";
   return text.includes(ANSWER) ? "answer" : "message";
 }
 
@@ -2283,6 +2355,11 @@ function discussionBlocks(comments) {
   for (const comment of comments) {
     const body = comment.body || "";
     if (body.startsWith(LOG)) continue;
+    if (body.startsWith(JTEST_MARK)) {
+      blocks.push({ jtest: comment });
+      group = null;
+      continue;
+    }
     if (body.includes(PROGRESS)) {
       open = attempt({ progress: comment, answer: null });
     } else if (kindOf(body) === "answer") {
@@ -2757,7 +2834,10 @@ function renderSessionView() {
   const status = runStatus(run);
   const comments = session.comments;
   const lastProgress = [...comments].reverse().find((comment) => (comment.body || "").includes(PROGRESS));
-  const answered = comments.length && (comments[comments.length - 1].body || "").includes(ANSWER);
+  const lastJtest = [...comments].reverse().find((comment) => (comment.body || "").startsWith(JTEST_MARK));
+  // Les cartes JTest viennent après la réponse : elles ne la font pas oublier.
+  const talk = comments.filter((comment) => !(comment.body || "").startsWith(JTEST_MARK));
+  const answered = talk.length && (talk[talk.length - 1].body || "").includes(ANSWER);
   const active = waiting || (status && (status.key === "queued" || status.key === "running"));
   const step = session.step ? ` · ${escapeHtml(session.step)}` : "";
   const pull = session.pull;
@@ -2789,7 +2869,8 @@ function renderSessionView() {
       </header>
       <div class="messages">
         ${userMessageHtml(session.issue.user ? session.issue.user.login : "", taskOf(session.issue))}
-        ${discussionBlocks(comments).map((block) => (block.message ? messageHtml(block.message, false)
+        ${discussionBlocks(comments).map((block) => (block.jtest ? jtestHtml(block.jtest, block.jtest === lastJtest)
+          : block.message ? messageHtml(block.message, false)
           : attemptsHtml(block, (comment) => comment === lastProgress && !answered))).join("")}
         ${preparing ? preparingHtml(run, status, session.step) : ""}
       </div>
@@ -2802,6 +2883,7 @@ function renderSessionView() {
           ${active && run ? `<button class="small-link stop" data-action="stop">${ICON.stop}<span>Arrêter</span></button>` : ""}
           ${!active && !unsent ? `<button class="small-link" data-action="retry">${ICON.retry}<span>Relancer</span></button>` : ""}
           ${!active ? `<button class="small-link" data-action="publish-site">${ICON.globe}<span>Mettre en ligne</span></button>` : ""}
+          ${!active ? `<button class="small-link" data-action="jtest">${ICON.phone}<span>JTest</span></button>` : ""}
           <details class="more-menu">
             <summary class="small-link" aria-label="Autres actions"><span class="dots" aria-hidden="true">•••</span></summary>
             <div class="menu-list">
@@ -2881,6 +2963,26 @@ function renderSessionView() {
     }
   });
   view.querySelector('[data-action="publish-site"]')?.addEventListener("click", () => openPublish(session));
+  for (const button of view.querySelectorAll('[data-action="jtest"]')) {
+    button.addEventListener("click", async () => {
+      for (const item of view.querySelectorAll('[data-action="jtest"]')) item.disabled = true;
+      try {
+        await dispatchJtest(session);
+        toast("JTest lancé sur le serveur : le lien arrive ici d'ici une à trois minutes");
+        await pollSession(true);
+      } catch (error) {
+        for (const item of view.querySelectorAll('[data-action="jtest"]')) item.disabled = false;
+        failure(error);
+      }
+    });
+  }
+  const jtestStop = view.querySelector('[data-action="jtest-stop"]');
+  if (jtestStop) {
+    twoTaps(jtestStop, async () => {
+      await dispatchJtest(session, true);
+      toast("JTest arrêté dans la minute");
+    });
+  }
   // Deux appuis pour arrêter (pas de fenêtre de confirmation, comme le reste de l'appli).
   view.querySelector('[data-action="stop"]')?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
@@ -3014,7 +3116,8 @@ async function pollSession(force = false) {
     if (atBottom || force) window.scrollTo({ top: document.body.scrollHeight });
   }
   if (state.session === session && !document.hidden) {
-    state.pollTimer = setTimeout(() => pollSession().catch(failure), session.active ? 4000 : 30000);
+    state.pollTimer = setTimeout(() => pollSession().catch(failure),
+      session.active || jtestWatching(session.number) ? 4000 : 30000);
   }
 }
 

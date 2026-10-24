@@ -358,6 +358,12 @@ export default {
      "read_only": false
     },
     {
+     "name": "jtest",
+     "title": "Tester sur le téléphone (JTest)",
+     "read_only": false,
+     "note": "Sur le serveur Oracle, lien https pour le téléphone (tunnel Cloudflare)"
+    },
+    {
      "name": "list_environments",
      "title": "Lister les machines",
      "read_only": true

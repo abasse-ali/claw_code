@@ -220,7 +220,7 @@ de trois serveurs MCP (liste complète dans le menu, « Outils MCP », avec un f
   ou la copie d'un dépôt (« Créer un dépôt » dans le choix du dépôt), et l'écriture de fichiers
   par l'API sur la branche de la session ou sur la branche de départ : Claw modifie sa copie de
   travail, que le moteur pousse à la fin.
-- **`claw-remote`** (28 outils, ceux de `claude-code-remote`) : vos autres sessions (lister,
+- **`claw-remote`** (les 28 outils de `claude-code-remote`, plus `jtest`) : vos autres sessions (lister,
   lire, leur écrire, en créer, les arrêter, archiver, renommer, étiqueter), les routines, le
   suivi d'une pull request, la surveillance d'une adresse, la liste de vos dépôts et la copie en
   lecture d'un autre dépôt à côté du travail, les machines, la documentation de Claw Web. Un
@@ -297,6 +297,32 @@ jobs:
 Il prend une minute d'Actions par heure au plus ; aucune sur « Ma machine » (variable du dépôt
 `CLAW_RUNNER` = `claw-pc`). Les routines et les suivis sont rangés sur `claw-web-fichiers`,
 dans `routines/`.
+
+## JTest : essayer sur le téléphone
+
+« JTest » (sous la conversation d'une session) lance le travail de la session sur votre serveur
+gratuit d'Oracle et donne un lien https à ouvrir sur l'iPhone : un site, une appli web, ou un
+programme. Claw le fait aussi de lui-même quand vous voulez essayer le résultat (« je veux le
+tester sur mon iPhone ») : après sa réponse, le lien arrive dans la session.
+
+- Le serveur clone la branche de la session, devine comment lancer le projet (Vite, Next.js,
+  Astro, Nuxt, Angular, Create React App, `npm run dev` ou `npm start`, Flask, FastAPI, Django,
+  Streamlit, site statique, dans la racine ou un dossier `app/`, `web/`, `frontend/`…), installe
+  ses dépendances et le lance. Le lien vient d'un tunnel Cloudflare gratuit
+  (`https://….trycloudflare.com`) : rien à ouvrir ni à régler chez Oracle.
+- Un programme qui n'est pas un site (Python, Node, Rust…) s'ouvre dans un terminal web : la carte
+  donne l'identifiant et le mot de passe ; le programme se relance d'Entrée quand il se termine.
+- La carte JTest de la session : « Ouvrir sur le téléphone », l'heure jusqu'à laquelle il reste en
+  ligne (4 heures par défaut, 24 au plus), « Arrêter » (deux appuis), « Relancer ». Un échec dit
+  pourquoi, avec le journal de l'installation.
+- Un projet particulier : un fichier `jtest.json` à la racine, par exemple
+  `{"command": "npm run dev -- --port {port}", "install": ["npm ci"], "path": "/admin"}`.
+- Au plus trois JTest en ligne à la fois sur le serveur (la plus ancienne s'arrête). Le lien est
+  public mais introuvable sans lui ; ne le partagez pas pour un projet privé. Les programmes lancés
+  n'ont ni jeton ni clé.
+
+Il faut le serveur gratuit d'Oracle (« Sessions sur votre machine » ci-dessous) : JTest tourne
+sur l'exécuteur `claw-pc` à processeur ARM, et le site y reste en ligne après le passage.
 
 ## Fusionner, mettre en ligne
 

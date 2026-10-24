@@ -109,7 +109,7 @@ class CatalogTest(unittest.TestCase):
     def test_catalog_lists_the_three_servers(self):
         catalog = mcp_server.catalog()
         counts = {server["server"]: len(server["tools"]) for server in catalog["servers"]}
-        self.assertEqual(counts, {"github": 54, "claw-remote": 28, "claw-docs": 8})
+        self.assertEqual(counts, {"github": 54, "claw-remote": 29, "claw-docs": 8})
         for server in catalog["servers"]:
             for tool in server["tools"]:
                 self.assertTrue(tool["title"] and tool["title"][0].isupper(), tool)

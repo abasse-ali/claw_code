@@ -348,7 +348,7 @@ class RepoToolsTest(unittest.TestCase):
         names = [tool.name for tool in mcp_remote.tools(Context())]
         self.assertEqual(sorted(names), sorted([
             "add_repo", "archive_session", "confirm_repository_trust", "create_session", "create_trigger",
-            "delete_trigger", "fire_trigger", "get_event", "get_session", "get_trigger", "interrupt_session",
+            "delete_trigger", "fire_trigger", "get_event", "get_session", "get_trigger", "interrupt_session", "jtest",
             "list_environments", "list_events", "list_repos", "list_sessions", "list_triggers", "read_documentation",
             "register_repo_root", "send_later", "send_message", "set_session_tags", "set_session_title",
             "subscribe_pr_activity", "unarchive_session", "unsubscribe_pr_activity", "unwatch_url", "update_trigger",

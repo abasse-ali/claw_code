@@ -108,8 +108,38 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python3 claw-src/.github/claw-web/models_catalog.py
 
+  # JTest : le travail d'une session lancé sur le serveur d'Oracle (exécuteur claw-pc, ARM64) et
+  # ouvert sur le téléphone par un lien https (tunnel Cloudflare). L'appli ou Claw lancent la
+  # session réservée `jtest-<n>` (`jtest-stop-<n>` pour l'arrêter) : `base` porte la branche à
+  # lancer, `model` les réglages (JSON facultatif : command, install, port, path, hours). Le site
+  # reste en ligne après le job, quelques heures. Voir .github/claw-web/jtest.py.
+  jtest:
+    if: startsWith(inputs.session, 'jtest-')
+    runs-on: [claw-pc, ARM64]
+    timeout-minutes: 30
+    steps:
+      - name: Scripts du moteur
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.claw_source }}
+          ref: ${{ inputs.claw_ref }}
+          token: ${{ secrets.CLAW_REPO_TOKEN || github.token }}
+          path: claw-src
+          sparse-checkout: .github/claw-web
+          persist-credentials: false
+      - name: JTest
+        env:
+          SESSION_INPUT: ${{ inputs.session }}
+          REPO: ${{ inputs.repo }}
+          BRANCH: ${{ inputs.base }}
+          OPTIONS: ${{ inputs.model }}
+          JOB_TOKEN: ${{ github.token }}
+          REPO_TOKEN: ${{ secrets.CLAW_REPO_TOKEN }}
+          PYTHONPATH: ${{ github.workspace }}/claw-src/.github/claw-web
+        run: python3 claw-src/.github/claw-web/jtest.py
+
   task:
-    if: inputs.session != 'catalogue-modeles'
+    if: inputs.session != 'catalogue-modeles' && !startsWith(inputs.session, 'jtest-')
     # Sur votre PC (exécuteur auto-hébergé `claw-pc`), aucune minute de GitHub n'est comptée.
     runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 120
