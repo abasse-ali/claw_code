@@ -25,7 +25,7 @@ HERE = Path(__file__).resolve().parent
 SOURCE = HERE.parents[1] / "crates" / "claw-cli" / "src" / "image_reader.rs"
 MODEL = os.environ.get("READER_MODEL", "nvidia/nemotron-3.5-super-vl-120b-a12b")
 URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-TOKENS = 8000
+TOKENS = int(os.environ.get("READER_TOKENS", "8000"))
 
 
 def rust_const(name):
@@ -56,8 +56,14 @@ def ask(prompt, image):
         try:
             with urllib.request.urlopen(request, timeout=240) as response:
                 answer = json.loads(response.read())
-            message = answer["choices"][0]["message"]
-            return (message.get("content") or "").strip()
+            choice = answer["choices"][0]
+            message = choice["message"]
+            text = (message.get("content") or "").strip()
+            thought = message.get("reasoning_content") or message.get("reasoning") or ""
+            usage = answer.get("usage") or {}
+            print(f"[appel] fin={choice.get('finish_reason')} sortie={usage.get('completion_tokens')} "
+                  f"réponse={len(text)} car. raisonnement={len(thought)} car.", flush=True)
+            return text
         except urllib.error.HTTPError as error:
             if error.code == 429 and attempt < 3:
                 time.sleep(20 * (attempt + 1))
