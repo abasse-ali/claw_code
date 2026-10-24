@@ -191,14 +191,39 @@ def load(token, engine, repo, call=api):
     return parse(text), found.get("sha")
 
 
+# Un nom de fichier du projet dans une commande ou une note (`tests/test_x.py`, `app.js`).
+PROJECT_FILE = re.compile(r"(?<![:/\w.-])(?:\./)?([\w-]+(?:/[\w.-]+)*\.(?:py|js|mjs|ts|tsx|jsx|html?|css|json|md|rs|go|"
+                          r"java|rb|php|sh|toml|ya?ml|vue|svelte))\b")
+
+
+def _absent(names, root):
+    """Des fichiers sont nommés, et aucun n'existe dans le clone."""
+    names = [name for name in names if name]
+    return bool(names) and not any((root / name).exists() for name in names)
+
+
+def for_this_checkout(data, root):
+    """La mémoire sans ce qui ne parle que de fichiers absents du clone : une autre branche du
+    même dépôt peut porter un tout autre projet. Vu le 24 octobre 2026 (session de test : une appli
+    de budget partie d'une branche vide du dépôt d'un script Amazon) : la réponse finale renvoyait
+    l'utilisateur aux tests `tests/test_cdiscount_client.py` du script, absents de sa branche. Le
+    fichier de mémoire du dépôt des sessions, lui, garde tout."""
+    kept = dict(data)
+    kept["errors"] = [item for item in data["errors"] if not _absent(PROJECT_FILE.findall(item.get("cmd", "")), root)]
+    kept["worked"] = [item for item in data["worked"] if not _absent(PROJECT_FILE.findall(item.get("cmd", "")), root)]
+    kept["requests"] = [item for item in data["requests"] if not _absent(item.get("files") or [], root)]
+    kept["defects"] = [item for item in data.get("defects") or [] if not _absent(item.get("files") or [], root)]
+    return kept
+
+
 def install(data, claw_dir):
     """Remet la mémoire dans `.claw/` du clone ; rend les leçons écrites (pour savoir ensuite
-    lesquelles sont nouvelles)."""
+    lesquelles sont nouvelles). N'y va que ce qui concerne les fichiers de ce clone."""
     claw_dir.mkdir(parents=True, exist_ok=True)
     lessons = [lesson if lesson.startswith("- ") else f"- {lesson}" for lesson in data["lessons"]]
     if lessons:
         (claw_dir / "lessons.md").write_text("\n".join(lessons) + "\n", encoding="utf-8")
-    body = memory_text(data)
+    body = memory_text(for_this_checkout(data, claw_dir.parent))
     if body:
         (claw_dir / "memory.md").write_text(body, encoding="utf-8")
     return lessons
