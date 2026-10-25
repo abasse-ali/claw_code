@@ -1105,3 +1105,31 @@ html.scroll-locked, html.scroll-locked body { overflow: hidden; overscroll-behav
 .jtest-card .jtest-lock { display: flex; align-items: flex-start; gap: 6px; color: var(--muted); font-size: .85rem; }
 .jtest-lock svg { width: 15px; height: 15px; margin-top: 2px; color: var(--ok); }
 .jtest-card pre { max-height: 240px; overflow: auto; font-size: .78rem; }
+
+/* Verrou : par-dessus toute l'appli, rien derrière ne se voit ni ne se touche */
+body.locked { overflow: hidden; }
+.lock-screen {
+  position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; overflow-y: auto;
+  padding: max(24px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); background: var(--bg);
+}
+.lock-panel { display: flex; flex-direction: column; gap: 14px; width: min(380px, 100%); }
+.lock-logo {
+  display: inline-flex; align-items: center; justify-content: center; width: 56px; height: 56px; border-radius: 16px;
+  background: var(--panel); border: 1px solid var(--border); color: var(--accent);
+}
+.lock-logo svg { width: 26px; height: 26px; }
+.lock-panel h1 { margin: 4px 0 0; font-size: 1.6rem; line-height: 1.2; }
+.lock-intro, .lock-help { margin: 0; color: var(--muted); line-height: 1.5; }
+.lock-intro strong { color: var(--text); }
+.lock-help { font-size: .85rem; }
+.lock-field { display: flex; flex-direction: column; gap: 6px; font-size: .9rem; }
+.lock-field input {
+  min-height: 48px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--panel); color: var(--text); font: inherit; font-size: 1rem;
+}
+.lock-field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.lock-error { margin: 0; color: var(--error); }
+.lock-panel .primary { align-self: stretch; min-height: 48px; font-size: 1rem; }
+.lock-forgot { color: var(--muted); font-size: .9rem; }
+.lock-forgot summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; }
+.lock-forgot p { margin: 0 0 10px; line-height: 1.5; }

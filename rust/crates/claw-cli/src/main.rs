@@ -10862,7 +10862,7 @@ fn prompt_from(prompt: String, mut input: impl io::Read) -> Result<String, Strin
     if text.trim().is_empty() {
         return Err("la demande lue sur l'entrée standard est vide".to_string());
     }
-    expand_leading_command(text.trim_end_matches(['\n', '\r']))
+    Ok(expand_leading_command(text.trim_end_matches(['\n', '\r'])))
 }
 
 /// Demande lue sur l'entrée standard qui commence par une commande (`/review`,
@@ -10870,9 +10870,9 @@ fn prompt_from(prompt: String, mut input: impl io::Read) -> Result<String, Strin
 /// consignes, comme `claw /review` en ligne de commande. Les notes qu'un moteur
 /// ajoute après (`[Claw] ...`) restent à la suite. Vu dans Claw Web : un
 /// « /review » tapé dans la session arrivait au modèle comme du simple texte.
-fn expand_leading_command(text: &str) -> Result<String, String> {
+fn expand_leading_command(text: &str) -> String {
     if !text.starts_with('/') {
-        return Ok(text.to_string());
+        return text.to_string();
     }
     let (command, rest) = text
         .split_once("\n\n[Claw]")
@@ -10883,19 +10883,19 @@ fn expand_leading_command(text: &str) -> Result<String, String> {
         Some(SlashCommand::Expert { command, args }) => {
             match expert_command_prompt(command, args.as_deref()) {
                 Ok(prompt) => prompt,
-                Err(_) => return Ok(text.to_string()),
+                Err(_) => return text.to_string(),
             }
         }
         _ => match custom_command_prompt(command.trim()) {
             Some(Ok(invocation)) => invocation.prompt,
-            _ => return Ok(text.to_string()),
+            _ => return text.to_string(),
         },
     };
-    Ok(if rest.is_empty() {
+    if rest.is_empty() {
         expanded
     } else {
         format!("{expanded}\n\n[Claw]{rest}")
-    })
+    }
 }
 
 /// Mode équipe au démarrage : `CLAW_TEAM`, sinon `"team"` dans la config.

@@ -10,6 +10,7 @@ import { LOG, changesHtml, decodeLog, photoLink, photoView, transcriptHtml, with
 import { highlightLines, languageOf } from "./highlight.js";
 import { accountStatus, allFreeModels, freeModels, resetTime } from "./openrouter.js";
 import { extras } from "./tools.js";
+import { LOCK_AFTER_MS, MIN_CODE, SECRET_FIELDS, createVault, openVault, removeVault, seal, vault, waitLeft } from "./lock.js";
 
 const STORE = "claw-web.settings.v1";
 const DEFAULT_ENGINE = "abasse-ali/claw-sessions";
@@ -125,9 +126,21 @@ function loadSettings() {
   }
 }
 
+/** Les clés des réglages (jeton GitHub, clé OpenRouter), à garder chiffrées. */
+const secretsOf = (settings) => Object.fromEntries(SECRET_FIELDS.filter((field) => settings[field]).map((field) => [field, settings[field]]));
+
 function saveSettings() {
   try {
-    localStorage.setItem(STORE, JSON.stringify(state.settings));
+    // Verrou posé : les clés ne vont que dans le coffre chiffré, jamais en clair.
+    const stored = { ...state.settings };
+    if (vault() || state.lock) {
+      for (const field of SECRET_FIELDS) delete stored[field];
+      if (state.lock) {
+        seal(state.lock.key, state.lock.salt, secretsOf(state.settings), state.lock.owner)
+          .catch(() => toast("Les clés n'ont pas pu être chiffrées sur cet appareil", "error"));
+      }
+    }
+    localStorage.setItem(STORE, JSON.stringify(stored));
   } catch {
     toast("Ce navigateur ne garde pas les réglages (navigation privée ?)", "error");
   }
@@ -3928,7 +3941,7 @@ function showSettings(first = false, justConnected = false) {
           <summary class="row"><span class="row-icon">${ICON.key}</span>${text("Jeton et dépôt du moteur", "")}${ICON.chevron}</summary>
           <form class="settings-form" autocomplete="off">
             ${field("Jeton GitHub", "Jeton à grain fin ; il reste dans ce navigateur",
-              `<input name="token" type="password" placeholder="github_pat_…" value="${escapeHtml(settings.token || "")}" spellcheck="false">`)}
+              `<input name="token" type="password" placeholder="${settings.token ? "jeton enregistré : vide, il reste" : "github_pat_…"}" autocomplete="off" spellcheck="false">`)}
             ${field("Dépôt du moteur", "Où vivent les sessions (propriétaire/nom)",
               `<input name="engine" type="text" value="${escapeHtml(engine)}" spellcheck="false">`)}
             <div class="row-actions"><button class="primary" type="submit">Enregistrer</button></div>
@@ -3941,6 +3954,23 @@ function showSettings(first = false, justConnected = false) {
         <dl class="perms">${perms.map(([when, names]) => `<dt>${when}</dt><dd>${names.map((name) => `<span class="perm">${name}</span>`).join("")}</dd>`).join("")}</dl>
         <p>Modifier ces autorisations sur GitHub garde la valeur du jeton : rien à refaire ici.</p>
       </details>
+      ${state.lock ? `
+
+      <h2 class="group-title">Verrou</h2>
+      <div class="group">
+        <div class="row"><span class="row-icon">${ICON.lock}</span>${text("Code demandé à chaque ouverture", "Et après 15 minutes d'absence. Le jeton et les clés de cet appareil sont chiffrés par ce code.")}<span class="pill ok">Actif</span></div>
+        <button type="button" class="row" data-action="lock-now"><span class="row-icon">${ICON.lock}</span>${text("Verrouiller maintenant", "")}</button>
+        <details class="disclosure">
+          <summary class="row"><span class="row-icon">${ICON.key}</span>${text("Changer le code", "")}${ICON.chevron}</summary>
+          <form class="code-form" autocomplete="off">
+            <input type="text" name="username" autocomplete="username" value="${escapeHtml(state.lock.owner || login || "claw")}" hidden>
+            ${field("Code actuel", "", '<input name="current" type="password" autocomplete="current-password" required>')}
+            ${field("Nouveau code", `Au moins ${MIN_CODE} caractères`, '<input name="code" type="password" autocomplete="new-password" required>')}
+            ${field("Le même code, encore", "", '<input name="again" type="password" autocomplete="new-password" required>')}
+            <div class="row-actions"><button class="primary" type="submit">Changer le code</button></div>
+          </form>
+        </details>
+      </div>` : ""}
       ${state.github ? `
 
       <h2 class="group-title">Moteur</h2>
@@ -4009,10 +4039,30 @@ function showSettings(first = false, justConnected = false) {
         <button type="button" class="row danger-row" data-action="forget">Effacer le jeton de cet appareil</button>
       </div>` : ""}
     </section>`;
+  $("#view [data-action=lock-now]")?.addEventListener("click", lockNow);
+  $("#view .code-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    try {
+      if (form.code.value.length < MIN_CODE) throw new Error(`Le nouveau code doit avoir au moins ${MIN_CODE} caractères.`);
+      if (form.code.value !== form.again.value) throw new Error("Les deux nouveaux codes ne sont pas les mêmes.");
+      // Le code actuel d'abord : quelqu'un qui trouve l'appli ouverte ne peut pas le changer.
+      await openVault(form.current.value);
+      const owner = state.lock.owner;
+      const { key, salt } = await createVault(form.code.value, secretsOf(state.settings), owner);
+      state.lock = { key, salt, owner };
+      toast("Code changé");
+      showSettings();
+    } catch (error) {
+      toast(error.message, "error");
+      form.current.value = "";
+    }
+  });
   $("#view .settings-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.target;
-    const token = form.token.value.trim();
+    // Champ laissé vide : le jeton gardé reste (il n'est jamais réaffiché).
+    const token = form.token.value.trim() || state.settings.token || "";
     const engine = form.engine.value.trim() || DEFAULT_ENGINE;
     if (!/^[\w.-]+\/[\w.-]+$/.test(engine)) {
       toast("Dépôt du moteur attendu sous la forme propriétaire/nom", "error");
@@ -4023,6 +4073,9 @@ function showSettings(first = false, justConnected = false) {
       state.user = await github.user();
       state.github = github;
       state.settings.token = token;
+      // Premier jeton de l'appareil : le verrou d'abord, le jeton n'est jamais gardé en clair.
+      if (!vault()) await lockScreen("create");
+      else if (state.lock) state.lock.owner = state.user.login;
       if (state.settings.engine !== engine) state.repos = null;
       // Autre jeton ou autre moteur : ses secrets se relisent.
       state.providerSecrets = null;
@@ -4138,6 +4191,96 @@ function showSettings(first = false, justConnected = false) {
     });
   }
 }
+
+// --- Verrou de l'appli -----------------------------------------------------------------------
+
+/** L'écran du verrou, par-dessus tout : poser le code (« create », la première fois qu'un jeton
+ * est gardé) ou le donner (« open », à chaque ouverture et après une absence). Rend la main
+ * une fois l'appli déverrouillée, les clés en mémoire seulement. */
+function lockScreen(mode) {
+  return new Promise((resolve) => {
+    const box = vault();
+    const create = mode === "create";
+    const owner = (box && box.owner) || (state.user && state.user.login) || "";
+    const screen = document.createElement("div");
+    screen.id = "lock";
+    screen.className = "lock-screen";
+    screen.setAttribute("role", "dialog");
+    screen.setAttribute("aria-modal", "true");
+    screen.setAttribute("aria-label", create ? "Protéger Claw par un code" : "Déverrouiller Claw");
+    screen.innerHTML = `
+      <form class="lock-panel">
+        <span class="lock-logo">${ICON.lock}</span>
+        <h1>${create ? "Protégez Claw par un code" : "Claw est verrouillé"}</h1>
+        <p class="lock-intro">${create
+          ? "Votre jeton GitHub ouvre vos dépôts. Il sera chiffré sur cet appareil par un code que vous seul connaissez, demandé à chaque ouverture et après 15 minutes d'absence."
+          : owner ? `Compte GitHub <strong>${escapeHtml(owner)}</strong>` : "Entrez votre code pour continuer."}</p>
+        <input type="text" name="username" autocomplete="username" value="${escapeHtml(owner || "claw")}" hidden>
+        <label class="lock-field"><span>${create ? "Nouveau code" : "Code"}</span>
+          <input name="code" type="password" autocomplete="${create ? "new-password" : "current-password"}" required></label>
+        ${create ? `<label class="lock-field"><span>Le même code, encore</span>
+          <input name="again" type="password" autocomplete="new-password" required></label>
+          <p class="lock-help">Au moins ${MIN_CODE} caractères. Une courte phrase se retient mieux, et résiste mieux, qu'un code à chiffres.</p>` : ""}
+        <p class="lock-error" role="alert" hidden></p>
+        <button class="primary" type="submit">${create ? "Activer le verrou" : "Déverrouiller"}</button>
+        ${create ? "" : `<details class="lock-forgot"><summary>Code oublié ?</summary>
+          <p>Le code ne se retrouve pas. Effacez les clés de cet appareil, puis reconnectez-vous avec votre jeton GitHub et choisissez un nouveau code.</p>
+          <button type="button" class="small-link danger" data-action="lock-reset"><span>Effacer les clés de cet appareil</span></button>
+        </details>`}
+      </form>`;
+    document.body.append(screen);
+    document.body.classList.add("locked");
+    const form = screen.querySelector("form");
+    const error = screen.querySelector(".lock-error");
+    const show = (message) => {
+      error.textContent = message;
+      error.hidden = !message;
+    };
+    if (!create && waitLeft() > 0) show(`Trop d'essais : réessayez dans ${Math.ceil(waitLeft() / 1000)} s.`);
+    form.code.focus();
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const button = form.querySelector('button[type="submit"]');
+      button.disabled = true;
+      show("");
+      try {
+        if (create) {
+          if (form.code.value.length < MIN_CODE) throw new Error(`Le code doit avoir au moins ${MIN_CODE} caractères.`);
+          if (form.code.value !== form.again.value) throw new Error("Les deux codes ne sont pas les mêmes.");
+          const { key, salt } = await createVault(form.code.value, secretsOf(state.settings), owner);
+          state.lock = { key, salt, owner };
+        } else {
+          const opened = await openVault(form.code.value);
+          state.lock = { key: opened.key, salt: opened.salt, owner: opened.owner };
+          Object.assign(state.settings, opened.secrets);
+        }
+        // Les clés en clair d'avant le verrou quittent le stockage.
+        saveSettings();
+        screen.remove();
+        document.body.classList.remove("locked");
+        resolve();
+      } catch (problem) {
+        show(problem.message);
+        form.code.value = "";
+        form.code.focus();
+      } finally {
+        button.disabled = false;
+      }
+    });
+    const reset = screen.querySelector('[data-action="lock-reset"]');
+    if (reset) {
+      twoTaps(reset, () => {
+        removeVault();
+        for (const field of SECRET_FIELDS) delete state.settings[field];
+        saveSettings();
+        location.reload();
+      });
+    }
+  });
+}
+
+/** Verrouille tout de suite : la page repart sans les clés, le code les rend. */
+const lockNow = () => location.reload();
 
 // --- Démarrage -------------------------------------------------------------------------------
 
@@ -4403,6 +4546,12 @@ async function boot() {
   });
   window.addEventListener("hashchange", route);
   document.addEventListener("visibilitychange", () => {
+    // Après une absence, le code est redemandé (la page repart sans les clés).
+    if (document.hidden) state.hiddenAt = Date.now();
+    else if (state.lock && state.hiddenAt && Date.now() - state.hiddenAt > LOCK_AFTER_MS) {
+      lockNow();
+      return;
+    }
     if (!document.hidden && state.session) pollSession().catch(failure);
     if (!document.hidden) refreshQuota();
     if (!document.hidden) watchRequests().catch(() => {});
@@ -4410,10 +4559,13 @@ async function boot() {
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("sw.js").catch(() => {});
   }
+  // Verrou : sans le code, aucune clé ; un jeton encore en clair (avant le verrou) le fait poser.
+  if (vault()) await lockScreen("open");
   if (state.settings.token) {
     const github = new GitHub(state.settings.token);
     try {
       state.user = await github.user();
+      if (!vault()) await lockScreen("create");
       state.github = github;
       showQuotaLabel();
       refreshQuota();
