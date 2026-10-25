@@ -529,6 +529,13 @@ struct TurnAids {
     open_tasks: Vec<(String, String)>,
     /// Renvois déjà faits pendant ce tour pour une liste laissée ouverte.
     open_task_rounds: u32,
+    /// Paliers de requêtes déjà ajoutés pour finir la liste de tâches, et
+    /// l'avancée au dernier palier (modifications, tâches ouvertes).
+    task_extensions: u32,
+    changes_at_extension: usize,
+    open_at_extension: Option<usize>,
+    /// Le refus d'un palier (rien n'avance) déjà dit.
+    task_extension_explained: bool,
     /// Renvois déjà faits pendant ce tour pour un travail annoncé et pas fait.
     announced_work_rounds: u32,
     /// Données de test laissées dans une page : déjà renvoyé faire le ménage.
@@ -1862,6 +1869,17 @@ where
                 && self.continue_design(&mut aids, "limite du tour")
             {
                 turn_limit += crate::web_design::CONTINUATION_REQUESTS;
+            }
+            // Liste de tâches pas finie et travail qui avance : la limite
+            // recule d'un palier, au lieu de s'arrêter à 0/9 (demandé le 25
+            // octobre 2026 : « Faut l'interdire de s'arrêter s'il n'a pas fini
+            // les tâches »).
+            if !wrapping_up
+                && turn_limit > 0
+                && iterations > turn_limit
+                && self.continue_tasks(&mut aids)
+            {
+                turn_limit += harness::TASK_EXTENSION_REQUESTS;
             }
             // Budget de requêtes du tour atteint : le modèle conclut et rend
             // la main, au lieu de dépenser le quota du jour en un seul tour.
@@ -3603,6 +3621,57 @@ where
     /// revues) sous la barre : il continue si la note monte, dans la limite
     /// des poursuites (`CLAW_DESIGN_CONTINUE`) et du quota du jour. Sinon,
     /// l'utilisateur lit pourquoi il s'arrête, une fois.
+    /// À la limite du tour, des tâches de la liste restent ouvertes : un palier
+    /// de requêtes de plus si le travail a avancé depuis le palier précédent
+    /// (un fichier changé, une tâche finie), dans la limite des paliers et du
+    /// quota gratuit du jour. Sinon le tour conclut, et la raison est dite.
+    fn continue_tasks(&mut self, aids: &mut TurnAids) -> bool {
+        if self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::OpenTasks)
+            || aids.open_tasks.is_empty()
+        {
+            return false;
+        }
+        let open = aids.open_tasks.len();
+        let moved = aids.project_changes > aids.changes_at_extension
+            || aids.open_at_extension.is_some_and(|before| open < before);
+        let free_left = self.api_client.free_requests_left();
+        let refusal = if aids.task_extensions >= harness::MAX_TASK_EXTENSIONS {
+            Some(format!(
+                "{} paliers déjà ajoutés",
+                harness::MAX_TASK_EXTENSIONS
+            ))
+        } else if !moved {
+            Some("rien n'a avancé depuis le dernier palier".to_string())
+        } else if free_left.is_some_and(|left| left < harness::TASK_EXTENSION_REQUESTS as u64 * 2) {
+            Some("le quota gratuit du jour est presque épuisé".to_string())
+        } else {
+            None
+        };
+        if let Some(reason) = refusal {
+            if !aids.task_extension_explained {
+                aids.task_extension_explained = true;
+                self.api_client.notify(&format!(
+                    "Tâches pas finies ({open} restante{}) mais le tour conclut : {reason}. Écrivez « continue » pour reprendre",
+                    if open > 1 { "s" } else { "" }
+                ));
+            }
+            return false;
+        }
+        aids.task_extensions += 1;
+        aids.changes_at_extension = aids.project_changes;
+        aids.open_at_extension = Some(open);
+        self.api_client.notify(&format!(
+            "Tâches pas finies ({open} restante{}) : le tour continue, {} requêtes de plus ({}/{})",
+            if open > 1 { "s" } else { "" },
+            harness::TASK_EXTENSION_REQUESTS,
+            aids.task_extensions,
+            harness::MAX_TASK_EXTENSIONS
+        ));
+        true
+    }
+
     fn continue_design(&mut self, aids: &mut TurnAids, at: &str) -> bool {
         if self.subagent || interrupt_requested() || !harness::enabled(Aid::DesignReview) {
             return false;
@@ -9839,6 +9908,95 @@ mod tests {
         // Le tour suivant repart avec un budget entier.
         drop(observed);
         runtime.run_turn("continue", None).expect("tour suivant");
+    }
+
+    #[test]
+    fn a_turn_with_open_tasks_and_progress_goes_past_its_request_limit() {
+        let _serial = crate::test_serial();
+        // Session #31 du 25 octobre 2026 : arrêt à la limite de 100 requêtes
+        // sur « Tâches 0/9 », et l'utilisateur : « Faut l'interdire de
+        // s'arrêter s'il n'a pas fini les tâches ».
+        let open = r#"{"oldTodos":[],"newTodos":[{"content":"Écrire a","activeForm":"a","status":"in_progress"},{"content":"Écrire b","activeForm":"b","status":"pending"}]}"#;
+        let done = r#"{"oldTodos":[],"newTodos":[{"content":"Écrire a","activeForm":"a","status":"completed"},{"content":"Écrire b","activeForm":"b","status":"completed"}]}"#;
+        let todo = |id: &str| AssistantEvent::ToolUse {
+            id: id.to_string(),
+            name: "TodoWrite".to_string(),
+            input: r#"{"todos":[]}"#.to_string(),
+        };
+        let write = |id: &str, path: &str| AssistantEvent::ToolUse {
+            id: id.to_string(),
+            name: "write_file".to_string(),
+            input: format!(r#"{{"path":"{path}","content":"x"}}"#),
+        };
+        let (runtime, observed, _) = aided_runtime(
+            vec![
+                vec![
+                    todo("liste-1"),
+                    write("a", "a.txt"),
+                    AssistantEvent::MessageStop,
+                ],
+                tool_step("bash", r#"{"command":"python essai.py 1"}"#),
+                tool_step("bash", r#"{"command":"python essai.py 2"}"#),
+                vec![
+                    todo("liste-2"),
+                    write("b", "b.txt"),
+                    AssistantEvent::MessageStop,
+                ],
+                text_step("a et b sont écrits."),
+            ],
+            vec![PASSING, PASSING, PASSING],
+        );
+        let mut outputs = std::collections::VecDeque::from(vec![open, done]);
+        let mut runtime = runtime.with_turn_request_limit(3);
+        runtime.tool_executor = std::mem::take(&mut runtime.tool_executor)
+            .register("TodoWrite", move |_| {
+                Ok(outputs.pop_front().unwrap_or(done).to_string())
+            });
+        let summary = runtime.run_turn("écris a puis b", None).expect("tour");
+        let observed = observed.borrow();
+        // La limite (3) tombe sur une liste ouverte dont le travail avance :
+        // un palier de plus, la liste se finit et la réponse suit.
+        assert!(observed.notices.iter().any(|notice| notice.contains(
+            "Tâches pas finies (2 restantes) : le tour continue, 40 requêtes de plus (1/3)"
+        )));
+        assert!(!observed
+            .requests
+            .iter()
+            .any(|request| request.contains("the limit for one turn")));
+        let last = super::message_text(summary.assistant_messages.last().expect("réponse"));
+        assert!(last.contains("a et b sont écrits"));
+        drop(observed);
+
+        // Sans rien de changé, la limite tient : le tour conclut et le dit.
+        let (runtime, observed, _) = aided_runtime(
+            vec![
+                vec![
+                    todo("liste-1"),
+                    AssistantEvent::ToolUse {
+                        id: "lecture".to_string(),
+                        name: "read_file".to_string(),
+                        input: r#"{"path":"a.py"}"#.to_string(),
+                    },
+                    AssistantEvent::MessageStop,
+                ],
+                tool_step("read_file", r#"{"path":"b.py"}"#),
+                tool_step("read_file", r#"{"path":"c.py"}"#),
+                text_step("Je n'ai rien changé."),
+            ],
+            vec![PASSING],
+        );
+        let mut runtime = runtime.with_turn_request_limit(3);
+        runtime.tool_executor = std::mem::take(&mut runtime.tool_executor)
+            .register("TodoWrite", move |_| Ok(open.to_string()))
+            .register("read_file", |_| Ok("print(1)".to_string()));
+        runtime.run_turn("regarde", None).expect("tour");
+        let observed = observed.borrow();
+        assert!(observed.notices.iter().any(|notice| notice
+            .contains("Tâches pas finies (2 restantes) mais le tour conclut : rien n'a avancé")));
+        assert!(observed
+            .requests
+            .last()
+            .is_some_and(|request| request.contains("[Claw] This turn has used 3 requests")));
     }
 
     #[test]
