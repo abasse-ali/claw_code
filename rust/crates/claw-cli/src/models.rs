@@ -293,6 +293,20 @@ fn strongest_free_model(current: &str) -> Option<String> {
         current,
         api::model_available,
     )
+    .filter(|model| !same_model(model, current))
+}
+
+/// Le même modèle chez un autre fournisseur (`nvidia:nvidia/x` et
+/// `nvidia/x:free`) : le reprendre n'apporte aucune force de plus. Vu le 25
+/// octobre 2026 (session #31) : Nemotron 3 Ultra de NVIDIA bloqué passait la
+/// main au même Ultra gratuit d'`OpenRouter`, qui avait déjà échoué en 504, et la
+/// session quittait NVIDIA.
+fn same_model(left: &str, right: &str) -> bool {
+    let base = |model: &str| {
+        let model = model.strip_prefix("nvidia:").unwrap_or(model);
+        model.strip_suffix(":free").unwrap_or(model).to_string()
+    };
+    base(left) == base(right)
 }
 
 fn strongest_free_in(
@@ -2907,6 +2921,12 @@ mod tests {
             stronger_nvidia_agent("nvidia/nemotron-3-super-120b-a12b:free"),
             None
         );
+        // Le même modèle chez OpenRouter n'est pas un modèle plus fort.
+        assert!(super::same_model(
+            ultra,
+            "nvidia/nemotron-3-ultra-550b-a55b:free"
+        ));
+        assert!(!super::same_model(ultra, super_));
     }
 
     #[test]
