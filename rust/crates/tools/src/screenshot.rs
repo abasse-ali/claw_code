@@ -43,12 +43,15 @@ const START_LIMIT: Duration = Duration::from_secs(25);
 /// Tailles d'écran et actions acceptées par appel.
 const MAX_VIEWPORTS: usize = 4;
 const MAX_ACTIONS: usize = 12;
-/// Une page entière : au plus trois écrans de haut.
+/// Une page entière : des captures de trois écrans de haut, trois au plus.
 const FULL_PAGE_SCREENS: f64 = 3.0;
+const MAX_SLICES: usize = 3;
+/// Fenêtres ouvertes par un bouton, capturées par appel (option `windows`).
+const MAX_WINDOW_SHOTS: usize = 3;
 /// Qualité JPEG des captures : nettes pour un lecteur, légères dans la conversation.
 const JPEG_QUALITY: u8 = 80;
-/// Aperçu du premier écran de chaque capture (vignette de Claw Web) : 160
-/// pixels de large, quelques kilo-octets.
+/// Aperçu de chaque capture (vignette de Claw Web) : 160 pixels de large,
+/// quelques kilo-octets.
 const PREVIEW_WIDTH: f64 = 160.0;
 const PREVIEW_QUALITY: u8 = 60;
 /// Messages de console rendus par capture.
@@ -85,6 +88,9 @@ pub(crate) struct ScreenshotInput {
     theme: Option<String>,
     #[serde(default)]
     full_page: Option<bool>,
+    /// Capturer aussi, au téléphone, chaque fenêtre qu'un bouton ouvre.
+    #[serde(default)]
+    windows: Option<bool>,
     #[serde(default)]
     wait_ms: Option<u64>,
     /// Liste d'actions, ou la même liste écrite en texte JSON.
@@ -958,8 +964,20 @@ struct Shot {
     actions: Vec<String>,
     note: Option<String>,
     jpeg_base64: String,
-    /// Aperçu du premier écran (vignette), quand le navigateur l'a rendu.
+    /// Aperçu de la zone capturée (vignette), quand le navigateur l'a rendu.
     preview_base64: Option<String>,
+    /// Suite de la page, au-delà de la première capture.
+    more: Vec<Extra>,
+    /// Boutons qui ouvrent une fenêtre (nom, sélecteur), relevés en les essayant.
+    openers: Vec<(String, String)>,
+}
+
+/// Une capture de plus : une autre partie de la page, ou une fenêtre ouverte.
+struct Extra {
+    /// Ce qu'elle montre, après le nom de l'écran (« from 2532px »).
+    label: String,
+    jpeg: String,
+    preview: Option<String>,
 }
 
 /// Sélecteurs de remise à zéro : ils s'appliquent à tout et ne disent pas
@@ -1424,6 +1442,8 @@ struct Session<'a> {
     url: &'a str,
     theme: Option<&'a str>,
     full_page: bool,
+    /// Capturer aussi les fenêtres que les boutons ouvrent.
+    windows: bool,
     wait: Duration,
     actions: &'a [Action],
 }
@@ -1493,12 +1513,27 @@ fn open_page(
     Ok(note)
 }
 
-/// Les boutons essayés un à un : ceux qui ne font rien, ceux qui échouent.
-fn click_problems(devtools: &mut DevTools) -> Vec<String> {
+/// Les boutons essayés un à un : ceux qui ne font rien, ceux qui échouent ; et
+/// ceux qui ouvrent une fenêtre (nom, sélecteur), pour la capturer ensuite.
+fn click_problems(devtools: &mut DevTools) -> (Vec<String>, Vec<(String, String)>) {
     let script = format!("const clawSnapshot = () => {SNAPSHOT_SCRIPT};\n{CLICKS_SCRIPT}");
     let Ok(result) = devtools.evaluate(&script) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
+    let openers = result["openers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|opener| {
+            Some((
+                opener["label"].as_str()?.to_string(),
+                opener["selector"]
+                    .as_str()
+                    .filter(|path| !path.is_empty())?
+                    .to_string(),
+            ))
+        })
+        .collect();
     let mut problems = Vec::new();
     let dead = strings(&result["dead"]);
     if !dead.is_empty() {
@@ -1549,7 +1584,7 @@ fn click_problems(devtools: &mut DevTools) -> Vec<String> {
         ));
     }
     problems.extend(lost_on_reload(devtools, &result["kept"]));
-    problems
+    (problems, openers)
 }
 
 /// Dates d'exemple toutes passées dans la page et ses scripts, quand ce sont
@@ -1745,63 +1780,58 @@ fn capture(
     let mut problems = strings(&audit["problems"]);
     problems.extend(drawn_icons_problem(&audit["svgIcons"]));
     let mut notes = strings(&audit["notes"]);
-    let mut params = json!({ "format": "jpeg", "quality": JPEG_QUALITY });
-    // Zone capturée, pour l'aperçu : le premier écran, sauf page entière.
-    let mut area = (0.0, f64::from(viewport.height));
+    // Zones capturées : le premier écran, ou la page entière en tranches de trois
+    // écrans (`MAX_SLICES` au plus), à partir de l'endroit où elle a défilé.
+    let screen = f64::from(viewport.height);
+    let mut areas = Vec::new();
     if session.full_page {
         let metrics = devtools.call("Page.getLayoutMetrics", json!({}))?;
         let content = metrics["cssContentSize"]["height"]
             .as_f64()
             .or_else(|| metrics["contentSize"]["height"].as_f64())
-            .unwrap_or(f64::from(viewport.height));
+            .unwrap_or(screen);
         // Après un `scroll`, la capture part de l'endroit atteint : sans cela,
         // la page entière repartait du haut et montrait toujours le même début.
         let top = metrics["cssVisualViewport"]["pageY"]
             .as_f64()
             .unwrap_or(0.0)
-            .clamp(0.0, (content - f64::from(viewport.height)).max(0.0));
-        let height = (content - top)
-            .min(f64::from(viewport.height) * FULL_PAGE_SCREENS)
-            .max(f64::from(viewport.height));
-        area = (top, height);
-        params["captureBeyondViewport"] = json!(true);
-        params["clip"] =
-            json!({ "x": 0, "y": top, "width": viewport.width, "height": height, "scale": 1 });
-        if top + height < content {
+            .clamp(0.0, (content - screen).max(0.0));
+        let mut start = top;
+        while areas.is_empty() || (start < content && areas.len() < MAX_SLICES) {
+            let height = (content - start)
+                .min(screen * FULL_PAGE_SCREENS)
+                .max(screen);
+            areas.push((start, height));
+            start += height;
+        }
+        if start < content {
             note = Some(format!(
-                "the page is {content:.0}px high: the capture shows {top:.0}px to {:.0}px; to see further down, call Screenshot again with an action such as {{\"scroll\": \"#a-section-id\"}}",
-                top + height
+                "the page is {content:.0}px high: the captures show {top:.0}px to {start:.0}px; to see further down, call Screenshot again with an action such as {{\"scroll\": \"#a-section-id\"}}"
             ));
         } else if top > 0.0 {
             note = Some(format!(
                 "the capture shows the page from {top:.0}px down to its end ({content:.0}px)"
             ));
+        } else if areas.len() > 1 {
+            note = Some(format!(
+                "the page is {content:.0}px high: it is shown in {} captures of this screen, one after the other from top to bottom",
+                areas.len()
+            ));
         }
     }
-    let picture = devtools.call("Page.captureScreenshot", params)?;
-    let jpeg_base64 = picture["data"]
-        .as_str()
-        .filter(|data| !data.is_empty())
-        .ok_or("the browser returned no image")?
-        .to_string();
-    // La zone capturée, réduite : la vignette que Claw Web montre à l'utilisateur
-    // (le premier écran seul faisait se ressembler toutes les vignettes).
-    let preview_base64 = devtools
-        .call(
-            "Page.captureScreenshot",
-            json!({
-                "format": "jpeg",
-                "quality": PREVIEW_QUALITY,
-                "captureBeyondViewport": true,
-                "clip": {
-                    "x": 0, "y": area.0, "width": viewport.width, "height": area.1,
-                    "scale": PREVIEW_WIDTH / f64::from(viewport.width),
-                },
-            }),
-        )
-        .ok()
-        .and_then(|preview| preview["data"].as_str().map(ToOwned::to_owned))
-        .filter(|data| !data.is_empty());
+    let (jpeg_base64, preview_base64) = picture(devtools, viewport, areas.first().copied())?;
+    let more = areas
+        .iter()
+        .skip(1)
+        .filter_map(|&(top, height)| {
+            let (jpeg, preview) = picture(devtools, viewport, Some((top, height))).ok()?;
+            Some(Extra {
+                label: format!("from {top:.0}px"),
+                jpeg,
+                preview,
+            })
+        })
+        .collect();
     browser_measures(devtools, &audit, &mut problems, &mut notes);
     // Après la capture (les essais changent la page) : le menu d'un téléphone
     // s'ouvre-t-il, et chaque bouton fait-il quelque chose ?
@@ -1810,9 +1840,12 @@ fn capture(
             problems.extend(strings(&probe["problems"]));
         }
     }
+    let mut openers = Vec::new();
     if try_clicks {
         problems.extend(stale_dates(devtools));
-        problems.extend(click_problems(devtools));
+        let (found, opening) = click_problems(devtools);
+        problems.extend(found);
+        openers = opening;
     }
     Ok(Shot {
         viewport: viewport.clone(),
@@ -1824,7 +1857,102 @@ fn capture(
         note,
         jpeg_base64,
         preview_base64,
+        more,
+        openers,
     })
+}
+
+/// Une zone de la page (`area` : haut et hauteur), ou ce que montre l'écran, en
+/// JPEG, avec sa vignette pour Claw Web.
+fn picture(
+    devtools: &mut DevTools,
+    viewport: &Viewport,
+    area: Option<(f64, f64)>,
+) -> Result<(String, Option<String>), String> {
+    let mut params = json!({ "format": "jpeg", "quality": JPEG_QUALITY });
+    let (top, height) = if let Some((top, height)) = area {
+        params["captureBeyondViewport"] = json!(true);
+        params["clip"] =
+            json!({ "x": 0, "y": top, "width": viewport.width, "height": height, "scale": 1 });
+        (top, height)
+    } else {
+        let metrics = devtools.call("Page.getLayoutMetrics", json!({}))?;
+        let top = metrics["cssVisualViewport"]["pageY"]
+            .as_f64()
+            .unwrap_or(0.0);
+        (top, f64::from(viewport.height))
+    };
+    let picture = devtools.call("Page.captureScreenshot", params)?;
+    let jpeg = picture["data"]
+        .as_str()
+        .filter(|data| !data.is_empty())
+        .ok_or("the browser returned no image")?
+        .to_string();
+    // Le premier écran de la zone capturée, réduit : la vignette que Claw Web montre
+    // (sa pastille n'en montre que le haut ; la capture entière se charge au toucher).
+    // Plus haute, elle pesait 20 Ko et le journal n'en gardait que deux par appel.
+    let height = height.min(f64::from(viewport.height));
+    let preview = devtools
+        .call(
+            "Page.captureScreenshot",
+            json!({
+                "format": "jpeg",
+                "quality": PREVIEW_QUALITY,
+                "captureBeyondViewport": true,
+                // 160 pixels de large, quelle que soit la densité de l'écran (1,5
+                // pour un téléphone, qui grossissait la vignette d'autant).
+                "clip": {
+                    "x": 0, "y": top, "width": viewport.width, "height": height,
+                    "scale": PREVIEW_WIDTH / (f64::from(viewport.width) * viewport.scale),
+                },
+            }),
+        )
+        .ok()
+        .and_then(|preview| preview["data"].as_str().map(ToOwned::to_owned))
+        .filter(|data| !data.is_empty());
+    Ok((jpeg, preview))
+}
+
+/// Les fenêtres que des boutons ouvrent (`openers` : nom et sélecteur, relevés par
+/// le parcours des boutons), rouvries une à une dans une page neuve et capturées
+/// à l'écran `viewport`. Vu le 25 octobre 2026 (site d'un club de foot) : ses trois
+/// fenêtres n'avaient jamais été capturées, ni vues par l'utilisateur.
+fn window_shots(
+    devtools: &mut DevTools,
+    session: &Session<'_>,
+    viewport: &Viewport,
+    openers: &[(String, String)],
+) -> Vec<Extra> {
+    let mut shots = Vec::new();
+    for (label, selector) in openers.iter().take(MAX_WINDOW_SHOTS) {
+        // Les essais du parcours (« Camille Claw8762C ») restaient dans les champs
+        // que la page remplit de sa mémoire ; `storage` se repose au chargement.
+        let _ = devtools
+            .evaluate("try { localStorage.clear(); sessionStorage.clear(); } catch (error) {}");
+        if open_page(devtools, session, viewport).is_err() {
+            break;
+        }
+        let open = format!(
+            "(async () => {{ const el = document.querySelector({}); if (!el) return false; el.scrollIntoView({{ block: 'center' }}); el.click(); await new Promise((done) => setTimeout(done, 500)); return [...document.querySelectorAll('dialog[open], [role=dialog], [aria-modal=true]')].some((box) => {{ const r = box.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(box).visibility !== 'hidden'; }}); }})()",
+            json!(selector)
+        );
+        if devtools
+            .evaluate(&open)
+            .ok()
+            .and_then(|shown| shown.as_bool())
+            != Some(true)
+        {
+            continue;
+        }
+        if let Ok((jpeg, preview)) = picture(devtools, viewport, None) {
+            shots.push(Extra {
+                label: format!("window opened by {label}"),
+                jpeg,
+                preview,
+            });
+        }
+    }
+    shots
 }
 
 /// Dossier des captures gardées (dossier temporaire) ; celles de plus d'un jour sont effacées.
@@ -1847,20 +1975,22 @@ fn shots_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-/// Enregistre une capture et son aperçu du premier écran dans le dossier des
-/// captures : leurs chemins, quand l'écriture a réussi.
-fn save_shot(dir: &Path, stamp: u128, shot: &Shot) -> (Option<PathBuf>, Option<PathBuf>) {
-    let label = shot.viewport.label.replace(' ', "-");
-    let write = |name: String, data: &str| {
-        let path = dir.join(name);
+/// Enregistre une capture (`name` : sans espaces, unique dans l'appel) et son
+/// aperçu dans le dossier des captures : leurs chemins, quand l'écriture a réussi.
+fn save_shot(
+    dir: &Path,
+    stamp: u128,
+    name: &str,
+    jpeg: &str,
+    preview: Option<&str>,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    let write = |file: String, data: &str| {
+        let path = dir.join(file);
         std::fs::write(&path, decode_base64(data)?).ok()?;
         Some(path)
     };
-    let file = write(format!("{stamp}-{label}.jpg"), &shot.jpeg_base64);
-    let preview = shot
-        .preview_base64
-        .as_deref()
-        .and_then(|data| write(format!("{stamp}-{label}-preview.jpg"), data));
+    let file = write(format!("{stamp}-{name}.jpg"), jpeg);
+    let preview = preview.and_then(|data| write(format!("{stamp}-{name}-preview.jpg"), data));
     (file, preview)
 }
 
@@ -1945,6 +2075,35 @@ fn storage_script(storage: Option<&Value>) -> Result<Option<String>, String> {
     )))
 }
 
+/// L'entrée du résultat d'une capture de plus, faite à l'écran `device`, dont
+/// l'image rejoint `images`.
+fn extra_entry(
+    dir: Option<&Path>,
+    stamp: u128,
+    name: &str,
+    device: &str,
+    extra: Extra,
+    images: &mut Vec<ImageAttachment>,
+) -> Value {
+    let screen = format!("{device}, {}", extra.label);
+    let (file, preview) = dir.map_or((None, None), |dir| {
+        save_shot(dir, stamp, name, &extra.jpeg, extra.preview.as_deref())
+    });
+    images.push(ImageAttachment {
+        media_type: "image/jpeg".to_string(),
+        data: extra.jpeg,
+        path: file.clone().unwrap_or_default(),
+    });
+    let mut entry = json!({ "screen": screen, "image": images.len() });
+    if let Some(file) = file {
+        entry["file"] = json!(file.display().to_string());
+    }
+    if let Some(preview) = preview {
+        entry["preview"] = json!(preview.display().to_string());
+    }
+    entry
+}
+
 /// Ce que `Screenshot` rend au modèle ; les captures partent à part (`take_captured`).
 pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
     let url = target(input)?;
@@ -1979,6 +2138,7 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
         // et ne voyait alors que l'en-tête, capture après capture (vu le 25 octobre
         // 2026, refonte du site d'un club de foot : les défauts plus bas restaient).
         full_page: input.full_page.unwrap_or(true),
+        windows: input.windows.unwrap_or(false),
         wait,
         actions: &steps,
     };
@@ -1987,14 +2147,22 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
         .iter()
         .position(|viewport| !viewport.mobile)
         .unwrap_or(sizes.len().saturating_sub(1));
+    let mut openers = Vec::new();
     for (index, viewport) in sizes.iter().enumerate() {
         match capture(&mut devtools, &session, viewport, index == clicks_at) {
             Ok(shot) => {
                 total += shot.problems.len();
                 design_notes += shot.notes.len();
-                let (file, preview) = dir
-                    .as_ref()
-                    .map_or((None, None), |dir| save_shot(dir, stamp, &shot));
+                let name = shot.viewport.label.replace(' ', "-");
+                let (file, preview) = dir.as_ref().map_or((None, None), |dir| {
+                    save_shot(
+                        dir,
+                        stamp,
+                        &name,
+                        &shot.jpeg_base64,
+                        shot.preview_base64.as_deref(),
+                    )
+                });
                 images.push(ImageAttachment {
                     media_type: "image/jpeg".to_string(),
                     data: shot.jpeg_base64,
@@ -2023,8 +2191,39 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
                     entry["preview"] = json!(preview.display().to_string());
                 }
                 captures.push(entry);
+                for (number, extra) in shot.more.into_iter().enumerate() {
+                    let name = format!("{name}-{}", number + 2);
+                    captures.push(extra_entry(
+                        dir.as_deref(),
+                        stamp,
+                        &name,
+                        &shot.viewport.label,
+                        extra,
+                        &mut images,
+                    ));
+                }
+                if openers.is_empty() {
+                    openers = shot.openers;
+                }
             }
             Err(error) => captures.push(json!({ "screen": viewport.label, "error": error })),
+        }
+    }
+    // Les fenêtres, au téléphone de préférence : là où un parent les ouvre.
+    if session.windows && !openers.is_empty() {
+        if let Some(viewport) = sizes.iter().find(|size| size.mobile).or(sizes.first()) {
+            let shots = window_shots(&mut devtools, &session, viewport, &openers);
+            for (number, extra) in shots.into_iter().enumerate() {
+                let name = format!("{}-window-{}", viewport.label.replace(' ', "-"), number + 1);
+                captures.push(extra_entry(
+                    dir.as_deref(),
+                    stamp,
+                    &name,
+                    &viewport.label,
+                    extra,
+                    &mut images,
+                ));
+            }
         }
     }
     if images.is_empty() {
@@ -2504,6 +2703,7 @@ mod tests {
             viewports: None,
             theme: None,
             full_page: None,
+            windows: None,
             wait_ms: None,
             actions: None,
             storage: None,
@@ -2603,31 +2803,56 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
-    fn the_whole_page_is_captured_by_default_and_from_where_it_was_scrolled() {
+    fn the_whole_page_its_windows_and_where_it_was_scrolled_are_captured() {
         let cwd = std::env::current_dir().expect("dossier");
         let dir = cwd.join(format!("claw-long-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dossier");
         std::fs::write(
             dir.join("index.html"),
-            "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Long</title><style>body{margin:0}section{height:1500px}</style></head><body><main><section><h1>Haut</h1></section><section id=\"milieu\"><h2>Milieu</h2></section><section id=\"bas\"><h2>Bas</h2></section></main></body></html>",
+            "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Long</title><style>body{margin:0}section{height:1500px}</style></head><body><main><section><h1>Haut</h1><button id=\"ouvrir\" type=\"button\">Je conduis</button></section><section id=\"milieu\"><h2>Milieu</h2></section><section id=\"bas\"><h2>Bas</h2></section></main><dialog id=\"fenetre\"><h2>Conduire</h2><button type=\"button\" id=\"fermer\">Fermer</button></dialog><script>const box = document.getElementById('fenetre'); document.getElementById('ouvrir').onclick = () => box.showModal(); document.getElementById('fermer').onclick = () => box.close();</script></body></html>",
         )
         .expect("html");
         let page = format!("claw-long-{}/index.html", std::process::id());
         let mut request = input(None, Some(&page));
         request.viewports = Some(json!(["phone"]));
-        let top = super::take(&request).expect("capture")["captures"][0].clone();
+        request.windows = Some(true);
+        let whole = super::take(&request).expect("capture");
+        request.windows = None;
         request.actions = Some(json!([{ "scroll": "#bas" }]));
         let scrolled = super::take(&request).expect("capture")["captures"][0].clone();
         let _ = std::fs::remove_dir_all(&dir);
-        // Trois écrans de téléphone, et non le seul premier écran : la vignette aussi.
-        let note = top["note"].as_str().unwrap_or_default();
+        // La page entière en deux captures de trois écrans au plus, puis la fenêtre
+        // ouverte par « Je conduis ».
+        let captures = whole["captures"].as_array().expect("captures");
+        let screens: Vec<&str> = captures
+            .iter()
+            .map(|capture| capture["screen"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(screens.len(), 3, "{whole}");
+        assert_eq!(screens[0], "phone 390x844");
         assert!(
-            note.contains("0px to 2532px") && note.contains("scroll"),
-            "{top}"
+            screens[1].starts_with("phone 390x844, from 25"),
+            "{screens:?}"
         );
-        // Le premier écran seul en ferait le tiers (environ 520 pixels de haut).
-        let preview = jpeg_height(top["preview"].as_str().expect("aperçu"));
-        assert!((1500..=1600).contains(&preview), "{preview}");
+        assert!(
+            screens[2].starts_with("phone 390x844, window opened by")
+                && screens[2].contains("Je conduis"),
+            "{screens:?}"
+        );
+        // (les images du second appel : une seule capture, partie de « Bas »)
+        assert_eq!(super::take_captured().len(), 1);
+        let note = captures[0]["note"].as_str().unwrap_or_default();
+        assert!(note.contains("shown in 2 captures"), "{whole}");
+        // La vignette : le premier écran de chaque capture, 160 pixels de large, assez
+        // légère pour que le journal de Claw Web en garde plusieurs.
+        for capture in captures {
+            let file = capture["preview"].as_str().expect("aperçu");
+            assert!((340..=350).contains(&jpeg_height(file)), "{capture}");
+            assert!(
+                std::fs::metadata(file).expect("aperçu").len() < 8_000,
+                "{capture}"
+            );
+        }
         // Après le défilement, la capture part de « Bas » jusqu'à la fin de la page.
         let note = scrolled["note"].as_str().unwrap_or_default();
         // (3000 pixels, plus les marges des titres)

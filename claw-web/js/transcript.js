@@ -280,21 +280,33 @@ function unifiedDiffHtml(patch, language) {
 /** Chemin d'une capture rangée sur la branche des fichiers du moteur, ou « ». */
 const shotPath = (path) => (/^uploads\/session-\d+\/[A-Za-z0-9._-]+\.jpg$/.test(String(path || "")) ? path : "");
 
-/** Écran d'une capture, en français : « phone 390x844 » devient « téléphone 390 x 844 ». */
-function screenName(screen) {
-  const [kind, size] = String(screen || "").split(" ");
+/** Écran d'une capture, en français : « phone 390x844 » devient « téléphone 390 x 844 » ;
+ * la suite de la page (« , from 2532px ») et les fenêtres (« , window opened by button "Je
+ * conduis" ») le disent aussi. */
+export function screenName(screen) {
+  const [device, ...rest] = String(screen || "").split(", ");
+  const [kind, size] = device.split(" ");
   const names = { phone: "téléphone", mobile: "téléphone", tablet: "tablette", desktop: "ordinateur" };
-  return [names[kind] || kind, (size || "").replace("x", " x ")].filter(Boolean).join(" ");
+  const name = [names[kind] || kind, (size || "").replace("x", " x ")].filter(Boolean).join(" ");
+  const part = rest.join(", ");
+  const from = part.match(/^from (\d+)px$/);
+  if (from) return `${name}, suite de la page (à partir de ${from[1]} px)`;
+  const opener = part.match(/^window opened by .*?"([^"]+)"$/);
+  if (opener) return `${name}, fenêtre « ${opener[1]} »`;
+  return part ? `${name}, ${part}` : name;
 }
 
-/** Vignettes des captures d'écran : un toucher ouvre la capture entière. */
+/** Vignettes des captures d'écran : un toucher ouvre la capture entière, avec les problèmes
+ * relevés dessus. */
 function shotsHtml(shots) {
   const pills = shots.map((shot) => {
     const thumb = thumbData(shot.t);
     const path = shotPath(shot.p);
     if (!thumb && !path) return "";
     const label = `Capture ${screenName(shot.screen)}${shot.n ? ` · ${plural(shot.n, "problème")}` : ""}`;
+    const problems = Array.isArray(shot.pb) ? shot.pb.filter((item) => typeof item === "string") : [];
     return `<button type="button" class="photo-pill shot" data-shot="${escapeHtml(path)}" data-thumb="${escapeHtml(thumb)}"`
+      + ` data-problems="${escapeHtml(JSON.stringify(problems))}" data-count="${Number(shot.n) || 0}"`
       + ` data-label="${escapeHtml(label)}" title="${escapeHtml(label)}" aria-label="${escapeHtml(`Voir la ${label.toLowerCase()}`)}">`
       + (thumb ? `<img src="${escapeHtml(thumb)}" alt="">` : ICONS.image)
       + (shot.n ? `<span class="shot-flag">${shot.n}</span>` : "")

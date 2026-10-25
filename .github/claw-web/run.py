@@ -125,7 +125,9 @@ class ShotStore:
         if not data.startswith(b"\xff\xd8\xff") or len(data) > self.MAX_BYTES or not self._branch():
             return ""
         self.count += 1
-        label = "".join(c if c.isalnum() else "-" for c in screen.lower()).strip("-")[:30] or "page"
+        # En ASCII : l'appli n'ouvre que les chemins en [A-Za-z0-9._-] (une fenêtre ouverte
+        # par « Réserver » aurait sinon une capture introuvable).
+        label = "".join(c if c.isascii() and c.isalnum() else "-" for c in screen.lower()).strip("-")[:30] or "page"
         name = f"uploads/session-{self.session}/{self.run_id}-{self.count}-{label}.jpg"
         try:
             self.call("PUT", f"/repos/{self.engine}/contents/{name}", self.token, {

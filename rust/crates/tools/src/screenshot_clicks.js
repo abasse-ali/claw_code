@@ -336,6 +336,19 @@
   const covered = [];
   // Fenêtres que leur bouton de fermeture ne ferme pas.
   const stuck = [];
+  // Boutons qui ouvrent une fenêtre, une fois par fenêtre : Screenshot rouvre
+  // chacune pour la capturer (sans capture, l'utilisateur ne la voyait jamais).
+  const openers = [];
+  const openedWindows = new Set();
+  const path = (el) => {
+    const parts = [];
+    for (let node = el; node && node.nodeType === 1 && node !== document.documentElement; node = node.parentElement) {
+      if (node.id && /^[A-Za-z][\w-]*$/.test(node.id)) { parts.unshift(`#${node.id}`); break; }
+      const same = [...(node.parentElement?.children || [])].filter((item) => item.tagName === node.tagName);
+      parts.unshift(`${node.tagName.toLowerCase()}${same.length > 1 ? `:nth-of-type(${same.indexOf(node) + 1})` : ""}`);
+    }
+    return parts.join(" > ");
+  };
   const windows = () => [...document.querySelectorAll("dialog[open], [role=dialog], [aria-modal=true]")].filter(shown);
   const coveredIn = (opener) => {
     for (const box of windows()) {
@@ -385,6 +398,10 @@
     const blocked = covered.length < 4 && coveredIn(el);
     // La fenetre ouverte : ses formulaires s'essaient, puis son bouton la ferme.
     for (const box of windows().filter((item) => !opened.has(item))) {
+      if (!openedWindows.has(box) && openers.length < 4) {
+        openedWindows.add(box);
+        openers.push({ label: label(el), selector: path(el) });
+      }
       if (blocked) break;
       for (const form of [...box.querySelectorAll("form")].filter((item) => shown(item) && !tested.has(item))) {
         if (tested.size < 10) await tryForm(form);
@@ -404,5 +421,5 @@
     }
     await wait(40);
   }
-  return { checked: controls.length, dead, failing, covered, buried, stuck, links, files, forms, kept };
+  return { checked: controls.length, dead, failing, covered, buried, stuck, links, files, forms, kept, openers };
 })()
