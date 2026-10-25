@@ -507,10 +507,28 @@ def agent_env(environ, mock=False):
     return env
 
 
+# Le job `task` du workflow est coupé à 120 minutes ; Claw conclut 12 minutes avant (la
+# requête en cours, la réponse, la poussée de la branche).
+JOB_MINUTES = 120
+WRAP_UP_MINUTES = 12
+
+
+def deadline(environ):
+    """L'heure (secondes Unix) à laquelle Claw doit conclure, d'après l'heure de départ du job
+    notée par le workflow ; « » sans elle."""
+    started = str(environ.get("CLAW_JOB_STARTED") or "").strip()
+    if not started.isdigit():
+        return ""
+    return str(int(started) + (JOB_MINUTES - WRAP_UP_MINUTES) * 60)
+
+
 def main():
     request = (WORK / "prompt.txt").read_text(encoding="utf-8")
     env = agent_env(os.environ, mock=MODEL == "mock")
     env["CLAW_NO_BROWSER"] = "1"
+    # Vu le 25 octobre 2026 : un passage de 300 requêtes coupé à 120 minutes, sans réponse.
+    if deadline(os.environ):
+        env["CLAW_DEADLINE"] = deadline(os.environ)
     # Questions de Claw (AskUserQuestion) montrées dans l'appli, avec des réponses à toucher :
     # le passage s'arrête sur elles, la réponse de l'utilisateur lance le suivant.
     env["CLAW_DEFERRED_QUESTIONS"] = "1"
