@@ -4280,7 +4280,8 @@ function lockScreen(mode) {
           <p class="lock-help">Au moins ${MIN_CODE} caractères. Une courte phrase se retient mieux, et résiste mieux, qu'un code à chiffres.</p>` : ""}
         <p class="lock-error" role="alert" hidden></p>
         <button class="primary" type="submit">${create ? "Activer le verrou" : "Déverrouiller"}</button>
-        ${!create && faceEnabled() ? `<button class="secondary lock-face" type="button" data-action="face">${ICON.face}<span>Déverrouiller avec Face ID</span></button>` : ""}
+        ${!create && faceEnabled() ? `<button class="secondary lock-face" type="button" data-action="face">${ICON.face}<span>Déverrouiller avec Face ID</span></button>
+        <button class="small-link" type="button" data-action="face-redo" hidden><span>Face ID ne marche pas ? Le réactiver avec le code</span></button>` : ""}
         ${create ? "" : `<details class="lock-forgot"><summary>Code oublié ?</summary>
           <p>Le code ne se retrouve pas. Effacez les clés de cet appareil, puis reconnectez-vous avec votre jeton GitHub et choisissez un nouveau code.</p>
           <button type="button" class="small-link danger" data-action="lock-reset"><span>Effacer les clés de cet appareil</span></button>
@@ -4300,20 +4301,36 @@ function lockScreen(mode) {
       document.body.classList.remove("locked");
       resolve();
     };
+    // « Le réactiver » : après le code, Face ID repart de zéro (nouvelle clé d'accès).
+    let redo = false;
     const unlock = async (code) => {
       const opened = await openVault(code);
       state.lock = { key: opened.key, salt: opened.salt, owner: opened.owner };
       Object.assign(state.settings, opened.secrets);
       saveSettings();
-      done();
+      if (redo) {
+        disableFace();
+        faceStep(screen, code, opened.owner, done);
+      } else {
+        done();
+      }
     };
-    // Face ID : demandé dès l'ouverture ; refusé ou annulé, le bouton et le code restent.
+    // Face ID : demandé dès l'ouverture ; refusé ou annulé, le bouton et le code restent. iOS
+    // n'ouvre Face ID qu'à travers la clé d'accès de Claw : s'il dit n'en trouver aucune (clé
+    // effacée, ou rangée chez un autre gestionnaire), la réactiver en refait une.
     const faceButton = screen.querySelector('[data-action="face"]');
+    const redoButton = screen.querySelector('[data-action="face-redo"]');
+    redoButton?.addEventListener("click", () => {
+      redo = true;
+      show("Entrez votre code : Face ID sera réactivé juste après.");
+      form.code.focus();
+    });
     const withFace = async (quiet) => {
       faceButton.disabled = true;
       try {
         await unlock(await codeFromFace());
       } catch (problem) {
+        redoButton.hidden = false;
         if (!quiet || problem.name !== "NotAllowedError") show(problem.name === "NotAllowedError" ? "Face ID annulé : touchez le bouton pour réessayer, ou entrez le code." : problem.message);
       } finally {
         faceButton.disabled = false;
@@ -4397,6 +4414,7 @@ function faceStep(screen, code, owner, done) {
       <span class="lock-logo">${ICON.face}</span>
       <h1>Déverrouiller avec Face ID ?</h1>
       <p class="lock-intro">À chaque ouverture, Claw demandera votre visage au lieu du code. Le code reste le secours.</p>
+      <p class="lock-help">Sur un site web, iOS passe Face ID par une clé d'accès&nbsp;: quand il demande où l'enregistrer, choisissez «&nbsp;Mots de passe&nbsp;» (le trousseau iCloud). À l'ouverture, il proposera alors «&nbsp;Claw&nbsp;», puis Face ID.</p>
       <p class="lock-error" role="alert" hidden></p>
       <button class="primary" type="button" data-action="face-on">${ICON.face}<span>Activer Face ID</span></button>
       <button class="secondary" type="button" data-action="face-later">Plus tard</button>

@@ -94,6 +94,8 @@ async function faceSecret(id, salt) {
       challenge: crypto.getRandomValues(new Uint8Array(32)),
       rpId: location.hostname,
       allowCredentials: [{ type: "public-key", id }],
+      // La clé de cet appareil (Face ID), pas un QR code ni une clé de sécurité.
+      hints: ["client-device"],
       userVerification: "required",
       timeout: 60_000,
       extensions: { prf: { eval: { first: salt } } },
@@ -116,6 +118,7 @@ export async function createFaceKey(owner) {
       challenge: crypto.getRandomValues(new Uint8Array(32)),
       pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
       authenticatorSelection: { authenticatorAttachment: "platform", residentKey: "preferred", userVerification: "required" },
+      hints: ["client-device"],
       timeout: 60_000,
       extensions: { prf: { eval: { first: salt } } },
     },
