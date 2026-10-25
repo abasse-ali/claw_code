@@ -8606,7 +8606,12 @@ fn build_runtime_with_ui(
         system_prompt.push(PLAN_MODE_PROMPT.to_string());
     }
     let auto_compaction = auto_compaction_config(&model);
-    Ok(ConversationRuntime::new_with_features(
+    let turn_limit = unmetered_turn_limit(
+        &model,
+        feature_config.turn_request_limit().is_some()
+            || env::var_os("CLAW_TURN_REQUESTS").is_some(),
+    );
+    let runtime = ConversationRuntime::new_with_features(
         session,
         DefaultRuntimeClient::new(
             &model,
@@ -8626,7 +8631,19 @@ fn build_runtime_with_ui(
         feature_config,
     )
     .with_auto_compaction(auto_compaction)
-    .with_checkpoint_turns(true))
+    .with_checkpoint_turns(true);
+    Ok(match turn_limit {
+        Some(limit) => runtime.with_turn_request_limit(limit),
+        None => runtime,
+    })
+}
+
+/// Budget de requêtes d'un tour quand le modèle n'a pas de quota du jour
+/// (NVIDIA, serveur local) et que l'utilisateur n'en a pas réglé un.
+fn unmetered_turn_limit(model: &str, chosen_by_user: bool) -> Option<usize> {
+    let unmetered = api::split_compat_model(model)
+        .is_some_and(|(provider, _)| provider.local || provider.name == "nvidia");
+    (unmetered && !chosen_by_user).then_some(runtime::harness::UNMETERED_TURN_REQUEST_LIMIT)
 }
 
 /// Compaction automatique selon la fenêtre de contexte du modèle ;
@@ -11747,8 +11764,28 @@ fn print_help() {
 mod tests {
     use super::{
         describe_permission_target, expert_command_prompt, parse_permission_answer,
-        persist_allow_rule, ExpertCommand, PermissionAnswer,
+        persist_allow_rule, unmetered_turn_limit, ExpertCommand, PermissionAnswer,
     };
+
+    #[test]
+    fn a_model_without_a_daily_quota_gets_a_longer_turn_unless_the_user_chose_one() {
+        let long = Some(runtime::harness::UNMETERED_TURN_REQUEST_LIMIT);
+        assert_eq!(
+            unmetered_turn_limit("nvidia:nvidia/nemotron-3-ultra-550b-a55b", false),
+            long
+        );
+        assert_eq!(unmetered_turn_limit("ollama:qwen3-coder", false), long);
+        assert_eq!(
+            unmetered_turn_limit("nvidia:nvidia/nemotron-3-ultra-550b-a55b", true),
+            None
+        );
+        assert_eq!(unmetered_turn_limit("qwen/qwen3-coder:free", false), None);
+        assert_eq!(unmetered_turn_limit("gemini:gemini-2.5-pro", false), None);
+        assert_eq!(
+            unmetered_turn_limit("groq:llama-3.3-70b-versatile", false),
+            None
+        );
+    }
 
     #[test]
     fn a_turn_ending_on_questions_keeps_the_answer_written_before_them() {
