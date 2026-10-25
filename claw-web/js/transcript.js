@@ -293,6 +293,9 @@ export function screenName(screen) {
   if (from) return `${name}, suite de la page (à partir de ${from[1]} px)`;
   const opener = part.match(/^window opened by .*?"([^"]+)"$/);
   if (opener) return `${name}, fenêtre « ${opener[1]} »`;
+  if (/^menu opened by /.test(part)) return `${name}, menu ouvert`;
+  const tab = part.match(/^tab .*?"([^"]+)"$/);
+  if (tab) return `${name}, onglet « ${tab[1]} »`;
   return part ? `${name}, ${part}` : name;
 }
 
@@ -304,9 +307,15 @@ function shotsHtml(shots) {
     const path = shotPath(shot.p);
     if (!thumb && !path) return "";
     const label = `Capture ${screenName(shot.screen)}${shot.n ? ` · ${plural(shot.n, "problème")}` : ""}`;
-    const problems = Array.isArray(shot.pb) ? shot.pb.filter((item) => typeof item === "string") : [];
+    const strings = (list) => (Array.isArray(list) ? list.filter((item) => typeof item === "string") : []);
+    // En français quand le moteur les a traduits (`pf`), sinon tels que Claw les a écrits.
+    const english = strings(shot.pb);
+    const french = strings(shot.pf);
+    const translated = french.length > 0 && french.length === english.length;
+    const problems = translated ? french : english;
     return `<button type="button" class="photo-pill shot" data-shot="${escapeHtml(path)}" data-thumb="${escapeHtml(thumb)}"`
       + ` data-problems="${escapeHtml(JSON.stringify(problems))}" data-count="${Number(shot.n) || 0}"`
+      + ` data-french="${translated ? "1" : ""}"`
       + ` data-label="${escapeHtml(label)}" title="${escapeHtml(label)}" aria-label="${escapeHtml(`Voir la ${label.toLowerCase()}`)}">`
       + (thumb ? `<img src="${escapeHtml(thumb)}" alt="">` : ICONS.image)
       + (shot.n ? `<span class="shot-flag">${shot.n}</span>` : "")

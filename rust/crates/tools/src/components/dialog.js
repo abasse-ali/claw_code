@@ -5,6 +5,11 @@
   if (document.documentElement.dataset.dialogsReady) return;
   document.documentElement.dataset.dialogsReady = "1";
   let opener = null;
+  // Le clic d'un glissement parti du contenu et fini sur le fond va au <dialog> :
+  // le fond ne ferme que si l'appui y a commencé (sinon, faire défiler un
+  // formulaire du doigt fermait la fenêtre).
+  let pressed = null;
+  document.addEventListener("pointerdown", (event) => { pressed = event.target; }, true);
   document.addEventListener("click", (event) => {
     const open = event.target.closest("[data-dialog-open]");
     if (open) {
@@ -22,7 +27,9 @@
       return;
     }
     // Un clic sur le fond tombe sur le <dialog> lui-même, pas sur son contenu.
-    if (event.target instanceof HTMLDialogElement && event.target.open) event.target.close();
+    if (event.target instanceof HTMLDialogElement && event.target.open && pressed === event.target) {
+      event.target.close();
+    }
   });
   document.addEventListener("close", (event) => {
     if (event.target instanceof HTMLDialogElement && opener) {

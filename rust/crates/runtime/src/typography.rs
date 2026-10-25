@@ -183,6 +183,47 @@ pub fn cleaned(text: &str) -> Cow<'_, str> {
     }
 }
 
+/// `text` sans tiret cadratin, pour un fichier que Claw écrit : un « - » le
+/// remplace, avec le même espacement que dans les réponses. Les emoji restent
+/// (un fichier peut en avoir besoin, une expression régulière par exemple).
+/// Vu le 25 octobre 2026 : la consigne ne suffisait pas, le site d'un club de
+/// foot affichait « Association loi 1901 \u{2014} » malgré elle.
+#[must_use]
+pub fn without_long_dashes(text: &str) -> Cow<'_, str> {
+    if !text.contains(is_long_dash) {
+        return Cow::Borrowed(text);
+    }
+    let mut output = String::with_capacity(text.len());
+    let mut last: Option<char> = None;
+    let mut after_dash = false;
+    for character in text.chars() {
+        if is_long_dash(character) {
+            if last.is_some_and(|previous| !previous.is_whitespace()) {
+                output.push(' ');
+            }
+            output.push('-');
+            after_dash = true;
+            last = Some('-');
+            continue;
+        }
+        if after_dash && !hugs_the_dash(character) {
+            output.push(' ');
+        }
+        after_dash = false;
+        output.push(character);
+        last = Some(character);
+    }
+    Cow::Owned(output)
+}
+
+/// Tirets cadratins dans `text`.
+#[must_use]
+pub fn long_dashes(text: &str) -> usize {
+    text.chars()
+        .filter(|character| is_long_dash(*character))
+        .count()
+}
+
 /// Le même nettoyage pour un texte reçu par morceaux : le filtre retient où
 /// il en est, pour que l'espacement reste juste quand un tiret ou un emoji
 /// tombe au bord d'un morceau.
@@ -255,9 +296,27 @@ impl OutputFilter {
 
 #[cfg(test)]
 mod tests {
-    use super::{cleaned, is_banned, is_emoji, OutputFilter, EMOJI_RANGES, EM_DASH};
+    use super::{
+        cleaned, is_banned, is_emoji, long_dashes, without_long_dashes, OutputFilter, EMOJI_RANGES,
+        EM_DASH,
+    };
     use std::borrow::Cow;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_written_file_has_hyphens_instead_of_em_dashes_and_keeps_its_emoji() {
+        let dash = EM_DASH;
+        let page = format!("Association loi 1901 {dash} contact\nU9{dash}U11, fin{dash}\n");
+        assert_eq!(long_dashes(&page), 3);
+        assert_eq!(
+            without_long_dashes(&page),
+            "Association loi 1901 - contact\nU9 - U11, fin -\n"
+        );
+        assert!(matches!(without_long_dashes("a - b"), Cow::Borrowed(_)));
+        // Un fichier peut avoir besoin d'un emoji : il reste.
+        let pattern = "/[\u{1F600}-\u{1F64F}]/u";
+        assert_eq!(without_long_dashes(pattern), pattern);
+    }
 
     /// Fichiers texte du projet sous `directory`, hors dossiers générés.
     fn text_files(directory: &Path, found: &mut Vec<PathBuf>) {

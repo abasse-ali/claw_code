@@ -336,6 +336,8 @@
   const covered = [];
   // Fenêtres que leur bouton de fermeture ne ferme pas.
   const stuck = [];
+  // Fenêtres qu'un glissement fini sur leur fond referme.
+  const dragged = [];
   // Boutons qui ouvrent une fenêtre, une fois par fenêtre : Screenshot rouvre
   // chacune pour la capturer (sans capture, l'utilisateur ne la voyait jamais).
   const openers = [];
@@ -407,6 +409,30 @@
         if (tested.size < 10) await tryForm(form);
       }
       if (!box.isConnected || !shown(box)) continue;
+      // Un glissement parti de la fenêtre et fini sur son fond : le navigateur
+      // donne le clic à leur ancêtre commun, la fenêtre (<dialog>) ou le fond.
+      // Une fenêtre fermée dès que `event.target` est le fond se ferme alors
+      // sous le doigt qui fait défiler son formulaire (vu le 25 octobre 2026 :
+      // « quand on force le glisser vers le bas, ça ferme la fenêtre »).
+      if (dragged.length < 3) {
+        const inner = [...box.querySelectorAll("h1, h2, h3, label, p, input, button")].find(shown);
+        const outside = document.elementFromPoint(innerWidth / 2, 6);
+        if (inner && outside && (outside === box || !box.contains(outside))) {
+          let common = inner;
+          while (common && !common.contains(outside)) common = common.parentElement;
+          const fire = (target, type, Kind) => target.dispatchEvent(new Kind(type, { bubbles: true, cancelable: true, view: window, clientX: innerWidth / 2, clientY: 6 }));
+          fire(inner, "pointerdown", PointerEvent);
+          fire(inner, "mousedown", MouseEvent);
+          fire(outside, "pointerup", PointerEvent);
+          fire(outside, "mouseup", MouseEvent);
+          if (common) fire(common, "click", MouseEvent);
+          await wait(300);
+          if (!box.isConnected || !shown(box)) {
+            dragged.push(`${label(el)} opens a window that closes when a finger slides from inside it onto its edge (scrolling its form is enough)`);
+            continue;
+          }
+        }
+      }
       const close = closeButton(box);
       if (close) {
         close.click();
@@ -421,5 +447,5 @@
     }
     await wait(40);
   }
-  return { checked: controls.length, dead, failing, covered, buried, stuck, links, files, forms, kept, openers };
+  return { checked: controls.length, dead, failing, covered, buried, stuck, links, files, forms, kept, openers, dragged };
 })()

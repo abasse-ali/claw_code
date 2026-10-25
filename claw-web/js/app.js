@@ -125,6 +125,14 @@ const state = {
 
 const $ = (selector) => document.querySelector(selector);
 
+/** Ce qui a reçu le dernier appui (doigt, souris) : le clic d'un glissement parti de la fenêtre
+ * et fini sur son fond va au fond, et le fermait. Vu le 25 octobre 2026 (« quand on force le
+ * glisser vers le bas, ça ferme la fenêtre ouverte »). */
+let lastPress = null;
+document.addEventListener("pointerdown", (event) => { lastPress = event.target; }, true);
+/** Un toucher sur le fond d'une fenêtre, commencé sur ce fond. */
+const backdropTap = (event, sheet) => event.target === sheet && lastPress === sheet;
+
 // --- Réglages gardés dans ce navigateur ----------------------------------------------------
 
 function loadSettings() {
@@ -250,7 +258,7 @@ function openImage(path) {
       <img class="full-image" alt="" src="${url}">
     </div>`;
   sheet.onclick = (event) => {
-    if (event.target === sheet || event.target.closest("[data-close]")) {
+    if (backdropTap(event, sheet) || event.target.closest("[data-close]")) {
       sheet.hidden = true;
       sheet.innerHTML = "";
     }
@@ -272,7 +280,7 @@ function openPhoto({ photo, credit, source }) {
       ${origin ? `<p class="help"><a href="${escapeHtml(origin)}" target="_blank" rel="noopener noreferrer">Voir la page de la photo</a></p>` : ""}
     </div>`;
   sheet.onclick = (event) => {
-    if (event.target === sheet || event.target.closest("[data-close]")) {
+    if (backdropTap(event, sheet) || event.target.closest("[data-close]")) {
       sheet.hidden = true;
       sheet.innerHTML = "";
     }
@@ -374,7 +382,7 @@ function openCloudRunner() {
       </div>
     </div>`;
   sheet.onclick = (event) => {
-    if (event.target === sheet || event.target.closest("[data-close]")) {
+    if (backdropTap(event, sheet) || event.target.closest("[data-close]")) {
       sheet.hidden = true;
       sheet.innerHTML = "";
     }
@@ -481,9 +489,10 @@ function openCloudRunner() {
   sheet.hidden = false;
 }
 
-/** Les problèmes relevés sur une capture (texte de Claw pour l'agent, en anglais), en liste ;
- * `count` dit s'il y en avait plus que gardés. */
-function shotProblemsHtml(problems, count) {
+/** Les problèmes relevés sur une capture, en liste : traduits en français par le moteur
+ * (`french`), sinon tels que Claw les a transmis à l'agent, en anglais ; `count` dit s'il y en
+ * avait plus que gardés. */
+function shotProblemsHtml(problems, count, french) {
   let list = [];
   try {
     list = JSON.parse(problems || "[]").filter((item) => typeof item === "string");
@@ -494,7 +503,8 @@ function shotProblemsHtml(problems, count) {
   const total = Math.max(Number(count) || 0, list.length);
   const more = total - list.length;
   return `<details class="shot-problems" open><summary>${total} problème${total > 1 ? "s relevés" : " relevé"}`
-    + ` <span class="muted">(tels que Claw les a transmis à l'agent, en anglais)</span></summary>`
+    + (french ? "" : ` <span class="muted">(pas encore traduits : tels que Claw les a transmis à l'agent, en anglais)</span>`)
+    + "</summary>"
     + `<ol>${list.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>`
     + (more ? `<p class="help">… et ${more} autre${more > 1 ? "s" : ""}.</p>` : "")
     + "</details>";
@@ -503,18 +513,18 @@ function shotProblemsHtml(problems, count) {
 /** Capture d'écran de l'agent, entière (rangée sur la branche des fichiers du moteur) ; sa
  * vignette s'affiche le temps qu'elle arrive, ou seule quand elle n'a pas pu être rangée. Les
  * problèmes relevés dessus s'affichent au-dessus. */
-async function openShot({ shot, thumb, label, problems, count }) {
+async function openShot({ shot, thumb, label, problems, count, french }) {
   const sheet = $("#sheet");
   const preview = /^data:image\/(?:jpeg|png|webp);base64,/.test(thumb || "") ? thumb : "";
   sheet.innerHTML = `
     <div class="sheet-panel image-panel shot-panel" role="dialog" aria-modal="true" aria-label="Capture d'écran">
       <div class="sheet-head"><strong>${escapeHtml(label || "Capture d'écran")}</strong><button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button></div>
-      ${shotProblemsHtml(problems, count)}
+      ${shotProblemsHtml(problems, count, french === "1")}
       <div class="shot-scroll"><img class="full-image tall" alt="" src="${escapeHtml(preview)}"${preview ? "" : " hidden"}></div>
       <p class="help shot-state">${shot ? "Chargement de la capture entière…" : "Seul l'aperçu du premier écran a été gardé."}</p>
     </div>`;
   sheet.onclick = (event) => {
-    if (event.target === sheet || event.target.closest("[data-close]")) {
+    if (backdropTap(event, sheet) || event.target.closest("[data-close]")) {
       sheet.hidden = true;
       sheet.innerHTML = "";
     }
@@ -900,7 +910,7 @@ function openPicker({ title, items, current, placeholder, onPick, onRemove, onAc
     sheet.innerHTML = "";
   };
   sheet.onclick = (event) => {
-    if (event.target === sheet || event.target.closest("[data-close]")) close();
+    if (backdropTap(event, sheet) || event.target.closest("[data-close]")) close();
     if (event.target.closest(".sheet-action-button")) {
       close();
       onAction?.(active);
@@ -1023,7 +1033,7 @@ async function openDeleteRepo(repo) {
     submit.disabled = form.elements.confirm.value.trim() !== fullName;
   });
   sheet.onclick = (event) => {
-    if (event.target === sheet || event.target.closest("[data-close]")) close();
+    if (backdropTap(event, sheet) || event.target.closest("[data-close]")) close();
   };
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1110,7 +1120,7 @@ function openCreateRepo(prefill = "") {
     sheet.innerHTML = "";
   };
   sheet.onclick = (event) => {
-    if (event.target === sheet || event.target.closest("[data-close]")) close();
+    if (backdropTap(event, sheet) || event.target.closest("[data-close]")) close();
   };
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1328,7 +1338,7 @@ async function openBranches({ repo, current, title, onPick }) {
     });
   };
   sheet.onclick = (event) => {
-    if (event.target === sheet || event.target.closest("[data-close]")) {
+    if (backdropTap(event, sheet) || event.target.closest("[data-close]")) {
       close();
       return;
     }
@@ -1862,7 +1872,7 @@ async function openQuota() {
     if (bar) bar.querySelector("span").style.width = `${bar.dataset.share}%`;
   };
   sheet.onclick = async (event) => {
-    if (event.target === sheet || event.target.closest("[data-close]") || event.target.closest('a[href="#/reglages"]')) {
+    if (backdropTap(event, sheet) || event.target.closest("[data-close]") || event.target.closest('a[href="#/reglages"]')) {
       close();
       return;
     }
@@ -2262,7 +2272,7 @@ async function openDeleteSessions(issues) {
       <p class="empty">Lecture des pull requests…</p>
     </div>`;
   sheet.onclick = (event) => {
-    if (event.target === sheet || event.target.closest("[data-close]")) close();
+    if (backdropTap(event, sheet) || event.target.closest("[data-close]")) close();
   };
   sheet.hidden = false;
   // Pull request de chaque branche : une ouverte est fermée avec sa branche, et c'est dit.
@@ -3708,7 +3718,7 @@ async function openPublish(session) {
       <p class="empty">Lecture du dépôt…</p>
     </div>`;
   sheet.onclick = (event) => {
-    if (event.target === sheet || event.target.closest("[data-close]")) close();
+    if (backdropTap(event, sheet) || event.target.closest("[data-close]")) close();
   };
   sheet.hidden = false;
   try {

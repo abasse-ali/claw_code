@@ -46,8 +46,9 @@ const MAX_ACTIONS: usize = 12;
 /// Une page entière : des captures de trois écrans de haut, trois au plus.
 const FULL_PAGE_SCREENS: f64 = 3.0;
 const MAX_SLICES: usize = 3;
-/// Fenêtres ouvertes par un bouton, capturées par appel (option `windows`).
-const MAX_WINDOW_SHOTS: usize = 3;
+/// Vues ouvertes par un bouton (fenêtres, menu, onglets), capturées par appel
+/// (option `windows`).
+const MAX_VIEW_SHOTS: usize = 5;
 /// Qualité JPEG des captures : nettes pour un lecteur, légères dans la conversation.
 const JPEG_QUALITY: u8 = 80;
 /// Aperçu de chaque capture (vignette de Claw Web) : 160 pixels de large,
@@ -1563,6 +1564,11 @@ fn click_problems(devtools: &mut DevTools) -> (Vec<String>, Vec<(String, String)
             buried.join("; ")
         ));
     }
+    for window in strings(&result["dragged"]) {
+        problems.push(format!(
+            "{window}: the browser gives that slide's click to the backdrop. Close on a backdrop tap only when the press also started there: remember the target of pointerdown, and close on click only if both are the backdrop"
+        ));
+    }
     for window in strings(&result["stuck"]) {
         problems.push(format!(
             "{window}: the visitor stays shut in; make that button close it (dialog.close(), or remove the class that shows it)"
@@ -1913,18 +1919,75 @@ fn picture(
     Ok((jpeg, preview))
 }
 
-/// Les fenêtres que des boutons ouvrent (`openers` : nom et sélecteur, relevés par
-/// le parcours des boutons), rouvries une à une dans une page neuve et capturées
-/// à l'écran `viewport`. Vu le 25 octobre 2026 (site d'un club de foot) : ses trois
-/// fenêtres n'avaient jamais été capturées, ni vues par l'utilisateur.
-fn window_shots(
+/// Une vue que la page ne montre qu'après un toucher : une fenêtre (relevée par
+/// le parcours des boutons), le menu d'un téléphone, un onglet non choisi.
+struct View {
+    /// « window », « menu » ou « tab ».
+    kind: &'static str,
+    label: String,
+    selector: String,
+}
+
+/// Le menu replié et les onglets non choisis de la page ouverte, avec un
+/// sélecteur stable pour les retrouver dans une page neuve.
+const VIEWS_SCRIPT: &str = r#"(() => {
+  const shown = (el) => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none"; };
+  const label = (el) => `${el.tagName.toLowerCase()} "${(el.innerText || el.getAttribute("aria-label") || "").trim().replace(/\s+/g, " ").slice(0, 40)}"`;
+  const path = (el) => {
+    const parts = [];
+    for (let node = el; node && node.nodeType === 1 && node !== document.documentElement; node = node.parentElement) {
+      if (node.id && /^[A-Za-z][\w-]*$/.test(node.id)) { parts.unshift(`#${node.id}`); break; }
+      const same = [...(node.parentElement?.children || [])].filter((item) => item.tagName === node.tagName);
+      parts.unshift(`${node.tagName.toLowerCase()}${same.length > 1 ? `:nth-of-type(${same.indexOf(node) + 1})` : ""}`);
+    }
+    return parts.join(" > ");
+  };
+  const menus = [...document.querySelectorAll("button[aria-expanded=false], [role=button][aria-expanded=false]")]
+    .filter((el) => shown(el) && !el.closest("dialog, [role=dialog]")).slice(0, 2)
+    .map((el) => ({ kind: "menu", label: label(el), selector: path(el) }));
+  const tabs = [...document.querySelectorAll("[role=tab]")]
+    .filter((el) => shown(el) && el.getAttribute("aria-selected") !== "true").slice(0, 4)
+    .map((el) => ({ kind: "tab", label: label(el), selector: path(el) }));
+  return menus.concat(tabs);
+})()"#;
+
+/// Les vues que la page cache (fenêtres d'`openers`, relevées par le parcours des
+/// boutons ; menu replié, onglets non choisis, relevés ici), rouvertes une à une
+/// dans une page neuve et capturées à l'écran `viewport`. Vu le 25 octobre 2026
+/// (site d'un club de foot) : ni ses trois fenêtres, ni son menu, ni les onglets
+/// de son calendrier n'avaient été capturés ou vus par l'utilisateur.
+fn view_shots(
     devtools: &mut DevTools,
     session: &Session<'_>,
     viewport: &Viewport,
     openers: &[(String, String)],
 ) -> Vec<Extra> {
+    let mut views: Vec<View> = openers
+        .iter()
+        .map(|(label, selector)| View {
+            kind: "window",
+            label: label.clone(),
+            selector: selector.clone(),
+        })
+        .collect();
+    if open_page(devtools, session, viewport).is_ok() {
+        if let Ok(Value::Array(found)) = devtools.evaluate(VIEWS_SCRIPT) {
+            for view in found {
+                let (Some(label), Some(selector)) =
+                    (view["label"].as_str(), view["selector"].as_str())
+                else {
+                    continue;
+                };
+                views.push(View {
+                    kind: if view["kind"] == "tab" { "tab" } else { "menu" },
+                    label: label.to_string(),
+                    selector: selector.to_string(),
+                });
+            }
+        }
+    }
     let mut shots = Vec::new();
-    for (label, selector) in openers.iter().take(MAX_WINDOW_SHOTS) {
+    for view in views.iter().take(MAX_VIEW_SHOTS) {
         // Les essais du parcours (« Camille Claw8762C ») restaient dans les champs
         // que la page remplit de sa mémoire ; `storage` se repose au chargement.
         let _ = devtools
@@ -1932,9 +1995,16 @@ fn window_shots(
         if open_page(devtools, session, viewport).is_err() {
             break;
         }
+        // Une fenêtre doit s'être ouverte ; un menu ou un onglet se montre tel quel.
+        let check = if view.kind == "window" {
+            "[...document.querySelectorAll('dialog[open], [role=dialog], [aria-modal=true]')].some((box) => { const r = box.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(box).visibility !== 'hidden'; })"
+        } else {
+            "true"
+        };
         let open = format!(
-            "(async () => {{ const el = document.querySelector({}); if (!el) return false; el.scrollIntoView({{ block: 'center' }}); el.click(); await new Promise((done) => setTimeout(done, 500)); return [...document.querySelectorAll('dialog[open], [role=dialog], [aria-modal=true]')].some((box) => {{ const r = box.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(box).visibility !== 'hidden'; }}); }})()",
-            json!(selector)
+            "(async () => {{ const el = document.querySelector({}); if (!el) return false; el.scrollIntoView({{ block: '{}' }}); el.click(); await new Promise((done) => setTimeout(done, 500)); return {check}; }})()",
+            json!(view.selector),
+            if view.kind == "tab" { "start" } else { "center" }
         );
         if devtools
             .evaluate(&open)
@@ -1945,8 +2015,12 @@ fn window_shots(
             continue;
         }
         if let Ok((jpeg, preview)) = picture(devtools, viewport, None) {
+            let label = match view.kind {
+                "tab" => format!("tab {}", view.label),
+                kind => format!("{kind} opened by {}", view.label),
+            };
             shots.push(Extra {
-                label: format!("window opened by {label}"),
+                label,
                 jpeg,
                 preview,
             });
@@ -2209,12 +2283,12 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
             Err(error) => captures.push(json!({ "screen": viewport.label, "error": error })),
         }
     }
-    // Les fenêtres, au téléphone de préférence : là où un parent les ouvre.
-    if session.windows && !openers.is_empty() {
+    // Fenêtres, menu et onglets, au téléphone de préférence : là où un parent les ouvre.
+    if session.windows {
         if let Some(viewport) = sizes.iter().find(|size| size.mobile).or(sizes.first()) {
-            let shots = window_shots(&mut devtools, &session, viewport, &openers);
+            let shots = view_shots(&mut devtools, &session, viewport, &openers);
             for (number, extra) in shots.into_iter().enumerate() {
-                let name = format!("{}-window-{}", viewport.label.replace(' ', "-"), number + 1);
+                let name = format!("{}-view-{}", viewport.label.replace(' ', "-"), number + 1);
                 captures.push(extra_entry(
                     dir.as_deref(),
                     stamp,
@@ -2432,6 +2506,36 @@ mod tests {
         );
         let behind = problems("derriere", "z-index: -1;");
         assert!(!behind.contains("cannot be tapped"), "{behind}");
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn a_window_closed_by_a_slide_onto_its_backdrop_is_found_in_a_real_browser() {
+        // « Quand on force le glisser vers le bas, ça ferme la fenêtre » (25 octobre
+        // 2026) : le clic d'un glissement va au <dialog>, que `event.target` ferme.
+        let cwd = std::env::current_dir().expect("dossier");
+        let problems = |name: &str, close: &str| {
+            let dir = cwd.join(format!("claw-slide-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Club</title><style>body {{ font-family: sans-serif; }} dialog {{ margin: 0; padding: 0; border: 0; width: 100%; max-width: none; height: 100%; max-height: none; background: transparent; }} dialog[open] {{ display: flex; align-items: flex-end; }} .panel {{ background: #fff; width: 100%; padding: 20px; }}</style></head><body><main><h1>Club</h1><button id=\"drive\" type=\"button\">Je conduis</button></main><dialog id=\"sheet\"><div class=\"panel\"><h2>Conduire</h2><label for=\"places\">Places</label><input id=\"places\" type=\"number\"><button type=\"button\" id=\"fermer\">Fermer</button></div></dialog><script>const sheet = document.getElementById('sheet'); let pressed = null; document.addEventListener('pointerdown', (event) => {{ pressed = event.target; }}, true); document.getElementById('drive').onclick = () => sheet.showModal(); document.getElementById('fermer').onclick = () => sheet.close(); sheet.addEventListener('click', (event) => {{ if ({close}) sheet.close(); }});</script></body></html>"),
+            )
+            .expect("html");
+            let page = format!("claw-slide-{name}-{}/index.html", std::process::id());
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let slid = problems("glisse", "event.target === sheet");
+        assert!(
+            slid.contains("closes when a finger slides from inside it onto its edge"),
+            "{slid}"
+        );
+        let held = problems("tenue", "event.target === sheet && pressed === sheet");
+        assert!(!held.contains("slides from inside it"), "{held}");
     }
 
     #[test]
@@ -2809,7 +2913,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("dossier");
         std::fs::write(
             dir.join("index.html"),
-            "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Long</title><style>body{margin:0}section{height:1500px}</style></head><body><main><section><h1>Haut</h1><button id=\"ouvrir\" type=\"button\">Je conduis</button></section><section id=\"milieu\"><h2>Milieu</h2></section><section id=\"bas\"><h2>Bas</h2></section></main><dialog id=\"fenetre\"><h2>Conduire</h2><button type=\"button\" id=\"fermer\">Fermer</button></dialog><script>const box = document.getElementById('fenetre'); document.getElementById('ouvrir').onclick = () => box.showModal(); document.getElementById('fermer').onclick = () => box.close();</script></body></html>",
+            "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Long</title><style>body{margin:0}section{height:1500px}</style></head><body><main><section><h1>Haut</h1><button id=\"menu\" type=\"button\" aria-expanded=\"false\" aria-controls=\"nav\">Menu</button><nav id=\"nav\" hidden><a href=\"#bas\">Infos</a></nav><button id=\"ouvrir\" type=\"button\">Je conduis</button><div role=\"tablist\"><button role=\"tab\" aria-selected=\"true\" id=\"tous\">Tous</button><button role=\"tab\" aria-selected=\"false\" id=\"u9\">U9</button></div></section><section id=\"milieu\"><h2>Milieu</h2></section><section id=\"bas\"><h2>Bas</h2></section></main><dialog id=\"fenetre\"><h2>Conduire</h2><button type=\"button\" id=\"fermer\">Fermer</button></dialog><script>const box = document.getElementById('fenetre'); document.getElementById('ouvrir').onclick = () => box.showModal(); document.getElementById('fermer').onclick = () => box.close(); const menu = document.getElementById('menu'); menu.onclick = () => { const open = menu.getAttribute('aria-expanded') !== 'true'; menu.setAttribute('aria-expanded', String(open)); document.getElementById('nav').hidden = !open; }; for (const tab of document.querySelectorAll('[role=tab]')) tab.onclick = () => { for (const other of document.querySelectorAll('[role=tab]')) other.setAttribute('aria-selected', String(other === tab)); };</script></body></html>",
         )
         .expect("html");
         let page = format!("claw-long-{}/index.html", std::process::id());
@@ -2822,18 +2926,29 @@ mod tests {
         let scrolled = super::take(&request).expect("capture")["captures"][0].clone();
         let _ = std::fs::remove_dir_all(&dir);
         // La page entière en deux captures de trois écrans au plus, puis la fenêtre
-        // ouverte par « Je conduis ».
+        // ouverte par « Je conduis », le menu et l'onglet « U9 ».
         let captures = whole["captures"].as_array().expect("captures");
         let screens: Vec<&str> = captures
             .iter()
             .map(|capture| capture["screen"].as_str().unwrap_or_default())
             .collect();
-        assert_eq!(screens.len(), 3, "{whole}");
+        assert_eq!(screens.len(), 5, "{whole}");
         assert_eq!(screens[0], "phone 390x844");
         assert!(
             screens[1].starts_with("phone 390x844, from 25"),
             "{screens:?}"
         );
+        assert!(
+            screens[2].starts_with("phone 390x844, window opened by")
+                && screens[2].contains("Je conduis"),
+            "{screens:?}"
+        );
+        // Le menu replié, ouvert, et l'onglet que la page n'a pas choisi.
+        assert!(
+            screens[3].starts_with("phone 390x844, menu opened by") && screens[3].contains("Menu"),
+            "{screens:?}"
+        );
+        assert_eq!(screens[4], "phone 390x844, tab button \"U9\"");
         assert!(
             screens[2].starts_with("phone 390x844, window opened by")
                 && screens[2].contains("Je conduis"),
