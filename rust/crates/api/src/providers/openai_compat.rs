@@ -1089,6 +1089,14 @@ impl StreamState {
                 self.push_text_tool_calls(calls, events);
                 return;
             }
+            // Une réponse finale emballée dans un outil inventé (`FinalAnswer`).
+            if let Some(answer) = raw
+                .get(held_from..)
+                .and_then(|held| text_tools::unwrap_answer_call(held, &self.tools))
+            {
+                self.push_text(answer, events);
+                return;
+            }
         }
         self.push_text(raw[held_from..].to_string(), events);
     }
@@ -1974,6 +1982,8 @@ fn normalize_response(
                 visible = text[..start].trim_end().to_string();
                 keep_visible = true;
                 calls = salvaged;
+            } else if let Some(answer) = text_tools::unwrap_answer_call(&visible, tools) {
+                visible = answer;
             }
         }
         if calls.is_empty() {
@@ -3069,6 +3079,43 @@ mod tests {
                 Vec::new()
             )
         );
+    }
+
+    #[test]
+    fn a_final_answer_wrapped_in_an_invented_tool_is_shown_as_text() {
+        // Session #31 du 25 octobre 2026 : Nemotron 3.5 Lightning finissait sur
+        // `<tool_call><function=FinalAnswer><parameter=content>…`.
+        let events = stream_deltas(&[
+            json!({"content": "<tool_call>\n<function=Final"}),
+            json!({"content": "Answer>\n<parameter=content>\nCorrections terminées :\n\n1. **Badge** repositionné.\n"}),
+            json!({"content": "</parameter>\n</function>\n</tool_call>"}),
+        ]);
+        assert_eq!(
+            texts_and_tools(&events),
+            (
+                "Corrections terminées :\n\n1. **Badge** repositionné.".to_string(),
+                Vec::new()
+            )
+        );
+        // Hors flux aussi, avec le texte qui précède.
+        let reply = "Voilà.\n<invoke name=\"attempt_completion\"><parameter name=\"result\">Le site est prêt.</parameter></invoke>";
+        assert_eq!(
+            super::text_tools::unwrap_answer_call(reply, &[]).as_deref(),
+            Some("Voilà.\n\nLe site est prêt.")
+        );
+        // Un vrai outil, un appel suivi de texte, ou un exemple, ne sont pas touchés.
+        let tool = ToolDefinition {
+            name: "answer".to_string(),
+            description: None,
+            input_schema: json!({"type": "object"}),
+        };
+        let real = "<function=answer>\n<parameter=content>x</parameter>\n</function>";
+        assert!(super::text_tools::unwrap_answer_call(real, &[tool]).is_none());
+        let followed =
+            "<function=FinalAnswer><parameter=content>x</parameter></function> puis la suite";
+        assert!(super::text_tools::unwrap_answer_call(followed, &[]).is_none());
+        let fenced = "```\n<function=FinalAnswer><parameter=content>x</parameter></function>\n```";
+        assert!(super::text_tools::unwrap_answer_call(fenced, &[]).is_none());
     }
 
     #[test]

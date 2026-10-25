@@ -272,6 +272,76 @@ pub fn salvage_invoke_calls(
     None
 }
 
+/// Noms d'outil qu'un modèle invente pour emballer sa réponse finale (en
+/// minuscules, sans `_`).
+const ANSWER_TOOLS: [&str; 7] = [
+    "finalanswer",
+    "final",
+    "answer",
+    "attemptcompletion",
+    "respond",
+    "reply",
+    "finish",
+];
+/// Paramètre qui porte le texte de cette réponse.
+const ANSWER_FIELDS: [&str; 6] = ["content", "answer", "text", "message", "result", "response"];
+
+/// Réponse finale écrite comme l'appel d'un outil qui n'existe pas,
+/// `<tool_call><function=FinalAnswer><parameter=content>…`, en fin de texte et
+/// hors bloc de code : rend le texte qui précède suivi du contenu, sans les
+/// balises. Vu le 25 octobre 2026 (session #31) : Nemotron 3.5 Lightning, modèle
+/// de secours, finissait ainsi, et l'utilisateur lisait les balises.
+#[must_use]
+pub fn unwrap_answer_call(text: &str, tools: &[ToolDefinition]) -> Option<String> {
+    let mut from = 0;
+    while let Some(position) = invoke_outside_code(text, from) {
+        if let Some(answer) = answer_call(&text[position..], tools) {
+            let before = text[..wrapper_start(&text[..position])].trim_end();
+            return Some(if before.is_empty() {
+                answer
+            } else {
+                format!("{before}\n\n{answer}")
+            });
+        }
+        from = position + 1;
+    }
+    None
+}
+
+/// Contenu de l'appel d'un outil de réponse inventé qui termine `text`.
+fn answer_call(text: &str, tools: &[ToolDefinition]) -> Option<String> {
+    let (name, arguments, rest) = if let Some(tail) = text.strip_prefix(INVOKE_TAG) {
+        let (name, after) = tail.split_once("\">")?;
+        let end = after.find(INVOKE_CLOSE)?;
+        let arguments = invoke_arguments(&after[..end], &Value::Null)?;
+        (name, arguments, &after[end + INVOKE_CLOSE.len()..])
+    } else {
+        let (name, after) = text.strip_prefix(FUNCTION_TAG)?.split_once('>')?;
+        let end = after.find(FUNCTION_CLOSE)?;
+        let arguments = function_arguments(&after[..end], &Value::Null)?;
+        (name, arguments, &after[end + FUNCTION_CLOSE.len()..])
+    };
+    let name = name.trim();
+    let normalized = name.to_ascii_lowercase().replace(['_', '-'], "");
+    if !ANSWER_TOOLS.contains(&normalized.as_str())
+        || tools.iter().any(|tool| tool.name == name)
+        || !skip_wrapper_tags(rest).is_empty()
+    {
+        return None;
+    }
+    let arguments = arguments.as_object()?;
+    let value = ANSWER_FIELDS
+        .iter()
+        .find_map(|field| arguments.get(*field))
+        .or_else(|| {
+            (arguments.len() == 1)
+                .then(|| arguments.values().next())
+                .flatten()
+        })?;
+    let answer = value.as_str()?.trim();
+    (!answer.is_empty()).then(|| answer.to_string())
+}
+
 /// Premier début d'appel (`<invoke name="`, `<function=`) à partir de `from`
 /// qui n'est ni dans un bloc de code ni dans du code en ligne (un exemple
 /// n'est pas un appel).
