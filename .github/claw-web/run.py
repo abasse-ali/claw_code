@@ -23,6 +23,7 @@ from pathlib import Path
 from common import (EFFORTS, FILES_BRANCH, MCP_TOKEN_FILE, PROGRESS, WORK, GitHubError, api, clean_notice,
                     edit_comment, output, post_comment, run_url, stop_tree)
 from journal import Journal
+from translate import Translator
 from mcp_server import Context, Host, build, describe_call
 from on_github import REQUESTS_FILE, STATE_FILE
 import memory
@@ -243,7 +244,7 @@ class Progress:
         self.comment_id = None
         self.dirty = True
         self.lock = threading.Lock()
-        self.journal = Journal(relative, store=ShotStore())
+        self.journal = Journal(relative, store=ShotStore(), translate=translator(os.environ))
         self.journal_at = 0.0
         self.log_comments = {}
         # Un envoi à la fois (le fil de rafraîchissement et la fin du passage) : jamais deux
@@ -509,6 +510,15 @@ def agent_env(environ, mock=False):
     return env
 
 
+def translator(environ):
+    """Le traducteur des problèmes des captures, avec la clé de NVIDIA du moteur ; None sans
+    elle (l'appli montre alors l'anglais)."""
+    key = str(environ.get("NVIDIA_API_KEY") or "").strip()
+    if not key or MODEL == "mock":
+        return None
+    return Translator(key, environ.get("CLAW_TRANSLATE_MODEL") or None)
+
+
 # Le job `task` du workflow est coupé à 120 minutes ; Claw conclut 12 minutes avant (la
 # requête en cours, la réponse, la poussée de la branche).
 JOB_MINUTES = 120
@@ -662,6 +672,9 @@ def main():
     # (Gemini et NVIDIA n'ont pas de compte à lire comme OpenRouter).
     (WORK / "usage.json").write_text(json.dumps({"model": MODEL, "requests": requests}), encoding="utf-8")
     progress.publish(state, force=True)
+    # Les problèmes des captures en cours de traduction rejoignent le dernier envoi.
+    if progress.journal.translate:
+        progress.journal.translate.wait(30)
     progress.publish_journal(force=True)
     (WORK / "notices.txt").write_text("\n".join(progress.notices[-2:]), encoding="utf-8")
     (WORK / "result.md").write_text(result or "", encoding="utf-8")

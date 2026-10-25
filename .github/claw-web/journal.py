@@ -28,8 +28,9 @@ DIFF_LINES = 60
 # de Commons) est téléchargée ici et glissée dans le journal, la grande version reste chez sa
 # source, la seule image extérieure que l'appli autorise (Content-Security-Policy).
 MAX_PHOTOS = 4
-# Captures d'un appel de Screenshot : la page entière en tranches et ses fenêtres.
-MAX_SHOTS = 8
+# Captures d'un appel de Screenshot : la page entière en tranches, ses fenêtres, son menu et
+# ses onglets.
+MAX_SHOTS = 10
 # Problèmes gardés par capture, et leur longueur.
 MAX_PROBLEMS = 12
 PROBLEM_CHARS = 400
@@ -103,10 +104,11 @@ def local_thumb(path):
     return f"data:{kind};base64,{base64.b64encode(data).decode('ascii')}"
 
 
-def shots(value, store=None):
+def shots(value, store=None, translate=None, changed=lambda: None):
     """Les captures de l'outil Screenshot : l'aperçu du premier écran glissé dans le journal,
     la capture entière rangée par `store` (chemin local -> chemin dans la branche des fichiers),
-    l'écran et le nombre de problèmes relevés."""
+    l'écran et les problèmes relevés, traduits en français par `translate` quand il y en a un
+    (la traduction arrive après coup : `changed` le signale au journal)."""
     found = []
     budget = THUMBS_BUDGET
     for capture in (value.get("captures") or [])[:MAX_SHOTS]:
@@ -128,6 +130,11 @@ def shots(value, store=None):
             # Le texte des problèmes, que l'appli montre quand on touche la capture.
             "pb": [excerpt(str(problem), PROBLEM_CHARS) for problem in problems[:MAX_PROBLEMS]],
         })
+        if translate and found[-1]["pb"]:
+            def done(french, shot=found[-1]):
+                shot["pf"] = french
+                changed()
+            translate(found[-1]["pb"], done)
     return found
 
 
@@ -176,9 +183,11 @@ def patch(hunks):
 class Journal:
     """Les événements d'un passage, en bref, répartis en parties publiables."""
 
-    def __init__(self, relative=lambda text: str(text), fetch=fetch_small, store=None):
+    def __init__(self, relative=lambda text: str(text), fetch=fetch_small, store=None, translate=None):
         self.relative = relative
         self.fetch = fetch
+        # Traduit les problèmes des captures en français (translate.Translator), s'il y en a un.
+        self.translate = translate
         # Range une capture entière (chemin local, écran) ; « » quand elle n'a pas pu l'être.
         self.store = store
         self.events = []
@@ -276,6 +285,10 @@ class Journal:
                 self.waiting.remove(entry)
                 return entry
         return self.waiting.popleft()
+
+    def _changed(self):
+        """Une traduction arrivée après coup : la partie du journal est à republier."""
+        self.dirty = True
 
     def _push(self, entry):
         self.events.append(entry)
@@ -412,7 +425,8 @@ class Journal:
         if name == "Photo":
             return {"photos": photos(value, self.fetch)}
         if name == "Screenshot":
-            return {"shots": shots(value, self.store), "found": value.get("problemsFound", 0)}
+            return {"shots": shots(value, self.store, self.translate, self._changed),
+                    "found": value.get("problemsFound", 0)}
         if name in ("Icon", "Ornament", "Component"):
             # Du SVG et du CSS pour le modèle : rien à lire pour l'utilisateur.
             return {}

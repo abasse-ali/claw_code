@@ -764,7 +764,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     },
                     "theme": { "type": "string", "enum": ["light", "dark"], "description": "Color scheme the device says it prefers (prefers-color-scheme)." },
                     "full_page": { "type": "boolean", "description": "Capture the page down to its end, up to three screens (default true); false keeps the first screen only. After a scroll action, the capture starts where the page was scrolled to." },
-                    "windows": { "type": "boolean", "description": "Also capture, at phone size, each window (dialog, sheet) that a button of the page opens, as the visitor sees it (default false)." },
+                    "windows": { "type": "boolean", "description": "Also capture, at phone size, what the page shows only after a tap: each window (dialog, sheet) a button opens, the folded menu opened, and each tab not selected (default false)." },
                     "wait_ms": {
                         "type": "integer",
                         "minimum": 0,
@@ -1515,27 +1515,52 @@ fn run_read_file(input: ReadFileInput) -> Result<String, String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_write_file(input: WriteFileInput) -> Result<String, String> {
-    let output = to_pretty_json(write_file(&input.path, &input.content).map_err(io_to_string)?)?;
-    Ok(with_security_note(output, &input.path, &input.content))
+    let content = runtime::typography::without_long_dashes(&input.content);
+    let output = to_pretty_json(write_file(&input.path, &content).map_err(io_to_string)?)?;
+    let output = with_dash_note(output, &input.content);
+    Ok(with_security_note(output, &input.path, &content))
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_edit_file(input: EditFileInput) -> Result<String, String> {
+    let new_string = runtime::typography::without_long_dashes(&input.new_string);
     let output = to_pretty_json(
         edit_file(
             &input.path,
             &input.old_string,
-            &input.new_string,
+            &new_string,
             input.replace_all.unwrap_or(false),
         )
         .map_err(io_to_string)?,
     )?;
-    Ok(with_security_note(output, &input.path, &input.new_string))
+    let output = with_dash_note(output, &input.new_string);
+    Ok(with_security_note(output, &input.path, &new_string))
 }
 
-fn run_multi_edit(input: MultiEditInput) -> Result<String, String> {
+/// Tirets cadratins du texte demandé, écrits en « - » : dit au modèle, pour
+/// qu'il cesse d'en écrire (réglage de l'utilisateur : jamais de tiret long).
+fn with_dash_note(output: String, asked: &str) -> String {
+    match runtime::typography::long_dashes(asked) {
+        0 => output,
+        count => format!(
+            "{output}\n\n[Claw] {count} em dash character(s) were written as \"-\": the user never wants the em dash, in pages, documents or code. Write \"-\" (or a comma, a colon) yourself."
+        ),
+    }
+}
+
+fn run_multi_edit(mut input: MultiEditInput) -> Result<String, String> {
+    let asked = input
+        .edits
+        .iter()
+        .map(|edit| edit.new_string.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for edit in &mut input.edits {
+        edit.new_string = runtime::typography::without_long_dashes(&edit.new_string).into_owned();
+    }
     let output =
         to_pretty_json(runtime::multi_edit_file(&input.path, &input.edits).map_err(io_to_string)?)?;
+    let output = with_dash_note(output, &asked);
     let written = input
         .edits
         .iter()
@@ -8118,6 +8143,36 @@ Deploy $ARGUMENTS
                 .contains("fini"),
             "{waited}"
         );
+    }
+
+    #[test]
+    fn written_and_edited_files_get_hyphens_instead_of_em_dashes() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = temp_path("tirets");
+        fs::create_dir_all(&root).expect("create root");
+        let original_dir = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&root).expect("set cwd");
+        let dash = runtime::typography::EM_DASH;
+        let written = execute_tool(
+            "write_file",
+            &json!({ "path": "index.html", "content": format!("<footer>Association loi 1901 {dash} club</footer>\n") }),
+        );
+        let edited = execute_tool(
+            "edit_file",
+            &json!({ "path": "index.html", "old_string": "club", "new_string": format!("club{dash}U9") }),
+        );
+        let page = fs::read_to_string(root.join("index.html")).expect("page");
+        std::env::set_current_dir(original_dir).expect("restore cwd");
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(page, "<footer>Association loi 1901 - club - U9</footer>\n");
+        for output in [written.expect("écrit"), edited.expect("modifié")] {
+            assert!(
+                output.contains("1 em dash character(s) were written as \"-\""),
+                "{output}"
+            );
+        }
     }
 
     #[test]
