@@ -1932,10 +1932,15 @@ where
             };
             self.auto_compact(false);
             self.autosave(&[]);
+            // Budget du tour atteint : la conclusion part sans outils. Vu le 25
+            // octobre 2026 (session #30) : avec ses outils, le modèle a continué
+            // à corriger, chaque appel a été refusé et le tour a fini sans un
+            // mot pour l'utilisateur après 280 requêtes.
+            let text_only = announcing || wrapping_up;
             let request = ApiRequest {
                 system_prompt: self.system_prompt.clone(),
                 messages: self.session.messages.clone(),
-                text_only: announcing,
+                text_only,
             };
             let request_started = std::time::Instant::now();
             let events = match self.api_client.stream(request) {
@@ -1947,7 +1952,7 @@ where
                     self.api_client.stream(ApiRequest {
                         system_prompt: self.system_prompt.clone(),
                         messages: self.session.messages.clone(),
-                        text_only: announcing,
+                        text_only,
                     })?
                 }
                 // L'annonce ne passe pas (fournisseur qui refuse une requête
@@ -9825,6 +9830,8 @@ mod tests {
         assert_eq!(observed.requests.len(), 4);
         assert!(!observed.requests[2].contains("the limit for one turn"));
         assert!(observed.requests[3].contains("[Claw] This turn has used 3 requests"));
+        // La conclusion part sans outils : le modèle ne peut que répondre.
+        assert_eq!(observed.text_only, vec![3]);
         assert!(observed
             .notices
             .iter()

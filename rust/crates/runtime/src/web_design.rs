@@ -133,10 +133,18 @@ pub fn continuation(
     if free_left.is_some_and(|left| left < CONTINUATION_RESERVE) {
         return Continuation::LowQuota;
     }
-    if let [.., before, _] = graded {
-        if last.mean < before.mean + MIN_GAIN {
-            return Continuation::Stalled;
-        }
+    // La meilleure note d'avant, pas seulement la précédente : vu le 25 octobre
+    // 2026 (session #30), 4,9 puis 4,1 puis 4,6 valait une deuxième poursuite
+    // (4,6 au-dessus de 4,1) et 120 requêtes de plus pour une page moins bien
+    // notée qu'au départ.
+    let best_before = graded[..graded.len() - 1]
+        .iter()
+        .map(|graded| graded.mean)
+        .fold(None, |best: Option<f32>, mean| {
+            Some(best.map_or(mean, |best| best.max(mean)))
+        });
+    if best_before.is_some_and(|best| last.mean < best + MIN_GAIN) {
+        return Continuation::Stalled;
     }
     Continuation::Continue
 }
@@ -1181,6 +1189,16 @@ mod tests {
         let flat = [graded(7.3, &["identity"]), graded(7.4, &["identity"])];
         assert_eq!(
             continuation(&flat, 1, 1, 2, Some(600)),
+            Continuation::Stalled
+        );
+        // Session #30 : 4,9 puis 4,1 puis 4,6, remontée sous la meilleure note.
+        let below_best = [
+            graded(4.9, &["phone"]),
+            graded(4.1, &["phone"]),
+            graded(4.6, &["phone"]),
+        ];
+        assert_eq!(
+            continuation(&below_best, 2, 1, 2, Some(600)),
             Continuation::Stalled
         );
         // Barre atteinte, poursuites épuisées, quota du jour trop bas.
