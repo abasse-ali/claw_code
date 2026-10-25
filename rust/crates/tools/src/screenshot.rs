@@ -1518,11 +1518,101 @@ fn click_problems(devtools: &mut DevTools) -> Vec<String> {
             "{window}, and takes every tap (a tap there closes the window or does nothing): put the backdrop behind the window's content (the dialog's ::backdrop, or a lower z-index), or give it pointer-events: none"
         ));
     }
+    let buried = strings(&result["buried"]);
+    if !buried.is_empty() {
+        problems.push(format!(
+            "{} button(s) cannot be tapped, something else lies over their center: {}: move or shrink what covers them, or give it pointer-events: none",
+            buried.len(),
+            buried.join("; ")
+        ));
+    }
+    for window in strings(&result["stuck"]) {
+        problems.push(format!(
+            "{window}: the visitor stays shut in; make that button close it (dialog.close(), or remove the class that shows it)"
+        ));
+    }
+    let mut links = strings(&result["links"]);
+    links.extend(missing_pages(&result["files"]));
+    if !links.is_empty() {
+        let more = links.len().saturating_sub(8);
+        problems.push(format!(
+            "broken links: {}{}: point each one to what exists (the section's id, the page's real file), or remove it",
+            links.iter().take(8).cloned().collect::<Vec<_>>().join("; "),
+            if more > 0 { format!("; and {more} more") } else { String::new() }
+        ));
+    }
+    for form in strings(&result["forms"]).iter().take(4) {
+        problems.push(format!(
+            "{form} (Screenshot filled it with plausible entries, today or later for dates, and sent it): handle the submit event (preventDefault), check the entries, show what happened (a message, the new item in its list) and keep what must be kept"
+        ));
+    }
+    problems.extend(lost_on_reload(devtools, &result["kept"]));
     problems
 }
 
+/// Pages du site ouvert en `file://` que ses liens visent, et qui manquent sur le disque.
+fn missing_pages(files: &Value) -> Vec<String> {
+    let Some(files) = files.as_array() else {
+        return Vec::new();
+    };
+    files
+        .iter()
+        .filter_map(|file| {
+            let url = file["url"].as_str()?;
+            let path = PathBuf::from(crate::page_view::file_url_path(url)?);
+            let exists = if url.ends_with('/') {
+                path.join("index.html").is_file()
+            } else {
+                path.exists()
+            };
+            (!exists).then(|| {
+                format!(
+                    "{} leads to {}, which does not exist",
+                    file["from"].as_str().unwrap_or("a link"),
+                    path.display()
+                )
+            })
+        })
+        .collect()
+}
+
+/// Ce qu'un formulaire a ajouté à la page doit y être encore après un rechargement.
+fn lost_on_reload(devtools: &mut DevTools, kept: &Value) -> Vec<String> {
+    let Some(kept) = kept.as_array().filter(|kept| !kept.is_empty()) else {
+        return Vec::new();
+    };
+    // Les messages de la console d'avant le rechargement restent ceux de la capture.
+    let earlier = std::mem::take(&mut devtools.events);
+    let reloaded = devtools.call("Page.reload", json!({})).is_ok()
+        && devtools
+            .wait_for("Page.loadEventFired", LOAD_LIMIT)
+            .unwrap_or(false);
+    let text = if reloaded {
+        let _ = devtools.pump(Duration::from_millis(800));
+        devtools.evaluate("document.body ? document.body.innerText : ''")
+    } else {
+        Err(String::new())
+    };
+    devtools.events = earlier;
+    let Ok(text) = text else {
+        return Vec::new();
+    };
+    let text = text.as_str().unwrap_or("");
+    kept.iter()
+        .filter_map(|item| {
+            let marker = item["marker"].as_str()?;
+            (!text.contains(marker)).then(|| {
+                format!(
+                    "{} adds \"{marker}\" to the page, but it is gone after a reload: if this is a list the visitor builds (an entry, a booking, an offer), save it (localStorage, or the server) and read it back when the page opens",
+                    item["form"].as_str().unwrap_or("a form")
+                )
+            })
+        })
+        .collect()
+}
+
 /// Ouvre la page à une taille d'écran, joue les actions, mesure et capture ;
-/// avec `try_clicks`, essaie ensuite chaque bouton.
+/// avec `try_clicks`, parcourt ensuite la page : boutons, liens, formulaires, fenêtres.
 fn capture(
     devtools: &mut DevTools,
     session: &Session<'_>,
@@ -2015,6 +2105,67 @@ mod tests {
         );
         let behind = problems("derriere", "z-index: -1;");
         assert!(!behind.contains("cannot be tapped"), "{behind}");
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn links_forms_and_windows_are_walked_in_a_real_browser() {
+        // Le parcours d'un visiteur : chaque lien, chaque formulaire rempli et
+        // envoyé, chaque fenêtre refermée, puis la page rechargée.
+        let cwd = std::env::current_dir().expect("dossier");
+        let problems = |name: &str, body: &str, script: &str| {
+            let dir = cwd.join(format!("claw-walk-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("tarifs.html"),
+                "<!doctype html><title>Tarifs</title>",
+            )
+            .expect("html");
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Club</title><style>body {{ font-family: sans-serif; }} #fenetre {{ display: none; }} #fenetre.open {{ display: block; }}</style></head><body><main><h1>Club</h1><section id=\"equipe\"><h2>Équipe</h2></section>{body}<ul id=\"liste\"></ul></main><script>{script}</script></body></html>"),
+            )
+            .expect("html");
+            let page = format!("claw-walk-{name}-{}/index.html", std::process::id());
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let broken = problems(
+            "casse",
+            "<nav><a href=\"#equipe\">Équipe</a> <a href=\"#calendrier\">Calendrier</a> <a href=\"tarifs.html\">Tarifs</a> <a href=\"contact.html\">Contact</a> <a href=\"tel:0000000000\">Appeler</a> <a href=\"mailto:club@\">Écrire</a></nav><form id=\"inscription\"><label for=\"nom\">Nom</label><input id=\"nom\" name=\"nom\" required><button>Inscrire</button></form><form id=\"ajout\"><label for=\"joueur\">Joueur</label><input id=\"joueur\" name=\"joueur\" required><button>Ajouter</button></form><button id=\"ouvrir\" onclick=\"document.getElementById('fenetre').classList.add('open')\">Ouvrir</button><div id=\"fenetre\" role=\"dialog\"><p>Fenêtre</p><button aria-label=\"Fermer\">×</button></div>",
+            "document.getElementById('ajout').addEventListener('submit', (e) => { e.preventDefault(); const li = document.createElement('li'); li.textContent = document.getElementById('joueur').value; document.getElementById('liste').append(li); });",
+        );
+        for expected in [
+            "points to #calendrier, but the page has no element with that id",
+            "contact.html, which does not exist",
+            "is not a phone number",
+            "is not an e-mail address",
+            "sending form#inscription reloads the page",
+            "is gone after a reload",
+            "opens a window that button \\\"×\\\" does not close",
+        ] {
+            assert!(broken.contains(expected), "{expected}: {broken}");
+        }
+        assert!(
+            !broken.contains("tarifs.html") && !broken.contains("#equipe"),
+            "{broken}"
+        );
+        let sound = problems(
+            "sain",
+            "<nav><a href=\"#equipe\">Équipe</a> <a href=\"tarifs.html\">Tarifs</a> <a href=\"tel:+33561000000\">Appeler</a></nav><form id=\"ajout\"><label for=\"joueur\">Joueur</label><input id=\"joueur\" name=\"joueur\" required><button>Ajouter</button></form><button id=\"ouvrir\" onclick=\"document.getElementById('fenetre').classList.add('open')\">Ouvrir</button><div id=\"fenetre\" role=\"dialog\"><p>Fenêtre</p><button aria-label=\"Fermer\" onclick=\"document.getElementById('fenetre').classList.remove('open')\">×</button></div>",
+            "const show = () => { document.getElementById('liste').innerHTML = JSON.parse(localStorage.getItem('joueurs') || '[]').map((nom) => `<li>${nom}</li>`).join(''); }; show(); document.getElementById('ajout').addEventListener('submit', (e) => { e.preventDefault(); const list = JSON.parse(localStorage.getItem('joueurs') || '[]'); list.push(document.getElementById('joueur').value); localStorage.setItem('joueurs', JSON.stringify(list)); show(); });",
+        );
+        for absent in [
+            "broken links",
+            "sending",
+            "after a reload",
+            "does not close",
+        ] {
+            assert!(!sound.contains(absent), "{absent}: {sound}");
+        }
     }
 
     #[test]
