@@ -314,7 +314,7 @@ pub(crate) fn replacement(source: &ImageSource, number: usize, total: usize) -> 
             // modèle cherchait trois fois à corriger un texte déjà juste (vu le
             // 25 octobre 2026, refonte du site d'un club de foot).
             format!(
-                "{warning}[{place} by {} because the current model cannot read images (image id {}). To look again at any part of it, call LookAtImage with this id and one precise question. The reader can misread small text (a missing space, a wrong letter or digit): before changing a text this description quotes, find it in the files with grep_search; if the files already have it right, the text is not the problem: a word that looks glued can come from the CSS (a negative letter-spacing), which the Screenshot measurements name; do not rewrite a text that is right.]\n{body}{pixels}",
+                "{warning}[{place} by {} because the current model cannot read images (image id {}). To look again at any part of it, call LookAtImage with this id and one precise question. The reader can misread small text (a missing space, a wrong letter or digit): before changing a text this description quotes, find it in the files with grep_search; if the files already have it right, the text is not the problem: a word that looks glued can come from the CSS (a negative letter-spacing), which the Screenshot measurements name. When the measurements do not report it (no \"Words that run together\", no cut text), the reader misread the image: leave it and move on; do not rewrite a text that is right, and do not search for it again.]\n{body}{pixels}",
                 description.model,
                 image_id(source)
             )
@@ -1065,7 +1065,7 @@ mod tests {
         assert_eq!(
             replacement(&first, 1, 1),
             format!(
-                "[Image described by acme/vision:free because the current model cannot read images (image id {}). To look again at any part of it, call LookAtImage with this id and one precise question. The reader can misread small text (a missing space, a wrong letter or digit): before changing a text this description quotes, find it in the files with grep_search; if the files already have it right, the text is not the problem: a word that looks glued can come from the CSS (a negative letter-spacing), which the Screenshot measurements name; do not rewrite a text that is right.]\nCapture essai-lecteur-1",
+                "[Image described by acme/vision:free because the current model cannot read images (image id {}). To look again at any part of it, call LookAtImage with this id and one precise question. The reader can misread small text (a missing space, a wrong letter or digit): before changing a text this description quotes, find it in the files with grep_search; if the files already have it right, the text is not the problem: a word that looks glued can come from the CSS (a negative letter-spacing), which the Screenshot measurements name. When the measurements do not report it (no \"Words that run together\", no cut text), the reader misread the image: leave it and move on; do not rewrite a text that is right, and do not search for it again.]\nCapture essai-lecteur-1",
                 image_id(&first)
             )
         );
