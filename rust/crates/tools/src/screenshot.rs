@@ -2306,6 +2306,51 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn cut_text_invisible_icons_and_emptied_sections_are_found_in_a_real_browser() {
+        // Site du club, session #31 (25 octobre 2026) : le lieu coupé par le
+        // bord de la carte, une icône vert foncé dans un bouton vert foncé, et
+        // « Prochains événements » réduit à son titre sur téléphone.
+        let cwd = std::env::current_dir().expect("dossier");
+        let problems = |name: &str, css: &str| {
+            let dir = cwd.join(format!("claw-club-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Club</title><style>body {{ margin: 0; font-family: sans-serif; }} .card {{ margin: 16px; padding: 16px; overflow: hidden; border: 1px solid #ccc; }} .meta {{ display: flex; gap: 24px; white-space: nowrap; }} .go {{ background: #1b5e20; color: #fff; border: 0; padding: 12px 20px; font-size: 16px; }} .go svg {{ width: 18px; height: 18px; fill: none; stroke: currentColor; }} {css}</style></head><body><main><section class=\"card\"><h1>U11 contre FC Voisins</h1><div class=\"meta\"><span>samedi 7 novembre à 10:00</span><span>Stade Municipal du quartier</span></div><button class=\"go\"><svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"9\"/></svg> Je conduis</button></section><section id=\"calendrier\"><h2>Prochains événements</h2><ol class=\"timeline\"><li>Entraînement U9, mercredi 4 novembre à 17:30</li><li>Entraînement U11, mercredi 4 novembre à 17:30</li></ol></section></main></body></html>"),
+            )
+            .expect("html");
+            let page = format!("claw-club-{name}-{}/index.html", std::process::id());
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let broken = problems(
+            "casse",
+            ".go svg { color: #1b5e20; } @media (max-width: 600px) { .timeline { display: none; } }",
+        );
+        for expected in [
+            "Text partly cut off by the edge of a box around it",
+            "Stade Municipal",
+            "Icons that cannot be seen",
+            "section#calendrier",
+            "show only their heading",
+        ] {
+            assert!(broken.contains(expected), "{expected}: {broken}");
+        }
+        let sound = problems("sain", ".meta { flex-wrap: wrap; white-space: normal; }");
+        for absent in [
+            "cut off by the edge",
+            "cannot be seen",
+            "only their heading",
+        ] {
+            assert!(!sound.contains(absent), "{absent}: {sound}");
+        }
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn past_sample_dates_of_the_page_scripts_are_found_in_a_real_browser() {
         // Session #31 reprise : `app.js`, jamais réécrit, aux matchs de 2025.
         let cwd = std::env::current_dir().expect("dossier");
