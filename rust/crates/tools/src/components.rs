@@ -494,6 +494,9 @@ mod tests {
                 "drawn by hand",
                 "stay invisible",
                 "menu button",
+                "cut off by the edge of a box",
+                "Icons that cannot be seen",
+                "show only their heading",
             ] {
                 assert!(!problems.contains(defect), "{defect}: {problems}");
             }

@@ -309,6 +309,98 @@
   if (pale.length) blame(paleEls);
   if (pale.length) problems.push(`Text with too little contrast against its background, 4.5:1 is needed (3:1 for large text): ${list(pale)}`);
 
+  // 7b. Texte rogné par un parent qui découpe (overflow: hidden) : une partie du
+  // texte est dessinée hors du cadre et disparaît. Vu le 25 octobre 2026 (site
+  // du club, session #31) : « Stade Municipal » et « 2 places disponibles »
+  // coupés par le bord de la carte du prochain match, sans aucune alerte (la
+  // règle 2 ne voit que la boîte du texte elle-même).
+  const scrolls = (el) => {
+    for (let node = el.parentElement; node && node !== document.body; node = node.parentElement) {
+      const style = css(node);
+      if (["auto", "scroll"].includes(style.overflowX) || ["auto", "scroll"].includes(style.overflowY)) return true;
+    }
+    return false;
+  };
+  // Une diapositive en attente (déplacée par transform, ou cachée exprès) n'est
+  // pas un texte rogné.
+  const sliding = (el) => {
+    if (el.closest("[aria-hidden=true], [inert]")) return true;
+    for (let node = el; node && node !== document.body; node = node.parentElement) {
+      if (css(node).transform && css(node).transform !== "none") return true;
+    }
+    return false;
+  };
+  const rogne = visible.filter((el) => ownText(el) && !scrolls(el) && !pinned(el) && !sliding(el)).filter((el) => {
+    const rect = el.getBoundingClientRect();
+    const seenPart = visibleBox(el);
+    if (seenPart.width > 0 && seenPart.height > 0) {
+      return rect.width - seenPart.width > 4 || rect.height - seenPart.height > 4;
+    }
+    // Tout hors du cadre, mais sa ligne en partie visible (l'icône du lieu
+    // là, le nom du lieu dehors) : rogné aussi.
+    const parent = el.parentElement;
+    if (!parent || parent === document.body) return false;
+    const around = visibleBox(parent);
+    const full = parent.getBoundingClientRect();
+    return around.width > 0 && around.height > 0 && (full.width - around.width > 4 || full.height - around.height > 4);
+  }).slice(0, 8);
+  if (rogne.length) {
+    blame(rogne);
+    problems.push(`Text partly cut off by the edge of a box around it (overflow: hidden on a parent): ${list(rogne.map((el) => {
+      const rect = el.getBoundingClientRect();
+      const seenPart = visibleBox(el);
+      return `${name(el)} shows ${Math.round(seenPart.width)}x${Math.round(seenPart.height)}px of ${Math.round(rect.width)}x${Math.round(rect.height)}px`;
+    }))}. Let the row wrap (flex-wrap: wrap, min-width: 0) or stack it on phones, instead of letting the box cut it`);
+  }
+
+  // 7c. Icônes invisibles : dessinées de la couleur de leur fond (une icône vert
+  // foncé dans un bouton vert foncé). Vu le 25 octobre 2026 : « Je conduis » et
+  // « Prochain match » portaient une icône invisible qui décalait leur texte.
+  const paint = (svg) => {
+    const shape = svg.querySelector("path, circle, rect, line, polyline, polygon, ellipse") || svg;
+    const style = css(shape);
+    const pick = style.stroke && style.stroke !== "none" ? style.stroke : style.fill;
+    if (!pick || pick === "none") return null;
+    return parse(pick === "currentcolor" || pick === "currentColor" ? css(svg).color : pick);
+  };
+  const ghosts = [...document.querySelectorAll("svg")].filter((svg) => {
+    const rect = svg.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10 || rect.width > 96 || !shown(svg)) return false;
+    const color = paint(svg);
+    const under = background(svg);
+    if (!color || !under) return false;
+    const ink = blend({ ...color, a: color.a * Number(css(svg).opacity || 1) }, under);
+    const [light, dark] = [luminance(ink), luminance(under)].sort((x, y) => y - x);
+    return (light + 0.05) / (dark + 0.05) < 1.4;
+  }).slice(0, 6);
+  if (ghosts.length) {
+    blame(ghosts);
+    problems.push(`Icons that cannot be seen, drawn in the color of their background: ${list(ghosts.map((svg) => {
+      const holder = svg.closest("button, a, [role=button], span, div") || svg;
+      return `the icon in ${name(holder)}`;
+    }))}. Give each one a color that stands out (currentColor of the text next to it), or remove it: an invisible icon still takes room and pushes the text off center`);
+  }
+
+  // 7d. Section vidée à cette taille d'écran : son titre est là, tout son contenu
+  // est caché (display: none). Vu le 25 octobre 2026 : « Prochains événements »,
+  // sur téléphone, n'avait plus que son titre et un dessin, ses 8 événements
+  // cachés par une règle « masquer la timeline sur mobile ».
+  const emptied = [...document.querySelectorAll("section, [role=region], article")].filter((section) => {
+    const heading = section.querySelector("h1, h2, h3");
+    if (!heading || !shown(heading) || !shown(section)) return false;
+    const inside = [...section.querySelectorAll("*")].filter((el) => !el.closest("h1, h2, h3") && !el.closest("svg"));
+    if (inside.some((el) => ownText(el) && shown(el))) return false;
+    const hidden = inside.filter((el) => css(el).display === "none" && words(el).length >= 20 && !el.closest("dialog, template, [role=dialog]"));
+    return hidden.length > 0;
+  }).slice(0, 4);
+  if (emptied.length) {
+    blame(emptied);
+    problems.push(`Sections that show only their heading at this screen width, their content is hidden (display: none): ${list(emptied.map((section) => {
+      const hidden = [...section.querySelectorAll("*")].find((el) => css(el).display === "none" && words(el).length >= 20);
+      return `${name(section)} "${words(section.querySelector("h1, h2, h3")).slice(0, 40)}" hides ${hidden ? name(hidden) : "its content"}`;
+    }))}. Show the content on every screen size (lay it out differently on phones, never replace it by a drawing)`);
+  }
+
   // 8. Page vide.
   const text = (document.body.innerText || "").trim();
   if (!text && !visible.some((el) => el.matches("img, svg, canvas, video, iframe"))) {
