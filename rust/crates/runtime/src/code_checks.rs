@@ -311,8 +311,12 @@ pub fn pitfalls(path: &Path) -> Vec<String> {
                     .collect()
             })
             .unwrap_or_default(),
-        "html" | "htm" | "js" | "mjs" | "jsx" | "ts" | "tsx" | "vue" | "svelte" => read(path)
-            .map(|text| injected_test_data(&text))
+        "html" | "htm" | "js" | "mjs" | "jsx" | "ts" | "tsx" | "vue" | "svelte" | "json" => read(path)
+            .map(|text| {
+                let mut found = injected_test_data(&text);
+                found.extend(past_dates(&text, &crate::prompt::current_date_iso()));
+                found
+            })
             .unwrap_or_default(),
         _ => Vec::new(),
     };
@@ -361,6 +365,50 @@ pub fn injected_test_data(text: &str) -> Vec<String> {
             )]
         })
         .unwrap_or_default()
+}
+
+/// Dates d'un fichier toutes passées (`AAAA-MM-JJ`, trois au moins) : les
+/// exemples d'une appli de calendrier ou d'événements datés d'avant aujourd'hui
+/// (`today`, même format). Vu le 25 octobre 2026 (session #31) : un site de club
+/// de foot aux matchs de 2025, « Prochain match » d'il y a un an et « Aucun
+/// événement à venir » sous la liste ; le modèle avait la date du jour.
+#[must_use]
+pub fn past_dates(text: &str, today: &str) -> Vec<String> {
+    let mut dates: Vec<(usize, &str)> = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let bytes = line.as_bytes();
+        let mut start = 0;
+        while start + 10 <= bytes.len() {
+            let candidate = &line[start..start + 10];
+            let shaped = candidate
+                .bytes()
+                .enumerate()
+                .all(|(position, byte)| match position {
+                    4 | 7 => byte == b'-',
+                    _ => byte.is_ascii_digit(),
+                });
+            let bounded = (start == 0 || !bytes[start - 1].is_ascii_alphanumeric())
+                && bytes
+                    .get(start + 10)
+                    .is_none_or(|byte| !byte.is_ascii_digit());
+            if shaped && bounded && candidate.starts_with("20") {
+                dates.push((index + 1, candidate));
+                start += 10;
+            } else {
+                start += line[start..].chars().next().map_or(1, char::len_utf8);
+            }
+        }
+    }
+    let Some(&(line, latest)) = dates.iter().max_by_key(|(_, date)| *date) else {
+        return Vec::new();
+    };
+    if dates.len() < 3 || latest >= today {
+        return Vec::new();
+    }
+    vec![format!(
+        "line {line}: the {} dates of this file are all before today ({today}), the latest is {latest}: events, matches or deadlines shown as coming are already past, and lists of what is upcoming stay empty. Date the sample data from today onward",
+        dates.len()
+    )]
 }
 
 /// Ce qui est dit au modèle quand un fichier a des pièges.
@@ -835,6 +883,27 @@ fn shell_pitfalls(path: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sample_dates_all_in_the_past_are_found() {
+        // Session #31 : les matchs d'un club en 2025, un an avant la session.
+        let data = "const MATCHES = [\n  { date: \"2025-10-14\" },\n  { date: \"2025-10-21\" },\n  { date: \"2025-11-04\" },\n];";
+        let found = super::past_dates(data, "2026-10-25");
+        assert_eq!(found.len(), 1);
+        assert!(found[0].starts_with("line 4: the 3 dates of this file are all before today (2026-10-25), the latest is 2025-11-04"));
+        // Une date à venir suffit ; moins de trois dates ou un numéro ne comptent pas.
+        assert!(
+            super::past_dates(&data.replace("2025-11-04", "2026-11-04"), "2026-10-25").is_empty()
+        );
+        assert!(
+            super::past_dates("créé le 2025-01-02, revu le 2025-03-04", "2026-10-25").is_empty()
+        );
+        assert!(super::past_dates(
+            "v12025-10-14 x2025-10-21 2025-10-210 2025-10-1",
+            "2026-10-25"
+        )
+        .is_empty());
+    }
+
     #[test]
     fn test_data_injected_into_a_page_is_found_and_real_storage_is_not() {
         let page = "<body>\n  <!-- Debug: inject test data -->\n  <script>\n    var t = [{\"amount\": 2500}];\n    localStorage.setItem('expenses', JSON.stringify(t));\n  </script>\n</body>";
