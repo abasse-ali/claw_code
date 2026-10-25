@@ -78,6 +78,7 @@ class Translator:
                 print(f"Traduction des problèmes impossible : {type(error).__name__}", flush=True)
                 return
             if not translated or len(translated) != len(missing):
+                print("Traduction des problèmes illisible : l'anglais reste", flush=True)
                 return
             self.cache.update(zip(missing, translated))
             done([self.cache[text] for text in texts])
@@ -98,9 +99,12 @@ class Translator:
     def _post(self, texts):
         body = json.dumps({
             "model": self.model,
-            "messages": [{"role": "user", "content": PROMPT + json.dumps(texts, ensure_ascii=False)}],
+            # Les modèles Nemotron raisonnent longuement sans cette consigne, et les jetons
+            # pouvaient manquer à la réponse elle-même.
+            "messages": [{"role": "system", "content": "detailed thinking off"},
+                         {"role": "user", "content": PROMPT + json.dumps(texts, ensure_ascii=False)}],
             "temperature": 0.2,
-            "max_tokens": 4096,
+            "max_tokens": 8192,
         }).encode("utf-8")
         request = urllib.request.Request(NVIDIA_URL, data=body, headers={
             "Authorization": f"Bearer {self.key}",
