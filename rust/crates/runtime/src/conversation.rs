@@ -8584,10 +8584,9 @@ mod tests {
         let write = || {
             tool_step(
                 "write_file",
-                &format!(
-                    r#"{{"path":"{}","content":"<h1>Club</h1>"}}"#,
-                    page.display()
-                ),
+                // Un chemin Windows a des barres obliques inverses : du JSON fait par serde.
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                    .to_string(),
             )
         };
         let mut steps: Vec<Vec<AssistantEvent>> = (0..7).map(|_| write()).collect();
@@ -8616,10 +8615,9 @@ mod tests {
         let page = measured_page("verifie");
         let write = tool_step(
             "write_file",
-            &format!(
-                r#"{{"path":"{}","content":"<h1>Club</h1>"}}"#,
-                page.display()
-            ),
+            // Un chemin Windows a des barres obliques inverses : du JSON fait par serde.
+            &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                .to_string(),
         );
         let steps = vec![
             write,
