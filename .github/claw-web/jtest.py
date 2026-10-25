@@ -36,6 +36,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -365,6 +366,43 @@ def tunnel_url(log_path, timeout=90, pgid=None):
     return None
 
 
+def public_answer(url, timeout=10):
+    """Ce que l'adresse publique répond depuis Internet : un code HTTP (la porte répond « Accès
+    réservé », 403, sans la clé), ou la raison de l'échec (nom inconnu, connexion refusée)."""
+    host = urllib.parse.urlsplit(url).hostname or ""
+    try:
+        socket.getaddrinfo(host, 443)
+    except OSError as error:
+        return f"nom introuvable ({error})"
+    request = urllib.request.Request(url, headers={"User-Agent": "claw-jtest"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status
+    except urllib.error.HTTPError as error:
+        return error.code
+    except (urllib.error.URLError, OSError) as error:
+        return f"pas de réponse ({getattr(error, 'reason', error)})"
+
+
+def tunnel_ready(url, log_path, timeout=120, pgid=None):
+    """Le tunnel enregistré chez Cloudflare, puis l'adresse qui répond depuis Internet. Annoncer
+    plus tôt menait à « serveur introuvable » sur le téléphone (vu le 25 octobre 2026), et un
+    téléphone qui a demandé le nom trop tôt garde un moment la réponse « inconnu ». Rend None si
+    tout va bien, sinon la dernière raison."""
+    deadline = time.time() + timeout
+    last = "le tunnel ne s'est pas enregistré chez Cloudflare"
+    while time.time() < deadline:
+        if pgid and not alive(pgid):
+            return "le tunnel s'est arrêté : " + tail(log_path, 5).replace("\n", " ")[-300:]
+        if "Registered tunnel connection" in tail(log_path, 400):
+            answer = public_answer(url)
+            if isinstance(answer, int) and answer < 500:
+                return None
+            last = f"l'adresse ne répond pas encore depuis Internet ({answer})"
+        time.sleep(3)
+    return last
+
+
 def arch():
     machine = platform.machine().lower()
     return "arm64" if machine in ("aarch64", "arm64") else "amd64"
@@ -583,6 +621,11 @@ def start(session, repo, branch, requested, token, now=None, hours=None):
         for pgid in pgids:
             kill_group(pgid)
         raise JTestError("le tunnel Cloudflare n'a pas donné d'adresse (réseau du serveur ?).")
+    problem = tunnel_ready(url, tunnel_log, pgid=pgids[-1])
+    if problem:
+        for pgid in pgids:
+            kill_group(pgid)
+        raise JTestError(f"le tunnel Cloudflare ne mène pas au test : {problem}. Relancez dans une minute.")
     data["url"] = url.rstrip("/") + (plan.path if plan.path.startswith("/") else "/" + plan.path)
     data["key"] = key
     save_state(session, {"session": str(session), "repo": repo, "branch": branch, "pgids": pgids, "port": plan.port,
@@ -591,14 +634,39 @@ def start(session, repo, branch, requested, token, now=None, hours=None):
     return data
 
 
+def status_report(session):
+    """`jtest-status-<n>` : l'état d'une JTest sur le serveur, dans le journal du job, sans rien
+    changer ni rien écrire dans la session (ni la clé, ni l'adresse complète des journaux)."""
+    state = load_state(session)
+    if not state:
+        return f"JTest {session} : aucune sur ce serveur."
+    folder = HOME / str(session)
+    lines = [f"JTest {session} : {state.get('url')} (jusqu'à {state.get('until')})"]
+    names = ["projet", "porte", "tunnel"]
+    for index, pgid in enumerate(state.get("pgids") or []):
+        name = names[index] if index < len(names) else f"processus {index}"
+        lines.append(f"- {name} (groupe {pgid}) : {'en marche' if alive(pgid) else 'arrêté'}")
+    if state.get("url"):
+        lines.append(f"- adresse publique : {public_answer(state['url'])}")
+    for title, path in [("tunnel.log", folder / "tunnel.log"), ("gate.log", folder / "gate.log"),
+                        ("jtest.log", folder / "jtest.log")]:
+        lines.append(f"--- {title} ---")
+        # Les requêtes de la porte portent la clé (`?key=…`) : jamais dans le journal du job.
+        lines.append(re.sub(r"\?\S*", "?…", tail(path, 15)) or "(vide)")
+    return "\n".join(lines)
+
+
 def main():
     from common import GitHubError, api
 
     raw = os.environ.get("SESSION_INPUT", "").strip()
-    found = re.fullmatch(r"jtest-(stop-)?(\d+)", raw)
+    found = re.fullmatch(r"jtest-(stop-|status-)?(\d+)", raw)
     if not found:
         print(f"::error::session JTest invalide : {raw!r}")
         return 2
+    if found.group(1) == "status-":
+        print(status_report(found.group(2)))
+        return 0
     stopping, number = bool(found.group(1)), found.group(2)
     engine = os.environ["GITHUB_REPOSITORY"]
     repo = os.environ.get("REPO", "").strip()

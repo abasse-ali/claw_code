@@ -133,15 +133,17 @@ class StartStopTest(unittest.TestCase):
         site = project({"index.html": "<h1>JTest</h1>"})
         fake = home / "fake-cloudflared"
         fake.write_text("#!/bin/sh\necho \"args: $*\" >&2\necho 'INF |  https://essai-jtest.trycloudflare.com  |' >&2\n"
-                        "exec sleep 600\n")
+                        "echo 'INF Registered tunnel connection connIndex=0' >&2\nexec sleep 600\n")
         fake.chmod(0o755)
 
         def clone(repo, branch, token, target):
             target.parent.mkdir(parents=True, exist_ok=True)
             os.system(f"cp -r {site} {target}")
 
+        # L'adresse publique répond « Accès réservé » (la porte, sans la clé).
         with mock.patch.object(jtest, "HOME", home), mock.patch.object(jtest, "clone", clone), \
-                mock.patch.object(jtest, "tool", lambda name, url: fake):
+                mock.patch.object(jtest, "tool", lambda name, url: fake), \
+                mock.patch.object(jtest, "public_answer", lambda url, timeout=10: 403):
             data = jtest.start("12", "o/app", "claw/session-3", {}, "t", now=NOW, hours=0.5)
             try:
                 self.assertEqual(data["state"], "online")
@@ -171,6 +173,36 @@ class StartStopTest(unittest.TestCase):
             time.sleep(0.3)
             self.assertFalse(any(jtest.alive(pgid) for pgid in state["pgids"]))
             self.assertEqual(jtest.live_sessions(), [])
+
+    def test_online_only_once_the_public_address_answers(self):
+        # 25 octobre 2026 : « en ligne » annoncé, et « serveur introuvable » sur le téléphone.
+        log = Path(tempfile.mkdtemp()) / "tunnel.log"
+        log.write_text("INF |  https://essai.trycloudflare.com  |\n", encoding="utf-8")
+        with mock.patch.object(jtest.time, "sleep", lambda seconds: None):
+            unregistered = jtest.tunnel_ready("https://essai.trycloudflare.com/", log, timeout=0.05)
+            self.assertIn("pas enregistré", unregistered)
+            log.write_text("INF Registered tunnel connection connIndex=0\n", encoding="utf-8")
+            with mock.patch.object(jtest, "public_answer", lambda url, timeout=10: "nom introuvable (-2)"):
+                unknown = jtest.tunnel_ready("https://essai.trycloudflare.com/", log, timeout=0.05)
+            self.assertIn("ne répond pas encore depuis Internet (nom introuvable", unknown)
+            with mock.patch.object(jtest, "public_answer", lambda url, timeout=10: 403):
+                self.assertIsNone(jtest.tunnel_ready("https://essai.trycloudflare.com/", log, timeout=5))
+
+    def test_status_report_never_shows_the_key(self):
+        home = Path(tempfile.mkdtemp())
+        folder = home / "14"
+        folder.mkdir(parents=True)
+        (folder / "gate.log").write_text('127.0.0.1 - - "GET /?claw_key=SECRETE123 HTTP/1.1" 302 -\n', encoding="utf-8")
+        (folder / "tunnel.log").write_text("INF Registered tunnel connection connIndex=0\n", encoding="utf-8")
+        with mock.patch.object(jtest, "HOME", home), \
+                mock.patch.object(jtest, "public_answer", lambda url, timeout=10: 403):
+            jtest.save_state("14", {"session": "14", "pgids": [999999], "url": "https://essai.trycloudflare.com/",
+                                    "until": "2026-10-25T14:52:00Z"})
+            report = jtest.status_report("14")
+        self.assertNotIn("SECRETE123", report)
+        self.assertIn("- projet (groupe 999999) : arrêté", report)
+        self.assertIn("- adresse publique : 403", report)
+        self.assertIn("Registered tunnel connection", report)
 
     def test_a_server_that_never_answers_fails_clearly(self):
         home = Path(tempfile.mkdtemp())
