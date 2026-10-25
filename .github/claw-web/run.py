@@ -20,8 +20,8 @@ import time
 import urllib.request
 from pathlib import Path
 
-from common import (FILES_BRANCH, MCP_TOKEN_FILE, PROGRESS, WORK, GitHubError, api, clean_notice, edit_comment,
-                    output, post_comment, run_url, stop_tree)
+from common import (EFFORTS, FILES_BRANCH, MCP_TOKEN_FILE, PROGRESS, WORK, GitHubError, api, clean_notice,
+                    edit_comment, output, post_comment, run_url, stop_tree)
 from journal import Journal
 from mcp_server import Context, Host, build, describe_call
 from on_github import REQUESTS_FILE, STATE_FILE
@@ -45,6 +45,15 @@ def session_model(environ):
 
 
 MODEL = session_model(os.environ)
+
+
+def session_effort(path):
+    """Le niveau de réflexion noté par setup.py pour ce passage (vide : celui de Claw)."""
+    try:
+        effort = json.loads(Path(path).read_text(encoding="utf-8")).get("effort") or ""
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return effort if effort in EFFORTS else ""
 # Mise à jour du commentaire de progression au plus toutes les N secondes, du journal
 # détaillé (plus lourd) au plus toutes les LOG_EVERY secondes.
 PROGRESS_EVERY = 12
@@ -518,6 +527,12 @@ def main():
     helper.chmod(0o755)
     env["PATH"] = f"{tools}{os.pathsep}{env.get('PATH', '')}"
     env["CLAW_WEB_REPO_DIR"] = ROOT
+    # Niveau de réflexion choisi pour ce message (bouton « Réflexion » de l'appli, noté par
+    # setup.py) ; sans choix, celui de Claw.
+    effort = session_effort(WORK / "options.json")
+    if effort:
+        env["CLAW_REASONING"] = effort
+        print(f"Option : réflexion {effort}", flush=True)
     # Options choisies dans l'appli : mode équipe, Ultracode (comme les boutons de l'interface
     # locale de Claw).
     for choice, variable, label in (("TEAM", "CLAW_TEAM", "mode équipe"), ("ULTRACODE", "CLAW_ULTRACODE", "Ultracode")):

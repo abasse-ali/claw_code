@@ -306,6 +306,41 @@ def images_of(text):
     return IMAGES.sub(replace, text or "").strip(), found
 
 
+# Niveau de réflexion choisi dans l'appli pour un message (bouton « Réflexion » du bloc de
+# message), noté dans le message lui-même : le workflow des sessions n'a pas d'entrée de plus.
+EFFORT = re.compile(r"\n*<!--\s*claw-web:effort\s+([a-z]+)\s*-->")
+EFFORTS = ("off", "low", "medium", "high", "max")
+
+
+def effort_of(text):
+    """Le texte sans ses marques de niveau de réflexion, et le dernier niveau choisi (vide :
+    celui de Claw)."""
+    found = [value for value in EFFORT.findall(text or "") if value in EFFORTS]
+    return EFFORT.sub("", text or "").strip(), (found[-1] if found else "")
+
+
+# Commandes propres à Claw Web (menu « / » de l'appli) : ce que la commande demande, en mots.
+# Les commandes de Claw (/review, /fix, /verify...) passent telles quelles : Claw les déplie.
+WEB_COMMANDS = {
+    "jtest": "Lance JTest pour que j'essaie le projet sur mon téléphone, tel qu'il est sur la branche, "
+             "et donne-moi le lien.",
+    "pages": "Mets le site en ligne sur GitHub Pages (fusionne d'abord la branche si ses fichiers n'y sont "
+             "que là) et donne-moi son adresse.",
+    "merge": "Fusionne la pull request de cette session.",
+    "continue": "continue",
+}
+
+
+def web_command(text):
+    """La demande d'une commande de Claw Web tapée seule (« /jtest », « /pages en ligne »), sinon
+    None. Ce qui suit la commande est ajouté à la demande."""
+    found = re.match(r"^/([a-z-]+)\b[ \t]*(.*)$", (text or "").strip(), re.S)
+    if not found or found.group(1) not in WEB_COMMANDS:
+        return None
+    extra = found.group(2).strip()
+    return WEB_COMMANDS[found.group(1)] + (f"\n\n{extra}" if extra else "")
+
+
 def task_text(body):
     """La tâche, sans le bloc de réglages."""
     return SETTINGS.sub("", body or "").strip()

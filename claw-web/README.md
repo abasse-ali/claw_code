@@ -111,6 +111,22 @@ les réponses ») ; on peut aussi répondre avec ses mots. Dans le journal, une 
 ce qu'elle montre : « Capture en ligne » (le site publié) ou « Capture de la session » (les
 fichiers de la branche, pas encore en ligne).
 
+## Commandes « / » et niveau de réflexion
+
+Un « / » en début de message (ou le bouton carré barré à côté des options) ouvre la liste des
+commandes ; la suite du mot la filtre, un toucher ou Entrée la met dans le champ :
+
+- les commandes de Claw, que le moteur déplie en consignes comme `claw /review` dans un
+  terminal : `/review`, `/fix <ce qui ne marche pas>`, `/verify`, `/simplify`, `/audit`,
+  `/security-review`, `/archi <sujet>`, `/avis <question>` ;
+- celles de l'appli : `/jtest` (essayer sur le téléphone), `/pages` (mettre le site en ligne),
+  `/merge` (fusionner la pull request), `/continue`.
+
+La pastille « Réflexion », à côté du modèle, règle le niveau de réflexion du prochain message :
+Auto (celui de Claw), Aucune, Faible, Moyenne, Élevée ou Maximale. Le choix reste pour les
+messages suivants ; il est noté dans le message (une marque invisible), et le moteur le donne à
+Claw (`CLAW_REASONING`).
+
 ## Ce que Claw compte faire
 
 Pendant qu'il travaille, la progression de la session commence par **Ce que Claw compte faire** :
@@ -359,7 +375,16 @@ passages suivants démarrent en moins d'une minute.
 
 ## Sécurité
 
-- Le jeton reste dans le stockage de ce navigateur (bouton « Effacer le jeton de cet appareil »).
+- **Verrou de l'appli.** Dès qu'un jeton est gardé sur l'appareil, l'appli fait choisir un code
+  (8 caractères au moins) et le demande à chaque ouverture et après 15 minutes en arrière-plan.
+  Le jeton GitHub et la clé OpenRouter sont chiffrés par ce code (AES-GCM, clé tirée du code par
+  PBKDF2-SHA-256, 600 000 tours) et ne sont jamais gardés en clair : quelqu'un qui prend le
+  téléphone, ou lit le stockage du navigateur, n'a pas le jeton sans le code. Trois codes faux
+  imposent une attente qui double (30 s, puis 1 min...). Réglages, groupe « Verrou » :
+  verrouiller tout de suite, changer le code (l'actuel est demandé). Code oublié : « Effacer les
+  clés de cet appareil » sur l'écran du verrou, puis recoller le jeton et choisir un nouveau code.
+- Le jeton n'est jamais réaffiché dans les réglages (champ vide : il reste) ; « Effacer le jeton
+  de cet appareil » le retire.
 - Les secrets partent chiffrés pour la clé publique du dépôt du moteur (sealed box de libsodium,
   avec [tweetnacl](https://github.com/dchest/tweetnacl-js) et BLAKE2b) ; la clé OpenRouter n'est
   pas gardée par l'appli.

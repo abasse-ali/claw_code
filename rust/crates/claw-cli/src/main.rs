@@ -10862,7 +10862,40 @@ fn prompt_from(prompt: String, mut input: impl io::Read) -> Result<String, Strin
     if text.trim().is_empty() {
         return Err("la demande lue sur l'entrée standard est vide".to_string());
     }
-    Ok(text.trim_end_matches(['\n', '\r']).to_string())
+    Ok(expand_leading_command(text.trim_end_matches(['\n', '\r'])))
+}
+
+/// Demande lue sur l'entrée standard qui commence par une commande (`/review`,
+/// `/fix les tests`, une commande du projet) : la commande devient ses
+/// consignes, comme `claw /review` en ligne de commande. Les notes qu'un moteur
+/// ajoute après (`[Claw] ...`) restent à la suite. Vu dans Claw Web : un
+/// « /review » tapé dans la session arrivait au modèle comme du simple texte.
+fn expand_leading_command(text: &str) -> String {
+    if !text.starts_with('/') {
+        return text.to_string();
+    }
+    let (command, rest) = text
+        .split_once("\n\n[Claw]")
+        .map_or((text, ""), |(command, rest)| (command, rest));
+    let expanded = match SlashCommand::parse(command.trim()) {
+        // Une commande incomplète (`/archi` sans sujet) reste le texte de
+        // l'utilisateur : le modèle demande ce qui manque, le passage ne tombe pas.
+        Some(SlashCommand::Expert { command, args }) => {
+            match expert_command_prompt(command, args.as_deref()) {
+                Ok(prompt) => prompt,
+                Err(_) => return text.to_string(),
+            }
+        }
+        _ => match custom_command_prompt(command.trim()) {
+            Some(Ok(invocation)) => invocation.prompt,
+            _ => return text.to_string(),
+        },
+    };
+    if rest.is_empty() {
+        expanded
+    } else {
+        format!("{expanded}\n\n[Claw]{rest}")
+    }
 }
 
 /// Mode équipe au démarrage : `CLAW_TEAM`, sinon `"team"` dans la config.
@@ -11996,6 +12029,31 @@ mod tests {
             Ok("bonjour".to_string())
         );
         assert!(super::prompt_from("-".to_string(), " \n".as_bytes()).is_err());
+    }
+
+    #[test]
+    fn a_command_read_from_standard_input_becomes_its_instructions() {
+        // Claw Web : « /review » tapé dans une session, suivi des notes du moteur.
+        let expanded = super::prompt_from(
+            "-".to_string(),
+            "/review le dernier commit\n\n[Claw] You are working in the repository x\n".as_bytes(),
+        )
+        .expect("demande");
+        assert!(
+            expanded.starts_with("/review - Act as a code reviewer for le dernier commit."),
+            "{expanded}"
+        );
+        assert!(expanded.ends_with("\n\n[Claw] You are working in the repository x"));
+        // Une commande inconnue, ou un chemin, reste le texte de l'utilisateur.
+        assert_eq!(
+            super::prompt_from("-".to_string(), "/usr/bin/env est cassé".as_bytes()),
+            Ok("/usr/bin/env est cassé".to_string())
+        );
+        // Sans le sujet qu'elle demande, la commande reste telle quelle.
+        assert_eq!(
+            super::prompt_from("-".to_string(), "/archi".as_bytes()),
+            Ok("/archi".to_string())
+        );
     }
 
     #[test]
