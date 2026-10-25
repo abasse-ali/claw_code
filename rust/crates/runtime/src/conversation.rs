@@ -138,6 +138,13 @@ pub trait ApiClient {
         Vec::new()
     }
 
+    /// Le modèle du tour lit lui-même les images : la capture d'une
+    /// vérification de la page peut lui être jointe (sans description à
+    /// attendre).
+    fn reads_images(&mut self) -> bool {
+        false
+    }
+
     /// Critique de design : les captures d'une interface jugées par un modèle
     /// qui lit les images. `None` : aucun modèle disponible.
     fn critique_design(
@@ -381,9 +388,12 @@ struct TurnAids {
     /// Modifications de l'interface depuis le dernier regard sur la page (une
     /// capture du modèle, une revue, une mesure de Claw).
     blind_edits: u32,
-    /// Mesures faites par Claw pendant ce tour parce que le modèle modifiait
-    /// l'interface sans la regarder.
+    /// Vérifications de la page faites par Claw pendant ce tour, après les
+    /// modifications de l'interface.
     blind_measures: u32,
+    /// Défauts relevés par la vérification précédente : la suivante dit ce
+    /// que la modification a cassé ou réparé.
+    last_checked: Option<Vec<String>>,
     /// Une réponse « vérifié » sans regard sur la page a déjà été renvoyée.
     claim_checked: bool,
     /// Fichiers d'interface changés par une commande, déjà revus.
@@ -2002,13 +2012,11 @@ where
                         .push(ConversationMessage::user_text(feedback));
                 }
             }
-            // L'interface change depuis un moment sans regard sur la page :
-            // Claw la mesure avant la requête suivante.
+            // L'interface vient de changer : Claw regarde la page avant la
+            // requête suivante.
             if !wrapping_up {
-                if let Some(feedback) = self.blind_edits_check(&mut aids, &mut prompter) {
-                    self.session
-                        .messages
-                        .push(ConversationMessage::user_text(feedback));
+                if let Some(check) = self.visual_check(&mut aids, &mut prompter) {
+                    self.session.messages.push(check);
                 }
             }
             // Mode équipe : le rôle de cette étape, d'après l'état du travail.
@@ -3586,6 +3594,26 @@ where
         aids: &mut TurnAids,
         prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> Option<(String, Option<String>)> {
+        let (target, audit, _) = self.render_page(aids, prompter, false)?;
+        let broken = aids.baseline.as_ref().map_or_else(Vec::new, |baseline| {
+            crate::web_design::regressions(baseline, &audit)
+        });
+        Some((target, crate::web_design::measured_list(&audit, &broken)))
+    }
+
+    /// La page ouverte par Claw dans le navigateur, mesurée et parcourue :
+    /// téléphone et ordinateur, ou téléphone seul (`quick`, la vérification
+    /// après chaque modification). Rend la page, les mesures et les captures.
+    fn render_page(
+        &mut self,
+        aids: &mut TurnAids,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+        quick: bool,
+    ) -> Option<(
+        String,
+        crate::web_design::Audit,
+        Vec<crate::attachments::ImageAttachment>,
+    )> {
         if self.subagent || interrupt_requested() || !harness::enabled(Aid::DesignReview) {
             return None;
         }
@@ -3594,7 +3622,11 @@ where
         if !crate::web_design::missing_local_assets(&cwd, &target).is_empty() {
             return None;
         }
-        let input = crate::web_design::screenshot_input(&target);
+        let input = if quick {
+            crate::web_design::quick_screenshot_input(&target)
+        } else {
+            crate::web_design::screenshot_input(&target)
+        };
         self.tool_executor.announce("Screenshot", &input);
         let (message, _) = self.execute_tool_call(
             format!("claw-measure-{}", aids.blind_measures + 1),
@@ -3604,58 +3636,74 @@ where
                 .as_mut()
                 .map(|prompt| &mut **prompt as &mut dyn PermissionPrompter),
         );
-        // Mesures seulement : les captures ne vont ni au modèle ni au juge.
-        drop(std::mem::take(&mut self.tool_images));
+        // Les captures ne vont pas dans la conversation d'elles-mêmes.
+        let images = std::mem::take(&mut self.tool_images);
         let (output, is_error) = tool_result_parts(&message)?;
         if is_error {
             return None;
         }
         aids.blind_edits = 0;
         let audit = crate::web_design::read_audit(output);
-        let broken = aids.baseline.as_ref().map_or_else(Vec::new, |baseline| {
-            crate::web_design::regressions(baseline, &audit)
-        });
-        Some((target, crate::web_design::measured_list(&audit, &broken)))
+        aids.last_checked = Some(
+            audit
+                .problems
+                .iter()
+                .chain(&audit.console)
+                .cloned()
+                .collect(),
+        );
+        Some((target, audit, images))
     }
 
-    /// Le modèle modifie l'interface depuis un moment sans la regarder : Claw
-    /// la mesure et lui rend ce qui ne va pas, avant qu'il ne continue.
-    fn blind_edits_check(
+    /// Après chaque réponse du modèle qui a modifié l'interface, Claw ouvre
+    /// la page dans un navigateur de téléphone, la mesure et la parcourt, et
+    /// dit au modèle ce que sa modification a cassé, réparé, et ce qui reste.
+    /// Un modèle qui lit les images reçoit aussi la capture. Demandé le 25
+    /// octobre 2026 : « À chaque modification il doit vérifier visuellement
+    /// la page ».
+    fn visual_check(
         &mut self,
         aids: &mut TurnAids,
         prompter: &mut Option<&mut dyn PermissionPrompter>,
-    ) -> Option<String> {
-        if aids.blind_edits < harness::BLIND_EDIT_LIMIT
-            || aids.blind_measures >= harness::MAX_BLIND_MEASURES
-        {
+    ) -> Option<ConversationMessage> {
+        if aids.blind_edits == 0 || aids.blind_measures >= harness::MAX_VISUAL_CHECKS {
             return None;
         }
-        // Rien à mesurer (pas de page HTML) : on n'en reparle pas à chaque
-        // modification.
-        if self.page_to_review(aids).is_none() {
+        // Rien à regarder (pas de page HTML), ou une page qui appelle des
+        // fichiers pas encore écrits : on attend sans compter d'essai.
+        let target = self.page_to_review(aids)?;
+        let cwd = std::env::current_dir().ok()?;
+        if !crate::web_design::missing_local_assets(&cwd, &target).is_empty() {
             return None;
         }
-        let edits = aids.blind_edits;
         aids.blind_measures += 1;
-        self.api_client.notify(&format!(
-            "Claw mesure la page : {edits} modifications de l'interface sans la regarder"
-        ));
-        let Some((target, measured)) = self.measure_now(aids, prompter) else {
+        let before = aids.last_checked.clone();
+        let Some((target, audit, images)) = self.render_page(aids, prompter, true) else {
             // La page ne s'ouvre pas en fichier (une appli qui veut son
             // serveur) : pas d'autre essai pendant ce tour.
-            aids.blind_measures = harness::MAX_BLIND_MEASURES;
+            aids.blind_measures = harness::MAX_VISUAL_CHECKS;
             return None;
         };
-        let count = measured.as_deref().map_or(0, |list| list.lines().count());
+        let (new, fixed, open) = crate::web_design::check_delta(before.as_deref(), &audit);
         self.api_client.notify(&format!(
-            "Mesure de la page : {count} défaut(s) à reprendre{}",
-            if count == 0 {
-                ", rien de cassé"
-            } else {
-                " : renvoyé(s) à l'agent"
-            }
+            "Claw vérifie la page après la modification : {} défaut(s) nouveau(x), {fixed} réparé(s), {} restant(s)",
+            new.len(),
+            open.len()
         ));
-        crate::web_design::blind_edits_feedback(&target, edits, measured.as_deref())
+        let image = images
+            .into_iter()
+            .next()
+            .filter(|_| self.api_client.reads_images());
+        let text =
+            crate::web_design::visual_check_feedback(&target, &new, fixed, &open, image.is_some());
+        let mut message = ConversationMessage::user_text(text);
+        if let Some(image) = image {
+            message.blocks.push(ContentBlock::Image {
+                media_type: image.media_type,
+                data: image.data,
+            });
+        }
+        Some(message)
     }
 
     /// Le tour se termine (limite de requêtes ou de temps) après des
@@ -8531,9 +8579,11 @@ mod tests {
         page
     }
 
+    /// `measured` : ce que rend chaque appel de `Screenshot`, dans l'ordre
+    /// (`None` : une erreur) ; le dernier se répète.
     fn measured_runtime(
         steps: Vec<Vec<AssistantEvent>>,
-        measured: &'static str,
+        measured: Vec<Option<&'static str>>,
     ) -> (Aided, std::rc::Rc<std::cell::Cell<u32>>) {
         let shots = std::rc::Rc::new(std::cell::Cell::new(0));
         let counted = std::rc::Rc::clone(&shots);
@@ -8548,8 +8598,11 @@ mod tests {
             })
             .register("bash", |_| Ok(PASSING.to_string()))
             .register("Screenshot", move |_| {
+                let index = (counted.get() as usize).min(measured.len() - 1);
                 counted.set(counted.get() + 1);
-                Ok(measured.to_string())
+                measured[index]
+                    .map(ToString::to_string)
+                    .ok_or_else(|| super::ToolError::new("la page ne s'ouvre pas"))
             });
         let runtime = ConversationRuntime::new(
             Session::new(),
@@ -8575,12 +8628,17 @@ mod tests {
 
     const MEASURED: &str = r#"{"captures":[{"screen":"phone 390x844","problems":["Words that run together: a letter-spacing of -0.02em or tighter on text under 32px eats the space between words (h1.hero-title \"U11 vs FC Voisins\" 14px, letter-spacing -0.28px)"]}]}"#;
 
+    const TWO_PROBLEMS: &str = r#"{"captures":[{"screen":"phone 390x844","problems":["Words that run together: a letter-spacing of -0.02em or tighter on text under 32px eats the space between words (h1.hero-title \"U11 vs FC Voisins\" 14px, letter-spacing -0.28px)","The page is 430px wide on a 390px-wide screen and scrolls sideways (because of decorations drawn past the edge: div.hero-card::before)"]}]}"#;
+    const WIDE_ONLY: &str = r#"{"captures":[{"screen":"phone 390x844","problems":["The page is 430px wide on a 390px-wide screen and scrolls sideways (because of decorations drawn past the edge: div.hero-card::before)"]}]}"#;
+
     #[test]
-    fn claw_measures_the_page_after_interface_edits_made_without_looking() {
+    fn claw_looks_at_the_page_after_each_change_and_says_what_it_broke_or_fixed() {
         let _serial = crate::test_serial();
-        // Session #31 : 64 actions de CSS avant la première capture.
+        // Demandé le 25 octobre 2026 : « À chaque modification il doit
+        // vérifier visuellement la page ». Session #31 : 64 actions de CSS
+        // avant la première capture.
         std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
-        let page = measured_page("aveugle");
+        let page = measured_page("chaque");
         let write = || {
             tool_step(
                 "write_file",
@@ -8589,23 +8647,44 @@ mod tests {
                     .to_string(),
             )
         };
-        let mut steps: Vec<Vec<AssistantEvent>> = (0..7).map(|_| write()).collect();
-        steps.push(text_step("Corrigé."));
-        let ((mut runtime, observed, _), shots) = measured_runtime(steps, MEASURED);
+        let steps = vec![write(), write(), write(), text_step("Corrigé.")];
+        let ((mut runtime, observed, _), shots) = measured_runtime(
+            steps,
+            vec![Some(MEASURED), Some(TWO_PROBLEMS), Some(WIDE_ONLY)],
+        );
         runtime.run_turn("corrige le site", None).expect("tour");
         std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
         let observed = observed.borrow();
-        assert!(shots.get() >= 1, "aucune mesure");
-        let request = observed
-            .requests
-            .iter()
-            .find(|request| request.contains("without looking at the page"))
-            .expect("mesure renvoyée au modèle");
-        assert!(request.contains("U11 vs FC Voisins"), "{request}");
-        assert!(observed
-            .notices
-            .iter()
-            .any(|notice| notice.contains("6 modifications de l'interface sans la regarder")));
+        assert_eq!(shots.get(), 3);
+        // La dernière vérification de chaque requête (la conversation garde
+        // les précédentes).
+        let last = |index: usize| {
+            observed.requests[index]
+                .rsplit("Claw looked at")
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        };
+        let first = &last(1);
+        assert!(
+            observed.requests[1].contains("Claw looked at")
+                && first.contains("Still wrong on the page")
+                && first.contains("U11 vs FC Voisins"),
+            "{first}"
+        );
+        let second = &last(2);
+        assert!(
+            second.contains("Broken by your last change") && second.contains("430px wide"),
+            "{second}"
+        );
+        let third = &last(3);
+        assert!(
+            third.contains("Your last change fixed 1 problem(s)"),
+            "{third}"
+        );
+        assert!(!third.contains("Broken by your last change"), "{third}");
+        assert!(observed.notices.iter().any(|notice| notice
+            .contains("Claw vérifie la page après la modification : 1 défaut(s) nouveau(x)")));
     }
 
     #[test]
@@ -8625,11 +8704,15 @@ mod tests {
             text_step("Il reste les mots collés du titre."),
             text_step("fin"),
         ];
-        let ((mut runtime, observed, _), shots) = measured_runtime(steps, MEASURED);
+        // La vérification après la modification échoue (page qui ne s'ouvre
+        // pas) : rien n'a regardé la page, la réponse « vérifié » est renvoyée
+        // avec la mesure faite à ce moment.
+        let ((mut runtime, observed, _), shots) =
+            measured_runtime(steps, vec![None, Some(MEASURED)]);
         runtime.run_turn("corrige le site", None).expect("tour");
         std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
         let observed = observed.borrow();
-        assert_eq!(shots.get(), 1);
+        assert_eq!(shots.get(), 2);
         assert!(
             observed.requests[2].contains("Your answer says the work is checked")
                 && observed.requests[2].contains("U11 vs FC Voisins"),

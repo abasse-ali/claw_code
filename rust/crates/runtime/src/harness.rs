@@ -3011,13 +3011,13 @@ pub fn announced_work_feedback(sentence: &str) -> String {
     )
 }
 
-/// Modifications de l'interface d'affilée sans un regard sur la page, au-delà
-/// desquelles Claw la mesure lui-même. Vu le 25 octobre 2026 (session #31) :
-/// 64 actions et 16 minutes de CSS avant la première capture, quatre défauts
-/// créés, et « j'ai corrigé tous les problèmes » écrit sans avoir rien vu.
-pub const BLIND_EDIT_LIMIT: u32 = 6;
-/// Mesures de ce genre par tour, au plus.
-pub const MAX_BLIND_MEASURES: u32 = 6;
+/// Vérifications de la page par tour, au plus : Claw la regarde après chaque
+/// réponse du modèle qui a modifié l'interface (demandé le 25 octobre 2026 :
+/// « À chaque modification il doit vérifier visuellement la page »). Vu le
+/// même jour (session #31) : 64 actions et 16 minutes de CSS avant la
+/// première capture, quatre défauts créés, et « j'ai corrigé tous les
+/// problèmes » écrit sans avoir rien vu.
+pub const MAX_VISUAL_CHECKS: u32 = 80;
 
 const VERIFIED_WORDS: [&str; 12] = [
     "vérifié",
