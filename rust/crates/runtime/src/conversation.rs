@@ -307,6 +307,9 @@ pub struct ConversationRuntime<C, T> {
     autosave: Option<std::path::PathBuf>,
     /// Requêtes au modèle par tour avant que Claw lui fasse conclure (0 : sans limite).
     turn_request_limit: usize,
+    /// Heure (secondes Unix) à laquelle le modèle conclut, quoi qu'il reste
+    /// (`CLAW_DEADLINE`, posée par le moteur de Claw Web avant la fin de son job).
+    deadline: Option<u64>,
     /// Dossier suivi par le mode projet ; `None` : le dossier de travail.
     project_root: Option<std::path::PathBuf>,
     /// Mode projet : la sonde de l'environnement, au premier tour (une fois
@@ -1202,6 +1205,7 @@ where
             file_views: BTreeMap::new(),
             autosave: None,
             turn_request_limit: turn_request_limit(&feature_config),
+            deadline: harness::deadline(),
             project_root: None,
             environment: EnvironmentProbe::Pending,
             tool_images: Vec::new(),
@@ -1216,6 +1220,13 @@ where
     #[must_use]
     pub fn with_turn_request_limit(mut self, limit: usize) -> Self {
         self.turn_request_limit = limit;
+        self
+    }
+
+    /// Heure (secondes Unix) à laquelle le modèle doit conclure.
+    #[must_use]
+    pub fn with_deadline(mut self, deadline: Option<u64>) -> Self {
+        self.deadline = deadline;
         self
     }
 
@@ -1790,6 +1801,8 @@ where
         let mut cut_continuations = 0;
         // Le budget de requêtes du tour est atteint : le modèle conclut.
         let mut wrapping_up = false;
+        // La conclusion est demandée par l'heure (`CLAW_DEADLINE`), pas par le budget.
+        let mut out_of_time = false;
         // Réponse qu'un contrôle vient de rendre provisoire, tant que le
         // modèle n'a rien changé depuis.
         let mut superseded_draft: Option<String> = None;
@@ -1859,6 +1872,23 @@ where
 
             if interrupt_requested() {
                 return Err(RuntimeError::new(INTERRUPTED_MESSAGE));
+            }
+            // Le temps du passage s'achève (Claw Web) : le modèle conclut avant que
+            // le job ne soit coupé, quelles que soient les requêtes qui restent.
+            if !wrapping_up && !self.subagent && harness::deadline_reached(self.deadline) {
+                wrapping_up = true;
+                out_of_time = true;
+                self.api_client.notify(
+                    "Le temps de ce passage s'achève : Claw demande à l'agent de conclure. Écrivez « continue » pour poursuivre",
+                );
+                let mut note = harness::DEADLINE_NOTE.to_string();
+                if aids.project.is_some() {
+                    note.push_str(project::WRAP_UP_NOTE);
+                }
+                note.push_str(&harness::language_note(self.response_language.as_deref()));
+                self.session
+                    .messages
+                    .push(ConversationMessage::user_text(note));
             }
             // Tour de design resté sous la barre, dont la note monte : la
             // limite recule, au lieu d'attendre un « continue ».
@@ -2218,7 +2248,11 @@ where
             // Encore des outils alors que le budget du tour est atteint : rien
             // ne tourne, chaque appel reçoit son résultat et le tour s'arrête.
             if wrapping_up {
-                let reason = harness::turn_limit_refusal(turn_limit);
+                let reason = if out_of_time {
+                    harness::DEADLINE_REFUSAL.to_string()
+                } else {
+                    harness::turn_limit_refusal(turn_limit)
+                };
                 for (tool_use_id, tool_name, input) in pending_tool_uses {
                     self.tool_executor.skipped(&tool_name, &input, &reason);
                     let message = ConversationMessage::tool_result(
@@ -10038,6 +10072,32 @@ mod tests {
             .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
             .count();
         assert_eq!(calls, results);
+    }
+
+    #[test]
+    fn when_the_session_time_is_over_the_model_concludes_and_no_tool_runs() {
+        let _serial = crate::test_serial();
+        let (runtime, observed, bash_calls) = aided_runtime(
+            vec![
+                tool_step("bash", r#"{"command":"python essai.py"}"#),
+                text_step("Ne doit pas être demandé."),
+            ],
+            vec![PASSING],
+        );
+        // Échéance déjà passée : le moteur de Claw Web va couper le job.
+        let mut runtime = runtime.with_deadline(Some(1));
+        let summary = runtime.run_turn("essaie", None).expect("tour");
+        assert_eq!(bash_calls.borrow().len(), 0);
+        let last = summary.tool_results.last().expect("résultat");
+        assert!(super::tool_result_parts(last)
+            .expect("sortie")
+            .0
+            .contains("the time given to this session is over"));
+        assert_eq!(observed.borrow().requests.len(), 1);
+        assert!(crate::harness::deadline_reached(Some(1)));
+        assert!(!crate::harness::deadline_reached(None));
+        assert_eq!(crate::harness::parse_deadline(Some(" 100 ")), Some(100));
+        assert_eq!(crate::harness::parse_deadline(Some("demain")), None);
     }
 
     #[test]

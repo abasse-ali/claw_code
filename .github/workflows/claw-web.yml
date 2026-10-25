@@ -144,6 +144,11 @@ jobs:
     runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 120
     steps:
+      # Heure de départ du job : run.py en tire l'heure à laquelle Claw doit conclure, avant que
+      # les 120 minutes ne coupent le passage en plein travail (vu le 25 octobre 2026).
+      - name: Heure de départ
+        run: echo "CLAW_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
       # L'exécuteur du PC garde ses fichiers d'un passage à l'autre, quand une machine de GitHub
       # repart de zéro : le dossier de travail repart vide (sinon `git clone … work` échoue).
       - name: Dossier de travail vide
