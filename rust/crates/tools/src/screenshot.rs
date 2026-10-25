@@ -1804,11 +1804,16 @@ fn capture(
             .as_f64()
             .unwrap_or(0.0)
             .clamp(0.0, (content - screen).max(0.0));
+        // Les tranches se coupent entre deux blocs, pas au milieu d'une carte.
+        let blocks = devtools
+            .evaluate(BLOCKS_SCRIPT)
+            .ok()
+            .map(|value| block_spans(&value))
+            .unwrap_or_default();
         let mut start = top;
         while areas.is_empty() || (start < content && areas.len() < MAX_SLICES) {
-            let height = (content - start)
-                .min(screen * FULL_PAGE_SCREENS)
-                .max(screen);
+            let end = slice_end(start, screen, content, &blocks);
+            let height = (end - start).max(screen);
             areas.push((start, height));
             start += height;
         }
@@ -1872,6 +1877,65 @@ fn capture(
 
 /// Une zone de la page (`area` : haut et hauteur), ou ce que montre l'écran, en
 /// JPEG, avec sa vignette pour Claw Web.
+/// Blocs de la page (haut et bas, en pixels depuis le haut de la page) entre
+/// lesquels une capture pleine page peut se couper : cartes, lignes de liste,
+/// paragraphes, titres, images, formulaires.
+const BLOCKS_SCRIPT: &str = r#"(() => {
+  const spans = [];
+  for (const el of document.querySelectorAll("article, li, figure, img, p, h1, h2, h3, h4, form, table, tr, blockquote, pre, button, [class*=card], [class*=item]")) {
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden" || style.position === "fixed") continue;
+    const rect = el.getBoundingClientRect();
+    if (rect.height < 4 || rect.width < 4) continue;
+    spans.push([Math.round(rect.top + scrollY), Math.round(rect.bottom + scrollY)]);
+    if (spans.length >= 1500) break;
+  }
+  return spans;
+})()"#;
+
+fn block_spans(value: &Value) -> Vec<(f64, f64)> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|span| Some((span[0].as_f64()?, span[1].as_f64()?)))
+        .collect()
+}
+
+/// Fin de la tranche qui commence à `start` : au plus trois écrans plus bas,
+/// et, quand la page continue, à un endroit qu'aucun bloc ne traverse (le bas
+/// d'un bloc, le plus bas possible). Un bloc plus haut que deux écrans (une
+/// section entière) ne compte pas : il serait toujours traversé. Vu le 25
+/// octobre 2026 (session #31) : les tranches coupaient les cartes à leurs
+/// bords, et le lecteur d'images signalait « carte coupée en haut », « la
+/// dernière carte coupée en bas », que le modèle cherchait à réparer.
+fn slice_end(start: f64, screen: f64, content: f64, blocks: &[(f64, f64)]) -> f64 {
+    let limit = start + screen * FULL_PAGE_SCREENS;
+    if limit >= content {
+        return content;
+    }
+    let small: Vec<&(f64, f64)> = blocks
+        .iter()
+        .filter(|(top, bottom)| bottom - top < screen * 2.0)
+        .collect();
+    let crossed = |y: f64| {
+        small
+            .iter()
+            .any(|(top, bottom)| *top < y - 1.0 && *bottom > y + 1.0)
+    };
+    if !crossed(limit) {
+        return limit;
+    }
+    small
+        .iter()
+        .map(|(_, bottom)| bottom + 2.0)
+        .filter(|&y| y > start + screen && y <= limit && !crossed(y))
+        .fold(None, |best: Option<f64>, y| {
+            Some(best.map_or(y, |best| best.max(y)))
+        })
+        .unwrap_or(limit)
+}
+
 fn picture(
     devtools: &mut DevTools,
     viewport: &Viewport,
@@ -2654,6 +2718,25 @@ mod tests {
         ] {
             assert!(!sound.contains(absent), "{absent}: {sound}");
         }
+    }
+
+    #[test]
+    fn full_page_slices_end_between_blocks() {
+        // Écran de 800px, page de 4000px : la première tranche irait jusqu'à
+        // 2400px, au milieu de la carte 2300-2500 ; elle s'arrête sous la
+        // carte précédente (2250).
+        let blocks = [
+            (100.0, 600.0),
+            (1900.0, 2250.0),
+            (2300.0, 2500.0),
+            (0.0, 4000.0),
+        ];
+        assert!((super::slice_end(0.0, 800.0, 4000.0, &blocks) - 2252.0).abs() < 0.1);
+        // Sans endroit libre entre deux et trois écrans : la coupe d'avant.
+        let packed = [(700.0, 1700.0), (1600.0, 2600.0)];
+        assert!((super::slice_end(0.0, 800.0, 4000.0, &packed) - 2400.0).abs() < 0.1);
+        // La fin de la page tient dans la tranche.
+        assert!((super::slice_end(2000.0, 800.0, 3500.0, &blocks) - 3500.0).abs() < 0.1);
     }
 
     #[test]
