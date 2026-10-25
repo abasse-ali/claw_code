@@ -2295,6 +2295,11 @@ pub fn batch_note(streak: u32, recent: &[(String, String)]) -> String {
 /// 1 000 par jour.
 pub const TURN_REQUEST_LIMIT: usize = 100;
 
+/// Budget d'un tour pour un modèle sans quota du jour (NVIDIA, serveur local) :
+/// rien à protéger, la limite ne sert plus qu'à arrêter une boucle sans fin.
+/// À 100, un tour de NVIDIA s'arrêtait avec 0 tâche finie sur 9.
+pub const UNMETERED_TURN_REQUEST_LIMIT: usize = 300;
+
 /// Message adressé au modèle quand le tour atteint son budget de requêtes.
 #[must_use]
 pub fn turn_limit_note(limit: usize) -> String {

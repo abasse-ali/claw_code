@@ -151,12 +151,17 @@ fn preset_provider(preset: &Preset) -> CompatProvider {
         api_key_env: Some(preset.api_key_env.to_string()),
         requires_key: !preset.local,
         local: preset.local,
-        context_window: None,
+        context_window: (preset.name == "nvidia").then_some(NVIDIA_CONTEXT_WINDOW),
         max_output_tokens: None,
         headers: Vec::new(),
         text_tools: false,
     }
 }
+
+/// Fenêtre des modèles Nemotron 3 servis par build.nvidia.com : 1 M de jetons
+/// pour le modèle, 262 144 chez les hébergeurs. Les 128 000 supposés par défaut
+/// faisaient compacter la conversation dès ~72 000 jetons.
+const NVIDIA_CONTEXT_WINDOW: u64 = 262_144;
 
 /// Tous les fournisseurs connus : config d'abord, puis préréglages.
 #[must_use]
@@ -244,6 +249,14 @@ mod tests {
         assert_eq!(provider.api_key_env.as_deref(), Some("NVIDIA_API_KEY"));
         assert_eq!(model, "nvidia/nemotron-3-super-120b-a12b");
         assert!(split_compat_model("nvidia/nemotron-3-super-120b-a12b:free").is_none());
+        assert_eq!(provider.default_context_window(), 262_144);
+        assert_eq!(
+            split_compat_model("groq:llama-3.3-70b-versatile")
+                .expect("groq")
+                .0
+                .default_context_window(),
+            128_000
+        );
 
         assert!(split_compat_model("qwen/qwen3-coder:free").is_none());
         assert!(split_compat_model("inconnu:modele").is_none());
