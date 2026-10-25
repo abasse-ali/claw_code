@@ -31,6 +31,12 @@ class AgentEnvTest(unittest.TestCase):
             self.assertNotIn(token, env)
         self.assertEqual(env["PATH"], "/usr/bin")
 
+    def test_claw_concludes_twelve_minutes_before_the_job_is_cut(self):
+        # Job parti à 1 000 000 : coupé à 120 minutes, Claw conclut à 108.
+        self.assertEqual(run.deadline({"CLAW_JOB_STARTED": "1000000"}), str(1_000_000 + 108 * 60))
+        self.assertEqual(run.deadline({}), "")
+        self.assertEqual(run.deadline({"CLAW_JOB_STARTED": "hier"}), "")
+
     def test_the_mock_model_gets_no_real_key(self):
         env = run.agent_env(SECRETS, mock=True)
         self.assertNotIn("OPENROUTER_API_KEY", env)

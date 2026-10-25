@@ -2308,6 +2308,37 @@ pub fn turn_limit_note(limit: usize) -> String {
     )
 }
 
+/// L'heure de conclure est passée : `CLAW_DEADLINE` (secondes Unix), posée par
+/// le moteur de Claw Web avant que son job ne soit coupé. Vu le 25 octobre 2026 :
+/// un passage de 300 requêtes coupé à 120 minutes, sans réponse ni point sur le
+/// travail.
+#[must_use]
+pub fn deadline_reached(deadline: Option<u64>) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    deadline.is_some_and(|deadline| now >= deadline)
+}
+
+/// L'heure de conclure donnée par `CLAW_DEADLINE`, si elle est lisible.
+#[must_use]
+pub fn deadline() -> Option<u64> {
+    parse_deadline(std::env::var("CLAW_DEADLINE").ok().as_deref())
+}
+
+/// Secondes Unix en texte ; `None` pour une valeur vide ou illisible.
+#[must_use]
+pub fn parse_deadline(value: Option<&str>) -> Option<u64> {
+    value.and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+/// Message adressé au modèle quand le temps du passage s'achève.
+pub const DEADLINE_NOTE: &str = "[Claw] The time given to this session is almost over: it will be stopped in a few minutes. Stop working now and do not call any tool (a call made in your next reply will not run). Give your final answer: what is done and verified, what is done but not verified, what remains to do, and the exact next step. The user can then ask you to continue.";
+
+/// Résultat d'un appel d'outil demandé après ce message.
+pub const DEADLINE_REFUSAL: &str =
+    "[Claw] Not run: the time given to this session is over. The user can ask you to continue.";
+
 /// Résultat d'un appel d'outil demandé après ce message : il n'a pas tourné.
 #[must_use]
 pub fn turn_limit_refusal(limit: usize) -> String {
