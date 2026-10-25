@@ -375,6 +375,11 @@ passages suivants démarrent en moins d'une minute.
 
 ## Sécurité
 
+- **Réservée à son propriétaire.** La page est publique (GitHub Pages), mais l'appli ne sert
+  qu'aux comptes GitHub de `OWNERS` (début de `js/app.js`) : le jeton d'un autre compte est
+  refusé avant tout, sans code posé ni rien de gardé sur l'appareil, et un appareil où un autre
+  compte s'était installé est vidé à l'ouverture. Sans jeton du propriétaire, aucune session,
+  aucun dépôt, aucun secret n'est lisible : c'est GitHub qui les garde.
 - **Verrou de l'appli.** Dès qu'un jeton est gardé sur l'appareil, l'appli fait choisir un code
   (8 caractères au moins) et le demande à chaque ouverture et après 15 minutes en arrière-plan.
   Le jeton GitHub et la clé OpenRouter sont chiffrés par ce code (AES-GCM, clé tirée du code par

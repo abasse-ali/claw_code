@@ -62,6 +62,34 @@
     .slice(0, 24);
   const dead = [];
   const failing = [];
+  // Fenêtres ouvertes par un bouton dont les commandes ne se touchent pas : un
+  // fond (backdrop) posé par-dessus prend le doigt. Vu le 25 octobre 2026
+  // (session #31) : « Je conduis » ouvrait un formulaire sous un
+  // <form class="modal-backdrop"> ; toucher un champ fermait la fenêtre.
+  // `el.click()` passe outre : seul le point touché le dit.
+  const covered = [];
+  const coveredIn = (opener) => {
+    for (const box of document.querySelectorAll("dialog[open], [role=dialog], [aria-modal=true]")) {
+      if (!shown(box)) continue;
+      const blocked = [...box.querySelectorAll("button, input:not([type=hidden]), select, textarea, a[href]")]
+        .filter(shown)
+        .slice(0, 12)
+        .map((control) => {
+          const rect = control.getBoundingClientRect();
+          const x = rect.left + rect.width / 2;
+          const y = rect.top + rect.height / 2;
+          if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) return null;
+          const top = document.elementFromPoint(x, y);
+          if (!top || top === control || control.contains(top) || (top.control && top.control === control)) return null;
+          return { control, top };
+        })
+        .filter(Boolean);
+      if (blocked.length) {
+        covered.push(`${label(opener)} opens a window whose ${blocked.slice(0, 3).map((item) => label(item.control)).join(", ")} cannot be tapped: ${label(blocked[0].top)} lies over them`);
+        return;
+      }
+    }
+  };
   for (const el of controls) {
     if (!el.isConnected || !shown(el)) continue;
     let mutations = 0;
@@ -79,6 +107,7 @@
     if (!mutations && !moved && !focused && effects === before.effects && errors.length === before.errors) {
       dead.push(label(el));
     }
+    if (covered.length < 4) coveredIn(el);
     // Ce qui s'est ouvert se referme, pour que le bouton suivant soit libre.
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     for (const dialog of document.querySelectorAll("dialog[open]")) {
@@ -86,5 +115,5 @@
     }
     await wait(40);
   }
-  return { checked: controls.length, dead, failing };
+  return { checked: controls.length, dead, failing, covered };
 })()
