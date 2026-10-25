@@ -423,6 +423,33 @@
       }
     }
   }
+  // 9b. Texte d'une barre fixe ou collante qui n'y tient pas : coupé par le haut
+  // de l'écran, ou qui déborde sous la barre sur la page. Vu le 25 octobre 2026
+  // (site d'un club de foot, signalé deux fois par l'utilisateur) : le nom du
+  // club commençait 8 pixels au-dessus de l'écran et son sous-titre dépassait la
+  // barre de 8 pixels, sans aucune alerte. Un menu replié, entièrement hors de
+  // la barre, n'est pas compté.
+  const topBars = bars.concat(visible.filter((el) => css(el).position === "sticky" && box.get(el).top <= 1
+    && el.matches("header, nav, [role=banner]")));
+  for (const bar of topBars) {
+    const rb = box.get(bar);
+    const spilled = visible.filter((el) => bar.contains(el) && el !== bar
+      && [...el.childNodes].some((node) => node.nodeType === 3 && node.textContent.trim()))
+      .filter((el) => {
+        const r = box.get(el);
+        const inside = r.bottom > rb.top + 2 && r.top < rb.bottom - 2;
+        return inside && (r.top < Math.max(rb.top, 0) - 2 || r.bottom > rb.bottom + 2);
+      });
+    if (spilled.length) {
+      blame(spilled);
+      const cut = spilled.filter((el) => box.get(el).top < Math.max(rb.top, 0) - 2);
+      const over = spilled.filter((el) => box.get(el).bottom > rb.bottom + 2);
+      const parts = [];
+      if (cut.length) parts.push(`${list(cut.map(name), 3)} starts above the top of the screen and is cut`);
+      if (over.length) parts.push(`${list(over.map(name), 3)} runs past the bar's bottom edge, onto the page`);
+      problems.push(`The text of the fixed ${name(bar)} (${Math.round(rb.height)}px high) does not fit in it: ${parts.join("; ")}. Make the bar fit its content (height: auto with padding, or a min-height instead of a fixed height), shorten or hide the subtitle on phones, and keep the title on one line (white-space: nowrap; text-overflow: ellipsis)`);
+    }
+  }
   // Barre fixe en bas (navigation d'une appli) : défilée jusqu'au bout, la page
   // finit sous elle si rien ne la décale. Vu le 25 octobre 2026 (session #30) :
   // « Terminer la séance » restait sous la barre, aucune séance ne s'enregistrait.

@@ -2568,6 +2568,39 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn a_fixed_header_whose_text_does_not_fit_is_found_in_a_real_browser() {
+        // Site du club, session #31 : le nom du club coupé par le haut de l'écran
+        // et le sous-titre qui dépasse la barre fixe, signalés deux fois.
+        let cwd = std::env::current_dir().expect("dossier");
+        let problems = |name: &str, css: &str| {
+            let dir = cwd.join(format!("claw-header-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Club</title><style>body {{ margin: 0; padding-top: 120px; font-family: sans-serif; }} header {{ position: fixed; top: 0; left: 0; right: 0; background: #fff; padding: 0 16px; display: flex; align-items: center; }} .brand {{ display: flex; flex-direction: column; }} .title {{ font-size: 30px; line-height: 1.2; }} .subtitle {{ font-size: 14px; text-transform: uppercase; }} main {{ padding: 0 16px; }} {css}</style></head><body><header><div class=\"brand\"><span class=\"title\">FC Petit Quartier</span><span class=\"subtitle\">Le club de foot des petits du quartier, U9 et U11</span></div></header><main><h1>Prochain match</h1><p>Samedi à 10:00, au stade.</p></main></body></html>"),
+            )
+            .expect("html");
+            let page = format!("claw-header-{name}-{}/index.html", std::process::id());
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let broken = problems("casse", "header { height: 60px; }");
+        for expected in [
+            "does not fit in it",
+            "starts above the top of the screen",
+            "runs past the bar's bottom edge",
+        ] {
+            assert!(broken.contains(expected), "{expected}: {broken}");
+        }
+        let sound = problems("sain", "header { min-height: 60px; padding: 8px 16px; }");
+        assert!(!sound.contains("does not fit in it"), "{sound}");
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn past_sample_dates_of_the_page_scripts_are_found_in_a_real_browser() {
         // Session #31 reprise : `app.js`, jamais réécrit, aux matchs de 2025.
         let cwd = std::env::current_dir().expect("dossier");
