@@ -379,7 +379,10 @@ passages suivants démarrent en moins d'une minute.
   qu'aux comptes GitHub de `OWNERS` (début de `js/app.js`) : le jeton d'un autre compte est
   refusé avant tout, sans code posé ni rien de gardé sur l'appareil, et un appareil où un autre
   compte s'était installé est vidé à l'ouverture. Sans jeton du propriétaire, aucune session,
-  aucun dépôt, aucun secret n'est lisible : c'est GitHub qui les garde.
+  aucun dépôt, aucun secret n'est lisible : c'est GitHub qui les garde. Sur un appareil sans
+  verrou, seul l'écran de connexion s'affiche (jeton GitHub du propriétaire) : aucune page, pas
+  même une adresse comme `#/reglages`, ne se montre avant. Le code de la page reste public,
+  comme tout site GitHub Pages ; il ne contient aucun secret.
 - **Verrou de l'appli.** Dès qu'un jeton est gardé sur l'appareil, l'appli fait choisir un code
   (8 caractères au moins) et le demande à chaque ouverture et après 15 minutes en arrière-plan.
   Le jeton GitHub et la clé OpenRouter sont chiffrés par ce code (AES-GCM, clé tirée du code par
@@ -388,6 +391,12 @@ passages suivants démarrent en moins d'une minute.
   imposent une attente qui double (30 s, puis 1 min...). Réglages, groupe « Verrou » :
   verrouiller tout de suite, changer le code (l'actuel est demandé). Code oublié : « Effacer les
   clés de cet appareil » sur l'écran du verrou, puis recoller le jeton et choisir un nouveau code.
+- **Face ID.** Proposé juste après le choix du code, ou dans Réglages, groupe « Verrou ». Une clé
+  d'accès (passkey) de l'appareil, avec l'extension PRF de WebAuthn, libère après vérification
+  du visage un secret qui déchiffre le code du verrou : à l'ouverture, Face ID est demandé tout
+  de suite, et le code reste le secours. Il faut iOS 18 (Safari ou l'appli ajoutée à l'écran
+  d'accueil) et le trousseau iCloud ; ailleurs, Touch ID ou Windows Hello font de même. Changer
+  le code retire Face ID, à réactiver avec le nouveau.
 - Le jeton n'est jamais réaffiché dans les réglages (champ vide : il reste) ; « Effacer le jeton
   de cet appareil » le retire.
 - Les secrets partent chiffrés pour la clé publique du dépôt du moteur (sealed box de libsodium,

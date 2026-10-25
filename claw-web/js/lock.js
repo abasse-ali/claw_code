@@ -38,21 +38,122 @@ async function deriveKey(code, salt, iterations = ITERATIONS) {
     { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
 }
 
-/** Chiffre les clés avec la clé de l'appareil (gardée en mémoire seulement) et range le coffre. */
-export async function seal(key, salt, secrets, owner) {
+/** Chiffre les clés avec la clé de l'appareil (gardée en mémoire seulement) et range le coffre.
+ * Face ID reste branché (même code) ; `bio` à null le retire. */
+export async function seal(key, salt, secrets, owner, bio = (vault() || {}).bio || null) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, encoder.encode(JSON.stringify(secrets)));
-  localStorage.setItem(VAULT, JSON.stringify({ v: 1, iterations: ITERATIONS, salt: base64(salt), iv: base64(iv), data: base64(data), owner }));
+  const box = { v: 1, iterations: ITERATIONS, salt: base64(salt), iv: base64(iv), data: base64(data), owner };
+  if (bio) box.bio = bio;
+  localStorage.setItem(VAULT, JSON.stringify(box));
 }
 
-/** Pose le verrou : un code neuf, un sel neuf ; rend la clé à garder en mémoire. */
+/** Pose le verrou : un code neuf, un sel neuf ; rend la clé à garder en mémoire. Face ID, qui
+ * gardait l'ancien code, est retiré : il se réactive avec le nouveau. */
 export async function createVault(code, secrets, owner) {
   if (String(code).length < MIN_CODE) throw new Error(`Le code doit avoir au moins ${MIN_CODE} caractères.`);
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const key = await deriveKey(code, salt);
-  await seal(key, salt, secrets, owner);
+  await seal(key, salt, secrets, owner, null);
   clearTries();
   return { key, salt };
+}
+
+// --- Face ID (ou Touch ID, Windows Hello) -----------------------------------------------------
+// Une clé d'accès (passkey) de l'appareil, avec l'extension PRF de WebAuthn : la vérification du
+// visage libère un secret propre à cette clé, d'où se tire une clé AES qui chiffre le code du
+// verrou. Le code reste la clé du coffre, et le secours si Face ID échoue. Sans le visage (ni le
+// code de l'iPhone), le secret ne sort pas de l'appareil.
+
+const FACE_INFO = encoder.encode("claw-web face id v1");
+
+/** Face ID est-il là ? (L'extension PRF, elle, ne se sait qu'à l'activation.) */
+export async function faceAvailable() {
+  try {
+    return Boolean(window.PublicKeyCredential
+      && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable());
+  } catch {
+    return false;
+  }
+}
+
+export const faceEnabled = () => Boolean((vault() || {}).bio);
+
+async function faceKey(secret) {
+  const material = await crypto.subtle.importKey("raw", secret, "HKDF", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({ name: "HKDF", hash: "SHA-256", salt: new Uint8Array(32), info: FACE_INFO },
+    material, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+}
+
+const unsupported = () => new Error("Face ID n'est pas utilisable ici pour le verrou : il faut iOS 18 (ou un navigateur récent) et le trousseau iCloud. Le code reste demandé.");
+
+/** Le secret PRF de la clé `id` : demande le visage. */
+async function faceSecret(id, salt) {
+  const answer = await navigator.credentials.get({
+    publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      rpId: location.hostname,
+      allowCredentials: [{ type: "public-key", id }],
+      userVerification: "required",
+      timeout: 60_000,
+      extensions: { prf: { eval: { first: salt } } },
+    },
+  });
+  const secret = answer && answer.getClientExtensionResults().prf?.results?.first;
+  if (!secret) throw unsupported();
+  return secret;
+}
+
+/** Crée la clé d'accès de Claw sur cet appareil (premier appui). Rend de quoi finir l'activation :
+ * le secret tout de suite si l'appareil le donne à la création, sinon `finish` le demandera
+ * (second appui, une vérification du visage). */
+export async function createFaceKey(owner) {
+  const salt = crypto.getRandomValues(new Uint8Array(32));
+  const credential = await navigator.credentials.create({
+    publicKey: {
+      rp: { name: "Claw", id: location.hostname },
+      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: owner || "claw", displayName: `Claw (${owner || "verrou"})` },
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+      authenticatorSelection: { authenticatorAttachment: "platform", residentKey: "preferred", userVerification: "required" },
+      timeout: 60_000,
+      extensions: { prf: { eval: { first: salt } } },
+    },
+  });
+  const prf = credential && credential.getClientExtensionResults().prf;
+  if (!prf || prf.enabled === false) throw unsupported();
+  return { id: new Uint8Array(credential.rawId), salt, secret: prf.results?.first || null };
+}
+
+/** Finit l'activation : chiffre le code par le secret du visage et le range avec le coffre. */
+export async function enableFace(created, code) {
+  const box = vault();
+  if (!box) throw new Error("Aucun verrou sur cet appareil.");
+  const secret = created.secret || await faceSecret(created.id, created.salt);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await faceKey(secret), encoder.encode(code));
+  box.bio = { id: base64(created.id), salt: base64(created.salt), iv: base64(iv), data: base64(data) };
+  localStorage.setItem(VAULT, JSON.stringify(box));
+}
+
+/** Le code du verrou, rendu par Face ID. */
+export async function codeFromFace() {
+  const bio = (vault() || {}).bio;
+  if (!bio) throw new Error("Face ID n'est pas activé sur cet appareil.");
+  const secret = await faceSecret(bytes(bio.id), bytes(bio.salt));
+  try {
+    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: bytes(bio.iv) }, await faceKey(secret), bytes(bio.data));
+    return new TextDecoder().decode(plain);
+  } catch {
+    throw new Error("Face ID a répondu, mais ne rend pas le code : désactivez-le puis réactivez-le dans les réglages.");
+  }
+}
+
+export function disableFace() {
+  const box = vault();
+  if (!box || !box.bio) return;
+  delete box.bio;
+  localStorage.setItem(VAULT, JSON.stringify(box));
 }
 
 /** Ouvre le coffre avec le code : les clés, et la clé de l'appareil pour les rechiffrer. Un
