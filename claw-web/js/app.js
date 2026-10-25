@@ -1746,6 +1746,13 @@ function setAidMenu(open) {
 
 // --- Requêtes gratuites ------------------------------------------------------------------------
 
+/** La dernière minute de NVIDIA, en clair, d'après `used` requêtes de Claw. */
+function nvidiaMinute(used) {
+  return used
+    ? `Dernière minute : ${used} requête${used > 1 ? "s" : ""} de Claw, environ ${Math.max(0, 40 - used)} encore libres sur 40.`
+    : "Aucune requête de Claw dans la dernière minute : environ 40 libres.";
+}
+
 /** Compteur de la barre du haut : requêtes gratuites restantes / limite du jour, en vert,
  * orange ou rouge selon ce qu'il reste ; « Quota ? » sans clé gardée (le détail explique). */
 function showQuotaLabel() {
@@ -1768,7 +1775,12 @@ function showQuotaLabel() {
       + `<circle class="level" cx="10" cy="10" r="7.5" pathLength="100" stroke-dasharray="${Math.round(share * 100)} 100" transform="rotate(-90 10 10)"/></svg>`
       + `<strong>${left}</strong><small>/min</small>`;
     pill.setAttribute("aria-label", `NVIDIA : environ ${left} requêtes libres sur ${limit} dans la minute`);
-    if (used) state.meterTimer = setTimeout(showQuotaLabel, 5000);
+    // La fenêtre « Requêtes gratuites », ouverte, suit le même compte.
+    const line = document.querySelector("#sheet .nvidia-minute");
+    if (line) line.textContent = nvidiaMinute(used);
+    // Chaque seconde (demandé le 25 octobre 2026) : une requête sort de la minute glissante
+    // à la seconde près, et le compte remonte aussitôt.
+    if (used) state.meterTimer = setTimeout(showQuotaLabel, 1000);
     return;
   }
   if (provider !== "openrouter") {
@@ -1849,7 +1861,7 @@ async function openQuota() {
       gemini: `<p>Offre gratuite de Google : quota par jour et par modèle, compté par projet. Relevé : 20 requêtes par jour pour Gemini 3.8 Flash.</p>
         <p class="help">Google ne donne pas ce compte en direct : votre consommation est sur <a href="https://aistudio.google.com/rate-limit" target="_blank" rel="noopener noreferrer">AI Studio, Rate limit</a>. Remise à zéro à ${escapeHtml(nextMidnightIn("America/Los_Angeles"))} (minuit, heure du Pacifique). Chaque réponse de Claw dit combien de requêtes son passage a prises.</p>
         ${missing("gemini")}`,
-      nvidia: `<p>${nvidiaUsed ? `Dernière minute : ${nvidiaUsed} requête${nvidiaUsed > 1 ? "s" : ""} de Claw, environ ${Math.max(0, 40 - nvidiaUsed)} encore libres sur 40.` : "Aucune requête de Claw dans la dernière minute : environ 40 libres."}</p>
+      nvidia: `<p class="nvidia-minute">${escapeHtml(nvidiaMinute(nvidiaUsed))}</p>
         <p class="help">Compté d'après le journal des sessions en cours, publié toutes les 20 à 30 secondes. Gratuit pour les membres du programme pour développeurs de NVIDIA : environ 40 requêtes par minute pour le compte, aucun quota par jour annoncé. Quand la limite est atteinte, Claw attend et réessaie. Chaque réponse de Claw dit combien de requêtes son passage a prises.</p>
         ${missing("nvidia")}`,
     };
@@ -3378,7 +3390,10 @@ async function pollSession(force = false) {
 /** Heures des requêtes de chaque passage d'une session qui travaille avec un modèle de NVIDIA,
  * d'après son journal (événements « req » du moteur, une par réponse du modèle). */
 function noteRequests(session) {
-  if (providerOf(session.settings && session.settings.model) !== "nvidia") return;
+  // Une session sans modèle à elle (« model » vide) prend celui choisi dans l'appli : vu le
+  // 25 octobre 2026, ses requêtes n'étaient jamais comptées et le compteur restait à 40.
+  const model = (session.settings && session.settings.model) || state.settings.model;
+  if (providerOf(model) !== "nvidia") return;
   const byRun = new Map();
   for (const log of session.logs.values()) {
     const times = log.events.filter((event) => event.k === "req" && event.at).map((event) => event.at);
