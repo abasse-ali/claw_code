@@ -336,7 +336,7 @@
   }
   scrollTo(0, 0);
   const closeButton = (box) => [...box.querySelectorAll("button, [role=button], a[href]")].filter(shown)
-    .find((el) => /^(fermer|close|annuler|cancel|retour|x|×|✕|✖)$/i.test((el.innerText || "").trim())
+    .find((el) => /^(fermer|close|annuler|cancel|retour|x|\u00d7|\u2715|\u2716)$/i.test((el.innerText || "").trim())
       || /fermer|close|annuler|cancel/i.test(el.getAttribute("aria-label") || el.getAttribute("title") || ""));
   for (const el of controls) {
     if (!el.isConnected) continue;
