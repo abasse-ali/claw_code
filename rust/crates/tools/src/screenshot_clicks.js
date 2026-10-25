@@ -136,14 +136,15 @@
       if (url.origin !== location.origin && url.protocol !== "file:") continue;
       const page = `${url.origin === "null" ? "file://" : url.origin}${url.pathname}`;
       if (page === here.split("?")[0] || pages.has(page)) continue;
-      pages.set(page, label(link));
+      // `/tarifs.html` vise la racine du site, que Claw situe dans le projet.
+      pages.set(page, { from: label(link), root: /^\/(?!\/)/.test(href) ? href.split(/[?#]/)[0] : null });
     }
   }
   // Les pages du site : un serveur les sert ; une page ouverte en fichier
   // laisse Claw verifier le disque.
   const files = [];
-  for (const [page, from] of [...pages].slice(0, 15)) {
-    if (page.startsWith("file:")) { files.push({ url: page, from }); continue; }
+  for (const [page, { from, root }] of [...pages].slice(0, 15)) {
+    if (page.startsWith("file:")) { files.push({ url: page, from, root, page: here }); continue; }
     try {
       const stop = new AbortController();
       const timer = setTimeout(() => stop.abort(), 3000);
@@ -157,7 +158,9 @@
   const forms = [];
   const kept = [];
   const tested = new Set();
-  const marker = `Camille Claw${Math.floor(1000 + Math.random() * 9000)}`;
+  // Un nom par formulaire : au rechargement, on sait lequel a perdu son ajout.
+  const base = `Camille Claw${Math.floor(1000 + Math.random() * 9000)}`;
+  let marker = base;
   const day = (offset) => {
     const date = new Date(Date.now() + offset * 86400000);
     return date.toISOString().slice(0, 10);
@@ -219,10 +222,11 @@
       if (field instanceof HTMLSelectElement) {
         const option = [...field.options].find((item) => !item.disabled && item.value !== "");
         if (option && !field.value) setValue(field, option.value);
-      } else if (!field.value) {
+      } else {
         const value = plausible(field, named);
         if (value === marker) named = true;
-        if (value) setValue(field, value);
+        // Le nom d'un formulaire precedent, garde par la page, est remplace.
+        if (value && (!field.value || value === marker)) setValue(field, value);
       }
       // Un motif (pattern) que le navigateur ne lit pas lève une erreur ici.
       let valid = true;
@@ -246,6 +250,7 @@
     if (form.getAttribute("method") === "dialog" || !form.querySelector("input, select, textarea")) return;
     const action = (form.getAttribute("action") || "").trim();
     const name = formName(form);
+    marker = `${base}${String.fromCharCode(65 + tested.size)}`;
     const refused = fill(form);
     if (refused.length) {
       forms.push(`${name} refuses plausible entries: ${refused.slice(0, 3).join("; ")}`);
@@ -282,7 +287,14 @@
       forms.push(`sending ${name} shows nothing: no confirmation, no error, no change in the page`);
       return;
     }
-    const added = document.body.innerText.includes(marker);
+    // Ajoute a la page, hors du message passager (toast) qui le remercie.
+    const passing = "[role=status], [role=alert], [aria-live], .toast, .snackbar, .notification, output";
+    const texts = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let added = false;
+    for (let node = texts.nextNode(); node && !added; node = texts.nextNode()) {
+      const holder = node.parentElement;
+      added = node.nodeValue.includes(marker) && holder && !holder.closest(passing) && shown(holder);
+    }
     if (added) kept.push({ form: name, marker });
   };
 
