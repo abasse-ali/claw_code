@@ -2437,7 +2437,12 @@ pub fn todos_left(output: &str) -> bool {
 // --- Liste de tâches laissée ouverte -----------------------------------------------------
 
 /// Renvois au plus par tour pour une liste de tâches laissée ouverte.
-pub const MAX_OPEN_TASK_ROUNDS: u32 = 2;
+pub const MAX_OPEN_TASK_ROUNDS: u32 = 4;
+
+/// Requêtes ajoutées au tour, par palier, quand la limite tombe sur une liste
+/// de tâches pas finie dont le travail avance ; paliers au plus par tour.
+pub const TASK_EXTENSION_REQUESTS: usize = 40;
+pub const MAX_TASK_EXTENSIONS: u32 = 3;
 
 /// Tâches pas finies de la liste que ce résultat de `TodoWrite` enregistre,
 /// (état, texte) dans l'ordre de la liste ; `None` si le résultat ne porte
