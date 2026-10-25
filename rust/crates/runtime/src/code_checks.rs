@@ -379,20 +379,21 @@ pub fn past_dates(text: &str, today: &str) -> Vec<String> {
         let bytes = line.as_bytes();
         let mut start = 0;
         while start + 10 <= bytes.len() {
-            let candidate = &line[start..start + 10];
-            let shaped = candidate
-                .bytes()
+            // Les octets d'abord : dix octets peuvent finir au milieu d'un
+            // caractère (« • », un accent), que la tranche du texte refuserait.
+            let shaped = bytes[start..start + 10]
+                .iter()
                 .enumerate()
                 .all(|(position, byte)| match position {
-                    4 | 7 => byte == b'-',
+                    4 | 7 => *byte == b'-',
                     _ => byte.is_ascii_digit(),
                 });
             let bounded = (start == 0 || !bytes[start - 1].is_ascii_alphanumeric())
                 && bytes
                     .get(start + 10)
                     .is_none_or(|byte| !byte.is_ascii_digit());
-            if shaped && bounded && candidate.starts_with("20") {
-                dates.push((index + 1, candidate));
+            if shaped && bounded && bytes[start..].starts_with(b"20") {
+                dates.push((index + 1, &line[start..start + 10]));
                 start += 10;
             } else {
                 start += line[start..].chars().next().map_or(1, char::len_utf8);
@@ -896,6 +897,15 @@ mod tests {
         );
         assert!(
             super::past_dates("créé le 2025-01-02, revu le 2025-03-04", "2026-10-25").is_empty()
+        );
+        // Session #31 relancée : un « • » coupé en deux faisait tomber Claw.
+        assert_eq!(
+            super::past_dates(
+                "<p>U11 • 2025-10-14 • 2025-10-21 • 2025-11-04 é</p>\nabcdefghi• Équipe",
+                "2026-10-25"
+            )
+            .len(),
+            1
         );
         assert!(super::past_dates(
             "v12025-10-14 x2025-10-21 2025-10-210 2025-10-1",
