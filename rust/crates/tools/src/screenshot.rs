@@ -1982,6 +1982,37 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn a_bottom_bar_over_the_end_of_the_page_is_found_in_a_real_browser() {
+        // Session #30 du 25 octobre 2026 : « Terminer la séance » sous la
+        // navigation fixée en bas, jamais touchable, même défilé jusqu'au bout.
+        let cwd = std::env::current_dir().expect("dossier");
+        let problems = |name: &str, padding: &str| {
+            let dir = cwd.join(format!("claw-foot-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Séance</title><style>body {{ margin: 0; font-family: sans-serif; {padding} }} main {{ min-height: 120vh; }} nav {{ position: fixed; left: 0; right: 0; bottom: 0; height: 72px; background: #111; color: #fff; }}</style></head><body><main><h1>Nouvelle séance</h1></main><button>Terminer la séance</button><nav>Séance Historique</nav></body></html>"),
+            )
+            .expect("html");
+            let page = format!("claw-foot-{name}-{}/index.html", std::process::id());
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let covered = problems("couvert", "");
+        assert!(
+            covered.contains("covers the end of the page")
+                && covered.contains("Terminer la séance"),
+            "{covered}"
+        );
+        let room = problems("place", "padding-bottom: 80px;");
+        assert!(!room.contains("covers the end of the page"), "{room}");
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn buttons_icons_and_reveals_are_tried_in_a_real_browser() {
         let cwd = std::env::current_dir().expect("dossier");
         let dir = cwd.join(format!("claw-clicks-{}", std::process::id()));

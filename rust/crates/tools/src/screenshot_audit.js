@@ -331,6 +331,23 @@
       }
     }
   }
+  // Barre fixe en bas (navigation d'une appli) : défilée jusqu'au bout, la page
+  // finit sous elle si rien ne la décale. Vu le 25 octobre 2026 (session #30) :
+  // « Terminer la séance » restait sous la barre, aucune séance ne s'enregistrait.
+  const end = document.documentElement.scrollHeight;
+  const footBars = visible.filter((el) => css(el).position === "fixed" && box.get(el).bottom >= window.innerHeight - 1
+    && box.get(el).top > window.innerHeight * 0.5 && box.get(el).width >= W * 0.6)
+    .filter((el, _, all) => !all.some((other) => other !== el && other.contains(el)));
+  for (const bar of footBars) {
+    const height = box.get(bar).height;
+    const hidden = visible.filter((el) => !pinned(el) && !bar.contains(el)
+      && el.matches("h1, h2, h3, p, a, button, input, select, textarea, label")
+      && box.get(el).bottom + window.scrollY > end - height + 2);
+    if (hidden.length) {
+      blame([bar]);
+      problems.push(`The fixed ${name(bar)} (${Math.round(height)}px high) at the bottom of the screen covers the end of the page even when scrolled all the way down: ${list(hidden.map(name), 3)} can never be seen or tapped. Leave room for it (padding-bottom on the body or the main content, at least its height plus env(safe-area-inset-bottom))`);
+    }
+  }
   if (mobile) {
     const tall = bars.concat(visible.filter((el) => css(el).position === "sticky" && el.matches("header, nav, [role=banner]")))
       .find((el) => box.get(el).height > window.innerHeight * 0.25);
