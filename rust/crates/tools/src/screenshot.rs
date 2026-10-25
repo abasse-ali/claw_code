@@ -1513,6 +1513,11 @@ fn click_problems(devtools: &mut DevTools) -> Vec<String> {
             "clicking {failure} (an error in the page's script)"
         ));
     }
+    for window in strings(&result["covered"]).iter().take(4) {
+        problems.push(format!(
+            "{window}, and takes every tap (a tap there closes the window or does nothing): put the backdrop behind the window's content (the dialog's ::backdrop, or a lower z-index), or give it pointer-events: none"
+        ));
+    }
     problems
 }
 
@@ -1978,6 +1983,38 @@ mod tests {
                 && problems.contains("(CSS rules: styles.css:5 .wide; styles.css:2 .row)"),
             "{problems}"
         );
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn a_window_whose_backdrop_takes_the_taps_is_found_in_a_real_browser() {
+        // Session #31 du 25 octobre 2026 : le formulaire « Je conduis » sous
+        // un <form class="modal-backdrop"> posé par-dessus, dans la fenêtre.
+        let cwd = std::env::current_dir().expect("dossier");
+        let problems = |name: &str, backdrop: &str| {
+            let dir = cwd.join(format!("claw-sheet-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Club</title><style>body {{ font-family: sans-serif; }} dialog {{ padding: 20px; }} .modal-backdrop {{ position: fixed; inset: 0; {backdrop} }}</style></head><body><main><h1>Club</h1><button id=\"drive\" onclick=\"document.getElementById('sheet').showModal()\">Je conduis</button></main><dialog id=\"sheet\"><form id=\"form\"><label for=\"nom\">Ton nom</label><input id=\"nom\" name=\"nom\"><button type=\"submit\">Confirmer</button></form><form method=\"dialog\" class=\"modal-backdrop\"></form></dialog></body></html>"),
+            )
+            .expect("html");
+            let page = format!("claw-sheet-{name}-{}/index.html", std::process::id());
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let covered = problems("couvert", "");
+        assert!(
+            covered.contains("button#drive \\\"Je conduis\\\" opens a window whose")
+                && covered.contains("cannot be tapped")
+                && covered.contains("form.modal-backdrop"),
+            "{covered}"
+        );
+        let behind = problems("derriere", "z-index: -1;");
+        assert!(!behind.contains("cannot be tapped"), "{behind}");
     }
 
     #[test]
