@@ -9863,6 +9863,10 @@ impl ApiClient for DefaultRuntimeClient {
     /// Images de la demande décrites dès le début du tour, pour un modèle qui
     /// ne les lit pas (elles l'auraient été à la première requête) : le
     /// défaut qu'elles montrent décide de la méthode jointe à la demande.
+    fn reads_images(&mut self) -> bool {
+        !image_reader::model_cannot_read_images(self.chain.primary())
+    }
+
     fn image_defects(
         &mut self,
         images: &[runtime::attachments::ImageAttachment],

@@ -690,6 +690,17 @@ pub fn screenshot_input(target: &str) -> String {
     input.to_string()
 }
 
+/// Entrée de `Screenshot` pour la vérification qui suit chaque modification :
+/// le téléphone seul, page entière, sans les fenêtres (le parcours les ouvre
+/// quand même). Quelques secondes, au lieu de la revue complète.
+#[must_use]
+pub fn quick_screenshot_input(target: &str) -> String {
+    let mut input: Value = serde_json::from_str(&screenshot_input(target)).unwrap_or_default();
+    input["viewports"] = json!(["phone"]);
+    input["windows"] = json!(false);
+    input.to_string()
+}
+
 /// Ce que l'outil `Screenshot` a mesuré, toutes tailles d'écran confondues.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Audit {
@@ -1074,15 +1085,80 @@ pub fn measured_list(audit: &Audit, broken: &[String]) -> Option<String> {
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
-/// Message au modèle qui modifie l'interface depuis un moment sans la
-/// regarder : ce que Claw vient d'y mesurer. `None` si rien n'est à reprendre.
+/// Ce qu'une modification a changé sur la page : défauts apparus depuis la
+/// vérification précédente (`before`, `None` pour la première), défauts
+/// disparus, et ceux qui restent.
 #[must_use]
-pub fn blind_edits_feedback(target: &str, edits: u32, measured: Option<&str>) -> Option<String> {
-    let measured = measured?;
+pub fn check_delta(before: Option<&[String]>, audit: &Audit) -> (Vec<String>, usize, Vec<String>) {
+    let keys = |list: &[String]| {
+        list.iter()
+            .map(|problem| problem_key(problem))
+            .collect::<Vec<_>>()
+    };
+    let now: Vec<String> = audit
+        .problems
+        .iter()
+        .chain(&audit.console)
+        .cloned()
+        .collect();
+    let Some(before) = before else {
+        return (Vec::new(), 0, now);
+    };
+    let (old, current) = (keys(before), keys(&now));
+    let fixed = old.iter().filter(|key| !current.contains(key)).count();
+    let (new, open): (Vec<String>, Vec<String>) = now
+        .into_iter()
+        .partition(|problem| !old.contains(&problem_key(problem)));
+    (new, fixed, open)
+}
+
+/// Message au modèle après la vérification de la page qui suit sa
+/// modification de l'interface : ce qu'elle a cassé, réparé, ce qui reste.
+#[must_use]
+pub fn visual_check_feedback(
+    target: &str,
+    new: &[String],
+    fixed: usize,
+    open: &[String],
+    with_image: bool,
+) -> String {
     let page = target.split_once(':').map_or(target, |(_, page)| page);
-    Some(format!(
-        "[Claw] You changed the interface {edits} times without looking at the page. Claw measured {page} now, at phone and desktop sizes, tapping every button and sending every form (measurements only, no screenshots):\n{measured}\nFix these before changing anything else. From now on, check with Screenshot after each small batch of interface changes: it returns these measurements, and guessing from the code is how this turn broke what worked."
-    ))
+    let mut text = format!(
+        "[Claw] Claw looked at {page} after your change, rendered in a phone browser (full page, every button tapped, every form sent){}.",
+        if with_image { "; the capture is attached" } else { "" }
+    );
+    if new.is_empty() && open.is_empty() {
+        text.push_str(" Nothing measured wrong.");
+        return text;
+    }
+    if !new.is_empty() {
+        text.push_str("\nBroken by your last change (it was fine before it), fix it first:\n");
+        text.push_str(
+            &new.iter()
+                .map(|problem| format!("- {problem}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    if fixed > 0 {
+        let _ = write!(text, "\nYour last change fixed {fixed} problem(s).");
+    }
+    if !open.is_empty() {
+        let more = open.len().saturating_sub(8);
+        text.push_str("\nStill wrong on the page:\n");
+        text.push_str(
+            &open
+                .iter()
+                .take(8)
+                .map(|problem| format!("- {problem}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        if more > 0 {
+            let _ = write!(text, "\n- and {more} more");
+        }
+    }
+    text
 }
 
 /// Message au modèle après la revue ; `None` quand il n'y a rien à corriger.
