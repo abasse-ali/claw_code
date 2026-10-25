@@ -17,7 +17,15 @@
     const style = getComputedStyle(holder);
     if (style.display === "none" || style.visibility === "hidden" || holder.querySelector(passing)) continue;
     const text = (holder.innerText || "").replace(/\s+/g, " ").trim();
-    if (text && text.length <= 200) blocks.add(text);
+    if (!text || text.length > 200) continue;
+    // Le meme texte sur deux cartes (« Il reste 4 places ») : la carte le
+    // situe. Vu le 25 octobre 2026 (session #31) : une carte passait de 5 a
+    // 4 places, une autre affichait deja « Il reste 4 places », et l'ajout
+    // passait inapercu.
+    const card = holder.parentElement && holder.parentElement.closest("li, article, tr, [role=listitem], [class*=card], [class*=item]");
+    const head = card && card !== holder && !card.contains(document.querySelector("main"))
+      ? (card.innerText || "").replace(/\s+/g, " ").trim().slice(0, 50) : "";
+    blocks.add(head && head !== text && !head.startsWith(text) ? `${text} (in "${head}")` : text);
   }
   return [...blocks];
 })()

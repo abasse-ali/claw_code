@@ -88,12 +88,41 @@
     return top;
   };
 
+  // Toucher une commande comme un doigt : au centre de ce qui est dessine la, le
+  // plus souvent l'icone ou le texte qu'elle contient. `el.click()` vise la
+  // commande elle-meme et passe a cote des gestionnaires qui lisent
+  // `event.target`. Vu le 25 octobre 2026 (session #31) : la croix d'une
+  // fenetre ne la fermait que si `event.target` etait le bouton ; le doigt
+  // touchait son icone, la fenetre restait ouverte, et le parcours disait
+  // que tout marchait.
+  const tap = (el) => {
+    let rect = el.getBoundingClientRect();
+    if (rect.top < 0 || rect.bottom > innerHeight || rect.left < 0 || rect.right > innerWidth) {
+      el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      rect = el.getBoundingClientRect();
+    }
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    const point = x >= 0 && y >= 0 && x <= innerWidth && y <= innerHeight ? document.elementFromPoint(x, y) : null;
+    if (!point || (point !== el && !el.contains(point))) {
+      el.click();
+      return;
+    }
+    const at = { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button: 0 };
+    point.dispatchEvent(new PointerEvent("pointerdown", { ...at, pointerType: "touch", isPrimary: true }));
+    point.dispatchEvent(new MouseEvent("mousedown", at));
+    point.dispatchEvent(new PointerEvent("pointerup", { ...at, pointerType: "touch", isPrimary: true }));
+    point.dispatchEvent(new MouseEvent("mouseup", at));
+    point.dispatchEvent(new MouseEvent("click", { ...at, detail: 1 }));
+  };
+
   // Textes durables de la page (screenshot_snapshot.js, donne par Claw avant ce
   // script) : ceux qu'un formulaire fait apparaitre doivent revenir au rechargement.
   const snapshot = () => (typeof clawSnapshot === "function" ? clawSnapshot() : []);
 
   // --- Liens -----------------------------------------------------------------
   const links = [];
+  const anchors = new Map();
   const pages = new Map();
   const here = location.href.split("#")[0];
   for (const link of [...document.querySelectorAll("a[href]")].slice(0, 120)) {
@@ -105,7 +134,7 @@
       try { id = decodeURIComponent(id); } catch (_) { /* laisse tel quel */ }
       if (!document.getElementById(id) && !document.getElementsByName(id).length) {
         links.push(`${label(link)} points to #${id}, but the page has no element with that id`);
-      }
+      } else if (document.getElementById(id) && !anchors.has(id)) anchors.set(id, link);
     } else if (/^tel:/i.test(href)) {
       const number = href.slice(4).replace(/[\s.()-]/g, "");
       if (!/^\+?\d{6,15}$/.test(number) || /^\+?(\d)\1+$/.test(number)) {
@@ -144,6 +173,35 @@
       pages.set(page, { from: label(link), root: /^\/(?!\/)/.test(href) ? href.split(/[?#]/)[0] : null });
     }
   }
+  // Une section ouverte par son lien arrive sous la barre fixe du haut : son
+  // titre est cache. Vu le 25 octobre 2026 (session #31) : le menu menait a
+  // « Covoiturage », dont le titre passait 17px sous l'en-tete ; la page
+  // prevoyait 64px pour un en-tete de 77px. scrollIntoView suit
+  // scroll-padding-top et scroll-margin-top, comme le navigateur sur un lien.
+  const bar = () => [...document.querySelectorAll("body *")].find((el) => {
+    const style = getComputedStyle(el);
+    if (!["fixed", "sticky"].includes(style.position) || !shown(el)) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.top <= 1 && rect.width >= innerWidth * 0.6 && rect.height < innerHeight / 2;
+  });
+  const hidden = [];
+  for (const [id, link] of [...anchors].slice(0, 6)) {
+    const target = document.getElementById(id);
+    if (!shown(target)) continue;
+    target.scrollIntoView({ block: "start", behavior: "instant" });
+    await wait(60);
+    const top = bar();
+    if (!top || top.contains(target)) continue;
+    const heading = target.matches("h1, h2, h3, h4") ? target : target.querySelector("h1, h2, h3, h4") || target;
+    const under = top.getBoundingClientRect().bottom - heading.getBoundingClientRect().top;
+    // Une section en haut de page ne peut pas descendre plus bas : rien a dire.
+    if (under > 2 && scrollY > 2) hidden.push(`${label(link)} -> #${id}: ${label(heading)} ends up ${Math.round(under)}px under ${label(top)}`);
+  }
+  scrollTo({ top: 0, left: 0, behavior: "instant" });
+  const underBar = hidden.length
+    ? [`Links to sections land with the section's title hidden under the fixed bar at the top: ${hidden.slice(0, 3).join("; ")}. Set scroll-margin-top on the sections (or scroll-padding-top on html) to the bar's real height`]
+    : [];
+
   // Les pages du site : un serveur les sert ; une page ouverte en fichier
   // laisse Claw verifier le disque.
   const files = [];
@@ -161,6 +219,8 @@
   // --- Formulaires -----------------------------------------------------------
   const forms = [];
   const kept = [];
+  // Envois qui changent un compteur sans montrer le nom donne.
+  const unnamed = [];
   const tested = new Set();
   // Un nom par formulaire : au rechargement, on sait lequel a perdu son ajout.
   const base = `Camille Claw${Math.floor(1000 + Math.random() * 9000)}`;
@@ -276,7 +336,7 @@
       if (send && shown(send)) {
         const top = onTop(send);
         if (top) forms.push(`${name}: its ${label(send)} cannot be tapped, ${label(top)} lies over it`);
-        send.click();
+        tap(send);
       } else form.requestSubmit();
     } catch (error) { errors.push(String((error && error.message) || error)); }
     await wait(600);
@@ -310,6 +370,14 @@
     // Ou la page a change (un compteur, une liste) sans montrer le nom : les
     // textes apparus a l'envoi.
     const appeared = personal ? snapshot().filter((text) => !prior.has(text)).slice(0, 8) : [];
+    // Un compteur a bouge (« Il reste 2 places ») mais le nom donne n'est
+    // nulle part : on ne sait pas qui s'est inscrit. Vu le 25 octobre 2026
+    // (session #31) : « Je conduis » enlevait des places, aucun parent ne
+    // voyait qui conduisait.
+    const counted = appeared.find((text) => /\d/.test(text));
+    if (personal && !added && counted) {
+      unnamed.push(`Sending ${name} changes the page ("${counted.slice(0, 90)}") but the name typed in it ("${marker}") is shown nowhere, only in a passing message at best: people cannot see who signed up or who offered. Show each new entry with its name where it belongs (in the card or list it changed), and keep it after a reload`);
+    }
     if (added || appeared.length) kept.push({ form: name, marker, shown: added, appeared });
   };
 
@@ -383,10 +451,14 @@
   for (const el of controls) {
     if (!el.isConnected) continue;
     if (!shown(el)) continue;
+    // A l'ecran avant la mesure : le defilement du toucher ne compte pas comme
+    // un effet du bouton.
+    el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+    await wait(40);
     const opened = new Set(windows());
     const seen = watch();
     const before = { url: location.href, x: scrollX, y: scrollY, effects, scrolled, errors: errors.length, focus: document.activeElement };
-    try { el.click(); } catch (error) { errors.push(String((error && error.message) || error)); }
+    try { tap(el); } catch (error) { errors.push(String((error && error.message) || error)); }
     await wait(300);
     seen.stop();
     if (errors.length > before.errors) failing.push(`${label(el)}: ${errors[errors.length - 1]}`);
@@ -435,7 +507,7 @@
       }
       const close = closeButton(box);
       if (close) {
-        close.click();
+        tap(close);
         await wait(300);
         if (box.isConnected && shown(box) && stuck.length < 3) stuck.push(`${label(el)} opens a window that ${label(close)} does not close`);
       }
@@ -447,5 +519,5 @@
     }
     await wait(40);
   }
-  return { checked: controls.length, dead, failing, covered, buried, stuck, links, files, forms, kept, openers, dragged };
+  return { checked: controls.length, dead, failing, covered, buried, stuck, links, files, forms, unnamed, underBar, kept, openers, dragged };
 })()

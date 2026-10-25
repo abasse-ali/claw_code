@@ -180,9 +180,12 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@stable
 
+      # Dossier de compilation gardé d'un passage à l'autre sur la machine des sessions (le
+      # serveur garde son disque) : après une fusion, seuls les crates changés se recompilent.
+      # Vu le 25 octobre 2026 : 5 minutes de compilation complète à chaque passage.
       - name: Compiler Claw
         if: steps.cache.outputs.cache-hit != 'true'
-        run: cargo install --path claw-src/rust/crates/claw-cli --locked --root ~/.claw-bin
+        run: cargo install --path claw-src/rust/crates/claw-cli --locked --root ~/.claw-bin --target-dir ~/.claw-target
 
       - name: Garder le binaire de Claw
         if: steps.cache.outputs.cache-hit != 'true'

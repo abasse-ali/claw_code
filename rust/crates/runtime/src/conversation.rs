@@ -378,6 +378,14 @@ struct TurnAids {
     interface_dirty: bool,
     /// Revues visuelles faites pendant ce tour.
     interface_rounds: usize,
+    /// Modifications de l'interface depuis le dernier regard sur la page (une
+    /// capture du modèle, une revue, une mesure de Claw).
+    blind_edits: u32,
+    /// Mesures faites par Claw pendant ce tour parce que le modèle modifiait
+    /// l'interface sans la regarder.
+    blind_measures: u32,
+    /// Une réponse « vérifié » sans regard sur la page a déjà été renvoyée.
+    claim_checked: bool,
     /// Fichiers d'interface changés par une commande, déjà revus.
     interface_commands: std::collections::BTreeSet<String>,
     /// La méthode de design est jointe à la demande de ce tour.
@@ -1721,6 +1729,29 @@ where
         if let Some(text) = guide {
             user_message.blocks.push(ContentBlock::Text { text });
         }
+        // Liste de tâches d'un tour précédent restée ouverte : la liste de ce
+        // tour se refait à partir du nouveau message. Une relance courte
+        // (« continue ») poursuit l'ancienne liste : rien à dire.
+        if !self.subagent && earlier.is_none() && harness::enabled(Aid::OpenTasks) {
+            let earlier_open = self
+                .session
+                .messages
+                .iter()
+                .rev()
+                .flat_map(|message| message.blocks.iter().rev())
+                .find_map(|block| match block {
+                    ContentBlock::ToolUse { name, input, .. } if name == "TodoWrite" => {
+                        Some(harness::open_tasks_in_input(input))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default();
+            if !earlier_open.is_empty() {
+                user_message.blocks.push(ContentBlock::Text {
+                    text: harness::fresh_tasks_note(&earlier_open),
+                });
+            }
+        }
         // Question d'information (« comment marche le formulaire ? ») : la
         // réponse est le travail du tour. Ni méthode de travail, ni mode
         // projet, ni Ultracode, et les fichiers restent tels quels. Vu le
@@ -1899,6 +1930,7 @@ where
                 if aids.project.is_some() {
                     note.push_str(project::WRAP_UP_NOTE);
                 }
+                note.push_str(&self.wrap_up_measure(&mut aids, &mut prompter));
                 note.push_str(&harness::language_note(self.response_language.as_deref()));
                 self.session
                     .messages
@@ -1938,6 +1970,7 @@ where
                 if aids.project.is_some() {
                     note.push_str(project::WRAP_UP_NOTE);
                 }
+                note.push_str(&self.wrap_up_measure(&mut aids, &mut prompter));
                 note.push_str(&harness::language_note(self.response_language.as_deref()));
                 self.session
                     .messages
@@ -1964,6 +1997,15 @@ where
                 if let Some(feedback) =
                     self.interface_gate(&mut aids, &request_text, earlier.as_deref(), &mut prompter)
                 {
+                    self.session
+                        .messages
+                        .push(ConversationMessage::user_text(feedback));
+                }
+            }
+            // L'interface change depuis un moment sans regard sur la page :
+            // Claw la mesure avant la requête suivante.
+            if !wrapping_up {
+                if let Some(feedback) = self.blind_edits_check(&mut aids, &mut prompter) {
                     self.session
                         .messages
                         .push(ConversationMessage::user_text(feedback));
@@ -2197,6 +2239,7 @@ where
                             &mut prompter,
                         )
                     })
+                    .or_else(|| self.unchecked_claim_gate(&mut aids, &answer, &mut prompter))
                     .or_else(|| {
                         self.workflow_gate(
                             &mut aids,
@@ -2604,6 +2647,7 @@ where
             if let Some(target) = crate::web_design::page_target(input) {
                 self.page_target = Some(target);
             }
+            aids.blind_edits = 0;
         }
         // Issue d'une commande du modèle : celle de `bash`, ou la fin, lue avec
         // `BashOutput`, d'une commande passée en arrière-plan pendant ce tour.
@@ -2852,6 +2896,7 @@ where
         if json_field(input, "path").is_some_and(|path| crate::web_design::is_interface_file(&path))
         {
             aids.interface_dirty = true;
+            aids.blind_edits += 1;
         }
         aids.feedback_pending = false;
         aids.verified_commands.clear();
@@ -3532,6 +3577,141 @@ where
         ));
     }
 
+    /// Mesure de la page par Claw, sans juge ni captures pour le modèle : la
+    /// page et la liste de ce qui est à reprendre (régressions du tour en
+    /// tête), `None` dans la liste si rien ne l'est. Le compte des
+    /// modifications à l'aveugle repart de zéro.
+    fn measure_now(
+        &mut self,
+        aids: &mut TurnAids,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> Option<(String, Option<String>)> {
+        if self.subagent || interrupt_requested() || !harness::enabled(Aid::DesignReview) {
+            return None;
+        }
+        let target = self.page_to_review(aids)?;
+        let cwd = std::env::current_dir().ok()?;
+        if !crate::web_design::missing_local_assets(&cwd, &target).is_empty() {
+            return None;
+        }
+        let input = crate::web_design::screenshot_input(&target);
+        self.tool_executor.announce("Screenshot", &input);
+        let (message, _) = self.execute_tool_call(
+            format!("claw-measure-{}", aids.blind_measures + 1),
+            "Screenshot".to_string(),
+            &input,
+            prompter
+                .as_mut()
+                .map(|prompt| &mut **prompt as &mut dyn PermissionPrompter),
+        );
+        // Mesures seulement : les captures ne vont ni au modèle ni au juge.
+        drop(std::mem::take(&mut self.tool_images));
+        let (output, is_error) = tool_result_parts(&message)?;
+        if is_error {
+            return None;
+        }
+        aids.blind_edits = 0;
+        let audit = crate::web_design::read_audit(output);
+        let broken = aids.baseline.as_ref().map_or_else(Vec::new, |baseline| {
+            crate::web_design::regressions(baseline, &audit)
+        });
+        Some((target, crate::web_design::measured_list(&audit, &broken)))
+    }
+
+    /// Le modèle modifie l'interface depuis un moment sans la regarder : Claw
+    /// la mesure et lui rend ce qui ne va pas, avant qu'il ne continue.
+    fn blind_edits_check(
+        &mut self,
+        aids: &mut TurnAids,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> Option<String> {
+        if aids.blind_edits < harness::BLIND_EDIT_LIMIT
+            || aids.blind_measures >= harness::MAX_BLIND_MEASURES
+        {
+            return None;
+        }
+        // Rien à mesurer (pas de page HTML) : on n'en reparle pas à chaque
+        // modification.
+        if self.page_to_review(aids).is_none() {
+            return None;
+        }
+        let edits = aids.blind_edits;
+        aids.blind_measures += 1;
+        self.api_client.notify(&format!(
+            "Claw mesure la page : {edits} modifications de l'interface sans la regarder"
+        ));
+        let Some((target, measured)) = self.measure_now(aids, prompter) else {
+            // La page ne s'ouvre pas en fichier (une appli qui veut son
+            // serveur) : pas d'autre essai pendant ce tour.
+            aids.blind_measures = harness::MAX_BLIND_MEASURES;
+            return None;
+        };
+        let count = measured.as_deref().map_or(0, |list| list.lines().count());
+        self.api_client.notify(&format!(
+            "Mesure de la page : {count} défaut(s) à reprendre{}",
+            if count == 0 {
+                ", rien de cassé"
+            } else {
+                " : renvoyé(s) à l'agent"
+            }
+        ));
+        crate::web_design::blind_edits_feedback(&target, edits, measured.as_deref())
+    }
+
+    /// Le tour se termine (limite de requêtes ou de temps) après des
+    /// modifications de l'interface que rien n'a regardées : Claw mesure la
+    /// page, et la conclusion dit ce qui reste au lieu de le croire réglé. Vu
+    /// le 25 octobre 2026 (session #31) : conclusion à la limite du tour, sans
+    /// aucun contrôle, qui donnait pour vérifiés des boutons jamais essayés.
+    fn wrap_up_measure(
+        &mut self,
+        aids: &mut TurnAids,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> String {
+        if aids.blind_edits == 0 {
+            return String::new();
+        }
+        self.api_client
+            .notify("Claw mesure la page avant la conclusion, pour qu'elle dise ce qui reste");
+        match self.measure_now(aids, prompter) {
+            Some((_, Some(measured))) => format!(
+                "\n\n[Claw] Claw measured the page just now (phone and desktop, every button tapped, every form sent). Still wrong:\n{measured}\nIn your conclusion, list these plainly as not done yet, and call verified only what this measurement does not contradict."
+            ),
+            _ => String::new(),
+        }
+    }
+
+    /// La réponse dit « vérifié » alors que l'interface a changé depuis le
+    /// dernier regard sur la page : Claw la mesure, et le modèle reprend ce
+    /// qui ne va pas avant de répondre, une fois par tour. Vu le 25 octobre
+    /// 2026 (session #31) : « Persistance localStorage … survivant au
+    /// rechargement » et « Toutes interactions » donnés pour vérifiés, alors
+    /// qu'aucun bouton n'avait été essayé de tout le tour.
+    fn unchecked_claim_gate(
+        &mut self,
+        aids: &mut TurnAids,
+        answer: &str,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> Option<String> {
+        if aids.claim_checked || aids.blind_edits == 0 || self.subagent || interrupt_requested() {
+            return None;
+        }
+        let sentence = harness::verification_claim(answer)?;
+        aids.claim_checked = true;
+        let edits = aids.blind_edits;
+        self.api_client.notify(
+            "La réponse dit « vérifié » sans regard sur la page depuis les dernières modifications : Claw la mesure",
+        );
+        let measured = self
+            .measure_now(aids, prompter)
+            .and_then(|(_, measured)| measured);
+        Some(harness::unchecked_claim_feedback(
+            &sentence,
+            edits,
+            measured.as_deref(),
+        ))
+    }
+
     /// Revue visuelle : le modèle a modifié l'interface et dit avoir fini.
     /// Claw regarde la page comme un utilisateur (captures pleine page au
     /// téléphone et à l'ordinateur, défauts mesurés, essai du menu) et la fait
@@ -3615,6 +3795,7 @@ where
         );
         // Les captures vont au juge, pas dans la conversation.
         let images = std::mem::take(&mut self.tool_images);
+        aids.blind_edits = 0;
         let (output, is_error) = tool_result_parts(&message)?;
         if is_error {
             self.api_client.notify(&format!(
@@ -8338,6 +8519,179 @@ mod tests {
             "{:?}",
             observed.notices
         );
+    }
+
+    /// Un runtime d'essai dont l'outil `Screenshot` rend les mesures données,
+    /// et une page `index.html` réelle dans un dossier temporaire.
+    fn measured_page(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("claw-mesure-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let page = dir.join("index.html");
+        std::fs::write(&page, "<!doctype html><title>Club</title><h1>Club</h1>").expect("page");
+        page
+    }
+
+    fn measured_runtime(
+        steps: Vec<Vec<AssistantEvent>>,
+        measured: &'static str,
+    ) -> (Aided, std::rc::Rc<std::cell::Cell<u32>>) {
+        let shots = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counted = std::rc::Rc::clone(&shots);
+        let observed = std::rc::Rc::new(std::cell::RefCell::new(Observed::default()));
+        let executor = StaticToolExecutor::new()
+            .register("write_file", |input| {
+                let path = serde_json::from_str::<serde_json::Value>(input)
+                    .ok()
+                    .and_then(|value| value["path"].as_str().map(ToString::to_string))
+                    .unwrap_or_default();
+                Ok(serde_json::json!({ "filePath": path, "content": "x" }).to_string())
+            })
+            .register("bash", |_| Ok(PASSING.to_string()))
+            .register("Screenshot", move |_| {
+                counted.set(counted.get() + 1);
+                Ok(measured.to_string())
+            });
+        let runtime = ConversationRuntime::new(
+            Session::new(),
+            StepsApiClient {
+                steps: steps.into(),
+                observed: std::rc::Rc::clone(&observed),
+                advisor: std::collections::VecDeque::new(),
+                escalation: None,
+            },
+            executor,
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["système".to_string()],
+        );
+        (
+            (
+                runtime,
+                observed,
+                std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            ),
+            shots,
+        )
+    }
+
+    const MEASURED: &str = r#"{"captures":[{"screen":"phone 390x844","problems":["Words that run together: a letter-spacing of -0.02em or tighter on text under 32px eats the space between words (h1.hero-title \"U11 vs FC Voisins\" 14px, letter-spacing -0.28px)"]}]}"#;
+
+    #[test]
+    fn claw_measures_the_page_after_interface_edits_made_without_looking() {
+        let _serial = crate::test_serial();
+        // Session #31 : 64 actions de CSS avant la première capture.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("aveugle");
+        let write = || {
+            tool_step(
+                "write_file",
+                &format!(
+                    r#"{{"path":"{}","content":"<h1>Club</h1>"}}"#,
+                    page.display()
+                ),
+            )
+        };
+        let mut steps: Vec<Vec<AssistantEvent>> = (0..7).map(|_| write()).collect();
+        steps.push(text_step("Corrigé."));
+        let ((mut runtime, observed, _), shots) = measured_runtime(steps, MEASURED);
+        runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        assert!(shots.get() >= 1, "aucune mesure");
+        let request = observed
+            .requests
+            .iter()
+            .find(|request| request.contains("without looking at the page"))
+            .expect("mesure renvoyée au modèle");
+        assert!(request.contains("U11 vs FC Voisins"), "{request}");
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("6 modifications de l'interface sans la regarder")));
+    }
+
+    #[test]
+    fn an_answer_that_says_verified_without_looking_at_the_page_is_sent_back() {
+        let _serial = crate::test_serial();
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("verifie");
+        let write = tool_step(
+            "write_file",
+            &format!(
+                r#"{{"path":"{}","content":"<h1>Club</h1>"}}"#,
+                page.display()
+            ),
+        );
+        let steps = vec![
+            write,
+            text_step("Ce qui fonctionne (vérifié) : toutes les interactions."),
+            text_step("Il reste les mots collés du titre."),
+            text_step("fin"),
+        ];
+        let ((mut runtime, observed, _), shots) = measured_runtime(steps, MEASURED);
+        runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        assert_eq!(shots.get(), 1);
+        assert!(
+            observed.requests[2].contains("Your answer says the work is checked")
+                && observed.requests[2].contains("U11 vs FC Voisins"),
+            "{}",
+            observed.requests[2]
+        );
+    }
+
+    #[test]
+    fn a_new_message_gets_a_new_task_list_and_continue_keeps_the_old_one() {
+        let _serial = crate::test_serial();
+        let todo = r#"{"todos":[{"content":"Boutons vert pale","status":"in_progress","activeForm":"x"},{"content":"Icones sac a dos","status":"pending","activeForm":"y"},{"content":"Header","status":"completed","activeForm":"z"}]}"#;
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                tool_step("TodoWrite", todo),
+                text_step("Arrêté ici."),
+                text_step("Je reprends."),
+                text_step("Fait."),
+            ],
+            vec![],
+        );
+        runtime
+            .run_turn("corrige les boutons et les icônes du site", None)
+            .ok();
+        runtime.run_turn("continue", None).ok();
+        runtime
+            .run_turn(
+                "Sur mon téléphone le titre est collé et le menu est trop haut, corrige ça",
+                None,
+            )
+            .ok();
+        let observed = observed.borrow();
+        let last = observed.requests.last().expect("requête");
+        assert!(
+            last.contains("still has 2 unfinished task(s)") && last.contains("Boutons vert pale"),
+            "{last}"
+        );
+        assert!(!observed
+            .requests
+            .iter()
+            .rev()
+            .nth(1)
+            .expect("relance")
+            .contains("unfinished task(s) ("));
+    }
+
+    #[test]
+    fn verification_claims_are_found_and_denials_are_not() {
+        use crate::harness::verification_claim;
+        assert_eq!(
+            verification_claim("## État\n**Ce qui fonctionne (vérifié) :**\n- Header").as_deref(),
+            Some("**Ce qui fonctionne (vérifié) :**")
+        );
+        assert!(verification_claim("- Persistance localStorage testée au rechargement").is_some());
+        assert!(verification_claim("Ce qui est fait mais non vérifié : le menu").is_none());
+        assert!(
+            verification_claim("Les boutons ne fonctionnent pas encore.\n```\nverified\n```")
+                .is_none()
+        );
+        assert!(verification_claim("Rien n'est à vérifier ici.").is_none());
     }
 
     #[test]

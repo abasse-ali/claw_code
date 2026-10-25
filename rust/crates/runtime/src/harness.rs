@@ -2521,6 +2521,45 @@ pub fn open_tasks_feedback(tasks: &[(String, String)]) -> String {
     )
 }
 
+/// Tâches pas finies d'une liste écrite avec `TodoWrite` (son entrée JSON).
+#[must_use]
+pub fn open_tasks_in_input(input: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<Value>(input) else {
+        return Vec::new();
+    };
+    value["todos"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|task| task["status"].as_str() != Some("completed"))
+        .filter_map(|task| {
+            task["content"]
+                .as_str()
+                .map(|text| text.chars().take(80).collect())
+        })
+        .collect()
+}
+
+/// Note jointe au nouveau message quand la liste de tâches d'un tour
+/// précédent reste ouverte : la liste du tour se refait à partir de ce
+/// message. Vu le 25 octobre 2026 (session #31) : dix minutes passées sur
+/// « boutons vert pâle » et « icônes sac à dos et camion », plaintes de deux
+/// messages plus tôt, pendant que le nouveau message en listait d'autres.
+#[must_use]
+pub fn fresh_tasks_note(open: &[String]) -> String {
+    let shown = open
+        .iter()
+        .take(4)
+        .map(|task| format!("\"{task}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "[Claw] Your task list from an earlier turn still has {} unfinished task(s) ({shown}{}). This turn's work is the user's new message above: write a new list with TodoWrite from that message, one task per point the user raised, in their order, before anything else. Carry an earlier task over only if this message still asks for it.",
+        open.len(),
+        if open.len() > 4 { ", …" } else { "" }
+    )
+}
+
 // --- Script muet -------------------------------------------------------------------------
 
 /// Un script Python lancé par une commande qui n'a rien écrit : s'il définit
@@ -2970,6 +3009,95 @@ pub fn announced_work_feedback(sentence: &str) -> String {
     format!(
         "[Claw] Your reply ends by saying what you are about to do (\"{sentence}\"), but nothing has been written in this turn: no file was created or changed. This reply is what the user receives, so the work it announces does not exist for them. Do it now with your tools. Write the files one by one, several small files rather than one huge one (the page, its stylesheet, its script); a file too long for one call is written in parts: Write the first part, then Edit to add the next. Give your final answer only once the files exist."
     )
+}
+
+/// Modifications de l'interface d'affilée sans un regard sur la page, au-delà
+/// desquelles Claw la mesure lui-même. Vu le 25 octobre 2026 (session #31) :
+/// 64 actions et 16 minutes de CSS avant la première capture, quatre défauts
+/// créés, et « j'ai corrigé tous les problèmes » écrit sans avoir rien vu.
+pub const BLIND_EDIT_LIMIT: u32 = 6;
+/// Mesures de ce genre par tour, au plus.
+pub const MAX_BLIND_MEASURES: u32 = 6;
+
+const VERIFIED_WORDS: [&str; 12] = [
+    "vérifié",
+    "vérifiée",
+    "vérifiés",
+    "vérifiées",
+    "testé",
+    "testée",
+    "testés",
+    "testées",
+    "verified",
+    "tested",
+    "confirmed working",
+    "fonctionne",
+];
+
+/// Phrase d'une réponse qui dit avoir vérifié ou essayé le résultat
+/// (« Ce qui fonctionne (vérifié) : … », « Persistance testée »), s'il y en
+/// a une. Les phrases qui disent le contraire (« non vérifié », « pas encore
+/// testé ») ne comptent pas. Le code et les citations non plus.
+#[must_use]
+pub fn verification_claim(answer: &str) -> Option<String> {
+    let mut in_code = false;
+    for line in answer.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code || trimmed.is_empty() || trimmed.starts_with('>') {
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        let denied = [
+            "non vérifi",
+            "pas vérifi",
+            "pas encore vérifi",
+            "non testé",
+            "pas testé",
+            "pas encore testé",
+            "not verified",
+            "not tested",
+            "unverified",
+            "untested",
+            "à vérifier",
+            "to verify",
+            "ne fonctionne pas",
+        ]
+        .iter()
+        .any(|phrase| lower.contains(phrase));
+        if denied {
+            continue;
+        }
+        if VERIFIED_WORDS.iter().any(|word| {
+            lower.match_indices(word).any(|(index, _)| {
+                let after = lower[index + word.len()..].chars().next();
+                after.is_none_or(|character| !character.is_alphanumeric())
+            })
+        }) {
+            return Some(trimmed.chars().take(200).collect());
+        }
+    }
+    None
+}
+
+/// Message au modèle dont la réponse dit « vérifié » alors que l'interface a
+/// changé depuis le dernier regard sur la page (sa capture ou une revue).
+/// `measured` : ce que Claw vient de mesurer, s'il a pu.
+#[must_use]
+pub fn unchecked_claim_feedback(sentence: &str, edits: u32, measured: Option<&str>) -> String {
+    let mut text = format!(
+        "[Claw] Your answer says the work is checked (\"{sentence}\"), but you changed the interface {edits} time(s) since anything looked at the page, and you never ran the page yourself: nothing in this turn checked that claim. The user reads \"verified\" as tried on a real screen."
+    );
+    match measured {
+        Some(measured) => {
+            let _ = write!(text, " Claw measured the page now:\n{measured}\nFix what is listed, then answer again, and in your answer call verified only what this measurement or your own Screenshot run showed working; put everything else under what is not verified.");
+        }
+        None => text.push_str(" Run Screenshot on the page (it taps every button, fills and sends every form, reloads to check what is kept), fix what it reports, then answer again; call verified only what it showed working."),
+    }
+    text
 }
 
 /// Lignes de la fin d'une réponse où chercher des questions à l'utilisateur.

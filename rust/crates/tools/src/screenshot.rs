@@ -1589,6 +1589,8 @@ fn click_problems(devtools: &mut DevTools) -> (Vec<String>, Vec<(String, String)
             "{form} (Screenshot filled it with plausible entries, today or later for dates, and sent it): handle the submit event (preventDefault), check the entries, show what happened (a message, the new item in its list) and keep what must be kept"
         ));
     }
+    problems.extend(strings(&result["unnamed"]).into_iter().take(3));
+    problems.extend(strings(&result["underBar"]));
     problems.extend(lost_on_reload(devtools, &result["kept"]));
     (problems, openers)
 }
@@ -2540,6 +2542,55 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn what_session_31_missed_is_found_in_a_real_browser() {
+        // Site du club, session #31 (25 octobre 2026) : une croix qui ne
+        // ferme sa fenêtre que si le clic vise le bouton, pas son icône ; un
+        // titre de 14px serré à -0.03em (« FCVoisins ») ; un en-tête fixe de
+        // 120px pour 60px prévus ; un décor ::before qui élargit la page.
+        let cwd = std::env::current_dir().expect("dossier");
+        let problems = |name: &str, css: &str, close: &str| {
+            let dir = cwd.join(format!("claw-s31-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Club</title><style>body {{ margin: 0; font: 16px/1.5 sans-serif; }} header {{ position: fixed; top: 0; left: 0; right: 0; height: 120px; background: #fff; }} html {{ scroll-padding-top: 60px; }} main {{ padding: 130px 16px 0; }} section {{ min-height: 900px; }} .carte {{ position: relative; }} .carte::before {{ content: \"\"; position: absolute; top: 0; right: -40px; width: 180px; height: 80px; background: #cfe; }} h1 {{ font-size: 14px; letter-spacing: -0.03em; }} dialog button {{ padding: 10px; }} {css}</style></head><body><header><a href=\"#covoiturage\">Covoiturage</a></header><main><section class=\"carte\"><h1>U11 vs FC Voisins</h1><button id=\"ouvrir\">Détails</button></section><section id=\"covoiturage\"><h2>Covoiturage</h2></section></main><dialog id=\"fenetre\"><p>Détails du match</p><button class=\"fermer\" aria-label=\"Fermer\"><svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\"><path d=\"M4 4l16 16M20 4L4 20\" stroke=\"#000\" stroke-width=\"3\"/></svg></button></dialog><script>const box = document.getElementById('fenetre'); document.getElementById('ouvrir').addEventListener('click', () => box.showModal()); box.addEventListener('click', (e) => {{ if ({close}) box.close(); }});</script></body></html>"),
+            )
+            .expect("html");
+            let page = format!("claw-s31-{name}-{}/index.html", std::process::id());
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let broken = problems("casse", "", "e.target.classList.contains('fermer')");
+        for expected in [
+            "does not close",
+            "Words that run together",
+            "The main title h1",
+            "hidden under the fixed bar",
+            "::before (reaches x=",
+        ] {
+            assert!(broken.contains(expected), "{expected}: {broken}");
+        }
+        let sound = problems(
+            "sain",
+            "h1 { font-size: 32px; letter-spacing: normal; } html { scroll-padding-top: 130px; } .carte::before { right: 0; }",
+            "e.target.closest('.fermer')",
+        );
+        for absent in [
+            "does not close",
+            "Words that run together",
+            "The main title h1",
+            "hidden under the fixed bar",
+            "scrolls sideways",
+        ] {
+            assert!(!sound.contains(absent), "{absent}: {sound}");
+        }
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn links_forms_and_windows_are_walked_in_a_real_browser() {
         // Le parcours d'un visiteur : chaque lien, chaque formulaire rempli et
         // envoyé, chaque fenêtre refermée, puis la page rechargée.
@@ -2580,6 +2631,8 @@ mod tests {
             "form#covoit changes the page once sent",
             "is gone after a reload",
             "opens a window that button \\\"×\\\" does not close",
+            // Session #31 : des places ajoutées, et personne ne sait qui conduit.
+            "Sending form#covoit changes the page",
         ] {
             assert!(broken.contains(expected), "{expected}: {broken}");
         }
@@ -2589,14 +2642,15 @@ mod tests {
         );
         let sound = problems(
             "sain",
-            "<nav><a href=\"#equipe\">Équipe</a> <a href=\"tarifs.html\">Tarifs</a> <a href=\"/tarifs.html\">Tarifs</a> <a href=\"tel:+33561000000\">Appeler</a></nav><form id=\"contact\"><label for=\"qui\">Ton nom</label><input id=\"qui\" name=\"nom\" required><button>Envoyer</button></form><p id=\"merci\" role=\"status\"></p><form id=\"ajout\"><label for=\"joueur\">Joueur</label><input id=\"joueur\" name=\"joueur\" required><button>Ajouter</button></form><button id=\"ouvrir\" onclick=\"document.getElementById('fenetre').classList.add('open')\">Ouvrir</button><div id=\"fenetre\" role=\"dialog\"><p>Fenêtre</p><button aria-label=\"Fermer\" onclick=\"document.getElementById('fenetre').classList.remove('open')\">×</button></div><form id=\"covoit\"><label for=\"conducteur\">Ton nom</label><input id=\"conducteur\" name=\"nom\" required><label for=\"places\">Places</label><input id=\"places\" name=\"places\" type=\"number\" min=\"1\" max=\"4\" value=\"3\" required><button>Je conduis</button></form><p><strong id=\"dispo\">2</strong> places dispo</p>",
-            "const show = () => { document.getElementById('liste').innerHTML = JSON.parse(localStorage.getItem('joueurs') || '[]').map((nom) => `<li>${nom}</li>`).join(''); }; show(); document.getElementById('ajout').addEventListener('submit', (e) => { e.preventDefault(); const list = JSON.parse(localStorage.getItem('joueurs') || '[]'); list.push(document.getElementById('joueur').value); localStorage.setItem('joueurs', JSON.stringify(list)); show(); }); document.getElementById('contact').addEventListener('submit', (e) => { e.preventDefault(); document.getElementById('merci').textContent = `Merci ${document.getElementById('qui').value}, message envoyé.`; }); const dispo = document.getElementById('dispo'); dispo.textContent = localStorage.getItem('dispo') || '2'; document.getElementById('covoit').addEventListener('submit', (e) => { e.preventDefault(); dispo.textContent = Number(dispo.textContent) + Number(document.getElementById('places').value); localStorage.setItem('dispo', dispo.textContent); });",
+            "<nav><a href=\"#equipe\">Équipe</a> <a href=\"tarifs.html\">Tarifs</a> <a href=\"/tarifs.html\">Tarifs</a> <a href=\"tel:+33561000000\">Appeler</a></nav><form id=\"contact\"><label for=\"qui\">Ton nom</label><input id=\"qui\" name=\"nom\" required><button>Envoyer</button></form><p id=\"merci\" role=\"status\"></p><form id=\"ajout\"><label for=\"joueur\">Joueur</label><input id=\"joueur\" name=\"joueur\" required><button>Ajouter</button></form><button id=\"ouvrir\" onclick=\"document.getElementById('fenetre').classList.add('open')\">Ouvrir</button><div id=\"fenetre\" role=\"dialog\"><p>Fenêtre</p><button aria-label=\"Fermer\" onclick=\"document.getElementById('fenetre').classList.remove('open')\">×</button></div><form id=\"covoit\"><label for=\"conducteur\">Ton nom</label><input id=\"conducteur\" name=\"nom\" required><label for=\"places\">Places</label><input id=\"places\" name=\"places\" type=\"number\" min=\"1\" max=\"4\" value=\"3\" required><button>Je conduis</button></form><p><strong id=\"dispo\">2</strong> places dispo</p><p id=\"conducteurs\"></p>",
+            "const show = () => { document.getElementById('liste').innerHTML = JSON.parse(localStorage.getItem('joueurs') || '[]').map((nom) => `<li>${nom}</li>`).join(''); }; show(); document.getElementById('ajout').addEventListener('submit', (e) => { e.preventDefault(); const list = JSON.parse(localStorage.getItem('joueurs') || '[]'); list.push(document.getElementById('joueur').value); localStorage.setItem('joueurs', JSON.stringify(list)); show(); }); document.getElementById('contact').addEventListener('submit', (e) => { e.preventDefault(); document.getElementById('merci').textContent = `Merci ${document.getElementById('qui').value}, message envoyé.`; }); const dispo = document.getElementById('dispo'); dispo.textContent = localStorage.getItem('dispo') || '2'; const drivers = document.getElementById('conducteurs'); drivers.textContent = localStorage.getItem('conducteurs') || ''; document.getElementById('covoit').addEventListener('submit', (e) => { e.preventDefault(); dispo.textContent = Number(dispo.textContent) + Number(document.getElementById('places').value); drivers.textContent = `${drivers.textContent} ${document.getElementById('conducteur').value}`.trim(); localStorage.setItem('dispo', dispo.textContent); localStorage.setItem('conducteurs', drivers.textContent); });",
         );
         for absent in [
             "broken links",
             "sending",
             "after a reload",
             "does not close",
+            "is shown nowhere",
         ] {
             assert!(!sound.contains(absent), "{absent}: {sound}");
         }
