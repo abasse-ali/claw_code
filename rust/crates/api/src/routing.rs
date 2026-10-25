@@ -22,6 +22,10 @@ const PERSISTED_COOLDOWN: Duration = Duration::from_secs(600);
 
 /// Réessais sur place d'un modèle surchargé (erreur arrivée dans le flux).
 const IN_PLACE_RETRIES: u32 = 2;
+/// Limite par minute (429) : réessais sur place, toutes les 8, 16, 24 puis
+/// 32 s, soit plus d'une minute, avant de passer au modèle suivant.
+const RATE_LIMIT_RETRIES: u32 = 4;
+const RATE_LIMIT_STEP: Duration = Duration::from_secs(8);
 
 static COOLDOWN: Mutex<BTreeMap<String, Instant>> = Mutex::new(BTreeMap::new());
 static COOLDOWN_STORE: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -252,6 +256,29 @@ fn record_failure(model: &str, error: &ApiError) {
 /// modèle peut répondre quelques secondes plus tard. Les erreurs HTTP sont déjà
 /// réessayées par le client (`RetriesExhausted`).
 fn retry_in_place_delay(error: &ApiError, attempt: u32) -> Option<Duration> {
+    // Limite par minute (429 sans quota du jour), même après les essais du
+    // client HTTP : attendre que la minute passe plutôt que donner la requête
+    // à un modèle bien plus faible. Vu le 25 octobre 2026 (session #31) :
+    // Nemotron 3 Ultra limité à 40 requêtes par minute, et le site du club
+    // écrit pour une bonne part par Nemotron 3.5 Lightning (30B), le secours.
+    let inner = match error {
+        ApiError::RetriesExhausted { last_error, .. } => last_error.as_ref(),
+        other => other,
+    };
+    if let ApiError::Api { status, .. } = inner {
+        if status.as_u16() == 429 && inner.is_retryable() && !inner.is_daily_quota() {
+            if attempt > RATE_LIMIT_RETRIES {
+                return None;
+            }
+            return match inner.rate_limit_reset() {
+                Some(reset) if reset <= Duration::from_secs(70) => {
+                    Some(reset + Duration::from_millis(500))
+                }
+                Some(_) => None,
+                None => Some(RATE_LIMIT_STEP * attempt),
+            };
+        }
+    }
     let ApiError::Api { status, .. } = error else {
         return None;
     };
@@ -800,6 +827,21 @@ mod tests {
             last_error: Box::new(api_error(503, "{}")),
         };
         assert_eq!(super::retry_in_place_delay(&exhausted, 1), None);
+        // Limite par minute, même déjà réessayée par le client HTTP : on
+        // attend que la minute passe (8, 16, 24, 32 s) avant de basculer.
+        let per_minute_exhausted = crate::error::ApiError::RetriesExhausted {
+            attempts: 3,
+            last_error: Box::new(api_error(429, "{}")),
+        };
+        assert_eq!(
+            super::retry_in_place_delay(&per_minute_exhausted, 1),
+            Some(Duration::from_secs(8))
+        );
+        assert_eq!(
+            super::retry_in_place_delay(&per_minute_exhausted, 4),
+            Some(Duration::from_secs(32))
+        );
+        assert_eq!(super::retry_in_place_delay(&per_minute_exhausted, 5), None);
         let tomorrow_ms = (super::now_epoch_secs() + 7_200) * 1_000;
         let per_day = api_error(
             429,
