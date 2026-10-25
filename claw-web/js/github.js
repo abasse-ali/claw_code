@@ -334,7 +334,9 @@ export class GitHub {
     }
   }
 
-  /** Contenu brut d'un fichier d'une branche, en Blob. */
+  /** Contenu brut d'un fichier d'une branche, en Blob. GitHub le sert en
+   * « application/vnd.github.raw » : une image reprend son vrai type, sans quoi son adresse
+   * data: n'en est pas une pour Safari. */
   async rawFile(repo, path, branch) {
     let response;
     try {
@@ -346,7 +348,10 @@ export class GitHub {
       throw new GitHubError(0, "GitHub ne répond pas : vérifiez la connexion");
     }
     if (!response.ok) throw new GitHubError(response.status, `Image introuvable (${response.status})`);
-    return response.blob();
+    const blob = await response.blob();
+    const extension = String(path).split(".").pop().toLowerCase();
+    const type = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif" }[extension];
+    return type ? new Blob([blob], { type }) : blob;
   }
 
   /** Supprime un fichier d'une branche ; déjà absent, rien à faire. */
