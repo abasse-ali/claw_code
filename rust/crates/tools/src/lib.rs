@@ -5,6 +5,7 @@ mod mcp_bridge;
 pub mod mcp_oauth;
 pub mod monitors;
 mod questions;
+mod rewrite_guard;
 mod web_page;
 pub mod workflows;
 
@@ -1508,16 +1509,43 @@ fn run_bash(input: BashCommandInput) -> Result<String, String> {
     )
 }
 
+/// Lignes rendues au moins par une lecture partielle. Vu le 25 octobre 2026
+/// (site d'un club) : `styles.css` lu 46 fois par tranches de 30 à 60 lignes en
+/// un passage, et une modification sur cinq ratée, son texte recopié d'une
+/// tranche lue plus tôt ; une fenêtre plus large, centrée sur la demande, en
+/// évite une partie.
+const MIN_READ_WINDOW: usize = 150;
+
+/// La fenêtre lue pour une demande de `limit` lignes depuis `offset` : au
+/// moins `MIN_READ_WINDOW` lignes, centrées sur la demande.
+fn read_window(offset: Option<usize>, limit: Option<usize>) -> (Option<usize>, Option<usize>) {
+    match limit {
+        // Une demande de quelques lignes est précise (une ligne, un compte) : gardée.
+        Some(limit) if (20..MIN_READ_WINDOW).contains(&limit) => {
+            let extra = MIN_READ_WINDOW - limit;
+            let start = offset.unwrap_or(0).saturating_sub(extra / 2);
+            (Some(start), Some(MIN_READ_WINDOW))
+        }
+        _ => (offset, limit),
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn run_read_file(input: ReadFileInput) -> Result<String, String> {
-    to_pretty_json(read_file(&input.path, input.offset, input.limit).map_err(io_to_string)?)
+    let (offset, limit) = read_window(input.offset, input.limit);
+    to_pretty_json(read_file(&input.path, offset, limit).map_err(io_to_string)?)
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_write_file(input: WriteFileInput) -> Result<String, String> {
     let content = runtime::typography::without_long_dashes(&input.content);
+    let before = std::fs::read_to_string(&input.path).ok();
     let output = to_pretty_json(write_file(&input.path, &content).map_err(io_to_string)?)?;
     let output = with_dash_note(output, &input.content);
+    let output = match rewrite_guard::note(Path::new(&input.path), before.as_deref(), &content) {
+        Some(note) => format!("{output}\n\n{note}"),
+        None => output,
+    };
     Ok(with_security_note(output, &input.path, &content))
 }
 
@@ -1534,6 +1562,11 @@ fn run_edit_file(input: EditFileInput) -> Result<String, String> {
         .map_err(io_to_string)?,
     )?;
     let output = with_dash_note(output, &input.new_string);
+    // Un identifiant retiré d'une page, ou cherché par un script : ses usages cassés.
+    let output = match rewrite_guard::note(Path::new(&input.path), None, "") {
+        Some(note) => format!("{output}\n\n{note}"),
+        None => output,
+    };
     Ok(with_security_note(output, &input.path, &new_string))
 }
 
@@ -8143,6 +8176,20 @@ Deploy $ARGUMENTS
                 .contains("fini"),
             "{waited}"
         );
+    }
+
+    #[test]
+    fn a_short_read_gets_a_wider_window_around_it() {
+        // 30 lignes demandées à partir de la ligne 440 : 150, centrées dessus.
+        assert_eq!(
+            super::read_window(Some(440), Some(30)),
+            (Some(380), Some(150))
+        );
+        assert_eq!(super::read_window(Some(10), Some(30)), (Some(0), Some(150)));
+        // Une lecture large ou entière, ou de quelques lignes précises, reste telle quelle.
+        assert_eq!(super::read_window(Some(0), Some(400)), (Some(0), Some(400)));
+        assert_eq!(super::read_window(Some(1), Some(1)), (Some(1), Some(1)));
+        assert_eq!(super::read_window(None, None), (None, None));
     }
 
     #[test]
