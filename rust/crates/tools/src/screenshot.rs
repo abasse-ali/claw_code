@@ -1550,6 +1550,69 @@ fn click_problems(devtools: &mut DevTools) -> Vec<String> {
     problems
 }
 
+/// Dates d'exemple toutes passées dans la page et ses scripts, quand ce sont
+/// des fichiers du projet (`file://`, ou un serveur local qui sert le dossier de
+/// travail). Le contrôle à l'écriture ne voit que les fichiers modifiés : vu le
+/// 25 octobre 2026 (session #31 reprise), les matchs de 2025 d'`app.js`, lu et
+/// jamais réécrit, laissaient « Aucun événement à venir » sans alerte.
+fn stale_dates(devtools: &mut DevTools) -> Vec<String> {
+    let Ok(sources) = devtools.evaluate(
+        "[location.href, ...[...document.scripts].map((script) => script.src).filter(Boolean)]",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(cwd) = std::env::current_dir() else {
+        return Vec::new();
+    };
+    let today = runtime::current_date_iso();
+    let mut problems = Vec::new();
+    for source in strings(&sources).iter().take(12) {
+        let Some(path) = project_file(&cwd, source) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let shown = path
+            .strip_prefix(&cwd)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        for found in runtime::code_checks::past_dates(&text, &today) {
+            problems.push(format!("{shown}, {found}"));
+        }
+    }
+    problems
+}
+
+/// Fichier du dossier de travail derrière une adresse de la page : `file://`, ou
+/// `http://localhost` (le serveur du projet, servi depuis ce dossier).
+fn project_file(cwd: &Path, url: &str) -> Option<PathBuf> {
+    let path = if url.starts_with("file://") {
+        PathBuf::from(crate::page_view::file_url_path(
+            url.split(['?', '#']).next()?,
+        )?)
+    } else {
+        let rest = url
+            .strip_prefix("http://")
+            .or_else(|| url.strip_prefix("https://"))?;
+        let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let host = host.split(':').next()?;
+        if !matches!(host, "localhost" | "127.0.0.1" | "[::1]") {
+            return None;
+        }
+        let path = path.split(['?', '#']).next()?;
+        let decoded = crate::page_view::file_url_path(&format!("file:///{path}"))?;
+        let mut path = cwd.join(decoded.trim_start_matches('/'));
+        if path.is_dir() {
+            path = path.join("index.html");
+        }
+        path
+    };
+    let path = path.canonicalize().ok()?;
+    (path.starts_with(cwd.canonicalize().ok()?) && path.is_file()).then_some(path)
+}
+
 /// Pages du site ouvert en `file://` que ses liens visent, et qui manquent sur le disque.
 fn missing_pages(files: &Value) -> Vec<String> {
     let Some(files) = files.as_array() else {
@@ -1708,6 +1771,7 @@ fn capture(
         }
     }
     if try_clicks {
+        problems.extend(stale_dates(devtools));
         problems.extend(click_problems(devtools));
     }
     Ok(Shot {
@@ -2189,6 +2253,63 @@ mod tests {
         ] {
             assert!(!sound.contains(absent), "{absent}: {sound}");
         }
+    }
+
+    #[test]
+    fn page_addresses_map_to_project_files_only() {
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-files-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("js")).expect("dossier");
+        std::fs::write(dir.join("index.html"), "<!doctype html>").expect("html");
+        std::fs::write(dir.join("js").join("app.js"), "").expect("js");
+        let name = dir.file_name().and_then(|name| name.to_str()).expect("nom");
+        let local =
+            super::project_file(&cwd, &format!("http://localhost:8080/{name}/js/app.js?v=2"));
+        let folder = super::project_file(&cwd, &format!("http://127.0.0.1:3000/{name}/"));
+        let file = super::file_url(&cwd, &dir.join("index.html"))
+            .ok()
+            .and_then(|url| super::project_file(&cwd, &url));
+        let outside = super::project_file(&cwd, &format!("https://example.org/{name}/js/app.js"));
+        let above = super::project_file(&cwd, "http://localhost/../Cargo.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(local.is_some_and(|path| path.ends_with("js/app.js")));
+        assert!(folder.is_some_and(|path| path.ends_with("index.html")));
+        assert!(file.is_some_and(|path| path.ends_with("index.html")));
+        assert!(outside.is_none() && above.is_none());
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn past_sample_dates_of_the_page_scripts_are_found_in_a_real_browser() {
+        // Session #31 reprise : `app.js`, jamais réécrit, aux matchs de 2025.
+        let cwd = std::env::current_dir().expect("dossier");
+        let problems = |name: &str, last: &str| {
+            let dir = cwd.join(format!("claw-dates-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("app.js"),
+                format!("const MATCHES = [{{ date: '2025-10-14' }}, {{ date: '2025-10-21' }}, {{ date: '{last}' }}];\ndocument.getElementById('n').textContent = MATCHES.length;\n"),
+            )
+            .expect("js");
+            std::fs::write(
+                dir.join("index.html"),
+                "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Club</title></head><body><main><h1>Matchs</h1><p id=\"n\"></p></main><script src=\"app.js\"></script></body></html>",
+            )
+            .expect("html");
+            let page = format!("claw-dates-{name}-{}/index.html", std::process::id());
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let stale = problems("passees", "2025-11-04");
+        assert!(
+            stale.contains("app.js, line 1: the 3 dates of this file are all before today"),
+            "{stale}"
+        );
+        let coming = problems("a-venir", "2099-11-04");
+        assert!(!coming.contains("before today"), "{coming}");
     }
 
     #[test]
