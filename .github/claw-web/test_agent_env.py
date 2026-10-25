@@ -47,6 +47,33 @@ class AgentEnvTest(unittest.TestCase):
         self.assertEqual(run.session_model({"MODEL": "poolside/laguna-s-2.1:free", "NVIDIA_API_KEY": "nvapi-x"}),
                          "poolside/laguna-s-2.1:free")
 
+    def test_the_reasoning_level_chosen_in_the_app_reaches_claw(self):
+        import tempfile
+        from pathlib import Path
+
+        import common
+        text, effort = common.effort_of("Corrige le bug\n\n<!-- claw-web:effort high -->")
+        self.assertEqual((text, effort), ("Corrige le bug", "high"))
+        # Le dernier choix compte ; un niveau inconnu ne passe pas.
+        self.assertEqual(common.effort_of("a <!-- claw-web:effort low --> b <!-- claw-web:effort max -->")[1], "max")
+        self.assertEqual(common.effort_of("a <!-- claw-web:effort turbo -->"), ("a", ""))
+        folder = Path(tempfile.mkdtemp())
+        (folder / "options.json").write_text('{"effort": "medium"}', encoding="utf-8")
+        self.assertEqual(run.session_effort(folder / "options.json"), "medium")
+        (folder / "options.json").write_text('{"effort": "rm -rf"}', encoding="utf-8")
+        self.assertEqual(run.session_effort(folder / "options.json"), "")
+        self.assertEqual(run.session_effort(folder / "absent.json"), "")
+
+    def test_app_commands_become_requests(self):
+        import common
+        self.assertIn("JTest", common.web_command("/jtest"))
+        self.assertTrue(common.web_command("/pages vite").endswith("\n\nvite"))
+        self.assertEqual(common.web_command("/continue"), "continue")
+        # Les commandes de Claw et les chemins restent le texte de l'utilisateur.
+        self.assertIsNone(common.web_command("/review le dernier commit"))
+        self.assertIsNone(common.web_command("/usr/bin/env est cassé"))
+        self.assertIsNone(common.web_command("Corrige /jtest"))
+
 
 if __name__ == "__main__":
     unittest.main()

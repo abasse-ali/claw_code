@@ -57,6 +57,9 @@ const ICON = {
   chevron: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>',
   tasks: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6h10M10 12h10M10 18h10"/><path d="M3.5 6l1.5 1.5L8 4.5M3.5 12l1.5 1.5L8 10.5M3.5 18l1.5 1.5L8 16.5"/></svg>',
   check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  // Icons: Lucide, ISC license (lightbulb, square-slash).
+  bulb: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6M10 22h4"/></svg>',
+  slash: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 15l6-6"/></svg>',
 };
 
 const state = {
@@ -1543,6 +1546,114 @@ const AIDS = {
   },
 };
 
+// --- Niveau de réflexion du prochain message ------------------------------------------------
+
+const EFFORTS = [
+  { value: "", label: "Auto", detail: "Le niveau de Claw : élevé quand le modèle le permet" },
+  { value: "off", label: "Aucune", detail: "Répond sans réfléchir d'abord : le plus rapide, pour les petites demandes" },
+  { value: "low", label: "Faible", detail: "Réfléchit peu : rapide" },
+  { value: "medium", label: "Moyenne", detail: "Un équilibre entre vitesse et soin" },
+  { value: "high", label: "Élevée", detail: "Réfléchit longuement avant d'agir" },
+  { value: "max", label: "Maximale", detail: "Le plus haut niveau que le modèle accepte : plus lent, pour les problèmes difficiles" },
+];
+
+const effortLabel = () => {
+  const effort = EFFORTS.find((entry) => entry.value === (state.settings.effort || "")) || EFFORTS[0];
+  return effort.value ? `Réflexion ${effort.label.toLowerCase()}` : "Réflexion";
+};
+
+/** Le niveau choisi, noté dans le message pour le moteur (rien en Auto). */
+const effortMark = () => (state.settings.effort ? `\n\n<!-- claw-web:effort ${state.settings.effort} -->` : "");
+
+function pickEffort() {
+  openPicker({
+    title: "Niveau de réflexion",
+    current: state.settings.effort || "",
+    items: EFFORTS.map((effort) => ({ value: effort.value, label: effort.label, detail: effort.detail })),
+    onPick: (value) => {
+      state.settings.effort = value;
+      saveSettings();
+      renderComposer();
+    },
+  });
+}
+
+// --- Commandes « / » ---------------------------------------------------------------------------
+
+// Les commandes de Claw que le moteur déplie (claw prompt -), puis celles de l'appli
+// (.github/claw-web/common.py, WEB_COMMANDS).
+const COMMANDS = [
+  { name: "review", hint: "", detail: "Relire les changements, sans rien modifier" },
+  { name: "fix", hint: "ce qui ne marche pas", detail: "Trouver la cause d'un problème et le corriger" },
+  { name: "verify", hint: "", detail: "Vérifier que le travail marche : tests, lancement, essai" },
+  { name: "simplify", hint: "", detail: "Simplifier le code modifié sans changer ce qu'il fait" },
+  { name: "audit", hint: "", detail: "Audit du projet (sécurité, qualité), sans modification" },
+  { name: "security-review", hint: "", detail: "Revue de sécurité des changements" },
+  { name: "archi", hint: "besoin ou sujet", detail: "Proposer une architecture avant de coder" },
+  { name: "avis", hint: "question", detail: "Demander l'avis d'un autre modèle" },
+  { name: "jtest", hint: "", detail: "Essayer le projet sur ce téléphone" },
+  { name: "pages", hint: "", detail: "Mettre le site en ligne (GitHub Pages) et donner son adresse" },
+  { name: "merge", hint: "", detail: "Fusionner la pull request de la session" },
+  { name: "continue", hint: "", detail: "Reprendre le travail là où il s'est arrêté" },
+];
+
+/** Le menu des commandes sous un « / » tapé en début de message : la liste filtrée par ce qui
+ * suit le « / », une commande touchée la met dans le champ. */
+function slashMenu(composer, textarea) {
+  const menu = composer.querySelector(".slash-menu");
+  let matches = [];
+  let active = 0;
+  const close = () => {
+    menu.hidden = true;
+    matches = [];
+  };
+  const choose = (command) => {
+    textarea.value = `/${command.name} `;
+    textarea.dispatchEvent(new Event("input"));
+    close();
+    textarea.focus();
+  };
+  const draw = () => {
+    const typed = textarea.value.match(/^\/([a-z-]*)$/);
+    matches = typed ? COMMANDS.filter((command) => command.name.startsWith(typed[1])) : [];
+    if (!matches.length) return close();
+    active = Math.min(active, matches.length - 1);
+    menu.innerHTML = matches.map((command, index) => `
+      <button type="button" role="option" class="slash-item${index === active ? " on" : ""}" aria-selected="${index === active}" data-index="${index}">
+        <strong>/${command.name}${command.hint ? ` <em>${escapeHtml(command.hint)}</em>` : ""}</strong>
+        <small>${escapeHtml(command.detail)}</small>
+      </button>`).join("");
+    menu.hidden = false;
+  };
+  textarea.addEventListener("input", draw);
+  textarea.addEventListener("keydown", (event) => {
+    if (menu.hidden || !matches.length) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      active = (active + (event.key === "ArrowDown" ? 1 : matches.length - 1)) % matches.length;
+      draw();
+    } else if (event.key === "Enter" || event.key === "Tab") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      choose(matches[active]);
+    } else if (event.key === "Escape") {
+      close();
+    }
+  });
+  // Toucher une commande ne fait pas perdre le champ avant le clic.
+  menu.addEventListener("pointerdown", (event) => event.preventDefault());
+  menu.addEventListener("click", (event) => {
+    const item = event.target.closest("[data-index]");
+    if (item) choose(matches[Number(item.dataset.index)]);
+  });
+  composer.querySelector(".slash")?.addEventListener("click", () => {
+    if (!textarea.value.trim()) textarea.value = "/";
+    textarea.focus();
+    draw();
+  });
+  draw();
+}
+
 /** Options du prochain passage (nouvelle tâche ou suivi), pour le moteur. */
 const aidInputs = () => ({
   team: state.settings.team ? "1" : "",
@@ -1755,6 +1866,8 @@ function renderComposer() {
     chip("repo", repo || "Choisir un dépôt");
     chip("branch", branch || "branche");
     chip("model", modelLabel(state.settings.model));
+    chip("effort", effortLabel());
+    composer.querySelector('[data-action="effort"]')?.classList.toggle("on", Boolean(state.settings.effort));
     drawAids();
     renderDock();
     composer.refresh?.();
@@ -1769,6 +1882,7 @@ function renderComposer() {
       <button class="chip" data-action="repo">${ICON.repo}<span>${escapeHtml(repo || "Choisir un dépôt")}</span></button>
       <button class="chip" data-action="branch">${ICON.branch}<span>${escapeHtml(branch || "branche")}</span></button>`}
       <button class="chip" data-action="model">${ICON.model}<span>${escapeHtml(modelLabel(state.settings.model))}</span></button>
+      <button class="chip${state.settings.effort ? " on" : ""}" data-action="effort" aria-label="Niveau de réflexion">${ICON.bulb}<span>${escapeHtml(effortLabel())}</span></button>
     </div>
     <div class="attachments" hidden></div>
     <form class="prompt" autocomplete="off">
@@ -1780,6 +1894,8 @@ function renderComposer() {
           <span class="switch" aria-hidden="true"></span>
         </button>`).join("")}
       </div>
+      <button class="slash" type="button" aria-label="Commandes">${ICON.slash}</button>
+      <div class="slash-menu" role="listbox" aria-label="Commandes" hidden></div>
       <input class="file-input" type="file" accept="image/*" multiple hidden>
       <textarea rows="1" name="text" placeholder="${followUp ? "Répondez ou donnez une nouvelle consigne." : "Décrivez une tâche ou posez une question."}" aria-label="Message pour Claw"></textarea>
       <button class="send" type="submit" aria-label="Envoyer" disabled>${ICON.send}</button>
@@ -1799,6 +1915,8 @@ function renderComposer() {
     else state.drafts.delete(key);
     resize();
   });
+  // Avant l'envoi par Entrée : Entrée choisit d'abord la commande du menu ouvert.
+  slashMenu(composer, textarea);
   textarea.addEventListener("keydown", (event) => {
     // Entrée envoie sur un clavier d'ordinateur ; Maj+Entrée va à la ligne.
     const touch = window.matchMedia("(pointer: coarse)").matches;
@@ -1817,6 +1935,7 @@ function renderComposer() {
   composer.querySelector('[data-action="repo"]')?.addEventListener("click", pickRepo);
   composer.querySelector('[data-action="branch"]')?.addEventListener("click", pickBranch);
   composer.querySelector('[data-action="model"]').addEventListener("click", () => pickModel());
+  composer.querySelector('[data-action="effort"]').addEventListener("click", pickEffort);
   const picker = composer.querySelector(".file-input");
   composer.querySelector(".attach").addEventListener("click", () => picker.click());
   picker.addEventListener("change", async () => {
@@ -1866,7 +1985,7 @@ async function startSession(text, textarea) {
       work = `claw/session-${n}-${suffix}`;
     }
     const block = `<!-- claw-web ${JSON.stringify({ repo, base: branch, model: model || "", n, branch: work })} -->`;
-    const issue = await state.github.createIssue(engine, title, `${text}${images}\n\n${block}`);
+    const issue = await state.github.createIssue(engine, title, `${text}${images}${effortMark()}\n\n${block}`);
     state.attachments = [];
     textarea.value = "";
     clearDraft("home");
@@ -1895,7 +2014,7 @@ async function followUpSession(text, textarea) {
   renderSending(true);
   try {
     const images = await uploadAttachments();
-    const posted = await state.github.comment(state.settings.engine, session.number, `${text}${images}`);
+    const posted = await state.github.comment(state.settings.engine, session.number, `${text}${images}${effortMark()}`);
     state.attachments = [];
     if (textarea.isConnected) clearDraft(`session:${session.number}`);
     textarea.value = "";

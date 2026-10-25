@@ -18,8 +18,8 @@ from pathlib import Path
 import urllib.request
 
 from common import (ANSWER, ANSWERED, API, FILES_BRANCH, MCP_TOKEN_FILE, NOTES, QUESTIONS, QUESTIONS_END, WORK,
-                    GitHubError, answer_marks, answered_up_to, api, comments, images_of, kind_of, output, post_comment,
-                    run_url, settings, task_text)
+                    GitHubError, answer_marks, answered_up_to, api, comments, effort_of, images_of, kind_of, output,
+                    post_comment, run_url, settings, task_text, web_command)
 from on_github import STATE_FILE, describe, read_state
 from sessions import origin_of
 import memory
@@ -358,6 +358,12 @@ def main():
     # Les mots de l'utilisateur d'abord : Claw ne décide le mode projet que sur ce qui
     # précède la première ligne `[Claw]`.
     request, history, images, processed, retry = conversation(issue, notes)
+    # Niveau de réflexion choisi pour ce message dans l'appli : run.py le donne à Claw.
+    request, effort = effort_of(request)
+    history = effort_of(history)[0]
+    (WORK / "options.json").write_text(json.dumps({"effort": effort}), encoding="utf-8")
+    # Commande de l'appli (« /jtest », « /pages ») : sa demande en mots.
+    request = web_command(request) or request
     # Les mots de l'utilisateur seuls (sans les notes de Claw) : publish.py y cherche s'il veut
     # essayer le résultat sur son téléphone.
     (WORK / "user_words.txt").write_text(request.split("\n\n[Claw]")[0], encoding="utf-8")

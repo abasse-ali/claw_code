@@ -60,6 +60,8 @@ PRIVATE = ("key", "user", "password")
 # Dossiers où chercher le projet quand la racine n'en a pas.
 SUBDIRS = ("app", "web", "frontend", "client", "site", "www", "src")
 STATIC_DIRS = (".", "docs", "public", "site", "dist", "build", "www")
+# Jamais un site à servir : dépendances, environnements, caches.
+SKIPPED_DIRS = ("node_modules", "venv", "vendor", "__pycache__", "target")
 
 
 @dataclass
@@ -143,6 +145,10 @@ def node_plan(folder, port):
         return Plan("web", "npm run dev", "npm run dev", install, env=env)
     if scripts.get("start"):
         return Plan("web", "npm start", "npm start", install, env=env)
+    # Une page avec un package.json fait par `npm init` (« main »: « app.js », le script de la
+    # page) : un site statique, pas un programme Node (session #30, 25 octobre 2026).
+    if (folder / "index.html").is_file():
+        return None
     main = data.get("main") or ("index.js" if (folder / "index.js").is_file() else "")
     if main:
         return Plan("terminal", f"node {main}", f"node {main}", install)
@@ -191,6 +197,20 @@ def static_plan(folder, port):
     return None
 
 
+def nearest_page(root, depth=3):
+    """Le dossier du `index.html` le moins profond du projet, ailleurs que dans les dossiers connus
+    (`site-perso/`, `etape1/`...), sans les dépendances ni les dossiers cachés. Vu le 24 octobre
+    2026 (session #29) : un site en HTML rangé dans `site-perso/`, et JTest ne savait pas le lancer."""
+    level = [Path(root)]
+    for _ in range(depth):
+        level = sorted(child for folder in level for child in folder.iterdir()
+                       if child.is_dir() and not child.name.startswith(".") and child.name not in SKIPPED_DIRS)
+        for folder in level:
+            if (folder / "index.html").is_file():
+                return folder
+    return None
+
+
 def other_plan(folder):
     if (folder / "Cargo.toml").is_file():
         return Plan("terminal", "cargo run", "cargo run --quiet", ["cargo build --quiet"])
@@ -231,6 +251,11 @@ def detect(root, requested=None, port=0):
                 plan.cwd, plan.port = name, port
                 plan.path = str(options.get("path") or plan.path)
                 return plan
+    site = None if options.get("cwd") else nearest_page(root)
+    if site is not None:
+        where = site.relative_to(root).as_posix()
+        return Plan("web", f"Site statique ({where}/)",
+                    f"python3 -m http.server {port} --bind 127.0.0.1 --directory {where}", port=port)
     raise JTestError("JTest ne sait pas lancer ce projet : ajoutez à la racine un fichier `jtest.json`, par "
                      "exemple `{\"command\": \"npm run dev -- --port {port}\"}`, ou demandez à Claw de lancer "
                      "JTest avec la commande.")

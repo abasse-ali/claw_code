@@ -82,6 +82,20 @@ class DetectTest(unittest.TestCase):
         plan = self.plan({"index.html": ""}, {"command": "python3 serve.py {port}", "install": "pip install x"})
         self.assertEqual((plan.command, plan.install), ("python3 serve.py 4321", ["pip install x"]))
 
+    def test_a_static_site_in_any_folder(self):
+        # Session #29 : le site d'un projet d'étudiant rangé dans `site-perso/`.
+        plan = self.plan({"site-perso/index.html": "<h1>Salut</h1>", "site-perso/images/a.svg": "<svg/>",
+                          "README.md": "x"})
+        self.assertEqual((plan.kind, plan.label), ("web", "Site statique (site-perso/)"))
+        self.assertEqual(plan.command, "python3 -m http.server 4321 --bind 127.0.0.1 --directory site-perso")
+        # Les dépendances et les dossiers cachés ne sont pas un site.
+        with self.assertRaises(jtest.JTestError):
+            self.plan({"node_modules/x/index.html": "", ".claw/index.html": "", "README.md": "x"})
+        # Session #30 : une page avec le package.json de `npm init` (« main » : son script).
+        plan = self.plan({"package.json": {"main": "app.js", "scripts": {"test": "exit 1"}},
+                          "index.html": "<h1>IronLog</h1>", "app.js": "document.title = 'x';"})
+        self.assertEqual((plan.kind, plan.label), ("web", "Site statique"))
+
     def test_unknown_project(self):
         with self.assertRaises(jtest.JTestError) as caught:
             self.plan({"README.md": "rien"})
