@@ -88,6 +88,10 @@
     return top;
   };
 
+  // Textes durables de la page (screenshot_snapshot.js, donne par Claw avant ce
+  // script) : ceux qu'un formulaire fait apparaitre doivent revenir au rechargement.
+  const snapshot = () => (typeof clawSnapshot === "function" ? clawSnapshot() : []);
+
   // --- Liens -----------------------------------------------------------------
   const links = [];
   const pages = new Map();
@@ -191,9 +195,11 @@
     if (type === "week") return "";
     if (type === "color") return "#336699";
     if (type === "number" || type === "range") {
+      // Un nombre par formulaire : deux formulaires qui ajoutent autant de places
+      // donneraient le meme total, et l'un passerait pour l'autre.
       const min = field.min !== "" ? Number(field.min) : 1;
       const max = field.max !== "" ? Number(field.max) : min + 10;
-      return String(Math.max(min, Math.min(max, Math.max(1, min))));
+      return String(Math.max(min, Math.min(max, Math.max(1, min) + tested.size - 1)));
     }
     if (field instanceof HTMLTextAreaElement) return "Message d'essai, a ignorer.";
     if (!named || /nom|name|pr[eé]nom|pseudo|qui|conducteur|joueur|parent/.test(words)) return marker;
@@ -226,7 +232,9 @@
         const value = plausible(field, named);
         if (value === marker) named = true;
         // Le nom d'un formulaire precedent, garde par la page, est remplace.
-        if (value && (!field.value || value === marker)) setValue(field, value);
+        // Un nombre deja propose (« 3 places ») aussi : chaque formulaire a le sien.
+        const counted = field.type === "number" || field.type === "range";
+        if (value && (!field.value || value === marker || counted)) setValue(field, value);
       }
       // Un motif (pattern) que le navigateur ne lit pas lève une erreur ici.
       let valid = true;
@@ -257,6 +265,10 @@
       return;
     }
     const send = form.querySelector("button[type=submit], button:not([type]), input[type=submit]");
+    // Un formulaire ou le visiteur donne son nom : une inscription, une offre,
+    // une reservation, pas une recherche.
+    const personal = [...form.elements].some((field) => field.value === marker);
+    const prior = new Set(snapshot());
     const seen = watch();
     const before = { effects, errors: errors.length, text: document.body.innerText.length };
     lastSubmit = null;
@@ -295,7 +307,10 @@
       const holder = node.parentElement;
       added = node.nodeValue.includes(marker) && holder && !holder.closest(passing) && shown(holder);
     }
-    if (added) kept.push({ form: name, marker });
+    // Ou la page a change (un compteur, une liste) sans montrer le nom : les
+    // textes apparus a l'envoi.
+    const appeared = personal ? snapshot().filter((text) => !prior.has(text)).slice(0, 8) : [];
+    if (added || appeared.length) kept.push({ form: name, marker, shown: added, appeared });
   };
 
   for (const form of [...document.forms].filter(shown).slice(0, 6)) await tryForm(form);
