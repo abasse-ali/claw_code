@@ -28,6 +28,11 @@ DIFF_LINES = 60
 # de Commons) est téléchargée ici et glissée dans le journal, la grande version reste chez sa
 # source, la seule image extérieure que l'appli autorise (Content-Security-Policy).
 MAX_PHOTOS = 4
+# Captures d'un appel de Screenshot : la page entière en tranches et ses fenêtres.
+MAX_SHOTS = 8
+# Problèmes gardés par capture, et leur longueur.
+MAX_PROBLEMS = 12
+PROBLEM_CHARS = 400
 THUMB_BYTES = 20_000
 # Vignettes d'une même recherche, encodées : une partie du journal tient en 60 000 caractères.
 THUMBS_BUDGET = 40_000
@@ -104,7 +109,7 @@ def shots(value, store=None):
     l'écran et le nombre de problèmes relevés."""
     found = []
     budget = THUMBS_BUDGET
-    for capture in (value.get("captures") or [])[:MAX_PHOTOS]:
+    for capture in (value.get("captures") or [])[:MAX_SHOTS]:
         if not isinstance(capture, dict) or not capture.get("file"):
             continue
         thumb = local_thumb(capture.get("preview"))
@@ -114,12 +119,14 @@ def shots(value, store=None):
         stored = store(capture["file"], str(capture.get("screen") or "")) if store else ""
         if not thumb and not stored:
             continue
-        problems = capture.get("problems")
+        problems = capture.get("problems") if isinstance(capture.get("problems"), list) else []
         found.append({
             "t": thumb,
             "p": stored,
-            "screen": excerpt(capture.get("screen", ""), 40),
-            "n": len(problems) if isinstance(problems, list) else 0,
+            "screen": excerpt(capture.get("screen", ""), 120),
+            "n": len(problems),
+            # Le texte des problèmes, que l'appli montre quand on touche la capture.
+            "pb": [excerpt(str(problem), PROBLEM_CHARS) for problem in problems[:MAX_PROBLEMS]],
         })
     return found
 

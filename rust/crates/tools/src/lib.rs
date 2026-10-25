@@ -764,6 +764,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     },
                     "theme": { "type": "string", "enum": ["light", "dark"], "description": "Color scheme the device says it prefers (prefers-color-scheme)." },
                     "full_page": { "type": "boolean", "description": "Capture the page down to its end, up to three screens (default true); false keeps the first screen only. After a scroll action, the capture starts where the page was scrolled to." },
+                    "windows": { "type": "boolean", "description": "Also capture, at phone size, each window (dialog, sheet) that a button of the page opens, as the visitor sees it (default false)." },
                     "wait_ms": {
                         "type": "integer",
                         "minimum": 0,

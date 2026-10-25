@@ -481,14 +481,35 @@ function openCloudRunner() {
   sheet.hidden = false;
 }
 
+/** Les problèmes relevés sur une capture (texte de Claw pour l'agent, en anglais), en liste ;
+ * `count` dit s'il y en avait plus que gardés. */
+function shotProblemsHtml(problems, count) {
+  let list = [];
+  try {
+    list = JSON.parse(problems || "[]").filter((item) => typeof item === "string");
+  } catch {
+    list = [];
+  }
+  if (!list.length) return "";
+  const total = Math.max(Number(count) || 0, list.length);
+  const more = total - list.length;
+  return `<details class="shot-problems" open><summary>${total} problème${total > 1 ? "s relevés" : " relevé"}`
+    + ` <span class="muted">(tels que Claw les a transmis à l'agent, en anglais)</span></summary>`
+    + `<ol>${list.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>`
+    + (more ? `<p class="help">… et ${more} autre${more > 1 ? "s" : ""}.</p>` : "")
+    + "</details>";
+}
+
 /** Capture d'écran de l'agent, entière (rangée sur la branche des fichiers du moteur) ; sa
- * vignette s'affiche le temps qu'elle arrive, ou seule quand elle n'a pas pu être rangée. */
-async function openShot({ shot, thumb, label }) {
+ * vignette s'affiche le temps qu'elle arrive, ou seule quand elle n'a pas pu être rangée. Les
+ * problèmes relevés dessus s'affichent au-dessus. */
+async function openShot({ shot, thumb, label, problems, count }) {
   const sheet = $("#sheet");
   const preview = /^data:image\/(?:jpeg|png|webp);base64,/.test(thumb || "") ? thumb : "";
   sheet.innerHTML = `
     <div class="sheet-panel image-panel shot-panel" role="dialog" aria-modal="true" aria-label="Capture d'écran">
       <div class="sheet-head"><strong>${escapeHtml(label || "Capture d'écran")}</strong><button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button></div>
+      ${shotProblemsHtml(problems, count)}
       <div class="shot-scroll"><img class="full-image tall" alt="" src="${escapeHtml(preview)}"${preview ? "" : " hidden"}></div>
       <p class="help shot-state">${shot ? "Chargement de la capture entière…" : "Seul l'aperçu du premier écran a été gardé."}</p>
     </div>`;

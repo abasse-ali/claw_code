@@ -310,8 +310,11 @@ pub(crate) fn replacement(source: &ImageSource, number: usize, total: usize) -> 
             let warning = defect.map_or_else(String::new, |line| {
                 format!("[Claw] The image reader saw a defect in this image: {line}. Treat it as evidence of a problem to fix, not as a design to copy.\n")
             });
+            // Le lecteur lit des pixels : « FC Voisins » devenait « FCVoisins », et le
+            // modèle cherchait trois fois à corriger un texte déjà juste (vu le
+            // 25 octobre 2026, refonte du site d'un club de foot).
             format!(
-                "{warning}[{place} by {} because the current model cannot read images (image id {}). To look again at any part of it, call LookAtImage with this id and one precise question.]\n{body}{pixels}",
+                "{warning}[{place} by {} because the current model cannot read images (image id {}). To look again at any part of it, call LookAtImage with this id and one precise question. The reader can misread small text (a missing space, a wrong letter or digit): before changing a text this description quotes, find it in the files with grep_search; if the files already have it right, there is nothing to fix.]\n{body}{pixels}",
                 description.model,
                 image_id(source)
             )
@@ -1029,7 +1032,7 @@ mod tests {
         assert_eq!(
             replacement(&first, 1, 1),
             format!(
-                "[Image described by acme/vision:free because the current model cannot read images (image id {}). To look again at any part of it, call LookAtImage with this id and one precise question.]\nCapture essai-lecteur-1",
+                "[Image described by acme/vision:free because the current model cannot read images (image id {}). To look again at any part of it, call LookAtImage with this id and one precise question. The reader can misread small text (a missing space, a wrong letter or digit): before changing a text this description quotes, find it in the files with grep_search; if the files already have it right, there is nothing to fix.]\nCapture essai-lecteur-1",
                 image_id(&first)
             )
         );

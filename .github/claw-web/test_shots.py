@@ -66,9 +66,17 @@ class ShotsTest(unittest.TestCase):
         self.assertTrue(shot["t"].startswith("data:image/jpeg;base64,"))
         self.assertEqual(shot["p"], "uploads/session-13/99-1-phone-390x844.jpg")
         self.assertEqual((shot["screen"], shot["n"], entry["r"]["found"]), ("phone 390x844", 2, 2))
+        # Le texte des problèmes, pour l'appli quand on touche la capture.
+        self.assertEqual(shot["pb"], ["a", "b"])
         put = [call for call in github.calls if call[0] == "PUT"][0]
         self.assertEqual(put[1], "/repos/o/claw-sessions/contents/uploads/session-13/99-1-phone-390x844.jpg")
         self.assertEqual(put[2]["branch"], "claw-web-fichiers")
+
+    def test_a_window_capture_is_stored_under_an_ascii_name(self):
+        github = FakeGitHub()
+        store = run.ShotStore(token="t", engine="o/claw-sessions", session="13", run_id="99", call=github)
+        name = store(self.full, 'phone 390x844, window opened by button "Réserver"')
+        self.assertEqual(name, "uploads/session-13/99-1-phone-390x844--window-opened-b.jpg")
 
     def test_the_files_branch_is_created_when_missing(self):
         github = FakeGitHub(branch=False)

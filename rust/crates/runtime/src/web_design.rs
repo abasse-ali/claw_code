@@ -679,7 +679,9 @@ pub fn missing_assets_feedback(page: &str, missing: &[String]) -> String {
 /// Entrée de l'outil `Screenshot` pour la revue : page entière, téléphone puis ordinateur.
 #[must_use]
 pub fn screenshot_input(target: &str) -> String {
-    let mut input = json!({ "viewports": ["phone", "desktop"], "full_page": true });
+    // Les fenêtres aussi : le juge et l'utilisateur ne voyaient que la page.
+    let mut input =
+        json!({ "viewports": ["phone", "desktop"], "full_page": true, "windows": true });
     match target.split_once(':') {
         Some(("url", url)) => input["url"] = json!(url),
         Some(("path", path)) => input["path"] = json!(path),

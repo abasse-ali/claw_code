@@ -429,6 +429,12 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 /* Capture entière : toute la largeur, à faire défiler. */
 .shot-panel { display: flex; flex-direction: column; min-height: 0; }
 .shot-scroll { overflow-y: auto; min-height: 0; border-radius: 10px; }
+.shot-problems { flex: none; max-height: 40vh; overflow-y: auto; margin: 0 0 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); font-size: 0.875rem; }
+.shot-problems summary { cursor: pointer; font-weight: 600; }
+.shot-problems summary .muted { color: var(--muted); font-weight: 400; }
+.shot-problems ol { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 6px; }
+.shot-problems li { overflow-wrap: anywhere; line-height: 1.4; }
+.shot-problems .help { margin: 6px 0 0; }
 .full-image.tall { width: 100%; max-height: none; object-fit: initial; display: block; }
 /* Serveur gratuit dans le nuage : étapes, puis le script à coller chez Oracle. */
 .cloud-panel { overflow-y: auto; min-height: 0; }
