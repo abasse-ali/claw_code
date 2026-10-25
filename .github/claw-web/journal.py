@@ -240,11 +240,10 @@ class Journal:
                     # texte annonce le travail, aucun contrôle ne le reprend.
                     self.reply_text = None
         elif kind == "user":
-            # Les résultats arrivent dans l'ordre des appels.
             for part in message.get("content") or []:
                 if part.get("type") != "tool_result" or not self.waiting:
                     continue
-                entry = self.waiting.popleft()
+                entry = self._waiting_for(part.get("tool_name"))
                 entry["r"] = self._result(entry["n"], part.get("content"))
                 if part.get("is_error"):
                     entry["e"] = True
@@ -257,6 +256,19 @@ class Journal:
                 "ms": event.get("duration_ms"),
                 "cost": event.get("cost", ""),
             })
+
+    def _waiting_for(self, name):
+        """L'appel qu'un résultat termine : le plus ancien en attente du même outil. Les
+        résultats arrivent dans l'ordre des appels, mais un appel annoncé peut ne jamais en
+        recevoir : le premier en attente, pris d'office, décalait alors toute la suite (vu le
+        25 octobre 2026 : une capture montrait le contenu d'un fichier CSS, et ses images
+        allaient trois actions plus bas). Sans nom d'outil, ou sans appel de ce nom, le
+        premier en attente."""
+        for entry in self.waiting:
+            if name and entry["n"] == name:
+                self.waiting.remove(entry)
+                return entry
+        return self.waiting.popleft()
 
     def _push(self, entry):
         self.events.append(entry)

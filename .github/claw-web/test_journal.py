@@ -126,6 +126,24 @@ class JournalRequestsTest(unittest.TestCase):
         # L'heure précède ce que dit la réponse : le reste du journal ne bouge pas.
         self.assertEqual([event["k"] for event in log.events], ["req", "think", "text", "tool", "req", "text"])
 
+    def test_a_call_that_never_gets_a_result_does_not_shift_the_others(self):
+        log = Journal()
+        # Un appel annoncé sans résultat (vu le 25 octobre 2026) : la capture recevait le
+        # contenu du fichier lu, et le fichier lu la réponse de la commande.
+        log.add(block("reply-1", {"type": "tool_use", "name": "ExitPlanMode", "input": {}}))
+        log.add(block("reply-2", {"type": "tool_use", "name": "Screenshot", "input": {"path": "index.html"}}))
+        log.add(tool("reply-2", "styles.css"))
+        log.add({"type": "user", "message": {"content": [{"type": "tool_result", "tool_name": "Screenshot",
+                                                          "content": json.dumps({"captures": [], "problemsFound": 3})}]}})
+        log.add({"type": "user", "message": {"content": [{"type": "tool_result", "tool_name": "read_file",
+                                                          "content": json.dumps({"file": {"numLines": 12}})}]}})
+        calls = {event["n"]: event.get("r") for event in log.events if event["k"] == "tool"}
+        self.assertEqual(calls, {"ExitPlanMode": None, "Screenshot": {"shots": [], "found": 3},
+                                 "read_file": {"count": 12}})
+        # Un résultat sans nom d'outil termine le premier appel en attente, comme avant.
+        log.add(RESULT)
+        self.assertEqual(log.events[1].get("r"), {"out": "…"})
+
     def test_blocks_without_a_reply_number_are_each_a_request(self):
         log = Journal()
         log.add({"type": "assistant", "message": {"content": [{"type": "text", "text": "Je lis le plan."}]}})

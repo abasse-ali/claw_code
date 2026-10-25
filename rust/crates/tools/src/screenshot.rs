@@ -1746,21 +1746,35 @@ fn capture(
     problems.extend(drawn_icons_problem(&audit["svgIcons"]));
     let mut notes = strings(&audit["notes"]);
     let mut params = json!({ "format": "jpeg", "quality": JPEG_QUALITY });
+    // Zone capturée, pour l'aperçu : le premier écran, sauf page entière.
+    let mut area = (0.0, f64::from(viewport.height));
     if session.full_page {
         let metrics = devtools.call("Page.getLayoutMetrics", json!({}))?;
         let content = metrics["cssContentSize"]["height"]
             .as_f64()
             .or_else(|| metrics["contentSize"]["height"].as_f64())
             .unwrap_or(f64::from(viewport.height));
-        let height = content
+        // Après un `scroll`, la capture part de l'endroit atteint : sans cela,
+        // la page entière repartait du haut et montrait toujours le même début.
+        let top = metrics["cssVisualViewport"]["pageY"]
+            .as_f64()
+            .unwrap_or(0.0)
+            .clamp(0.0, (content - f64::from(viewport.height)).max(0.0));
+        let height = (content - top)
             .min(f64::from(viewport.height) * FULL_PAGE_SCREENS)
             .max(f64::from(viewport.height));
+        area = (top, height);
         params["captureBeyondViewport"] = json!(true);
         params["clip"] =
-            json!({ "x": 0, "y": 0, "width": viewport.width, "height": height, "scale": 1 });
-        if content > height {
+            json!({ "x": 0, "y": top, "width": viewport.width, "height": height, "scale": 1 });
+        if top + height < content {
             note = Some(format!(
-                "the page is {content:.0}px high: the capture shows its first {height:.0}px"
+                "the page is {content:.0}px high: the capture shows {top:.0}px to {:.0}px; to see further down, call Screenshot again with an action such as {{\"scroll\": \"#a-section-id\"}}",
+                top + height
+            ));
+        } else if top > 0.0 {
+            note = Some(format!(
+                "the capture shows the page from {top:.0}px down to its end ({content:.0}px)"
             ));
         }
     }
@@ -1770,7 +1784,8 @@ fn capture(
         .filter(|data| !data.is_empty())
         .ok_or("the browser returned no image")?
         .to_string();
-    // Le premier écran, réduit : la vignette que Claw Web montre à l'utilisateur.
+    // La zone capturée, réduite : la vignette que Claw Web montre à l'utilisateur
+    // (le premier écran seul faisait se ressembler toutes les vignettes).
     let preview_base64 = devtools
         .call(
             "Page.captureScreenshot",
@@ -1779,7 +1794,7 @@ fn capture(
                 "quality": PREVIEW_QUALITY,
                 "captureBeyondViewport": true,
                 "clip": {
-                    "x": 0, "y": 0, "width": viewport.width, "height": viewport.height,
+                    "x": 0, "y": area.0, "width": viewport.width, "height": area.1,
                     "scale": PREVIEW_WIDTH / f64::from(viewport.width),
                 },
             }),
@@ -1960,7 +1975,10 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
     let session = Session {
         url: &url,
         theme,
-        full_page: input.full_page.unwrap_or(false),
+        // Page entière par défaut : le modèle ne demande presque jamais `full_page`,
+        // et ne voyait alors que l'en-tête, capture après capture (vu le 25 octobre
+        // 2026, refonte du site d'un club de foot : les défauts plus bas restaient).
+        full_page: input.full_page.unwrap_or(true),
         wait,
         actions: &steps,
     };
@@ -2571,6 +2589,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let capture = result.expect("capture")["captures"][0].clone();
         assert_eq!(capture["title"], json!("2 dépense(s)"), "{capture}");
+    }
+
+    /// Hauteur d'une image JPEG, lue dans son en-tête de trame.
+    fn jpeg_height(path: &str) -> u32 {
+        let data = std::fs::read(path).expect("aperçu");
+        let at = data
+            .windows(2)
+            .position(|pair| pair[0] == 0xFF && matches!(pair[1], 0xC0 | 0xC2))
+            .expect("trame");
+        u32::from(data[at + 5]) << 8 | u32::from(data[at + 6])
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn the_whole_page_is_captured_by_default_and_from_where_it_was_scrolled() {
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-long-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        std::fs::write(
+            dir.join("index.html"),
+            "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Long</title><style>body{margin:0}section{height:1500px}</style></head><body><main><section><h1>Haut</h1></section><section id=\"milieu\"><h2>Milieu</h2></section><section id=\"bas\"><h2>Bas</h2></section></main></body></html>",
+        )
+        .expect("html");
+        let page = format!("claw-long-{}/index.html", std::process::id());
+        let mut request = input(None, Some(&page));
+        request.viewports = Some(json!(["phone"]));
+        let top = super::take(&request).expect("capture")["captures"][0].clone();
+        request.actions = Some(json!([{ "scroll": "#bas" }]));
+        let scrolled = super::take(&request).expect("capture")["captures"][0].clone();
+        let _ = std::fs::remove_dir_all(&dir);
+        // Trois écrans de téléphone, et non le seul premier écran : la vignette aussi.
+        let note = top["note"].as_str().unwrap_or_default();
+        assert!(
+            note.contains("0px to 2532px") && note.contains("scroll"),
+            "{top}"
+        );
+        // Le premier écran seul en ferait le tiers (environ 520 pixels de haut).
+        let preview = jpeg_height(top["preview"].as_str().expect("aperçu"));
+        assert!((1500..=1600).contains(&preview), "{preview}");
+        // Après le défilement, la capture part de « Bas » jusqu'à la fin de la page.
+        let note = scrolled["note"].as_str().unwrap_or_default();
+        // (3000 pixels, plus les marges des titres)
+        assert!(
+            note.starts_with("the capture shows the page from 30")
+                && note.contains("down to its end"),
+            "{scrolled}"
+        );
     }
 
     #[test]
