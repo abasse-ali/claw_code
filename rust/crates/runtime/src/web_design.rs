@@ -997,6 +997,55 @@ pub fn critique_changes(text: &str, bar: u8) -> Option<String> {
     Some(verdict)
 }
 
+/// La règle d'un défaut mesuré (« [phone 390x844] Text partly cut off by the
+/// edge of a box…: span#lieu… »), sans son écran ni ses mesures : le même
+/// défaut garde la même clé quand ses chiffres ou ses éléments changent.
+#[must_use]
+pub fn problem_key(problem: &str) -> String {
+    let rule = problem
+        .split_once("] ")
+        .map_or(problem, |(_, rest)| rest)
+        .split([':', '('])
+        .next()
+        .unwrap_or_default();
+    rule.chars()
+        .filter(|character| !character.is_ascii_digit())
+        .take(80)
+        .collect::<String>()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Les défauts mesurés maintenant dont la règle n'était pas relevée au début
+/// du tour (`baseline` : clés de `problem_key`) : le tour les a introduits.
+/// Vu le 25 octobre 2026 (site d'un club, huit passages) : chaque passage
+/// corrigeait des défauts et en créait d'autres, sans que rien ne le dise ;
+/// une réécriture avait coupé l'en-tête, qui allait bien avant.
+#[must_use]
+pub fn regressions(baseline: &[String], audit: &Audit) -> Vec<String> {
+    audit
+        .problems
+        .iter()
+        .filter(|problem| !baseline.contains(&problem_key(problem)))
+        .cloned()
+        .collect()
+}
+
+/// La tête d'une revue quand le tour a cassé ce qui allait : à réparer d'abord.
+#[must_use]
+pub fn regression_note(regressions: &[String]) -> String {
+    format!(
+        "[Claw] Regressions: Claw measured the page before this turn's first change, and these problems were not there. Your changes in this turn broke them. Repair them first, without undoing what the user asked for (compare with the files as they were: git diff shows your changes):\n{}",
+        regressions
+            .iter()
+            .map(|problem| format!("- {problem}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
 /// Message au modèle après la revue ; `None` quand il n'y a rien à corriger.
 #[must_use]
 pub fn review_feedback(
@@ -1049,9 +1098,47 @@ pub fn review_feedback(
 mod tests {
     use super::{
         critique_changes, design_guide, is_interface_file, is_interface_request, page_from_files,
-        page_target, read_audit, review_feedback, screenshot_input, Audit,
+        page_target, problem_key, read_audit, regression_note, regressions, review_feedback,
+        screenshot_input, Audit,
     };
     use serde_json::json;
+
+    #[test]
+    fn problems_absent_when_the_turn_started_are_named_as_regressions() {
+        // Site du club, 25 octobre 2026 : l'en-tête allait bien à 10:50, la
+        // réécriture de 12:40 l'a coupé ; le texte rogné, lui, était déjà là.
+        let before = Audit {
+            problems: vec![
+                "[phone 390x844] Text partly cut off by the edge of a box around it (overflow: hidden on a parent): span#hero-location \"Stade Municipal\" shows 0x26px of 121x26px".to_string(),
+            ],
+            ..Audit::default()
+        };
+        let baseline: Vec<String> = before
+            .problems
+            .iter()
+            .map(|problem| problem_key(problem))
+            .collect();
+        let after = Audit {
+            problems: vec![
+                // Le même défaut, d'autres mesures : pas une régression.
+                "[desktop 1280x800] Text partly cut off by the edge of a box around it (overflow: hidden on a parent): span.meta \"Terrain A\" shows 10x20px of 80x20px".to_string(),
+                "[phone 390x844] The text of the fixed header.header (60px high) does not fit in it: span.logo-text starts above the top of the screen and is cut".to_string(),
+            ],
+            ..Audit::default()
+        };
+        let broken = regressions(&baseline, &after);
+        assert_eq!(broken.len(), 1);
+        assert!(broken[0].contains("fixed header"), "{broken:?}");
+        let note = regression_note(&broken);
+        assert!(
+            note.starts_with("[Claw] Regressions")
+                && note.contains("- [phone 390x844] The text of the fixed header")
+        );
+        assert_eq!(
+            problem_key("[phone 390x844] Icons that cannot be seen, drawn in the color of their background: the icon in div.hero"),
+            "icons that cannot be seen, drawn in the color of their background"
+        );
+    }
 
     #[test]
     fn interface_requests_are_recognized() {

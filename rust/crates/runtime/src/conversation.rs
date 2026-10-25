@@ -396,6 +396,10 @@ struct TurnAids {
     foundation_noted: bool,
     /// Notes des revues visuelles du tour, dans l'ordre.
     graded: Vec<crate::web_design::Graded>,
+    /// Règles des défauts mesurés sur la page avant le premier changement du
+    /// tour (`web_design::problem_key`) : les revues nomment ceux que le tour
+    /// a introduits.
+    baseline: Option<Vec<String>>,
     /// Pièges du code déjà signalés pendant ce tour (fichier et constat).
     pitfalls_seen: std::collections::HashSet<String>,
     /// Langages dont les règles ont été données pendant ce tour.
@@ -1859,6 +1863,16 @@ where
         aids.checklisted = aids.ultracode;
         if aids.ultracode {
             self.explore_stage(&request_text, earlier.as_deref(), &mut aids, &mut prompter);
+        }
+        // Tour qui touche à une page déjà là : son état avant le premier
+        // changement, pour que les revues nomment ce que le tour casse.
+        let interface_turn = aids.design_guided
+            || crate::web_design::is_interface_request(&request_text)
+            || earlier
+                .as_deref()
+                .is_some_and(crate::web_design::is_interface_request);
+        if interface_turn && !aids.work_question {
+            self.baseline_audit(&mut aids, &mut prompter);
         }
 
         loop {
@@ -3469,6 +3483,55 @@ where
         crate::web_design::page_from_files(&cwd, &changed)
     }
 
+    /// État de la page au début du tour : ses défauts mesurés (sans juge ni
+    /// captures pour le modèle), gardés pour que chaque revue du tour nomme
+    /// ceux que le tour a introduits.
+    fn baseline_audit(
+        &mut self,
+        aids: &mut TurnAids,
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) {
+        if self.subagent || interrupt_requested() || !harness::enabled(Aid::DesignReview) {
+            return;
+        }
+        let Some(target) = self.page_to_review(aids) else {
+            return;
+        };
+        let cwd = std::env::current_dir().unwrap_or_default();
+        if !crate::web_design::missing_local_assets(&cwd, &target).is_empty() {
+            return;
+        }
+        self.api_client
+            .notify("État de la page avant ce tour : Claw la mesure, pour repérer ce que le tour casserait…");
+        let input = crate::web_design::screenshot_input(&target);
+        self.tool_executor.announce("Screenshot", &input);
+        let (message, _) = self.execute_tool_call(
+            "claw-baseline".to_string(),
+            "Screenshot".to_string(),
+            &input,
+            prompter
+                .as_mut()
+                .map(|prompt| &mut **prompt as &mut dyn PermissionPrompter),
+        );
+        // Les captures ne servent qu'à mesurer : ni juge, ni conversation.
+        drop(std::mem::take(&mut self.tool_images));
+        let Some((output, false)) = tool_result_parts(&message) else {
+            return;
+        };
+        let audit = crate::web_design::read_audit(output);
+        aids.baseline = Some(
+            audit
+                .problems
+                .iter()
+                .map(|problem| crate::web_design::problem_key(problem))
+                .collect(),
+        );
+        self.api_client.notify(&format!(
+            "État de la page avant ce tour : {} défaut(s) mesuré(s)",
+            audit.problems.len()
+        ));
+    }
+
     /// Revue visuelle : le modèle a modifié l'interface et dit avoir fini.
     /// Claw regarde la page comme un utilisateur (captures pleine page au
     /// téléphone et à l'ordinateur, défauts mesurés, essai du menu) et la fait
@@ -3628,6 +3691,23 @@ where
             rounds,
             bar,
         );
+        // Ce que le tour a cassé passe en tête : à réparer avant le reste.
+        let broken = aids.baseline.as_ref().map_or_else(Vec::new, |baseline| {
+            crate::web_design::regressions(baseline, &audit)
+        });
+        let feedback = match feedback {
+            Some(text) if !broken.is_empty() => Some(format!(
+                "{}\n\n{text}",
+                crate::web_design::regression_note(&broken)
+            )),
+            other => other,
+        };
+        if !broken.is_empty() {
+            self.api_client.notify(&format!(
+                "Revue visuelle : {} défaut(s) absent(s) au début du tour, introduit(s) par ce tour : à réparer d'abord",
+                broken.len()
+            ));
+        }
         if feedback.is_some() {
             let judged = verdict.as_ref().map_or_else(String::new, |(model, lines)| {
                 format!(
