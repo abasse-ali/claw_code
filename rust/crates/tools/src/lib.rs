@@ -763,7 +763,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                         "description": "Screen sizes, one screenshot each: \"phone\" (390x844), \"tablet\" (820x1180), \"desktop\" (1280x800) or \"WIDTHxHEIGHT\". Default: phone and desktop."
                     },
                     "theme": { "type": "string", "enum": ["light", "dark"], "description": "Color scheme the device says it prefers (prefers-color-scheme)." },
-                    "full_page": { "type": "boolean", "description": "Capture the page down to its end (up to three screens) instead of the first screen." },
+                    "full_page": { "type": "boolean", "description": "Capture the page down to its end, up to three screens (default true); false keeps the first screen only. After a scroll action, the capture starts where the page was scrolled to." },
                     "wait_ms": {
                         "type": "integer",
                         "minimum": 0,
