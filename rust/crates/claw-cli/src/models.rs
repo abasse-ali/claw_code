@@ -961,17 +961,23 @@ pub(crate) const NVIDIA_MODELS: &[NvidiaModel] = &[
 /// par les deux autres : Ultra en 126 s, tout en français, compte rendu net ;
 /// Lightning en 107 s, une correction de plus et des phrases en anglais.
 /// Ultra passe donc avant Lightning, bien qu'il ait été lent le 19 octobre
-/// (longues réponses coupées par NVIDIA).
+/// (longues réponses coupées par NVIDIA). Super, toujours introuvable le
+/// 25 octobre, est retiré : chaque bascule perdait une requête sur lui avant
+/// d'aller à Lightning.
 const NVIDIA_FALLBACK_ORDER: &[&str] = &[
-    "nvidia/nemotron-3-super-120b-a12b",
     "nvidia/nemotron-3-ultra-550b-a55b",
     "nvidia/nemotron-3.5-lightning-30b-a3b",
 ];
 
 /// Ce qu'il faut savoir d'un agent de NVIDIA avant de le choisir.
 fn nvidia_caveat(id: &str) -> Option<&'static str> {
-    (id == "nvidia/nemotron-3-ultra-550b-a55b")
-        .then_some("lent sur l'offre gratuite : NVIDIA coupe parfois ses longues réponses (Claw passe alors à Nemotron 3 Super)")
+    match id {
+        "nvidia/nemotron-3-ultra-550b-a55b" => Some("lent sur l'offre gratuite : NVIDIA coupe parfois ses longues réponses (Claw passe alors à Nemotron 3.5 Lightning)"),
+        // L'agent « le plus puissant sans réserve » qui reprenait un modèle bloqué
+        // était Super, introuvable : l'escalade perdait sa requête.
+        "nvidia/nemotron-3-super-120b-a12b" => Some("introuvable chez NVIDIA (erreur 404) depuis le 20 octobre 2026"),
+        _ => None,
+    }
 }
 
 fn has_nvidia_key() -> bool {
@@ -2861,12 +2867,10 @@ mod tests {
     fn nvidia_and_gemini_models_fall_back_on_their_own_provider() {
         use super::provider_fallbacks;
         // Nemotron 3 Ultra seul relançait le même modèle six fois par étape.
+        // Super, introuvable (404) depuis le 20 octobre 2026, n'en est plus.
         assert_eq!(
             provider_fallbacks("nvidia:nvidia/nemotron-3-ultra-550b-a55b").expect("NVIDIA"),
-            [
-                "nvidia:nvidia/nemotron-3-super-120b-a12b",
-                "nvidia:nvidia/nemotron-3.5-lightning-30b-a3b",
-            ]
+            ["nvidia:nvidia/nemotron-3.5-lightning-30b-a3b"]
         );
         // Super introuvable (20 octobre 2026) : Ultra, puis Lightning ; jamais
         // Step 5 Preview, qui inventait des messages de l'utilisateur.
@@ -2881,7 +2885,8 @@ mod tests {
         );
         assert!(!from_super.iter().any(|model| model.contains("step-5")));
         assert!(super::nvidia_caveat("nvidia/nemotron-3-ultra-550b-a55b").is_some());
-        assert!(super::nvidia_caveat("nvidia/nemotron-3-super-120b-a12b").is_none());
+        assert!(super::nvidia_caveat("nvidia/nemotron-3-super-120b-a12b").is_some());
+        assert!(super::nvidia_caveat("nvidia/nemotron-3.5-lightning-30b-a3b").is_none());
         // Le lecteur d'images n'appelle pas les outils : jamais un secours d'agent.
         assert!(
             !provider_fallbacks("nvidia:nvidia/nemotron-3.5-lightning-30b-a3b")
@@ -2904,17 +2909,16 @@ mod tests {
         use super::stronger_nvidia_agent;
         let ultra = "nvidia:nvidia/nemotron-3-ultra-550b-a55b";
         let super_ = "nvidia:nvidia/nemotron-3-super-120b-a12b";
-        // Le plus puissant des agents rapides : Super, jamais Ultra (lent, il
-        // coupait ses longues réponses).
-        assert_eq!(
-            stronger_nvidia_agent("nvidia:nvidia/nemotron-3.5-lightning-30b-a3b").as_deref(),
-            Some(super_)
-        );
+        let lightning = "nvidia:nvidia/nemotron-3.5-lightning-30b-a3b";
+        // Le plus puissant des agents sans réserve : ni Ultra (lent, il coupait
+        // ses longues réponses), ni Super (introuvable depuis le 20 octobre
+        // 2026) ; Lightning reprend un modèle inconnu.
         assert_eq!(
             stronger_nvidia_agent("nvidia:z-ai/glm-5.3").as_deref(),
-            Some(super_)
+            Some(lightning)
         );
         // Déjà le plus puissant : l'escalade habituelle (OpenRouter) décide.
+        assert_eq!(stronger_nvidia_agent(lightning), None);
         assert_eq!(stronger_nvidia_agent(super_), None);
         assert_eq!(stronger_nvidia_agent(ultra), None);
         assert_eq!(

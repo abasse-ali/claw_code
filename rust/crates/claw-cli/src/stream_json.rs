@@ -146,6 +146,11 @@ impl TurnObserver for StreamJsonObserver {
     }
 
     fn tool_result(&self, name: &str, output: &str, is_error: bool) {
+        // Un appel annoncé hors d'une réponse du modèle (revue visuelle, commande
+        // de Claw) attendait la réponse suivante : son résultat arrivait avant lui,
+        // et l'appli ne savait où le mettre (vu le 25 octobre 2026 : les captures
+        // de la revue perdues). L'appel part d'abord.
+        self.flush();
         emit(&json!({
             "type": "user",
             "session_id": self.session_id,
@@ -259,6 +264,28 @@ mod tests {
         );
         assert_eq!(user_text_from_line("   "), Ok(None));
         assert!(user_text_from_line("pas du json").is_err());
+    }
+
+    #[test]
+    fn a_call_announced_by_claw_is_published_before_its_result() {
+        use super::StreamJsonObserver;
+        use crate::TurnObserver;
+        super::EMITTED.with(|emitted| emitted.borrow_mut().clear());
+        let observer = StreamJsonObserver::new("essai");
+        // La revue visuelle annonce sa capture, hors de toute réponse du modèle.
+        observer.tool_call("Screenshot", r#"{"path":"index.html"}"#);
+        observer.tool_result("Screenshot", "{}", false);
+        let emitted = super::EMITTED.with(std::cell::RefCell::take);
+        let kinds: Vec<String> = emitted
+            .iter()
+            .map(|event| {
+                event["message"]["content"][0]["type"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(kinds, ["tool_use", "tool_result"]);
     }
 
     #[test]

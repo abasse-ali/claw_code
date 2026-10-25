@@ -52,6 +52,8 @@ KNOWN_ISSUES = {
     "nvidia:stepfun-ai/step-5-preview":
         "écarté par Claw (20 octobre 2026) : écrit de faux messages de l'utilisateur et suit des tâches inventées",
     "nvidia:openai/gpt-oss-20b": "écarté par Claw (20 octobre 2026) : en échec dans les vraies sessions",
+    "nvidia:nvidia/nemotron-3-super-120b-a12b":
+        "introuvable chez NVIDIA (erreur 404) depuis le 20 octobre 2026, encore le 25 : retiré des secours de Claw",
     "nvidia:nvidia/nemotron-3.5-super-vl-120b-a12b":
         "lit les images, mais échoue avec les outils d'une vraie session (erreur 500) : Claw s'en sert comme lecteur d'images",
 }
