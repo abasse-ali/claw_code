@@ -29,6 +29,7 @@ const AUDIT_SCRIPT: &str = include_str!("screenshot_audit.js");
 const PROBE_SCRIPT: &str = include_str!("screenshot_probe.js");
 /// Essai de chaque bouton de la page, après la capture.
 const CLICKS_SCRIPT: &str = include_str!("screenshot_clicks.js");
+const SNAPSHOT_SCRIPT: &str = include_str!("screenshot_snapshot.js");
 
 /// Temps laissé à la page après son chargement et après chaque action.
 const DEFAULT_WAIT_MS: u64 = 1_500;
@@ -1494,7 +1495,8 @@ fn open_page(
 
 /// Les boutons essayés un à un : ceux qui ne font rien, ceux qui échouent.
 fn click_problems(devtools: &mut DevTools) -> Vec<String> {
-    let Ok(result) = devtools.evaluate(CLICKS_SCRIPT) else {
+    let script = format!("const clawSnapshot = () => {SNAPSHOT_SCRIPT};\n{CLICKS_SCRIPT}");
+    let Ok(result) = devtools.evaluate(&script) else {
         return Vec::new();
     };
     let mut problems = Vec::new();
@@ -1673,24 +1675,47 @@ fn lost_on_reload(devtools: &mut DevTools, kept: &Value) -> Vec<String> {
             .unwrap_or(false);
     let text = if reloaded {
         let _ = devtools.pump(Duration::from_millis(800));
-        devtools.evaluate("document.body ? document.body.innerText : ''")
+        devtools.evaluate(&format!(
+            "({{ text: document.body ? document.body.innerText : '', snapshot: {SNAPSHOT_SCRIPT} }})"
+        ))
     } else {
         Err(String::new())
     };
     devtools.events = earlier;
-    let Ok(text) = text else {
+    let Ok(reload) = text else {
         return Vec::new();
     };
-    let text = text.as_str().unwrap_or("");
+    let text = reload["text"].as_str().unwrap_or("");
+    let blocks = strings(&reload["snapshot"]);
+    let advice = "if this is something the visitor adds (an entry, a booking, an offer, seats), save it (localStorage, or the server) and read it back when the page opens";
+    // Les formulaires ont été envoyés l'un après l'autre : les textes d'un
+    // formulaire suivant (« 7 places dispo ») contiennent aussi l'ajout perdu d'un
+    // précédent, et ne se jugent plus.
+    let mut judged = true;
     kept.iter()
         .filter_map(|item| {
             let marker = item["marker"].as_str()?;
-            (!text.contains(marker)).then(|| {
-                format!(
-                    "{} adds \"{marker}\" to the page, but it is gone after a reload: if this is a list the visitor builds (an entry, a booking, an offer), save it (localStorage, or the server) and read it back when the page opens",
-                    item["form"].as_str().unwrap_or("a form")
-                )
-            })
+            let form = item["form"].as_str().unwrap_or("a form");
+            if item["shown"].as_bool().unwrap_or(true) {
+                (!text.contains(marker)).then(|| {
+                    format!("{form} adds \"{marker}\" to the page, but it is gone after a reload: {advice}")
+                })
+            } else {
+                // Aucun des textes apparus à l'envoi ne revient. Vu le 25 octobre
+                // 2026 (session #31) : « Je conduis » passait à « 4 places dispo ·
+                // 3 conducteurs », et à 2 places au rechargement.
+                let appeared = strings(&item["appeared"]);
+                let lost = judged
+                    && !appeared.is_empty()
+                    && !appeared.iter().any(|block| blocks.contains(block));
+                judged &= !lost;
+                lost.then(|| {
+                        format!(
+                            "{form} changes the page once sent (\"{}\"), but after a reload that change is gone: {advice}",
+                            appeared[0]
+                        )
+                    })
+            }
         })
         .collect()
 }
@@ -2220,8 +2245,8 @@ mod tests {
         };
         let broken = problems(
             "casse",
-            "<nav><a href=\"#equipe\">Équipe</a> <a href=\"#calendrier\">Calendrier</a> <a href=\"tarifs.html\">Tarifs</a> <a href=\"contact.html\">Contact</a> <a href=\"/absent.html\">Absent</a> <a href=\"tel:0000000000\">Appeler</a> <a href=\"mailto:club@\">Écrire</a></nav><form id=\"inscription\"><label for=\"nom\">Nom</label><input id=\"nom\" name=\"nom\" required><button>Inscrire</button></form><form id=\"ajout\"><label for=\"joueur\">Joueur</label><input id=\"joueur\" name=\"joueur\" required><button>Ajouter</button></form><button id=\"ouvrir\" onclick=\"document.getElementById('fenetre').classList.add('open')\">Ouvrir</button><div id=\"fenetre\" role=\"dialog\"><p>Fenêtre</p><button aria-label=\"Fermer\">×</button></div>",
-            "document.getElementById('ajout').addEventListener('submit', (e) => { e.preventDefault(); const li = document.createElement('li'); li.textContent = document.getElementById('joueur').value; document.getElementById('liste').append(li); });",
+            "<nav><a href=\"#equipe\">Équipe</a> <a href=\"#calendrier\">Calendrier</a> <a href=\"tarifs.html\">Tarifs</a> <a href=\"contact.html\">Contact</a> <a href=\"/absent.html\">Absent</a> <a href=\"tel:0000000000\">Appeler</a> <a href=\"mailto:club@\">Écrire</a></nav><form id=\"inscription\"><label for=\"nom\">Nom</label><input id=\"nom\" name=\"nom\" required><button>Inscrire</button></form><form id=\"ajout\"><label for=\"joueur\">Joueur</label><input id=\"joueur\" name=\"joueur\" required><button>Ajouter</button></form><button id=\"ouvrir\" onclick=\"document.getElementById('fenetre').classList.add('open')\">Ouvrir</button><div id=\"fenetre\" role=\"dialog\"><p>Fenêtre</p><button aria-label=\"Fermer\">×</button></div><form id=\"covoit\"><label for=\"conducteur\">Ton nom</label><input id=\"conducteur\" name=\"nom\" required><label for=\"places\">Places</label><input id=\"places\" name=\"places\" type=\"number\" min=\"1\" max=\"4\" value=\"3\" required><button>Je conduis</button></form><p><strong id=\"dispo\">2</strong> places dispo</p>",
+            "document.getElementById('ajout').addEventListener('submit', (e) => { e.preventDefault(); const li = document.createElement('li'); li.textContent = document.getElementById('joueur').value; document.getElementById('liste').append(li); }); document.getElementById('covoit').addEventListener('submit', (e) => { e.preventDefault(); const dispo = document.getElementById('dispo'); dispo.textContent = Number(dispo.textContent) + Number(document.getElementById('places').value); });",
         );
         for expected in [
             "points to #calendrier, but the page has no element with that id",
@@ -2231,6 +2256,7 @@ mod tests {
             "sending form#inscription reloads the page",
             "absent.html, which does not exist",
             "form#ajout adds",
+            "form#covoit changes the page once sent",
             "is gone after a reload",
             "opens a window that button \\\"×\\\" does not close",
         ] {
@@ -2242,8 +2268,8 @@ mod tests {
         );
         let sound = problems(
             "sain",
-            "<nav><a href=\"#equipe\">Équipe</a> <a href=\"tarifs.html\">Tarifs</a> <a href=\"/tarifs.html\">Tarifs</a> <a href=\"tel:+33561000000\">Appeler</a></nav><form id=\"contact\"><label for=\"qui\">Ton nom</label><input id=\"qui\" name=\"nom\" required><button>Envoyer</button></form><p id=\"merci\" role=\"status\"></p><form id=\"ajout\"><label for=\"joueur\">Joueur</label><input id=\"joueur\" name=\"joueur\" required><button>Ajouter</button></form><button id=\"ouvrir\" onclick=\"document.getElementById('fenetre').classList.add('open')\">Ouvrir</button><div id=\"fenetre\" role=\"dialog\"><p>Fenêtre</p><button aria-label=\"Fermer\" onclick=\"document.getElementById('fenetre').classList.remove('open')\">×</button></div>",
-            "const show = () => { document.getElementById('liste').innerHTML = JSON.parse(localStorage.getItem('joueurs') || '[]').map((nom) => `<li>${nom}</li>`).join(''); }; show(); document.getElementById('ajout').addEventListener('submit', (e) => { e.preventDefault(); const list = JSON.parse(localStorage.getItem('joueurs') || '[]'); list.push(document.getElementById('joueur').value); localStorage.setItem('joueurs', JSON.stringify(list)); show(); }); document.getElementById('contact').addEventListener('submit', (e) => { e.preventDefault(); document.getElementById('merci').textContent = `Merci ${document.getElementById('qui').value}, message envoyé.`; });",
+            "<nav><a href=\"#equipe\">Équipe</a> <a href=\"tarifs.html\">Tarifs</a> <a href=\"/tarifs.html\">Tarifs</a> <a href=\"tel:+33561000000\">Appeler</a></nav><form id=\"contact\"><label for=\"qui\">Ton nom</label><input id=\"qui\" name=\"nom\" required><button>Envoyer</button></form><p id=\"merci\" role=\"status\"></p><form id=\"ajout\"><label for=\"joueur\">Joueur</label><input id=\"joueur\" name=\"joueur\" required><button>Ajouter</button></form><button id=\"ouvrir\" onclick=\"document.getElementById('fenetre').classList.add('open')\">Ouvrir</button><div id=\"fenetre\" role=\"dialog\"><p>Fenêtre</p><button aria-label=\"Fermer\" onclick=\"document.getElementById('fenetre').classList.remove('open')\">×</button></div><form id=\"covoit\"><label for=\"conducteur\">Ton nom</label><input id=\"conducteur\" name=\"nom\" required><label for=\"places\">Places</label><input id=\"places\" name=\"places\" type=\"number\" min=\"1\" max=\"4\" value=\"3\" required><button>Je conduis</button></form><p><strong id=\"dispo\">2</strong> places dispo</p>",
+            "const show = () => { document.getElementById('liste').innerHTML = JSON.parse(localStorage.getItem('joueurs') || '[]').map((nom) => `<li>${nom}</li>`).join(''); }; show(); document.getElementById('ajout').addEventListener('submit', (e) => { e.preventDefault(); const list = JSON.parse(localStorage.getItem('joueurs') || '[]'); list.push(document.getElementById('joueur').value); localStorage.setItem('joueurs', JSON.stringify(list)); show(); }); document.getElementById('contact').addEventListener('submit', (e) => { e.preventDefault(); document.getElementById('merci').textContent = `Merci ${document.getElementById('qui').value}, message envoyé.`; }); const dispo = document.getElementById('dispo'); dispo.textContent = localStorage.getItem('dispo') || '2'; document.getElementById('covoit').addEventListener('submit', (e) => { e.preventDefault(); dispo.textContent = Number(dispo.textContent) + Number(document.getElementById('places').value); localStorage.setItem('dispo', dispo.textContent); });",
         );
         for absent in [
             "broken links",
