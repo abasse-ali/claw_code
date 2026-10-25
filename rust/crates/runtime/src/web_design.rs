@@ -1046,6 +1046,45 @@ pub fn regression_note(regressions: &[String]) -> String {
     )
 }
 
+/// Ce que Claw a mesuré sur la page sans juge (ni captures pour le modèle) :
+/// régressions du tour d'abord, puis défauts et erreurs de la console.
+/// `None` quand la mesure ne trouve rien.
+#[must_use]
+pub fn measured_list(audit: &Audit, broken: &[String]) -> Option<String> {
+    let mut lines: Vec<String> = broken
+        .iter()
+        .map(|problem| {
+            format!("- broken by this turn (it was fine when the turn started): {problem}")
+        })
+        .collect();
+    lines.extend(
+        audit
+            .problems
+            .iter()
+            .filter(|problem| !broken.contains(problem))
+            .map(|problem| format!("- {problem}")),
+    );
+    lines.extend(
+        audit
+            .console
+            .iter()
+            .take(6)
+            .map(|line| format!("- console: {line}")),
+    );
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// Message au modèle qui modifie l'interface depuis un moment sans la
+/// regarder : ce que Claw vient d'y mesurer. `None` si rien n'est à reprendre.
+#[must_use]
+pub fn blind_edits_feedback(target: &str, edits: u32, measured: Option<&str>) -> Option<String> {
+    let measured = measured?;
+    let page = target.split_once(':').map_or(target, |(_, page)| page);
+    Some(format!(
+        "[Claw] You changed the interface {edits} times without looking at the page. Claw measured {page} now, at phone and desktop sizes, tapping every button and sending every form (measurements only, no screenshots):\n{measured}\nFix these before changing anything else. From now on, check with Screenshot after each small batch of interface changes: it returns these measurements, and guessing from the code is how this turn broke what worked."
+    ))
+}
+
 /// Message au modèle après la revue ; `None` quand il n'y a rien à corriger.
 #[must_use]
 pub fn review_feedback(

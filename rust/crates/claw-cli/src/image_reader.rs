@@ -314,7 +314,7 @@ pub(crate) fn replacement(source: &ImageSource, number: usize, total: usize) -> 
             // modèle cherchait trois fois à corriger un texte déjà juste (vu le
             // 25 octobre 2026, refonte du site d'un club de foot).
             format!(
-                "{warning}[{place} by {} because the current model cannot read images (image id {}). To look again at any part of it, call LookAtImage with this id and one precise question. The reader can misread small text (a missing space, a wrong letter or digit): before changing a text this description quotes, find it in the files with grep_search; if the files already have it right, there is nothing to fix.]\n{body}{pixels}",
+                "{warning}[{place} by {} because the current model cannot read images (image id {}). To look again at any part of it, call LookAtImage with this id and one precise question. The reader can misread small text (a missing space, a wrong letter or digit): before changing a text this description quotes, find it in the files with grep_search; if the files already have it right, the text is not the problem: a word that looks glued can come from the CSS (a negative letter-spacing), which the Screenshot measurements name; do not rewrite a text that is right.]\n{body}{pixels}",
                 description.model,
                 image_id(source)
             )
@@ -490,11 +490,18 @@ pub(crate) fn describe(model: &str, sources: &[ImageSource], announce: &mut dyn 
     };
     let images: Vec<&ImageSource> = sources.iter().collect();
     remember(model, &images);
-    describe_missing(model, &images, &dir, &readers, announce, |source| {
-        describe_thoroughly(&readers(), &|models, prompt| {
-            ask_reader(models, prompt, source)
-        })
-    });
+    describe_missing(
+        model,
+        &images,
+        &dir,
+        &readers,
+        announce,
+        |readers, source| {
+            describe_thoroughly(readers, &|models, prompt| {
+                ask_reader(models, prompt, source)
+            })
+        },
+    );
 }
 
 /// Avant une requête à `model` : s'il ne lit pas les images, fait décrire
@@ -517,14 +524,21 @@ pub(crate) fn prepare(model: &str, messages: &[InputMessage], announce: &mut dyn
     };
     remember(model, &images(messages));
     let quick = tool_image_keys(messages);
-    prepare_with(model, messages, &dir, &readers, announce, |source| {
-        if quick.contains(&image_key(source)) {
-            return describe_quickly(&readers(), source);
-        }
-        describe_thoroughly(&readers(), &|models, prompt| {
-            ask_reader(models, prompt, source)
-        })
-    });
+    prepare_with(
+        model,
+        messages,
+        &dir,
+        &readers,
+        announce,
+        |readers, source| {
+            if quick.contains(&image_key(source)) {
+                return describe_quickly(readers, source);
+            }
+            describe_thoroughly(readers, &|models, prompt| {
+                ask_reader(models, prompt, source)
+            })
+        },
+    );
 }
 
 /// Une consigne posée sur `source` aux lecteurs `models` (le premier qui
@@ -669,7 +683,7 @@ fn prepare_with(
     dir: &Path,
     readers: &dyn Fn() -> Vec<String>,
     announce: &mut dyn FnMut(&str),
-    describe: impl Fn(&ImageSource) -> Result<(String, String), String>,
+    describe: impl Fn(&[String], &ImageSource) -> Result<(String, String), String> + Sync,
 ) {
     let images = images(messages);
     if images.is_empty() {
@@ -688,7 +702,7 @@ fn describe_missing(
     dir: &Path,
     readers: &dyn Fn() -> Vec<String>,
     announce: &mut dyn FnMut(&str),
-    describe: impl Fn(&ImageSource) -> Result<(String, String), String>,
+    describe: impl Fn(&[String], &ImageSource) -> Result<(String, String), String> + Sync,
 ) -> (bool, Option<String>) {
     let mut missing = Vec::new();
     for source in images {
@@ -712,8 +726,29 @@ fn describe_missing(
             count(missing.len(), "image"),
             readers[0]
         ));
-        for (key, source) in missing {
-            match describe(source) {
+        // Toutes les images à la fois : une description prend une à deux
+        // minutes, et les captures d'une page arrivent par quatre ou cinq. Vu
+        // le 25 octobre 2026 (session #31) : 32 minutes sur 93 à attendre des
+        // descriptions faites l'une après l'autre.
+        let results: Vec<Result<(String, String), String>> = std::thread::scope(|scope| {
+            let workers: Vec<_> = missing
+                .iter()
+                .map(|(_, source)| {
+                    let (describe, readers) = (&describe, &readers);
+                    scope.spawn(move || describe(readers, source))
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| {
+                    worker
+                        .join()
+                        .unwrap_or_else(|_| Err("le lecteur d'images s'est arrêté".to_string()))
+                })
+                .collect()
+        });
+        for ((key, _), result) in missing.into_iter().zip(results) {
+            match result {
                 Ok((reader, text)) if !text.trim().is_empty() => {
                     let description = Description {
                         model: reader,
@@ -729,8 +764,6 @@ fn describe_missing(
                 Err(error) => {
                     unreadable().insert(key);
                     failure = Some(error);
-                    // Les mêmes modèles échoueraient pour les images suivantes.
-                    break;
                 }
             }
         }
@@ -1001,7 +1034,7 @@ mod tests {
         let (first, second) = (image("essai-lecteur-1"), image("essai-lecteur-2"));
         let messages = conversation(&[&first, &second, &first]);
         let readers = vec!["acme/vision:free".to_string()];
-        let asked = RefCell::new(0);
+        let asked = std::sync::atomic::AtomicUsize::new(0);
         let notices = RefCell::new(Vec::new());
         let run = || {
             prepare_with(
@@ -1010,8 +1043,8 @@ mod tests {
                 &dir,
                 &|| readers.clone(),
                 &mut |text: &str| notices.borrow_mut().push(text.to_string()),
-                |source| {
-                    *asked.borrow_mut() += 1;
+                |_, source| {
+                    asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     Ok((
                         "acme/vision:free".to_string(),
                         format!("Capture {}", source.data),
@@ -1021,7 +1054,7 @@ mod tests {
         };
         run();
         // Deux images différentes (l'une figure deux fois) : deux descriptions.
-        assert_eq!(*asked.borrow(), 2);
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(
             *notices.borrow(),
             [
@@ -1032,7 +1065,7 @@ mod tests {
         assert_eq!(
             replacement(&first, 1, 1),
             format!(
-                "[Image described by acme/vision:free because the current model cannot read images (image id {}). To look again at any part of it, call LookAtImage with this id and one precise question. The reader can misread small text (a missing space, a wrong letter or digit): before changing a text this description quotes, find it in the files with grep_search; if the files already have it right, there is nothing to fix.]\nCapture essai-lecteur-1",
+                "[Image described by acme/vision:free because the current model cannot read images (image id {}). To look again at any part of it, call LookAtImage with this id and one precise question. The reader can misread small text (a missing space, a wrong letter or digit): before changing a text this description quotes, find it in the files with grep_search; if the files already have it right, the text is not the problem: a word that looks glued can come from the CSS (a negative letter-spacing), which the Screenshot measurements name; do not rewrite a text that is right.]\nCapture essai-lecteur-1",
                 image_id(&first)
             )
         );
@@ -1044,7 +1077,7 @@ mod tests {
         );
         // Requête suivante : rien n'est redemandé, rien n'est redit.
         run();
-        assert_eq!(*asked.borrow(), 2);
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(notices.borrow().len(), 2);
         std::fs::remove_dir_all(&dir).expect("nettoyage");
     }
@@ -1118,7 +1151,7 @@ mod tests {
         let lost = image("essai-lecteur-illisible");
         let messages = conversation(&[&lost]);
         let readers = vec!["acme/vision:free".to_string()];
-        let asked = RefCell::new(0);
+        let asked = std::sync::atomic::AtomicUsize::new(0);
         let notices = RefCell::new(Vec::new());
         let run = |readers: &[String]| {
             prepare_with(
@@ -1127,15 +1160,15 @@ mod tests {
                 &dir,
                 &|| readers.to_vec(),
                 &mut |text: &str| notices.borrow_mut().push(text.to_string()),
-                |_| {
-                    *asked.borrow_mut() += 1;
+                |_, _| {
+                    asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     Err("erreur 429".to_string())
                 },
             );
         };
         run(&readers);
         run(&readers);
-        assert_eq!(*asked.borrow(), 1);
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
             notices.borrow().last().map(String::as_str),
 Some("acme/texte-2:free ne lit pas les images : 1 image n'a pas pu lui être décrite (erreur 429) et ne lui est pas envoyée. Un modèle qui lit les images y aurait accès (/models vision).")

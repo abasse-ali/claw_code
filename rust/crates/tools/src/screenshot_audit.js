@@ -157,6 +157,30 @@
     if (rect.width > W + 1) return `the element itself is ${Math.round(rect.width)}px wide with no content that wide: a width, margin or transform in the CSS`;
     return `it starts at x=${Math.round(rect.left)}: a left margin, padding or transform pushes it`;
   };
+  // Souvent un décor ::before ou ::after placé en dehors de sa carte, que la
+  // liste des éléments ne voit pas. Vu le 25 octobre 2026 (session #31) :
+  // .hero-card::before à right: -40px élargissait la page de 40px, et le
+  // modèle a retouché l'en-tête cinq fois sans trouver.
+  const decor = [];
+  const owners = [];
+  if (pageWidth > W + 1) {
+    for (const el of visible) {
+      if (decor.length >= 3) break;
+      for (const pseudo of ["::before", "::after"]) {
+        const style = getComputedStyle(el, pseudo);
+        if (style.content === "none" || style.content === "normal" || !["absolute", "fixed"].includes(style.position)) continue;
+        const rect = box.get(el);
+        const width = parseFloat(style.width) || 0;
+        const right = style.right.endsWith("px") && style.left === "auto" ? rect.right - parseFloat(style.right)
+          : style.left.endsWith("px") ? rect.left + parseFloat(style.left) + width : null;
+        if (right !== null && right > W + 1) {
+          owners.push(el);
+          decor.push(`${name(el)}${pseudo} (reaches x=${Math.round(right)}: left ${style.left}, right ${style.right}, width ${style.width})`);
+        }
+      }
+    }
+    if (owners.length) blame(owners);
+  }
   if (outside.length) {
     const how = pageWidth > W + 1 ? `the page scrolls sideways, ${pageWidth}px wide` : "it is cut off";
     const masked = ["hidden", "clip"].includes(css(document.body).overflowX) || ["hidden", "clip"].includes(css(document.documentElement).overflowX)
@@ -165,9 +189,11 @@
     problems.push(`Content goes past the edge of the ${W}px-wide screen (${how}): ${list(outside.map((el) => {
       const rect = box.get(el);
       return `${name(el)} spans x=${Math.round(rect.left)} to x=${Math.round(rect.right)}, because of ${why(el)}`;
-    }), 4)}.${masked}`);
+    }), 4)}.${decor.length ? ` The page itself is widened by decorations drawn past the edge, fix them first: ${list(decor, 3)} (right: 0, or overflow: hidden on their card).` : ""}${masked}`);
   } else if (pageWidth > W + 1) {
-    problems.push(`The page is ${pageWidth}px wide on a ${W}px-wide screen and scrolls sideways (an empty element, a margin or a padding makes it wider)`);
+    problems.push(`The page is ${pageWidth}px wide on a ${W}px-wide screen and scrolls sideways (${decor.length
+      ? `because of decorations drawn past the edge: ${list(decor, 3)}; keep them inside (right: 0, or overflow: hidden on their card)`
+      : "an empty element, a margin or a padding makes it wider"})`);
   }
 
   // 2. Texte coupé : un libellé court ou un bouton qui ne tient pas dans sa boîte
@@ -256,6 +282,31 @@
     if (!document.querySelector('meta[name="viewport"]')) {
       problems.push('No <meta name="viewport" content="width=device-width, initial-scale=1"> in the page: phones show it zoomed out, with tiny text');
     }
+    // Le titre principal pas plus grand que le texte. Vu le 25 octobre 2026
+    // (session #31) : le titre du prochain match à 14px sur téléphone, en gras
+    // serré, que l'utilisateur lisait « FCVoisins ».
+    const h1 = document.querySelector("h1");
+    const bodySize = parseFloat(css(document.body).fontSize) || 16;
+    if (h1 && shown(h1) && parseFloat(css(h1).fontSize) <= bodySize * 1.15) {
+      blame([h1]);
+      problems.push(`The main title ${name(h1)} is ${css(h1).fontSize} on this phone, no bigger than the body text (${bodySize}px): nobody sees what the page is about. Give it at least 1.6 times the body size on phones (font-size: clamp(1.6rem, 6vw, 3rem))`);
+    }
+  }
+
+  // 6b. Mots collés : un espacement de lettres négatif sur un texte de taille
+  // courante écrase l'espace entre les mots. Vu le 25 octobre 2026 (session
+  // #31) : « U11 vs FC Voisins » lu « FCVoisins » ; le texte avait bien son
+  // espace, et Claw l'a cherché dans le code à chaque passage sans le trouver.
+  const glued = visible.filter((el) => {
+    if (!ownText(el) || !/\S \S/.test(el.textContent)) return false;
+    const size = parseFloat(css(el).fontSize);
+    const spacing = parseFloat(css(el).letterSpacing);
+    // -0.01em sur un texte courant passe ; -0.02em et moins se voit.
+    return Number.isFinite(spacing) && spacing / size < -0.019 && size < 32;
+  }).filter((el, _, all) => !all.some((other) => other !== el && other.contains(el)));
+  if (glued.length) {
+    blame(glued);
+    problems.push(`Words that run together: a letter-spacing of -0.02em or tighter on text under 32px eats the space between words (${list(glued.map((el) => `${name(el)} ${css(el).fontSize}, letter-spacing ${css(el).letterSpacing}`), 4)}). The text has its spaces, the CSS hides them: keep negative tracking for large titles only, letter-spacing: normal below 32px`);
   }
 
   // 7. Texte trop pâle sur son fond (fond uni seulement : une image de fond n'est pas jugée).
