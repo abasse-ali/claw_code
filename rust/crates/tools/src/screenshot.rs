@@ -1559,11 +1559,32 @@ fn missing_pages(files: &Value) -> Vec<String> {
         .iter()
         .filter_map(|file| {
             let url = file["url"].as_str()?;
+            let found = |path: &Path| {
+                if url.ends_with('/') {
+                    path.join("index.html").is_file()
+                } else {
+                    path.exists()
+                }
+            };
             let path = PathBuf::from(crate::page_view::file_url_path(url)?);
-            let exists = if url.ends_with('/') {
-                path.join("index.html").is_file()
-            } else {
-                path.exists()
+            // `/tarifs.html` vise la racine du site publié, pas celle du disque :
+            // le dossier du projet, ou celui d'où le site est servi (`public/`),
+            // entre la page et le projet.
+            let exists = match file["root"].as_str() {
+                Some(_) => {
+                    let relative = path.strip_prefix("/").unwrap_or(&path).to_path_buf();
+                    let cwd = std::env::current_dir().ok()?;
+                    let page = file["page"]
+                        .as_str()
+                        .and_then(crate::page_view::file_url_path)
+                        .map(PathBuf::from);
+                    page.iter()
+                        .flat_map(|page| page.ancestors().skip(1))
+                        .take_while(|dir| dir.starts_with(&cwd))
+                        .chain(std::iter::once(cwd.as_path()))
+                        .any(|dir| found(&dir.join(&relative)))
+                }
+                None => found(&path),
             };
             (!exists).then(|| {
                 format!(
@@ -2135,7 +2156,7 @@ mod tests {
         };
         let broken = problems(
             "casse",
-            "<nav><a href=\"#equipe\">Équipe</a> <a href=\"#calendrier\">Calendrier</a> <a href=\"tarifs.html\">Tarifs</a> <a href=\"contact.html\">Contact</a> <a href=\"tel:0000000000\">Appeler</a> <a href=\"mailto:club@\">Écrire</a></nav><form id=\"inscription\"><label for=\"nom\">Nom</label><input id=\"nom\" name=\"nom\" required><button>Inscrire</button></form><form id=\"ajout\"><label for=\"joueur\">Joueur</label><input id=\"joueur\" name=\"joueur\" required><button>Ajouter</button></form><button id=\"ouvrir\" onclick=\"document.getElementById('fenetre').classList.add('open')\">Ouvrir</button><div id=\"fenetre\" role=\"dialog\"><p>Fenêtre</p><button aria-label=\"Fermer\">×</button></div>",
+            "<nav><a href=\"#equipe\">Équipe</a> <a href=\"#calendrier\">Calendrier</a> <a href=\"tarifs.html\">Tarifs</a> <a href=\"contact.html\">Contact</a> <a href=\"/absent.html\">Absent</a> <a href=\"tel:0000000000\">Appeler</a> <a href=\"mailto:club@\">Écrire</a></nav><form id=\"inscription\"><label for=\"nom\">Nom</label><input id=\"nom\" name=\"nom\" required><button>Inscrire</button></form><form id=\"ajout\"><label for=\"joueur\">Joueur</label><input id=\"joueur\" name=\"joueur\" required><button>Ajouter</button></form><button id=\"ouvrir\" onclick=\"document.getElementById('fenetre').classList.add('open')\">Ouvrir</button><div id=\"fenetre\" role=\"dialog\"><p>Fenêtre</p><button aria-label=\"Fermer\">×</button></div>",
             "document.getElementById('ajout').addEventListener('submit', (e) => { e.preventDefault(); const li = document.createElement('li'); li.textContent = document.getElementById('joueur').value; document.getElementById('liste').append(li); });",
         );
         for expected in [
@@ -2144,6 +2165,8 @@ mod tests {
             "is not a phone number",
             "is not an e-mail address",
             "sending form#inscription reloads the page",
+            "absent.html, which does not exist",
+            "form#ajout adds",
             "is gone after a reload",
             "opens a window that button \\\"×\\\" does not close",
         ] {
@@ -2155,8 +2178,8 @@ mod tests {
         );
         let sound = problems(
             "sain",
-            "<nav><a href=\"#equipe\">Équipe</a> <a href=\"tarifs.html\">Tarifs</a> <a href=\"tel:+33561000000\">Appeler</a></nav><form id=\"ajout\"><label for=\"joueur\">Joueur</label><input id=\"joueur\" name=\"joueur\" required><button>Ajouter</button></form><button id=\"ouvrir\" onclick=\"document.getElementById('fenetre').classList.add('open')\">Ouvrir</button><div id=\"fenetre\" role=\"dialog\"><p>Fenêtre</p><button aria-label=\"Fermer\" onclick=\"document.getElementById('fenetre').classList.remove('open')\">×</button></div>",
-            "const show = () => { document.getElementById('liste').innerHTML = JSON.parse(localStorage.getItem('joueurs') || '[]').map((nom) => `<li>${nom}</li>`).join(''); }; show(); document.getElementById('ajout').addEventListener('submit', (e) => { e.preventDefault(); const list = JSON.parse(localStorage.getItem('joueurs') || '[]'); list.push(document.getElementById('joueur').value); localStorage.setItem('joueurs', JSON.stringify(list)); show(); });",
+            "<nav><a href=\"#equipe\">Équipe</a> <a href=\"tarifs.html\">Tarifs</a> <a href=\"/tarifs.html\">Tarifs</a> <a href=\"tel:+33561000000\">Appeler</a></nav><form id=\"contact\"><label for=\"qui\">Ton nom</label><input id=\"qui\" name=\"nom\" required><button>Envoyer</button></form><p id=\"merci\" role=\"status\"></p><form id=\"ajout\"><label for=\"joueur\">Joueur</label><input id=\"joueur\" name=\"joueur\" required><button>Ajouter</button></form><button id=\"ouvrir\" onclick=\"document.getElementById('fenetre').classList.add('open')\">Ouvrir</button><div id=\"fenetre\" role=\"dialog\"><p>Fenêtre</p><button aria-label=\"Fermer\" onclick=\"document.getElementById('fenetre').classList.remove('open')\">×</button></div>",
+            "const show = () => { document.getElementById('liste').innerHTML = JSON.parse(localStorage.getItem('joueurs') || '[]').map((nom) => `<li>${nom}</li>`).join(''); }; show(); document.getElementById('ajout').addEventListener('submit', (e) => { e.preventDefault(); const list = JSON.parse(localStorage.getItem('joueurs') || '[]'); list.push(document.getElementById('joueur').value); localStorage.setItem('joueurs', JSON.stringify(list)); show(); }); document.getElementById('contact').addEventListener('submit', (e) => { e.preventDefault(); document.getElementById('merci').textContent = `Merci ${document.getElementById('qui').value}, message envoyé.`; });",
         );
         for absent in [
             "broken links",
