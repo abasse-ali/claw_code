@@ -688,9 +688,9 @@ const KEYED_PROVIDERS = [
     // Observé par les utilisateurs, non publié par NVIDIA ; aucun quota par jour annoncé.
     perMinute: 40,
     models: [
-      // Nemotron 3 Super d'abord : rapide et fiable. Ultra, le plus puissant, est lent sur
-      // l'offre gratuite (vu le 19 octobre 2026 : longues réponses coupées par NVIDIA).
-      { id: "nvidia:nvidia/nemotron-3-super-120b-a12b", short: "NVIDIA Nemotron 3 Super" },
+      // Nemotron 3 Super n'est plus proposé : introuvable chez NVIDIA (erreur 404) depuis le
+      // 20 octobre 2026, encore le 25. Ultra, le plus puissant, est lent sur l'offre gratuite
+      // (vu le 19 octobre 2026 : longues réponses coupées par NVIDIA).
       { id: "nvidia:nvidia/nemotron-3-ultra-550b-a55b", short: "NVIDIA Nemotron 3 Ultra", note: "le plus puissant ; parfois lent, NVIDIA coupe alors ses longues réponses (Claw passe à un autre modèle de NVIDIA)" },
       // Revu le 20 octobre 2026 : Lightning répond en moins d'une seconde et fait le travail.
       // Step 5 Preview (faux messages de l'utilisateur, tâches inventées) et gpt-oss 20B (en
