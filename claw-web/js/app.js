@@ -14,6 +14,11 @@ import { LOCK_AFTER_MS, MIN_CODE, SECRET_FIELDS, createVault, openVault, removeV
 
 const STORE = "claw-web.settings.v1";
 const DEFAULT_ENGINE = "abasse-ali/claw-sessions";
+// Seuls comptes GitHub admis : la page est publique (GitHub Pages), l'appli ne sert qu'à eux. Un
+// jeton d'un autre compte est refusé avant tout (ni code, ni réglage, rien n'est gardé).
+const OWNERS = ["abasse-ali"];
+const isOwner = (login) => OWNERS.some((owner) => owner.toLowerCase() === String(login || "").toLowerCase());
+const ownerRefusal = (login) => new Error(`Claw Web est réservé à son propriétaire. Ce jeton ouvre le compte « ${login} » : accès refusé, rien n'a été gardé sur cet appareil.`);
 // Moteurs déplacés : les sessions de claw_code (devenu public) vivent dans un dépôt privé.
 const MOVED_ENGINES = { "abasse-ali/claw_code": "abasse-ali/claw-sessions" };
 // Code de Claw et du moteur (entrée `claw_source` du workflow) : jamais supprimé depuis l'appli.
@@ -3927,7 +3932,7 @@ function showSettings(first = false, justConnected = false) {
     <section class="settings">
       ${state.github ? `<a class="back" href="#/">${ICON.back}<span>Accueil</span></a>` : ""}
       <h1>Réglages</h1>
-      ${first ? '<p class="intro">Claw travaille sur vos dépôts GitHub depuis GitHub Actions. Pour commencer, donnez à l\'appli un jeton GitHub.</p>' : ""}
+      ${first ? `<p class="intro">Accès réservé : Claw Web ne s'ouvre qu'avec le jeton GitHub de son propriétaire (${escapeHtml(OWNERS.join(", "))}). Tout autre compte est refusé.</p>` : ""}
       ${justConnected ? `<div class="ready"><p>Connecté. Configurez le moteur ci-dessous une fois, puis décrivez votre première tâche depuis l'accueil.</p><a class="primary" href="#/">Aller à l'accueil</a></div>` : ""}
 
       <h2 class="group-title">Compte GitHub</h2>
@@ -4070,7 +4075,12 @@ function showSettings(first = false, justConnected = false) {
     }
     const github = new GitHub(token);
     try {
-      state.user = await github.user();
+      const user = await github.user();
+      if (!isOwner(user.login)) {
+        form.token.value = "";
+        throw ownerRefusal(user.login);
+      }
+      state.user = user;
       state.github = github;
       state.settings.token = token;
       // Premier jeton de l'appareil : le verrou d'abord, le jeton n'est jamais gardé en clair.
@@ -4564,7 +4574,16 @@ async function boot() {
   if (state.settings.token) {
     const github = new GitHub(state.settings.token);
     try {
-      state.user = await github.user();
+      const user = await github.user();
+      // Un appareil où un autre compte s'était installé (avant cette règle) : tout est effacé.
+      if (!isOwner(user.login)) {
+        removeVault();
+        state.lock = null;
+        for (const field of SECRET_FIELDS) delete state.settings[field];
+        saveSettings();
+        throw ownerRefusal(user.login);
+      }
+      state.user = user;
       if (!vault()) await lockScreen("create");
       state.github = github;
       showQuotaLabel();
