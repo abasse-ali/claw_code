@@ -10,7 +10,10 @@ import { LOG, changesHtml, decodeLog, photoLink, photoView, transcriptHtml, with
 import { highlightLines, languageOf } from "./highlight.js";
 import { accountStatus, allFreeModels, freeModels, resetTime } from "./openrouter.js";
 import { extras } from "./tools.js";
-import { LOCK_AFTER_MS, MIN_CODE, SECRET_FIELDS, createVault, openVault, removeVault, seal, vault, waitLeft } from "./lock.js";
+import {
+  LOCK_AFTER_MS, MIN_CODE, SECRET_FIELDS, codeFromFace, createFaceKey, createVault, disableFace, enableFace,
+  faceAvailable, faceEnabled, openVault, removeVault, seal, vault, waitLeft,
+} from "./lock.js";
 
 const STORE = "claw-web.settings.v1";
 const DEFAULT_ENGINE = "abasse-ali/claw-sessions";
@@ -36,6 +39,7 @@ const ICON = {
   down: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5.5 12.5 12 19l6.5-6.5"/></svg>',
   plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
   lock: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg>',
+  face: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><path d="M9 9.5v1M15 9.5v1M12 9.5v3.5h-1M9.5 15.5a3.5 3.5 0 0 0 5 0"/></svg>',
   close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>',
   external: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>',
   pull: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="19" r="2"/><path d="M6 7v10M18 17V9a3 3 0 0 0-3-3h-4M13 3.5 10.5 6 13 8.5"/></svg>',
@@ -3965,6 +3969,19 @@ function showSettings(first = false, justConnected = false) {
       <div class="group">
         <div class="row"><span class="row-icon">${ICON.lock}</span>${text("Code demandé à chaque ouverture", "Et après 15 minutes d'absence. Le jeton et les clés de cet appareil sont chiffrés par ce code.")}<span class="pill ok">Actif</span></div>
         <button type="button" class="row" data-action="lock-now"><span class="row-icon">${ICON.lock}</span>${text("Verrouiller maintenant", "")}</button>
+        ${faceEnabled() ? `
+        <div class="row"><span class="row-icon">${ICON.face}</span>${text("Face ID", "Déverrouille Claw à chaque ouverture ; le code reste le secours.")}<span class="pill ok">Actif</span></div>
+        <button type="button" class="row" data-action="face-off"><span class="row-icon">${ICON.face}</span>${text("Désactiver Face ID", "")}</button>` : window.PublicKeyCredential ? `
+        <details class="disclosure">
+          <summary class="row"><span class="row-icon">${ICON.face}</span>${text("Activer Face ID", "Au lieu du code à chaque ouverture")}${ICON.chevron}</summary>
+          <form class="face-form" autocomplete="off">
+            <input type="text" name="username" autocomplete="username" value="${escapeHtml(state.lock.owner || login || "claw")}" hidden>
+            ${field("Code actuel", "Pour le confier à Face ID", '<input name="current" type="password" autocomplete="current-password" required>')}
+            <p class="face-error" role="alert" hidden></p>
+            <div class="row-actions"><button class="primary" type="submit">Vérifier le code</button>
+              <button class="primary" type="button" data-action="face-on" hidden>${ICON.face}<span>Activer Face ID</span></button></div>
+          </form>
+        </details>` : ""}
         <details class="disclosure">
           <summary class="row"><span class="row-icon">${ICON.key}</span>${text("Changer le code", "")}${ICON.chevron}</summary>
           <form class="code-form" autocomplete="off">
@@ -4045,6 +4062,36 @@ function showSettings(first = false, justConnected = false) {
       </div>` : ""}
     </section>`;
   $("#view [data-action=lock-now]")?.addEventListener("click", lockNow);
+  $("#view [data-action=face-off]")?.addEventListener("click", () => {
+    disableFace();
+    toast("Face ID désactivé : le code est demandé à chaque ouverture");
+    showSettings();
+  });
+  // Face ID : le code vérifié d'abord, puis un appui (la vérification du visage demande un geste).
+  const faceForm = $("#view .face-form");
+  if (faceForm) {
+    const faceError = faceForm.querySelector(".face-error");
+    const show = (message) => {
+      faceError.textContent = message;
+      faceError.hidden = !message;
+    };
+    faceForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      show("");
+      try {
+        if (!await faceAvailable()) throw new Error("Cet appareil n'a pas Face ID (ou Touch ID) utilisable par le navigateur.");
+        const code = faceForm.current.value;
+        await openVault(code);
+        faceForm.querySelector('button[type="submit"]').hidden = true;
+        const button = faceForm.querySelector('[data-action="face-on"]');
+        button.hidden = false;
+        activateFace(code, state.lock.owner, button, show, () => showSettings());
+      } catch (error) {
+        show(error.message);
+        faceForm.current.value = "";
+      }
+    });
+  }
   $("#view .code-form")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.target;
@@ -4233,6 +4280,7 @@ function lockScreen(mode) {
           <p class="lock-help">Au moins ${MIN_CODE} caractères. Une courte phrase se retient mieux, et résiste mieux, qu'un code à chiffres.</p>` : ""}
         <p class="lock-error" role="alert" hidden></p>
         <button class="primary" type="submit">${create ? "Activer le verrou" : "Déverrouiller"}</button>
+        ${!create && faceEnabled() ? `<button class="secondary lock-face" type="button" data-action="face">${ICON.face}<span>Déverrouiller avec Face ID</span></button>` : ""}
         ${create ? "" : `<details class="lock-forgot"><summary>Code oublié ?</summary>
           <p>Le code ne se retrouve pas. Effacez les clés de cet appareil, puis reconnectez-vous avec votre jeton GitHub et choisissez un nouveau code.</p>
           <button type="button" class="small-link danger" data-action="lock-reset"><span>Effacer les clés de cet appareil</span></button>
@@ -4247,7 +4295,36 @@ function lockScreen(mode) {
       error.hidden = !message;
     };
     if (!create && waitLeft() > 0) show(`Trop d'essais : réessayez dans ${Math.ceil(waitLeft() / 1000)} s.`);
-    form.code.focus();
+    const done = () => {
+      screen.remove();
+      document.body.classList.remove("locked");
+      resolve();
+    };
+    const unlock = async (code) => {
+      const opened = await openVault(code);
+      state.lock = { key: opened.key, salt: opened.salt, owner: opened.owner };
+      Object.assign(state.settings, opened.secrets);
+      saveSettings();
+      done();
+    };
+    // Face ID : demandé dès l'ouverture ; refusé ou annulé, le bouton et le code restent.
+    const faceButton = screen.querySelector('[data-action="face"]');
+    const withFace = async (quiet) => {
+      faceButton.disabled = true;
+      try {
+        await unlock(await codeFromFace());
+      } catch (problem) {
+        if (!quiet || problem.name !== "NotAllowedError") show(problem.name === "NotAllowedError" ? "Face ID annulé : touchez le bouton pour réessayer, ou entrez le code." : problem.message);
+      } finally {
+        faceButton.disabled = false;
+      }
+    };
+    if (faceButton) {
+      faceButton.addEventListener("click", () => withFace(false));
+      withFace(true);
+    } else {
+      form.code.focus();
+    }
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const button = form.querySelector('button[type="submit"]');
@@ -4259,16 +4336,13 @@ function lockScreen(mode) {
           if (form.code.value !== form.again.value) throw new Error("Les deux codes ne sont pas les mêmes.");
           const { key, salt } = await createVault(form.code.value, secretsOf(state.settings), owner);
           state.lock = { key, salt, owner };
+          // Les clés en clair d'avant le verrou quittent le stockage.
+          saveSettings();
+          if (await faceAvailable()) faceStep(screen, form.code.value, owner, done);
+          else done();
         } else {
-          const opened = await openVault(form.code.value);
-          state.lock = { key: opened.key, salt: opened.salt, owner: opened.owner };
-          Object.assign(state.settings, opened.secrets);
+          await unlock(form.code.value);
         }
-        // Les clés en clair d'avant le verrou quittent le stockage.
-        saveSettings();
-        screen.remove();
-        document.body.classList.remove("locked");
-        resolve();
       } catch (problem) {
         show(problem.message);
         form.code.value = "";
@@ -4286,6 +4360,103 @@ function lockScreen(mode) {
         location.reload();
       });
     }
+  });
+}
+
+/** Active Face ID avec le code `code` (déjà vérifié), en un ou deux appuis : la clé d'accès se
+ * crée au premier ; si l'appareil ne rend pas son secret à la création, un second appui le
+ * demande. `then` est appelé une fois fini ou refusé ; les erreurs vont à `show`. */
+function activateFace(code, owner, button, show, then) {
+  let created = null;
+  const label = button.querySelector("span");
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    show("");
+    try {
+      created = created || await createFaceKey(owner);
+      if (!created.secret && label.textContent !== "Confirmer avec Face ID") {
+        label.textContent = "Confirmer avec Face ID";
+        return;
+      }
+      await enableFace(created, code);
+      toast("Face ID activé : il déverrouillera Claw à chaque ouverture");
+      then();
+    } catch (problem) {
+      show(problem.name === "NotAllowedError" ? "Face ID annulé." : problem.message);
+      if (problem.name !== "NotAllowedError") created = null;
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+/** Après la création du code : proposer Face ID pour les ouvertures suivantes. */
+function faceStep(screen, code, owner, done) {
+  screen.innerHTML = `
+    <div class="lock-panel">
+      <span class="lock-logo">${ICON.face}</span>
+      <h1>Déverrouiller avec Face ID ?</h1>
+      <p class="lock-intro">À chaque ouverture, Claw demandera votre visage au lieu du code. Le code reste le secours.</p>
+      <p class="lock-error" role="alert" hidden></p>
+      <button class="primary" type="button" data-action="face-on">${ICON.face}<span>Activer Face ID</span></button>
+      <button class="secondary" type="button" data-action="face-later">Plus tard</button>
+    </div>`;
+  const error = screen.querySelector(".lock-error");
+  const show = (message) => {
+    error.textContent = message;
+    error.hidden = !message;
+  };
+  activateFace(code, owner, screen.querySelector('[data-action="face-on"]'), show, done);
+  screen.querySelector('[data-action="face-later"]').addEventListener("click", done);
+}
+
+/** Appareil sans verrou : rien de l'appli ne s'affiche avant le jeton GitHub du propriétaire. */
+function signInScreen() {
+  return new Promise((resolve) => {
+    const screen = document.createElement("div");
+    screen.id = "lock";
+    screen.className = "lock-screen";
+    screen.setAttribute("role", "dialog");
+    screen.setAttribute("aria-modal", "true");
+    screen.setAttribute("aria-label", "Connexion à Claw");
+    screen.innerHTML = `
+      <form class="lock-panel">
+        <span class="lock-logo">${ICON.lock}</span>
+        <h1>Claw Web</h1>
+        <p class="lock-intro">Accès réservé à son propriétaire. Connectez-vous avec votre jeton GitHub : tout autre compte est refusé, et rien n'est gardé sur cet appareil.</p>
+        <label class="lock-field"><span>Jeton GitHub</span>
+          <input name="token" type="password" autocomplete="off" spellcheck="false" placeholder="github_pat_…" required></label>
+        <p class="lock-error" role="alert" hidden></p>
+        <button class="primary" type="submit">Se connecter</button>
+      </form>`;
+    document.body.append(screen);
+    document.body.classList.add("locked");
+    const form = screen.querySelector("form");
+    const error = screen.querySelector(".lock-error");
+    form.token.focus();
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const button = form.querySelector('button[type="submit"]');
+      button.disabled = true;
+      error.hidden = true;
+      const token = form.token.value.trim();
+      try {
+        const user = await new GitHub(token).user();
+        if (!isOwner(user.login)) throw ownerRefusal(user.login);
+        state.settings.token = token;
+        state.user = user;
+        screen.remove();
+        document.body.classList.remove("locked");
+        resolve();
+      } catch (problem) {
+        error.textContent = problem.message;
+        error.hidden = false;
+        form.token.value = "";
+        form.token.focus();
+      } finally {
+        button.disabled = false;
+      }
+    });
   });
 }
 
@@ -4352,6 +4523,8 @@ const pages = extras({
 });
 
 function route() {
+  // Verrouillé : une adresse (`#/reglages`, une session) ne montre rien derrière l'écran.
+  if (document.body.classList.contains("locked")) return;
   clearTimeout(state.pollTimer);
   closeDrawer();
   const hash = location.hash || "#/";
@@ -4570,7 +4743,10 @@ async function boot() {
     navigator.serviceWorker.register("sw.js").catch(() => {});
   }
   // Verrou : sans le code, aucune clé ; un jeton encore en clair (avant le verrou) le fait poser.
+  // Sans verrou ni jeton (appareil neuf, autre navigateur) : la connexion d'abord, aucune page
+  // (pas même `#/reglages`) ne s'affiche avant le jeton du propriétaire.
   if (vault()) await lockScreen("open");
+  else if (!state.settings.token) await signInScreen();
   if (state.settings.token) {
     const github = new GitHub(state.settings.token);
     try {

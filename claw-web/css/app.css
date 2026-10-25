@@ -1129,7 +1129,12 @@ body.locked { overflow: hidden; }
 }
 .lock-field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .lock-error { margin: 0; color: var(--error); }
-.lock-panel .primary { align-self: stretch; min-height: 48px; font-size: 1rem; }
+.face-error { margin: 0; padding: 0 16px; color: var(--error); }
+.lock-panel .primary, .lock-panel .secondary {
+  align-self: stretch; min-height: 48px; font-size: 1rem;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+}
+.lock-panel button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .lock-forgot { color: var(--muted); font-size: .9rem; }
 .lock-forgot summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; }
 .lock-forgot p { margin: 0 0 10px; line-height: 1.5; }
