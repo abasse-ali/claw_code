@@ -1002,7 +1002,6 @@ html.scroll-locked, html.scroll-locked body { overflow: hidden; overscroll-behav
 .dock-todos li.doing .box { border-color: var(--accent); }
 .dock-todos li.doing { font-weight: 600; }
 /* Plus aucun passage ne travaille et la liste n'est pas finie : elle le dit. */
-.dock-tasks.stopped .dock-current { color: var(--warn); }
 .dock-questions { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px 12px; }
 .dock-head { display: flex; align-items: center; gap: 8px; font-size: .88rem; min-width: 0; }
 .dock-head strong { flex: 1; min-width: 0; }

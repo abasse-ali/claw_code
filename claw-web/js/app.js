@@ -2716,17 +2716,14 @@ function lastQuestions(comments) {
   return questions ? { id: answer.id, questions } : null;
 }
 
-/** Liste de tâches la plus récente de la session (outil TodoWrite du dernier passage qui en a
- * une) : [[état, texte], …], ou null. */
+/** Liste de tâches du dernier passage de la session (son dernier appel à TodoWrite) :
+ * [[état, texte], …], ou null. Celle d'un passage plus ancien ne revient pas. */
 function latestTodos(session) {
-  const runs = [...new Set([...session.logs.values()].map((log) => log.run))].sort((a, b) => b - a);
-  for (const run of runs) {
-    const events = journalOf(run);
-    const last = [...events].reverse().find((event) => event.k === "tool" && event.n === "TodoWrite"
-      && event.i && Array.isArray(event.i.todos) && event.i.todos.length);
-    if (last) return last.i.todos;
-  }
-  return null;
+  const run = Math.max(...[...session.logs.values()].map((log) => log.run));
+  if (!Number.isFinite(run)) return null;
+  const last = [...journalOf(run)].reverse().find((event) => event.k === "tool" && event.n === "TodoWrite"
+    && event.i && Array.isArray(event.i.todos) && event.i.todos.length);
+  return last ? last.i.todos : null;
 }
 
 const DOCK_TASKS_KEY = "claw-web-dock-tasks";
@@ -2739,10 +2736,11 @@ function renderDock() {
   const dock = document.querySelector("#composer .dock");
   if (!dock) return;
   const session = state.session;
-  const todos = session ? latestTodos(session) : null;
   const open = session ? session.openQuestions : null;
-  // Plus aucun passage ne travaille : une tâche « en cours » ne l'est plus.
   const live = Boolean(session && session.live);
+  // Les tâches ne se montrent que pendant que Claw travaille : passage fini (tout fait, ou
+  // arrêté avant), le bloc disparaît ; sa réponse dit ce qui reste (demandé le 25 octobre 2026).
+  const todos = session && live ? latestTodos(session) : null;
   const signature = JSON.stringify([session && session.number, todos, open && open.id, live]);
   if (dock.dataset.signature === signature) return;
   dock.dataset.signature = signature;
@@ -2754,17 +2752,14 @@ function renderDock() {
   if (todos && todos.some(([status]) => status !== "completed")) {
     const done = todos.filter(([status]) => status === "completed").length;
     const current = todos.find(([status]) => status === "in_progress") || todos.find(([status]) => status !== "completed");
-    const left = todos.length - done;
-    const summary = !current ? "Toutes terminées"
-      : live ? current[1]
-        : `Arrêtée : ${left} tâche${left > 1 ? "s" : ""} pas faite${left > 1 ? "s" : ""}`;
+    const summary = current ? current[1] : "Toutes terminées";
     let unfolded = false;
     try {
       unfolded = localStorage.getItem(DOCK_TASKS_KEY) === "open";
     } catch {
       unfolded = false;
     }
-    parts.push(`<details class="dock-card dock-tasks${current && !live ? " stopped" : ""}"${unfolded ? " open" : ""}>
+    parts.push(`<details class="dock-card dock-tasks"${unfolded ? " open" : ""}>
       <summary>
         <span class="dock-icon">${ICON.tasks}</span>
         <span class="dock-title"><strong>Tâches</strong><span class="dock-count">${done}/${todos.length}</span></span>
@@ -2772,7 +2767,7 @@ function renderDock() {
         <span class="dock-chevron">${ICON.chevron}</span>
       </summary>
       <ul class="dock-todos">${todos.map(([status, text]) => `
-        <li class="${status === "completed" ? "done" : status === "in_progress" && live ? "doing" : ""}">
+        <li class="${status === "completed" ? "done" : status === "in_progress" ? "doing" : ""}">
           <span class="box">${status === "completed" ? ICON.check : ""}</span><span>${escapeHtml(text)}</span>
         </li>`).join("")}</ul>
     </details>`);
