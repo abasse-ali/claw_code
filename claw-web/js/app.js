@@ -133,6 +133,85 @@ document.addEventListener("pointerdown", (event) => { lastPress = event.target; 
 /** Un toucher sur le fond d'une fenêtre, commencé sur ce fond. */
 const backdropTap = (event, sheet) => event.target === sheet && lastPress === sheet;
 
+/** Une fenêtre se ferme quand on la tire vers le bas depuis le haut de son contenu, comme les
+ * fenêtres d'iPhone : elle suit le doigt, et part au-delà de SWIPE_CLOSE pixels (ou d'un
+ * geste vif) ; en deçà, elle revient. Fermer passe par son bouton, qui fait le reste. */
+const SWIPE_CLOSE = 90;
+let swipe = null;
+
+/** Tout ce qui défile entre le doigt et la fenêtre est-il en haut ? */
+function scrolledToTop(target, panel) {
+  for (let node = target; node && node !== panel.parentNode; node = node.parentNode) {
+    if (node.nodeType === 1 && node.scrollTop > 0 && node.scrollHeight > node.clientHeight) return false;
+  }
+  return true;
+}
+
+document.addEventListener("touchstart", (event) => {
+  swipe = null;
+  const panel = event.target.closest?.("#sheet .sheet-panel");
+  if (!panel || event.touches.length !== 1 || event.target.closest("input, textarea, select, [contenteditable]")) return;
+  if (!scrolledToTop(event.target, panel)) return;
+  const touch = event.touches[0];
+  swipe = { panel, target: event.target, x: touch.clientX, y: touch.clientY, at: Date.now(), dy: 0, moving: false };
+}, { passive: true });
+
+document.addEventListener("touchmove", (event) => {
+  if (!swipe || event.touches.length !== 1) return;
+  const touch = event.touches[0];
+  const dy = touch.clientY - swipe.y;
+  const dx = touch.clientX - swipe.x;
+  if (!swipe.moving) {
+    // Un geste de côté, vers le haut, ou un contenu qui a défilé entre-temps : ce n'est pas pour fermer.
+    if (Math.abs(dy) < 8 && Math.abs(dx) < 8) return;
+    if (dy <= 0 || Math.abs(dx) > dy || !scrolledToTop(swipe.target, swipe.panel)) {
+      swipe = null;
+      return;
+    }
+    swipe.moving = true;
+    swipe.panel.style.transition = "none";
+  }
+  swipe.dy = Math.max(0, dy);
+  swipe.panel.style.transform = `translateY(${swipe.dy}px)`;
+  if (event.cancelable) event.preventDefault();
+}, { passive: false });
+
+function endSwipe() {
+  const done = swipe;
+  swipe = null;
+  if (!done || !done.moving) return;
+  const { panel, dy } = done;
+  const quick = dy > 40 && dy / Math.max(1, Date.now() - done.at) > 0.6;
+  panel.style.transition = "transform .18s ease-out";
+  if (dy < SWIPE_CLOSE && !quick) {
+    panel.style.transform = "";
+    return;
+  }
+  panel.style.transform = "translateY(100%)";
+  setTimeout(() => {
+    const sheet = $("#sheet");
+    if (!sheet || !sheet.contains(panel)) return;
+    const close = panel.querySelector("[data-close]");
+    if (close) {
+      close.click();
+    } else {
+      sheet.hidden = true;
+      sheet.innerHTML = "";
+    }
+    // Une fenêtre gardée pour plus tard doit revenir en place.
+    panel.style.transition = "";
+    panel.style.transform = "";
+  }, 180);
+}
+document.addEventListener("touchend", endSwipe, { passive: true });
+document.addEventListener("touchcancel", () => {
+  if (swipe?.moving) {
+    swipe.panel.style.transition = "transform .18s ease-out";
+    swipe.panel.style.transform = "";
+  }
+  swipe = null;
+}, { passive: true });
+
 // --- Réglages gardés dans ce navigateur ----------------------------------------------------
 
 function loadSettings() {

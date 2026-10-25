@@ -391,7 +391,10 @@ function toolHtml(event, key, openTodo) {
   }
   const shots = event.n === "Screenshot" && result && Array.isArray(result.shots) ? result.shots : null;
   if (shots) {
-    side = result.found ? `<span class="del">${plural(result.found, "problème")}</span>` : plural(shots.length, "capture");
+    // Sans capture gardée (passages d'avant le 25 octobre 2026, aperçus trop lourds), le dire
+    // plutôt qu'un « 0 capture » sans image.
+    side = result.found ? `<span class="del">${plural(result.found, "problème")}</span>`
+      : shots.length ? plural(shots.length, "capture") : "captures non gardées";
     body = "";
   }
   const summary = `${ICONS[icon] || ICONS.tool}<span class="verb">${escapeHtml(verb)}</span>`
