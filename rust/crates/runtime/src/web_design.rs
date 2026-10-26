@@ -1109,7 +1109,16 @@ pub fn check_delta(before: Option<&[String]>, audit: &Audit) -> (Vec<String>, us
         return (Vec::new(), 0, now);
     };
     let (old, current) = (keys(before), keys(&now));
-    let fixed = old.iter().filter(|key| !current.contains(key)).count();
+    // Réparé : seulement ce que la vérification (au téléphone) peut revoir ;
+    // un défaut relevé à l'ordinateur au début du tour n'y est jamais mesuré.
+    let fixed = before
+        .iter()
+        .filter(|problem| !problem.starts_with('[') || problem.starts_with("[phone"))
+        .map(|problem| problem_key(problem))
+        .collect::<std::collections::BTreeSet<_>>()
+        .iter()
+        .filter(|key| !current.contains(key))
+        .count();
     let (new, open): (Vec<String>, Vec<String>) = now
         .into_iter()
         .partition(|problem| !old.contains(&problem_key(problem)));
@@ -1220,6 +1229,29 @@ mod tests {
         page_target, problem_key, read_audit, regression_note, regressions, review_feedback,
         screenshot_input, Audit,
     };
+
+    #[test]
+    fn a_dead_button_found_on_desktop_before_the_turn_is_not_new_on_the_phone() {
+        // La mesure du début du tour essaie les boutons à l'ordinateur, la
+        // vérification après chaque modification au téléphone.
+        let before = vec![
+            "[desktop 1280x800] 1 button(s) do nothing when clicked: button#details".to_string(),
+            "[desktop 1280x800] No visible keyboard focus: nothing changes".to_string(),
+            "[phone 390x844] Words that run together: h1".to_string(),
+        ];
+        let audit = super::Audit {
+            problems: vec![
+                "[phone 390x844] 1 button(s) do nothing when clicked: button#details".to_string(),
+            ],
+            ..super::Audit::default()
+        };
+        let (new, fixed, open) = super::check_delta(Some(&before), &audit);
+        assert!(new.is_empty(), "{new:?}");
+        // Les mots collés (téléphone) sont réparés ; le focus (ordinateur
+        // seul) n'est pas revu, donc pas compté.
+        assert_eq!(fixed, 1);
+        assert_eq!(open.len(), 1);
+    }
     use serde_json::json;
 
     #[test]
