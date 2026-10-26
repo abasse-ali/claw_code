@@ -695,11 +695,13 @@ pub fn screenshot_input(target: &str) -> String {
 /// (leurs mesures : largeur, place, liste coupée). Vu le 26 octobre 2026
 /// (session #31) : la fenêtre « Proposer ma voiture », collée à gauche et
 /// restée en haut sur l'iPhone du parent, n'était jamais vérifiée après une
-/// modification. Quelques secondes, au lieu de la revue complète.
+/// modification. Une attente courte après chaque chargement (600 ms au lieu
+/// de 1,5 s) : sur le site du club, 16 s au lieu de 19, mêmes défauts.
 #[must_use]
 pub fn quick_screenshot_input(target: &str) -> String {
     let mut input: Value = serde_json::from_str(&screenshot_input(target)).unwrap_or_default();
     input["viewports"] = json!(["phone"]);
+    input["wait_ms"] = json!(600);
     input.to_string()
 }
 
