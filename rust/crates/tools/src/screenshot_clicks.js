@@ -414,7 +414,20 @@
     // nulle part : on ne sait pas qui s'est inscrit. Vu le 25 octobre 2026
     // (session #31) : « Je conduis » enlevait des places, aucun parent ne
     // voyait qui conduisait.
-    const counted = appeared.find((text) => /\d/.test(text));
+    // Un texte du formulaire lui-même (sa quantité remise à 0, son total) n'est
+    // pas une liste que d'autres lisent. Vu le 26 octobre 2026 (session #32) :
+    // « 1,30 € … 0 », la carte du produit dans le formulaire de réservation,
+    // prise pour un compteur ; l'agent a ajouté une section « Mes
+    // réservations » que personne n'avait demandée pour faire taire l'alerte.
+    const outside = (text) => {
+      const base = text.replace(/ \(in ".*$/, "").trim();
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        if (base && node.nodeValue.includes(base.slice(0, 40))) return !form.contains(node);
+      }
+      return true;
+    };
+    const counted = appeared.find((text) => /\d/.test(text) && outside(text));
     if (personal && !added && counted) {
       unnamed.push(`Sending ${name} changes the page ("${counted.slice(0, 90)}") but the name typed in it ("${marker}") is shown nowhere, only in a passing message at best: people cannot see who signed up or who offered. Show each new entry with its name where the people who need it read it (the card or list it changed; for a reservation or an order, the list its owner reads, which need not be public), and keep it after a reload`);
     }

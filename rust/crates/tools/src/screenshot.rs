@@ -3424,6 +3424,29 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn a_reservation_whose_form_resets_its_own_quantities_is_not_unnamed() {
+        // Session #32 (26 octobre 2026) : la quantité du formulaire remise à 0
+        // après l'envoi était prise pour un compteur public ; l'agent a ajouté
+        // une section « Mes réservations » pour faire taire l'alerte.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-commande-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        std::fs::write(
+            dir.join("index.html"),
+            "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Boulangerie</title><style>body { margin: 0; padding: 16px; font: 16px/1.5 sans-serif; } button, input { font: inherit; padding: 10px; }</style></head><body><h1>Réserver</h1><form id=\"commande\"><article class=\"produit\"><p>Baguette tradition</p><p>1,30 €</p><output id=\"qte\">0</output> <button type=\"button\" id=\"plus\" aria-label=\"Ajouter une baguette\">+</button></article><label for=\"nom\">Votre nom</label><input id=\"nom\" required><button type=\"submit\" id=\"reserver\" disabled>Réserver</button></form><p class=\"toast\" role=\"status\" id=\"merci\"></p><script>let qte = 0; document.getElementById('plus').addEventListener('click', () => { qte += 1; document.getElementById('qte').textContent = qte; document.getElementById('reserver').disabled = false; }); document.getElementById('commande').addEventListener('submit', (e) => { e.preventDefault(); localStorage.setItem('commandes', JSON.stringify([{ nom: document.getElementById('nom').value, qte }])); document.getElementById('merci').textContent = 'Merci ' + document.getElementById('nom').value; qte = 0; document.getElementById('qte').textContent = '0'; e.target.reset(); });</script></body></html>",
+        )
+        .expect("html");
+        let page = format!("claw-commande-{}/index.html", std::process::id());
+        let mut request = input(None, Some(&page));
+        request.viewports = Some(json!(["phone"]));
+        let result = super::take(&request);
+        let _ = std::fs::remove_dir_all(&dir);
+        let problems = result.expect("capture")["captures"][0]["problems"].to_string();
+        assert!(!problems.contains("is shown nowhere"), "{problems}");
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn links_forms_and_windows_are_walked_in_a_real_browser() {
         // Le parcours d'un visiteur : chaque lien, chaque formulaire rempli et
         // envoyé, chaque fenêtre refermée, puis la page rechargée.
