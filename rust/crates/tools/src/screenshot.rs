@@ -1633,6 +1633,9 @@ fn console_lines(events: &[Value]) -> Vec<String> {
                     continue;
                 }
                 let url = entry["url"].as_str().filter(|url| !url.is_empty());
+                if file_origin_noise(entry["text"].as_str().unwrap_or(""), url) {
+                    continue;
+                }
                 format!(
                     "{level}: {}{}",
                     entry["text"].as_str().unwrap_or(""),
@@ -1648,6 +1651,18 @@ fn console_lines(events: &[Value]) -> Vec<String> {
     }
     lines.truncate(MAX_CONSOLE);
     lines
+}
+
+/// Erreur que seule l'ouverture en `file://` produit : le navigateur refuse à
+/// une page sans origine le manifeste ou le service worker qu'elle demande.
+/// Le site en ligne ne l'a pas. Vu le 26 octobre 2026 (session #31) : quatre
+/// erreurs « CORS » sur manifest.json comptées en défauts, deux revues
+/// renvoyées à l'agent pour rien, et la réponse finale les expliquait au parent.
+fn file_origin_noise(text: &str, url: Option<&str>) -> bool {
+    text.contains("from origin 'null' has been blocked by CORS policy")
+        || text.contains("current origin ('null') is not supported")
+        || (text.starts_with("Failed to load resource: net::ERR_FAILED")
+            && url.is_some_and(|url| url.starts_with("file://")))
 }
 
 /// Ce que demande une série de captures, le même pour chaque taille d'écran.
@@ -3862,6 +3877,10 @@ mod tests {
             json!({ "method": "Runtime.consoleAPICalled", "params": { "type": "error", "args": [{ "type": "string", "value": "échec" }, { "type": "number", "value": 3 }] } }),
             json!({ "method": "Runtime.exceptionThrown", "params": { "exceptionDetails": { "text": "Uncaught", "exception": { "description": "ReferenceError: x is not defined\n    at y" } } } }),
             json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Failed to load resource: 404", "url": "http://h/a.css" } } }),
+            // Propres à l'ouverture en file:// : le site en ligne ne les a pas.
+            json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Access to Manifest at 'file:///C:/w/manifest.json' from origin 'null' has been blocked by CORS policy: Cross origin requests are only supported for protocol schemes: http, data, chrome, https.", "url": "file:///C:/w/index.html" } } }),
+            json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Failed to load resource: net::ERR_FAILED", "url": "file:///C:/w/manifest.json" } } }),
+            json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Failed to load resource: net::ERR_FAILED", "url": "http://h/b.js" } } }),
         ];
         assert_eq!(
             console_lines(&events),
@@ -3869,6 +3888,7 @@ mod tests {
                 "error: échec 3",
                 "uncaught: ReferenceError: x is not defined",
                 "error: Failed to load resource: 404 (http://h/a.css)",
+                "error: Failed to load resource: net::ERR_FAILED (http://h/b.js)",
             ]
         );
     }
