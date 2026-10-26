@@ -87,6 +87,17 @@ class ConversationTest(unittest.TestCase):
         self.assertEqual((request, last, retry), ("Mets en ligne", 10, False))
         self.assertNotIn("pas pu commencer", history)
 
+    def test_the_new_message_is_repeated_after_the_history(self):
+        # Session #31, passage 6 : l'agent reprenait les points des messages déjà traités.
+        history = "[Message]\nIl reste 5 places : c'est faux.\n\n[Your answer]\nCorrigé."
+        request = setup.with_history("Corrige la bande sous l'en-tête.\nRien d'autre.", history)
+        self.assertTrue(request.startswith("Corrige la bande sous l'en-tête.\nRien d'autre.\n\n[Claw] Earlier conversation"))
+        self.assertIn("do not redo its points", request)
+        self.assertTrue(request.endswith("repeated here:\n\n> Corrige la bande sous l'en-tête.\n> Rien d'autre."), request)
+        self.assertEqual(setup.with_history("Bonjour", ""), "Bonjour")
+        long = setup.with_history("a" * 2000 + "\n\n[Claw] Images jointes", history)
+        self.assertTrue(long.endswith("a" * setup.HISTORY_REMINDER_CHARS + "…"))
+
 
 if __name__ == "__main__":
     unittest.main()
