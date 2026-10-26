@@ -11,6 +11,7 @@ reçus grâce à `exec` dans le workflow) arrête l'agent et le dit dans la prog
 
 import base64
 import json
+import re
 import os
 import signal
 import subprocess
@@ -217,6 +218,18 @@ def describe(name, data):
     return name
 
 
+# Appel d'outil écrit dans le texte par un modèle sans appels natifs (`<tool_call>`,
+# `<function=…>`, `<parameter=…>`) : le moteur le lance, l'utilisateur n'a pas à le lire.
+# Vu le 26 octobre 2026 (session #31) : « En ce moment : … <tool_call> <function=node>
+# <parameter=command> --check app.js … ».
+TOOL_MARKUP = re.compile(r"<tool_call>.*?(</tool_call>|$)|</?(function|parameter)(=[^>]*)?>|</?tool_call>", re.S)
+
+
+def spoken(text):
+    """Le texte d'une réponse sans les appels d'outils écrits dedans."""
+    return " ".join(TOOL_MARKUP.sub(" ", text).split())
+
+
 def shorten(text, size):
     """Une ligne de `size` caractères au plus, coupée sur un mot."""
     text = " ".join(str(text).split())
@@ -270,9 +283,9 @@ class Progress:
                                 self.plan = self.said
                             self.said = ""
                         self.dirty = True
-                    elif part.get("type") == "text" and part.get("text", "").strip():
+                    elif part.get("type") == "text" and spoken(part.get("text", "")):
                         self.replies += 1
-                        self.said = " ".join(part["text"].split())
+                        self.said = spoken(part["text"])
                         self.dirty = True
             elif kind == "system" and event.get("subtype") == "notice":
                 notice = clean_notice(event.get("text", ""))
