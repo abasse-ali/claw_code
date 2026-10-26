@@ -691,13 +691,15 @@ pub fn screenshot_input(target: &str) -> String {
 }
 
 /// Entrée de `Screenshot` pour la vérification qui suit chaque modification :
-/// le téléphone seul, page entière, sans les fenêtres (le parcours les ouvre
-/// quand même). Quelques secondes, au lieu de la revue complète.
+/// le téléphone seul, page entière, avec les fenêtres que les boutons ouvrent
+/// (leurs mesures : largeur, place, liste coupée). Vu le 26 octobre 2026
+/// (session #31) : la fenêtre « Proposer ma voiture », collée à gauche et
+/// restée en haut sur l'iPhone du parent, n'était jamais vérifiée après une
+/// modification. Quelques secondes, au lieu de la revue complète.
 #[must_use]
 pub fn quick_screenshot_input(target: &str) -> String {
     let mut input: Value = serde_json::from_str(&screenshot_input(target)).unwrap_or_default();
     input["viewports"] = json!(["phone"]);
-    input["windows"] = json!(false);
     input.to_string()
 }
 
