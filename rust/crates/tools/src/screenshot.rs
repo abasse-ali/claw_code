@@ -1997,6 +1997,12 @@ fn capture(
         .map_err(|error| format!("the layout check failed in the page: {error}"))?;
     let mut problems = strings(&audit["problems"]);
     problems.extend(drawn_icons_problem(&audit["svgIcons"]));
+    if session.actions.is_empty() {
+        problems.extend(lost_controls(
+            &format!("{} {}", session.url, viewport.label),
+            &strings(&audit["controls"]),
+        ));
+    }
     let mut notes = strings(&audit["notes"]);
     // Zones capturées : le premier écran, ou la page entière en tranches de trois
     // écrans (`MAX_SLICES` au plus), à partir de l'endroit où elle a défilé.
@@ -2085,6 +2091,48 @@ fn capture(
         openers,
         inspected,
     })
+}
+
+/// Boutons et liens de chaque page (adresse et taille d'écran) à sa première
+/// capture dans ce processus : l'état de la page avant le travail.
+static FIRST_CONTROLS: std::sync::Mutex<std::collections::BTreeMap<String, Vec<String>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Les boutons et liens de la première capture de la page qui n'y sont plus.
+/// Vu le 26 octobre 2026 (session #31) : pour supprimer le vide sous « Je
+/// propose ma voiture », le modèle a supprimé le bouton, et ses gestionnaires
+/// avec ceux de « Détails du match » ; rien ne le lui a dit.
+fn lost_controls(page: &str, controls: &[String]) -> Option<String> {
+    let mut first = FIRST_CONTROLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(before) = first.get(page) else {
+        if !controls.is_empty() {
+            first.insert(page.to_string(), controls.to_vec());
+        }
+        return None;
+    };
+    let gone: Vec<&String> = before
+        .iter()
+        .filter(|label| !controls.contains(label))
+        .collect();
+    if gone.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = gone
+        .iter()
+        .take(6)
+        .map(|label| format!("\"{label}\""))
+        .collect();
+    Some(format!(
+        "Buttons or links that were on this page at its first capture in this session are gone: {}{}. Unless the user asked to remove them, put them back with what they did: removing a control takes away what it did for the user, and is not a fix for its layout or for the space around it (fix the spacing instead)",
+        shown.join(", "),
+        if gone.len() > 6 {
+            format!(" and {} more", gone.len() - 6)
+        } else {
+            String::new()
+        }
+    ))
 }
 
 /// Une zone de la page (`area` : haut et hauteur), ou ce que montre l'écran, en
@@ -3026,6 +3074,44 @@ mod tests {
             "document.getElementById('details').addEventListener('click', () => box.showModal());",
         );
         assert!(!sound.contains("do nothing when clicked"), "{sound}");
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn a_button_removed_since_the_first_capture_is_named_in_a_real_browser() {
+        // Session #31 (26 octobre 2026) : pour supprimer le vide sous « Je
+        // propose ma voiture », le modèle a supprimé le bouton.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-perdu-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |cta: &str| {
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Club</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button {{ font: inherit; padding: 12px; }}</style></head><body><h1>Covoiturage</h1><p>Il manque 3 places pour samedi.</p><button onclick=\"this.textContent = 'Merci'\">Je conduis</button>{cta}<p><a href=\"#infos\">Infos club</a></p><p id=\"infos\">Stade</p></body></html>"),
+            )
+            .expect("html");
+        };
+        let page = format!("claw-perdu-{}/index.html", std::process::id());
+        let capture = || {
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            super::take(&request).expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let cta = "<button onclick=\"this.textContent = 'Envoyé'\">Je propose ma voiture</button>";
+        write(cta);
+        let first = capture();
+        write("");
+        let after = capture();
+        write(cta);
+        let restored = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!first.contains("are gone"), "{first}");
+        assert!(
+            after.contains("first capture in this session are gone: \\\"Je propose ma voiture\\\""),
+            "{after}"
+        );
+        assert!(!after.contains("Je conduis\\\""), "{after}");
+        assert!(!restored.contains("are gone"), "{restored}");
     }
 
     #[test]
