@@ -1148,5 +1148,11 @@
     const owner = svg.closest("a, button, label, li, p, h1, h2, h3, h4, span") || svg;
     svgIcons.push({ where: name(owner), markup: svg.outerHTML.slice(0, 6000) });
   }
-  return { title: document.title || "", problems, notes, culprits, motion, hoverLabels, svgIcons, textLength: text.length };
+  // Boutons et liens visibles, par leur nom (chiffres ôtés : un compteur
+  // change) : Screenshot compare avec la première capture de la session.
+  const controlNames = [...new Set(visible
+    .filter((el) => el.matches("button, a[href], [role=button], summary, input[type=button], input[type=submit]"))
+    .map((el) => words(el).replace(/\d+/g, "").replace(/\s+/g, " ").trim())
+    .filter((label) => label.length >= 2 && label.length <= 60))].slice(0, 80);
+  return { title: document.title || "", problems, notes, culprits, motion, hoverLabels, svgIcons, controls: controlNames, textLength: text.length };
 })()
