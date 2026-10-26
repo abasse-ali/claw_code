@@ -2995,6 +2995,41 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn a_dead_button_after_the_menu_button_is_found_in_a_real_browser() {
+        // Session #31 (26 octobre 2026) : « Détails du match » n'ouvrait plus
+        // rien. Le parcours venait d'ouvrir le menu ; toucher « Détails » le
+        // refermait (gestionnaire de toute la page), et ce changement passait
+        // pour l'effet du bouton.
+        let cwd = std::env::current_dir().expect("dossier");
+        let problems = |name: &str, script: &str| {
+            let dir = cwd.join(format!("claw-mort-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Club</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button {{ font: inherit; padding: 12px; }} .nav-list {{ display: none; }} .nav-list.open {{ display: block; }}</style></head><body><header><button class=\"nav-toggle\" aria-expanded=\"false\" aria-label=\"Ouvrir le menu\">Menu</button><ul class=\"nav-list\"><li><a href=\"#a\">Calendrier</a></li></ul></header><main><h1>Prochain match</h1><button id=\"details\">Détails du match</button><dialog id=\"fenetre\"><p>Samedi 10:00</p><button class=\"fermer\">Fermer</button></dialog><p id=\"a\">Calendrier</p></main><script>const toggle = document.querySelector('.nav-toggle'); const list = document.querySelector('.nav-list'); toggle.addEventListener('click', (e) => {{ e.stopPropagation(); const open = !list.classList.contains('open'); list.classList.toggle('open', open); toggle.setAttribute('aria-expanded', String(open)); }}); document.addEventListener('click', () => {{ list.classList.remove('open'); toggle.setAttribute('aria-expanded', 'false'); }}); const box = document.getElementById('fenetre'); box.querySelector('.fermer').addEventListener('click', () => box.close()); {script}</script></body></html>"),
+            )
+            .expect("html");
+            let page = format!("claw-mort-{name}-{}/index.html", std::process::id());
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let broken = problems("casse", "");
+        assert!(
+            broken.contains("do nothing when clicked") && broken.contains("button#details"),
+            "{broken}"
+        );
+        let sound = problems(
+            "sain",
+            "document.getElementById('details').addEventListener('click', () => box.showModal());",
+        );
+        assert!(!sound.contains("do nothing when clicked"), "{sound}");
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn links_forms_and_windows_are_walked_in_a_real_browser() {
         // Le parcours d'un visiteur : chaque lien, chaque formulaire rempli et
         // envoyé, chaque fenêtre refermée, puis la page rechargée.
