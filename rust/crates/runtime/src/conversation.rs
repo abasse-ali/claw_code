@@ -1940,7 +1940,8 @@ where
                 self.api_client.notify(
                     "Le temps de ce passage s'achève : Claw demande à l'agent de conclure. Écrivez « continue » pour poursuivre",
                 );
-                let mut note = harness::DEADLINE_NOTE.to_string();
+                let mut note =
+                    format!("{} {}", harness::DEADLINE_NOTE, harness::FINAL_ANSWER_SHAPE);
                 if aids.project.is_some() {
                     note.push_str(project::WRAP_UP_NOTE);
                 }
@@ -10742,6 +10743,16 @@ mod tests {
             .0
             .contains("the time given to this session is over"));
         assert_eq!(observed.borrow().requests.len(), 1);
+        // La conclusion s'adresse à l'utilisateur, point par point, sans code
+        // (session #31 : du CSS et « relancer Screenshot » pour un parent).
+        let request = &observed.borrow().requests[0];
+        assert!(
+            request
+                .contains("written for the user, who may not be a developer: plain words, no code")
+                && request.contains("Go through each thing the user asked")
+                && request.contains("anything that no longer works"),
+            "{request}"
+        );
         assert!(crate::harness::deadline_reached(Some(1)));
         assert!(!crate::harness::deadline_reached(None));
         assert_eq!(crate::harness::parse_deadline(Some(" 100 ")), Some(100));
