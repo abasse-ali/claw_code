@@ -335,6 +335,24 @@
       return;
     }
     const send = form.querySelector("button[type=submit], button:not([type]), input[type=submit]");
+    // Bouton d'envoi grisé une fois les champs remplis : la page attend autre
+    // chose (une quantité au « + »). Le « + » du formulaire est essayé une fois ;
+    // s'il reste grisé, le visiteur ne peut pas envoyer, et c'est cela qui est
+    // dit (pas « aucun événement submit »). Vu le 26 octobre 2026 (session #32) :
+    // « l'envoi ne fait rien » répété une heure, l'agent relisait son submit.
+    const greyed = (el) => el && (el.disabled || el.getAttribute("aria-disabled") === "true");
+    if (greyed(send)) {
+      const adder = [...form.querySelectorAll("button, [role=button]")].find((el) => el !== send && shown(el) && !greyed(el)
+        && /^\s*\+\s*$|ajout|augment|plus\b|increase|\badd\b|more\b/i.test(`${el.innerText || ""} ${el.getAttribute("aria-label") || ""} ${el.title || ""}`));
+      if (adder) {
+        tap(adder);
+        await wait(250);
+      }
+      if (greyed(send)) {
+        forms.push(`${name}: its ${label(send)} stays disabled once every field is filled${adder ? ` and ${label(adder)} is pressed` : ""}, so a visitor cannot send it. Enable it when the form can be sent, and say on the page what is still missing`);
+        return;
+      }
+    }
     // Un formulaire ou le visiteur donne son nom : une inscription, une offre,
     // une reservation, pas une recherche.
     const personal = [...form.elements].some((field) => field.value === marker);

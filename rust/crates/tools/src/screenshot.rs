@@ -3800,6 +3800,44 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn a_send_button_greyed_until_a_quantity_is_chosen_is_tried_with_its_plus() {
+        // Session #32 (26 octobre 2026) : le bouton « Réserver » restait grisé
+        // tant qu'aucune quantité n'était choisie ; la mesure disait « l'envoi
+        // ne fait rien, aucun événement submit » et l'agent relisait son code.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-grise-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |plus: &str| {
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Boulangerie</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button, input {{ font: inherit; padding: 10px; }}</style></head><body><h1>Réserver</h1><ul id=\"liste\"></ul><form id=\"reservation\"><p>Baguette <span id=\"qte\">0</span> {plus}</p><label for=\"nom\">Votre nom</label><input id=\"nom\" name=\"nom\" required><button id=\"envoyer\" type=\"submit\" disabled>Réserver</button></form><script>let qte = 0; const envoyer = document.getElementById('envoyer'); const plus = document.getElementById('plus'); if (plus) plus.addEventListener('click', () => {{ qte += 1; document.getElementById('qte').textContent = qte; envoyer.disabled = false; }}); document.getElementById('reservation').addEventListener('submit', (e) => {{ e.preventDefault(); const li = document.createElement('li'); li.textContent = document.getElementById('nom').value + ' : ' + qte + ' baguette(s)'; document.getElementById('liste').appendChild(li); }});</script></body></html>"),
+            )
+            .expect("html");
+        };
+        let page = format!("claw-grise-{}/index.html", std::process::id());
+        let capture = || {
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            super::take(&request).expect("capture")["captures"][0]["problems"].to_string()
+        };
+        write("<button type=\"button\" id=\"plus\" aria-label=\"Ajouter une baguette\">+</button>");
+        let with_plus = capture();
+        write("");
+        let without = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            !with_plus.contains("does nothing") && !with_plus.contains("stays disabled"),
+            "{with_plus}"
+        );
+        assert!(
+            without.contains("button#envoyer \\\"Réserver\\\" stays disabled once every field is filled, so a visitor cannot send it")
+                && !without.contains("does nothing: no submit event"),
+            "{without}"
+        );
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn an_option_of_a_native_list_is_chosen_not_clicked() {
         // Session #32 (26 octobre 2026) : un clic sur l'option « 8h00 » d'une
         // liste fermée tombait au point (0, 0), sur l'en-tête fixe.
