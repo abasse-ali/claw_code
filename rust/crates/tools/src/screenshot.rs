@@ -691,6 +691,9 @@ struct DevTools {
     next_id: u64,
     /// Événements reçus (console, exceptions, chargement), dans l'ordre.
     events: Vec<Value>,
+    /// Fenêtres natives (`alert`, `confirm`, `prompt`) ouvertes par la page et
+    /// fermées par Claw : leur genre et leur texte.
+    dialogs: Vec<String>,
 }
 
 impl DevTools {
@@ -743,7 +746,33 @@ impl DevTools {
             incoming,
             next_id: 0,
             events: Vec::new(),
+            dialogs: Vec::new(),
         })
+    }
+
+    /// Garde un événement. Une fenêtre native (`alert`, `confirm`, `prompt`)
+    /// bloque la page jusqu'à sa réponse : Claw la ferme aussitôt (annuler,
+    /// comme le parcours) et la note. Vu le 26 octobre 2026 (session #32) : le
+    /// `prompt()` du code de la boulangère, ouvert par une action, bloquait la
+    /// mesure 30 s puis la faisait échouer.
+    fn keep(&mut self, message: Value) {
+        if message["method"] == "Page.javascriptDialogOpening" {
+            let kind = message["params"]["type"]
+                .as_str()
+                .unwrap_or("alert")
+                .to_string();
+            let text: String = message["params"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .take(120)
+                .collect();
+            self.next_id += 1;
+            let answer = json!({ "id": self.next_id, "method": "Page.handleJavaScriptDialog", "params": { "accept": matches!(kind.as_str(), "alert" | "beforeunload") } });
+            let _ = write_frame(&mut self.writer, 0x1, answer.to_string().as_bytes());
+            self.dialogs.push(format!("{kind}(\"{text}\")"));
+        }
+        self.events.push(message);
     }
 
     /// Reçoit un message ; `None` quand rien n'est venu dans `wait`.
@@ -792,7 +821,7 @@ impl DevTools {
                 return Ok(message["result"].clone());
             }
             if message.get("method").is_some() {
-                self.events.push(message);
+                self.keep(message);
             }
         }
     }
@@ -807,7 +836,7 @@ impl DevTools {
             }
             if let Some(message) = self.receive(left.min(Duration::from_millis(250)))? {
                 if message.get("method").is_some() {
-                    self.events.push(message);
+                    self.keep(message);
                 }
             }
         }
@@ -827,7 +856,7 @@ impl DevTools {
             if let Some(message) = self.receive(left.min(Duration::from_millis(250)))? {
                 let found = message["method"] == method;
                 if message.get("method").is_some() {
-                    self.events.push(message);
+                    self.keep(message);
                 }
                 if found {
                     return Ok(true);
@@ -2042,7 +2071,12 @@ fn capture(
     let mut note = open_page(devtools, session, viewport)?;
     let mut done = Vec::new();
     for action in session.actions {
+        let dialogs = devtools.dialogs.len();
         match run_action(devtools, action, session.wait) {
+            Ok(line) if devtools.dialogs.len() > dialogs => done.push(format!(
+                "{line}; it opened the browser's own {} window, which blocks the whole page until it is answered: Screenshot cancelled it. A visitor gets that grey system box (with the page's address on top) instead of the page's design: ask in the page itself (a field, a dialog element) rather than with alert, confirm or prompt",
+                devtools.dialogs[dialogs..].join(", ")
+            )),
             Ok(line) => done.push(line),
             Err(error) => {
                 done.push(format!("FAILED: {error}"));
@@ -3890,6 +3924,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!ringed.contains("No visible keyboard focus"), "{ringed}");
         assert!(bare.contains("No visible keyboard focus"), "{bare}");
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn a_native_prompt_opened_by_an_action_is_closed_and_named() {
+        // Session #32 (26 octobre 2026) : « Espace boulanger » demandait le code
+        // avec prompt() ; la page restait bloquée et la mesure échouait après 30 s.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-prompt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        std::fs::write(
+            dir.join("index.html"),
+            "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Boulangerie</title><style>body { margin: 0; padding: 16px; font: 16px/1.5 sans-serif; } a { display: inline-block; padding: 12px; }</style></head><body><h1>Réservez</h1><a id=\"espace\" href=\"#preparer\">Espace boulanger</a><section id=\"preparer\" hidden><h2>Préparation du jour</h2></section><script>document.getElementById('espace').addEventListener('click', (e) => { e.preventDefault(); if (prompt('Code d\\'accès boulanger') === '1234') document.getElementById('preparer').hidden = false; });</script></body></html>",
+        )
+        .expect("html");
+        let page = format!("claw-prompt-{}/index.html", std::process::id());
+        let mut request = input(None, Some(&page));
+        request.viewports = Some(json!(["desktop"]));
+        request.actions = Some(json!([{ "click": "#espace" }]));
+        let started = std::time::Instant::now();
+        let result = super::take(&request);
+        let _ = std::fs::remove_dir_all(&dir);
+        let shot = result.expect("capture")["captures"][0].to_string();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(25),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            shot.contains(
+                "it opened the browser's own prompt(\\\"Code d'accès boulanger\\\") window"
+            ),
+            "{shot}"
+        );
     }
 
     #[test]

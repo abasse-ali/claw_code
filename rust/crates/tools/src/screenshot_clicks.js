@@ -416,7 +416,7 @@
     // voyait qui conduisait.
     const counted = appeared.find((text) => /\d/.test(text));
     if (personal && !added && counted) {
-      unnamed.push(`Sending ${name} changes the page ("${counted.slice(0, 90)}") but the name typed in it ("${marker}") is shown nowhere, only in a passing message at best: people cannot see who signed up or who offered. Show each new entry with its name where it belongs (in the card or list it changed), and keep it after a reload`);
+      unnamed.push(`Sending ${name} changes the page ("${counted.slice(0, 90)}") but the name typed in it ("${marker}") is shown nowhere, only in a passing message at best: people cannot see who signed up or who offered. Show each new entry with its name where the people who need it read it (the card or list it changed; for a reservation or an order, the list its owner reads, which need not be public), and keep it after a reload`);
     }
     if (added || appeared.length) kept.push({ form: name, marker, shown: added, appeared });
   };
