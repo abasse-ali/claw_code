@@ -1812,8 +1812,9 @@ fn open_page(
 /// Les boutons essayés un à un : ceux qui ne font rien, ceux qui échouent ; et
 /// ceux qui ouvrent une fenêtre (nom, sélecteur), pour la capturer ensuite.
 fn click_problems(devtools: &mut DevTools) -> (Vec<String>, Vec<(String, String)>) {
+    let codes = Value::from(page_access_codes(devtools)).to_string();
     let script = format!(
-        "const clawSnapshot = () => {SNAPSHOT_SCRIPT};\nconst clawWindow = () => {WINDOW_SCRIPT};\n{CLICKS_SCRIPT}"
+        "const clawSnapshot = () => {SNAPSHOT_SCRIPT};\nconst clawWindow = () => {WINDOW_SCRIPT};\nconst clawCodes = {codes};\n{CLICKS_SCRIPT}"
     );
     let Ok(result) = devtools.evaluate(&script) else {
         return (Vec::new(), Vec::new());
@@ -1892,12 +1893,9 @@ fn click_problems(devtools: &mut DevTools) -> (Vec<String>, Vec<(String, String)
     (problems, openers)
 }
 
-/// Dates d'exemple toutes passées dans la page et ses scripts, quand ce sont
-/// des fichiers du projet (`file://`, ou un serveur local qui sert le dossier de
-/// travail). Le contrôle à l'écriture ne voit que les fichiers modifiés : vu le
-/// 25 octobre 2026 (session #31 reprise), les matchs de 2025 d'`app.js`, lu et
-/// jamais réécrit, laissaient « Aucun événement à venir » sans alerte.
-fn stale_dates(devtools: &mut DevTools) -> Vec<String> {
+/// Fichiers du projet derrière la page et ses scripts (`file://`, ou un
+/// serveur local qui sert le dossier de travail), avec leur chemin affiché.
+fn page_sources(devtools: &mut DevTools) -> Vec<(String, String)> {
     let Ok(sources) = devtools.evaluate(
         "[location.href, ...[...document.scripts].map((script) => script.src).filter(Boolean)]",
     ) else {
@@ -1906,20 +1904,46 @@ fn stale_dates(devtools: &mut DevTools) -> Vec<String> {
     let Ok(cwd) = std::env::current_dir() else {
         return Vec::new();
     };
+    strings(&sources)
+        .iter()
+        .take(12)
+        .filter_map(|source| {
+            let path = project_file(&cwd, source)?;
+            let text = std::fs::read_to_string(&path).ok()?;
+            let shown = path
+                .strip_prefix(&cwd)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            Some((shown, text))
+        })
+        .collect()
+}
+
+/// Codes d'accès écrits dans la page et ses scripts : le parcours ouvre avec
+/// eux l'espace réservé qu'une fenêtre à code garde.
+fn page_access_codes(devtools: &mut DevTools) -> Vec<String> {
+    let mut codes: Vec<String> = Vec::new();
+    for (_, text) in page_sources(devtools) {
+        for code in runtime::code_checks::access_codes(&text) {
+            if !codes.contains(&code) {
+                codes.push(code);
+            }
+        }
+    }
+    codes.truncate(4);
+    codes
+}
+
+/// Dates d'exemple toutes passées dans la page et ses scripts, quand ce sont
+/// des fichiers du projet (`file://`, ou un serveur local qui sert le dossier de
+/// travail). Le contrôle à l'écriture ne voit que les fichiers modifiés : vu le
+/// 25 octobre 2026 (session #31 reprise), les matchs de 2025 d'`app.js`, lu et
+/// jamais réécrit, laissaient « Aucun événement à venir » sans alerte.
+fn stale_dates(devtools: &mut DevTools) -> Vec<String> {
     let today = runtime::current_date_iso();
     let mut problems = Vec::new();
-    for source in strings(&sources).iter().take(12) {
-        let Some(path) = project_file(&cwd, source) else {
-            continue;
-        };
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let shown = path
-            .strip_prefix(&cwd)
-            .unwrap_or(&path)
-            .display()
-            .to_string();
+    for (shown, text) in page_sources(devtools) {
         for found in runtime::code_checks::past_dates(&text, &today) {
             problems.push(format!("{shown}, {found}"));
         }
@@ -3988,6 +4012,48 @@ mod tests {
             .position(|pair| pair[0] == 0xFF && matches!(pair[1], 0xC0 | 0xC2))
             .expect("trame");
         u32::from(data[at + 5]) << 8 | u32::from(data[at + 6])
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn a_space_behind_an_access_code_is_opened_with_the_code_of_the_script() {
+        // Session #32, passages 4 et 5 (26 octobre 2026) : la liste de la
+        // boulangère levait une erreur dès qu'une réservation existait, derrière
+        // le code de l'espace boulanger ; le parcours s'arrêtait à la fenêtre du
+        // code, et l'agent annonçait la liste « vérifiée ».
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-code-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        std::fs::write(
+            dir.join("index.html"),
+            "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Boulangerie</title><style>body { margin: 0; padding: 16px; font: 16px/1.5 sans-serif; } button, input { font: inherit; padding: 10px; }</style></head><body><header><button type=\"button\" id=\"espace\">Espace boulanger</button></header><dialog id=\"fenetre\"><form method=\"dialog\"><h2>Espace boulanger</h2><label for=\"pin\">Code d'accès</label><input type=\"password\" id=\"pin\" inputmode=\"numeric\"><button type=\"button\" value=\"cancel\" id=\"annuler\">Annuler</button><button type=\"button\" value=\"submit\" id=\"acceder\">Accéder</button></form></dialog><main><h1>Réservez</h1><section id=\"liste\" hidden></section><form id=\"reservation\"><label for=\"nom\">Votre prénom</label><input id=\"nom\" name=\"nom\" required><button type=\"submit\">Réserver</button></form><p id=\"merci\" role=\"status\"></p></main><script src=\"app.js\"></script></body></html>",
+        )
+        .expect("html");
+        let write = |icon: &str| {
+            std::fs::write(
+                dir.join("app.js"),
+                format!("'use strict';\nconst PIN_KEY = 'boulangerie_pin';\nconst DEFAULT_PIN = '4321';\nconst reservations = [];\nconst fenetre = document.getElementById('fenetre');\ndocument.getElementById('espace').addEventListener('click', () => {{ document.getElementById('pin').value = ''; fenetre.showModal(); }});\ndocument.getElementById('annuler').addEventListener('click', () => fenetre.close());\ndocument.getElementById('acceder').addEventListener('click', () => {{\n  if (document.getElementById('pin').value !== DEFAULT_PIN) return;\n  fenetre.close();\n  const liste = document.getElementById('liste');\n  liste.hidden = false;\n  liste.innerHTML = '';\n  reservations.forEach((nom) => {{\n    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');\n    {icon}\n    const p = document.createElement('p');\n    p.append(svg, nom);\n    liste.append(p);\n  }});\n}});\ndocument.getElementById('reservation').addEventListener('submit', (e) => {{ e.preventDefault(); reservations.push(document.getElementById('nom').value); document.getElementById('merci').textContent = 'Merci ' + document.getElementById('nom').value; }});\n"),
+            )
+            .expect("script");
+        };
+        let page = format!("claw-code-{}/index.html", std::process::id());
+        let capture = || {
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            super::take(&request).expect("capture")["captures"][0]["problems"].to_string()
+        };
+        write("svg.className = 'icon';");
+        let broken = capture();
+        write("svg.setAttribute('class', 'icon');");
+        let fixed = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        // Ouverte en `file://`, la page ne donne de son script que « Script
+        // error. » ; la console de la capture en garde le texte.
+        assert!(
+            broken.contains("button#espace \\\"Espace boulanger\\\", then the access code \\\"4321\\\" written in the page's script"),
+            "{broken}"
+        );
+        assert!(!fixed.contains("access code"), "{fixed}");
     }
 
     #[test]
