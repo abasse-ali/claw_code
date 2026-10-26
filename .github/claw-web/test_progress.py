@@ -51,6 +51,20 @@ class ProgressTest(unittest.TestCase):
         self.assertIn("Je lis le projet", done)
         self.assertNotIn("sont prêts", done)
 
+    def test_a_tool_call_written_in_the_text_is_not_shown(self):
+        # Vu le 26 octobre 2026 (session #31) : un modèle sans appels natifs écrit son
+        # appel d'outil dans le texte ; le moteur le lance, le parent n'a pas à le lire.
+        progress = run.Progress()
+        progress.event(reply("Je corrige les fenêtres.", ("edit_file", "styles.css")))
+        progress.event(reply("Il reste à vérifier le JS. <tool_call> <function=node> <parameter=command> --check app.js </parameter> </function> </tool_call>"))
+        body = progress.body("running")
+        self.assertIn("**En ce moment** : Il reste à vérifier le JS.", body)
+        self.assertNotIn("tool_call", body)
+        self.assertNotIn("--check", body)
+        # Un appel seul, sans texte autour, ne remplace pas l'étape en cours.
+        progress.event(reply("<tool_call>\n{\"name\": \"bash\", \"arguments\": {}}\n</tool_call>"))
+        self.assertIn("Il reste à vérifier le JS.", progress.body("running"))
+
     def test_a_reply_without_tools_is_not_a_plan(self):
         progress = run.Progress()
         progress.event(reply("Voici la réponse à votre question."))
