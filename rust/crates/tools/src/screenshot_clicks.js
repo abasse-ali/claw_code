@@ -422,17 +422,20 @@
     // Une liste des choses du visiteur lui-même (« Mes réservations », « Votre
     // commande ») n'a pas à redire son nom : elle est à lui.
     const own = /^(mes|mon|ma|vos|votre|my|your)\b/i;
+    // Le bloc qui porte ce texte, même écrit en plusieurs morceaux (« mardi 27
+    // octobre » et « 07:00 » dans deux <span>) : le plus profond qui le contient.
+    const flat = (value) => (value || "").replace(/\s+/g, "");
     const outside = (text) => {
-      const base = text.replace(/ \(in ".*$/, "").trim();
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-        if (!base || !node.nodeValue.includes(base.slice(0, 40))) continue;
-        if (form.contains(node)) return false;
-        const region = node.parentElement && node.parentElement.closest("section, aside, article, [role=region]");
-        const title = region && region.querySelector("h1, h2, h3, h4, [role=heading]");
-        return !(title && own.test((title.textContent || "").trim()));
-      }
-      return true;
+      const base = flat(text.replace(/ \(in ".*$/, "")).slice(0, 60);
+      if (!base) return true;
+      const holder = [...document.body.querySelectorAll("*")]
+        .filter((el) => !el.closest("script, style, template, noscript") && el.getClientRects().length && flat(el.innerText).includes(base))
+        .pop();
+      if (!holder) return true;
+      if (form.contains(holder)) return false;
+      const region = holder.closest("section, aside, article, [role=region]");
+      const title = region && region.querySelector("h1, h2, h3, h4, [role=heading]");
+      return !(title && own.test((title.textContent || "").trim()));
     };
     const counted = appeared.find((text) => /\d/.test(text) && outside(text));
     if (personal && !added && counted) {
