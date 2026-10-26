@@ -1187,5 +1187,16 @@
     .filter((el) => el.matches("button, a[href], [role=button], summary, input[type=button], input[type=submit]"))
     .map((el) => words(el).replace(/\d+/g, "").replace(/\s+/g, " ").trim())
     .filter((label) => label.length >= 2 && label.length <= 60))].slice(0, 80);
-  return { title: document.title || "", problems, notes, culprits, motion, hoverLabels, svgIcons, controls: controlNames, textLength: text.length };
+  // Boutons et liens cachés derrière un bouton qui les déplie (menu replié,
+  // <details> fermé) : rangés, pas perdus. Vu le 26 octobre 2026 (session
+  // #32) : les liens du haut passés dans le menu du téléphone, comptés
+  // « disparus » à chaque capture.
+  const toggles = visible.filter((el) => el.matches("[aria-expanded], [aria-controls], summary"));
+  const panels = toggles.map((el) => document.getElementById(el.getAttribute("aria-controls") || "")).filter(Boolean);
+  const foldedNames = toggles.length ? [...new Set(elements
+    .filter((el) => !box.has(el) && el.matches("button, a[href], [role=button], summary, input[type=button], input[type=submit]"))
+    .filter((el) => panels.some((panel) => panel.contains(el)) || el.closest("nav, [role=navigation], details:not([open])"))
+    .map((el) => (words(el) || el.textContent || "").replace(/\d+/g, "").replace(/\s+/g, " ").trim())
+    .filter((label) => label.length >= 2 && label.length <= 60))].slice(0, 80) : [];
+  return { title: document.title || "", problems, notes, culprits, motion, hoverLabels, svgIcons, controls: controlNames, folded: foldedNames, textLength: text.length };
 })()

@@ -976,8 +976,12 @@ fn console_messages(events: &[Value]) -> Vec<(String, String)> {
             }
             Some("Log.entryAdded") => {
                 let entry = &params["entry"];
+                let text = entry["text"].as_str().unwrap_or_default();
+                if file_origin_noise(text, entry["url"].as_str()) {
+                    continue;
+                }
                 (
-                    entry["text"].as_str().unwrap_or_default().to_string(),
+                    text.to_string(),
                     place(entry["url"].as_str(), entry["lineNumber"].as_u64()),
                 )
             }
@@ -2022,6 +2026,7 @@ fn capture(
         problems.extend(lost_controls(
             &format!("{} {}", session.url, viewport.label),
             &strings(&audit["controls"]),
+            &strings(&audit["folded"]),
         ));
     }
     let mut notes = strings(&audit["notes"]);
@@ -2124,7 +2129,7 @@ static FIRST_CONTROLS: std::sync::Mutex<std::collections::BTreeMap<String, Vec<S
 /// Vu le 26 octobre 2026 (session #31) : pour supprimer le vide sous « Je
 /// propose ma voiture », le modèle a supprimé le bouton, et ses gestionnaires
 /// avec ceux de « Détails du match » ; rien ne le lui a dit.
-fn lost_controls(page: &str, controls: &[String]) -> Option<String> {
+fn lost_controls(page: &str, controls: &[String], folded: &[String]) -> Option<String> {
     let mut first = FIRST_CONTROLS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2134,20 +2139,37 @@ fn lost_controls(page: &str, controls: &[String]) -> Option<String> {
         }
         return None;
     };
+    // Rangé dans un menu replié : toujours là, un appui plus loin.
     let gone: Vec<&String> = before
         .iter()
-        .filter(|label| !controls.contains(label))
+        .filter(|label| !controls.contains(label) && !folded.contains(label))
         .collect();
     if gone.is_empty() {
         return None;
     }
+    // Un nom apparu depuis peut être le même bouton, renommé : au modèle d'en
+    // juger sur les deux listes, pas sur ce qu'il croit avoir écrit.
+    let new: Vec<String> = controls
+        .iter()
+        .filter(|label| !before.contains(label))
+        .take(6)
+        .map(|label| format!("\"{label}\""))
+        .collect();
+    let renamed = if new.is_empty() {
+        String::new()
+    } else {
+        format!(
+            ". New since then: {}; if one of them is the same control renamed on purpose, say so in your answer and leave it",
+            new.join(", ")
+        )
+    };
     let shown: Vec<String> = gone
         .iter()
         .take(6)
         .map(|label| format!("\"{label}\""))
         .collect();
     Some(format!(
-        "Buttons or links that were on this page at its first capture in this session are gone: {}{}. Unless the user asked to remove them, put them back with what they did: removing a control takes away what it did for the user, and is not a fix for its layout or for the space around it (fix the spacing instead)",
+        "Buttons or links that were on this page at its first capture in this session are gone: {}{}. Unless the user asked to remove them, put them back with what they did: removing a control takes away what it did for the user, and is not a fix for its layout or for the space around it (fix the spacing instead){renamed}",
         shown.join(", "),
         if gone.len() > 6 {
             format!(" and {} more", gone.len() - 6)
@@ -3256,6 +3278,47 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn links_folded_into_a_menu_are_not_lost_and_a_rename_is_shown() {
+        // Session #32 (26 octobre 2026) : les liens du haut passés dans le
+        // menu replié du téléphone, et l'un renommé ; la mesure les disait
+        // disparus à chaque capture et l'agent ne la croyait plus.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-replie-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |nav: &str| {
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Boulangerie</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button {{ font: inherit; padding: 12px; }} #menu[hidden] {{ display: none; }} a {{ display: inline-block; padding: 12px; }}</style></head><body><header>{nav}</header><h1>Réservez votre pain</h1><p id=\"reserver\">Formulaire</p><p id=\"boulangere\">Liste du matin</p></body></html>"),
+            )
+            .expect("html");
+        };
+        let page = format!("claw-replie-{}/index.html", std::process::id());
+        let capture = || {
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            super::take(&request).expect("capture")["captures"][0]["problems"].to_string()
+        };
+        write(
+            "<nav><a href=\"#reserver\">Je réserve</a><a href=\"#boulangere\">Je prépare</a></nav>",
+        );
+        let first = capture();
+        write("<button aria-expanded=\"false\" aria-controls=\"menu\">Menu</button><nav id=\"menu\" hidden><a href=\"#reserver\">Je réserve</a><a href=\"#boulangere\">Je prépare</a></nav>");
+        let folded = capture();
+        write("<button aria-expanded=\"false\" aria-controls=\"menu\">Menu</button><nav id=\"menu\" hidden><a href=\"#reserver\">Je réserve</a></nav><a href=\"#boulangere\">Espace boulangère</a>");
+        let renamed = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!first.contains("are gone"), "{first}");
+        assert!(!folded.contains("are gone"), "{folded}");
+        assert!(
+            renamed.contains("are gone: \\\"Je prépare\\\". ")
+                && renamed.contains("New since then: \\\"Menu\\\", \\\"Espace boulangère\\\""),
+            "{renamed}"
+        );
+        assert!(!renamed.contains("\\\"Je réserve\\\""), "{renamed}");
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn a_zero_size_window_and_a_desktop_window_are_measured_in_a_real_browser() {
         // Session #31 (26 octobre 2026, passage 4) : la fenêtre « Je conduis »
         // était un <dialog> de 0px dont le panneau était posé en position
@@ -3890,6 +3953,24 @@ mod tests {
                 "error: Failed to load resource: 404 (http://h/a.css)",
                 "error: Failed to load resource: net::ERR_FAILED (http://h/b.js)",
             ]
+        );
+    }
+
+    #[test]
+    fn the_page_view_console_leaves_out_what_file_urls_alone_produce() {
+        // Session #32 (26 octobre 2026) : ViewPage montrait encore les erreurs
+        // du manifeste refusé en file://, absentes du site en ligne.
+        let events = vec![
+            json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Access to manifest at 'file://manifest.json' from origin 'null' has been blocked by CORS policy: Cross origin requests are only supported for protocol schemes: chrome, data, http, https.", "url": "file://index.html" } } }),
+            json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Failed to load resource: net::ERR_FAILED", "url": "file://manifest.json" } } }),
+            json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Failed to load resource: 404", "url": "file://photo.jpg" } } }),
+        ];
+        assert_eq!(
+            super::console_messages(&events),
+            [(
+                "Failed to load resource: 404".to_string(),
+                "file://photo.jpg".to_string()
+            )]
         );
     }
 
