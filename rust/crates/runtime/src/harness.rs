@@ -2304,9 +2304,17 @@ pub const UNMETERED_TURN_REQUEST_LIMIT: usize = 300;
 #[must_use]
 pub fn turn_limit_note(limit: usize) -> String {
     format!(
-        "[Claw] This turn has used {limit} requests, the limit for one turn: the user's daily quota of requests is limited. Stop working now and do not call any tool (a call made in your next reply will not run). Give your final answer: what is done and verified, what is done but not verified, what remains to do, and the exact next step. The user can then ask you to continue."
+        "[Claw] This turn has used {limit} requests, the limit for one turn: the user's daily quota of requests is limited. Stop working now and do not call any tool (a call made in your next reply will not run). {FINAL_ANSWER_SHAPE}"
     )
 }
+
+/// Forme de la réponse finale quand le tour s'arrête (temps ou requêtes).
+/// Vu le 26 octobre 2026 (session #31, un parent « pas du tout
+/// informaticien ») : la réponse donnait du CSS à appliquer et « relancer
+/// Screenshot », annonçait comme restants des défauts que seule la
+/// description d'une capture voyait, et taisait un bouton supprimé et un
+/// autre qui ne marchait plus.
+pub const FINAL_ANSWER_SHAPE: &str = "Give your final answer, written for the user, who may not be a developer: plain words, no code and no tool names. Go through each thing the user asked in their last message, one line each, and say whether it is done and checked on the page, done but not checked, or not done. Then say what you removed or changed that the user did not ask for, and anything that no longer works (the measurements below name it): never leave it out. Report as remaining only what the measurements or the user name; an image description alone can misread. End with what the user can ask you next. The user can then ask you to continue.";
 
 /// L'heure de conclure est passée : `CLAW_DEADLINE` (secondes Unix), posée par
 /// le moteur de Claw Web avant que son job ne soit coupé. Vu le 25 octobre 2026 :
@@ -2333,7 +2341,7 @@ pub fn parse_deadline(value: Option<&str>) -> Option<u64> {
 }
 
 /// Message adressé au modèle quand le temps du passage s'achève.
-pub const DEADLINE_NOTE: &str = "[Claw] The time given to this session is almost over: it will be stopped in a few minutes. Stop working now and do not call any tool (a call made in your next reply will not run). Give your final answer: what is done and verified, what is done but not verified, what remains to do, and the exact next step. The user can then ask you to continue.";
+pub const DEADLINE_NOTE: &str = "[Claw] The time given to this session is almost over: it will be stopped in a few minutes. Stop working now and do not call any tool (a call made in your next reply will not run).";
 
 /// Résultat d'un appel d'outil demandé après ce message.
 pub const DEADLINE_REFUSAL: &str =
