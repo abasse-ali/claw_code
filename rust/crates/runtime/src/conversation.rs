@@ -516,6 +516,8 @@ struct TurnAids {
     evidence_asked: bool,
     /// Les commandes conseillées sans avoir été lancées ont déjà été signalées.
     commands_checked: bool,
+    /// La réponse sur une page, écrite pour un développeur, a déjà été renvoyée.
+    plain_asked: bool,
     /// Déroulé ultracode pour ce tour (session ou mot-clé du message).
     ultracode: bool,
     /// Dossier préparé par l'agent d'exploration (ultracode).
@@ -2291,6 +2293,7 @@ where
                     })
                     .or_else(|| self.milestone_validation_gate(&mut aids, &answer))
                     .or_else(|| self.instructions_gate(&mut aids, &answer))
+                    .or_else(|| self.plain_answer_gate(&mut aids, &answer))
                     .or_else(|| {
                         asking = self.questions_gate(&mut aids, &answer);
                         asking.then(|| harness::QUESTIONS_FEEDBACK.to_string())
@@ -4766,6 +4769,30 @@ where
             "La réponse conseille des commandes jamais lancées : Claw demande à l'agent de les essayer",
         );
         Some(harness::untried_feedback(&untried))
+    }
+
+    /// Réponse sur une page écrite pour un développeur : le relecteur de Claw
+    /// nommé, des bouts de code, des noms de fichiers. L'utilisateur d'un site
+    /// ne lit pas le code : le modèle réécrit sa réponse une fois, en mots
+    /// simples, sur le plan de `FINAL_ANSWER_SHAPE`.
+    fn plain_answer_gate(&mut self, aids: &mut TurnAids, answer: &str) -> Option<String> {
+        if aids.plain_asked
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::DesignReview)
+            || self.page_to_review(aids).is_none()
+        {
+            return None;
+        }
+        let signs = harness::developer_signs(answer);
+        if signs.is_empty() {
+            return None;
+        }
+        aids.plain_asked = true;
+        self.api_client.notify(
+            "La réponse parle de code et de fichiers : Claw demande à l'agent de la réécrire en mots simples",
+        );
+        Some(harness::plain_answer_feedback(&signs))
     }
 
     /// Questions à l'utilisateur : la réponse finale se termine par des
@@ -8871,6 +8898,35 @@ mod tests {
             check.contains("Broken by your last change") && check.contains("430px wide"),
             "{check}"
         );
+    }
+
+    #[test]
+    fn an_answer_about_a_page_written_for_a_developer_is_rewritten_once() {
+        let _serial = crate::test_serial();
+        // Session #31 (26 octobre 2026) : « Les deux points du reviewer ont été
+        // corrigés », `styles.css`, `app.js:725-731`, à un parent.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("reponse");
+        let steps = vec![
+            text_step("Les deux points du reviewer ont été corrigés : `styles.css` charge `Inter`, et `app.js:725-731` raccourcit les titres."),
+            text_step("Toujours `styles.css` et `app.js`."),
+        ];
+        let ((mut runtime, observed, _), _) = measured_runtime(steps, vec![Some(MEASURED)]);
+        runtime.page_target = Some(format!("path:{}", page.display()));
+        let summary = runtime.run_turn("corrige le menu", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        assert_eq!(observed.requests.len(), 2, "{:?}", observed.notices);
+        let note = &observed.requests[1];
+        assert!(
+            note.contains(
+                "Your final answer is written for a developer (it talks about Claw's reviewer"
+            ) && note.contains("plain words, no code"),
+            "{note}"
+        );
+        // Une seule fois : la seconde réponse, même maladroite, est gardée.
+        let last = super::message_text(summary.assistant_messages.last().expect("réponse"));
+        assert!(last.contains("Toujours"), "{last}");
     }
 
     #[test]
