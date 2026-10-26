@@ -25,6 +25,8 @@ use serde_json::{json, Value};
 
 /// Mesures faites dans la page (voir le fichier pour la liste des défauts).
 const AUDIT_SCRIPT: &str = include_str!("screenshot_audit.js");
+/// Mesures d'une fenêtre ouverte (largeur, place, liste coupée, libellés).
+const WINDOW_SCRIPT: &str = include_str!("screenshot_window.js");
 /// Essai d'un téléphone après la capture : le bouton menu ouvre-t-il la navigation ?
 const PROBE_SCRIPT: &str = include_str!("screenshot_probe.js");
 /// Essai de chaque bouton de la page, après la capture.
@@ -1017,6 +1019,8 @@ struct Extra {
     label: String,
     jpeg: String,
     preview: Option<String>,
+    /// Défauts mesurés dans ce qu'elle montre (une fenêtre ouverte).
+    problems: Vec<String>,
 }
 
 /// Sélecteurs de remise à zéro : ils s'appliquent à tout et ne disent pas
@@ -2058,6 +2062,7 @@ fn capture(
                 label: format!("from {top:.0}px"),
                 jpeg,
                 preview,
+                problems: Vec::new(),
             })
         })
         .collect();
@@ -2355,6 +2360,16 @@ fn view_shots(
         {
             continue;
         }
+        // La fenêtre se mesure comme la page : la capture seule ne disait
+        // rien de sa largeur ni de sa place (session #31, 26 octobre 2026).
+        let problems = if view.kind == "window" {
+            strings(&devtools.evaluate(WINDOW_SCRIPT).unwrap_or_default())
+                .into_iter()
+                .map(|problem| format!("In the window opened by {}: {problem}", view.label))
+                .collect()
+        } else {
+            Vec::new()
+        };
         if let Ok((jpeg, preview)) = picture(devtools, viewport, None) {
             let label = match view.kind {
                 "tab" => format!("tab {}", view.label),
@@ -2364,6 +2379,7 @@ fn view_shots(
                 label,
                 jpeg,
                 preview,
+                problems,
             });
         }
     }
@@ -2510,6 +2526,9 @@ fn extra_entry(
         path: file.clone().unwrap_or_default(),
     });
     let mut entry = json!({ "screen": screen, "image": images.len() });
+    if !extra.problems.is_empty() {
+        entry["problems"] = json!(extra.problems);
+    }
     if let Some(file) = file {
         entry["file"] = json!(file.display().to_string());
     }
@@ -2634,6 +2653,7 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
         if let Some(viewport) = sizes.iter().find(|size| size.mobile).or(sizes.first()) {
             let shots = view_shots(&mut devtools, &session, viewport, &openers);
             for (number, extra) in shots.into_iter().enumerate() {
+                total += extra.problems.len();
                 let name = format!("{}-view-{}", viewport.label.replace(' ', "-"), number + 1);
                 captures.push(extra_entry(
                     dir.as_deref(),
@@ -3039,6 +3059,66 @@ mod tests {
         for absent in ["framed box", "stretched into bars"] {
             assert!(!sound.contains(absent), "{absent}: {sound}");
         }
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn a_misplaced_window_is_measured_in_a_real_browser() {
+        // Session #31 (26 octobre 2026), sur l'iPhone du parent : « Proposer
+        // ma voiture » faisait 352px sur 390, collée à gauche et en haut au
+        // lieu d'en bas ; le match choisi était coupé et les libellés
+        // touchaient le champ du dessus. La capture de la page n'en disait rien.
+        let cwd = std::env::current_dir().expect("dossier");
+        let problems = |name: &str, css: &str, option: &str| {
+            let dir = cwd.join(format!("claw-fenetre-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Club</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button, select, input {{ font: inherit; }} .modal {{ position: fixed; inset: 0; margin: 0; padding: 0; border: none; background: transparent; }} .modal[open] {{ display: flex; align-items: flex-end; }} .panel {{ width: 100%; background: #fff; border-radius: 24px 24px 0 0; padding: 16px; box-sizing: border-box; }} form {{ display: flex; flex-direction: column; }} select, input {{ width: 100%; box-sizing: border-box; padding: 10px 16px; }} label {{ margin-top: 2px; }} {css}</style></head><body><h1>Covoiturage</h1><button id=\"conduis\">Je conduis</button><dialog id=\"fenetre\" class=\"modal\"><div class=\"panel\"><h2>Proposer ma voiture</h2><form><label for=\"match\">Match concerné</label><select id=\"match\"><option>{option}</option></select><label for=\"places\">Places disponibles</label><input id=\"places\" type=\"number\" value=\"3\"><button type=\"button\" class=\"fermer\">Fermer</button></form></div></dialog><script>const box = document.getElementById('fenetre'); document.getElementById('conduis').addEventListener('click', () => box.showModal()); box.querySelector('.fermer').addEventListener('click', () => box.close());</script></body></html>"),
+            )
+            .expect("html");
+            let page = format!("claw-fenetre-{name}-{}/index.html", std::process::id());
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            request.windows = Some(true);
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            let result = result.expect("capture");
+            result["captures"]
+                .as_array()
+                .expect("captures")
+                .iter()
+                .filter(|capture| {
+                    capture["screen"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("window opened by")
+                })
+                .map(|capture| capture["problems"].to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let broken = problems(
+            "casse",
+            "",
+            "U11 vs FC Voisins · samedi 28 novembre 2026 à 10:00, stade municipal",
+        );
+        for expected in [
+            "In the window opened by",
+            "stuck to the left edge",
+            "max-width and max-height (calc(100% - 2em - 6px))",
+            "sits at the top",
+            "The chosen option of a list is cut",
+            "Labels touch the field above them",
+        ] {
+            assert!(broken.contains(expected), "{expected}: {broken}");
+        }
+        let sound = problems(
+            "sain",
+            ".modal { max-width: 100%; max-height: 100%; width: 100%; height: 100%; } label { margin-top: 16px; }",
+            "U11 vs FC Voisins · 28 nov.",
+        );
+        assert!(!sound.contains("In the window opened by"), "{sound}");
     }
 
     #[test]
