@@ -68,10 +68,20 @@
     errors.push(String((reason && reason.message) || reason));
   });
   // Ce qu'une action change dans la page, compte par l'observateur.
+  // Changements de la page pendant un essai. Un attribut récrit avec la même
+  // valeur n'en est pas un (un gestionnaire de toute la page qui « referme »
+  // à chaque toucher un menu déjà fermé) : le bouton touché n'a rien fait.
   const watch = () => {
     const seen = { mutations: 0 };
-    const observer = new MutationObserver((records) => { seen.mutations += records.length; });
-    observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, characterData: true });
+    const changed = (record) => {
+      if (record.type === "childList") return record.addedNodes.length + record.removedNodes.length > 0;
+      if (record.type === "attributes") return record.target.getAttribute(record.attributeName) !== record.oldValue;
+      return record.target.data !== record.oldValue;
+    };
+    const observer = new MutationObserver((records) => { seen.mutations += records.filter(changed).length; });
+    observer.observe(document.documentElement, {
+      subtree: true, childList: true, attributes: true, characterData: true, attributeOldValue: true, characterDataOldValue: true,
+    });
     seen.stop = () => observer.disconnect();
     return seen;
   };
@@ -513,6 +523,15 @@
       }
     }
     // Ce qui reste ouvert se referme, pour que le bouton suivant soit libre.
+    // Un menu déplié par ce bouton se replie par lui : sinon le toucher du
+    // bouton suivant le refermait (un gestionnaire de toute la page), et ce
+    // changement passait pour l'effet de ce bouton suivant. Vu le 26 octobre
+    // 2026 (session #31) : « Détails du match » n'ouvrait plus rien, et le
+    // parcours, qui venait d'ouvrir le menu, le croyait vivant.
+    if (el.isConnected && shown(el) && el.getAttribute("aria-expanded") === "true") {
+      try { tap(el); } catch (_) { /* le parcours continue */ }
+      await wait(300);
+    }
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     for (const dialog of document.querySelectorAll("dialog[open]")) {
       try { dialog.close(); } catch (_) { /* deja fermee */ }
