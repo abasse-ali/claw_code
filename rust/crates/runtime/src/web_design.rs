@@ -330,9 +330,6 @@ const COMPLAINT_WORDS: &[&str] = &[
 ];
 /// Marques d'une création ou d'une refonte : celles-là se jugent au design.
 const CREATION_WORDS: &[&str] = &[
-    "cree",
-    "creer",
-    "construis",
     "refais",
     "refaire",
     "refonte",
@@ -346,11 +343,25 @@ const CREATION_WORDS: &[&str] = &[
     "plus moderne",
     "modernise",
     "embellis",
-    "create",
-    "build",
     "prettier",
     "more beautiful",
 ];
+
+/// Créer ou construire *un site, une page, une appli* : « créer un compte »
+/// n'en est pas une. Vu le 26 octobre 2026 (session #32, passage 5) : « je
+/// ne saurai pas créer un compte Firebase » lu comme une création, et le
+/// plan de design exigé, d'où trois fichiers réécrits en entier.
+fn creates_a_page(folded: &str) -> bool {
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    PATTERN
+        .get_or_init(|| {
+            regex::Regex::new(
+                r"\b(?:cree[sz]?|creer|construi[st]?|construire|fai[st]|faire|faudrait|veux|voudrais|aimerais|souhaite|besoin\s+d'|create|build|make|want|need)\s+(?:moi\s+|nous\s+)?(?:un|une|le|la|mon|ma|notre|a|an|the|my|our)?\s*(?:nouveau\s+|nouvelle\s+|petit\s+|petite\s+|new\s+|small\s+)?(?:site|page|appli|application|boutique|landing|website|web\s*app|app)\b",
+            )
+            .expect("motif de création")
+        })
+        .is_match(folded)
+}
 
 /// Clé ou identifiant à remplacer laissé dans le code (`VOTRE_API_KEY`,
 /// `YOUR_PROJECT_ID`, `your-api-key`) : le site attend un compte que
@@ -443,7 +454,7 @@ const LOOKS_COMPLAINTS: &[&str] = &[
 #[must_use]
 pub fn asks_new_design(text: &str) -> bool {
     let folded = crate::team::without_accents(&text.to_lowercase()).replace('\u{2019}', "'");
-    CREATION_WORDS.iter().any(|word| folded.contains(word))
+    creates_a_page(&folded) || CREATION_WORDS.iter().any(|word| folded.contains(word))
 }
 
 /// Le message demande des corrections sur une interface déjà faite, pas une
@@ -454,10 +465,11 @@ pub fn asks_new_design(text: &str) -> bool {
 #[must_use]
 pub fn is_repair_request(text: &str) -> bool {
     let folded = crate::team::without_accents(&text.to_lowercase()).replace('\u{2019}', "'");
-    if CREATION_WORDS
-        .iter()
-        .chain(LOOKS_COMPLAINTS)
-        .any(|word| folded.contains(word))
+    if creates_a_page(&folded)
+        || CREATION_WORDS
+            .iter()
+            .chain(LOOKS_COMPLAINTS)
+            .any(|word| folded.contains(word))
     {
         return false;
     }
@@ -1667,6 +1679,22 @@ mod tests {
         assert!(!is_repair_request("Je ne saurai pas créer un compte toute seule, il me faut quelque chose où je n'ai rien à régler. Et le site fait un peu triste : il n'y a pas de photo de mon pain, et le titre est caché, je dois remonter."));
         assert!(!asks_new_design(reported));
         assert!(asks_new_design("Refais la page d'accueil, plus moderne"));
+        // Session #32, passage 5 : créer un compte n'est pas créer une page.
+        assert!(!asks_new_design(
+            "Je ne saurai pas créer un compte Firebase toute seule. Et le site fait un peu triste."
+        ));
+        for creation in [
+            "crée-moi un site pour ma boulangerie",
+            "il me faudrait un petit site",
+            "Build a landing page",
+            "fais une appli de budget",
+            "Construis une nouvelle page tarifs",
+        ] {
+            assert!(
+                asks_new_design(&creation.replace("crée-moi", "crée moi")),
+                "{creation}"
+            );
+        }
         assert!(!is_repair_request("Ajoute une page pour les tarifs"));
     }
 
@@ -1686,6 +1714,7 @@ mod tests {
         assert!(super::is_repair_request(crate::project::own_words(
             with_notes
         )));
+        // L'historique, lui, contient la demande de création du site.
         assert!(!super::is_repair_request(with_notes));
         for creation in [
             "bonjour, je m'occupe du club de foot des petits de mon quartier. il me faudrait un petit site pour ça, que les parents puissent regarder sur leur tel",
