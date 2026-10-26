@@ -314,6 +314,18 @@
       }
       if (!valid) refused.push(`${label(field.labels && field.labels[0] ? field.labels[0] : field)} (${field.validationMessage})`);
     }
+    // Liste faite main (role=combobox, sa liste role=listbox) : ouverte, puis
+    // sa première option choisie, comme le doigt du visiteur. Vu le 26 octobre
+    // 2026 (session #32) : l'heure de retrait restait vide, et le bouton
+    // « Réserver » grisé.
+    for (const box of form.querySelectorAll("[role=combobox], [aria-haspopup=listbox]")) {
+      const list = document.getElementById(box.getAttribute("aria-controls") || "") || box.querySelector("[role=listbox]");
+      const input = box.matches("input") ? box : box.querySelector("input");
+      if (!list || (input && input.value) || list.querySelector("[role=option][aria-selected=true]")) continue;
+      tap(box);
+      const option = [...list.querySelectorAll("[role=option]")].find((el) => el.getAttribute("aria-disabled") !== "true");
+      if (option) tap(option);
+    }
     return refused;
   };
   const formName = (form) => {
