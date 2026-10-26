@@ -367,6 +367,30 @@ pub fn injected_test_data(text: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Codes d'accès écrits dans un script (`const DEFAULT_PIN = '1234'`,
+/// `password: "boulange"`) : ceux qui ouvrent l'espace réservé d'une page, que
+/// le parcours de Screenshot essaie pour voir ce qu'il y a derrière. Les chiffres
+/// d'abord ; une clé de rangement (`PIN_KEY = 'boulangerie_pin'`) n'en est pas un.
+#[must_use]
+pub fn access_codes(text: &str) -> Vec<String> {
+    let assigned = Regex::new(
+        r#"(?i)\b[\w$]*(?:pin|code|passe?|password|motdepasse|passcode|secret)[\w$]*["']?\s*(?:=|:)\s*["'`]([^"'`\s]{3,32})["'`]"#,
+    )
+    .expect("regex");
+    let mut codes: Vec<String> = Vec::new();
+    for found in assigned.captures_iter(text) {
+        let whole = found[0].to_lowercase();
+        let code = found[1].to_string();
+        if whole.contains("key") || whole.contains("storage") || codes.contains(&code) {
+            continue;
+        }
+        codes.push(code);
+    }
+    codes.sort_by_key(|code| !code.chars().all(|c| c.is_ascii_digit()));
+    codes.truncate(4);
+    codes
+}
+
 /// Dates d'un fichier toutes passées (`AAAA-MM-JJ`, trois au moins) : les
 /// exemples d'une appli de calendrier ou d'événements datés d'avant aujourd'hui
 /// (`today`, même format). Vu le 25 octobre 2026 (session #31) : un site de club
@@ -912,6 +936,15 @@ mod tests {
             "2026-10-25"
         )
         .is_empty());
+    }
+
+    #[test]
+    fn access_codes_written_in_a_script_are_found_and_storage_keys_are_not() {
+        // Session #32, passage 5 : l'espace boulanger et son code par défaut.
+        let script = "const PIN_KEY = 'boulangerie_pin';\n  const DEFAULT_PIN = '1234';\n  const config = { adminPassword: \"fournil\" };\n  const productCode = \"1234\";";
+        assert_eq!(super::access_codes(script), ["1234", "fournil"]);
+        assert!(super::access_codes("let total = 0; const name = 'Léa';").is_empty());
+        assert!(super::access_codes("<input type=\"password\" id=\"pin-input\">").is_empty());
     }
 
     #[test]

@@ -518,6 +518,11 @@
     if (top && buried.length < 6) buried.push(`${label(el)} (under ${label(top)})`);
   }
   scrollTo(0, 0);
+  // Champ d'un code d'accès (code PIN, mot de passe) dans une fenêtre.
+  const codeField = (box) => [...box.querySelectorAll("input")].filter(shown).find((field) => field.type === "password"
+    || /pin|code|passe|password/i.test(`${field.name} ${field.id} ${field.labels && field.labels[0] ? field.labels[0].innerText : ""}`));
+  // Boutons dont la fenêtre demande un code : rouverts à la fin du parcours.
+  const gated = [];
   const closeButton = (box) => [...box.querySelectorAll("button, [role=button], a[href]")].filter(shown)
     .find((el) => /^(fermer|close|annuler|cancel|retour|x|\u00d7|\u2715|\u2716)$/i.test((el.innerText || "").trim())
       || /fermer|close|annuler|cancel/i.test(el.getAttribute("aria-label") || el.getAttribute("title") || ""));
@@ -559,6 +564,7 @@
         }
       }
       if (blocked) break;
+      if (codeField(box) && gated.length < 2 && !gated.some((item) => item.el === el)) gated.push({ el });
       for (const form of [...box.querySelectorAll("form")].filter((item) => shown(item) && !tested.has(item))) {
         if (tested.size < 10) await tryForm(form);
       }
@@ -609,6 +615,67 @@
       try { dialog.close(); } catch (_) { /* deja fermee */ }
     }
     await wait(40);
+  }
+  // Un espace gardé par un code (« Espace boulanger ») : rouvert après l'envoi
+  // des formulaires, pour qu'il ait de quoi montrer, et ouvert avec le code
+  // écrit dans le script de la page (`clawCodes`, lu par Screenshot). Vu le
+  // 26 octobre 2026 (session #32, passages 4 et 5) : la liste de la
+  // boulangère levait une erreur dès qu'une réservation existait, derrière
+  // le code ; le parcours s'arrêtait à la fenêtre du code, et l'agent
+  // annonçait « vérifié ».
+  const codes = typeof clawCodes === "undefined" ? [] : clawCodes;
+  // Les boutons essayés ont pu changer ce que l'espace montre (le jour choisi
+  // dans le formulaire) : les formulaires encore à l'écran sont renvoyés juste
+  // avant, sans que ce second envoi compte dans le rapport.
+  if (codes.length && gated.length) {
+    const reported = { forms: forms.length, unnamed: unnamed.length, kept: kept.length, errors: errors.length };
+    for (const form of [...document.forms].filter((item) => shown(item) && tested.has(item)).slice(0, 3)) {
+      tested.delete(form);
+      await tryForm(form);
+    }
+    forms.length = reported.forms;
+    unnamed.length = reported.unnamed;
+    kept.length = reported.kept;
+    errors.length = reported.errors;
+  }
+  for (const { el } of codes.length ? gated : []) {
+    if (!el.isConnected) continue;
+    if (!shown(el)) {
+      // Rangé dans un menu replié : le menu s'ouvre d'abord.
+      const toggle = [...document.querySelectorAll("[aria-expanded=false]")].filter(shown)
+        .find((item) => { const menu = document.getElementById(item.getAttribute("aria-controls") || ""); return menu && menu.contains(el); });
+      if (toggle) { tap(toggle); await wait(300); }
+      if (!shown(el)) continue;
+    }
+    for (const code of codes.slice(0, 4)) {
+      const opened = new Set(windows());
+      try { tap(el); } catch (error) { errors.push(String((error && error.message) || error)); }
+      await wait(300);
+      const box = windows().find((item) => !opened.has(item)) || windows().find((item) => codeField(item));
+      const field = box && codeField(box);
+      if (!field) break;
+      const before = errors.length;
+      setValue(field, code);
+      const enter = [...box.querySelectorAll("button, input[type=submit], [role=button]")].filter(shown)
+        .find((item) => item.value === "submit" || item.type === "submit"
+          || /^(ok|entrer|valider|acc[eé]der|ouvrir|connexion|se connecter|confirmer|d[eé]verrouiller|enter|log ?in|sign in|unlock|open|submit|go)$/i.test((item.innerText || item.value || "").trim()));
+      try {
+        if (enter) tap(enter);
+        else field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+      } catch (error) { errors.push(String((error && error.message) || error)); }
+      await wait(600);
+      if (errors.length > before) {
+        failing.push(`${label(el)}, then the access code "${code}" written in the page's script, typed in the window it opens, once the page's forms were sent (so there is something to show): ${errors[errors.length - 1]}`);
+        break;
+      }
+      const unlocked = !box.isConnected || !open(box) || !codeField(box);
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      for (const dialog of document.querySelectorAll("dialog[open]")) {
+        try { dialog.close(); } catch (_) { /* deja fermee */ }
+      }
+      await wait(40);
+      if (unlocked) break;
+    }
   }
   return { checked: controls.length, windowLayout, dead, failing, covered, buried, stuck, links, files, forms, unnamed, underBar, kept, openers, dragged };
 })()
