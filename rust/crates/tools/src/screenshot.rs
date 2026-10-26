@@ -2655,6 +2655,54 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn doubled_frames_and_stretched_labels_are_found_in_a_real_browser() {
+        // Session #31 (26 octobre 2026) : « Complet » dans une pastille verte,
+        // elle-même dans un encadré vert ; les noms des conducteurs dans des
+        // barres vertes de toute la largeur. Une page saine garde un tableau
+        // rayé, une liste de liens, une alerte et des pastilles à leur taille.
+        let cwd = std::env::current_dir().expect("dossier");
+        let problems = |name: &str, css: &str| {
+            let dir = cwd.join(format!("claw-cadres-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Club</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} .dispo {{ display: flex; gap: 8px; align-items: center; padding: 6px 12px; background: #ecfdf3; border: 1px solid #bbf7d0; border-radius: 12px; }} .badge {{ padding: 6px 12px; background: #e8f5e9; border: 1px solid #c8e6c9; border-radius: 999px; }} .conducteurs {{ display: flex; flex-direction: column; gap: 8px; }} .conducteur {{ padding: 4px 10px; background: #ecfdf5; border-radius: 999px; }} table {{ width: 100%; border-collapse: collapse; }} tr:nth-child(odd) td {{ background: #f3f4f6; }} .liens a {{ display: block; padding: 10px; background: #f3f4f6; border-radius: 8px; margin-bottom: 4px; color: #111; }} .alerte {{ padding: 10px; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 8px; }} .carte {{ padding: 16px; border: 1px solid #ddd; border-radius: 12px; background: #fff; }} {css}</style></head><body><h1>Prochain match</h1><div class=\"dispo\"><svg width=\"20\" height=\"20\" aria-hidden=\"true\"><circle cx=\"10\" cy=\"10\" r=\"8\" fill=\"none\" stroke=\"#166534\"/></svg><span class=\"badge\">Complet</span></div><div class=\"conducteurs\"><div class=\"conducteur\">Thomas D.</div><div class=\"conducteur\">Julie M.</div></div><table><tr><td>Samedi</td><td>10:00</td></tr><tr><td>Mercredi</td><td>17:30</td></tr></table><nav class=\"liens\"><a href=\"#a\">Calendrier</a><a href=\"#b\">Covoiturage</a></nav><p class=\"alerte\" role=\"status\">Match reporté</p><div class=\"carte\"><p>U9 vs FC Avenir, samedi 14 novembre</p><span class=\"badge\">Il manque 2 places</span></div><p id=\"a\">a</p><p id=\"b\">b</p></body></html>"),
+            )
+            .expect("html");
+            let page = format!("claw-cadres-{name}-{}/index.html", std::process::id());
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let broken = problems("casse", "");
+        assert!(
+            broken.contains("framed box that holds nothing but another framed box: span.badge"),
+            "{broken}"
+        );
+        assert!(
+            broken.contains("Short labels stretched into bars"),
+            "{broken}"
+        );
+        assert!(
+            broken.contains("div.conducteur \\\"Thomas D.\\\""),
+            "{broken}"
+        );
+        for absent in ["Calendrier", "Samedi", "Match reporté", "U9 vs FC Avenir"] {
+            assert!(!broken.contains(absent), "{absent}: {broken}");
+        }
+        let sound = problems(
+            "sain",
+            ".dispo { background: none; border: 0; padding: 0; } .conducteurs { align-items: flex-start; }",
+        );
+        for absent in ["framed box", "stretched into bars"] {
+            assert!(!sound.contains(absent), "{absent}: {sound}");
+        }
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn links_forms_and_windows_are_walked_in_a_real_browser() {
         // Le parcours d'un visiteur : chaque lien, chaque formulaire rempli et
         // envoyé, chaque fenêtre refermée, puis la page rechargée.
