@@ -168,6 +168,28 @@ pub fn own_words(request: &str) -> &str {
     request
 }
 
+/// Les mots de l'utilisateur avec ceux de ses messages précédents, que Claw Web
+/// rappelle après la demande sous `[Request]` et `[Message]` (les réponses de
+/// l'agent, `[Your answer]`, et les notes `[Claw]` restent dehors). Un besoin
+/// posé au premier message vaut encore quand le suivant n'en parle plus.
+#[must_use]
+pub fn user_words_with_history(request: &str) -> String {
+    let mut words = own_words(request).to_string();
+    let mut kept = false;
+    for line in request.lines() {
+        let label = line.trim_end();
+        if label.starts_with('[') {
+            kept = label == "[Request]" || label == "[Message]";
+            continue;
+        }
+        if kept {
+            words.push('\n');
+            words.push_str(line);
+        }
+    }
+    words
+}
+
 /// Ce que le message dit du mode projet. Une question (« qu'est-ce que le
 /// mode projet ? ») ne l'active pas.
 #[must_use]
@@ -2650,6 +2672,20 @@ mod tests {
         assert!(!creation_request(own_words(request)));
         assert!(creation_request(request));
         assert_eq!(own_words("Crée une appli\n"), "Crée une appli\n");
+    }
+
+    #[test]
+    fn earlier_messages_of_the_user_are_kept_and_the_answers_left_out() {
+        // Session #32, passage 5 : la réponse de la boulangère ne parlait plus
+        // des clientes qui réservent ; le premier message, si.
+        let request = "Je ne saurai pas créer un compte Firebase.\n\n[Claw] Earlier conversation of this session, for context only.\n\n[Request]\nles clients réservent, moi je vois la liste\n\n[Your answer]\nJ'ai ajouté Firebase.\n\n[Message]\nla réservation de ma fille n'apparait pas\n\n[Claw] End of the earlier conversation.\n\n> Je ne saurai pas créer un compte Firebase.";
+        let words = user_words_with_history(request);
+        assert!(words.starts_with("Je ne saurai pas créer un compte Firebase."));
+        assert!(words.contains("les clients réservent, moi je vois la liste"));
+        assert!(words.contains("ma fille n'apparait pas"));
+        assert!(!words.contains("J'ai ajouté Firebase"), "{words}");
+        assert!(!words.contains("End of the earlier"), "{words}");
+        assert_eq!(user_words_with_history("Crée une appli"), "Crée une appli");
     }
 
     #[test]
