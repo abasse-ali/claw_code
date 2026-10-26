@@ -32,6 +32,7 @@ JOB_TOKEN = os.environ["JOB_TOKEN"]
 REPO_TOKEN = os.environ.get("REPO_TOKEN", "").strip()
 # Taille gardée de la conversation passée (les réponses les plus anciennes sont raccourcies).
 HISTORY_MAX_CHARS = 30_000
+HISTORY_REMINDER_CHARS = 1_500
 # État du mode projet de la session, gardé en cache entre les passages (claw-web.yml).
 STATE = Path("claw-state") / "project.json"
 
@@ -196,6 +197,28 @@ def bare_continue_note(request, history, retry):
         "in a few sentences: what the project is and what looks finished or unfinished. Then ask the "
         "user what to do next with AskUserQuestion (2 to 4 next steps, the one you recommend first): "
         "they answer with one tap. Change no file in this pass."
+    )
+
+
+def with_history(request, history):
+    """La demande suivie de la conversation qui précède, puis rappelée : seul le nouveau message
+    est la tâche du passage. Vu le 26 octobre 2026 (session #31, passage 6) : « corrige la bande
+    sous l'en-tête sans toucher au reste », et l'agent a repris les listes des messages déjà
+    traités (le texte des places, les cadres de « Complet »), lues dans l'historique."""
+    if not history:
+        return request
+    words = request.split("\n\n[Claw]")[0].strip()
+    if len(words) > HISTORY_REMINDER_CHARS:
+        words = words[:HISTORY_REMINDER_CHARS] + "…"
+    return (
+        request
+        + "\n\n[Claw] Earlier conversation of this session, for context only (your earlier changes "
+        "are already on the branch). Each earlier message was handled by the answer after it: do not "
+        "redo its points, and do not reopen any point the new message does not name.\n\n"
+        + history
+        + "\n\n[Claw] End of the earlier conversation. Your task in this pass is only the user's new "
+        "message, the one at the top, repeated here:\n\n"
+        + "\n".join(f"> {line}" if line else ">" for line in words.splitlines())
     )
 
 
@@ -381,11 +404,7 @@ def main():
     if saved:
         request += "\n\nImages jointes : " + " ".join(f"@{path}" for path in saved)
         print(f"{len(saved)} image(s) jointe(s)")
-    if history:
-        request += (
-            "\n\n[Claw] Earlier conversation of this session, for context (your earlier changes "
-            "are already on the branch):\n\n" + history
-        )
+    request = with_history(request, history)
     if retry:
         request += (
             "\n\n[Claw] The user asked for a new answer to this message: your earlier attempts at it "
