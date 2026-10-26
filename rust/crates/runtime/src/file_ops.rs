@@ -482,6 +482,17 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
         (note, kept) => note.or(kept),
     };
 
+    let structured_patch = make_patch(original_file.as_deref().unwrap_or(""), content);
+    let note = match (
+        note,
+        original_file
+            .as_deref()
+            .and_then(|original| rewrite_note(&absolute_path, original, &structured_patch)),
+    ) {
+        (Some(note), Some(rewrite)) => Some(format!("{note} {rewrite}")),
+        (note, rewrite) => note.or(rewrite),
+    };
+
     Ok(WriteFileOutput {
         kind: if original_file.is_some() {
             String::from("update")
@@ -490,13 +501,39 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
         },
         file_path: display_path(&absolute_path),
         content: content.to_owned(),
-        structured_patch: make_patch(original_file.as_deref().unwrap_or(""), content),
+        structured_patch,
         original_file,
         git_diff: None,
         encoding_note,
         note,
     })
 }
+
+/// Fichier existant réécrit en entier pour en changer une petite partie. Vu
+/// le 26 octobre 2026 (session #32) : 13 `write_file` sur index.html,
+/// styles.css et app.js pour des retouches de 4 à 40 lignes, 28 des 40
+/// minutes du passage à recopier des fichiers de 250 à 900 lignes.
+fn rewrite_note(file: &Path, original: &str, hunks: &[StructuredPatchHunk]) -> Option<String> {
+    let total = original.lines().count();
+    let changed = hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| line.starts_with('+') || line.starts_with('-'))
+        .count();
+    if total < REWRITE_NOTE_MIN_LINES || changed == 0 || changed * 3 > total {
+        return None;
+    }
+    let name = file.file_name().map_or_else(
+        || file.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    Some(format!(
+        "[Claw] You sent all {total} lines of {name} again to change {changed}: writing a whole file takes minutes. For a change to an existing file, use edit_file (or MultiEdit for several places) with only the lines that change; keep write_file for a new file or a real rewrite."
+    ))
+}
+
+/// Taille à partir de laquelle recopier un fichier pour une retouche coûte.
+const REWRITE_NOTE_MIN_LINES: usize = 80;
 
 /// Ce que le type du fichier impose, quel que soit le fichier d'avant : un
 /// `.bat` ou un `.cmd` en CRLF et sans BOM (en LF, `cmd.exe` perd ses
@@ -2496,6 +2533,39 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&created).expect("lu"), "x = 1\n");
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(created);
+    }
+
+    #[test]
+    fn a_whole_file_sent_again_for_a_small_change_is_pointed_to_edit_file() {
+        let dir = std::env::temp_dir().join(format!("claw-reecrit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let path = dir.join("styles.css");
+        let original: String = (0..200)
+            .map(|i| format!(".r{i} {{ margin: {i}px; }}\n"))
+            .collect();
+        std::fs::write(&path, &original).expect("css");
+        let path = path.display().to_string();
+        let small = original.replace(".r5 { margin: 5px; }", ".r5 { margin: 6px; }");
+        let output = write_file(&path, &small).expect("écrit");
+        assert!(
+            output.note.as_deref().is_some_and(|note| note
+                .contains("You sent all 200 lines of styles.css again to change 2")
+                && note.contains("use edit_file")),
+            "{:?}",
+            output.note
+        );
+        // Une vraie réécriture, ou un petit fichier : rien à dire.
+        let rewritten: String = (0..200)
+            .map(|i| format!(".n{i} {{ padding: {i}px; }}\n"))
+            .collect();
+        assert!(write_file(&path, &rewritten).expect("écrit").note.is_none());
+        let short = dir.join("court.css").display().to_string();
+        write_file(&short, "a { color: red; }\n").expect("créé");
+        assert!(write_file(&short, "a { color: blue; }\n")
+            .expect("écrit")
+            .note
+            .is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
