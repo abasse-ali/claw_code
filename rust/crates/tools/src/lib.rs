@@ -780,6 +780,11 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "storage": {
                         "type": "object",
                         "description": "localStorage set before the page loads, {key: value} (a value that is not a string is stored as JSON): to see a page that keeps its data in the browser filled with sample data, without editing the project's files to inject it."
+                    },
+                    "inspect": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Up to 6 elements to examine, each a CSS selector or a piece of their visible text (\".contact-list a\", \"Coach Thomas\"): for each, the CSS rules that style it and its parent, with file, line and declarations, and its measured box, margin, padding, gap and space to the next block. Use it to find which rule makes a gap, a size or a color, instead of searching the stylesheets."
                     }
                 },
                 "additionalProperties": false

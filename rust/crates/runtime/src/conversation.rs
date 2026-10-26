@@ -396,6 +396,10 @@ struct TurnAids {
     last_checked: Option<Vec<String>>,
     /// Une réponse « vérifié » sans regard sur la page a déjà été renvoyée.
     claim_checked: bool,
+    /// Recherches dans les styles à la suite, sans modification ni capture.
+    style_searches: u32,
+    /// Remarques déjà faites pendant ce tour vers `inspect` de `Screenshot`.
+    style_search_notes: u32,
     /// Fichiers d'interface changés par une commande, déjà revus.
     interface_commands: std::collections::BTreeSet<String>,
     /// La méthode de design est jointe à la demande de ce tour.
@@ -2678,6 +2682,7 @@ where
                 aids.open_tasks = open;
             }
         }
+        notes.extend(self.style_search_note(tool_name, input, aids));
         if tool_name == "read_file" && !is_error {
             notes.extend(self.repeated_read_note(&output, aids));
             notes.extend(self.viewed_read_note(&output, aids));
@@ -3078,6 +3083,35 @@ where
     /// lecture encore dans la conversation : l'ancienne copie laisse la place
     /// à la nouvelle. Refaite dans le même tour, elle n'a rien appris au
     /// modèle pour le prix d'une requête : une remarque le lui dit.
+    /// Trois recherches à la suite dans les styles d'une page : remarque qui
+    /// renvoie vers `inspect` de `Screenshot`, qui nomme les règles d'un
+    /// élément (fichier, ligne) et mesure ses espacements. Vu le 26 octobre
+    /// 2026 (session #31) : six recherches de suite (`\.section\s*\{`,
+    /// `section.*padding`…) puis deux lectures pour trouver l'espacement d'une
+    /// section.
+    fn style_search_note(
+        &self,
+        tool_name: &str,
+        input: &str,
+        aids: &mut TurnAids,
+    ) -> Option<String> {
+        if harness::is_style_search(tool_name, input) {
+            aids.style_searches += 1;
+        } else if !matches!(tool_name, "read_file" | "TodoWrite") {
+            aids.style_searches = 0;
+        }
+        if aids.style_searches < harness::STYLE_SEARCHES_BEFORE_NOTE
+            || aids.style_search_notes >= harness::MAX_STYLE_SEARCH_NOTES
+            || self.subagent
+            || self.page_to_review(aids).is_none()
+        {
+            return None;
+        }
+        aids.style_searches = 0;
+        aids.style_search_notes += 1;
+        Some(harness::STYLE_SEARCH_NOTE.to_string())
+    }
+
     fn repeated_read_note(&mut self, output: &str, aids: &mut TurnAids) -> Option<String> {
         if !harness::enabled(Aid::RepeatedReads) {
             return None;
@@ -8685,6 +8719,43 @@ mod tests {
         assert!(!third.contains("Broken by your last change"), "{third}");
         assert!(observed.notices.iter().any(|notice| notice
             .contains("Claw vérifie la page après la modification : 1 défaut(s) nouveau(x)")));
+    }
+
+    #[test]
+    fn three_searches_in_the_styles_point_to_inspect() {
+        let _serial = crate::test_serial();
+        // Session #31 (26 octobre 2026) : six recherches de suite pour trouver
+        // la règle de l'espacement d'une section.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("styles");
+        let grep = |pattern: &str| {
+            tool_step(
+                "bash",
+                &serde_json::json!({ "command": format!("grep -n '{pattern}' styles.css") })
+                    .to_string(),
+            )
+        };
+        let steps = vec![
+            grep("\\.section"),
+            grep("section.*padding"),
+            grep("^\\.section\\s*\\{"),
+            text_step("Trouvé."),
+        ];
+        let ((mut runtime, observed, _), _) = measured_runtime(steps, vec![Some(MEASURED)]);
+        runtime.page_target = Some(format!("path:{}", page.display()));
+        runtime.run_turn("corrige l'espace", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        assert!(
+            !observed.requests[2].contains("\"inspect\""),
+            "{}",
+            observed.requests[2]
+        );
+        assert!(
+            observed.requests[3].contains("Ask the page instead"),
+            "{}",
+            observed.requests[3]
+        );
     }
 
     #[test]
