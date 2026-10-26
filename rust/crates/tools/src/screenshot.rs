@@ -1909,7 +1909,22 @@ fn block_spans(value: &Value) -> Vec<(f64, f64)> {
 /// octobre 2026 (session #31) : les tranches coupaient les cartes à leurs
 /// bords, et le lecteur d'images signalait « carte coupée en haut », « la
 /// dernière carte coupée en bas », que le modèle cherchait à réparer.
+///
+/// Moins d'un écran restant après la coupe : il rejoint cette tranche. Une
+/// dernière tranche garde la hauteur d'un écran, et montrait sous la fin de
+/// la page un vide qui n'existe pas. Vu le 26 octobre 2026 (session #31) :
+/// « Footer at TOP with 82% empty space below » sur ordinateur, que le
+/// modèle a pris pour une mise en page cassée.
 fn slice_end(start: f64, screen: f64, content: f64, blocks: &[(f64, f64)]) -> f64 {
+    let end = slice_cut(start, screen, content, blocks);
+    if end < content && content - end < screen {
+        content
+    } else {
+        end
+    }
+}
+
+fn slice_cut(start: f64, screen: f64, content: f64, blocks: &[(f64, f64)]) -> f64 {
     let limit = start + screen * FULL_PAGE_SCREENS;
     if limit >= content {
         return content;
@@ -2785,6 +2800,10 @@ mod tests {
         assert!((super::slice_end(0.0, 800.0, 4000.0, &packed) - 2400.0).abs() < 0.1);
         // La fin de la page tient dans la tranche.
         assert!((super::slice_end(2000.0, 800.0, 3500.0, &blocks) - 3500.0).abs() < 0.1);
+        // Il resterait 150px (un pied de page) : ils rejoignent la tranche, au
+        // lieu d'une dernière tranche d'un écran vide aux quatre cinquièmes.
+        assert!((super::slice_end(0.0, 800.0, 2550.0, &[]) - 2550.0).abs() < 0.1);
+        assert!((super::slice_end(0.0, 800.0, 3300.0, &[]) - 2400.0).abs() < 0.1);
     }
 
     #[test]
