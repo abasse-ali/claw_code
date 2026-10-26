@@ -3579,9 +3579,22 @@ where
                 .map(|problem| crate::web_design::problem_key(problem))
                 .collect(),
         );
+        // Point de départ de la vérification qui suit chaque modification
+        // (téléphone seul) : sans lui, ce que la première modification casse
+        // passait pour « restant ». Vu le 26 octobre 2026 (session #31) :
+        // « 0 défaut mesuré » avant le tour, puis « 0 nouveau, 2 restants ».
+        aids.last_checked = Some(
+            audit
+                .problems
+                .iter()
+                .filter(|problem| problem.starts_with("[phone"))
+                .chain(&audit.console)
+                .cloned()
+                .collect(),
+        );
         self.api_client.notify(&format!(
             "État de la page avant ce tour : {} défaut(s) mesuré(s)",
-            audit.problems.len()
+            audit.problems.len() + audit.console.len()
         ));
     }
 
@@ -8685,6 +8698,55 @@ mod tests {
         assert!(!third.contains("Broken by your last change"), "{third}");
         assert!(observed.notices.iter().any(|notice| notice
             .contains("Claw vérifie la page après la modification : 1 défaut(s) nouveau(x)")));
+    }
+
+    #[test]
+    fn what_the_first_change_breaks_is_new_against_the_page_before_the_turn() {
+        let _serial = crate::test_serial();
+        // Session #31 (26 octobre 2026) : « 0 défaut mesuré » avant le tour,
+        // puis après la première modification « 0 nouveau, 2 restants » :
+        // ce qu'elle cassait passait pour un défaut d'avant.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("depart");
+        let write = tool_step(
+            "write_file",
+            // Un chemin Windows a des barres obliques inverses : du JSON fait par serde.
+            &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                .to_string(),
+        );
+        let steps = vec![write, text_step("Corrigé.")];
+        let ((mut runtime, observed, _), shots) =
+            measured_runtime(steps, vec![Some(MEASURED), Some(TWO_PROBLEMS)]);
+        runtime.page_target = Some(format!("path:{}", page.display()));
+        runtime
+            .run_turn("fais un site plus joli", None)
+            .expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        assert_eq!(shots.get(), 2, "{:?}", observed.notices);
+        assert!(
+            observed
+                .notices
+                .iter()
+                .any(|notice| notice.contains("État de la page avant ce tour : 1 défaut(s)")),
+            "{:?}",
+            observed.notices
+        );
+        assert!(
+            observed.notices.iter().any(|notice| notice.contains(
+                "après la modification : 1 défaut(s) nouveau(x), 0 réparé(s), 1 restant(s)"
+            )),
+            "{:?}",
+            observed.notices
+        );
+        let check = observed.requests[1]
+            .rsplit("Claw looked at")
+            .next()
+            .unwrap_or_default();
+        assert!(
+            check.contains("Broken by your last change") && check.contains("430px wide"),
+            "{check}"
+        );
     }
 
     #[test]
