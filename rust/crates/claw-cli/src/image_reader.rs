@@ -126,6 +126,8 @@ struct Description {
 static DESCRIPTIONS: Mutex<BTreeMap<String, Description>> = Mutex::new(BTreeMap::new());
 /// Images qu'aucun modèle n'a su décrire : pas de nouvel essai à chaque requête.
 static UNREADABLE: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+/// Captures en cours de description, en arrière-plan.
+static IN_FLIGHT: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 /// Images décrites à un modèle qui ne les lit pas, par identifiant court : il
 /// peut les regarder à nouveau avec `LookAtImage`.
 static IMAGES: Mutex<BTreeMap<String, ImageSource>> = Mutex::new(BTreeMap::new());
@@ -327,6 +329,19 @@ pub(crate) fn replacement(
                 description.model,
                 image_id(source)
             )
+        }
+        None if IN_FLIGHT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&image_key(source)) =>
+        {
+            let place = if total > 1 {
+                format!("Image {number} of {total}")
+            } else {
+                "This capture".to_string()
+            };
+            let part = slice.map_or_else(String::new, Slice::note);
+            format!("{part}[{place} is being described by a model that reads images, in the background: its description will take the place of this note in a later request. Meanwhile, work from the measurements in the tool result: they say what is wrong on the page.]{pixels}")
         }
         None if total > 1 => format!("[Image {number} of {total}] {IMAGE_NOT_SENT}{pixels}"),
         None => format!("{IMAGE_NOT_SENT}{pixels}"),
@@ -635,23 +650,105 @@ pub(crate) fn prepare(model: &str, messages: &[InputMessage], announce: &mut dyn
             .get_or_init(|| Reader::configured().models(model))
             .clone()
     };
-    remember(model, &images(messages));
+    let all = images(messages);
+    remember(model, &all);
+    // Les captures d'un outil se décrivent en arrière-plan : le modèle
+    // continue avec les mesures qui les accompagnent. Vu le 26 octobre 2026
+    // (session #31, passage 4) : 35 minutes sur 106 à attendre la description
+    // des captures, 2,7 minutes en moyenne à chaque fois.
     let quick = tool_image_keys(messages);
-    prepare_with(
+    let (captures, others): (Vec<&ImageSource>, Vec<&ImageSource>) = all
+        .into_iter()
+        .partition(|source| quick.contains(&image_key(source)));
+    let started = describe_in_background(&captures, &dir, &readers, describe_quickly);
+    if started > 0 {
+        announce(&format!(
+            "{model} ne lit pas les images : description de {} demandée en arrière-plan à un modèle qui les lit ; l'agent continue avec les mesures de la page",
+            count(started, "capture")
+        ));
+    }
+    if others.is_empty() {
+        return;
+    }
+    let (had_missing, failure) = describe_missing(
         model,
-        messages,
+        &others,
         &dir,
         &readers,
         announce,
         |readers, source| {
-            if quick.contains(&image_key(source)) {
-                return describe_quickly(readers, source);
-            }
             describe_thoroughly(readers, &|models, prompt| {
                 ask_reader(models, prompt, source)
             })
         },
     );
+    announce_state(model, &others, had_missing, failure.as_deref(), announce);
+}
+
+/// Lance, sans l'attendre, la description des captures qui n'en ont pas
+/// (ni gardée, ni en cours, ni déjà ratée). Chacune prend la place de son
+/// image dans les requêtes suivantes dès qu'elle arrive. Rend le nombre de
+/// descriptions lancées.
+fn describe_in_background(
+    captures: &[&ImageSource],
+    dir: &Path,
+    readers: &dyn Fn() -> Vec<String>,
+    describe: fn(&[String], &ImageSource) -> Result<(String, String), String>,
+) -> usize {
+    let mut missing = Vec::new();
+    for source in captures {
+        let key = image_key(source);
+        if descriptions().contains_key(&key) || unreadable().contains(&key) {
+            continue;
+        }
+        if let Some(known) = load(dir, &key) {
+            descriptions().insert(key, known);
+            continue;
+        }
+        let mut flying = IN_FLIGHT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if flying.insert(key.clone()) {
+            missing.push((key, (*source).clone()));
+        }
+    }
+    if missing.is_empty() {
+        return 0;
+    }
+    let models = readers();
+    if models.is_empty() {
+        let mut flying = IN_FLIGHT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (key, _) in &missing {
+            flying.remove(key);
+        }
+        return 0;
+    }
+    let started = missing.len();
+    for (key, source) in missing {
+        let (models, dir) = (models.clone(), dir.to_path_buf());
+        std::thread::spawn(move || {
+            match describe(&models, &source) {
+                Ok((reader, text)) if !text.trim().is_empty() => {
+                    let description = Description {
+                        model: reader,
+                        text: text.trim().to_string(),
+                    };
+                    save(&dir, &key, &description);
+                    descriptions().insert(key.clone(), description);
+                }
+                _ => {
+                    unreadable().insert(key.clone());
+                }
+            }
+            IN_FLIGHT
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&key);
+        });
+    }
+    started
 }
 
 /// Une consigne posée sur `source` aux lecteurs `models` (le premier qui
@@ -789,7 +886,9 @@ pub(crate) fn look(id: &str, question: &str) -> Result<String, String> {
 }
 
 /// Le même travail, avec le dossier des descriptions, les modèles lecteurs et
-/// l'appel au lecteur donnés par l'appelant.
+/// l'appel au lecteur donnés par l'appelant (description de chaque image
+/// avant la requête, comme pour les images de l'utilisateur).
+#[cfg(test)]
 fn prepare_with(
     model: &str,
     messages: &[InputMessage],
@@ -1304,6 +1403,51 @@ mod tests {
         );
         // Une fenêtre ou une capture entière garde l'alerte.
         assert!(replacement(&shot, 3, 5, None).starts_with("[Claw] The image reader saw a defect"));
+    }
+
+    #[test]
+    fn captures_are_described_in_the_background_and_replace_their_note_when_ready() {
+        // Session #31 (26 octobre 2026, passage 4) : 35 minutes sur 106 à
+        // attendre la description des captures du modèle.
+        fn slow(_: &[String], source: &ImageSource) -> Result<(String, String), String> {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            Ok((
+                "acme/vision:free".to_string(),
+                format!("Une page ({} octets).\nVERDICT: OK", source.data.len()),
+            ))
+        }
+        let dir = temp_dir("arriere-plan");
+        let shot = image("essai-capture-arriere-plan");
+        let readers = || vec!["acme/vision:free".to_string()];
+        let begun = std::time::Instant::now();
+        assert_eq!(
+            super::describe_in_background(&[&shot], &dir, &readers, slow),
+            1
+        );
+        // Rien n'attend la description.
+        assert!(begun.elapsed() < std::time::Duration::from_millis(100));
+        let pending = replacement(&shot, 1, 1, None);
+        assert!(
+            pending.contains("is being described by a model that reads images, in the background"),
+            "{pending}"
+        );
+        // La même capture n'est pas demandée deux fois.
+        assert_eq!(
+            super::describe_in_background(&[&shot], &dir, &readers, slow),
+            0
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !replacement(&shot, 1, 1, None).contains("Une page")
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let ready = replacement(&shot, 1, 1, None);
+        assert!(
+            ready.contains("described by acme/vision:free") && ready.contains("Une page"),
+            "{ready}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
