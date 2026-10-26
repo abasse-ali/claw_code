@@ -314,6 +314,18 @@
       }
       if (!valid) refused.push(`${label(field.labels && field.labels[0] ? field.labels[0] : field)} (${field.validationMessage})`);
     }
+    // Liste faite main (role=combobox, sa liste role=listbox) : ouverte, puis
+    // sa première option choisie, comme le doigt du visiteur. Vu le 26 octobre
+    // 2026 (session #32) : l'heure de retrait restait vide, et le bouton
+    // « Réserver » grisé.
+    for (const box of form.querySelectorAll("[role=combobox], [aria-haspopup=listbox]")) {
+      const list = document.getElementById(box.getAttribute("aria-controls") || "") || box.querySelector("[role=listbox]");
+      const input = box.matches("input") ? box : box.querySelector("input");
+      if (!list || (input && input.value) || list.querySelector("[role=option][aria-selected=true]")) continue;
+      tap(box);
+      const option = [...list.querySelectorAll("[role=option]")].find((el) => el.getAttribute("aria-disabled") !== "true");
+      if (option) tap(option);
+    }
     return refused;
   };
   const formName = (form) => {
@@ -335,6 +347,24 @@
       return;
     }
     const send = form.querySelector("button[type=submit], button:not([type]), input[type=submit]");
+    // Bouton d'envoi grisé une fois les champs remplis : la page attend autre
+    // chose (une quantité au « + »). Le « + » du formulaire est essayé une fois ;
+    // s'il reste grisé, le visiteur ne peut pas envoyer, et c'est cela qui est
+    // dit (pas « aucun événement submit »). Vu le 26 octobre 2026 (session #32) :
+    // « l'envoi ne fait rien » répété une heure, l'agent relisait son submit.
+    const greyed = (el) => el && (el.disabled || el.getAttribute("aria-disabled") === "true");
+    if (greyed(send)) {
+      const adder = [...form.querySelectorAll("button, [role=button]")].find((el) => el !== send && shown(el) && !greyed(el)
+        && /^\s*\+\s*$|ajout|augment|plus\b|increase|\badd\b|more\b/i.test(`${el.innerText || ""} ${el.getAttribute("aria-label") || ""} ${el.title || ""}`));
+      if (adder) {
+        tap(adder);
+        await wait(250);
+      }
+      if (greyed(send)) {
+        forms.push(`${name}: its ${label(send)} stays disabled once every field is filled${adder ? ` and ${label(adder)} is pressed` : ""}, so a visitor cannot send it. Enable it when the form can be sent, and say on the page what is still missing`);
+        return;
+      }
+    }
     // Un formulaire ou le visiteur donne son nom : une inscription, une offre,
     // une reservation, pas une recherche.
     const personal = [...form.elements].some((field) => field.value === marker);
