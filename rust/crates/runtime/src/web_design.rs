@@ -357,6 +357,40 @@ const CREATION_WORDS: &[&str] = &[
 /// l'utilisateur doit créer. Rend le premier trouvé.
 #[must_use]
 pub fn placeholder_credential(text: &str) -> Option<String> {
+    // Une clé laissée vide (`apiKey: ""`) attend le même compte. Vu le 26
+    // octobre 2026 (session #32, passage 3) : la configuration de Firebase
+    // vidée, et le mode d'emploi pour la créer mis dans la page publique.
+    const KEYS: &[&str] = &[
+        "apikey",
+        "api_key",
+        "projectid",
+        "databaseurl",
+        "authdomain",
+        "anon_key",
+        "anonkey",
+        "supabaseurl",
+        "supabase_url",
+    ];
+    for line in text.lines() {
+        let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+        let lower = compact.to_ascii_lowercase();
+        let empty_after = |at: usize| {
+            let rest = lower[at..].trim_start_matches(['"', '\'']);
+            rest.strip_prefix([':', '=']).is_some_and(|value| {
+                ["\"\"", "''", "``"]
+                    .iter()
+                    .any(|empty| value.starts_with(empty))
+            })
+        };
+        let found = KEYS.iter().any(|key| {
+            lower
+                .match_indices(key)
+                .any(|(at, _)| empty_after(at + key.len()))
+        });
+        if found {
+            return Some(compact.trim_end_matches([',', ';']).to_string());
+        }
+    }
     let mut words = text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'));
     words.find_map(|word| {
         let upper = word.to_ascii_uppercase().replace('-', "_");
@@ -380,7 +414,7 @@ pub fn placeholder_credential(text: &str) -> Option<String> {
 #[must_use]
 pub fn account_setup_note(sample: &str) -> String {
     format!(
-        "[Claw] Your code now waits for keys the user must create ({sample}): an account on a service, a project, keys to copy into the code. The user did not choose this and may not be a developer. Before building more on it, ask them with AskUserQuestion: 2 to 4 options in plain words, each saying what it asks of them (an account, the minutes of setup, a cost), with your recommendation first and, if there is one, an option that needs nothing from them. Until they answer, keep what works today working. In your final answer, say in plain words what is not active yet and what they will be asked to do."
+        "[Claw] Your code now waits for keys the user must create ({sample}): an account on a service, a project, keys to copy into the code. The user did not choose this and may not be a developer. Before building more on it, ask them with AskUserQuestion: 2 to 4 options in plain words, each saying what it asks of them (an account, the minutes of setup, a cost), with your recommendation first and, if there is one, an option that needs nothing from them. Until they answer, keep what works today working. Never put the setup steps for the site's owner in the page itself: every visitor would see them. In your final answer, say in plain words what is not active yet and what they will be asked to do."
     )
 }
 
@@ -1545,10 +1579,22 @@ mod tests {
             placeholder_credential("key = 'your-api-key'").as_deref(),
             Some("your-api-key")
         );
+        // Session #32, passage 3 : la configuration vidée.
+        assert_eq!(
+            placeholder_credential(
+                "const firebaseConfig = {\n    apiKey: \"\",\n    projectId: \"\" };"
+            )
+            .as_deref(),
+            Some("apiKey:\"\"")
+        );
+        assert!(placeholder_credential("const SUPABASE_ANON_KEY = '';").is_some());
+        assert!(placeholder_credential("{\"apiKey\": \"\"}").is_some());
         for plain in [
             "const VOTRE_PANIER = [];",
             "Votre commande est prête",
             "YOUR_NAME",
+            "apiKey: process.env.API_KEY,",
+            "const apiKeyLabel = '';",
         ] {
             assert_eq!(placeholder_credential(plain), None, "{plain}");
         }

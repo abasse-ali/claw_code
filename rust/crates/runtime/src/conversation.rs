@@ -4853,10 +4853,12 @@ where
         if aids.keys_checked || aids.asked || self.subagent || interrupt_requested() {
             return None;
         }
-        let sample = aids.originals.iter().find_map(|(path, original)| {
+        // Un fichier touché par le tour qui attend encore ses clés, même
+        // laissées par un tour précédent : tant qu'elles manquent, ce qui en
+        // dépend ne marche pas, et l'utilisateur doit le savoir.
+        let sample = aids.originals.keys().find_map(|path| {
             let current = std::fs::read_to_string(path).ok()?;
             crate::web_design::placeholder_credential(&current)
-                .filter(|_| crate::web_design::placeholder_credential(original).is_none())
         })?;
         aids.keys_checked = true;
         self.api_client.notify(

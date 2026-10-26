@@ -3447,6 +3447,37 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn the_visitors_own_list_does_not_need_their_name() {
+        // Session #32, passage 3 : « Mes réservations » montrait la date et
+        // l'heure de la réservation du visiteur, sans son nom ; la mesure le
+        // reprochait comme une liste publique.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-mes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |title: &str| {
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Boulangerie</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button, input {{ font: inherit; padding: 10px; }}</style></head><body><h1>Réserver</h1><form id=\"commande\"><label for=\"nom\">Votre nom</label><input id=\"nom\" required><button type=\"submit\">Réserver</button></form><section><h2>{title}</h2><ul id=\"liste\"></ul></section><script>document.getElementById('commande').addEventListener('submit', (e) => {{ e.preventDefault(); const li = document.createElement('li'); li.textContent = 'mardi 27 octobre 07:00'; document.getElementById('liste').append(li); localStorage.setItem('r', li.textContent); }});</script></body></html>"),
+            )
+            .expect("html");
+        };
+        let page = format!("claw-mes-{}/index.html", std::process::id());
+        let capture = || {
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            super::take(&request).expect("capture")["captures"][0]["problems"].to_string()
+        };
+        write("Mes réservations");
+        let mine = capture();
+        write("Les inscrits");
+        let shared = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!mine.contains("is shown nowhere"), "{mine}");
+        assert!(shared.contains("is shown nowhere"), "{shared}");
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn links_forms_and_windows_are_walked_in_a_real_browser() {
         // Le parcours d'un visiteur : chaque lien, chaque formulaire rempli et
         // envoyé, chaque fenêtre refermée, puis la page rechargée.

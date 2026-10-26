@@ -419,11 +419,18 @@
     // « 1,30 € … 0 », la carte du produit dans le formulaire de réservation,
     // prise pour un compteur ; l'agent a ajouté une section « Mes
     // réservations » que personne n'avait demandée pour faire taire l'alerte.
+    // Une liste des choses du visiteur lui-même (« Mes réservations », « Votre
+    // commande ») n'a pas à redire son nom : elle est à lui.
+    const own = /^(mes|mon|ma|vos|votre|my|your)\b/i;
     const outside = (text) => {
       const base = text.replace(/ \(in ".*$/, "").trim();
       const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
       for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-        if (base && node.nodeValue.includes(base.slice(0, 40))) return !form.contains(node);
+        if (!base || !node.nodeValue.includes(base.slice(0, 40))) continue;
+        if (form.contains(node)) return false;
+        const region = node.parentElement && node.parentElement.closest("section, aside, article, [role=region]");
+        const title = region && region.querySelector("h1, h2, h3, h4, [role=heading]");
+        return !(title && own.test((title.textContent || "").trim()));
       }
       return true;
     };
