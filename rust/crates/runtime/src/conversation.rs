@@ -3614,15 +3614,17 @@ where
                 .map(|problem| crate::web_design::problem_key(problem))
                 .collect(),
         );
-        // Point de départ de la vérification qui suit chaque modification
-        // (téléphone seul) : sans lui, ce que la première modification casse
-        // passait pour « restant ». Vu le 26 octobre 2026 (session #31) :
-        // « 0 défaut mesuré » avant le tour, puis « 0 nouveau, 2 restants ».
+        // Point de départ de la vérification qui suit chaque modification :
+        // sans lui, ce que la première modification casse passait pour
+        // « restant ». Vu le 26 octobre 2026 (session #31) : « 0 défaut
+        // mesuré » avant le tour, puis « 0 nouveau, 2 restants ». Toutes les
+        // tailles d'écran : la mesure du début essaie les boutons à
+        // l'ordinateur, la vérification au téléphone ; un bouton mort déjà là
+        // ne doit pas passer pour cassé par la modification.
         aids.last_checked = Some(
             audit
                 .problems
                 .iter()
-                .filter(|problem| problem.starts_with("[phone"))
                 .chain(&audit.console)
                 .cloned()
                 .collect(),
