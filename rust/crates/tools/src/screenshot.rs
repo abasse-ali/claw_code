@@ -1731,7 +1731,9 @@ fn open_page(
 /// Les boutons essayés un à un : ceux qui ne font rien, ceux qui échouent ; et
 /// ceux qui ouvrent une fenêtre (nom, sélecteur), pour la capturer ensuite.
 fn click_problems(devtools: &mut DevTools) -> (Vec<String>, Vec<(String, String)>) {
-    let script = format!("const clawSnapshot = () => {SNAPSHOT_SCRIPT};\n{CLICKS_SCRIPT}");
+    let script = format!(
+        "const clawSnapshot = () => {SNAPSHOT_SCRIPT};\nconst clawWindow = () => {WINDOW_SCRIPT};\n{CLICKS_SCRIPT}"
+    );
     let Ok(result) = devtools.evaluate(&script) else {
         return (Vec::new(), Vec::new());
     };
@@ -1749,7 +1751,7 @@ fn click_problems(devtools: &mut DevTools) -> (Vec<String>, Vec<(String, String)
             ))
         })
         .collect();
-    let mut problems = Vec::new();
+    let mut problems = strings(&result["windowLayout"]);
     let dead = strings(&result["dead"]);
     if !dead.is_empty() {
         let more = dead.len().saturating_sub(6);
@@ -2343,7 +2345,7 @@ fn view_shots(
         }
         // Une fenêtre doit s'être ouverte ; un menu ou un onglet se montre tel quel.
         let check = if view.kind == "window" {
-            "[...document.querySelectorAll('dialog[open], [role=dialog], [aria-modal=true]')].some((box) => { const r = box.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(box).visibility !== 'hidden'; })"
+            "[...document.querySelectorAll('dialog[open], [role=dialog], [aria-modal=true]')].some((box) => { const s = getComputedStyle(box); if (s.display === 'none' || s.visibility === 'hidden') return false; return [box, ...[...box.querySelectorAll('*')].slice(0, 300)].some((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'; }); })"
         } else {
             "true"
         };
@@ -3192,6 +3194,43 @@ mod tests {
         );
         assert!(!after.contains("Je conduis\\\""), "{after}");
         assert!(!restored.contains("are gone"), "{restored}");
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn a_zero_size_window_and_a_desktop_window_are_measured_in_a_real_browser() {
+        // Session #31 (26 octobre 2026, passage 4) : la fenêtre « Je conduis »
+        // était un <dialog> de 0px dont le panneau était posé en position
+        // fixe ; Claw la croyait fermée et n'y mesurait rien (le match restait
+        // coupé). À l'ordinateur, le panneau restait collé à gauche et en haut,
+        // et les fenêtres n'étaient mesurées qu'au téléphone.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-fenetre-nulle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        std::fs::write(
+            dir.join("index.html"),
+            "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Club</title><style>body { margin: 0; padding: 16px; font: 16px/1.5 sans-serif; } button, select, input { font: inherit; } dialog { width: 0; height: 0; padding: 0; border: 0; overflow: visible; } .panel { position: fixed; left: 0; right: 0; bottom: 0; background: #fff; border-radius: 24px 24px 0 0; padding: 16px; } select { width: 100%; padding: 10px 16px; box-sizing: border-box; } @media (min-width: 900px) { .panel { right: auto; bottom: auto; top: 0; width: 480px; } }</style></head><body><h1>Covoiturage</h1><button id=\"conduis\">Je conduis</button><dialog id=\"fenetre\"><div class=\"panel\"><h2>Proposer ma voiture</h2><label for=\"match\">Match concerné</label><select id=\"match\"><option>U11 vs FC Voisins · samedi 28 novembre 2026 à 10:00, stade municipal</option></select><button class=\"fermer\">Fermer</button></div></dialog><script>const box = document.getElementById('fenetre'); document.getElementById('conduis').addEventListener('click', () => box.showModal()); box.querySelector('.fermer').addEventListener('click', () => box.close());</script></body></html>",
+        )
+        .expect("html");
+        let page = format!("claw-fenetre-nulle-{}/index.html", std::process::id());
+        let mut request = input(None, Some(&page));
+        request.viewports = Some(json!(["phone", "desktop"]));
+        request.windows = Some(true);
+        let result = super::take(&request);
+        let _ = std::fs::remove_dir_all(&dir);
+        let all = result.expect("capture")["captures"].to_string();
+        assert!(all.contains("window opened by button#conduis"), "{all}");
+        assert!(all.contains("The chosen option of a list is cut"), "{all}");
+        assert!(
+            all.contains("on a 1280px-wide screen: The window is 512px wide on a 1280px-wide screen and stuck to the left edge"),
+            "{all}"
+        );
+        assert!(!all.contains("do nothing when clicked"), "{all}");
+        // Le <dialog> de 0px n'est pas la cause : pas de conseil sur sa largeur.
+        assert!(
+            !all.contains("A <dialog> keeps the browser's max-width"),
+            "{all}"
+        );
     }
 
     #[test]

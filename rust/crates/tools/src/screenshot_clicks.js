@@ -420,6 +420,8 @@
   // chacune pour la capturer (sans capture, l'utilisateur ne la voyait jamais).
   const openers = [];
   const openedWindows = new Set();
+  // Défauts de mise en page des fenêtres ouvertes, mesurés à l'ordinateur.
+  const windowLayout = [];
   const path = (el) => {
     const parts = [];
     for (let node = el; node && node.nodeType === 1 && node !== document.documentElement; node = node.parentElement) {
@@ -429,7 +431,15 @@
     }
     return parts.join(" > ");
   };
-  const windows = () => [...document.querySelectorAll("dialog[open], [role=dialog], [aria-modal=true]")].filter(shown);
+  // Une fenêtre ouverte : elle, ou ce qu'elle contient, se voit. Vu le 26 octobre
+  // 2026 (session #31) : un <dialog> de 0px dont le panneau est posé en position
+  // fixe ; le parcours la croyait fermée, et rien n'en était vérifié.
+  const open = (box) => {
+    const style = getComputedStyle(box);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    return shown(box) || [...box.querySelectorAll("*")].slice(0, 300).some(shown);
+  };
+  const windows = () => [...document.querySelectorAll("dialog[open], [role=dialog], [aria-modal=true]")].filter(open);
   const coveredIn = (opener) => {
     for (const box of windows()) {
       const blocked = [...box.querySelectorAll("button, input:not([type=hidden]), select, textarea, a[href]")]
@@ -485,12 +495,21 @@
       if (!openedWindows.has(box) && openers.length < 4) {
         openedWindows.add(box);
         openers.push({ label: label(el), selector: path(el) });
+        // Sur ordinateur, la fenêtre se mesure ici : Screenshot ne capture les
+        // fenêtres qu'au téléphone. Vu le 26 octobre 2026 (session #31) : la
+        // feuille réparée au téléphone restait collée à gauche et en haut à
+        // l'ordinateur, sans que rien ne le dise.
+        if (innerWidth >= 900 && typeof clawWindow === "function") {
+          try {
+            for (const problem of clawWindow()) windowLayout.push(`In the window opened by ${label(el)}, on a ${innerWidth}px-wide screen: ${problem}`);
+          } catch (_) { /* la mesure de la fenêtre ne bloque pas le parcours */ }
+        }
       }
       if (blocked) break;
       for (const form of [...box.querySelectorAll("form")].filter((item) => shown(item) && !tested.has(item))) {
         if (tested.size < 10) await tryForm(form);
       }
-      if (!box.isConnected || !shown(box)) continue;
+      if (!box.isConnected || !open(box)) continue;
       // Un glissement parti de la fenêtre et fini sur son fond : le navigateur
       // donne le clic à leur ancêtre commun, la fenêtre (<dialog>) ou le fond.
       // Une fenêtre fermée dès que `event.target` est le fond se ferme alors
@@ -509,7 +528,7 @@
           fire(outside, "mouseup", MouseEvent);
           if (common) fire(common, "click", MouseEvent);
           await wait(300);
-          if (!box.isConnected || !shown(box)) {
+          if (!box.isConnected || !open(box)) {
             dragged.push(`${label(el)} opens a window that closes when a finger slides from inside it onto its edge (scrolling its form is enough)`);
             continue;
           }
@@ -519,7 +538,7 @@
       if (close) {
         tap(close);
         await wait(300);
-        if (box.isConnected && shown(box) && stuck.length < 3) stuck.push(`${label(el)} opens a window that ${label(close)} does not close`);
+        if (box.isConnected && open(box) && stuck.length < 3) stuck.push(`${label(el)} opens a window that ${label(close)} does not close`);
       }
     }
     // Ce qui reste ouvert se referme, pour que le bouton suivant soit libre.
@@ -538,5 +557,5 @@
     }
     await wait(40);
   }
-  return { checked: controls.length, dead, failing, covered, buried, stuck, links, files, forms, unnamed, underBar, kept, openers, dragged };
+  return { checked: controls.length, windowLayout, dead, failing, covered, buried, stuck, links, files, forms, unnamed, underBar, kept, openers, dragged };
 })()
