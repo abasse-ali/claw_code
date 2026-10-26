@@ -4814,13 +4814,16 @@ where
             || interrupt_requested()
             || !harness::enabled(Aid::DesignReview)
             || self.page_to_review(aids).is_none()
-            || !crate::web_design::shared_between_people(crate::project::own_words(request))
+            || !crate::web_design::shared_between_people(&crate::project::user_words_with_history(
+                request,
+            ))
         {
             return None;
         }
         let stores =
             |text: &str| text.contains("Storage.setItem") || text.contains("indexedDB.open");
         let mut sources = Vec::new();
+        let mut before = Vec::new();
         let mut introduced = false;
         for (path, original) in &aids.originals {
             let script = [
@@ -4836,9 +4839,14 @@ where
             };
             introduced |= stores(&current) && !stores(original);
             sources.push(current);
+            before.push(original.as_str());
         }
         let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
-        if !introduced || !crate::web_design::kept_on_each_device(&sources) {
+        // Vu le 26 octobre 2026 (session #32, passage 5) : « je ne saurai pas
+        // créer un compte Firebase », et l'agent a retiré Firebase sans rien
+        // mettre à la place ; le localStorage était déjà là.
+        let removed = !crate::web_design::kept_on_each_device(&before);
+        if !(introduced || removed) || !crate::web_design::kept_on_each_device(&sources) {
             return None;
         }
         aids.shared_checked = true;

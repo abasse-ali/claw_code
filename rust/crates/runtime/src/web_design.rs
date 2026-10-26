@@ -558,15 +558,28 @@ pub fn kept_on_each_device(sources: &[&str]) -> bool {
         ]
         .iter()
         .any(|call| source.contains(call))
+            || sends_a_message(source)
     });
     stored && !sent
+}
+
+/// Un lien qui ouvre la messagerie du visiteur (`WhatsApp`, SMS, e-mail) avec
+/// le texte déjà écrit : ce qu'il entre part chez le destinataire sans
+/// serveur ni compte à créer. Un simple lien de contact (`mailto:` sans
+/// texte) n'envoie rien de ce qu'il a entré.
+fn sends_a_message(source: &str) -> bool {
+    let whatsapp = (source.contains("wa.me/") || source.contains("api.whatsapp.com/send"))
+        && source.contains("text=");
+    let written =
+        (source.contains("mailto:") || source.contains("sms:")) && source.contains("body=");
+    whatsapp || written
 }
 
 /// Message renvoyé au modèle : la demande suppose un partage, le site garde
 /// tout dans chaque téléphone. Vu le 26 octobre 2026 (session #32) : les
 /// clientes réservaient dans leur navigateur, la boulangère n'en aurait
 /// jamais rien vu ; le pied de page le disait en petit, la réponse non.
-pub const SHARED_DATA_NOTE: &str = "[Claw] The user asked for something several people share: some enter it (a reservation, a sign-up, an offer) and someone else sees it on another phone. Your page keeps what a visitor enters in that visitor's own browser (localStorage), so nobody else ever sees it: as built, the request does not work, even if every check passes on one device. Do not hide this. Either make the data shared (a small server of the project, or a free hosted store the user sets up: ask them with AskUserQuestion which one they accept, in plain words), or say it plainly at the top of your final answer: what works on one phone, what does not work between phones, and what is needed to make it work.";
+pub const SHARED_DATA_NOTE: &str = "[Claw] The user asked for something several people share: some enter it (a reservation, a sign-up, an offer) and someone else sees it on another phone. Your page keeps what a visitor enters in that visitor's own browser (localStorage), so nobody else ever sees it: as built, the request does not work, even if every check passes on one device. Do not hide this. Either make the data shared, or say it plainly at the top of your final answer: what works on one phone, what does not work between phones, and what is needed to make it work. Ways to share it: a small server of the project; a free hosted store the user sets up; or, when the user does not want to set anything up, send each entry to the person who must see it through the visitor's own messaging app: the form opens WhatsApp (https://wa.me/<number>?text=...), SMS (sms:<number>?body=...) or email (mailto:<address>?subject=...&body=...) with the entry already written in, and the visitor only taps send; nothing to create or configure, only that person's number or address is needed (ask for it if you do not have it, never invent one). Ask the user with AskUserQuestion which way they accept, in plain words, without technical names.";
 
 /// Photos que l'outil `Photo` a enregistrées dans le projet, d'après les
 /// crédits qu'il tient (`images/CREDITS.md` : « - `images/pain-1.jpg`: … »).
@@ -1632,6 +1645,21 @@ mod tests {
         ]));
         assert!(!kept_on_each_device(&[
             "const x = localStorage.getItem('pin');"
+        ]));
+        // Session #32, passage 5 : Firebase retiré, plus rien ne partait. Un
+        // lien WhatsApp ou SMS au texte déjà écrit envoie la réservation ; un
+        // lien de contact du pied de page, non.
+        assert!(!kept_on_each_device(&[
+            local,
+            "location.href = `https://wa.me/33612345678?text=${encodeURIComponent(msg)}`;"
+        ]));
+        assert!(!kept_on_each_device(&[
+            local,
+            "a.href = 'sms:0612345678?body=' + encodeURIComponent(msg);"
+        ]));
+        assert!(kept_on_each_device(&[
+            local,
+            "<a href=\"mailto:contact@boulangerie.fr\">Écrire</a>"
         ]));
     }
 
