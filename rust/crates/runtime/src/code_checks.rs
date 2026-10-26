@@ -381,7 +381,11 @@ pub fn access_codes(text: &str) -> Vec<String> {
     for found in assigned.captures_iter(text) {
         let whole = found[0].to_lowercase();
         let code = found[1].to_string();
-        if whole.contains("key") || whole.contains("storage") || codes.contains(&code) {
+        let not_access = [
+            "key", "storage", "postal", "zip", "country", "promo", "coupon", "qr", "bar", "color",
+            "colour", "lang", "status", "error", "area", "dial", "currency", "event", "http",
+        ];
+        if not_access.iter().any(|word| whole.contains(word)) || codes.contains(&code) {
             continue;
         }
         codes.push(code);
@@ -945,6 +949,10 @@ mod tests {
         assert_eq!(super::access_codes(script), ["1234", "fournil"]);
         assert!(super::access_codes("let total = 0; const name = 'Léa';").is_empty());
         assert!(super::access_codes("<input type=\"password\" id=\"pin-input\">").is_empty());
+        assert!(super::access_codes(
+            "const shop = { postalCode: \"75001\", promoCode: 'BIENVENUE', countryCode: 'FR' };"
+        )
+        .is_empty());
     }
 
     #[test]

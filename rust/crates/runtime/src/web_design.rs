@@ -6,6 +6,7 @@
 //! comme un utilisateur (captures téléphone et ordinateur, défauts mesurés) et
 //! la fait juger par un modèle qui voit ; les corrections repartent au modèle.
 
+use regex::Regex;
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -575,6 +576,108 @@ fn sends_a_message(source: &str) -> bool {
     whatsapp || written
 }
 
+/// Texte que montrent les pages HTML du projet : sans balises, scripts ni styles.
+#[must_use]
+pub fn shown_text(root: &Path) -> String {
+    let tags = Regex::new(r"(?is)<script\b.*?</script>|<style\b.*?</style>|<!--.*?-->|<[^>]+>")
+        .expect("regex");
+    page_texts(root)
+        .iter()
+        .filter(|text| {
+            let lower = text.to_ascii_lowercase();
+            lower.contains("<body") || lower.contains("<html")
+        })
+        .map(|text| {
+            tags.replace_all(text, "\n")
+                .replace("&nbsp;", " ")
+                .replace("&#39;", "'")
+                .replace("&amp;", "&")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Heures et durées d'un texte, écrites d'une seule façon (« 19 h », « 19h00 »
+/// et « 19:00 » donnent « 19h »), et les canaux promis (« sms », « e-mail »).
+fn facts_of(text: &str) -> Vec<String> {
+    let folded = crate::team::without_accents(&text.to_lowercase()).replace('\u{2019}', "'");
+    let pattern = Regex::new(
+        r"(\d{1,2})\s?(?:h|:)\s?(\d{2})?\b|(\d+)\s?(€|euros?\b|%|jours?\b|heures?\b|minutes?\b|min\b)|\b(sms|e-?mail|courriel|livraison)\b",
+    )
+    .expect("regex");
+    pattern
+        .captures_iter(&folded)
+        .map(|found| {
+            if let Some(hour) = found.get(1) {
+                match found.get(2).map(|minutes| minutes.as_str()) {
+                    None | Some("00") => format!("{}h", hour.as_str()),
+                    Some(minutes) => format!("{}h{minutes}", hour.as_str()),
+                }
+            } else if let Some(amount) = found.get(3) {
+                let unit = found.get(4).map_or("", |unit| unit.as_str());
+                format!("{} {}", amount.as_str(), unit.trim_end_matches('s'))
+            } else {
+                found
+                    .get(5)
+                    .map_or_else(String::new, |word| word.as_str().replace('-', ""))
+            }
+        })
+        .collect()
+}
+
+/// Phrases de la page qui posent une règle ou une promesse (un délai, une
+/// limite, une confirmation par SMS) avec une heure, une durée ou un canal que
+/// l'utilisateur n'a jamais donnés. Vu le 26 octobre 2026 (session #32) :
+/// « Annulation possible jusqu'à 19h la veille » et « Vous recevrez un SMS »,
+/// inventés pour une boulangère qui n'envoie pas de SMS, gardés trois passages.
+#[must_use]
+pub fn invented_rules(page: &str, user: &str) -> Vec<String> {
+    let rule = Regex::new(
+        r"(?i)annul|jusqu'?\s?(?:a|à)\b|au plus tard|d[ée]lai|minimum|maximum|garanti|rembours|recevrez|confirmation par|par sms|par e-?mail|livr|deadline|at the latest|refund|you will receive",
+    )
+    .expect("regex");
+    let given = facts_of(user);
+    let mut found = Vec::new();
+    for sentence in page.split(['.', '!', '?', '\n']) {
+        let sentence = sentence.split_whitespace().collect::<Vec<_>>().join(" ");
+        if sentence.len() < 8 || !rule.is_match(&sentence) {
+            continue;
+        }
+        let facts = facts_of(&sentence);
+        if facts.iter().any(|fact| !given.contains(fact)) && !found.contains(&sentence) {
+            found.push(sentence.chars().take(140).collect());
+        }
+        if found.len() == 3 {
+            break;
+        }
+    }
+    found
+}
+
+/// Message renvoyé au modèle : des règles que l'utilisateur n'a pas données.
+#[must_use]
+pub fn invented_rules_note(sentences: &[String]) -> String {
+    format!(
+        "[Claw] The page states rules or promises the user never gave: {}. A rule written on a business's page (a deadline, a limit, a confirmation by SMS or e-mail) binds the user in front of their customers, and may be false. Remove these sentences from the page; if such a rule could help, ask the user in your answer whether they want it, and with which hour or limit.",
+        sentences
+            .iter()
+            .map(|sentence| format!("« {sentence} »"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// Message renvoyé au modèle : la page s'ouvre avec un code que la réponse
+/// ne donne pas. Vu le 26 octobre 2026 (session #32, passage 5) : « Espace
+/// boulanger → code », et le code 1234 écrit dans app.js, jamais dit.
+#[must_use]
+pub fn access_code_note(codes: &[String]) -> String {
+    format!(
+        "[Claw] The page opens a reserved space with the code \"{}\", written in its script, and your answer never gives it: the user cannot get in. Say in your answer, in plain words, the code, where to type it and how to choose their own; and in one line, that this code keeps out the curious but not someone who reads the page's code.",
+        codes[0]
+    )
+}
+
 /// Message renvoyé au modèle : la demande suppose un partage, le site garde
 /// tout dans chaque téléphone. Vu le 26 octobre 2026 (session #32) : les
 /// clientes réservaient dans leur navigateur, la boulangère n'en aurait
@@ -679,6 +782,7 @@ img, svg, video { max-width: 100%; height: auto; }
 .container { width: min(100% - 2 * var(--gutter), 72rem); margin-inline: auto; }
 .grid > *, .split > *, .row > * { min-width: 0; }
 input, select, textarea, button { font: inherit; color: inherit; }
+fieldset { border: 0; padding: 0; margin: 0; min-width: 0; } legend { padding: 0; }
 a, button, input, select, textarea, .card { transition: color .2s, background-color .2s, border-color .2s, box-shadow .2s, transform .2s; }
 a:hover { color: var(--accent); }
 button:hover, .button:hover { transform: translateY(-1px); }
@@ -784,7 +888,8 @@ fn design_method(bar: u8) -> String {
         ""
     };
     format!("This request builds or reshapes a web interface. The bar is a page a top design studio would ship and sign: distinctive, polished and fully working on phones and desktops, never a template. When you finish, Claw has the page scored by an art director, 1 to 10 on seven criteria (phone, hierarchy, spacing, typography, color, identity, finish), and sends back every criterion under {bar}.
-1. Brief. In one line each: the subject, the audience, the page's main job. Use real, specific content in the user's language: no lorem ipsum, no \"Welcome to our website\", no stand-ins such as \"FB\" for a social link.
+1. Brief. In one line each: the subject, the audience, the page's main job. Use real, specific content in the user's language: no lorem ipsum, no \"Welcome to our website\", no stand-ins such as \"FB\" for a social link. Never write on the page a fact the user did not give: a rule (a cancellation deadline, a minimum order, a limit), a promise (a confirmation by SMS or e-mail, a delivery, a guarantee), an address or opening hours. What only the user knows is asked in your answer; example products and prices are said to be examples in your answer, so the user corrects them. The page speaks the visitor's words: no technical word (CSV, JSON, local storage, sync, database, API) unless the audience is developers.
+1b. Tool or showcase. When the page's main job is something the visitor does (reserve, order, sign up, fill or follow a list), it is a tool first and the steps below serve that task: the first screen, on phones and desktops, shows the title and the start of the task (the form itself, or a button that leads to it), any picture small beside or under it; the form is one calm card in the page's style, its fields one under the other, each with one visible label (no browser frames around groups, no group title repeating the label); a list to choose from (products, time slots, people) is a list of compact rows, the name and price on the left and the control on the right, 64 to 88px high, never a grid of tall cards for a few words each; the owner's view is a plain list in the order they work, with counts in words (« 1 commande », « 3 commandes »). The identity then comes from the typography, the color and one picture, never from decoration that pushes the task down. A showcase (a shop, a club, a portfolio) follows the steps below as they are.
 2. Design plan, written in your reply before any code, with numbers:
 - Color: 4 to 6 named hex values taken from the subject's own world (its materials, products, place), one accent covering at most a tenth of the page; every text color checked at 4.5:1 against its background.
 - Type: one display face and one text face chosen for this subject (from the Font tool: `search` with the subject's style, then `display` and `text` give the <link> with only the weights used and the CSS of the type scale; paste both as they are), 2 or 3 weights in all; never Inter, Roboto, Arial, Open Sans, Montserrat, Poppins, Lato, Playfair Display, Space Grotesk or system-ui. A modular scale of 5 to 7 sizes with a ratio of at least 1.25: h1 at least 3rem on desktops and 2.25rem on phones, body text 16 to 18px with a line-height of 1.5 to 1.7, lines of 45 to 75 characters.
@@ -1135,7 +1240,7 @@ pub fn plan_critique_prompt(request: &str, plan: &str, bar: u8) -> String {
     let brief: String = request.chars().take(1_500).collect();
     let plan: String = plan.chars().take(5_000).collect();
     format!(
-        "The client's brief:\n\"{brief}\"\n\nThe designer's plan, written before any code:\n{plan}\n\nJudge this direction against what a top studio would ship (the built page will be scored 1 to 10 on phone, hierarchy, spacing, typography, color, identity and finish, and must reach {bar} on each):\n1. identity: one memorable idea specific to this subject, or a template in disguise (a centered hero band, identical cards, the same layout in every section, generic stock imagery)?\n2. hierarchy: one clear focal point on the first screen, and an obvious next step?\n3. typography: typefaces chosen for this subject (not Inter, Roboto, Montserrat, Poppins, Playfair Display and the like), a scale with real contrast between levels?\n4. color: a palette taken from the subject's world, readable contrast, an accent used sparingly?\n5. composition: do the sections vary (split, full width, list, offset), with an even rhythm?\n6. interactions: can the visitor do what the brief asks, in the fewest steps, with a few well-chosen ready-made components, and is the motion restrained (one entrance, a few reveals)?\nYou direct the design of what the client asked for: never add a feature, a page, an access code or password, a rule (opening hours, deadlines, limits) or data the brief does not ask for. Each feature added is work the client did not order and something more that can break.\nReply with at most 5 changes to the plan, the most important first, one per line, each as:\nN. [criterion] what is weak in the plan -> the exact change (a typeface name, hex values, a layout, a concrete idea)\nBe specific to this subject; no generic advice. Small UI icons (phone, clock, menu) come from a polished line icon set (Lucide) on purpose: do not ask to redraw them by hand; the page's identity comes from its illustration, typography, color and composition. {pictures} If the plan would already reach {bar}/10 on every criterion, reply exactly: PLAN OK"
+        "The client's brief:\n\"{brief}\"\n\nThe designer's plan, written before any code:\n{plan}\n\nJudge this direction against what a top studio would ship (the built page will be scored 1 to 10 on phone, hierarchy, spacing, typography, color, identity and finish, and must reach {bar} on each):\n1. identity: one memorable idea specific to this subject, or a template in disguise (a centered hero band, identical cards, the same layout in every section, generic stock imagery)?\n2. hierarchy: one clear focal point on the first screen, and an obvious next step?\n3. typography: typefaces chosen for this subject (not Inter, Roboto, Montserrat, Poppins, Playfair Display and the like), a scale with real contrast between levels?\n4. color: a palette taken from the subject's world, readable contrast, an accent used sparingly?\n5. composition: do the sections vary (split, full width, list, offset), with an even rhythm?\n6. interactions: can the visitor do what the brief asks, in the fewest steps, with a few well-chosen ready-made components, and is the motion restrained (one entrance, a few reveals)?\n7. task: when the visitor comes to do something (reserve, order, sign up), does the first screen start that task on phones and desktops, is the form one calm card, and is a list to choose from made of compact rows rather than tall cards?\nYou direct the design of what the client asked for: never add a feature, a page, an access code or password, a rule (opening hours, deadlines, limits) or data the brief does not ask for. Each feature added is work the client did not order and something more that can break.\nReply with at most 5 changes to the plan, the most important first, one per line, each as:\nN. [criterion] what is weak in the plan -> the exact change (a typeface name, hex values, a layout, a concrete idea)\nBe specific to this subject; no generic advice. Small UI icons (phone, clock, menu) come from a polished line icon set (Lucide) on purpose: do not ask to redraw them by hand; the page's identity comes from its illustration, typography, color and composition. {pictures} If the plan would already reach {bar}/10 on every criterion, reply exactly: PLAN OK"
     )
 }
 
@@ -1274,10 +1379,10 @@ pub fn critique_prompt(
                 .map(|(criterion, score)| format!("{criterion}={score}"))
                 .collect::<Vec<_>>()
                 .join(" ");
-            format!("Your previous review of this page, before the developer's last changes, scored: {line}. Keep the same scale: a score moves when something visible changed, up or down; when a score moves by 2 or more, the change lines must name what you see that justifies it.\n\n")
+            format!("Your previous review of this page, before the developer's last changes, scored: {line}. Keep the same scale: a score moves when something visible changed, up or down; when a score moves by 2 or more, the change lines must name what you see that justifies it. If the scores barely move from that review, your last changes were too small to matter: lead with the change of structure that would move them.\n\n")
         });
     format!(
-        "The client's brief:\n\"{brief}\"\n\n{images} screenshots follow, full page: the phone view first, then the desktop view.\n\nAlready measured in the page and sent to the developer (do not repeat these):\n{measured}\n\n{anchor}Score the page from 1 to 10 on each criterion, against what a top studio would ship: 5 is a competent template, 8 is what a strong studio would sign, 10 is award-level. Be strict: most generated pages deserve 4 to 6, and an 8 must be earned by something specific you can point to.\n1. phone: nothing cut, covered or cramped; a menu that fits; comfortable tap targets; text sized for a phone.\n2. hierarchy: a clear first screen with one strong focal point; the eye knows where to go next; headings, text and actions clearly ranked.\n3. spacing: one consistent vertical rhythm, aligned edges, generous but even breathing room, no crowded areas and no empty bands.\n4. typography: typefaces chosen for this subject, a clear scale with real contrast between levels, comfortable line length and leading, nothing default-looking.\n5. color: a harmonious palette tied to the subject, readable contrast, the accent used sparingly and on purpose.\n6. identity: does it look made for this subject, with a memorable idea, or like a template (a plain colored hero band, identical cards, icon placeholders for photos, lines under every heading, ALL-CAPS badges, the same layout in every section)?\n7. finish: craft in the details (alignment, consistent radii and shadows, polished icons and illustrations, states of buttons and fields); anything unstyled, broken, empty or unfinished. Any emoji anywhere in the page caps finish at 4: icons must be inline SVG.\n\nThe first line of your reply is exactly in this form:\nSCORES: phone=N hierarchy=N spacing=N typography=N color=N identity=N finish=N\nThen, for every criterion under {bar}, the changes that would raise it, the most important first, at most 8 in all, one per line, each as:\nN. [criterion] what is wrong, as seen in the screenshots -> the exact change to make (CSS properties and values, HTML structure, copy)\nBe specific to this page; no generic advice. {pictures} Small UI icons come from a polished line icon set (Lucide) on purpose: judge how they are sized, colored and placed, do not ask to redraw them by hand. If every score is {bar} or more, write NO CHANGES NEEDED after the scores line."
+        "The client's brief:\n\"{brief}\"\n\n{images} screenshots follow, full page: the phone view first, then the desktop view.\n\nAlready measured in the page and sent to the developer (do not repeat these):\n{measured}\n\n{anchor}Score the page from 1 to 10 on each criterion, against what a top studio would ship: 5 is a competent template, 8 is what a strong studio would sign, 10 is award-level. Be strict: most generated pages deserve 4 to 6, and an 8 must be earned by something specific you can point to.\n1. phone: nothing cut, covered or cramped; a menu that fits; comfortable tap targets; text sized for a phone.\n2. hierarchy: a clear first screen with one strong focal point; the eye knows where to go next; headings, text and actions clearly ranked.\n3. spacing: one consistent vertical rhythm, aligned edges, generous but even breathing room, no crowded areas and no empty bands.\n4. typography: typefaces chosen for this subject, a clear scale with real contrast between levels, comfortable line length and leading, nothing default-looking.\n5. color: a harmonious palette tied to the subject, readable contrast, the accent used sparingly and on purpose.\n6. identity: does it look made for this subject, with a memorable idea, or like a template (a plain colored hero band, identical cards, icon placeholders for photos, lines under every heading, ALL-CAPS badges, the same layout in every section)?\n7. finish: craft in the details (alignment, consistent radii and shadows, polished icons and illustrations, states of buttons and fields); anything unstyled, broken, empty or unfinished. Any emoji anywhere in the page caps finish at 4: icons must be inline SVG.\n\nThe first line of your reply is exactly in this form:\nSCORES: phone=N hierarchy=N spacing=N typography=N color=N identity=N finish=N\nThen, for every criterion under {bar}, the changes that would raise it, the most important first, at most 8 in all, one per line, each as:\nN. [criterion] what is wrong, as seen in the screenshots -> the exact change to make (CSS properties and values, HTML structure, copy)\nOrder the changes by how much they would raise the scores: first what changes the structure (what the first screen shows, how blocks are grouped and sized, a list as compact rows or as tall cards, the order of sections), then the details (a padding, a color value, a radius). A review of small tweaks leaves a page with a weak structure where it is: when the structure keeps a criterion under {bar}, the first change says so. When the visitor comes to do something (reserve, order, sign up), the task comes first: judge phone and hierarchy on how soon and how easily it is done (does it start on the first screen, does the form read as one calm card rather than the frames of an admin screen, is a list to choose from made of compact rows), and never ask for decoration that pushes it down. Never ask for a feature, a rule (a deadline, a limit) or a text the brief does not give. Be specific to this page; no generic advice. {pictures} Small UI icons come from a polished line icon set (Lucide) on purpose: judge how they are sized, colored and placed, do not ask to redraw them by hand. If every score is {bar} or more, write NO CHANGES NEEDED after the scores line."
     )
 }
 
@@ -1661,6 +1766,37 @@ mod tests {
             local,
             "<a href=\"mailto:contact@boulangerie.fr\">Écrire</a>"
         ]));
+    }
+
+    #[test]
+    fn rules_the_user_never_gave_are_found_and_their_own_hours_are_not() {
+        use super::invented_rules;
+        // Session #32 : la boulangère a donné son adresse et ses horaires.
+        let user = "Mon adresse c'est 3 place de l'Église à Saint-Martin, ouvert du mardi au dimanche de 7 h à 13 h. Et je n'envoie pas de SMS.";
+        let page = "Réservez votre pain\nOuvert du mardi au dimanche, 7h - 13h\nRetrait jusqu'à 13h00.\nConfirmation par téléphone. Annulation possible jusqu'à 19h la veille.\nCommande minimum 10 €.";
+        let found = invented_rules(page, user);
+        assert_eq!(
+            found,
+            [
+                "Annulation possible jusqu'à 19h la veille",
+                "Commande minimum 10 €"
+            ],
+            "{found:?}"
+        );
+        assert!(super::invented_rules(
+            "Annulation jusqu'à 19 h la veille.",
+            "annulation possible jusqu'à 19h00 la veille"
+        )
+        .is_empty());
+        assert_eq!(
+            super::invented_rules(
+                "Vous recevrez un SMS de confirmation.",
+                "un site pour réserver"
+            )
+            .len(),
+            1
+        );
+        assert!(super::shown_text(std::path::Path::new("/nonexistent")).is_empty());
     }
 
     #[test]

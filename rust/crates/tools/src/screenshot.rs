@@ -2217,6 +2217,13 @@ fn capture(
 static FIRST_CONTROLS: std::sync::Mutex<std::collections::BTreeMap<String, Vec<String>>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 
+/// Boutons et liens déjà signalés disparus, par page : dits une fois. Vu le 26
+/// octobre 2026 (session #32, passage 5) : Firebase retiré à la demande de
+/// l'utilisatrice, et « Aide pour activer la synchronisation » redit à chaque
+/// capture, une dizaine de fois ; l'agent a passé autant de tours à s'en défendre.
+static TOLD_LOST: std::sync::Mutex<std::collections::BTreeMap<String, Vec<String>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 /// Les boutons et liens de la première capture de la page qui n'y sont plus.
 /// Vu le 26 octobre 2026 (session #31) : pour supprimer le vide sous « Je
 /// propose ma voiture », le modèle a supprimé le bouton, et ses gestionnaires
@@ -2236,9 +2243,20 @@ fn lost_controls(page: &str, controls: &[String], folded: &[String]) -> Option<S
         .iter()
         .filter(|label| !controls.contains(label) && !folded.contains(label))
         .collect();
+    let mut told = TOLD_LOST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let told = told.entry(page.to_string()).or_default();
+    // Revenu depuis : une nouvelle disparition se redira.
+    told.retain(|label| !controls.contains(label) && !folded.contains(label));
+    let gone: Vec<&String> = gone
+        .into_iter()
+        .filter(|label| !told.contains(label))
+        .collect();
     if gone.is_empty() {
         return None;
     }
+    told.extend(gone.iter().map(|label| (*label).clone()));
     // Un nom apparu depuis peut être le même bouton, renommé : au modèle d'en
     // juger sur les deux listes, pas sur ce qu'il croit avoir écrit.
     let new: Vec<String> = controls
@@ -3356,8 +3374,12 @@ mod tests {
         let first = capture();
         write("");
         let after = capture();
+        // Dit une fois : la capture suivante ne le redit pas.
+        let again = capture();
         write(cta);
         let restored = capture();
+        write("");
+        let lost_again = capture();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!first.contains("are gone"), "{first}");
         assert!(
@@ -3366,6 +3388,8 @@ mod tests {
         );
         assert!(!after.contains("Je conduis\\\""), "{after}");
         assert!(!restored.contains("are gone"), "{restored}");
+        assert!(!again.contains("are gone"), "{again}");
+        assert!(lost_again.contains("are gone"), "{lost_again}");
     }
 
     #[test]
@@ -3508,6 +3532,82 @@ mod tests {
         }
         for absent in ["menu button shows", "said twice", "spilling past"] {
             assert!(!sound.contains(absent), "{absent}: {sound}");
+        }
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn an_admin_looking_form_and_its_layout_faults_are_found() {
+        // Session #32, passages 4 et 5 (26 octobre 2026) : les cadres gris des
+        // groupes de champs, « Aujour / d'hui », « Fait / avec », six produits
+        // d'un quart d'écran chacun, « 1 COMMANDES », et à l'ordinateur une photo
+        // de 800px avant le formulaire.
+        use std::fmt::Write as _;
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-outil-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |css: &str, count: &str, foot: &str, total: &str| {
+            let products: String = ["Baguette", "Croissant", "Pain complet", "Chocolatine", "Brioche"]
+                .iter()
+                .fold(String::new(), |mut html, product| {
+                    let _ = write!(html, "<article class=\"produit\"><p>{product}</p><p>1,30 €</p><button type=\"button\" aria-label=\"Ajouter\">+</button></article>");
+                    html
+                });
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Boulangerie</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button, input {{ font: inherit; min-height: 44px; }} .jours {{ display: flex; gap: 8px; }} .jour {{ width: 64px; overflow-wrap: anywhere; padding: 4px; }} .produit {{ min-height: 260px; border: 1px solid #ccc; margin: 8px 0; }} .photo {{ display: block; width: 100%; height: 900px; background: #c9a; }} .pied {{ display: flex; gap: 8px; }} {css}</style></head><body><header><h1>Réservez votre pain</h1></header><main><div class=\"photo\" role=\"img\" aria-label=\"Pains\"></div><form id=\"reservation\"><fieldset><legend>Pour quel jour ?</legend><div class=\"jours\"><button type=\"button\" class=\"jour\">Aujourd'hui</button><button type=\"button\" class=\"jour\">Demain</button></div></fieldset><fieldset><legend>Vos coordonnées</legend><label for=\"nom\">Prénom</label> <input id=\"nom\"> <label for=\"tel\">Téléphone</label> <input id=\"tel\" type=\"tel\"></fieldset>{products}<button type=\"submit\">Réserver</button></form><p class=\"stat\"><strong>{count}</strong> <span>commandes</span></p><p class=\"total\">Total : {total}</p></main><footer><p class=\"pied\">Fait avec<span>soin pour les boulangers de village, chaque matin depuis 1987, {foot}</span></p></footer></body></html>"),
+            )
+            .expect("html");
+        };
+        let page = format!("claw-outil-{}/index.html", std::process::id());
+        let capture = |viewport: &str| {
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!([viewport]));
+            super::take(&request).expect("capture")["captures"][0].to_string()
+        };
+        write(
+            "",
+            "1",
+            "données stockées localement sur chaque téléphone",
+            "undefined €",
+        );
+        let (phone, desktop) = (capture("phone"), capture("desktop"));
+        write(
+            "fieldset { border: 0; padding: 0; margin: 0; } .jour { width: auto; overflow-wrap: normal; } .produit { min-height: 0; display: flex; gap: 8px; align-items: center; } .photo { height: 200px; } .pied { display: block; }",
+            "2",
+            "avec du bon pain",
+            "3,90 €",
+        );
+        let (sound_phone, sound_desktop) = (capture("phone"), capture("desktop"));
+        let _ = std::fs::remove_dir_all(&dir);
+        for expected in [
+            "Groups of fields keep the browser's default frame",
+            "Words cut in two across lines: \\\"Aujourd'hui\\\"",
+            "Text squeezed into a column too narrow for it, one word per line: \\\"Fait avec\\\"",
+            "5 items of the same kind",
+            "A count of 0 or 1 followed by a plural: p.stat",
+            "Technical words shown to visitors",
+            "A script value shown as text (undefined, NaN, null or [object Object]): p.total",
+        ] {
+            assert!(phone.contains(expected), "{expected}: {phone}");
+        }
+        assert!(
+            desktop.contains("The first screen (")
+                && desktop.contains("shows nothing to do outside the header"),
+            "{desktop}"
+        );
+        for absent in [
+            "default frame",
+            "cut in two",
+            "squeezed",
+            "items of the same kind",
+            "followed by a plural",
+            "Technical words",
+            "shows nothing to do",
+            "script value",
+        ] {
+            assert!(!sound_phone.contains(absent), "{absent}: {sound_phone}");
+            assert!(!sound_desktop.contains(absent), "{absent}: {sound_desktop}");
         }
     }
 
