@@ -360,6 +360,91 @@ pub fn is_repair_request(text: &str) -> bool {
             >= 2
 }
 
+/// Des gens qui entrent quelque chose (une réservation, une inscription) et
+/// d'autres qui le voient : la demande suppose des données partagées.
+const SHARING_PARTIES: &[&str] = &[
+    "client",
+    "parent",
+    "membre",
+    "adherent",
+    "joueur",
+    "eleve",
+    "voisin",
+    "benevole",
+    "invite",
+    "visiteur",
+    "participant",
+    "tout le monde",
+    "les autres",
+    "customer",
+    "member",
+    "guest",
+    "player",
+    "everyone",
+];
+const SHARING_SEES: &[&str] = &[
+    "je vois",
+    "je voie",
+    "je puisse voir",
+    "voient",
+    "voir qui",
+    "voir la liste",
+    "savent",
+    "sachent",
+    "la liste",
+    "tableau",
+    " see ",
+    "can see",
+];
+const SHARING_ENTRIES: &[&str] = &[
+    "reserv", "inscri", "command", "propos", "conduit", "conduire", "vote", "ajout", "book",
+    "sign up", "order", "register",
+];
+
+/// La demande fait entrer des choses par les uns et les fait voir par
+/// d'autres, chacun sur son téléphone.
+#[must_use]
+pub fn shared_between_people(text: &str) -> bool {
+    let folded = format!(
+        " {} ",
+        crate::team::without_accents(&text.to_lowercase()).replace('\u{2019}', "'")
+    );
+    let has = |words: &[&str]| words.iter().any(|word| folded.contains(word));
+    has(SHARING_PARTIES) && has(SHARING_SEES) && has(SHARING_ENTRIES)
+}
+
+/// Le code garde ce que les visiteurs entrent dans leur propre navigateur, et
+/// rien ne l'envoie ailleurs.
+#[must_use]
+pub fn kept_on_each_device(sources: &[&str]) -> bool {
+    let stored = sources.iter().any(|source| {
+        source.contains("localStorage.setItem")
+            || source.contains("sessionStorage.setItem")
+            || source.contains("indexedDB.open")
+    });
+    let sent = sources.iter().any(|source| {
+        [
+            "fetch(",
+            "XMLHttpRequest",
+            "firebase",
+            "supabase",
+            "WebSocket",
+            "navigator.sendBeacon",
+            "$.ajax",
+            "axios",
+        ]
+        .iter()
+        .any(|call| source.contains(call))
+    });
+    stored && !sent
+}
+
+/// Message renvoyé au modèle : la demande suppose un partage, le site garde
+/// tout dans chaque téléphone. Vu le 26 octobre 2026 (session #32) : les
+/// clientes réservaient dans leur navigateur, la boulangère n'en aurait
+/// jamais rien vu ; le pied de page le disait en petit, la réponse non.
+pub const SHARED_DATA_NOTE: &str = "[Claw] The user asked for something several people share: some enter it (a reservation, a sign-up, an offer) and someone else sees it on another phone. Your page keeps what a visitor enters in that visitor's own browser (localStorage), so nobody else ever sees it: as built, the request does not work, even if every check passes on one device. Do not hide this. Either make the data shared (a small server of the project, or a free hosted store the user sets up: ask them with AskUserQuestion which one they accept, in plain words), or say it plainly at the top of your final answer: what works on one phone, what does not work between phones, and what is needed to make it work.";
+
 /// Méthode jointe à une demande d'interface (aussi à un message court qui
 /// poursuit une telle demande).
 #[must_use]
@@ -1295,6 +1380,33 @@ mod tests {
         page_target, problem_key, read_audit, regression_note, regressions, review_feedback,
         screenshot_input, Audit,
     };
+
+    #[test]
+    fn data_entered_by_some_and_seen_by_others_is_told_from_a_private_tool() {
+        use super::{kept_on_each_device, shared_between_people};
+        // Session #32 et #31 : la boulangerie, le club de foot.
+        assert!(shared_between_people("j'aimerais un petit site où les clients réservent eux-mêmes depuis leur téléphone, et où moi je vois le matin la liste de ce que je dois préparer"));
+        assert!(shared_between_people(
+            "les parents savent jamais quand c'est les matchs ni qui conduit"
+        ));
+        // Un outil pour soi, ou une vitrine : rien de partagé.
+        for private in [
+            "je note tout sur des bouts de papier, j'aimerais un truc pour noter mes séances et voir si je progresse",
+            "un petit truc pour gérer mes sous chaque mois, je note ce que je dépense",
+            "un site pour que mes clients puissent voir mes horaires et mes tarifs",
+        ] {
+            assert!(!shared_between_people(private), "{private}");
+        }
+        let local = "localStorage.setItem('reservations', JSON.stringify(list));";
+        assert!(kept_on_each_device(&[local, "<form id=\"r\"></form>"]));
+        assert!(!kept_on_each_device(&[
+            local,
+            "await fetch('/api/reservations', { method: 'POST' });"
+        ]));
+        assert!(!kept_on_each_device(&[
+            "const x = localStorage.getItem('pin');"
+        ]));
+    }
 
     #[test]
     fn a_list_of_fixes_is_told_from_a_creation_or_a_redesign() {
