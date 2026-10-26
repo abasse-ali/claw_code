@@ -3888,6 +3888,61 @@ pub const IMAGES_EVIDENCE_PROMPT: &str = "[Claw] Before this answer goes to the 
 
 // --- Outil appelé comme une commande ---------------------------------------------------
 
+// --- Recherches dans les styles ------------------------------------------------------------
+
+/// Recherches dans les styles à la suite avant la remarque vers `inspect`.
+pub const STYLE_SEARCHES_BEFORE_NOTE: u32 = 3;
+/// Remarques vers `inspect` au plus par tour.
+pub const MAX_STYLE_SEARCH_NOTES: u32 = 2;
+
+pub const STYLE_SEARCH_NOTE: &str = "[Claw] You are searching the stylesheets for the rule behind a size or a gap. Ask the page instead: call Screenshot with \"inspect\": [\"<CSS selector or visible text of the element>\"] (up to 6). For each element it gives the CSS rules that style it and its parent, with file, line and declarations, and its measured margin, padding, gap and space to the next block: the rule to change is named there.";
+
+/// Recherche (`grep_search`, ou `grep`/`rg` dans une commande) qui vise des
+/// styles : un fichier ou un motif de CSS (`.css`, `\.classe`, `{`,
+/// `padding`, `margin`, `gap`).
+#[must_use]
+pub fn is_style_search(tool_name: &str, input: &str) -> bool {
+    let value: serde_json::Value = serde_json::from_str(input).unwrap_or_default();
+    let text = match tool_name {
+        "grep_search" => format!(
+            "{} {} {}",
+            value["pattern"].as_str().unwrap_or_default(),
+            value["path"].as_str().unwrap_or_default(),
+            value["glob"].as_str().unwrap_or_default()
+        ),
+        "bash" | "PowerShell" => {
+            let command = value["command"].as_str().unwrap_or_default();
+            let searches = crate::bash::shell_segments(command)
+                .iter()
+                .any(|(segment, _)| {
+                    matches!(
+                        segment.split_whitespace().next(),
+                        Some("grep" | "rg" | "egrep" | "Select-String")
+                    )
+                });
+            if !searches {
+                return false;
+            }
+            command.to_string()
+        }
+        _ => return false,
+    };
+    let lower = text.to_ascii_lowercase();
+    [
+        ".css",
+        ".scss",
+        "\\.",
+        "{",
+        "padding",
+        "margin",
+        "gap",
+        "font-size",
+        "min-height",
+    ]
+    .iter()
+    .any(|mark| lower.contains(mark))
+}
+
 /// Outils de Claw qu'un modèle écrit parfois comme une commande du shell.
 const TOOL_NAMES: &[&str] = &[
     "KillShell",
@@ -5261,6 +5316,34 @@ mod language_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn searches_in_the_styles_are_told_from_other_searches() {
+        assert!(super::is_style_search(
+            "grep_search",
+            r#"{"pattern": "\\.section\\s*\\{"}"#
+        ));
+        assert!(super::is_style_search(
+            "grep_search",
+            r#"{"pattern": "hero", "glob": "*.css"}"#
+        ));
+        assert!(super::is_style_search(
+            "bash",
+            r#"{"command": "grep -n \"padding\" styles.css"}"#
+        ));
+        assert!(!super::is_style_search(
+            "grep_search",
+            r#"{"pattern": "fn main", "glob": "*.rs"}"#
+        ));
+        assert!(!super::is_style_search(
+            "bash",
+            r#"{"command": "cat styles.css"}"#
+        ));
+        assert!(!super::is_style_search(
+            "read_file",
+            r#"{"path": "styles.css"}"#
+        ));
+    }
+
     use super::{
         check_tool_is_missing, covers, detect_verify_commands, error_sites, exit_reflects_check,
         is_check_command, original_content, read_bash_output, review_findings, syntax_check,

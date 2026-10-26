@@ -100,6 +100,10 @@ pub(crate) struct ScreenshotInput {
     /// `localStorage` posé avant chaque chargement de la page : { clé: valeur }.
     #[serde(default)]
     storage: Option<Value>,
+    /// Éléments à examiner (sélecteur CSS ou texte visible) : leurs règles CSS
+    /// avec fichier et ligne, et leurs espacements mesurés.
+    #[serde(default)]
+    inspect: Option<Value>,
 }
 
 /// Une action avant la capture : un seul de ses champs est rempli.
@@ -205,6 +209,38 @@ fn viewports(value: Option<&Value>) -> Result<Vec<Viewport>, String> {
 }
 
 /// Actions demandées, dans l'ordre.
+/// Éléments de `inspect` au plus.
+const MAX_INSPECT: usize = 6;
+
+/// Demandes d'`inspect` : une liste, une seule en texte, ou une liste écrite
+/// en texte JSON.
+fn inspect_queries(value: Option<&Value>) -> Result<Vec<String>, String> {
+    let value = match value {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::String(text)) if text.trim_start().starts_with('[') => {
+            serde_json::from_str::<Value>(text).map_err(|error| {
+                format!("inspect must be a list such as [\".contact\", \"Coach Thomas\"]: {error}")
+            })?
+        }
+        Some(Value::String(text)) => json!([text]),
+        Some(other) => other.clone(),
+    };
+    let list: Vec<String> = serde_json::from_value(value).map_err(|error| {
+        format!("inspect must be a list such as [\".contact\", \"Coach Thomas\"]: {error}")
+    })?;
+    let list: Vec<String> = list
+        .into_iter()
+        .map(|query| query.trim().to_string())
+        .filter(|query| !query.is_empty())
+        .collect();
+    if list.len() > MAX_INSPECT {
+        return Err(format!(
+            "at most {MAX_INSPECT} elements to inspect per call"
+        ));
+    }
+    Ok(list)
+}
+
 fn actions(value: Option<&Value>) -> Result<Vec<Action>, String> {
     let value = match value {
         None | Some(Value::Null) => return Ok(Vec::new()),
@@ -971,6 +1007,8 @@ struct Shot {
     more: Vec<Extra>,
     /// Boutons qui ouvrent une fenêtre (nom, sélecteur), relevés en les essayant.
     openers: Vec<(String, String)>,
+    /// Ce que `inspect` a trouvé : un élément par demande.
+    inspected: Vec<Value>,
 }
 
 /// Une capture de plus : une autre partie de la page, ou une fenêtre ouverte.
@@ -1038,21 +1076,11 @@ fn author_rules(
     rules
 }
 
-/// Règles CSS de l'auteur qui dessinent les éléments que l'audit a mis en
-/// cause (`data-claw-blame`), par défaut (`false`) ou remarque (`true`) et
-/// par rang dans sa liste. Le modèle va droit à la règle au lieu de lire le
-/// fichier par morceaux : vu dans un essai réel, la moitié des requêtes d'un
-/// tour passaient à lire et chercher dans un CSS de 1 000 lignes. Rien en cas
-/// d'échec du navigateur : les défauts restent dits sans leurs règles.
-fn blamed_rules(devtools: &mut DevTools, culprits: &[Value]) -> Vec<(bool, usize, Vec<String>)> {
-    if culprits.is_empty()
-        || devtools.call("DOM.enable", json!({})).is_err()
-        || devtools.call("CSS.enable", json!({})).is_err()
-    {
-        return Vec::new();
-    }
+/// Feuilles de style annoncées par le navigateur (domaine CSS activé) : pour
+/// chacune, son adresse et, pour un `<style>` de la page, sa ligne de départ.
+fn sheet_places(devtools: &mut DevTools) -> std::collections::BTreeMap<String, (String, u64)> {
     let _ = devtools.pump(Duration::from_millis(300));
-    let sheets: std::collections::BTreeMap<String, (String, u64)> = devtools
+    devtools
         .events
         .iter()
         .filter(|event| event["method"] == "CSS.styleSheetAdded")
@@ -1071,7 +1099,187 @@ fn blamed_rules(devtools: &mut DevTools, culprits: &[Value]) -> Vec<(bool, usize
                 ),
             ))
         })
-        .collect();
+        .collect()
+}
+
+/// Toutes les règles de l'auteur d'un élément, de la moins précise à la plus
+/// précise, avec fichier, ligne et déclarations :
+/// `styles.css:412 .contact-list { gap: 12px; }`.
+fn rules_with_declarations(
+    matched: &Value,
+    sheets: &std::collections::BTreeMap<String, (String, u64)>,
+) -> Vec<String> {
+    matched["matchedCSSRules"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|entry| &entry["rule"])
+        .filter(|rule| rule["origin"] == "regular")
+        .filter_map(|rule| {
+            let selector = rule["selectorList"]["text"].as_str()?.trim();
+            let (url, offset) = sheets.get(rule["styleSheetId"].as_str()?)?;
+            let line = rule["selectorList"]["selectors"][0]["range"]["startLine"]
+                .as_u64()
+                .or_else(|| rule["style"]["range"]["startLine"].as_u64())?;
+            let file = url
+                .split(['?', '#'])
+                .next()
+                .and_then(|path| path.rsplit('/').next())
+                .filter(|name| !name.is_empty())
+                .map_or_else(|| "the page".to_string(), |name| name.replace("%20", " "));
+            let body = rule["style"]["cssText"]
+                .as_str()
+                .unwrap_or_default()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let body: String = if body.chars().count() > 220 {
+                format!("{}…", body.chars().take(219).collect::<String>())
+            } else {
+                body
+            };
+            let short: String = selector.chars().take(70).collect();
+            Some(format!("{file}:{} {short} {{ {body} }}", offset + line + 1))
+        })
+        .collect()
+}
+
+/// Repère dans la page chaque élément demandé par `inspect` (sélecteur CSS, ou
+/// texte visible) et rend ses mesures : boîte, marges, espacements, écart avec
+/// le bloc suivant, et son parent. Marque l'élément et son parent
+/// `data-claw-inspect` pour retrouver leurs règles.
+const INSPECT_SCRIPT: &str = r#"((queries) => {
+  const name = (el) => {
+    let label = el.tagName.toLowerCase();
+    if (el.id) label += `#${el.id}`;
+    const classes = typeof el.className === "string" ? el.className.trim().split(/\s+/).filter(Boolean) : [];
+    if (classes.length) label += `.${classes.slice(0, 2).join(".")}`;
+    const text = (el.innerText || "").replace(/\s+/g, " ").trim();
+    return text ? `${label} "${text.length > 40 ? `${text.slice(0, 39)}…` : text}"` : label;
+  };
+  const shown = (el) => {
+    const style = getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+  };
+  const find = (query) => {
+    let list = [];
+    try { list = [...document.querySelectorAll(query)]; } catch (_) { list = []; }
+    list = list.filter(shown);
+    if (list.length) return [list[0], list.length];
+    const wanted = query.replace(/\s+/g, " ").trim().toLowerCase();
+    if (!wanted) return [null, 0];
+    const hits = [...document.body.querySelectorAll("*")].filter((el) => shown(el)
+      && (el.innerText || "").replace(/\s+/g, " ").toLowerCase().includes(wanted));
+    const deepest = hits.filter((el) => !hits.some((other) => other !== el && el.contains(other)));
+    return [deepest[0] || null, deepest.length];
+  };
+  const px = (value) => value.split(" ").map((part) => part.replace(/\.\d+px/, "px")).join(" ");
+  const sizes = (el) => {
+    const style = getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return {
+      box: `${Math.round(rect.width)}x${Math.round(rect.height)}px at y=${Math.round(rect.top + scrollY)}`,
+      display: style.display,
+      margin: px(style.margin),
+      padding: px(style.padding),
+      gap: style.display.includes("flex") || style.display.includes("grid") ? px(style.gap) : undefined,
+      "line-height": style.lineHeight,
+      "min-height": style.minHeight !== "auto" && style.minHeight !== "0px" ? style.minHeight : undefined,
+    };
+  };
+  return queries.map((query, index) => {
+    const [el, count] = find(query);
+    if (!el) return { query, found: false };
+    el.setAttribute("data-claw-inspect", `${index}`);
+    const parent = el.parentElement;
+    if (parent && parent !== document.body) parent.setAttribute("data-claw-inspect-parent", `${index}`);
+    let next = el.nextElementSibling;
+    while (next && !shown(next)) next = next.nextElementSibling;
+    const result = { query, found: true, element: name(el), matches: count, ...sizes(el) };
+    if (next) result["space to next block"] = `${Math.round(next.getBoundingClientRect().top - el.getBoundingClientRect().bottom)}px before ${name(next)}`;
+    if (parent && parent !== document.body) result.parent = { element: name(parent), ...sizes(parent) };
+    return result;
+  });
+})"#;
+
+/// Les éléments demandés par `inspect`, mesurés dans la page, avec les règles
+/// CSS qui les dessinent (fichier, ligne, déclarations). Vu le 26 octobre 2026
+/// (session #31) : le modèle cherchait la règle de l'espacement d'une section
+/// avec six recherches de suite dans un CSS de 1 000 lignes.
+fn inspect_elements(devtools: &mut DevTools, queries: &[String]) -> Vec<Value> {
+    if queries.is_empty() {
+        return Vec::new();
+    }
+    let script = format!(
+        "{INSPECT_SCRIPT}({})",
+        serde_json::to_string(queries).unwrap_or_else(|_| "[]".to_string())
+    );
+    let Ok(Value::Array(mut found)) = devtools.evaluate(&script) else {
+        return Vec::new();
+    };
+    if devtools.call("DOM.enable", json!({})).is_err()
+        || devtools.call("CSS.enable", json!({})).is_err()
+    {
+        return found;
+    }
+    let sheets = sheet_places(devtools);
+    let root = devtools
+        .call("DOM.getDocument", json!({ "depth": 0 }))
+        .ok()
+        .and_then(|document| document["root"]["nodeId"].as_u64());
+    if let Some(root) = root {
+        for (index, entry) in found.iter_mut().enumerate() {
+            if entry["found"] != json!(true) {
+                continue;
+            }
+            for (attribute, key, keep) in [
+                ("data-claw-inspect", "CSS rules", 8),
+                ("data-claw-inspect-parent", "parent CSS rules", 3),
+            ] {
+                let node = devtools
+                    .call(
+                        "DOM.querySelector",
+                        json!({ "nodeId": root, "selector": format!("[{attribute}=\"{index}\"]") }),
+                    )
+                    .ok()
+                    .and_then(|found| found["nodeId"].as_u64())
+                    .filter(|id| *id > 0);
+                let Some(node) = node else { continue };
+                let Ok(matched) =
+                    devtools.call("CSS.getMatchedStylesForNode", json!({ "nodeId": node }))
+                else {
+                    continue;
+                };
+                let mut rules = rules_with_declarations(&matched, &sheets);
+                // Les plus précises comptent : elles l'emportent.
+                let skip = rules.len().saturating_sub(keep);
+                rules.drain(..skip);
+                rules.reverse();
+                if !rules.is_empty() {
+                    entry[key] = json!(rules);
+                }
+            }
+        }
+    }
+    let _ = devtools.call("CSS.disable", json!({}));
+    found
+}
+
+/// Règles CSS de l'auteur qui dessinent les éléments que l'audit a mis en
+/// cause (`data-claw-blame`), par défaut (`false`) ou remarque (`true`) et
+/// par rang dans sa liste. Le modèle va droit à la règle au lieu de lire le
+/// fichier par morceaux : vu dans un essai réel, la moitié des requêtes d'un
+/// tour passaient à lire et chercher dans un CSS de 1 000 lignes. Rien en cas
+/// d'échec du navigateur : les défauts restent dits sans leurs règles.
+fn blamed_rules(devtools: &mut DevTools, culprits: &[Value]) -> Vec<(bool, usize, Vec<String>)> {
+    if culprits.is_empty()
+        || devtools.call("DOM.enable", json!({})).is_err()
+        || devtools.call("CSS.enable", json!({})).is_err()
+    {
+        return Vec::new();
+    }
+    let sheets = sheet_places(devtools);
     let mut found: Vec<(bool, usize, Vec<String>)> = Vec::new();
     let root = devtools
         .call("DOM.getDocument", json!({ "depth": 0 }))
@@ -1447,6 +1655,8 @@ struct Session<'a> {
     windows: bool,
     wait: Duration,
     actions: &'a [Action],
+    /// Éléments à examiner (`inspect`).
+    inspect: &'a [String],
 }
 
 /// Défile toute la page puis revient en haut : les apparitions au défilement
@@ -1846,6 +2056,7 @@ fn capture(
         })
         .collect();
     browser_measures(devtools, &audit, &mut problems, &mut notes);
+    let inspected = inspect_elements(devtools, session.inspect);
     // Après la capture (les essais changent la page) : le menu d'un téléphone
     // s'ouvre-t-il, et chaque bouton fait-il quelque chose ?
     if viewport.mobile {
@@ -1872,6 +2083,7 @@ fn capture(
         preview_base64,
         more,
         openers,
+        inspected,
     })
 }
 
@@ -2249,6 +2461,7 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
     let url = target(input)?;
     let sizes = viewports(input.viewports.as_ref())?;
     let steps = actions(input.actions.as_ref())?;
+    let inspect = inspect_queries(input.inspect.as_ref())?;
     let theme = color_scheme(input.theme.as_deref())?;
     let wait = Duration::from_millis(input.wait_ms.unwrap_or(DEFAULT_WAIT_MS).min(MAX_WAIT_MS));
     let (_browser, port) = Browser::launch_first(&crate::page_view::browser_candidates())?;
@@ -2281,6 +2494,7 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
         windows: input.windows.unwrap_or(false),
         wait,
         actions: &steps,
+        inspect: &inspect,
     };
     // Les boutons s'essaient une fois, à l'ordinateur de préférence.
     let clicks_at = sizes
@@ -2317,6 +2531,9 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
                 });
                 if !shot.notes.is_empty() {
                     entry["designNotes"] = json!(shot.notes);
+                }
+                if !shot.inspected.is_empty() {
+                    entry["inspected"] = json!(shot.inspected);
                 }
                 if !shot.actions.is_empty() {
                     entry["actions"] = json!(shot.actions);
@@ -2651,6 +2868,66 @@ mod tests {
         ] {
             assert!(!sound.contains(absent), "{absent}: {sound}");
         }
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn inspect_names_the_rules_and_spacing_of_an_element_in_a_real_browser() {
+        // Session #31 (26 octobre 2026) : six recherches de suite pour trouver
+        // la règle qui écartait l'email du téléphone du club.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-inspect-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        std::fs::write(
+            dir.join("styles.css"),
+            "body { margin: 0; font: 16px/1.5 sans-serif; }\n.contact {\n  display: flex;\n  flex-direction: column;\n  gap: 40px;\n}\n.contact a { min-height: 44px; display: inline-flex; align-items: center; }\n",
+        )
+        .expect("css");
+        std::fs::write(
+            dir.join("index.html"),
+            "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Club</title><link rel=\"stylesheet\" href=\"styles.css\"></head><body><ul class=\"contact\"><li><a href=\"mailto:club@exemple.fr\">club@exemple.fr</a></li><li><a href=\"tel:0123\">01 23 45 67 89</a></li></ul><p>Coach Thomas</p></body></html>",
+        )
+        .expect("html");
+        let page = format!("claw-inspect-{}/index.html", std::process::id());
+        let mut request = input(None, Some(&page));
+        request.viewports = Some(json!(["phone"]));
+        request.inspect = Some(json!([".contact li", "Coach Thomas", ".absent"]));
+        let result = super::take(&request);
+        let _ = std::fs::remove_dir_all(&dir);
+        let result = result.expect("capture");
+        let inspected = &result["captures"][0]["inspected"];
+        let first = inspected[0].to_string();
+        assert!(
+            first.contains("space to next block\":\"40px before li"),
+            "{first}"
+        );
+        assert!(
+            first.contains(
+                "styles.css:2 .contact { display: flex; flex-direction: column; gap: 40px; }"
+            ),
+            "{first}"
+        );
+        assert!(first.contains("\"gap\":\"40px\""), "{first}");
+        assert_eq!(inspected[0]["matches"], json!(2));
+        assert!(
+            inspected[1]["element"].to_string().contains("Coach Thomas"),
+            "{inspected}"
+        );
+        assert_eq!(inspected[2]["found"], json!(false));
+    }
+
+    #[test]
+    fn inspect_takes_a_list_a_single_text_or_a_list_in_text() {
+        assert_eq!(super::inspect_queries(None).unwrap(), Vec::<String>::new());
+        assert_eq!(
+            super::inspect_queries(Some(&json!(".a"))).unwrap(),
+            vec![".a"]
+        );
+        assert_eq!(
+            super::inspect_queries(Some(&json!("[\".a\", \"Coach\"]"))).unwrap(),
+            vec![".a", "Coach"]
+        );
+        assert!(super::inspect_queries(Some(&json!(["1", "2", "3", "4", "5", "6", "7"]))).is_err());
     }
 
     #[test]
@@ -3029,6 +3306,7 @@ mod tests {
             wait_ms: None,
             actions: None,
             storage: None,
+            inspect: None,
         }
     }
 
