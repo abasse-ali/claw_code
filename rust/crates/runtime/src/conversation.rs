@@ -1888,7 +1888,11 @@ where
                 .and_then(|cwd| harness::DataSnapshot::take(&cwd)),
             project: project_turn,
             design_guided,
-            repair: crate::web_design::is_repair_request(&request_text),
+            // Les mots de l'utilisateur seulement : Claw Web y ajoute la
+            // conversation et ses consignes (« created from projet-vierge »),
+            // qui faisaient passer le passage 5 de la session #31 pour une
+            // création.
+            repair: crate::web_design::is_repair_request(crate::project::own_words(&request_text)),
             code_languages,
             ..TurnAids::default()
         };

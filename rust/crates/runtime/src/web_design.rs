@@ -1306,6 +1306,13 @@ mod tests {
         ] {
             assert!(super::is_repair_request(repair), "{repair}");
         }
+        // Ce que Claw Web ajoute au message (« created from projet-vierge »)
+        // ne compte pas : seuls les mots de l'utilisateur sont lus.
+        let with_notes = "Corrige ça, et dis-moi simplement à la fin ce qui est fait.\n\n[Claw] Earlier conversation of this session, for context:\n\nil me faudrait un petit site\n\n[Claw] You are working in the repository o/claw-projet, on the branch claw/session-4 (created from projet-vierge).";
+        assert!(super::is_repair_request(crate::project::own_words(
+            with_notes
+        )));
+        assert!(!super::is_repair_request(with_notes));
         for creation in [
             "bonjour, je m'occupe du club de foot des petits de mon quartier. il me faudrait un petit site pour ça, que les parents puissent regarder sur leur tel",
             "Refais la page d'accueil, plus moderne",
