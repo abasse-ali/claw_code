@@ -527,6 +527,28 @@
       }
     }
   }
+  // 9a. Bloc fixe hors de la barre du haut (un bandeau, une alerte posée sous
+  // l'en-tête) qui recouvre le début de la page au chargement. Vu le 26 octobre
+  // 2026 (session #32) : « Mode local uniquement (Firebase non chargé) », fixé
+  // sous l'en-tête, cachait le titre « Réservez votre pain » à chaque cliente,
+  // et aucune mesure ne le disait.
+  if (window.scrollY < 2) {
+    const floating = visible.filter((el) => css(el).position === "fixed" && !bars.includes(el)
+      && box.get(el).top > 1 && box.get(el).top < window.innerHeight * 0.5 && box.get(el).width >= W * 0.4
+      && box.get(el).height >= 24 && !el.closest("dialog, [role=dialog], [aria-modal=true]"))
+      .filter((el, _, all) => !all.some((other) => other !== el && other.contains(el)));
+    for (const layer of floating) {
+      const rl = box.get(layer);
+      const hidden = visible.filter((el) => !pinned(el) && !layer.contains(el)
+        && el.matches("h1, h2, h3, p, a, button, img, input, select, label")
+        && box.get(el).top < rl.bottom - 4 && box.get(el).bottom > rl.top + 4
+        && box.get(el).left < rl.right - 4 && box.get(el).right > rl.left + 4);
+      if (hidden.length) {
+        blame([layer]);
+        problems.push(`The fixed ${name(layer)} (${Math.round(rl.height)}px high, ${Math.round(rl.top)}px from the top) lies over the page when it opens: ${list(hidden.map(name), 3)} sit underneath it and cannot be read or tapped. Put it in the flow of the page (not position: fixed), or move what it covers below it`);
+      }
+    }
+  }
   // 9b. Texte d'une barre fixe ou collante qui n'y tient pas : coupé par le haut
   // de l'écran, ou qui déborde sous la barre sur la page. Vu le 25 octobre 2026
   // (site d'un club de foot, signalé deux fois par l'utilisateur) : le nom du
@@ -695,10 +717,13 @@
   if (nameless.length) problems.push(`Buttons or links with no text or label, a screen reader announces nothing (add aria-label): ${list(nameless.map(name))}`);
 
   // 13. Texte de remplissage ou inachevé.
-  const filler = /lorem ipsum|dolor sit amet|\b(?:todo|tbd|placeholder)\b|your (?:text|content|title|name) here|votre (?:texte|contenu|titre) ici|ins[eé]rer .{0,20} ici|insert .{0,20} here/i;
+  const filler = /lorem ipsum|dolor sit amet|\b(?:todo|tbd|placeholder)\b|your (?:text|content|title|name) here|votre (?:texte|contenu|titre) ici|ins[eé]rer .{0,20} ici|insert .{0,20} here|\[(?:votre|vos|ton|ta|tes|your|ins[eé]rer|insert|nom|adresse|t[eé]l[eé]phone|horaires|address|phone)\b[^\]]{0,40}\]/i;
   const ownWords = (el) => [...el.childNodes].filter((node) => node.nodeType === 3).map((node) => node.textContent).join(" ");
   const fillers = visible.filter((el) => ownText(el) && filler.test(ownWords(el)));
-  if (fillers.length) problems.push(`Filler or unfinished text: ${list(fillers.map(name))}. Write the real content`);
+  // Vu le 26 octobre 2026 (session #32) : « [Votre adresse ici] », « [Vos
+  // horaires d'ouverture] » mis à la place d'une adresse inventée, sur la page
+  // que voit chaque client.
+  if (fillers.length) problems.push(`Filler or unfinished text: ${list(fillers.map(name))}. Write the real content; what only the user knows (an address, a phone number, opening hours) is asked of them in your answer or left out of the page, never shown as a blank to fill in or invented`);
 
   // 14. Aucune typographie choisie : la police par défaut du navigateur.
   const mainFamily = bodyFont.split(",")[0].replace(/["']/g, "").trim().toLowerCase();

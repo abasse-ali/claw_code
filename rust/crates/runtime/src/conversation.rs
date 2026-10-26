@@ -2298,6 +2298,9 @@ where
                         self.requirements_gate(&mut aids, &request_text, earlier.as_deref())
                     })
                     .or_else(|| self.shared_data_gate(&mut aids, &request_text))
+                    // Avant la question sur les clés : une question posée dans
+                    // Claw Web clôt le passage, sans les contrôles qui suivent.
+                    .or_else(|| self.plain_answer_gate(&mut aids, &answer))
                     .or_else(|| self.account_setup_gate(&mut aids))
                     .or_else(|| {
                         self.review_gate(&mut aids, &request_text, earlier.as_deref(), &answer)
@@ -2305,7 +2308,6 @@ where
                     .or_else(|| self.milestone_validation_gate(&mut aids, &answer))
                     .or_else(|| self.instructions_gate(&mut aids, &answer))
                     .or_else(|| self.unused_photos_gate(&mut aids))
-                    .or_else(|| self.plain_answer_gate(&mut aids, &answer))
                     .or_else(|| {
                         asking = self.questions_gate(&mut aids, &answer);
                         asking.then(|| harness::QUESTIONS_FEEDBACK.to_string())
@@ -4872,13 +4874,23 @@ where
     /// (session #32) : 19 photos (11 Mo) dans images/, aucune dans la page,
     /// dont « baguette-1.jpg » qui montrait un pot d'ajvar.
     fn unused_photos_gate(&mut self, aids: &mut TurnAids) -> Option<String> {
-        if aids.photos_checked || aids.photos.is_empty() || self.subagent || interrupt_requested() {
+        if aids.photos_checked || self.subagent || interrupt_requested() {
             return None;
         }
         let cwd = std::env::current_dir().ok()?;
+        // Celles d'un tour précédent aussi, quand ce tour touche à la page :
+        // l'outil les note dans images/CREDITS.md. Vu le 26 octobre 2026
+        // (session #32) : 11 Mo de photos du premier passage, jamais utilisées,
+        // toujours publiés trois passages plus tard.
+        let mut photos = aids.photos.clone();
+        if self.page_to_review(aids).is_some() {
+            photos.extend(crate::web_design::credited_photos(&cwd));
+        }
+        if photos.is_empty() {
+            return None;
+        }
         let pages = crate::web_design::page_texts(&cwd);
-        let unused: Vec<&String> = aids
-            .photos
+        let unused: Vec<&String> = photos
             .iter()
             .filter(|path| {
                 cwd.join(path.as_str()).is_file() || std::path::Path::new(path.as_str()).is_file()

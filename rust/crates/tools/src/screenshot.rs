@@ -3447,6 +3447,51 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn a_fixed_banner_over_the_title_and_blanks_to_fill_in_are_found() {
+        // Session #32, passage 4 : « Mode local uniquement (Firebase non
+        // chargé) » fixé sous l'en-tête cachait « Réservez votre pain », et le
+        // pied de page affichait « [Votre adresse ici] ».
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-bandeau-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |position: &str, footer: &str| {
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Boulangerie</title><style>body {{ margin: 0; padding-top: 64px; font: 16px/1.5 sans-serif; }} header {{ position: fixed; top: 0; left: 0; right: 0; height: 64px; background: #fff; }} .etat {{ position: {position}; top: 72px; left: 16px; right: 16px; padding: 16px; background: #f3efe8; }} main {{ padding: 16px; }}</style></head><body><header><strong>Ma Boulangerie</strong></header><div class=\"etat\">Mode local uniquement</div><main><h1>Réservez votre pain</h1><p>Commandez la veille, récupérez le matin.</p></main><footer><p>{footer}</p></footer></body></html>"),
+            )
+            .expect("html");
+        };
+        let page = format!("claw-bandeau-{}/index.html", std::process::id());
+        let capture = || {
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            super::take(&request).expect("capture")["captures"][0]["problems"].to_string()
+        };
+        write("fixed", "[Votre adresse ici] · [Vos horaires d'ouverture]");
+        let broken = capture();
+        write(
+            "static",
+            "12 rue du Four, Saint-Martin · du mardi au dimanche, 7 h - 13 h",
+        );
+        let sound = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            broken.contains("lies over the page when it opens: h1 \\\"Réservez votre pain\\\""),
+            "{broken}"
+        );
+        assert!(
+            broken.contains("Filler or unfinished text")
+                && broken.contains("never shown as a blank to fill in"),
+            "{broken}"
+        );
+        assert!(
+            !sound.contains("lies over the page") && !sound.contains("Filler"),
+            "{sound}"
+        );
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn the_visitors_own_list_does_not_need_their_name() {
         // Session #32, passage 3 : « Mes réservations » montrait la date et
         // l'heure de la réservation du visiteur, sans son nom ; la mesure le
