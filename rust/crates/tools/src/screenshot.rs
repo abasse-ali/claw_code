@@ -1537,12 +1537,29 @@ fn run_action(devtools: &mut DevTools, action: &Action, wait: Duration) -> Resul
     let done = if let Some(selector) = &action.click {
         // Clic de souris au centre de l'élément : il touche ce qu'un doigt toucherait
         // (un élément posé par-dessus reçoit le clic, comme chez l'utilisateur).
+        // Une option d'une liste native n'a pas de place à l'écran : elle se
+        // choisit (comme le doigt dans la liste du téléphone), elle ne se
+        // clique pas. Vu le 26 octobre 2026 (session #32) : le clic au point
+        // (0, 0) tombait sur l'en-tête fixe, « l'en-tête couvre la liste », et
+        // l'agent a remplacé la liste des heures par une liste faite main.
         let point = devtools.evaluate(&format!(
-            "(() => {{ const el = document.querySelector({sel}); if (!el) return null; el.scrollIntoView({{ block: 'center', inline: 'center' }}); const r = el.getBoundingClientRect(); const x = r.left + r.width / 2, y = r.top + r.height / 2; const top = document.elementFromPoint(x, y); return {{ x, y, covered: top && top !== el && !el.contains(top) ? (top.tagName.toLowerCase() + (top.id ? '#' + top.id : '')) : '' }}; }})()",
+            "(() => {{ const el = document.querySelector({sel}); if (!el) return null; const list = el.tagName === 'OPTION' && el.closest('select'); if (list) {{ list.scrollIntoView({{ block: 'center' }}); list.focus(); list.value = el.value; list.dispatchEvent(new Event('input', {{ bubbles: true }})); list.dispatchEvent(new Event('change', {{ bubbles: true }})); return {{ chose: (el.textContent || el.value).trim(), list: 'select' + (list.id ? '#' + list.id : list.name ? '[name=' + list.name + ']' : '') }}; }} el.scrollIntoView({{ block: 'center', inline: 'center' }}); const r = el.getBoundingClientRect(); if (r.width < 1 && r.height < 1) return {{ empty: true }}; const x = r.left + r.width / 2, y = r.top + r.height / 2; const top = document.elementFromPoint(x, y); return {{ x, y, covered: top && top !== el && !el.contains(top) ? (top.tagName.toLowerCase() + (top.id ? '#' + top.id : '')) : '' }}; }})()",
             sel = quote(selector)
         ))?;
         if point.is_null() {
             return Err(format!("click: no element matches `{selector}`"));
+        }
+        if let Some(chose) = point["chose"].as_str() {
+            devtools.pump(wait.max(Duration::from_millis(300)))?;
+            return Ok(format!(
+                "chose \"{chose}\" in {} (the option of a native list is picked, as a finger does in the phone's list, not clicked)",
+                point["list"].as_str().unwrap_or("select")
+            ));
+        }
+        if point["empty"] == json!(true) {
+            return Err(format!(
+                "click: `{selector}` takes no space on the screen (hidden, folded or not laid out): nothing was clicked, and nothing about the page can be told from it"
+            ));
         }
         let (x, y) = (
             point["x"].as_f64().unwrap_or(0.0),
@@ -3779,6 +3796,37 @@ mod tests {
             .position(|pair| pair[0] == 0xFF && matches!(pair[1], 0xC0 | 0xC2))
             .expect("trame");
         u32::from(data[at + 5]) << 8 | u32::from(data[at + 6])
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn an_option_of_a_native_list_is_chosen_not_clicked() {
+        // Session #32 (26 octobre 2026) : un clic sur l'option « 8h00 » d'une
+        // liste fermée tombait au point (0, 0), sur l'en-tête fixe.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-option-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        std::fs::write(
+            dir.join("index.html"),
+            "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Boulangerie</title><style>body { margin: 0; padding: 80px 16px 16px; font: 16px/1.5 sans-serif; } header { position: fixed; top: 0; left: 0; right: 0; height: 64px; background: #fff; } select { font: inherit; }</style></head><body><header>Ma Boulangerie</header><label for=\"heure\">Heure de passage</label><select id=\"heure\"><option value=\"\">Choisir</option><option value=\"08:00\">8h00</option></select><p id=\"choisi\">Rien</p><p id=\"cache\" hidden>Caché</p><script>document.getElementById('heure').addEventListener('change', (e) => { document.getElementById('choisi').textContent = 'Passage à ' + e.target.value; });</script></body></html>",
+        )
+        .expect("html");
+        let page = format!("claw-option-{}/index.html", std::process::id());
+        let mut request = input(None, Some(&page));
+        request.viewports = Some(json!(["phone"]));
+        request.actions =
+            Some(json!([{ "click": "#heure option[value='08:00']" }, { "click": "#cache" }]));
+        let result = super::take(&request).expect("capture");
+        let _ = std::fs::remove_dir_all(&dir);
+        let shot = result["captures"][0].to_string();
+        assert!(
+            shot.contains("chose \\\"8h00\\\" in select#heure") && !shot.contains("lies on top"),
+            "{shot}"
+        );
+        assert!(
+            shot.contains("`#cache` takes no space on the screen"),
+            "{shot}"
+        );
     }
 
     #[test]
