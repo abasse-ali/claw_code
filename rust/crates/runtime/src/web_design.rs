@@ -414,7 +414,7 @@ pub fn placeholder_credential(text: &str) -> Option<String> {
 #[must_use]
 pub fn account_setup_note(sample: &str) -> String {
     format!(
-        "[Claw] Your code now waits for keys the user must create ({sample}): an account on a service, a project, keys to copy into the code. The user did not choose this and may not be a developer. Before building more on it, ask them with AskUserQuestion: 2 to 4 options in plain words, each saying what it asks of them (an account, the minutes of setup, a cost), with your recommendation first and, if there is one, an option that needs nothing from them. Until they answer, keep what works today working. Never put the setup steps for the site's owner in the page itself: every visitor would see them. In your final answer, say in plain words what is not active yet and what they will be asked to do."
+        "[Claw] Your code now waits for keys the user must create ({sample}): an account on a service, a project, keys to copy into the code. The user did not choose this and may not be a developer. Before building more on it, ask them with AskUserQuestion: 2 to 4 options in plain words, each saying what it asks of them (an account, the minutes of setup, a cost), with your recommendation first and, if there is one, an option that needs nothing from them. Until they answer, keep what works today working. Never put the setup steps for the site's owner in the page itself: every visitor would see them. The text before your question is your final answer and the last thing they read (the question ends the pass): plain words, no code, no file names or line numbers, no tool names; say what works now, what is not active yet, and what each option would ask of them."
     )
 }
 
@@ -531,6 +531,22 @@ pub fn kept_on_each_device(sources: &[&str]) -> bool {
 /// clientes réservaient dans leur navigateur, la boulangère n'en aurait
 /// jamais rien vu ; le pied de page le disait en petit, la réponse non.
 pub const SHARED_DATA_NOTE: &str = "[Claw] The user asked for something several people share: some enter it (a reservation, a sign-up, an offer) and someone else sees it on another phone. Your page keeps what a visitor enters in that visitor's own browser (localStorage), so nobody else ever sees it: as built, the request does not work, even if every check passes on one device. Do not hide this. Either make the data shared (a small server of the project, or a free hosted store the user sets up: ask them with AskUserQuestion which one they accept, in plain words), or say it plainly at the top of your final answer: what works on one phone, what does not work between phones, and what is needed to make it work.";
+
+/// Photos que l'outil `Photo` a enregistrées dans le projet, d'après les
+/// crédits qu'il tient (`images/CREDITS.md` : « - `images/pain-1.jpg`: … »).
+#[must_use]
+pub fn credited_photos(root: &Path) -> Vec<String> {
+    let Ok(credits) = std::fs::read_to_string(root.join("images").join("CREDITS.md")) else {
+        return Vec::new();
+    };
+    credits
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("- `"))
+        .filter_map(|rest| rest.split('`').next())
+        .filter(|path| !path.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
 
 /// Textes des pages et des styles du projet (HTML, CSS, scripts, gabarits),
 /// hors dépendances : ce qui peut nommer une image.
@@ -1523,6 +1539,21 @@ mod tests {
     };
 
     #[test]
+    fn photos_are_read_back_from_their_credits() {
+        let root = std::env::temp_dir().join(format!("claw-credits-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("images")).expect("dossier");
+        std::fs::write(
+            root.join("images/CREDITS.md"),
+            "# Photo credits\n\nPhotos under free licences…\n\n- `images/baguette-1.jpg`: \"Ajvar\" by X, CC BY-SA 4.0\n- `images/croissant-2.jpg`: \"Croissant\" by Y, CC0\n",
+        )
+        .expect("crédits");
+        let photos = super::credited_photos(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(photos, ["images/baguette-1.jpg", "images/croissant-2.jpg"]);
+        assert!(super::credited_photos(std::path::Path::new("/nulle/part")).is_empty());
+    }
+
+    #[test]
     fn the_texts_that_can_name_an_image_are_read_outside_dependencies() {
         let root = std::env::temp_dir().join(format!("claw-textes-{}", std::process::id()));
         std::fs::create_dir_all(root.join("node_modules/x")).expect("dossiers");
@@ -1589,6 +1620,8 @@ mod tests {
         );
         assert!(placeholder_credential("const SUPABASE_ANON_KEY = '';").is_some());
         assert!(placeholder_credential("{\"apiKey\": \"\"}").is_some());
+        // La question clôt le passage : la réponse qui la précède est la dernière lue.
+        assert!(super::account_setup_note("apiKey:\"\"").contains("no file names or line numbers"));
         for plain in [
             "const VOTRE_PANIER = [];",
             "Votre commande est prête",
