@@ -3951,6 +3951,35 @@ pub fn is_style_search(tool_name: &str, input: &str) -> bool {
     .any(|mark| lower.contains(mark))
 }
 
+/// Résultat d'une capture reprise : rien n'a changé depuis la précédente.
+pub const SAME_CAPTURE_NOTE: &str = "[Claw] No file changed since your last identical Screenshot call (no edit, no command): this is its result again, without rendering the page a second time. Change something, or call Screenshot with other options (\"inspect\", \"actions\", \"viewports\") to learn more.";
+
+/// Outils qui ne changent aucun fichier : une capture faite avant eux vaut
+/// encore après.
+#[must_use]
+pub fn leaves_files_alone(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "read_file"
+            | "read_many_files"
+            | "grep_search"
+            | "glob_search"
+            | "list_directory"
+            | "file_outline"
+            | "FindSymbol"
+            | "TodoWrite"
+            | "Screenshot"
+            | "ViewPage"
+            | "LookAtImage"
+            | "Icon"
+            | "Font"
+            | "WebSearch"
+            | "WebFetch"
+            | "Remember"
+            | "Consult"
+    )
+}
+
 /// Outils de Claw qu'un modèle écrit parfois comme une commande du shell.
 const TOOL_NAMES: &[&str] = &[
     "KillShell",

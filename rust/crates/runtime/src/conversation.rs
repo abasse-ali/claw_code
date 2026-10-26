@@ -328,6 +328,9 @@ pub struct ConversationRuntime<C, T> {
     /// Dernière page regardée par le modèle (`Screenshot`, `ViewPage`) :
     /// celle que reprend la revue visuelle.
     page_target: Option<String>,
+    /// Dernière capture demandée par le modèle (entrée normalisée, résultat),
+    /// tant qu'aucun fichier n'a pu changer depuis : la même demande la reprend.
+    last_capture: Option<(String, String)>,
     /// Arrêt demandé par un hook (`"continue": false`) : le tour s'arrête
     /// après les appels en cours.
     hook_stop: Option<String>,
@@ -404,6 +407,9 @@ struct TurnAids {
     interface_commands: std::collections::BTreeSet<String>,
     /// La méthode de design est jointe à la demande de ce tour.
     design_guided: bool,
+    /// Le message du tour demande des corrections, pas une création : la
+    /// revue renvoie ce qui est mesuré, sans note de design à atteindre.
+    repair: bool,
     /// Le plan de design de ce tour a été relu avant le code.
     plan_reviewed: bool,
     /// Le modèle a écrit l'interface sans plan : il lui a été demandé.
@@ -634,6 +640,13 @@ fn message_text(message: &ConversationMessage) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Clé d'une demande de capture : ses champs triés, sans les espaces.
+fn capture_key(input: &str) -> Option<String> {
+    serde_json::from_str::<std::collections::BTreeMap<String, serde_json::Value>>(input)
+        .ok()
+        .and_then(|fields| serde_json::to_string(&fields).ok())
 }
 
 /// Sortie et statut d'un message de résultat d'outil.
@@ -1236,6 +1249,7 @@ where
             environment: EnvironmentProbe::Pending,
             tool_images: Vec::new(),
             page_target: None,
+            last_capture: None,
             hook_stop: None,
             question_turn: false,
         }
@@ -1874,6 +1888,7 @@ where
                 .and_then(|cwd| harness::DataSnapshot::take(&cwd)),
             project: project_turn,
             design_guided,
+            repair: crate::web_design::is_repair_request(&request_text),
             code_languages,
             ..TurnAids::default()
         };
@@ -3914,7 +3929,11 @@ where
             _ => request.to_string(),
         };
         let bar = crate::web_design::design_bar();
-        let critique = if images.is_empty() {
+        // Une demande de corrections se juge sur ce qui est mesuré (défauts,
+        // régressions) : pas de note de design à atteindre. Vu le 26 octobre
+        // 2026 (session #31, passage 4) : 89 minutes après une première
+        // réponse à 17 minutes, pour une note restée à 4 sur 8.
+        let critique = if images.is_empty() || aids.repair {
             None
         } else {
             self.api_client
@@ -4066,7 +4085,12 @@ where
     }
 
     fn continue_design(&mut self, aids: &mut TurnAids, at: &str) -> bool {
-        if self.subagent || interrupt_requested() || !harness::enabled(Aid::DesignReview) {
+        // Des corrections ne poursuivent pas une note de design.
+        if aids.repair
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::DesignReview)
+        {
             return false;
         }
         let max = crate::web_design::max_continuations();
@@ -5755,12 +5779,34 @@ where
         );
         match permission_outcome {
             PermissionOutcome::Allow => {
+                // La même capture, demandée par le modèle sans qu'aucun fichier
+                // ait pu changer depuis : son résultat, sans refaire le rendu.
+                // Vu le 26 octobre 2026 (session #31, passage 4) : 74 captures
+                // du modèle, souvent deux de suite sans rien changer entre elles.
+                let model_capture = tool_name == "Screenshot"
+                    && !tool_use_id.starts_with("claw-")
+                    && !self.api_client.reads_images();
+                let capture_key = model_capture.then(|| capture_key(input)).flatten();
+                if let (Some(key), Some((last, output))) = (&capture_key, &self.last_capture) {
+                    if key == last {
+                        let output = format!("{}\n{output}", harness::SAME_CAPTURE_NOTE);
+                        let message =
+                            ConversationMessage::tool_result(tool_use_id, tool_name, output, false);
+                        return (message, false);
+                    }
+                }
                 crate::checkpoint::record_before_write(&tool_name, input);
                 let (mut output, mut is_error) = match self.tool_executor.execute(&tool_name, input)
                 {
                     Ok(output) => (output, false),
                     Err(error) => (error.to_string(), true),
                 };
+                if !harness::leaves_files_alone(&tool_name) {
+                    self.last_capture = None;
+                }
+                if let (Some(key), false) = (capture_key, is_error) {
+                    self.last_capture = Some((key, output.clone()));
+                }
                 self.tool_images.extend(self.tool_executor.take_images());
                 output = merge_hook_feedback(pre_hook_result.messages(), output, false);
 
@@ -8821,6 +8867,51 @@ mod tests {
             check.contains("Broken by your last change") && check.contains("430px wide"),
             "{check}"
         );
+    }
+
+    #[test]
+    fn the_same_capture_without_any_change_is_not_rendered_again() {
+        let _serial = crate::test_serial();
+        // Session #31 (26 octobre 2026, passage 4) : 74 captures du modèle,
+        // souvent deux de suite sans rien changer entre elles.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("meme-capture");
+        let shot = || {
+            tool_step(
+                "Screenshot",
+                &serde_json::json!({ "path": page.display().to_string(), "viewports": ["phone"] })
+                    .to_string(),
+            )
+        };
+        let reordered = tool_step(
+            "Screenshot",
+            &serde_json::json!({ "viewports": ["phone"], "path": page.display().to_string() })
+                .to_string(),
+        );
+        let write = tool_step(
+            "write_file",
+            &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                .to_string(),
+        );
+        let steps = vec![shot(), reordered, write, shot(), text_step("Fini.")];
+        let ((mut runtime, observed, _), shots) = measured_runtime(steps, vec![Some(MEASURED)]);
+        runtime.run_turn("regarde la page", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        // 1 capture, la même reprise, puis après la modification : la
+        // vérification de Claw et la nouvelle capture du modèle.
+        assert_eq!(shots.get(), 3, "{:?}", observed.notices);
+        assert!(
+            observed.requests[2]
+                .contains("No file changed since your last identical Screenshot call"),
+            "{}",
+            observed.requests[2]
+        );
+        assert!(!observed.requests[4]
+            .rsplit("Screenshot")
+            .next()
+            .unwrap_or_default()
+            .contains("No file changed since"));
     }
 
     #[test]

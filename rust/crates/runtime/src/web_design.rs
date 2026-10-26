@@ -294,6 +294,72 @@ pub fn is_interface_request(text: &str) -> bool {
         && (has_any(&folded, MAKE_WORDS) || has_any(&folded, TASTE_WORDS))
 }
 
+/// Marques d'une demande de corrections : un verbe qui répare, ou des
+/// défauts signalés (« il reste », « toujours », « coupé »).
+const REPAIR_VERBS: &[&str] = &["corrig", "repar", "remet", "fix", "repair"];
+const COMPLAINT_WORDS: &[&str] = &[
+    "il reste",
+    "toujours",
+    "encore",
+    "ne marche",
+    "marche pas",
+    "n'ouvre",
+    "n ouvre",
+    "disparu",
+    "coupe",
+    "colle",
+    "bug",
+    "probleme",
+    "still",
+    "broken",
+    "doesn't work",
+    "not working",
+];
+/// Marques d'une création ou d'une refonte : celles-là se jugent au design.
+const CREATION_WORDS: &[&str] = &[
+    "cree",
+    "creer",
+    "construis",
+    "refais",
+    "refaire",
+    "refonte",
+    "redesign",
+    "nouveau site",
+    "nouvelle page",
+    "plus beau",
+    "plus belle",
+    "plus joli",
+    "plus jolie",
+    "plus moderne",
+    "modernise",
+    "embellis",
+    "create",
+    "build",
+    "prettier",
+    "more beautiful",
+];
+
+/// Le message demande des corrections sur une interface déjà faite, pas une
+/// création ni une refonte. Vu le 26 octobre 2026 (session #31, passage 4) :
+/// une liste de sept défauts, réglée pour l'essentiel en 17 minutes, puis 89
+/// minutes de revues pour monter une note de design de 4 à 8, jamais
+/// atteinte.
+#[must_use]
+pub fn is_repair_request(text: &str) -> bool {
+    let folded = crate::team::without_accents(&text.to_lowercase()).replace('\u{2019}', "'");
+    if CREATION_WORDS.iter().any(|word| folded.contains(word)) {
+        return false;
+    }
+    REPAIR_VERBS
+        .iter()
+        .any(|verb| crate::team::has_word_start(&folded, verb))
+        || COMPLAINT_WORDS
+            .iter()
+            .filter(|word| folded.contains(*word))
+            .count()
+            >= 2
+}
+
 /// Méthode jointe à une demande d'interface (aussi à un message court qui
 /// poursuit une telle demande).
 #[must_use]
@@ -1229,6 +1295,26 @@ mod tests {
         page_target, problem_key, read_audit, regression_note, regressions, review_feedback,
         screenshot_input, Audit,
     };
+
+    #[test]
+    fn a_list_of_fixes_is_told_from_a_creation_or_a_redesign() {
+        // Messages réels de la session #31.
+        for repair in [
+            "Le texte des places est bien maintenant, merci. Mais sur mon téléphone :\n- Quand j'appuie sur « Je conduis », la fenêtre est collée à gauche.\n- Le bouton « Je propose ma voiture » a disparu.\nCorrige ça, regarde la page après chaque changement.",
+            "C'est mieux en haut, merci. Mais sur mon téléphone il reste : les titres ont toujours les mots collés.",
+            "the menu is still broken on my phone and the form doesn't work",
+        ] {
+            assert!(super::is_repair_request(repair), "{repair}");
+        }
+        for creation in [
+            "bonjour, je m'occupe du club de foot des petits de mon quartier. il me faudrait un petit site pour ça, que les parents puissent regarder sur leur tel",
+            "Refais la page d'accueil, plus moderne",
+            "Corrige les couleurs et rends le site plus beau",
+            "Crée un site pour ma boulangerie",
+        ] {
+            assert!(!super::is_repair_request(creation), "{creation}");
+        }
+    }
 
     #[test]
     fn a_dead_button_found_on_desktop_before_the_turn_is_not_new_on_the_phone() {
