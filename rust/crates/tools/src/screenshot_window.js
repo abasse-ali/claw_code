@@ -13,16 +13,23 @@
     const rect = el.getBoundingClientRect();
     return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
   };
-  const box = [...document.querySelectorAll("dialog[open], [role=dialog], [aria-modal=true]")].filter(shown).pop();
+  // Une fenêtre de 0px dont le panneau est en position fixe compte aussi.
+  const open = (el) => {
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    return shown(el) || [...el.querySelectorAll("*")].slice(0, 300).some(shown);
+  };
+  const box = [...document.querySelectorAll("dialog[open], [role=dialog], [aria-modal=true]")].filter(open).pop();
   if (!box) return [];
   const problems = [];
   // Ce qui se voit : la fenêtre, ou, si elle est transparente (un <dialog>
-  // plein écran qui pose son panneau en bas), son plus grand panneau coloré.
+  // plein écran qui pose son panneau en bas) ou sans taille (un <dialog> de 0px
+  // dont le panneau est en position fixe), son plus grand panneau coloré.
   const painted = (el) => {
     const color = getComputedStyle(el).backgroundColor;
     return color && !/rgba?\(0, 0, 0, 0\)|transparent/.test(color);
   };
-  const panel = painted(box) ? box : [...box.querySelectorAll("*")].filter((el) => shown(el) && painted(el))
+  const panel = painted(box) && shown(box) ? box : [...box.querySelectorAll("*")].filter((el) => shown(el) && painted(el))
     .sort((a, b) => {
       const ra = a.getBoundingClientRect();
       const rb = b.getBoundingClientRect();
@@ -32,7 +39,7 @@
   const rect = panel.getBoundingClientRect();
   const dialogStyle = getComputedStyle(box);
   const px = (value) => Math.round(value);
-  const fromDialog = box.tagName === "DIALOG" && (/^calc\(100% -/.test(dialogStyle.maxWidth) || /^calc\(100% -/.test(dialogStyle.maxHeight))
+  const fromDialog = box.tagName === "DIALOG" && shown(box) && (/^calc\(100% -/.test(dialogStyle.maxWidth) || /^calc\(100% -/.test(dialogStyle.maxHeight))
     ? " A <dialog> keeps the browser's max-width and max-height (calc(100% - 2em - 6px)): set max-width: 100% and max-height: 100% (or the window's own sizes) with margin: 0."
     : "";
   const left = rect.left;
