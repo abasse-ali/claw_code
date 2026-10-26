@@ -1527,6 +1527,22 @@ fn strings(value: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Remet la page en mode clavier avant la mesure : après un clic de souris
+/// (une action, un essai précédent), Chrome ne montre plus `:focus-visible`
+/// sur un focus donné par script, et la mesure 15 voyait « aucun focus
+/// visible » sur une page qui en a. Vu le 26 octobre 2026 (session #32) :
+/// l'alerte répétée vingt minutes, `!important` ajouté trois fois pour rien.
+/// Un appui sur Maj, sans effet sur la page, suffit.
+fn keyboard_mode(devtools: &mut DevTools) -> Result<(), String> {
+    for kind in ["rawKeyDown", "keyUp"] {
+        devtools.call(
+            "Input.dispatchKeyEvent",
+            json!({ "type": kind, "key": "Shift", "code": "ShiftLeft", "windowsVirtualKeyCode": 16, "nativeVirtualKeyCode": 16 }),
+        )?;
+    }
+    Ok(())
+}
+
 /// Exécute une action ; rend ce qui s'est passé, en une ligne.
 fn run_action(devtools: &mut DevTools, action: &Action, wait: Duration) -> Result<String, String> {
     if let Some(ms) = action.wait_ms {
@@ -2034,6 +2050,7 @@ fn capture(
             }
         }
     }
+    keyboard_mode(devtools)?;
     let audit = devtools
         .evaluate(AUDIT_SCRIPT)
         .map_err(|error| format!("the layout check failed in the page: {error}"))?;
@@ -3796,6 +3813,37 @@ mod tests {
             .position(|pair| pair[0] == 0xFF && matches!(pair[1], 0xC0 | 0xC2))
             .expect("trame");
         u32::from(data[at + 5]) << 8 | u32::from(data[at + 6])
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn the_focus_ring_is_seen_after_a_mouse_click() {
+        // Session #32 (26 octobre 2026) : après les clics des actions, le
+        // focus donné par la mesure ne montrait plus :focus-visible.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-focus-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |css: &str| {
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Boulangerie</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button, a {{ outline: none; font: inherit; padding: 12px; }} {css}</style></head><body><h1>Réservez</h1><button id=\"demain\">Demain</button><button>Après-demain</button><a href=\"#infos\">Infos</a><p id=\"infos\">Ouvert du mardi au dimanche</p></body></html>"),
+            )
+            .expect("html");
+        };
+        let page = format!("claw-focus-{}/index.html", std::process::id());
+        let capture = || {
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["desktop"]));
+            request.actions = Some(json!([{ "click": "#demain" }]));
+            super::take(&request).expect("capture")["captures"][0]["problems"].to_string()
+        };
+        write(":focus-visible { outline: 3px solid #8a5a2b; outline-offset: 3px; }");
+        let ringed = capture();
+        write("");
+        let bare = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!ringed.contains("No visible keyboard focus"), "{ringed}");
+        assert!(bare.contains("No visible keyboard focus"), "{bare}");
     }
 
     #[test]
