@@ -554,6 +554,39 @@
       problems.push(`The text of the fixed ${name(bar)} (${Math.round(rb.height)}px high) does not fit in it: ${parts.join("; ")}. Make the bar fit its content (height: auto with padding, or a min-height instead of a fixed height), shorten or hide the subtitle on phones, and keep the title on one line (white-space: nowrap; text-overflow: ellipsis)`);
     }
   }
+  // 9c. Fine bande vide sous la barre du haut : le premier bloc de la page
+  // commence quelques pixels plus bas et trace son propre bord sur toute la
+  // largeur ; entre les deux traits, une bande sans rien. Vu le 26 octobre 2026
+  // (session #31) : 17px entre l'en-tête et le bord de la carte du prochain
+  // match, signalée par l'utilisateur puis dite « supprimée » par l'agent.
+  if (window.scrollY < 2) {
+    const drawsEdge = (el) => {
+      const style = css(el);
+      const edge = parse(style.borderTopColor);
+      if (parseFloat(style.borderTopWidth) >= 1 && style.borderTopStyle !== "none" && edge && edge.a > 0.05) return true;
+      const fill = parse(style.backgroundColor);
+      if (!fill || fill.a < 0.05 || !el.parentElement) return false;
+      const under = background(el.parentElement);
+      return Math.abs(fill.r - under.r) + Math.abs(fill.g - under.g) + Math.abs(fill.b - under.b) > 24;
+    };
+    for (const bar of topBars) {
+      const rb = box.get(bar);
+      const edged = visible.filter((el) => !pinned(el) && !bar.contains(el) && box.get(el).width >= W * 0.9
+        && box.get(el).top >= rb.bottom + 4 && box.get(el).top <= rb.bottom + 28 && drawsEdge(el))
+        .sort((a, b) => box.get(a).top - box.get(b).top)[0];
+      if (!edged) continue;
+      const top = box.get(edged).top;
+      // Un dessin de fond qui passe sous la barre et dans le bloc n'occupe pas
+      // la bande : seul compte ce qui commence dedans.
+      const between = visible.some((el) => !pinned(el) && !bar.contains(el) && !el.contains(edged)
+        && (ownText(el) || el.matches("img, svg, video, canvas, input, select, textarea, button"))
+        && !el.closest("[aria-hidden=true]")
+        && box.get(el).top >= rb.bottom - 2 && box.get(el).top < top - 1);
+      if (between) continue;
+      blame([edged]);
+      problems.push(`A thin empty strip, ${Math.round(top - rb.bottom)}px high, between the bottom of the fixed ${name(bar)} and the top edge of ${name(edged)}, which spans the whole screen width: two lines with nothing between them read as a stray band. Start ${name(edged).replace(/ ".*$/, "")} right under the bar (no padding or margin above it), or drop its full-width top border and background on phones`);
+    }
+  }
   // Barre fixe en bas (navigation d'une appli) : défilée jusqu'au bout, la page
   // finit sous elle si rien ne la décale. Vu le 25 octobre 2026 (session #30) :
   // « Terminer la séance » restait sous la barre, aucune séance ne s'enregistrait.

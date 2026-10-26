@@ -3065,6 +3065,49 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn a_thin_strip_under_the_fixed_header_is_found_in_a_real_browser() {
+        // Session #31 (26 octobre 2026) : 17px vides entre l'en-tête fixe et le
+        // bord de la carte du prochain match, sur toute la largeur du
+        // téléphone ; un dessin de fond passait sous les deux. Collée à la
+        // barre, ou contenu dans l'intervalle, la page est saine.
+        let cwd = std::env::current_dir().expect("dossier");
+        let problems = |name: &str, css: &str, between: &str| {
+            let dir = cwd.join(format!("claw-bande-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Club</title><style>body {{ margin: 0; font: 16px/1.5 sans-serif; }} header {{ position: fixed; top: 0; left: 0; right: 0; height: 68px; background: #fff; border-bottom: 1px solid #ddd; }} main {{ padding-top: 60px; }} .hero {{ position: relative; padding-top: 26px; }} .hero svg {{ position: absolute; top: -30px; right: 0; }} .carte {{ padding: 24px 16px; border-top: 1px solid #d1d5db; background: #fff; }} {css}</style></head><body><header><strong>FC Petit Quartier</strong></header><main><section class=\"hero\"><svg width=\"200\" height=\"200\" aria-hidden=\"true\"><circle cx=\"100\" cy=\"100\" r=\"90\" fill=\"#f3f4f6\"/></svg>{between}<div class=\"carte\"><h1>U11 vs FC Voisins</h1><p>Samedi 10:00</p></div></section></main></body></html>"),
+            )
+            .expect("html");
+            let page = format!("claw-bande-{name}-{}/index.html", std::process::id());
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let broken = problems("casse", "", "");
+        assert!(
+            broken.contains("thin empty strip, 17px high, between the bottom of the fixed header"),
+            "{broken}"
+        );
+        assert!(broken.contains("div.carte"), "{broken}");
+        for (name, css, between) in [
+            ("collee", ".hero { padding-top: 9px; }", ""),
+            ("sans-bord", ".carte { border-top: 0; }", ""),
+            (
+                "remplie",
+                ".hero { padding-top: 0; }",
+                "<p style=\"margin: 8px 16px\">Prochain match</p>",
+            ),
+        ] {
+            let sound = problems(name, css, between);
+            assert!(!sound.contains("thin empty strip"), "{name}: {sound}");
+        }
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn a_misplaced_window_is_measured_in_a_real_browser() {
         // Session #31 (26 octobre 2026), sur l'iPhone du parent : « Proposer
         // ma voiture » faisait 352px sur 390, collée à gauche et en haut au

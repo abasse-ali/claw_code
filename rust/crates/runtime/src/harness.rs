@@ -4215,6 +4215,63 @@ pub fn untried_commands(answer: &str, executed: &[String]) -> Vec<String> {
     untried
 }
 
+/// Ce qui, dans une réponse finale sur une page web, la destine à un
+/// développeur : le relecteur de Claw nommé, des bouts de code, des noms de
+/// fichiers. Vu le 26 octobre 2026 (session #31) : « Les deux points du
+/// reviewer ont été corrigés », `styles.css`, `app.js:725-731`, `node --check`,
+/// à un parent qui avait demandé des corrections sur le site du club.
+#[must_use]
+pub fn developer_signs(answer: &str) -> Vec<String> {
+    let lower = answer.to_lowercase();
+    let mut signs = Vec::new();
+    if ["reviewer", "relecteur", "relecture", "[claw]"]
+        .iter()
+        .any(|word| lower.contains(word))
+    {
+        signs.push("it talks about Claw's reviewer or notes".to_string());
+    }
+    let spans: Vec<&str> = answer
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|span| !span.trim().is_empty())
+        .collect();
+    let files: Vec<&str> = answer
+        .split(|c: char| c.is_whitespace() || "`()[]«»\"',;".contains(c))
+        .filter(|word| {
+            let name = word.split(':').next().unwrap_or_default();
+            name.rsplit_once('.').is_some_and(|(stem, extension)| {
+                !stem.is_empty()
+                    && [
+                        "css", "js", "html", "ts", "tsx", "jsx", "json", "py", "rs", "vue",
+                    ]
+                    .contains(&extension.to_ascii_lowercase().as_str())
+            })
+        })
+        .collect();
+    if spans.len() >= 2 {
+        signs.push(format!(
+            "{} pieces of code such as `{}`",
+            spans.len(),
+            spans[0]
+        ));
+    }
+    if files.len() >= 2 {
+        signs.push(format!("file names such as {}", files[0]));
+    }
+    signs
+}
+
+/// Message renvoyé au modèle dont la réponse sur une page est écrite pour un
+/// développeur.
+#[must_use]
+pub fn plain_answer_feedback(signs: &[String]) -> String {
+    format!(
+        "[Claw] Your final answer is written for a developer ({}). The user does not read code and never saw Claw's checks or reviewer: those are your own work, not theirs. Rewrite only the answer now, without calling any tool, and claim only what you checked on the page. {FINAL_ANSWER_SHAPE}",
+        signs.join("; ")
+    )
+}
+
 /// Message renvoyé au modèle qui conseille des commandes jamais lancées.
 #[must_use]
 pub fn untried_feedback(commands: &[String]) -> String {
@@ -5299,6 +5356,30 @@ mod invented_turn_tests {
         assert!(!invented_turn(
             "User stories : chaque ligne `user` du fichier est lue."
         ));
+    }
+}
+
+#[cfg(test)]
+mod plain_answer_tests {
+    use super::developer_signs;
+
+    #[test]
+    fn an_answer_written_for_a_developer_is_told_from_a_plain_one() {
+        // La réponse du passage du 26 octobre 2026 (session #31).
+        let seen = "Les deux points du reviewer ont été corrigés :\n\n1. **Police rétablie à Inter** : `styles.css` (`--font-text: \"Inter\"`) et `index.html` chargent maintenant `Inter`.\n2. Dans `app.js:725-731`, les titres des matchs sont raccourcis.\n\nVérification : syntaxe JS valide (`node --check app.js` → OK).";
+        let signs = developer_signs(seen);
+        assert_eq!(signs.len(), 3, "{signs:?}");
+        assert!(signs[0].contains("reviewer"));
+        assert!(signs[1].contains("`styles.css`"), "{signs:?}");
+        assert!(signs[2].contains("styles.css"), "{signs:?}");
+        for plain in [
+            "Le texte de la fenêtre « Proposer ma voiture » s'affiche en entier, vérifié sur la page au téléphone et à l'ordinateur. Il reste un seul bouton « Je propose ma voiture » sous la liste.",
+            // Un seul nom ou une adresse n'en font pas une réponse de développeur.
+            "Ouvrez `index.html` dans le navigateur : le menu se replie bien.",
+            "Le site est en ligne sur https://club.example.fr/index.html et la page des matchs aussi.",
+        ] {
+            assert!(developer_signs(plain).is_empty(), "{plain}");
+        }
     }
 }
 
