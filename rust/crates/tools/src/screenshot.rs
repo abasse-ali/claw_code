@@ -3447,6 +3447,48 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn a_menu_button_beside_its_menu_a_repeated_label_and_spilling_text_are_found() {
+        // Session #32 : le bouton du menu à côté des liens à l'ordinateur,
+        // « Votre prénom » trois fois, « Aujourd'hui » plus large que sa case.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-libelles-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |css: &str, legend: &str| {
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Boulangerie</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button, input {{ font: inherit; }} .jours {{ display: flex; gap: 8px; }} .jour {{ width: 90px; white-space: nowrap; padding: 8px; }} {css}</style></head><body><header><button id=\"menu\" aria-controls=\"liens\" aria-expanded=\"false\" aria-label=\"Ouvrir le menu\">Menu</button><nav id=\"liens\"><a href=\"#r\">Je réserve</a> <a href=\"#b\">Espace boulanger</a></nav></header><h1 id=\"r\">Réservez</h1><div class=\"jours\"><button class=\"jour\">Aujourd'hui exceptionnel</button><button class=\"jour\">Demain</button></div><form><fieldset><legend>{legend}</legend><label for=\"nom\">Votre prénom</label><input id=\"nom\" placeholder=\"Votre prénom\"></fieldset></form><p id=\"b\">Espace</p></body></html>"),
+            )
+            .expect("html");
+        };
+        let page = format!("claw-libelles-{}/index.html", std::process::id());
+        let capture = || {
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["desktop"]));
+            super::take(&request).expect("capture")["captures"][0]["problems"].to_string()
+        };
+        write("", "Votre prénom");
+        let broken = capture();
+        write("#menu { display: none; } .jour { white-space: normal; overflow-wrap: anywhere; } #nom::placeholder { color: #555; }", "Qui vient chercher la commande ?");
+        let sound_html = std::fs::read_to_string(dir.join("index.html"))
+            .expect("html")
+            .replace("placeholder=\"Votre prénom\"", "placeholder=\"Marie\"");
+        std::fs::write(dir.join("index.html"), sound_html).expect("html");
+        let sound = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        for expected in [
+            "A menu button shows while the menu it opens is already on screen: button#menu",
+            "The same words said twice or three times around a field",
+            "Text wider than its button or box, spilling past its edge: button.jour",
+        ] {
+            assert!(broken.contains(expected), "{expected}: {broken}");
+        }
+        for absent in ["menu button shows", "said twice", "spilling past"] {
+            assert!(!sound.contains(absent), "{absent}: {sound}");
+        }
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn a_fixed_banner_over_the_title_and_blanks_to_fill_in_are_found() {
         // Session #32, passage 4 : « Mode local uniquement (Firebase non
         // chargé) » fixé sous l'en-tête cachait « Réservez votre pain », et le

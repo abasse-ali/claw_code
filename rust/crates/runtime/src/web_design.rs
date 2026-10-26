@@ -418,6 +418,26 @@ pub fn account_setup_note(sample: &str) -> String {
     )
 }
 
+/// Plaintes sur l'apparence : elles se jugent au design, même au milieu de
+/// corrections. Vu le 26 octobre 2026 (session #32) : le site n'avait jamais
+/// été noté (premier passage arrêté, puis des corrections).
+const LOOKS_COMPLAINTS: &[&str] = &[
+    "triste",
+    "moche",
+    "pas joli",
+    "pas beau",
+    "pas belle",
+    "fade",
+    "terne",
+    "austere",
+    "ennuyeux",
+    "sans vie",
+    "ugly",
+    "boring",
+    "dull",
+    "looks bad",
+];
+
 /// Le message demande une nouvelle page, une refonte ou un embellissement :
 /// ce qui se juge au design, plan compris.
 #[must_use]
@@ -434,7 +454,11 @@ pub fn asks_new_design(text: &str) -> bool {
 #[must_use]
 pub fn is_repair_request(text: &str) -> bool {
     let folded = crate::team::without_accents(&text.to_lowercase()).replace('\u{2019}', "'");
-    if CREATION_WORDS.iter().any(|word| folded.contains(word)) {
+    if CREATION_WORDS
+        .iter()
+        .chain(LOOKS_COMPLAINTS)
+        .any(|word| folded.contains(word))
+    {
         return false;
     }
     REPAIR_VERBS
@@ -1639,6 +1663,8 @@ mod tests {
         // Session #32, passage 2 : aucun verbe de réparation, deux constats.
         let reported = "C'est joli, merci ! Mais j'ai essayé sur mon téléphone et sur celui de ma fille : la réservation qu'elle a faite sur le sien n'apparaît pas dans ma liste du matin. Et quand j'appuie sur « Espace boulanger » j'arrive tout en bas de la page, je dois remonter. Il faut que je voie les commandes de tous mes clients, sinon ça ne me sert à rien.";
         assert!(is_repair_request(reported));
+        // Une plainte sur l'apparence se juge au design.
+        assert!(!is_repair_request("Je ne saurai pas créer un compte toute seule, il me faut quelque chose où je n'ai rien à régler. Et le site fait un peu triste : il n'y a pas de photo de mon pain, et le titre est caché, je dois remonter."));
         assert!(!asks_new_design(reported));
         assert!(asks_new_design("Refais la page d'accueil, plus moderne"));
         assert!(!is_repair_request("Ajoute une page pour les tarifs"));

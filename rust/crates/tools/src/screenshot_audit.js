@@ -457,6 +457,45 @@
     }))}. Let the row wrap (flex-wrap: wrap, min-width: 0) or stack it on phones, instead of letting the box cut it`);
   }
 
+  // 7d. Bouton de menu affiché alors que le menu qu'il ouvre est déjà là (à
+  // l'ordinateur, le bouton du menu à côté des liens). Vu le 26 octobre 2026 (session #32).
+  const redundant = visible.filter((el) => el.matches("[aria-controls][aria-expanded=false], button[aria-controls]")
+    && el.getAttribute("aria-expanded") !== "true").filter((toggle) => {
+    const panel = document.getElementById(toggle.getAttribute("aria-controls") || "");
+    return panel && box.has(panel) && !panel.contains(toggle)
+      && [...panel.querySelectorAll("a[href], button")].some((link) => box.has(link));
+  });
+  if (redundant.length) {
+    blame(redundant);
+    problems.push(`A menu button shows while the menu it opens is already on screen: ${list(redundant.map(name), 3)}. Hide the button at the sizes where the links are shown (display: none in that media query), or fold the links away`);
+  }
+
+  // 7e. Même libellé répété autour d'un champ : le titre du groupe, l'étiquette
+  // et le texte d'exemple disent la même chose. Vu le 26 octobre 2026 (session
+  // #32) : « Votre prénom » trois fois de suite.
+  const same = (a, b) => a && b && a.replace(/\s+/g, " ").trim().toLowerCase() === b.replace(/\s+/g, " ").trim().toLowerCase();
+  const repeated = visible.filter((el) => el.matches("input, select, textarea")).filter((field) => {
+    const label = field.labels && field.labels[0] ? field.labels[0].innerText : "";
+    const legend = field.closest("fieldset")?.querySelector("legend")?.innerText || "";
+    const hint = field.getAttribute("placeholder") || "";
+    return (same(label, legend) || (same(label, hint) && hint.length > 3)) && label;
+  });
+  if (repeated.length) {
+    blame(repeated);
+    problems.push(`The same words said twice or three times around a field (group title, label, example text): ${list(repeated.map((field) => `${name(field)} "${(field.labels[0].innerText || "").trim()}"`), 3)}. Keep one label, and use the example text for an example (« Marie », « 06 12 34 56 78 »)`);
+  }
+
+  // 7f. Texte qui dépasse de son bouton ou de sa carte, sans être coupé : il
+  // déborde sur le voisin. Vu le 26 octobre 2026 (session #32) : « Aujourd'hui »
+  // plus large que sa case.
+  const spilling = visible.filter((el) => el.matches("button, [role=button], label, a")
+    && css(el).overflowX === "visible" && box.get(el).width > 20
+    && el.scrollWidth > el.clientWidth + 3 && words(el)).slice(0, 6);
+  if (spilling.length) {
+    blame(spilling);
+    problems.push(`Text wider than its button or box, spilling past its edge: ${list(spilling.map((el) => `${name(el)} (${el.scrollWidth}px of content in ${el.clientWidth}px)`), 3)}. Let it wrap (overflow-wrap: anywhere, hyphens: auto), make the text smaller on phones, or give the box room`);
+  }
+
   // 7c. Icônes invisibles : dessinées de la couleur de leur fond (une icône vert
   // foncé dans un bouton vert foncé). Vu le 25 octobre 2026 : « Je conduis » et
   // « Prochain match » portaient une icône invisible qui décalait leur texte.
