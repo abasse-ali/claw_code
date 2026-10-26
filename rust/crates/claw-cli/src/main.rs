@@ -10647,6 +10647,9 @@ fn messages_for_model(model: &str, messages: &[InputMessage], passback: bool) ->
                 .filter(|block| matches!(block, InputContentBlock::Image { .. }))
                 .count();
             let mut image_number = 0;
+            // Tranches d'une page entière (résultat de `Screenshot`), dans
+            // l'ordre des images qui suivent ce résultat.
+            let mut slices = std::collections::VecDeque::new();
             let content = message
                 .content
                 .iter()
@@ -10660,9 +10663,23 @@ fn messages_for_model(model: &str, messages: &[InputMessage], passback: bool) ->
                     // modèle reçoit la description de l'image à sa place.
                     InputContentBlock::Image { source } if blind => {
                         image_number += 1;
+                        let slice = slices.pop_front().flatten();
                         InputContentBlock::Text {
-                            text: image_reader::replacement(source, image_number, image_total),
+                            text: image_reader::replacement(
+                                source,
+                                image_number,
+                                image_total,
+                                slice.as_ref(),
+                            ),
                         }
+                    }
+                    InputContentBlock::ToolResult { content, .. } if blind => {
+                        for part in content {
+                            if let api::ToolResultContentBlock::Text { text } = part {
+                                slices.extend(image_reader::slices_of_result(text));
+                            }
+                        }
+                        block.clone()
                     }
                     other => other.clone(),
                 })
