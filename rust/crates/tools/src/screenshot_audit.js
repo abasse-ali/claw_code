@@ -360,6 +360,59 @@
   if (pale.length) blame(paleEls);
   if (pale.length) problems.push(`Text with too little contrast against its background, 4.5:1 is needed (3:1 for large text): ${list(pale)}`);
 
+  // 7b. Cadre dans un cadre : une boîte bordée et colorée qui ne contient
+  // qu'une autre boîte bordée et colorée (une icône à côté au plus). Vu le
+  // 26 octobre 2026 (session #31) : « Complet » dans une pastille verte, elle-
+  // même dans un encadré vert ; le parent l'a vu doublé, « comme un bouton ».
+  const framed = (el) => {
+    const style = css(el);
+    const fill = parse(style.backgroundColor);
+    const edge = parse(style.borderTopColor);
+    return fill && fill.a > 0.05 && parseFloat(style.borderTopWidth) >= 1 && edge && edge.a > 0.05 && style.borderTopStyle !== "none";
+  };
+  const nested = visible.filter((el) => framed(el) && words(el)).map((outer) => {
+    const inner = [...outer.querySelectorAll("*")].find((el) => el !== outer && box.has(el) && framed(el) && words(el) === words(outer));
+    return inner && box.get(outer).height < box.get(inner).height * 2.5 ? [outer, inner] : null;
+  }).filter(Boolean).filter(([outer], _, all) => !all.some(([other]) => other !== outer && outer.contains(other)));
+  if (nested.length) {
+    blame(nested[0]);
+    problems.push(`A framed box that holds nothing but another framed box: ${list(nested.map(([outer, inner]) => `${name(inner)} inside ${name(outer).replace(/ ".*$/, "")}`), 3)}. Two borders and two backgrounds around the same words read as doubled, and like a button. Keep one frame: remove the border and background of the outer box, or of the inner one`);
+  }
+
+  // 7c. Étiquette courte dans une barre pleine largeur : un nom de quelques
+  // lettres dans un bandeau coloré de toute la largeur ressemble à un champ à
+  // remplir ou à une barre de progression. Vu le 26 octobre 2026 (session
+  // #31) : les noms des conducteurs, 72px de texte dans des barres de 313px.
+  const stretched = visible.filter((el) => {
+    if (!words(el) || words(el).length > 30 || el.closest("a, button, input, select, textarea, label, summary, td, th, [role=button], [role=progressbar], [role=alert], [role=status]")) return false;
+    // Une pastille (coins arrondis), pas une ligne de liste ou de tableau.
+    if (css(el).cursor === "pointer" || el.children.length > 2 || parseFloat(css(el).borderTopLeftRadius) < 6) return false;
+    const rect = box.get(el);
+    const parent = el.parentElement && box.get(el.parentElement);
+    if (!parent || rect.width < 200 || rect.width < parent.width * 0.6 || rect.height > 56) return false;
+    const fill = parse(css(el).backgroundColor);
+    const filled = (fill && fill.a > 0.05) || parseFloat(css(el).borderTopWidth) >= 1;
+    if (!filled) return false;
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const text = range.getBoundingClientRect();
+    return text.width > 0 && text.width < rect.width * 0.35 && text.height < rect.height + 1;
+  });
+  const families = new Map();
+  for (const el of stretched) {
+    const key = `${el.parentElement.tagName}>${el.tagName}.${typeof el.className === "string" ? el.className.trim() : ""}`;
+    families.set(key, [...(families.get(key) || []), el]);
+  }
+  const labelBars = [...families.values()].filter((els) => els.length >= 2 || document.querySelectorAll(`.${CSS.escape((els[0].classList[0] || "x"))}`).length >= 2).flat();
+  if (labelBars.length) {
+    blame(labelBars);
+    problems.push(`Short labels stretched into bars as wide as their container: ${list(labelBars.map((el) => {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      return `${name(el)} (${Math.round(range.getBoundingClientRect().width)}px of text in a ${Math.round(box.get(el).width)}px filled bar)`;
+    }), 3)}. A filled bar that wide around a few words looks like an empty field to fill in or a progress bar. Size each label to its text (display: inline-flex, or width: fit-content / align-self: flex-start in a flex column)`);
+  }
+
   // 7b. Texte rogné par un parent qui découpe (overflow: hidden) : une partie du
   // texte est dessinée hors du cadre et disparaît. Vu le 25 octobre 2026 (site
   // du club, session #31) : « Stade Municipal » et « 2 places disponibles »
