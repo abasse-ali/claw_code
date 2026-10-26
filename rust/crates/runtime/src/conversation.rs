@@ -521,6 +521,8 @@ struct TurnAids {
     /// Données que la demande veut partagées, gardées dans chaque navigateur :
     /// déjà signalé.
     shared_checked: bool,
+    /// Clés d'un compte à créer laissées dans le code : déjà signalées.
+    keys_checked: bool,
     /// Photos enregistrées par l'outil `Photo` pendant le tour.
     photos: std::collections::BTreeSet<String>,
     /// Photos jamais utilisées par la page : déjà signalées.
@@ -2296,6 +2298,7 @@ where
                         self.requirements_gate(&mut aids, &request_text, earlier.as_deref())
                     })
                     .or_else(|| self.shared_data_gate(&mut aids, &request_text))
+                    .or_else(|| self.account_setup_gate(&mut aids))
                     .or_else(|| {
                         self.review_gate(&mut aids, &request_text, earlier.as_deref(), &answer)
                     })
@@ -3497,8 +3500,16 @@ where
         earlier: Option<&str>,
         aids: &mut TurnAids,
     ) -> Option<String> {
+        // Une correction, ou une page qui existait déjà sans demande de refonte :
+        // pas de plan à écrire. Vu le 26 octobre 2026 (session #32) : deux
+        // balises <script> ajoutées pour partager les réservations, et l'agent
+        // renvoyé écrire un plan de design complet.
+        let existing_page = aids.baseline.is_some()
+            && !crate::web_design::asks_new_design(crate::project::own_words(request));
         if !aids.design_guided
             || aids.plan_reviewed
+            || aids.repair
+            || existing_page
             || self.subagent
             || interrupt_requested()
             || !harness::enabled(Aid::DesignReview)
@@ -4833,6 +4844,25 @@ where
             "Ce que les visiteurs entrent reste dans leur propre téléphone, alors que la demande le veut partagé : Claw demande à l'agent de le rendre partagé ou de le dire",
         );
         Some(crate::web_design::SHARED_DATA_NOTE.to_string())
+    }
+
+    /// Clés à remplacer (`VOTRE_API_KEY`) introduites par le tour dans un
+    /// fichier modifié, sans que l'utilisateur ait été consulté : le modèle lui
+    /// demande d'abord quelle solution il accepte. Une fois par tour.
+    fn account_setup_gate(&mut self, aids: &mut TurnAids) -> Option<String> {
+        if aids.keys_checked || aids.asked || self.subagent || interrupt_requested() {
+            return None;
+        }
+        let sample = aids.originals.iter().find_map(|(path, original)| {
+            let current = std::fs::read_to_string(path).ok()?;
+            crate::web_design::placeholder_credential(&current)
+                .filter(|_| crate::web_design::placeholder_credential(original).is_none())
+        })?;
+        aids.keys_checked = true;
+        self.api_client.notify(
+            "Le code attend les clés d'un compte que l'utilisateur doit créer : Claw demande à l'agent de lui poser la question d'abord",
+        );
+        Some(crate::web_design::account_setup_note(&sample))
     }
 
     /// Photos enregistrées pendant le tour et que rien n'utilise : du poids
@@ -9049,6 +9079,46 @@ mod tests {
             observed.notices
         );
         let _ = std::fs::remove_file(&script);
+    }
+
+    #[test]
+    fn keys_of_an_account_the_user_must_create_lead_to_a_question_first() {
+        let _serial = crate::test_serial();
+        // Session #32 (26 octobre 2026) : Firebase branché d'office, avec
+        // VOTRE_API_KEY dans le code, sans rien demander à la boulangère.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("cles");
+        let script = page.with_file_name("app.js");
+        std::fs::write(
+            &script,
+            "const firebaseConfig = { apiKey: 'VOTRE_API_KEY', projectId: 'VOTRE_PROJECT_ID' };\n",
+        )
+        .expect("app.js");
+        let write = tool_step(
+            "write_file",
+            &serde_json::json!({ "path": script.display().to_string(), "content": "x" })
+                .to_string(),
+        );
+        let steps = vec![
+            write,
+            text_step("C'est corrigé."),
+            text_step("Je vous pose d'abord la question."),
+        ];
+        let ((mut runtime, observed, _), _) =
+            measured_runtime(steps, vec![Some(MEASURED), Some(MEASURED), Some(MEASURED)]);
+        runtime.page_target = Some(format!("path:{}", page.display()));
+        runtime
+            .run_turn("je veux voir les commandes de tous mes clients", None)
+            .expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let _ = std::fs::remove_file(&script);
+        let observed = observed.borrow();
+        assert!(
+            observed.requests.iter().any(|request| request
+                .contains("Your code now waits for keys the user must create (VOTRE_API_KEY)")),
+            "{:?}",
+            observed.notices
+        );
     }
 
     #[test]

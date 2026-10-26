@@ -314,6 +314,19 @@ const COMPLAINT_WORDS: &[&str] = &[
     "broken",
     "doesn't work",
     "not working",
+    // Ce qu'un utilisateur constate sans nommer de défaut (session #32 : « sa
+    // réservation n'apparaît pas dans ma liste », « ça ne me sert à rien »).
+    "apparait pas",
+    "affiche pas",
+    "sert a rien",
+    "vois pas",
+    "voit pas",
+    "trouve pas",
+    "fonctionne pas",
+    "rien ne se passe",
+    "je dois remonter",
+    "doesn't show",
+    "can't see",
 ];
 /// Marques d'une création ou d'une refonte : celles-là se jugent au design.
 const CREATION_WORDS: &[&str] = &[
@@ -338,6 +351,46 @@ const CREATION_WORDS: &[&str] = &[
     "prettier",
     "more beautiful",
 ];
+
+/// Clé ou identifiant à remplacer laissé dans le code (`VOTRE_API_KEY`,
+/// `YOUR_PROJECT_ID`, `your-api-key`) : le site attend un compte que
+/// l'utilisateur doit créer. Rend le premier trouvé.
+#[must_use]
+pub fn placeholder_credential(text: &str) -> Option<String> {
+    let mut words = text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+    words.find_map(|word| {
+        let upper = word.to_ascii_uppercase().replace('-', "_");
+        let stem = upper
+            .strip_prefix("VOTRE_")
+            .or_else(|| upper.strip_prefix("YOUR_"))?;
+        [
+            "API", "KEY", "PROJECT", "PROJET", "SECRET", "TOKEN", "ID", "APP", "DATABASE", "URL",
+            "SENDER", "BUCKET", "DOMAIN",
+        ]
+        .iter()
+        .any(|part| stem.contains(part))
+        .then(|| word.to_string())
+    })
+}
+
+/// Message renvoyé au modèle dont le code attend des clés d'un compte que
+/// l'utilisateur n'a pas choisi de créer. Vu le 26 octobre 2026 (session #32) :
+/// Firebase branché d'office, `VOTRE_API_KEY` dans le code, pour une
+/// boulangère « nulle en informatique ».
+#[must_use]
+pub fn account_setup_note(sample: &str) -> String {
+    format!(
+        "[Claw] Your code now waits for keys the user must create ({sample}): an account on a service, a project, keys to copy into the code. The user did not choose this and may not be a developer. Before building more on it, ask them with AskUserQuestion: 2 to 4 options in plain words, each saying what it asks of them (an account, the minutes of setup, a cost), with your recommendation first and, if there is one, an option that needs nothing from them. Until they answer, keep what works today working. In your final answer, say in plain words what is not active yet and what they will be asked to do."
+    )
+}
+
+/// Le message demande une nouvelle page, une refonte ou un embellissement :
+/// ce qui se juge au design, plan compris.
+#[must_use]
+pub fn asks_new_design(text: &str) -> bool {
+    let folded = crate::team::without_accents(&text.to_lowercase()).replace('\u{2019}', "'");
+    CREATION_WORDS.iter().any(|word| folded.contains(word))
+}
 
 /// Le message demande des corrections sur une interface déjà faite, pas une
 /// création ni une refonte. Vu le 26 octobre 2026 (session #31, passage 4) :
@@ -1479,6 +1532,37 @@ mod tests {
         assert!(!kept_on_each_device(&[
             "const x = localStorage.getItem('pin');"
         ]));
+    }
+
+    #[test]
+    fn keys_left_to_fill_in_are_found() {
+        use super::placeholder_credential;
+        assert_eq!(
+            placeholder_credential("const firebaseConfig = {\n  apiKey: \"VOTRE_API_KEY\",\n  projectId: \"VOTRE_PROJECT_ID\" };").as_deref(),
+            Some("VOTRE_API_KEY")
+        );
+        assert_eq!(
+            placeholder_credential("key = 'your-api-key'").as_deref(),
+            Some("your-api-key")
+        );
+        for plain in [
+            "const VOTRE_PANIER = [];",
+            "Votre commande est prête",
+            "YOUR_NAME",
+        ] {
+            assert_eq!(placeholder_credential(plain), None, "{plain}");
+        }
+    }
+
+    #[test]
+    fn a_bug_reported_in_plain_words_is_a_repair() {
+        use super::{asks_new_design, is_repair_request};
+        // Session #32, passage 2 : aucun verbe de réparation, deux constats.
+        let reported = "C'est joli, merci ! Mais j'ai essayé sur mon téléphone et sur celui de ma fille : la réservation qu'elle a faite sur le sien n'apparaît pas dans ma liste du matin. Et quand j'appuie sur « Espace boulanger » j'arrive tout en bas de la page, je dois remonter. Il faut que je voie les commandes de tous mes clients, sinon ça ne me sert à rien.";
+        assert!(is_repair_request(reported));
+        assert!(!asks_new_design(reported));
+        assert!(asks_new_design("Refais la page d'accueil, plus moderne"));
+        assert!(!is_repair_request("Ajoute une page pour les tarifs"));
     }
 
     #[test]
