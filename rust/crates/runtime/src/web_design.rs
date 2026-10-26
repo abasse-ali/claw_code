@@ -445,6 +445,60 @@ pub fn kept_on_each_device(sources: &[&str]) -> bool {
 /// jamais rien vu ; le pied de page le disait en petit, la réponse non.
 pub const SHARED_DATA_NOTE: &str = "[Claw] The user asked for something several people share: some enter it (a reservation, a sign-up, an offer) and someone else sees it on another phone. Your page keeps what a visitor enters in that visitor's own browser (localStorage), so nobody else ever sees it: as built, the request does not work, even if every check passes on one device. Do not hide this. Either make the data shared (a small server of the project, or a free hosted store the user sets up: ask them with AskUserQuestion which one they accept, in plain words), or say it plainly at the top of your final answer: what works on one phone, what does not work between phones, and what is needed to make it work.";
 
+/// Textes des pages et des styles du projet (HTML, CSS, scripts, gabarits),
+/// hors dépendances : ce qui peut nommer une image.
+#[must_use]
+pub fn page_texts(root: &Path) -> Vec<String> {
+    const KINDS: &[&str] = &[
+        "html",
+        "htm",
+        "css",
+        "scss",
+        "js",
+        "mjs",
+        "jsx",
+        "ts",
+        "tsx",
+        "vue",
+        "svelte",
+        "astro",
+        "md",
+        "json",
+        "webmanifest",
+    ];
+    let mut texts = Vec::new();
+    let mut folders = vec![(root.to_path_buf(), 0)];
+    while let Some((folder, depth)) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if depth < 4
+                    && !name.starts_with('.')
+                    && !matches!(name.as_str(), "node_modules" | "dist" | "build" | "target")
+                {
+                    folders.push((path, depth + 1));
+                }
+            } else if name != "CREDITS.md"
+                && path.extension().is_some_and(|ext| {
+                    KINDS.contains(&ext.to_string_lossy().to_ascii_lowercase().as_str())
+                })
+            {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    texts.push(text);
+                }
+            }
+            if texts.len() > 400 {
+                return texts;
+            }
+        }
+    }
+    texts
+}
+
 /// Méthode jointe à une demande d'interface (aussi à un message court qui
 /// poursuit une telle demande).
 #[must_use]
@@ -929,7 +983,7 @@ pub fn plan_critique_prompt(request: &str, plan: &str, bar: u8) -> String {
     let brief: String = request.chars().take(1_500).collect();
     let plan: String = plan.chars().take(5_000).collect();
     format!(
-        "The client's brief:\n\"{brief}\"\n\nThe designer's plan, written before any code:\n{plan}\n\nJudge this direction against what a top studio would ship (the built page will be scored 1 to 10 on phone, hierarchy, spacing, typography, color, identity and finish, and must reach {bar} on each):\n1. identity: one memorable idea specific to this subject, or a template in disguise (a centered hero band, identical cards, the same layout in every section, generic stock imagery)?\n2. hierarchy: one clear focal point on the first screen, and an obvious next step?\n3. typography: typefaces chosen for this subject (not Inter, Roboto, Montserrat, Poppins, Playfair Display and the like), a scale with real contrast between levels?\n4. color: a palette taken from the subject's world, readable contrast, an accent used sparingly?\n5. composition: do the sections vary (split, full width, list, offset), with an even rhythm?\n6. interactions: can the visitor do what this subject calls for (book, find the hours and the way, filter, order, ask), with a few well-chosen ready-made components, and is the motion restrained (one entrance, a few reveals)?\nReply with at most 5 changes to the plan, the most important first, one per line, each as:\nN. [criterion] what is weak in the plan -> the exact change (a typeface name, hex values, a layout, a concrete idea)\nBe specific to this subject; no generic advice. Small UI icons (phone, clock, menu) come from a polished line icon set (Lucide) on purpose: do not ask to redraw them by hand; the page's identity comes from its illustration, typography, color and composition. {pictures} If the plan would already reach {bar}/10 on every criterion, reply exactly: PLAN OK"
+        "The client's brief:\n\"{brief}\"\n\nThe designer's plan, written before any code:\n{plan}\n\nJudge this direction against what a top studio would ship (the built page will be scored 1 to 10 on phone, hierarchy, spacing, typography, color, identity and finish, and must reach {bar} on each):\n1. identity: one memorable idea specific to this subject, or a template in disguise (a centered hero band, identical cards, the same layout in every section, generic stock imagery)?\n2. hierarchy: one clear focal point on the first screen, and an obvious next step?\n3. typography: typefaces chosen for this subject (not Inter, Roboto, Montserrat, Poppins, Playfair Display and the like), a scale with real contrast between levels?\n4. color: a palette taken from the subject's world, readable contrast, an accent used sparingly?\n5. composition: do the sections vary (split, full width, list, offset), with an even rhythm?\n6. interactions: can the visitor do what the brief asks, in the fewest steps, with a few well-chosen ready-made components, and is the motion restrained (one entrance, a few reveals)?\nYou direct the design of what the client asked for: never add a feature, a page, an access code or password, a rule (opening hours, deadlines, limits) or data the brief does not ask for. Each feature added is work the client did not order and something more that can break.\nReply with at most 5 changes to the plan, the most important first, one per line, each as:\nN. [criterion] what is weak in the plan -> the exact change (a typeface name, hex values, a layout, a concrete idea)\nBe specific to this subject; no generic advice. Small UI icons (phone, clock, menu) come from a polished line icon set (Lucide) on purpose: do not ask to redraw them by hand; the page's identity comes from its illustration, typography, color and composition. {pictures} If the plan would already reach {bar}/10 on every criterion, reply exactly: PLAN OK"
     )
 }
 
@@ -992,13 +1046,13 @@ pub fn looks_like_design_plan(text: &str) -> bool {
 }
 
 /// Message joint au premier fichier d'interface écrit sans plan de design.
-pub const PLAN_REQUEST: &str = "[Claw] You started writing the page without the design plan the method asks for. Before going further, write the plan in your reply: the brief, 4 to 6 named hex colors, the two typefaces and the type scale, the spacing scale, an ASCII wireframe of the first screen drawn with the Wireframe tool, the memorable element, and one line saying it uses none of the forbidden marks. Then revise this file to follow it. An art director reviews the plan before the rest of the page is built.";
+pub const PLAN_REQUEST: &str = "[Claw] You started writing the page without the design plan the method asks for. Before going further, write the plan in your reply: the brief, 4 to 6 named hex colors, the two typefaces and the type scale, the spacing scale, an ASCII wireframe of the first screen drawn with the Wireframe tool, the memorable element, and one line saying it uses none of the forbidden marks. Then change in this file only what the plan changes, with edit_file: it is already written, do not send it again whole. An art director reviews the plan before the rest of the page is built.";
 
 /// Message joint au premier fichier d'interface écrit après le plan.
 #[must_use]
 pub fn plan_feedback(model: &str, changes: &str) -> String {
     format!(
-        "[Claw] An art director ({model}) reviewed your design plan before the code:\n{changes}\nApply these changes now: revise the plan in one line each, then build with them, in the file you just wrote and in the next ones."
+        "[Claw] An art director ({model}) reviewed your design plan before the code:\n{changes}\nApply these changes now: revise the plan in one line each, then build with them: in the file you just wrote with edit_file (only the lines that change), and in the next ones. Leave out any change that adds what the user did not ask for (a feature, a page, an access code, a rule such as a deadline): design advice only."
     )
 }
 
@@ -1382,6 +1436,25 @@ mod tests {
     };
 
     #[test]
+    fn the_texts_that_can_name_an_image_are_read_outside_dependencies() {
+        let root = std::env::temp_dir().join(format!("claw-textes-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("node_modules/x")).expect("dossiers");
+        std::fs::create_dir_all(root.join("images")).expect("dossiers");
+        std::fs::write(root.join("index.html"), "<img src=\"images/pain.jpg\">").expect("page");
+        std::fs::write(
+            root.join("styles.css"),
+            ".hero { background: url(images/four.jpg); }",
+        )
+        .expect("css");
+        std::fs::write(root.join("node_modules/x/a.js"), "seigle.jpg").expect("dépendance");
+        std::fs::write(root.join("images/CREDITS.md"), "seigle.jpg par X").expect("crédits");
+        let texts = super::page_texts(&root).join("\n");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(texts.contains("pain.jpg") && texts.contains("four.jpg"));
+        assert!(!texts.contains("seigle.jpg"), "{texts}");
+    }
+
+    #[test]
     fn data_entered_by_some_and_seen_by_others_is_told_from_a_private_tool() {
         use super::{kept_on_each_device, shared_between_people};
         // Session #32 et #31 : la boulangerie, le club de foot.
@@ -1735,12 +1808,17 @@ mod tests {
                 && prompt.contains("reach 8 on each")
                 && prompt.contains("PLAN OK")
         );
+        // Session #32 (26 octobre 2026) : le juge du plan a fait ajouter un code
+        // d'accès et une heure limite que la boulangère n'avait pas demandés.
+        assert!(prompt.contains("never add a feature, a page, an access code"));
+        assert!(!prompt.contains("book, find the hours"));
         assert_eq!(plan_changes("PLAN OK"), None);
         assert_eq!(plan_changes("The plan is strong. PLAN OK"), None);
         let changes = plan_changes("Notes:\n1. [identity] centered hero -> a split hero with a pressed-flower SVG\n2. [typography] Poppins -> Fraunces 600\nGood luck").expect("changes");
         assert_eq!(changes.lines().count(), 2);
-        assert!(plan_feedback("juge", &changes)
-            .starts_with("[Claw] An art director (juge) reviewed your design plan"));
+        let feedback = plan_feedback("juge", &changes);
+        assert!(feedback.starts_with("[Claw] An art director (juge) reviewed your design plan"));
+        assert!(feedback.contains("design advice only"));
         // Budget : 160 pour un tour de design, sauf réglage de l'utilisateur.
         assert_eq!(
             turn_request_budget(true, 100, 100, false),

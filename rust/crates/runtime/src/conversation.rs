@@ -521,6 +521,10 @@ struct TurnAids {
     /// Données que la demande veut partagées, gardées dans chaque navigateur :
     /// déjà signalé.
     shared_checked: bool,
+    /// Photos enregistrées par l'outil `Photo` pendant le tour.
+    photos: std::collections::BTreeSet<String>,
+    /// Photos jamais utilisées par la page : déjà signalées.
+    photos_checked: bool,
     /// Déroulé ultracode pour ce tour (session ou mot-clé du message).
     ultracode: bool,
     /// Dossier préparé par l'agent d'exploration (ultracode).
@@ -2297,6 +2301,7 @@ where
                     })
                     .or_else(|| self.milestone_validation_gate(&mut aids, &answer))
                     .or_else(|| self.instructions_gate(&mut aids, &answer))
+                    .or_else(|| self.unused_photos_gate(&mut aids))
                     .or_else(|| self.plain_answer_gate(&mut aids, &answer))
                     .or_else(|| {
                         asking = self.questions_gate(&mut aids, &answer);
@@ -2676,6 +2681,16 @@ where
             }
         } else if !is_error && fetches_svg(tool_name, input, aids) {
             crate::icon_set::learn_fetched(&output);
+        }
+        // Photos enregistrées : la fin du tour vérifie que la page s'en sert.
+        if tool_name == "Photo" && !is_error {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&output) {
+                for photo in value["photos"].as_array().into_iter().flatten() {
+                    if let Some(path) = photo["path"].as_str() {
+                        aids.photos.insert(path.to_string());
+                    }
+                }
+            }
         }
         // Questions déjà posées avec le menu : rien à redemander en fin de tour.
         aids.asked |= tool_name == "AskUserQuestion";
@@ -4818,6 +4833,49 @@ where
             "Ce que les visiteurs entrent reste dans leur propre téléphone, alors que la demande le veut partagé : Claw demande à l'agent de le rendre partagé ou de le dire",
         );
         Some(crate::web_design::SHARED_DATA_NOTE.to_string())
+    }
+
+    /// Photos enregistrées pendant le tour et que rien n'utilise : du poids
+    /// pour le site, et souvent une photo hors sujet. Vu le 26 octobre 2026
+    /// (session #32) : 19 photos (11 Mo) dans images/, aucune dans la page,
+    /// dont « baguette-1.jpg » qui montrait un pot d'ajvar.
+    fn unused_photos_gate(&mut self, aids: &mut TurnAids) -> Option<String> {
+        if aids.photos_checked || aids.photos.is_empty() || self.subagent || interrupt_requested() {
+            return None;
+        }
+        let cwd = std::env::current_dir().ok()?;
+        let pages = crate::web_design::page_texts(&cwd);
+        let unused: Vec<&String> = aids
+            .photos
+            .iter()
+            .filter(|path| {
+                cwd.join(path.as_str()).is_file() || std::path::Path::new(path.as_str()).is_file()
+            })
+            .filter(|path| {
+                let name = std::path::Path::new(path.as_str())
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                !pages.iter().any(|text| text.contains(&name))
+            })
+            .collect();
+        if unused.is_empty() {
+            return None;
+        }
+        aids.photos_checked = true;
+        self.api_client.notify(&format!(
+            "{} photo(s) enregistrée(s) et jamais utilisée(s) : Claw demande à l'agent de les retirer ou de s'en servir",
+            unused.len()
+        ));
+        Some(format!(
+            "[Claw] The page uses none of these photos you saved: {}. Each one weighs on the site the user publishes. Delete the ones you do not use (with a shell command, and their lines in images/CREDITS.md), or put the right one in the page where it shows what it should; then end with your final answer.",
+            unused
+                .iter()
+                .take(12)
+                .map(|path| format!("`{path}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
     }
 
     /// Réponse sur une page écrite pour un développeur : le relecteur de Claw
@@ -8991,6 +9049,53 @@ mod tests {
             observed.notices
         );
         let _ = std::fs::remove_file(&script);
+    }
+
+    #[test]
+    fn photos_saved_but_used_nowhere_are_named_before_the_answer() {
+        let _serial = crate::test_serial();
+        // Session #32 (26 octobre 2026) : 19 photos (11 Mo) dans images/,
+        // aucune dans la page.
+        let photo =
+            std::env::temp_dir().join(format!("claw-photo-{}-baguette-1.jpg", std::process::id()));
+        std::fs::write(&photo, b"jpeg").expect("photo");
+        let shown = photo.display().to_string();
+        let observed = std::rc::Rc::new(std::cell::RefCell::new(Observed::default()));
+        let executor = StaticToolExecutor::new().register("Photo", move |_| {
+            Ok(
+                serde_json::json!({ "photos": [{ "path": shown.clone(), "kilobytes": 700 }] })
+                    .to_string(),
+            )
+        });
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            StepsApiClient {
+                steps: vec![
+                    tool_step("Photo", r#"{"search": "baguette"}"#),
+                    text_step("Le site est prêt."),
+                    text_step("Photo retirée, le site est prêt."),
+                ]
+                .into(),
+                observed: std::rc::Rc::clone(&observed),
+                advisor: std::collections::VecDeque::new(),
+                escalation: None,
+            },
+            executor,
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["système".to_string()],
+        );
+        runtime
+            .run_turn("une page pour ma boulangerie", None)
+            .expect("tour");
+        let _ = std::fs::remove_file(&photo);
+        let observed = observed.borrow();
+        assert!(
+            observed.requests.iter().any(|request| request
+                .contains("The page uses none of these photos you saved")
+                && request.contains("baguette-1.jpg")),
+            "{:?}",
+            observed.notices
+        );
     }
 
     #[test]
