@@ -294,7 +294,12 @@ fn images(messages: &[InputMessage]) -> Vec<&ImageSource> {
 /// `number` sur `total` : sa place parmi les images du message. Quand il y
 /// en a plusieurs, chacune est numérotée : deux longues descriptions à la
 /// suite se lisent sinon comme une seule image, et la première est oubliée.
-pub(crate) fn replacement(source: &ImageSource, number: usize, total: usize) -> String {
+pub(crate) fn replacement(
+    source: &ImageSource,
+    number: usize,
+    total: usize,
+    slice: Option<&Slice>,
+) -> String {
     let place = if total > 1 {
         format!(
             "Image {number} of {total} in this message (each image can show something different: take all {total} into account), described"
@@ -307,14 +312,18 @@ pub(crate) fn replacement(source: &ImageSource, number: usize, total: usize) -> 
         Some(description) => {
             let (defect, body) = split_verdict(&description.text);
             // Une capture du résultat cassé avait été prise pour une maquette.
-            let warning = defect.map_or_else(String::new, |line| {
-                format!("[Claw] The image reader saw a defect in this image: {line}. Treat it as evidence of a problem to fix, not as a design to copy.\n")
-            });
+            // Un « coupé » au bord d'une tranche de page entière n'en est pas un.
+            let warning = defect
+                .filter(|line| !slice.is_some_and(|slice| slice.explains(line)))
+                .map_or_else(String::new, |line| {
+                    format!("[Claw] The image reader saw a defect in this image: {line}. Treat it as evidence of a problem to fix, not as a design to copy.\n")
+                });
+            let part = slice.map_or_else(String::new, Slice::note);
             // Le lecteur lit des pixels : « FC Voisins » devenait « FCVoisins », et le
             // modèle cherchait trois fois à corriger un texte déjà juste (vu le
             // 25 octobre 2026, refonte du site d'un club de foot).
             format!(
-                "{warning}[{place} by {} because the current model cannot read images (image id {}). To look again at any part of it, call LookAtImage with this id and one precise question. The reader can misread small text (a missing space, a wrong letter or digit): before changing a text this description quotes, find it in the files with grep_search; if the files already have it right, the text is not the problem: a word that looks glued can come from the CSS (a negative letter-spacing), which the Screenshot measurements name. When the measurements do not report it (no \"Words that run together\", no cut text), the reader misread the image: leave it and move on; do not rewrite a text that is right, and do not search for it again.]\n{body}{pixels}",
+                "{warning}{part}[{place} by {} because the current model cannot read images (image id {}). To look again at any part of it, call LookAtImage with this id and one precise question. The reader can misread small text (a missing space, a wrong letter or digit): before changing a text this description quotes, find it in the files with grep_search; if the files already have it right, the text is not the problem: a word that looks glued can come from the CSS (a negative letter-spacing), which the Screenshot measurements name. When the measurements do not report it (no \"Words that run together\", no cut text), the reader misread the image: leave it and move on; do not rewrite a text that is right, and do not search for it again.]\n{body}{pixels}",
                 description.model,
                 image_id(source)
             )
@@ -322,6 +331,110 @@ pub(crate) fn replacement(source: &ImageSource, number: usize, total: usize) -> 
         None if total > 1 => format!("[Image {number} of {total}] {IMAGE_NOT_SENT}{pixels}"),
         None => format!("{IMAGE_NOT_SENT}{pixels}"),
     }
+}
+
+/// Place d'une capture dans une page entière découpée en tranches par
+/// `Screenshot` : la partie `part` sur `parts`, à la taille d'écran `screen`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Slice {
+    part: usize,
+    parts: usize,
+    screen: String,
+}
+
+impl Slice {
+    /// Ce que le modèle lit avant la description : les bords de la tranche
+    /// sont des coupures de la capture, pas de la page. Vu le 25 et le 26
+    /// octobre 2026 (session #31) : « dernière carte coupée en bas »,
+    /// « section Covoiturage coupée », une demi-heure de corrections pour un
+    /// bord de tranche.
+    fn note(&self) -> String {
+        let edges = match (self.part == 1, self.part == self.parts) {
+            (true, _) => "its bottom edge continues in the next part",
+            (false, true) => "its top edge continues the previous part",
+            (false, false) => "its top edge continues the previous part and its bottom edge continues in the next one",
+        };
+        format!(
+            "[Claw] This image is part {} of {} of one full-page capture at {}, from top to bottom: {edges}. A card or section that the description calls cut off, cropped or truncated at that edge is where the capture was split, not a defect of the page: do not change the page for it.\n",
+            self.part, self.parts, self.screen
+        )
+    }
+
+    /// Le défaut vu par le lecteur n'est qu'un bord de la tranche.
+    fn explains(&self, defect: &str) -> bool {
+        let lower = defect.to_lowercase();
+        let cut = [
+            "cut off",
+            "cut-off",
+            "cropped",
+            "truncated",
+            "coupé",
+            "rogné",
+            "cut at",
+        ]
+        .iter()
+        .any(|word| lower.contains(word));
+        let mut edges = Vec::new();
+        if self.part > 1 {
+            edges.extend(["top", "haut"]);
+        }
+        if self.part < self.parts {
+            edges.extend(["bottom", "bas", "end of", "fin"]);
+        }
+        cut && edges.iter().any(|edge| lower.contains(edge))
+    }
+}
+
+/// Tranches des images d'un résultat de `Screenshot`, dans l'ordre de ses
+/// images (`None` : une capture entière, ou une fenêtre). Rien pour un autre
+/// résultat.
+pub(crate) fn slices_of_result(text: &str) -> Vec<Option<Slice>> {
+    let Some(start) = text.find('{') else {
+        return Vec::new();
+    };
+    let Some(Ok(value)) = serde_json::Deserializer::from_str(&text[start..])
+        .into_iter::<serde_json::Value>()
+        .next()
+    else {
+        return Vec::new();
+    };
+    let Some(captures) = value["captures"].as_array() else {
+        return Vec::new();
+    };
+    let screens: Vec<(usize, String)> = captures
+        .iter()
+        .filter_map(|capture| {
+            let image = usize::try_from(capture["image"].as_u64()?).ok()?;
+            Some((image, capture["screen"].as_str()?.to_string()))
+        })
+        .collect();
+    let last = screens.iter().map(|(image, _)| *image).max().unwrap_or(0);
+    let mut slices = vec![None; last];
+    for (image, screen) in &screens {
+        // La page entière d'un écran : sa première capture (« phone 390x844 »),
+        // puis ses suites (« phone 390x844, from 2532px »).
+        let base = screen.split(", from ").next().unwrap_or(screen);
+        let parts: Vec<usize> = screens
+            .iter()
+            .filter(|(_, other)| other == base || other.starts_with(&format!("{base}, from ")))
+            .map(|(image, _)| *image)
+            .collect();
+        if parts.len() < 2 || !(screen == base || screen.starts_with(&format!("{base}, from "))) {
+            continue;
+        }
+        let part = parts
+            .iter()
+            .position(|at| at == image)
+            .map_or(1, |at| at + 1);
+        if let Some(entry) = slices.get_mut(image.saturating_sub(1)) {
+            *entry = Some(Slice {
+                part,
+                parts: parts.len(),
+                screen: base.to_string(),
+            });
+        }
+    }
+    slices
 }
 
 /// Fichiers lisibles d'une image, calculés de ses pixels (`image_text`) et gardés à côté de sa
@@ -1063,7 +1176,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            replacement(&first, 1, 1),
+            replacement(&first, 1, 1, None),
             format!(
                 "[Image described by acme/vision:free because the current model cannot read images (image id {}). To look again at any part of it, call LookAtImage with this id and one precise question. The reader can misread small text (a missing space, a wrong letter or digit): before changing a text this description quotes, find it in the files with grep_search; if the files already have it right, the text is not the problem: a word that looks glued can come from the CSS (a negative letter-spacing), which the Screenshot measurements name. When the measurements do not report it (no \"Words that run together\", no cut text), the reader misread the image: leave it and move on; do not rewrite a text that is right, and do not search for it again.]\nCapture essai-lecteur-1",
                 image_id(&first)
@@ -1071,9 +1184,9 @@ mod tests {
         );
         // Plusieurs images dans un message : chacune porte son numéro.
         assert!(
-            replacement(&first, 2, 3).starts_with("[Image 2 of 3 in this message (each image can show something different: take all 3 into account), described by acme/vision:free"),
+            replacement(&first, 2, 3, None).starts_with("[Image 2 of 3 in this message (each image can show something different: take all 3 into account), described by acme/vision:free"),
             "{}",
-            replacement(&first, 2, 3)
+            replacement(&first, 2, 3, None)
         );
         // Requête suivante : rien n'est redemandé, rien n'est redit.
         run();
@@ -1137,12 +1250,60 @@ mod tests {
             },
         );
         assert_eq!(defect(&broken).as_deref(), Some("zone de comparaison vide"));
-        let shown = replacement(&broken, 1, 1);
+        let shown = replacement(&broken, 1, 1, None);
         assert!(shown.starts_with(
             "[Claw] The image reader saw a defect in this image: zone de comparaison vide. Treat it as evidence of a problem to fix, not as a design to copy.\n[Image described by acme/vision:free"
         ));
         assert!(shown.ends_with("]\nCapture de l'application."), "{shown}");
         assert_eq!(defect(&image("essai-verdict-inconnue")), None);
+    }
+
+    #[test]
+    fn a_cut_at_the_edge_of_a_full_page_slice_is_not_a_defect() {
+        // Session #31 (25 et 26 octobre 2026) : « dernière carte coupée en
+        // bas », « section Covoiturage coupée » : le bord d'une tranche.
+        let result = r#"{"captures":[{"screen":"phone 390x844","image":1,"problems":[]},{"screen":"desktop 1280x800","image":2,"problems":[]},{"screen":"phone 390x844, from 2532px","image":3},{"screen":"phone 390x844, from 5064px","image":4},{"screen":"phone 390x844, menu open","image":5}]}
+[Claw] note"#;
+        let slices = super::slices_of_result(result);
+        assert_eq!(slices.len(), 5);
+        let part = |index: usize| {
+            slices[index]
+                .as_ref()
+                .map(|slice| (slice.part, slice.parts))
+        };
+        assert_eq!(part(0), Some((1, 3)));
+        assert_eq!(part(1), None);
+        assert_eq!(part(2), Some((2, 3)));
+        assert_eq!(part(3), Some((3, 3)));
+        assert_eq!(part(4), None);
+        assert!(super::slices_of_result("Wrote styles.css").is_empty());
+
+        let middle = slices[2].clone().expect("tranche");
+        assert!(middle.explains("The last carpool card is cut off at the bottom"));
+        assert!(middle.explains("Section Covoiturage coupée en haut de l'image"));
+        assert!(!middle.explains("The menu button overlaps the title"));
+        let first = slices[0].clone().expect("tranche");
+        assert!(!first.explains("The hero card is cut off at the top"));
+
+        let shot = image("essai-tranche-milieu");
+        descriptions().insert(
+            image_key(&shot),
+            Description {
+                model: "acme/vision:free".to_string(),
+                text: "Une page de club.\nVERDICT: DEFECT - the last card is cut off at the bottom"
+                    .to_string(),
+            },
+        );
+        let shown = replacement(&shot, 3, 5, Some(&middle));
+        assert!(!shown.contains("saw a defect"), "{shown}");
+        assert!(
+            shown.starts_with(
+                "[Claw] This image is part 2 of 3 of one full-page capture at phone 390x844"
+            ),
+            "{shown}"
+        );
+        // Une fenêtre ou une capture entière garde l'alerte.
+        assert!(replacement(&shot, 3, 5, None).starts_with("[Claw] The image reader saw a defect"));
     }
 
     #[test]
@@ -1173,7 +1334,7 @@ mod tests {
             notices.borrow().last().map(String::as_str),
 Some("acme/texte-2:free ne lit pas les images : 1 image n'a pas pu lui être décrite (erreur 429) et ne lui est pas envoyée. Un modèle qui lit les images y aurait accès (/models vision).")
         );
-        assert!(replacement(&lost, 1, 1).starts_with("[Image not sent"));
+        assert!(replacement(&lost, 1, 1, None).starts_with("[Image not sent"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
