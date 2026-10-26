@@ -518,6 +518,9 @@ struct TurnAids {
     commands_checked: bool,
     /// La réponse sur une page, écrite pour un développeur, a déjà été renvoyée.
     plain_asked: bool,
+    /// Données que la demande veut partagées, gardées dans chaque navigateur :
+    /// déjà signalé.
+    shared_checked: bool,
     /// Déroulé ultracode pour ce tour (session ou mot-clé du message).
     ultracode: bool,
     /// Dossier préparé par l'agent d'exploration (ultracode).
@@ -2288,6 +2291,7 @@ where
                     .or_else(|| {
                         self.requirements_gate(&mut aids, &request_text, earlier.as_deref())
                     })
+                    .or_else(|| self.shared_data_gate(&mut aids, &request_text))
                     .or_else(|| {
                         self.review_gate(&mut aids, &request_text, earlier.as_deref(), &answer)
                     })
@@ -4769,6 +4773,51 @@ where
             "La réponse conseille des commandes jamais lancées : Claw demande à l'agent de les essayer",
         );
         Some(harness::untried_feedback(&untried))
+    }
+
+    /// Données partagées gardées dans chaque téléphone : la demande fait entrer
+    /// des choses par les uns (réserver, s'inscrire) et voir par d'autres, et
+    /// le tour a mis ce qu'entrent les visiteurs dans `localStorage`, sans rien
+    /// qui l'envoie ailleurs. Le modèle rend les données partagées ou le dit
+    /// en tête de sa réponse ; une fois par tour.
+    fn shared_data_gate(&mut self, aids: &mut TurnAids, request: &str) -> Option<String> {
+        if aids.shared_checked
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::DesignReview)
+            || self.page_to_review(aids).is_none()
+            || !crate::web_design::shared_between_people(crate::project::own_words(request))
+        {
+            return None;
+        }
+        let stores =
+            |text: &str| text.contains("Storage.setItem") || text.contains("indexedDB.open");
+        let mut sources = Vec::new();
+        let mut introduced = false;
+        for (path, original) in &aids.originals {
+            let script = [
+                ".js", ".mjs", ".jsx", ".ts", ".tsx", ".html", ".vue", ".svelte",
+            ]
+            .iter()
+            .any(|extension| path.ends_with(extension));
+            if !script {
+                continue;
+            }
+            let Ok(current) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            introduced |= stores(&current) && !stores(original);
+            sources.push(current);
+        }
+        let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
+        if !introduced || !crate::web_design::kept_on_each_device(&sources) {
+            return None;
+        }
+        aids.shared_checked = true;
+        self.api_client.notify(
+            "Ce que les visiteurs entrent reste dans leur propre téléphone, alors que la demande le veut partagé : Claw demande à l'agent de le rendre partagé ou de le dire",
+        );
+        Some(crate::web_design::SHARED_DATA_NOTE.to_string())
     }
 
     /// Réponse sur une page écrite pour un développeur : le relecteur de Claw
@@ -8898,6 +8947,50 @@ mod tests {
             check.contains("Broken by your last change") && check.contains("430px wide"),
             "{check}"
         );
+    }
+
+    #[test]
+    fn reservations_kept_in_each_phone_are_named_when_the_request_shares_them() {
+        let _serial = crate::test_serial();
+        // Session #32 (26 octobre 2026) : les clientes réservaient dans leur
+        // navigateur ; la boulangère n'en aurait jamais rien vu.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("partage");
+        let script = page.with_file_name("app.js");
+        // L'exécuteur des essais n'écrit pas : le fichier est posé ici.
+        std::fs::write(
+            &script,
+            "function save(list) {\n  localStorage.setItem('reservations', JSON.stringify(list));\n}\n",
+        )
+        .expect("app.js");
+        let write = tool_step(
+            "write_file",
+            &serde_json::json!({ "path": script.display().to_string(), "content": "function save(list) {\n  localStorage.setItem('reservations', JSON.stringify(list));\n}\n" })
+                .to_string(),
+        );
+        let steps = vec![
+            write,
+            text_step("Le site est prêt."),
+            text_step("Le site est prêt, mais chaque téléphone garde ses réservations."),
+        ];
+        let ((mut runtime, observed, _), _) =
+            measured_runtime(steps, vec![Some(MEASURED), Some(MEASURED), Some(MEASURED)]);
+        runtime.page_target = Some(format!("path:{}", page.display()));
+        runtime
+            .run_turn("j'aimerais un petit site où les clients réservent depuis leur téléphone, et où moi je vois le matin la liste de ce que je dois préparer", None)
+            .expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        assert!(
+            observed
+                .requests
+                .iter()
+                .any(|request| request.contains("several people share")
+                    && request.contains("localStorage")),
+            "{:?}",
+            observed.notices
+        );
+        let _ = std::fs::remove_file(&script);
     }
 
     #[test]
