@@ -432,6 +432,13 @@ const INTERFACE_WORDS: &[&str] = &[
     "web app",
     "application web",
     "app web",
+    // Vu le 27 octobre 2026 (session #35) : « je veux un appli web perso
+    // utilisable sur téléphone » n'était pas reconnu ; seules les notes du
+    // moteur, jointes à la demande, faisaient appliquer le guide de design.
+    "appli web",
+    "appli mobile",
+    "application mobile",
+    "pwa",
     "blog",
     "boutique en ligne",
     "e-commerce",
@@ -492,6 +499,11 @@ const MAKE_WORDS: &[&str] = &[
     "generate",
     "write",
     "add",
+    // Une demande dite comme un souhait : « je veux une appli », « j'aimerais un site ».
+    "veux",
+    "voudrais",
+    "aimerais",
+    "want",
 ];
 
 /// Mots de goût : « plus beau », « moderne », « joli ».
@@ -2809,6 +2821,16 @@ mod tests {
         assert!(design_guide("Crée un site pour un fleuriste", None).is_some());
         assert!(design_guide("plus coloré", Some("Crée un site pour un fleuriste")).is_some());
         assert!(design_guide("corrige le calcul de la TVA", None).is_none());
+        // Session #35 (27 octobre 2026).
+        assert!(is_interface_request(
+            "Je veux un appli web perso utilisable sur téléphone incluant tous les fonctionnalités que j'ai besoin"
+        ));
+        assert!(is_interface_request(
+            "j'aimerais une appli mobile pour mes comptes"
+        ));
+        assert!(!is_interface_request(
+            "je veux un script python qui renomme mes photos"
+        ));
     }
 
     #[test]

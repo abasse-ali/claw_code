@@ -9706,6 +9706,154 @@ mod tests {
     }
 
     #[test]
+    fn a_check_that_moves_nothing_is_said_in_one_line_and_the_third_steps_back() {
+        let _serial = crate::test_serial();
+        // Session #35 (27 octobre 2026) : « 0 nouveau, 0 réparé, 6 restants »
+        // redit vingt-cinq fois, la liste entière à chaque fois, et l'agent
+        // changeait une couleur après chaque vérification.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("immobile");
+        let write = || {
+            tool_step(
+                "write_file",
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                    .to_string(),
+            )
+        };
+        let steps = vec![
+            write(),
+            write(),
+            write(),
+            write(),
+            write(),
+            text_step("Corrigé."),
+        ];
+        let ((mut runtime, observed, _), shots) = measured_runtime(steps, vec![Some(MEASURED)]);
+        runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        assert_eq!(shots.get(), 5);
+        let last = |index: usize| {
+            observed.requests[index]
+                .rsplit("Claw looked at")
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        };
+        let first = last(1);
+        assert!(
+            first.contains("Still wrong on the page") && first.contains("U11 vs FC Voisins"),
+            "{first}"
+        );
+        for index in [2, 3, 5] {
+            let said = last(index);
+            assert!(
+                said.contains("nothing new, nothing fixed; the 1 problem(s) listed before remain")
+                    && !said.contains("U11 vs FC Voisins")
+                    && !said.contains("Step back"),
+                "{index}: {said}"
+            );
+        }
+        let third = last(4);
+        assert!(
+            third.contains("nothing new, nothing fixed") && third.contains("Step back"),
+            "{third}"
+        );
+    }
+
+    #[test]
+    fn the_first_version_of_a_new_page_is_checked_against_the_request_before_its_look() {
+        let _serial = crate::test_serial();
+        // Session #35 (27 octobre 2026) : une heure et demie de retouches de
+        // couleurs sur une appli qui ne contenait aucun montant de
+        // l'utilisateur ; le contrôle des exigences n'arrivait qu'à la fin.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("premiere");
+        let write = || {
+            tool_step(
+                "write_file",
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Budget</h1>" })
+                    .to_string(),
+            )
+        };
+        let steps = vec![write(), write(), text_step("C'est prêt.")];
+        let ((mut runtime, observed, _), _) = measured_runtime(steps, vec![Some(MEASURED)]);
+        runtime.page_target = Some(format!("path:{}", page.display()));
+        runtime
+            .run_turn(
+                "Je veux une appli web perso utilisable sur téléphone pour gérer mon budget : salaire = 1235.15 euro, caf = 103 à 206 euro, loyer = 450 euro.",
+                None,
+            )
+            .expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        let early = "The first complete version of the page is written";
+        let first = observed
+            .requests
+            .iter()
+            .position(|request| request.contains(early))
+            .unwrap_or_else(|| panic!("{:?}", observed.notices));
+        assert!(
+            observed.requests[first].contains("1235.15, 103, 206"),
+            "{}",
+            observed.requests[first]
+        );
+        // Une fois par tour.
+        let last = observed.requests.last().expect("requêtes");
+        assert_eq!(last.matches(early).count(), 1);
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.starts_with("Première version de la page écrite")));
+    }
+
+    #[test]
+    fn a_turn_cut_by_its_limit_ends_with_what_claw_could_check() {
+        let _serial = crate::test_serial();
+        // Session #35 (27 octobre 2026) : temps écoulé, la conclusion partait
+        // sans aucun contrôle, avec « fait et vérifié » pour des montants
+        // absents et un graphique vide.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("limite");
+        let write = || {
+            tool_step(
+                "write_file",
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                    .to_string(),
+            )
+        };
+        let steps = vec![write(), write(), text_step("Tout est fait et vérifié.")];
+        let ((runtime, _, _), _) = measured_runtime(steps, vec![Some(MEASURED)]);
+        let mut runtime = runtime.with_turn_request_limit(2);
+        let summary = runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let answer = summary
+            .assistant_messages
+            .last()
+            .map(super::message_text)
+            .unwrap_or_default();
+        assert!(answer.starts_with("Tout est fait et vérifié."), "{answer}");
+        for said in [
+            "Ce que Claw a pu vérifier avant de s'arrêter** (limite de requêtes du tour atteinte)",
+            "Encore mesuré sur la page à la dernière vérification : 1 défaut(s) d'affichage.",
+            "n'ont pas été confrontées une à une",
+            "Écrivez « continue »",
+        ] {
+            assert!(answer.contains(said), "{said}: {answer}");
+        }
+        // La session garde la même réponse : le passage suivant la relit telle quelle.
+        let stored = runtime
+            .session()
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::Assistant)
+            .map(super::message_text)
+            .unwrap_or_default();
+        assert_eq!(stored, answer);
+    }
+
+    #[test]
     fn the_check_after_a_change_runs_while_the_model_answers() {
         let _serial = crate::test_serial();
         // Session #32, passage 5 : 33 vérifications de 25 s, le modèle
