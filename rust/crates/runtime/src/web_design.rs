@@ -265,6 +265,12 @@ const FUNCTION_FAULTS: &[(&str, u8, u8, &str)] = &[
         "envoi sans confirmation",
     ),
     ("is shown nowhere", 1, 10, "nom envoyé affiché nulle part"),
+    (
+        "appears in no list",
+        1,
+        10,
+        "entrée ajoutée absente de sa liste",
+    ),
     ("do nothing when clicked", 1, 10, "bouton qui ne fait rien"),
     (
         "is written on the page for every visitor",

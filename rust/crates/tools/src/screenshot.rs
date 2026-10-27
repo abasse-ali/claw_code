@@ -4735,6 +4735,48 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn an_entry_missing_from_its_list_is_not_asked_for_a_name() {
+        // Session #36 (27 octobre 2026) : la liste des opérations d'une appli de
+        // budget ne montrait pas la dépense ajoutée ; le message parlait de
+        // « qui s'est inscrit », et l'agent a ajouté un champ « Nom » à la dépense.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-entree-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |listed: bool| {
+            let shown = if listed {
+                "li.textContent = libelle;"
+            } else {
+                ""
+            };
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Budget</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button, input {{ font: inherit; padding: 10px; }}</style></head><body><h1>Dépenses</h1><p id=\"total\">Total : 0 €</p><form id=\"depense\"><label for=\"montant\">Montant</label><input id=\"montant\" inputmode=\"decimal\" required><label for=\"libelle\">Libellé</label><input id=\"libelle\" required><button type=\"submit\">Ajouter</button></form><section><h2>Opérations</h2><ul id=\"liste\"></ul></section><script>let total = 0; document.getElementById('depense').addEventListener('submit', (e) => {{ e.preventDefault(); const libelle = document.getElementById('libelle').value; total += Number(document.getElementById('montant').value.replace(',', '.')); document.getElementById('total').textContent = 'Total : ' + total + ' €'; const li = document.createElement('li'); {shown} li.append(' ' + total + ' €'); document.getElementById('liste').append(li); }});</script></body></html>"),
+            )
+            .expect("html");
+        };
+        let page = format!("claw-entree-{}/index.html", std::process::id());
+        let capture = || {
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            super::take(&request).expect("capture")["captures"][0]["problems"].to_string()
+        };
+        write(false);
+        let lost = capture();
+        write(true);
+        let listed = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            lost.contains("appears in no list") && lost.contains("in the field \\\"Libellé\\\""),
+            "{lost}"
+        );
+        assert!(!lost.contains("who signed up"), "{lost}");
+        // Le montant reçoit un nombre, pas le nom d'essai.
+        assert!(!lost.contains("NaN"), "{lost}");
+        assert!(!listed.contains("appears in no list"), "{listed}");
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn links_forms_and_windows_are_walked_in_a_real_browser() {
         // Le parcours d'un visiteur : chaque lien, chaque formulaire rempli et
         // envoyé, chaque fenêtre refermée, puis la page rechargée.

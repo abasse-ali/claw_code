@@ -251,7 +251,51 @@ const ARGUMENT_SYNONYMS: &[(&str, &str)] = &[
     ("case_insensitive", "-i"),
     ("ignore_case", "-i"),
     ("timeout_ms", "timeout"),
+    ("into", "target"),
 ];
+
+/// Une étape de `Browser` écrite comme une action de `Screenshot`
+/// (`{"click": "#ajouter"}`, `{"type": "12", "into": "#montant"}`) mise à la
+/// forme d'une étape (`action`, `target`, `text`) ; `true` si elle a changé.
+fn browser_step(step: &mut Map<String, Value>) -> bool {
+    let mut changed = false;
+    if !step.contains_key("target") {
+        if let Some(target) = step.remove("into") {
+            step.insert("target".to_string(), target);
+            changed = true;
+        }
+    }
+    if step.contains_key("action") {
+        return changed;
+    }
+    for (key, action, field) in [
+        ("click", "click", "target"),
+        ("type", "type", "text"),
+        ("select", "select", "text"),
+        ("press", "press", "key"),
+        ("scroll", "scroll", "to"),
+        ("open", "open", "path"),
+    ] {
+        let Some(value) = step.remove(key) else {
+            continue;
+        };
+        let field = if key == "open" && value.as_str().is_some_and(|text| text.starts_with("http"))
+        {
+            "url"
+        } else {
+            field
+        };
+        step.insert("action".to_string(), json!(action));
+        step.insert(field.to_string(), value);
+        return true;
+    }
+    // Une pause (`wait_ms`) : la page regardée de nouveau.
+    if step.remove("wait_ms").is_some() || step.remove("wait").is_some() {
+        step.insert("action".to_string(), json!("look"));
+        return true;
+    }
+    changed
+}
 
 /// Les arguments d'un appel mis à la forme de son outil, et ce qu'il faut en
 /// dire au modèle : noms d'autres agents traduits (`file_path` pour `path`),
@@ -303,6 +347,39 @@ pub fn normalize_arguments(
             }
             said.push("start_line and end_line were read as offset and limit".to_string());
             changed = true;
+        }
+    }
+    // `Browser` : un parcours écrit autrement. Vu le 27 octobre 2026 (session
+    // #36) : `actions` au lieu de `steps`, `steps` sans `action`, `into` au lieu
+    // de `target` (comme les actions de Screenshot) ; trois appels perdus.
+    if tool_name == "Browser" {
+        if !arguments.contains_key("steps") && arguments.get("actions").is_some_and(Value::is_array)
+        {
+            if let Some(list) = arguments.remove("actions") {
+                arguments.insert("steps".to_string(), list);
+                said.push("\"actions\" was read as \"steps\"".to_string());
+                changed = true;
+            }
+        }
+        if arguments.get("steps").is_some_and(Value::is_array) && !arguments.contains_key("action")
+        {
+            arguments.insert("action".to_string(), json!("steps"));
+            said.push("the list of steps was played as \"action\": \"steps\"".to_string());
+            changed = true;
+        }
+        if let Some(Value::Array(steps)) = arguments.get_mut("steps") {
+            let fixed = steps
+                .iter_mut()
+                .filter_map(Value::as_object_mut)
+                .map(browser_step)
+                .filter(|changed| *changed)
+                .count();
+            if fixed > 0 {
+                said.push(format!(
+                    "{fixed} step(s) written like Screenshot actions were read as Browser steps ({{\"action\": \"click\", \"target\": …}})"
+                ));
+                changed = true;
+            }
         }
     }
     // `bash` : un dossier de travail donné à part.
@@ -821,6 +898,59 @@ mod tests {
             "{note}"
         );
         assert_eq!(take_argument_note("read_file", input), None);
+    }
+
+    #[test]
+    fn a_browser_journey_written_another_way_is_played() {
+        use super::normalize_arguments;
+        let browser = json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string" }, "steps": { "type": "array" }, "target": { "type": "string" },
+                "text": { "type": "string" }, "url": { "type": "string" }, "path": { "type": "string" },
+                "to": { "type": "string" }, "key": { "type": "string" }, "device": { "type": "string" }
+            },
+            "required": ["action"]
+        });
+        // Session #36 (27 octobre 2026) : `actions`, des étapes de Screenshot, `into`.
+        let (input, note) = normalize_arguments(
+            "Browser",
+            r##"{"actions": [{"click": "[data-dialog-open]"}, {"type": "12", "into": "#montant"}, {"wait_ms": 300}, {"open": "http://127.0.0.1:8124"}, {"action": "type", "into": "#nom", "text": "Léa"}]}"##,
+            &browser,
+        )
+        .expect("mis en forme");
+        let input: serde_json::Value = serde_json::from_str(&input).expect("JSON");
+        assert_eq!(
+            input,
+            json!({ "action": "steps", "steps": [
+                { "action": "click", "target": "[data-dialog-open]" },
+                { "action": "type", "text": "12", "target": "#montant" },
+                { "action": "look" },
+                { "action": "open", "url": "http://127.0.0.1:8124" },
+                { "action": "type", "target": "#nom", "text": "Léa" }
+            ] })
+        );
+        let note = note.unwrap_or_default();
+        assert!(note.contains("\"actions\" was read as \"steps\""), "{note}");
+        assert!(
+            note.contains("5 step(s) written like Screenshot actions"),
+            "{note}"
+        );
+        // `steps` sans `action`, et `into` d'une action seule.
+        let (input, _) = normalize_arguments(
+            "Browser",
+            r#"{"device": "phone", "steps": [{"action": "look"}]}"#,
+            &browser,
+        )
+        .expect("mis en forme");
+        assert!(input.contains(r#""action":"steps""#), "{input}");
+        let (input, _) = normalize_arguments(
+            "Browser",
+            r##"{"action": "type", "into": "#nom", "text": "Léa"}"##,
+            &browser,
+        )
+        .expect("mis en forme");
+        assert!(input.contains(r##""target":"#nom""##), "{input}");
     }
 
     #[test]

@@ -318,8 +318,11 @@
     if (/code.?postal|zip/.test(words)) return "31000";
     return "Essai";
   };
+  // Le champ qui a reçu le nom d'essai du formulaire en cours.
+  let markedField = null;
   const fill = (form) => {
     let named = false;
+    markedField = null;
     const refused = [];
     const groups = new Set();
     for (const field of form.querySelectorAll("input, select, textarea")) {
@@ -341,7 +344,10 @@
         if (option && !field.value) setValue(field, option.value);
       } else {
         const value = plausible(field, named);
-        if (value === marker) named = true;
+        if (value === marker) {
+          named = true;
+          markedField = field;
+        }
         // Le nom d'un formulaire precedent, garde par la page, est remplace.
         // Un nombre deja propose (« 3 places ») aussi : chaque formulaire a le sien.
         const counted = field.type === "number" || field.type === "range";
@@ -492,8 +498,15 @@
       return !(title && own.test((title.textContent || "").trim()));
     };
     const counted = appeared.find((text) => /\d/.test(text) && outside(text));
-    if (personal && !added && counted) {
+    // Un nom de personne, ou le libellé d'une entrée (une dépense, une séance) :
+    // le message le dit, sinon l'agent ajoutait un champ « Nom » à une dépense
+    // (vu le 27 octobre 2026, session #36).
+    const person = !markedField || /nom|name|pr[eé]nom|pseudo|qui|conducteur|joueur|parent/.test(nameOf(markedField));
+    if (personal && !added && counted && person) {
       unnamed.push(`Sending ${name} changes the page ("${counted.slice(0, 90)}") but the name typed in it ("${marker}") is shown nowhere, only in a passing message at best: people cannot see who signed up or who offered. Show each new entry with its name where the people who need it read it (the card or list it changed; for a reservation or an order, the list its owner reads, which need not be public), and keep it after a reload`);
+    } else if (personal && !added && counted) {
+      const field = (markedField.labels && markedField.labels[0] ? markedField.labels[0].innerText : markedField.name || markedField.id || "").replace(/\s+/g, " ").trim().slice(0, 40);
+      unnamed.push(`Sending ${name} changes the page ("${counted.slice(0, 90)}") but the entry typed in it ("${marker}" in the field "${field}") appears in no list, only in a passing message at best: the list of entries does not show the new one. Show each new entry in its list (on the screen or one tap away), and keep it after a reload; do not add fields to the form for this`);
     }
     if (added || appeared.length) kept.push({ form: name, marker, shown: added, appeared });
   };
