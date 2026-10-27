@@ -297,6 +297,41 @@ fn browser_step(step: &mut Map<String, Value>) -> bool {
     changed
 }
 
+/// `Browser` : un parcours écrit autrement. Vu le 27 octobre 2026 (session
+/// #36) : `actions` au lieu de `steps`, `steps` sans `action`, `into` au lieu
+/// de `target` (comme les actions de Screenshot) ; trois appels perdus.
+/// `true` si les arguments ont changé.
+fn browser_arguments(arguments: &mut Map<String, Value>, said: &mut Vec<String>) -> bool {
+    let mut changed = false;
+    if !arguments.contains_key("steps") && arguments.get("actions").is_some_and(Value::is_array) {
+        if let Some(list) = arguments.remove("actions") {
+            arguments.insert("steps".to_string(), list);
+            said.push("\"actions\" was read as \"steps\"".to_string());
+            changed = true;
+        }
+    }
+    if arguments.get("steps").is_some_and(Value::is_array) && !arguments.contains_key("action") {
+        arguments.insert("action".to_string(), json!("steps"));
+        said.push("the list of steps was played as \"action\": \"steps\"".to_string());
+        changed = true;
+    }
+    if let Some(Value::Array(steps)) = arguments.get_mut("steps") {
+        let fixed = steps
+            .iter_mut()
+            .filter_map(Value::as_object_mut)
+            .map(browser_step)
+            .filter(|changed| *changed)
+            .count();
+        if fixed > 0 {
+            said.push(format!(
+                "{fixed} step(s) written like Screenshot actions were read as Browser steps ({{\"action\": \"click\", \"target\": …}})"
+            ));
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Les arguments d'un appel mis à la forme de son outil, et ce qu'il faut en
 /// dire au modèle : noms d'autres agents traduits (`file_path` pour `path`),
 /// nombres et booléens écrits en texte convertis (`"50"`, `"true"`), liste
@@ -349,38 +384,8 @@ pub fn normalize_arguments(
             changed = true;
         }
     }
-    // `Browser` : un parcours écrit autrement. Vu le 27 octobre 2026 (session
-    // #36) : `actions` au lieu de `steps`, `steps` sans `action`, `into` au lieu
-    // de `target` (comme les actions de Screenshot) ; trois appels perdus.
-    if tool_name == "Browser" {
-        if !arguments.contains_key("steps") && arguments.get("actions").is_some_and(Value::is_array)
-        {
-            if let Some(list) = arguments.remove("actions") {
-                arguments.insert("steps".to_string(), list);
-                said.push("\"actions\" was read as \"steps\"".to_string());
-                changed = true;
-            }
-        }
-        if arguments.get("steps").is_some_and(Value::is_array) && !arguments.contains_key("action")
-        {
-            arguments.insert("action".to_string(), json!("steps"));
-            said.push("the list of steps was played as \"action\": \"steps\"".to_string());
-            changed = true;
-        }
-        if let Some(Value::Array(steps)) = arguments.get_mut("steps") {
-            let fixed = steps
-                .iter_mut()
-                .filter_map(Value::as_object_mut)
-                .map(browser_step)
-                .filter(|changed| *changed)
-                .count();
-            if fixed > 0 {
-                said.push(format!(
-                    "{fixed} step(s) written like Screenshot actions were read as Browser steps ({{\"action\": \"click\", \"target\": …}})"
-                ));
-                changed = true;
-            }
-        }
+    if tool_name == "Browser" && browser_arguments(arguments, &mut said) {
+        changed = true;
     }
     // `bash` : un dossier de travail donné à part.
     if tool_name == "bash" {
