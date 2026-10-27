@@ -5039,33 +5039,15 @@ where
         {
             return None;
         }
-        let stores =
-            |text: &str| text.contains("Storage.setItem") || text.contains("indexedDB.open");
-        let mut sources = Vec::new();
-        let mut before = Vec::new();
-        let mut introduced = false;
-        for (path, original) in &aids.originals {
-            let script = [
-                ".js", ".mjs", ".jsx", ".ts", ".tsx", ".html", ".vue", ".svelte",
-            ]
-            .iter()
-            .any(|extension| path.ends_with(extension));
-            if !script {
-                continue;
-            }
-            let Ok(current) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            introduced |= stores(&current) && !stores(original);
-            sources.push(current);
-            before.push(original.as_str());
-        }
+        // Tout le site, pas seulement ce que le tour a touché : vu le 27
+        // octobre 2026 (session #32, passage 6), « je ne vois aucune
+        // réservation de mes clientes sur mon téléphone », le stockage local
+        // était déjà là avant le tour, et l'agent a répondu « limitation
+        // architecturale » sans proposer d'envoyer les réservations.
+        let cwd = std::env::current_dir().ok()?;
+        let sources = crate::web_design::page_scripts(&cwd);
         let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
-        // Vu le 26 octobre 2026 (session #32, passage 5) : « je ne saurai pas
-        // créer un compte Firebase », et l'agent a retiré Firebase sans rien
-        // mettre à la place ; le localStorage était déjà là.
-        let removed = !crate::web_design::kept_on_each_device(&before);
-        if !(introduced || removed) || !crate::web_design::kept_on_each_device(&sources) {
+        if !crate::web_design::kept_on_each_device(&sources) {
             return None;
         }
         aids.shared_checked = true;
