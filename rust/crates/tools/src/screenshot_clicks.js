@@ -305,6 +305,14 @@
       return String(Math.max(min, Math.min(max, Math.max(1, min) + tested.size - 1)));
     }
     if (field instanceof HTMLTextAreaElement) return "Message d'essai, a ignorer.";
+    // Un montant ou une quantite dans un champ texte (clavier numerique du
+    // telephone) : un nombre, pas un nom. Vu le 27 octobre 2026 (kit d'appli) :
+    // « Camille Claw8858B » tape dans « Montant », lu 8 858 €, et l'operation
+    // passait pour perdue.
+    const mode = (field.getAttribute("inputmode") || "").toLowerCase();
+    if (mode === "decimal" || mode === "numeric" || /montant|amount|prix|price|somme|quantit|qty/.test(words)) {
+      return mode === "numeric" ? String(10 + tested.size) : `${12 + tested.size},50`;
+    }
     if (!named || /nom|name|pr[eé]nom|pseudo|qui|conducteur|joueur|parent/.test(words)) return marker;
     if (/ville|city|lieu|adresse|address|d[eé]part/.test(words)) return "Toulouse";
     if (/code.?postal|zip/.test(words)) return "31000";
@@ -435,11 +443,23 @@
     }
     // Ajoute a la page, hors du message passager (toast) qui le remercie.
     const passing = "[role=status], [role=alert], [aria-live], .toast, .snackbar, .notification, output";
+    // Ou ajouté à un écran caché que la page ouvre d'un lien, d'un onglet ou
+    // d'un bouton (une appli d'une seule page : la liste des opérations derrière
+    // son onglet). Vu le 27 octobre 2026 (kit d'appli) : l'opération ajoutée
+    // depuis l'accueil, listée dans l'écran « Opérations », passait pour perdue.
+    const openable = (el) => {
+      for (let node = el; node && node !== document.body; node = node.parentElement) {
+        if (!node.id || shown(node)) continue;
+        const id = CSS.escape(node.id);
+        if (document.querySelector(`a[href="#${id}"], [aria-controls="${id}"], [data-screen="${id}"], [data-view="${id}"], [data-tab="${id}"], [data-target="#${id}"]`)) return true;
+      }
+      return false;
+    };
     const texts = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let added = false;
     for (let node = texts.nextNode(); node && !added; node = texts.nextNode()) {
       const holder = node.parentElement;
-      added = node.nodeValue.includes(marker) && holder && !holder.closest(passing) && shown(holder);
+      added = node.nodeValue.includes(marker) && holder && !holder.closest(passing) && (shown(holder) || openable(holder));
     }
     // Ou la page a change (un compteur, une liste) sans montrer le nom : les
     // textes apparus a l'envoi.

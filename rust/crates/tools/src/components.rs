@@ -750,6 +750,7 @@ mod tests {
             "NaN",
             "wider than the screen",
             "too little contrast",
+            "is shown nowhere",
         ] {
             assert!(!text.contains(defect), "{defect}: {text}");
         }

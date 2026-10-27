@@ -212,6 +212,13 @@ struct PendingCheck {
     before: Option<Vec<String>>,
 }
 
+/// Temps laissé avant la requête suivante à une vérification encore en route :
+/// au-delà, la requête part sans elle, et son résultat suit au pas d'après.
+/// Vu le 27 octobre 2026 (session #35) : 62 vérifications d'environ 25 s,
+/// attendues chacune après des requêtes de 6 à 9 s ; l'utilisateur a demandé
+/// des vérifications regroupées, sans baisser les barres.
+const CHECK_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+
 pub trait ToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
 
@@ -2120,8 +2127,8 @@ where
                 }
             }
             // L'interface vient de changer : Claw regarde la page avant la
-            // requête suivante.
-            if let Some((check, _)) = self.finish_visual_check(&mut aids) {
+            // requête suivante, si sa vérification a fini ; sinon elle suit.
+            if let Some((check, _)) = self.ready_visual_check(&mut aids) {
                 self.session.messages.push(check);
             }
             if !wrapping_up {
@@ -3916,7 +3923,12 @@ where
         aids: &mut TurnAids,
         prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> Option<ConversationMessage> {
-        if aids.blind_edits == 0 || aids.blind_measures >= harness::MAX_VISUAL_CHECKS {
+        // Une vérification encore en route : les modifications faites depuis
+        // attendent la suivante, qui les regroupe.
+        if aids.blind_edits == 0
+            || aids.blind_measures >= harness::MAX_VISUAL_CHECKS
+            || aids.pending_check.is_some()
+        {
             return None;
         }
         // Rien à regarder (pas de page HTML), ou une page qui appelle des
@@ -4016,6 +4028,19 @@ where
             });
         }
         (message, new.len())
+    }
+
+    /// La vérification lancée en arrière-plan si elle a fini, ou finit dans
+    /// `CHECK_GRACE` ; sinon `None`, et elle reste en route pour le pas suivant.
+    fn ready_visual_check(&mut self, aids: &mut TurnAids) -> Option<(ConversationMessage, usize)> {
+        let deadline = std::time::Instant::now() + CHECK_GRACE;
+        while !aids.pending_check.as_ref()?.handle.is_finished() {
+            if std::time::Instant::now() >= deadline || interrupt_requested() {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        self.finish_visual_check(aids)
     }
 
     /// La vérification lancée en arrière-plan, attendue (le plus souvent déjà
@@ -6975,6 +7000,8 @@ pub struct StaticToolExecutor {
     handlers: BTreeMap<String, ToolHandler>,
     /// Outils lancés en arrière-plan (`spawn_background`), à résultat fixe.
     background: BTreeMap<String, String>,
+    /// Durée de ces outils en arrière-plan (aucune par défaut).
+    background_delay: std::time::Duration,
 }
 
 impl StaticToolExecutor {
@@ -7003,6 +7030,13 @@ impl StaticToolExecutor {
         self.background.insert(tool_name.into(), output.into());
         self
     }
+
+    /// Les outils en arrière-plan prennent `delay` avant de rendre leur résultat.
+    #[must_use]
+    pub fn background_delay(mut self, delay: std::time::Duration) -> Self {
+        self.background_delay = delay;
+        self
+    }
 }
 
 impl ToolExecutor for StaticToolExecutor {
@@ -7014,7 +7048,11 @@ impl ToolExecutor for StaticToolExecutor {
 
     fn spawn_background(&mut self, tool_name: &str, _input: &str) -> Option<Background> {
         let output = self.background.get(tool_name)?.clone();
-        Some(std::thread::spawn(move || (Ok(output), Vec::new())))
+        let delay = self.background_delay;
+        Some(std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            (Ok(output), Vec::new())
+        }))
     }
 }
 
@@ -9910,6 +9948,72 @@ mod tests {
             observed.requests[2]
         );
         // Deux vérifications, la seconde reprise avant la conclusion.
+        let checks = observed
+            .notices
+            .iter()
+            .filter(|notice| notice.starts_with("Claw vérifie la page après la modification"))
+            .count();
+        assert_eq!(checks, 2, "{:?}", observed.notices);
+    }
+
+    #[test]
+    fn a_slow_check_does_not_hold_the_next_request_and_groups_the_changes() {
+        let _serial = crate::test_serial();
+        // Session #35 (27 octobre 2026) : 62 vérifications d'environ 25 s,
+        // attendues après des requêtes de 6 à 9 s. Une vérification encore en
+        // route laisse partir la requête, et les modifications faites pendant
+        // ce temps attendent la suivante, qui les regroupe.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("lente");
+        let write = || {
+            tool_step(
+                "write_file",
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                    .to_string(),
+            )
+        };
+        let observed = std::rc::Rc::new(std::cell::RefCell::new(Observed::default()));
+        let executor = StaticToolExecutor::new()
+            .register("write_file", |input| {
+                let path = serde_json::from_str::<serde_json::Value>(input)
+                    .ok()
+                    .and_then(|value| value["path"].as_str().map(ToString::to_string))
+                    .unwrap_or_default();
+                Ok(serde_json::json!({ "filePath": path, "content": "x" }).to_string())
+            })
+            .register("Screenshot", |_| {
+                Err(super::ToolError::new("la vérification ne doit pas bloquer"))
+            })
+            .in_background("Screenshot", MEASURED)
+            .background_delay(std::time::Duration::from_millis(2400));
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            StepsApiClient {
+                steps: vec![write(), write(), write(), text_step("Corrigé.")].into(),
+                observed: std::rc::Rc::clone(&observed),
+                advisor: std::collections::VecDeque::new(),
+                escalation: None,
+            },
+            executor,
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["système".to_string()],
+        );
+        runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        assert_eq!(observed.requests.len(), 4, "{:?}", observed.notices);
+        // Les deux requêtes qui suivent la première modification partent sans
+        // attendre sa vérification, encore en route ; la troisième la reçoit.
+        for request in &observed.requests[1..3] {
+            assert!(!request.contains("Claw looked at"), "{request}");
+        }
+        assert!(
+            observed.requests[3].contains("Claw looked at"),
+            "{}",
+            observed.requests[3]
+        );
+        // Deux vérifications pour trois modifications : la seconde regroupe
+        // les deux faites pendant la première.
         let checks = observed
             .notices
             .iter()

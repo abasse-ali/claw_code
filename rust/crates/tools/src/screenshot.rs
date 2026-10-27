@@ -1082,6 +1082,9 @@ struct Shot {
     explore: Explore,
     /// Ce que `inspect` a trouvé : un élément par demande.
     inspected: Vec<Value>,
+    /// Menu replié, onglets et écrans cachés de la page à son arrivée, relevés
+    /// pendant la capture d'un téléphone (`None` ailleurs).
+    views: Option<Vec<View>>,
 }
 
 /// Un écran que la page ne montre qu'après un bouton (« Espace boulanger »),
@@ -1909,6 +1912,20 @@ fn open_page(
     session: &Session<'_>,
     viewport: &Viewport,
 ) -> Result<Option<String>, String> {
+    open_page_with(devtools, session, viewport, true)
+}
+
+/// La page ouverte ; `scroll_through` la fait défiler jusqu'en bas puis
+/// remonter, pour que ce qui apparaît au défilement soit là dans une capture
+/// de la page entière. Une vue (fenêtre, menu, écran) se capture sur un seul
+/// écran après un clic : elle s'en passe (1,4 s de moins par vue, mesuré le 27
+/// octobre 2026 sur l'appli de la session #35).
+fn open_page_with(
+    devtools: &mut DevTools,
+    session: &Session<'_>,
+    viewport: &Viewport,
+    scroll_through: bool,
+) -> Result<Option<String>, String> {
     // Une page vide d'abord : la même adresse à `#` se rechargerait sans charger la page.
     devtools.events.clear();
     devtools.call("Page.navigate", json!({ "url": "about:blank" }))?;
@@ -1957,7 +1974,7 @@ fn open_page(
         ));
     }
     devtools.pump(session.wait)?;
-    if devtools.evaluate(SCROLL_THROUGH).is_ok() {
+    if scroll_through && devtools.evaluate(SCROLL_THROUGH).is_ok() {
         devtools.pump(Duration::from_millis(600))?;
     }
     Ok(note)
@@ -2307,6 +2324,10 @@ fn capture(
     let audit = devtools
         .evaluate(AUDIT_SCRIPT)
         .map_err(|error| format!("the layout check failed in the page: {error}"))?;
+    // Les vues de la page à son arrivée, avant que les essais la changent : la
+    // suite n'a pas à rouvrir la page pour les chercher.
+    let views = (session.windows && viewport.mobile && session.actions.is_empty())
+        .then(|| found_views(devtools));
     let mut problems = strings(&audit["problems"]);
     problems.extend(drawn_icons_problem(&audit["svgIcons"]));
     if session.actions.is_empty() {
@@ -2418,6 +2439,7 @@ fn capture(
         openers,
         explore,
         inspected,
+        views,
     })
 }
 
@@ -2784,6 +2806,28 @@ const VIEWS_SCRIPT: &str = r#"(() => {
   return menus.concat(tabs, views);
 })()"#;
 
+/// Le menu replié, les onglets non choisis et les écrans cachés de la page
+/// ouverte (`VIEWS_SCRIPT`).
+fn found_views(devtools: &mut DevTools) -> Vec<View> {
+    let Ok(Value::Array(found)) = devtools.evaluate(VIEWS_SCRIPT) else {
+        return Vec::new();
+    };
+    found
+        .iter()
+        .filter_map(|view| {
+            Some(View {
+                kind: match view["kind"].as_str() {
+                    Some("tab") => "tab",
+                    Some("view") => "view",
+                    _ => "menu",
+                },
+                label: view["label"].as_str()?.to_string(),
+                selector: view["selector"].as_str()?.to_string(),
+            })
+        })
+        .collect()
+}
+
 /// Les vues que la page cache (fenêtres d'`openers`, relevées par le parcours des
 /// boutons ; menu replié, onglets non choisis, relevés ici), rouvertes une à une
 /// dans une page neuve et capturées à l'écran `viewport`. Vu le 25 octobre 2026
@@ -2794,6 +2838,7 @@ fn view_shots(
     session: &Session<'_>,
     viewport: &Viewport,
     openers: &[(String, String)],
+    arrival: Option<Vec<View>>,
     known: &[String],
 ) -> Vec<Extra> {
     let mut views: Vec<View> = openers
@@ -2804,23 +2849,13 @@ fn view_shots(
             selector: selector.clone(),
         })
         .collect();
-    if open_page(devtools, session, viewport).is_ok() {
-        if let Ok(Value::Array(found)) = devtools.evaluate(VIEWS_SCRIPT) {
-            for view in found {
-                let (Some(label), Some(selector)) =
-                    (view["label"].as_str(), view["selector"].as_str())
-                else {
-                    continue;
-                };
-                views.push(View {
-                    kind: match view["kind"].as_str() {
-                        Some("tab") => "tab",
-                        Some("view") => "view",
-                        _ => "menu",
-                    },
-                    label: label.to_string(),
-                    selector: selector.to_string(),
-                });
+    // Relevées pendant la capture du téléphone ; sinon la page se rouvre pour
+    // les chercher.
+    match arrival {
+        Some(found) => views.extend(found),
+        None => {
+            if open_page(devtools, session, viewport).is_ok() {
+                views.extend(found_views(devtools));
             }
         }
     }
@@ -2846,7 +2881,7 @@ fn view_shots(
         // que la page remplit de sa mémoire ; `storage` se repose au chargement.
         let _ = devtools
             .evaluate("try { localStorage.clear(); sessionStorage.clear(); } catch (error) {}");
-        if open_page(devtools, session, viewport).is_err() {
+        if open_page_with(devtools, session, viewport, false).is_err() {
             break;
         }
         // Une fenêtre doit s'être ouverte ; un menu, un onglet ou un écran se
@@ -3043,7 +3078,9 @@ fn open_screen(
     screen: &Screen,
     resend: bool,
 ) -> Option<Opened> {
-    open_page(devtools, session, viewport).ok()?;
+    // L'écran est caché pendant que la page défilerait : le défilement de toute
+    // la page ne lui montre rien.
+    open_page_with(devtools, session, viewport, false).ok()?;
     let typed = if resend {
         resend_forms(devtools)
     } else {
@@ -3549,6 +3586,7 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
         .position(|viewport| !viewport.mobile)
         .unwrap_or(sizes.len().saturating_sub(1));
     let mut openers = Vec::new();
+    let mut arrival = None;
     let mut explore = Explore::default();
     // Défauts de la page elle-même : les écrans explorés ne les redisent pas.
     let mut known = Vec::new();
@@ -3613,6 +3651,9 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
                 if openers.is_empty() {
                     openers = shot.openers;
                 }
+                if arrival.is_none() {
+                    arrival = shot.views;
+                }
                 if explore.screens.is_empty() && explore.pages.is_empty() {
                     explore = shot.explore;
                 }
@@ -3667,7 +3708,14 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
     // Fenêtres, menu et onglets, au téléphone de préférence : là où un parent les ouvre.
     if session.windows {
         if let Some(viewport) = sizes.iter().find(|size| size.mobile).or(sizes.first()) {
-            let shots = view_shots(&mut devtools, &session, viewport, &openers, &known);
+            let shots = view_shots(
+                &mut devtools,
+                &session,
+                viewport,
+                &openers,
+                arrival.take(),
+                &known,
+            );
             for (number, extra) in shots.into_iter().enumerate() {
                 total += extra.problems.len();
                 let name = format!("{}-view-{}", viewport.label.replace(' ', "-"), number + 1);

@@ -26,6 +26,8 @@
   // deux chiffres est la virgule des décimales, les autres sont des milliers.
   const parseAmount = (value) => {
     if (typeof value === "number") return value;
+    // Des lettres (hors « € » ou « euros ») : ce n'est pas un montant.
+    if (/\p{L}/u.test(String(value ?? "").replace(/€|\beur(os?)?\b/gi, ""))) return NaN;
     const text = String(value ?? "").replace(/[^\d,.+-]/g, "");
     const last = Math.max(text.lastIndexOf(","), text.lastIndexOf("."));
     const decimals = last >= 0 && /^\d{1,2}$/.test(text.slice(last + 1));
