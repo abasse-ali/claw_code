@@ -250,6 +250,12 @@ const FUNCTION_FAULTS: &[(&str, u8, u8, &str)] = &[
     ),
     ("is shown nowhere", 1, 10, "nom envoyé affiché nulle part"),
     ("do nothing when clicked", 1, 10, "bouton qui ne fait rien"),
+    (
+        "is written on the page for every visitor",
+        2,
+        6,
+        "code d'accès lisible par tous les visiteurs",
+    ),
     ("broken links", 1, 10, "lien cassé"),
     ("cannot be tapped", 1, 10, "bouton impossible à toucher"),
     ("does not close", 1, 10, "fenêtre qui ne se ferme pas"),
@@ -864,7 +870,7 @@ pub fn invented_rules_note(sentences: &[String]) -> String {
 #[must_use]
 pub fn access_code_note(codes: &[String]) -> String {
     format!(
-        "[Claw] The page opens a reserved space with the code \"{}\", written in its script, and your answer never gives it: the user cannot get in. Say in your answer, in plain words, the code, where to type it and how to choose their own; and in one line, that this code keeps out the curious but not someone who reads the page's code.",
+        "[Claw] The page opens a reserved space with the code \"{}\", written in its script, and your answer never gives it: the user cannot get in. Say in your answer, in plain words, the code, where to type it and how to choose their own; and in one line, that this code keeps out the curious but not someone who reads the page's code. Give it in the answer only: never write it on the page (no hint, no example in the field), where every visitor would read it.",
         codes[0]
     )
 }
@@ -873,7 +879,104 @@ pub fn access_code_note(codes: &[String]) -> String {
 /// tout dans chaque téléphone. Vu le 26 octobre 2026 (session #32) : les
 /// clientes réservaient dans leur navigateur, la boulangère n'en aurait
 /// jamais rien vu ; le pied de page le disait en petit, la réponse non.
-pub const SHARED_DATA_NOTE: &str = "[Claw] The user asked for something several people share: some enter it (a reservation, a sign-up, an offer) and someone else sees it on another phone. Your page keeps what a visitor enters in that visitor's own browser (localStorage), so nobody else ever sees it: as built, the request does not work, even if every check passes on one device. Do not hide this. Either make the data shared, or say it plainly at the top of your final answer: what works on one phone, what does not work between phones, and what is needed to make it work. Ways to share it: a small server of the project; a free hosted store the user sets up; or, when the user does not want to set anything up, send each entry to the person who must see it through the visitor's own messaging app: the form opens WhatsApp (https://wa.me/<number>?text=...), SMS (sms:<number>?body=...) or email (mailto:<address>?subject=...&body=...) with the entry already written in, and the visitor only taps send; nothing to create or configure, only that person's number or address is needed (ask for it if you do not have it, never invent one). Ask the user with AskUserQuestion which way they accept, in plain words, without technical names.";
+pub const SHARED_DATA_NOTE: &str = "[Claw] The user asked for something several people share: some enter it (a reservation, a sign-up, an offer) and someone else sees it on another phone. Your page keeps what a visitor enters in that visitor's own browser (localStorage), so nobody else ever sees it: as built, the request does not work, even if every check passes on one device. Do not hide this. Either make the data shared, or say it plainly at the top of your final answer: what works on one phone, what does not work between phones, and what is needed to make it work. Ways to share it: a small server of the project; a free hosted store the user sets up; or, when the user does not want to set anything up, send each entry to the person who must see it through the visitor's own messaging app: the form opens WhatsApp (https://wa.me/<number>?text=...), SMS (sms:<number>?body=...) or email (mailto:<address>?subject=...&body=...) with the entry already written in, and the visitor only taps send; nothing to create or configure, only that person's number or address is needed (ask for it if you do not have it, never invent one). Ask the user with AskUserQuestion which way they accept, in plain words, without technical names. Never send the entries to a service the user has not chosen (a free public store found online): whoever finds its address reads the customers' names and numbers.";
+
+/// Adresses que le code nomme sans y envoyer ce que les visiteurs entrent :
+/// polices, bibliothèques, images, cartes, réseaux, messageries.
+const NOT_DATA_HOSTS: &[&str] = &[
+    "fonts.googleapis.com",
+    "fonts.gstatic.com",
+    "jsdelivr.net",
+    "unpkg.com",
+    "cdnjs.cloudflare.com",
+    "jquery.com",
+    "tailwindcss.com",
+    "w3.org",
+    "schema.org",
+    "wa.me",
+    "whatsapp.com",
+    "google.com",
+    "openstreetmap.org",
+    "unsplash.com",
+    "wikimedia.org",
+    "wikipedia.org",
+    "youtube.com",
+    "vimeo.com",
+    "github.com",
+    "githubusercontent.com",
+    "localhost",
+    "example.com",
+    "example.org",
+    "instagram.com",
+    "facebook.com",
+];
+
+/// Services d'un tiers à qui le code envoie des données (POST, PUT, PATCH,
+/// `sendBeacon`), que `after` nomme et `before` non : un service ajouté par le
+/// tour. Les adresses de liens et d'images (`href`, `src`), de fichiers
+/// (`.css`, `.png`…) et de polices ou bibliothèques n'en sont pas.
+#[must_use]
+pub fn new_data_services(before: &str, after: &str) -> Vec<String> {
+    let writes = Regex::new(
+        r#"(?i)method\s*:\s*['"`](?:post|put|patch)\b|\.(?:post|put|patch)\s*\(|sendBeacon\s*\(|\.open\s*\(\s*['"`](?:post|put|patch)\b"#,
+    )
+    .expect("regex");
+    if !writes.is_match(after) {
+        return Vec::new();
+    }
+    let urls =
+        Regex::new(r#"https?://([a-z0-9-]+(?:\.[a-z0-9-]+)+)(/[^\s'"`)<>]*)?"#).expect("regex");
+    let asset = Regex::new(
+        r"\.(css|m?js|png|jpe?g|gif|svg|webp|avif|ico|woff2?|ttf|otf|mp4|webm|pdf)(\?|#|$)",
+    )
+    .expect("regex");
+    let before = before.to_lowercase();
+    let after = after.to_lowercase();
+    let mut hosts: Vec<String> = Vec::new();
+    for found in urls.captures_iter(&after) {
+        let whole = found.get(0).expect("adresse");
+        let host = found[1].to_string();
+        let path = found.get(2).map_or("", |path| path.as_str());
+        let lead = after[..whole.start()].trim_end_matches(['"', '\'']);
+        let linked = ["href=", "src=", "srcset=", "url(", "content="]
+            .iter()
+            .any(|attribute| lead.ends_with(attribute));
+        let known = NOT_DATA_HOSTS
+            .iter()
+            .any(|name| host == *name || host.ends_with(&format!(".{name}")));
+        if linked
+            || known
+            || asset.is_match(path)
+            || before.contains(&host)
+            || hosts.contains(&host)
+        {
+            continue;
+        }
+        hosts.push(host);
+    }
+    hosts
+}
+
+/// L'utilisateur a nommé ce service (« mantledb », « firebase ») dans ses
+/// messages : il l'a choisi.
+#[must_use]
+pub fn named_by_user(host: &str, words: &str) -> bool {
+    host.split('.')
+        .rev()
+        .nth(1)
+        .filter(|name| name.len() >= 4)
+        .is_some_and(|name| words.contains(name))
+}
+
+/// Message renvoyé au modèle : le code envoie ce que les visiteurs entrent à
+/// un service que l'utilisateur n'a pas choisi.
+#[must_use]
+pub fn data_service_note(hosts: &[String]) -> String {
+    format!(
+        "[Claw] Your code now sends what visitors enter to {}, a service run by someone else that the user never chose. Whoever finds that address can read, change or erase what is there (names, phone numbers: personal data the user answers for), the service can stop or wipe it without notice, and the user did not agree. Do not ship it this way. Ask the user first with AskUserQuestion, in plain words, without technical or service names, which way they accept: each entry sent straight to the person who must see it through the visitor's own messaging app (WhatsApp, SMS or email, already written in; nothing to set up, only that person's number or address); an account the user creates for a store of their own (a few minutes, you guide them step by step); or a small server of the project, with somewhere to host it. Until they answer, take that service out of the code and say so in your answer.",
+        hosts.join(", ")
+    )
+}
 
 /// Photos que l'outil `Photo` a enregistrées dans le projet, d'après les
 /// crédits qu'il tient (`images/CREDITS.md` : « - `images/pain-1.jpg`: … »).
@@ -1938,6 +2041,53 @@ pub fn visual_check_feedback(
     text
 }
 
+/// Ce que Claw a vu de la page avant le travail, donné à l'agent avec la
+/// demande ; `None` quand la page n'a rien à reprendre. Vu le 27 octobre 2026
+/// (session #32, passage 7) : la mesure du début avait trouvé l'erreur qui
+/// vidait la liste de la boulangère (« `Cannot set property className of
+/// SVGElement` »), mais ne servait qu'à comparer ; l'agent a cherché la cause
+/// dans le filtre des dates, puis dans `file://`, et n'a jamais réparé la
+/// liste.
+#[must_use]
+pub fn start_brief(target: &str, audit: &Audit, shared_note: bool) -> Option<String> {
+    let missed = audit
+        .explored
+        .iter()
+        .any(|line| line.starts_with("Not reached:"));
+    if audit.is_clean() && !missed && !shared_note {
+        return None;
+    }
+    let page = target.split_once(':').map_or(target, |(_, page)| page);
+    let mut text = format!(
+        "[Claw] Before you change anything: Claw opened {page} in a real browser, at phone and desktop sizes, and used it like a visitor (every button, form and screen it could reach). This is measured, not guessed. As it is now, the page works at {}/10.",
+        function_score(audit).score
+    );
+    if !audit.explored.is_empty() {
+        text.push(' ');
+        text.push_str(&audit.explored.join(" "));
+    }
+    let bullets = |lines: &mut dyn Iterator<Item = &String>| {
+        lines
+            .map(|line| format!("- {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    if !audit.problems.is_empty() {
+        text.push_str("\nWhat is wrong now:\n");
+        text.push_str(&bullets(&mut audit.problems.iter()));
+    }
+    if !audit.console.is_empty() {
+        text.push_str("\nConsole errors:\n");
+        text.push_str(&bullets(&mut audit.console.iter().take(8)));
+    }
+    text.push_str("\nStart with what the request is about. A script error above is why that screen fails: find the line that throws (search the files for what the message names) and fix it first, before looking for any other cause. To see a screen yourself, use the Browser tool (open the page, click, type, look).");
+    if shared_note {
+        text.push('\n');
+        text.push_str(SHARED_DATA_NOTE);
+    }
+    Some(text)
+}
+
 /// Message au modèle après la revue ; `None` quand il n'y a rien à corriger.
 #[must_use]
 pub fn review_feedback(
@@ -2005,6 +2155,58 @@ mod tests {
         page_target, problem_key, read_audit, regression_note, regressions, review_feedback,
         screenshot_input, Audit,
     };
+
+    #[test]
+    fn a_public_store_the_turn_sends_entries_to_is_found() {
+        // Session #32, passage 7 (27 octobre 2026) : les réservations des
+        // clientes envoyées à MantleDB, trouvé par une recherche.
+        let before = "const KEY = 'reservations';\nfunction save(list) { localStorage.setItem(KEY, JSON.stringify(list)); }\n";
+        let after = "const MANTLE_URL = 'https://mantledb.sh/v2/boulangerie-3place/reservations';\nconst FONT = 'https://fonts.googleapis.com/css2?family=Fraunces';\nfunction save(entry) {\n  return fetch(MANTLE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entry) });\n}\nfooter.innerHTML = '<a href=\"https://www.tripadvisor.fr/boulangerie\">Avis</a><img src=\"https://cdn.example.net/pain.jpg\">';\n";
+        assert_eq!(
+            super::new_data_services(before, after),
+            vec!["mantledb.sh".to_string()]
+        );
+        // Déjà là avant le tour, ou rien n'y est écrit : rien de nouveau.
+        assert!(super::new_data_services(after, after).is_empty());
+        assert!(super::new_data_services(
+            before,
+            "fetch('https://api.open-meteo.com/v1/forecast?latitude=43').then((r) => r.json());"
+        )
+        .is_empty());
+        assert!(super::named_by_user(
+            "mantledb.sh",
+            "mettez mes réservations sur mantledb"
+        ));
+        assert!(!super::named_by_user(
+            "mantledb.sh",
+            "je ne veux rien régler"
+        ));
+        let note = super::data_service_note(&["mantledb.sh".to_string()]);
+        assert!(
+            note.contains("sends what visitors enter to mantledb.sh")
+                && note.contains("AskUserQuestion")
+        );
+    }
+
+    #[test]
+    fn what_the_page_does_wrong_before_the_turn_goes_to_the_agent() {
+        // Session #32, passage 7 (27 octobre 2026) : l'erreur qui vidait la
+        // liste était mesurée au début du tour, mais l'agent ne l'a jamais lue.
+        let audit = Audit {
+            problems: vec!["In the screen \"Préparation du jour\" (opened by button.nav-link \"Espace boulanger\", with the code \"1234\"): opening it raises an error in the page's script: uncaught: Uncaught (in promise) TypeError: Cannot set property className of #<SVGElement> which has only a getter".to_string()],
+            explored: vec!["Explored like a visitor: the page; the screen \"Préparation du jour\".".to_string()],
+            ..Audit::default()
+        };
+        let brief = super::start_brief("path:index.html", &audit, true).expect("bilan");
+        assert!(
+            brief.starts_with("[Claw] Before you change anything: Claw opened index.html"),
+            "{brief}"
+        );
+        assert!(brief.contains("works at 5/10"), "{brief}");
+        assert!(brief.contains("Cannot set property className"), "{brief}");
+        assert!(brief.contains("several people share"), "{brief}");
+        assert!(super::start_brief("path:index.html", &Audit::default(), false).is_none());
+    }
 
     #[test]
     fn photos_are_read_back_from_their_credits() {

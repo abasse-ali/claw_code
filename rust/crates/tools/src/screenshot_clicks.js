@@ -686,6 +686,23 @@
   // le code ; le parcours s'arrêtait à la fenêtre du code, et l'agent
   // annonçait « vérifié ».
   const codes = typeof clawCodes === "undefined" ? [] : clawCodes;
+  // Le code écrit à l'écran (texte ou exemple du champ) : tout visiteur le lit
+  // et entre. Vu le 27 octobre 2026 (session #32, passage 7) : « Code par
+  // défaut : 1234 » dans la fenêtre même de l'espace boulanger.
+  const codeShown = [];
+  const writtenCode = (code, field) => {
+    if (field && field.placeholder && field.placeholder.trim() === code) return `the example of its field: "${code}"`;
+    const quoted = code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`(^|[^\\w])${quoted}([^\\w]|$)`);
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const parent = node.parentElement;
+      if (!parent || parent.closest("script, style, template, noscript") || !shown(parent) || !pattern.test(node.textContent)) continue;
+      const block = parent.closest("p, li, label, dt, dd, small, div") || parent;
+      return `«${(block.innerText || node.textContent).replace(/\s+/g, " ").trim().slice(0, 80)}»`;
+    }
+    return null;
+  };
   // Les boutons essayés ont pu changer ce que l'espace montre (le jour choisi
   // dans le formulaire) : les formulaires encore à l'écran sont renvoyés juste
   // avant, sans que ce second envoi compte dans le rapport.
@@ -717,6 +734,10 @@
       const box = windows().find((item) => !opened.has(item)) || windows().find((item) => codeField(item));
       const field = box && codeField(box);
       if (!field) break;
+      const written = writtenCode(code, field);
+      if (written && !codeShown.some((line) => line.includes(`"${code}"`))) {
+        codeShown.push(`the access code "${code}" that opens ${label(el)} is written on the page for every visitor to read (${written})`);
+      }
       const before = errors.length;
       setValue(field, code);
       const enter = [...box.querySelectorAll("button, input[type=submit], [role=button]")].filter(shown)
@@ -726,7 +747,15 @@
         if (enter) tap(enter);
         else field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
       } catch (error) { errors.push(String((error && error.message) || error)); }
-      await wait(600);
+      // Un code vérifié de façon asynchrone (les données attendues d'un
+      // serveur) ferme sa fenêtre plus tard : jusqu'à 3 s. Vu le 27 octobre
+      // 2026 (session #32, passage 7) : l'écran du boulanger, ouvert après
+      // un appel réseau, n'était plus atteint.
+      for (let waited = 0; waited < 3000; waited += 150) {
+        await wait(150);
+        if (errors.length > before || !box.isConnected || !open(box) || !codeField(box)) break;
+      }
+      await wait(300);
       if (errors.length > before) {
         failing.push(`${label(el)}, then the access code "${code}" written in the page's script, typed in the window it opens, once the page's forms were sent (so there is something to show): ${errors[errors.length - 1]}`);
         // Même en erreur, l'écran s'est ouvert : Screenshot le capture tel quel.
@@ -753,7 +782,7 @@
             const go = [...box.querySelectorAll("button, input[type=submit], [role=button]")].filter(shown)
               .find((item) => item.value === "submit" || item.type === "submit" || /acc[eé]der|valider|ok|entrer|ouvrir|enter|open|submit/i.test((item.innerText || item.value || "").trim()));
             if (go) tap(go);
-            await wait(600);
+            for (let waited = 0; waited < 3000 && !shown(region); waited += 150) await wait(150);
             return shown(region);
           });
         }
@@ -791,5 +820,5 @@
     }
   }
   const sitePages = [...pages].map(([url, { from }]) => ({ url, from }));
-  return { checked: tried.size, windowLayout, dead, failing, covered, buried, stuck, links, files, forms, unnamed, underBar, kept, openers, dragged, screens, pages: sitePages, typed };
+  return { checked: tried.size, windowLayout, dead, failing, covered, buried, stuck, links, files, forms, unnamed, underBar, kept, openers, dragged, screens, pages: sitePages, typed, codeShown };
 })()

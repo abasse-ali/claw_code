@@ -291,6 +291,16 @@
       blame([h1]);
       problems.push(`The main title ${name(h1)} is ${css(h1).fontSize} on this phone, no bigger than the body text (${bodySize}px): nobody sees what the page is about. Give it at least 1.6 times the body size on phones (font-size: clamp(1.6rem, 6vw, 3rem))`);
     }
+    // Titres plus petits que le texte courant : rétrécis pour tenir. Vu le 27
+    // octobre 2026 (session #32, passage 7) : les noms des produits coupés sur
+    // téléphone, passés à 13px au lieu de recevoir la place qu'il leur fallait.
+    const shrunk = visible.filter((el) => el.matches("h2, h3, h4") && ownText(el) && !el.closest("footer")
+      && css(el).textTransform !== "uppercase" && (parseFloat(css(el).letterSpacing) || 0) < 1
+      && parseFloat(css(el).fontSize) < bodySize * 0.9);
+    if (shrunk.length) {
+      blame(shrunk);
+      problems.push(`Headings smaller than the body text (${bodySize}px) on this phone: ${list(shrunk.map((el) => `${name(el)} (${css(el).fontSize})`))}. A heading or an item name smaller than the text around it is read last. When it does not fit, give it room (let it wrap to two lines, put its buttons under it) instead of shrinking it: at least the body size`);
+    }
   }
 
   // 6b. Mots collés : un espacement de lettres négatif sur un texte de taille
