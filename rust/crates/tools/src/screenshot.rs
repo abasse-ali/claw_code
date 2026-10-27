@@ -2948,9 +2948,41 @@ fn shown_view_problems(devtools: &mut DevTools, view: &View, known: &[String]) -
                 problems.push(format!("{place}: {problem}"));
             }
         }
+        // L'autre mode aussi quand la page suit le réglage du téléphone et que
+        // l'écran a des champs. Vu le 27 octobre 2026 (session #36) : les
+        // montants de l'écran « Réglages », noir sur noir en mode sombre, que la
+        // mesure de la page d'accueil, en clair, ne voyait pas.
+        let fields = "[...document.querySelectorAll('input:not([type=hidden]):not([type=checkbox]):not([type=radio]), textarea, select')].some((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })";
+        if audit["schemes"].as_bool() == Some(true)
+            && devtools
+                .evaluate(fields)
+                .ok()
+                .and_then(|shown| shown.as_bool())
+                == Some(true)
+        {
+            let shown = session_theme(devtools);
+            for problem in other_scheme_problems(devtools, &shown) {
+                let measured = problem
+                    .split_once("): ")
+                    .map_or(problem.as_str(), |(_, rest)| rest);
+                if view_problem(measured) && !known.contains(&problem) {
+                    problems.push(format!("{place}: {problem}"));
+                }
+            }
+        }
     }
     let _ = devtools.evaluate("document.querySelectorAll('[data-claw-blame], [data-claw-hover]').forEach((el) => { el.removeAttribute('data-claw-blame'); el.removeAttribute('data-claw-hover'); })");
     problems
+}
+
+/// Le mode de couleurs que la page voit en ce moment (`prefers-color-scheme`).
+fn session_theme(devtools: &mut DevTools) -> String {
+    let dark = devtools
+        .evaluate("matchMedia('(prefers-color-scheme: dark)').matches")
+        .ok()
+        .and_then(|value| value.as_bool())
+        == Some(true);
+    if dark { "dark" } else { "light" }.to_string()
 }
 
 /// Défauts qu'un écran ouvert (fenêtre, onglet, écran d'une appli) ajoute à
@@ -4731,6 +4763,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!mine.contains("is shown nowhere"), "{mine}");
         assert!(shared.contains("is shown nowhere"), "{shared}");
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn typed_text_unreadable_in_the_other_mode_of_a_hidden_screen_is_found() {
+        // Session #36 (27 octobre 2026) : les montants de l'écran « Réglages »,
+        // noir sur noir quand le téléphone est réglé en sombre.
+        let cwd = std::env::current_dir().expect("dossier");
+        let name = format!("claw-reglages-{}", std::process::id());
+        let dir = cwd.join(&name);
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |field_color: &str| {
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Budget</title><style>:root {{ --bg: #f6f3ee; --text: #1f1d1a; --field: #ffffff; }} @media (prefers-color-scheme: dark) {{ :root {{ --bg: #161412; --text: #f1ebe2; --field: #0b0a09; }} }} body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; background: var(--bg); color: var(--text); }} input {{ font: inherit; padding: 10px; background: var(--field); {field_color} border: 1px solid #888; }} a {{ color: inherit; display: inline-block; padding: 12px; }} [hidden] {{ display: none; }}</style></head><body><nav><a href=\"#accueil\">Accueil</a><a href=\"#reglages\">Réglages</a></nav><section id=\"accueil\"><h1>Ce mois-ci</h1><p>Reste 848,55 €</p></section><section id=\"reglages\" hidden><h2>Réglages</h2><label for=\"salaire\">Salaire</label><input id=\"salaire\" value=\"1235.15\"></section><script>const show = () => {{ const id = location.hash.slice(1) || 'accueil'; for (const s of document.querySelectorAll('section')) s.hidden = s.id !== id; }}; addEventListener('hashchange', show); show();</script></body></html>"),
+            )
+            .expect("html");
+        };
+        let capture = || {
+            let mut request = input(None, Some(&format!("{name}/index.html")));
+            request.viewports = Some(json!(["phone"]));
+            request.windows = Some(true);
+            super::take(&request).expect("capture").to_string()
+        };
+        write("");
+        let unreadable = capture();
+        write("color: inherit;");
+        let readable = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            unreadable.contains("In the screen opened by a \\\"Réglages\\\": In dark mode")
+                && unreadable.contains("Fields whose typed text cannot be read"),
+            "{unreadable}"
+        );
+        assert!(
+            !readable.contains("Fields whose typed text cannot be read"),
+            "{readable}"
+        );
     }
 
     #[test]

@@ -69,7 +69,7 @@ des défauts mal mesurés :
 | 6. Kit d'appli | Cinq composants de l'outil `Component` pour une appli perso : `app-tabs` (écrans d'une seule page derrière une barre d'onglets, en bas au téléphone ; l'écran suit l'adresse, `screenchange` à chaque changement ; les messages passent au-dessus de la barre), `entries` (données gardées sur le téléphone ; les chiffres de l'utilisateur posés au mois en cours dès le premier lancement, jamais recopiés sur les mois d'avant ; liste du mois et totaux ; suppression avec « Annuler » ; copie en fichier tableur `;` et virgule décimale, reprise sans doublon grâce à l'identifiant), `entry-sheet` (volet d'ajout qui monte du bas, montant « 12,50 » ou « 12.50 », champs lisibles en sombre), `chart` (barres en SVG à la largeur de leur écran, redessinées à son ouverture, sans boucle de `ResizeObserver`), `pwa` (balises du `<head>`, manifeste à `start_url` relative, service worker réseau d'abord, rendus sous `files`). `toast` reçoit une action (« Annuler »). Nouvel outil `AppIcon` (`tools/src/app_icons.rs`) : le navigateur dessine les PNG 192, 512, maskable et 180 (iPhone) depuis l'icône SVG, refuse une icône vide ; fond pris au manifeste. La méthode de design demande le kit, les cinq ensemble, pour une appli qui garde les données de l'utilisateur, et `AppIcon` pour les PNG | fait |
 | 7. Vitesse | Mesuré sur le journal de #35 (temps entre deux requêtes, selon ce qui s'y passe) : les 62 vérifications après modification pesaient le plus. Chacune durait 29 s sur l'appli de #35, dont 18 s pour rouvrir la page à chaque vue (fenêtres, menu, écrans), contre 6 à 9 s pour la requête suivante du modèle : de l'ordre de 20 min d'attente sur 109. Changements, barres et mesures inchangées (mêmes défauts trouvés, comparés avant et après sur l'appli de #35 et sur celle du kit) : (1) les vues sont relevées pendant la capture du téléphone, sans rouvrir la page, et une vue se rouvre sans faire défiler toute la page (`open_page_with`) : 29 s → 20 s (appli de #35), 17 s → 10 s (kit) ; (2) la requête suivante n'attend plus une vérification encore en route que 1,5 s (`CHECK_GRACE`, `ready_visual_check`) : son résultat suit au pas d'après, et les modifications faites pendant ce temps sont regroupées dans la vérification suivante (« vérifications regroupées »). Les revues de début et de fin de tour attendent toujours la leur. Fausse alerte trouvée en mesurant, corrigée : le parcours tapait son nom d'essai dans un montant (`inputmode="decimal"`) et disait l'opération « montrée nulle part » ; un champ numérique reçoit un nombre, et un nom ajouté à un écran caché qu'un lien ou un onglet ouvre compte comme montré | fait |
 | 8. Banc t9-budget | `rust/scripts/real-tests/scenarios/t9-budget` : la demande de #35 avec les réponses à ses questions, dossier vide ; `check.py` sert le projet en http et le mène dans un vrai navigateur par DevTools (client WebSocket en Python sans dépendance), 12 points (vérifications cachées ci-dessous, plus une dépense gardée après un rechargement). Étalonné : l'appli de Claude 11/12 (seul le mode sombre manque : elle n'avait pas la réponse « sobre foncé »), celle de #35 4/12 | fait |
-| 9. Livraison | Vérification complète, essai réel (2 passages au plus), comparaison avec #35, **fusion directe dans `main`** | à faire |
+| 9. Livraison | Vérification complète (969 tests, 42 essais navigateur sur 43 : seul `advisors`, attendu), essai réel en un passage (session #36, ci-dessous), corrections tirées du passage (parcours Browser écrits autrement, entrée absente de sa liste, champs illisibles de l'autre mode dans les écrans cachés), **fusion directe dans `main`** le 27 octobre 2026 | fait |
 
 Vérifications cachées prévues pour t9 (tirées de la comparaison) : montants présents au
 premier lancement (`1235.15`, `103`, `206`, `80`, `21.6`) ; espèces comptées seulement une
@@ -80,9 +80,21 @@ worker (hors-ligne) ; aucun débordement horizontal au téléphone.
 
 ## Suite, dans l'ordre
 
-1. Lot 9.
-2. Lot 9 : essai réel, puis fusion dans `main`, puis mise à jour de ce fichier et de
-   `rust/docs/suivi-intelligence.md`.
+Le chantier est fusionné dans `main`. Ce que l'essai réel a laissé (session #36, ci-dessous) :
+
+1. **Le kit recopié au lieu d'être collé** : l'agent a gardé l'architecture du kit
+   (`window.entries`, `drawChart`, `screenchange`) mais a tout retapé dans un `app.js` de 829
+   lignes, et y a mis deux bogues que le kit n'a pas (graphique `NaN`, liste du mois vide),
+   réparés ensuite. Piste : que l'outil `Component` écrive les scripts du kit dans le projet
+   (`components/entries.js`…), à inclure par `<script src>`, au lieu de les rendre en texte.
+2. **La CAF de 103 à 206 €** a été prise pour un gain non assuré : le reste prudent affiché
+   (745,55 €) l'oublie. La demande dit `+` (gain sûr) avec une fourchette : le bas de la
+   fourchette est sûr. À dire dans la méthode (une fourchette sur un gain sûr : le bas compte
+   dans le prudent, le haut dans le meilleur des cas), puis le vérifier sur t9.
+3. **Pas de question posée** dans #36 : le style (« sobre foncé » dans #35) n'a pas été
+   demandé, et l'appli suit le réglage du téléphone, claire par défaut.
+4. Banc t9 avec le banc d'essai (`run.py t9-budget`), et un second passage de #36
+   (« continue ») si l'utilisateur le veut : il reste 9 tâches à l'agent.
 
 ## Vérifier
 
@@ -129,8 +141,33 @@ chantier n'a pas touchés, et des fonctions déjà trop longues avant lui (`take
 
 ## Essai réel (lot 9)
 
-Accord de l'utilisateur : 2 passages au plus (le passage des questions compte). Pour essayer
-la branche sans toucher `main` :
+Fait le 27 octobre 2026 : session #36 de `claw-sessions` (même demande que #35, même modèle
+`nvidia:nvidia/nemotron-3-ultra-550b-a55b`, exécuteur `claw-pc`, `budget_claw` branche
+`claw/session-10`), moteur de la branche (`f08985c`) par la branche
+`claude/eloquent-mccarthy-17goou` de `claw-sessions`. Un seul passage : Claw n'a posé aucune
+question et a construit directement ; le second passage n'a pas été lancé, le quota gratuit
+du jour (relecteurs, lecteur d'images) étant épuisé (1004/1000).
+
+| | #35 (moteur d'avant) | #36 (ce chantier) |
+|---|---|---|
+| Durée du passage de travail | 109 min, arrêté par l'heure | 62 min 31 s, arrêté par la limite de 300 requêtes |
+| Requêtes | 304, moyenne 21,5 s (médiane 9 s) | 301, moyenne 11,6 s (médiane 7 s) à mi-parcours |
+| Composants | aucun du kit | `app-tabs`, `entries`, `entry-sheet`, `chart`, `pwa`, `toast`, `dialog` ; icônes PNG par `AppIcon` |
+| Banc t9 (`check.py`) | 4/12 | 8/12 |
+| Montants au premier lancement | absents (0,00 € partout) | là (sauf le haut de la CAF, 206) |
+| Graphique | vide (canvas 0x0) | dessiné (SVG, accueil et bilan) |
+| Hors-ligne et installable | `start_url` `/`, pas de service worker, icône SVG seule | manifeste à `start_url` `./`, service worker, PNG 192, 512, maskable, 180 |
+| Texte tapé lisible | noir sur noir en sombre | noir sur noir en sombre dans l'écran « Réglages » (mesure ajoutée depuis) |
+| Reste prudent / au mieux | absents | 745,55 € (la CAF comptée comme incertaine), pas de meilleur des cas |
+| Sombre | clair imposé malgré « sobre foncé » | suit le téléphone (aucune question posée) |
+
+Corrections tirées de #36, faites sur la branche avant la fusion : parcours `Browser` écrits
+autrement (`actions`, `steps` sans `action`, `into`, étapes de Screenshot) mis à la forme ;
+une entrée ajoutée absente de sa liste n'est plus dite « nom affiché nulle part » (l'agent
+ajoutait un champ « Nom » à la dépense) ; les champs d'un écran caché ou d'une fenêtre sont
+mesurés aussi dans l'autre mode quand la page suit le réglage du téléphone.
+
+Pour essayer une branche sans toucher `main` :
 
 1. Dans `abasse-ali/claw-sessions`, sur une branche, faire pointer le workflow
    `.github/workflows/claw-web.yml` sur `abasse-ali/claw_code/.github/workflows/claw-web.yml@<branche>`
