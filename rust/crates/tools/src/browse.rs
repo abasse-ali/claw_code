@@ -249,7 +249,9 @@ fn open(session: &mut Session, url: &str, viewport: &Viewport) -> Result<Value, 
 /// Trouve l'élément visé (référence, sélecteur ou texte visible), le met à
 /// l'écran et rend son centre, son nom, et ce qui se trouve sous ce centre.
 const FIND_SCRIPT: &str = r##"(() => {
-  const wanted = clawTarget.trim();
+  // « [e5] », tel que la vue l'écrit, vise e5. Vu le 27 octobre 2026
+  // (session #32, passage 6) : deux clics refusés pour leurs crochets.
+  const wanted = clawTarget.trim().replace(/^\[(e\d+)\]$/, "$1");
   const shown = (el) => { const s = getComputedStyle(el); const r = el.getBoundingClientRect(); return s.display !== "none" && s.visibility !== "hidden" && r.width > 0 && r.height > 0; };
   const label = (el) => (el.getAttribute("aria-label") || (el.labels && el.labels[0] && el.labels[0].innerText) || el.innerText || el.value || el.getAttribute("placeholder") || el.getAttribute("title") || "").replace(/\s+/g, " ").trim();
   let el = null;
@@ -591,6 +593,7 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    #[allow(clippy::too_many_lines)]
     fn the_page_is_used_like_a_visitor_and_seen_as_text() {
         // Session #32 (26 octobre 2026) : réserver, puis ouvrir l'espace de la
         // boulangère avec son code ; la liste plantait dès qu'une réservation
@@ -617,6 +620,17 @@ mod tests {
         let unlocked = step(json!({ "action": "click", "target": "Accéder" }));
         let looked = step(json!({ "action": "look", "full": true }));
         let unknown = step(json!({ "action": "click", "target": "Rien de tel" }));
+        // La référence écrite comme dans la vue, entre crochets.
+        let bracketed = looked["view"]
+            .as_str()
+            .unwrap_or_default()
+            .lines()
+            .find(|line| line.contains("Préparation du jour") || line.contains("[e"))
+            .and_then(|line| line.split('[').nth(1))
+            .and_then(|rest| rest.split(']').next())
+            .map(|reference| format!("[{reference}]"))
+            .unwrap_or_default();
+        let by_bracket = step(json!({ "action": "scroll", "to": bracketed }));
         let closed = step(json!({ "action": "close" }));
         let after = step(json!({ "action": "look" }));
         let _ = std::fs::remove_dir_all(&dir);
@@ -684,6 +698,13 @@ mod tests {
                 .unwrap_or_default()
                 .starts_with("nothing on the page matches `Rien de tel`"),
             "{unknown}"
+        );
+        assert!(
+            by_bracket["done"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("scrolled to"),
+            "{by_bracket}"
         );
         assert_eq!(closed["done"], "the browser is closed");
         assert!(

@@ -308,12 +308,31 @@ pub fn function_score(audit: &Audit) -> FunctionScore {
     if !audit.console.is_empty() && !scripted {
         count(3, 5, "erreur du script");
     }
-    // Ce que la revue n'a pas pu ouvrir n'est pas vérifié.
-    if audit
+    // Le deuxième appareil n'a rien eu à comparer, parce que l'écran du
+    // propriétaire ne montre pas ce qui vient d'être envoyé, ou qu'aucun écran
+    // ne montre aux autres ce qu'on envoie : la demande partagée ne marche
+    // pas. Vu le 27 octobre 2026 (session #32, passage 6) : « fonctionnement
+    // 9/10 (partie du site pas atteinte) » pour une boulangère qui ne recevait
+    // aucune réservation.
+    let missed = audit
         .explored
         .iter()
-        .any(|line| line.starts_with("Not reached:"))
-    {
+        .find(|line| line.starts_with("Not reached:"))
+        .map_or("", String::as_str);
+    if missed.contains("did not show the entry the form had just sent") {
+        count(
+            3,
+            5,
+            "l'écran du propriétaire ne montre pas ce qui vient d'être envoyé",
+        );
+    } else if missed.contains("no screen of the page shows what others sent") {
+        count(
+            3,
+            5,
+            "aucun écran ne montre à quelqu'un d'autre ce que les visiteurs envoient",
+        );
+    } else if !missed.is_empty() {
+        // Ce que la revue n'a pas pu ouvrir n'est pas vérifié.
         count(1, 10, "partie du site pas atteinte");
     }
     FunctionScore {
@@ -876,23 +895,40 @@ pub fn credited_photos(root: &Path) -> Vec<String> {
 /// hors dépendances : ce qui peut nommer une image.
 #[must_use]
 pub fn page_texts(root: &Path) -> Vec<String> {
-    const KINDS: &[&str] = &[
-        "html",
-        "htm",
-        "css",
-        "scss",
-        "js",
-        "mjs",
-        "jsx",
-        "ts",
-        "tsx",
-        "vue",
-        "svelte",
-        "astro",
-        "md",
-        "json",
-        "webmanifest",
-    ];
+    texts_of(root, PAGE_KINDS)
+}
+
+/// Pages et scripts du projet (sans styles, notes ni données) : ce qui garde
+/// ou envoie ce que les visiteurs entrent.
+#[must_use]
+pub fn page_scripts(root: &Path) -> Vec<String> {
+    texts_of(
+        root,
+        &[
+            "html", "htm", "js", "mjs", "jsx", "ts", "tsx", "vue", "svelte", "astro",
+        ],
+    )
+}
+
+const PAGE_KINDS: &[&str] = &[
+    "html",
+    "htm",
+    "css",
+    "scss",
+    "js",
+    "mjs",
+    "jsx",
+    "ts",
+    "tsx",
+    "vue",
+    "svelte",
+    "astro",
+    "md",
+    "json",
+    "webmanifest",
+];
+
+fn texts_of(root: &Path, kinds: &[&str]) -> Vec<String> {
     let mut texts = Vec::new();
     let mut folders = vec![(root.to_path_buf(), 0)];
     while let Some((folder, depth)) = folders.pop() {
@@ -911,7 +947,7 @@ pub fn page_texts(root: &Path) -> Vec<String> {
                 }
             } else if name != "CREDITS.md"
                 && path.extension().is_some_and(|ext| {
-                    KINDS.contains(&ext.to_string_lossy().to_ascii_lowercase().as_str())
+                    kinds.contains(&ext.to_string_lossy().to_ascii_lowercase().as_str())
                 })
             {
                 if let Ok(text) = std::fs::read_to_string(&path) {
@@ -2430,6 +2466,19 @@ mod tests {
             &["Not reached: the page infos.html (it did not open)."],
         ));
         assert_eq!(minor.score, 7, "{minor:?}");
+        // Session #32, passage 6 : rien à comparer sur le deuxième appareil.
+        let unseen = function_score(&audit(
+            &[],
+            &[],
+            &["Not reached: a second device (on the first device, the screen \"Préparation du jour\" did not show the entry the form had just sent either, so there was nothing to compare)."],
+        ));
+        assert_eq!(unseen.score, 5, "{unseen:?}");
+        let nowhere = function_score(&audit(
+            &[],
+            &[],
+            &["Not reached: a second device (no screen of the page shows what others sent, so there was nothing to compare)."],
+        ));
+        assert_eq!(nowhere.score, 5, "{nowhere:?}");
         // Une erreur de la console seule plafonne aussi.
         assert_eq!(
             function_score(&audit(&[], &["error: x is not defined"], &[])).score,
