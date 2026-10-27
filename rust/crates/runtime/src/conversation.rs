@@ -565,7 +565,7 @@ struct TurnAids {
     /// La demande fait voir aux uns ce que les autres entrent : les revues
     /// vérifient sur un deuxième appareil.
     shared_request: bool,
-    /// Code d'accès de la page déjà cherché dans la réponse.
+    /// L'agent a déjà été renvoyé donner le code d'accès de la page.
     code_told: bool,
     /// Données que la demande veut partagées, gardées dans chaque navigateur :
     /// déjà signalé.
@@ -5067,14 +5067,11 @@ where
         Some(crate::web_design::SHARED_DATA_NOTE.to_string())
     }
 
-    /// Le site garde ce que les visiteurs entrent dans leur propre navigateur,
-    /// sans rien en envoyer : le dossier de la page revue (le projet), et les
-    /// fichiers du tour.
-    fn kept_locally(&self, aids: &TurnAids) -> bool {
-        let Some(target) = self.page_to_review(aids) else {
-            return false;
-        };
-        let Some(root) = target
+    /// Le dossier de la page revue (le projet), ou le dossier courant pour
+    /// une adresse.
+    fn page_root(&self, aids: &TurnAids) -> Option<std::path::PathBuf> {
+        let target = self.page_to_review(aids)?;
+        target
             .strip_prefix("path:")
             .and_then(|page| {
                 std::path::Path::new(page)
@@ -5083,7 +5080,13 @@ where
             })
             .filter(|folder| !folder.as_os_str().is_empty())
             .or_else(|| std::env::current_dir().ok())
-        else {
+    }
+
+    /// Le site garde ce que les visiteurs entrent dans leur propre navigateur,
+    /// sans rien en envoyer : le dossier de la page revue (le projet), et les
+    /// fichiers du tour.
+    fn kept_locally(&self, aids: &TurnAids) -> bool {
+        let Some(root) = self.page_root(aids) else {
             return false;
         };
         let mut sources = crate::web_design::page_scripts(&root);
@@ -5161,14 +5164,15 @@ where
             || self.subagent
             || interrupt_requested()
             || !harness::enabled(Aid::DesignReview)
-            || self.page_to_review(aids).is_none()
         {
             return None;
         }
-        aids.code_told = true;
-        let cwd = std::env::current_dir().ok()?;
+        // Vérifié à chaque réponse, pas seulement la première : vu le 27
+        // octobre 2026 (session #32, passage 7), le premier brouillon donnait
+        // le code, la réponse finale récrite en mots simples l'avait perdu.
+        let root = self.page_root(aids)?;
         let mut codes: Vec<String> = Vec::new();
-        for text in crate::web_design::page_texts(&cwd) {
+        for text in crate::web_design::page_texts(&root) {
             for code in crate::code_checks::access_codes(&text) {
                 if !codes.contains(&code) {
                     codes.push(code);
@@ -5178,6 +5182,7 @@ where
         if codes.is_empty() || codes.iter().any(|code| answer.contains(code.as_str())) {
             return None;
         }
+        aids.code_told = true;
         self.api_client.notify(
             "La page s'ouvre avec un code que la réponse ne donne pas : Claw demande à l'agent de le dire à l'utilisateur",
         );
@@ -9561,6 +9566,52 @@ mod tests {
             observed.notices
         );
         let _ = std::fs::remove_file(&script);
+    }
+
+    #[test]
+    fn an_access_code_lost_by_a_rewritten_answer_is_asked_for_again() {
+        let _serial = crate::test_serial();
+        // Session #32, passage 7 (27 octobre 2026) : le premier brouillon
+        // donnait le code, la réponse finale récrite l'avait perdu, et la
+        // garde ne regardait que la première réponse.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("code-perdu");
+        let script = page.with_file_name("app.js");
+        std::fs::write(
+            &script,
+            "const DEFAULT_PIN = '4321';\nconst firebaseConfig = { apiKey: 'VOTRE_API_KEY' };\nfunction ok(pin) { return pin === DEFAULT_PIN; }\n",
+        )
+        .expect("app.js");
+        let write = tool_step(
+            "write_file",
+            &serde_json::json!({ "path": script.display().to_string(), "content": "x" })
+                .to_string(),
+        );
+        let steps = vec![
+            write,
+            // Renvoyé par une autre garde (les clés d'un compte à créer)…
+            text_step("C'est prêt, le code est 4321."),
+            // … la réponse suivante perd le code.
+            text_step("Je vous pose d'abord la question du compte."),
+            text_step("C'est prêt : l'espace boulanger s'ouvre avec le code 4321."),
+        ];
+        let ((mut runtime, observed, _), _) =
+            measured_runtime(steps, vec![Some(MEASURED), Some(MEASURED), Some(MEASURED)]);
+        runtime.page_target = Some(format!("path:{}", page.display()));
+        runtime
+            .run_turn("ajoutez un espace boulanger avec un code", None)
+            .expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let _ = std::fs::remove_file(&script);
+        let observed = observed.borrow();
+        assert!(
+            observed
+                .requests
+                .iter()
+                .any(|request| request.contains("your answer never gives it")),
+            "{:?}",
+            observed.notices
+        );
     }
 
     #[test]
