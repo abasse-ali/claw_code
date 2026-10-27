@@ -593,6 +593,7 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    #[allow(clippy::too_many_lines)]
     fn the_page_is_used_like_a_visitor_and_seen_as_text() {
         // Session #32 (26 octobre 2026) : réserver, puis ouvrir l'espace de la
         // boulangère avec son code ; la liste plantait dès qu'une réservation
