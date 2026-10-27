@@ -5044,8 +5044,23 @@ where
         // réservation de mes clientes sur mon téléphone », le stockage local
         // était déjà là avant le tour, et l'agent a répondu « limitation
         // architecturale » sans proposer d'envoyer les réservations.
-        let cwd = std::env::current_dir().ok()?;
-        let sources = crate::web_design::page_scripts(&cwd);
+        // Le dossier de la page revue (le projet), et les fichiers du tour.
+        let target = self.page_to_review(aids)?;
+        let root = target
+            .strip_prefix("path:")
+            .and_then(|page| {
+                std::path::Path::new(page)
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+            })
+            .filter(|folder| !folder.as_os_str().is_empty())
+            .or_else(|| std::env::current_dir().ok())?;
+        let mut sources = crate::web_design::page_scripts(&root);
+        for path in aids.originals.keys() {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                sources.push(text);
+            }
+        }
         let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
         if !crate::web_design::kept_on_each_device(&sources) {
             return None;
