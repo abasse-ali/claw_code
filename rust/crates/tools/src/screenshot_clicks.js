@@ -31,6 +31,10 @@
   window.confirm = () => { count(); return false; };
   window.prompt = () => { count(); return null; };
   window.open = () => { count(); return null; };
+  // L'impression ne montre rien sans écran : un bouton « Imprimer » n'est pas
+  // mort. Vu le 27 octobre 2026 (session #32, passage 7) : signalé à chaque
+  // revue, l'agent l'a récrit trois fois.
+  window.print = count;
   try {
     if (navigator.clipboard) navigator.clipboard.writeText = async () => { count(); };
   } catch (_) { /* presse-papiers absent */ }

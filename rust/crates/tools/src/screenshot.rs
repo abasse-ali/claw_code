@@ -3933,6 +3933,13 @@ mod tests {
             "document.getElementById('details').addEventListener('click', () => box.showModal());",
         );
         assert!(!sound.contains("do nothing when clicked"), "{sound}");
+        // Session #32, passage 7 : « Imprimer » ouvre l'impression, qui ne
+        // montre rien sans écran.
+        let printed = problems(
+            "imprime",
+            "document.getElementById('details').addEventListener('click', () => window.print());",
+        );
+        assert!(!printed.contains("do nothing when clicked"), "{printed}");
     }
 
     #[test]
