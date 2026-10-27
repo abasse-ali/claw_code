@@ -902,7 +902,7 @@ Forbidden unless the brief asks for it, because they mark a generated page: a pl
 3. Build. One file per role (index.html, styles.css, app.js, and the manifest and service worker of an app), each short enough to be written in one call (under about 400 lines; split a bigger script into modules): never the whole app packed into one huge HTML file, which a reply cuts before it is written. An app meant to work offline loads nothing from a CDN or another site (draw charts in inline SVG or on a canvas, keep every script and font it needs in the project, and list them in the service worker's cache), and its manifest icon is a real drawing: one SVG file (\"sizes\": \"any\", \"type\": \"image/svg+xml\"), never an empty or 1x1 placeholder PNG. CSS custom properties for every color, size and space of the plan, and no raw values outside them (except 0 and 1px borders). Semantic HTML (header, nav, main, section, footer) with exactly one h1 and no skipped heading levels; mobile first. On phones the navigation folds into a menu button that opens and closes it (aria-expanded), and a fixed header never covers content (offset the page by its height). Every link, button and field has hover, :focus-visible and active states, with transitions of 150 to 250ms, and @media (prefers-reduced-motion: reduce) stops the motion. Animate only transform and opacity (never width, height, margin or top): 150 to 250ms for hover and press, 400 to 700ms for an entrance, with an ease-out curve; nothing loops forever except one slow decorative detail; content never waits for a script to be visible. Tap targets of at least 44x44px on phones. Pictures: the user's images{photo_pictures}, Ornament shapes, or simple illustrations in inline SVG (each with an explicit width and height) or CSS, never broken or placeholder images. Forms: styled like the rest of the page (font: inherit), a visible label on every field, errors shown only after the user acts (:user-invalid, or on submit), a clear confirmation in the page. Watch CSS specificity: a .section rule and a .cta rule can cancel each other's spacing.
 {FOUNDATION}
 4. Make everything work: every link leads somewhere real (a section that exists, mailto:, tel:), every button does what its label says, forms validate and confirm, no console errors. Take the interactive parts from the Component tool (nav-menu, booking, filter, form, cart, dialog, toast, open-now, directions...; several names in one call) and paste them as they are, then adapt their texts and colors: they work, they are accessible, and their icons come from the icon set. During the review Claw walks the page like a visitor: it clicks every button, follows every link, fills and sends every form (those in windows too), closes every window with its own button and reloads the page, then reports what does nothing, throws an error, leads nowhere, cannot be tapped or is lost on reload.
-5. Check and critique before you answer (a static page needs no server: give Screenshot and ViewPage the path of index.html, relative to the working directory, and start no server in the background): Screenshot with full_page true at phone and desktop sizes; then Browser, to use the page yourself like a visitor and see it as text (each thing on the screen with its size, font, colors and place, what each action changed, script errors, measured problems): open it on a phone, go through the visitor's whole task (fill the form, send it empty then filled, open the menu, every window and every screen, with its code if it has one), then resize to a desktop and look again; ViewPage for console errors. Fix every measured problem and every design note. Then score the screenshots yourself, 1 to 10 on the seven criteria, as a strict art director would (most generated pages deserve 4 to 6; an 8 must be earned by something you can point to), and improve every criterion under {bar} before you answer. Remove one decoration that does not serve the subject.")
+5. Check and critique before you answer (a static page needs no server: give Screenshot and ViewPage the path of index.html, relative to the working directory, and start no server in the background): Screenshot with full_page true at phone and desktop sizes; then Browser, to use the page yourself like a visitor and see it as text (each thing on the screen with its size, font, colors and place, what each action changed, script errors, measured problems): open it on a phone, go through the visitor's whole task (fill the form, send it empty then filled, open the menu, every window and every screen, with its code if it has one), then resize to a desktop and look again; once the page works, Screenshot with windows and explore true walks it from top to bottom (every screen a button opens, with its code and with data, every window, every page of the site) and says what it could not reach; ViewPage for console errors. Say in your answer only what these checks saw. Fix every measured problem and every design note. Then score the screenshots yourself, 1 to 10 on the seven criteria, as a strict art director would (most generated pages deserve 4 to 6; an 8 must be earned by something you can point to), and improve every criterion under {bar} before you answer. Remove one decoration that does not serve the subject.")
 }
 
 /// Fichier qui décide de l'apparence d'une page.
@@ -1152,6 +1152,22 @@ pub fn screenshot_input(target: &str) -> String {
     input.to_string()
 }
 
+/// Entrée de `Screenshot` pour la revue de début et de fin de tour : la page
+/// explorée de fond en comble (écrans cachés, avec leur code et des données ;
+/// autres pages du site) et, quand la demande fait voir aux uns ce que les
+/// autres entrent, un deuxième appareil. Vu le 26 octobre 2026 (session #32) :
+/// la liste de la boulangère, derrière un code, jamais vue par le juge ; vide
+/// sur tout autre téléphone que celui qui avait réservé.
+#[must_use]
+pub fn review_screenshot_input(target: &str, second_device: bool) -> String {
+    let mut input: Value = serde_json::from_str(&screenshot_input(target)).unwrap_or_default();
+    input["explore"] = json!(true);
+    if second_device {
+        input["second_device"] = json!(true);
+    }
+    input.to_string()
+}
+
 /// Entrée de `Screenshot` pour la vérification qui suit chaque modification :
 /// le téléphone seul, page entière, avec les fenêtres que les boutons ouvrent
 /// (leurs mesures : largeur, place, liste coupée). Vu le 26 octobre 2026
@@ -1173,6 +1189,8 @@ pub struct Audit {
     pub problems: Vec<String>,
     pub notes: Vec<String>,
     pub console: Vec<String>,
+    /// Ce que l'exploration a vu, et ce qu'elle n'a pas atteint.
+    pub explored: Vec<String>,
 }
 
 impl Audit {
@@ -1195,6 +1213,11 @@ pub fn read_audit(output: &str) -> Audit {
     let Ok(value) = serde_json::from_str::<Value>(output) else {
         return audit;
     };
+    for line in value["explored"].as_array().into_iter().flatten() {
+        if let Some(line) = line.as_str() {
+            push_unique(&mut audit.explored, line.to_string());
+        }
+    }
     for capture in value["captures"].as_array().into_iter().flatten() {
         let screen = capture["screen"].as_str().unwrap_or("screen");
         for problem in capture["problems"].as_array().into_iter().flatten() {
@@ -1382,7 +1405,7 @@ pub fn critique_prompt(
             format!("Your previous review of this page, before the developer's last changes, scored: {line}. Keep the same scale: a score moves when something visible changed, up or down; when a score moves by 2 or more, the change lines must name what you see that justifies it. If the scores barely move from that review, your last changes were too small to matter: lead with the change of structure that would move them.\n\n")
         });
     format!(
-        "The client's brief:\n\"{brief}\"\n\n{images} screenshots follow, full page: the phone view first, then the desktop view.\n\nAlready measured in the page and sent to the developer (do not repeat these):\n{measured}\n\n{anchor}Score the page from 1 to 10 on each criterion, against what a top studio would ship: 5 is a competent template, 8 is what a strong studio would sign, 10 is award-level. Be strict: most generated pages deserve 4 to 6, and an 8 must be earned by something specific you can point to.\n1. phone: nothing cut, covered or cramped; a menu that fits; comfortable tap targets; text sized for a phone.\n2. hierarchy: a clear first screen with one strong focal point; the eye knows where to go next; headings, text and actions clearly ranked.\n3. spacing: one consistent vertical rhythm, aligned edges, generous but even breathing room, no crowded areas and no empty bands.\n4. typography: typefaces chosen for this subject, a clear scale with real contrast between levels, comfortable line length and leading, nothing default-looking.\n5. color: a harmonious palette tied to the subject, readable contrast, the accent used sparingly and on purpose.\n6. identity: does it look made for this subject, with a memorable idea, or like a template (a plain colored hero band, identical cards, icon placeholders for photos, lines under every heading, ALL-CAPS badges, the same layout in every section)?\n7. finish: craft in the details (alignment, consistent radii and shadows, polished icons and illustrations, states of buttons and fields); anything unstyled, broken, empty or unfinished. Any emoji anywhere in the page caps finish at 4: icons must be inline SVG.\n\nThe first line of your reply is exactly in this form:\nSCORES: phone=N hierarchy=N spacing=N typography=N color=N identity=N finish=N\nThen, for every criterion under {bar}, the changes that would raise it, the most important first, at most 8 in all, one per line, each as:\nN. [criterion] what is wrong, as seen in the screenshots -> the exact change to make (CSS properties and values, HTML structure, copy)\nOrder the changes by how much they would raise the scores: first what changes the structure (what the first screen shows, how blocks are grouped and sized, a list as compact rows or as tall cards, the order of sections), then the details (a padding, a color value, a radius). A review of small tweaks leaves a page with a weak structure where it is: when the structure keeps a criterion under {bar}, the first change says so. When the visitor comes to do something (reserve, order, sign up), the task comes first: judge phone and hierarchy on how soon and how easily it is done (does it start on the first screen, does the form read as one calm card rather than the frames of an admin screen, is a list to choose from made of compact rows), and never ask for decoration that pushes it down. Never ask for a feature, a rule (a deadline, a limit) or a text the brief does not give. Be specific to this page; no generic advice. {pictures} Small UI icons come from a polished line icon set (Lucide) on purpose: judge how they are sized, colored and placed, do not ask to redraw them by hand. If every score is {bar} or more, write NO CHANGES NEEDED after the scores line."
+        "The client's brief:\n\"{brief}\"\n\n{images} screenshots follow, full page: the phone view first, then the desktop view, then what the page shows after a tap, on the phone (its windows, its menu, the other screens its buttons open, its other pages): judge each screen the visitor or the owner uses, not only the first.\n\nAlready measured in the page and sent to the developer (do not repeat these):\n{measured}\n\n{anchor}Score the page from 1 to 10 on each criterion, against what a top studio would ship: 5 is a competent template, 8 is what a strong studio would sign, 10 is award-level. Be strict: most generated pages deserve 4 to 6, and an 8 must be earned by something specific you can point to.\n1. phone: nothing cut, covered or cramped; a menu that fits; comfortable tap targets; text sized for a phone.\n2. hierarchy: a clear first screen with one strong focal point; the eye knows where to go next; headings, text and actions clearly ranked.\n3. spacing: one consistent vertical rhythm, aligned edges, generous but even breathing room, no crowded areas and no empty bands.\n4. typography: typefaces chosen for this subject, a clear scale with real contrast between levels, comfortable line length and leading, nothing default-looking.\n5. color: a harmonious palette tied to the subject, readable contrast, the accent used sparingly and on purpose.\n6. identity: does it look made for this subject, with a memorable idea, or like a template (a plain colored hero band, identical cards, icon placeholders for photos, lines under every heading, ALL-CAPS badges, the same layout in every section)?\n7. finish: craft in the details (alignment, consistent radii and shadows, polished icons and illustrations, states of buttons and fields); anything unstyled, broken, empty or unfinished. Any emoji anywhere in the page caps finish at 4: icons must be inline SVG.\n\nThe first line of your reply is exactly in this form:\nSCORES: phone=N hierarchy=N spacing=N typography=N color=N identity=N finish=N\nThen, for every criterion under {bar}, the changes that would raise it, the most important first, at most 8 in all, one per line, each as:\nN. [criterion] what is wrong, as seen in the screenshots -> the exact change to make (CSS properties and values, HTML structure, copy)\nOrder the changes by how much they would raise the scores: first what changes the structure (what the first screen shows, how blocks are grouped and sized, a list as compact rows or as tall cards, the order of sections), then the details (a padding, a color value, a radius). A review of small tweaks leaves a page with a weak structure where it is: when the structure keeps a criterion under {bar}, the first change says so. When the visitor comes to do something (reserve, order, sign up), the task comes first: judge phone and hierarchy on how soon and how easily it is done (does it start on the first screen, does the form read as one calm card rather than the frames of an admin screen, is a list to choose from made of compact rows), and never ask for decoration that pushes it down. Never ask for a feature, a rule (a deadline, a limit) or a text the brief does not give. Be specific to this page; no generic advice. {pictures} Small UI icons come from a polished line icon set (Lucide) on purpose: judge how they are sized, colored and placed, do not ask to redraw them by hand. If every score is {bar} or more, write NO CHANGES NEEDED after the scores line."
     )
 }
 
@@ -1659,6 +1682,10 @@ pub fn review_feedback(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    if !audit.explored.is_empty() {
+        text.push(' ');
+        text.push_str(&audit.explored.join(" "));
+    }
     if !audit.problems.is_empty() {
         text.push_str("\nMeasured problems, fix every one:\n");
         text.push_str(&bullets(&mut audit.problems.iter()));
@@ -2008,6 +2035,42 @@ mod tests {
             serde_json::from_str(&screenshot_input("url:http://localhost:5173/")).expect("json");
         assert_eq!(input["url"], "http://localhost:5173/");
         assert_eq!(input["full_page"], true);
+        // La revue explore ; le deuxième appareil, quand la demande est partagée.
+        let review: serde_json::Value =
+            serde_json::from_str(&super::review_screenshot_input("path:index.html", true))
+                .expect("json");
+        assert_eq!(review["explore"], true);
+        assert_eq!(review["second_device"], true);
+        assert_eq!(review["windows"], true);
+        let alone: serde_json::Value =
+            serde_json::from_str(&super::review_screenshot_input("path:index.html", false))
+                .expect("json");
+        assert!(alone.get("second_device").is_none());
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&screenshot_input("path:index.html"))
+                .expect("json")
+                .get("explore")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn what_the_exploration_saw_reaches_the_review() {
+        let output = json!({
+            "captures": [{ "screen": "phone 390x844, screen \"Préparation du jour\" opened by button \"Espace boulanger\"", "problems": ["In the screen \"Préparation du jour\": opening it raises an error in the page's script: TypeError"] }],
+            "explored": ["Explored like a visitor: the page; the screen \"Préparation du jour\".", "Not reached: a second device.", "Only what is listed here was seen: do not say in your answer that anything else was checked."]
+        })
+        .to_string();
+        let audit = super::read_audit(&output);
+        assert_eq!(audit.explored.len(), 3);
+        let feedback =
+            super::review_feedback("path:index.html", &audit, None, 1, 2, 8).expect("revue");
+        assert!(
+            feedback.contains("Explored like a visitor: the page; the screen"),
+            "{feedback}"
+        );
+        assert!(feedback.contains("do not say in your answer that anything else was checked"));
+        assert!(feedback.contains("opening it raises an error in the page's script"));
     }
 
     #[test]

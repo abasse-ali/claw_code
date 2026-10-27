@@ -59,6 +59,10 @@
       if (event.cancelable) event.preventDefault();
     });
   }
+  // Mode « formulaires seuls » (`clawOnlyForms`) : Screenshot renvoie les
+  // formulaires de la page avant d'ouvrir un écran à capturer, pour qu'il ait
+  // de quoi montrer ; ni liens ni boutons.
+  const onlyForms = typeof clawOnlyForms !== "undefined" && clawOnlyForms;
   let scrolled = 0;
   window.addEventListener("scroll", () => { scrolled += 1; }, true);
   const errors = [];
@@ -135,7 +139,7 @@
   const anchors = new Map();
   const pages = new Map();
   const here = location.href.split("#")[0];
-  for (const link of [...document.querySelectorAll("a[href]")].slice(0, 120)) {
+  for (const link of onlyForms ? [] : [...document.querySelectorAll("a[href]")].slice(0, 120)) {
     const href = link.getAttribute("href").trim();
     // `#/outils`, `#!/outils` : une route de l'application, pas une section.
     if (/^#[/!]/.test(href)) continue;
@@ -229,6 +233,9 @@
   // --- Formulaires -----------------------------------------------------------
   const forms = [];
   const kept = [];
+  // Noms d'essai tapés dans les formulaires envoyés : Screenshot les cherche
+  // ensuite dans les écrans, et sur un deuxième appareil.
+  const typed = [];
   // Envois qui changent un compteur sans montrer le nom donne.
   const unnamed = [];
   const tested = new Set();
@@ -368,6 +375,7 @@
     // Un formulaire ou le visiteur donne son nom : une inscription, une offre,
     // une reservation, pas une recherche.
     const personal = [...form.elements].some((field) => field.value === marker);
+    if (personal) typed.push(marker);
     const prior = new Set(snapshot());
     const seen = watch();
     const before = { effects, errors: errors.length, text: document.body.innerText.length };
@@ -445,6 +453,7 @@
   };
 
   for (const form of [...document.forms].filter(shown).slice(0, 6)) await tryForm(form);
+  if (onlyForms) return { typed, forms };
 
   // --- Boutons ---------------------------------------------------------------
   const controls = [...document.querySelectorAll("button, [role=button], input[type=button], summary")]
@@ -526,9 +535,33 @@
   const closeButton = (box) => [...box.querySelectorAll("button, [role=button], a[href]")].filter(shown)
     .find((el) => /^(fermer|close|annuler|cancel|retour|x|\u00d7|\u2715|\u2716)$/i.test((el.innerText || "").trim())
       || /fermer|close|annuler|cancel/i.test(el.getAttribute("aria-label") || el.getAttribute("title") || ""));
-  for (const el of controls) {
-    if (!el.isConnected) continue;
-    if (!shown(el)) continue;
+  // Grandes zones à l'écran, hors fenêtres et barres : un bouton qui en fait
+  // paraître une nouvelle change d'écran (« Espace boulanger »). Cet écran est
+  // exploré à son tour, et Screenshot le capture. Vu le 26 octobre 2026
+  // (session #32) : la liste de la boulangère, un écran entier que ni le juge
+  // ni les mesures n'avaient jamais vu.
+  const regions = () => new Set([...document.querySelectorAll("main, section, article, form, [role=main], [role=region], [role=tabpanel], body > div, main > div")]
+    .filter((el) => shown(el) && !el.closest("dialog, [role=dialog], [aria-modal=true], header, footer, nav")
+      && el.getBoundingClientRect().height >= innerHeight * 0.25));
+  const screens = [];
+  const tried = new Set();
+  const deadEls = [];
+  const noteScreen = (el, before, code) => {
+    if (el.matches("summary, [aria-expanded], [aria-controls]") || el.closest("details")) return null;
+    const fresh = [...regions()].filter((item) => !before.has(item) && !item.contains(el));
+    const region = fresh.find((item) => !fresh.some((other) => other !== item && other.contains(item)));
+    if (!region) return null;
+    const heading = region.querySelector("h1, h2, h3");
+    const name = (heading ? heading.innerText : label(region)).replace(/\s+/g, " ").trim().slice(0, 50);
+    if (screens.length < 3 && !screens.some((screen) => screen.name === name)) {
+      screens.push({ label: label(el), selector: path(el), name, code: code || null });
+    }
+    return region;
+  };
+  const tryControl = async (el) => {
+    if (!el.isConnected || !shown(el) || tried.has(el)) return null;
+    tried.add(el);
+    const shownBefore = regions();
     // A l'ecran avant la mesure : le defilement du toucher ne compte pas comme
     // un effet du bouton.
     el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
@@ -546,6 +579,7 @@
     const focused = focus !== before.focus && focus !== el && focus !== document.body;
     if (!seen.mutations && !moved && !focused && effects === before.effects && errors.length === before.errors) {
       dead.push(label(el));
+      deadEls.push([el, label(el)]);
     }
     const blocked = covered.length < 4 && coveredIn(el);
     // La fenetre ouverte : ses formulaires s'essaient, puis son bouton la ferme.
@@ -615,7 +649,35 @@
       try { dialog.close(); } catch (_) { /* deja fermee */ }
     }
     await wait(40);
-  }
+    return noteScreen(el, shownBefore);
+  };
+  for (const el of controls) await tryControl(el);
+  // Les boutons d'un écran caché au départ s'essaient aussi, et ses
+  // formulaires s'envoient : l'écran est rouvert par son bouton chaque fois
+  // qu'un essai l'a quitté.
+  const reveal = async (el) => {
+    if (shown(el)) return true;
+    const toggle = [...document.querySelectorAll("[aria-expanded=false]")].filter(shown)
+      .find((item) => { const menu = document.getElementById(item.getAttribute("aria-controls") || ""); return menu && menu.contains(el); });
+    if (toggle) { tap(toggle); await wait(300); }
+    return shown(el);
+  };
+  const exploreScreen = async (region, reopen) => {
+    const inner = () => [...region.querySelectorAll("button, [role=button], input[type=button], summary")]
+      .filter((el) => shown(el) && !tried.has(el) && !el.disabled && el.getAttribute("aria-disabled") !== "true"
+        && !(el.type === "submit" && el.form));
+    for (let round = 0; round < 10; round += 1) {
+      if (!region.isConnected) return;
+      if (!shown(region) && !(await reopen())) return;
+      const next = inner()[0];
+      if (!next) break;
+      await tryControl(next);
+    }
+    if (!shown(region) && !(await reopen())) return;
+    for (const form of [...region.querySelectorAll("form")].filter((item) => shown(item) && !tested.has(item)).slice(0, 2)) {
+      if (tested.size < 10) await tryForm(form);
+    }
+  };
   // Un espace gardé par un code (« Espace boulanger ») : rouvert après l'envoi
   // des formulaires, pour qu'il ait de quoi montrer, et ouvert avec le code
   // écrit dans le script de la page (`clawCodes`, lu par Screenshot). Vu le
@@ -649,6 +711,7 @@
     }
     for (const code of codes.slice(0, 4)) {
       const opened = new Set(windows());
+      const shownBefore = regions();
       try { tap(el); } catch (error) { errors.push(String((error && error.message) || error)); }
       await wait(300);
       const box = windows().find((item) => !opened.has(item)) || windows().find((item) => codeField(item));
@@ -666,6 +729,8 @@
       await wait(600);
       if (errors.length > before) {
         failing.push(`${label(el)}, then the access code "${code}" written in the page's script, typed in the window it opens, once the page's forms were sent (so there is something to show): ${errors[errors.length - 1]}`);
+        // Même en erreur, l'écran s'est ouvert : Screenshot le capture tel quel.
+        noteScreen(el, shownBefore, code);
         break;
       }
       const unlocked = !box.isConnected || !open(box) || !codeField(box);
@@ -674,8 +739,57 @@
         try { dialog.close(); } catch (_) { /* deja fermee */ }
       }
       await wait(40);
-      if (unlocked) break;
+      if (unlocked) {
+        // L'écran que le code ouvre : noté pour Screenshot, et ses boutons essayés.
+        const region = noteScreen(el, shownBefore, code);
+        if (region) {
+          await exploreScreen(region, async () => {
+            if (!(await reveal(el))) return false;
+            tap(el);
+            await wait(300);
+            const box = windows().find((item) => codeField(item));
+            if (!box) return shown(region);
+            setValue(codeField(box), code);
+            const go = [...box.querySelectorAll("button, input[type=submit], [role=button]")].filter(shown)
+              .find((item) => item.value === "submit" || item.type === "submit" || /acc[eé]der|valider|ok|entrer|ouvrir|enter|open|submit/i.test((item.innerText || item.value || "").trim()));
+            if (go) tap(go);
+            await wait(600);
+            return shown(region);
+          });
+        }
+        break;
+      }
     }
   }
-  return { checked: controls.length, windowLayout, dead, failing, covered, buried, stuck, links, files, forms, unnamed, underBar, kept, openers, dragged };
+  // Les autres écrans, après l'espace à code : leurs essais (« Annuler ma
+  // réservation ») videraient ce que l'espace devait montrer.
+  for (const screen of screens.filter((item) => !item.code)) {
+    const opener = document.querySelector(screen.selector);
+    if (!opener) continue;
+    const open = async () => {
+      if (!(await reveal(opener))) return false;
+      const before = regions();
+      tap(opener);
+      await wait(300);
+      return Boolean(noteScreen(opener, before)) || [...regions()].some((item) => (item.querySelector("h1, h2, h3")?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 50) === screen.name);
+    };
+    if (!(await open())) continue;
+    const region = [...regions()].find((item) => (item.querySelector("h1, h2, h3")?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 50) === screen.name);
+    if (region) await exploreScreen(region, open);
+  }
+  // Un bouton qui ne faisait rien sur l'écran de départ (« Accueil » quand on y
+  // est déjà) s'essaie encore depuis un autre écran : s'il y change la page,
+  // il n'est pas mort.
+  if (screens.length) {
+    for (const [el, name] of deadEls) {
+      if (!el.isConnected || !(await reveal(el))) continue;
+      const seen = watch();
+      tap(el);
+      await wait(300);
+      seen.stop();
+      if (seen.mutations && dead.includes(name)) dead.splice(dead.indexOf(name), 1);
+    }
+  }
+  const sitePages = [...pages].map(([url, { from }]) => ({ url, from }));
+  return { checked: tried.size, windowLayout, dead, failing, covered, buried, stuck, links, files, forms, unnamed, underBar, kept, openers, dragged, screens, pages: sitePages, typed };
 })()

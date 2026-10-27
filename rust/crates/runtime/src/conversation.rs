@@ -527,6 +527,9 @@ struct TurnAids {
     edited_since_plain: bool,
     /// Règles inventées sur la page déjà cherchées dans ce tour.
     rules_checked: bool,
+    /// La demande fait voir aux uns ce que les autres entrent : les revues
+    /// vérifient sur un deuxième appareil.
+    shared_request: bool,
     /// Code d'accès de la page déjà cherché dans la réponse.
     code_told: bool,
     /// Données que la demande veut partagées, gardées dans chaque navigateur :
@@ -1958,6 +1961,9 @@ where
                 .as_deref()
                 .is_some_and(crate::web_design::is_interface_request);
         if interface_turn && !aids.work_question {
+            aids.shared_request = crate::web_design::shared_between_people(
+                &crate::project::user_words_with_history(&request_text),
+            );
             self.baseline_audit(&mut aids, &mut prompter);
         }
 
@@ -3659,7 +3665,7 @@ where
         }
         self.api_client
             .notify("État de la page avant ce tour : Claw la mesure, pour repérer ce que le tour casserait…");
-        let input = crate::web_design::screenshot_input(&target);
+        let input = crate::web_design::review_screenshot_input(&target, aids.shared_request);
         self.tool_executor.announce("Screenshot", &input);
         let (message, _) = self.execute_tool_call(
             "claw-baseline".to_string(),
@@ -3949,7 +3955,11 @@ where
             "Revue visuelle de l'interface ({}/{rounds}) : captures au téléphone et à l'ordinateur…",
             aids.interface_rounds
         ));
-        let input = crate::web_design::screenshot_input(&target);
+        let shared = aids.shared_request
+            || crate::web_design::shared_between_people(&crate::project::user_words_with_history(
+                request,
+            ));
+        let input = crate::web_design::review_screenshot_input(&target, shared);
         self.tool_executor.announce("Screenshot", &input);
         let (message, _) = self.execute_tool_call(
             format!("claw-design-{}", aids.interface_rounds),
