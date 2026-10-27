@@ -10057,7 +10057,7 @@ impl ApiClient for DefaultRuntimeClient {
             let (count, said) = (strikes.len(), strikes.join(", "));
             models::bench_coder(&coder);
             self.notify(&format!(
-                "Équipe : {coder} a abîmé le code {count} fois ({said}) : le rôle « écrire le code » passe à un autre modèle pour 24 h"
+                "Équipe : {coder} a abîmé le code {count} fois ({said}) : le rôle « écrire le code » revient au modèle de la session pour 24 h"
             ));
         }
     }

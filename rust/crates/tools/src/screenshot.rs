@@ -1837,6 +1837,8 @@ fn file_origin_noise(text: &str, url: Option<&str>) -> bool {
     // octobre 2026 (session #33) : la commande envoyée par SMS comptée
     // « erreur du script », fonctionnement 4/10.
     text.contains("because the scheme does not have a registered handler")
+        || (text.starts_with("Not allowed to launch '") && text.contains("user gesture"))
+        || text.contains("net::ERR_UNKNOWN_URL_SCHEME")
         || text.contains("from origin 'null' has been blocked by CORS policy")
         || text.contains("current origin ('null') is not supported")
         || (text.starts_with("Failed to load resource: net::ERR_FAILED")
@@ -5283,6 +5285,7 @@ mod tests {
             json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Failed to load resource: net::ERR_FILE_NOT_FOUND", "url": "file:///C:/site/manifest.json" } } }),
             // La commande ouverte dans l'application SMS du visiteur.
             json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Failed to launch 'sms:0612345678?body=Commande' because the scheme does not have a registered handler.", "url": "file:///C:/site/index.html" } } }),
+            json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Not allowed to launch 'sms:+33612345678?body=Commande' because a user gesture is required.", "url": "file:///C:/site/index.html" } } }),
         ];
         assert_eq!(
             console_lines(&events),

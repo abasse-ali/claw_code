@@ -1199,6 +1199,19 @@ pub(crate) fn bench_coder(model: &str) {
     }
 }
 
+/// Vrai si un codeur de l'équipe est encore à l'écart : le rôle « écrire le
+/// code » revient alors au modèle de la session. Vu le 27 octobre 2026
+/// (session #34) : laguna écarté, puis flint, dots et north-mini cassaient le
+/// code à leur tour ; le modèle de la session n'avait rien cassé en solo.
+pub(crate) fn any_coder_benched() -> bool {
+    let now = epoch_secs();
+    CODE_BENCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|(_, benched)| benched.values().any(|until| *until > now))
+}
+
 /// Vrai si `model` est encore retiré du rôle « écrire le code ».
 pub(crate) fn coder_benched(model: &str) -> bool {
     let now = epoch_secs();
@@ -1245,6 +1258,9 @@ pub(crate) fn team_pick(role: runtime::team::Role, needs: &TeamNeeds) -> Option<
         return Some(pick).filter(|pick| Some(pick.model.as_str()) != needs.avoid);
     }
     let code = role == runtime::team::Role::Code;
+    if code && any_coder_benched() {
+        return None;
+    }
     let has_key = env::var("OPENROUTER_API_KEY").is_ok_and(|key| !key.trim().is_empty());
     if !has_key {
         return None;
@@ -2296,10 +2312,16 @@ mod tests {
         // Le lancement suivant relit le fichier.
         super::set_code_bench_store(path.clone());
         assert!(super::coder_benched("poolside/laguna-s-2.1:free"));
+        // Un codeur à l'écart : le code revient au modèle de la session.
+        assert!(super::any_coder_benched());
+        assert!(
+            super::team_pick(runtime::team::Role::Code, &super::TeamNeeds::default()).is_none()
+        );
         // Une mise à l'écart passée ne compte plus.
         std::fs::write(&path, r#"{"poolside/laguna-s-2.1:free": 1}"#).expect("fichier");
         super::set_code_bench_store(path.clone());
         assert!(!super::coder_benched("poolside/laguna-s-2.1:free"));
+        assert!(!super::any_coder_benched());
         let _ = std::fs::remove_file(&path);
     }
     use api::{OpenRouterModel, RankedModel};

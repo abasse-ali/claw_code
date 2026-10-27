@@ -279,6 +279,27 @@ const FUNCTION_FAULTS: &[(&str, u8, u8, &str)] = &[
     ),
 ];
 
+/// « erreur du script », avec le début du message : l'utilisateur et la
+/// relecture du passage voient laquelle. Vu le 27 octobre 2026 (session #34) :
+/// cinq revues à « erreur du script » sans que le journal dise laquelle.
+fn script_reason(line: &str) -> String {
+    let message = line
+        .rsplit_once("uncaught: ")
+        .or_else(|| line.rsplit_once("error in the page's script: "))
+        .map_or(line, |(_, message)| message)
+        .trim_start_matches("error: ")
+        .trim_start_matches("Uncaught (in promise) ")
+        .trim_start_matches("Uncaught ")
+        .trim();
+    let short: String = message.chars().take(70).collect();
+    let more = if message.chars().count() > 70 {
+        "…"
+    } else {
+        ""
+    };
+    format!("erreur du script : « {short}{more} »")
+}
+
 #[must_use]
 pub fn function_score(audit: &Audit) -> FunctionScore {
     let mut lost = 0u8;
@@ -306,13 +327,17 @@ pub fn function_score(audit: &Audit) -> FunctionScore {
                     *weight
                 };
                 scripted |= reason.starts_with("erreur du script");
-                count(weight, *ceiling, reason);
+                if reason.starts_with("erreur du script") {
+                    count(weight, *ceiling, &script_reason(problem));
+                } else {
+                    count(weight, *ceiling, reason);
+                }
                 break;
             }
         }
     }
-    if !audit.console.is_empty() && !scripted {
-        count(3, 5, "erreur du script");
+    if let Some(first) = audit.console.first().filter(|_| !scripted) {
+        count(3, 5, &script_reason(first));
     }
     // Le deuxième appareil n'a rien eu à comparer, parce que l'écran du
     // propriétaire ne montre pas ce qui vient d'être envoyé, ou qu'aucun écran
@@ -887,7 +912,7 @@ pub fn access_code_note(codes: &[String]) -> String {
 /// tout dans chaque téléphone. Vu le 26 octobre 2026 (session #32) : les
 /// clientes réservaient dans leur navigateur, la boulangère n'en aurait
 /// jamais rien vu ; le pied de page le disait en petit, la réponse non.
-pub const SHARED_DATA_NOTE: &str = "[Claw] The user asked for something several people share: some enter it (a reservation, a sign-up, an offer) and someone else sees it on another phone. Your page keeps what a visitor enters in that visitor's own browser (localStorage), so nobody else ever sees it: as built, the request does not work, even if every check passes on one device. Do not hide this. Either make the data shared, or say it plainly at the top of your final answer: what works on one phone, what does not work between phones, and what is needed to make it work. Ways to share it: a small server of the project; a free hosted store the user sets up; or, when the user does not want to set anything up, send each entry to the person who must see it through the visitor's own messaging app: the form opens WhatsApp (https://wa.me/<number>?text=...), SMS (sms:<number>?body=...) or email (mailto:<address>?subject=...&body=...) with the entry already written in, and the visitor only taps send; nothing to create or configure, only that person's number or address is needed (ask for it if you do not have it, never invent one). Ask the user with AskUserQuestion which way they accept, in plain words, without technical names. Never send the entries to a service the user has not chosen (a free public store found online): whoever finds its address reads the customers' names and numbers.";
+pub const SHARED_DATA_NOTE: &str = "[Claw] The user asked for something several people share: some enter it (a reservation, a sign-up, an offer) and someone else sees it on another phone. Your page keeps what a visitor enters in that visitor's own browser (localStorage), so nobody else ever sees it: as built, the request does not work, even if every check passes on one device. Do not hide this. Either make the data shared, or say it plainly at the top of your final answer: what works on one phone, what does not work between phones, and what is needed to make it work. Ways to share it: a small server of the project; a free hosted store the user sets up; or, when the user does not want to set anything up, send each entry to the person who must see it through the visitor's own messaging app: the form opens WhatsApp (https://wa.me/<number>?text=...), SMS (sms:<number>?body=...) or email (mailto:<address>?subject=...&body=...) with the entry already written in (everything that person needs to act on it: the visitor's name and phone number, what, which day, what time), and the visitor only taps send; nothing to create or configure, only that person's number or address is needed (ask for it if you do not have it, never invent one). Ask the user with AskUserQuestion which way they accept, in plain words, without technical names. Never send the entries to a service the user has not chosen (a free public store found online): whoever finds its address reads the customers' names and numbers. Keeping the data private means nobody else can read it, not hiding it from the owner: on the owner's own screen, behind their code, show the full names and phone numbers they need to call a customer back.";
 
 /// Adresses que le code nomme sans y envoyer ce que les visiteurs entrent :
 /// polices, bibliothèques, images, cartes, réseaux, messageries.
@@ -981,7 +1006,7 @@ pub fn named_by_user(host: &str, words: &str) -> bool {
 #[must_use]
 pub fn data_service_note(hosts: &[String]) -> String {
     format!(
-        "[Claw] Your code sends what visitors enter to {}, a service run by someone else that the user never chose. Whoever finds that address can read, change or erase what is there (names, phone numbers: personal data the user answers for), the service can stop or wipe it without notice, and the user did not agree. Do not ship it this way. Ask the user first with AskUserQuestion, in plain words, without technical or service names, which way they accept: each entry sent straight to the person who must see it through the visitor's own messaging app (WhatsApp, SMS or email, already written in; nothing to set up, only that person's number or address); an account the user creates for a store of their own (a few minutes, you guide them step by step); or a small server of the project, with somewhere to host it. Until they answer, take that service out of the code and say so in your answer.",
+        "[Claw] Your code sends what visitors enter to {}, a service run by someone else that the user never chose. Whoever finds that address can read, change or erase what is there (names, phone numbers: personal data the user answers for), the service can stop or wipe it without notice, and the user did not agree. Do not ship it this way. Ask the user first with AskUserQuestion, in plain words, without technical or service names, which way they accept: each entry sent straight to the person who must see it through the visitor's own messaging app (WhatsApp, SMS or email, already written in; nothing to set up, only that person's number or address); an account the user creates for a store of their own (a few minutes, you guide them step by step); or a small server of the project, with somewhere to host it. Until they answer, take that service out of the code and say so in your answer. Private means nobody else can read the data, not hiding it from the owner: keep full names and phone numbers on the owner's own screen.",
         hosts.join(", ")
     )
 }
@@ -2720,9 +2745,19 @@ mod tests {
         assert_eq!(
             bakery.reasons,
             [
-                "erreur du script",
+                "erreur du script : « TypeError »",
                 "ce qu'envoie un visiteur ne se voit pas sur un autre appareil"
             ]
+        );
+        // Session #34 : le message dit laquelle.
+        let sms = function_score(&audit(
+            &[],
+            &["uncaught: ReferenceError: NUMERO_SMS is not defined (at app.js:253)"],
+            &[],
+        ));
+        assert_eq!(
+            sms.reasons,
+            ["erreur du script : « ReferenceError: NUMERO_SMS is not defined (at app.js:253) »"]
         );
         // Des boutons morts : un point chacun, trois au plus ; une partie du site pas atteinte.
         let minor = function_score(&audit(
