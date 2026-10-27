@@ -206,6 +206,22 @@ const FUNCTION_FAULTS: &[(&str, u8, u8, &str)] = &[
     ),
     ("The page shows nothing", 9, 1, "page blanche"),
     ("did not return an HTML page", 9, 1, "page introuvable"),
+    // Vu le 27 octobre 2026 (session #35) : l'appli vide de ses montants, le
+    // texte tapé noir sur noir, le graphique de l'historique vide ; aucune
+    // mesure ne les voyait, la note de fonctionnement non plus.
+    (
+        "Figures the user gave that the page never shows",
+        3,
+        5,
+        "chiffres de la demande absents de la page",
+    ),
+    (
+        "Fields whose typed text cannot be read",
+        2,
+        6,
+        "texte tapé illisible",
+    ),
+    ("Charts that show nothing", 2, 6, "graphique vide"),
     (
         "refuses plausible entries",
         2,
@@ -1527,6 +1543,110 @@ pub fn quick_screenshot_input(target: &str) -> String {
     input.to_string()
 }
 
+/// Mode de couleurs que l'utilisateur a demandé pour la page : `dark` quand il
+/// la veut sombre. Les captures et les mesures se font alors dans ce mode (le
+/// juge voit la page demandée), et l'autre mode se mesure aussi quand la page
+/// suit le réglage du téléphone. Vu le 27 octobre 2026 (session #35) : « Sobre
+/// foncé » choisi, chaque capture en mode clair.
+#[must_use]
+pub fn requested_theme(words: &str) -> Option<&'static str> {
+    const DARK: &[&str] = &[
+        "sombre",
+        "fonce",
+        "dark mode",
+        "dark theme",
+        "theme dark",
+        "mode nuit",
+        "fond noir",
+        "noir et ",
+        "tout noir",
+    ];
+    let text = crate::team::without_accents(&words.to_lowercase());
+    DARK.iter()
+        .any(|word| text.contains(word))
+        .then_some("dark")
+}
+
+/// Montants et chiffres que l'utilisateur a donnés et qu'une appli bâtie sur
+/// eux doit montrer : les nombres à décimales, et ceux suivis d'une monnaie,
+/// assez particuliers pour ne pas se trouver par hasard dans une page (ni 100,
+/// ni 450, ni 8 : un compte rond ou un petit nombre). Rien en dessous de deux.
+/// Vu le 27 octobre 2026 (session #35) : « salaire = 1235.15 euro, caf = 103 à
+/// 206 euro… » ; l'appli s'ouvrait à 0,00 € partout.
+#[must_use]
+pub fn request_figures(words: &str) -> Vec<String> {
+    static NUMBER: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let number = NUMBER.get_or_init(|| {
+        regex::Regex::new(r"(\d{1,3}(?:[ \u{a0}\u{202f}]\d{3})+|\d+)(?:[.,](\d{1,2}))?")
+            .expect("motif des nombres")
+    });
+    let mut figures: Vec<String> = Vec::new();
+    for found in number.captures_iter(words) {
+        let Some(whole) = found.get(0) else { continue };
+        let before = words[..whole.start()].chars().next_back();
+        let rest = &words[whole.end()..];
+        let after = rest.chars().next();
+        // Partie d'un autre jeton : version, date, heure, mot, pourcentage.
+        if before.is_some_and(|c| c.is_alphanumeric() || matches!(c, '/' | ':' | '.' | ',' | '#'))
+            || after.is_some_and(|c| c.is_alphanumeric() && !matches!(c, 'e' | 'E' | '€'))
+            || after.is_some_and(|c| matches!(c, '%' | '/' | ':' | '.' | ','))
+        {
+            continue;
+        }
+        let integer: String = found[1].chars().filter(char::is_ascii_digit).collect();
+        let Ok(units) = integer.parse::<u64>() else {
+            continue;
+        };
+        let decimals = found
+            .get(2)
+            .map(|cents| cents.as_str().trim_end_matches('0').to_string())
+            .unwrap_or_default();
+        let near =
+            crate::team::without_accents(&rest.chars().take(18).collect::<String>().to_lowercase());
+        let money = ["€", "eur", "$", "£", "chf", "dollar", "fcfa", "dh"]
+            .iter()
+            .any(|unit| near.contains(unit));
+        let distinctive = if decimals.is_empty() {
+            money && units >= 20 && units % 50 != 0 && !(1900..=2100).contains(&units)
+        } else {
+            true
+        };
+        if !distinctive {
+            continue;
+        }
+        let figure = if decimals.is_empty() {
+            units.to_string()
+        } else {
+            format!("{units}.{decimals}")
+        };
+        if !figures.contains(&figure) && figures.len() < 12 {
+            figures.push(figure);
+        }
+    }
+    if figures.len() < 2 {
+        figures.clear();
+    }
+    figures
+}
+
+/// L'entrée de `Screenshot` complétée par ce que la demande dit de la page :
+/// son mode de couleurs et les chiffres qu'elle doit montrer.
+#[must_use]
+pub fn with_request(input: &str, theme: Option<&str>, figures: &[String]) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(input) else {
+        return input.to_string();
+    };
+    if let Some(theme) = theme {
+        if value.get("theme").is_none() {
+            value["theme"] = json!(theme);
+        }
+    }
+    if !figures.is_empty() {
+        value["figures"] = json!(figures);
+    }
+    value.to_string()
+}
+
 /// Ce que l'outil `Screenshot` a mesuré, toutes tailles d'écran confondues.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Audit {
@@ -2074,6 +2194,46 @@ pub fn visual_check_feedback(
     text
 }
 
+/// Remarque à la première version complète d'une page : la confronter à la
+/// demande, phrase par phrase, et construire ce qui manque avant toute
+/// retouche visuelle ; avec les chiffres que l'utilisateur a donnés.
+#[must_use]
+pub fn early_requirements_note(request: &str, earlier: Option<&str>, figures: &[String]) -> String {
+    let mut words = crate::project::user_words_with_history(request);
+    if let Some(earlier) = earlier.map(str::trim).filter(|earlier| !earlier.is_empty()) {
+        words = format!("{earlier}\n{words}");
+    }
+    let words: String = words.chars().take(4_000).collect();
+    let mut text = String::from(
+        "[Claw] The first complete version of the page is written. Before any visual polish, make sure it does what the user asked: go through their request below, sentence by sentence, and for each one name in one line where the page does it (file and function) or that it is missing. Build what is missing now, data and behaviour first (the user's own figures and rules, what each button does, what is kept after a reload), then go back to the look. Keep this check short: no new file to describe it.",
+    );
+    if !figures.is_empty() {
+        let _ = write!(
+            text,
+            "\nThe user gave these figures: {}. The app must show them from its first opening, filled in as values the user can change, not ask to type them again.",
+            figures.join(", ")
+        );
+    }
+    let _ = write!(text, "\nThe user's words:\n<<<\n{words}\n>>>");
+    text
+}
+
+/// La vérification après une modification n'a rien vu bouger : une ligne au
+/// lieu de la liste entière, et, à la troisième fois de suite, de quoi sortir
+/// de la boucle (relire la règle nommée, ou dire pourquoi un défaut n'en est
+/// pas un, et passer au reste de la demande).
+#[must_use]
+pub fn unchanged_check_feedback(target: &str, open: usize, streak: u32) -> String {
+    let page = target.split_once(':').map_or(target, |(_, page)| page);
+    let mut text = format!(
+        "[Claw] Claw looked at {page} after your change: nothing new, nothing fixed; the {open} problem(s) listed before remain."
+    );
+    if streak == 3 {
+        text.push_str(" Your last three changes moved none of them. Step back before editing again: read the rule each problem names (its file and line, and for colors the light or dark mode it was measured in) and fix that rule, not a neighbour. If you are sure a problem is not real, say why in one sentence and go on with the rest of the request: the final review measures the page again.");
+    }
+    text
+}
+
 /// Ce que Claw a vu de la page avant le travail, donné à l'agent avec la
 /// demande ; `None` quand la page n'a rien à reprendre. Vu le 27 octobre 2026
 /// (session #32, passage 7) : la mesure du début avait trouvé l'erreur qui
@@ -2214,6 +2374,81 @@ mod tests {
         page_target, problem_key, read_audit, regression_note, regressions, review_feedback,
         screenshot_input, Audit,
     };
+
+    #[test]
+    fn the_figures_of_session_35_are_the_ones_a_page_must_show() {
+        let request = "+(gain) -(perte) ~(gain non assuré)\n\nTous les mois je reçois :\n+ salaire = 1235.15 euro\n+ mobili-jeune = 100 euro\n+ caf = 103 à 206 euro\n~ espece = 80 à 200 euro\net mes dépenses impossible à évitées :\n- loyer = 450 euro\n- forfait = 10 euro\n- claude = 21.60 euro\n- transport = 8 euro (normalement 16 mais grace à Orange, il me rembourse 50%)\n- alimentaire = 100 euro\n\nJe veux un appli web perso utilisable sur téléphone.";
+        assert_eq!(
+            super::request_figures(request),
+            vec!["1235.15", "103", "206", "80", "21.6"]
+        );
+        // Ni dates, ni heures, ni versions, ni pourcentages, ni comptes ronds.
+        assert!(super::request_figures(
+            "Le 27/10/2026 à 10:30, version 2.5, 50% de remise, 3 fois par semaine, 100 €, 2026 €"
+        )
+        .is_empty());
+        // Un seul chiffre ne suffit pas à conclure.
+        assert!(super::request_figures("un pain à 1,20 €").is_empty());
+        assert_eq!(
+            super::request_figures("pain 1,20 €, croissant 1,10 € et la baguette à 1 135,50 €"),
+            vec!["1.2", "1.1", "1135.5"]
+        );
+    }
+
+    #[test]
+    fn a_dark_page_asked_for_is_measured_dark() {
+        assert_eq!(
+            super::requested_theme("Fonctions : Tout\nStyle : Sobre foncé"),
+            Some("dark")
+        );
+        assert_eq!(
+            super::requested_theme("je veux un mode sombre"),
+            Some("dark")
+        );
+        assert_eq!(super::requested_theme("A dark theme please"), Some("dark"));
+        assert_eq!(super::requested_theme("Style : Minimaliste chaud"), None);
+        let input = super::with_request(
+            &screenshot_input("path:index.html"),
+            Some("dark"),
+            &["1235.15".to_string(), "103".to_string()],
+        );
+        let value: serde_json::Value = serde_json::from_str(&input).expect("json");
+        assert_eq!(value["theme"], "dark");
+        assert_eq!(value["figures"], serde_json::json!(["1235.15", "103"]));
+        assert_eq!(value["path"], "index.html");
+        let plain = super::with_request(&screenshot_input("path:index.html"), None, &[]);
+        assert_eq!(plain, screenshot_input("path:index.html"));
+    }
+
+    #[test]
+    fn an_unchanged_check_is_one_line_and_the_third_one_steps_back() {
+        let first = super::unchanged_check_feedback("path:index.html", 6, 1);
+        assert!(first.contains("nothing new, nothing fixed") && first.contains("6 problem(s)"));
+        assert!(!first.contains("Step back"));
+        assert!(super::unchanged_check_feedback("path:index.html", 6, 3).contains("Step back"));
+        assert!(!super::unchanged_check_feedback("path:index.html", 6, 4).contains("Step back"));
+    }
+
+    #[test]
+    fn missing_figures_typed_text_and_empty_charts_count_against_function() {
+        let audit = Audit {
+            problems: vec![
+                "Figures the user gave that the page never shows, not even on its hidden screens: 1235.15, 103".to_string(),
+                "In the window opened by button#add: Fields whose typed text cannot be read, its color is too close to the field's background (3:1 at least): input#amount (#000000 on #050505, 1.0:1)".to_string(),
+                "In the screen opened by a \"Historique\": Charts that show nothing: canvas#chart is 0x0px".to_string(),
+            ],
+            ..Audit::default()
+        };
+        let score = super::function_score(&audit);
+        assert!(score.score <= 5, "{score:?}");
+        let reasons = score.reasons.join(" ; ");
+        assert!(
+            reasons.contains("chiffres de la demande absents"),
+            "{reasons}"
+        );
+        assert!(reasons.contains("texte tapé illisible"), "{reasons}");
+        assert!(reasons.contains("graphique vide"), "{reasons}");
+    }
 
     #[test]
     fn a_public_store_the_turn_sends_entries_to_is_found() {

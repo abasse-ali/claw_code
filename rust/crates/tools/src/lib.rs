@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 mod components;
 mod fonts;
 mod icons;
+mod local_server;
 mod ornaments;
 mod page_view;
 mod photos;
@@ -769,8 +770,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                         "items": { "type": "string" },
                         "description": "Screen sizes, one screenshot each: \"phone\" (390x844), \"tablet\" (820x1180), \"desktop\" (1280x800) or \"WIDTHxHEIGHT\". Default: phone and desktop."
                     },
-                    "theme": { "type": "string", "enum": ["light", "dark"], "description": "Color scheme the device says it prefers (prefers-color-scheme)." },
+                    "theme": { "type": "string", "enum": ["light", "dark"], "description": "Color scheme the device says it prefers (prefers-color-scheme). Default light; a page that follows the phone's setting is also measured in the other mode, and each color problem names its mode." },
                     "full_page": { "type": "boolean", "description": "Capture the page down to its end, up to three screens (default true); false keeps the first screen only. After a scroll action, the capture starts where the page was scrolled to." },
+                    "figures": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Numbers the user gave (amounts, prices, \"1235.15\") that the page must show somewhere, its hidden screens included: the result names those it never shows."
+                    },
                     "windows": { "type": "boolean", "description": "Also capture, at phone size, what the page shows only after a tap: each window (dialog, sheet) a button opens, the folded menu opened, and each tab not selected (default false)." },
                     "explore": { "type": "boolean", "description": "With windows: explore the site from top to bottom like a visitor, slower: each screen a button swaps in (with the access code written in the page's script when one is asked, the form sent first so it has something to show), its buttons and forms tried, and the site's other pages; each captured and measured; the result lists what was explored and what was not reached (default false)." },
                     "second_device": { "type": "boolean", "description": "With explore: also open those screens on a second device (a fresh browser with its own memory) and check that what the first device sent shows there too, as it must when other people see what a visitor enters (default false)." },

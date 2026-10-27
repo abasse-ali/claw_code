@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::{
-    attach, console_lines, file_url, page_socket_path, strings, Browser, DevTools, Viewport,
+    attach, console_lines, page_socket_path, page_url, strings, Browser, DevTools, Viewport,
     AUDIT_SCRIPT,
 };
 
@@ -142,7 +142,7 @@ fn address(input: &BrowserInput) -> Result<String, String> {
         .map(str::trim)
         .filter(|path| !path.is_empty())
     {
-        return file_url(&cwd, std::path::Path::new(path));
+        return page_url(&cwd, std::path::Path::new(path));
     }
     let url = input
         .url
@@ -159,7 +159,7 @@ fn address(input: &BrowserInput) -> Result<String, String> {
         .then(|| crate::page_view::file_url_path(url))
         .flatten()
     {
-        file_url(&cwd, std::path::Path::new(&path))
+        page_url(&cwd, std::path::Path::new(&path))
     } else {
         Err(format!(
             "`{url}` is not an http address: for a file of the project, pass `path`"
@@ -222,6 +222,18 @@ fn open(session: &mut Session, url: &str, viewport: &Viewport) -> Result<Value, 
     session.events_seen = 0;
     session.texts.clear();
     session.told.clear();
+    // Page du projet servie par Claw : le navigateur garde sa session d'un
+    // appel à l'autre, et un service worker de la page servirait l'ancienne
+    // version des fichiers que l'agent vient de corriger. Ses caches partent
+    // avant chaque ouverture ; les données de la page (localStorage) restent.
+    if crate::local_server::serves(url) {
+        if let Some(origin) = url.get(..url[7..].find('/').map_or(url.len(), |at| at + 7)) {
+            let _ = session.devtools.call(
+                "Storage.clearDataForOrigin",
+                json!({ "origin": origin, "storageTypes": "service_workers,cache_storage" }),
+            );
+        }
+    }
     let navigation = session
         .devtools
         .call("Page.navigate", json!({ "url": url }))?;

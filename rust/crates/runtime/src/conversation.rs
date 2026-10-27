@@ -592,6 +592,18 @@ struct TurnAids {
     /// Une vérification indépendante a déjà eu lieu pendant ce tour.
     workflow_checked: bool,
     workflow_runs: usize,
+    /// Mode de couleurs demandé pour la page (`dark` : l'utilisateur la veut
+    /// sombre) : les captures et les mesures se font dans ce mode.
+    page_theme: Option<&'static str>,
+    /// Chiffres de la demande que la page doit montrer (montants, prix).
+    figures: Vec<String>,
+    /// Vérifications de suite, après chaque modification, où rien n'a bougé :
+    /// leur liste n'est plus redite en entier.
+    unchanged_checks: u32,
+    /// La première version de la page a déjà été confrontée à la demande.
+    early_checked: bool,
+    /// La liste entière des défauts mesurés a déjà été donnée pendant ce tour.
+    check_listed: bool,
     /// Mode équipe pour ce tour, et sujet spécialisé de la demande.
     team: bool,
     topic: Option<&'static str>,
@@ -2003,9 +2015,10 @@ where
                 .as_deref()
                 .is_some_and(crate::web_design::is_interface_request);
         if interface_turn && !aids.work_question {
-            aids.shared_request = crate::web_design::shared_between_people(
-                &crate::project::user_words_with_history(&request_text),
-            );
+            let words = crate::project::user_words_with_history(&request_text);
+            aids.shared_request = crate::web_design::shared_between_people(&words);
+            aids.page_theme = crate::web_design::requested_theme(&words);
+            aids.figures = crate::web_design::request_figures(&words);
             self.baseline_audit(&request_text, &mut aids, &mut prompter);
         }
 
@@ -2114,6 +2127,15 @@ where
             if !wrapping_up {
                 if let Some(check) = self.visual_check(&mut aids, &mut prompter) {
                     self.session.messages.push(check);
+                }
+                // La première version complète de la page est là : le fond
+                // avant la forme.
+                if let Some(note) =
+                    self.early_requirements(&mut aids, &request_text, earlier.as_deref())
+                {
+                    self.session
+                        .messages
+                        .push(ConversationMessage::user_text(note));
                 }
             }
             // Mode équipe : le rôle de cette étape, d'après l'état du travail.
@@ -2315,8 +2337,13 @@ where
                 // modification) : elle finit avant tout contrôle de la conclusion.
                 let pending_check = self.finish_visual_check(&mut aids);
                 // Budget du tour atteint : la conclusion part telle quelle,
-                // aucun contrôle ne renvoie le modèle au travail.
+                // aucun contrôle ne renvoie le modèle au travail ; Claw y ajoute
+                // ce qu'il a pu vérifier, pour que l'utilisateur ne prenne pas
+                // pour vérifié ce qui ne l'est pas.
                 if wrapping_up {
+                    if let Some(status) = self.wrap_up_status(&aids, out_of_time) {
+                        self.append_to_answer(&mut assistant_messages, &status);
+                    }
                     self.run_stop_hooks(stop_continuations, true, &assistant_messages);
                     break;
                 }
@@ -3738,9 +3765,13 @@ where
         }
         self.api_client
             .notify("État de la page avant ce tour : Claw la mesure, pour repérer ce que le tour casserait…");
-        let input = crate::web_design::review_screenshot_input(
-            &target,
-            self.second_device(aids, aids.shared_request),
+        let input = crate::web_design::with_request(
+            &crate::web_design::review_screenshot_input(
+                &target,
+                self.second_device(aids, aids.shared_request),
+            ),
+            aids.page_theme,
+            &[],
         );
         self.tool_executor.announce("Screenshot", &input);
         let (message, _) = self.execute_tool_call(
@@ -3837,11 +3868,15 @@ where
         if !crate::web_design::missing_local_assets(&cwd, &target).is_empty() {
             return None;
         }
-        let input = if quick {
-            crate::web_design::quick_screenshot_input(&target)
-        } else {
-            crate::web_design::screenshot_input(&target)
-        };
+        let input = crate::web_design::with_request(
+            &if quick {
+                crate::web_design::quick_screenshot_input(&target)
+            } else {
+                crate::web_design::screenshot_input(&target)
+            },
+            aids.page_theme,
+            &aids.figures,
+        );
         self.tool_executor.announce("Screenshot", &input);
         let (message, _) = self.execute_tool_call(
             format!("claw-measure-{}", aids.blind_measures + 1),
@@ -3897,7 +3932,11 @@ where
         // pendant que le modèle prépare sa réponse suivante, et le résultat
         // arrive avec elle. Vu le 26 octobre 2026 (session #32, passage 5) : 33
         // vérifications de 25 s chacune, le modèle attendant chaque fois.
-        let input = crate::web_design::quick_screenshot_input(&target);
+        let input = crate::web_design::with_request(
+            &crate::web_design::quick_screenshot_input(&target),
+            aids.page_theme,
+            &aids.figures,
+        );
         if let Some(handle) = self.tool_executor.spawn_background("Screenshot", &input) {
             aids.blind_edits = 0;
             aids.pending_check = Some(PendingCheck {
@@ -3914,7 +3953,7 @@ where
             return None;
         };
         Some(
-            self.check_message(&target, before.as_deref(), &audit, images)
+            self.check_message(aids, &target, before.as_deref(), &audit, images)
                 .0,
         )
     }
@@ -3924,6 +3963,7 @@ where
     /// et le nombre de défauts nouveaux.
     fn check_message(
         &mut self,
+        aids: &mut TurnAids,
         target: &str,
         before: Option<&[String]>,
         audit: &crate::web_design::Audit,
@@ -3938,12 +3978,36 @@ where
         if !new.is_empty() {
             self.api_client.team_strike("défaut introduit dans la page");
         }
+        // Rien n'a bougé depuis la vérification d'avant : la même liste n'est
+        // pas redite (ni la capture renvoyée), et après trois modifications sans
+        // effet l'agent est invité à prendre du recul. Vu le 27 octobre 2026
+        // (session #35) : « 0 nouveau, 0 réparé, 6 restants » redit vingt-cinq
+        // fois, et l'agent changeait une couleur à chaque fois.
+        let unchanged = aids.check_listed
+            && before.is_some()
+            && new.is_empty()
+            && fixed == 0
+            && !open.is_empty();
+        aids.unchanged_checks = if unchanged {
+            aids.unchanged_checks + 1
+        } else {
+            0
+        };
+        if unchanged {
+            let text = crate::web_design::unchanged_check_feedback(
+                target,
+                open.len(),
+                aids.unchanged_checks,
+            );
+            return (ConversationMessage::user_text(text), 0);
+        }
         let image = images
             .into_iter()
             .next()
             .filter(|_| self.api_client.reads_images());
         let text =
             crate::web_design::visual_check_feedback(target, &new, fixed, &open, image.is_some());
+        aids.check_listed = true;
         let mut message = ConversationMessage::user_text(text);
         if let Some(image) = image {
             message.blocks.push(ContentBlock::Image {
@@ -3977,7 +4041,110 @@ where
                 .cloned()
                 .collect(),
         );
-        Some(self.check_message(&pending.target, pending.before.as_deref(), &audit, images))
+        Some(self.check_message(
+            aids,
+            &pending.target,
+            pending.before.as_deref(),
+            &audit,
+            images,
+        ))
+    }
+
+    /// La première version complète d'une page créée dans ce tour (tous ses
+    /// fichiers écrits, la page mesurée une première fois) : avant les retouches
+    /// visuelles, l'agent la confronte à la demande, phrase par phrase, et
+    /// construit ce qui manque. Une fois par tour. Vu le 27 octobre 2026
+    /// (session #35) : une heure et demie de retouches de couleurs sur une
+    /// appli qui ne contenait aucun des montants de l'utilisateur ; le contrôle
+    /// des exigences, prévu à la fin, n'a jamais eu lieu (temps écoulé).
+    fn early_requirements(
+        &mut self,
+        aids: &mut TurnAids,
+        request: &str,
+        earlier: Option<&str>,
+    ) -> Option<String> {
+        if aids.early_checked
+            || !aids.design_guided
+            || aids.repair
+            || aids.work_question
+            || aids.blind_measures == 0
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::Checklist)
+        {
+            return None;
+        }
+        aids.early_checked = true;
+        self.api_client.notify(
+            "Première version de la page écrite : Claw la fait confronter à la demande avant les retouches visuelles",
+        );
+        Some(crate::web_design::early_requirements_note(
+            request,
+            earlier,
+            &aids.figures,
+        ))
+    }
+
+    /// Ce que Claw a pu vérifier quand le tour s'arrête sur sa limite (temps
+    /// ou requêtes), sans les contrôles de fin : les défauts encore mesurés sur
+    /// la page, et les exigences jamais confrontées. `None` s'il n'y a rien à dire.
+    fn wrap_up_status(&self, aids: &TurnAids, out_of_time: bool) -> Option<String> {
+        if self.subagent || aids.originals.is_empty() {
+            return None;
+        }
+        let mut lines = Vec::new();
+        if let Some(open) = aids.last_checked.as_ref().filter(|open| !open.is_empty()) {
+            let audit = crate::web_design::Audit {
+                problems: open.clone(),
+                ..crate::web_design::Audit::default()
+            };
+            let reasons = crate::web_design::function_score(&audit).reasons;
+            let shown = if reasons.is_empty() {
+                format!("{} défaut(s) d'affichage", open.len())
+            } else {
+                reasons.join(", ")
+            };
+            lines.push(format!(
+                "- Encore mesuré sur la page à la dernière vérification : {shown}."
+            ));
+        }
+        let verified = (aids.checklisted && !aids.ultracode) || aids.workflow_checked;
+        if !verified {
+            lines.push("- Les exigences de la demande n'ont pas été confrontées une à une au travail : ce que la réponse dit « fait » ou « vérifié » n'est pas garanti par Claw.".to_string());
+        }
+        if lines.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "\n\n---\n**Ce que Claw a pu vérifier avant de s'arrêter** ({}) :\n{}\n\nÉcrivez « continue » pour que Claw termine le travail et le vérifie.",
+            if out_of_time {
+                "temps du passage écoulé"
+            } else {
+                "limite de requêtes du tour atteinte"
+            },
+            lines.join("\n")
+        ))
+    }
+
+    /// Ajoute un texte de Claw à la fin de la dernière réponse du modèle (celle
+    /// que l'utilisateur lit), dans le tour comme dans la session.
+    fn append_to_answer(&mut self, assistant_messages: &mut [ConversationMessage], text: &str) {
+        let Some(last) = assistant_messages.last_mut() else {
+            return;
+        };
+        let before = last.clone();
+        last.blocks.push(ContentBlock::Text {
+            text: text.to_string(),
+        });
+        if let Some(stored) = self
+            .session
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|message| **message == before)
+        {
+            *stored = last.clone();
+        }
     }
 
     /// Le tour se termine (limite de requêtes ou de temps) après des
@@ -4112,8 +4279,11 @@ where
             || crate::web_design::shared_between_people(&crate::project::user_words_with_history(
                 request,
             ));
-        let input =
-            crate::web_design::review_screenshot_input(&target, self.second_device(aids, shared));
+        let input = crate::web_design::with_request(
+            &crate::web_design::review_screenshot_input(&target, self.second_device(aids, shared)),
+            aids.page_theme,
+            &aids.figures,
+        );
         self.tool_executor.announce("Screenshot", &input);
         let (message, _) = self.execute_tool_call(
             format!("claw-design-{}", aids.interface_rounds),

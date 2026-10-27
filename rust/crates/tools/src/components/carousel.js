@@ -27,6 +27,9 @@
       const end = track.scrollLeft + track.clientWidth >= track.scrollWidth - 4;
       if (prev) prev.disabled = track.scrollLeft <= 4;
       if (next) next.disabled = end;
+      // Toutes les images tiennent à l'écran (trois colonnes à l'ordinateur) :
+      // les points n'auraient rien à faire défiler, ils se cachent.
+      if (dots) dots.hidden = track.scrollWidth <= track.clientWidth + 4;
     };
     if (prev) prev.addEventListener("click", () => go(current() - 1));
     if (next) next.addEventListener("click", () => go(current() + 1));

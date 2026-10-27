@@ -42,6 +42,27 @@
   try { navigator.canShare = () => true; } catch (_) { /* partage absent */ }
   HTMLAnchorElement.prototype.click = function click() { count(); };
   try { HTMLFormElement.prototype.submit = function submit() { count(); }; } catch (_) { /* rien */ }
+  // Un bouton qui ouvre le choix d'un fichier (« Importer ») : le navigateur
+  // sans écran n'affiche aucune fenêtre, mais le bouton a bien agi. Vu le 27
+  // octobre 2026 (session #35) : « Importer (CSV) » dit « ne fait rien » à
+  // chaque revue, l'agent l'a réécrit trois fois.
+  try {
+    const nativeClick = HTMLInputElement.prototype.click;
+    HTMLInputElement.prototype.click = function click() {
+      if ((this.type || "").toLowerCase() === "file") { count(); return; }
+      return nativeClick.call(this);
+    };
+    if (HTMLInputElement.prototype.showPicker) {
+      HTMLInputElement.prototype.showPicker = function showPicker() { count(); };
+    }
+  } catch (_) { /* champ absent */ }
+  if (window.showOpenFilePicker) window.showOpenFilePicker = async () => { count(); return []; };
+  // Un libellé lié à un champ de fichier ouvre lui aussi le choix.
+  window.addEventListener("click", (event) => {
+    const label = event.target && event.target.closest && event.target.closest("label");
+    const field = label && (label.control || label.querySelector("input[type=file]"));
+    if (field && (field.type || "").toLowerCase() === "file") { count(); event.preventDefault(); }
+  }, true);
   // L'envoi est arrete en dernier (a la fenetre, apres les gestionnaires de
   // la page) : on sait ainsi si la page l'a pris en charge ou l'aurait laisse
   // recharger la page.
@@ -224,7 +245,8 @@
   // laisse Claw verifier le disque.
   const files = [];
   for (const [page, { from, root }] of [...pages].slice(0, 15)) {
-    if (page.startsWith("file:")) { files.push({ url: page, from, root, page: here }); continue; }
+    const served = typeof clawServed !== "undefined" && clawServed && page.startsWith(location.origin);
+    if (page.startsWith("file:") || served) { files.push({ url: page, from, root, page: here }); continue; }
     try {
       const stop = new AbortController();
       const timer = setTimeout(() => stop.abort(), 3000);

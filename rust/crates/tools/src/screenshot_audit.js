@@ -370,6 +370,69 @@
   if (pale.length) blame(paleEls);
   if (pale.length) problems.push(`Text with too little contrast against its background, 4.5:1 is needed (3:1 for large text): ${list(pale)}`);
 
+  // 7a. Ce qu'on tape dans un champ : sa couleur sur le fond du champ, que la
+  // mesure du texte ne voyait pas (une valeur tapée n'est pas un nœud de
+  // texte). Vu le 27 octobre 2026 (session #35) : les champs d'un <dialog>
+  // en color: inherit, texte noir sur fond #050505, le montant tapé invisible.
+  const hex = ({ r, g, b }) => `#${[r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
+  const contrastOf = (fg, bg) => {
+    const ink = blend(fg, bg);
+    const [light, dark] = [luminance(ink), luminance(bg)].sort((x, y) => y - x);
+    return (light + 0.05) / (dark + 0.05);
+  };
+  const typing = "input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]):not([type=file]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]), textarea, select";
+  const unreadableEls = [];
+  const unreadable = [...document.querySelectorAll(typing)].filter((field) => shown(field) && !field.disabled).slice(0, 40).map((field) => {
+    const color = parse(css(field).webkitTextFillColor || css(field).color);
+    const under = background(field);
+    if (!color || !under) return null;
+    const ratio = contrastOf(color, under);
+    if (ratio >= 3) return null;
+    unreadableEls.push(field);
+    return `${name(field)} (${hex(blend(color, under))} on ${hex(under)}, ${ratio.toFixed(1)}:1)`;
+  }).filter(Boolean);
+  if (unreadable.length) {
+    blame(unreadableEls);
+    problems.push(`Fields whose typed text cannot be read, its color is too close to the field's background (3:1 at least): ${list(unreadable)}. Give input, select and textarea an explicit color (color: inherit takes the text color of their parent, black by default inside a <dialog>)`);
+  }
+
+  // 7b. Graphiques vides : un <canvas> resté à 0x0 (dessiné pendant que son
+  // onglet était caché : sa taille lue valait 0) ou sans un seul point
+  // dessiné, un <svg> de graphique sans aucune forme. Vu le 27 octobre 2026
+  // (session #35) : l'onglet Historique montrait sa légende et un cadre vide.
+  const emptyCharts = [];
+  for (const canvas of [...document.querySelectorAll("canvas")].slice(0, 12)) {
+    const style = css(canvas);
+    if (style.display === "none" || style.visibility === "hidden") continue;
+    const holder = canvas.parentElement;
+    if (!holder || !shown(holder) || holder.getBoundingClientRect().height < 40) continue;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1 || canvas.width === 0 || canvas.height === 0) {
+      emptyCharts.push(`${name(canvas)} is ${Math.round(rect.width)}x${Math.round(rect.height)}px on screen with a ${canvas.width}x${canvas.height} drawing: it was sized while hidden (its size read 0) and never redrawn; draw it when its view is shown, and give it a CSS width and height`);
+      continue;
+    }
+    if (rect.width < 60 || rect.height < 40) continue;
+    let context = null;
+    try { context = canvas.getContext("2d"); } catch (_) { context = null; }
+    if (!context) continue;
+    let painted = false;
+    try {
+      const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      const step = Math.max(4, Math.floor(data.length / 4 / 20000) * 4);
+      for (let i = 3; i < data.length; i += step) {
+        if (data[i] > 0) { painted = true; break; }
+      }
+    } catch (_) { painted = true; }
+    if (!painted) emptyCharts.push(`${name(canvas)} (${Math.round(rect.width)}x${Math.round(rect.height)}px) has nothing drawn in it`);
+  }
+  for (const svg of visible.filter((el) => el.tagName === "svg").slice(0, 60)) {
+    const rect = box.get(svg);
+    if (!rect || rect.width < 120 || rect.height < 80) continue;
+    if (!/chart|graph|graphique|courbe|histogram|diagram/i.test(`${svg.id} ${svg.getAttribute("class") || ""} ${svg.getAttribute("aria-label") || ""} ${svg.parentElement ? svg.parentElement.className : ""}`)) continue;
+    if (!svg.querySelector("path, rect, circle, line, polyline, polygon, ellipse")) emptyCharts.push(`${name(svg)} (${Math.round(rect.width)}x${Math.round(rect.height)}px) holds no shape`);
+  }
+  if (emptyCharts.length) problems.push(`Charts that show nothing: ${list(emptyCharts, 3)}`);
+
   // 7b. Cadre dans un cadre : une boîte bordée et colorée qui ne contient
   // qu'une autre boîte bordée et colorée (une icône à côté au plus). Vu le
   // 26 octobre 2026 (session #31) : « Complet » dans une pastille verte, elle-
@@ -469,11 +532,20 @@
 
   // 7d. Bouton de menu affiché alors que le menu qu'il ouvre est déjà là (à
   // l'ordinateur, le bouton du menu à côté des liens). Vu le 26 octobre 2026 (session #32).
+  // Le menu doit être dans l'écran : un tiroir replié hors champ
+  // (transform: translateX(-100%)) a une taille, mais personne ne le voit. Vu
+  // le 27 octobre 2026 (session #35) : le tiroir à x = -260, signalé « déjà
+  // là » à chaque mesure, et l'agent a passé une demi-heure sur ce défaut.
+  const inScreen = (el) => {
+    const rect = box.get(el) || el.getBoundingClientRect();
+    const seen = Math.min(rect.right, W) - Math.max(rect.left, 0);
+    return seen >= Math.min(rect.width, 40) * 0.5 && rect.bottom > 0 && rect.top < window.innerHeight;
+  };
   const redundant = visible.filter((el) => el.matches("[aria-controls][aria-expanded=false], button[aria-controls]")
     && el.getAttribute("aria-expanded") !== "true").filter((toggle) => {
     const panel = document.getElementById(toggle.getAttribute("aria-controls") || "");
-    return panel && box.has(panel) && !panel.contains(toggle)
-      && [...panel.querySelectorAll("a[href], button")].some((link) => box.has(link));
+    return panel && box.has(panel) && inScreen(panel) && !panel.contains(toggle)
+      && [...panel.querySelectorAll("a[href], button")].some((link) => box.has(link) && inScreen(link));
   });
   if (redundant.length) {
     blame(redundant);
@@ -1121,10 +1193,10 @@
       blame(plural);
       problems.push(`A count of ${french ? "0 or 1" : "1"} followed by a plural: ${list(plural.map(name), 3)}. Write the singular for ${french ? "0 and 1 (« 1 commande », « 0 article »)" : "1 (\"1 item\")"}: a small function that picks the word from the number`);
     }
-    const leaked = smallest((text) => /(?:^|[\s:(])(?:undefined|NaN|null)(?:$|[\s.,)])|\[object Object\]/.test(text));
+    const leaked = smallest((text) => /(?:^|[\s:(])(?:undefined|NaN|null|-?Infinity)(?:$|[\s.,)%\u20ac$])|\[object Object\]|Invalid Date/.test(text));
     if (leaked.length) {
       blame(leaked);
-      problems.push(`A script value shown as text (undefined, NaN, null or [object Object]): ${list(leaked.map(name), 3)}. A field read before it was set, or a number made from text: fix the value, and show a dash or nothing while it is missing`);
+      problems.push(`A script value shown as text (undefined, NaN, null, Infinity, Invalid Date or [object Object]): ${list(leaked.map(name), 3)}. A field read before it was set, or a number made from text: fix the value, and show a dash or nothing while it is missing`);
     }
   }
 
@@ -1484,5 +1556,31 @@
     .filter((el) => panels.some((panel) => panel.contains(el)) || el.closest("nav, [role=navigation], details:not([open])"))
     .map((el) => (words(el) || el.textContent || "").replace(/\d+/g, "").replace(/\s+/g, " ").trim())
     .filter((label) => label.length >= 2 && label.length <= 60))].slice(0, 80) : [];
-  return { title: document.title || "", problems, notes, culprits, motion, hoverLabels, svgIcons, controls: controlNames, folded: foldedNames, textLength: text.length };
+  // Couleurs qui suivent le réglage clair ou sombre du téléphone : Claw mesure
+  // alors aussi l'autre mode (contraste, icônes, champs), et nomme le mode de
+  // chaque défaut. Vu le 27 octobre 2026 (session #35) : des contrastes
+  // mesurés en mode clair, et l'agent qui retouchait dix fois les couleurs du
+  // mode sombre.
+  const schemes = (() => {
+    const meta = document.querySelector('meta[name="color-scheme"]');
+    const both = (value) => /light/i.test(value || "") && /dark/i.test(value || "");
+    if (meta && both(meta.content)) return true;
+    if (both(getComputedStyle(document.documentElement).colorScheme)) return true;
+    const scan = (rules, depth) => {
+      for (const rule of rules) {
+        if (rule.media && /prefers-color-scheme/.test(rule.media.mediaText || "")) return true;
+        if (rule.cssRules && depth < 4 && scan(rule.cssRules, depth + 1)) return true;
+      }
+      return false;
+    };
+    for (const sheet of document.styleSheets) {
+      try {
+        if (sheet.media && /prefers-color-scheme/.test(sheet.media.mediaText || "")) return true;
+        if (scan(sheet.cssRules, 0)) return true;
+      } catch (_) { /* feuille d'un autre site : illisible */ }
+    }
+    return false;
+  })();
+
+  return { title: document.title || "", problems, notes, culprits, motion, hoverLabels, svgIcons, controls: controlNames, folded: foldedNames, textLength: text.length, schemes };
 })()
