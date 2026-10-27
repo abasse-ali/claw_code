@@ -150,6 +150,178 @@ pub fn continuation(
     Continuation::Continue
 }
 
+/// Design atteint : la moyenne des critères à la barre au moins, et aucun
+/// critère à plus d'un point sous elle. Ce que l'utilisateur appelle « 8/10 » ;
+/// chaque critère à 8 exactement, un juge gratuit ne l'accorde presque jamais,
+/// et le tour s'épuisait sur un seul critère à 7.
+#[must_use]
+pub fn design_reached(scores: &[(String, u8)], bar: u8) -> bool {
+    if scores.is_empty() {
+        return false;
+    }
+    let total: u32 = scores.iter().map(|(_, score)| u32::from(*score)).sum();
+    #[allow(clippy::cast_precision_loss)]
+    let mean = total as f32 / scores.len() as f32;
+    mean >= f32::from(bar) && scores.iter().all(|(_, score)| score + 1 >= bar)
+}
+
+/// Ajout à la consigne du juge quand la note stagne sous la barre : des
+/// changements de structure, pas des retouches. Vu le 26 octobre 2026
+/// (session #32, passage 5) : 6,4 puis 6,6 puis 6,6, huit retouches à chaque
+/// revue (une marge, un cœur en SVG) et un formulaire resté en cadres gris.
+#[must_use]
+pub fn restructure_note(trail: &str, bar: u8) -> String {
+    format!("\n\nThe page is stuck under the bar ({trail}/10, bar {bar}) after reviews of small changes: small fixes will not raise it. This time give at most 4 changes, each a change of structure the developer can make in one go: what the first screen shows and in what order, how blocks are grouped and sized, a list turned into compact rows or a grid into a list, a different composition for a section, a stronger single idea for the identity. No padding, color value or radius alone.")
+}
+
+/// Note de fonctionnement sur 10, comptée sur ce que la revue a mesuré en
+/// utilisant la page (pas devinée par un modèle) : 10 quand rien n'est cassé.
+/// Une erreur du script, un formulaire principal qui ne marche pas, ou ce que
+/// les autres doivent voir et ne voient pas plafonnent la note à 5 ; chaque
+/// autre défaut retire un ou deux points. Vu le 26 octobre 2026 (session
+/// #32) : une page notée 6,6 en design dont la liste de la boulangère plantait
+/// et restait vide sur son téléphone, sans qu'aucune note ne le dise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionScore {
+    pub score: u8,
+    /// Ce qui retire des points, en français pour l'utilisateur.
+    pub reasons: Vec<String>,
+}
+
+/// Défauts de fonctionnement : motif dans le défaut mesuré, points retirés,
+/// plafond de la note (10 : aucun), et ce qu'en lit l'utilisateur.
+const FUNCTION_FAULTS: &[(&str, u8, u8, &str)] = &[
+    ("an error in the page's script", 3, 5, "erreur du script"),
+    (
+        "raises an error in the page's script",
+        3,
+        5,
+        "erreur du script",
+    ),
+    (
+        "On a second device",
+        3,
+        5,
+        "ce qu'envoie un visiteur ne se voit pas sur un autre appareil",
+    ),
+    ("The page shows nothing", 9, 1, "page blanche"),
+    ("did not return an HTML page", 9, 1, "page introuvable"),
+    (
+        "refuses plausible entries",
+        2,
+        6,
+        "formulaire qui refuse des entrées normales",
+    ),
+    (
+        "stays disabled once every field is filled",
+        2,
+        6,
+        "bouton d'envoi qui reste grisé",
+    ),
+    (
+        "does nothing: no submit event",
+        2,
+        6,
+        "formulaire dont l'envoi ne fait rien",
+    ),
+    (
+        "reloads the page (no script takes the submit event",
+        2,
+        6,
+        "formulaire qui recharge la page",
+    ),
+    (
+        "is gone after a reload",
+        2,
+        10,
+        "donnée perdue au rechargement",
+    ),
+    (
+        "after a reload that change is gone",
+        2,
+        10,
+        "donnée perdue au rechargement",
+    ),
+    (
+        "shows nothing: no confirmation",
+        1,
+        10,
+        "envoi sans confirmation",
+    ),
+    ("is shown nowhere", 1, 10, "nom envoyé affiché nulle part"),
+    ("do nothing when clicked", 1, 10, "bouton qui ne fait rien"),
+    ("broken links", 1, 10, "lien cassé"),
+    ("cannot be tapped", 1, 10, "bouton impossible à toucher"),
+    ("does not close", 1, 10, "fenêtre qui ne se ferme pas"),
+    (
+        "closes when a finger slides",
+        1,
+        10,
+        "fenêtre qui se ferme en faisant défiler",
+    ),
+    (
+        "opened the browser's own",
+        1,
+        10,
+        "boîte grise du navigateur",
+    ),
+    (
+        "Buttons or links that were on this page at its first capture",
+        1,
+        10,
+        "bouton disparu",
+    ),
+];
+
+#[must_use]
+pub fn function_score(audit: &Audit) -> FunctionScore {
+    let mut lost = 0u8;
+    let mut cap = 10u8;
+    let mut reasons: Vec<String> = Vec::new();
+    let mut count = |weight: u8, ceiling: u8, reason: &str| {
+        lost = lost.saturating_add(weight);
+        cap = cap.min(ceiling);
+        if !reasons.iter().any(|seen| seen == reason) {
+            reasons.push(reason.to_string());
+        }
+    };
+    let mut scripted = false;
+    for problem in &audit.problems {
+        for (pattern, weight, ceiling, reason) in FUNCTION_FAULTS {
+            if problem.contains(pattern) {
+                // Plusieurs boutons morts dans un même défaut : un point chacun, trois au plus.
+                let weight = if *pattern == "do nothing when clicked" {
+                    problem
+                        .split_whitespace()
+                        .find_map(|word| word.trim_start_matches('[').parse::<u8>().ok())
+                        .unwrap_or(1)
+                        .clamp(1, 3)
+                } else {
+                    *weight
+                };
+                scripted |= reason.starts_with("erreur du script");
+                count(weight, *ceiling, reason);
+                break;
+            }
+        }
+    }
+    if !audit.console.is_empty() && !scripted {
+        count(3, 5, "erreur du script");
+    }
+    // Ce que la revue n'a pas pu ouvrir n'est pas vérifié.
+    if audit
+        .explored
+        .iter()
+        .any(|line| line.starts_with("Not reached:"))
+    {
+        count(1, 10, "partie du site pas atteinte");
+    }
+    FunctionScore {
+        score: 10u8.saturating_sub(lost).min(cap),
+        reasons,
+    }
+}
+
 /// La suite des notes, pour l'utilisateur : « 6,0 puis 7,3 ».
 #[must_use]
 pub fn score_trail(graded: &[Graded]) -> String {
@@ -1676,6 +1848,14 @@ pub fn review_feedback(
     let mut text = format!(
         "[Claw] Claw looked at the page you built ({page}) as a user would, full page at phone and desktop sizes (review {round} of {rounds}). The bar is a page a top studio would ship: {bar}/10 or more on every criterion."
     );
+    let function = function_score(audit);
+    if function.score < bar {
+        let _ = write!(
+            text,
+            " It works at {}/10 (bar {bar}), counted on what was measured while using it: fix the problems that break it first (script errors, forms, what others must see, dead buttons), before any design change.",
+            function.score
+        );
+    }
     let bullets = |lines: &mut dyn Iterator<Item = &String>| {
         lines
             .map(|line| format!("- {line}"))
@@ -2120,6 +2300,62 @@ mod tests {
             review_feedback("path:index.html", &Audit::default(), None, 1, 2, 8),
             None
         );
+    }
+
+    #[test]
+    fn the_function_score_is_counted_on_what_was_measured() {
+        use super::{function_score, Audit};
+        let audit = |problems: &[&str], console: &[&str], explored: &[&str]| Audit {
+            problems: problems.iter().map(ToString::to_string).collect(),
+            notes: Vec::new(),
+            console: console.iter().map(ToString::to_string).collect(),
+            explored: explored.iter().map(ToString::to_string).collect(),
+        };
+        assert_eq!(function_score(&audit(&[], &[], &[])).score, 10);
+        // Session #32, passage 5 : la liste plantait, la boulangère ne voyait
+        // rien sur son téléphone, « 1 COMMANDES ».
+        let bakery = function_score(&audit(
+            &[
+                "[phone 390x844, screen \"Préparation du jour\" opened by button] In the screen \"Préparation du jour\": opening it raises an error in the page's script: TypeError",
+                "[second device] On a second device (a fresh browser with its own memory), the screen \"Préparation du jour\" shows none of the entries",
+                "[phone 390x844] A count of 0 or 1 followed by a plural: div.stat \"1 COMMANDES\"",
+            ],
+            &[],
+            &[],
+        ));
+        assert_eq!(bakery.score, 4, "{bakery:?}");
+        assert_eq!(
+            bakery.reasons,
+            [
+                "erreur du script",
+                "ce qu'envoie un visiteur ne se voit pas sur un autre appareil"
+            ]
+        );
+        // Des boutons morts : un point chacun, trois au plus ; une partie du site pas atteinte.
+        let minor = function_score(&audit(
+            &["[desktop 1280x800] 2 button(s) do nothing when clicked (no change in the page): a; b"],
+            &[],
+            &["Not reached: the page infos.html (it did not open)."],
+        ));
+        assert_eq!(minor.score, 7, "{minor:?}");
+        // Une erreur de la console seule plafonne aussi.
+        assert_eq!(
+            function_score(&audit(&[], &["error: x is not defined"], &[])).score,
+            5
+        );
+        // Le design atteint : moyenne à la barre, aucun critère sous barre - 1.
+        let scores = |values: &[u8]| -> Vec<(String, u8)> {
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| (format!("c{index}"), *value))
+                .collect()
+        };
+        assert!(super::design_reached(&scores(&[8, 8, 9, 7, 8, 8, 9]), 8));
+        assert!(!super::design_reached(&scores(&[9, 9, 9, 6, 9, 9, 9]), 8));
+        assert!(!super::design_reached(&scores(&[8, 8, 7, 7, 8, 8, 7]), 8));
+        assert!(!super::design_reached(&[], 8));
+        assert!(super::restructure_note("6,4 puis 6,6", 8).contains("change of structure"));
     }
 
     #[test]
