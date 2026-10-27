@@ -2721,7 +2721,7 @@ where
         aids.questions_deferred |=
             tool_name == "AskUserQuestion" && output.contains(harness::QUESTIONS_DEFERRED);
         // Page que le modèle a regardée lui-même : la revue visuelle la reprend.
-        if matches!(tool_name, "Screenshot" | "ViewPage") && !is_error {
+        if matches!(tool_name, "Screenshot" | "ViewPage" | "Browser") && !is_error {
             if let Some(target) = crate::web_design::page_target(input) {
                 self.page_target = Some(target);
             }

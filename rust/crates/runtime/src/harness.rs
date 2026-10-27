@@ -3969,6 +3969,7 @@ pub fn leaves_files_alone(tool_name: &str) -> bool {
             | "FindSymbol"
             | "TodoWrite"
             | "Screenshot"
+            | "Browser"
             | "ViewPage"
             | "LookAtImage"
             | "Icon"
@@ -4007,6 +4008,7 @@ const TOOL_NAMES: &[&str] = &[
     "WebFetch",
     "ViewPage",
     "Screenshot",
+    "Browser",
     "WebSearch",
     "FindSymbol",
     "Remember",

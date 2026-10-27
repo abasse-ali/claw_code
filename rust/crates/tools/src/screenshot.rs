@@ -25,6 +25,10 @@ use serde_json::{json, Value};
 
 /// Mesures faites dans la page (voir le fichier pour la liste des défauts).
 const AUDIT_SCRIPT: &str = include_str!("screenshot_audit.js");
+
+/// L'outil `Browser` : le même navigateur, gardé ouvert et mené pas à pas.
+#[path = "browse.rs"]
+pub(crate) mod browse;
 /// Mesures d'une fenêtre ouverte (largeur, place, liste coupée, libellés).
 const WINDOW_SCRIPT: &str = include_str!("screenshot_window.js");
 /// Essai d'un téléphone après la capture : le bouton menu ouvre-t-il la navigation ?
