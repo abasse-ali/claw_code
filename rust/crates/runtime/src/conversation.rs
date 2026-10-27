@@ -1999,7 +1999,7 @@ where
             aids.shared_request = crate::web_design::shared_between_people(
                 &crate::project::user_words_with_history(&request_text),
             );
-            self.baseline_audit(&mut aids, &mut prompter);
+            self.baseline_audit(&request_text, &mut aids, &mut prompter);
         }
 
         loop {
@@ -3698,6 +3698,7 @@ where
     /// ceux que le tour a introduits.
     fn baseline_audit(
         &mut self,
+        request: &str,
         aids: &mut TurnAids,
         prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) {
@@ -3758,7 +3759,12 @@ where
         // Ce que la mesure a vu va à l'agent avec la demande : il part des
         // défauts réels, pas d'une supposition.
         let shared = aids.shared_request && self.kept_locally(aids);
-        if let Some(brief) = crate::web_design::start_brief(&target, &audit, shared) {
+        let words = crate::project::user_words_with_history(request).to_lowercase();
+        let services = self
+            .page_root(aids)
+            .map(|root| crate::web_design::unchosen_services(&root, &words))
+            .unwrap_or_default();
+        if let Some(brief) = crate::web_design::start_brief(&target, &audit, shared, &services) {
             if let Some(message) = self.session.messages.last_mut() {
                 message.blocks.push(ContentBlock::Text { text: brief });
             }
@@ -9651,8 +9657,11 @@ mod tests {
         let _ = std::fs::remove_file(&script);
         let observed = observed.borrow();
         assert!(
-            observed.requests.iter().any(|request| request
-                .contains("Your code now sends what visitors enter to mantledb.sh")),
+            observed
+                .requests
+                .iter()
+                .any(|request| request
+                    .contains("Your code sends what visitors enter to mantledb.sh")),
             "{:?}",
             observed.notices
         );

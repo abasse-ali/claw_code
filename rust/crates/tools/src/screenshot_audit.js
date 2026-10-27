@@ -483,7 +483,10 @@
   // 7e. Même libellé répété autour d'un champ : le titre du groupe, l'étiquette
   // et le texte d'exemple disent la même chose. Vu le 26 octobre 2026 (session
   // #32) : « Votre prénom » trois fois de suite.
-  const same = (a, b) => a && b && a.replace(/\s+/g, " ").trim().toLowerCase() === b.replace(/\s+/g, " ").trim().toLowerCase();
+  // « Votre prénom » et « Prénom » disent la même chose : les possessifs ne
+  // comptent pas. Vu le 27 octobre 2026 (session #32, passage 7).
+  const plain = (text) => text.replace(/\s+/g, " ").trim().toLowerCase().replace(/^(votre|vos|ton|ta|tes|your)\s+/, "");
+  const same = (a, b) => a && b && plain(a) === plain(b);
   const repeated = visible.filter((el) => el.matches("input, select, textarea")).filter((field) => {
     const label = field.labels && field.labels[0] ? field.labels[0].innerText : "";
     const legend = field.closest("fieldset")?.querySelector("legend")?.innerText || "";
@@ -1373,16 +1376,62 @@
       .filter(([top, bottom]) => bottom > top)
       .sort((a, b) => a[0] - b[0]);
     const limit = window.innerHeight * 0.5;
+    // Sur un téléphone, 96px de vide entre deux blocs est déjà beaucoup : 32
+    // à 64px suffisent. Vu le 27 octobre 2026 (session #32, passage 7) : 110
+    // à 130px avant chaque titre de section, la page paraissait inachevée.
+    const loose = mobile ? 96 : limit;
     const gaps = [];
     let reach = spans.length ? spans[0][1] : 0;
     let before = spans.length ? spans[0][2] : null;
     for (const [top, bottom, el] of spans.slice(1)) {
-      if (top - reach > limit) gaps.push({ from: reach, to: top, before, after: el });
+      if (top - reach > loose) gaps.push({ from: reach, to: top, before, after: el });
       if (bottom > reach) { reach = bottom; before = el; }
     }
-    if (gaps.length) {
-      notes.push(`Empty bands taller than half a screen, with nothing to read or see (${gaps.slice(0, 3).map((gap) => `${Math.round(gap.to - gap.from)}px between ${name(gap.before)} and ${name(gap.after)}`).join("; ")}): tighten the padding and min-height there, or put content in the space`);
+    const said = (list) => list.slice(0, 3).map((gap) => `${Math.round(gap.to - gap.from)}px between ${name(gap.before)} and ${name(gap.after)}`).join("; ");
+    const tall = gaps.filter((gap) => gap.to - gap.from > limit);
+    if (tall.length) {
+      notes.push(`Empty bands taller than half a screen, with nothing to read or see (${said(tall)}): tighten the padding and min-height there, or put content in the space`);
     }
+    const wide = gaps.filter((gap) => gap.to - gap.from <= limit);
+    if (mobile && wide.length >= 2) {
+      notes.push(`${wide.length} blank gaps of 96px or more between blocks on this phone (${said(wide)}): on a phone, 32 to 64px between sections is enough; large blanks look unfinished and push the content down. Reduce the section padding and margins at this width`);
+    }
+  }
+
+  // Boutons empilés de largeurs différentes, et dernier élément seul sur sa
+  // ligne dans une grille. Vu le 27 octobre 2026 (session #32, passage 7) :
+  // « Imprimer » et « Exporter CSV » l'un sous l'autre, 260 et 290px ; trois
+  // compteurs en deux colonnes, le troisième seul en dessous.
+  if (mobile) {
+    const buttonish = (el) => el.matches("button, a[href], [role=button]") && (css(el).backgroundColor !== "rgba(0, 0, 0, 0)" || parseFloat(css(el).borderTopWidth) > 0);
+    const uneven = [];
+    const orphans = [];
+    const seen = new Set(visible);
+    const rect = (el) => box.get(el) || el.getBoundingClientRect();
+    for (const parent of new Set(visible.map((el) => el.parentElement).filter(Boolean))) {
+      const kids = [...parent.children].filter((el) => seen.has(el));
+      const buttons = kids.filter(buttonish);
+      if (buttons.length >= 2 && buttons.length === kids.length) {
+        const rows = new Set(buttons.map((el) => Math.round(rect(el).top)));
+        const widths = buttons.map((el) => rect(el).width);
+        const room = rect(parent).width;
+        if (rows.size === buttons.length && Math.max(...widths) - Math.min(...widths) > 12 && Math.min(...widths) < room * 0.9) {
+          uneven.push(`${list(buttons.map(name), 3)} (${widths.map((width) => Math.round(width)).join(", ")}px)`);
+        }
+      }
+      const display = css(parent).display;
+      if (kids.length >= 3 && (display.includes("grid") || (display.includes("flex") && css(parent).flexWrap === "wrap"))) {
+        const tops = kids.map((el) => Math.round(rect(el).top));
+        const last = tops[tops.length - 1];
+        const lastRow = tops.filter((top) => Math.abs(top - last) < 4).length;
+        const firstRow = tops.filter((top) => Math.abs(top - tops[0]) < 4).length;
+        if (firstRow >= 2 && lastRow === 1 && rect(kids[kids.length - 1]).width < rect(parent).width * 0.8) {
+          orphans.push(`${name(parent)}: ${kids.length} items, ${firstRow} per row`);
+        }
+      }
+    }
+    if (uneven.length) notes.push(`Buttons stacked one under the other at different widths: ${uneven.slice(0, 2).join("; ")}. Give them the same width (the full width of the column on a phone), or set them side by side when they fit`);
+    if (orphans.length) notes.push(`The last item sits alone on its row: ${orphans.slice(0, 2).join("; ")}. Choose a column count that divides the items (3 in a row, or 1 per row), or let the last one span the row`);
   }
 
   // Cibles tactiles : 24px est le minimum légal, 44px le confort attendu.

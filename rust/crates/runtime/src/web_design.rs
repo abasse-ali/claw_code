@@ -973,7 +973,7 @@ pub fn named_by_user(host: &str, words: &str) -> bool {
 #[must_use]
 pub fn data_service_note(hosts: &[String]) -> String {
     format!(
-        "[Claw] Your code now sends what visitors enter to {}, a service run by someone else that the user never chose. Whoever finds that address can read, change or erase what is there (names, phone numbers: personal data the user answers for), the service can stop or wipe it without notice, and the user did not agree. Do not ship it this way. Ask the user first with AskUserQuestion, in plain words, without technical or service names, which way they accept: each entry sent straight to the person who must see it through the visitor's own messaging app (WhatsApp, SMS or email, already written in; nothing to set up, only that person's number or address); an account the user creates for a store of their own (a few minutes, you guide them step by step); or a small server of the project, with somewhere to host it. Until they answer, take that service out of the code and say so in your answer.",
+        "[Claw] Your code sends what visitors enter to {}, a service run by someone else that the user never chose. Whoever finds that address can read, change or erase what is there (names, phone numbers: personal data the user answers for), the service can stop or wipe it without notice, and the user did not agree. Do not ship it this way. Ask the user first with AskUserQuestion, in plain words, without technical or service names, which way they accept: each entry sent straight to the person who must see it through the visitor's own messaging app (WhatsApp, SMS or email, already written in; nothing to set up, only that person's number or address); an account the user creates for a store of their own (a few minutes, you guide them step by step); or a small server of the project, with somewhere to host it. Until they answer, take that service out of the code and say so in your answer.",
         hosts.join(", ")
     )
 }
@@ -2049,12 +2049,17 @@ pub fn visual_check_feedback(
 /// dans le filtre des dates, puis dans `file://`, et n'a jamais réparé la
 /// liste.
 #[must_use]
-pub fn start_brief(target: &str, audit: &Audit, shared_note: bool) -> Option<String> {
+pub fn start_brief(
+    target: &str,
+    audit: &Audit,
+    shared_note: bool,
+    services: &[String],
+) -> Option<String> {
     let missed = audit
         .explored
         .iter()
         .any(|line| line.starts_with("Not reached:"));
-    if audit.is_clean() && !missed && !shared_note {
+    if audit.is_clean() && !missed && !shared_note && services.is_empty() {
         return None;
     }
     let page = target.split_once(':').map_or(target, |(_, page)| page);
@@ -2085,7 +2090,28 @@ pub fn start_brief(target: &str, audit: &Audit, shared_note: bool) -> Option<Str
         text.push('\n');
         text.push_str(SHARED_DATA_NOTE);
     }
+    // Un service choisi par l'agent à un tour précédent, sans l'utilisateur :
+    // la garde de fin de tour ne voit que ce que le tour ajoute.
+    if !services.is_empty() {
+        text.push('\n');
+        text.push_str(&data_service_note(services));
+    }
     Some(text)
+}
+
+/// Services de tiers à qui les pages du projet envoient des données, que
+/// l'utilisateur n'a pas nommés dans ses messages (`words`, en minuscules).
+#[must_use]
+pub fn unchosen_services(root: &Path, words: &str) -> Vec<String> {
+    let mut hosts: Vec<String> = Vec::new();
+    for text in page_scripts(root) {
+        for host in new_data_services("", &text) {
+            if !hosts.contains(&host) && !named_by_user(&host, words) {
+                hosts.push(host);
+            }
+        }
+    }
+    hosts
 }
 
 /// Message au modèle après la revue ; `None` quand il n'y a rien à corriger.
@@ -2189,6 +2215,24 @@ mod tests {
     }
 
     #[test]
+    fn a_store_chosen_at_an_earlier_turn_is_found_in_the_project() {
+        // Session #32, passage 8 (27 octobre 2026) : MantleDB ajouté au tour
+        // précédent ; la garde de fin de tour ne voit que ce que le tour ajoute.
+        let root = std::env::temp_dir().join(format!("claw-tiers-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("dossier");
+        std::fs::write(
+            root.join("app.js"),
+            "const BASE = 'https://mantledb.sh/v2/boulangerie/reservations';\nfetch(BASE, { method: 'POST', body: '{}' });\n",
+        )
+        .expect("app.js");
+        let found = super::unchosen_services(&root, "je ne veux rien régler");
+        let named = super::unchosen_services(&root, "mettez tout sur mantledb");
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(found, vec!["mantledb.sh".to_string()]);
+        assert!(named.is_empty());
+    }
+
+    #[test]
     fn what_the_page_does_wrong_before_the_turn_goes_to_the_agent() {
         // Session #32, passage 7 (27 octobre 2026) : l'erreur qui vidait la
         // liste était mesurée au début du tour, mais l'agent ne l'a jamais lue.
@@ -2197,7 +2241,13 @@ mod tests {
             explored: vec!["Explored like a visitor: the page; the screen \"Préparation du jour\".".to_string()],
             ..Audit::default()
         };
-        let brief = super::start_brief("path:index.html", &audit, true).expect("bilan");
+        let brief = super::start_brief(
+            "path:index.html",
+            &audit,
+            true,
+            &["mantledb.sh".to_string()],
+        )
+        .expect("bilan");
         assert!(
             brief.starts_with("[Claw] Before you change anything: Claw opened index.html"),
             "{brief}"
@@ -2205,7 +2255,12 @@ mod tests {
         assert!(brief.contains("works at 5/10"), "{brief}");
         assert!(brief.contains("Cannot set property className"), "{brief}");
         assert!(brief.contains("several people share"), "{brief}");
-        assert!(super::start_brief("path:index.html", &Audit::default(), false).is_none());
+        // Session #32, passage 8 : MantleDB ajouté au tour précédent.
+        assert!(
+            brief.contains("Your code sends what visitors enter to mantledb.sh"),
+            "{brief}"
+        );
+        assert!(super::start_brief("path:index.html", &Audit::default(), false, &[]).is_none());
     }
 
     #[test]
