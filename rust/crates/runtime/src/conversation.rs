@@ -5258,10 +5258,13 @@ where
             })
             .unwrap_or_default();
         let mut problems: Vec<String> = Vec::new();
-        let signs = harness::developer_signs(&asked);
+        // Le texte au-dessus aussi : il part avec la question. Vu le 27
+        // octobre 2026 (session #33) : « localStorage » et `app.js` dans le
+        // texte, la question elle-même en mots simples.
+        let signs = harness::developer_signs(&format!("{said}\n{asked}"));
         if !signs.is_empty() {
             problems.push(format!(
-                "The questions and choices are written for a developer ({}): say each choice by what it means for the user (who sees what, what they must do, what it costs), without technical or service names.",
+                "Your text and questions are written for a developer ({}): say each thing by what it means for the user (who sees what, what they must do, what it costs), without technical or service names, code or file names.",
                 signs.join("; ")
             ));
         }
@@ -10227,6 +10230,52 @@ mod tests {
             .notices
             .iter()
             .any(|notice| notice.contains("Claw attend ses réponses")));
+    }
+
+    #[test]
+    fn jargon_in_the_text_above_a_plain_question_is_sent_back_too() {
+        let _serial = crate::test_serial();
+        // Session #33 (27 octobre 2026) : la question en mots simples, mais
+        // « localStorage » et `app.js` dans le texte qui part avec elle.
+        CAN_ASK.with(|flag| flag.set(true));
+        ASK_LATER.with(|flag| flag.set(true));
+        let question = serde_json::json!({ "questions": [{ "question": "Comment voulez-vous recevoir les commandes ?", "options": [{ "label": "Par SMS" }, { "label": "Par e-mail" }] }] }).to_string();
+        let step = |text: &str, id: &str| {
+            vec![
+                AssistantEvent::TextDelta(text.to_string()),
+                AssistantEvent::ToolUse {
+                    id: id.to_string(),
+                    name: "AskUserQuestion".to_string(),
+                    input: question.clone(),
+                },
+                AssistantEvent::MessageStop,
+            ]
+        };
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                step(
+                    "Le code par défaut est défini dans `app.js` ; le site garde tout dans le localStorage de chaque téléphone.",
+                    "q1",
+                ),
+                step(
+                    "Aujourd'hui, chaque réservation reste sur le téléphone de la cliente. Il me faut votre choix.",
+                    "q2",
+                ),
+            ],
+            vec![],
+        );
+        let summary = runtime.run_turn("trouvez une solution simple", None);
+        CAN_ASK.with(|flag| flag.set(false));
+        ASK_LATER.with(|flag| flag.set(false));
+        summary.expect("tour");
+        let observed = observed.borrow();
+        assert_eq!(observed.requests.len(), 2, "{:?}", observed.notices);
+        assert!(
+            observed.requests[1].contains("Your text and questions are written for a developer")
+                && observed.requests[1].contains("localstorage"),
+            "{}",
+            observed.requests[1]
+        );
     }
 
     #[test]
