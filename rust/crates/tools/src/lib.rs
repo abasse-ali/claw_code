@@ -766,6 +766,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "theme": { "type": "string", "enum": ["light", "dark"], "description": "Color scheme the device says it prefers (prefers-color-scheme)." },
                     "full_page": { "type": "boolean", "description": "Capture the page down to its end, up to three screens (default true); false keeps the first screen only. After a scroll action, the capture starts where the page was scrolled to." },
                     "windows": { "type": "boolean", "description": "Also capture, at phone size, what the page shows only after a tap: each window (dialog, sheet) a button opens, the folded menu opened, and each tab not selected (default false)." },
+                    "explore": { "type": "boolean", "description": "With windows: explore the site from top to bottom like a visitor, slower: each screen a button swaps in (with the access code written in the page's script when one is asked, the form sent first so it has something to show), its buttons and forms tried, and the site's other pages; each captured and measured; the result lists what was explored and what was not reached (default false)." },
+                    "second_device": { "type": "boolean", "description": "With explore: also open those screens on a second device (a fresh browser with its own memory) and check that what the first device sent shows there too, as it must when other people see what a visitor enters (default false)." },
                     "wait_ms": {
                         "type": "integer",
                         "minimum": 0,
