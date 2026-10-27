@@ -4279,6 +4279,9 @@ pub fn developer_signs(answer: &str) -> Vec<String> {
         "javascript",
         "css",
         "dom",
+        "endpoint",
+        "backend",
+        "mantledb",
     ]
     .into_iter()
     .filter(|word| {

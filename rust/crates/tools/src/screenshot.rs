@@ -2007,6 +2007,11 @@ fn click_problems(devtools: &mut DevTools) -> (Vec<String>, Vec<(String, String)
         ));
     }
     problems.extend(strings(&result["unnamed"]).into_iter().take(3));
+    for open in strings(&result["gateOpen"]) {
+        problems.push(format!(
+            "{open}: anyone sees the reserved screen without the code. Keep it hidden (hidden attribute) until the right code is typed, and show it only then"
+        ));
+    }
     for written in strings(&result["codeShown"]) {
         problems.push(format!(
             "{written}: anyone gets in. Take it off the page (text, example of the field, help line); give it to the owner in your final answer, with how to choose their own"
@@ -4927,6 +4932,18 @@ mod tests {
         )
         .expect("html");
         let written = capture();
+        // Session #32, passage 8 : l'écran gardé ouvert dès le bouton, sous
+        // la fenêtre du code.
+        let script = std::fs::read_to_string(dir.join("app.js")).expect("script");
+        std::fs::write(
+            dir.join("app.js"),
+            script.replace(
+                "fenetre.showModal(); });",
+                "const liste = document.getElementById('liste'); liste.hidden = false; liste.style.minHeight = '420px'; liste.innerHTML = '<h2>Préparation du jour</h2>'; fenetre.showModal(); });",
+            ),
+        )
+        .expect("script");
+        let early = capture();
         let _ = std::fs::remove_dir_all(&dir);
         // Ouverte en `file://`, la page ne donne de son script que « Script
         // error. » ; la console de la capture en garde le texte.
@@ -4943,6 +4960,13 @@ mod tests {
             written.contains("the access code \\\"4321\\\" that opens button#espace \\\"Espace boulanger\\\" is written on the page for every visitor to read («Code par défaut : 4321»)"),
             "{written}"
         );
+        assert!(
+            early.contains(
+                "shows \\\"Préparation du jour\\\" behind its code window before any code is typed"
+            ),
+            "{early}"
+        );
+        assert!(!written.contains("behind its code window"), "{written}");
     }
 
     #[test]
