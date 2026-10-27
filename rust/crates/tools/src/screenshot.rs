@@ -1772,15 +1772,9 @@ fn console_lines(events: &[Value]) -> Vec<String> {
                     ),
                 };
                 let at = url.map_or_else(String::new, |url| {
-                    let name = url
-                        .split(['?', '#'])
-                        .next()
-                        .unwrap_or(url)
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(url);
                     format!(
-                        " (at {name}{})",
+                        " (at {}{})",
+                        project_file_name(url),
                         line.map_or_else(String::new, |line| format!(":{}", line + 1))
                     )
                 });
@@ -1793,14 +1787,24 @@ fn console_lines(events: &[Value]) -> Vec<String> {
                     continue;
                 }
                 let url = entry["url"].as_str().filter(|url| !url.is_empty());
-                if file_origin_noise(entry["text"].as_str().unwrap_or(""), url) {
+                let text = entry["text"].as_str().unwrap_or("");
+                if file_origin_noise(text, url) {
                     continue;
                 }
-                format!(
-                    "{level}: {}{}",
-                    entry["text"].as_str().unwrap_or(""),
-                    url.map(|url| format!(" ({url})")).unwrap_or_default()
-                )
+                // Un fichier du projet qui manque, dit comme tel : vu le 27
+                // octobre 2026 (session #32, passage 8), « manifest.json »
+                // absent, lu par l'agent comme une limite des pages `file://`.
+                match url.filter(|url| url.starts_with("file:")) {
+                    Some(url) if text.contains("ERR_FILE_NOT_FOUND") => format!(
+                        "{level}: the page loads {}, which is not in the project: add the file, or remove what asks for it",
+                        project_file_name(url)
+                    ),
+                    Some(url) => format!("{level}: {text} ({})", project_file_name(url)),
+                    None => format!(
+                        "{level}: {text}{}",
+                        url.map(|url| format!(" ({url})")).unwrap_or_default()
+                    ),
+                }
             }
             _ => continue,
         };
@@ -1811,6 +1815,15 @@ fn console_lines(events: &[Value]) -> Vec<String> {
     }
     lines.truncate(MAX_CONSOLE);
     lines
+}
+
+/// Le nom du fichier d'une adresse, sans dossier, requête ni ancre.
+fn project_file_name(url: &str) -> &str {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    path.rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
 }
 
 /// Erreur que seule l'ouverture en `file://` produit : le navigateur refuse à
@@ -1994,6 +2007,11 @@ fn click_problems(devtools: &mut DevTools) -> (Vec<String>, Vec<(String, String)
         ));
     }
     problems.extend(strings(&result["unnamed"]).into_iter().take(3));
+    for open in strings(&result["gateOpen"]) {
+        problems.push(format!(
+            "{open}: anyone sees the reserved screen without the code. Keep it hidden (hidden attribute) until the right code is typed, and show it only then"
+        ));
+    }
     for written in strings(&result["codeShown"]) {
         problems.push(format!(
             "{written}: anyone gets in. Take it off the page (text, example of the field, help line); give it to the owner in your final answer, with how to choose their own"
@@ -4507,6 +4525,50 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn blanks_uneven_buttons_a_lone_item_and_a_label_said_twice_are_found() {
+        // Session #32, passage 7 (27 octobre 2026) : 110 à 190px de vide
+        // entre les blocs au téléphone, « Votre prénom » puis « Prénom »,
+        // « Imprimer » et « Exporter CSV » empilés à 239 et 267px.
+        let cwd = std::env::current_dir().expect("dossier");
+        let capture = |name: &str, css: &str| {
+            let dir = cwd.join(format!("claw-vides-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Boulangerie</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} h1 {{ font-size: 32px; }} fieldset {{ border: 0; padding: 0; margin: 0; }} input, button {{ font: inherit; padding: 12px; }} .actions {{ display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }} .actions button {{ background: #f0e6da; border: 1px solid #c9a27e; }} .stats {{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }} .stats div {{ background: #f0e6da; padding: 12px; }} {css}</style></head><body><main><h1>Réservez</h1><section class=\"bloc\"><fieldset><legend>Votre prénom</legend><label for=\"nom\">Prénom</label><input id=\"nom\"></fieldset></section><section class=\"bloc\"><h2>Préparation</h2><div class=\"actions\"><button type=\"button\">Imprimer</button><button type=\"button\">Exporter la liste</button></div></section><section class=\"bloc\"><div class=\"stats\"><div>1 commande</div><div>1 client</div><div>3 articles</div></div></section></main></body></html>"),
+            )
+            .expect("html");
+            let page = format!("claw-vides-{name}-{}/index.html", std::process::id());
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.expect("capture")["captures"][0].to_string()
+        };
+        let loose = capture("larges", ".bloc { margin-block: 120px; }");
+        for expected in [
+            "said twice or three times around a field",
+            "blank gaps of 96px or more between blocks on this phone",
+            "Buttons stacked one under the other at different widths",
+            "The last item sits alone on its row",
+        ] {
+            assert!(loose.contains(expected), "{expected}: {loose}");
+        }
+        let tidy = capture(
+            "serres",
+            ".bloc { margin-block: 32px; } .actions button { width: 100%; } .stats { grid-template-columns: 1fr 1fr 1fr; }",
+        );
+        for absent in [
+            "blank gaps of 96px",
+            "Buttons stacked one under the other",
+            "alone on its row",
+        ] {
+            assert!(!tidy.contains(absent), "{absent}: {tidy}");
+        }
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn item_names_shrunk_below_the_body_text_are_found_in_a_real_browser() {
         // Session #32, passage 7 (27 octobre 2026) : les noms des produits,
         // coupés sur téléphone, passés à 13px au lieu de recevoir leur place.
@@ -4870,6 +4932,18 @@ mod tests {
         )
         .expect("html");
         let written = capture();
+        // Session #32, passage 8 : l'écran gardé ouvert dès le bouton, sous
+        // la fenêtre du code.
+        let script = std::fs::read_to_string(dir.join("app.js")).expect("script");
+        std::fs::write(
+            dir.join("app.js"),
+            script.replace(
+                "fenetre.showModal(); });",
+                "const liste = document.getElementById('liste'); liste.hidden = false; liste.style.minHeight = '420px'; liste.innerHTML = '<h2>Préparation du jour</h2>'; fenetre.showModal(); });",
+            ),
+        )
+        .expect("script");
+        let early = capture();
         let _ = std::fs::remove_dir_all(&dir);
         // Ouverte en `file://`, la page ne donne de son script que « Script
         // error. » ; la console de la capture en garde le texte.
@@ -4886,6 +4960,13 @@ mod tests {
             written.contains("the access code \\\"4321\\\" that opens button#espace \\\"Espace boulanger\\\" is written on the page for every visitor to read («Code par défaut : 4321»)"),
             "{written}"
         );
+        assert!(
+            early.contains(
+                "shows \\\"Préparation du jour\\\" behind its code window before any code is typed"
+            ),
+            "{early}"
+        );
+        assert!(!written.contains("behind its code window"), "{written}");
     }
 
     #[test]
@@ -5194,6 +5275,7 @@ mod tests {
             json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Access to Manifest at 'file:///C:/w/manifest.json' from origin 'null' has been blocked by CORS policy: Cross origin requests are only supported for protocol schemes: http, data, chrome, https.", "url": "file:///C:/w/index.html" } } }),
             json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Failed to load resource: net::ERR_FAILED", "url": "file:///C:/w/manifest.json" } } }),
             json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Failed to load resource: net::ERR_FAILED", "url": "http://h/b.js" } } }),
+            json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Failed to load resource: net::ERR_FILE_NOT_FOUND", "url": "file:///C:/site/manifest.json" } } }),
         ];
         assert_eq!(
             console_lines(&events),
@@ -5203,6 +5285,7 @@ mod tests {
                 "uncaught: TypeError: Cannot set property className of #<SVGElement> which has only a getter (at app.js:812)",
                 "error: Failed to load resource: 404 (http://h/a.css)",
                 "error: Failed to load resource: net::ERR_FAILED (http://h/b.js)",
+                "error: the page loads manifest.json, which is not in the project: add the file, or remove what asks for it",
             ]
         );
     }

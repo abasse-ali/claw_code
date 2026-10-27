@@ -535,6 +535,8 @@ struct TurnAids {
     asked: bool,
     /// Services tiers qui reçoivent les données des visiteurs : signalés une fois par tour.
     services_checked: bool,
+    /// Questions à l'utilisateur relues avant d'être montrées : une fois par tour.
+    questions_checked: bool,
     /// Questions montrées sans attendre (appli web) : le tour finit avec ce
     /// lot d'outils, la réponse viendra au message suivant.
     questions_deferred: bool,
@@ -1999,7 +2001,7 @@ where
             aids.shared_request = crate::web_design::shared_between_people(
                 &crate::project::user_words_with_history(&request_text),
             );
-            self.baseline_audit(&mut aids, &mut prompter);
+            self.baseline_audit(&request_text, &mut aids, &mut prompter);
         }
 
         loop {
@@ -2487,6 +2489,14 @@ where
                         reason.to_string(),
                         true,
                     );
+                    self.session.messages.push(message.clone());
+                    tool_results.push(message);
+                    continue;
+                }
+                if let Some(problem) = self.question_check(&tool_name, &input, &mut aids) {
+                    self.tool_executor.skipped(&tool_name, &input, &problem);
+                    let message =
+                        ConversationMessage::tool_result(tool_use_id, tool_name, problem, true);
                     self.session.messages.push(message.clone());
                     tool_results.push(message);
                     continue;
@@ -3698,6 +3708,7 @@ where
     /// ceux que le tour a introduits.
     fn baseline_audit(
         &mut self,
+        request: &str,
         aids: &mut TurnAids,
         prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) {
@@ -3758,7 +3769,12 @@ where
         // Ce que la mesure a vu va à l'agent avec la demande : il part des
         // défauts réels, pas d'une supposition.
         let shared = aids.shared_request && self.kept_locally(aids);
-        if let Some(brief) = crate::web_design::start_brief(&target, &audit, shared) {
+        let words = crate::project::user_words_with_history(request).to_lowercase();
+        let services = self
+            .page_root(aids)
+            .map(|root| crate::web_design::unchosen_services(&root, &words))
+            .unwrap_or_default();
+        if let Some(brief) = crate::web_design::start_brief(&target, &audit, shared, &services) {
             if let Some(message) = self.session.messages.last_mut() {
                 message.blocks.push(ContentBlock::Text { text: brief });
             }
@@ -5157,6 +5173,117 @@ where
         Some(crate::web_design::invented_rules_note(&sentences))
     }
 
+    /// Codes d'accès écrits dans les pages et scripts du dossier de la page revue.
+    fn page_codes(&self, aids: &TurnAids) -> Vec<String> {
+        let Some(root) = self.page_root(aids) else {
+            return Vec::new();
+        };
+        let mut codes: Vec<String> = Vec::new();
+        for text in crate::web_design::page_texts(&root) {
+            for code in crate::code_checks::access_codes(&text) {
+                if !codes.contains(&code) {
+                    codes.push(code);
+                }
+            }
+        }
+        codes
+    }
+
+    /// Questions à l'utilisateur relues avant d'être montrées, une fois par
+    /// tour : le tour s'arrête sur elles, rien ne se corrige après. Vu le 27
+    /// octobre 2026 (session #32, passage 8) : une question pleine de
+    /// `localStorage`, `MantleDB` et « endpoint » posée à une boulangère,
+    /// sous un texte qui racontait le plan de l'agent (« je vais utiliser
+    /// `AskUserQuestion` »), sans le code d'accès qu'elle avait demandé.
+    fn question_check(
+        &mut self,
+        tool_name: &str,
+        input: &str,
+        aids: &mut TurnAids,
+    ) -> Option<String> {
+        if tool_name != "AskUserQuestion" || aids.questions_checked || self.subagent {
+            return None;
+        }
+        aids.questions_checked = true;
+        let value: serde_json::Value = serde_json::from_str(input).ok()?;
+        let mut asked = String::new();
+        for question in value["questions"].as_array().into_iter().flatten() {
+            for key in ["question", "header"] {
+                if let Some(text) = question[key].as_str() {
+                    asked.push_str(text);
+                    asked.push('\n');
+                }
+            }
+            for option in question["options"].as_array().into_iter().flatten() {
+                for key in ["label", "description"] {
+                    if let Some(text) = option[key].as_str() {
+                        asked.push_str(text);
+                        asked.push('\n');
+                    }
+                }
+            }
+        }
+        let said = self
+            .session
+            .messages
+            .last()
+            .filter(|message| message.role == crate::session::MessageRole::Assistant)
+            .map(|message| {
+                message
+                    .blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        let mut problems: Vec<String> = Vec::new();
+        let signs = harness::developer_signs(&asked);
+        if !signs.is_empty() {
+            problems.push(format!(
+                "The questions and choices are written for a developer ({}): say each choice by what it means for the user (who sees what, what they must do, what it costs), without technical or service names.",
+                signs.join("; ")
+            ));
+        }
+        let lower = said.to_lowercase();
+        if [
+            "askuserquestion",
+            "je dois poser",
+            "je vais utiliser",
+            "i need to ask",
+            "i will use",
+        ]
+        .iter()
+        .any(|sign| lower.contains(sign))
+        {
+            problems.push("Your text above the question is shown to the user as your message: write it for them (what you changed, what you need from them), not your plan, and never name your tools.".to_string());
+        }
+        let codes = self.page_codes(aids);
+        if !codes.is_empty()
+            && !codes
+                .iter()
+                .any(|code| said.contains(code.as_str()) || asked.contains(code.as_str()))
+        {
+            problems.push(format!(
+                "Before asking, answer in your text what you already know and the user needs: the access code \"{}\" of the reserved space, where to type it and how to choose their own.",
+                codes[0]
+            ));
+        }
+        if problems.is_empty() {
+            return None;
+        }
+        self.api_client.notify(
+            "Question à l'utilisateur relue avant d'être montrée : Claw demande à l'agent de la reformuler",
+        );
+        Some(format!(
+            "[Claw] Your question was not shown yet: the turn ends on it, so fix this first, then call AskUserQuestion again.\n- {}",
+            problems.join("\n- ")
+        ))
+    }
+
     /// Code d'accès écrit dans le script de la page, absent de la réponse :
     /// l'utilisateur ne pourrait pas entrer. Une fois par tour.
     fn access_code_gate(&mut self, aids: &mut TurnAids, answer: &str) -> Option<String> {
@@ -5170,15 +5297,7 @@ where
         // Vérifié à chaque réponse, pas seulement la première : vu le 27
         // octobre 2026 (session #32, passage 7), le premier brouillon donnait
         // le code, la réponse finale récrite en mots simples l'avait perdu.
-        let root = self.page_root(aids)?;
-        let mut codes: Vec<String> = Vec::new();
-        for text in crate::web_design::page_texts(&root) {
-            for code in crate::code_checks::access_codes(&text) {
-                if !codes.contains(&code) {
-                    codes.push(code);
-                }
-            }
-        }
+        let codes = self.page_codes(aids);
         if codes.is_empty() || codes.iter().any(|code| answer.contains(code.as_str())) {
             return None;
         }
@@ -9651,8 +9770,11 @@ mod tests {
         let _ = std::fs::remove_file(&script);
         let observed = observed.borrow();
         assert!(
-            observed.requests.iter().any(|request| request
-                .contains("Your code now sends what visitors enter to mantledb.sh")),
+            observed
+                .requests
+                .iter()
+                .any(|request| request
+                    .contains("Your code sends what visitors enter to mantledb.sh")),
             "{:?}",
             observed.notices
         );
@@ -10022,6 +10144,64 @@ mod tests {
             .any(|notice| notice.contains("Claw attend ses réponses")));
         // La proposition reste la réponse du tour.
         assert_eq!(observed.superseded, 0);
+    }
+
+    #[test]
+    fn a_question_in_jargon_under_a_narrated_plan_is_sent_back_once() {
+        let _serial = crate::test_serial();
+        // Session #32, passage 8 (27 octobre 2026) : « Garder localStorage »,
+        // « Réutiliser MantleDB », sous « je vais utiliser AskUserQuestion ».
+        CAN_ASK.with(|flag| flag.set(true));
+        ASK_LATER.with(|flag| flag.set(true));
+        let ask = |question: &str, choice: &str| {
+            serde_json::json!({ "questions": [{ "question": question, "options": [{ "label": choice }, { "label": "Autre" }] }] })
+                .to_string()
+        };
+        let jargon = vec![
+            AssistantEvent::TextDelta(
+                "Maintenant, je dois poser la question. Je vais utiliser `AskUserQuestion`."
+                    .to_string(),
+            ),
+            AssistantEvent::ToolUse {
+                id: "q1".to_string(),
+                name: "AskUserQuestion".to_string(),
+                input: ask("Quelle solution ?", "Garder localStorage"),
+            },
+            AssistantEvent::MessageStop,
+        ];
+        let plain = vec![
+            AssistantEvent::TextDelta(
+                "J'ai retiré l'envoi des commandes vers un site public. Il me faut un choix de votre part."
+                    .to_string(),
+            ),
+            AssistantEvent::ToolUse {
+                id: "q2".to_string(),
+                name: "AskUserQuestion".to_string(),
+                input: ask(
+                    "Comment voulez-vous recevoir les commandes ?",
+                    "Par message sur mon téléphone",
+                ),
+            },
+            AssistantEvent::MessageStop,
+        ];
+        let (mut runtime, observed, _) = aided_runtime(vec![jargon, plain], vec![]);
+        let summary = runtime.run_turn("trouvez une solution simple", None);
+        CAN_ASK.with(|flag| flag.set(false));
+        ASK_LATER.with(|flag| flag.set(false));
+        summary.expect("tour");
+        let observed = observed.borrow();
+        assert_eq!(observed.requests.len(), 2, "{:?}", observed.notices);
+        let sent_back = &observed.requests[1];
+        assert!(
+            sent_back.contains("Your question was not shown yet")
+                && sent_back.contains("technical words such as localstorage")
+                && sent_back.contains("never name your tools"),
+            "{sent_back}"
+        );
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("Claw attend ses réponses")));
     }
 
     #[test]

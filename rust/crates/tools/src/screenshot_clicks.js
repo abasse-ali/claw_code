@@ -548,6 +548,18 @@
     .filter((el) => shown(el) && !el.closest("dialog, [role=dialog], [aria-modal=true], header, footer, nav")
       && el.getBoundingClientRect().height >= innerHeight * 0.25));
   const screens = [];
+  // Écran gardé par un code, déjà visible derrière la fenêtre du code avant
+  // toute saisie. Vu le 27 octobre 2026 (session #32, passage 8) :
+  // « Préparation du jour » affiché sous la fenêtre, le code pas encore tapé.
+  const gateOpen = [];
+  const openedEarly = (el, box, before) => {
+    const fresh = [...regions()].filter((item) => !before.has(item) && !item.contains(el) && !box.contains(item) && !item.contains(box));
+    // Le plus petit : celui qui vient d'apparaître, pas la page qu'il agrandit.
+    const early = fresh.find((item) => !fresh.some((other) => other !== item && item.contains(other)));
+    if (!early || gateOpen.some((line) => line.startsWith(label(el)))) return;
+    const heading = early.querySelector("h1, h2, h3");
+    gateOpen.push(`${label(el)} shows "${(heading ? heading.innerText : label(early)).replace(/\s+/g, " ").trim().slice(0, 50)}" behind its code window before any code is typed`);
+  };
   const tried = new Set();
   const deadEls = [];
   const noteScreen = (el, before, code) => {
@@ -602,6 +614,7 @@
         }
       }
       if (blocked) break;
+      if (codeField(box)) openedEarly(el, box, shownBefore);
       if (codeField(box) && gated.length < 2 && !gated.some((item) => item.el === el)) gated.push({ el });
       for (const form of [...box.querySelectorAll("form")].filter((item) => shown(item) && !tested.has(item))) {
         if (tested.size < 10) await tryForm(form);
@@ -738,6 +751,7 @@
       const box = windows().find((item) => !opened.has(item)) || windows().find((item) => codeField(item));
       const field = box && codeField(box);
       if (!field) break;
+      openedEarly(el, box, shownBefore);
       const written = writtenCode(code, field);
       if (written && !codeShown.some((line) => line.includes(`"${code}"`))) {
         codeShown.push(`the access code "${code}" that opens ${label(el)} is written on the page for every visitor to read (${written})`);
@@ -824,5 +838,5 @@
     }
   }
   const sitePages = [...pages].map(([url, { from }]) => ({ url, from }));
-  return { checked: tried.size, windowLayout, dead, failing, covered, buried, stuck, links, files, forms, unnamed, underBar, kept, openers, dragged, screens, pages: sitePages, typed, codeShown };
+  return { checked: tried.size, windowLayout, dead, failing, covered, buried, stuck, links, files, forms, unnamed, underBar, kept, openers, dragged, screens, pages: sitePages, typed, codeShown, gateOpen };
 })()
