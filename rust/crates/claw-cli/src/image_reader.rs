@@ -269,6 +269,47 @@ pub(crate) fn critique(
     if readers.is_empty() {
         return Err("aucun modèle gratuit ne lit les images (imageReader)".to_string());
     }
+    // Mode équipe : un jury de deux juges, interrogés en même temps (le temps
+    // d'un seul), dont les notes se moyennent. Les autres lecteurs restent en
+    // renfort de chacun.
+    if runtime::team::team() && readers.len() >= 2 {
+        let (first, second) = std::thread::scope(|scope| {
+            let ask = |models: Vec<String>| {
+                scope.spawn(move || {
+                    tools::advisors::ask_about_images_within(
+                        &models,
+                        system,
+                        prompt,
+                        sources,
+                        CRITIQUE_TOKENS,
+                        CRITIQUE_PATIENCE,
+                    )
+                })
+            };
+            let mut odd: Vec<String> = readers.iter().skip(1).step_by(2).cloned().collect();
+            let mut even: Vec<String> = readers.iter().step_by(2).cloned().collect();
+            odd.retain(|model| !even.contains(model));
+            even.dedup();
+            let first = ask(even);
+            let second = ask(odd);
+            (
+                first
+                    .join()
+                    .unwrap_or_else(|_| Err("juge interrompu".to_string())),
+                second
+                    .join()
+                    .unwrap_or_else(|_| Err("juge interrompu".to_string())),
+            )
+        });
+        return match (first, second) {
+            (Ok(one), Ok(two)) if one.model != two.model => Ok((
+                format!("{} + {}", one.model, two.model),
+                runtime::web_design::merge_critiques(&[&one.text, &two.text]),
+            )),
+            (Ok(one), _) | (Err(_), Ok(one)) => Ok((one.model, one.text)),
+            (Err(error), Err(_)) => Err(error),
+        };
+    }
     tools::advisors::ask_about_images_within(
         &readers,
         system,

@@ -192,6 +192,21 @@ pub struct AutoCompactionConfig {
     pub preserve_recent_messages: usize,
 }
 
+/// Appel d'outil lancé dans un fil à part : son résultat et ses images.
+pub type Background = std::thread::JoinHandle<(
+    Result<String, String>,
+    Vec<crate::attachments::ImageAttachment>,
+)>;
+
+/// Vérification de la page lancée après une modification, qui tourne pendant
+/// la requête suivante du modèle (`spawn_background`) : la page à nommer, et
+/// les défauts de la vérification d'avant, pour dire ce qui a changé.
+struct PendingCheck {
+    handle: Background,
+    target: String,
+    before: Option<Vec<String>>,
+}
+
 pub trait ToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
 
@@ -206,6 +221,14 @@ pub trait ToolExecutor {
             .iter()
             .map(|(name, input)| self.execute(name, input))
             .collect()
+    }
+
+    /// Lance un outil dans un fil à part, sans rien demander à l'utilisateur
+    /// (une vérification de Claw, en lecture seule) : son résultat et ses
+    /// images se reprennent plus tard. `None` quand l'exécuteur ne sait pas :
+    /// l'outil tourne alors tout de suite, comme avant.
+    fn spawn_background(&mut self, _tool_name: &str, _input: &str) -> Option<Background> {
+        None
     }
 
     /// Annonce un appel lancé par Claw lui-même (vérification imposée), pour
@@ -462,6 +485,8 @@ struct TurnAids {
     /// Poursuites accordées au fonctionnement sous la barre.
     function_extensions: usize,
     function_explained: bool,
+    /// Vérification de la page en cours, lancée en arrière-plan.
+    pending_check: Option<PendingCheck>,
     /// Le design a stagné une fois : le juge a été prié de changer la structure.
     restructured: bool,
     restructure_asked: bool,
@@ -2074,6 +2099,9 @@ where
             }
             // L'interface vient de changer : Claw regarde la page avant la
             // requête suivante.
+            if let Some((check, _)) = self.finish_visual_check(&mut aids) {
+                self.session.messages.push(check);
+            }
             if !wrapping_up {
                 if let Some(check) = self.visual_check(&mut aids, &mut prompter) {
                     self.session.messages.push(check);
@@ -2274,6 +2302,9 @@ where
                         "Réponse encore coupée par la limite de sortie du modèle : elle est rendue telle quelle",
                     );
                 }
+                // Vérification encore en route (lancée après la dernière
+                // modification) : elle finit avant tout contrôle de la conclusion.
+                let pending_check = self.finish_visual_check(&mut aids);
                 // Budget du tour atteint : la conclusion part telle quelle,
                 // aucun contrôle ne renvoie le modèle au travail.
                 if wrapping_up {
@@ -2290,8 +2321,12 @@ where
                     .unwrap_or_default();
                 // Questions écrites en fin de réponse : à poser avec le menu à choix.
                 let mut asking = false;
-                let feedback = self
-                    .empty_titles_gate(&mut aids, &answer)
+                // Ce qu'elle a trouvé de nouveau passe avant la conclusion.
+                let checked = pending_check
+                    .filter(|(_, new)| *new > 0)
+                    .map(|(message, _)| message_text(&message));
+                let feedback = checked
+                    .or_else(|| self.empty_titles_gate(&mut aids, &answer))
                     .or_else(|| self.announced_work_gate(&mut aids, &answer))
                     .or_else(|| self.persistence_gate(&mut aids))
                     .or_else(|| self.open_tasks_gate(&mut aids, &answer))
@@ -2631,6 +2666,8 @@ where
         } else {
             self.tool_executor.execute_batch(&batch)
         };
+        // Les images des appels du lot (photos de `Photo`) suivent leurs résultats.
+        self.tool_images.extend(self.tool_executor.take_images());
         // 3. Hooks PostToolUse et résultats, dans l'ordre d'origine.
         for ((index, outcome), pre) in ready.iter().zip(outputs).zip(pre_messages) {
             let (id, name, _) = &calls[*index];
@@ -3810,13 +3847,43 @@ where
         }
         aids.blind_measures += 1;
         let before = aids.last_checked.clone();
+        // En arrière-plan quand l'exécuteur le permet : la page se mesure
+        // pendant que le modèle prépare sa réponse suivante, et le résultat
+        // arrive avec elle. Vu le 26 octobre 2026 (session #32, passage 5) : 33
+        // vérifications de 25 s chacune, le modèle attendant chaque fois.
+        let input = crate::web_design::quick_screenshot_input(&target);
+        if let Some(handle) = self.tool_executor.spawn_background("Screenshot", &input) {
+            aids.blind_edits = 0;
+            aids.pending_check = Some(PendingCheck {
+                handle,
+                target,
+                before,
+            });
+            return None;
+        }
         let Some((target, audit, images)) = self.render_page(aids, prompter, true) else {
             // La page ne s'ouvre pas en fichier (une appli qui veut son
             // serveur) : pas d'autre essai pendant ce tour.
             aids.blind_measures = harness::MAX_VISUAL_CHECKS;
             return None;
         };
-        let (new, fixed, open) = crate::web_design::check_delta(before.as_deref(), &audit);
+        Some(
+            self.check_message(&target, before.as_deref(), &audit, images)
+                .0,
+        )
+    }
+
+    /// Ce que la vérification dit au modèle : ce que sa modification a cassé,
+    /// réparé, et ce qui reste (avec la capture pour un modèle qui la lit) ;
+    /// et le nombre de défauts nouveaux.
+    fn check_message(
+        &mut self,
+        target: &str,
+        before: Option<&[String]>,
+        audit: &crate::web_design::Audit,
+        images: Vec<crate::attachments::ImageAttachment>,
+    ) -> (ConversationMessage, usize) {
+        let (new, fixed, open) = crate::web_design::check_delta(before, audit);
         self.api_client.notify(&format!(
             "Claw vérifie la page après la modification : {} défaut(s) nouveau(x), {fixed} réparé(s), {} restant(s)",
             new.len(),
@@ -3827,7 +3894,7 @@ where
             .next()
             .filter(|_| self.api_client.reads_images());
         let text =
-            crate::web_design::visual_check_feedback(&target, &new, fixed, &open, image.is_some());
+            crate::web_design::visual_check_feedback(target, &new, fixed, &open, image.is_some());
         let mut message = ConversationMessage::user_text(text);
         if let Some(image) = image {
             message.blocks.push(ContentBlock::Image {
@@ -3835,7 +3902,33 @@ where
                 data: image.data,
             });
         }
-        Some(message)
+        (message, new.len())
+    }
+
+    /// La vérification lancée en arrière-plan, attendue (le plus souvent déjà
+    /// finie : elle a tourné pendant la requête du modèle) : son message et le
+    /// nombre de défauts nouveaux. Une page qui ne s'ouvre pas arrête les
+    /// vérifications du tour, comme avant.
+    fn finish_visual_check(&mut self, aids: &mut TurnAids) -> Option<(ConversationMessage, usize)> {
+        let pending = aids.pending_check.take()?;
+        let (result, images) = pending
+            .handle
+            .join()
+            .unwrap_or_else(|_| (Err("la vérification s'est arrêtée".to_string()), Vec::new()));
+        let Ok(output) = result else {
+            aids.blind_measures = harness::MAX_VISUAL_CHECKS;
+            return None;
+        };
+        let audit = crate::web_design::read_audit(&output);
+        aids.last_checked = Some(
+            audit
+                .problems
+                .iter()
+                .chain(&audit.console)
+                .cloned()
+                .collect(),
+        );
+        Some(self.check_message(&pending.target, pending.before.as_deref(), &audit, images))
     }
 
     /// Le tour se termine (limite de requêtes ou de temps) après des
@@ -6489,6 +6582,8 @@ type ToolHandler = Box<dyn FnMut(&str) -> Result<String, ToolError>>;
 #[derive(Default)]
 pub struct StaticToolExecutor {
     handlers: BTreeMap<String, ToolHandler>,
+    /// Outils lancés en arrière-plan (`spawn_background`), à résultat fixe.
+    background: BTreeMap<String, String>,
 }
 
 impl StaticToolExecutor {
@@ -6506,6 +6601,17 @@ impl StaticToolExecutor {
         self.handlers.insert(tool_name.into(), Box::new(handler));
         self
     }
+
+    /// `tool_name` tourne en arrière-plan quand Claw le demande, et rend `output`.
+    #[must_use]
+    pub fn in_background(
+        mut self,
+        tool_name: impl Into<String>,
+        output: impl Into<String>,
+    ) -> Self {
+        self.background.insert(tool_name.into(), output.into());
+        self
+    }
 }
 
 impl ToolExecutor for StaticToolExecutor {
@@ -6513,6 +6619,11 @@ impl ToolExecutor for StaticToolExecutor {
         self.handlers
             .get_mut(tool_name)
             .ok_or_else(|| ToolError::new(format!("unknown tool: {tool_name}")))?(input)
+    }
+
+    fn spawn_background(&mut self, tool_name: &str, _input: &str) -> Option<Background> {
+        let output = self.background.get(tool_name)?.clone();
+        Some(std::thread::spawn(move || (Ok(output), Vec::new())))
     }
 }
 
@@ -9195,6 +9306,71 @@ mod tests {
         assert!(!third.contains("Broken by your last change"), "{third}");
         assert!(observed.notices.iter().any(|notice| notice
             .contains("Claw vérifie la page après la modification : 1 défaut(s) nouveau(x)")));
+    }
+
+    #[test]
+    fn the_check_after_a_change_runs_while_the_model_answers() {
+        let _serial = crate::test_serial();
+        // Session #32, passage 5 : 33 vérifications de 25 s, le modèle
+        // attendant chaque fois. Lancée en arrière-plan, la vérification de la
+        // première modification arrive avec la requête qui suit la seconde.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("fond");
+        let write = || {
+            tool_step(
+                "write_file",
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                    .to_string(),
+            )
+        };
+        let observed = std::rc::Rc::new(std::cell::RefCell::new(Observed::default()));
+        let executor = StaticToolExecutor::new()
+            .register("write_file", |input| {
+                let path = serde_json::from_str::<serde_json::Value>(input)
+                    .ok()
+                    .and_then(|value| value["path"].as_str().map(ToString::to_string))
+                    .unwrap_or_default();
+                Ok(serde_json::json!({ "filePath": path, "content": "x" }).to_string())
+            })
+            .register("Screenshot", |_| {
+                Err(super::ToolError::new("la vérification ne doit pas bloquer"))
+            })
+            .in_background("Screenshot", MEASURED);
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            StepsApiClient {
+                steps: vec![write(), write(), text_step("Corrigé.")].into(),
+                observed: std::rc::Rc::clone(&observed),
+                advisor: std::collections::VecDeque::new(),
+                escalation: None,
+            },
+            executor,
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["système".to_string()],
+        );
+        runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        assert_eq!(observed.requests.len(), 3, "{:?}", observed.notices);
+        // Pas d'attente : la requête qui suit la première modification part sans elle.
+        assert!(
+            !observed.requests[1].contains("Claw looked at"),
+            "{}",
+            observed.requests[1]
+        );
+        assert!(
+            observed.requests[2].contains("Claw looked at")
+                && observed.requests[2].contains("U11 vs FC Voisins"),
+            "{}",
+            observed.requests[2]
+        );
+        // Deux vérifications, la seconde reprise avant la conclusion.
+        let checks = observed
+            .notices
+            .iter()
+            .filter(|notice| notice.starts_with("Claw vérifie la page après la modification"))
+            .count();
+        assert_eq!(checks, 2, "{:?}", observed.notices);
     }
 
     #[test]

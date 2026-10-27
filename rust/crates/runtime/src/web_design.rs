@@ -1606,6 +1606,77 @@ pub fn critique_scores(text: &str) -> Vec<(String, u8)> {
         .collect()
 }
 
+/// Avis de plusieurs juges rendus en même temps (mode équipe) réunis en un
+/// seul, dans la forme d'un juge : la note de chaque critère est la moyenne
+/// des juges (arrondie), et leurs changements alternent, huit au plus,
+/// renumérotés. Un juge seul varie d'une revue à l'autre (vu dans un essai
+/// réel : 7,9 puis 6,0 pour une page qui s'était améliorée) ; deux lissent.
+#[must_use]
+pub fn merge_critiques(texts: &[&str]) -> String {
+    let scored: Vec<Vec<(String, u8)>> = texts.iter().map(|text| critique_scores(text)).collect();
+    let mut line = Vec::new();
+    for criterion in CRITERIA {
+        let values: Vec<u16> = scored
+            .iter()
+            .filter_map(|scores| {
+                scores
+                    .iter()
+                    .find(|(name, _)| name == criterion)
+                    .map(|(_, score)| u16::from(*score))
+            })
+            .collect();
+        if values.is_empty() {
+            continue;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let count = values.len() as u16;
+        let mean = (values.iter().sum::<u16>() * 2 + count) / (count * 2);
+        line.push(format!("{criterion}={mean}"));
+    }
+    let changes: Vec<Vec<String>> = texts
+        .iter()
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| {
+                    line.chars()
+                        .next()
+                        .is_some_and(|first| first.is_ascii_digit())
+                })
+                .filter(|line| !line.to_ascii_uppercase().starts_with("SCORES"))
+                .map(|line| {
+                    line.trim_start_matches(|ch: char| {
+                        ch.is_ascii_digit() || ch == '.' || ch == ')'
+                    })
+                    .trim()
+                    .to_string()
+                })
+                .collect()
+        })
+        .collect();
+    let mut merged: Vec<String> = Vec::new();
+    for rank in 0..8 {
+        for list in &changes {
+            if let Some(change) = list.get(rank) {
+                if merged.len() < 8 && !merged.contains(change) {
+                    merged.push(change.clone());
+                }
+            }
+        }
+    }
+    let satisfied = texts
+        .iter()
+        .all(|text| text.to_ascii_uppercase().contains("NO CHANGES NEEDED"));
+    let mut text = format!("SCORES: {}", line.join(" "));
+    if satisfied {
+        text.push_str("\nNO CHANGES NEEDED");
+    }
+    for (number, change) in merged.iter().enumerate() {
+        let _ = write!(text, "\n{}. {change}", number + 1);
+    }
+    text
+}
+
 /// Moyenne des notes, pour l'annoncer.
 #[must_use]
 pub fn average_score(scores: &[(String, u8)]) -> Option<f32> {
@@ -2300,6 +2371,27 @@ mod tests {
             review_feedback("path:index.html", &Audit::default(), None, 1, 2, 8),
             None
         );
+    }
+
+    #[test]
+    fn two_judges_answering_together_make_one_review() {
+        let first = "SCORES: phone=7 hierarchy=6 spacing=7 typography=8 color=7 identity=5 finish=6\n1. [identity] cards everywhere -> one hero photo\n2. [hierarchy] no focal point -> bigger h1";
+        let second = "SCORES: phone=8 hierarchy=7 spacing=6 typography=8 color=8 identity=6 finish=7\n1. [identity] cards everywhere -> one hero photo\n2. [spacing] crowded form -> 24px gaps\n3. [finish] grey frames -> remove fieldset borders";
+        let merged = super::merge_critiques(&[first, second]);
+        assert_eq!(
+            merged.lines().next(),
+            Some("SCORES: phone=8 hierarchy=7 spacing=7 typography=8 color=8 identity=6 finish=7")
+        );
+        assert!(merged.contains("1. [identity] cards everywhere -> one hero photo"));
+        assert!(merged.contains("2. [hierarchy] no focal point -> bigger h1"));
+        assert!(merged.contains("3. [spacing] crowded form -> 24px gaps"));
+        assert!(merged.contains("4. [finish] grey frames -> remove fieldset borders"));
+        assert!(!merged.contains("NO CHANGES NEEDED"));
+        let scores = super::critique_scores(&merged);
+        assert_eq!(scores.len(), 7);
+        // Les deux satisfaits : la revue l'est.
+        let pleased = "SCORES: phone=9 hierarchy=8 spacing=8 typography=9 color=8 identity=8 finish=8\nNO CHANGES NEEDED";
+        assert!(super::merge_critiques(&[pleased, pleased]).contains("NO CHANGES NEEDED"));
     }
 
     #[test]

@@ -70,6 +70,12 @@ pub fn take_screenshots() -> Vec<runtime::attachments::ImageAttachment> {
     screenshot::take_captured()
 }
 
+/// Images prises par un outil dans un autre fil (un lot parallèle), remises à
+/// celui-ci pour suivre les résultats.
+pub fn attach_images(images: Vec<runtime::attachments::ImageAttachment>) {
+    screenshot::attach(images);
+}
+
 use mcp_bridge::connected_mcp_tools;
 pub use mcp_bridge::{
     call_mcp_tool, ensure_mcp_started, mcp_prompt_commands, mcp_prompt_invocation,
@@ -4209,6 +4215,8 @@ pub const PARALLEL_SAFE_TOOLS: &[&str] = &[
     "Component",
     "WebSearch",
     "BashOutput",
+    "Photo",
+    "LookAtImage",
 ];
 
 fn build_agent_runtime(

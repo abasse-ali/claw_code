@@ -84,7 +84,7 @@ pub use config::{
     RuntimeProviderConfig, ScopedMcpServerConfig, CLAW_SETTINGS_SCHEMA_NAME,
 };
 pub use conversation::{
-    cut_reply_continued, ApiClient, ApiRequest, AssistantEvent, AutoCompactionConfig,
+    cut_reply_continued, ApiClient, ApiRequest, AssistantEvent, AutoCompactionConfig, Background,
     ConsultPurpose, Consultation, ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError,
     ToolExecutor, TurnSummary, HOOK_CONTEXT_PREFIX, STOP_HOOK_PREFIX,
 };

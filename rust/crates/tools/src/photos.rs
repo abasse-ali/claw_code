@@ -637,21 +637,55 @@ fn find(
 ) -> Vec<Candidate> {
     let mut candidates = Vec::new();
     for query in relaxed_queries(search) {
-        match fetch_json(client, &openverse_url(&query, orientation)) {
+        // Les deux sources en même temps : vu le 26 octobre 2026 (session #32,
+        // passage 5), un appel de 160 s, chaque requête attendant la précédente.
+        let (openverse, commons) = std::thread::scope(|scope| {
+            let openverse = scope.spawn(|| fetch_json(client, &openverse_url(&query, orientation)));
+            let commons = scope.spawn(|| fetch_json(client, &commons_url(&query)));
+            (
+                openverse
+                    .join()
+                    .unwrap_or_else(|_| Err("search stopped".to_string())),
+                commons
+                    .join()
+                    .unwrap_or_else(|_| Err("search stopped".to_string())),
+            )
+        });
+        match openverse {
             Ok(body) => candidates.extend(openverse_candidates(&body)),
             Err(error) => errors.push(format!("Openverse: {error}")),
         }
-        if candidates.len() < count {
-            match fetch_json(client, &commons_url(&query)) {
-                Ok(body) => candidates.extend(commons_candidates(&body, orientation)),
-                Err(error) => errors.push(format!("Wikimedia Commons: {error}")),
-            }
+        match commons {
+            Ok(body) => candidates.extend(commons_candidates(&body, orientation)),
+            Err(error) => errors.push(format!("Wikimedia Commons: {error}")),
         }
         if candidates.len() >= count {
             break;
         }
     }
     candidates
+}
+
+/// Télécharge les candidats en même temps (dans leur ordre) : un lien lent ou
+/// mort ne fait plus attendre les autres.
+fn download_all(
+    client: &Client,
+    candidates: &[&Candidate],
+) -> Vec<Result<(Vec<u8>, &'static str), String>> {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = candidates
+            .iter()
+            .map(|candidate| scope.spawn(move || download(client, &candidate.url)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err("download stopped".to_string()))
+            })
+            .collect()
+    })
 }
 
 /// Ce que l'outil `Photo` rend au modèle.
@@ -677,11 +711,13 @@ pub(crate) fn photo(input: &PhotoInput) -> Result<Value, String> {
     let mut credits = String::new();
     // Quelques essais de plus que de photos demandées : un lien mort ou une
     // image trop petite ne doivent pas tout arrêter.
-    for candidate in candidates.iter().take(count + 6) {
+    let tried: Vec<&Candidate> = candidates.iter().take(count + 6).collect();
+    let downloads = download_all(&client, &tried);
+    for (candidate, downloaded) in tried.into_iter().zip(downloads) {
         if photos.len() >= count {
             break;
         }
-        let (bytes, extension) = match download(&client, &candidate.url) {
+        let (bytes, extension) = match downloaded {
             Ok(downloaded) => downloaded,
             Err(error) => {
                 errors.push(format!("{}: {error}", candidate.url));
