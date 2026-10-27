@@ -119,6 +119,9 @@ const DEFAULT_DATE: &str = match option_env!("BUILD_DATE") {
     None => "inconnue",
 };
 const DEFAULT_OAUTH_CALLBACK_PORT: u16 = 4545;
+/// Dégâts (erreur de syntaxe, défaut introduit, retours échappés) après
+/// lesquels un codeur de l'équipe perd son rôle.
+const TEAM_STRIKES: usize = 2;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TARGET: Option<&str> = option_env!("TARGET");
 const GIT_SHA: Option<&str> = option_env!("GIT_SHA");
@@ -1576,11 +1579,10 @@ fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Modèles mis de côté longtemps (quota du jour épuisé, modèle refusé à
     // Claw) : retenus d'un lancement à l'autre pour ne pas les réessayer.
     if let Ok(cwd) = env::current_dir() {
-        api::set_cooldown_store(
-            ConfigLoader::default_for(&cwd)
-                .config_home()
-                .join("model-cooldowns.json"),
-        );
+        let home = ConfigLoader::default_for(&cwd).config_home().to_path_buf();
+        api::set_cooldown_store(home.join("model-cooldowns.json"));
+        // Codeurs de l'équipe qui ont abîmé le code : écartés d'un lancement à l'autre.
+        models::set_code_bench_store(home.join("team-benched.json"));
     }
     init_reasoning_effort(startup_config.as_ref());
     init_ultracode(startup_config.as_ref());
@@ -9498,6 +9500,8 @@ struct DefaultRuntimeClient {
     team_last: Option<String>,
     /// Modèle qui a écrit le code pendant ce tour : le relecteur en prend un autre.
     team_coder: Option<String>,
+    /// Ce que chaque codeur de l'équipe a abîmé pendant ce lancement.
+    team_strikes: std::collections::BTreeMap<String, Vec<String>>,
     /// La dernière réponse s'est arrêtée sur la limite de sortie au milieu de
     /// son texte : le runtime en demandera la suite.
     reply_cut: bool,
@@ -9557,6 +9561,7 @@ impl DefaultRuntimeClient {
             team_base: None,
             team_last: None,
             team_coder: None,
+            team_strikes: std::collections::BTreeMap::new(),
             reply_cut: false,
         })
     }
@@ -10032,6 +10037,29 @@ impl ApiClient for DefaultRuntimeClient {
 
     fn plan_step(&mut self, step: runtime::team::Step) {
         self.team_step = Some(step);
+    }
+
+    fn team_strike(&mut self, reason: &str) {
+        if !runtime::team::team() {
+            return;
+        }
+        let Some(coder) = self.team_coder.clone() else {
+            return;
+        };
+        // Le modèle de la session reste : il n'y a personne derrière lui.
+        let base = self.team_base.as_ref().unwrap_or(&self.chain).primary();
+        if coder == base || models::coder_benched(&coder) {
+            return;
+        }
+        let strikes = self.team_strikes.entry(coder.clone()).or_default();
+        strikes.push(reason.to_string());
+        if strikes.len() >= TEAM_STRIKES {
+            let (count, said) = (strikes.len(), strikes.join(", "));
+            models::bench_coder(&coder);
+            self.notify(&format!(
+                "Équipe : {coder} a abîmé le code {count} fois ({said}) : le rôle « écrire le code » passe à un autre modèle pour 24 h"
+            ));
+        }
     }
 
     fn team_model(&mut self, role: runtime::team::Role) -> Option<String> {

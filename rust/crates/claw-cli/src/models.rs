@@ -1147,6 +1147,68 @@ pub(crate) struct TeamPick {
     pub why: String,
 }
 
+/// Modèles retirés du rôle « écrire le code » (fin de la mise à l'écart, en
+/// secondes depuis 1970), et le fichier qui les garde d'un lancement à
+/// l'autre. Vu le 27 octobre 2026 (session #32, passages 6 à 8) : le codeur
+/// choisi d'après les mesures de vitesse faisait toutes les erreurs de syntaxe
+/// et la plupart des défauts introduits, passage après passage.
+static CODE_BENCH: std::sync::Mutex<Option<(PathBuf, std::collections::BTreeMap<String, u64>)>> =
+    std::sync::Mutex::new(None);
+
+/// Durée de la mise à l'écart d'un codeur qui abîme le code.
+const CODE_BENCH_SECS: u64 = 24 * 3600;
+
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// Lit les codeurs mis à l'écart, gardés dans `path`.
+pub(crate) fn set_code_bench_store(path: PathBuf) {
+    let now = epoch_secs();
+    let benched: std::collections::BTreeMap<String, u64> = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let benched = benched
+        .into_iter()
+        .filter(|(_, until)| *until > now)
+        .collect();
+    *CODE_BENCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((path, benched));
+}
+
+/// Retire `model` du rôle « écrire le code » pour un jour.
+pub(crate) fn bench_coder(model: &str) {
+    let mut store = CODE_BENCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let entry = store.get_or_insert_with(|| (PathBuf::new(), std::collections::BTreeMap::new()));
+    entry
+        .1
+        .insert(model.to_string(), epoch_secs() + CODE_BENCH_SECS);
+    if !entry.0.as_os_str().is_empty() {
+        if let Some(parent) = entry.0.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(text) = serde_json::to_string_pretty(&entry.1) {
+            let _ = fs::write(&entry.0, text);
+        }
+    }
+}
+
+/// Vrai si `model` est encore retiré du rôle « écrire le code ».
+pub(crate) fn coder_benched(model: &str) -> bool {
+    let now = epoch_secs();
+    CODE_BENCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|(_, benched)| benched.get(model).is_some_and(|until| *until > now))
+}
+
 /// Ce que l'étape demande en plus de son rôle.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct TeamNeeds<'a> {
@@ -1182,6 +1244,7 @@ pub(crate) fn team_pick(role: runtime::team::Role, needs: &TeamNeeds) -> Option<
     if let Some(pick) = configured(role.key()) {
         return Some(pick).filter(|pick| Some(pick.model.as_str()) != needs.avoid);
     }
+    let code = role == runtime::team::Role::Code;
     let has_key = env::var("OPENROUTER_API_KEY").is_ok_and(|key| !key.trim().is_empty());
     if !has_key {
         return None;
@@ -1192,7 +1255,7 @@ pub(crate) fn team_pick(role: runtime::team::Role, needs: &TeamNeeds) -> Option<
         &crate::bench::recent_results(),
         role,
         needs,
-        api::model_available,
+        |model: &str| api::model_available(model) && !(code && coder_benched(model)),
     )
 }
 
@@ -2218,6 +2281,27 @@ fn models_view_json(
 #[cfg(test)]
 mod tests {
     use super::{format_age, format_context, render_ranking};
+
+    #[test]
+    fn a_coder_that_broke_the_code_stays_benched_from_one_launch_to_the_next() {
+        // Session #32, passages 6 à 8 (27 octobre 2026) : le codeur choisi
+        // d'après les mesures de vitesse faisait toutes les erreurs de syntaxe.
+        let path = std::env::temp_dir().join(format!("claw-banc-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        super::set_code_bench_store(path.clone());
+        assert!(!super::coder_benched("poolside/laguna-s-2.1:free"));
+        super::bench_coder("poolside/laguna-s-2.1:free");
+        assert!(super::coder_benched("poolside/laguna-s-2.1:free"));
+        assert!(!super::coder_benched("nvidia/nemotron-3.5-super-vl:free"));
+        // Le lancement suivant relit le fichier.
+        super::set_code_bench_store(path.clone());
+        assert!(super::coder_benched("poolside/laguna-s-2.1:free"));
+        // Une mise à l'écart passée ne compte plus.
+        std::fs::write(&path, r#"{"poolside/laguna-s-2.1:free": 1}"#).expect("fichier");
+        super::set_code_bench_store(path.clone());
+        assert!(!super::coder_benched("poolside/laguna-s-2.1:free"));
+        let _ = std::fs::remove_file(&path);
+    }
     use api::{OpenRouterModel, RankedModel};
 
     #[test]
