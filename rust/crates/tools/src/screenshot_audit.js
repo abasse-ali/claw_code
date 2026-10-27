@@ -493,7 +493,7 @@
     && el.scrollWidth > el.clientWidth + 3 && words(el)).slice(0, 6);
   if (spilling.length) {
     blame(spilling);
-    problems.push(`Text wider than its button or box, spilling past its edge: ${list(spilling.map((el) => `${name(el)} (${el.scrollWidth}px of content in ${el.clientWidth}px)`), 3)}. Let it wrap (overflow-wrap: anywhere, hyphens: auto), make the text smaller on phones, or give the box room`);
+    problems.push(`Text wider than its button or box, spilling past its edge: ${list(spilling.map((el) => `${name(el)} (${el.scrollWidth}px of content in ${el.clientWidth}px)`), 3)}. Make the text smaller on phones, shorten it, or give the box room; never let the browser cut a word in two (no overflow-wrap: anywhere or word-break: break-all on labels and buttons)`);
   }
 
   // 7c. Icônes invisibles : dessinées de la couleur de leur fond (une icône vert
@@ -984,6 +984,157 @@
     problems.push(`Emoji in the page (${parts.join("; ")}): emoji are drawn by the device's own font, look different on every phone and computer, and belong to no design. Replace each one with an inline SVG drawn for the subject (with width, height and aria-hidden="true", or a role="img" and aria-label when it carries meaning), or remove it from the text`);
   }
 
+  // 20. Cadre par défaut des groupes de champs : le <fieldset> garde la
+  // bordure grise en relief du navigateur, sa légende posée dans le trait.
+  // Vu le 26 octobre 2026 (session #32, passages 4 et 5) : le formulaire de
+  // réservation d'une boulangerie, quatre cadres gris d'écran d'administration.
+  const rawGroups = visible.filter((el) => el.tagName === "FIELDSET" && ["groove", "ridge", "inset", "outset"].includes(css(el).borderTopStyle)
+    && parseFloat(css(el).borderTopWidth) > 0);
+  if (rawGroups.length) {
+    blame(rawGroups);
+    problems.push(`Groups of fields keep the browser's default frame, a grey relief border with the legend cut into it: ${list(rawGroups.map(name), 3)}. It makes the form look like an unstyled admin screen. Remove it (fieldset { border: 0; padding: 0; margin: 0; min-width: 0 }), style each legend like the page's other labels, and group the fields in one card of the page's own style if they need a frame`);
+  }
+
+  // 21. Mot coupé en deux sur deux lignes, dans un libellé, un bouton ou un
+  // titre. Vu le 26 octobre 2026 (session #32) : « Aujour / d'hui » dans les
+  // cases du jour, après un `overflow-wrap: anywhere` que Claw avait conseillé.
+  const splitWords = [];
+  for (const el of visible) {
+    if (splitWords.length >= 4) break;
+    if (!ownText(el) || el.closest("pre, code, textarea")) continue;
+    const text = words(el);
+    if (text.length > 60 && !/^H[1-6]$/.test(el.tagName)) continue;
+    for (const node of el.childNodes) {
+      if (node.nodeType !== 3) continue;
+      const pattern = /[\p{L}\p{N}'’]{4,}/gu;
+      let found = null;
+      for (let match = pattern.exec(node.textContent); match && !found; match = pattern.exec(node.textContent)) {
+        const range = document.createRange();
+        range.setStart(node, match.index);
+        range.setEnd(node, match.index + match[0].length);
+        const rects = [...range.getClientRects()].filter((rect) => rect.width > 0);
+        if (rects.length > 1 && rects[rects.length - 1].top - rects[0].top > 2) found = match[0];
+      }
+      if (found) {
+        splitWords.push({ el, word: found });
+        break;
+      }
+    }
+  }
+  if (splitWords.length) {
+    blame(splitWords.map((item) => item.el));
+    problems.push(`Words cut in two across lines: ${list(splitWords.map((item) => `"${item.word}" in ${name(item.el)}`), 4)}. A word broken in the middle reads as a typo. Never cut a word (remove overflow-wrap: anywhere and word-break: break-all there): shorten the text, make it smaller on phones, or give its box room (a smaller gap, fewer items per row)`);
+  }
+
+  // 22. Texte écrasé dans une colonne trop étroite : un mot par ligne. Vu le
+  // 26 octobre 2026 (session #32) : « Fait / avec » dans le pied de page, à
+  // côté d'un paragraphe qui prenait toute la place.
+  // Chaque bout de texte est mesuré ligne par ligne : dans un paragraphe en
+  // display: flex, « Fait avec » est un élément anonyme qu'aucune boîte ne nomme.
+  const squeezed = [];
+  for (const el of visible) {
+    if (squeezed.length >= 3) break;
+    if (!ownText(el) || /^H[1-6]$/.test(el.tagName) || el.closest("button, a, label, th, td, nav, pre, code")) continue;
+    for (const node of el.childNodes) {
+      if (node.nodeType !== 3) continue;
+      const count = node.textContent.trim().split(/\s+/).filter(Boolean).length;
+      if (count < 2 || count > 12) continue;
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const rects = [...range.getClientRects()].filter((rect) => rect.width > 0);
+      if (!rects.length) continue;
+      const lines = new Set(rects.map((rect) => Math.round(rect.top))).size;
+      const width = Math.max(...rects.map((rect) => rect.right)) - Math.min(...rects.map((rect) => rect.left));
+      if (lines >= 2 && count / lines <= 1.2 && width < W * 0.3) {
+        squeezed.push({ el, text: node.textContent.trim().replace(/\s+/g, " "), width: Math.round(width) });
+        break;
+      }
+    }
+  }
+  if (squeezed.length) {
+    blame(squeezed.map((item) => item.el));
+    problems.push(`Text squeezed into a column too narrow for it, one word per line: ${list(squeezed.map((item) => `"${item.text.slice(0, 40)}" in ${name(item.el)}, ${item.width}px wide`), 3)}. It usually is a flex item shrunk by a wider neighbour: keep the phrase together (white-space: nowrap on a short phrase, or flex: none), let the row wrap (flex-wrap: wrap), or put it on its own line`);
+  }
+
+  // 23. Liste d'éléments semblables, chacun haut d'un quart d'écran pour
+  // quelques mots (téléphone). Vu le 26 octobre 2026 (session #32) : six
+  // produits, nom, prix et « - 0 + », chacun dans une carte de 280px.
+  if (mobile) {
+    const families = new Map();
+    for (const el of visible) {
+      const parent = el.parentElement;
+      if (!parent || pinned(el)) continue;
+      const key = `${el.tagName}.${(typeof el.className === "string" ? el.className.trim().split(/\s+/)[0] : "") || ""}`;
+      const id = families.get(parent) || new Map();
+      families.set(parent, id);
+      id.set(key, [...(id.get(key) || []), el]);
+    }
+    const hollow = [];
+    for (const groups of families.values()) {
+      for (const items of groups.values()) {
+        if (items.length < 4) continue;
+        const tall = items.filter((el) => box.get(el).height > window.innerHeight * 0.25 && words(el).length < 40
+          && ![...el.querySelectorAll("img, video, picture, canvas")].some((media) => {
+            const rect = media.getBoundingClientRect();
+            return rect.height > box.get(el).height * 0.35;
+          }));
+        if (tall.length >= 4 && tall.length >= items.length * 0.75) hollow.push(tall);
+      }
+    }
+    if (hollow.length) {
+      const items = hollow[0];
+      blame(items);
+      const height = Math.round(items.reduce((sum, el) => sum + box.get(el).height, 0) / items.length);
+      problems.push(`${items.length} items of the same kind, each about ${height}px tall on this ${window.innerHeight}px-high phone screen, for a few words each (${list(items.map(name), 3)}): the list takes ${Math.max(1, Math.round(items.length * height / window.innerHeight))} screens of scrolling for little content. Make each one a compact row (its name and price on the left, its control on the right, 64 to 88px tall), with the same padding as the rest of the page`);
+    }
+  }
+
+  // 24. Un compte de 0 ou 1 suivi d'un pluriel (« 1 COMMANDES »), et une
+  // valeur de script affichée telle quelle (« undefined », « NaN »). Vu le 26
+  // octobre 2026 (session #32) : le tableau de bord de la boulangère.
+  {
+    const french = /^fr/i.test(document.documentElement.lang || "");
+    const counted = french ? /(?:^|[^\d.,])([01])\s+([a-zà-öø-ÿ]{3,}s)\b/i : /(?:^|[^\d.,])(1)\s+([a-z]{3,}s)\b/i;
+    const always = /^(?:fois|mois|pas|prix|temps|cours|bras|avis|repas|poids|corps|jus|bus|choix|acc[eè]s|succ[eè]s|plus|puis|sans|dans|sous|apr[eè]s|tr[eè]s|vers|tous|frais|bois|colis|fils|gros|pays|permis|tapis|relais|discours|secours|concours|parcours|campus|virus|bonus|news|series|species|this|was|has|is|its|less|plus|class|kids)$/i;
+    const smallest = (test) => {
+      const hits = visible.filter((el) => (el.innerText || "").length < 60 && test(el.innerText || ""));
+      return hits.filter((el) => !hits.some((other) => other !== el && el.contains(other)));
+    };
+    const plural = smallest((text) => {
+      const match = counted.exec(text.replace(/\s+/g, " "));
+      return Boolean(match && !always.test(match[2]) && !/ss$|us$|is$/i.test(match[2]));
+    });
+    if (plural.length) {
+      blame(plural);
+      problems.push(`A count of ${french ? "0 or 1" : "1"} followed by a plural: ${list(plural.map(name), 3)}. Write the singular for ${french ? "0 and 1 (« 1 commande », « 0 article »)" : "1 (\"1 item\")"}: a small function that picks the word from the number`);
+    }
+    const leaked = smallest((text) => /(?:^|[\s:(])(?:undefined|NaN|null)(?:$|[\s.,)])|\[object Object\]/.test(text));
+    if (leaked.length) {
+      blame(leaked);
+      problems.push(`A script value shown as text (undefined, NaN, null or [object Object]): ${list(leaked.map(name), 3)}. A field read before it was set, or a number made from text: fix the value, and show a dash or nothing while it is missing`);
+    }
+  }
+
+  // 25. Premier écran sans rien à faire : la page sert un formulaire, et le
+  // premier écran ne montre aucun bouton, lien ni champ hors de l'en-tête.
+  // Vu le 26 octobre 2026 (session #32) : sur l'ordinateur, une photo de
+  // 1000px avant le formulaire de réservation.
+  {
+    const mainForm = [...document.forms].find((form) => shown(form)
+      && [...form.querySelectorAll("input, select, textarea")].filter((field) => field.type !== "hidden").length >= 2);
+    const first = window.innerHeight;
+    const acts = visible.filter((el) => el.matches("a[href], button, input, select, textarea, [role=button]")
+      && !el.closest("header, nav, footer, [role=banner], [role=navigation], dialog") && !pinned(el));
+    const above = acts.some((el) => box.get(el).top + window.scrollY < first);
+    if (mainForm && !above && mainForm.getBoundingClientRect().top + window.scrollY >= first) {
+      const top = Math.round(mainForm.getBoundingClientRect().top + window.scrollY);
+      const before = visible.filter((el) => el.matches("img, picture, video, svg") && box.get(el).top + window.scrollY < first
+        && box.get(el).height > first * 0.4);
+      blame([mainForm]);
+      problems.push(`The first screen (${first}px high) shows nothing to do outside the header: the form starts at ${top}px${before.length ? `, after ${list(before.map((el) => `${name(el)} ${Math.round(box.get(el).height)}px high`), 2)}` : ""}. Visitors come for the form: bring it, or a button that leads to it, into the first screen (a shorter picture beside or below the title, or the picture next to the form on wide screens)`);
+    }
+  }
+
   // Remarques de design : pas des défauts, des choix à reconsidérer.
   const notes = [];
   if (!mobile) {
@@ -1232,6 +1383,18 @@
     if (small.length >= 2) blameNote(small);
     if (small.length >= 2) notes.push(`${small.length} buttons or links are under the comfortable 44x44px tap size on a phone (${list(small.map((el) => `${name(el)} ${Math.round(box.get(el).width)}x${Math.round(box.get(el).height)}px`), 3)}): give them more padding or a min-height of 44px`);
   }
+  // Mots de développeur visibles des visiteurs : une remarque, la page peut
+  // s'adresser à des développeurs. Vu le 26 octobre 2026 (session #32) :
+  // « Données stockées localement sur chaque téléphone », « Exporter CSV ».
+  {
+    const jargon = /\b(?:localStorage|sessionStorage|IndexedDB|Firebase|Supabase|JSON|CSV|API|backend|frontend|stock[ée]e?s? localement|stored locally|local storage)\b/i;
+    const found = visible.filter((el) => ownText(el) && jargon.test([...el.childNodes].filter((node) => node.nodeType === 3).map((node) => node.textContent).join(" ")));
+    if (found.length) {
+      blameNote(found);
+      notes.push(`Technical words shown to visitors: ${list(found.map(name), 3)}. Unless the page is made for developers, say what it does for them in everyday words (« Télécharger la liste » for a CSV export; nothing at all about where data is stored)`);
+    }
+  }
+
   // Petits SVG de la page (et symboles d'un sprite) : Claw les compare au jeu
   // d'icônes, pour signaler une icône dessinée à la main.
   const svgIcons = [];

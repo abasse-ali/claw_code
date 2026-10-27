@@ -4259,6 +4259,40 @@ pub fn developer_signs(answer: &str) -> Vec<String> {
     if files.len() >= 2 {
         signs.push(format!("file names such as {}", files[0]));
     }
+    // Mots de développeur : où sont rangées les données, où publier. Vu le 26
+    // octobre 2026 (session #32, passage 5) : « logique localStorage complète »,
+    // « glissez le dossier sur Netlify », dans la réponse à une boulangère.
+    let technical: Vec<&str> = [
+        "localstorage",
+        "sessionstorage",
+        "indexeddb",
+        "firebase",
+        "supabase",
+        "netlify",
+        "vercel",
+        "github pages",
+        "json",
+        "csv",
+        "api",
+        "javascript",
+        "css",
+        "dom",
+    ]
+    .into_iter()
+    .filter(|word| {
+        lower
+            .split(|c: char| !c.is_alphanumeric() && c != ' ')
+            .any(|part| {
+                part.split(' ')
+                    .collect::<Vec<_>>()
+                    .windows(word.split(' ').count())
+                    .any(|window| window.join(" ") == *word)
+            })
+    })
+    .collect();
+    if !technical.is_empty() {
+        signs.push(format!("technical words such as {}", technical[0]));
+    }
     signs
 }
 
@@ -5368,7 +5402,7 @@ mod plain_answer_tests {
         // La réponse du passage du 26 octobre 2026 (session #31).
         let seen = "Les deux points du reviewer ont été corrigés :\n\n1. **Police rétablie à Inter** : `styles.css` (`--font-text: \"Inter\"`) et `index.html` chargent maintenant `Inter`.\n2. Dans `app.js:725-731`, les titres des matchs sont raccourcis.\n\nVérification : syntaxe JS valide (`node --check app.js` → OK).";
         let signs = developer_signs(seen);
-        assert_eq!(signs.len(), 3, "{signs:?}");
+        assert_eq!(signs.len(), 4, "{signs:?}");
         assert!(signs[0].contains("reviewer"));
         assert!(signs[1].contains("`styles.css`"), "{signs:?}");
         assert!(signs[2].contains("styles.css"), "{signs:?}");
@@ -5377,9 +5411,15 @@ mod plain_answer_tests {
             // Un seul nom ou une adresse n'en font pas une réponse de développeur.
             "Ouvrez `index.html` dans le navigateur : le menu se replie bien.",
             "Le site est en ligne sur https://club.example.fr/index.html et la page des matchs aussi.",
+            // « api » dans un mot n'en est pas un.
+            "Les capitales et les rapides sont dans la liste, avec la jsonnerie du café.",
         ] {
             assert!(developer_signs(plain).is_empty(), "{plain}");
         }
+        // Session #32, passage 5 : la réponse à la boulangère.
+        let bakery = "Le site marche : tout en localStorage, hors-ligne. Glissez le dossier sur Netlify pour le publier.";
+        let signs = developer_signs(bakery);
+        assert_eq!(signs, ["technical words such as localstorage"], "{signs:?}");
     }
 }
 

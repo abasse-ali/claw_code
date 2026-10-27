@@ -517,7 +517,18 @@ struct TurnAids {
     /// Les commandes conseillées sans avoir été lancées ont déjà été signalées.
     commands_checked: bool,
     /// La réponse sur une page, écrite pour un développeur, a déjà été renvoyée.
-    plain_asked: bool,
+    /// Réponses renvoyées pour être dites en mots simples. Une seconde fois
+    /// seulement quand l'agent a modifié des fichiers depuis (une autre garde
+    /// l'a renvoyé au travail) : sa nouvelle réponse se relit. Vu le 26 octobre
+    /// 2026 (session #32, passage 5) : réécrite, puis refaite après la relecture
+    /// et le tri des photos, la réponse finale citait app.js et localStorage.
+    plain_asked: u8,
+    /// Fichiers modifiés depuis la dernière demande de mots simples.
+    edited_since_plain: bool,
+    /// Règles inventées sur la page déjà cherchées dans ce tour.
+    rules_checked: bool,
+    /// Code d'accès de la page déjà cherché dans la réponse.
+    code_told: bool,
     /// Données que la demande veut partagées, gardées dans chaque navigateur :
     /// déjà signalé.
     shared_checked: bool,
@@ -2298,6 +2309,8 @@ where
                         self.requirements_gate(&mut aids, &request_text, earlier.as_deref())
                     })
                     .or_else(|| self.shared_data_gate(&mut aids, &request_text))
+                    .or_else(|| self.invented_rules_gate(&mut aids, &request_text))
+                    .or_else(|| self.access_code_gate(&mut aids, &answer))
                     // Avant la question sur les clés : une question posée dans
                     // Claw Web clôt le passage, sans les contrôles qui suivent.
                     .or_else(|| self.plain_answer_gate(&mut aids, &answer))
@@ -2953,6 +2966,7 @@ where
         aids.dirty = true;
         aids.editor_dirty = true;
         aids.workflow_dirty = true;
+        aids.edited_since_plain = true;
         if json_field(input, "path").is_some_and(|path| crate::web_design::is_interface_file(&path))
         {
             aids.interface_dirty = true;
@@ -4856,6 +4870,63 @@ where
         Some(crate::web_design::SHARED_DATA_NOTE.to_string())
     }
 
+    /// Règles et promesses de la page que l'utilisateur n'a pas données (un
+    /// délai d'annulation, une confirmation par SMS) : retirées ou demandées.
+    /// Une fois par tour.
+    fn invented_rules_gate(&mut self, aids: &mut TurnAids, request: &str) -> Option<String> {
+        if aids.rules_checked
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::DesignReview)
+            || self.page_to_review(aids).is_none()
+        {
+            return None;
+        }
+        aids.rules_checked = true;
+        let cwd = std::env::current_dir().ok()?;
+        let page = crate::web_design::shown_text(&cwd);
+        let user = crate::project::user_words_with_history(request);
+        let sentences = crate::web_design::invented_rules(&page, &user);
+        if sentences.is_empty() {
+            return None;
+        }
+        self.api_client.notify(&format!(
+            "{} règle(s) ou promesse(s) sur la page que l'utilisateur n'a pas données : Claw demande à l'agent de les retirer ou de les lui demander",
+            sentences.len()
+        ));
+        Some(crate::web_design::invented_rules_note(&sentences))
+    }
+
+    /// Code d'accès écrit dans le script de la page, absent de la réponse :
+    /// l'utilisateur ne pourrait pas entrer. Une fois par tour.
+    fn access_code_gate(&mut self, aids: &mut TurnAids, answer: &str) -> Option<String> {
+        if aids.code_told
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::DesignReview)
+            || self.page_to_review(aids).is_none()
+        {
+            return None;
+        }
+        aids.code_told = true;
+        let cwd = std::env::current_dir().ok()?;
+        let mut codes: Vec<String> = Vec::new();
+        for text in crate::web_design::page_texts(&cwd) {
+            for code in crate::code_checks::access_codes(&text) {
+                if !codes.contains(&code) {
+                    codes.push(code);
+                }
+            }
+        }
+        if codes.is_empty() || codes.iter().any(|code| answer.contains(code.as_str())) {
+            return None;
+        }
+        self.api_client.notify(
+            "La page s'ouvre avec un code que la réponse ne donne pas : Claw demande à l'agent de le dire à l'utilisateur",
+        );
+        Some(crate::web_design::access_code_note(&codes))
+    }
+
     /// Clés à remplacer (`VOTRE_API_KEY`) introduites par le tour dans un
     /// fichier modifié, sans que l'utilisateur ait été consulté : le modèle lui
     /// demande d'abord quelle solution il accepte. Une fois par tour.
@@ -4935,7 +5006,8 @@ where
     /// ne lit pas le code : le modèle réécrit sa réponse une fois, en mots
     /// simples, sur le plan de `FINAL_ANSWER_SHAPE`.
     fn plain_answer_gate(&mut self, aids: &mut TurnAids, answer: &str) -> Option<String> {
-        if aids.plain_asked
+        if aids.plain_asked >= 2
+            || (aids.plain_asked == 1 && !aids.edited_since_plain)
             || self.subagent
             || interrupt_requested()
             || !harness::enabled(Aid::DesignReview)
@@ -4947,7 +5019,8 @@ where
         if signs.is_empty() {
             return None;
         }
-        aids.plain_asked = true;
+        aids.plain_asked += 1;
+        aids.edited_since_plain = false;
         self.api_client.notify(
             "La réponse parle de code et de fichiers : Claw demande à l'agent de la réécrire en mots simples",
         );
