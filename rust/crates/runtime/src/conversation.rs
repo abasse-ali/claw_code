@@ -457,6 +457,14 @@ struct TurnAids {
     continuations: usize,
     /// Revues notées au moment de la dernière poursuite.
     graded_at_continuation: usize,
+    /// Notes de fonctionnement des revues du tour (`function_score`).
+    function_scores: Vec<u8>,
+    /// Poursuites accordées au fonctionnement sous la barre.
+    function_extensions: usize,
+    function_explained: bool,
+    /// Le design a stagné une fois : le juge a été prié de changer la structure.
+    restructured: bool,
+    restructure_asked: bool,
     /// Revues visuelles ajoutées au tour par les poursuites.
     extra_rounds: usize,
     /// L'arrêt sous la barre a été expliqué à l'utilisateur.
@@ -2003,8 +2011,8 @@ where
             if !wrapping_up
                 && turn_limit > 0
                 && iterations > turn_limit
-                && aids.design_guided
-                && self.continue_design(&mut aids, "limite du tour")
+                && (self.continue_function(&mut aids, "limite du tour")
+                    || (aids.design_guided && self.continue_design(&mut aids, "limite du tour")))
             {
                 turn_limit += crate::web_design::CONTINUATION_REQUESTS;
             }
@@ -3917,7 +3925,10 @@ where
         let mut rounds = crate::web_design::max_review_rounds() + aids.extra_rounds;
         if aids.interface_rounds >= rounds {
             // Revues du tour épuisées : une de plus si la note monte encore.
-            if rounds == 0 || !self.continue_design(aids, "revues du tour") {
+            if rounds == 0
+                || !(self.continue_function(aids, "revues du tour")
+                    || self.continue_design(aids, "revues du tour"))
+            {
                 return None;
             }
             aids.extra_rounds += 1;
@@ -4003,13 +4014,23 @@ where
                 .notify("Revue visuelle : un modèle qui voit note les captures…");
             self.api_client.critique_design(
                 crate::web_design::CRITIC_SYSTEM,
-                &crate::web_design::critique_prompt(
-                    &brief,
-                    images.len(),
-                    &audit,
-                    bar,
-                    aids.graded.last().map(|graded| graded.scores.as_slice()),
-                ),
+                &{
+                    let mut prompt = crate::web_design::critique_prompt(
+                        &brief,
+                        images.len(),
+                        &audit,
+                        bar,
+                        aids.graded.last().map(|graded| graded.scores.as_slice()),
+                    );
+                    if aids.restructured && !aids.restructure_asked {
+                        aids.restructure_asked = true;
+                        prompt.push_str(&crate::web_design::restructure_note(
+                            &crate::web_design::score_trail(&aids.graded),
+                            bar,
+                        ));
+                    }
+                    prompt
+                },
                 &images,
             )
         };
@@ -4018,10 +4039,11 @@ where
             .as_ref()
             .map(|consultation| crate::web_design::critique_scores(&consultation.text))
             .unwrap_or_default();
+        let reached = crate::web_design::design_reached(&scores, bar);
         let graded = crate::web_design::average_score(&scores).map_or_else(String::new, |mean| {
             let under: Vec<&str> = scores
                 .iter()
-                .filter(|(_, score)| *score < bar)
+                .filter(|(_, score)| *score < bar && !reached)
                 .map(|(criterion, _)| criterion.as_str())
                 .collect();
             aids.graded.push(crate::web_design::Graded {
@@ -4069,6 +4091,17 @@ where
                 broken.len()
             ));
         }
+        let function = crate::web_design::function_score(&audit);
+        aids.function_scores.push(function.score);
+        let graded = format!(
+            "{graded} · fonctionnement {}/10{}",
+            function.score,
+            if function.reasons.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", function.reasons.join(", "))
+            }
+        );
         if feedback.is_some() {
             let judged = verdict.as_ref().map_or_else(String::new, |(model, lines)| {
                 format!(
@@ -4181,6 +4214,22 @@ where
             ));
             return true;
         }
+        // La note stagne sous la barre : une poursuite de plus, une seule, où le
+        // juge ne donne que des changements de structure.
+        if decision == crate::web_design::Continuation::Stalled
+            && !aids.restructured
+            && self
+                .api_client
+                .free_requests_left()
+                .is_none_or(|left| left >= crate::web_design::CONTINUATION_RESERVE)
+        {
+            aids.restructured = true;
+            aids.graded_at_continuation = aids.graded.len();
+            self.api_client.notify(&format!(
+                "Design bloqué sous la barre {bar} (note {trail}/10) : Claw demande au juge des changements de structure, et le tour continue"
+            ));
+            return true;
+        }
         if let Some(reason) = crate::web_design::stop_reason(decision) {
             if !aids.continuation_explained {
                 aids.continuation_explained = true;
@@ -4188,6 +4237,59 @@ where
                     "Design arrêté sous la barre {bar} (note {trail}/10) : {reason}. Écrivez « continue » pour reprendre"
                 ));
             }
+        }
+        false
+    }
+
+    /// Le fonctionnement mesuré reste sous la barre : le tour continue tant
+    /// que la note monte (ou à la première note), deux fois au plus, dans le
+    /// quota du jour ; les corrections comptent aussi. Sinon l'utilisateur lit
+    /// où il s'arrête, une fois.
+    fn continue_function(&mut self, aids: &mut TurnAids, at: &str) -> bool {
+        if self.subagent || interrupt_requested() || !harness::enabled(Aid::DesignReview) {
+            return false;
+        }
+        let bar = crate::web_design::design_bar();
+        let Some(&last) = aids.function_scores.last() else {
+            return false;
+        };
+        if last >= bar {
+            return false;
+        }
+        let best_before = aids.function_scores[..aids.function_scores.len() - 1]
+            .iter()
+            .max()
+            .copied();
+        let rising = best_before.is_none_or(|best| last > best);
+        let quota = self
+            .api_client
+            .free_requests_left()
+            .is_none_or(|left| left >= crate::web_design::CONTINUATION_RESERVE);
+        let trail = aids
+            .function_scores
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" puis ");
+        if rising && quota && aids.function_extensions < crate::web_design::max_continuations() {
+            aids.function_extensions += 1;
+            self.api_client.notify(&format!(
+                "Fonctionnement {trail}/10, sous la barre {bar} ({at}) : le tour continue pour le réparer"
+            ));
+            return true;
+        }
+        if !aids.function_explained {
+            aids.function_explained = true;
+            let reason = if !quota {
+                "il reste peu de requêtes gratuites aujourd'hui"
+            } else if rising {
+                "les poursuites permises ont servi"
+            } else {
+                "la dernière revue ne l'a pas fait monter"
+            };
+            self.api_client.notify(&format!(
+                "Fonctionnement arrêté sous la barre {bar} ({trail}/10) : {reason}. Écrivez « continue » pour reprendre"
+            ));
         }
         false
     }
@@ -8093,19 +8195,58 @@ mod tests {
         // Aucune revue depuis : pas de deuxième poursuite sur la même note.
         assert!(!runtime.continue_design(&mut aids, "limite du tour"));
         aids.graded.push(graded(6.1));
+        // La note stagne : une poursuite de plus, une seule, pour changer la
+        // structure (session #32, passage 5 : 6,4 puis 6,6 puis 6,6).
+        assert!(runtime.continue_design(&mut aids, "revues du tour"));
+        assert!(aids.restructured);
+        assert!(!runtime.continue_design(&mut aids, "revues du tour"));
+        aids.graded.push(graded(6.1));
         assert!(!runtime.continue_design(&mut aids, "revues du tour"));
         assert!(!runtime.continue_design(&mut aids, "revues du tour"));
         let observed = observed.borrow();
         assert!(observed.notices.iter().any(|notice| notice
             == "Poursuite du design (1/2, limite du tour) : note 6,0/10, sous la barre 8 (identity) ; le tour continue"));
+        assert!(observed.notices.iter().any(|notice| notice.starts_with(
+            "Design bloqué sous la barre 8 (note 6,0 puis 6,1/10) : Claw demande au juge des changements de structure"
+        )));
         let stops: Vec<&String> = observed
             .notices
             .iter()
             .filter(|notice| notice.starts_with("Design arrêté sous la barre"))
             .collect();
         assert_eq!(stops.len(), 1, "l'arrêt est expliqué une fois : {stops:?}");
-        assert!(stops[0].contains("6,0 puis 6,1") && stops[0].contains("pas fait monter"));
+        assert!(stops[0].contains("6,0 puis 6,1 puis 6,1") && stops[0].contains("pas fait monter"));
         assert_eq!(aids.continuations, 1);
+    }
+
+    #[test]
+    fn a_page_that_works_badly_keeps_the_turn_going_while_it_gets_better() {
+        let _serial = crate::test_serial();
+        let (mut runtime, observed, _) = aided_runtime(Vec::new(), Vec::new());
+        let mut aids = super::TurnAids::default();
+        // Pas encore de note : rien à poursuivre.
+        assert!(!runtime.continue_function(&mut aids, "revues du tour"));
+        aids.function_scores.push(4);
+        assert!(runtime.continue_function(&mut aids, "revues du tour"));
+        aids.function_scores.push(6);
+        assert!(runtime.continue_function(&mut aids, "revues du tour"));
+        // Les poursuites permises ont servi.
+        aids.function_scores.push(7);
+        assert!(!runtime.continue_function(&mut aids, "revues du tour"));
+        // À la barre : rien à poursuivre.
+        let mut good = super::TurnAids::default();
+        good.function_scores.push(9);
+        assert!(!runtime.continue_function(&mut good, "revues du tour"));
+        // Note qui ne monte pas : arrêt expliqué une fois.
+        let mut flat = super::TurnAids::default();
+        flat.function_scores.extend([5, 5]);
+        assert!(!runtime.continue_function(&mut flat, "limite du tour"));
+        let observed = observed.borrow();
+        assert!(observed.notices.iter().any(|notice| notice
+            == "Fonctionnement 4/10, sous la barre 8 (revues du tour) : le tour continue pour le réparer"));
+        assert!(observed.notices.iter().any(|notice| notice.starts_with(
+            "Fonctionnement arrêté sous la barre 8 (5 puis 5/10) : la dernière revue ne l'a pas fait monter"
+        )));
     }
 
     #[test]
