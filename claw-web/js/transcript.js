@@ -101,6 +101,7 @@ function describe(name, input) {
     case "Font": return ["tool", "Polices", [value.display, value.text, value.mono].filter(Boolean).join(", ") || value.search || ""];
     case "Ornament": return ["tool", "Ornement", value.kind || ""];
     case "Component": return ["tool", "Composants", (value.names || []).join(", ")];
+    case "AppIcon": return ["image", "Icônes de l'appli", value.target || ""];
     case "Screenshot": {
       // Le site publié, ou la copie de travail de la session (fichier, serveur local) : pas la
       // même version de l'appli (vu le 21 octobre 2026, l'ancienne prise pour la nouvelle).

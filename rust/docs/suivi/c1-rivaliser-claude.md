@@ -66,7 +66,7 @@ des défauts mal mesurés :
 | 3. Vrais bugs mesurés | Audit : texte tapé illisible (7a), graphiques vides (7b), valeurs `Infinity` et `Invalid Date` ; chiffres de la demande (`request_figures` dans le runtime, entrée `figures` de Screenshot, `missing_figures`) ; écrans d'une appli d'une seule page ouverts et mesurés (`VIEWS_SCRIPT`, sorte `view`) ; note de fonctionnement (`FUNCTION_FAULTS` : chiffres absents, texte tapé illisible, graphique vide) | fait |
 | 4. Le fond avant la forme | Première version complète d'une page créée : confrontée à la demande avant les retouches (`early_requirements`, `early_requirements_note`) ; vérification après modification réduite à une ligne quand rien n'a bougé, conseil de recul à la troisième (`unchanged_check_feedback`, `check_listed`) ; tour arrêté par sa limite : Claw ajoute à la réponse ce qu'il a pu vérifier (`wrap_up_status`, `append_to_answer`) ; « appli web », « appli mobile », « PWA » et « je veux… » reconnus comme des demandes d'interface (la demande de #35 ne l'était que par les notes du moteur) | fait (trois tests de conversation) |
 | 5. Parcours en un appel | `Browser` avec `"action": "steps"` et `steps` : jusqu'à 40 actions jouées d'un appel, la page posée après chacune, arrêt à la première qui échoue ; `expect` et `absent` sur chaque étape (et sur une action seule) vérifient le résultat (un total, un nom, « NaN » absent) ; la méthode de design demande le parcours entier en un appel avec ses résultats attendus ; progression de l'appli : « Navigateur : parcours de N étapes » (24 appels `Browser` dans #35) | fait |
-| 6. Kit d'appli | Composants testés pour les applis perso (stockage local avec annuler, export CSV et import ; volet de formulaire aux champs lisibles ; barre d'onglets ; graphique qui se redessine quand son écran s'ouvre ; PWA hors-ligne : manifeste à `start_url` relative, service worker, icônes PNG) ; le guide de design les propose pour une appli de données perso | à faire |
+| 6. Kit d'appli | Cinq composants de l'outil `Component` pour une appli perso : `app-tabs` (écrans d'une seule page derrière une barre d'onglets, en bas au téléphone ; l'écran suit l'adresse, `screenchange` à chaque changement ; les messages passent au-dessus de la barre), `entries` (données gardées sur le téléphone ; les chiffres de l'utilisateur posés au mois en cours dès le premier lancement, jamais recopiés sur les mois d'avant ; liste du mois et totaux ; suppression avec « Annuler » ; copie en fichier tableur `;` et virgule décimale, reprise sans doublon grâce à l'identifiant), `entry-sheet` (volet d'ajout qui monte du bas, montant « 12,50 » ou « 12.50 », champs lisibles en sombre), `chart` (barres en SVG à la largeur de leur écran, redessinées à son ouverture, sans boucle de `ResizeObserver`), `pwa` (balises du `<head>`, manifeste à `start_url` relative, service worker réseau d'abord, rendus sous `files`). `toast` reçoit une action (« Annuler »). Nouvel outil `AppIcon` (`tools/src/app_icons.rs`) : le navigateur dessine les PNG 192, 512, maskable et 180 (iPhone) depuis l'icône SVG, refuse une icône vide ; fond pris au manifeste. La méthode de design demande le kit, les cinq ensemble, pour une appli qui garde les données de l'utilisateur, et `AppIcon` pour les PNG | fait |
 | 7. Vitesse | Après les lots 1 à 4 (moins de faux défauts, moins de messages redits) : mesurer sur le passage réel ce qui fait encore attendre (revues, juge, lecteur d'images, traductions des notes) et le couper ou le paralléliser, barres gardées à 8 | à faire |
 | 8. Banc t9-budget | Scénario `rust/scripts/real-tests/scenarios/` avec ce prompt et les vérifications cachées ci-dessous | à faire |
 | 9. Livraison | Vérification complète, essai réel (2 passages au plus), comparaison avec #35, **fusion directe dans `main`** | à faire |
@@ -80,7 +80,7 @@ worker (hors-ligne) ; aucun débordement horizontal au téléphone.
 
 ## Suite, dans l'ordre
 
-1. Lots 6, 7, 8, dans cet ordre.
+1. Lots 7 et 8, dans cet ordre.
 2. Lot 9 : essai réel, puis fusion dans `main`, puis mise à jour de ce fichier et de
    `rust/docs/suivi-intelligence.md`.
 
@@ -107,6 +107,14 @@ CLAW_TEST_BROWSER=1 CLAW_BROWSER=/chemin/vers/chrome CLAW_NO_USER_ENV=1 \
   ces changements).
 - Le test du navigateur qui rejoue la session #35 :
   `cargo test -p tools -- --ignored the_budget_app_of_session_35`.
+
+Essais du lot 6 avec un vrai navigateur : `every_component_works_in_a_real_browser` (les 23
+composants hors `pwa` dans une page), `png_icons_are_drawn_from_the_svg_in_a_real_browser`, et
+`the_app_kit_makes_a_budget_app_that_works_in_a_real_browser` : l'appli de budget de #35 bâtie
+avec le kit, en sombre, mesurée par Screenshot (fenêtres et exploration, chiffres de la demande)
+puis parcourue par Browser (ajout de 12,50, liste, suppression, « Annuler », graphique). Cet
+essai a trouvé deux défauts du kit, corrigés : le message de confirmation couvrait la barre
+d'onglets du téléphone, et la balise `apple-mobile-web-app-capable` est signalée comme dépassée.
 
 Points de mesure le 27 octobre 2026 : sans ces changements, 956 tests passent ; avec un vrai
 navigateur, 37 sur 39 passent (`advisors`, attendu, et `components`, qui échouait justement

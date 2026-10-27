@@ -213,6 +213,8 @@ def describe(name, data):
         return f"Ornement : {short(str(data.get('kind', '')))}"
     if name == "Component":
         return f"Composants : {short(names())}"
+    if name == "AppIcon":
+        return f"Icônes de l'appli : {short(relative(str(data.get('svg', ''))))}"
     if name == "Screenshot":
         return f"Capture de la page : {short(relative(str(data.get('url') or data.get('path') or '')))}"
     if name == "Browser":

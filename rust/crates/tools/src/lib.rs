@@ -917,7 +917,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "Component",
-            description: "Interactive components that work as soon as they are pasted (HTML, CSS and dependency-free JS), accessible, in the plan's colors, with icons from the icon set: nav-menu (header and phone menu), accordion (FAQ), tabs, dialog (modal), toast (confirmation messages), carousel, booking (days, slots, places left, calendar file), filter (tags and search), form (validation, sending, success), cart (basket or quote), theme-toggle (dark mode), copy, share, open-now (live opening hours), directions (route, call, map), reveal (appear on scroll), count-up (key figures), scroll-effects (reading progress, parallax), page-transitions. Use them instead of writing these by hand: every button then does what it says. Ask for several by name in one call; without names you get the list.",
+            description: "Interactive components that work as soon as they are pasted (HTML, CSS and dependency-free JS), accessible, in the plan's colors, with icons from the icon set: nav-menu (header and phone menu), accordion (FAQ), tabs, dialog (modal), toast (confirmation messages), carousel, booking (days, slots, places left, calendar file), filter (tags and search), form (validation, sending, success), cart (basket or quote), theme-toggle (dark mode), copy, share, open-now (live opening hours), directions (route, call, map), reveal (appear on scroll), count-up (key figures), scroll-effects (reading progress, parallax), page-transitions; for a personal app that keeps the user's data (budget, log, habits): app-tabs (screens behind a tab bar), entries (data kept on the phone with the user's figures from the first launch, undo, a copy saved and taken back), entry-sheet (panel to add an entry, fields readable in dark mode), chart (SVG bars redrawn when their screen opens), pwa (manifest, service worker, offline). Use them instead of writing these by hand: every button then does what it says. Ask for several by name in one call; without names you get the list.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -926,6 +926,21 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "AppIcon",
+            description: "PNG icons of an installable app (home screen, offline), drawn by a real browser from the app's SVG icon: icon-192.png and icon-512.png (transparent), icon-maskable-512.png (the drawing inside Android's safe zone, on a full background) and apple-touch-icon.png (180 px, full background, for the iPhone). Draw the SVG first (Icon tool with `color` and `background`, or an Ornament shape, colors written in the SVG), save it in the project (icons/icon.svg), then call this tool: it writes the PNGs next to it and returns the manifest's \"icons\" and the <head> tags. Never write a PNG by hand or leave a 1x1 placeholder.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "svg": { "type": "string", "description": "Path of the app's SVG icon in the project, for example \"icons/icon.svg\"" },
+                    "folder": { "type": "string", "description": "Folder inside the project for the PNGs (default: the SVG's folder)" },
+                    "background": { "type": "string", "description": "Color behind the drawing in the maskable and iPhone icons (default: the manifest's background_color, else white)" }
+                },
+                "required": ["svg"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
             name: "LookAtImage",
@@ -1488,6 +1503,9 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
             .and_then(to_pretty_json),
         "Component" => from_value::<components::ComponentInput>(input)
             .and_then(|input| components::component_tool(&input))
+            .and_then(to_pretty_json),
+        "AppIcon" => from_value::<screenshot::app_icons::AppIconInput>(input)
+            .and_then(|input| screenshot::app_icons::app_icon(&input))
             .and_then(to_pretty_json),
         "Photo" => from_value::<photos::PhotoInput>(input)
             .and_then(|input| photos::photo(&input))

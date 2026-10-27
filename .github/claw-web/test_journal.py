@@ -84,6 +84,7 @@ class JournalPhotosTest(unittest.TestCase):
         self.assertEqual(run.describe("Icon", {"names": ["wallet", "plus"]}), "Icônes : wallet, plus")
         self.assertEqual(run.describe("Ornament", {"kind": "lines"}), "Ornement : lines")
         self.assertEqual(run.describe("Component", {"names": ["form", "dialog"]}), "Composants : form, dialog")
+        self.assertEqual(run.describe("AppIcon", {"svg": "icons/icon.svg"}), "Icônes de l'appli : icons/icon.svg")
         log = Journal()
         log.add({"type": "assistant", "message": {"content": [
             {"type": "tool_use", "name": "Icon", "input": {"names": ["wallet"]}}]}})

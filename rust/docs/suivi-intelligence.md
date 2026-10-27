@@ -41,7 +41,8 @@ budget : mesures justes, vrais bugs mesurés, le fond avant la forme, vitesse) s
 [suivi/c1-rivaliser-claude.md](suivi/c1-rivaliser-claude.md), avec les décisions de
 l'utilisateur (deux passages réels au plus, fusion directe dans `main`, gratuit uniquement,
 barres gardées à 8) : reprendre au premier lot qui n'est pas fait, sur la branche
-`claude/eloquent-brown-tusn0u` tant qu'elle n'est pas fusionnée.
+`claude/eloquent-mccarthy-17goou` (qui reprend `claude/eloquent-brown-tusn0u`) tant qu'elle
+n'est pas fusionnée.
 
 Reprise automatique : arrêtée. Le 12 octobre 2026, l'utilisateur avait demandé que la
 session reprenne d'elle-même (« continue ») à 6 h 22 puis toutes les 5 heures. Le 14 octobre

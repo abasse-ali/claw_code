@@ -26,6 +26,9 @@ use serde_json::{json, Value};
 /// Mesures faites dans la page (voir le fichier pour la liste des défauts).
 const AUDIT_SCRIPT: &str = include_str!("screenshot_audit.js");
 
+/// L'outil `AppIcon` : les icônes PNG d'une appli, dessinées par le même navigateur.
+#[path = "app_icons.rs"]
+pub(crate) mod app_icons;
 /// L'outil `Browser` : le même navigateur, gardé ouvert et mené pas à pas.
 #[path = "browse.rs"]
 pub(crate) mod browse;

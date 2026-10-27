@@ -1,0 +1,24 @@
+<nav class="app-tabs" aria-label="Écrans de l'appli" data-app-tabs>
+  <a class="app-tabs__tab" href="#accueil" aria-current="page">{{icon:house}}<span>Accueil</span></a>
+  <a class="app-tabs__tab" href="#operations">{{icon:list}}<span>Opérations</span></a>
+  <a class="app-tabs__tab" href="#bilan">{{icon:chart-column}}<span>Bilan</span></a>
+  <a class="app-tabs__tab" href="#reglages">{{icon:settings}}<span>Réglages</span></a>
+</nav>
+<div class="app-screens">
+  <section class="app-screen" id="accueil" data-screen aria-labelledby="accueil-titre">
+    <h1 id="accueil-titre">Ce mois-ci</h1>
+    <p>Le résumé du mois, et ce qu'il reste à dépenser.</p>
+  </section>
+  <section class="app-screen" id="operations" data-screen aria-labelledby="operations-titre" hidden>
+    <h2 id="operations-titre">Opérations</h2>
+    <p>Les dépenses et les rentrées, les plus récentes d'abord.</p>
+  </section>
+  <section class="app-screen" id="bilan" data-screen aria-labelledby="bilan-titre" hidden>
+    <h2 id="bilan-titre">Bilan</h2>
+    <p>Les mois passés, côte à côte.</p>
+  </section>
+  <section class="app-screen" id="reglages" data-screen aria-labelledby="reglages-titre" hidden>
+    <h2 id="reglages-titre">Réglages</h2>
+    <p>Les montants de chaque mois, la copie des données.</p>
+  </section>
+</div>

@@ -1,0 +1,40 @@
+.sheet-open { display: inline-flex; align-items: center; gap: .5rem; min-height: 48px; padding: 0 1.25rem; border: 0; border-radius: 999px; background: var(--accent, #8a3b12); color: var(--on-accent, var(--paper, #f7f3ec)); font: inherit; font-weight: 700; cursor: pointer; transition: filter .2s, transform .2s; }
+.sheet-open:hover { filter: brightness(1.08); }
+.sheet-open:active { transform: scale(.97); }
+.sheet-open:focus-visible, .sheet__submit:focus-visible { outline: 2px solid var(--accent, #8a3b12); outline-offset: 3px; }
+.sheet__form { display: grid; gap: 1rem; padding: 1.25rem 1.25rem calc(1.25rem + env(safe-area-inset-bottom)); }
+.sheet__header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+.sheet__title { margin: 0; font-family: var(--font-display, inherit); font-size: 1.375rem; line-height: 1.2; }
+.sheet__kind { display: grid; grid-template-columns: 1fr 1fr; gap: .25rem; margin: 0; padding: .25rem; border: 0; border-radius: 999px; background: color-mix(in srgb, var(--ink, #1f1d1a) 8%, transparent); }
+.sheet__legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.sheet__kind label { position: relative; }
+.sheet__kind input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.sheet__kind span { display: grid; place-items: center; min-height: 44px; border-radius: 999px; color: var(--muted, #5f5a52); font-weight: 600; transition: background-color .2s, color .2s; }
+.sheet__kind input:checked + span { background: var(--paper, #f7f3ec); color: var(--ink, #1f1d1a); box-shadow: 0 1px 3px rgb(0 0 0 / .18); }
+.sheet__kind input:focus-visible + span { outline: 2px solid var(--accent, #8a3b12); outline-offset: 2px; }
+.sheet__field { display: grid; gap: .375rem; min-width: 0; }
+.sheet__field > label { font-weight: 600; }
+/* minmax(0, 1fr) : un champ de date garde sinon sa largeur propre et déborde. */
+.sheet__row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: .75rem; }
+/* Les champs ne prennent pas la couleur du texte d'eux-mêmes : sans ces
+   règles, le texte tapé reste noir sur un fond sombre. */
+.sheet input:not([type="radio"]), .sheet select { width: 100%; min-width: 0; min-height: 48px; padding: .625rem .875rem; border: 1px solid color-mix(in srgb, var(--ink, #1f1d1a) 25%, transparent); border-radius: calc(var(--radius, 12px) - 4px); background: var(--field, color-mix(in srgb, var(--paper, #f7f3ec) 90%, var(--ink, #1f1d1a))); color: var(--ink, #1f1d1a); font: inherit; transition: border-color .2s, box-shadow .2s; }
+.sheet input::placeholder { color: var(--muted, #5f5a52); opacity: 1; }
+.sheet select option { background: var(--paper, #f7f3ec); color: var(--ink, #1f1d1a); }
+.sheet input:focus, .sheet select:focus { outline: none; border-color: var(--accent, #8a3b12); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #8a3b12) 25%, transparent); }
+.sheet__money { position: relative; }
+.sheet__money input { padding-right: 2.5rem; font-size: 1.375rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.sheet__money span { position: absolute; top: 50%; right: .875rem; color: var(--muted, #5f5a52); font-weight: 700; transform: translateY(-50%); }
+.sheet__error { display: none; margin: 0; color: var(--error, #b42318); font-size: .9rem; }
+.sheet__field.is-invalid input { border-color: var(--error, #b42318); }
+.sheet__field.is-invalid .sheet__error { display: block; }
+.sheet__submit { min-height: 52px; border: 0; border-radius: 999px; background: var(--accent, #8a3b12); color: var(--on-accent, var(--paper, #f7f3ec)); font: inherit; font-weight: 700; cursor: pointer; transition: filter .2s, transform .2s; }
+.sheet__submit:hover { filter: brightness(1.08); }
+.sheet__submit:active { transform: scale(.98); }
+/* Au téléphone, le volet monte du bas de l'écran, à portée du pouce. */
+@media (max-width: 699px) {
+  .dialog.sheet { width: 100%; max-width: 100%; max-height: 92vh; margin: auto 0 0; border-radius: calc(var(--radius, 12px) + 8px) calc(var(--radius, 12px) + 8px) 0 0; }
+  .dialog.sheet[open] { animation: sheet-up .25s ease-out; }
+}
+@keyframes sheet-up { from { transform: translateY(40px); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .dialog.sheet[open] { animation: none; } .sheet-open:active, .sheet__submit:active { transform: none; } }
