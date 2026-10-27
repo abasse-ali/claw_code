@@ -279,6 +279,27 @@ const FUNCTION_FAULTS: &[(&str, u8, u8, &str)] = &[
     ),
 ];
 
+/// « erreur du script », avec le début du message : l'utilisateur et la
+/// relecture du passage voient laquelle. Vu le 27 octobre 2026 (session #34) :
+/// cinq revues à « erreur du script » sans que le journal dise laquelle.
+fn script_reason(line: &str) -> String {
+    let message = line
+        .rsplit_once("uncaught: ")
+        .or_else(|| line.rsplit_once("error in the page's script: "))
+        .map_or(line, |(_, message)| message)
+        .trim_start_matches("error: ")
+        .trim_start_matches("Uncaught (in promise) ")
+        .trim_start_matches("Uncaught ")
+        .trim();
+    let short: String = message.chars().take(70).collect();
+    let more = if message.chars().count() > 70 {
+        "…"
+    } else {
+        ""
+    };
+    format!("erreur du script : « {short}{more} »")
+}
+
 #[must_use]
 pub fn function_score(audit: &Audit) -> FunctionScore {
     let mut lost = 0u8;
@@ -306,13 +327,17 @@ pub fn function_score(audit: &Audit) -> FunctionScore {
                     *weight
                 };
                 scripted |= reason.starts_with("erreur du script");
-                count(weight, *ceiling, reason);
+                if reason.starts_with("erreur du script") {
+                    count(weight, *ceiling, &script_reason(problem));
+                } else {
+                    count(weight, *ceiling, reason);
+                }
                 break;
             }
         }
     }
-    if !audit.console.is_empty() && !scripted {
-        count(3, 5, "erreur du script");
+    if let Some(first) = audit.console.first().filter(|_| !scripted) {
+        count(3, 5, &script_reason(first));
     }
     // Le deuxième appareil n'a rien eu à comparer, parce que l'écran du
     // propriétaire ne montre pas ce qui vient d'être envoyé, ou qu'aucun écran
@@ -2720,9 +2745,19 @@ mod tests {
         assert_eq!(
             bakery.reasons,
             [
-                "erreur du script",
+                "erreur du script : « TypeError »",
                 "ce qu'envoie un visiteur ne se voit pas sur un autre appareil"
             ]
+        );
+        // Session #34 : le message dit laquelle.
+        let sms = function_score(&audit(
+            &[],
+            &["uncaught: ReferenceError: NUMERO_SMS is not defined (at app.js:253)"],
+            &[],
+        ));
+        assert_eq!(
+            sms.reasons,
+            ["erreur du script : « ReferenceError: NUMERO_SMS is not defined (at app.js:253) »"]
         );
         // Des boutons morts : un point chacun, trois au plus ; une partie du site pas atteinte.
         let minor = function_score(&audit(
