@@ -215,6 +215,9 @@ def describe(name, data):
         return f"Composants : {short(names())}"
     if name == "Screenshot":
         return f"Capture de la page : {short(relative(str(data.get('url') or data.get('path') or '')))}"
+    if name == "Browser":
+        aim = data.get("path") or data.get("url") or data.get("target") or data.get("to") or data.get("device") or ""
+        return f"Navigateur : {data.get('action', 'look')} {short(relative(str(aim)))}".rstrip()
     return name
 
 

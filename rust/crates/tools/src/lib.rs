@@ -792,6 +792,29 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "Browser",
+            description:
+                "Use the page in a real browser, step by step, like a visitor, and see it as text: the browser stays open between calls. `open` a page (path of an .html file of the project, or url; device phone, tablet, desktop or WIDTHxHEIGHT), then `click` or `type` into what you aim at (a reference [e12] from the latest view, its visible text, or a CSS selector), `select` an option, `press` a key (Enter, Escape, Tab, arrows), `scroll` (down, up, top, bottom, or to an element), `back`, `resize` to another device, `look` again (full true: the whole page, not only the screen), `inspect` an element (its CSS rules with file and line, and its spacing), `close`. Every call answers with what the action did, what changed on the page (texts now shown or gone), script errors, the browser's own alert boxes, layout problems measured since the last call (on look: all of them), and the view: each thing on the screen in reading order with its kind, text, font size, colors (text on background), place and size in px, and flags (covered by another element, cut, past the screen edge, small to tap, invalid field). picture true adds an image of the screen. Use it to check that what you built works and looks right: go through the visitor's task from start to end (open, fill the form, send, open the other screens, come back), on a phone and on a desktop, and fix what it shows.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["open", "click", "type", "select", "press", "scroll", "back", "resize", "look", "inspect", "close"] },
+                    "path": { "type": "string", "description": "open: an .html file of the project, for a page that needs no server." },
+                    "url": { "type": "string", "description": "open: an http address (a local server: http://localhost:3000/)." },
+                    "device": { "type": "string", "description": "open, resize: phone (default for open), tablet, desktop or WIDTHxHEIGHT." },
+                    "target": { "type": "string", "description": "click, type, select, scroll, inspect: a reference from the latest view (e12), the element's visible text, or a CSS selector." },
+                    "text": { "type": "string", "description": "type: the text to type (the field is emptied first); select: the option's text or value." },
+                    "key": { "type": "string", "description": "press: Enter, Escape, Tab, Space, Backspace, ArrowDown, ArrowUp, ArrowLeft, ArrowRight." },
+                    "to": { "type": "string", "description": "scroll: down, up, top, bottom, or an element (reference, text or selector)." },
+                    "full": { "type": "boolean", "description": "Describe the whole page, not only what the screen shows (default false)." },
+                    "picture": { "type": "boolean", "description": "Also return an image of the screen (default false)." }
+                },
+                "required": ["action"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "Icon",
             description: "Polished SVG icons for a web page, ready to paste: 1539 line icons from Lucide (ISC license), drawn on a 24px grid in the text color (currentColor). Use them instead of drawing icons by hand, and never use emoji. Give `names` to get several icons in one call (\"map-pin\", \"phone\", \"clock\", \"croissant\", \"leaf\", \"calendar\", \"star\", \"menu\", \"x\", \"arrow-right\"), or `search` with English words (\"bread pastry\", \"location\") to find names. Each icon comes as a complete <svg> with width, height and aria-hidden; color and size it with CSS.",
             input_schema: json!({
@@ -1386,6 +1409,11 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
     ]
 }
 
+/// Ferme le navigateur de l'outil `Browser` (à la sortie de Claw).
+pub fn close_browser() {
+    screenshot::browse::close_all();
+}
+
 pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
     match name {
         "bash" => from_value::<BashCommandInput>(input).and_then(run_bash),
@@ -1445,6 +1473,9 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
             .and_then(to_pretty_json),
         "Screenshot" => from_value::<screenshot::ScreenshotInput>(input)
             .and_then(|input| screenshot::take(&input))
+            .and_then(to_pretty_json),
+        "Browser" => from_value::<screenshot::browse::BrowserInput>(input)
+            .and_then(|input| screenshot::browse::browse(&input))
             .and_then(to_pretty_json),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
         "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
@@ -4464,6 +4495,7 @@ const READ_ONLY_ROLE_TOOLS: &[&str] = &[
     "WebFetch",
     "ViewPage",
     "Screenshot",
+    "Browser",
     "Icon",
     "Font",
     "Ornament",
@@ -4496,6 +4528,7 @@ const TESTER_TOOLS: &[&str] = &[
     "FindSymbol",
     "ViewPage",
     "Screenshot",
+    "Browser",
     "TodoWrite",
     "ToolSearch",
     "NotebookEdit",
@@ -4553,6 +4586,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "WebFetch",
             "ViewPage",
             "Screenshot",
+            "Browser",
             "WebSearch",
             "ToolSearch",
             "TodoWrite",
@@ -4607,6 +4641,7 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
             "WebFetch",
             "ViewPage",
             "Screenshot",
+            "Browser",
             "WebSearch",
             "TodoWrite",
             "Skill",

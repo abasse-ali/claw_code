@@ -210,6 +210,7 @@ pub fn tool_label(name: &str) -> &str {
         "WebFetch" => "Page web",
         "ViewPage" => "Page vue dans le navigateur",
         "Screenshot" => "Captures de la page",
+        "Browser" => "Navigateur",
         "Icon" => "Icônes",
         "Font" => "Polices",
         "Ornament" => "Ornement",
@@ -310,6 +311,11 @@ fn tool_argument(name: &str, input: &Value) -> Option<String> {
         }
         "WebFetch" | "ViewPage" => str_field(input, &["url"]).map(ToOwned::to_owned),
         "Screenshot" => str_field(input, &["url", "path"]).map(ToOwned::to_owned),
+        "Browser" => {
+            let action = str_field(input, &["action"]).unwrap_or("look");
+            let aim = str_field(input, &["path", "url", "target", "to", "device", "key"]);
+            Some(aim.map_or_else(|| action.to_string(), |aim| format!("{action} {aim}")))
+        }
         "Icon" => input
             .get("names")
             .and_then(|names| names.as_array())
@@ -395,6 +401,7 @@ pub fn running_label(name: &str) -> String {
         "WebFetch" => "Lecture de la page…".to_string(),
         "ViewPage" => "Ouverture de la page dans le navigateur…".to_string(),
         "Screenshot" => "Captures de la page dans le navigateur…".to_string(),
+        "Browser" => "Visite de la page dans le navigateur…".to_string(),
         "Icon" => "Choix des icônes…".to_string(),
         "Font" => "Choix des polices…".to_string(),
         "Ornament" => "Tracé de l'ornement…".to_string(),

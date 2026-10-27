@@ -501,7 +501,13 @@ impl PermissionRule {
             "agent" | "task" => &["Agent"],
             // ViewPage charge aussi une page du web : une règle qui limite
             // WebFetch le limite aussi.
-            "webfetch" => &["WebFetch", "ViewPage", "Screenshot", "http_request"],
+            "webfetch" => &[
+                "WebFetch",
+                "ViewPage",
+                "Screenshot",
+                "Browser",
+                "http_request",
+            ],
             _ => {
                 return self.tool.eq_ignore_ascii_case(tool_name)
                     || (self.tool.starts_with("mcp__")
@@ -945,7 +951,7 @@ impl ToolTarget {
                 Self::Path(field("path").unwrap_or_else(|| ".".to_string()))
             }
             "WebFetch" | "ViewPage" | "http_request" => field("url").map_or(Self::Other, Self::Url),
-            "Screenshot" => field("url")
+            "Screenshot" | "Browser" => field("url")
                 .map(Self::Url)
                 .or_else(|| field("path").map(Self::Path))
                 .unwrap_or(Self::Other),

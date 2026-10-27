@@ -97,6 +97,9 @@ class ShotsTest(unittest.TestCase):
 
     def test_a_screenshot_is_named_in_a_few_words(self):
         self.assertEqual(run.describe("Screenshot", {"path": "docs/index.html"}), "Capture de la page : docs/index.html")
+        self.assertEqual(run.describe("Browser", {"action": "open", "path": "index.html"}), "Navigateur : open index.html")
+        self.assertEqual(run.describe("Browser", {"action": "click", "target": "e12"}), "Navigateur : click e12")
+        self.assertEqual(run.describe("Browser", {"action": "look"}), "Navigateur : look")
 
 
 if __name__ == "__main__":

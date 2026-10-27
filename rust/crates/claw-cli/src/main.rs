@@ -159,6 +159,7 @@ fn main() {
     runtime::bash_tasks::kill_all();
     runtime::stop_all_containers();
     tools::shutdown_mcp();
+    tools::close_browser();
     if let Err(error) = result {
         eprintln!("{}", render_cli_error(&error.to_string()));
         std::process::exit(1);
@@ -2639,7 +2640,7 @@ fn filter_tool_specs(
         name if SELDOM_USED_TOOLS.contains(&name) => false,
         "BashOutput" | "KillShell" => background,
         // Sans navigateur installé, l'outil ne pourrait rien montrer.
-        "ViewPage" | "Screenshot" => tools::page_viewer_available(),
+        "ViewPage" | "Screenshot" | "Browser" => tools::page_viewer_available(),
         "PowerShell" => !posix_shell,
         "NotebookEdit" => project_has_notebooks(),
         "Consult" => {
@@ -9311,7 +9312,7 @@ fn describe_permission_target(tool_name: &str, input: &str) -> String {
         }),
         "NotebookEdit" => field("notebook_path").map(|path| format!("Notebook         {path}")),
         "WebFetch" | "ViewPage" => field("url").map(|url| format!("URL              {url}")),
-        "Screenshot" => field("url")
+        "Screenshot" | "Browser" => field("url")
             .or_else(|| field("path"))
             .map(|page| format!("Page             {page}")),
         "Agent" => {

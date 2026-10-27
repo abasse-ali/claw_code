@@ -105,7 +105,7 @@ fn tool_kind(name: &str) -> &'static str {
         "delete_file" => "delete",
         "bash" | "PowerShell" | "REPL" | "KillShell" => "execute",
         "glob_search" | "grep_search" | "ToolSearch" => "search",
-        "WebFetch" | "WebSearch" | "ViewPage" | "Screenshot" => "fetch",
+        "WebFetch" | "WebSearch" | "ViewPage" | "Screenshot" | "Browser" => "fetch",
         "Agent" | "ExitPlanMode" | "TodoWrite" => "think",
         _ => "other",
     }
