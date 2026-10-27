@@ -11488,6 +11488,21 @@ impl ToolExecutor for CliToolExecutor {
         tools::PARALLEL_SAFE_TOOLS.contains(&tool_name)
     }
 
+    /// Une vérification de Claw dans un fil à part : la page se mesure pendant
+    /// que le modèle prépare sa réponse suivante.
+    fn spawn_background(&mut self, tool_name: &str, input: &str) -> Option<runtime::Background> {
+        self.check_allowed(tool_name).ok()?;
+        let registry = self.tool_registry.clone();
+        let (name, input) = (tool_name.to_string(), input.to_string());
+        std::thread::Builder::new()
+            .name(format!("claw-{name}"))
+            .spawn(move || {
+                let result = Self::run_tool(&registry, &name, &input);
+                (result, tools::take_screenshots())
+            })
+            .ok()
+    }
+
     fn execute_batch(&mut self, calls: &[(String, String)]) -> Vec<Result<String, ToolError>> {
         if self.emit_output {
             live::show(&format!("{} outils en parallèle…", calls.len()));
@@ -11498,9 +11513,13 @@ impl ToolExecutor for CliToolExecutor {
                 .map(|(name, input)| {
                     let registry = &self.tool_registry;
                     let allowed = self.check_allowed(name);
-                    scope.spawn(move || match allowed {
-                        Ok(()) => Self::run_tool(registry, name, input),
-                        Err(error) => Err(error.to_string()),
+                    scope.spawn(move || {
+                        let result = match allowed {
+                            Ok(()) => Self::run_tool(registry, name, input),
+                            Err(error) => Err(error.to_string()),
+                        };
+                        // Les images restent dans le fil qui les a prises.
+                        (result, tools::take_screenshots())
                     })
                 })
                 .collect::<Vec<_>>();
@@ -11509,10 +11528,17 @@ impl ToolExecutor for CliToolExecutor {
                 .map(|handle| {
                     handle
                         .join()
-                        .unwrap_or_else(|_| Err("tool thread panicked".to_string()))
+                        .unwrap_or_else(|_| (Err("tool thread panicked".to_string()), Vec::new()))
                 })
                 .collect::<Vec<_>>()
         });
+        let outcomes: Vec<Result<String, String>> = outcomes
+            .into_iter()
+            .map(|(result, images)| {
+                tools::attach_images(images);
+                result
+            })
+            .collect();
         calls
             .iter()
             .zip(outcomes)
