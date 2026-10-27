@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       scenarios:
-        description: "Scénarios, séparés par des espaces (t1-inventaire … t8-materiel), ou « tous »"
+        description: "Scénarios, séparés par des espaces (t1-inventaire … t9-budget), ou « tous »"
         required: true
         default: "t1-inventaire"
         type: string

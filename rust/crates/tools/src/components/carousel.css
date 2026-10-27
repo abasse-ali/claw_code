@@ -10,6 +10,7 @@
 .carousel__arrow:hover:not(:disabled) { background: var(--ink, #1f1d1a); color: var(--paper, #f7f3ec); }
 .carousel__arrow:disabled { opacity: .35; cursor: default; }
 .carousel__dots { display: flex; }
+.carousel__dots[hidden] { display: none; }
 .carousel__dot { width: 44px; height: 44px; padding: 0; border: 0; background: transparent; font: inherit; cursor: pointer; }
 .carousel__dot::before { content: ""; display: block; width: 8px; height: 8px; margin: auto; border-radius: 999px; background: color-mix(in srgb, var(--ink, #1f1d1a) 25%, transparent); transition: width .2s, background-color .2s; }
 .carousel__dot[aria-current="true"]::before { width: 22px; background: var(--accent, #8a3b12); }

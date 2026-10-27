@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::{
-    attach, console_lines, file_url, page_socket_path, strings, Browser, DevTools, Viewport,
+    attach, console_lines, page_socket_path, page_url, strings, Browser, DevTools, Viewport,
     AUDIT_SCRIPT,
 };
 
@@ -45,7 +45,19 @@ pub(crate) struct BrowserInput {
     full: Option<bool>,
     #[serde(default)]
     picture: Option<bool>,
+    /// `steps` : les actions d'un parcours, jouées d'un seul appel.
+    #[serde(default)]
+    steps: Option<Vec<Value>>,
+    /// Texte qui doit se voir sur la page après l'action.
+    #[serde(default)]
+    expect: Option<String>,
+    /// Texte qui ne doit plus (ou jamais) se voir sur la page après l'action.
+    #[serde(default)]
+    absent: Option<String>,
 }
+
+/// Étapes jouées au plus par un parcours.
+const MAX_STEPS: usize = 40;
 
 /// La page ouverte : le navigateur, sa connexion, et ce qui a déjà été dit
 /// (événements, fenêtres natives, textes de la page, défauts mesurés).
@@ -79,6 +91,9 @@ pub(crate) fn browse(input: &BrowserInput) -> Result<Value, String> {
         *guard = None;
         return Ok(json!({ "done": "the browser is closed" }));
     }
+    if matches!(action.as_str(), "steps" | "run" | "journey") {
+        return run_steps(&mut guard, input);
+    }
     if action == "open" {
         let url = address(input)?;
         let viewport = Viewport::parse(input.device.as_deref().unwrap_or("phone"))?;
@@ -86,7 +101,10 @@ pub(crate) fn browse(input: &BrowserInput) -> Result<Value, String> {
             *guard = Some(start(viewport.clone())?);
         }
         let session = guard.as_mut().ok_or("the browser did not start")?;
-        let result = open(session, &url, &viewport);
+        let result = open(session, &url, &viewport).map(|mut result| {
+            expectations(session, input, &mut result);
+            result
+        });
         if result.is_err() {
             // Navigateur tombé : le prochain `open` en relance un.
             *guard = None;
@@ -96,7 +114,27 @@ pub(crate) fn browse(input: &BrowserInput) -> Result<Value, String> {
     let session = guard.as_mut().ok_or(
         "no page is open in the browser: start with {\"action\": \"open\", \"path\": \"index.html\"} (or \"url\")",
     )?;
-    let done = match action.as_str() {
+    if action == "inspect" {
+        let found = super::inspect_elements(&mut session.devtools, &[target(input)?.to_string()]);
+        return Ok(json!({ "inspected": found }));
+    }
+    let done = act(session, input, &action)?;
+    let look = matches!(action.as_str(), "look" | "view" | "see");
+    let mut result = report(
+        session,
+        &done,
+        input.full.unwrap_or(false),
+        input.picture.unwrap_or(false),
+        look,
+    )?;
+    expectations(session, input, &mut result);
+    Ok(result)
+}
+
+/// Une action sur la page ouverte (ni `open`, ni `inspect`, ni `close`) : ce
+/// qu'elle a fait, en une phrase.
+fn act(session: &mut Session, input: &BrowserInput, action: &str) -> Result<String, String> {
+    Ok(match action {
         "click" | "tap" => click(session, target(input)?)?,
         "type" | "fill" => type_into(session, target(input)?, input.text.as_deref().unwrap_or(""))?,
         "select" | "choose" => select(session, target(input)?, input.text.as_deref().unwrap_or(""))?,
@@ -112,25 +150,184 @@ pub(crate) fn browse(input: &BrowserInput) -> Result<Value, String> {
             session.viewport = viewport;
             format!("the screen is now {}", session.viewport.label)
         }
-        "look" | "view" | "see" => "looked at the page".to_string(),
-        "inspect" => {
-            let found = super::inspect_elements(&mut session.devtools, &[target(input)?.to_string()]);
-            return Ok(json!({ "inspected": found }));
-        }
+        "look" | "view" | "see" | "expect" | "check" => "looked at the page".to_string(),
         other => {
             return Err(format!(
-                "unknown action `{other}`: use open, click, type, select, press, scroll, back, resize, look, inspect or close"
+                "unknown action `{other}`: use open, click, type, select, press, scroll, back, resize, look, inspect, steps or close"
             ))
         }
+    })
+}
+
+/// Un parcours entier en un appel : chaque étape (`open`, `click`, `type`,
+/// `select`, `press`, `scroll`, `back`, `resize`, `look`, avec `expect` ou
+/// `absent` au besoin) jouée dans l'ordre, la page posée après chacune ; le
+/// parcours s'arrête à la première qui échoue. Puis la vue de la page, comme
+/// après une action seule. Vu le 27 octobre 2026 (session #35) : 24 appels à
+/// `Browser`, un geste par requête d'une vingtaine de secondes.
+fn run_steps(guard: &mut Option<Session>, input: &BrowserInput) -> Result<Value, String> {
+    let steps = input
+        .steps
+        .as_deref()
+        .filter(|steps| !steps.is_empty())
+        .ok_or("`steps` needs the list of steps, for example [{\"action\": \"open\", \"path\": \"index.html\"}, {\"action\": \"click\", \"target\": \"Ajouter\"}, {\"action\": \"type\", \"target\": \"Montant\", \"text\": \"12,50\"}, {\"action\": \"click\", \"target\": \"Enregistrer\", \"expect\": \"12,50\"}]")?;
+    if steps.len() > MAX_STEPS {
+        return Err(format!(
+            "{} steps: play at most {MAX_STEPS} in one call, then the rest in another",
+            steps.len()
+        ));
+    }
+    let mut log = Vec::new();
+    let mut failed = None;
+    for (index, raw) in steps.iter().enumerate() {
+        let number = index + 1;
+        let step: BrowserInput = match serde_json::from_value(raw.clone()) {
+            Ok(step) => step,
+            Err(error) => {
+                failed = Some(format!("step {number} cannot be read ({error}): each step is an object with an `action`"));
+                break;
+            }
+        };
+        let action = step.action.trim().to_ascii_lowercase();
+        let outcome = play_step(guard, &step, &action);
+        match outcome {
+            Ok(done) => log.push(format!("{number}. {done}")),
+            Err(error) => {
+                log.push(format!("{number}. FAILED: {error}"));
+                failed = Some(format!("step {number} failed: {error}"));
+                break;
+            }
+        }
+    }
+    let session = guard
+        .as_mut()
+        .ok_or("no page is open: the first step must be {\"action\": \"open\", \"path\": \"index.html\"} (or \"url\")")?;
+    let played = log.len();
+    let done = match &failed {
+        Some(_) => format!(
+            "played {played} of {} steps; the journey stopped at the step that failed",
+            steps.len()
+        ),
+        None => format!("played all {} steps", steps.len()),
     };
-    let look = matches!(action.as_str(), "look" | "view" | "see");
-    report(
+    let mut result = report(
         session,
         &done,
         input.full.unwrap_or(false),
         input.picture.unwrap_or(false),
-        look,
-    )
+        false,
+    )?;
+    result["steps"] = json!(log);
+    if let Some(failed) = failed {
+        result["failed"] = json!(failed);
+    }
+    Ok(result)
+}
+
+/// Une étape d'un parcours : l'action, la page posée, puis ses attentes.
+fn play_step(
+    guard: &mut Option<Session>,
+    step: &BrowserInput,
+    action: &str,
+) -> Result<String, String> {
+    if matches!(action, "steps" | "run" | "journey" | "close") {
+        return Err(format!("`{action}` cannot be a step of a journey"));
+    }
+    let done = if action == "open" {
+        let url = address(step)?;
+        let viewport = Viewport::parse(step.device.as_deref().unwrap_or("phone"))?;
+        if guard.is_none() {
+            *guard = Some(start(viewport.clone())?);
+        }
+        let session = guard.as_mut().ok_or("the browser did not start")?;
+        if let Err(error) = navigate(session, &url, &viewport) {
+            *guard = None;
+            return Err(error);
+        }
+        format!("opened {url} on a {}", viewport.label)
+    } else {
+        let session = guard.as_mut().ok_or(
+            "no page is open: start the journey with {\"action\": \"open\", \"path\": \"index.html\"}",
+        )?;
+        let done = if action == "inspect" {
+            "inspect is not a step: call it on its own".to_string()
+        } else {
+            act(session, step, action)?
+        };
+        settle(session)?;
+        done
+    };
+    let session = guard.as_mut().ok_or("the browser stopped")?;
+    let checked = check_texts(session, step.expect.as_deref(), step.absent.as_deref())?;
+    Ok(if checked.is_empty() {
+        done
+    } else {
+        format!("{done}; {checked}")
+    })
+}
+
+/// Les attentes d'une action seule (`expect`, `absent`) : leur résultat dans
+/// la réponse, ou une erreur quand l'une n'est pas tenue.
+fn expectations(session: &mut Session, input: &BrowserInput, result: &mut Value) {
+    if input.expect.is_none() && input.absent.is_none() {
+        return;
+    }
+    result["expected"] =
+        match check_texts(session, input.expect.as_deref(), input.absent.as_deref()) {
+            Ok(checked) => json!(checked),
+            Err(error) => json!(format!("NOT AS EXPECTED: {error}")),
+        };
+}
+
+/// Le texte de la page tel qu'un visiteur le lit (écran, fenêtres ouvertes,
+/// valeurs des champs), espaces insécables ramenées à des espaces.
+const PAGE_TEXT: &str = "(() => { const parts = [document.body ? document.body.innerText : '']; for (const field of document.querySelectorAll('input, textarea, select')) if (field.value) parts.push(field.value); return parts.join(' ').replace(/[\\s\\u00a0\\u202f\\u2009]+/g, ' '); })()";
+
+/// `expect` doit se voir sur la page, `absent` ne doit pas s'y voir (casse et
+/// espaces ignorées). Rend ce qui a été vérifié, ou ce qui ne l'est pas.
+fn check_texts(
+    session: &mut Session,
+    expect: Option<&str>,
+    absent: Option<&str>,
+) -> Result<String, String> {
+    if expect.is_none() && absent.is_none() {
+        return Ok(String::new());
+    }
+    let text = session
+        .devtools
+        .evaluate(PAGE_TEXT)
+        .ok()
+        .and_then(|text| text.as_str().map(ToOwned::to_owned))
+        .unwrap_or_default();
+    let fold = |value: &str| {
+        value
+            .replace(['\u{a0}', '\u{202f}', '\u{2009}'], " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    let page = fold(&text);
+    let mut checked = Vec::new();
+    if let Some(wanted) = expect.map(str::trim).filter(|wanted| !wanted.is_empty()) {
+        if !page.contains(&fold(wanted)) {
+            let shown: String = text.chars().take(400).collect();
+            return Err(format!(
+                "\"{wanted}\" is not on the page (it shows: \"{shown}\")"
+            ));
+        }
+        checked.push(format!("\"{wanted}\" is on the page"));
+    }
+    if let Some(unwanted) = absent
+        .map(str::trim)
+        .filter(|unwanted| !unwanted.is_empty())
+    {
+        if page.contains(&fold(unwanted)) {
+            return Err(format!("\"{unwanted}\" is still on the page"));
+        }
+        checked.push(format!("\"{unwanted}\" is not on the page"));
+    }
+    Ok(checked.join("; "))
 }
 
 /// Adresse à ouvrir : une page du projet (`path`, ou `file://`), ou une adresse web.
@@ -142,7 +339,7 @@ fn address(input: &BrowserInput) -> Result<String, String> {
         .map(str::trim)
         .filter(|path| !path.is_empty())
     {
-        return file_url(&cwd, std::path::Path::new(path));
+        return page_url(&cwd, std::path::Path::new(path));
     }
     let url = input
         .url
@@ -159,7 +356,7 @@ fn address(input: &BrowserInput) -> Result<String, String> {
         .then(|| crate::page_view::file_url_path(url))
         .flatten()
     {
-        file_url(&cwd, std::path::Path::new(&path))
+        page_url(&cwd, std::path::Path::new(&path))
     } else {
         Err(format!(
             "`{url}` is not an http address: for a file of the project, pass `path`"
@@ -216,12 +413,36 @@ fn emulate(devtools: &mut DevTools, viewport: &Viewport) -> Result<(), String> {
 }
 
 fn open(session: &mut Session, url: &str, viewport: &Viewport) -> Result<Value, String> {
+    navigate(session, url, viewport)?;
+    report(
+        session,
+        &format!("opened {url} on a {}", viewport.label),
+        false,
+        false,
+        true,
+    )
+}
+
+/// Ouvre la page à la taille d'écran donnée et attend qu'elle soit chargée.
+fn navigate(session: &mut Session, url: &str, viewport: &Viewport) -> Result<(), String> {
     emulate(&mut session.devtools, viewport)?;
     session.viewport = viewport.clone();
     session.devtools.events.clear();
     session.events_seen = 0;
     session.texts.clear();
     session.told.clear();
+    // Page du projet servie par Claw : le navigateur garde sa session d'un
+    // appel à l'autre, et un service worker de la page servirait l'ancienne
+    // version des fichiers que l'agent vient de corriger. Ses caches partent
+    // avant chaque ouverture ; les données de la page (localStorage) restent.
+    if crate::local_server::serves(url) {
+        if let Some(origin) = url.get(..url[7..].find('/').map_or(url.len(), |at| at + 7)) {
+            let _ = session.devtools.call(
+                "Storage.clearDataForOrigin",
+                json!({ "origin": origin, "storageTypes": "service_workers,cache_storage" }),
+            );
+        }
+    }
     let navigation = session
         .devtools
         .call("Page.navigate", json!({ "url": url }))?;
@@ -237,13 +458,7 @@ fn open(session: &mut Session, url: &str, viewport: &Viewport) -> Result<Value, 
         .devtools
         .wait_for("Page.loadEventFired", LOAD_LIMIT)?;
     session.devtools.pump(SETTLE)?;
-    report(
-        session,
-        &format!("opened {url} on a {}", viewport.label),
-        false,
-        false,
-        true,
-    )
+    Ok(())
 }
 
 /// Trouve l'élément visé (référence, sélecteur ou texte visible), le met à
@@ -451,20 +666,7 @@ fn report(
     picture: bool,
     look: bool,
 ) -> Result<Value, String> {
-    let start = session.devtools.events.len();
-    session.devtools.pump(SETTLE)?;
-    if session.devtools.events[start..].iter().any(|event| {
-        event["method"] == "Page.frameStartedLoading" || event["method"] == "Page.frameNavigated"
-    }) {
-        session
-            .devtools
-            .events
-            .retain(|event| event["method"] != "Page.loadEventFired");
-        session
-            .devtools
-            .wait_for("Page.loadEventFired", LOAD_LIMIT)?;
-        session.devtools.pump(SETTLE)?;
-    }
+    settle(session)?;
     let view = session
         .devtools
         .evaluate(&format!(
@@ -537,6 +739,26 @@ fn report(
     Ok(result)
 }
 
+/// La page se pose après une action : une navigation qu'elle a lancée est
+/// attendue jusqu'au chargement.
+fn settle(session: &mut Session) -> Result<(), String> {
+    let start = session.devtools.events.len();
+    session.devtools.pump(SETTLE)?;
+    if session.devtools.events[start..].iter().any(|event| {
+        event["method"] == "Page.frameStartedLoading" || event["method"] == "Page.frameNavigated"
+    }) {
+        session
+            .devtools
+            .events
+            .retain(|event| event["method"] != "Page.loadEventFired");
+        session
+            .devtools
+            .wait_for("Page.loadEventFired", LOAD_LIMIT)?;
+        session.devtools.pump(SETTLE)?;
+    }
+    Ok(())
+}
+
 /// Erreurs et avertissements du script écrits depuis le dernier appel.
 fn new_errors(session: &mut Session) -> Vec<String> {
     let from = session.events_seen.min(session.devtools.events.len());
@@ -589,6 +811,68 @@ mod tests {
     fn step(input: Value) -> Value {
         let input: super::BrowserInput = serde_json::from_value(input).expect("entrée");
         super::browse(&input).unwrap_or_else(|error| json!({ "error": error }))
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn a_whole_journey_is_played_in_one_call_and_its_results_are_checked() {
+        // Session #35 (27 octobre 2026) : 24 appels à Browser, un geste par
+        // requête d'une vingtaine de secondes, et aucun résultat vérifié.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-parcours-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        std::fs::write(
+            dir.join("index.html"),
+            "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Budget</title><style>body { margin: 0; padding: 16px; font: 16px/1.5 sans-serif; } input, button { font: inherit; min-height: 44px; }</style></head><body><main><h1>Dépenses</h1><label for=\"montant\">Montant</label><input id=\"montant\" inputmode=\"decimal\"><button type=\"button\" id=\"ajouter\">Ajouter</button><p id=\"total\">Total : 0,00 €</p></main><script>let total = 0; document.getElementById('ajouter').addEventListener('click', () => { const champ = document.getElementById('montant'); total += Number(champ.value.replace(',', '.')); document.getElementById('total').textContent = 'Total : ' + total.toLocaleString('fr-FR', { minimumFractionDigits: 2 }) + ' €'; champ.value = ''; });</script></body></html>",
+        )
+        .expect("html");
+        let page = format!("claw-parcours-{}/index.html", std::process::id());
+        let journey = step(json!({ "action": "steps", "steps": [
+            { "action": "open", "path": page, "expect": "Total : 0,00 €" },
+            { "action": "type", "target": "Montant", "text": "12,50" },
+            { "action": "click", "target": "Ajouter", "expect": "Total : 12,50 €", "absent": "NaN" },
+            { "action": "type", "target": "Montant", "text": "7,5" },
+            { "action": "click", "target": "Ajouter", "expect": "total : 20,00 €" }
+        ] }));
+        let steps = journey["steps"].to_string();
+        assert!(journey.get("failed").is_none(), "{journey}");
+        assert!(
+            journey["done"] == "played all 5 steps"
+                && steps.contains("1. opened http://127.0.0.1:")
+                && steps.contains("\\\"Total : 12,50 €\\\" is on the page")
+                && steps.contains("\\\"NaN\\\" is not on the page")
+                && steps.contains("\\\"total : 20,00 €\\\" is on the page"),
+            "{journey}"
+        );
+        assert!(
+            journey["view"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Total : 20,00 €"),
+            "{journey}"
+        );
+        // Un résultat attendu qui n'arrive pas arrête le parcours, et le dit.
+        let broken = step(json!({ "action": "steps", "steps": [
+            { "action": "type", "target": "Montant", "text": "abc" },
+            { "action": "click", "target": "Ajouter", "absent": "NaN" },
+            { "action": "click", "target": "Ajouter" }
+        ] }));
+        let _ = step(json!({ "action": "close" }));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            broken["failed"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("step 2 failed: \"NaN\" is still on the page")
+                && broken["done"]
+                    == "played 2 of 3 steps; the journey stopped at the step that failed",
+            "{broken}"
+        );
+        // Une action seule vérifie aussi ce qu'on attend d'elle.
+        let single: super::BrowserInput =
+            serde_json::from_value(json!({ "action": "look", "expect": "Dépenses" }))
+                .expect("entrée");
+        assert_eq!(single.expect.as_deref(), Some("Dépenses"));
     }
 
     #[test]

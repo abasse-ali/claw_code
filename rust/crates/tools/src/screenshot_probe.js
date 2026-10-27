@@ -35,6 +35,18 @@
   await new Promise((resolve) => setTimeout(resolve, 700));
   if (!hidden.some(shown)) {
     problems.push(`The menu button ${name(toggle)} does nothing on a phone: after a click, the ${hidden.length} navigation links stay hidden (check its click handler and the CSS class or attribute it toggles)`);
+    return { problems };
   }
-  return { problems };
+  // Le menu se referme : le parcours des boutons qui suit doit trouver la page
+  // comme un visiteur la trouve. Vu le 27 octobre 2026 (session #35) : le menu
+  // laissé ouvert par cet essai couvrait la page, et chaque bouton passait
+  // pour « impossible à toucher ».
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  toggle.click();
+  await wait(500);
+  if (hidden.some(shown)) {
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await wait(400);
+  }
+  return { problems, leftOpen: hidden.some(shown) };
 })()

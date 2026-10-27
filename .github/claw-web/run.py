@@ -213,9 +213,14 @@ def describe(name, data):
         return f"Ornement : {short(str(data.get('kind', '')))}"
     if name == "Component":
         return f"Composants : {short(names())}"
+    if name == "AppIcon":
+        return f"Icônes de l'appli : {short(relative(str(data.get('svg', ''))))}"
     if name == "Screenshot":
         return f"Capture de la page : {short(relative(str(data.get('url') or data.get('path') or '')))}"
     if name == "Browser":
+        steps = data.get("steps")
+        if data.get("action") in ("steps", "run", "journey") and isinstance(steps, list):
+            return f"Navigateur : parcours de {len(steps)} étape{'s' if len(steps) > 1 else ''}"
         aim = data.get("path") or data.get("url") or data.get("target") or data.get("to") or data.get("device") or ""
         return f"Navigateur : {data.get('action', 'look')} {short(relative(str(aim)))}".rstrip()
     return name

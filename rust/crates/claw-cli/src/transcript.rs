@@ -215,6 +215,7 @@ pub fn tool_label(name: &str) -> &str {
         "Font" => "Polices",
         "Ornament" => "Ornement",
         "Component" => "Composants",
+        "AppIcon" => "Icônes de l'appli",
         "Photo" => "Photos libres",
         "LookAtImage" => "Image regardée",
         "WebSearch" => "Recherche web",
@@ -329,6 +330,7 @@ fn tool_argument(name: &str, input: &Value) -> Option<String> {
             .filter(|names| !names.is_empty())
             .or_else(|| str_field(input, &["search", "name"]).map(ToOwned::to_owned)),
         "Ornament" => str_field(input, &["kind"]).map(ToOwned::to_owned),
+        "AppIcon" => str_field(input, &["svg"]).map(ToOwned::to_owned),
         "Component" => input
             .get("names")
             .and_then(|names| names.as_array())
@@ -406,6 +408,7 @@ pub fn running_label(name: &str) -> String {
         "Font" => "Choix des polices…".to_string(),
         "Ornament" => "Tracé de l'ornement…".to_string(),
         "Component" => "Choix des composants…".to_string(),
+        "AppIcon" => "Dessin des icônes de l'appli…".to_string(),
         "Photo" => "Recherche de photos libres…".to_string(),
         "LookAtImage" => "Regard sur l'image…".to_string(),
         "Consult" => "Second avis demandé à d'autres modèles…".to_string(),

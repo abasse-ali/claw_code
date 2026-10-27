@@ -212,6 +212,13 @@ struct PendingCheck {
     before: Option<Vec<String>>,
 }
 
+/// Temps laissé avant la requête suivante à une vérification encore en route :
+/// au-delà, la requête part sans elle, et son résultat suit au pas d'après.
+/// Vu le 27 octobre 2026 (session #35) : 62 vérifications d'environ 25 s,
+/// attendues chacune après des requêtes de 6 à 9 s ; l'utilisateur a demandé
+/// des vérifications regroupées, sans baisser les barres.
+const CHECK_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+
 pub trait ToolExecutor {
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
 
@@ -592,6 +599,18 @@ struct TurnAids {
     /// Une vérification indépendante a déjà eu lieu pendant ce tour.
     workflow_checked: bool,
     workflow_runs: usize,
+    /// Mode de couleurs demandé pour la page (`dark` : l'utilisateur la veut
+    /// sombre) : les captures et les mesures se font dans ce mode.
+    page_theme: Option<&'static str>,
+    /// Chiffres de la demande que la page doit montrer (montants, prix).
+    figures: Vec<String>,
+    /// Vérifications de suite, après chaque modification, où rien n'a bougé :
+    /// leur liste n'est plus redite en entier.
+    unchanged_checks: u32,
+    /// La première version de la page a déjà été confrontée à la demande.
+    early_checked: bool,
+    /// La liste entière des défauts mesurés a déjà été donnée pendant ce tour.
+    check_listed: bool,
     /// Mode équipe pour ce tour, et sujet spécialisé de la demande.
     team: bool,
     topic: Option<&'static str>,
@@ -2003,9 +2022,10 @@ where
                 .as_deref()
                 .is_some_and(crate::web_design::is_interface_request);
         if interface_turn && !aids.work_question {
-            aids.shared_request = crate::web_design::shared_between_people(
-                &crate::project::user_words_with_history(&request_text),
-            );
+            let words = crate::project::user_words_with_history(&request_text);
+            aids.shared_request = crate::web_design::shared_between_people(&words);
+            aids.page_theme = crate::web_design::requested_theme(&words);
+            aids.figures = crate::web_design::request_figures(&words);
             self.baseline_audit(&request_text, &mut aids, &mut prompter);
         }
 
@@ -2107,13 +2127,22 @@ where
                 }
             }
             // L'interface vient de changer : Claw regarde la page avant la
-            // requête suivante.
-            if let Some((check, _)) = self.finish_visual_check(&mut aids) {
+            // requête suivante, si sa vérification a fini ; sinon elle suit.
+            if let Some((check, _)) = self.ready_visual_check(&mut aids) {
                 self.session.messages.push(check);
             }
             if !wrapping_up {
                 if let Some(check) = self.visual_check(&mut aids, &mut prompter) {
                     self.session.messages.push(check);
+                }
+                // La première version complète de la page est là : le fond
+                // avant la forme.
+                if let Some(note) =
+                    self.early_requirements(&mut aids, &request_text, earlier.as_deref())
+                {
+                    self.session
+                        .messages
+                        .push(ConversationMessage::user_text(note));
                 }
             }
             // Mode équipe : le rôle de cette étape, d'après l'état du travail.
@@ -2315,8 +2344,13 @@ where
                 // modification) : elle finit avant tout contrôle de la conclusion.
                 let pending_check = self.finish_visual_check(&mut aids);
                 // Budget du tour atteint : la conclusion part telle quelle,
-                // aucun contrôle ne renvoie le modèle au travail.
+                // aucun contrôle ne renvoie le modèle au travail ; Claw y ajoute
+                // ce qu'il a pu vérifier, pour que l'utilisateur ne prenne pas
+                // pour vérifié ce qui ne l'est pas.
                 if wrapping_up {
+                    if let Some(status) = self.wrap_up_status(&aids, out_of_time) {
+                        self.append_to_answer(&mut assistant_messages, &status);
+                    }
                     self.run_stop_hooks(stop_continuations, true, &assistant_messages);
                     break;
                 }
@@ -3738,9 +3772,13 @@ where
         }
         self.api_client
             .notify("État de la page avant ce tour : Claw la mesure, pour repérer ce que le tour casserait…");
-        let input = crate::web_design::review_screenshot_input(
-            &target,
-            self.second_device(aids, aids.shared_request),
+        let input = crate::web_design::with_request(
+            &crate::web_design::review_screenshot_input(
+                &target,
+                self.second_device(aids, aids.shared_request),
+            ),
+            aids.page_theme,
+            &[],
         );
         self.tool_executor.announce("Screenshot", &input);
         let (message, _) = self.execute_tool_call(
@@ -3837,11 +3875,15 @@ where
         if !crate::web_design::missing_local_assets(&cwd, &target).is_empty() {
             return None;
         }
-        let input = if quick {
-            crate::web_design::quick_screenshot_input(&target)
-        } else {
-            crate::web_design::screenshot_input(&target)
-        };
+        let input = crate::web_design::with_request(
+            &if quick {
+                crate::web_design::quick_screenshot_input(&target)
+            } else {
+                crate::web_design::screenshot_input(&target)
+            },
+            aids.page_theme,
+            &aids.figures,
+        );
         self.tool_executor.announce("Screenshot", &input);
         let (message, _) = self.execute_tool_call(
             format!("claw-measure-{}", aids.blind_measures + 1),
@@ -3881,7 +3923,12 @@ where
         aids: &mut TurnAids,
         prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> Option<ConversationMessage> {
-        if aids.blind_edits == 0 || aids.blind_measures >= harness::MAX_VISUAL_CHECKS {
+        // Une vérification encore en route : les modifications faites depuis
+        // attendent la suivante, qui les regroupe.
+        if aids.blind_edits == 0
+            || aids.blind_measures >= harness::MAX_VISUAL_CHECKS
+            || aids.pending_check.is_some()
+        {
             return None;
         }
         // Rien à regarder (pas de page HTML), ou une page qui appelle des
@@ -3897,7 +3944,11 @@ where
         // pendant que le modèle prépare sa réponse suivante, et le résultat
         // arrive avec elle. Vu le 26 octobre 2026 (session #32, passage 5) : 33
         // vérifications de 25 s chacune, le modèle attendant chaque fois.
-        let input = crate::web_design::quick_screenshot_input(&target);
+        let input = crate::web_design::with_request(
+            &crate::web_design::quick_screenshot_input(&target),
+            aids.page_theme,
+            &aids.figures,
+        );
         if let Some(handle) = self.tool_executor.spawn_background("Screenshot", &input) {
             aids.blind_edits = 0;
             aids.pending_check = Some(PendingCheck {
@@ -3914,7 +3965,7 @@ where
             return None;
         };
         Some(
-            self.check_message(&target, before.as_deref(), &audit, images)
+            self.check_message(aids, &target, before.as_deref(), &audit, images)
                 .0,
         )
     }
@@ -3924,6 +3975,7 @@ where
     /// et le nombre de défauts nouveaux.
     fn check_message(
         &mut self,
+        aids: &mut TurnAids,
         target: &str,
         before: Option<&[String]>,
         audit: &crate::web_design::Audit,
@@ -3938,12 +3990,36 @@ where
         if !new.is_empty() {
             self.api_client.team_strike("défaut introduit dans la page");
         }
+        // Rien n'a bougé depuis la vérification d'avant : la même liste n'est
+        // pas redite (ni la capture renvoyée), et après trois modifications sans
+        // effet l'agent est invité à prendre du recul. Vu le 27 octobre 2026
+        // (session #35) : « 0 nouveau, 0 réparé, 6 restants » redit vingt-cinq
+        // fois, et l'agent changeait une couleur à chaque fois.
+        let unchanged = aids.check_listed
+            && before.is_some()
+            && new.is_empty()
+            && fixed == 0
+            && !open.is_empty();
+        aids.unchanged_checks = if unchanged {
+            aids.unchanged_checks + 1
+        } else {
+            0
+        };
+        if unchanged {
+            let text = crate::web_design::unchanged_check_feedback(
+                target,
+                open.len(),
+                aids.unchanged_checks,
+            );
+            return (ConversationMessage::user_text(text), 0);
+        }
         let image = images
             .into_iter()
             .next()
             .filter(|_| self.api_client.reads_images());
         let text =
             crate::web_design::visual_check_feedback(target, &new, fixed, &open, image.is_some());
+        aids.check_listed = true;
         let mut message = ConversationMessage::user_text(text);
         if let Some(image) = image {
             message.blocks.push(ContentBlock::Image {
@@ -3952,6 +4028,19 @@ where
             });
         }
         (message, new.len())
+    }
+
+    /// La vérification lancée en arrière-plan si elle a fini, ou finit dans
+    /// `CHECK_GRACE` ; sinon `None`, et elle reste en route pour le pas suivant.
+    fn ready_visual_check(&mut self, aids: &mut TurnAids) -> Option<(ConversationMessage, usize)> {
+        let deadline = std::time::Instant::now() + CHECK_GRACE;
+        while !aids.pending_check.as_ref()?.handle.is_finished() {
+            if std::time::Instant::now() >= deadline || interrupt_requested() {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        self.finish_visual_check(aids)
     }
 
     /// La vérification lancée en arrière-plan, attendue (le plus souvent déjà
@@ -3977,7 +4066,110 @@ where
                 .cloned()
                 .collect(),
         );
-        Some(self.check_message(&pending.target, pending.before.as_deref(), &audit, images))
+        Some(self.check_message(
+            aids,
+            &pending.target,
+            pending.before.as_deref(),
+            &audit,
+            images,
+        ))
+    }
+
+    /// La première version complète d'une page créée dans ce tour (tous ses
+    /// fichiers écrits, la page mesurée une première fois) : avant les retouches
+    /// visuelles, l'agent la confronte à la demande, phrase par phrase, et
+    /// construit ce qui manque. Une fois par tour. Vu le 27 octobre 2026
+    /// (session #35) : une heure et demie de retouches de couleurs sur une
+    /// appli qui ne contenait aucun des montants de l'utilisateur ; le contrôle
+    /// des exigences, prévu à la fin, n'a jamais eu lieu (temps écoulé).
+    fn early_requirements(
+        &mut self,
+        aids: &mut TurnAids,
+        request: &str,
+        earlier: Option<&str>,
+    ) -> Option<String> {
+        if aids.early_checked
+            || !aids.design_guided
+            || aids.repair
+            || aids.work_question
+            || aids.blind_measures == 0
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::Checklist)
+        {
+            return None;
+        }
+        aids.early_checked = true;
+        self.api_client.notify(
+            "Première version de la page écrite : Claw la fait confronter à la demande avant les retouches visuelles",
+        );
+        Some(crate::web_design::early_requirements_note(
+            request,
+            earlier,
+            &aids.figures,
+        ))
+    }
+
+    /// Ce que Claw a pu vérifier quand le tour s'arrête sur sa limite (temps
+    /// ou requêtes), sans les contrôles de fin : les défauts encore mesurés sur
+    /// la page, et les exigences jamais confrontées. `None` s'il n'y a rien à dire.
+    fn wrap_up_status(&self, aids: &TurnAids, out_of_time: bool) -> Option<String> {
+        if self.subagent || aids.originals.is_empty() {
+            return None;
+        }
+        let mut lines = Vec::new();
+        if let Some(open) = aids.last_checked.as_ref().filter(|open| !open.is_empty()) {
+            let audit = crate::web_design::Audit {
+                problems: open.clone(),
+                ..crate::web_design::Audit::default()
+            };
+            let reasons = crate::web_design::function_score(&audit).reasons;
+            let shown = if reasons.is_empty() {
+                format!("{} défaut(s) d'affichage", open.len())
+            } else {
+                reasons.join(", ")
+            };
+            lines.push(format!(
+                "- Encore mesuré sur la page à la dernière vérification : {shown}."
+            ));
+        }
+        let verified = (aids.checklisted && !aids.ultracode) || aids.workflow_checked;
+        if !verified {
+            lines.push("- Les exigences de la demande n'ont pas été confrontées une à une au travail : ce que la réponse dit « fait » ou « vérifié » n'est pas garanti par Claw.".to_string());
+        }
+        if lines.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "\n\n---\n**Ce que Claw a pu vérifier avant de s'arrêter** ({}) :\n{}\n\nÉcrivez « continue » pour que Claw termine le travail et le vérifie.",
+            if out_of_time {
+                "temps du passage écoulé"
+            } else {
+                "limite de requêtes du tour atteinte"
+            },
+            lines.join("\n")
+        ))
+    }
+
+    /// Ajoute un texte de Claw à la fin de la dernière réponse du modèle (celle
+    /// que l'utilisateur lit), dans le tour comme dans la session.
+    fn append_to_answer(&mut self, assistant_messages: &mut [ConversationMessage], text: &str) {
+        let Some(last) = assistant_messages.last_mut() else {
+            return;
+        };
+        let before = last.clone();
+        last.blocks.push(ContentBlock::Text {
+            text: text.to_string(),
+        });
+        if let Some(stored) = self
+            .session
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|message| **message == before)
+        {
+            *stored = last.clone();
+        }
     }
 
     /// Le tour se termine (limite de requêtes ou de temps) après des
@@ -4112,8 +4304,11 @@ where
             || crate::web_design::shared_between_people(&crate::project::user_words_with_history(
                 request,
             ));
-        let input =
-            crate::web_design::review_screenshot_input(&target, self.second_device(aids, shared));
+        let input = crate::web_design::with_request(
+            &crate::web_design::review_screenshot_input(&target, self.second_device(aids, shared)),
+            aids.page_theme,
+            &aids.figures,
+        );
         self.tool_executor.announce("Screenshot", &input);
         let (message, _) = self.execute_tool_call(
             format!("claw-design-{}", aids.interface_rounds),
@@ -6805,6 +7000,8 @@ pub struct StaticToolExecutor {
     handlers: BTreeMap<String, ToolHandler>,
     /// Outils lancés en arrière-plan (`spawn_background`), à résultat fixe.
     background: BTreeMap<String, String>,
+    /// Durée de ces outils en arrière-plan (aucune par défaut).
+    background_delay: std::time::Duration,
 }
 
 impl StaticToolExecutor {
@@ -6833,6 +7030,13 @@ impl StaticToolExecutor {
         self.background.insert(tool_name.into(), output.into());
         self
     }
+
+    /// Les outils en arrière-plan prennent `delay` avant de rendre leur résultat.
+    #[must_use]
+    pub fn background_delay(mut self, delay: std::time::Duration) -> Self {
+        self.background_delay = delay;
+        self
+    }
 }
 
 impl ToolExecutor for StaticToolExecutor {
@@ -6844,7 +7048,11 @@ impl ToolExecutor for StaticToolExecutor {
 
     fn spawn_background(&mut self, tool_name: &str, _input: &str) -> Option<Background> {
         let output = self.background.get(tool_name)?.clone();
-        Some(std::thread::spawn(move || (Ok(output), Vec::new())))
+        let delay = self.background_delay;
+        Some(std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            (Ok(output), Vec::new())
+        }))
     }
 }
 
@@ -9536,6 +9744,154 @@ mod tests {
     }
 
     #[test]
+    fn a_check_that_moves_nothing_is_said_in_one_line_and_the_third_steps_back() {
+        let _serial = crate::test_serial();
+        // Session #35 (27 octobre 2026) : « 0 nouveau, 0 réparé, 6 restants »
+        // redit vingt-cinq fois, la liste entière à chaque fois, et l'agent
+        // changeait une couleur après chaque vérification.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("immobile");
+        let write = || {
+            tool_step(
+                "write_file",
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                    .to_string(),
+            )
+        };
+        let steps = vec![
+            write(),
+            write(),
+            write(),
+            write(),
+            write(),
+            text_step("Corrigé."),
+        ];
+        let ((mut runtime, observed, _), shots) = measured_runtime(steps, vec![Some(MEASURED)]);
+        runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        assert_eq!(shots.get(), 5);
+        let last = |index: usize| {
+            observed.requests[index]
+                .rsplit("Claw looked at")
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        };
+        let first = last(1);
+        assert!(
+            first.contains("Still wrong on the page") && first.contains("U11 vs FC Voisins"),
+            "{first}"
+        );
+        for index in [2, 3, 5] {
+            let said = last(index);
+            assert!(
+                said.contains("nothing new, nothing fixed; the 1 problem(s) listed before remain")
+                    && !said.contains("U11 vs FC Voisins")
+                    && !said.contains("Step back"),
+                "{index}: {said}"
+            );
+        }
+        let third = last(4);
+        assert!(
+            third.contains("nothing new, nothing fixed") && third.contains("Step back"),
+            "{third}"
+        );
+    }
+
+    #[test]
+    fn the_first_version_of_a_new_page_is_checked_against_the_request_before_its_look() {
+        let _serial = crate::test_serial();
+        // Session #35 (27 octobre 2026) : une heure et demie de retouches de
+        // couleurs sur une appli qui ne contenait aucun montant de
+        // l'utilisateur ; le contrôle des exigences n'arrivait qu'à la fin.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("premiere");
+        let write = || {
+            tool_step(
+                "write_file",
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Budget</h1>" })
+                    .to_string(),
+            )
+        };
+        let steps = vec![write(), write(), text_step("C'est prêt.")];
+        let ((mut runtime, observed, _), _) = measured_runtime(steps, vec![Some(MEASURED)]);
+        runtime.page_target = Some(format!("path:{}", page.display()));
+        runtime
+            .run_turn(
+                "Je veux une appli web perso utilisable sur téléphone pour gérer mon budget : salaire = 1235.15 euro, caf = 103 à 206 euro, loyer = 450 euro.",
+                None,
+            )
+            .expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        let early = "The first complete version of the page is written";
+        let first = observed
+            .requests
+            .iter()
+            .position(|request| request.contains(early))
+            .unwrap_or_else(|| panic!("{:?}", observed.notices));
+        assert!(
+            observed.requests[first].contains("1235.15, 103, 206"),
+            "{}",
+            observed.requests[first]
+        );
+        // Une fois par tour.
+        let last = observed.requests.last().expect("requêtes");
+        assert_eq!(last.matches(early).count(), 1);
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.starts_with("Première version de la page écrite")));
+    }
+
+    #[test]
+    fn a_turn_cut_by_its_limit_ends_with_what_claw_could_check() {
+        let _serial = crate::test_serial();
+        // Session #35 (27 octobre 2026) : temps écoulé, la conclusion partait
+        // sans aucun contrôle, avec « fait et vérifié » pour des montants
+        // absents et un graphique vide.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("limite");
+        let write = || {
+            tool_step(
+                "write_file",
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                    .to_string(),
+            )
+        };
+        let steps = vec![write(), write(), text_step("Tout est fait et vérifié.")];
+        let ((runtime, _, _), _) = measured_runtime(steps, vec![Some(MEASURED)]);
+        let mut runtime = runtime.with_turn_request_limit(2);
+        let summary = runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let answer = summary
+            .assistant_messages
+            .last()
+            .map(super::message_text)
+            .unwrap_or_default();
+        assert!(answer.starts_with("Tout est fait et vérifié."), "{answer}");
+        for said in [
+            "Ce que Claw a pu vérifier avant de s'arrêter** (limite de requêtes du tour atteinte)",
+            "Encore mesuré sur la page à la dernière vérification : 1 défaut(s) d'affichage.",
+            "n'ont pas été confrontées une à une",
+            "Écrivez « continue »",
+        ] {
+            assert!(answer.contains(said), "{said}: {answer}");
+        }
+        // La session garde la même réponse : le passage suivant la relit telle quelle.
+        let stored = runtime
+            .session()
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::Assistant)
+            .map(super::message_text)
+            .unwrap_or_default();
+        assert_eq!(stored, answer);
+    }
+
+    #[test]
     fn the_check_after_a_change_runs_while_the_model_answers() {
         let _serial = crate::test_serial();
         // Session #32, passage 5 : 33 vérifications de 25 s, le modèle
@@ -9592,6 +9948,72 @@ mod tests {
             observed.requests[2]
         );
         // Deux vérifications, la seconde reprise avant la conclusion.
+        let checks = observed
+            .notices
+            .iter()
+            .filter(|notice| notice.starts_with("Claw vérifie la page après la modification"))
+            .count();
+        assert_eq!(checks, 2, "{:?}", observed.notices);
+    }
+
+    #[test]
+    fn a_slow_check_does_not_hold_the_next_request_and_groups_the_changes() {
+        let _serial = crate::test_serial();
+        // Session #35 (27 octobre 2026) : 62 vérifications d'environ 25 s,
+        // attendues après des requêtes de 6 à 9 s. Une vérification encore en
+        // route laisse partir la requête, et les modifications faites pendant
+        // ce temps attendent la suivante, qui les regroupe.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("lente");
+        let write = || {
+            tool_step(
+                "write_file",
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                    .to_string(),
+            )
+        };
+        let observed = std::rc::Rc::new(std::cell::RefCell::new(Observed::default()));
+        let executor = StaticToolExecutor::new()
+            .register("write_file", |input| {
+                let path = serde_json::from_str::<serde_json::Value>(input)
+                    .ok()
+                    .and_then(|value| value["path"].as_str().map(ToString::to_string))
+                    .unwrap_or_default();
+                Ok(serde_json::json!({ "filePath": path, "content": "x" }).to_string())
+            })
+            .register("Screenshot", |_| {
+                Err(super::ToolError::new("la vérification ne doit pas bloquer"))
+            })
+            .in_background("Screenshot", MEASURED)
+            .background_delay(std::time::Duration::from_millis(2400));
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            StepsApiClient {
+                steps: vec![write(), write(), write(), text_step("Corrigé.")].into(),
+                observed: std::rc::Rc::clone(&observed),
+                advisor: std::collections::VecDeque::new(),
+                escalation: None,
+            },
+            executor,
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["système".to_string()],
+        );
+        runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        assert_eq!(observed.requests.len(), 4, "{:?}", observed.notices);
+        // Les deux requêtes qui suivent la première modification partent sans
+        // attendre sa vérification, encore en route ; la troisième la reçoit.
+        for request in &observed.requests[1..3] {
+            assert!(!request.contains("Claw looked at"), "{request}");
+        }
+        assert!(
+            observed.requests[3].contains("Claw looked at"),
+            "{}",
+            observed.requests[3]
+        );
+        // Deux vérifications pour trois modifications : la seconde regroupe
+        // les deux faites pendant la première.
         let checks = observed
             .notices
             .iter()

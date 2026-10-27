@@ -42,6 +42,27 @@
   try { navigator.canShare = () => true; } catch (_) { /* partage absent */ }
   HTMLAnchorElement.prototype.click = function click() { count(); };
   try { HTMLFormElement.prototype.submit = function submit() { count(); }; } catch (_) { /* rien */ }
+  // Un bouton qui ouvre le choix d'un fichier (« Importer ») : le navigateur
+  // sans écran n'affiche aucune fenêtre, mais le bouton a bien agi. Vu le 27
+  // octobre 2026 (session #35) : « Importer (CSV) » dit « ne fait rien » à
+  // chaque revue, l'agent l'a réécrit trois fois.
+  try {
+    const nativeClick = HTMLInputElement.prototype.click;
+    HTMLInputElement.prototype.click = function click() {
+      if ((this.type || "").toLowerCase() === "file") { count(); return; }
+      return nativeClick.call(this);
+    };
+    if (HTMLInputElement.prototype.showPicker) {
+      HTMLInputElement.prototype.showPicker = function showPicker() { count(); };
+    }
+  } catch (_) { /* champ absent */ }
+  if (window.showOpenFilePicker) window.showOpenFilePicker = async () => { count(); return []; };
+  // Un libellé lié à un champ de fichier ouvre lui aussi le choix.
+  window.addEventListener("click", (event) => {
+    const label = event.target && event.target.closest && event.target.closest("label");
+    const field = label && (label.control || label.querySelector("input[type=file]"));
+    if (field && (field.type || "").toLowerCase() === "file") { count(); event.preventDefault(); }
+  }, true);
   // L'envoi est arrete en dernier (a la fenetre, apres les gestionnaires de
   // la page) : on sait ainsi si la page l'a pris en charge ou l'aurait laisse
   // recharger la page.
@@ -224,7 +245,8 @@
   // laisse Claw verifier le disque.
   const files = [];
   for (const [page, { from, root }] of [...pages].slice(0, 15)) {
-    if (page.startsWith("file:")) { files.push({ url: page, from, root, page: here }); continue; }
+    const served = typeof clawServed !== "undefined" && clawServed && page.startsWith(location.origin);
+    if (page.startsWith("file:") || served) { files.push({ url: page, from, root, page: here }); continue; }
     try {
       const stop = new AbortController();
       const timer = setTimeout(() => stop.abort(), 3000);
@@ -283,13 +305,24 @@
       return String(Math.max(min, Math.min(max, Math.max(1, min) + tested.size - 1)));
     }
     if (field instanceof HTMLTextAreaElement) return "Message d'essai, a ignorer.";
+    // Un montant ou une quantite dans un champ texte (clavier numerique du
+    // telephone) : un nombre, pas un nom. Vu le 27 octobre 2026 (kit d'appli) :
+    // « Camille Claw8858B » tape dans « Montant », lu 8 858 €, et l'operation
+    // passait pour perdue.
+    const mode = (field.getAttribute("inputmode") || "").toLowerCase();
+    if (mode === "decimal" || mode === "numeric" || /montant|amount|prix|price|somme|quantit|qty/.test(words)) {
+      return mode === "numeric" ? String(10 + tested.size) : `${12 + tested.size},50`;
+    }
     if (!named || /nom|name|pr[eé]nom|pseudo|qui|conducteur|joueur|parent/.test(words)) return marker;
     if (/ville|city|lieu|adresse|address|d[eé]part/.test(words)) return "Toulouse";
     if (/code.?postal|zip/.test(words)) return "31000";
     return "Essai";
   };
+  // Le champ qui a reçu le nom d'essai du formulaire en cours.
+  let markedField = null;
   const fill = (form) => {
     let named = false;
+    markedField = null;
     const refused = [];
     const groups = new Set();
     for (const field of form.querySelectorAll("input, select, textarea")) {
@@ -311,7 +344,10 @@
         if (option && !field.value) setValue(field, option.value);
       } else {
         const value = plausible(field, named);
-        if (value === marker) named = true;
+        if (value === marker) {
+          named = true;
+          markedField = field;
+        }
         // Le nom d'un formulaire precedent, garde par la page, est remplace.
         // Un nombre deja propose (« 3 places ») aussi : chaque formulaire a le sien.
         const counted = field.type === "number" || field.type === "range";
@@ -413,11 +449,23 @@
     }
     // Ajoute a la page, hors du message passager (toast) qui le remercie.
     const passing = "[role=status], [role=alert], [aria-live], .toast, .snackbar, .notification, output";
+    // Ou ajouté à un écran caché que la page ouvre d'un lien, d'un onglet ou
+    // d'un bouton (une appli d'une seule page : la liste des opérations derrière
+    // son onglet). Vu le 27 octobre 2026 (kit d'appli) : l'opération ajoutée
+    // depuis l'accueil, listée dans l'écran « Opérations », passait pour perdue.
+    const openable = (el) => {
+      for (let node = el; node && node !== document.body; node = node.parentElement) {
+        if (!node.id || shown(node)) continue;
+        const id = CSS.escape(node.id);
+        if (document.querySelector(`a[href="#${id}"], [aria-controls="${id}"], [data-screen="${id}"], [data-view="${id}"], [data-tab="${id}"], [data-target="#${id}"]`)) return true;
+      }
+      return false;
+    };
     const texts = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let added = false;
     for (let node = texts.nextNode(); node && !added; node = texts.nextNode()) {
       const holder = node.parentElement;
-      added = node.nodeValue.includes(marker) && holder && !holder.closest(passing) && shown(holder);
+      added = node.nodeValue.includes(marker) && holder && !holder.closest(passing) && (shown(holder) || openable(holder));
     }
     // Ou la page a change (un compteur, une liste) sans montrer le nom : les
     // textes apparus a l'envoi.
@@ -450,8 +498,15 @@
       return !(title && own.test((title.textContent || "").trim()));
     };
     const counted = appeared.find((text) => /\d/.test(text) && outside(text));
-    if (personal && !added && counted) {
+    // Un nom de personne, ou le libellé d'une entrée (une dépense, une séance) :
+    // le message le dit, sinon l'agent ajoutait un champ « Nom » à une dépense
+    // (vu le 27 octobre 2026, session #36).
+    const person = !markedField || /nom|name|pr[eé]nom|pseudo|qui|conducteur|joueur|parent/.test(nameOf(markedField));
+    if (personal && !added && counted && person) {
       unnamed.push(`Sending ${name} changes the page ("${counted.slice(0, 90)}") but the name typed in it ("${marker}") is shown nowhere, only in a passing message at best: people cannot see who signed up or who offered. Show each new entry with its name where the people who need it read it (the card or list it changed; for a reservation or an order, the list its owner reads, which need not be public), and keep it after a reload`);
+    } else if (personal && !added && counted) {
+      const field = (markedField.labels && markedField.labels[0] ? markedField.labels[0].innerText : markedField.name || markedField.id || "").replace(/\s+/g, " ").trim().slice(0, 40);
+      unnamed.push(`Sending ${name} changes the page ("${counted.slice(0, 90)}") but the entry typed in it ("${marker}" in the field "${field}") appears in no list, only in a passing message at best: the list of entries does not show the new one. Show each new entry in its list (on the screen or one tap away), and keep it after a reload; do not add fields to the form for this`);
     }
     if (added || appeared.length) kept.push({ form: name, marker, shown: added, appeared });
   };

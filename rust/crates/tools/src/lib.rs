@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 mod components;
 mod fonts;
 mod icons;
+mod local_server;
 mod ornaments;
 mod page_view;
 mod photos;
@@ -769,8 +770,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                         "items": { "type": "string" },
                         "description": "Screen sizes, one screenshot each: \"phone\" (390x844), \"tablet\" (820x1180), \"desktop\" (1280x800) or \"WIDTHxHEIGHT\". Default: phone and desktop."
                     },
-                    "theme": { "type": "string", "enum": ["light", "dark"], "description": "Color scheme the device says it prefers (prefers-color-scheme)." },
+                    "theme": { "type": "string", "enum": ["light", "dark"], "description": "Color scheme the device says it prefers (prefers-color-scheme). Default light; a page that follows the phone's setting is also measured in the other mode, and each color problem names its mode." },
                     "full_page": { "type": "boolean", "description": "Capture the page down to its end, up to three screens (default true); false keeps the first screen only. After a scroll action, the capture starts where the page was scrolled to." },
+                    "figures": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Numbers the user gave (amounts, prices, \"1235.15\") that the page must show somewhere, its hidden screens included: the result names those it never shows."
+                    },
                     "windows": { "type": "boolean", "description": "Also capture, at phone size, what the page shows only after a tap: each window (dialog, sheet) a button opens, the folded menu opened, and each tab not selected (default false)." },
                     "explore": { "type": "boolean", "description": "With windows: explore the site from top to bottom like a visitor, slower: each screen a button swaps in (with the access code written in the page's script when one is asked, the form sent first so it has something to show), its buttons and forms tried, and the site's other pages; each captured and measured; the result lists what was explored and what was not reached (default false)." },
                     "second_device": { "type": "boolean", "description": "With explore: also open those screens on a second device (a fresh browser with its own memory) and check that what the first device sent shows there too, as it must when other people see what a visitor enters (default false)." },
@@ -802,11 +808,18 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "Browser",
             description:
-                "Use the page in a real browser, step by step, like a visitor, and see it as text: the browser stays open between calls. `open` a page (path of an .html file of the project, or url; device phone, tablet, desktop or WIDTHxHEIGHT), then `click` or `type` into what you aim at (a reference [e12] from the latest view, its visible text, or a CSS selector), `select` an option, `press` a key (Enter, Escape, Tab, arrows), `scroll` (down, up, top, bottom, or to an element), `back`, `resize` to another device, `look` again (full true: the whole page, not only the screen), `inspect` an element (its CSS rules with file and line, and its spacing), `close`. Every call answers with what the action did, what changed on the page (texts now shown or gone), script errors, the browser's own alert boxes, layout problems measured since the last call (on look: all of them), and the view: each thing on the screen in reading order with its kind, text, font size, colors (text on background), place and size in px, and flags (covered by another element, cut, past the screen edge, small to tap, invalid field). picture true adds an image of the screen. Use it to check that what you built works and looks right: go through the visitor's task from start to end (open, fill the form, send, open the other screens, come back), on a phone and on a desktop, and fix what it shows.",
+                "Use the page in a real browser like a visitor, and see it as text: the browser stays open between calls. A whole journey goes in ONE call: action `steps` with `steps`, the list of actions played in order (each an object like a call of this tool: {\"action\": \"click\", \"target\": \"Ajouter\"}), each step with `expect` (text that must then be on the page, \"736,05\") or `absent` (text that must not, \"NaN\"); the journey stops at the first step that fails and says which. `open` a page (path of an .html file of the project, or url; device phone, tablet, desktop or WIDTHxHEIGHT), then `click` or `type` into what you aim at (a reference [e12] from the latest view, its visible text, or a CSS selector), `select` an option, `press` a key (Enter, Escape, Tab, arrows), `scroll` (down, up, top, bottom, or to an element), `back`, `resize` to another device, `look` again (full true: the whole page, not only the screen), `inspect` an element (its CSS rules with file and line, and its spacing), `close`. Every call answers with what the action did, what changed on the page (texts now shown or gone), script errors, the browser's own alert boxes, layout problems measured since the last call (on look: all of them), and the view: each thing on the screen in reading order with its kind, text, font size, colors (text on background), place and size in px, and flags (covered by another element, cut, past the screen edge, small to tap, invalid field). picture true adds an image of the screen. Use it to check that what you built works and looks right: go through the visitor's task from start to end (open, fill the form, send, open the other screens, come back), on a phone and on a desktop, and fix what it shows.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["open", "click", "type", "select", "press", "scroll", "back", "resize", "look", "inspect", "close"] },
+                    "action": { "type": "string", "enum": ["steps", "open", "click", "type", "select", "press", "scroll", "back", "resize", "look", "inspect", "close"] },
+                    "steps": {
+                        "type": "array",
+                        "items": { "type": "object" },
+                        "description": "steps: the journey, up to 40 actions played in one call, each an object with the fields of a single call (action, path, url, device, target, text, key, to, expect, absent)."
+                    },
+                    "expect": { "type": "string", "description": "Text that must be on the page after this action (case and spaces ignored), to prove the result: a total, a name, a message." },
+                    "absent": { "type": "string", "description": "Text that must not be on the page after this action (\"NaN\", \"undefined\", an entry just deleted)." },
                     "path": { "type": "string", "description": "open: an .html file of the project, for a page that needs no server." },
                     "url": { "type": "string", "description": "open: an http address (a local server: http://localhost:3000/)." },
                     "device": { "type": "string", "description": "open, resize: phone (default for open), tablet, desktop or WIDTHxHEIGHT." },
@@ -904,7 +917,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "Component",
-            description: "Interactive components that work as soon as they are pasted (HTML, CSS and dependency-free JS), accessible, in the plan's colors, with icons from the icon set: nav-menu (header and phone menu), accordion (FAQ), tabs, dialog (modal), toast (confirmation messages), carousel, booking (days, slots, places left, calendar file), filter (tags and search), form (validation, sending, success), cart (basket or quote), theme-toggle (dark mode), copy, share, open-now (live opening hours), directions (route, call, map), reveal (appear on scroll), count-up (key figures), scroll-effects (reading progress, parallax), page-transitions. Use them instead of writing these by hand: every button then does what it says. Ask for several by name in one call; without names you get the list.",
+            description: "Interactive components that work as soon as they are pasted (HTML, CSS and dependency-free JS), accessible, in the plan's colors, with icons from the icon set: nav-menu (header and phone menu), accordion (FAQ), tabs, dialog (modal), toast (confirmation messages), carousel, booking (days, slots, places left, calendar file), filter (tags and search), form (validation, sending, success), cart (basket or quote), theme-toggle (dark mode), copy, share, open-now (live opening hours), directions (route, call, map), reveal (appear on scroll), count-up (key figures), scroll-effects (reading progress, parallax), page-transitions; for a personal app that keeps the user's data (budget, log, habits): app-tabs (screens behind a tab bar), entries (data kept on the phone with the user's figures from the first launch, undo, a copy saved and taken back), entry-sheet (panel to add an entry, fields readable in dark mode), chart (SVG bars redrawn when their screen opens), pwa (manifest, service worker, offline). Use them instead of writing these by hand: every button then does what it says. Ask for several by name in one call; without names you get the list.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -913,6 +926,21 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "AppIcon",
+            description: "PNG icons of an installable app (home screen, offline), drawn by a real browser from the app's SVG icon: icon-192.png and icon-512.png (transparent), icon-maskable-512.png (the drawing inside Android's safe zone, on a full background) and apple-touch-icon.png (180 px, full background, for the iPhone). Draw the SVG first (Icon tool with `color` and `background`, or an Ornament shape, colors written in the SVG), save it in the project (icons/icon.svg), then call this tool: it writes the PNGs next to it and returns the manifest's \"icons\" and the <head> tags. Never write a PNG by hand or leave a 1x1 placeholder.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "svg": { "type": "string", "description": "Path of the app's SVG icon in the project, for example \"icons/icon.svg\"" },
+                    "folder": { "type": "string", "description": "Folder inside the project for the PNGs (default: the SVG's folder)" },
+                    "background": { "type": "string", "description": "Color behind the drawing in the maskable and iPhone icons (default: the manifest's background_color, else white)" }
+                },
+                "required": ["svg"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
             name: "LookAtImage",
@@ -1475,6 +1503,9 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
             .and_then(to_pretty_json),
         "Component" => from_value::<components::ComponentInput>(input)
             .and_then(|input| components::component_tool(&input))
+            .and_then(to_pretty_json),
+        "AppIcon" => from_value::<screenshot::app_icons::AppIconInput>(input)
+            .and_then(|input| screenshot::app_icons::app_icon(&input))
             .and_then(to_pretty_json),
         "Photo" => from_value::<photos::PhotoInput>(input)
             .and_then(|input| photos::photo(&input))

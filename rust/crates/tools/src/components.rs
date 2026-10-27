@@ -195,6 +195,46 @@ const COMPONENTS: &[Component] = &[
         "Pure CSS: browsers without scroll-driven animations show a still page. Keep one effect per page.",
     ),
     component(
+        "app-tabs",
+        "screens of a single-page app (home, entries, summary, settings) behind a tab bar at the bottom of phones and at the top of desktops; the open screen follows the address, so it stays after a reload and Back returns to the one before",
+        files!("app-tabs"),
+        include_str!("components/app-tabs.js"),
+        &[],
+        "One <section data-screen> per screen with its id, one tab link per screen (href=\"#id\"); only the first screen has an h1. Each change of screen sends the event screenchange, on which a chart redraws.",
+    ),
+    component(
+        "entries",
+        "data of a personal app kept on the phone (expenses and income, sessions, readings): the user's own figures shown from the first launch, the month's list newest first with its totals, deletion with an Undo, a copy saved as a spreadsheet file and taken back",
+        files!("entries"),
+        include_str!("components/entries.js"),
+        &["toast"],
+        "Put the figures the user gave in the data-entries-seed JSON (label, amount negative for an expense, category): they show at the first launch, in the current month only; never copy them onto the months before. data-entries names the storage key. window.entries (add, remove, month, months, totals, format) feeds the rest of the app, and every change sends entries:change.",
+    ),
+    component(
+        "entry-sheet",
+        "panel to add an entry (a sheet that rises from the bottom of phones): expense or income, amount typed as 12,50 or 12.50, label, category, date of the day, with fields readable in light and dark mode",
+        files!("entry-sheet"),
+        include_str!("components/entry-sheet.js"),
+        &["dialog", "toast", "entries"],
+        "Edit the categories to the user's own; the panel adds to window.entries, closes and confirms. Fields take their colors from --ink and --field: set both in the dark tokens, with color-scheme: dark.",
+    ),
+    component(
+        "chart",
+        "bar chart in inline SVG, sized to its screen and redrawn when that screen opens, when its size changes and when the data change: the income and spending of the last months from entries, or your own series",
+        files!("chart"),
+        include_str!("components/chart.js"),
+        &[],
+        "data-chart=\"entries\" and data-chart-months draw window.entries; a month without entries stays empty. For other data, call window.drawChart(figure, { labels, series: [{ name, values, tone }] }). Never a <canvas> sized by script in a hidden screen: it stays 0 px wide.",
+    ),
+    component(
+        "pwa",
+        "app installable on the home screen and usable offline: the <head> tags, the manifest (start_url relative to the app's folder) and the service worker (network first, the saved copy without network)",
+        files!("pwa"),
+        include_str!("components/pwa.js"),
+        &[],
+        "Save files.manifest.webmanifest and files.sw.js at the app's root, list every file of the app in FILES, and change VERSION at each update. Draw icons/icon.svg (Icon tool with a background badge, or Ornament), then the AppIcon tool makes the PNG icons the manifest names (192, 512, maskable, and the iPhone's 180).",
+    ),
+    component(
         "page-transitions",
         "smooth cross-fade between the pages of a multi-page site, the title gliding from one page to the next",
         files!("page-transitions"),
@@ -257,7 +297,42 @@ const ALIASES: &[(&str, &str)] = &[
     ("parallax", "scroll-effects"),
     ("progression", "scroll-effects"),
     ("transitions", "page-transitions"),
+    ("ecrans", "app-tabs"),
+    ("screens", "app-tabs"),
+    ("tab-bar", "app-tabs"),
+    ("donnees", "entries"),
+    ("data", "entries"),
+    ("store", "entries"),
+    ("stockage", "entries"),
+    ("operations", "entries"),
+    ("export", "entries"),
+    ("import", "entries"),
+    ("csv", "entries"),
+    ("sheet", "entry-sheet"),
+    ("volet", "entry-sheet"),
+    ("saisie", "entry-sheet"),
+    ("ajout", "entry-sheet"),
+    ("graphique", "chart"),
+    ("graph", "chart"),
+    ("diagramme", "chart"),
+    ("hors-ligne", "pwa"),
+    ("offline", "pwa"),
+    ("manifest", "pwa"),
+    ("service-worker", "pwa"),
+    ("installable", "pwa"),
 ];
+
+/// Fichiers à part d'un composant, rendus sous `files` avec le nom à leur donner.
+const EXTRA_FILES: &[(&str, &[(&str, &str)])] = &[(
+    "pwa",
+    &[
+        (
+            "manifest.webmanifest",
+            include_str!("components/pwa.webmanifest"),
+        ),
+        ("sw.js", include_str!("components/pwa-sw.js")),
+    ],
+)];
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ComponentInput {
@@ -316,6 +391,13 @@ fn rendered(component: &Component) -> Value {
     }
     if !component.needs.is_empty() {
         value["needs"] = json!(component.needs);
+    }
+    if let Some((_, files)) = EXTRA_FILES.iter().find(|(name, _)| *name == component.name) {
+        value["files"] = files
+            .iter()
+            .map(|(file, text)| ((*file).to_string(), json!(text)))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
     }
     value
 }
@@ -392,7 +474,7 @@ mod tests {
 
     #[test]
     fn every_component_is_complete_and_draws_no_icon_by_hand() {
-        assert_eq!(COMPONENTS.len(), 19);
+        assert_eq!(COMPONENTS.len(), 24);
         for component in COMPONENTS {
             let html = with_icons(component.html);
             let js = with_icons(component.js);
@@ -431,7 +513,12 @@ mod tests {
         let mut html = String::new();
         let mut css = String::from(":root { --paper: #f7f3ec; --ink: #1f1d1a; --muted: #5f5a52; --accent: #8a3b12; --error: #b42318; --font-display: Georgia, serif; --font-text: system-ui, sans-serif; }\n*, *::before, *::after { box-sizing: border-box; }\nbody { margin: 0; font-family: var(--font-text); font-size: 1.0625rem; line-height: 1.6; color: var(--ink); background: var(--paper); }\nmain { width: min(100% - 2.5rem, 60rem); margin: 0 auto; padding: 2rem 0 6rem; }\nmain > section + section { margin-top: 3rem; }\n:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }\nimg { max-width: 100%; height: auto; }\n");
         let mut js = String::new();
-        for component in COMPONENTS {
+        // Les balises de l'appli installable vont dans le <head> et demandent
+        // ses fichiers : l'essai du kit d'appli s'en sert, pas cette page.
+        for component in COMPONENTS
+            .iter()
+            .filter(|component| component.name != "pwa")
+        {
             let body = with_icons(component.html)
                 .replace("images/bouquet-1.jpg", "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 1000'%3E%3Crect width='800' height='1000' fill='%23c9a27e'/%3E%3C/svg%3E")
                 .replace("images/bouquet-2.jpg", "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 1000'%3E%3Crect width='800' height='1000' fill='%238fa98b'/%3E%3C/svg%3E")
@@ -507,6 +594,179 @@ mod tests {
         }
     }
 
+    /// Une appli de budget bâtie avec le kit comme un modèle la collerait :
+    /// écrans, données de l'utilisateur, volet d'ajout, graphique, hors-ligne.
+    fn kit_app(dir: &std::path::Path) {
+        let kit = ask(json!({ "names": ["app-tabs", "entry-sheet", "chart", "pwa"] }));
+        let parts: Vec<&serde_json::Value> = kit["components"]
+            .as_array()
+            .expect("liste")
+            .iter()
+            .collect();
+        let part = |name: &str| {
+            *parts
+                .iter()
+                .find(|component| component["name"] == name)
+                .unwrap_or_else(|| panic!("{name}"))
+        };
+        let html = |name: &str| part(name)["html"].as_str().expect("html").to_string();
+        let seed = r#"[
+      { "label": "Salaire", "amount": 1235.15, "category": "Revenus" },
+      { "label": "Mobili-jeune", "amount": 100, "category": "Revenus" },
+      { "label": "CAF (au moins)", "amount": 103, "category": "Revenus" },
+      { "label": "Loyer", "amount": -450, "category": "Logement" },
+      { "label": "Forfait", "amount": -10, "category": "Abonnements" },
+      { "label": "Claude", "amount": -21.6, "category": "Abonnements" },
+      { "label": "Transport", "amount": -8, "category": "Transport" },
+      { "label": "Alimentaire", "amount": -100, "category": "Courses" }
+    ]"#;
+        let entries = html("entries");
+        let (before, rest) = entries.split_once("[\n").expect("données de départ");
+        let (_, after) = rest.split_once("]\n").expect("données de départ");
+        let entries = format!("{before}{seed}\n{after}");
+        let screens = html("app-tabs")
+            .replace(
+                "<p>Le résumé du mois, et ce qu'il reste à dépenser.</p>",
+                &format!("<p class=\"reste\">Reste ce mois-ci <strong data-entries-sum=\"balance\">0,00 €</strong></p>{}", html("entry-sheet")),
+            )
+            .replace("<p>Les dépenses et les rentrées, les plus récentes d'abord.</p>", &entries)
+            .replace("<p>Les mois passés, côte à côte.</p>", &html("chart"))
+            .replace("<p>Les montants de chaque mois, la copie des données.</p>", "<p>Une copie des données se garde depuis l'écran Opérations.</p>");
+        let head = html("pwa").replace("<!-- Dans le <head> de index.html : -->\n", "");
+        std::fs::write(
+            dir.join("index.html"),
+            format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\"><title>Mon budget</title>{head}<link rel=\"stylesheet\" href=\"styles.css\"></head><body><header class=\"tete\"><p class=\"nom\">Mon budget</p></header><main>{screens}</main><script src=\"app.js\"></script></body></html>"),
+        )
+        .expect("page");
+        // « Sobre foncé » : le mode sombre demandé, pour tous les téléphones.
+        let mut css = String::from(":root { --paper: #161412; --ink: #f1ebe2; --muted: #b8afa3; --accent: #e0a040; --on-accent: #161412; --income: #7fcf9a; --error: #ff8a7a; --field: #221f1c; --radius: 12px; color-scheme: dark; }\n*, *::before, *::after { box-sizing: border-box; }\nbody { margin: 0; font: 17px/1.6 system-ui, sans-serif; color: var(--ink); background: var(--paper); }\nmain { width: min(100% - 2rem, 48rem); margin: 0 auto; padding: 1rem 0 2rem; }\n.tete { padding: 1rem; }\n.nom { margin: 0; font-weight: 700; }\nh1 { font-size: 2.25rem; line-height: 1.1; margin: 0 0 1rem; }\nh2 { font-size: 1.5rem; margin: 0 0 1rem; }\n.reste { font-size: 1.25rem; }\n");
+        let mut js = String::new();
+        for component in &parts {
+            css.push_str(component["css"].as_str().unwrap_or_default());
+            css.push('\n');
+            js.push_str(component["js"].as_str().unwrap_or_default());
+            js.push('\n');
+        }
+        std::fs::write(dir.join("styles.css"), css).expect("css");
+        std::fs::write(dir.join("app.js"), js).expect("js");
+        for (file, text) in part("pwa")["files"].as_object().expect("fichiers") {
+            std::fs::write(dir.join(file), text.as_str().expect("texte")).expect("fichier");
+        }
+        std::fs::create_dir_all(dir.join("icons")).expect("dossier");
+        std::fs::write(
+            dir.join("icons/icon.svg"),
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24" rx="5" fill="#161412"/><path d="M5 17V9m5 8V6m5 11v-5m4 5V8" stroke="#e0a040" stroke-width="2.4" stroke-linecap="round"/></svg>"##,
+        )
+        .expect("icône");
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    #[allow(clippy::too_many_lines)]
+    fn the_app_kit_makes_a_budget_app_that_works_in_a_real_browser() {
+        // Session #35 (27 octobre 2026) : l'appli de budget de Claw s'ouvrait
+        // vide, son texte tapé était noir sur noir, son graphique vide et ses
+        // icônes absentes. Le kit donne tout cela fait et essayé.
+        let name = format!("claw-kit-{}", std::process::id());
+        let dir = std::env::current_dir().expect("dossier").join(&name);
+        std::fs::create_dir_all(&dir).expect("dossier");
+        kit_app(&dir);
+        if let Ok(copy) = std::env::var("CLAW_KIT_DEMO") {
+            let _ = std::fs::remove_dir_all(&copy);
+            let _ = std::fs::create_dir_all(&copy);
+            for file in [
+                "index.html",
+                "styles.css",
+                "app.js",
+                "manifest.webmanifest",
+                "sw.js",
+            ] {
+                let _ = std::fs::copy(dir.join(file), std::path::Path::new(&copy).join(file));
+            }
+        }
+        let icons: crate::screenshot::app_icons::AppIconInput =
+            serde_json::from_value(json!({ "svg": format!("{name}/icons/icon.svg") }))
+                .expect("entrée");
+        let icons = crate::screenshot::app_icons::app_icon(&icons);
+        let shot: crate::screenshot::ScreenshotInput = serde_json::from_value(json!({
+            "path": format!("{name}/index.html"),
+            "viewports": ["phone", "desktop"],
+            "theme": "dark",
+            "windows": true,
+            "explore": true,
+            "figures": ["1235.15", "100", "103", "450", "21.6", "8"]
+        }))
+        .expect("entrée");
+        let shot = crate::screenshot::take(&shot);
+        let step = |input: serde_json::Value| {
+            let input: crate::screenshot::browse::BrowserInput =
+                serde_json::from_value(input).expect("entrée");
+            crate::screenshot::browse::browse(&input)
+                .unwrap_or_else(|error| json!({ "error": error }))
+        };
+        let journey = step(json!({ "action": "steps", "steps": [
+            { "action": "open", "path": format!("{name}/index.html"), "expect": "Ce mois-ci", "absent": "NaN" },
+            { "action": "click", "target": "Ajouter" },
+            { "action": "type", "target": "Montant", "text": "12,50" },
+            { "action": "type", "target": "Libellé", "text": "Cinéma" },
+            { "action": "click", "target": "Enregistrer", "expect": "Dépense de 12,50 € enregistrée" },
+            { "action": "click", "target": "Opérations", "expect": "Cinéma", "absent": "Invalid Date" },
+            // Le message « « Cinéma » supprimé » nomme encore l'opération : c'est
+            // son montant dans la liste qui doit partir, puis revenir.
+            { "action": "click", "target": "[aria-label=\"Supprimer « Cinéma »\"]", "expect": "« Cinéma » supprimé", "absent": "-12,50 €" },
+            { "action": "click", "target": "Annuler", "expect": "-12,50 €" },
+            { "action": "click", "target": "Bilan", "expect": "Rentrées et dépenses" }
+        ] }));
+        let chart = step(json!({ "action": "look", "full": true }));
+        let _ = step(json!({ "action": "close" }));
+        let pngs: Vec<bool> = [
+            "icon-192.png",
+            "icon-512.png",
+            "icon-maskable-512.png",
+            "apple-touch-icon.png",
+        ]
+        .iter()
+        .map(|file| {
+            std::fs::read(dir.join("icons").join(file))
+                .is_ok_and(|bytes| bytes.starts_with(b"\x89PNG"))
+        })
+        .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        let icons = icons.expect("icônes");
+        assert_eq!(icons["background"], "#161412", "{icons}");
+        assert!(pngs.iter().all(|written| *written), "{pngs:?}");
+        let shot = shot.expect("captures");
+        let text = shot.to_string();
+        for defect in [
+            "never shows",
+            "typed text cannot be read",
+            "Charts that show nothing",
+            "do nothing when clicked",
+            "cannot be tapped",
+            "not in the project",
+            "Unsafe attempt",
+            "drawn by hand",
+            "Invalid Date",
+            "NaN",
+            "wider than the screen",
+            "too little contrast",
+            "is shown nowhere",
+        ] {
+            assert!(!text.contains(defect), "{defect}: {text}");
+        }
+        for capture in shot["captures"].as_array().expect("captures") {
+            let console = capture["console"].to_string();
+            assert!(
+                !console.contains("uncaught") && !console.contains("error:"),
+                "{console}"
+            );
+        }
+        assert!(journey.get("failed").is_none(), "{journey}");
+        assert!(journey.get("error").is_none(), "{journey}");
+        let view = chart.to_string();
+        assert!(view.contains("Rentrées et dépenses"), "{view}");
+    }
+
     #[test]
     fn components_are_found_by_name_or_alias_with_what_they_need() {
         let result = ask(json!({ "names": ["panier", "booking"] }));
@@ -528,7 +788,7 @@ mod tests {
         let catalog = ask(json!({}));
         assert_eq!(
             catalog["components"].as_array().expect("catalogue").len(),
-            19
+            24
         );
         // Un nom inconnu reçoit le catalogue avec les autres.
         let mixed = ask(json!({ "names": ["dragon", "tabs"] }));

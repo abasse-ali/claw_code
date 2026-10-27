@@ -5,6 +5,8 @@
 .toast[data-tone="error"] .toast__icon { color: #ff9a8a; }
 .toast__icon { display: inline-grid; flex: none; }
 .toast__text { flex: 1; }
+.toast__action { flex: none; min-height: 44px; padding: 0 .9rem; border: 0; border-radius: 999px; background: transparent; color: inherit; font: inherit; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.toast__action:hover { background: rgb(255 255 255 / .12); }
 .toast__close { display: inline-grid; place-items: center; flex: none; width: 44px; height: 44px; margin: -.25rem -.25rem -.25rem 0; border: 0; border-radius: 999px; background: transparent; color: inherit; font: inherit; cursor: pointer; opacity: .8; }
 .toast__close:hover { opacity: 1; background: rgb(255 255 255 / .12); }
 .toast.is-leaving { animation: toast-out .2s ease-in forwards; }

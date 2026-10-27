@@ -26,6 +26,9 @@ use serde_json::{json, Value};
 /// Mesures faites dans la page (voir le fichier pour la liste des défauts).
 const AUDIT_SCRIPT: &str = include_str!("screenshot_audit.js");
 
+/// L'outil `AppIcon` : les icônes PNG d'une appli, dessinées par le même navigateur.
+#[path = "app_icons.rs"]
+pub(crate) mod app_icons;
 /// L'outil `Browser` : le même navigateur, gardé ouvert et mené pas à pas.
 #[path = "browse.rs"]
 pub(crate) mod browse;
@@ -54,7 +57,7 @@ const FULL_PAGE_SCREENS: f64 = 3.0;
 const MAX_SLICES: usize = 3;
 /// Vues ouvertes par un bouton (fenêtres, menu, onglets), capturées par appel
 /// (option `windows`).
-const MAX_VIEW_SHOTS: usize = 5;
+const MAX_VIEW_SHOTS: usize = 6;
 /// Qualité JPEG des captures : nettes pour un lecteur, légères dans la conversation.
 const JPEG_QUALITY: u8 = 80;
 /// Aperçu de chaque capture (vignette de Claw Web) : 160 pixels de large,
@@ -117,6 +120,9 @@ pub(crate) struct ScreenshotInput {
     /// mémoire) que ce qu'un visiteur envoie se voit chez les autres.
     #[serde(default)]
     second_device: Option<bool>,
+    /// Chiffres donnés par l'utilisateur que la page doit montrer quelque part.
+    #[serde(default)]
+    figures: Option<Vec<String>>,
 }
 
 /// Une action avant la capture : un seul de ses champs est rempli.
@@ -313,14 +319,14 @@ fn target(input: &ScreenshotInput) -> Result<String, String> {
             {
                 // Une page du projet donnée par son adresse : comme `path`.
                 let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-                file_url(&cwd, Path::new(&path))
+                page_url(&cwd, Path::new(&path))
             } else {
                 Err(format!("Screenshot opens http and https pages: `{url}` is not one (for a file of the project, pass `path`; for a local server, give its http://localhost address)"))
             }
         }
         (None, Some(path)) => {
             let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-            file_url(&cwd, Path::new(path))
+            page_url(&cwd, Path::new(path))
         }
         // Les deux donnés (vu le 21 octobre 2026, une requête perdue) : l'adresse web si c'en
         // est une, sinon le fichier du projet.
@@ -329,15 +335,15 @@ fn target(input: &ScreenshotInput) -> Result<String, String> {
                 Ok(url.to_string())
             } else {
                 let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-                file_url(&cwd, Path::new(path))
+                page_url(&cwd, Path::new(path))
             }
         }
         (None, None) => Err("give the page to capture: url (http://localhost:3000/ for a local server) or path (an .html file of the project)".to_string()),
     }
 }
 
-/// Adresse `file://` d'un fichier HTML du dossier de travail `cwd` (pas ailleurs).
-pub(crate) fn file_url(cwd: &Path, path: &Path) -> Result<String, String> {
+/// Fichier HTML du dossier de travail `cwd` (pas ailleurs), en chemin canonique.
+fn project_page(cwd: &Path, path: &Path) -> Result<PathBuf, String> {
     let full = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -361,6 +367,25 @@ pub(crate) fn file_url(cwd: &Path, path: &Path) -> Result<String, String> {
     if !matches!(extension.as_str(), "html" | "htm" | "svg") {
         return Err(format!("{} is not an .html file: open a page, or start the project's server and give its address", path.display()));
     }
+    Ok(full)
+}
+
+/// Adresse d'une page du projet, telle qu'en ligne : servie par le serveur
+/// local de Claw (`http://127.0.0.1:<port>/…`, voir `local_server`), ou en
+/// `file://` s'il ne peut pas démarrer. En `file://`, le navigateur refuse à
+/// la page son manifeste, son service worker et ses modules : des erreurs que
+/// le site publié n'a pas (vu le 27 octobre 2026, session #35).
+pub(crate) fn page_url(cwd: &Path, path: &Path) -> Result<String, String> {
+    let full = project_page(cwd, path)?;
+    match crate::local_server::url_for(cwd, &full) {
+        Some(url) => Ok(url),
+        None => file_url(cwd, path),
+    }
+}
+
+/// Adresse `file://` d'un fichier HTML du dossier de travail `cwd` (pas ailleurs).
+pub(crate) fn file_url(cwd: &Path, path: &Path) -> Result<String, String> {
+    let full = project_page(cwd, path)?;
     let text = full.to_string_lossy().replace('\\', "/");
     // Chemin long de Windows (`//?/C:/…`) ramené à sa forme courte.
     let text = text.strip_prefix("//?/").unwrap_or(&text);
@@ -1057,6 +1082,9 @@ struct Shot {
     explore: Explore,
     /// Ce que `inspect` a trouvé : un élément par demande.
     inspected: Vec<Value>,
+    /// Menu replié, onglets et écrans cachés de la page à son arrivée, relevés
+    /// pendant la capture d'un téléphone (`None` ailleurs).
+    views: Option<Vec<View>>,
 }
 
 /// Un écran que la page ne montre qu'après un bouton (« Espace boulanger »),
@@ -1794,11 +1822,19 @@ fn console_lines(events: &[Value]) -> Vec<String> {
                 // Un fichier du projet qui manque, dit comme tel : vu le 27
                 // octobre 2026 (session #32, passage 8), « manifest.json »
                 // absent, lu par l'agent comme une limite des pages `file://`.
-                match url.filter(|url| url.starts_with("file:")) {
-                    Some(url) if text.contains("ERR_FILE_NOT_FOUND") => format!(
+                // Servie par Claw (`local_server`), une page dit 404 pour un
+                // fichier absent : le même cas, nommé de même.
+                match url.filter(|url| url.starts_with("file:") || crate::local_server::serves(url))
+                {
+                    Some(url)
+                        if text.contains("ERR_FILE_NOT_FOUND")
+                            || text.contains("status of 404") =>
+                    {
+                        format!(
                         "{level}: the page loads {}, which is not in the project: add the file, or remove what asks for it",
                         project_file_name(url)
-                    ),
+                    )
+                    }
                     Some(url) => format!("{level}: {text} ({})", project_file_name(url)),
                     None => format!(
                         "{level}: {text}{}",
@@ -1840,6 +1876,10 @@ fn file_origin_noise(text: &str, url: Option<&str>) -> bool {
         || (text.starts_with("Not allowed to launch '") && text.contains("user gesture"))
         || text.contains("net::ERR_UNKNOWN_URL_SCHEME")
         || text.contains("from origin 'null' has been blocked by CORS policy")
+        // Vu le 27 octobre 2026 (session #35) : le manifeste d'une page ouverte
+        // en `file://`, compté « erreur du script ».
+        || (text.starts_with("Unsafe attempt to load URL file:")
+            && text.contains("'file:' URLs are treated as unique security origins"))
         || text.contains("current origin ('null') is not supported")
         || (text.starts_with("Failed to load resource: net::ERR_FAILED")
             && url.is_some_and(|url| url.starts_with("file://")))
@@ -1857,6 +1897,8 @@ struct Session<'a> {
     actions: &'a [Action],
     /// Éléments à examiner (`inspect`).
     inspect: &'a [String],
+    /// Chiffres de la demande que la page doit montrer (`figures`).
+    figures: &'a [String],
 }
 
 /// Défile toute la page puis revient en haut : les apparitions au défilement
@@ -1869,6 +1911,20 @@ fn open_page(
     devtools: &mut DevTools,
     session: &Session<'_>,
     viewport: &Viewport,
+) -> Result<Option<String>, String> {
+    open_page_with(devtools, session, viewport, true)
+}
+
+/// La page ouverte ; `scroll_through` la fait défiler jusqu'en bas puis
+/// remonter, pour que ce qui apparaît au défilement soit là dans une capture
+/// de la page entière. Une vue (fenêtre, menu, écran) se capture sur un seul
+/// écran après un clic : elle s'en passe (1,4 s de moins par vue, mesuré le 27
+/// octobre 2026 sur l'appli de la session #35).
+fn open_page_with(
+    devtools: &mut DevTools,
+    session: &Session<'_>,
+    viewport: &Viewport,
+    scroll_through: bool,
 ) -> Result<Option<String>, String> {
     // Une page vide d'abord : la même adresse à `#` se rechargerait sans charger la page.
     devtools.events.clear();
@@ -1918,18 +1974,30 @@ fn open_page(
         ));
     }
     devtools.pump(session.wait)?;
-    if devtools.evaluate(SCROLL_THROUGH).is_ok() {
+    if scroll_through && devtools.evaluate(SCROLL_THROUGH).is_ok() {
         devtools.pump(Duration::from_millis(600))?;
     }
     Ok(note)
+}
+
+/// La page ouverte est-elle servie par Claw (`local_server`) ? Ses liens se
+/// vérifient alors sur le disque, comme en `file://`, et nomment le fichier du
+/// projet plutôt qu'une adresse au port changeant.
+fn served_by_claw(devtools: &mut DevTools) -> bool {
+    devtools
+        .evaluate("location.href")
+        .ok()
+        .and_then(|href| href.as_str().map(crate::local_server::serves))
+        .unwrap_or(false)
 }
 
 /// Les boutons essayés un à un : ceux qui ne font rien, ceux qui échouent ; et
 /// ceux qui ouvrent une fenêtre (nom, sélecteur), pour la capturer ensuite.
 fn click_problems(devtools: &mut DevTools) -> (Vec<String>, Vec<(String, String)>, Explore) {
     let codes = Value::from(page_access_codes(devtools)).to_string();
+    let served = served_by_claw(devtools);
     let script = format!(
-        "const clawSnapshot = () => {SNAPSHOT_SCRIPT};\nconst clawWindow = () => {WINDOW_SCRIPT};\nconst clawCodes = {codes};\n{CLICKS_SCRIPT}"
+        "const clawSnapshot = () => {SNAPSHOT_SCRIPT};\nconst clawWindow = () => {WINDOW_SCRIPT};\nconst clawCodes = {codes};\nconst clawServed = {served};\n{CLICKS_SCRIPT}"
     );
     let Ok(result) = devtools.evaluate(&script) else {
         return (Vec::new(), Vec::new(), Explore::default());
@@ -2115,7 +2183,8 @@ fn project_file(cwd: &Path, url: &str) -> Option<PathBuf> {
     (path.starts_with(cwd.canonicalize().ok()?) && path.is_file()).then_some(path)
 }
 
-/// Pages du site ouvert en `file://` que ses liens visent, et qui manquent sur le disque.
+/// Pages du site (servi par Claw, ou ouvert en `file://`) que ses liens visent,
+/// et qui manquent sur le disque.
 fn missing_pages(files: &Value) -> Vec<String> {
     let Some(files) = files.as_array() else {
         return Vec::new();
@@ -2131,18 +2200,25 @@ fn missing_pages(files: &Value) -> Vec<String> {
                     path.exists()
                 }
             };
-            let path = PathBuf::from(crate::page_view::file_url_path(url)?);
+            // Page servie par Claw (`local_server`) ou ouverte en `file://` : le
+            // fichier visé, et son chemin depuis la racine du site.
+            let (path, relative) = if let Some(path) = crate::local_server::path_for(url) {
+                (path, crate::local_server::relative_for(url)?)
+            } else {
+                let path = PathBuf::from(crate::page_view::file_url_path(url)?);
+                let relative = path.strip_prefix("/").unwrap_or(&path).to_path_buf();
+                (path, relative)
+            };
             // `/tarifs.html` vise la racine du site publié, pas celle du disque :
             // le dossier du projet, ou celui d'où le site est servi (`public/`),
             // entre la page et le projet.
             let exists = match file["root"].as_str() {
                 Some(_) => {
-                    let relative = path.strip_prefix("/").unwrap_or(&path).to_path_buf();
                     let cwd = std::env::current_dir().ok()?;
-                    let page = file["page"]
-                        .as_str()
-                        .and_then(crate::page_view::file_url_path)
-                        .map(PathBuf::from);
+                    let page = file["page"].as_str().and_then(|page| {
+                        crate::local_server::path_for(page)
+                            .or_else(|| crate::page_view::file_url_path(page).map(PathBuf::from))
+                    });
                     page.iter()
                         .flat_map(|page| page.ancestors().skip(1))
                         .take_while(|dir| dir.starts_with(&cwd))
@@ -2248,8 +2324,15 @@ fn capture(
     let audit = devtools
         .evaluate(AUDIT_SCRIPT)
         .map_err(|error| format!("the layout check failed in the page: {error}"))?;
+    // Les vues de la page à son arrivée, avant que les essais la changent : la
+    // suite n'a pas à rouvrir la page pour les chercher.
+    let views = (session.windows && viewport.mobile && session.actions.is_empty())
+        .then(|| found_views(devtools));
     let mut problems = strings(&audit["problems"]);
     problems.extend(drawn_icons_problem(&audit["svgIcons"]));
+    if session.actions.is_empty() {
+        problems.extend(missing_figures(devtools, session.figures));
+    }
     if session.actions.is_empty() {
         problems.extend(lost_controls(
             &format!("{} {}", session.url, viewport.label),
@@ -2317,13 +2400,21 @@ fn capture(
         })
         .collect();
     browser_measures(devtools, &audit, &mut problems, &mut notes);
+    color_modes(devtools, session, &audit, &mut problems);
     let inspected = inspect_elements(devtools, session.inspect);
     // Après la capture (les essais changent la page) : le menu d'un téléphone
     // s'ouvre-t-il, et chaque bouton fait-il quelque chose ?
+    let mut menu_left_open = false;
     if viewport.mobile {
         if let Ok(probe) = devtools.evaluate(PROBE_SCRIPT) {
             problems.extend(strings(&probe["problems"]));
+            menu_left_open = probe["leftOpen"].as_bool() == Some(true);
         }
+    }
+    // Un menu que l'essai n'a pas su refermer couvrirait les boutons essayés
+    // ensuite : la page repart de son état d'arrivée.
+    if try_clicks && menu_left_open {
+        let _ = open_page(devtools, session, viewport);
     }
     let mut openers = Vec::new();
     let mut explore = Explore::default();
@@ -2348,7 +2439,121 @@ fn capture(
         openers,
         explore,
         inspected,
+        views,
     })
+}
+
+/// Les chiffres de la demande que la page ne montre nulle part, écrans cachés
+/// compris (tout son texte, et la valeur de ses champs), quand il en manque au
+/// moins deux et la moitié. Vu le 27 octobre 2026 (session #35) : une appli de
+/// budget bâtie sur les montants de l'utilisateur (salaire 1235,15 €, CAF de
+/// 103 à 206 €) s'ouvrait à 0,00 € partout, et le compte rendu les disait
+/// « affichés et vérifiés ».
+fn missing_figures(devtools: &mut DevTools, figures: &[String]) -> Option<String> {
+    if figures.len() < 2 {
+        return None;
+    }
+    let script = format!(
+        r#"((figures) => {{
+  const parts = [];
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {{
+    acceptNode: (node) => node.parentElement && node.parentElement.closest("script, style, template, noscript") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+  }});
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) parts.push(node.textContent);
+  for (const field of document.querySelectorAll("input, textarea")) if (field.value) parts.push(field.value);
+  const text = parts.join(" ").replace(/(\d)[\s\u00a0\u202f\u2009']+(?=\d{{3}}\b)/g, "$1");
+  const seen = [...text.matchAll(/\d+(?:[.,]\d+)?/g)].map((found) => Number(found[0].replace(",", ".")));
+  return figures.filter((figure) => !seen.some((value) => Math.abs(value - Number(figure)) < 0.005));
+}})({})"#,
+        json!(figures)
+    );
+    let missing = strings(&devtools.evaluate(&script).ok()?);
+    if missing.len() < 2 || missing.len() * 2 < figures.len() {
+        return None;
+    }
+    Some(format!(
+        "Figures the user gave that the page never shows, not even on its hidden screens: {}. An app built on the user's own numbers starts with them filled in (as values they can change), not empty at 0",
+        missing.join(", ")
+    ))
+}
+
+/// La page suit le réglage clair ou sombre du téléphone : ses défauts de
+/// couleur portent leur mode, et l'autre mode se mesure aussi.
+fn color_modes(
+    devtools: &mut DevTools,
+    session: &Session<'_>,
+    audit: &Value,
+    problems: &mut Vec<String>,
+) {
+    if audit["schemes"].as_bool() != Some(true) {
+        return;
+    }
+    let shown = session.theme.unwrap_or("light");
+    for line in problems.iter_mut().filter(|line| is_color_problem(line)) {
+        *line = format!("{} {line}", scheme_prefix(shown));
+    }
+    problems.extend(other_scheme_problems(devtools, shown));
+}
+
+/// Défauts de couleur, propres au mode clair ou sombre de la page.
+fn is_color_problem(line: &str) -> bool {
+    [
+        "Text with too little contrast",
+        "Icons that cannot be seen",
+        "Fields whose typed text cannot be read",
+    ]
+    .iter()
+    .any(|start| line.starts_with(start))
+}
+
+/// Ce qui précède un défaut de couleur : le mode du téléphone où il se voit.
+fn scheme_prefix(theme: &str) -> String {
+    format!("In {theme} mode (a phone set to {theme}, prefers-color-scheme: {theme}):")
+}
+
+/// Les défauts de couleur de l'autre mode que celui de la capture (`shown`),
+/// avec les règles CSS en cause ; puis la page revient au mode de la capture.
+/// Vu le 27 octobre 2026 (session #35) : un site sombre avec un mode clair
+/// pour les téléphones réglés en clair ; chaque contraste à 1,1:1 venait du
+/// mode clair, et l'agent changeait dix fois les couleurs du mode sombre.
+fn other_scheme_problems(devtools: &mut DevTools, shown: &str) -> Vec<String> {
+    let other = if shown == "dark" { "light" } else { "dark" };
+    let clear = "document.querySelectorAll('[data-claw-blame], [data-claw-hover]').forEach((el) => { el.removeAttribute('data-claw-blame'); el.removeAttribute('data-claw-hover'); })";
+    let set = |devtools: &mut DevTools, theme: &str| {
+        devtools.call(
+            "Emulation.setEmulatedMedia",
+            json!({ "features": [{ "name": "prefers-color-scheme", "value": theme }] }),
+        )
+    };
+    let _ = devtools.evaluate(clear);
+    if set(devtools, other).is_err() {
+        return Vec::new();
+    }
+    // Les transitions de couleur rendraient encore l'ancien mode.
+    let _ = devtools.evaluate("(() => { const still = document.createElement('style'); still.id = 'claw-still'; still.textContent = '*, *::before, *::after { transition: none !important; animation: none !important; }'; document.head.appendChild(still); return true; })()");
+    let _ = devtools.pump(Duration::from_millis(250));
+    let mut found = Vec::new();
+    if let Ok(audit) = devtools.evaluate(AUDIT_SCRIPT) {
+        let mut problems = strings(&audit["problems"]);
+        let mut notes = Vec::new();
+        let culprits = audit["culprits"].as_array().cloned().unwrap_or_default();
+        for (is_note, index, rules) in blamed_rules(devtools, &culprits) {
+            let list = if is_note { &mut notes } else { &mut problems };
+            if let Some(line) = list.get_mut(index) {
+                let _ = write!(line, " (CSS rules: {})", rules.join("; "));
+            }
+        }
+        found = problems
+            .into_iter()
+            .filter(|line| is_color_problem(line))
+            .map(|line| format!("{} {line}", scheme_prefix(other)))
+            .collect();
+    }
+    let _ = devtools.evaluate("(() => { const still = document.getElementById('claw-still'); if (still) still.remove(); return true; })()");
+    let _ = devtools.evaluate(clear);
+    let _ = set(devtools, shown);
+    let _ = devtools.pump(Duration::from_millis(150));
+    found
 }
 
 /// Boutons et liens de chaque page (adresse et taille d'écran) à sa première
@@ -2582,8 +2787,46 @@ const VIEWS_SCRIPT: &str = r#"(() => {
   const tabs = [...document.querySelectorAll("[role=tab]")]
     .filter((el) => shown(el) && el.getAttribute("aria-selected") !== "true").slice(0, 4)
     .map((el) => ({ kind: "tab", label: label(el), selector: path(el) }));
-  return menus.concat(tabs);
+  // Écrans d'une appli d'une seule page, ouverts par un lien `#historique` ou
+  // un bouton `data-view` : la section visée est cachée au départ. Vu le 27
+  // octobre 2026 (session #35) : l'onglet Historique, son graphique vide, que
+  // ni les captures ni les mesures n'avaient ouvert.
+  const seenViews = new Set();
+  const views = [];
+  for (const el of document.querySelectorAll("a[href^='#'], [data-tab], [data-view], [data-screen], [data-page], [data-target]")) {
+    if (views.length >= 3 || el.closest("dialog, [role=dialog]")) continue;
+    const key = (el.getAttribute("href") || "").slice(1) || el.dataset.tab || el.dataset.view || el.dataset.screen || el.dataset.page || (el.dataset.target || "").replace(/^#/, "");
+    if (!key || seenViews.has(key)) continue;
+    let target = null;
+    try { target = document.getElementById(decodeURIComponent(key)) || document.querySelector(`[data-view="${CSS.escape(key)}"], [data-screen="${CSS.escape(key)}"], [data-tab-panel="${CSS.escape(key)}"]`); } catch (_) { target = null; }
+    if (!target || shown(target) || target.contains(el)) continue;
+    seenViews.add(key);
+    views.push({ kind: "view", label: label(el), selector: path(el) });
+  }
+  return menus.concat(tabs, views);
 })()"#;
+
+/// Le menu replié, les onglets non choisis et les écrans cachés de la page
+/// ouverte (`VIEWS_SCRIPT`).
+fn found_views(devtools: &mut DevTools) -> Vec<View> {
+    let Ok(Value::Array(found)) = devtools.evaluate(VIEWS_SCRIPT) else {
+        return Vec::new();
+    };
+    found
+        .iter()
+        .filter_map(|view| {
+            Some(View {
+                kind: match view["kind"].as_str() {
+                    Some("tab") => "tab",
+                    Some("view") => "view",
+                    _ => "menu",
+                },
+                label: view["label"].as_str()?.to_string(),
+                selector: view["selector"].as_str()?.to_string(),
+            })
+        })
+        .collect()
+}
 
 /// Les vues que la page cache (fenêtres d'`openers`, relevées par le parcours des
 /// boutons ; menu replié, onglets non choisis, relevés ici), rouvertes une à une
@@ -2595,6 +2838,8 @@ fn view_shots(
     session: &Session<'_>,
     viewport: &Viewport,
     openers: &[(String, String)],
+    arrival: Option<Vec<View>>,
+    known: &[String],
 ) -> Vec<Extra> {
     let mut views: Vec<View> = openers
         .iter()
@@ -2604,32 +2849,43 @@ fn view_shots(
             selector: selector.clone(),
         })
         .collect();
-    if open_page(devtools, session, viewport).is_ok() {
-        if let Ok(Value::Array(found)) = devtools.evaluate(VIEWS_SCRIPT) {
-            for view in found {
-                let (Some(label), Some(selector)) =
-                    (view["label"].as_str(), view["selector"].as_str())
-                else {
-                    continue;
-                };
-                views.push(View {
-                    kind: if view["kind"] == "tab" { "tab" } else { "menu" },
-                    label: label.to_string(),
-                    selector: selector.to_string(),
-                });
+    // Relevées pendant la capture du téléphone ; sinon la page se rouvre pour
+    // les chercher.
+    match arrival {
+        Some(found) => views.extend(found),
+        None => {
+            if open_page(devtools, session, viewport).is_ok() {
+                views.extend(found_views(devtools));
             }
         }
     }
+    // Trois fenêtres d'abord, puis le menu, les écrans de l'appli et les
+    // onglets : une appli d'une seule page (budget, club) montrait ses
+    // fenêtres et jamais ses autres écrans.
+    let rank = |index: usize, view: &View| match view.kind {
+        "window" if index < 3 => 0,
+        "menu" => 1,
+        "view" => 2,
+        "tab" => 3,
+        _ => 4,
+    };
+    let mut ordered: Vec<(usize, &View)> = views.iter().enumerate().collect();
+    ordered.sort_by_key(|(index, view)| (rank(*index, view), *index));
     let mut shots = Vec::new();
-    for view in views.iter().take(MAX_VIEW_SHOTS) {
+    for view in ordered
+        .into_iter()
+        .map(|(_, view)| view)
+        .take(MAX_VIEW_SHOTS)
+    {
         // Les essais du parcours (« Camille Claw8762C ») restaient dans les champs
         // que la page remplit de sa mémoire ; `storage` se repose au chargement.
         let _ = devtools
             .evaluate("try { localStorage.clear(); sessionStorage.clear(); } catch (error) {}");
-        if open_page(devtools, session, viewport).is_err() {
+        if open_page_with(devtools, session, viewport, false).is_err() {
             break;
         }
-        // Une fenêtre doit s'être ouverte ; un menu ou un onglet se montre tel quel.
+        // Une fenêtre doit s'être ouverte ; un menu, un onglet ou un écran se
+        // montre tel quel.
         let check = if view.kind == "window" {
             "[...document.querySelectorAll('dialog[open], [role=dialog], [aria-modal=true]')].some((box) => { const s = getComputedStyle(box); if (s.display === 'none' || s.visibility === 'hidden') return false; return [box, ...[...box.querySelectorAll('*')].slice(0, 300)].some((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'; }); })"
         } else {
@@ -2638,7 +2894,7 @@ fn view_shots(
         let open = format!(
             "(async () => {{ const el = document.querySelector({}); if (!el) return false; el.scrollIntoView({{ block: '{}' }}); el.click(); await new Promise((done) => setTimeout(done, 500)); return {check}; }})()",
             json!(view.selector),
-            if view.kind == "tab" { "start" } else { "center" }
+            if matches!(view.kind, "tab" | "view") { "start" } else { "center" }
         );
         if devtools
             .evaluate(&open)
@@ -2650,7 +2906,7 @@ fn view_shots(
         }
         // La fenêtre se mesure comme la page : la capture seule ne disait
         // rien de sa largeur ni de sa place (session #31, 26 octobre 2026).
-        let problems = if view.kind == "window" {
+        let mut problems: Vec<String> = if view.kind == "window" {
             strings(&devtools.evaluate(WINDOW_SCRIPT).unwrap_or_default())
                 .into_iter()
                 .map(|problem| format!("In the window opened by {}: {problem}", view.label))
@@ -2658,9 +2914,11 @@ fn view_shots(
         } else {
             Vec::new()
         };
+        problems.extend(shown_view_problems(devtools, view, known));
         if let Ok((jpeg, preview)) = picture(devtools, viewport, None) {
             let label = match view.kind {
                 "tab" => format!("tab {}", view.label),
+                "view" => format!("screen opened by {}", view.label),
                 kind => format!("{kind} opened by {}", view.label),
             };
             shots.push(Extra {
@@ -2672,6 +2930,72 @@ fn view_shots(
         }
     }
     shots
+}
+
+/// Ce que l'écran ouvert montre de faux (graphique vide, valeur de script,
+/// champ illisible) et que la page de départ ne montrait pas.
+fn shown_view_problems(devtools: &mut DevTools, view: &View, known: &[String]) -> Vec<String> {
+    let mut problems = Vec::new();
+    if let Ok(audit) = devtools.evaluate(AUDIT_SCRIPT) {
+        let place = match view.kind {
+            "window" => format!("In the window opened by {}", view.label),
+            "tab" => format!("In the tab {}", view.label),
+            "view" => format!("In the screen opened by {}", view.label),
+            _ => format!("In the menu opened by {}", view.label),
+        };
+        for problem in strings(&audit["problems"]) {
+            if view_problem(&problem) && !known.contains(&problem) {
+                problems.push(format!("{place}: {problem}"));
+            }
+        }
+        // L'autre mode aussi quand la page suit le réglage du téléphone et que
+        // l'écran a des champs. Vu le 27 octobre 2026 (session #36) : les
+        // montants de l'écran « Réglages », noir sur noir en mode sombre, que la
+        // mesure de la page d'accueil, en clair, ne voyait pas.
+        let fields = "[...document.querySelectorAll('input:not([type=hidden]):not([type=checkbox]):not([type=radio]), textarea, select')].some((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })";
+        if audit["schemes"].as_bool() == Some(true)
+            && devtools
+                .evaluate(fields)
+                .ok()
+                .and_then(|shown| shown.as_bool())
+                == Some(true)
+        {
+            let shown = session_theme(devtools);
+            for problem in other_scheme_problems(devtools, &shown) {
+                let measured = problem
+                    .split_once("): ")
+                    .map_or(problem.as_str(), |(_, rest)| rest);
+                if view_problem(measured) && !known.contains(&problem) {
+                    problems.push(format!("{place}: {problem}"));
+                }
+            }
+        }
+    }
+    let _ = devtools.evaluate("document.querySelectorAll('[data-claw-blame], [data-claw-hover]').forEach((el) => { el.removeAttribute('data-claw-blame'); el.removeAttribute('data-claw-hover'); })");
+    problems
+}
+
+/// Le mode de couleurs que la page voit en ce moment (`prefers-color-scheme`).
+fn session_theme(devtools: &mut DevTools) -> String {
+    let dark = devtools
+        .evaluate("matchMedia('(prefers-color-scheme: dark)').matches")
+        .ok()
+        .and_then(|value| value.as_bool())
+        == Some(true);
+    if dark { "dark" } else { "light" }.to_string()
+}
+
+/// Défauts qu'un écran ouvert (fenêtre, onglet, écran d'une appli) ajoute à
+/// ceux de la page de départ : ce qu'il montre, pas sa mise en page.
+fn view_problem(line: &str) -> bool {
+    [
+        "Charts that show nothing",
+        "A script value shown as text",
+        "Fields whose typed text cannot be read",
+        "Text with too little contrast",
+    ]
+    .iter()
+    .any(|start| line.starts_with(start))
 }
 
 /// Écrans cachés et pages du site capturés au plus, en plus de la page.
@@ -2786,7 +3110,9 @@ fn open_screen(
     screen: &Screen,
     resend: bool,
 ) -> Option<Opened> {
-    open_page(devtools, session, viewport).ok()?;
+    // L'écran est caché pendant que la page défilerait : le défilement de toute
+    // la page ne lui montre rien.
+    open_page_with(devtools, session, viewport, false).ok()?;
     let typed = if resend {
         resend_forms(devtools)
     } else {
@@ -2958,7 +3284,7 @@ fn explore_pages(
         if file.is_some() && file == here {
             continue;
         }
-        if url.starts_with("file:") && file.is_none() {
+        if (url.starts_with("file:") || crate::local_server::serves(url)) && file.is_none() {
             continue;
         }
         pages += 1;
@@ -3273,7 +3599,9 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
     let mut design_notes = 0;
     let session = Session {
         url: &url,
-        theme,
+        // Sans mode demandé, le mode clair : le même partout, quel que soit le
+        // réglage du système qui lance le navigateur.
+        theme: theme.or(Some("light")),
         // Page entière par défaut : le modèle ne demande presque jamais `full_page`,
         // et ne voyait alors que l'en-tête, capture après capture (vu le 25 octobre
         // 2026, refonte du site d'un club de foot : les défauts plus bas restaient).
@@ -3282,6 +3610,7 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
         wait,
         actions: &steps,
         inspect: &inspect,
+        figures: input.figures.as_deref().unwrap_or_default(),
     };
     // Les boutons s'essaient une fois, à l'ordinateur de préférence.
     let clicks_at = sizes
@@ -3289,6 +3618,7 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
         .position(|viewport| !viewport.mobile)
         .unwrap_or(sizes.len().saturating_sub(1));
     let mut openers = Vec::new();
+    let mut arrival = None;
     let mut explore = Explore::default();
     // Défauts de la page elle-même : les écrans explorés ne les redisent pas.
     let mut known = Vec::new();
@@ -3353,6 +3683,9 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
                 if openers.is_empty() {
                     openers = shot.openers;
                 }
+                if arrival.is_none() {
+                    arrival = shot.views;
+                }
                 if explore.screens.is_empty() && explore.pages.is_empty() {
                     explore = shot.explore;
                 }
@@ -3407,7 +3740,14 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
     // Fenêtres, menu et onglets, au téléphone de préférence : là où un parent les ouvre.
     if session.windows {
         if let Some(viewport) = sizes.iter().find(|size| size.mobile).or(sizes.first()) {
-            let shots = view_shots(&mut devtools, &session, viewport, &openers);
+            let shots = view_shots(
+                &mut devtools,
+                &session,
+                viewport,
+                &openers,
+                arrival.take(),
+                &known,
+            );
             for (number, extra) in shots.into_iter().enumerate() {
                 total += extra.problems.len();
                 let name = format!("{}-view-{}", viewport.label.replace(' ', "-"), number + 1);
@@ -3967,6 +4307,59 @@ mod tests {
         assert!(!printed.contains("do nothing when clicked"), "{printed}");
     }
 
+    /// Session #35 (27 octobre 2026), l'appli de budget : servie en http (plus
+    /// d'erreur `file://`), menu en tiroir hors de l'écran (pas « déjà là »),
+    /// menu refermé après son essai (aucun bouton « impossible à toucher »),
+    /// import d'un fichier (pas « ne fait rien »), contrastes nommés par mode,
+    /// texte tapé illisible dans la fenêtre, graphique vide de l'écran Historique.
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn the_budget_app_of_session_35_is_measured_right_in_a_real_browser() {
+        let cwd = std::env::current_dir().expect("dossier");
+        let name = format!("claw-budget-{}", std::process::id());
+        let dir = cwd.join(&name);
+        std::fs::create_dir_all(&dir).expect("dossier");
+        std::fs::write(dir.join("index.html"), "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Budget</title><link rel=\"manifest\" href=\"manifest.json\"><link rel=\"stylesheet\" href=\"style.css\"></head><body><header class=\"top\"><a class=\"brand\" href=\"#accueil\">Budget</a><button id=\"menuBtn\" class=\"menu-btn\" aria-controls=\"nav\" aria-expanded=\"false\">Menu</button></header><nav id=\"nav\" class=\"nav\"><a href=\"#accueil\" data-tab=\"accueil\">Accueil</a><a href=\"#historique\" data-tab=\"historique\">Historique</a><button id=\"btnImport\" type=\"button\">Importer</button><input type=\"file\" id=\"importFile\" aria-label=\"Fichier\" hidden></nav><div id=\"overlay\" class=\"overlay\"></div><main><section id=\"accueil\" class=\"panel active\"><h1>Résumé du mois</h1><p>Reste à vivre : 0,00 €</p><button id=\"add\" type=\"button\">Ajouter une dépense</button></section><section id=\"historique\" class=\"panel\"><h2>Historique</h2><div class=\"chart\"><canvas id=\"chart\"></canvas></div></section></main><dialog id=\"modal\"><form method=\"dialog\"><label for=\"amount\">Montant</label><input id=\"amount\" type=\"number\" value=\"450\"><button value=\"ok\">Enregistrer</button></form></dialog><script src=\"app.js\"></script></body></html>").expect("html");
+        std::fs::write(dir.join("style.css"), ":root { --bg: #111111; --text: #eeeeee; --accent: #ffe8a0; }\n@media (prefers-color-scheme: light) { :root { --bg: #f5f3f0; --text: #1f1d1a; } }\nbody { margin: 0; font: 16px/1.5 sans-serif; background: var(--bg); color: var(--text); }\n.top { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; }\n.brand { color: var(--accent); font-size: 20px; text-decoration: none; }\n.menu-btn { padding: 12px; font: inherit; color: var(--text); background: transparent; border: 1px solid currentColor; }\n.nav { position: fixed; top: 0; left: 0; bottom: 0; width: 260px; background: var(--bg); transform: translateX(-100%); display: flex; flex-direction: column; padding: 16px; z-index: 20; }\n.nav.open { transform: none; }\n.nav a, .nav button { color: var(--text); padding: 12px; font: inherit; background: transparent; border: 0; text-align: left; }\n.overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, .5); display: none; z-index: 10; }\n.overlay.visible { display: block; }\nmain { padding: 16px; }\n.panel { display: none; }\n.panel.active { display: block; }\n.chart { height: 200px; }\ndialog { background: #050505; border: 0; padding: 24px; }\ndialog label { color: #eeeeee; display: block; }\ninput { color: inherit; background: #050505; border: 1px solid #555555; padding: 12px; font: inherit; }\nbutton { font: inherit; padding: 12px; }\n").expect("css");
+        std::fs::write(dir.join("app.js"), "const nav = document.getElementById('nav'); const overlay = document.getElementById('overlay'); const btn = document.getElementById('menuBtn');\nconst setNav = (open) => { nav.classList.toggle('open', open); overlay.classList.toggle('visible', open); btn.setAttribute('aria-expanded', String(open)); };\nbtn.addEventListener('click', () => setNav(!nav.classList.contains('open')));\noverlay.addEventListener('click', () => setNav(false));\nconst show = (id) => document.querySelectorAll('.panel').forEach((panel) => panel.classList.toggle('active', panel.id === id));\ndocument.querySelectorAll('[data-tab]').forEach((link) => link.addEventListener('click', (event) => { event.preventDefault(); show(link.dataset.tab); setNav(false); }));\ndocument.getElementById('btnImport').addEventListener('click', () => document.getElementById('importFile').click());\ndocument.getElementById('add').addEventListener('click', () => document.getElementById('modal').showModal());\nconst canvas = document.getElementById('chart'); const rect = canvas.getBoundingClientRect(); canvas.width = rect.width; canvas.height = rect.height; if (canvas.width) canvas.getContext('2d').fillRect(0, 0, 10, 10);\n").expect("js");
+        std::fs::write(
+            dir.join("manifest.json"),
+            "{\"name\": \"Budget\", \"start_url\": \"./\", \"display\": \"standalone\"}",
+        )
+        .expect("manifest");
+        let mut request = input(None, Some(&format!("{name}/index.html")));
+        request.viewports = Some(json!(["phone"]));
+        request.windows = Some(true);
+        let result = super::take(&request);
+        let _ = std::fs::remove_dir_all(&dir);
+        let result = result.expect("capture");
+        let text = result.to_string();
+        let page = result["captures"][0].to_string();
+        assert!(
+            !page.contains("file:") && !page.contains("Unsafe attempt"),
+            "{page}"
+        );
+        assert!(!page.contains("is already on screen"), "{page}");
+        assert!(!page.contains("cannot be tapped"), "{page}");
+        assert!(!page.contains("do nothing when clicked"), "{page}");
+        assert!(
+            page.contains("In light mode (a phone set to light, prefers-color-scheme: light): Text with too little contrast")
+                && page.contains("a.brand"),
+            "{page}"
+        );
+        assert!(!page.contains("In dark mode (a phone set to dark, prefers-color-scheme: dark): Text with too little contrast"), "{page}");
+        assert!(
+            text.contains("Fields whose typed text cannot be read")
+                && text.contains("input#amount"),
+            "{text}"
+        );
+        assert!(
+            text.contains("In the screen opened by a \\\"Historique\\\": Charts that show nothing")
+                && text.contains("canvas#chart"),
+            "{text}"
+        );
+    }
+
     #[test]
     #[ignore = "lance le navigateur installé"]
     fn a_button_removed_since_the_first_capture_is_named_in_a_real_browser() {
@@ -4272,7 +4665,7 @@ mod tests {
             "5 items of the same kind",
             "A count of 0 or 1 followed by a plural: p.stat",
             "Technical words shown to visitors",
-            "A script value shown as text (undefined, NaN, null or [object Object]): p.total",
+            "A script value shown as text (undefined, NaN, null, Infinity, Invalid Date or [object Object]): p.total",
         ] {
             assert!(phone.contains(expected), "{expected}: {phone}");
         }
@@ -4370,6 +4763,86 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!mine.contains("is shown nowhere"), "{mine}");
         assert!(shared.contains("is shown nowhere"), "{shared}");
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn typed_text_unreadable_in_the_other_mode_of_a_hidden_screen_is_found() {
+        // Session #36 (27 octobre 2026) : les montants de l'écran « Réglages »,
+        // noir sur noir quand le téléphone est réglé en sombre.
+        let cwd = std::env::current_dir().expect("dossier");
+        let name = format!("claw-reglages-{}", std::process::id());
+        let dir = cwd.join(&name);
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |field_color: &str| {
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Budget</title><style>:root {{ --bg: #f6f3ee; --text: #1f1d1a; --field: #ffffff; }} @media (prefers-color-scheme: dark) {{ :root {{ --bg: #161412; --text: #f1ebe2; --field: #0b0a09; }} }} body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; background: var(--bg); color: var(--text); }} input {{ font: inherit; padding: 10px; background: var(--field); {field_color} border: 1px solid #888; }} a {{ color: inherit; display: inline-block; padding: 12px; }} [hidden] {{ display: none; }}</style></head><body><nav><a href=\"#accueil\">Accueil</a><a href=\"#reglages\">Réglages</a></nav><section id=\"accueil\"><h1>Ce mois-ci</h1><p>Reste 848,55 €</p></section><section id=\"reglages\" hidden><h2>Réglages</h2><label for=\"salaire\">Salaire</label><input id=\"salaire\" value=\"1235.15\"></section><script>const show = () => {{ const id = location.hash.slice(1) || 'accueil'; for (const s of document.querySelectorAll('section')) s.hidden = s.id !== id; }}; addEventListener('hashchange', show); show();</script></body></html>"),
+            )
+            .expect("html");
+        };
+        let capture = || {
+            let mut request = input(None, Some(&format!("{name}/index.html")));
+            request.viewports = Some(json!(["phone"]));
+            request.windows = Some(true);
+            super::take(&request).expect("capture").to_string()
+        };
+        write("");
+        let unreadable = capture();
+        write("color: inherit;");
+        let readable = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            unreadable.contains("In the screen opened by a \\\"Réglages\\\": In dark mode")
+                && unreadable.contains("Fields whose typed text cannot be read"),
+            "{unreadable}"
+        );
+        assert!(
+            !readable.contains("Fields whose typed text cannot be read"),
+            "{readable}"
+        );
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn an_entry_missing_from_its_list_is_not_asked_for_a_name() {
+        // Session #36 (27 octobre 2026) : la liste des opérations d'une appli de
+        // budget ne montrait pas la dépense ajoutée ; le message parlait de
+        // « qui s'est inscrit », et l'agent a ajouté un champ « Nom » à la dépense.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-entree-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |listed: bool| {
+            let shown = if listed {
+                "li.textContent = libelle;"
+            } else {
+                ""
+            };
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Budget</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button, input {{ font: inherit; padding: 10px; }}</style></head><body><h1>Dépenses</h1><p id=\"total\">Total : 0 €</p><form id=\"depense\"><label for=\"montant\">Montant</label><input id=\"montant\" inputmode=\"decimal\" required><label for=\"libelle\">Libellé</label><input id=\"libelle\" required><button type=\"submit\">Ajouter</button></form><section><h2>Opérations</h2><ul id=\"liste\"></ul></section><script>let total = 0; document.getElementById('depense').addEventListener('submit', (e) => {{ e.preventDefault(); const libelle = document.getElementById('libelle').value; total += Number(document.getElementById('montant').value.replace(',', '.')); document.getElementById('total').textContent = 'Total : ' + total + ' €'; const li = document.createElement('li'); {shown} li.append(' ' + total + ' €'); document.getElementById('liste').append(li); }});</script></body></html>"),
+            )
+            .expect("html");
+        };
+        let page = format!("claw-entree-{}/index.html", std::process::id());
+        let capture = || {
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            super::take(&request).expect("capture")["captures"][0]["problems"].to_string()
+        };
+        write(false);
+        let lost = capture();
+        write(true);
+        let listed = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            lost.contains("appears in no list") && lost.contains("in the field \\\"Libellé\\\""),
+            "{lost}"
+        );
+        assert!(!lost.contains("who signed up"), "{lost}");
+        // Le montant reçoit un nombre, pas le nom d'essai.
+        assert!(!lost.contains("NaN"), "{lost}");
+        assert!(!listed.contains("appears in no list"), "{listed}");
     }
 
     #[test]
@@ -4787,6 +5260,7 @@ mod tests {
             inspect: None,
             explore: None,
             second_device: None,
+            figures: None,
         }
     }
 

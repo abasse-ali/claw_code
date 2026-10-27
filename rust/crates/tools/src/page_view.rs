@@ -393,7 +393,7 @@ pub(crate) fn view_page(input: &ViewPageInput) -> Result<Value, String> {
         let path = file_url_path(given)
             .ok_or_else(|| format!("`{given}` is not a readable file:// address"))?;
         let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-        crate::screenshot::file_url(&cwd, std::path::Path::new(&path))?
+        crate::screenshot::page_url(&cwd, std::path::Path::new(&path))?
     } else if given.starts_with("http://") || given.starts_with("https://") {
         given.to_string()
     } else {

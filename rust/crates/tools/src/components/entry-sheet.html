@@ -1,0 +1,45 @@
+<button class="sheet-open" type="button" data-dialog-open="nouvelle-operation">{{icon:plus}}<span>Ajouter</span></button>
+
+<dialog class="dialog sheet" id="nouvelle-operation" aria-labelledby="nouvelle-operation-titre">
+  <form class="sheet__form" data-entry-form novalidate>
+    <header class="sheet__header">
+      <h2 class="sheet__title" id="nouvelle-operation-titre">Nouvelle opération</h2>
+      <button class="dialog__close" type="button" data-dialog-close aria-label="Fermer">{{icon:x}}</button>
+    </header>
+    <fieldset class="sheet__kind">
+      <legend class="sheet__legend">Genre</legend>
+      <label><input type="radio" name="kind" value="spending" checked><span>Dépense</span></label>
+      <label><input type="radio" name="kind" value="income"><span>Rentrée</span></label>
+    </fieldset>
+    <div class="sheet__field">
+      <label for="operation-montant">Montant</label>
+      <div class="sheet__money">
+        <input id="operation-montant" name="amount" inputmode="decimal" autocomplete="off" placeholder="0,00" required>
+        <span aria-hidden="true">€</span>
+      </div>
+      <p class="sheet__error" data-error-for="operation-montant">Un montant comme 12,50.</p>
+    </div>
+    <div class="sheet__field">
+      <label for="operation-libelle">Libellé</label>
+      <input id="operation-libelle" name="label" autocomplete="off" placeholder="Courses, cinéma…" required>
+      <p class="sheet__error" data-error-for="operation-libelle">Quelques mots pour la retrouver.</p>
+    </div>
+    <div class="sheet__row">
+      <div class="sheet__field">
+        <label for="operation-categorie">Catégorie</label>
+        <select id="operation-categorie" name="category">
+          <option>Courses</option>
+          <option>Transport</option>
+          <option>Loisirs</option>
+          <option>Santé</option>
+          <option>Autre</option>
+        </select>
+      </div>
+      <div class="sheet__field">
+        <label for="operation-date">Date</label>
+        <input id="operation-date" name="date" type="date" required>
+      </div>
+    </div>
+    <button class="sheet__submit" type="submit">Enregistrer</button>
+  </form>
+</dialog>

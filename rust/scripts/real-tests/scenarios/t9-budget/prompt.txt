@@ -1,0 +1,17 @@
++(gain) -(perte) ~(gain non assuré)
+
+Tous les mois je reçois :
++ salaire = 1235.15 euro
++ mobili-jeune = 100 euro
++ caf = 103 à 206 euro
+~ espece = 80 à 200 euro
+et mes dépenses impossible à évitées :
+- loyer = 450 euro
+- forfait = 10 euro
+- claude = 21.60 euro
+- transport = 8 euro (normalement 16 mais grace à Orange, il me rembourse 50%)
+- alimentaire = 100 euro
+
+Je veux un appli web perso utilisable sur téléphone incluant tous les fonctionnalités que j'ai besoin pour m'aider à gérer tout ça, et que ce soit quand même beau.
+
+Fonctions : tout (objectif d'épargne et alertes, historique sur plusieurs mois avec graphiques, dépenses variables avec saisie rapide, export et sauvegarde). Style : sobre foncé (anthracite, ambre, mode sombre).

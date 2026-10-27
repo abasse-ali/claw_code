@@ -350,6 +350,8 @@ class Journal:
             return {"names": [excerpt(item, 40) for item in names[:20] if isinstance(item, str)]}
         if name == "Ornament":
             return {"kind": excerpt(data.get("kind", ""), 40)}
+        if name == "AppIcon":
+            return {"target": excerpt(rel(data.get("svg", "")), 300)}
         if name == "Screenshot":
             return {"target": excerpt(rel(data.get("url") or data.get("path") or ""), 300)}
         if name.startswith("mcp__"):
@@ -430,6 +432,8 @@ class Journal:
         if name in ("Icon", "Ornament", "Component"):
             # Du SVG et du CSS pour le modèle : rien à lire pour l'utilisateur.
             return {}
+        if name == "AppIcon" and isinstance(value, dict):
+            return {"out": excerpt("\n".join(rel(str(item.get("path", ""))) for item in value.get("written", [])[:6] if isinstance(item, dict)), 600)}
         return {"out": excerpt(rel(json.dumps(value, ensure_ascii=False)), 800)}
 
     # --- Parties à publier ---------------------------------------------------------------
