@@ -164,6 +164,11 @@ pub trait ApiClient {
     fn team_model(&mut self, _role: crate::team::Role) -> Option<String> {
         None
     }
+
+    /// Mode équipe : le code vient d'être abîmé (erreur de syntaxe, défaut
+    /// introduit, retours à la ligne échappés) ; le client le compte au
+    /// modèle qui écrit le code.
+    fn team_strike(&mut self, _reason: &str) {}
 }
 
 /// Pourquoi le runtime consulte un autre modèle.
@@ -2774,6 +2779,14 @@ where
                 }
             }
         }
+        // Retours à la ligne envoyés en deux caractères : réparés, et comptés
+        // au modèle qui écrit le code (session #32, passage 8).
+        if crate::file_tools::writes_files(tool_name)
+            && output.contains("they were written as line breaks")
+        {
+            self.api_client
+                .team_strike("retours à la ligne écrits en \\n");
+        }
         // Questions déjà posées avec le menu : rien à redemander en fin de tour.
         aids.asked |= tool_name == "AskUserQuestion";
         aids.questions_deferred |=
@@ -3104,6 +3117,7 @@ where
                 self.api_client.notify(&format!(
                     "Erreur de syntaxe dans {name} : signalée au modèle"
                 ));
+                self.api_client.team_strike("erreur de syntaxe");
                 notes.push(harness::syntax_feedback(&path, &error));
             } else if harness::enabled(Aid::Pitfalls) {
                 // Les pièges du code, chacun dit une fois par tour : une
@@ -3918,6 +3932,9 @@ where
             new.len(),
             open.len()
         ));
+        if !new.is_empty() {
+            self.api_client.team_strike("défaut introduit dans la page");
+        }
         let image = images
             .into_iter()
             .next()
@@ -8091,6 +8108,8 @@ mod tests {
         kept: usize,
         /// Rôles annoncés au client en mode équipe, dans l'ordre.
         team_steps: Vec<String>,
+        /// Dégâts du code signalés au client (mode équipe).
+        strikes: Vec<String>,
     }
 
     /// Rallume les annonces le temps d'un test.
@@ -8212,6 +8231,10 @@ mod tests {
                 .borrow_mut()
                 .team_steps
                 .push(step.role.key().to_string());
+        }
+
+        fn team_strike(&mut self, reason: &str) {
+            self.observed.borrow_mut().strikes.push(reason.to_string());
         }
     }
 
@@ -9625,6 +9648,8 @@ mod tests {
             "{:?}",
             observed.notices
         );
+        // Mode équipe : le défaut introduit est compté au codeur.
+        assert_eq!(observed.strikes, ["défaut introduit dans la page"]);
         let check = observed.requests[1]
             .rsplit("Claw looked at")
             .next()
