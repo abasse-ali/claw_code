@@ -206,6 +206,26 @@ jobs:
           key: claw-web-state-${{ inputs.session }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: claw-web-state-${{ inputs.session }}-
 
+      # Modèles mis de côté (refus 403, quota du jour) et codeurs de l'équipe écartés pour
+      # avoir abîmé le code : gardés d'un passage à l'autre, sinon chaque passage les
+      # réessaie. Vu le 27 octobre 2026 (session #32, passages 6 à 8) : inkling refusé (403)
+      # au début de chaque passage. Ces fichiers ne disent que la disponibilité des modèles.
+      - name: Modèles écartés (cache)
+        uses: actions/cache/restore@v5
+        with:
+          path: claw-models
+          key: claw-web-models-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: claw-web-models-
+
+      - name: Modèles écartés dans les réglages de Claw
+        env:
+          CLAW_CONFIG_HOME: ${{ runner.temp }}/claw-home
+        run: |
+          mkdir -p "$CLAW_CONFIG_HOME"
+          for file in model-cooldowns.json team-benched.json; do
+            if [ -f "claw-models/$file" ]; then cp "claw-models/$file" "$CLAW_CONFIG_HOME/$file"; fi
+          done
+
       # Les entrées passent par l'environnement, jamais dans le script : un nom de branche
       # comme `"; curl … | sh; "` serait sinon exécuté.
       - name: Session et dépôt de la tâche
@@ -257,6 +277,26 @@ jobs:
             ${{ runner.temp }}/claw-web/claw.stderr
           retention-days: 7
           if-no-files-found: ignore
+
+      - name: Garder les modèles écartés
+        id: models
+        if: always()
+        env:
+          CLAW_CONFIG_HOME: ${{ runner.temp }}/claw-home
+        run: |
+          mkdir -p claw-models
+          saved=false
+          for file in model-cooldowns.json team-benched.json; do
+            if [ -f "$CLAW_CONFIG_HOME/$file" ]; then cp "$CLAW_CONFIG_HOME/$file" "claw-models/$file"; saved=true; fi
+          done
+          echo "saved=$saved" >> "$GITHUB_OUTPUT"
+
+      - name: Modèles écartés en cache
+        if: always() && steps.models.outputs.saved == 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: claw-models
+          key: claw-web-models-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Garder l'état de la session
         id: state
