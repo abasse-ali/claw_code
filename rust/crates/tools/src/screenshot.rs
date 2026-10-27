@@ -1832,7 +1832,12 @@ fn project_file_name(url: &str) -> &str {
 /// erreurs « CORS » sur manifest.json comptées en défauts, deux revues
 /// renvoyées à l'agent pour rien, et la réponse finale les expliquait au parent.
 fn file_origin_noise(text: &str, url: Option<&str>) -> bool {
-    text.contains("from origin 'null' has been blocked by CORS policy")
+    // Un lien `sms:`, `tel:` ou `mailto:` ouvert : le navigateur de Claw n'a
+    // aucune application pour lui, le téléphone du visiteur l'ouvre. Vu le 27
+    // octobre 2026 (session #33) : la commande envoyée par SMS comptée
+    // « erreur du script », fonctionnement 4/10.
+    text.contains("because the scheme does not have a registered handler")
+        || text.contains("from origin 'null' has been blocked by CORS policy")
         || text.contains("current origin ('null') is not supported")
         || (text.starts_with("Failed to load resource: net::ERR_FAILED")
             && url.is_some_and(|url| url.starts_with("file://")))
@@ -5276,6 +5281,8 @@ mod tests {
             json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Failed to load resource: net::ERR_FAILED", "url": "file:///C:/w/manifest.json" } } }),
             json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Failed to load resource: net::ERR_FAILED", "url": "http://h/b.js" } } }),
             json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Failed to load resource: net::ERR_FILE_NOT_FOUND", "url": "file:///C:/site/manifest.json" } } }),
+            // La commande ouverte dans l'application SMS du visiteur.
+            json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Failed to launch 'sms:0612345678?body=Commande' because the scheme does not have a registered handler.", "url": "file:///C:/site/index.html" } } }),
         ];
         assert_eq!(
             console_lines(&events),
