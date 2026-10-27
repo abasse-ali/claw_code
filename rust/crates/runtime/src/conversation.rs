@@ -533,6 +533,8 @@ struct TurnAids {
     /// L'agent a posé ses questions avec le menu à choix pendant ce tour, ou
     /// Claw le lui a déjà demandé.
     asked: bool,
+    /// Services tiers qui reçoivent les données des visiteurs : signalés une fois par tour.
+    services_checked: bool,
     /// Questions montrées sans attendre (appli web) : le tour finit avec ce
     /// lot d'outils, la réponse viendra au message suivant.
     questions_deferred: bool,
@@ -2357,6 +2359,7 @@ where
                     .or_else(|| {
                         self.requirements_gate(&mut aids, &request_text, earlier.as_deref())
                     })
+                    .or_else(|| self.data_service_gate(&mut aids, &request_text))
                     .or_else(|| self.shared_data_gate(&mut aids, &request_text))
                     .or_else(|| self.invented_rules_gate(&mut aids, &request_text))
                     .or_else(|| self.access_code_gate(&mut aids, &answer))
@@ -3752,6 +3755,16 @@ where
             "État de la page avant ce tour : {} défaut(s) mesuré(s)",
             audit.problems.len() + audit.console.len()
         ));
+        // Ce que la mesure a vu va à l'agent avec la demande : il part des
+        // défauts réels, pas d'une supposition.
+        let shared = aids.shared_request && self.kept_locally(aids);
+        if let Some(brief) = crate::web_design::start_brief(&target, &audit, shared) {
+            if let Some(message) = self.session.messages.last_mut() {
+                message.blocks.push(ContentBlock::Text { text: brief });
+            }
+            self.api_client
+                .notify("État de la page avant ce tour : transmis à l'agent avec la demande");
+        }
     }
 
     /// Mesure de la page par Claw, sans juge ni captures pour le modèle : la
@@ -5044,25 +5057,7 @@ where
         // réservation de mes clientes sur mon téléphone », le stockage local
         // était déjà là avant le tour, et l'agent a répondu « limitation
         // architecturale » sans proposer d'envoyer les réservations.
-        // Le dossier de la page revue (le projet), et les fichiers du tour.
-        let target = self.page_to_review(aids)?;
-        let root = target
-            .strip_prefix("path:")
-            .and_then(|page| {
-                std::path::Path::new(page)
-                    .parent()
-                    .map(std::path::Path::to_path_buf)
-            })
-            .filter(|folder| !folder.as_os_str().is_empty())
-            .or_else(|| std::env::current_dir().ok())?;
-        let mut sources = crate::web_design::page_scripts(&root);
-        for path in aids.originals.keys() {
-            if let Ok(text) = std::fs::read_to_string(path) {
-                sources.push(text);
-            }
-        }
-        let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
-        if !crate::web_design::kept_on_each_device(&sources) {
+        if !self.kept_locally(aids) {
             return None;
         }
         aids.shared_checked = true;
@@ -5070,6 +5065,66 @@ where
             "Ce que les visiteurs entrent reste dans leur propre téléphone, alors que la demande le veut partagé : Claw demande à l'agent de le rendre partagé ou de le dire",
         );
         Some(crate::web_design::SHARED_DATA_NOTE.to_string())
+    }
+
+    /// Le site garde ce que les visiteurs entrent dans leur propre navigateur,
+    /// sans rien en envoyer : le dossier de la page revue (le projet), et les
+    /// fichiers du tour.
+    fn kept_locally(&self, aids: &TurnAids) -> bool {
+        let Some(target) = self.page_to_review(aids) else {
+            return false;
+        };
+        let Some(root) = target
+            .strip_prefix("path:")
+            .and_then(|page| {
+                std::path::Path::new(page)
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+            })
+            .filter(|folder| !folder.as_os_str().is_empty())
+            .or_else(|| std::env::current_dir().ok())
+        else {
+            return false;
+        };
+        let mut sources = crate::web_design::page_scripts(&root);
+        for path in aids.originals.keys() {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                sources.push(text);
+            }
+        }
+        let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
+        crate::web_design::kept_on_each_device(&sources)
+    }
+
+    /// Ce que les visiteurs entrent (noms, téléphones), envoyé par le tour à
+    /// un service d'un tiers que l'utilisateur n'a ni nommé ni accepté. Vu le
+    /// 27 octobre 2026 (session #32, passage 7) : l'agent a trouvé `MantleDB`
+    /// par une recherche et y envoyait les réservations des clientes, que
+    /// lirait quiconque devine l'adresse, sans rien demander à la boulangère.
+    fn data_service_gate(&mut self, aids: &mut TurnAids, request: &str) -> Option<String> {
+        if aids.services_checked || aids.asked || self.subagent || interrupt_requested() {
+            return None;
+        }
+        let words = crate::project::user_words_with_history(request).to_lowercase();
+        let mut hosts: Vec<String> = Vec::new();
+        for (path, before) in &aids.originals {
+            let Ok(after) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            for host in crate::web_design::new_data_services(before, &after) {
+                if !hosts.contains(&host) && !crate::web_design::named_by_user(&host, &words) {
+                    hosts.push(host);
+                }
+            }
+        }
+        if hosts.is_empty() {
+            return None;
+        }
+        aids.services_checked = true;
+        self.api_client.notify(
+            "Le code envoie ce que les visiteurs entrent à un service tiers que l'utilisateur n'a pas choisi : Claw demande à l'agent de lui poser la question d'abord",
+        );
+        Some(crate::web_design::data_service_note(&hosts))
     }
 
     /// Règles et promesses de la page que l'utilisateur n'a pas données (un
@@ -9454,6 +9509,14 @@ mod tests {
             check.contains("Broken by your last change") && check.contains("430px wide"),
             "{check}"
         );
+        // Session #32, passage 7 (27 octobre 2026) : ce que la mesure du
+        // début a vu part avec la demande.
+        assert!(
+            observed.requests[0].contains("[Claw] Before you change anything")
+                && observed.requests[0].contains("Words that run together"),
+            "{}",
+            observed.requests[0]
+        );
     }
 
     #[test]
@@ -9498,6 +9561,50 @@ mod tests {
             observed.notices
         );
         let _ = std::fs::remove_file(&script);
+    }
+
+    #[test]
+    fn entries_sent_to_a_store_the_user_never_chose_lead_to_a_question_first() {
+        let _serial = crate::test_serial();
+        // Session #32, passage 7 (27 octobre 2026) : les réservations des
+        // clientes envoyées à MantleDB, trouvé par une recherche, sans rien
+        // demander à la boulangère.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("tiers");
+        let script = page.with_file_name("app.js");
+        std::fs::write(
+            &script,
+            "const URL = 'https://mantledb.sh/v2/boulangerie/reservations';\nfunction save(entry) {\n  localStorage.setItem('r', JSON.stringify(entry));\n  return fetch(URL, { method: 'POST', body: JSON.stringify(entry) });\n}\n",
+        )
+        .expect("app.js");
+        let write = tool_step(
+            "write_file",
+            &serde_json::json!({ "path": script.display().to_string(), "content": "x" })
+                .to_string(),
+        );
+        let steps = vec![
+            write,
+            text_step("La synchronisation marche."),
+            text_step("Je vous pose d'abord la question."),
+        ];
+        let ((mut runtime, observed, _), _) =
+            measured_runtime(steps, vec![Some(MEASURED), Some(MEASURED), Some(MEASURED)]);
+        runtime.page_target = Some(format!("path:{}", page.display()));
+        runtime
+            .run_turn(
+                "je veux recevoir les réservations de mes clientes sans rien avoir à régler",
+                None,
+            )
+            .expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let _ = std::fs::remove_file(&script);
+        let observed = observed.borrow();
+        assert!(
+            observed.requests.iter().any(|request| request
+                .contains("Your code now sends what visitors enter to mantledb.sh")),
+            "{:?}",
+            observed.notices
+        );
     }
 
     #[test]

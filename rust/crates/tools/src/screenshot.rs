@@ -1760,7 +1760,31 @@ fn console_lines(events: &[Value]) -> Vec<String> {
                     .as_str()
                     .or_else(|| details["text"].as_str())
                     .unwrap_or("exception");
-                format!("uncaught: {}", text.lines().next().unwrap_or(text))
+                // Le fichier et la ligne, sans le chemin `file:///…` : vu le 27
+                // octobre 2026 (session #32, passage 7), l'agent cherchait la
+                // cause dans l'ouverture en fichier au lieu de la ligne du script.
+                let frame = &details["stackTrace"]["callFrames"][0];
+                let (url, line) = match frame["url"].as_str().filter(|url| !url.is_empty()) {
+                    Some(url) => (Some(url), frame["lineNumber"].as_u64()),
+                    None => (
+                        details["url"].as_str().filter(|url| !url.is_empty()),
+                        details["lineNumber"].as_u64(),
+                    ),
+                };
+                let at = url.map_or_else(String::new, |url| {
+                    let name = url
+                        .split(['?', '#'])
+                        .next()
+                        .unwrap_or(url)
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(url);
+                    format!(
+                        " (at {name}{})",
+                        line.map_or_else(String::new, |line| format!(":{}", line + 1))
+                    )
+                });
+                format!("uncaught: {}{at}", text.lines().next().unwrap_or(text))
             }
             Some("Log.entryAdded") => {
                 let entry = &params["entry"];
@@ -1970,6 +1994,11 @@ fn click_problems(devtools: &mut DevTools) -> (Vec<String>, Vec<(String, String)
         ));
     }
     problems.extend(strings(&result["unnamed"]).into_iter().take(3));
+    for written in strings(&result["codeShown"]) {
+        problems.push(format!(
+            "{written}: anyone gets in. Take it off the page (text, example of the field, help line); give it to the owner in your final answer, with how to choose their own"
+        ));
+    }
     problems.extend(strings(&result["underBar"]));
     problems.extend(lost_on_reload(devtools, &result["kept"]));
     (problems, openers, explore)
@@ -4471,6 +4500,42 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn item_names_shrunk_below_the_body_text_are_found_in_a_real_browser() {
+        // Session #32, passage 7 (27 octobre 2026) : les noms des produits,
+        // coupés sur téléphone, passés à 13px au lieu de recevoir leur place.
+        let cwd = std::env::current_dir().expect("dossier");
+        let problems = |name: &str, css: &str| {
+            let dir = cwd.join(format!("claw-noms-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Boulangerie</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} h1 {{ font-size: 32px; }} .eyebrow {{ font-size: 12px; text-transform: uppercase; letter-spacing: 2px; }} footer h4 {{ font-size: 13px; }} {css}</style></head><body><main><h1>Réservez votre pain</h1><h2 class=\"eyebrow\">Nos produits</h2><ul><li><h3 class=\"product-name\">Baguette tradition</h3><p>1,30 €</p></li><li><h3 class=\"product-name\">Croissant beurre</h3><p>1,10 €</p></li></ul></main><footer><h4>Horaires</h4><p>7 h à 19 h</p></footer></body></html>"),
+            )
+            .expect("html");
+            let page = format!("claw-noms-{name}-{}/index.html", std::process::id());
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let shrunk = problems("petits", ".product-name { font-size: 13px; }");
+        assert!(
+            shrunk.contains(
+                "Headings smaller than the body text (16px) on this phone: h3.product-name"
+            ),
+            "{shrunk}"
+        );
+        assert!(
+            !shrunk.contains("eyebrow") && !shrunk.contains("h4"),
+            "{shrunk}"
+        );
+        let sound = problems("lisibles", ".product-name { font-size: 18px; }");
+        assert!(!sound.contains("Headings smaller"), "{sound}");
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn a_fixed_header_whose_text_does_not_fit_is_found_in_a_real_browser() {
         // Site du club, session #31 : le nom du club coupé par le haut de l'écran
         // et le sous-titre qui dépasse la barre fixe, signalés deux fois.
@@ -4766,12 +4831,38 @@ mod tests {
         let capture = || {
             let mut request = input(None, Some(&page));
             request.viewports = Some(json!(["phone"]));
-            super::take(&request).expect("capture")["captures"][0]["problems"].to_string()
+            super::take(&request).expect("capture")["captures"][0].to_string()
         };
         write("svg.className = 'icon';");
         let broken = capture();
+        // Session #32, passage 7 : le code vérifié après un appel réseau ; la
+        // fenêtre se ferme plus d'une seconde après. Ouverte en `file://`, la
+        // page ne reçoit pas l'erreur d'une fonction asynchrone : la console
+        // de la capture la garde, avec son fichier et sa ligne.
+        let script = std::fs::read_to_string(dir.join("app.js")).expect("script");
+        std::fs::write(
+            dir.join("app.js"),
+            script.replace(
+                "addEventListener('click', () => {\n  if (document.getElementById('pin')",
+                "addEventListener('click', async () => {\n  await new Promise((done) => setTimeout(done, 1200));\n  if (document.getElementById('pin')",
+            ),
+        )
+        .expect("script");
+        let late = capture();
         write("svg.setAttribute('class', 'icon');");
         let fixed = capture();
+        // Session #32, passage 7 (27 octobre 2026) : « Code par défaut : 1234 »
+        // dans la fenêtre même, lisible par tout visiteur.
+        let html = std::fs::read_to_string(dir.join("index.html")).expect("html");
+        std::fs::write(
+            dir.join("index.html"),
+            html.replace(
+                "<input type=\"password\" id=\"pin\" inputmode=\"numeric\">",
+                "<input type=\"password\" id=\"pin\" inputmode=\"numeric\"><p class=\"aide\">Code par défaut : 4321</p>",
+            ),
+        )
+        .expect("html");
+        let written = capture();
         let _ = std::fs::remove_dir_all(&dir);
         // Ouverte en `file://`, la page ne donne de son script que « Script
         // error. » ; la console de la capture en garde le texte.
@@ -4779,7 +4870,15 @@ mod tests {
             broken.contains("button#espace \\\"Espace boulanger\\\", then the access code \\\"4321\\\" written in the page's script"),
             "{broken}"
         );
+        assert!(
+            late.contains("Cannot set property className of #<SVGElement> which has only a getter (at app.js:"),
+            "{late}"
+        );
         assert!(!fixed.contains("access code"), "{fixed}");
+        assert!(
+            written.contains("the access code \\\"4321\\\" that opens button#espace \\\"Espace boulanger\\\" is written on the page for every visitor to read («Code par défaut : 4321»)"),
+            "{written}"
+        );
     }
 
     #[test]
@@ -5082,6 +5181,7 @@ mod tests {
             json!({ "method": "Runtime.consoleAPICalled", "params": { "type": "log", "args": [{ "type": "string", "value": "ordinaire" }] } }),
             json!({ "method": "Runtime.consoleAPICalled", "params": { "type": "error", "args": [{ "type": "string", "value": "échec" }, { "type": "number", "value": 3 }] } }),
             json!({ "method": "Runtime.exceptionThrown", "params": { "exceptionDetails": { "text": "Uncaught", "exception": { "description": "ReferenceError: x is not defined\n    at y" } } } }),
+            json!({ "method": "Runtime.exceptionThrown", "params": { "exceptionDetails": { "text": "Uncaught", "url": "file:///C:/site/index.html", "lineNumber": 3, "stackTrace": { "callFrames": [{ "url": "file:///C:/site/app.js?v=2", "lineNumber": 811 }] }, "exception": { "description": "TypeError: Cannot set property className of #<SVGElement> which has only a getter\n    at render" } } } }),
             json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Failed to load resource: 404", "url": "http://h/a.css" } } }),
             // Propres à l'ouverture en file:// : le site en ligne ne les a pas.
             json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Access to Manifest at 'file:///C:/w/manifest.json' from origin 'null' has been blocked by CORS policy: Cross origin requests are only supported for protocol schemes: http, data, chrome, https.", "url": "file:///C:/w/index.html" } } }),
@@ -5093,6 +5193,7 @@ mod tests {
             [
                 "error: échec 3",
                 "uncaught: ReferenceError: x is not defined",
+                "uncaught: TypeError: Cannot set property className of #<SVGElement> which has only a getter (at app.js:812)",
                 "error: Failed to load resource: 404 (http://h/a.css)",
                 "error: Failed to load resource: net::ERR_FAILED (http://h/b.js)",
             ]
