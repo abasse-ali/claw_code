@@ -3738,7 +3738,10 @@ where
         }
         self.api_client
             .notify("État de la page avant ce tour : Claw la mesure, pour repérer ce que le tour casserait…");
-        let input = crate::web_design::review_screenshot_input(&target, aids.shared_request);
+        let input = crate::web_design::review_screenshot_input(
+            &target,
+            self.second_device(aids, aids.shared_request),
+        );
         self.tool_executor.announce("Screenshot", &input);
         let (message, _) = self.execute_tool_call(
             "claw-baseline".to_string(),
@@ -4109,7 +4112,8 @@ where
             || crate::web_design::shared_between_people(&crate::project::user_words_with_history(
                 request,
             ));
-        let input = crate::web_design::review_screenshot_input(&target, shared);
+        let input =
+            crate::web_design::review_screenshot_input(&target, self.second_device(aids, shared));
         self.tool_executor.announce("Screenshot", &input);
         let (message, _) = self.execute_tool_call(
             format!("claw-design-{}", aids.interface_rounds),
@@ -5119,8 +5123,15 @@ where
     /// sans rien en envoyer : le dossier de la page revue (le projet), et les
     /// fichiers du tour.
     fn kept_locally(&self, aids: &TurnAids) -> bool {
+        let sources = self.site_sources(aids);
+        let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
+        !sources.is_empty() && crate::web_design::kept_on_each_device(&sources)
+    }
+
+    /// Pages et scripts du site (dossier de la page revue), et fichiers du tour.
+    fn site_sources(&self, aids: &TurnAids) -> Vec<String> {
         let Some(root) = self.page_root(aids) else {
-            return false;
+            return Vec::new();
         };
         let mut sources = crate::web_design::page_scripts(&root);
         for path in aids.originals.keys() {
@@ -5128,8 +5139,22 @@ where
                 sources.push(text);
             }
         }
+        sources
+    }
+
+    /// Deuxième appareil à la revue : la demande partage des entrées entre
+    /// personnes, et le site ne les envoie pas par la messagerie du visiteur.
+    /// Envoyées par SMS ou `WhatsApp`, elles arrivent dans les messages de
+    /// la personne, pas sur un écran du site : un autre téléphone n'a rien à
+    /// y voir. Vu le 27 octobre 2026 (session #33) : l'envoi par SMS choisi
+    /// par la boulangère compté « ne se voit pas sur un autre appareil ».
+    fn second_device(&self, aids: &TurnAids, shared: bool) -> bool {
+        if !shared {
+            return false;
+        }
+        let sources = self.site_sources(aids);
         let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
-        crate::web_design::kept_on_each_device(&sources)
+        !crate::web_design::sends_by_message(&sources)
     }
 
     /// Ce que les visiteurs entrent (noms, téléphones), envoyé par le tour à
@@ -5258,10 +5283,13 @@ where
             })
             .unwrap_or_default();
         let mut problems: Vec<String> = Vec::new();
-        let signs = harness::developer_signs(&asked);
+        // Le texte au-dessus aussi : il part avec la question. Vu le 27
+        // octobre 2026 (session #33) : « localStorage » et `app.js` dans le
+        // texte, la question elle-même en mots simples.
+        let signs = harness::developer_signs(&format!("{said}\n{asked}"));
         if !signs.is_empty() {
             problems.push(format!(
-                "The questions and choices are written for a developer ({}): say each choice by what it means for the user (who sees what, what they must do, what it costs), without technical or service names.",
+                "Your text and questions are written for a developer ({}): say each thing by what it means for the user (who sees what, what they must do, what it costs), without technical or service names, code or file names.",
                 signs.join("; ")
             ));
         }
@@ -9669,6 +9697,69 @@ mod tests {
     }
 
     #[test]
+    fn entries_sent_by_sms_are_not_looked_for_on_a_second_device() {
+        let _serial = crate::test_serial();
+        // Session #33 (27 octobre 2026) : la boulangère a choisi de recevoir
+        // les réservations par SMS ; la revue les cherchait sur un deuxième
+        // téléphone et notait « ne se voit pas sur un autre appareil ».
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "1");
+        let page = measured_page("sms");
+        let script = page.with_file_name("app.js");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let mut second = None;
+        for (tag, code) in [
+            ("local", "function save(r) { localStorage.setItem('r', JSON.stringify(r)); }\n"),
+            ("sms", "function save(r) { localStorage.setItem('r', JSON.stringify(r)); window.location.href = 'sms:0612345678?body=' + encodeURIComponent(r.nom); }\n"),
+        ] {
+            std::fs::write(&script, code).expect("app.js");
+            seen.borrow_mut().clear();
+            let inputs = std::rc::Rc::clone(&seen);
+            let executor = StaticToolExecutor::new()
+                .register("write_file", |_| Ok(serde_json::json!({ "filePath": "app.js", "content": "x" }).to_string()))
+                .register("bash", |_| Ok(PASSING.to_string()))
+                .register("Screenshot", move |input| {
+                    inputs.borrow_mut().push(input.to_string());
+                    Ok(MEASURED.to_string())
+                });
+            let observed = std::rc::Rc::new(std::cell::RefCell::new(Observed::default()));
+            let mut runtime = ConversationRuntime::new(
+                Session::new(),
+                StepsApiClient {
+                    steps: vec![
+                        tool_step(
+                            "write_file",
+                            &serde_json::json!({ "path": script.display().to_string(), "content": "x" }).to_string(),
+                        ),
+                        text_step("C'est prêt."),
+                        text_step("C'est prêt."),
+                        text_step("C'est prêt."),
+                    ]
+                    .into(),
+                    observed: std::rc::Rc::clone(&observed),
+                    advisor: std::collections::VecDeque::new(),
+                    escalation: None,
+                },
+                executor,
+                PermissionPolicy::new(PermissionMode::DangerFullAccess),
+                vec!["système".to_string()],
+            );
+            runtime.page_target = Some(format!("path:{}", page.display()));
+            runtime
+                .run_turn("les clientes réservent depuis leur téléphone, et moi je vois la liste le matin", None)
+                .expect("tour");
+            let asked = seen.borrow().iter().any(|input| input.contains("second_device"));
+            if tag == "local" {
+                assert!(asked, "{tag}: {:?}", seen.borrow());
+            } else {
+                second = Some(asked);
+            }
+        }
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let _ = std::fs::remove_file(&script);
+        assert_eq!(second, Some(false), "{:?}", seen.borrow());
+    }
+
+    #[test]
     fn reservations_kept_in_each_phone_are_named_when_the_request_shares_them() {
         let _serial = crate::test_serial();
         // Session #32 (26 octobre 2026) : les clientes réservaient dans leur
@@ -10227,6 +10318,52 @@ mod tests {
             .notices
             .iter()
             .any(|notice| notice.contains("Claw attend ses réponses")));
+    }
+
+    #[test]
+    fn jargon_in_the_text_above_a_plain_question_is_sent_back_too() {
+        let _serial = crate::test_serial();
+        // Session #33 (27 octobre 2026) : la question en mots simples, mais
+        // « localStorage » et `app.js` dans le texte qui part avec elle.
+        CAN_ASK.with(|flag| flag.set(true));
+        ASK_LATER.with(|flag| flag.set(true));
+        let question = serde_json::json!({ "questions": [{ "question": "Comment voulez-vous recevoir les commandes ?", "options": [{ "label": "Par SMS" }, { "label": "Par e-mail" }] }] }).to_string();
+        let step = |text: &str, id: &str| {
+            vec![
+                AssistantEvent::TextDelta(text.to_string()),
+                AssistantEvent::ToolUse {
+                    id: id.to_string(),
+                    name: "AskUserQuestion".to_string(),
+                    input: question.clone(),
+                },
+                AssistantEvent::MessageStop,
+            ]
+        };
+        let (mut runtime, observed, _) = aided_runtime(
+            vec![
+                step(
+                    "Le code par défaut est défini dans `app.js` ; le site garde tout dans le localStorage de chaque téléphone.",
+                    "q1",
+                ),
+                step(
+                    "Aujourd'hui, chaque réservation reste sur le téléphone de la cliente. Il me faut votre choix.",
+                    "q2",
+                ),
+            ],
+            vec![],
+        );
+        let summary = runtime.run_turn("trouvez une solution simple", None);
+        CAN_ASK.with(|flag| flag.set(false));
+        ASK_LATER.with(|flag| flag.set(false));
+        summary.expect("tour");
+        let observed = observed.borrow();
+        assert_eq!(observed.requests.len(), 2, "{:?}", observed.notices);
+        assert!(
+            observed.requests[1].contains("Your text and questions are written for a developer")
+                && observed.requests[1].contains("localstorage"),
+            "{}",
+            observed.requests[1]
+        );
     }
 
     #[test]

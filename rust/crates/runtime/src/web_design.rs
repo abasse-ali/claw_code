@@ -761,6 +761,14 @@ pub fn kept_on_each_device(sources: &[&str]) -> bool {
     stored && !sent
 }
 
+/// Le code envoie ce que les visiteurs entrent par leur messagerie (SMS,
+/// `WhatsApp`, e-mail, texte déjà écrit) : la personne qui doit le voir le
+/// reçoit dans ses messages, pas sur un écran du site.
+#[must_use]
+pub fn sends_by_message(sources: &[&str]) -> bool {
+    sources.iter().any(|source| sends_a_message(source))
+}
+
 /// Un lien qui ouvre la messagerie du visiteur (`WhatsApp`, SMS, e-mail) avec
 /// le texte déjà écrit : ce qu'il entre part chez le destinataire sans
 /// serveur ni compte à créer. Un simple lien de contact (`mailto:` sans
