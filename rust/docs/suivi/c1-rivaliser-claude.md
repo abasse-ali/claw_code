@@ -65,7 +65,7 @@ des défauts mal mesurés :
 | 2. Fausses alertes | Menu refermé après son essai (sinon page rouverte) ; menu « déjà là » seulement s'il est dans l'écran ; sélecteur de fichier compté comme une action ; liens d'une page servie vérifiés sur le disque (« which does not exist ») ; composant carrousel : points cachés quand toutes les images tiennent à l'écran (défaut ancien, que l'erreur `file://` masquait dans son essai) | fait |
 | 3. Vrais bugs mesurés | Audit : texte tapé illisible (7a), graphiques vides (7b), valeurs `Infinity` et `Invalid Date` ; chiffres de la demande (`request_figures` dans le runtime, entrée `figures` de Screenshot, `missing_figures`) ; écrans d'une appli d'une seule page ouverts et mesurés (`VIEWS_SCRIPT`, sorte `view`) ; note de fonctionnement (`FUNCTION_FAULTS` : chiffres absents, texte tapé illisible, graphique vide) | fait |
 | 4. Le fond avant la forme | Première version complète d'une page créée : confrontée à la demande avant les retouches (`early_requirements`, `early_requirements_note`) ; vérification après modification réduite à une ligne quand rien n'a bougé, conseil de recul à la troisième (`unchanged_check_feedback`, `check_listed`) ; tour arrêté par sa limite : Claw ajoute à la réponse ce qu'il a pu vérifier (`wrap_up_status`, `append_to_answer`) ; « appli web », « appli mobile », « PWA » et « je veux… » reconnus comme des demandes d'interface (la demande de #35 ne l'était que par les notes du moteur) | fait (trois tests de conversation) |
-| 5. Parcours en un appel | Browser accepte une liste d'étapes avec résultats attendus (`steps`), jouée d'un coup, au lieu d'un geste par requête (24 appels `Browser` dans #35) | à faire |
+| 5. Parcours en un appel | `Browser` avec `"action": "steps"` et `steps` : jusqu'à 40 actions jouées d'un appel, la page posée après chacune, arrêt à la première qui échoue ; `expect` et `absent` sur chaque étape (et sur une action seule) vérifient le résultat (un total, un nom, « NaN » absent) ; la méthode de design demande le parcours entier en un appel avec ses résultats attendus ; progression de l'appli : « Navigateur : parcours de N étapes » (24 appels `Browser` dans #35) | fait |
 | 6. Kit d'appli | Composants testés pour les applis perso (stockage local avec annuler, export CSV et import ; volet de formulaire aux champs lisibles ; barre d'onglets ; graphique qui se redessine quand son écran s'ouvre ; PWA hors-ligne : manifeste à `start_url` relative, service worker, icônes PNG) ; le guide de design les propose pour une appli de données perso | à faire |
 | 7. Vitesse | Après les lots 1 à 4 (moins de faux défauts, moins de messages redits) : mesurer sur le passage réel ce qui fait encore attendre (revues, juge, lecteur d'images, traductions des notes) et le couper ou le paralléliser, barres gardées à 8 | à faire |
 | 8. Banc t9-budget | Scénario `rust/scripts/real-tests/scenarios/` avec ce prompt et les vérifications cachées ci-dessous | à faire |
@@ -80,7 +80,7 @@ worker (hors-ligne) ; aucun débordement horizontal au téléphone.
 
 ## Suite, dans l'ordre
 
-1. Lots 5, 6, 7, 8, dans cet ordre.
+1. Lots 6, 7, 8, dans cet ordre.
 2. Lot 9 : essai réel, puis fusion dans `main`, puis mise à jour de ce fichier et de
    `rust/docs/suivi-intelligence.md`.
 

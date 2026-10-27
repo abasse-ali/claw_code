@@ -100,6 +100,8 @@ class ShotsTest(unittest.TestCase):
         self.assertEqual(run.describe("Browser", {"action": "open", "path": "index.html"}), "Navigateur : open index.html")
         self.assertEqual(run.describe("Browser", {"action": "click", "target": "e12"}), "Navigateur : click e12")
         self.assertEqual(run.describe("Browser", {"action": "look"}), "Navigateur : look")
+        self.assertEqual(run.describe("Browser", {"action": "steps", "steps": [{}, {}, {}]}),
+                         "Navigateur : parcours de 3 étapes")
 
 
 if __name__ == "__main__":
