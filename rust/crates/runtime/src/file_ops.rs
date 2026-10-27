@@ -436,11 +436,22 @@ pub fn write_file(path: &str, content: &str) -> io::Result<WriteFileOutput> {
     // Fichier existant : son texte (pour le diff) et son codage, qui est gardé
     // (un CSV d'Excel en Windows-1252 le reste).
     let original = read_text(&absolute_path).ok();
+    let repaired = escaped_line_breaks(content);
+    let content = repaired
+        .as_ref()
+        .map_or(content, |(fixed, _)| fixed.as_str());
     let note = placeholder_check(
         &absolute_path,
         content,
         original.as_ref().map(|(text, _)| text.as_str()),
     )?;
+    let note = match (
+        repaired.as_ref().map(|(_, count)| line_breaks_note(*count)),
+        note,
+    ) {
+        (Some(repair), Some(note)) => Some(format!("{repair} {note}")),
+        (repair, note) => repair.or(note),
+    };
     if let Some(parent) = absolute_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -972,6 +983,14 @@ pub(crate) fn apply_edit(
     new_string: &str,
     replace_all: bool,
 ) -> Result<(String, Option<String>), String> {
+    if let Some((fixed, count)) = escaped_line_breaks(new_string) {
+        let (updated, note) = apply_edit(original, old_string, &fixed, replace_all)?;
+        let repair = line_breaks_note(count);
+        return Ok((
+            updated,
+            Some(note.map_or_else(|| repair.clone(), |note| format!("{repair} {note}"))),
+        ));
+    }
     match apply_edit_strictly(original, old_string, new_string, replace_all) {
         Ok(applied) => return Ok(applied),
         Err(Some(ambiguous)) => return Err(ambiguous),
@@ -991,6 +1010,49 @@ pub(crate) fn apply_edit(
         }
     }
     Err(not_found_message(original, old_string))
+}
+
+/// Retours à la ligne écrits en deux caractères (`\n`) devant des lignes
+/// indentées, dans un texte qui n'a aucun vrai retour : le modèle a échappé
+/// deux fois. Vu le 27 octobre 2026 (session #32, passage 8) : `app.js`
+/// réduit par endroits à une ligne pleine de `\n`, que le modèle a dû
+/// réécrire en entier. Un `\n` suivi de texte (dans une chaîne, `'a\nb'`)
+/// reste tel quel. Rend le texte réparé et le nombre de retours rendus.
+fn escaped_line_breaks(text: &str) -> Option<(String, usize)> {
+    if text.contains('\n') {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut fixed = 0;
+    let mut rest = text;
+    while let Some(at) = rest.find("\\n") {
+        let (before, after) = rest.split_at(at);
+        let mut tail = &after[2..];
+        out.push_str(before);
+        let line_start = tail.is_empty()
+            || tail.starts_with("  ")
+            || tail.starts_with('\t')
+            || tail.starts_with("\\t")
+            || tail.starts_with("\\n")
+            || tail.starts_with('}');
+        if line_start && !before.ends_with('\\') {
+            out.push('\n');
+            fixed += 1;
+            while let Some(more) = tail.strip_prefix("\\t") {
+                out.push('\t');
+                tail = more;
+            }
+        } else {
+            out.push_str("\\n");
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    (fixed >= 2).then_some((out, fixed))
+}
+
+fn line_breaks_note(count: usize) -> String {
+    format!("The text had no line break but {count} \\n written as two characters before indented lines: they were written as line breaks. Send real line breaks.")
 }
 
 /// Variantes de `old_string` (et `new_string`) à essayer quand le texte n'est
@@ -2943,6 +3005,58 @@ mod tests {
             note(&empty)
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_whole_file_escaped_twice_is_written_on_its_lines() {
+        let dir = std::env::temp_dir().join(format!("claw-echappe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let path = dir.join("app.js");
+        let output = write_file(
+            &path.display().to_string(),
+            "(() => {\\n  const KEY = 'r';\\n  console.log(KEY);\\n})();\\n",
+        )
+        .expect("écrit");
+        let written = std::fs::read_to_string(&path).expect("lu");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            written,
+            "(() => {\n  const KEY = 'r';\n  console.log(KEY);\n})();\n"
+        );
+        assert!(output
+            .note
+            .is_some_and(|note| note.contains("written as line breaks")));
+    }
+
+    #[test]
+    fn line_breaks_escaped_twice_are_written_as_line_breaks() {
+        use super::apply_edit;
+        // Session #32, passage 8 (27 octobre 2026) : `new_string` sans aucun
+        // retour à la ligne, avec des `\n` en deux caractères devant chaque
+        // ligne indentée ; app.js réduit par endroits à une ligne.
+        let original = "  // ===== SYNC =====\n  const x = 1;\n";
+        let (updated, note) = apply_edit(
+            original,
+            "  // ===== SYNC =====",
+            "  // ===== LOCAL =====\\n  function load() {\\n    return JSON.parse(localStorage.getItem('r') || '[]');\\n  }",
+            false,
+        )
+        .expect("edit");
+        assert_eq!(
+            updated,
+            "  // ===== LOCAL =====\n  function load() {\n    return JSON.parse(localStorage.getItem('r') || '[]');\n  }\n  const x = 1;\n"
+        );
+        assert!(note.is_some_and(|note| note.contains("3 \\n written as two characters")));
+        // Un `\n` dans une chaîne du code reste tel quel.
+        let (updated, note) = apply_edit(
+            "const rows = [];\n",
+            "const rows = [];",
+            "const csv = rows.join('\\n');",
+            false,
+        )
+        .expect("chaîne");
+        assert_eq!(updated, "const csv = rows.join('\\n');\n");
+        assert!(note.is_none());
     }
 
     #[test]
