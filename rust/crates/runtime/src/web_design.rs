@@ -221,6 +221,7 @@ pub struct FunctionScore {
 /// Défauts de fonctionnement : motif dans le défaut mesuré, points retirés,
 /// plafond de la note (10 : aucun), et ce qu'en lit l'utilisateur.
 const FUNCTION_FAULTS: &[(&str, u8, u8, &str)] = &[
+    (FROZEN_PAGE, 9, 1, "page gelée par une boucle sans fin"),
     ("an error in the page's script", 3, 5, "erreur du script"),
     (
         "raises an error in the page's script",
@@ -1962,6 +1963,26 @@ fn push_unique(list: &mut Vec<String>, line: String) {
     }
 }
 
+/// Début du défaut d'une page que son script gèle (boucle sans fin) : les
+/// outils du navigateur le rendent en erreur, puisqu'aucune capture ni mesure
+/// n'a pu se faire. Vu le 28 octobre 2026 (essai #40, troisième passage) : une
+/// appli figée dès son ouverture par une boucle de `computeStreak`, des
+/// vérifications sautées sans un mot, et une réponse « rien n'est cassé ».
+pub const FROZEN_PAGE: &str = "The page is frozen";
+
+/// La mesure d'une page gelée, d'après l'erreur de l'outil qui devait la
+/// capturer : son seul défaut, qui passe avant tout autre. `None` pour une
+/// autre erreur (navigateur absent, adresse fausse).
+#[must_use]
+pub fn frozen_page_audit(error: &str) -> Option<Audit> {
+    let start = error.find(FROZEN_PAGE)?;
+    let line = error[start..].lines().next().unwrap_or_default().trim();
+    Some(Audit {
+        problems: vec![line.to_string()],
+        ..Audit::default()
+    })
+}
+
 /// Lit le résultat de `Screenshot` (défauts par écran, remarques, console).
 #[must_use]
 pub fn read_audit(output: &str) -> Audit {
@@ -2701,6 +2722,18 @@ mod tests {
         page_from_files, page_target, parse_conception, plan_critique_prompt, problem_key,
         read_audit, regression_note, regressions, review_feedback, screenshot_input, Audit,
     };
+
+    #[test]
+    fn a_frozen_page_is_its_one_blocking_defect() {
+        let error = "The page is frozen: its script has not given control back for 6 s, most likely an endless loop, in computeStreak (app.js line 178), called from renderTodayHabits (app.js line 302). While it runs, nothing on the page responds.";
+        let audit = super::frozen_page_audit(error).expect("page gelée");
+        assert_eq!(audit.problems, [error]);
+        let function = super::function_score(&audit);
+        assert_eq!(function.score, 1);
+        assert_eq!(function.reasons, ["page gelée par une boucle sans fin"]);
+        // Une autre erreur de l'outil (pas de navigateur) n'est pas un défaut.
+        assert!(super::frozen_page_audit("no Chromium-based browser found").is_none());
+    }
 
     #[test]
     fn the_designer_reply_gives_the_plan_and_base_css() {

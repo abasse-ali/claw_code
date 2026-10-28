@@ -4090,11 +4090,13 @@ where
         // Les captures ne vont pas dans la conversation d'elles-mêmes.
         let images = std::mem::take(&mut self.tool_images);
         let (output, is_error) = tool_result_parts(&message)?;
-        if is_error {
-            return None;
-        }
+        // Une page gelée par son script se mesure quand même : c'est son défaut.
+        let audit = if is_error {
+            crate::web_design::frozen_page_audit(output)?
+        } else {
+            crate::web_design::read_audit(output)
+        };
         aids.blind_edits = 0;
-        let audit = crate::web_design::read_audit(output);
         aids.last_checked = Some(
             audit
                 .problems
@@ -4247,11 +4249,19 @@ where
             .handle
             .join()
             .unwrap_or_else(|_| (Err("la vérification s'est arrêtée".to_string()), Vec::new()));
-        let Ok(output) = result else {
-            aids.blind_measures = harness::MAX_VISUAL_CHECKS;
-            return None;
+        let audit = match result {
+            Ok(output) => crate::web_design::read_audit(&output),
+            // La page gelée par son script (boucle sans fin) : son défaut passe
+            // avant tout, et la vérification reprend après la modification
+            // suivante. Avant, la vérification s'arrêtait sans un mot.
+            Err(error) => {
+                let Some(audit) = crate::web_design::frozen_page_audit(&error) else {
+                    aids.blind_measures = harness::MAX_VISUAL_CHECKS;
+                    return None;
+                };
+                audit
+            }
         };
-        let audit = crate::web_design::read_audit(&output);
         aids.last_checked = Some(
             audit
                 .problems
@@ -4516,14 +4526,21 @@ where
         let images = std::mem::take(&mut self.tool_images);
         aids.blind_edits = 0;
         let (output, is_error) = tool_result_parts(&message)?;
-        if is_error {
-            self.api_client.notify(&format!(
-                "Revue visuelle impossible : {}",
-                output.lines().next().unwrap_or_default()
-            ));
-            return None;
-        }
-        let audit = crate::web_design::read_audit(output);
+        let audit = if is_error {
+            // Gelée par son script : la revue la renvoie à l'agent, au lieu de
+            // laisser conclure sur une page que personne ne peut utiliser.
+            let Some(audit) = crate::web_design::frozen_page_audit(output) else {
+                self.api_client.notify(&format!(
+                    "Revue visuelle impossible : {}",
+                    output.lines().next().unwrap_or_default()
+                ));
+                return None;
+            };
+            aids.last_checked = Some(audit.problems.clone());
+            audit
+        } else {
+            crate::web_design::read_audit(output)
+        };
         // Une relance courte (« plus coloré ») se juge avec la demande qu'elle
         // poursuit, et avec les goûts que l'utilisateur a dits aux sessions d'avant.
         let brief = with_remembered_tastes(match earlier {
@@ -10204,6 +10221,74 @@ mod tests {
         assert!(!third.contains("Broken by your last change"), "{third}");
         assert!(observed.notices.iter().any(|notice| notice
             .contains("Claw vérifie la page après la modification : 1 défaut(s) nouveau(x)")));
+    }
+
+    #[test]
+    fn a_page_frozen_by_its_script_is_told_to_the_model_instead_of_ending_the_checks() {
+        let _serial = crate::test_serial();
+        // Essai #40, troisième passage (28 octobre 2026) : une boucle sans fin
+        // au chargement ; la capture échouait, les vérifications s'arrêtaient
+        // sans un mot, et la réponse disait « rien n'est cassé ».
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("gelee");
+        let write = || {
+            tool_step(
+                "write_file",
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                    .to_string(),
+            )
+        };
+        let frozen = "The page is frozen: its script has not given control back for 6 s, most likely an endless loop, in computeStreak (app.js line 178). Fix this loop first, then check the page again.";
+        let shots = std::rc::Rc::new(std::cell::Cell::new(0_u32));
+        let counted = std::rc::Rc::clone(&shots);
+        let observed = std::rc::Rc::new(std::cell::RefCell::new(Observed::default()));
+        let executor = StaticToolExecutor::new()
+            .register("write_file", |input| {
+                let path = serde_json::from_str::<serde_json::Value>(input)
+                    .ok()
+                    .and_then(|value| value["path"].as_str().map(ToString::to_string))
+                    .unwrap_or_default();
+                Ok(serde_json::json!({ "filePath": path, "content": "x" }).to_string())
+            })
+            .register("Screenshot", move |_| {
+                counted.set(counted.get() + 1);
+                if counted.get() == 1 {
+                    Err(super::ToolError::new(frozen))
+                } else {
+                    Ok(r#"{"captures":[{"screen":"phone 390x844","problems":[]}]}"#.to_string())
+                }
+            });
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            StepsApiClient {
+                steps: vec![write(), write(), text_step("Corrigé.")].into(),
+                observed: std::rc::Rc::clone(&observed),
+                advisor: std::collections::VecDeque::new(),
+                escalation: None,
+            },
+            executor,
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["système".to_string()],
+        );
+        runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        // La vérification a continué après la page gelée (deux captures), et le
+        // modèle a lu le défaut, puis la page réparée.
+        assert_eq!(shots.get(), 2);
+        assert!(
+            observed.requests[1].contains("in computeStreak (app.js line 178)"),
+            "{}",
+            observed.requests[1]
+        );
+        let second = observed.requests[2]
+            .rsplit("Claw looked at")
+            .next()
+            .unwrap_or_default();
+        assert!(second.contains("Nothing measured wrong."), "{second}");
+        // Première vérification du tour : le défaut est « restant ».
+        assert!(observed.notices.iter().any(|notice| notice
+            == "Claw vérifie la page après la modification : 0 défaut(s) nouveau(x), 0 réparé(s), 1 restant(s)"));
     }
 
     #[test]

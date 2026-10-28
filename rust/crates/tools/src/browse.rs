@@ -380,6 +380,8 @@ fn start(viewport: Viewport) -> Result<Session, String> {
     for domain in ["Page.enable", "Runtime.enable", "Log.enable"] {
         devtools.call(domain, json!({}))?;
     }
+    // Un script gelé se nomme (fonction, fichier, ligne) au lieu d'un délai dépassé.
+    devtools.watch_scripts();
     Ok(Session {
         devtools,
         viewport,

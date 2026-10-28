@@ -47,6 +47,15 @@ const MAX_WAIT_MS: u64 = 15_000;
 const LOAD_LIMIT: Duration = Duration::from_secs(25);
 /// Réponse du navigateur à une commande, au plus.
 const COMMAND_LIMIT: Duration = Duration::from_secs(30);
+/// Sans réponse à une commande au bout de ce délai, une sonde (une expression
+/// triviale) dit si le script de la page rend encore la main.
+const STUCK_PROBE: Duration = Duration::from_secs(4);
+/// Sonde restée sans réponse ce temps-là : le script tourne sans fin, le
+/// débogueur le met en pause pour dire où.
+const PROBE_WAIT: Duration = Duration::from_secs(2);
+/// Premier délai de chargement d'une page, avant de vérifier que son script
+/// n'est pas gelé.
+const FIRST_LOAD_WAIT: Duration = Duration::from_secs(4);
 /// Démarrage du navigateur, au plus.
 const START_LIMIT: Duration = Duration::from_secs(25);
 /// Tailles d'écran et actions acceptées par appel.
@@ -721,6 +730,18 @@ fn read_message(stream: &mut TcpStream, pong: &mut TcpStream) -> Result<String, 
 }
 
 /// Connexion au protocole `DevTools` d'un onglet.
+/// Sonde d'une commande restée sans réponse (voir `DevTools::call`).
+#[derive(Clone, Copy)]
+enum Probe {
+    Idle,
+    /// Expression triviale envoyée (son numéro, son heure).
+    Sent(u64, Instant),
+    /// Pause du script demandée au débogueur.
+    Pausing,
+    /// Sonde finie : la page rend la main, ou la pause est faite.
+    Done,
+}
+
 struct DevTools {
     writer: TcpStream,
     incoming: mpsc::Receiver<Result<String, String>>,
@@ -730,6 +751,9 @@ struct DevTools {
     /// Fenêtres natives (`alert`, `confirm`, `prompt`) ouvertes par la page et
     /// fermées par Claw : leur genre et leur texte.
     dialogs: Vec<String>,
+    /// Le débogueur suit les scripts de la page (`watch_scripts`) : un script
+    /// gelé peut être mis en pause et nommé.
+    watching: bool,
 }
 
 impl DevTools {
@@ -783,7 +807,74 @@ impl DevTools {
             next_id: 0,
             events: Vec::new(),
             dialogs: Vec::new(),
+            watching: false,
         })
+    }
+
+    /// Le débogueur suit les scripts de la page, avant qu'elle ne s'ouvre : il
+    /// ne peut plus être activé une fois un script gelé. Les points d'arrêt de
+    /// la page (`debugger;`) restent sans effet. Vu le 28 octobre 2026 (essai
+    /// #40, troisième passage) : une boucle sans fin au chargement ; la capture
+    /// a attendu 122 s pour rendre « the browser did not answer
+    /// Input.dispatchKeyEvent within 30 s », et le modèle, sans comprendre, a
+    /// vérifié avec `curl` et conclu que tout marchait.
+    fn watch_scripts(&mut self) {
+        self.watching = self.call("Debugger.enable", json!({})).is_ok()
+            && self
+                .call("Debugger.setBreakpointsActive", json!({ "active": false }))
+                .is_ok();
+    }
+
+    /// Envoie une commande sans attendre sa réponse (ignorée à son arrivée).
+    fn send(&mut self, method: &str, params: Value) {
+        self.next_id += 1;
+        let mut message = json!({ "id": self.next_id, "method": method });
+        message["params"] = params;
+        let _ = write_frame(&mut self.writer, 0x1, message.to_string().as_bytes());
+    }
+
+    /// L'adresse du script `script_id`, d'après le débogueur (vide pour les
+    /// scripts de mesure de Claw).
+    fn script_url(&self, script_id: &str) -> Option<&str> {
+        self.events
+            .iter()
+            .rev()
+            .find(|event| {
+                event["method"] == "Debugger.scriptParsed"
+                    && event["params"]["scriptId"].as_str() == Some(script_id)
+            })
+            .and_then(|event| event["params"]["url"].as_str())
+            .filter(|url| !url.is_empty())
+    }
+
+    /// Où tourne le script mis en pause : les appels du code de la page (pas
+    /// ceux de Claw), du plus profond au plus haut, trois au plus. `None` si
+    /// la pause est tombée dans un script de mesure de Claw.
+    fn stuck_place(&self, paused: &Value) -> Option<String> {
+        let frames: Vec<String> = paused["callFrames"]
+            .as_array()?
+            .iter()
+            .filter_map(|frame| {
+                let id = frame["location"]["scriptId"].as_str()?;
+                let url = self
+                    .script_url(id)
+                    .or_else(|| frame["url"].as_str().filter(|url| !url.is_empty()))?;
+                let path = url.split(['?', '#']).next().unwrap_or(url);
+                let file = path.rsplit('/').next().unwrap_or(path);
+                let line = frame["location"]["lineNumber"].as_u64()? + 1;
+                Some(
+                    match frame["functionName"]
+                        .as_str()
+                        .filter(|name| !name.is_empty())
+                    {
+                        Some(name) => format!("{name} ({file} line {line})"),
+                        None => format!("{file} line {line}"),
+                    },
+                )
+            })
+            .take(3)
+            .collect();
+        (!frames.is_empty()).then(|| frames.join(", called from "))
     }
 
     /// Garde un événement. Une fenêtre native (`alert`, `confirm`, `prompt`)
@@ -792,6 +883,10 @@ impl DevTools {
     /// `prompt()` du code de la boulangère, ouvert par une action, bloquait la
     /// mesure 30 s puis la faisait échouer.
     fn keep(&mut self, message: Value) {
+        // Une pause que Claw n'attendait plus : la page repart aussitôt.
+        if message["method"] == "Debugger.paused" {
+            self.send("Debugger.resume", json!({}));
+        }
         if message["method"] == "Page.javascriptDialogOpening" {
             let kind = message["params"]["type"]
                 .as_str()
@@ -835,18 +930,60 @@ impl DevTools {
         let text = message.to_string();
         write_frame(&mut self.writer, 0x1, text.as_bytes())
             .map_err(|error| format!("{method}: {error}"))?;
-        let deadline = Instant::now() + COMMAND_LIMIT;
+        let started = Instant::now();
+        let deadline = started + COMMAND_LIMIT;
+        let mut probe = Probe::Idle;
         loop {
-            let left = deadline.saturating_duration_since(Instant::now());
+            let now = Instant::now();
+            let left = deadline.saturating_duration_since(now);
             if left.is_zero() {
                 return Err(format!(
                     "the browser did not answer {method} within {} s",
                     COMMAND_LIMIT.as_secs()
                 ));
             }
+            match probe {
+                // Pas de réponse : le script de la page rend-il encore la main ?
+                Probe::Idle if self.watching && now.duration_since(started) >= STUCK_PROBE => {
+                    self.send(
+                        "Runtime.evaluate",
+                        json!({ "expression": "0", "returnByValue": true }),
+                    );
+                    probe = Probe::Sent(self.next_id, now);
+                }
+                // La sonde attend elle aussi : un script tourne sans fin.
+                Probe::Sent(_, sent) if now.duration_since(sent) >= PROBE_WAIT => {
+                    self.send("Debugger.pause", json!({}));
+                    probe = Probe::Pausing;
+                }
+                _ => {}
+            }
             let Some(message) = self.receive(left.min(Duration::from_millis(250)))? else {
                 continue;
             };
+            // La sonde a répondu : la page n'est pas gelée, la commande est lente.
+            if matches!(probe, Probe::Sent(probe_id, _) if message["id"].as_u64() == Some(probe_id))
+            {
+                probe = Probe::Done;
+                continue;
+            }
+            if matches!(probe, Probe::Pausing) && message["method"] == "Debugger.paused" {
+                probe = Probe::Done;
+                let Some(place) = self.stuck_place(&message["params"]) else {
+                    // La pause est tombée dans un script de mesure de Claw : il
+                    // reprend, et la commande continue d'attendre.
+                    self.send("Debugger.resume", json!({}));
+                    continue;
+                };
+                // Le script de la page arrêté, elle repart (son chargement finit).
+                self.send("Runtime.terminateExecution", json!({}));
+                self.send("Debugger.resume", json!({}));
+                return Err(format!(
+                    "{}: its script has not given control back for {} s, most likely an endless loop, in {place}. While it runs, nothing on the page responds: no visitor can use it, and nothing else could be checked. Fix this loop first (make sure it always reaches its end, also when there is no data yet), then check the page again.",
+                    runtime::web_design::FROZEN_PAGE,
+                    started.elapsed().as_secs()
+                ));
+            }
             if message["id"].as_u64() == Some(id) {
                 if let Some(error) = message.get("error") {
                     return Err(format!(
@@ -952,6 +1089,7 @@ pub(crate) fn load_page(
             .call(domain, json!({}))
             .map_err(LoadError::Browser)?;
     }
+    devtools.watch_scripts();
     // `wait` compte depuis le début du chargement, comme le temps virtuel de
     // la ligne de commande.
     let started = Instant::now();
@@ -1967,7 +2105,16 @@ fn open_page_with(
         ));
     }
     let mut note = None;
-    if !devtools.wait_for("Page.loadEventFired", LOAD_LIMIT)? {
+    // Toujours en chargement après quelques secondes : un script gelé se voit
+    // à la sonde (`DevTools::call`), sans attendre la fin du délai.
+    let loaded = devtools.wait_for("Page.loadEventFired", FIRST_LOAD_WAIT)? || {
+        devtools.evaluate("0")?;
+        devtools.wait_for(
+            "Page.loadEventFired",
+            LOAD_LIMIT.saturating_sub(FIRST_LOAD_WAIT),
+        )?
+    };
+    if !loaded {
         note = Some(format!(
             "the page was still loading after {} s; this is how it looked then",
             LOAD_LIMIT.as_secs()
@@ -3487,6 +3634,7 @@ fn second_device_check(
         for domain in ["Page.enable", "Runtime.enable", "Log.enable"] {
             other.call(domain, json!({})).ok()?;
         }
+        other.watch_scripts();
         let mut texts = Vec::new();
         for (screen, _) in showing {
             if let Some(opened) = open_screen(&mut other, session, phone, screen, false) {
@@ -3686,6 +3834,7 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
     for domain in ["Page.enable", "Runtime.enable", "Log.enable"] {
         devtools.call(domain, json!({}))?;
     }
+    devtools.watch_scripts();
     if let Some(script) = storage_script(input.storage.as_ref())? {
         devtools.call(
             "Page.addScriptToEvaluateOnNewDocument",
@@ -3792,6 +3941,10 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
                 if explore.screens.is_empty() && explore.pages.is_empty() {
                     explore = shot.explore;
                 }
+            }
+            // Gelée à cette taille, la page l'est à toutes : son défaut suffit.
+            Err(error) if error.starts_with(runtime::web_design::FROZEN_PAGE) => {
+                return Err(error);
             }
             Err(error) => captures.push(json!({ "screen": viewport.label, "error": error })),
         }
@@ -4485,6 +4638,45 @@ mod tests {
         // Le tableau du <details> fermé : rien de dit sur lui.
         assert!(!page.contains("drawn on top of each other"), "{page}");
         assert!(!page.contains("\\\"Mois\\\""), "{page}");
+    }
+
+    /// Essai #40, troisième passage (28 octobre 2026) : une appli figée dès son
+    /// ouverture par une boucle sans fin (la série d'une habitude jamais cochée
+    /// remontait le temps sans s'arrêter). La capture la nomme, vite, au lieu
+    /// d'un délai dépassé au bout de deux minutes.
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn a_page_frozen_by_an_endless_loop_is_named_in_a_real_browser() {
+        let cwd = std::env::current_dir().expect("dossier");
+        let name = format!("claw-gelee-{}", std::process::id());
+        let dir = cwd.join(&name);
+        std::fs::create_dir_all(&dir).expect("dossier");
+        std::fs::write(
+            dir.join("index.html"),
+            "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><title>Habitudes</title></head><body><h1>Série : <span id=\"serie\">0</span></h1><script>debugger;</script><script src=\"loop.js\"></script></body></html>",
+        )
+        .expect("html");
+        std::fs::write(
+            dir.join("loop.js"),
+            "function countStreak(done) {\n  let streak = 0;\n  const day = new Date();\n  while (true) {\n    if (done[day.toDateString()]) streak++;\n    else if (streak > 0) break;\n    day.setDate(day.getDate() - 1);\n  }\n  return streak;\n}\nfunction render() {\n  document.getElementById(\"serie\").textContent = countStreak({});\n}\nrender();\n",
+        )
+        .expect("js");
+        let started = std::time::Instant::now();
+        let result = super::take(&input(None, Some(&format!("{name}/index.html"))));
+        let elapsed = started.elapsed();
+        let _ = std::fs::remove_dir_all(&dir);
+        let error = result.expect_err("page gelée");
+        // Le `debugger;` de la page ne l'a pas arrêtée : c'est bien la boucle.
+        // La pause tombe sur l'une des lignes de la boucle (4 à 7).
+        assert!(
+            error.starts_with(runtime::web_design::FROZEN_PAGE)
+                && error.contains("in countStreak (loop.js line ")
+                && error.contains(
+                    "), called from render (loop.js line 12), called from loop.js line 14"
+                ),
+            "{error}"
+        );
+        assert!(elapsed < std::time::Duration::from_secs(30), "{elapsed:?}");
     }
 
     /// Session #39 (28 octobre 2026), l'appli de budget : les bugs graphiques
