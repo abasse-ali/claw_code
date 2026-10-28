@@ -917,15 +917,16 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "Component",
-            description: "Interactive components that work as soon as they are pasted (HTML, CSS and dependency-free JS), accessible, in the plan's colors, with icons from the icon set: nav-menu (header and phone menu), accordion (FAQ), tabs, dialog (modal), toast (confirmation messages), carousel, booking (days, slots, places left, calendar file), filter (tags and search), form (validation, sending, success), cart (basket or quote), theme-toggle (dark mode), copy, share, open-now (live opening hours), directions (route, call, map), reveal (appear on scroll), count-up (key figures), scroll-effects (reading progress, parallax), page-transitions; for a personal app that keeps the user's data (budget, log, habits): app-tabs (screens behind a tab bar), entries (data kept on the phone with the user's figures from the first launch, undo, a copy saved and taken back), entry-sheet (panel to add an entry, fields readable in dark mode), chart (SVG bars redrawn when their screen opens), pwa (manifest, service worker, offline). Use them instead of writing these by hand: every button then does what it says. Ask for several by name in one call; without names you get the list.",
+            description: "Interactive components that work as soon as they are pasted (HTML, CSS and dependency-free JS), accessible, in the plan's colors, with icons from the icon set: nav-menu (header and phone menu), accordion (FAQ), tabs, dialog (modal), toast (confirmation messages), carousel, booking (days, slots, places left, calendar file), filter (tags and search), form (validation, sending, success), cart (basket or quote), theme-toggle (dark mode), copy, share, open-now (live opening hours), directions (route, call, map), reveal (appear on scroll), count-up (key figures), scroll-effects (reading progress, parallax), page-transitions. For a personal app that keeps the user's data (budget, log, habits, collection): app-kit, the look and working of a recent phone app (Claw writes kit/app-kit.css and kit/app-kit.js into the project and gives the page skeleton: app bar with the month, screens behind a floating tab bar with an add button, balance card, tiles, cards with lists, meters, bar chart, settings, a sheet to add or edit an entry, undo, light and dark), with pwa (manifest, service worker, offline). Use them instead of writing these by hand: every button then does what it says. Ask for several by name in one call; without names you get the list.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "names": { "type": "array", "items": { "type": "string" }, "description": "Component names, for example [\"nav-menu\", \"booking\", \"open-now\"]" }
+                    "names": { "type": "array", "items": { "type": "string" }, "description": "Component names, for example [\"nav-menu\", \"booking\", \"open-now\"] or [\"app-kit\", \"pwa\"]" },
+                    "dir": { "type": "string", "description": "Folder of the app's index.html, relative to the project (default: the project's root); app-kit writes its files in its kit/ folder" }
                 },
                 "additionalProperties": false
             }),
-            required_permission: PermissionMode::ReadOnly,
+            required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
             name: "AppIcon",

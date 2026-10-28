@@ -1,0 +1,200 @@
+<!-- Le corps de index.html d'une appli perso, avec le kit : gardez ses classes et ses attributs data-, changez les textes, les écrans et les catégories pour l'appli demandée, retirez ce qui ne sert pas. Dans le <head> : <link rel="stylesheet" href="kit/app-kit.css"> avant votre feuille. -->
+<div class="app">
+  <header class="app-bar">
+    <button class="icon-btn" type="button" data-month-step="-1" aria-label="Mois précédent">{{icon:chevron-left}}</button>
+    <h1 class="app-bar__title" data-month-label>Octobre 2026</h1>
+    <button class="icon-btn" type="button" data-month-step="1" aria-label="Mois suivant">{{icon:chevron-right}}</button>
+    <span class="app-bar__spacer"></span>
+    <a class="icon-btn" href="#reglages" aria-label="Réglages">{{icon:settings}}</a>
+  </header>
+
+  <main>
+    <section class="app-screen" id="accueil" data-screen aria-label="Accueil">
+      <div class="hero">
+        <p class="hero__label">Disponible à dépenser</p>
+        <p class="hero__amount" data-show="left">0,00 €</p>
+        <p class="hero__sub">Jusqu'à <b data-show="best">0,00 €</b> dans le meilleur des cas</p>
+        <div class="hero__pills">
+          <div class="hero__pill"><span>Par jour</span><b data-show="per-day">0,00 €</b><small data-show="days-left">jours restants</small></div>
+          <div class="hero__pill"><span>Dépensé</span><b data-entries-sum="spending">0,00 €</b><small>hors charges fixes</small></div>
+        </div>
+        <div class="hero__bar" role="progressbar" aria-label="Budget du mois déjà dépensé" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i data-show="used-bar"></i></div>
+        <div class="hero__legend"><span data-show="used">0 % du budget dépensé</span><span data-show="budget">0,00 €</span></div>
+      </div>
+
+      <div class="tiles">
+        <div class="tile">
+          <p class="tile__label">{{icon:wallet}}Rentrées sûres</p>
+          <p class="tile__value" data-show="sure">0,00 €</p>
+          <p class="tile__note" data-show="unsure">non assurées : 0,00 €</p>
+        </div>
+        <div class="tile">
+          <p class="tile__label">{{icon:receipt}}Charges fixes</p>
+          <p class="tile__value" data-show="fixed">0,00 €</p>
+          <p class="tile__note" data-show="fixed-count">0 charges</p>
+        </div>
+      </div>
+
+      <section class="card" aria-labelledby="recentes-titre">
+        <div class="card__head">
+          <h2 id="recentes-titre">Dernières opérations</h2>
+          <a class="card__link" href="#operations">Tout voir</a>
+        </div>
+        <ul class="list" data-entries-list data-limit="4"></ul>
+        <div class="empty" data-entries-empty hidden>
+          {{icon:receipt}}
+          <p>Aucune opération ce mois-ci.</p>
+          <button class="btn btn--primary btn--small" type="button" data-dialog-open="operation">Ajouter une opération</button>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="rentrees-titre">
+        <div class="card__head">
+          <h2 id="rentrees-titre">Rentrées du mois</h2>
+          <span class="card__meta" data-show="incomes-count"></span>
+        </div>
+        <ul class="list" data-plan="incomes"></ul>
+      </section>
+
+      <section class="card" aria-labelledby="charges-titre">
+        <div class="card__head">
+          <h2 id="charges-titre">Charges fixes</h2>
+          <span class="card__meta" data-show="charges-count"></span>
+        </div>
+        <ul class="list" data-plan="charges"></ul>
+      </section>
+    </section>
+
+    <section class="app-screen" id="operations" data-screen aria-labelledby="operations-titre" hidden>
+      <h2 class="app-screen__title" id="operations-titre">Opérations</h2>
+      <div class="tiles">
+        <div class="tile"><p class="tile__label">Dépenses</p><p class="tile__value" data-entries-sum="spending">0,00 €</p><p class="tile__note">ce mois-ci</p></div>
+        <div class="tile"><p class="tile__label">Rentrées en plus</p><p class="tile__value" data-entries-sum="income">0,00 €</p><p class="tile__note">hors rentrées prévues</p></div>
+      </div>
+      <section class="card" aria-label="Opérations du mois">
+        <ul class="list" data-entries-list></ul>
+        <div class="empty" data-entries-empty hidden>
+          {{icon:receipt}}
+          <p>Aucune opération ce mois-ci.</p>
+          <button class="btn btn--primary btn--small" type="button" data-dialog-open="operation">Ajouter une opération</button>
+        </div>
+      </section>
+      <div class="btn-row">
+        <button class="btn btn--small" type="button" data-entries-export>{{icon:download}}Copie</button>
+        <button class="btn btn--small" type="button" data-entries-import>{{icon:upload}}Reprendre</button>
+      </div>
+      <input type="file" accept=".csv,text/csv" data-entries-file aria-label="Copie à reprendre" hidden>
+    </section>
+
+    <section class="app-screen" id="bilan" data-screen aria-labelledby="bilan-titre" hidden>
+      <h2 class="app-screen__title" id="bilan-titre">Bilan</h2>
+      <section class="card" aria-labelledby="reste-titre">
+        <div class="card__head"><h3 id="reste-titre">Reste du mois</h3><span class="card__meta">après charges fixes</span></div>
+        <div class="meters" data-show="scenarios"></div>
+      </section>
+      <section class="card chart" data-chart="entries" data-chart-months="6" aria-labelledby="graphique-titre">
+        <div class="card__head"><h3 id="graphique-titre">Rentrées et dépenses</h3><span class="card__meta">6 derniers mois</span></div>
+        <div class="chart__plot" data-chart-plot></div>
+        <p class="chart__legend"><span class="chart__key chart__key--in">Rentrées</span><span class="chart__key chart__key--out">Dépenses</span></p>
+        <p class="chart__empty" data-chart-empty hidden>Le graphique se remplit au fil des mois.</p>
+      </section>
+      <div class="tiles">
+        <div class="tile"><p class="tile__label">Par mois</p><p class="tile__value" data-show="habit">0,00 €</p><p class="tile__note">reste habituel</p></div>
+        <div class="tile"><p class="tile__label">Sur un an</p><p class="tile__value" data-show="year">0,00 €</p><p class="tile__note">au même rythme</p></div>
+      </div>
+    </section>
+
+    <section class="app-screen" id="reglages" data-screen aria-labelledby="reglages-titre" hidden>
+      <h2 class="app-screen__title" id="reglages-titre">Réglages</h2>
+      <section class="card" aria-labelledby="mes-rentrees">
+        <div class="card__head"><h3 id="mes-rentrees">Mes rentrées chaque mois</h3></div>
+        <div class="settings" data-settings="incomes"></div>
+      </section>
+      <section class="card" aria-labelledby="mes-charges">
+        <div class="card__head"><h3 id="mes-charges">Mes charges fixes</h3></div>
+        <div class="settings" data-settings="charges"></div>
+      </section>
+      <section class="card" aria-labelledby="donnees-titre">
+        <div class="card__head"><h3 id="donnees-titre">Mes données</h3></div>
+        <p>Elles restent sur ce téléphone. Gardez-en une copie de temps en temps.</p>
+        <div class="btn-row" style="margin-top: 12px">
+          <button class="btn btn--small" type="button" data-entries-export>{{icon:download}}Copie</button>
+          <button class="btn btn--small btn--danger" type="button" data-dialog-open="effacer">{{icon:trash-2}}Tout effacer</button>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <nav class="tabbar" data-app-tabs aria-label="Écrans de l'appli">
+    <a class="tabbar__tab" href="#accueil" aria-current="page">{{icon:house}}<span>Accueil</span></a>
+    <a class="tabbar__tab" href="#operations">{{icon:list}}<span>Opérations</span></a>
+    <button class="tabbar__add" type="button" data-dialog-open="operation" aria-label="Ajouter une opération">{{icon:plus}}</button>
+    <a class="tabbar__tab" href="#bilan">{{icon:chart-column}}<span>Bilan</span></a>
+    <a class="tabbar__tab" href="#reglages">{{icon:settings}}<span>Réglages</span></a>
+  </nav>
+</div>
+
+<dialog class="sheet" id="operation" aria-labelledby="operation-titre">
+  <form class="sheet__body" data-entry-form novalidate>
+    <div class="sheet__grip" aria-hidden="true"></div>
+    <div class="sheet__head">
+      <h2 class="sheet__title" id="operation-titre" data-entry-title>Nouvelle opération</h2>
+      <button class="icon-btn" type="button" data-dialog-close aria-label="Fermer">{{icon:x}}</button>
+    </div>
+    <fieldset class="seg seg--choice">
+      <legend class="visually-hidden">Genre</legend>
+      <label><input type="radio" name="kind" value="out" checked><span>Dépense</span></label>
+      <label><input type="radio" name="kind" value="in"><span>Rentrée</span></label>
+    </fieldset>
+    <label class="visually-hidden" for="operation-montant">Montant en euros</label>
+    <div class="sheet__amount">
+      <input id="operation-montant" name="amount" inputmode="decimal" autocomplete="off" placeholder="0">
+      <span aria-hidden="true">€</span>
+    </div>
+    <p class="sheet__error">Un montant comme 12,50.</p>
+    <div class="sheet__quick">
+      <button type="button" data-quick="5">+5 €</button>
+      <button type="button" data-quick="10">+10 €</button>
+      <button type="button" data-quick="20">+20 €</button>
+      <button type="button" data-quick="50">+50 €</button>
+    </div>
+    <fieldset class="sheet__cats">
+      <legend>Catégorie</legend>
+      <label class="sheet__cat"><input type="radio" name="category" value="Courses" checked><span>{{icon:shopping-cart}}<b>Courses</b></span></label>
+      <label class="sheet__cat"><input type="radio" name="category" value="Sorties"><span>{{icon:utensils}}<b>Sorties</b></span></label>
+      <label class="sheet__cat"><input type="radio" name="category" value="Transport"><span>{{icon:bus}}<b>Transport</b></span></label>
+      <label class="sheet__cat"><input type="radio" name="category" value="Shopping"><span>{{icon:shopping-bag}}<b>Shopping</b></span></label>
+      <label class="sheet__cat"><input type="radio" name="category" value="Santé"><span>{{icon:heart-pulse}}<b>Santé</b></span></label>
+      <label class="sheet__cat"><input type="radio" name="category" value="Loisirs"><span>{{icon:gamepad-2}}<b>Loisirs</b></span></label>
+      <label class="sheet__cat"><input type="radio" name="category" value="Cadeaux"><span>{{icon:gift}}<b>Cadeaux</b></span></label>
+      <label class="sheet__cat"><input type="radio" name="category" value="Autre"><span>{{icon:tag}}<b>Autre</b></span></label>
+    </fieldset>
+    <div class="field-row">
+      <div class="field">
+        <label for="operation-libelle">Libellé</label>
+        <input id="operation-libelle" name="label" autocomplete="off" placeholder="Boulangerie">
+      </div>
+      <div class="field">
+        <label for="operation-date">Date</label>
+        <input id="operation-date" name="date" type="date">
+      </div>
+    </div>
+    <button class="btn btn--primary btn--block" type="submit">Ajouter</button>
+    <button class="btn btn--danger btn--block" type="button" data-entry-delete hidden>Supprimer l'opération</button>
+  </form>
+</dialog>
+
+<dialog class="modal" id="effacer" aria-labelledby="effacer-titre">
+  <div class="modal__body">
+    <div class="modal__head"><h2 class="modal__title" id="effacer-titre">Tout effacer ?</h2></div>
+    <p>Les opérations de tous les mois seront effacées de ce téléphone.</p>
+    <div class="btn-row">
+      <button class="btn" type="button" data-dialog-close>Garder</button>
+      <button class="btn btn--danger" type="button" data-entries-clear data-dialog-close>Effacer</button>
+    </div>
+  </div>
+</dialog>
+
+<script type="application/json" data-entries-seed="budget">[]</script>
+<script src="kit/app-kit.js"></script>
+<script src="app.js"></script>

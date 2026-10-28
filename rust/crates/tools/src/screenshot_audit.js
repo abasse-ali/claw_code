@@ -9,6 +9,13 @@
   }
   const W = document.documentElement.clientWidth || window.innerWidth;
   const mobile = W < 900;
+  // Une appli (barre d'onglets du kit, ou toute nav fixée en bas avec ses
+  // écrans) : son titre est celui de sa barre, petit comme sur un téléphone,
+  // la police du téléphone y est le bon choix, et le chiffre principal fait
+  // le point focal. Les règles de vitrine (titre géant, police à soi) ne s'y
+  // appliquent pas. Vu le 28 octobre 2026 : ces remarques poussaient une
+  // appli de budget vers un titre d'affiche et une police à empattements.
+  const appShell = Boolean(document.querySelector("[data-app-tabs], .tabbar, .app-tabs")) && document.querySelectorAll("[data-screen]").length >= 2;
   const problems = [];
   // Éléments en cause : Claw demande au navigateur les règles CSS qui les
   // dessinent (fichier et ligne), pour que le modèle aille droit à la règle
@@ -287,7 +294,7 @@
     // serré, que l'utilisateur lisait « FCVoisins ».
     const h1 = document.querySelector("h1");
     const bodySize = parseFloat(css(document.body).fontSize) || 16;
-    if (h1 && shown(h1) && parseFloat(css(h1).fontSize) <= bodySize * 1.15) {
+    if (h1 && shown(h1) && !appShell && parseFloat(css(h1).fontSize) <= bodySize * 1.15) {
       blame([h1]);
       problems.push(`The main title ${name(h1)} is ${css(h1).fontSize} on this phone, no bigger than the body text (${bodySize}px): nobody sees what the page is about. Give it at least 1.6 times the body size on phones (font-size: clamp(1.6rem, 6vw, 3rem))`);
     }
@@ -320,11 +327,39 @@
   }
 
   // 7. Texte trop pâle sur son fond (fond uni seulement : une image de fond n'est pas jugée).
-  const parse = (color) => {
-    const found = /rgba?\(([^)]+)\)/.exec(color || "");
+  // Toute couleur CSS en rouge, vert, bleu et opacité : rgb() se lit tout de
+  // suite, les autres (color-mix(), oklch(), lab()...) le navigateur les peint
+  // sur un pixel et les relit. Vu le 28 octobre 2026 : seules les couleurs
+  // rgb() étaient lues, et le contraste des textes en color-mix() (gris doux,
+  // accent foncé) ou en oklch() n'était jamais mesuré.
+  const painter = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+  const painted = new Map();
+  const rgbOf = (text) => {
+    const found = /rgba?\(([^)]+)\)/.exec(text || "");
     if (!found) return null;
     const parts = found[1].split(/[\s,/]+/).filter(Boolean).map(Number);
     return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
+  };
+  const parse = (color) => {
+    const text = String(color || "").trim();
+    if (!text) return null;
+    if (/^rgba?\([^)]*\)$/.test(text)) return rgbOf(text);
+    if (painted.has(text)) return painted.get(text);
+    let value = null;
+    if (painter) {
+      painter.fillStyle = "#010203";
+      painter.fillStyle = text;
+      if (painter.fillStyle !== "#010203") {
+        painter.clearRect(0, 0, 1, 1);
+        painter.fillRect(0, 0, 1, 1);
+        const [r, g, b, a] = painter.getImageData(0, 0, 1, 1).data;
+        value = { r, g, b, a: a / 255 };
+      }
+    }
+    // Une valeur composée (une ombre, un dégradé) : sa première couleur rgb().
+    if (!value) value = rgbOf(text);
+    painted.set(text, value);
+    return value;
   };
   const blend = (top, under) => ({
     r: top.r * top.a + under.r * (1 - top.a),
@@ -1229,8 +1264,8 @@
     const families = new Set([document.body, ...document.querySelectorAll("h1, h2, h3")].filter(Boolean)
       .map((el) => css(el).fontFamily.split(",")[0].replace(/["']/g, "").trim()));
     const generic = [...families].filter((family) => common.includes(family.toLowerCase()));
-    if (generic.length) blameNote([document.body, document.querySelector("h1, h2")]);
-    if (generic.length) notes.push(`Typefaces ${generic.join(" and ")} are among the most frequent defaults of generated pages: a typeface chosen for this subject would give the page its own voice`);
+    if (generic.length && !appShell) blameNote([document.body, document.querySelector("h1, h2")]);
+    if (generic.length && !appShell) notes.push(`Typefaces ${generic.join(" and ")} are among the most frequent defaults of generated pages: a typeface chosen for this subject would give the page its own voice`);
     // 38em, soit environ 75 caractères : la mesure confortable d'un studio.
     const wide = visible.filter((el) => el.matches("p, li") && ownText(el) && words(el).length > 140
       && box.get(el).width / parseFloat(css(el).fontSize) > 38);
@@ -1250,7 +1285,7 @@
     // Un titre à peine plus grand que le texte : la hiérarchie ne se voit pas.
     const h1 = document.querySelector("h1");
     const bodySize = parseFloat(css(document.body).fontSize) || 16;
-    if (h1 && shown(h1) && parseFloat(css(h1).fontSize) / bodySize < 2.2) {
+    if (h1 && shown(h1) && !appShell && parseFloat(css(h1).fontSize) / bodySize < 2.2) {
       blameNote([h1]);
       notes.push(`The h1 is only ${(parseFloat(css(h1).fontSize) / bodySize).toFixed(1)} times the body text (${css(h1).fontSize}): a first screen needs a clear focal point, at least 2.5 times the body size on desktops`);
     }
@@ -1406,9 +1441,9 @@
     // Accent omniprésent : la couleur la plus saturée couvre plus de 15 % de
     // la page, elle n'accentue plus rien.
     const sat = (color) => {
-      const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
-      if (!match || (match[4] !== undefined && parseFloat(match[4]) < 0.5)) return null;
-      const [r, g, b] = [match[1], match[2], match[3]].map(Number);
+      const found = parse(color);
+      if (!found || found.a < 0.5) return null;
+      const { r, g, b } = found;
       const max = Math.max(r, g, b);
       const min = Math.min(r, g, b);
       return max === 0 ? 0 : (max - min) / max;

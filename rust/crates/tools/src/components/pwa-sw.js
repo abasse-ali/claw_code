@@ -3,7 +3,7 @@
 // VERSION à chaque mise en ligne efface les anciennes copies.
 const VERSION = "v1";
 const FILES = [
-  "./", "index.html", "styles.css", "app.js", "manifest.webmanifest",
+  "./", "index.html", "styles.css", "app.js", "kit/app-kit.css", "kit/app-kit.js", "manifest.webmanifest",
   "icons/icon.svg", "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png",
 ];
 
