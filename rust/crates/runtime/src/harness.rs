@@ -4310,7 +4310,7 @@ pub const LOCAL_ADDRESS_SIGN: &str = "it sends the user to a localhost address";
 /// Une adresse de cette machine dans la réponse (`localhost`, `127.0.0.1`,
 /// `0.0.0.0`) quand l'utilisateur n'y est pas : elle ne lui ouvre rien. Vu le
 /// 28 octobre 2026 (essai #40, troisième passage) : « Ouvrez
-/// http://localhost:8080 → Ajouter à l'écran d'accueil », lu sur un téléphone,
+/// `http://localhost:8080` → Ajouter à l'écran d'accueil », lu sur un téléphone,
 /// pour une appli qui tournait sur la machine de travail de Claw.
 /// `test_link` : Claw peut donner un lien d'essai ou publier le site
 /// (`claw-github`).
