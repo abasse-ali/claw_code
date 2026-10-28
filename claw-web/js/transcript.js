@@ -490,6 +490,37 @@ function repeatedInAnswer(events, answer) {
   return repeated;
 }
 
+/** Ce qu'une action a donné, en quelques signes, pour la liste du bloc « Claw travaille ». */
+function quickSide(event) {
+  const result = event.r;
+  if (!result) return '<span class="spinner" aria-label="en cours"></span>';
+  if (["write_file", "edit_file", "MultiEdit"].includes(event.n) && (result.add || result.del)) return counts(result.add, result.del);
+  if (Array.isArray(result.files)) {
+    return counts(result.files.reduce((sum, file) => sum + (file.add || 0), 0), result.files.reduce((sum, file) => sum + (file.del || 0), 0));
+  }
+  if (event.n === "read_file" && result.count) return plural(result.count, "ligne");
+  if ((event.n === "bash" || event.n === "PowerShell") && result.code) return `<span class="del">${escapeHtml(result.code)}</span>`;
+  if (event.n === "Screenshot" && result.found) return `<span class="del">${plural(result.found, "problème")}</span>`;
+  if (event.n === "Photo" && Array.isArray(result.photos)) return plural(result.photos.length, "photo");
+  return "";
+}
+
+/** Les dernières actions d'un passage en cours, la plus récente d'abord : icône, verbe, cible et
+ * ce qu'elle a donné. Celles d'après `seen` (rang dans le journal) viennent d'arriver : elles
+ * entrent en glissant, l'une après l'autre. */
+export function recentActions(events, count = 4, seen = Infinity) {
+  return events.map((event, index) => ({ event, index }))
+    .filter(({ event }) => event.k === "tool" && event.n !== "TodoWrite")
+    .slice(-count).reverse()
+    .map(({ event, index }) => {
+      const [icon, verb, target] = describe(event.n, event.i);
+      const state = !event.r ? " running" : event.e ? " failed" : "";
+      return `<li class="lr-action${state}${index >= seen ? " arrived" : ""}">${ICONS[icon] || ICONS.tool}`
+        + `<span class="verb">${escapeHtml(verb)}</span><span class="target">${escapeHtml(target)}</span>`
+        + `<span class="side">${quickSide(event)}</span></li>`;
+    }).join("");
+}
+
 /** Étapes d'un journal montrées d'emblée ; les précédentes se déplient. */
 const RECENT_STEPS = 30;
 

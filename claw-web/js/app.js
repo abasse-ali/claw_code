@@ -6,7 +6,7 @@
 import { ANSWER, GitHub, GitHubError, LABEL, PROGRESS } from "./github.js";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 import { sealedBox } from "./sealed-box.js";
-import { LOG, changesHtml, decodeLog, photoLink, photoView, transcriptHtml, withoutCallMarkup } from "./transcript.js";
+import { LOG, changesHtml, decodeLog, photoLink, photoView, recentActions, transcriptHtml, withoutCallMarkup } from "./transcript.js";
 import { highlightLines, languageOf } from "./highlight.js";
 import { accountStatus, allFreeModels, freeModels, resetTime } from "./openrouter.js";
 import { extras } from "./tools.js";
@@ -75,6 +75,12 @@ const ICON = {
   slash: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 15l6-6"/></svg>',
 };
 
+/** Les trois griffes du logo, qui se tracent l'une après l'autre tant que Claw travaille. */
+const CLAWS = '<svg class="claws" viewBox="116 100 320 320" aria-hidden="true">'
+  + '<path pathLength="1" d="M152 384C196 306 214 226 202 132"/>'
+  + '<path pathLength="1" d="M250 398C294 316 312 230 298 122"/>'
+  + '<path pathLength="1" d="M346 382C386 304 400 228 384 140"/></svg>';
+
 const state = {
   settings: loadSettings(),
   github: null,
@@ -122,6 +128,8 @@ const state = {
   drafts: new Map(),
   // Étapes du journal déjà montrées, par passage : les suivantes paraissent une par une.
   revealed: new Map(),
+  // Actions déjà vues dans le bloc « Claw travaille », par passage : les nouvelles y entrent.
+  liveSeen: new Map(),
   // Bloc au-dessus de la zone de saisie : questions de Claw (carte montrée, choix faits).
   dockQuestions: null,
 };
@@ -319,9 +327,15 @@ function animateIn(list) {
  * au travail) calées sur l'horloge : une vue redessinée (toutes les 4 s pendant un passage) les
  * reprend où elles en étaient, sans saut. */
 function keepInStep(root) {
-  for (const element of root.querySelectorAll(".spinner, .run-card.live, .run-card.stopping, .live-card, .live-bar span, .live-dot, .dot.running, .dot.queued, .dock-todos li.doing .box")) {
-    const period = Number.parseFloat(getComputedStyle(element).animationDuration) * 1000;
-    if (period > 0) element.style.animationDelay = `-${Date.now() % period}ms`;
+  for (const element of root.querySelectorAll(".spinner, .claws path, .lr-sweep span, .lr-segments .doing, .live-run.stopping, .live-dot, .dot.running, .dot.queued, .dock-todos li.doing .box")) {
+    if (element.dataset.inStep) continue;
+    const style = getComputedStyle(element);
+    const period = Number.parseFloat(style.animationDuration) * 1000;
+    if (!(period > 0)) continue;
+    // Le décalage de la feuille de style (les griffes l'une après l'autre) est gardé.
+    const offset = (Number.parseFloat(style.animationDelay) || 0) * 1000;
+    element.dataset.inStep = "1";
+    element.style.animationDelay = `${offset - (Date.now() % period)}ms`;
   }
 }
 
@@ -2616,18 +2630,21 @@ function sessionCard(issue) {
   </a></li>`;
 }
 
-/** Carte d'une session au travail : son état et sa durée qui avance à la seconde. */
+/** Carte d'une session au travail : les griffes qui grattent, son état et sa durée à la seconde. */
 function liveCard(issue, run) {
   const settings = settingsOf(issue);
   const queued = run.status !== "in_progress";
   const start = Date.parse(run.run_started_at || run.created_at);
   return `<a class="live-card${queued ? " queued" : ""}" href="#/session/${issue.number}">
-    <span class="live-top"><span class="live-dot" aria-hidden="true"></span>
-      <span class="live-state">${queued ? "En attente d'une machine" : "Claw travaille"}</span>
-      ${Number.isFinite(start) ? `<span class="live-clock">depuis <span class="clock" data-since="${start}">${clockText(Math.max(0, Math.floor((Date.now() - start) / 1000)))}</span></span>` : ""}</span>
-    <strong class="live-title"><span class="num">#${numberOf(issue)}</span> ${escapeHtml(issue.title)}</strong>
-    <span class="live-meta">${ICON.repo}<span>${escapeHtml((settings.repo || "").split("/").pop())}</span>${ICON.branch}<span>${escapeHtml(branchOf(issue))}</span></span>
-    <span class="live-bar" aria-hidden="true"><span></span></span>
+    <span class="lr-mark">${CLAWS}</span>
+    <span class="lc-body">
+      <span class="lc-top"><strong>${queued ? "En attente d'une machine" : "Claw travaille"}</strong>
+        ${Number.isFinite(start) ? `<span class="lc-clock">depuis <span class="clock" data-since="${start}">${clockText(Math.max(0, Math.floor((Date.now() - start) / 1000)))}</span></span>` : ""}</span>
+      <span class="lc-title"><span class="num">#${numberOf(issue)}</span> ${escapeHtml(issue.title)}</span>
+      <span class="lc-meta">${ICON.repo}<span>${escapeHtml((settings.repo || "").split("/").pop())}</span>${ICON.branch}<span>${escapeHtml(branchOf(issue))}</span></span>
+    </span>
+    <span class="lc-go">${ICON.chevron}</span>
+    <span class="lr-sweep" aria-hidden="true"><span></span></span>
   </a>`;
 }
 
@@ -3350,6 +3367,7 @@ function messageHtml(comment, isLastProgress, answer = "") {
     }
     // Passage qui travaille encore : sa durée avance à chaque seconde.
     const ticking = kind === "running" && isLastProgress && live;
+    if (events.length && (ticking || stopping)) return liveRunHtml({ body, head, events, run, comment, answer, stopping });
     if (events.length) {
       // « · 161 action(s) » : le compte est déjà dans la pastille du journal.
       // Durée insécable : « 12 min 05 s » ne se coupe pas.
@@ -3372,6 +3390,71 @@ function messageHtml(comment, isLastProgress, answer = "") {
   }
   if (body.includes(ANSWER)) return answerHtml(body, comment.id);
   return userMessageHtml(comment.user ? comment.user.login : "", body);
+}
+
+/** Le bloc « Claw travaille » d'un passage en cours : les griffes qui grattent, la durée à la
+ * seconde et « Arrêter » ; l'étape en cours, en grand, et l'avancée de sa liste de tâches ; ses
+ * dernières actions, la plus récente en haut (les nouvelles entrent en glissant) ; le journal
+ * complet, replié. Demandé le 28 octobre 2026 : la carte d'avant n'était que le journal brut. */
+function liveRunHtml({ body, head, events, run, comment, answer, stopping }) {
+  const key = `run${run}`;
+  // Tout est montré d'un coup : les nouvelles actions entrent dans la liste du bloc.
+  state.revealed.set(key, events.length);
+  const tools = events.filter((event) => event.k === "tool");
+  const lastTool = events.map((event) => event.k === "tool").lastIndexOf(true);
+  const seen = state.liveSeen.has(key) ? state.liveSeen.get(key) : lastTool + 1;
+  state.liveSeen.set(key, lastTool + 1);
+  const todo = [...events].reverse().find((event) => event.k === "tool" && event.n === "TodoWrite"
+    && event.i && Array.isArray(event.i.todos) && event.i.todos.length);
+  const todos = todo ? todo.i.todos : [];
+  const doing = todos.find(([status]) => status === "in_progress");
+  const line = (label) => ((body.match(new RegExp(`^\\*\\*${label}\\*\\* : (.+)$`, "m")) || [])[1] || "").trim();
+  const said = line("En ce moment");
+  const plan = line("Ce que Claw compte faire");
+  const last = [...events].reverse().find((event) => event.k === "tool" && event.n !== "TodoWrite");
+  const now = stopping ? "Claw s'arrête, puis range son travail sur la branche."
+    : doing ? doing[1] : said || (last ? recentActions([last], 1).replace(/<span class="side">[\s\S]*$/, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : "Claw lit la demande et prépare son plan.");
+  const elapsed = (head.match(/(?:depuis|après) ((?:\d+ min )?\d+ s)/) || [])[1] || "";
+  const clock = stopping ? (elapsed ? `après ${elapsed}` : "") : elapsed ? liveClock(`depuis ${elapsed}`, comment) : "";
+  const done = todos.filter(([status]) => status === "completed").length;
+  const bar = todos.length
+    ? `<div class="lr-progress" role="img" aria-label="${done} tâche${done > 1 ? "s" : ""} faite${done > 1 ? "s" : ""} sur ${todos.length}">
+        <span class="lr-segments">${todos.map(([status]) => `<span class="${status === "completed" ? "done" : status === "in_progress" ? "doing" : ""}"></span>`).join("")}</span>
+        <span class="lr-count">${done} sur ${todos.length}</span></div>`
+    : '<div class="lr-progress"><span class="lr-sweep"><span></span></span></div>';
+  return `<section class="live-run${stopping ? " stopping" : ""}" aria-label="${stopping ? "Arrêt en cours" : "Claw travaille"}">
+    <header class="lr-head">
+      <span class="lr-mark">${CLAWS}</span>
+      <span class="lr-title"><strong>${stopping ? "Arrêt en cours" : "Claw travaille"}</strong>
+        <span class="lr-sub">${clock || (stopping ? "" : "au travail")}</span></span>
+      ${stopping ? "" : `<button type="button" class="small-link stop lr-stop" data-action="stop">${ICON.stop}<span>Arrêter</span></button>`}
+    </header>
+    <div class="lr-now">
+      <span class="lr-label">${stopping ? "Arrêt demandé" : "En ce moment"}</span>
+      <p class="lr-step">${escapeHtml(now)}</p>
+      ${bar}
+      ${plan && !stopping ? `<details class="lr-plan" data-key="${key}:plan"><summary>Le plan de Claw</summary><p>${escapeHtml(plan)}</p></details>` : ""}
+    </div>
+    ${tools.length ? `<ul class="lr-actions">${recentActions(events, 4, seen)}</ul>` : ""}
+    <div class="lr-journal">${transcriptHtml(events, { key, live: false, answer, title: "Journal complet", shown: events.length })}</div>
+  </section>`;
+}
+
+/** Le bloc « Claw travaille » à l'écran : les tâches du bloc au-dessus de la saisie, qu'il montre
+ * déjà, se retirent ; elles reviennent dès qu'on remonte dans la conversation. */
+function watchLivePanel(view) {
+  state.panelWatch?.disconnect();
+  const composer = $("#composer");
+  const panel = view.querySelector(".live-run:not(.preparing)");
+  if (!panel || !("IntersectionObserver" in window)) {
+    composer.classList.remove("panel-visible");
+    return;
+  }
+  state.panelWatch = new IntersectionObserver(([entry]) => {
+    composer.classList.toggle("panel-visible", entry.isIntersecting);
+    updateComposerSpace();
+  }, { threshold: 0.35 });
+  state.panelWatch.observe(panel);
 }
 
 /** Durée lisible, comme celle du moteur : « 45 s », « 3 min 05 s » (insécable). */
@@ -3417,10 +3500,14 @@ function preparingHtml(run, status, step) {
   const detail = !run ? "Lancement du passage"
     : status && status.key === "queued" ? status.label
       : PREPARING_STEPS[step] || step || (status ? status.label : "");
-  return `<div class="run-card preparing"><div class="preparing-row">
-    <span class="run-state running"><span class="spinner" aria-label="en cours"></span></span>
-    <span class="run-title"><strong>Claw se prépare</strong><span class="run-sub">${escapeHtml(detail)}</span></span>
-  </div></div>`;
+  return `<section class="live-run preparing" aria-label="Claw se prépare">
+    <header class="lr-head">
+      <span class="lr-mark">${CLAWS}</span>
+      <span class="lr-title"><strong>Claw se prépare</strong><span class="lr-sub">${escapeHtml(detail)}</span></span>
+      ${run ? `<button type="button" class="small-link stop lr-stop" data-action="stop">${ICON.stop}<span>Arrêter</span></button>` : ""}
+    </header>
+    <div class="lr-progress"><span class="lr-sweep"><span></span></span></div>
+  </section>`;
 }
 
 /** Message de l'utilisateur en bulle ; le nom seulement quand c'est quelqu'un d'autre. */
@@ -3510,10 +3597,10 @@ function renderSessionView() {
       ${unsent ? `<div class="unsent">Ce message n'a pas encore été envoyé à Claw (aucun passage lancé depuis).
         <button class="small-link primary-link" data-action="retry">${ICON.retry}<span>Lancer le passage</span></button></div>` : ""}
       <div class="run-status ${stopping ? "stopping" : active ? "active" : status ? status.key : ""}">
-        ${stopping ? `<span class="spinner" aria-hidden="true"></span><span>${slowStop
+        ${stopping ? `<span class="spinner${slowStop ? "" : " run-line"}" aria-hidden="true"></span><span${slowStop ? "" : ' class="run-line"'}>${slowStop
           ? "GitHub tarde à arrêter le passage. « Forcer l'arrêt » le coupe tout de suite, sans pousser le travail de ce passage."
           : "Arrêt en cours : Claw s'arrête, puis range son travail sur la branche."}</span>` : ""}
-        ${active && !preparing && !stopping ? `<span class="spinner" aria-hidden="true"></span><span>${run ? escapeHtml(status.label) : "Lancement du passage"}${step}</span>` : ""}
+        ${active && !preparing && !stopping ? `<span class="spinner run-line" aria-hidden="true"></span><span class="run-line">${run ? escapeHtml(status.label) : "Lancement du passage"}${step}</span>` : ""}
         ${!active && status && status.key === "failed" && !answered ? `<span>Le dernier passage a échoué${session.failure ? ` : ${escapeHtml(session.failure)}` : "."}</span>` : ""}
         <span class="run-actions">
           ${active && !stopping ? `<button class="small-link stop" data-action="stop">${ICON.stop}<span>Arrêter</span></button>` : ""}
@@ -3536,6 +3623,14 @@ function renderSessionView() {
   for (const details of view.querySelectorAll("details[data-key]")) {
     if (opened.has(details.dataset.key)) details.open = opened.get(details.dataset.key);
   }
+  // Le bloc « Claw travaille » (ou « Claw se prépare ») dit déjà l'état et porte « Arrêter » : la
+  // ligne d'état ne le répète pas.
+  if (view.querySelector(".live-run")) {
+    for (const element of view.querySelectorAll(".run-status .run-line")) element.remove();
+    const stops = view.querySelectorAll('[data-action="stop"]');
+    if (stops.length > 1) stops[stops.length - 1].remove();
+  }
+  watchLivePanel(view);
   view.dataset.session = String(session.number);
   // La relecture qui suit un envoi redessine la vue en pleine entrée : l'animation des blocs
   // arrivés reprend où elle en était, au lieu de s'arrêter net.

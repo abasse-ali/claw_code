@@ -143,8 +143,6 @@
   }
 }
 
-/* Angle du contour animé d'un passage en cours (sans @property : contour fixe). */
-@property --angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
 
 /* --- Base --------------------------------------------------------------------------------- */
 * { box-sizing: border-box; }
@@ -458,33 +456,29 @@ input[type="text"]:focus, input[type="password"]:focus, input[type="search"]:foc
 .block-link:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .block-link svg { width: 15px; height: 15px; }
 
-/* En ce moment : les sessions au travail, contour animé et barre qui file. */
+/* En ce moment : les sessions au travail, dans le style du bloc « Claw travaille ». */
 .live-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--warn); animation: beacon 1.8s ease-out infinite; }
 .live-list { display: flex; flex-direction: column; gap: 10px; }
 .live-card {
-  position: relative; display: flex; flex-direction: column; gap: 7px; padding: 15px 16px 18px; overflow: hidden;
-  border-radius: 22px; color: var(--text); text-decoration: none; border: 1.5px solid transparent;
-  background:
-    linear-gradient(var(--panel), var(--panel)) padding-box,
-    conic-gradient(from var(--angle), var(--border) 0 55%, var(--accent) 72%, var(--accent-2) 82%, var(--accent-3) 90%, var(--border) 97%) border-box;
-  box-shadow: 0 18px 40px -28px var(--glow);
-  animation: orbit 3.6s linear infinite;
-  transition: transform .25s var(--spring);
+  position: relative; display: flex; align-items: center; gap: 13px; padding: 14px 14px 18px; overflow: hidden; isolation: isolate;
+  border-radius: 22px; color: var(--text); text-decoration: none;
+  border: 1px solid color-mix(in srgb, var(--accent-2) 32%, var(--border)); background: var(--panel);
+  box-shadow: 0 18px 40px -28px var(--glow); transition: transform .25s var(--spring), border-color .2s var(--ease);
 }
+.live-card:hover { border-color: color-mix(in srgb, var(--accent-2) 55%, var(--border)); }
 .live-card:active { transform: scale(.985); }
-.live-top { display: flex; align-items: center; gap: 8px; font-size: .82rem; }
-.live-state { font-weight: 700; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
-.live-clock { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
-.live-title { font: 700 1.08rem/1.3 var(--font-display); letter-spacing: -.01em; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.live-meta { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); font-size: .8rem; }
-.live-meta svg { width: 14px; height: 14px; }
-.live-meta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.live-meta span + svg { margin-left: 6px; }
-.live-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; overflow: hidden; background: color-mix(in srgb, var(--panel-3) 60%, transparent); }
-.live-bar span { position: absolute; top: 0; bottom: 0; width: 40%; border-radius: 999px; background: var(--grad); animation: sweep 1.8s var(--ease) infinite; }
-@keyframes sweep { from { left: -40%; } to { left: 100%; } }
-.live-card.queued .live-dot { background: var(--muted); animation: none; }
-.live-card.queued .live-bar span { animation-duration: 3.2s; opacity: .6; }
+.lc-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.lc-top { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 8px; font-size: .82rem; }
+.lc-top strong { font-weight: 700; background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.lc-clock { color: var(--muted); font-variant-numeric: tabular-nums; }
+.lc-title { font: 700 1.02rem/1.3 var(--font-display); letter-spacing: -.01em; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.lc-meta { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--muted); font-size: .78rem; }
+.lc-meta svg { width: 13px; height: 13px; }
+.lc-meta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lc-meta span + svg { margin-left: 6px; }
+.lc-go { flex: none; display: inline-flex; color: var(--muted); }
+.live-card .lr-sweep { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; border-radius: 0; }
+.live-card.queued .lc-top strong { background: none; color: var(--muted); }
 
 /* Pour démarrer : cartes qui défilent de côté. */
 .starters {
@@ -837,16 +831,6 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
   background: color-mix(in srgb, var(--panel) 82%, transparent); border: 1px solid var(--border);
   transition: border-color .3s var(--ease), box-shadow .3s var(--ease);
 }
-/* Passage qui travaille encore : un reflet de couleur tourne sur son contour. */
-.run-card.live {
-  border-color: transparent;
-  background:
-    linear-gradient(var(--panel), var(--panel)) padding-box,
-    conic-gradient(from var(--angle), var(--border) 0 55%, var(--accent) 72%, var(--accent-2) 82%, var(--accent-3) 90%, var(--border) 97%) border-box;
-  box-shadow: 0 16px 40px -28px var(--glow);
-  animation: orbit 3.6s linear infinite;
-}
-@keyframes orbit { to { --angle: 360deg; } }
 .run-card > .transcript > summary { gap: 11px; padding: 12px 0; color: var(--text); font-size: .9rem; }
 .run-card > .transcript > summary::before { display: none; }
 .run-card > .transcript > summary::after {
@@ -879,14 +863,93 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .run-title { flex: 1; min-width: 0; line-height: 1.35; }
 .run-title strong { font-weight: 650; }
 .run-sub { display: block; margin-top: 2px; font-size: .8rem; color: var(--muted); }
-/* Passage lancé, avant sa première progression : « Claw se prépare » et l'étape en cours. */
-.run-card.preparing { position: relative; overflow: hidden; padding: 12px 14px; }
-.run-card.preparing::after {
-  content: ""; position: absolute; inset: 0; pointer-events: none;
-  background: linear-gradient(100deg, transparent 30%, color-mix(in srgb, var(--accent-2) 10%, transparent) 50%, transparent 70%) 0 0 / 250% 100%;
-  animation: shimmer 2.2s ease-in-out infinite;
+/* --- Bloc « Claw travaille » : un passage en cours, en direct --------------------------------
+   Les griffes du logo qui grattent, la durée à la seconde et « Arrêter » ; l'étape en cours en
+   grand avec l'avancée de la liste de tâches ; les dernières actions, la plus récente en haut ;
+   le journal complet, replié. Même famille pour « Claw se prépare » et la carte de l'accueil. */
+.live-run {
+  position: relative; display: flex; flex-direction: column; gap: 14px; padding: 16px; overflow: hidden; isolation: isolate;
+  border-radius: 24px; border: 1px solid color-mix(in srgb, var(--accent-2) 32%, var(--border)); background: var(--panel);
+  box-shadow: 0 26px 54px -34px var(--glow);
 }
-.preparing-row { display: flex; align-items: center; gap: 11px; font-size: .9rem; }
+/* Une lueur qui respire derrière l'en-tête. */
+.live-run::before, .live-card::before {
+  content: ""; position: absolute; z-index: -1; inset: -60% -30% auto; height: 260px; pointer-events: none;
+  background:
+    radial-gradient(45% 55% at 18% 45%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 70%),
+    radial-gradient(40% 50% at 82% 30%, color-mix(in srgb, var(--accent-3) 17%, transparent), transparent 70%);
+  animation: breathe 7s ease-in-out infinite alternate;
+}
+@keyframes breathe { from { opacity: .55; transform: translateX(-4%) scale(1); } to { opacity: 1; transform: translateX(4%) scale(1.08); } }
+.lr-head { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.lr-mark {
+  flex: none; display: grid; place-items: center; width: 46px; height: 46px; border-radius: 15px;
+  background: color-mix(in srgb, var(--bg) 55%, transparent); border: 1px solid var(--border);
+}
+/* Les griffes : chacune se trace puis se retire, l'une après l'autre. */
+.claws { width: 28px; height: 28px; fill: none; stroke-width: 44; stroke-linecap: round; overflow: visible; }
+.claws path { stroke-dasharray: 1 1.1; stroke-dashoffset: 1.05; animation: scratch 1.9s var(--ease) infinite; }
+.claws path:nth-child(1) { stroke: #ff8a3d; }
+.claws path:nth-child(2) { stroke: #ff4f80; animation-delay: .14s; }
+.claws path:nth-child(3) { stroke: #a873ff; animation-delay: .28s; }
+@keyframes scratch { 0% { stroke-dashoffset: 1.05; } 42%, 68% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: -1.05; } }
+.lr-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.lr-title strong { font: 700 1.15rem/1.2 var(--font-display); letter-spacing: -.01em; }
+.lr-sub { color: var(--muted); font-size: .8rem; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lr-stop { flex: none; }
+.lr-now { display: flex; flex-direction: column; gap: 9px; padding: 14px; border-radius: 18px; border: 1px solid var(--border); background: color-mix(in srgb, var(--bg) 45%, transparent); }
+.lr-label { color: var(--accent); font-size: .7rem; font-weight: 750; letter-spacing: .09em; text-transform: uppercase; }
+.lr-step { margin: 0; font: 650 1.06rem/1.35 var(--font-display); letter-spacing: -.005em; overflow-wrap: anywhere; animation: fade-in .45s var(--ease); }
+.lr-progress { display: flex; align-items: center; gap: 10px; }
+.lr-segments { flex: 1; display: flex; gap: 4px; }
+.lr-segments span { flex: 1; height: 6px; border-radius: 999px; background: var(--panel-3); }
+.lr-segments .done { background: var(--grad); }
+.lr-segments .doing { background: linear-gradient(90deg, var(--panel-3) 0%, var(--accent-2) 50%, var(--panel-3) 100%) 0 0 / 200% 100%; animation: shimmer 1.4s linear infinite; }
+.lr-count { flex: none; color: var(--muted); font-size: .78rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.lr-sweep { position: relative; flex: 1; height: 6px; border-radius: 999px; overflow: hidden; background: var(--panel-3); }
+.lr-sweep span { position: absolute; top: 0; bottom: 0; width: 40%; border-radius: 999px; background: var(--grad); animation: sweep 1.8s var(--ease) infinite; }
+@keyframes sweep { from { left: -40%; } to { left: 100%; } }
+.lr-plan > summary { display: inline-flex; align-items: center; gap: 5px; list-style: none; cursor: pointer; color: var(--muted); font-size: .82rem; font-weight: 600; }
+.lr-plan > summary::-webkit-details-marker { display: none; }
+.lr-plan > summary::after { content: "›"; display: inline-block; transition: transform .3s var(--spring); }
+.lr-plan[open] > summary { color: var(--text); }
+.lr-plan[open] > summary::after { transform: rotate(90deg); }
+.lr-plan p { margin: 6px 0 0; font-size: .88rem; line-height: 1.5; overflow-wrap: anywhere; }
+/* Dernières actions : la plus récente en haut, les plus anciennes s'estompent. */
+.lr-actions { list-style: none; margin: 0 2px; padding: 0; display: flex; flex-direction: column; }
+.lr-action { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 8px 0; font-size: .86rem; border-top: 1px solid var(--border); }
+.lr-action:first-child { border-top: 0; padding-top: 0; }
+.lr-action:nth-child(2) { opacity: .82; }
+.lr-action:nth-child(3) { opacity: .64; }
+.lr-action:nth-child(4) { opacity: .46; }
+.lr-action svg { width: 16px; height: 16px; color: var(--muted); }
+.lr-action .verb { flex: none; font-weight: 600; }
+.lr-action .target { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.lr-action .side { flex: none; font-size: .76rem; color: var(--muted); }
+.lr-action .spinner { width: 13px; height: 13px; }
+.lr-action.running .verb { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.lr-action.running svg { color: var(--accent); }
+.lr-action.failed .verb, .lr-action.failed svg { color: var(--error); }
+.lr-action.arrived { animation: step-in .5s var(--ease) backwards; }
+.lr-action.arrived:nth-child(2) { animation-delay: .12s; }
+.lr-action.arrived:nth-child(3) { animation-delay: .24s; }
+.lr-action.arrived:nth-child(4) { animation-delay: .36s; }
+.lr-journal { margin: 0 -2px -6px; border-top: 1px solid var(--border); }
+.lr-journal .transcript > summary { padding: 10px 2px 4px; }
+.lr-journal .events { margin-bottom: 8px; }
+/* Claw se prépare : les griffes plus lentes, la barre qui file. */
+.live-run.preparing { gap: 12px; }
+.live-run.preparing .claws path { animation-duration: 2.8s; }
+/* Arrêt demandé : le bloc vire au rouge, les griffes se figent en gris. */
+.live-run.stopping { border-color: color-mix(in srgb, var(--error) 50%, var(--border)); box-shadow: 0 24px 50px -34px color-mix(in srgb, var(--error) 80%, transparent); animation: stop-pulse 1.6s ease-in-out infinite; }
+.live-run.stopping::before { background: radial-gradient(45% 55% at 18% 45%, color-mix(in srgb, var(--error) 18%, transparent), transparent 70%); }
+.live-run.stopping .claws path { animation: none; stroke: var(--muted); stroke-dashoffset: 0; opacity: .5; }
+.live-run.stopping .lr-label { color: var(--error); }
+.live-run.stopping .lr-segments .doing { animation: none; background: color-mix(in srgb, var(--error) 50%, var(--panel-3)); }
+.live-run.stopping .lr-action.running .verb { background: none; color: var(--error); }
+.live-run.stopping .lr-action.running svg { color: var(--error); }
+.live-run.stopping .spinner { background: conic-gradient(from 90deg, transparent 8%, var(--error)); }
+
 /* Réponse que Claw a fait reprendre (« Réponse provisoire ») : repliée dans le journal. */
 .ev.draft > summary .verb { color: var(--muted); font-weight: 500; }
 .ev { font-size: .88rem; min-width: 0; }
@@ -1753,6 +1816,8 @@ label.choice { cursor: pointer; }
   box-shadow: 0 14px 34px -22px var(--shadow);
   animation: rise .45s var(--ease) backwards;
 }
+/* Le bloc « Claw travaille » est à l'écran : il montre déjà les tâches. */
+.composer.panel-visible .dock-tasks, .composer.panel-visible .dock:not(:has(.dock-questions)) { display: none; }
 .dock-tasks > summary { display: flex; align-items: center; gap: 9px; padding: 11px 14px; list-style: none; cursor: pointer; min-width: 0; }
 .dock-tasks > summary::-webkit-details-marker { display: none; }
 .dock-icon { display: inline-flex; flex: none; color: var(--accent); }
@@ -1950,5 +2015,6 @@ details.opening[open] > :not(summary):not(.menu-list) { animation: unfold .35s v
     animation-delay: 0ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important;
   }
   body::before, .lock-screen::before, .lock-screen::after { animation: none !important; }
+  .claws path { animation: none !important; stroke-dashoffset: 0; }
   .spinner { animation: spin 1.6s linear infinite !important; }
 }
