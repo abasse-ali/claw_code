@@ -478,6 +478,8 @@ struct TurnAids {
     wireframe_flagged: bool,
     /// Un autre modèle a repris après deux réponses vides de suite.
     empty_escalated: bool,
+    /// Réponses coupées au bout de plusieurs minutes, dites au modèle.
+    long_cut_nudges: u32,
     /// Le modèle a été prévenu que sa page appelle des fichiers qui manquent.
     assets_reminded: bool,
     /// Le modèle a été prévenu que ses styles n'ont pas le socle de la méthode.
@@ -1147,6 +1149,22 @@ const EMPTY_RESPONSE_ERROR: &str = "le modèle n'a renvoyé aucun contenu";
 
 /// Relance unique après une réponse vide, au lieu d'échouer.
 const EMPTY_RESPONSE_NUDGE: &str = "[Claw] Your last reply was empty: no text and no tool call. A tool call written only in your reasoning is never executed. If you were about to write a long file, it did not fit in one reply: write it in parts of at most 150 lines, the first with write_file, each next one with write_file and \"append\": true. If the task is not finished, continue it now by calling the tools; otherwise give the user your final answer, in their language: what you did and what the verification showed.";
+
+/// Réponse coupée par le fournisseur du modèle après plusieurs minutes, sans
+/// rien d'utilisable (rendue par le client du modèle au lieu de la relancer
+/// telle quelle).
+pub const LONG_CUT_ERROR: &str =
+    "réponse du modèle coupée par son fournisseur après plusieurs minutes";
+
+/// Ce que le modèle apprend d'une réponse coupée au bout de plusieurs minutes.
+/// Vu le 28 octobre 2026 (essai #40, Nemotron 3 Ultra chez NVIDIA, qui
+/// n'envoie un appel d'outil qu'entier et termine une réponse vers 5 min) :
+/// `index.html` puis `app.js` voulus d'un seul appel, chaque réponse coupée
+/// à 5 min, et la même demande relancée refaisait la même réponse.
+const LONG_CUT_NUDGE: &str = "[Claw] Your last reply was lost: the model provider ended it after several minutes, before it was complete, and nothing of it arrived (a tool call is only received once it is complete). Keep each reply short: write a file of more than 150 lines in parts of at most 150 lines, the first with write_file, each next one with write_file and \"append\": true; split a long edit into several smaller ones the same way. Continue the task now.";
+
+/// Relances après une réponse coupée au bout de plusieurs minutes, par tour.
+const MAX_LONG_CUT_NUDGES: u32 = 2;
 
 /// Relance d'une réponse en texte arrêtée par la limite de sortie du modèle.
 /// Vu le 24 octobre 2026 (session #30, Nemotron 3 Ultra) : une appli entière
@@ -2246,6 +2264,19 @@ where
                 // sans outils) : le travail reprend sans elle.
                 Err(_) if announcing && !interrupt_requested() => {
                     self.session.messages.pop();
+                    continue;
+                }
+                // Réponse trop longue coupée par le fournisseur : la même
+                // demande referait la même réponse. Le modèle apprend pourquoi
+                // et écrit en parties plus courtes.
+                Err(error)
+                    if error.to_string() == LONG_CUT_ERROR
+                        && aids.long_cut_nudges < MAX_LONG_CUT_NUDGES =>
+                {
+                    aids.long_cut_nudges += 1;
+                    self.session
+                        .messages
+                        .push(ConversationMessage::user_text(LONG_CUT_NUDGE));
                     continue;
                 }
                 Err(error) => {
@@ -7697,6 +7728,71 @@ mod tests {
             runtime.tool_executor.0,
             ["écarté edit_file : arguments absents"]
         );
+    }
+
+    #[test]
+    fn a_reply_cut_after_minutes_is_explained_to_the_model_twice_at_most() {
+        let _serial = crate::test_serial();
+        // Le fournisseur coupe `cuts` réponses de suite, puis répond.
+        struct CutThenText {
+            cuts: usize,
+            calls: usize,
+            nudges_seen: Vec<usize>,
+        }
+        impl ApiClient for CutThenText {
+            fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                self.calls += 1;
+                self.nudges_seen.push(
+                    request
+                        .messages
+                        .iter()
+                        .flat_map(|message| &message.blocks)
+                        .filter(|block| {
+                            matches!(block, ContentBlock::Text { text } if text == super::LONG_CUT_NUDGE)
+                        })
+                        .count(),
+                );
+                if self.calls <= self.cuts {
+                    return Err(RuntimeError::new(super::LONG_CUT_ERROR));
+                }
+                Ok(vec![
+                    AssistantEvent::TextDelta("Terminé.".to_string()),
+                    AssistantEvent::MessageStop,
+                ])
+            }
+        }
+        let runtime_with = |cuts| {
+            ConversationRuntime::new(
+                Session::new(),
+                CutThenText {
+                    cuts,
+                    calls: 0,
+                    nudges_seen: Vec::new(),
+                },
+                StaticToolExecutor::new(),
+                PermissionPolicy::new(PermissionMode::WorkspaceWrite),
+                vec!["system".to_string()],
+            )
+        };
+
+        // Deux coupures : le modèle apprend chaque fois pourquoi, et finit.
+        let mut runtime = runtime_with(2);
+        let summary = runtime
+            .run_turn("écris app.js", None)
+            .expect("une réponse coupée ne doit pas faire échouer le tour");
+        assert_eq!(runtime.api_client.nudges_seen, [0, 1, 2]);
+        assert!(matches!(
+            summary.assistant_messages.last().and_then(|message| message.blocks.first()),
+            Some(ContentBlock::Text { text }) if text == "Terminé."
+        ));
+
+        // Une troisième de suite : l'erreur est rendue, sans boucle sans fin.
+        let mut runtime = runtime_with(3);
+        let error = runtime
+            .run_turn("écris app.js", None)
+            .expect_err("trois coupures de suite");
+        assert_eq!(error.to_string(), super::LONG_CUT_ERROR);
+        assert_eq!(runtime.api_client.calls, 3);
     }
 
     // Le second faux modèle est déclaré là où le scénario s'en sert.

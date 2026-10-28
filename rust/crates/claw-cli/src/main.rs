@@ -10250,6 +10250,7 @@ impl ApiClient for DefaultRuntimeClient {
         loop {
             answering.borrow_mut().clear();
             cut.set(false);
+            let attempt_started = std::time::Instant::now();
             // Dernière tentative : un appel coupé est marqué, et le modèle
             // apprend quoi envoyer à la place, au lieu de perdre le tour.
             let retry_unfinished = retries_left > 0;
@@ -10549,6 +10550,21 @@ impl ApiClient for DefaultRuntimeClient {
                         live::show("Réflexion…");
                     }
                 }
+                // Coupée au bout de plusieurs minutes : la conversation dit au
+                // modèle pourquoi, au lieu de relancer la même réponse trop longue.
+                Err(error) if is_long_cut(&error.to_string(), attempt_started.elapsed()) => {
+                    if emit {
+                        transcript::discard_calls();
+                    }
+                    if let Some(observer) = &self.observer {
+                        observer.reply_discarded();
+                    }
+                    notify(&format!(
+                        "Réponse coupée par le fournisseur du modèle au bout de {} : Claw lui demande des réponses plus courtes",
+                        format_elapsed(attempt_started.elapsed())
+                    ));
+                    return Err(RuntimeError::new(runtime::LONG_CUT_ERROR));
+                }
                 Err(error) if retries_left > 0 && is_broken_stream(&error.to_string()) => {
                     retries_left -= 1;
                     if emit {
@@ -10824,6 +10840,17 @@ fn active_model() -> String {
 
 /// Relances après une connexion coupée en cours de réponse.
 const BROKEN_STREAM_RETRIES: u32 = 2;
+
+/// Au-delà, une réponse coupée l'a sans doute été parce qu'elle était trop
+/// longue : la même demande referait la même réponse, le modèle doit
+/// l'apprendre (`runtime::LONG_CUT_ERROR`). Vu le 28 octobre 2026 (essai #40,
+/// NVIDIA) : chaque réponse coupée vers 5 min, puis relancée telle quelle.
+const LONG_CUT_AFTER: Duration = Duration::from_mins(2);
+
+/// Réponse coupée en route au bout de plusieurs minutes.
+fn is_long_cut(error: &str, elapsed: Duration) -> bool {
+    elapsed >= LONG_CUT_AFTER && is_broken_stream(error)
+}
 /// La réponse s'est interrompue côté réseau (et non par l'utilisateur ou par
 /// un refus du fournisseur) : la même requête peut être relancée.
 /// Erreur interne d'une réponse qui invente un message de l'utilisateur.
@@ -11933,6 +11960,22 @@ mod tests {
         describe_permission_target, expert_command_prompt, parse_permission_answer,
         persist_allow_rule, unmetered_turn_limit, ExpertCommand, PermissionAnswer,
     };
+
+    #[test]
+    fn a_reply_cut_after_minutes_is_told_to_the_model_instead_of_replayed() {
+        use std::time::Duration;
+        // L'erreur que voit Claw quand le flux se tait au-delà du délai, ou
+        // quand le serveur ferme la connexion en route (essayé le 28 octobre 2026).
+        let cut = "erreur http : error decoding response body";
+        assert!(super::is_long_cut(cut, Duration::from_secs(302)));
+        // Coupée tôt : un accroc du réseau, la même demande est relancée.
+        assert!(!super::is_long_cut(cut, Duration::from_secs(20)));
+        // Longue mais pas coupée (quota, clé refusée) : autre chose.
+        assert!(!super::is_long_cut(
+            "429 Too Many Requests",
+            Duration::from_secs(302)
+        ));
+    }
 
     #[test]
     fn a_model_without_a_daily_quota_gets_a_longer_turn_unless_the_user_chose_one() {

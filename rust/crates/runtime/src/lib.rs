@@ -86,7 +86,7 @@ pub use config::{
 pub use conversation::{
     cut_reply_continued, ApiClient, ApiRequest, AssistantEvent, AutoCompactionConfig, Background,
     ConsultPurpose, Consultation, ConversationRuntime, RuntimeError, StaticToolExecutor, ToolError,
-    ToolExecutor, TurnSummary, HOOK_CONTEXT_PREFIX, STOP_HOOK_PREFIX,
+    ToolExecutor, TurnSummary, HOOK_CONTEXT_PREFIX, LONG_CUT_ERROR, STOP_HOOK_PREFIX,
 };
 pub use file_ops::{
     edit_file, glob_search, grep_search, preview_edit, preview_write, read_file,
