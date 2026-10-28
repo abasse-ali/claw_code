@@ -198,6 +198,28 @@ en garde une copie), `the_app_kit_is_written_into_the_page_folder_and_the_old_na
 `the_graphic_bugs_of_session_39_are_measured_in_every_screen_in_a_real_browser`,
 `a_personal_app_gets_the_app_method_the_app_designer_and_the_app_judge`.
 
+## Quatrième volet : CSS propre, juge recalé, vitesse, essais (28 octobre 2026)
+
+« Qu'est-ce que tu peux faire pour Claw ? » : l'utilisateur a choisi les quatre chantiers
+proposés (CSS propre, revue visuelle juste, plus rapide, essais sur d'autres applis), avec
+son accord pour la jauge du juge et un essai réel « outil perso ».
+
+Ce que disent les journaux de #39 (second passage : 105 min, 263 requêtes) : 24 captures pour
+32 min ; 56 lectures de fichiers, dont 33 de `styles.css` par morceaux de 150 lignes et 9 du
+kit ; 68 recherches, la plupart ne rendant que « styles.css » ; quatre revues visuelles de
+5,0 à 5,7 sur 10, mêmes huit remarques, parfois contraires (« empiler les pavés », puis « les
+mettre côte à côte »), des survols demandés pour une appli de téléphone. Les consignes du
+juge disaient « most generated apps deserve 4 to 6 » : avec la barre à 8, la boucle ne
+pouvait finir qu'au bout du temps. Le kit lui-même a été modifié au second passage (une
+règle de largeur ajoutée dans `kit/app-kit.css`).
+
+| Lot | Contenu | État |
+|---|---|---|
+| 20. Recherche qui montre les lignes | `grep_search` sans mode : les lignes trouvées quand la recherche vise un fichier ou trouve peu (5 fichiers et 40 lignes au plus, 120 lignes rendues) ; sinon la liste des fichiers, comme avant | fait (tests unitaires) |
+| 21. CSS propre | Méthode d'appli : pas de `!important` (les règles du kit sont légères), une règle changée là où elle est ; kit écrit avec son empreinte en tête, remis à la version de Claw au début d'une session quand la copie est intacte (et les copies d'avant les empreintes, connues par leur empreinte) ; écrire dans le kit est un piège signalé dès l'écriture | fait (tests unitaires) |
+| 22. Juge recalé et jauge | Juge d'une appli : une appli propre qui montre les chiffres de l'utilisateur vaut 8, sur le kit elle part de là, et chaque point retiré se montre sur une capture ; quatre changements au plus ; jamais de survol ; les changements de la revue d'avant lui sont donnés, sans leur contraire. Jauge : `claw design-replay PAGE [DEMANDE]` note une page comme une revue du tour, sans agent ; la session réservée `jauge-<n>` du workflow note `jauge/*/index.html` d'une branche (kit seul, appli de Claude, appli de Claw #39 dans `budget_claw`) et range le résultat sur `claw-web-fichiers` (`jauge/<n>.json`) | fait ; jauge à lancer |
+| 23. Essai réel « outil perso » | Un suivi d'habitudes au téléphone (nouvelle session, deux passages au plus), comparé au budget | à faire |
+
 ## Suite, dans l'ordre
 
 Le chantier est fusionné dans `main`. Ce que l'essai réel a laissé (session #36, ci-dessous) :

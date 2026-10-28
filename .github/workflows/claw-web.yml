@@ -138,8 +138,78 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/claw-src/.github/claw-web
         run: python3 claw-src/.github/claw-web/jtest.py
 
+  # Jauge du juge de design : des pages de référence (le kit d'appli seul, l'appli faite par
+  # Claude, celle de Claw) notées par le juge visuel comme dans une revue du tour, sans agent ni
+  # session. Session réservée `jauge-<n>` : `repo` et `base` donnent le dépôt et la branche qui
+  # rangent les pages sous jauge/<nom>/index.html ; le résultat va sur la branche des fichiers
+  # (jauge/<n>.json) et dans le résumé du job. Voir .github/claw-web/jauge.py.
+  jauge:
+    if: startsWith(inputs.session, 'jauge-')
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 40
+    steps:
+      - name: Dossier de travail vide
+        if: runner.environment == 'self-hosted'
+        run: find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+
+      - name: Source de Claw
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.claw_source }}
+          ref: ${{ inputs.claw_ref }}
+          token: ${{ secrets.CLAW_REPO_TOKEN || github.token }}
+          path: claw-src
+          persist-credentials: false
+
+      - name: Binaire de Claw en cache
+        id: cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ~/.claw-bin
+          key: claw-bin-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('claw-src/rust/Cargo.lock', 'claw-src/rust/crates/**/*.rs', 'claw-src/rust/crates/**/Cargo.toml', 'claw-src/rust/crates/**/*.html', 'claw-src/rust/crates/**/*.js') }}
+
+      - name: Installer Rust
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Compiler Claw
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: cargo install --path claw-src/rust/crates/claw-cli --locked --root ~/.claw-bin --target-dir ~/.claw-target
+
+      - name: Garder le binaire de Claw
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ~/.claw-bin
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Claw dans le PATH
+        run: echo "$HOME/.claw-bin/bin" >> "$GITHUB_PATH"
+
+      - name: Pages de la jauge
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.base }}
+          token: ${{ secrets.CLAW_REPO_TOKEN || github.token }}
+          path: pages
+          persist-credentials: false
+
+      - name: Jauge du juge
+        env:
+          SESSION_INPUT: ${{ inputs.session }}
+          MODEL: ${{ inputs.model }}
+          PAGES_DIR: ${{ github.workspace }}/pages
+          JOB_TOKEN: ${{ github.token }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CLAW_CONFIG_HOME: ${{ runner.temp }}/claw-home
+          PYTHONPATH: ${{ github.workspace }}/claw-src/.github/claw-web
+        run: python3 claw-src/.github/claw-web/jauge.py
+
   task:
-    if: inputs.session != 'catalogue-modeles' && !startsWith(inputs.session, 'jtest-')
+    if: inputs.session != 'catalogue-modeles' && !startsWith(inputs.session, 'jtest-') && !startsWith(inputs.session, 'jauge-')
     # Sur votre PC (exécuteur auto-hébergé `claw-pc`), aucune minute de GitHub n'est comptée.
     runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 120

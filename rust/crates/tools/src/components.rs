@@ -321,6 +321,116 @@ const APP_KIT_FILES: &[(&str, &str)] = &[
     ("kit/app-kit.js", include_str!("components/app-kit.js")),
 ];
 
+/// Copies du kit écrites sans empreinte (avant le 28 octobre 2026 au soir),
+/// telles qu'elles sont dans les projets : celles-là aussi se remettent à jour.
+/// Les copies suivantes portent leur empreinte en tête (`kit_file`).
+const LEGACY_KIT: &[(&str, &str)] = &[
+    ("kit/app-kit.css", "86f04e6e49a79c0f"),
+    ("kit/app-kit.css", "13bb4532334e9213"),
+    ("kit/app-kit.css", "152b6565a575bbb2"),
+    ("kit/app-kit.js", "e833588149d83c4b"),
+];
+
+/// Empreinte d'un texte (FNV-1a sur 64 bits, en hexadécimal) : stable d'une
+/// version de Claw à l'autre, sans dépendance.
+fn kit_hash(text: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// Un fichier du kit tel que Claw l'écrit : son empreinte en tête, puis son
+/// texte, icônes dessinées. L'empreinte dit si la copie a été retouchée.
+fn kit_file(path: &str, text: &str) -> String {
+    let body = with_icons(text);
+    let mark = format!("app-kit {} : écrit par Claw, remis à jour par lui ; ne pas le modifier, mettre ses propres règles dans la feuille de l'appli.", kit_hash(&body));
+    let css = std::path::Path::new(path)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("css"));
+    if css {
+        format!("/* {mark} */\n{body}")
+    } else {
+        format!("// {mark}\n{body}")
+    }
+}
+
+/// Le texte d'une copie du kit, si elle est intacte : son empreinte en tête
+/// correspond à son texte, ou c'est une copie sans empreinte connue.
+fn untouched_kit(path: &str, text: &str) -> bool {
+    let first = text.lines().next().unwrap_or_default();
+    if let Some(rest) = first
+        .strip_prefix("/* app-kit ")
+        .or_else(|| first.strip_prefix("// app-kit "))
+    {
+        let mark: String = rest.chars().take(16).collect();
+        let body = text.split_once('\n').map_or("", |(_, body)| body);
+        return kit_hash(body) == mark;
+    }
+    let hash = kit_hash(text);
+    LEGACY_KIT
+        .iter()
+        .any(|(file, known)| *file == path && *known == hash)
+}
+
+/// Les copies intactes du kit d'appli dans un projet (`kit/` à la racine ou
+/// dans un dossier de page, deux niveaux au plus) remises à la version de ce
+/// Claw ; une copie retouchée reste telle quelle. Rend les fichiers remis à
+/// jour. Vu le 28 octobre 2026 : le kit corrigé (graphique, titre encadré)
+/// n'arrivait pas dans l'appli de l'essai #39, écrite avec l'ancien.
+pub(crate) fn refresh_app_kit(root: &std::path::Path) -> Vec<String> {
+    let mut folders = vec![root.to_path_buf()];
+    let mut depth = vec![root.to_path_buf()];
+    for _ in 0..2 {
+        let mut next = Vec::new();
+        for folder in &depth {
+            let Ok(entries) = std::fs::read_dir(folder) else {
+                continue;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if path.is_dir()
+                    && !name.starts_with('.')
+                    && name != "node_modules"
+                    && name != "kit"
+                {
+                    next.push(path);
+                }
+            }
+        }
+        folders.extend(next.iter().cloned());
+        depth = next;
+    }
+    let mut refreshed = Vec::new();
+    for folder in folders {
+        if !folder.join("kit/app-kit.css").is_file() && !folder.join("kit/app-kit.js").is_file() {
+            continue;
+        }
+        for (path, text) in APP_KIT_FILES {
+            let full = folder.join(path);
+            let Ok(old) = std::fs::read_to_string(&full) else {
+                continue;
+            };
+            let current = kit_file(path, text);
+            if old == current || !untouched_kit(path, &old) {
+                continue;
+            }
+            if std::fs::write(&full, &current).is_ok() {
+                refreshed.push(
+                    full.strip_prefix(root)
+                        .unwrap_or(&full)
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+    }
+    refreshed
+}
+
 /// Le script propre d'une appli de budget faite avec le kit : l'exemple que le
 /// modèle suit pour la sienne.
 const APP_KIT_EXAMPLE: &str = include_str!("components/app-kit-example.js");
@@ -443,7 +553,7 @@ fn write_app_kit(dir: Option<&str>) -> Result<Vec<String>, String> {
         if let Some(parent) = full.parent() {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        std::fs::write(&full, with_icons(text)).map_err(|error| error.to_string())?;
+        std::fs::write(&full, kit_file(path, text)).map_err(|error| error.to_string())?;
         written.push(
             full.strip_prefix(&root)
                 .unwrap_or(&full)
@@ -876,6 +986,48 @@ mod tests {
         assert!(component_tool(&input)
             .expect_err("inconnu")
             .contains("nav-menu"));
+    }
+
+    /// Le kit d'un projet déjà commencé : une copie intacte (avec son
+    /// empreinte, ou d'avant les empreintes) est remise à la version de ce
+    /// Claw ; une copie retouchée, ou déjà à jour, reste telle quelle.
+    #[test]
+    fn an_untouched_app_kit_is_brought_up_to_date_and_an_edited_one_is_kept() {
+        let root = std::env::temp_dir().join(format!("claw-kit-maj-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let page = root.join("appli");
+        std::fs::create_dir_all(page.join("kit")).expect("dossier");
+        // Une version d'avant, avec son empreinte : intacte.
+        let older = super::kit_file("kit/app-kit.css", ".ancien { color: red; }\n");
+        std::fs::write(page.join("kit/app-kit.css"), &older).expect("css");
+        // Le script, retouché après son écriture : gardé.
+        let edited = format!(
+            "{}\n// ajout\n",
+            super::kit_file("kit/app-kit.js", "window.ancien = 1;\n")
+        );
+        std::fs::write(page.join("kit/app-kit.js"), &edited).expect("js");
+        let refreshed = super::refresh_app_kit(&root);
+        assert_eq!(refreshed, vec!["appli/kit/app-kit.css".to_string()]);
+        let css = std::fs::read_to_string(page.join("kit/app-kit.css")).expect("css");
+        assert_eq!(
+            css,
+            super::kit_file("kit/app-kit.css", super::APP_KIT_FILES[0].1)
+        );
+        assert!(css.starts_with("/* app-kit ") && super::untouched_kit("kit/app-kit.css", &css));
+        assert_eq!(
+            std::fs::read_to_string(page.join("kit/app-kit.js")).expect("js"),
+            edited
+        );
+        // À jour : rien à refaire.
+        assert!(super::refresh_app_kit(&root).is_empty());
+        // Une copie d'avant les empreintes (essai #39, premier passage) : connue.
+        std::fs::write(root.join("vieux.css"), "x").expect("x");
+        assert!(!super::untouched_kit(
+            "kit/app-kit.css",
+            "/* Kit d'appli de Claw retouché */"
+        ));
+        assert_eq!(super::kit_hash("abc"), "e71fa2190541574b");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -64,6 +64,13 @@ fn run_look_at_image(input: &LookAtImageInput) -> Result<String, String> {
     looker(&input.image, &input.question)
 }
 
+/// Copies intactes du kit d'appli d'un projet remises à la version de ce Claw
+/// (au début d'une session) ; rend les fichiers remis à jour.
+#[must_use]
+pub fn refresh_app_kit(root: &std::path::Path) -> Vec<String> {
+    components::refresh_app_kit(root)
+}
+
 /// Captures prises par le dernier appel de `Screenshot` sur ce fil, à joindre
 /// à son résultat.
 #[must_use]

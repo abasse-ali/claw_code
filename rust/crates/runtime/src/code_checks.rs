@@ -313,6 +313,10 @@ pub fn pitfalls(path: &Path) -> Vec<String> {
                     .collect()
             })
             .unwrap_or_default(),
+        "css" | "js" if kit_file(path) => vec![format!(
+            "{} is Claw's app kit: never edit it, Claw replaces it with its next version and your change would be lost. Undo this change and put your rule in the app's own stylesheet or script",
+            path.display()
+        )],
         "css" => read(path)
             .map(|text| css_pitfalls(&text))
             .unwrap_or_default(),
@@ -457,6 +461,18 @@ pub fn pitfalls_feedback(path: &str, findings: &[String]) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     )
+}
+
+/// Un fichier du kit d'appli de Claw (`kit/app-kit.css`, `kit/app-kit.js`),
+/// que le modèle ne doit pas retoucher. Vu le 28 octobre 2026 (second passage
+/// de l'essai #39) : une règle de largeur ajoutée dans le kit lui-même.
+fn kit_file(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name == "app-kit.css" || name == "app-kit.js")
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|folder| folder == "kit")
 }
 
 /// Règles rapiécées dites au plus par feuille : les plus redites d'abord.
@@ -1442,6 +1458,24 @@ mod tests {
                 .any(|line| line.contains("prefers-color-scheme")),
             "{found:?}"
         );
+    }
+
+    /// Second passage de l'essai #39 : une règle ajoutée dans le kit lui-même.
+    #[test]
+    fn an_edit_of_the_app_kit_is_a_pitfall() {
+        let dir = std::env::temp_dir().join(format!("claw-kit-piege-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("kit")).expect("dossier");
+        let kit = dir.join("kit").join("app-kit.css");
+        std::fs::write(&kit, ".app { max-width: 430px; }\n").expect("kit");
+        let found = super::pitfalls(&kit);
+        assert!(
+            found.len() == 1 && found[0].contains("is Claw's app kit: never edit it"),
+            "{found:?}"
+        );
+        let own = dir.join("styles.css");
+        std::fs::write(&own, ".app { max-width: 430px; }\n").expect("css");
+        assert!(super::pitfalls(&own).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Une feuille tenue : jetons du clair et du sombre, tailles d'écran,

@@ -105,6 +105,65 @@ fn capture(
     Ok((runtime::web_design::read_audit(&output), sources))
 }
 
+/// `claw design-replay PAGE [DEMANDE]` : la page notée par le juge visuel
+/// comme dans une revue du tour (mêmes captures, même consigne), sans agent ni
+/// session. Sert de jauge : le kit seul, l'appli de Claude et celle de Claw
+/// notées par le même juge disent s'il est calé sur la barre. Vu le 28 octobre
+/// 2026 (essai réel #39) : quatre revues de 5,0 à 5,7, la barre à 8 hors
+/// d'atteinte, et le passage entier passé à suivre ses remarques.
+pub(crate) fn replay(page: &Path, brief: &str, model: &str) -> Result<Value, String> {
+    let root = page
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = page.file_name().map_or_else(
+        || "index.html".to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let started = std::time::Instant::now();
+    let (output, images) = {
+        let _restore = WorkingDir(std::env::current_dir().ok());
+        std::env::set_current_dir(root).map_err(|error| format!("{}: {error}", root.display()))?;
+        let input: Value =
+            serde_json::from_str(&runtime::web_design::review_screenshot_input(&name, false))
+                .map_err(|error| error.to_string())?;
+        let output = tools::execute_tool("Screenshot", &input)?;
+        (output, tools::take_screenshots())
+    };
+    if images.is_empty() {
+        return Err("aucune capture".to_string());
+    }
+    let sources: Vec<api::ImageSource> = images
+        .into_iter()
+        .map(|image| api::ImageSource::base64(image.media_type, image.data))
+        .collect();
+    let audit = runtime::web_design::read_audit(&output);
+    let bar = runtime::web_design::design_bar();
+    let prompt =
+        runtime::web_design::critique_prompt(brief, sources.len(), &audit, bar, None, None);
+    let (judge, text) = crate::image_reader::critique(
+        model,
+        runtime::web_design::CRITIC_SYSTEM,
+        &prompt,
+        &sources,
+    )?;
+    let scores = runtime::web_design::critique_scores(&text);
+    let reached = runtime::web_design::design_reached(&scores, bar);
+    Ok(json!({
+        "page": page.display().to_string(),
+        "judge": judge,
+        "seconds": started.elapsed().as_secs(),
+        "captures": sources.len(),
+        "problems": audit.problems.len() + audit.console.len(),
+        "bar": bar,
+        "mean": runtime::web_design::average_score(&scores),
+        "reached": reached,
+        "scores": scores.iter().map(|(criterion, score)| json!([criterion, score])).collect::<Vec<_>>(),
+        "changes": runtime::web_design::critique_changes(&text, bar),
+        "answer": text,
+    }))
+}
+
 /// Garde la page construite (sans la configuration du projet) pour la
 /// comparer à l'œil : `design-bench/<modèle>/`.
 fn keep_page(root: &Path, model: &str) -> Option<PathBuf> {
@@ -220,7 +279,7 @@ fn measure(model: &str, timeout: Duration, progress: &mut dyn FnMut(&str)) -> De
     };
     let bar = runtime::web_design::design_bar();
     let prompt =
-        runtime::web_design::critique_prompt(DESIGN_BRIEF, images.len(), &audit, bar, None);
+        runtime::web_design::critique_prompt(DESIGN_BRIEF, images.len(), &audit, bar, None, None);
     let (judge, text) = match crate::image_reader::critique(
         model,
         runtime::web_design::CRITIC_SYSTEM,

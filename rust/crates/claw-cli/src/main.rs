@@ -1669,6 +1669,11 @@ fn run_action(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
         CliAction::Credits => println!("{}", credits::report(true)),
         CliAction::ReviewReplay { model, raw, files } => review_replay(model, raw, &files)?,
+        CliAction::DesignReplay {
+            model,
+            page,
+            request,
+        } => design_replay(model, &page, request.as_deref())?,
         CliAction::ChecklistNote { request } => println!(
             "{}",
             runtime::harness::checklist_prompt(fs::read_to_string(request)?.trim(), None, false)
@@ -1883,6 +1888,13 @@ enum CliAction {
         model: Option<String>,
         raw: bool,
         files: Vec<PathBuf>,
+    },
+    /// `claw design-replay PAGE [DEMANDE]` (jauge du juge de design) : la
+    /// page notée par le juge visuel comme dans une revue du tour.
+    DesignReplay {
+        model: Option<String>,
+        page: PathBuf,
+        request: Option<PathBuf>,
     },
     /// `claw checklist-note DEMANDE` (banc d'essais réels) : le contrôle des
     /// exigences que Claw enverrait pour cette demande, sans requête.
@@ -2322,6 +2334,19 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             }
             Ok(CliAction::ReviewReplay { model, raw, files })
         }
+        "design-replay" => match &rest[1..] {
+            [page] => Ok(CliAction::DesignReplay {
+                model,
+                page: PathBuf::from(page),
+                request: None,
+            }),
+            [page, request] => Ok(CliAction::DesignReplay {
+                model,
+                page: PathBuf::from(page),
+                request: Some(PathBuf::from(request)),
+            }),
+            _ => Err("usage : claw design-replay PAGE [FICHIER_DE_LA_DEMANDE]".to_string()),
+        },
         "doctor" | "diagnostic" => Ok(CliAction::Doctor { model }),
         "system-prompt" => parse_system_prompt_args(&rest[1..]),
         "login" => Ok(CliAction::Login),
@@ -2692,6 +2717,24 @@ fn review_replay(
             "findings": runtime::harness::review_findings(&opinion.text),
         })
     );
+    Ok(())
+}
+
+/// Une page notée par le juge visuel, en JSON sur la sortie (jauge du juge).
+/// Sans demande, celle d'une appli de budget perso, comme l'essai réel #39.
+fn design_replay(
+    model: Option<String>,
+    page: &Path,
+    request: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let brief = match request {
+        Some(path) => fs::read_to_string(path)?,
+        None => "Je veux une appli web perso de budget utilisable sur téléphone, avec mes rentrées et mes charges de chaque mois, et que ce soit quand même beau.".to_string(),
+    };
+    let worker = resolve_model_alias(&model.unwrap_or_else(default_model));
+    tools::set_request_observer(credits::note_request);
+    let verdict = bench_design::replay(page, brief.trim(), &worker)?;
+    println!("{verdict}");
     Ok(())
 }
 
@@ -3906,8 +3949,21 @@ impl LiveCli {
             permission_mode,
             None,
         )?;
+        // Le kit d'appli d'un projet déjà commencé, remis à la version de ce
+        // Claw quand sa copie est intacte : le modèle le sait au premier tour.
+        let mut pending_context = Vec::new();
+        let refreshed = env::current_dir()
+            .map(|cwd| tools::refresh_app_kit(&cwd))
+            .unwrap_or_default();
+        if !refreshed.is_empty() {
+            eprintln!("Kit d'appli remis à jour : {}", refreshed.join(", "));
+            pending_context.push(format!(
+                "[Claw] The app kit was updated to Claw's current version: {}. Never edit these files (Claw replaces them again); your own rules stay in the app's stylesheet.",
+                refreshed.join(", ")
+            ));
+        }
         let cli = Self {
-            pending_context: Vec::new(),
+            pending_context,
             tui_switch: None,
             typeahead: turn_keys::TypeAhead::default(),
             model,

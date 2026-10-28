@@ -472,6 +472,9 @@ struct TurnAids {
     foundation_noted: bool,
     /// Notes des revues visuelles du tour, dans l'ordre.
     graded: Vec<crate::web_design::Graded>,
+    /// Changements demandés par la dernière revue visuelle : la suivante les
+    /// voit et ne demande pas leur contraire.
+    judge_asked: Option<String>,
     /// Règles des défauts mesurés sur la page avant le premier changement du
     /// tour (`web_design::problem_key`) : les revues nomment ceux que le tour
     /// a introduits.
@@ -4492,6 +4495,7 @@ where
                         &audit,
                         bar,
                         aids.graded.last().map(|graded| graded.scores.as_slice()),
+                        aids.judge_asked.as_deref(),
                     );
                     if aids.restructured && !aids.restructure_asked {
                         aids.restructure_asked = true;
@@ -4535,6 +4539,9 @@ where
             crate::web_design::critique_changes(&consultation.text, bar)
                 .map(|lines| (consultation.model.clone(), lines))
         });
+        if let Some((_, lines)) = &verdict {
+            aids.judge_asked = Some(lines.clone());
+        }
         let feedback = crate::web_design::review_feedback(
             &target,
             &audit,
