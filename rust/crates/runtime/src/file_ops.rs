@@ -1502,6 +1502,13 @@ fn repair_double_star(pattern: &str) -> String {
         .join("/")
 }
 
+/// Sans mode demandé : au plus tant de fichiers et de lignes trouvées pour
+/// que les lignes soient rendues plutôt que la liste des fichiers, et au plus
+/// tant de lignes rendues ainsi.
+const AUTO_CONTENT_FILES: usize = 5;
+const AUTO_CONTENT_LINES: usize = 40;
+const AUTO_CONTENT_SHOWN: usize = 120;
+
 pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
     let base_path = input
         .path
@@ -1515,6 +1522,14 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
     let globs = glob_filters(input.glob.as_deref())?;
     let types = input.file_type.as_deref().map(file_type_extensions);
     let output_mode = output_mode(input.output_mode.as_deref(), &mut notes);
+    // Sans mode demandé, les lignes trouvées sont rendues quand la recherche
+    // vise un fichier ou trouve peu de choses : la liste des fichiers seule
+    // obligeait à relire le fichier. Vu le 28 octobre 2026 (session #39) :
+    // 68 recherches dans un passage, la plupart ne rendaient que « styles.css ».
+    let auto = input
+        .output_mode
+        .as_deref()
+        .is_none_or(|mode| mode.trim().is_empty());
     let multiline = input.multiline.unwrap_or(false);
     let context = input.context.or(input.context_short).unwrap_or(0);
 
@@ -1556,7 +1571,7 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
         total_matches += matched_lines.len();
 
         let shown_path = display_path(&file_path);
-        if output_mode == "content" {
+        if output_mode == "content" || auto {
             push_matched_lines(
                 input,
                 context,
@@ -1582,14 +1597,46 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
         notes.push(filtered_out_note(filtered_out, &base_path, input));
     }
     notes.extend(search_note(&skipped_dirs, large_files));
+    let shown_lines = auto
+        && !content_lines.is_empty()
+        && (named_file
+            || (filenames.len() <= AUTO_CONTENT_FILES
+                && content_lines.len() <= AUTO_CONTENT_LINES));
+    if shown_lines {
+        notes.push(format!(
+            "The matching lines are shown ({}); output_mode \"files_with_matches\" lists only the files.",
+            if named_file { "one file searched" } else { "few matches" }
+        ));
+    }
     let note = (!notes.is_empty()).then(|| notes.join(" "));
-    if output_mode == "content" {
+    Ok(grep_output(
+        input,
+        &output_mode,
+        shown_lines,
+        (filenames, content_lines, total_matches),
+        note,
+    ))
+}
+
+/// Le résultat de `grep_search` : les lignes trouvées (mode `content`, ou
+/// rendues d'office quand peu est trouvé), sinon les fichiers ou leur compte.
+fn grep_output(
+    input: &GrepSearchInput,
+    output_mode: &str,
+    shown_lines: bool,
+    (filenames, content_lines, total_matches): (Vec<String>, Vec<String>, usize),
+    note: Option<String>,
+) -> GrepSearchOutput {
+    if output_mode == "content" || shown_lines {
         // `head_limit` et `offset` découpent les lignes rendues, pas la liste
         // des fichiers, qui reste celle de tous les fichiers trouvés.
-        let (lines, limit, offset) = apply_limit(content_lines, input.head_limit, input.offset);
+        let limit = input
+            .head_limit
+            .or_else(|| shown_lines.then_some(AUTO_CONTENT_SHOWN));
+        let (lines, limit, offset) = apply_limit(content_lines, limit, input.offset);
         let (filenames, _, _) = apply_limit(filenames, None, None);
-        return Ok(GrepSearchOutput {
-            mode: Some(output_mode),
+        return GrepSearchOutput {
+            mode: Some(String::from("content")),
             num_files: filenames.len(),
             filenames,
             num_lines: Some(lines.len()),
@@ -1598,14 +1645,13 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
             applied_limit: limit,
             applied_offset: offset,
             note,
-        });
+        };
     }
-
     let (filenames, applied_limit, applied_offset) =
         apply_limit(filenames, input.head_limit, input.offset);
-    Ok(GrepSearchOutput {
+    GrepSearchOutput {
         num_matches: (output_mode == "count").then_some(total_matches),
-        mode: Some(output_mode),
+        mode: Some(output_mode.to_string()),
         num_files: filenames.len(),
         filenames,
         content: None,
@@ -1613,7 +1659,7 @@ pub fn grep_search(input: &GrepSearchInput) -> io::Result<GrepSearchOutput> {
         applied_limit,
         applied_offset,
         note,
-    })
+    }
 }
 
 /// Lignes trouvées d'un fichier et leur contexte, préfixées du chemin (et du
@@ -3305,6 +3351,68 @@ mod tests {
         })
         .expect("grep should succeed");
         assert!(grep_output.content.unwrap_or_default().contains("hello"));
+    }
+
+    /// Session #39 (28 octobre 2026) : `grep_search` dans `styles.css` sans
+    /// mode ne rendait que « styles.css », et l'agent relisait le fichier par
+    /// morceaux. Un fichier visé, ou peu de lignes trouvées : les lignes ; un
+    /// dossier où beaucoup est trouvé : la liste des fichiers, comme avant.
+    #[test]
+    fn a_search_in_one_file_or_with_few_matches_shows_the_lines() {
+        use std::fmt::Write as _;
+        let dir = temp_path("search-lines");
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let sheet = dir.join("styles.css");
+        let mut css = String::from(".tabbar { position: fixed; }\n");
+        for index in 0..60 {
+            let _ = writeln!(css, ".item-{index} {{ color: red; }}");
+        }
+        std::fs::write(&sheet, &css).expect("css");
+        for index in 0..8 {
+            std::fs::write(dir.join(format!("part-{index}.css")), css.clone()).expect("part");
+        }
+        std::fs::write(dir.join("extra.css"), ".only-here { gap: 4px; }\n").expect("extra");
+        let grep = |pattern: &str, path: &std::path::Path| {
+            grep_search(&GrepSearchInput {
+                pattern: pattern.to_string(),
+                path: Some(path.to_string_lossy().into_owned()),
+                glob: None,
+                output_mode: None,
+                before: None,
+                after: None,
+                context_short: None,
+                context: None,
+                line_numbers: None,
+                case_insensitive: None,
+                file_type: None,
+                head_limit: None,
+                offset: None,
+                multiline: None,
+            })
+            .expect("grep")
+        };
+        let one = grep(r"\.tabbar", &sheet);
+        assert_eq!(one.mode.as_deref(), Some("content"));
+        assert!(
+            one.content
+                .as_deref()
+                .unwrap_or_default()
+                .ends_with("styles.css:1:.tabbar { position: fixed; }"),
+            "{:?}",
+            one.content
+        );
+        let many = grep("color: red", &sheet);
+        assert_eq!(many.num_lines, Some(60));
+        assert_eq!(many.applied_limit, None);
+        // Peu trouvé dans un dossier : les lignes aussi.
+        let few = grep("only-here", &dir);
+        assert_eq!(few.mode.as_deref(), Some("content"));
+        assert_eq!(few.num_lines, Some(1));
+        // Beaucoup trouvé dans un dossier : les fichiers, sans les lignes.
+        let wide = grep("color: red", &dir);
+        assert_eq!(wide.mode.as_deref(), Some("files_with_matches"));
+        assert_eq!(wide.num_files, 9);
+        assert!(wide.content.is_none());
     }
 
     #[test]
