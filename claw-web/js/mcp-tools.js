@@ -80,7 +80,7 @@ export default {
     },
     {
      "name": "fork_repository",
-     "title": "Forker un dépôt",
+     "title": "Copier un dépôt (fork)",
      "read_only": false,
      "note": "Sur Claw Web, les outils restent sur le dépôt de la session"
     },
@@ -101,7 +101,7 @@ export default {
     },
     {
      "name": "get_job_logs",
-     "title": "Lire les journaux d'un job",
+     "title": "Lire les journaux d'une exécution",
      "read_only": true
     },
     {

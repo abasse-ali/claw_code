@@ -64,6 +64,8 @@ PROGRESS_EVERY = 12
 LOG_EVERY = 12
 RUN_ID = int(os.environ.get("GITHUB_RUN_ID") or 0)
 SHOWN_ACTIONS = 8
+# Délai laissé à Claw et à ses commandes pour s'arrêter d'eux-mêmes avant SIGKILL, à l'annulation.
+STOP_GRACE = 3
 # Racine du dépôt de la tâche : les chemins sont montrés depuis elle, pas depuis le disque du job.
 ROOT = os.path.abspath("work")
 
@@ -632,8 +634,10 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     with open(WORK / "claw.jsonl", "w", encoding="utf-8") as log, \
             open(WORK / "claw.stderr", "w", encoding="utf-8") as errors:
+        # Sa propre session : à l'arrêt, ses commandes en arrière-plan s'arrêtent avec lui.
         process = subprocess.Popen(args, cwd="work", env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=errors, text=True, encoding="utf-8", errors="replace")
+                                   stderr=errors, text=True, encoding="utf-8", errors="replace",
+                                   start_new_session=True)
         process.stdin.write(request)
         process.stdin.close()
         # L'étape de publication arrête un agent qui aurait survécu à la sienne.
@@ -656,10 +660,16 @@ def main():
         except Stopped:
             stopped = True
             print("Job annulé : arrêt de Claw et des commandes qu'il a lancées", flush=True)
-            stop_tree(process.pid, alive=lambda: process.poll() is None)
+            stop_tree(process.pid, alive=lambda: process.poll() is None, grace=STOP_GRACE, session=True)
             status = process.wait()
     (WORK / "claw.pid").unlink(missing_ok=True)
     stop_refresh.set()
+    if stopped:
+        # GitHub ne laisse qu'une dizaine de secondes après le signal avant de couper l'étape :
+        # l'arrêt se dit dans la session d'abord, le reste (journal, mémoire) suit s'il a le temps.
+        # Avant, il attendait le quota d'OpenRouter (15 s au plus) et les traductions (30 s) :
+        # coupé avant, le passage restait « Claw travaille » dans l'appli.
+        progress.publish("stopped", force=True)
     if host:
         host.stop()
     if mock:
@@ -680,7 +690,7 @@ def main():
         state = "unfinished"
     else:
         state = "failed"
-    quota = free_quota(env.get("OPENROUTER_API_KEY", ""))
+    quota = None if stopped else free_quota(env.get("OPENROUTER_API_KEY", ""))
     if quota:
         spent = quota["used"] - quota_before["used"] if quota_before else None
         quota["run"] = spent if spent is not None and spent >= 0 else None
@@ -692,9 +702,11 @@ def main():
     # Modèle choisi et requêtes du passage : le pied de la réponse suit son fournisseur
     # (Gemini et NVIDIA n'ont pas de compte à lire comme OpenRouter).
     (WORK / "usage.json").write_text(json.dumps({"model": MODEL, "requests": requests}), encoding="utf-8")
-    progress.publish(state, force=True)
-    # Les problèmes des captures en cours de traduction rejoignent le dernier envoi.
-    if progress.journal.translate:
+    if not stopped:
+        progress.publish(state, force=True)
+    # Les problèmes des captures en cours de traduction rejoignent le dernier envoi (pas après
+    # un arrêt : le temps manque).
+    if progress.journal.translate and not stopped:
         progress.journal.translate.wait(30)
     progress.publish_journal(force=True)
     (WORK / "notices.txt").write_text("\n".join(progress.notices[-2:]), encoding="utf-8")

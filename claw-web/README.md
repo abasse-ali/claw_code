@@ -79,15 +79,23 @@ changement de ce dossier ; l'ancienne adresse, https://abasse-ali.github.io/claw
 ## La conversation
 
 Vos messages sont en bulle à droite ; les réponses de Claw, sans cadre, sur toute la largeur,
-avec leurs titres, et les remarques du moteur (travail inachevé, par exemple) en encadré. Chaque
-passage tient en une ligne : son état (en cours, fini, arrêté, erreur), sa durée et son nombre
-d'actions ; un toucher déplie son journal, dont les 30 dernières étapes sont en vue (les
-précédentes se déplient à leur tour), et les étapes d'un passage en cours paraissent une à une.
-Les tâches de Claw restent dans un petit bloc pliable au-dessus de la saisie, ses questions dans le
-même bloc, en cartes à faire défiler à gauche et à droite. Sous une réponse, les fichiers modifiés sur la branche et
-le job sont en pastilles, le modèle et les requêtes à déplier. « Relancer » et « Mettre en
-ligne » restent sous la conversation ; le job, la session sur GitHub, « Archiver » et
-« Supprimer » sont dans le menu « ••• ».
+avec leurs titres, et les remarques du moteur (travail inachevé, par exemple) en encadré.
+
+Un passage en cours a son bloc « Claw travaille » : les griffes du logo qui grattent, la durée à
+la seconde et « Arrêter » ; « En ce moment », l'étape en cours en grand (la tâche que Claw fait,
+sinon ce qu'il annonce, sinon sa dernière action) avec une barre découpée par tâche (« 2 sur 5 »)
+et son plan à déplier ; ses quatre dernières actions, la plus récente en haut, les nouvelles
+entrant en glissant l'une après l'autre ; le journal complet, replié. « Claw se prépare » (file
+d'attente, compilation) prend la même forme, et l'arrêt demandé le fait virer au rouge
+(« Arrêt en cours »). Fini, un passage tient en une ligne : son état (fini, arrêté, erreur), sa
+durée et son nombre d'actions ; un toucher déplie son journal, dont les 30 dernières étapes sont
+en vue (les précédentes se déplient à leur tour).
+Les tâches de Claw restent dans un petit bloc pliable au-dessus de la saisie (caché tant que le
+bloc « Claw travaille », qui les montre déjà, est à l'écran), ses questions dans le même bloc, en
+cartes à faire défiler à gauche et à droite. Sous une réponse, les fichiers modifiés sur la branche et
+l'exécution sur GitHub sont en pastilles, le modèle et les requêtes à déplier. « Relancer » et
+« Mettre en ligne » restent sous la conversation ; l'exécution et la session sur GitHub,
+« Archiver » et « Supprimer » sont dans le menu « ••• ».
 
 Votre message paraît dès son envoi, et une nouvelle session s'ouvre dès sa création ; jusqu'à
 la première progression, la carte « Claw se prépare » dit l'étape en cours (file d'attente,
@@ -110,6 +118,33 @@ toucher sur une réponse l'envoie (plusieurs questions : une réponse chacune, p
 les réponses ») ; on peut aussi répondre avec ses mots. Dans le journal, une capture d'écran dit
 ce qu'elle montre : « Capture en ligne » (le site publié) ou « Capture de la session » (les
 fichiers de la branche, pas encore en ligne).
+
+## L'accueil
+
+Un tableau de bord : la date et une salutation selon l'heure, trois chiffres (sessions au
+travail, passages réussis sur 7 jours, modèle choisi, qu'un toucher change), puis la carte
+« Espace de travail » : le dépôt et la branche où Claw travaillera, à changer d'un toucher, avec
+ses fichiers et « Nouveau dépôt ». Le dépôt ne se choisit plus près du champ de saisie : le champ
+dit pour quel dépôt on écrit (« Une tâche pour budget-app ? »). Viennent ensuite « En ce
+moment », les sessions au travail avec leur durée à la seconde (l'accueil se relit toutes les
+20 s tant qu'il y en a), « Pour démarrer », des demandes toutes prêtes qu'un toucher met dans le
+champ (créer une appli, `/fix`, `/review`, `/verify`, `/jtest`, `/pages`), et les sessions
+récentes en frise, par jour (« Tout voir » ouvre le menu).
+
+## Apparence
+
+Fond d'encre éclairé d'une aurore orange, rose et violette (thème clair au choix, ou celui du
+téléphone : Réglages, « Apparence ») ; barre du haut, zone de saisie, fenêtres et tiroir en verre
+dépoli ; un dégradé orange → rose → violet pour l'essentiel : l'envoi, les boutons principaux, le
+logo, le contour d'un passage en cours. Titres en Bricolage Grotesque (police libre, licence
+OFL, rangée dans `fonts/` : la page ne charge rien d'ailleurs), texte dans la police du téléphone.
+
+Les animations sont courtes et ne jouent qu'à l'arrivée d'un élément ou sous le doigt : une page
+qui arrive glisse en place, les listes entrent l'une après l'autre, les fenêtres montent du bas
+et y redescendent, le tiroir glisse depuis la gauche, un message envoyé ou une réponse arrivée
+entre dans la conversation. Une session redessinée en direct (toutes les 4 s pendant un passage)
+ne rejoue rien : les roues d'attente et le contour du passage en cours reprennent où ils en
+étaient. « Réduire les animations » (Réglages du téléphone, Accessibilité) coupe tout mouvement.
 
 ## Commandes « / » et niveau de réflexion
 
@@ -360,8 +395,14 @@ sur l'exécuteur `claw-pc` à processeur ARM, et le site y reste en ligne après
 
 ## Arrêter, supprimer
 
-- « Arrêter » (deux appuis) annule un passage en cours : ce qui est fait reste sur la branche
-  de la session ; un message de suivi reprend le travail.
+- « Arrêter » (deux appuis : le premier arme le bouton 4 s, une barre se vide) annule un passage
+  en cours : ce qui est fait reste sur la branche de la session ; un message de suivi reprend le
+  travail. La session dit aussitôt « Arrêt en cours » (plus aucune étape ne paraît ensuite) et
+  se relit toutes les 1,5 s : GitHub finit le passage en une dizaine de secondes, le temps que
+  Claw et ses commandes s'arrêtent (celles lancées en arrière-plan comprises) et que le travail
+  soit poussé. Un passage tout juste lancé, que GitHub ne liste pas encore, est arrêté dès qu'il
+  paraît. Si GitHub tarde (machine injoignable), « Forcer l'arrêt » paraît au bout de 45 s : il
+  coupe tout de suite, sans pousser le travail de ce passage.
 - « Supprimer » dans une session, ou « Choisir » dans la liste des sessions (menu) pour en
   supprimer plusieurs : la session et ses messages sont effacés de GitHub, sans retour possible.
   En option, sa branche `claw/session-<n>` (une pull request ouverte est alors fermée) et ses

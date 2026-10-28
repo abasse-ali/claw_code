@@ -1,6 +1,26 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="112" fill="#1b1a18"/>
-  <g fill="none" stroke="#e8743b" stroke-width="40" stroke-linecap="round">
+  <defs>
+    <linearGradient id="g" x1="150" y1="400" x2="400" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff8a3d"/>
+      <stop offset=".55" stop-color="#ff4f80"/>
+      <stop offset="1" stop-color="#a873ff"/>
+    </linearGradient>
+    <radialGradient id="bg" cx="30%" cy="18%" r="95%">
+      <stop offset="0" stop-color="#2a1830"/>
+      <stop offset=".55" stop-color="#141220"/>
+      <stop offset="1" stop-color="#0c0b11"/>
+    </radialGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <g fill="none" stroke="url(#g)" stroke-width="40" stroke-linecap="round">
+    <g opacity=".55" filter="url(#glow)">
+      <path d="M152 384C196 306 214 226 202 132"/>
+      <path d="M250 398C294 316 312 230 298 122"/>
+      <path d="M346 382C386 304 400 228 384 140"/>
+    </g>
     <path d="M152 384C196 306 214 226 202 132"/>
     <path d="M250 398C294 316 312 230 298 122"/>
     <path d="M346 382C386 304 400 228 384 140"/>

@@ -96,10 +96,17 @@ const DRAW_SCRIPT: &str = r#"(async (images, jobs, background) => {
 /// Dossier du projet où écrire les icônes (dans le dossier de travail).
 fn project_folder(root: &Path, folder: &str) -> Result<PathBuf, String> {
     let relative = Path::new(folder.trim().trim_start_matches("./"));
+    // `/etc` n'est pas « absolu » sous Windows (aucun lecteur) mais part de la racine du disque :
+    // refusé comme un chemin absolu, de même qu'un lecteur seul (`C:icons`).
     if relative.is_absolute()
-        || relative
-            .components()
-            .any(|part| matches!(part, std::path::Component::ParentDir))
+        || relative.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
     {
         return Err(format!(
             "folder `{folder}` must be a folder inside the project, written relative to it (for example \"icons\")"
