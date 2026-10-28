@@ -382,10 +382,16 @@ pub fn access_codes(text: &str) -> Vec<String> {
         r#"(?i)\b[\w$]*(?:pin|code|passe?|password|motdepasse|passcode|secret)[\w$]*["']?\s*(?:=|:)\s*["'`]([^"'`\s]{3,32})["'`]"#,
     )
     .expect("regex");
+    // Une version de bibliothèque (`"sourcemap-codec": "^1.5.0"` d'un package-lock) n'est
+    // pas un code : vu le 28 octobre 2026 (session #41), « ^1.5.0 » réclamé à la réponse.
+    let version = Regex::new(r"^[\^~<>=v]*\d+(\.[\dx*]+)+").expect("regex");
     let mut codes: Vec<String> = Vec::new();
     for found in assigned.captures_iter(text) {
         let whole = found[0].to_lowercase();
         let code = found[1].to_string();
+        if version.is_match(&code) {
+            continue;
+        }
         let not_access = [
             "key", "storage", "postal", "zip", "country", "promo", "coupon", "qr", "bar", "color",
             "colour", "lang", "status", "error", "area", "dial", "currency", "event", "http",
@@ -1257,6 +1263,11 @@ mod tests {
         assert!(super::access_codes("<input type=\"password\" id=\"pin-input\">").is_empty());
         assert!(super::access_codes(
             "const shop = { postalCode: \"75001\", promoCode: 'BIENVENUE', countryCode: 'FR' };"
+        )
+        .is_empty());
+        // Session #41 : les dépendances d'un package-lock.json ne sont pas des codes.
+        assert!(super::access_codes(
+            "\"@jridgewell/sourcemap-codec\": \"^1.5.0\",\n\"@jridgewell/trace-mapping\": \"0.3.24\""
         )
         .is_empty());
     }

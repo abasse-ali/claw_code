@@ -574,6 +574,20 @@ mod tests {
             })
             .collect();
         let built = dir.join("docs/index.html").is_file();
+        // Session #41 : l'appli publiée sans icône PNG. Claw les tire de public/icon.svg.
+        let icons = [
+            "icon-192.png",
+            "icon-512.png",
+            "icon-maskable-512.png",
+            "apple-touch-icon.png",
+        ]
+        .iter()
+        .all(|file| {
+            std::fs::read(dir.join("docs").join(file))
+                .is_ok_and(|bytes| bytes.starts_with(b"\x89PNG"))
+        });
+        let manifest =
+            std::fs::read_to_string(dir.join("docs/manifest.webmanifest")).unwrap_or_default();
         let step = |input: serde_json::Value| {
             let input: crate::screenshot::browse::BrowserInput =
                 serde_json::from_value(input).expect("entrée");
@@ -614,6 +628,7 @@ mod tests {
         let broken = crate::screenshot::take(&broken);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(built, "docs/index.html");
+        assert!(icons && manifest.contains("icon-512.png"), "{manifest}");
         for shot in shots {
             let shot = shot.expect("captures");
             let text = shot.to_string();

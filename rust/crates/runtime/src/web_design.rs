@@ -1158,6 +1158,16 @@ fn texts_of(root: &Path, kinds: &[&str]) -> Vec<String> {
         let Ok(entries) = std::fs::read_dir(&folder) else {
             continue;
         };
+        // La construction d'une appli Vite (`docs/`) : des bibliothèques minifiées,
+        // pas ce que le modèle a écrit (ses sources sont dans `src/`).
+        let vite = [
+            "vite.config.ts",
+            "vite.config.js",
+            "vite.config.mjs",
+            "vite.config.mts",
+        ]
+        .iter()
+        .any(|config| folder.join(config).is_file());
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -1165,10 +1175,13 @@ fn texts_of(root: &Path, kinds: &[&str]) -> Vec<String> {
                 if depth < 4
                     && !name.starts_with('.')
                     && !matches!(name.as_str(), "node_modules" | "dist" | "build" | "target")
+                    && (!vite || name != "docs")
                 {
                     folders.push((path, depth + 1));
                 }
             } else if name != "CREDITS.md"
+                // Les versions figées des bibliothèques, pas une page.
+                && !matches!(name.as_str(), "package-lock.json" | "npm-shrinkwrap.json")
                 && path.extension().is_some_and(|ext| {
                     kinds.contains(&ext.to_string_lossy().to_ascii_lowercase().as_str())
                 })
@@ -3091,6 +3104,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert!(texts.contains("pain.jpg") && texts.contains("four.jpg"));
         assert!(!texts.contains("seigle.jpg"), "{texts}");
+        // Une appli Vite (session #41) : ses sources, pas sa construction ni ses
+        // versions figées.
+        let app = std::env::temp_dir().join(format!("claw-textes-vite-{}", std::process::id()));
+        std::fs::create_dir_all(app.join("src")).expect("dossiers");
+        std::fs::create_dir_all(app.join("docs/assets")).expect("dossiers");
+        std::fs::write(app.join("vite.config.ts"), "export default {}").expect("config");
+        std::fs::write(app.join("src/App.tsx"), "<img src=\"./pain.jpg\" />").expect("source");
+        std::fs::write(app.join("docs/assets/index-a1.js"), "seigle.jpg").expect("construction");
+        std::fs::write(
+            app.join("package-lock.json"),
+            "{\"sourcemap-codec\": \"^1.5.0\"}",
+        )
+        .expect("versions");
+        let texts = super::page_texts(&app).join("\n");
+        let _ = std::fs::remove_dir_all(&app);
+        assert!(texts.contains("pain.jpg"), "{texts}");
+        assert!(
+            !texts.contains("seigle.jpg") && !texts.contains("codec"),
+            "{texts}"
+        );
     }
 
     #[test]

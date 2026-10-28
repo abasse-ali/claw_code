@@ -82,6 +82,27 @@ ses captures lui signalaient à tort, à cause du kit React :
 
 L'essai de bout en bout vérifie désormais ces défauts aussi, avec trois pastilles.
 
+Bilan du passage (47 min de travail, 124 actions, une seule session) : les chiffres de
+l'utilisateur dès l'ouverture, reste prudent 848,55 €, cas favorable 1 151,55 €, ajout,
+modification, suppression avec « Annuler », onglets, réglages ; note du juge bloquée vers
+6/10 (barre 8), en partie à cause des fausses alertes ci-dessus. Banc t9 : **10/12** (#35 :
+4/12, #36 : 8/12, #39 : 11/12). Manqués : pas d'icône PNG (le modèle n'a pas appelé
+`AppIcon`) ; sombre non imposé (la réponse « sobre foncé » n'est pas dans la demande de
+l'essai). Le banc lui-même avait un défaut : il ne lisait que le dernier écran visité après
+le rechargement (la dépense, gardée, était sous l'onglet Historique) ; il lit maintenant les
+montants de chaque écran, et sert `docs/` pour une appli Vite.
+
+Corrigé ensuite :
+
+- **Icônes PNG automatiques** (`vite::app_icons`) : à chaque construction, quand
+  `public/icon.svg` est plus récent qu'elles, Claw dessine les icônes PNG (192, 512,
+  maskable, iPhone) avec l'outil `AppIcon`, les ajoute au manifeste et lie celle de l'iPhone
+  dans `index.html`.
+- **« La page s'ouvre avec un code »** à tort : le détecteur de codes d'accès lisait
+  `package-lock.json` (`"sourcemap-codec": "^1.5.0"`, `trace-mapping`). Une version n'est plus
+  un code, et les textes de la page ne comprennent plus `package-lock.json` ni la construction
+  d'une appli Vite (`docs/` à côté d'un `vite.config`).
+
 ## Non fait, et pourquoi
 
 - **MySQL et Redis** : ni sur le PC de Claw ni sur GitHub Pages ; les serveurs de départ gardent
