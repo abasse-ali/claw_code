@@ -735,6 +735,10 @@ mod tests {
         // sombre, puis parcourue : ajout, modification, suppression, retour.
         let name = format!("claw-kit-{}", std::process::id());
         let dir = kit_app(&name);
+        let icons: crate::screenshot::app_icons::AppIconInput =
+            serde_json::from_value(json!({ "svg": format!("{name}/icons/icon.svg") }))
+                .expect("entrée");
+        let icons = crate::screenshot::app_icons::app_icon(&icons);
         if let Ok(copy) = std::env::var("CLAW_KIT_DEMO") {
             let copy = std::path::Path::new(&copy);
             let _ = std::fs::remove_dir_all(copy);
@@ -747,16 +751,16 @@ mod tests {
                 "kit/app-kit.css",
                 "kit/app-kit.js",
                 "icons/icon.svg",
+                "icons/icon-192.png",
+                "icons/icon-512.png",
+                "icons/icon-maskable-512.png",
+                "icons/apple-touch-icon.png",
             ] {
                 let target = copy.join(file);
                 let _ = std::fs::create_dir_all(target.parent().expect("dossier"));
                 let _ = std::fs::copy(dir.join(file), target);
             }
         }
-        let icons: crate::screenshot::app_icons::AppIconInput =
-            serde_json::from_value(json!({ "svg": format!("{name}/icons/icon.svg") }))
-                .expect("entrée");
-        let icons = crate::screenshot::app_icons::app_icon(&icons);
         let shots: Vec<_> = ["light", "dark"]
             .iter()
             .map(|theme| {

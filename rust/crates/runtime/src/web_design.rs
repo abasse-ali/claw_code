@@ -551,6 +551,59 @@ pub fn is_interface_request(text: &str) -> bool {
         && (has_any(&folded, MAKE_WORDS) || has_any(&folded, TASTE_WORDS))
 }
 
+/// Mots d'une appli, pas d'un site : « appli », « app », « application », « PWA ».
+const APP_WORDS: &[&str] = &[
+    "app ",
+    "apps ",
+    "appli",
+    "application",
+    "webapp",
+    "web app",
+    "pwa",
+];
+
+/// Débuts de mots d'un usage personnel, sur ses propres données (argent,
+/// suivi, carnet) : ce que le kit d'appli sait tenir.
+const PERSONAL_WORDS: &[&str] = &[
+    "perso",
+    "budget",
+    "depense",
+    "argent",
+    "salaire",
+    "revenu",
+    "epargne",
+    "economie",
+    "finance",
+    "carnet",
+    "journal",
+    "habitude",
+    "tracker",
+    "suivi de",
+    "suivre mes",
+    "routine",
+    "entrainement",
+    "seance",
+    "sommeil",
+    "humeur",
+    "poids",
+    "collection",
+    "lecture",
+    "personal",
+    "expense",
+    "habit",
+];
+
+/// La demande construit une appli perso, sur les données de l'utilisateur
+/// (un budget, un carnet, un suivi) : elle se fait avec le kit d'appli et se
+/// juge comme une appli de téléphone, pas comme un site vitrine. Vu le 28
+/// octobre 2026 (sessions #36 et #38) : la méthode d'un site (police « à
+/// soi », titre d'affiche) donnait à l'appli de budget un air de magazine daté.
+#[must_use]
+pub fn is_personal_app(text: &str) -> bool {
+    let folded = crate::team::without_accents(&text.to_lowercase()).replace('\u{2019}', "'");
+    is_interface_request(text) && has_any(&folded, APP_WORDS) && has_any(&folded, PERSONAL_WORDS)
+}
+
 /// Marques d'une demande de corrections : un verbe qui répare, ou des
 /// défauts signalés (« il reste », « toujours », « coupé »).
 const REPAIR_VERBS: &[&str] = &["corrig", "repar", "remet", "fix", "repair"];
@@ -1136,9 +1189,33 @@ fn texts_of(root: &Path, kinds: &[&str]) -> Vec<String> {
 /// poursuit une telle demande).
 #[must_use]
 pub fn design_guide(request: &str, earlier: Option<&str>) -> Option<String> {
-    let interface = is_interface_request(request)
-        || (request.split_whitespace().count() <= 12 && earlier.is_some_and(is_interface_request));
-    interface.then(|| format!("{GUIDE_PREFIX} {}", design_method(design_bar())))
+    let short = request.split_whitespace().count() <= 12;
+    let interface =
+        is_interface_request(request) || (short && earlier.is_some_and(is_interface_request));
+    let app = is_personal_app(request) || (short && earlier.is_some_and(is_personal_app));
+    interface.then(|| {
+        let method = if app {
+            app_method(design_bar())
+        } else {
+            design_method(design_bar())
+        };
+        format!("{GUIDE_PREFIX} {method}")
+    })
+}
+
+/// Méthode d'une appli perso : le kit d'appli fait l'allure et le
+/// fonctionnement communs, le modèle fait les données, les écrans et le
+/// script propre de l'appli. Une appli de téléphone récente (néobanque) est
+/// la barre, pas un site de studio : la police du téléphone, des surfaces
+/// calmes, le chiffre qui compte en premier.
+fn app_method(bar: u8) -> String {
+    format!("This request builds a personal app: a tool the user opens every day on their phone to keep their own data. The bar is a recent phone app at the level of the best (Revolut, Lydia, Apple's own apps): the figure that matters first, calm surfaces, every screen working, light and dark, never a website. When you finish, Claw has the screens scored by an art director, 1 to 10 on seven criteria (phone, hierarchy, spacing, typography, color, identity, finish), and sends back every criterion under {bar}.
+1. Brief. One line each: who uses it, the figures that matter most, the main daily action (add an expense, log a session). Use the user's own words and figures, in their language. Never write a fact the user did not give (a rule, a promise, an amount): what only the user knows is asked in your answer. No technical word on screen (CSV, JSON, local storage, sync, database).
+2. Data first. The figures the user gave are in the app from the first launch, as values they can change in its settings, never an empty app at 0. A figure given as a range counts at its least favourable end in the prudent total (the low end of an income, the high end of an expense), with the best case shown beside it; a figure marked as not sure stays out of the prudent total until it is received. Never fill the months before with copies of this month.
+3. Build on the app kit, in one call to the Component tool: names [\"app-kit\", \"pwa\"]. Claw writes kit/app-kit.css and kit/app-kit.js into the project and gives the page skeleton, the kit's blocks and an example of the app's own script: never write, copy or edit the kit's files. index.html starts from the skeleton as it is: change its texts, screens, categories and figures for this app, and compose every screen only with the kit's blocks (the hero with the main figure, tiles, cards holding lists of rows, badges, meters, the bar chart, settings, empty states, buttons, fields): no cards, lists, buttons or fields of your own, which would look different and break. styles.css only sets the app's tokens (its accent and its gradient, for light and dark) and the little the kit lacks; app.js holds only the app's logic, as in the example (window.entries, window.app, window.drawChart, window.toast). Keep the phone's own font, the kit's: a web typeface looks out of place in an app and is lost offline. Icons come from the kit and the Icon tool; emoji are forbidden everywhere, even if the brief sounds playful. The pwa component gives manifest.webmanifest and sw.js for the app's root (list every file of the app in FILES, the kit's two files included); draw icons/icon.svg with the Icon tool on the accent, then the AppIcon tool makes the PNG icons.
+4. Screens. 3 to 5 tabs, each with one clear job. The first screen leads with the main figure in the hero (what is left to spend, a streak, a total) and the main action is the add button of the tab bar; the entries are a card of compact rows; summaries are tiles, meters and the chart; the settings hold the user's figures as values to adjust; every list has its empty state. Short labels; amounts in the user's currency and format (1 235,15 €), the cents only where they matter.
+5. Make everything work: every button does what its label says; adding an entry updates every total and list at once; an entry can be changed and deleted, with Undo; the data stay after a reload; nothing shows NaN, Infinity or undefined.
+6. Check before you answer: Screenshot with windows and explore true (phone and desktop), then Browser in ONE call with action \"steps\": the user's day in the app (open it, add an entry, see it in the list and in the totals, change it, delete it, Undo, open every tab), each step with \"expect\" set to what must then show, so the call proves the results. Fix every measured problem. Say in your answer only what these checks saw.")
 }
 
 /// Socle de code à recopier au début de la feuille de styles : il évite les
@@ -1202,6 +1279,9 @@ fn foundation_css() -> String {
 /// mode sombre demandé ; `fonts` : les polices que l'outil `Font` sait servir.
 #[must_use]
 pub fn designer_prompt(brief: &str, dark: bool, fonts: &[&str], bar: u8) -> String {
+    if is_personal_app(brief) {
+        return app_designer_prompt(brief, dark, bar);
+    }
     let theme = if dark {
         "The client wants a dark interface: :root holds the dark values, whatever the phone's setting, with color-scheme: dark."
     } else {
@@ -1239,6 +1319,21 @@ Part 2, base.css in one ```css block (at most 260 lines), the design system the 
 Write nothing after the css block.", foundation = foundation_css())
 }
 
+/// Le modèle de conception d'une appli perso : le kit d'appli fait l'allure
+/// commune (police du téléphone, surfaces, blocs) ; lui donne l'identité par
+/// la couleur et le contenu, et le plan des écrans en blocs du kit. Vu le 28
+/// octobre 2026 (session #38) : libre de ses polices et de ses classes, il
+/// avait choisi Newsreader (empattements) et une grande carte blanche vide
+/// pour le solde.
+fn app_designer_prompt(brief: &str, dark: bool, bar: u8) -> String {
+    let theme = if dark {
+        "The client wants a dark app: :root holds the dark values, whatever the phone's setting, with color-scheme: dark."
+    } else {
+        "Give :root the light values with color-scheme: light, and the dark values in @media (prefers-color-scheme: dark) { :root { ... } } and again in :root[data-theme=\"dark\"], with color-scheme: dark, so the app follows the phone."
+    };
+    format!("The client's request, with their answers to the questions:\n\"{brief}\"\n\nThis is a personal app, built by the engineer on Claw's app kit, which already has the look of a recent phone app: the phone's own font, near-white or near-black surfaces with a hairline and a soft shadow, 20px radii, a main card on a gradient (the hero) with the main figure, figure tiles, cards holding lists of rows (an icon chip, a title, a detail, an amount, a status badge), meters, a bar chart, settings rows, empty states, a floating tab bar with an add button in the middle, a sheet to add or edit an entry, undo messages. The built screens must reach {bar}/10 on phone, hierarchy, spacing, typography, color, identity and finish. You give the app its identity through color and content, and you plan its screens with the kit's blocks: no font, no layout rule, no class of your own.\n\nWrite exactly two parts.\n\nPart 1, under the heading \"## Plan\" (at most 600 words), specific to this request:\n- Brief: who uses it, the figures that matter most, the daily action; one line each.\n- Direction: the mood in one sentence, and what the colors say.\n- Data: the figures the user gave, as the app starts with them (a range counts at its least favourable end in the prudent total, a figure marked not sure stays out of it until received, the best case beside it); nothing invented.\n- Screens: 3 to 5 tabs (name and a Lucide icon name); for each screen, the kit's blocks from top to bottom with their exact content (labels, which figure each shows, the rows of each list, the empty state's sentence). The first screen leads with the hero and its main figure.\n- The add sheet: the kinds (expense, income...), and 4 to 8 categories with a Lucide icon name each.\n- Never a block the kit does not have, a feature the brief does not ask for, or emoji.\n\nPart 2, base.css in one ```css block (at most 70 lines): only custom properties on :root, with these names: --accent (buttons, links, the selected tab), --hero-1, --hero-2, --hero-3 (the hero's and the add button's gradient: three close hues, white text must read at 4.5:1 on --hero-1 and --hero-2), --paper (the page), --surface (the cards), --ink, --muted, --line (hairlines), --income (money in), --error (money out and errors), --warn. {theme} Every text color at least 4.5:1 on --paper and on --surface; a calm, near-neutral --paper and --surface (no colored page), the color in the accent and the gradient. No font, no other rule, no comment longer than a line.\nWrite nothing after the css block.")
+}
+
 /// La réponse du modèle de conception : le plan, et `base.css` s'il l'a écrit.
 #[must_use]
 pub fn parse_conception(text: &str) -> Option<(String, Option<String>)> {
@@ -1270,8 +1365,9 @@ pub fn parse_conception(text: &str) -> Option<(String, Option<String>)> {
 /// Ce que l'agent reçoit de la conception : le plan à suivre, et la feuille de
 /// base écrite par Claw dans `file` (`None` : le modèle n'en a pas écrit).
 #[must_use]
-pub fn conception_note(model: &str, plan: &str, file: Option<(&str, usize)>) -> String {
+pub fn conception_note(model: &str, plan: &str, file: Option<(&str, usize)>, app: bool) -> String {
     let base = match file {
+        Some((file, lines)) if app => format!(" Claw already wrote the app's colors in {file} ({lines} lines of tokens: the accent, the hero's gradient, the surfaces and the text, light and dark): never write or edit it. Build the app on the app kit (Component with names [\"app-kit\", \"pwa\"]), and in the <head> link kit/app-kit.css, then {file}, then your own stylesheet, which only adds what the kit lacks: never redefine the tokens of {file}. Keep the phone's own font: no web typeface."),
         Some((file, lines)) => format!(" Claw already wrote its design system in {file} ({lines} lines: the tokens of color, type, space, radius and shadow, the foundation, and the base look of text, buttons, surfaces, list rows, fields and chips): read it before writing the pages, and never write or edit it. Link {file} in every page before your own stylesheet (<link rel=\"stylesheet\" href=\"{file}\">, with the path from the page), use its variables and classes for everything, never redefine its variables or restyle its base classes, and keep your own stylesheet for layout and the parts it does not cover. The method's foundation is already in it: do not copy it again. Load its two fonts with the Font tool."),
         None => " Write its tokens at the top of your stylesheet, as they are.".to_string(),
     };
@@ -1414,7 +1510,7 @@ fn design_method(bar: u8) -> String {
 - Space: one spacing scale on multiples of 8px (for example 8, 16, 24, 40, 64, 96) and nothing else; the same vertical padding for sections of the same rank; no empty band taller than half a screen.
 - Layout: an ASCII wireframe of the first screen (phone and desktop), drawn with the Wireframe tool and pasted as it is in a ``` block (never drawn or retouched by hand: hand-drawn boxes come out misaligned and overflow), and the order of the sections. Text left-aligned (center only one-line titles and short captions). Vary the composition from one section to the next (split, full width, grid, list, offset), never the same centered title over a grid each time.
 - One memorable element (a hero treatment, an illustration, a typographic idea, an interaction), with everything around it quiet and disciplined.
-- Interactions: what the visitor can do on the page, from the Component tool, chosen for this subject: booking for classes, tables or appointments; open-now and directions for a shop, a restaurant or a studio; filter for a schedule, a menu or a catalog; cart for products or a quote; accordion for questions; carousel for a gallery; copy and share for an address or an event; theme-toggle when the brand suits a dark mode. Two or three that serve the visitor, not all of them. A personal app that keeps the user's own data (a budget, a training log, habits, a collection) is built on the app kit instead, all five together: app-tabs (its screens), entries (the data kept on the phone, the user's own figures filled in from the first launch, undo, a copy saved and taken back), entry-sheet (adding an entry), chart (the months side by side) and pwa (home screen and offline).
+- Interactions: what the visitor can do on the page, from the Component tool, chosen for this subject: booking for classes, tables or appointments; open-now and directions for a shop, a restaurant or a studio; filter for a schedule, a menu or a catalog; cart for products or a quote; accordion for questions; carousel for a gallery; copy and share for an address or an event; theme-toggle when the brand suits a dark mode. Two or three that serve the visitor, not all of them. A personal app that keeps the user's own data (a budget, a training log, habits, a collection) is built on the app kit instead: Component with names [\"app-kit\", \"pwa\"] writes the kit into the project and gives the page skeleton to start from.
 - Motion: one entrance on the first screen, then reveal on a few chosen blocks (a list of cards, a key figure), count-up for key figures, at most one scroll effect (reading progress or a slow parallax on the hero picture), and micro-interactions on every link, button and card.
 Forbidden unless the brief asks for it, because they mark a generated page: a plain colored band with centered \"Welcome\" text as the hero; rows of identical cards with the same soft shadow; a short line under every heading; ALL-CAPS badges or small labels above headings; one repeated icon standing in for pictures; cream with terracotta, or near-black with one acid accent; 01/02/03 markers on things that are not steps; a fade-in on every section; decorative gradients everywhere. Check your plan against this list and say in one line that it uses none of them. Emoji are forbidden everywhere, with no exception, even if the brief sounds playful: emoji are drawn by the device's own font and look different on every phone and computer. Every icon and pictogram comes from the Icon tool (polished Lucide line icons, ready-to-paste inline SVG: ask for several names in one call; set their `color`, `style` \"duotone\", `background` badge, `corners` or `rotate` in the call, and ask `sprite` for icons used many times), pasted as it is: never write an icon's shapes yourself, not even a simple arrow, check, cross, star, menu or social logo, and not in a CSS data URL either (a select's arrow is the chevron-down icon); Claw compares every small SVG of the page with the icon set and sends back any drawn by hand; every decorative shape (an organic blob behind a title, layered waves at the edge of a hero, an arch framing a picture, a medallion around an initial, a branch, a sun, a dot, line, contour or grain texture) comes from the Ornament tool in the plan's colors: shapes drawn by hand look crude, and these are drawn from formulas.{photos} An illustration you still draw yourself stays simple and geometric (with width, height and aria-hidden=\"true\", or role=\"img\" and an aria-label when it carries meaning); no emoji appears in any heading, button, label or paragraph.
 3. Build. One file per role (index.html, styles.css, app.js, and the manifest and service worker of an app), each short enough to be written in one call (under about 400 lines; split a bigger script into modules): never the whole app packed into one huge HTML file, which a reply cuts before it is written. An app meant to work offline loads nothing from a CDN or another site (draw charts in inline SVG or on a canvas, keep every script and font it needs in the project, and list them in the service worker's cache), and its manifest icon is a real drawing: one SVG file (\"sizes\": \"any\", \"type\": \"image/svg+xml\"), from which the AppIcon tool draws the PNG icons phones ask for (192, 512, maskable, and the iPhone's 180); never an empty or 1x1 placeholder PNG written by hand. CSS custom properties for every color, size and space of the plan, and no raw values outside them (except 0 and 1px borders). Semantic HTML (header, nav, main, section, footer) with exactly one h1 and no skipped heading levels; mobile first. On phones the navigation folds into a menu button that opens and closes it (aria-expanded), and a fixed header never covers content (offset the page by its height). Every link, button and field has hover, :focus-visible and active states, with transitions of 150 to 250ms, and @media (prefers-reduced-motion: reduce) stops the motion. Animate only transform and opacity (never width, height, margin or top): 150 to 250ms for hover and press, 400 to 700ms for an entrance, with an ease-out curve; nothing loops forever except one slow decorative detail; content never waits for a script to be visible. Tap targets of at least 44x44px on phones. Pictures: the user's images{photo_pictures}, Ornament shapes, or simple illustrations in inline SVG (each with an explicit width and height) or CSS, never broken or placeholder images. Forms: styled like the rest of the page (font: inherit), a visible label on every field, errors shown only after the user acts (:user-invalid, or on submit), a clear confirmation in the page. Watch CSS specificity: a .section rule and a .cta rule can cancel each other's spacing.
@@ -1884,6 +1980,11 @@ pub fn plan_critique_prompt(request: &str, plan: &str, bar: u8) -> String {
     let pictures = pictures_note();
     let brief: String = request.chars().take(1_500).collect();
     let plan: String = plan.chars().take(5_000).collect();
+    if is_personal_app(request) {
+        return format!(
+            "The client's brief:\n\"{brief}\"\n\nThe plan of a personal app, written before any code:\n{plan}\n\nJudge this plan against the best phone apps (Revolut, Lydia, Apple's own apps); the built app will be scored 1 to 10 on phone, hierarchy, spacing, typography, color, identity and finish, and must reach {bar} on each:\n1. data: are the user's own figures in the app from the first launch, a range counted at its least favourable end, a figure marked not sure kept out of the prudent total, and nothing invented?\n2. hierarchy: does the first screen lead with the one figure that matters, is the daily action one tap away?\n3. screens: 3 to 5 tabs, each with one clear job, built only from the app kit's blocks (hero, tiles, cards with lists of rows, badges, meters, chart, settings, empty states), none repeating another?\n4. color: an accent and a gradient that suit the subject, calm neutral surfaces, readable in light and dark?\n5. typography: the phone's own font, the kit's: never a web typeface or a serif for an app.\nYou direct the design of what the client asked for: never add a feature, a screen or data the brief does not ask for.\nReply with at most 5 changes to the plan, the most important first, one per line, each as:\nN. [criterion] what is weak in the plan -> the exact change\nBe specific to this app; no generic advice. If the plan would already reach {bar}/10 on every criterion, reply exactly: PLAN OK"
+        );
+    }
     format!(
         "The client's brief:\n\"{brief}\"\n\nThe designer's plan, written before any code:\n{plan}\n\nJudge this direction against what a top studio would ship (the built page will be scored 1 to 10 on phone, hierarchy, spacing, typography, color, identity and finish, and must reach {bar} on each):\n1. identity: one memorable idea specific to this subject, or a template in disguise (a centered hero band, identical cards, the same layout in every section, generic stock imagery)?\n2. hierarchy: one clear focal point on the first screen, and an obvious next step?\n3. typography: typefaces chosen for this subject (not Inter, Roboto, Montserrat, Poppins, Playfair Display and the like), a scale with real contrast between levels?\n4. color: a palette taken from the subject's world, readable contrast, an accent used sparingly?\n5. composition: do the sections vary (split, full width, list, offset), with an even rhythm?\n6. interactions: can the visitor do what the brief asks, in the fewest steps, with a few well-chosen ready-made components, and is the motion restrained (one entrance, a few reveals)?\n7. task: when the visitor comes to do something (reserve, order, sign up), does the first screen start that task on phones and desktops, is the form one calm card, and is a list to choose from made of compact rows rather than tall cards?\nYou direct the design of what the client asked for: never add a feature, a page, an access code or password, a rule (opening hours, deadlines, limits) or data the brief does not ask for. Each feature added is work the client did not order and something more that can break.\nReply with at most 5 changes to the plan, the most important first, one per line, each as:\nN. [criterion] what is weak in the plan -> the exact change (a typeface name, hex values, a layout, a concrete idea)\nBe specific to this subject; no generic advice. Small UI icons (phone, clock, menu) come from a polished line icon set (Lucide) on purpose: do not ask to redraw them by hand; the page's identity comes from its illustration, typography, color and composition. {pictures} If the plan would already reach {bar}/10 on every criterion, reply exactly: PLAN OK"
     )
@@ -2014,6 +2115,11 @@ pub fn critique_prompt(
     };
     let brief: String = request.chars().take(1_500).collect();
     let pictures = pictures_note();
+    let criteria = if is_personal_app(request) {
+        APP_CRITERIA
+    } else {
+        SITE_CRITERIA
+    };
     // Les notes de la revue précédente servent de repère : vu dans un essai
     // réel, le même juge a noté 7,9 puis 6,0 une page qui s'était améliorée.
     let anchor = previous
@@ -2027,9 +2133,18 @@ pub fn critique_prompt(
             format!("Your previous review of this page, before the developer's last changes, scored: {line}. Keep the same scale: a score moves when something visible changed, up or down; when a score moves by 2 or more, the change lines must name what you see that justifies it. If the scores barely move from that review, your last changes were too small to matter: lead with the change of structure that would move them.\n\n")
         });
     format!(
-        "The client's brief:\n\"{brief}\"\n\n{images} screenshots follow, full page: the phone view first, then the desktop view, then what the page shows after a tap, on the phone (its windows, its menu, the other screens its buttons open, its other pages): judge each screen the visitor or the owner uses, not only the first.\n\nAlready measured in the page and sent to the developer (do not repeat these):\n{measured}\n\n{anchor}Score the page from 1 to 10 on each criterion, against what a top studio would ship: 5 is a competent template, 8 is what a strong studio would sign, 10 is award-level. Be strict: most generated pages deserve 4 to 6, and an 8 must be earned by something specific you can point to.\n1. phone: nothing cut, covered or cramped; a menu that fits; comfortable tap targets; text sized for a phone.\n2. hierarchy: a clear first screen with one strong focal point; the eye knows where to go next; headings, text and actions clearly ranked.\n3. spacing: one consistent vertical rhythm, aligned edges, generous but even breathing room, no crowded areas and no empty bands.\n4. typography: typefaces chosen for this subject, a clear scale with real contrast between levels, comfortable line length and leading, nothing default-looking.\n5. color: a harmonious palette tied to the subject, readable contrast, the accent used sparingly and on purpose.\n6. identity: does it look made for this subject, with a memorable idea, or like a template (a plain colored hero band, identical cards, icon placeholders for photos, lines under every heading, ALL-CAPS badges, the same layout in every section)?\n7. finish: craft in the details (alignment, consistent radii and shadows, polished icons and illustrations, states of buttons and fields); anything unstyled, broken, empty or unfinished. Any emoji anywhere in the page caps finish at 4: icons must be inline SVG.\n\nThe first line of your reply is exactly in this form:\nSCORES: phone=N hierarchy=N spacing=N typography=N color=N identity=N finish=N\nThen, for every criterion under {bar}, the changes that would raise it, the most important first, at most 8 in all, one per line, each as:\nN. [criterion] what is wrong, as seen in the screenshots -> the exact change to make (CSS properties and values, HTML structure, copy)\nOrder the changes by how much they would raise the scores: first what changes the structure (what the first screen shows, how blocks are grouped and sized, a list as compact rows or as tall cards, the order of sections), then the details (a padding, a color value, a radius). A review of small tweaks leaves a page with a weak structure where it is: when the structure keeps a criterion under {bar}, the first change says so. When the visitor comes to do something (reserve, order, sign up), the task comes first: judge phone and hierarchy on how soon and how easily it is done (does it start on the first screen, does the form read as one calm card rather than the frames of an admin screen, is a list to choose from made of compact rows), and never ask for decoration that pushes it down. Never ask for a feature, a rule (a deadline, a limit) or a text the brief does not give. Be specific to this page; no generic advice. {pictures} Small UI icons come from a polished line icon set (Lucide) on purpose: judge how they are sized, colored and placed, do not ask to redraw them by hand. If every score is {bar} or more, write NO CHANGES NEEDED after the scores line."
+        "The client's brief:\n\"{brief}\"\n\n{images} screenshots follow, full page: the phone view first, then the desktop view, then what the page shows after a tap, on the phone (its windows, its menu, the other screens its buttons open, its other pages): judge each screen the visitor or the owner uses, not only the first.\n\nAlready measured in the page and sent to the developer (do not repeat these):\n{measured}\n\n{anchor}{criteria}\n\nThe first line of your reply is exactly in this form:\nSCORES: phone=N hierarchy=N spacing=N typography=N color=N identity=N finish=N\nThen, for every criterion under {bar}, the changes that would raise it, the most important first, at most 8 in all, one per line, each as:\nN. [criterion] what is wrong, as seen in the screenshots -> the exact change to make (CSS properties and values, HTML structure, copy)\nOrder the changes by how much they would raise the scores: first what changes the structure (what the first screen shows, how blocks are grouped and sized, a list as compact rows or as tall cards, the order of sections), then the details (a padding, a color value, a radius). A review of small tweaks leaves a page with a weak structure where it is: when the structure keeps a criterion under {bar}, the first change says so. When the visitor comes to do something (reserve, order, sign up), the task comes first: judge phone and hierarchy on how soon and how easily it is done (does it start on the first screen, does the form read as one calm card rather than the frames of an admin screen, is a list to choose from made of compact rows), and never ask for decoration that pushes it down. Never ask for a feature, a rule (a deadline, a limit) or a text the brief does not give. Be specific to this page; no generic advice. {pictures} Small UI icons come from a polished line icon set (Lucide) on purpose: judge how they are sized, colored and placed, do not ask to redraw them by hand. If every score is {bar} or more, write NO CHANGES NEEDED after the scores line."
     )
 }
+
+/// Les sept critères du juge pour un site.
+const SITE_CRITERIA: &str = "Score the page from 1 to 10 on each criterion, against what a top studio would ship: 5 is a competent template, 8 is what a strong studio would sign, 10 is award-level. Be strict: most generated pages deserve 4 to 6, and an 8 must be earned by something specific you can point to.\n1. phone: nothing cut, covered or cramped; a menu that fits; comfortable tap targets; text sized for a phone.\n2. hierarchy: a clear first screen with one strong focal point; the eye knows where to go next; headings, text and actions clearly ranked.\n3. spacing: one consistent vertical rhythm, aligned edges, generous but even breathing room, no crowded areas and no empty bands.\n4. typography: typefaces chosen for this subject, a clear scale with real contrast between levels, comfortable line length and leading, nothing default-looking.\n5. color: a harmonious palette tied to the subject, readable contrast, the accent used sparingly and on purpose.\n6. identity: does it look made for this subject, with a memorable idea, or like a template (a plain colored hero band, identical cards, icon placeholders for photos, lines under every heading, ALL-CAPS badges, the same layout in every section)?\n7. finish: craft in the details (alignment, consistent radii and shadows, polished icons and illustrations, states of buttons and fields); anything unstyled, broken, empty or unfinished. Any emoji anywhere in the page caps finish at 4: icons must be inline SVG.";
+
+/// Les sept critères du juge pour une appli perso : une appli de téléphone
+/// de premier plan, pas un site de studio. Vu le 28 octobre 2026 : jugée
+/// comme un site, l'appli de budget était poussée vers une police « à soi »
+/// et un titre d'affiche, qui la faisaient paraître datée.
+const APP_CRITERIA: &str = "This is a personal app, used every day on a phone: judge it against the best phone apps (Revolut, Lydia, Apple's own apps), not against a showcase website. Score it from 1 to 10 on each criterion: 5 is a competent template, 8 is what a strong product team would ship, 10 is the best app of its kind. Be strict: most generated apps deserve 4 to 6, and an 8 must be earned by something specific you can point to.\n1. phone: nothing cut, covered, overlapping or cramped; the tab bar never hides content; comfortable tap targets; text sized for a phone.\n2. hierarchy: the figure that matters first and largest; the daily action one tap away; secondary figures and lists clearly ranked below.\n3. spacing: one consistent rhythm between cards, rows and screens, aligned edges, no crowded area and no empty band.\n4. typography: the phone's own font is right for an app (never ask for a web typeface or a serif); a clear scale: the main figure large and heavy, titles bold, details small and calm, amounts in tabular figures, labels that never break or run into each other.\n5. color: one accent and its gradient used with intent, calm neutral surfaces, money in and out meaningful and readable, a dark mode as good as the light one.\n6. identity: does it feel like a polished app made for this user (their figures, their words, its colors), or like a website or a template (colored cards side by side, centered text blocks, a magazine look, a form like an admin screen)?\n7. finish: craft in the details (alignment, consistent radii and shadows, icons, states of buttons and fields, empty states, the add sheet); anything unstyled, broken, cut, overlapping or unfinished. Any emoji anywhere caps finish at 4. When the app's blocks come from Claw's app kit (hero, tiles, cards with lists of rows, meters, chart, tab bar, sheet), ask for changes of content, of the choice and order of blocks, and of colors (its tokens), not for restyling the kit's blocks.";
 
 /// Notes du juge, lues sur sa ligne `SCORES:` (`typography=7`, `color: 8/10`).
 #[must_use]
@@ -2528,10 +2643,10 @@ pub fn review_feedback(
 #[cfg(test)]
 mod tests {
     use super::{
-        conception_note, critique_changes, design_guide, designer_prompt, has_interface_page,
-        is_interface_file, is_interface_request, page_from_files, page_target, parse_conception,
-        problem_key, read_audit, regression_note, regressions, review_feedback, screenshot_input,
-        Audit,
+        conception_note, critique_changes, critique_prompt, design_guide, designer_prompt,
+        has_interface_page, is_interface_file, is_interface_request, is_personal_app,
+        page_from_files, page_target, parse_conception, plan_critique_prompt, problem_key,
+        read_audit, regression_note, regressions, review_feedback, screenshot_input, Audit,
     };
 
     #[test]
@@ -2581,13 +2696,68 @@ mod tests {
         );
         let dark = designer_prompt("Une appli sombre", true, &[], 8);
         assert!(dark.contains("dark interface") && !dark.contains("Font library"));
-        let note = conception_note("glm", "Direction: calm.", Some(("base.css", 120)));
+        let note = conception_note("glm", "Direction: calm.", Some(("base.css", 120)), false);
         assert!(
             note.contains("by glm")
                 && note.contains("base.css (120 lines")
                 && note.ends_with("Direction: calm.")
         );
-        assert!(conception_note("glm", "x", None).contains("top of your stylesheet"));
+        assert!(conception_note("glm", "x", None, false).contains("top of your stylesheet"));
+        // Une appli perso : les couleurs du concepteur, le kit pour le reste.
+        let app = conception_note("gemini", "Screens: Accueil.", Some(("base.css", 40)), true);
+        assert!(app.contains("kit/app-kit.css, then base.css") && app.contains("no web typeface"));
+    }
+
+    #[test]
+    fn a_personal_app_gets_the_app_method_the_app_designer_and_the_app_judge() {
+        // La demande de la session #35 : une appli perso, pas un site.
+        let budget = "Tous les mois je reçois : + salaire = 1235.15 euro. Je veux un appli web perso utilisable sur téléphone incluant tous les fonctionnalités que j'ai besoin pour m'aider à gérer tout ça, et que ce soit quand même beau.";
+        assert!(is_personal_app(budget));
+        assert!(is_personal_app(
+            "Crée une appli web pour suivre mes séances d'entraînement"
+        ));
+        assert!(!is_personal_app("Crée le site vitrine de ma boulangerie"));
+        assert!(!is_personal_app(
+            "Fais une application web pour mon restaurant"
+        ));
+        assert!(!is_personal_app(
+            "Mon budget pour le site est de 500 euros, crée la page d'accueil"
+        ));
+        let guide = design_guide(budget, None).expect("méthode");
+        assert!(guide.contains("app kit") && guide.contains("names [\"app-kit\", \"pwa\"]"));
+        assert!(guide.contains("phone's own font") && !guide.contains("never Inter"));
+        assert!(!guide.contains("Wireframe tool") && !guide.contains("Ornament tool"));
+        // « continue » après une demande d'appli : toujours une appli.
+        assert!(design_guide("continue", Some(budget))
+            .expect("suite")
+            .contains("app kit"));
+        // Un site garde la méthode d'un studio.
+        let site = design_guide("Crée le site vitrine de ma boulangerie", None).expect("site");
+        assert!(
+            site.contains("never Inter") && !site.contains("This request builds a personal app")
+        );
+        // Le concepteur d'une appli : des jetons de couleur et le plan des écrans.
+        let designer = designer_prompt(budget, false, &["Inter"], 8);
+        assert!(
+            designer.contains("--hero-1")
+                && designer.contains("No font")
+                && !designer.contains("Font library")
+        );
+        let site_designer = designer_prompt(
+            "Crée le site vitrine de ma boulangerie",
+            false,
+            &["Inter"],
+            8,
+        );
+        assert!(site_designer.contains("Font library"));
+        // Le juge et la revue du plan d'une appli : une appli de téléphone.
+        let audit = Audit::default();
+        assert!(critique_prompt(budget, 3, &audit, 8, None).contains("best phone apps"));
+        assert!(
+            !critique_prompt("Crée le site vitrine de ma boulangerie", 3, &audit, 8, None)
+                .contains("best phone apps")
+        );
+        assert!(plan_critique_prompt(budget, "Screens: Accueil", 8).contains("app kit's blocks"));
     }
 
     #[test]

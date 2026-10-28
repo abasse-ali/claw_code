@@ -25,7 +25,9 @@
   /* 88 % : le texte discret garde 4,5:1 sur la carte comme sur le fond. */
   --faint: color-mix(in srgb, var(--muted) 88%, var(--surface));
   --accent-soft: color-mix(in srgb, var(--accent) 13%, var(--surface));
-  --accent-ink: color-mix(in srgb, var(--accent) 82%, var(--ink));
+  /* L'accent en texte, mêlé à l'encre : plus foncé sur un fond clair, plus
+     clair sur un fond sombre, que le sombre vienne du téléphone ou de l'appli. */
+  --accent-ink: color-mix(in oklab, var(--accent) 65%, var(--ink));
   --income-soft: color-mix(in srgb, var(--income) 13%, var(--surface));
   --error-soft: color-mix(in srgb, var(--error) 12%, var(--surface));
   --warn-soft: color-mix(in srgb, var(--warn) 14%, var(--surface));
@@ -46,15 +48,7 @@
     --hero-3: oklch(from var(--accent) calc(l + 0.12) calc(c * 0.9) calc(h + 62));
     --on-accent: oklch(from var(--accent) clamp(0.16, (0.66 - l) * 1000, 1) 0 0);
     --on-hero: oklch(from var(--hero-1) clamp(0.16, (0.7 - l) * 1000, 1) 0 0);
-    /* L'accent en texte : assez foncé sur le clair, assez clair sur le sombre. */
-    --accent-ink: oklch(from var(--accent) min(l, 0.5) c h);
   }
-}
-@supports (color: oklch(from red l c h)) {
-  @media (prefers-color-scheme: dark) {
-    :where(:root:not([data-theme="light"])) { --accent-ink: oklch(from var(--accent) max(l, 0.8) calc(c * 0.85) h); }
-  }
-  :where(:root[data-theme="dark"]) { --accent-ink: oklch(from var(--accent) max(l, 0.8) calc(c * 0.85) h); }
 }
 
 @media (prefers-color-scheme: dark) {

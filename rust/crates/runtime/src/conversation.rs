@@ -3702,6 +3702,7 @@ where
             &plan,
             file.as_ref()
                 .map(|(name, text)| (*name, text.lines().count())),
+            crate::web_design::is_personal_app(&brief),
         );
         Some((note, file.map(|(name, text)| (cwd.join(name), text))))
     }
@@ -8817,11 +8818,13 @@ mod tests {
                 && base.contains("--accent: #3B5BDB")
         );
         // Le plan part avec la demande : l'agent ne l'écrit pas, personne ne le
-        // relit, et Claw ne le réclame pas après la première écriture.
+        // relit, et Claw ne le réclame pas après la première écriture. Une
+        // appli perso : ses couleurs viennent du concepteur, le reste du kit.
         assert!(
             seen.requests[0].contains("Design conception by concepteur")
                 && seen.requests[0].contains("deep gradient balance card")
-                && seen.requests[0].contains("Link base.css in every page"),
+                && seen.requests[0].contains("link kit/app-kit.css, then base.css")
+                && seen.requests[0].contains("Build the app on the app kit"),
             "{}",
             seen.requests[0]
         );

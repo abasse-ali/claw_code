@@ -17,11 +17,19 @@
       { id: "alimentaire", label: "Alimentaire", amount: 100, category: "Courses" },
     ],
   };
+  const thisMonth = () => window.entries.today().slice(0, 7);
+  // Le plan vaut à partir du mois où l'appli a été ouverte la première fois :
+  // les mois d'avant restent vides, jamais inventés.
   const load = () => {
-    try { return JSON.parse(localStorage.getItem(PLAN_KEY)) || structuredClone(startPlan); } catch (_) { return structuredClone(startPlan); }
+    try {
+      const stored = JSON.parse(localStorage.getItem(PLAN_KEY));
+      if (stored && stored.incomes) return stored;
+    } catch (_) { /* plan illisible : celui de départ */ }
+    return { ...structuredClone(startPlan), start: thisMonth() };
   };
   let plan = load();
   const save = () => { try { localStorage.setItem(PLAN_KEY, JSON.stringify(plan)); } catch (_) { /* rien à faire */ } };
+  save();
   const money = (value) => window.entries.format(value);
   // « 103 à 206 € » : les centimes seulement quand il y en a.
   const short = (value) => (Number.isInteger(value) ? new Intl.NumberFormat("fr", { style: "currency", currency: "EUR", maximumFractionDigits: 0 }).format(value) : money(value));
@@ -81,6 +89,7 @@
       if (kind === "incomes" && item.min > item.max) item.max = item.min;
       save();
       render();
+      drawBudget();
       window.toast(`${item.label} : ${money(item[field])}`);
     });
     return row;
@@ -129,8 +138,39 @@
     if (charges) charges.replaceChildren(...plan.charges.map((item) => settingRow(item, "charges", "amount")));
   };
 
+  // Le graphique du bilan : chaque mois depuis le premier, les rentrées sûres
+  // et les charges du plan, plus les opérations du mois.
+  const chart = document.querySelector('[data-chart="budget"]');
+  const drawBudget = () => {
+    if (!chart) return;
+    const months = [];
+    for (let back = 5; back >= 0; back -= 1) {
+      const [year, month] = window.app.month.split("-").map(Number);
+      const date = new Date(year, month - 1 - back, 1);
+      months.push(`${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`);
+    }
+    const sure = plan.incomes.filter((item) => item.sure).reduce((sum, item) => sum + item.min, 0);
+    const fixed = plan.charges.reduce((sum, item) => sum + item.amount, 0);
+    const label = new Intl.DateTimeFormat("fr", { month: "short" });
+    const sums = months.map((month) => {
+      const own = window.entries.totals(window.entries.month(month));
+      const planned = month >= plan.start;
+      return { income: (planned ? sure : 0) + own.income, spending: (planned ? fixed : 0) + own.spending };
+    });
+    window.drawChart(chart, {
+      labels: months.map((month) => label.format(new Date(`${month}-01T12:00:00`)).replace(".", "")),
+      series: [
+        { name: "Rentrées", tone: "in", values: sums.map((sum) => sum.income) },
+        { name: "Dépenses", tone: "out", values: sums.map((sum) => sum.spending) },
+      ],
+    });
+  };
+  document.addEventListener("entries:change", drawBudget);
+  document.addEventListener("monthchange", drawBudget);
+  document.addEventListener("screenchange", () => requestAnimationFrame(drawBudget));
   document.addEventListener("entries:change", render);
   document.addEventListener("monthchange", render);
   renderSettings();
   render();
+  drawBudget();
 })();
