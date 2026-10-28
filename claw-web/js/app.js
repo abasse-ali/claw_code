@@ -244,14 +244,88 @@ function saveSettings() {
 
 // --- Petits outils -------------------------------------------------------------------------
 
+/** « Réduire les animations » demandé par le téléphone : les sorties animées n'attendent pas. */
+const calm = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/** Rejoue l'animation d'arrivée d'un élément déjà affiché (un message remplacé par un autre). */
+function replay(element) {
+  element.style.animation = "none";
+  void element.offsetWidth;
+  element.style.animation = "";
+}
+
 function toast(message, kind = "info") {
   const box = $("#toast");
+  const shown = !box.hidden;
   box.textContent = message;
   box.className = `toast ${kind}`;
   box.hidden = false;
+  if (shown) replay(box);
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => { box.hidden = true; }, kind === "error" ? 7000 : 3500);
+  clearTimeout(toast.leave);
+  toast.timer = setTimeout(hideToast, kind === "error" ? 7000 : 3500);
 }
+
+/** Le message s'efface en glissant vers le bas (un toucher le chasse aussi). */
+function hideToast() {
+  const box = $("#toast");
+  clearTimeout(toast.timer);
+  if (box.hidden) return;
+  if (calm()) {
+    box.hidden = true;
+    return;
+  }
+  box.classList.add("leaving");
+  toast.leave = setTimeout(() => {
+    box.hidden = true;
+    box.classList.remove("leaving");
+  }, 220);
+}
+
+/** Ferme la fenêtre ouverte : elle redescend (un fondu sur ordinateur), puis se vide. Une autre
+ * fenêtre ouverte entre-temps (un choix qui en ouvre une autre) reste ouverte. */
+function hideSheet() {
+  const sheet = $("#sheet");
+  const panel = sheet.querySelector(".sheet-panel");
+  if (sheet.hidden || !panel || calm()) {
+    sheet.hidden = true;
+    sheet.innerHTML = "";
+    return;
+  }
+  sheet.classList.add("closing");
+  setTimeout(() => {
+    if (sheet.querySelector(".sheet-panel") !== panel) return;
+    sheet.classList.remove("closing");
+    sheet.hidden = true;
+    sheet.innerHTML = "";
+  }, 220);
+}
+
+/** Fait entrer l'un après l'autre les éléments d'une liste qui vient d'arriver. Une seule fois :
+ * la même liste redessinée ensuite (un filtre, une case cochée) ne rejoue rien. */
+function animateIn(list) {
+  if (!list || calm()) return;
+  list.classList.remove("stagger");
+  void list.offsetWidth;
+  list.classList.add("stagger");
+  clearTimeout(list.staggerTimer);
+  list.staggerTimer = setTimeout(() => list.classList.remove("stagger"), 900);
+}
+
+/** Les animations sans fin (roues d'attente, contour d'un passage en cours, point d'une session
+ * au travail) calées sur l'horloge : une vue redessinée (toutes les 4 s pendant un passage) les
+ * reprend où elles en étaient, sans saut. */
+function keepInStep(root) {
+  for (const element of root.querySelectorAll(".spinner, .run-card.live, .dot.running, .dot.queued, .dock-todos li.doing .box")) {
+    const period = Number.parseFloat(getComputedStyle(element).animationDuration) * 1000;
+    if (period > 0) element.style.animationDelay = `-${Date.now() % period}ms`;
+  }
+}
+
+/** Lignes fantômes le temps qu'une liste de sessions arrive (le texte reste pour les lecteurs
+ * d'écran). */
+const sessionSkeletons = (count) => '<li class="visually-hidden">Chargement…</li>'
+  + '<li class="skeleton" aria-hidden="true"><span class="sk-dot"></span><span class="sk-lines"><span></span><span></span></span></li>'.repeat(count);
 
 function failure(error) {
   console.error(error);
@@ -338,8 +412,7 @@ function openImage(path) {
     </div>`;
   sheet.onclick = (event) => {
     if (backdropTap(event, sheet) || event.target.closest("[data-close]")) {
-      sheet.hidden = true;
-      sheet.innerHTML = "";
+      hideSheet();
     }
   };
   sheet.hidden = false;
@@ -360,8 +433,7 @@ function openPhoto({ photo, credit, source }) {
     </div>`;
   sheet.onclick = (event) => {
     if (backdropTap(event, sheet) || event.target.closest("[data-close]")) {
-      sheet.hidden = true;
-      sheet.innerHTML = "";
+      hideSheet();
     }
   };
   sheet.hidden = false;
@@ -462,8 +534,7 @@ function openCloudRunner() {
     </div>`;
   sheet.onclick = (event) => {
     if (backdropTap(event, sheet) || event.target.closest("[data-close]")) {
-      sheet.hidden = true;
-      sheet.innerHTML = "";
+      hideSheet();
     }
   };
   let script = "";
@@ -604,8 +675,7 @@ async function openShot({ shot, thumb, label, problems, count, french }) {
     </div>`;
   sheet.onclick = (event) => {
     if (backdropTap(event, sheet) || event.target.closest("[data-close]")) {
-      sheet.hidden = true;
-      sheet.innerHTML = "";
+      hideSheet();
     }
   };
   sheet.hidden = false;
@@ -984,10 +1054,8 @@ function openPicker({ title, items, current, placeholder, onPick, onRemove, onAc
       </button>${removable ? `<button type="button" class="icon-button" data-remove="${escapeHtml(item.value)}" aria-label="Supprimer ${escapeHtml(item.label)}">${ICON.trash}</button>` : ""}</li>`;
   };
   draw();
-  const close = () => {
-    sheet.hidden = true;
-    sheet.innerHTML = "";
-  };
+  animateIn(list);
+  const close = hideSheet;
   sheet.onclick = (event) => {
     if (backdropTap(event, sheet) || event.target.closest("[data-close]")) close();
     if (event.target.closest(".sheet-action-button")) {
@@ -1104,10 +1172,7 @@ async function openDeleteRepo(repo) {
     </div>`;
   const form = sheet.querySelector(".delete-repo");
   const submit = form.querySelector("button[type=submit]");
-  const close = () => {
-    sheet.hidden = true;
-    sheet.innerHTML = "";
-  };
+  const close = hideSheet;
   form.elements.confirm.addEventListener("input", () => {
     submit.disabled = form.elements.confirm.value.trim() !== fullName;
   });
@@ -1194,10 +1259,7 @@ function openCreateRepo(prefill = "") {
   fields.repo_name.addEventListener("input", () => {
     slug.textContent = fields.repo_name.value.trim() || "mon-projet";
   });
-  const close = () => {
-    sheet.hidden = true;
-    sheet.innerHTML = "";
-  };
+  const close = hideSheet;
   sheet.onclick = (event) => {
     if (backdropTap(event, sheet) || event.target.closest("[data-close]")) close();
   };
@@ -1283,10 +1345,7 @@ async function openBranches({ repo, current, title, onPick }) {
       <div class="branch-body"></div>
     </div>`;
   const body = sheet.querySelector(".branch-body");
-  const close = () => {
-    sheet.hidden = true;
-    sheet.innerHTML = "";
-  };
+  const close = hideSheet;
   const showList = () => {
     body.innerHTML = `
       <button type="button" class="sheet-item pinned" data-new><span class="sheet-label">${ICON.plus}<span>Nouvelle branche</span></span>
@@ -1446,6 +1505,7 @@ async function openBranches({ repo, current, title, onPick }) {
     }
   };
   showList();
+  animateIn(body.querySelector(".sheet-list"));
   sheet.hidden = false;
 }
 
@@ -1535,7 +1595,7 @@ async function searchCatalogue(provider) {
     data = null;
   }
   if (!data || data.at * 1000 < started - 120000) {
-    throw new Error(`La recherche a échoué dans le moteur (${run.conclusion}) : le workflow claw-web.yml du moteur est-il à jour ?`);
+    throw new Error(`La recherche a échoué dans le moteur (${run.conclusion}) : le fichier claw-web.yml du moteur est-il à jour ?`);
   }
   keepCatalogue(provider, data);
   return data;
@@ -1907,10 +1967,7 @@ async function openQuota() {
   const sheet = $("#sheet");
   // Clés des fournisseurs posées dans le moteur (noms seulement, demandés une fois).
   const secrets = await engineProviderSecrets();
-  const close = () => {
-    sheet.hidden = true;
-    sheet.innerHTML = "";
-  };
+  const close = hideSheet;
   const draw = () => {
     const free = state.quota && state.quota.free;
     const balance = state.quota && state.quota.balance;
@@ -2228,7 +2285,7 @@ function sessionItem(issue, selectable = false) {
       <span class="dot ${status ? status.key : "idle"}" aria-hidden="true"></span>
       <span class="session-text">
         <strong><span class="num">#${numberOf(issue)}</span> ${escapeHtml(issue.title)}</strong>
-        <small>${escapeHtml(settings.repo || "")} · ${status ? escapeHtml(status.label) : "en attente"} · ${since(issue.updated_at)}</small>
+        <small>${escapeHtml(settings.repo || "")} · <span class="state-label ${status ? status.key : "idle"}">${status ? escapeHtml(status.label) : "en attente"}</span> · ${since(issue.updated_at)}</small>
       </span>`;
   if (selectable) {
     return `
@@ -2246,6 +2303,7 @@ function drawDrawerList() {
   const list = $("#drawer .sessions");
   list.innerHTML = state.drawerSessions.map((issue) => sessionItem(issue, state.selecting)).join("")
     || '<li class="empty">Aucune session pour l\'instant.</li>';
+  keepInStep(list);
   const toggle = $("#drawer .select-toggle");
   if (toggle) {
     toggle.textContent = state.selecting ? "Annuler" : "Choisir";
@@ -2262,13 +2320,16 @@ function drawDrawerList() {
 
 async function renderDrawer() {
   const list = $("#drawer .sessions");
-  list.innerHTML = '<li class="empty">Chargement…</li>';
+  // Liste déjà lue : elle reste le temps de la relire, sans lignes fantômes.
+  if (!state.drawerSessions.length) list.innerHTML = sessionSkeletons(5);
   try {
     const [sessions] = await Promise.all([state.github.sessions(state.settings.engine), refreshRuns()]);
     await numberOldSessions(sessions);
+    const first = !state.drawerSessions.length;
     state.drawerSessions = sessions;
     state.selected = new Set([...state.selected].filter((number) => sessions.some((issue) => issue.number === number)));
     drawDrawerList();
+    if (first) animateIn(list);
   } catch (error) {
     list.innerHTML = '<li class="empty">Sessions indisponibles.</li>';
     failure(error);
@@ -2307,6 +2368,9 @@ function setupDrawerSelection() {
 }
 
 function openDrawer() {
+  clearTimeout(state.drawerTimer);
+  $("#drawer").classList.remove("closing");
+  $("#app").classList.remove("drawer-closing");
   $("#drawer").hidden = false;
   $("#app").classList.add("drawer-open");
   showDrawerPane(state.drawerPane);
@@ -2330,11 +2394,25 @@ function showDrawerPane(pane) {
   }
 }
 
+/** Le tiroir repart vers la gauche et le voile s'efface, puis il se cache. */
 function closeDrawer() {
-  $("#drawer").hidden = true;
-  $("#app").classList.remove("drawer-open");
+  const drawer = $("#drawer");
+  const app = $("#app");
   state.selecting = false;
   state.selected.clear();
+  clearTimeout(state.drawerTimer);
+  const done = () => {
+    drawer.hidden = true;
+    drawer.classList.remove("closing");
+    app.classList.remove("drawer-open", "drawer-closing");
+  };
+  if (drawer.hidden || calm()) {
+    done();
+    return;
+  }
+  drawer.classList.add("closing");
+  app.classList.add("drawer-closing");
+  state.drawerTimer = setTimeout(done, 240);
 }
 
 /** Session au travail (passage en file ou en cours) : elle s'arrête avant d'être supprimée. */
@@ -2350,17 +2428,14 @@ async function openDeleteSessions(issues) {
   const running = issues.filter(sessionRunning);
   const chosen = issues.filter((issue) => !running.includes(issue));
   const many = chosen.length > 1;
-  const close = () => {
-    sheet.hidden = true;
-    sheet.innerHTML = "";
-  };
+  const close = hideSheet;
   sheet.innerHTML = `
     <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="Supprimer">
       <div class="sheet-head">
         <strong>${many ? `Supprimer ${chosen.length} sessions` : "Supprimer la session"}</strong>
         <button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button>
       </div>
-      <p class="empty">Lecture des pull requests…</p>
+      <p class="empty loading">Lecture des pull requests…</p>
     </div>`;
   sheet.onclick = (event) => {
     if (backdropTap(event, sheet) || event.target.closest("[data-close]")) close();
@@ -2487,9 +2562,10 @@ async function showHome() {
   const name = state.user ? state.user.name || state.user.login : "";
   view.innerHTML = `
     <section class="home">
-      <h1 class="greeting"><span class="logo" aria-hidden="true"></span>Quoi de prévu${name ? `, ${escapeHtml(name.split(" ")[0])}` : ""} ?</h1>
+      <h1 class="greeting"><span class="logo" aria-hidden="true"></span><span>Quoi de prévu${name ? `, <span class="name">${escapeHtml(name.split(" ")[0])}</span>` : ""} ?</span></h1>
+      <p class="home-lead">Décrivez une tâche en bas de l'écran : Claw s'en charge dans le dépôt choisi, sur une branche à part.</p>
       <h2 class="section-title">Sessions récentes</h2>
-      <ul class="sessions recent"><li class="empty">Chargement…</li></ul>
+      <ul class="sessions recent">${sessionSkeletons(3)}</ul>
     </section>`;
   if (!state.settings.repo) {
     loadRepos().then((repos) => {
@@ -2509,7 +2585,9 @@ async function showHome() {
     if (recent) {
       // Pas `map(sessionItem)` : l'indice passé en second deviendrait « à cocher ».
       recent.innerHTML = sessions.filter((issue) => issue.state === "open").slice(0, 8).map((issue) => sessionItem(issue)).join("")
-        || '<li class="empty">Décrivez une tâche ci-dessous : Claw la fera dans le dépôt choisi et proposera une pull request.</li>';
+        || '<li class="empty">Aucune session ouverte pour l\'instant : votre première tâche apparaîtra ici.</li>';
+      keepInStep(recent);
+      animateIn(recent);
     }
   } catch (error) {
     failure(error);
@@ -2773,7 +2851,7 @@ function answerFoot(foot) {
     if (!item) continue;
     let match = item.match(/^Pull request : (https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+))\s*$/);
     if (match) {
-      chips.push(`<a class="foot-chip" href="${escapeHtml(match[1])}" target="_blank" rel="noopener noreferrer">${ICON.pull}<span>PR #${match[2]}</span></a>`);
+      chips.push(`<a class="foot-chip" href="${escapeHtml(match[1])}" target="_blank" rel="noopener noreferrer">${ICON.pull}<span>Pull request n° ${match[2]}</span></a>`);
       continue;
     }
     match = item.match(/^Branche `[^`]+` : (\d+) fichiers? \S+, \+([\d\s ]+) lignes?, [−-]([\d\s ]+) lignes?$/);
@@ -2784,7 +2862,7 @@ function answerFoot(foot) {
     }
     match = item.match(/^\[Détail du job\]\((https:\/\/github\.com\/\S+)\)$/);
     if (match) {
-      chips.push(`<a class="foot-chip" href="${escapeHtml(match[1])}" target="_blank" rel="noopener noreferrer">${ICON.external}<span>Job</span></a>`);
+      chips.push(`<a class="foot-chip" href="${escapeHtml(match[1])}" target="_blank" rel="noopener noreferrer">${ICON.external}<span>Exécution</span></a>`);
       continue;
     }
     lines.push(item);
@@ -2922,6 +3000,7 @@ function renderDock() {
   }
   dock.innerHTML = parts.join("");
   dock.hidden = !parts.length;
+  keepInStep(dock);
   dock.querySelector(".dock-tasks")?.addEventListener("toggle", (event) => {
     try {
       localStorage.setItem(DOCK_TASKS_KEY, event.currentTarget.open ? "open" : "closed");
@@ -3055,9 +3134,10 @@ function messageHtml(comment, isLastProgress, answer = "") {
       if (!state.revealed.has(key) || !isLastProgress) state.revealed.set(key, events.length);
       const shown = Math.min(state.revealed.get(key), events.length);
       const clocked = ticking ? liveClock(title, comment) : title;
-      return `<div class="run-card ${kind}">${transcriptHtml(events, { key, live: isLastProgress, answer, title: clocked, kind, shown })}</div>`;
+      return `<div class="run-card ${kind}${ticking ? " live" : ""}">${transcriptHtml(events, { key, live: isLastProgress, answer, title: clocked, kind, shown })}</div>`;
     }
-    const card = renderMarkdown(withoutCallMarkup(body));
+    // « Détail du job », écrit par le moteur : en français dans l'appli.
+    const card = renderMarkdown(withoutCallMarkup(body).replace(/\[Détail du job\]\(/g, "[Détail de l'exécution]("));
     return `<div class="progress-card ${kind}${isLastProgress ? "" : " old"}">${ticking ? liveClock(card, comment) : card}</div>`;
   }
   if (body.includes(ANSWER)) return answerHtml(body, comment.id);
@@ -3170,6 +3250,9 @@ function renderSessionView() {
   // Questions de la dernière réponse, tant que rien ne l'a suivie : dans le bloc au-dessus de la
   // zone de saisie, en cartes à feuilleter.
   session.openQuestions = answered && !active ? lastQuestions(comments) : null;
+  // Blocs de la conversation déjà à l'écran : ceux qui arrivent ensuite (votre message, la
+  // réponse de Claw) entrent en glissant ; la première vue de la session, elle, arrive d'un bloc.
+  const before = view.dataset.session === String(session.number) ? view.querySelectorAll(".messages > *").length : 0;
   view.innerHTML = `
     <section class="session">
       <header class="session-head">
@@ -3177,7 +3260,7 @@ function renderSessionView() {
         <div class="session-meta">
           <a class="meta-link" href="https://github.com/${escapeHtml(settings.repo || "")}" target="_blank" rel="noopener noreferrer">${ICON.repo}<span>${escapeHtml(settings.repo || "?")}</span></a>
           <span class="meta-link">${ICON.branch}<span>${escapeHtml(branchOf(session.issue))}</span></span>
-          ${pull ? `<a class="meta-link pull ${pullBadge}" href="${escapeHtml(pull.html_url)}" target="_blank" rel="noopener noreferrer">${ICON.pull}<span>PR #${pull.number} ${pullBadge}</span></a>` : ""}
+          ${pull ? `<a class="meta-link pull ${pullBadge}" href="${escapeHtml(pull.html_url)}" target="_blank" rel="noopener noreferrer">${ICON.pull}<span>Pull request n° ${pull.number} ${pullBadge}</span></a>` : ""}
           ${pull && pull.state === "open" && !pull.merged_at && !active ? `<button class="meta-link action" data-action="merge">${ICON.merge}<span>Fusionner</span></button>` : ""}
           ${session.site ? `<a class="meta-link site" href="${escapeHtml(session.site)}" target="_blank" rel="noopener noreferrer">${ICON.globe}<span>Site en ligne</span></a>` : ""}
         </div>
@@ -3203,7 +3286,7 @@ function renderSessionView() {
           <details class="more-menu">
             <summary class="small-link" aria-label="Autres actions"><span class="dots" aria-hidden="true">•••</span></summary>
             <div class="menu-list">
-              ${run ? `<a href="${escapeHtml(run.html_url)}" target="_blank" rel="noopener noreferrer" class="menu-item">${ICON.external}<span>Job sur GitHub</span></a>` : ""}
+              ${run ? `<a href="${escapeHtml(run.html_url)}" target="_blank" rel="noopener noreferrer" class="menu-item">${ICON.external}<span>Exécution sur GitHub</span></a>` : ""}
               <a href="${escapeHtml(session.issue.html_url)}" target="_blank" rel="noopener noreferrer" class="menu-item">${ICON.external}<span>Session sur GitHub</span></a>
               ${session.issue.state === "open" ? `<button class="menu-item" data-action="archive">${ICON.archive}<span>Archiver</span></button>` : ""}
               ${!active ? `<button class="menu-item danger-item" data-action="delete">${ICON.trash}<span>Supprimer</span></button>` : ""}
@@ -3215,6 +3298,19 @@ function renderSessionView() {
   for (const details of view.querySelectorAll("details[data-key]")) {
     if (opened.has(details.dataset.key)) details.open = opened.get(details.dataset.key);
   }
+  view.dataset.session = String(session.number);
+  // La relecture qui suit un envoi redessine la vue en pleine entrée : l'animation des blocs
+  // arrivés reprend où elle en était, au lieu de s'arrêter net.
+  const blocks = [...view.querySelectorAll(".messages > *")];
+  if (before && blocks.length > before) session.arrivals = { from: before, at: Date.now() };
+  const arrivals = session.arrivals;
+  if (arrivals && Date.now() - arrivals.at < 700) {
+    for (const block of blocks.slice(arrivals.from)) {
+      block.classList.add("fresh");
+      block.style.animationDelay = `-${Date.now() - arrivals.at}ms`;
+    }
+  }
+  keepInStep(view);
   // Menu « ••• » : se ferme en touchant ailleurs dans la session, ou après un choix.
   const menu = view.querySelector(".more-menu");
   menu?.addEventListener("toggle", () => {
@@ -3347,7 +3443,7 @@ function renderSessionView() {
 async function showSession(number) {
   const view = $("#view");
   if (!state.session || state.session.number !== number) {
-    view.innerHTML = '<section class="session"><p class="empty">Chargement de la session…</p></section>';
+    view.innerHTML = '<section class="session"><p class="empty loading">Chargement de la session…</p></section>';
     state.session = { number, issue: null, comments: [], settings: {}, pull: null, step: "", signature: "", logs: new Map() };
   } else if (state.session.issue) {
     // Déjà connue (session à peine créée, retour sur la page) : montrée avant la relecture.
@@ -3377,7 +3473,7 @@ async function failureOf(engine, run) {
         + "(quota du mois épuisé, ou facturation bloquée). Choisissez « Ma machine » dans Réglages, Sessions, puis relancez.";
   }
   const step = steps.find((each) => each.conclusion === "failure");
-  return step ? `étape « ${step.name} » en échec (détail dans le job sur GitHub, menu •••).` : "";
+  return step ? `étape « ${step.name} » en échec (détail dans l'exécution sur GitHub, menu •••).` : "";
 }
 
 /** Relit la session (messages, passage, pull request) et ne redessine que si elle a changé. */
@@ -3605,7 +3701,7 @@ async function ensureExplorer() {
 
 async function renderExplorer() {
   const pane = $("#drawer .explorer");
-  pane.innerHTML = '<p class="empty">Lecture…</p>';
+  pane.innerHTML = '<p class="empty loading">Lecture…</p>';
   try {
     await ensureExplorer();
   } catch (error) {
@@ -3638,7 +3734,7 @@ async function drawExplorer() {
     ...parts.map((part, index) => (index === parts.length - 1 ? `<span>${escapeHtml(part)}</span>`
       : `<button type="button" data-path="${escapeHtml(parts.slice(0, index + 1).join("/"))}">${escapeHtml(part)}</button>`)),
   ].join('<span class="sep">/</span>')}</p>`;
-  pane.innerHTML = `${head}${crumbs}<p class="empty">Lecture…</p>`;
+  pane.innerHTML = `${head}${crumbs}<p class="empty loading">Lecture…</p>`;
   let body;
   try {
     const items = await state.github.contents(explorer.repo, explorer.path, explorer.ref);
@@ -3653,6 +3749,7 @@ async function drawExplorer() {
   }
   if (state.explorer !== explorer || `${explorer.repo}@${explorer.ref}:${explorer.path}` !== where) return;
   pane.innerHTML = `${head}${crumbs}${body}`;
+  animateIn(pane.querySelector(".file-list"));
 }
 
 function onExplorerClick(event) {
@@ -3711,7 +3808,7 @@ async function showFiles({ repo, ref, path, number }) {
     <section class="files">
       ${back}
       <h1>Fichiers</h1>
-      <p class="empty">Lecture…</p>
+      <p class="empty loading">Lecture…</p>
     </section>`;
   const here = location.hash;
   try {
@@ -3753,7 +3850,11 @@ async function showFiles({ repo, ref, path, number }) {
   } catch (error) {
     if (error instanceof GitHubError && error.status === 404) {
       const section = view.querySelector(".files");
-      if (section) section.querySelector(".empty").textContent = "Introuvable sur cette branche.";
+      const empty = section && section.querySelector(".empty");
+      if (empty) {
+        empty.classList.remove("loading");
+        empty.textContent = "Introuvable sur cette branche.";
+      }
       return;
     }
     failure(error);
@@ -3801,15 +3902,12 @@ async function openPublish(session) {
   const base = session.settings.base || "main";
   const branch = branchOf(session.issue);
   const pull = session.pull;
-  const close = () => {
-    sheet.hidden = true;
-    sheet.innerHTML = "";
-  };
+  const close = hideSheet;
   sheet.innerHTML = `
     <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="Mettre en ligne">
       <div class="sheet-head"><strong>Mettre en ligne (GitHub Pages)</strong>
         <button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button></div>
-      <p class="empty">Lecture du dépôt…</p>
+      <p class="empty loading">Lecture du dépôt…</p>
     </div>`;
   sheet.onclick = (event) => {
     if (backdropTap(event, sheet) || event.target.closest("[data-close]")) close();
@@ -3897,7 +3995,7 @@ async function showChanges(number) {
   view.innerHTML = `
     <section class="changes">
       ${sessionTop(number, "modifications")}
-      <p class="empty">Lecture des différences…</p>
+      <p class="empty loading">Lecture des différences…</p>
     </section>`;
   try {
     const issue = await state.github.issue(state.settings.engine, number);
@@ -3963,9 +4061,9 @@ async function engineChecks() {
   }
   try {
     await state.github.workflow(engine);
-    add(true, "Workflow claw-web.yml présent");
+    add(true, "Fichier claw-web.yml présent dans le moteur");
   } catch {
-    add(false, "Workflow claw-web.yml absent du moteur");
+    add(false, "Fichier claw-web.yml absent du moteur");
   }
   for (const name of ["OPENROUTER_API_KEY", "CLAW_REPO_TOKEN"]) {
     try {
@@ -4119,7 +4217,7 @@ function showSettings(first = false, justConnected = false) {
       <div class="group">
         <details class="disclosure engine-state">
           <summary class="row"><span class="row-icon state"></span>${text("Vérification…", "")}${ICON.chevron}</summary>
-          <ul class="checks"><li>Vérification…</li></ul>
+          <ul class="checks"><li class="loading">Vérification…</li></ul>
         </details>
         <details class="disclosure"${justConnected ? " open" : ""}>
           <summary class="row"><span class="row-icon">${ICON.key}</span>${text("Clés des modèles", ["OpenRouter", ...KEYED_PROVIDERS.map((provider) => provider.label)].join(", "))}${ICON.chevron}</summary>
@@ -4649,6 +4747,7 @@ const pages = extras({
   icon: ICON,
   toast,
   failure,
+  animateIn,
   twoTaps,
   sendToSession,
   github: () => state.github,
@@ -4665,6 +4764,11 @@ function route() {
   if (document.body.classList.contains("locked")) return;
   clearTimeout(state.pollTimer);
   closeDrawer();
+  // Chaque page arrive d'un léger glissé ; la même page redessinée en direct ne bouge pas.
+  const view = $("#view");
+  view.classList.remove("view-enter");
+  void view.offsetWidth;
+  view.classList.add("view-enter");
   const hash = location.hash || "#/";
   const onSettings = hash.startsWith("#/reglages");
   $("#settings-button").classList.toggle("active", onSettings);
@@ -4722,7 +4826,7 @@ function applyTheme() {
   if (theme) document.documentElement.dataset.theme = theme;
   else delete document.documentElement.dataset.theme;
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() || "#1b1a18";
+  if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() || "#0c0b11";
 }
 
 /** La zone de saisie est fixée en bas : le contenu garde en dessous la place qu'elle prend
@@ -4824,9 +4928,43 @@ function watchScrollLock() {
   update();
 }
 
+/** La barre du haut prend un filet et une ombre dès que la page défile sous elle. */
+function watchTopbar() {
+  const bar = document.querySelector(".topbar");
+  let queued = false;
+  const update = () => {
+    queued = false;
+    bar.classList.toggle("scrolled", window.scrollY > 4);
+  };
+  window.addEventListener("scroll", () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(update);
+  }, { passive: true });
+  update();
+}
+
+/** Petits mouvements de toute l'appli : un bloc ouvert d'un toucher glisse en place, une
+ * fenêtre qui en remplace une autre en train de se fermer s'ouvre normalement, un toucher
+ * chasse le message du bas. */
+function watchMotion() {
+  document.addEventListener("click", (event) => {
+    const summary = event.target.closest("summary");
+    const details = summary && summary.parentElement;
+    if (!details || details.tagName !== "DETAILS" || details.open || summary !== details.querySelector(":scope > summary")) return;
+    details.classList.add("opening");
+    setTimeout(() => details.classList.remove("opening"), 450);
+  });
+  const sheet = $("#sheet");
+  new MutationObserver(() => sheet.classList.remove("closing")).observe(sheet, { childList: true });
+  $("#toast").addEventListener("click", hideToast);
+}
+
 async function boot() {
   applyTheme();
   watchScrollLock();
+  watchTopbar();
+  watchMotion();
   const moved = MOVED_ENGINES[state.settings.engine];
   if (moved) {
     state.settings.engine = moved;

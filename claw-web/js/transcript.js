@@ -84,7 +84,7 @@ function describe(name, input) {
     case "move_file": return ["edit", "Déplacement", `${value.from || ""} → ${value.to || ""}`];
     case "delete_file": return ["edit", "Suppression", value.path || ""];
     case "read_many_files": return ["file", "Lecture", (value.paths || []).join(", ")];
-    case "Wireframe": return ["list", "Wireframe", value.title || ""];
+    case "Wireframe": return ["list", "Maquette", value.title || ""];
     case "file_outline": return ["file", "Plan du fichier", value.path || ""];
     case "replace_in_files": return ["edit", value.preview ? "Aperçu du remplacement" : "Remplacement", `${value.pattern || ""} → ${value.replacement || ""}${value.glob ? ` · ${value.glob}` : ""}`];
     case "run_tests": return ["terminal", "Tests", value.cmd || "tests du projet"];

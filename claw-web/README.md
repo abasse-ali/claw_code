@@ -85,9 +85,9 @@ d'actions ; un toucher déplie son journal, dont les 30 dernières étapes sont 
 précédentes se déplient à leur tour), et les étapes d'un passage en cours paraissent une à une.
 Les tâches de Claw restent dans un petit bloc pliable au-dessus de la saisie, ses questions dans le
 même bloc, en cartes à faire défiler à gauche et à droite. Sous une réponse, les fichiers modifiés sur la branche et
-le job sont en pastilles, le modèle et les requêtes à déplier. « Relancer » et « Mettre en
-ligne » restent sous la conversation ; le job, la session sur GitHub, « Archiver » et
-« Supprimer » sont dans le menu « ••• ».
+l'exécution sur GitHub sont en pastilles, le modèle et les requêtes à déplier. « Relancer » et
+« Mettre en ligne » restent sous la conversation ; l'exécution et la session sur GitHub,
+« Archiver » et « Supprimer » sont dans le menu « ••• ».
 
 Votre message paraît dès son envoi, et une nouvelle session s'ouvre dès sa création ; jusqu'à
 la première progression, la carte « Claw se prépare » dit l'étape en cours (file d'attente,
@@ -110,6 +110,21 @@ toucher sur une réponse l'envoie (plusieurs questions : une réponse chacune, p
 les réponses ») ; on peut aussi répondre avec ses mots. Dans le journal, une capture d'écran dit
 ce qu'elle montre : « Capture en ligne » (le site publié) ou « Capture de la session » (les
 fichiers de la branche, pas encore en ligne).
+
+## Apparence
+
+Fond d'encre éclairé d'une aurore orange, rose et violette (thème clair au choix, ou celui du
+téléphone : Réglages, « Apparence ») ; barre du haut, zone de saisie, fenêtres et tiroir en verre
+dépoli ; un dégradé orange → rose → violet pour l'essentiel : l'envoi, les boutons principaux, le
+logo, le contour d'un passage en cours. Titres en Bricolage Grotesque (police libre, licence
+OFL, rangée dans `fonts/` : la page ne charge rien d'ailleurs), texte dans la police du téléphone.
+
+Les animations sont courtes et ne jouent qu'à l'arrivée d'un élément ou sous le doigt : une page
+qui arrive glisse en place, les listes entrent l'une après l'autre, les fenêtres montent du bas
+et y redescendent, le tiroir glisse depuis la gauche, un message envoyé ou une réponse arrivée
+entre dans la conversation. Une session redessinée en direct (toutes les 4 s pendant un passage)
+ne rejoue rien : les roues d'attente et le contour du passage en cours reprennent où ils en
+étaient. « Réduire les animations » (Réglages du téléphone, Accessibilité) coupe tout mouvement.
 
 ## Commandes « / » et niveau de réflexion
 

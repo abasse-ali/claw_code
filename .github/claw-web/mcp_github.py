@@ -1076,7 +1076,7 @@ def enable_pr_auto_merge(ctx, args):
             + ("" if ctx.local else " New commits from this session are pushed by Claw when you finish."))
 
 
-@tool("fork_repository", "Forker un dépôt", "Fork a GitHub repository to your account or specified organization",
+@tool("fork_repository", "Copier un dépôt (fork)", "Fork a GitHub repository to your account or specified organization",
       {"owner": OWNER, "repo": REPO, "organization": string("Organization to fork to")},
       ["owner", "repo"], scoped=False, note="Sur Claw Web, les outils restent sur le dépôt de la session")
 def fork_repository(ctx, args):
@@ -1228,7 +1228,7 @@ def job_log(ctx, job_id, name, content, tail):
             "message": "Job logs content retrieved successfully", "original_length": len(lines)}
 
 
-@tool("get_job_logs", "Lire les journaux d'un job",
+@tool("get_job_logs", "Lire les journaux d'une exécution",
       "Download logs for a specific workflow job or efficiently get all failed job logs for a workflow run",
       {"owner": OWNER, "repo": REPO,
        "job_id": number("The unique identifier of the workflow job (required for single job logs)"),
