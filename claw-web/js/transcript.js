@@ -496,6 +496,7 @@ const RECENT_STEPS = 30;
 /** Pastille d'état d'un passage : en cours, fini, arrêté, erreur. */
 const STATE_ICONS = {
   running: '<span class="spinner" aria-label="en cours"></span>',
+  stopping: '<span class="spinner" aria-label="arrêt en cours"></span>',
   done: ICONS.check,
   stopped: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>',
   failed: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v6M12 16.5h.01"/></svg>',

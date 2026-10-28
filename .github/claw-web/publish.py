@@ -62,7 +62,7 @@ def stop_leftover_agent():
         return True
 
     if alive():
-        stop_tree(pid, alive=alive)
+        stop_tree(pid, alive=alive, session=True)
 
 
 # Un utilisateur qui veut se servir du résultat sur son téléphone (« faut que ça marche sur

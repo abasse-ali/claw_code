@@ -111,6 +111,18 @@ les réponses ») ; on peut aussi répondre avec ses mots. Dans le journal, une 
 ce qu'elle montre : « Capture en ligne » (le site publié) ou « Capture de la session » (les
 fichiers de la branche, pas encore en ligne).
 
+## L'accueil
+
+Un tableau de bord : la date et une salutation selon l'heure, trois chiffres (sessions au
+travail, passages réussis sur 7 jours, modèle choisi, qu'un toucher change), puis la carte
+« Espace de travail » : le dépôt et la branche où Claw travaillera, à changer d'un toucher, avec
+ses fichiers et « Nouveau dépôt ». Le dépôt ne se choisit plus près du champ de saisie : le champ
+dit pour quel dépôt on écrit (« Une tâche pour budget-app ? »). Viennent ensuite « En ce
+moment », les sessions au travail avec leur durée à la seconde (l'accueil se relit toutes les
+20 s tant qu'il y en a), « Pour démarrer », des demandes toutes prêtes qu'un toucher met dans le
+champ (créer une appli, `/fix`, `/review`, `/verify`, `/jtest`, `/pages`), et les sessions
+récentes en frise, par jour (« Tout voir » ouvre le menu).
+
 ## Apparence
 
 Fond d'encre éclairé d'une aurore orange, rose et violette (thème clair au choix, ou celui du
@@ -375,8 +387,14 @@ sur l'exécuteur `claw-pc` à processeur ARM, et le site y reste en ligne après
 
 ## Arrêter, supprimer
 
-- « Arrêter » (deux appuis) annule un passage en cours : ce qui est fait reste sur la branche
-  de la session ; un message de suivi reprend le travail.
+- « Arrêter » (deux appuis : le premier arme le bouton 4 s, une barre se vide) annule un passage
+  en cours : ce qui est fait reste sur la branche de la session ; un message de suivi reprend le
+  travail. La session dit aussitôt « Arrêt en cours » (plus aucune étape ne paraît ensuite) et
+  se relit toutes les 1,5 s : GitHub finit le passage en une dizaine de secondes, le temps que
+  Claw et ses commandes s'arrêtent (celles lancées en arrière-plan comprises) et que le travail
+  soit poussé. Un passage tout juste lancé, que GitHub ne liste pas encore, est arrêté dès qu'il
+  paraît. Si GitHub tarde (machine injoignable), « Forcer l'arrêt » paraît au bout de 45 s : il
+  coupe tout de suite, sans pousser le travail de ce passage.
 - « Supprimer » dans une session, ou « Choisir » dans la liste des sessions (menu) pour en
   supprimer plusieurs : la session et ses messages sont effacés de GitHub, sans retour possible.
   En option, sa branche `claw/session-<n>` (une pull request ouverte est alors fermée) et ses

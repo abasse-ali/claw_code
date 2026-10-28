@@ -390,6 +390,12 @@ export class GitHub {
     return this.request("POST", `/repos/${engine}/actions/runs/${runId}/cancel`);
   }
 
+  /** Arrêt forcé : GitHub coupe le passage sans attendre ses étapes de fin (la poussée du
+   * travail et la réponse comprises). */
+  forceCancelRun(engine, runId) {
+    return this.request("POST", `/repos/${engine}/actions/runs/${runId}/force-cancel`);
+  }
+
   async jobs(engine, runId) {
     const data = await this.request("GET", `/repos/${engine}/actions/runs/${runId}/jobs`);
     return data.jobs || [];

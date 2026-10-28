@@ -67,6 +67,9 @@ const ICON = {
   chevron: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>',
   tasks: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6h10M10 12h10M10 18h10"/><path d="M3.5 6l1.5 1.5L8 4.5M3.5 12l1.5 1.5L8 10.5M3.5 18l1.5 1.5L8 16.5"/></svg>',
   check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  alert: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v6M12 16.5h.01"/></svg>',
+  bug: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="6.5" width="8" height="13" rx="4"/><path d="M12 11v8.5M8 13H4.5M19.5 13H16M9.5 6.5 7.5 4.5M14.5 6.5l2-2M8.3 17.5 5 19.5M15.7 17.5l3.3 2"/></svg>',
+  calendar: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5.5" width="16" height="14.5" rx="2.5"/><path d="M4 10h16M8.5 3.5v4M15.5 3.5v4"/></svg>',
   // Icons: Lucide, ISC license (lightbulb, square-slash).
   bulb: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6M10 22h4"/></svg>',
   slash: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 15l6-6"/></svg>',
@@ -316,7 +319,7 @@ function animateIn(list) {
  * au travail) calées sur l'horloge : une vue redessinée (toutes les 4 s pendant un passage) les
  * reprend où elles en étaient, sans saut. */
 function keepInStep(root) {
-  for (const element of root.querySelectorAll(".spinner, .run-card.live, .dot.running, .dot.queued, .dock-todos li.doing .box")) {
+  for (const element of root.querySelectorAll(".spinner, .run-card.live, .run-card.stopping, .live-card, .live-bar span, .live-dot, .dot.running, .dot.queued, .dock-todos li.doing .box")) {
     const period = Number.parseFloat(getComputedStyle(element).animationDuration) * 1000;
     if (period > 0) element.style.animationDelay = `-${Date.now() % period}ms`;
   }
@@ -2064,24 +2067,23 @@ function renderComposer() {
       const label = composer.querySelector(`[data-action="${action}"] span`);
       if (label && label.textContent !== text) label.textContent = text;
     };
-    chip("repo", repo || "Choisir un dépôt");
-    chip("branch", branch || "branche");
     chip("model", modelLabel(state.settings.model));
+    const textarea = composer.querySelector("textarea");
+    if (textarea.placeholder !== promptPlaceholder(followUp, repo)) textarea.placeholder = promptPlaceholder(followUp, repo);
     chip("effort", effortLabel());
     composer.querySelector('[data-action="effort"]')?.classList.toggle("on", Boolean(state.settings.effort));
     drawAids();
     renderDock();
     composer.refresh?.();
+    drawWorkspace();
     return;
   }
   composer.dataset.key = key;
-  // En suivi de session, le dépôt et la branche sont dans l'en-tête : seul le modèle se choisit.
+  // Le dépôt et la branche se choisissent ailleurs (carte « Espace de travail » de l'accueil,
+  // en-tête d'une session) : ici, le modèle et la réflexion.
   composer.innerHTML = `
     <div class="dock" hidden></div>
     <div class="chips">
-      ${followUp ? "" : `
-      <button class="chip" data-action="repo">${ICON.repo}<span>${escapeHtml(repo || "Choisir un dépôt")}</span></button>
-      <button class="chip" data-action="branch">${ICON.branch}<span>${escapeHtml(branch || "branche")}</span></button>`}
       <button class="chip" data-action="model">${ICON.model}<span>${escapeHtml(modelLabel(state.settings.model))}</span></button>
       <button class="chip${state.settings.effort ? " on" : ""}" data-action="effort" aria-label="Niveau de réflexion">${ICON.bulb}<span>${escapeHtml(effortLabel())}</span></button>
     </div>
@@ -2098,7 +2100,7 @@ function renderComposer() {
       <button class="slash" type="button" aria-label="Commandes">${ICON.slash}</button>
       <div class="slash-menu" role="listbox" aria-label="Commandes" hidden></div>
       <input class="file-input" type="file" accept="image/*" multiple hidden>
-      <textarea rows="1" name="text" placeholder="${followUp ? "Répondez ou donnez une nouvelle consigne." : "Décrivez une tâche ou posez une question."}" aria-label="Message pour Claw"></textarea>
+      <textarea rows="1" name="text" placeholder="${escapeHtml(promptPlaceholder(followUp, repo))}" aria-label="Message pour Claw"></textarea>
       <button class="send" type="submit" aria-label="Envoyer" disabled>${ICON.send}</button>
     </form>`;
   const textarea = composer.querySelector("textarea");
@@ -2133,8 +2135,6 @@ function renderComposer() {
     if (followUp) followUpSession(text, textarea);
     else startSession(text, textarea);
   });
-  composer.querySelector('[data-action="repo"]')?.addEventListener("click", pickRepo);
-  composer.querySelector('[data-action="branch"]')?.addEventListener("click", pickBranch);
   composer.querySelector('[data-action="model"]').addEventListener("click", () => pickModel());
   composer.querySelector('[data-action="effort"]').addEventListener("click", pickEffort);
   const picker = composer.querySelector(".file-input");
@@ -2165,6 +2165,13 @@ function renderComposer() {
   resize();
   // Tout de suite, pas au rappel de l'observateur : le défilement vers le bas suit.
   updateComposerSpace();
+  drawWorkspace();
+}
+
+/** Le texte d'attente du champ : la session, ou le dépôt où Claw travaillera. */
+function promptPlaceholder(followUp, repo) {
+  if (followUp) return "Répondez ou donnez une nouvelle consigne.";
+  return repo ? `Une tâche pour ${repo.split("/").pop()} ? Décrivez-la ici.` : "Choisissez d'abord un dépôt, en haut de l'écran.";
 }
 
 // --- Sessions --------------------------------------------------------------------------------
@@ -2556,39 +2563,247 @@ async function openDeleteSessions(issues) {
   });
 }
 
+// --- Accueil : salutation, espace de travail, passages en cours, idées, sessions ------------
+
+/** Demandes toutes prêtes de l'accueil : un toucher les met dans le champ, à compléter ou à
+ * envoyer telles quelles (les commandes « / » de Claw). */
+const STARTERS = [
+  { icon: "spark", title: "Créer une appli", detail: "De l'idée à une appli qui marche", text: "Crée une application web qui " },
+  { icon: "bug", title: "Corriger un problème", detail: "Claw trouve la cause et répare", text: "/fix " },
+  { icon: "diff", title: "Relire mes changements", detail: "Une revue, sans rien modifier", text: "/review " },
+  { icon: "check", title: "Vérifier que tout marche", detail: "Tests, lancement, essai", text: "/verify " },
+  { icon: "phone", title: "Essayer sur mon téléphone", detail: "Un lien à ouvrir sur l'iPhone", text: "/jtest " },
+  { icon: "globe", title: "Mettre le site en ligne", detail: "GitHub Pages et son adresse", text: "/pages " },
+];
+
+/** Salutation selon l'heure de l'appareil. */
+function greetingWord(hour = new Date().getHours()) {
+  if (hour >= 5 && hour < 12) return "Bonjour";
+  if (hour >= 12 && hour < 18) return "Bon après-midi";
+  if (hour >= 18 && hour < 23) return "Bonsoir";
+  return "Bonne nuit";
+}
+
+/** Groupe d'une session dans la frise de l'accueil, d'après sa dernière activité. */
+function dayGroup(date) {
+  const day = (value) => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+  const days = Math.round((day(new Date()) - day(new Date(date))) / 86_400_000);
+  if (days <= 0) return "Aujourd'hui";
+  if (days === 1) return "Hier";
+  return days < 7 ? "Cette semaine" : "Plus tôt";
+}
+
+/** Deux lettres pour la tuile d'un dépôt (« budget-app » : BA). */
+function repoInitials(name) {
+  const words = String(name || "?").split(/[-_.\s]+/).filter(Boolean);
+  return ((words[0] || "?")[0] + (words[1] ? words[1][0] : (words[0] || "").slice(1, 2))).toUpperCase();
+}
+
+/** Carte d'une session dans la frise : pastille d'état, titre sur deux lignes, dépôt et heure. */
+function sessionCard(issue) {
+  const settings = settingsOf(issue);
+  const status = issue.state === "closed" ? { key: "archived", label: "Archivée" } : runStatus(latestRun(settings.repo, issue.number));
+  const key = status ? status.key : "idle";
+  const badge = { done: ICON.check, failed: ICON.alert, running: '<span class="spinner" aria-hidden="true"></span>', queued: ICON.clock, archived: ICON.archive }[key] || ICON.chat;
+  return `<li><a class="session-card ${key}" href="#/session/${issue.number}">
+    <span class="sc-badge ${key}">${badge}</span>
+    <span class="sc-body">
+      <strong class="sc-title">${escapeHtml(issue.title)}</strong>
+      <span class="sc-meta"><span class="sc-repo">${ICON.repo}${escapeHtml((settings.repo || "").split("/").pop())}</span>
+        <span class="state-label ${key}">${status ? escapeHtml(status.label) : "en attente"}</span><span>${since(issue.updated_at)}</span></span>
+    </span>
+    <span class="sc-num">#${numberOf(issue)}</span>
+  </a></li>`;
+}
+
+/** Carte d'une session au travail : son état et sa durée qui avance à la seconde. */
+function liveCard(issue, run) {
+  const settings = settingsOf(issue);
+  const queued = run.status !== "in_progress";
+  const start = Date.parse(run.run_started_at || run.created_at);
+  return `<a class="live-card${queued ? " queued" : ""}" href="#/session/${issue.number}">
+    <span class="live-top"><span class="live-dot" aria-hidden="true"></span>
+      <span class="live-state">${queued ? "En attente d'une machine" : "Claw travaille"}</span>
+      ${Number.isFinite(start) ? `<span class="live-clock">depuis <span class="clock" data-since="${start}">${clockText(Math.max(0, Math.floor((Date.now() - start) / 1000)))}</span></span>` : ""}</span>
+    <strong class="live-title"><span class="num">#${numberOf(issue)}</span> ${escapeHtml(issue.title)}</strong>
+    <span class="live-meta">${ICON.repo}<span>${escapeHtml((settings.repo || "").split("/").pop())}</span>${ICON.branch}<span>${escapeHtml(branchOf(issue))}</span></span>
+    <span class="live-bar" aria-hidden="true"><span></span></span>
+  </a>`;
+}
+
+/** Carte « Espace de travail » de l'accueil : le dépôt et la branche où Claw travaillera, à
+ * changer d'un toucher. Redessinée avec la zone de saisie (dépôt ou branche changés). */
+function drawWorkspace() {
+  const box = document.querySelector("#view .workspace");
+  if (!box || state.session) return;
+  const full = state.settings.repo || "";
+  const branch = state.settings.branch || "main";
+  const info = (state.repos || []).find((repo) => repo.full_name === full);
+  const [owner, name] = full ? full.split("/") : ["", ""];
+  const signature = JSON.stringify([full, branch, info && [info.private, info.pushed_at]]);
+  if (box.dataset.signature === signature) return;
+  box.dataset.signature = signature;
+  box.innerHTML = full ? `
+    <button type="button" class="ws-main" data-home="repo">
+      <span class="ws-avatar" aria-hidden="true">${escapeHtml(repoInitials(name))}</span>
+      <span class="ws-text">
+        <small>Espace de travail</small>
+        <strong>${escapeHtml(name)}</strong>
+        <span class="ws-sub">${escapeHtml(owner)}${info ? ` · ${info.private ? "privé" : "public"} · poussé ${since(info.pushed_at)}` : ""}</span>
+      </span>
+      <span class="ws-change">Changer</span>
+    </button>
+    <div class="ws-row">
+      <button type="button" class="ws-pill" data-home="branch">${ICON.branch}<span>${escapeHtml(branch)}</span></button>
+      <button type="button" class="ws-pill" data-home="files">${ICON.folder}<span>Fichiers</span></button>
+      <button type="button" class="ws-pill" data-home="new-repo">${ICON.plus}<span>Nouveau dépôt</span></button>
+    </div>` : `
+    <button type="button" class="ws-main ws-empty" data-home="repo">
+      <span class="ws-avatar" aria-hidden="true">${ICON.repo}</span>
+      <span class="ws-text"><small>Pour commencer</small><strong>Choisissez un dépôt</strong><span class="ws-sub">ou créez-en un neuf</span></span>
+      <span class="ws-change">Choisir</span>
+    </button>`;
+}
+
+/** Les blocs de l'accueil qui dépendent des sessions : chiffres, sessions au travail, frise. */
+function drawHomeSessions(view, sessions, first) {
+  const open = sessions.filter((issue) => issue.state === "open");
+  const working = open.map((issue) => ({ issue, run: latestRun(settingsOf(issue).repo, issue.number) }))
+    .filter(({ run }) => runStatus(run) && ["running", "queued"].includes(runStatus(run).key));
+  const week = state.runs.filter((run) => run.conclusion === "success" && Date.now() - Date.parse(run.updated_at) < 7 * 86_400_000).length;
+  const stats = view.querySelector(".hello-stats");
+  if (stats) {
+    stats.innerHTML = `
+      <div class="stat${working.length ? " busy" : ""}"><strong>${working.length}</strong><span>au travail</span></div>
+      <div class="stat"><strong>${week}</strong><span>réussies · 7 j</span></div>
+      <button type="button" class="stat stat-model" data-home="model"><strong>${escapeHtml(modelLabel(state.settings.model))}</strong><span>modèle ${ICON.chevron}</span></button>`;
+  }
+  const pulse = view.querySelector(".hello-sub");
+  if (pulse) {
+    pulse.textContent = working.length
+      ? `Claw travaille sur ${working.length > 1 ? `${working.length} sessions` : "une session"} en ce moment.`
+      : "Claw est prêt. Que construit-on aujourd'hui ?";
+  }
+  const liveBlock = view.querySelector(".live-block");
+  if (liveBlock) {
+    liveBlock.hidden = !working.length;
+    liveBlock.querySelector(".live-list").innerHTML = working.map(({ issue, run }) => liveCard(issue, run)).join("");
+  }
+  const timeline = view.querySelector(".timeline");
+  if (!timeline) return;
+  const busy = new Set(working.map(({ issue }) => issue.number));
+  const recent = open.filter((issue) => !busy.has(issue.number)).slice(0, 10);
+  if (!recent.length) {
+    timeline.innerHTML = working.length ? '<p class="empty">Aucune autre session ouverte.</p>' : `
+      <div class="home-empty">
+        <span class="logo" aria-hidden="true"></span>
+        <strong>Votre première tâche commence ici</strong>
+        <span>Choisissez une idée ci-dessus, ou décrivez ce que Claw doit faire dans le champ en bas.</span>
+      </div>`;
+  } else {
+    const groups = [];
+    for (const issue of recent) {
+      const label = dayGroup(issue.updated_at);
+      if (!groups.length || groups[groups.length - 1].label !== label) groups.push({ label, issues: [] });
+      groups[groups.length - 1].issues.push(issue);
+    }
+    timeline.innerHTML = groups.map((group) => `
+      <section class="day">
+        <h3 class="day-title">${escapeHtml(group.label)}</h3>
+        <ul class="day-list">${group.issues.map((issue) => sessionCard(issue)).join("")}</ul>
+      </section>`).join("");
+  }
+  keepInStep(view);
+  if (first) {
+    animateIn(view.querySelector(".live-list"));
+    for (const list of view.querySelectorAll(".day-list")) animateIn(list);
+  }
+}
+
 async function showHome() {
   state.session = null;
   const view = $("#view");
   const name = state.user ? state.user.name || state.user.login : "";
+  const today = new Date().toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
   view.innerHTML = `
     <section class="home">
-      <h1 class="greeting"><span class="logo" aria-hidden="true"></span><span>Quoi de prévu${name ? `, <span class="name">${escapeHtml(name.split(" ")[0])}</span>` : ""} ?</span></h1>
-      <p class="home-lead">Décrivez une tâche en bas de l'écran : Claw s'en charge dans le dépôt choisi, sur une branche à part.</p>
-      <h2 class="section-title">Sessions récentes</h2>
-      <ul class="sessions recent">${sessionSkeletons(3)}</ul>
+      <header class="hello">
+        <p class="hello-date">${ICON.calendar}<span>${escapeHtml(today.charAt(0).toUpperCase() + today.slice(1))}</span></p>
+        <h1 class="hello-title">${greetingWord()}${name ? `, <span class="name">${escapeHtml(name.split(" ")[0])}</span>` : ""}</h1>
+        <p class="hello-sub">Claw est prêt. Que construit-on aujourd'hui ?</p>
+        <div class="hello-stats">
+          <div class="stat sk"></div><div class="stat sk"></div><div class="stat sk"></div>
+        </div>
+      </header>
+      <section class="workspace" aria-label="Espace de travail"></section>
+      <section class="home-block live-block" aria-label="En ce moment" hidden>
+        <h2 class="block-title"><span class="live-dot" aria-hidden="true"></span>En ce moment</h2>
+        <div class="live-list"></div>
+      </section>
+      <section class="home-block" aria-label="Pour démarrer">
+        <h2 class="block-title">Pour démarrer</h2>
+        <div class="starters">${STARTERS.map((starter, index) => `
+          <button type="button" class="starter" data-starter="${index}">
+            <span class="starter-icon">${ICON[starter.icon]}</span>
+            <strong>${escapeHtml(starter.title)}</strong>
+            <small>${escapeHtml(starter.detail)}</small>
+          </button>`).join("")}
+        </div>
+      </section>
+      <section class="home-block" aria-label="Sessions récentes">
+        <h2 class="block-title">Sessions récentes<button type="button" class="block-link" data-home="all">Tout voir ${ICON.chevron}</button></h2>
+        <div class="timeline"><ul class="day-list">${sessionSkeletons(3)}</ul></div>
+      </section>
     </section>`;
-  if (!state.settings.repo) {
-    loadRepos().then((repos) => {
-      if (!state.settings.repo && repos.length) {
-        state.settings.repo = repos[0].full_name;
-        state.settings.branch = repos[0].default_branch;
-        saveSettings();
-        renderComposer();
-      }
-    }).catch(failure);
-  }
+  view.querySelector(".home").addEventListener("click", (event) => {
+    const starter = event.target.closest("[data-starter]");
+    if (starter) {
+      const textarea = document.querySelector("#composer textarea");
+      if (!textarea) return;
+      textarea.value = STARTERS[Number(starter.dataset.starter)].text;
+      textarea.dispatchEvent(new Event("input"));
+      textarea.focus();
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+      return;
+    }
+    const action = event.target.closest("[data-home]");
+    if (!action) return;
+    const kind = action.dataset.home;
+    if (kind === "repo") pickRepo();
+    else if (kind === "branch") pickBranch();
+    else if (kind === "new-repo") openCreateRepo();
+    else if (kind === "model") pickModel();
+    else if (kind === "all") openDrawer();
+    else if (kind === "files" && state.settings.repo) {
+      location.hash = filesHash({ repo: state.settings.repo, ref: state.settings.branch || "main" });
+    }
+  });
+  animateIn(view.querySelector(".starters"));
+  loadRepos().then((repos) => {
+    if (!state.settings.repo && repos.length) {
+      state.settings.repo = repos[0].full_name;
+      state.settings.branch = repos[0].default_branch;
+      saveSettings();
+      renderComposer();
+    }
+    drawWorkspace();
+  }).catch(failure);
   renderComposer();
-  try {
+  let first = true;
+  const refresh = async () => {
     const [sessions] = await Promise.all([state.github.sessions(state.settings.engine), refreshRuns()]);
     await numberOldSessions(sessions);
-    const recent = view.querySelector(".recent");
-    if (recent) {
-      // Pas `map(sessionItem)` : l'indice passé en second deviendrait « à cocher ».
-      recent.innerHTML = sessions.filter((issue) => issue.state === "open").slice(0, 8).map((issue) => sessionItem(issue)).join("")
-        || '<li class="empty">Aucune session ouverte pour l\'instant : votre première tâche apparaîtra ici.</li>';
-      keepInStep(recent);
-      animateIn(recent);
+    if (!view.querySelector(".home")) return;
+    drawHomeSessions(view, sessions, first);
+    first = false;
+    // Une session au travail : l'accueil se relit toutes les 20 s (son état, sa fin).
+    clearTimeout(state.pollTimer);
+    if (view.querySelector(".live-card") && !document.hidden) {
+      state.pollTimer = setTimeout(() => refresh().catch(() => {}), 20_000);
     }
+  };
+  try {
+    await refresh();
   } catch (error) {
     failure(error);
   }
@@ -3119,10 +3334,22 @@ function messageHtml(comment, isLastProgress, answer = "") {
   if (body.includes(PROGRESS)) {
     const run = runOf(body);
     const events = run ? journalOf(run) : [];
-    const head = body.split("\n").find((line) => line.startsWith("**Claw")) || "";
-    const kind = runKind(head);
+    let head = body.split("\n").find((line) => line.startsWith("**Claw")) || "";
+    let kind = runKind(head);
+    const live = Boolean(state.session && state.session.live);
+    const stopping = kind === "running" && isLastProgress && Boolean(state.session && state.session.stopping);
+    if (stopping) {
+      // Arrêt demandé : dit tout de suite, sans attendre la dernière progression du moteur.
+      head = head.replace("**Claw travaille** depuis", "**Arrêt en cours** après");
+      kind = "stopping";
+    } else if (kind === "running" && !(isLastProgress && live)) {
+      // « Claw travaille » sur un passage qui ne travaille plus : le moteur a été coupé avant
+      // d'écrire sa fin. Plus de roue qui tourne pour rien.
+      head = head.replace("**Claw travaille** depuis", "**Claw s'est interrompu** après");
+      kind = "stopped";
+    }
     // Passage qui travaille encore : sa durée avance à chaque seconde.
-    const ticking = kind === "running" && isLastProgress && Boolean(state.session && state.session.live);
+    const ticking = kind === "running" && isLastProgress && live;
     if (events.length) {
       // « · 161 action(s) » : le compte est déjà dans la pastille du journal.
       // Durée insécable : « 12 min 05 s » ne se coupe pas.
@@ -3131,13 +3358,16 @@ function messageHtml(comment, isLastProgress, answer = "") {
       // Passage en cours : ce qui était déjà là à l'ouverture est montré d'un coup, ce qui arrive
       // ensuite paraît une étape à la fois.
       const key = `run${run}`;
-      if (!state.revealed.has(key) || !isLastProgress) state.revealed.set(key, events.length);
+      // Arrêt demandé : les étapes encore à paraître sont montrées d'un coup, aucune action ne
+      // semble continuer après l'arrêt.
+      if (!state.revealed.has(key) || !isLastProgress || stopping) state.revealed.set(key, events.length);
       const shown = Math.min(state.revealed.get(key), events.length);
       const clocked = ticking ? liveClock(title, comment) : title;
       return `<div class="run-card ${kind}${ticking ? " live" : ""}">${transcriptHtml(events, { key, live: isLastProgress, answer, title: clocked, kind, shown })}</div>`;
     }
     // « Détail du job », écrit par le moteur : en français dans l'appli.
-    const card = renderMarkdown(withoutCallMarkup(body).replace(/\[Détail du job\]\(/g, "[Détail de l'exécution]("));
+    const progressText = body.replace(/^\*\*Claw travaille\*\* depuis.*$/m, head);
+    const card = renderMarkdown(withoutCallMarkup(progressText).replace(/\[Détail du job\]\(/g, "[Détail de l'exécution]("));
     return `<div class="progress-card ${kind}${isLastProgress ? "" : " old"}">${ticking ? liveClock(card, comment) : card}</div>`;
   }
   if (body.includes(ANSWER)) return answerHtml(body, comment.id);
@@ -3234,7 +3464,11 @@ function renderSessionView() {
   const talk = comments.filter((comment) => !(comment.body || "").startsWith(JTEST_MARK));
   const answered = talk.length && (talk[talk.length - 1].body || "").includes(ANSWER);
   const active = waiting || (status && (status.key === "queued" || status.key === "running"));
-  session.live = Boolean(active);
+  // Arrêt demandé : montré tout de suite. GitHub met une dizaine de secondes à finir le passage
+  // (Claw s'arrête, puis range et pousse son travail) ; la session se relit entre-temps.
+  const stopping = Boolean(active && session.stopping);
+  const slowStop = stopping && Date.now() - session.stopping.at > STOP_PATIENCE;
+  session.live = Boolean(active) && !stopping;
   const step = session.step ? ` · ${escapeHtml(session.step)}` : "";
   const pull = session.pull;
   const pullBadge = pull ? (pull.merged_at ? "fusionnée" : pull.state === "open" ? "ouverte" : "fermée") : "";
@@ -3275,11 +3509,15 @@ function renderSessionView() {
       </div>
       ${unsent ? `<div class="unsent">Ce message n'a pas encore été envoyé à Claw (aucun passage lancé depuis).
         <button class="small-link primary-link" data-action="retry">${ICON.retry}<span>Lancer le passage</span></button></div>` : ""}
-      <div class="run-status ${active ? "active" : status ? status.key : ""}">
-        ${active && !preparing ? `<span class="spinner" aria-hidden="true"></span><span>${run ? escapeHtml(status.label) : "Lancement du passage"}${step}</span>` : ""}
+      <div class="run-status ${stopping ? "stopping" : active ? "active" : status ? status.key : ""}">
+        ${stopping ? `<span class="spinner" aria-hidden="true"></span><span>${slowStop
+          ? "GitHub tarde à arrêter le passage. « Forcer l'arrêt » le coupe tout de suite, sans pousser le travail de ce passage."
+          : "Arrêt en cours : Claw s'arrête, puis range son travail sur la branche."}</span>` : ""}
+        ${active && !preparing && !stopping ? `<span class="spinner" aria-hidden="true"></span><span>${run ? escapeHtml(status.label) : "Lancement du passage"}${step}</span>` : ""}
         ${!active && status && status.key === "failed" && !answered ? `<span>Le dernier passage a échoué${session.failure ? ` : ${escapeHtml(session.failure)}` : "."}</span>` : ""}
         <span class="run-actions">
-          ${active && run ? `<button class="small-link stop" data-action="stop">${ICON.stop}<span>Arrêter</span></button>` : ""}
+          ${active && !stopping ? `<button class="small-link stop" data-action="stop">${ICON.stop}<span>Arrêter</span></button>` : ""}
+          ${slowStop && session.stopping.run ? `<button class="small-link stop" data-action="force-stop">${ICON.stop}<span>Forcer l'arrêt</span></button>` : ""}
           ${!active && !unsent ? `<button class="small-link" data-action="retry">${ICON.retry}<span>Relancer</span></button>` : ""}
           ${!active ? `<button class="small-link" data-action="publish-site">${ICON.globe}<span>Mettre en ligne</span></button>` : ""}
           ${!active ? `<button class="small-link" data-action="jtest">${ICON.phone}<span>JTest</span></button>` : ""}
@@ -3352,27 +3590,10 @@ function renderSessionView() {
       }
     });
   }
-  view.querySelector('[data-action="merge"]')?.addEventListener("click", async (event) => {
-    const button = event.currentTarget;
-    if (!button.classList.contains("confirm")) {
-      button.classList.add("confirm");
-      button.querySelector("span").textContent = "Confirmer la fusion";
-      setTimeout(() => {
-        if (!button.isConnected) return;
-        button.classList.remove("confirm");
-        button.querySelector("span").textContent = "Fusionner";
-      }, 4000);
-      return;
-    }
-    button.disabled = true;
-    try {
-      await state.github.mergePull(settings.repo, pull.number);
-      toast(`Pull request n° ${pull.number} fusionnée dans ${settings.base || "main"}`);
-      await pollSession(true);
-    } catch (error) {
-      button.disabled = false;
-      failure(error);
-    }
+  armedTap(session, view.querySelector('[data-action="merge"]'), "Confirmer la fusion", async () => {
+    await state.github.mergePull(settings.repo, pull.number);
+    toast(`Pull request n° ${pull.number} fusionnée dans ${settings.base || "main"}`);
+    await pollSession(true);
   });
   view.querySelector('[data-action="publish-site"]')?.addEventListener("click", () => openPublish(session));
   for (const button of view.querySelectorAll('[data-action="jtest"]')) {
@@ -3388,35 +3609,16 @@ function renderSessionView() {
       }
     });
   }
-  const jtestStop = view.querySelector('[data-action="jtest-stop"]');
-  if (jtestStop) {
-    twoTaps(jtestStop, async () => {
-      await dispatchJtest(session, true);
-      toast("JTest arrêté dans la minute");
-    });
-  }
+  armedTap(session, view.querySelector('[data-action="jtest-stop"]'), "Confirmer", async () => {
+    await dispatchJtest(session, true);
+    toast("JTest arrêté dans la minute");
+  });
   // Deux appuis pour arrêter (pas de fenêtre de confirmation, comme le reste de l'appli).
-  view.querySelector('[data-action="stop"]')?.addEventListener("click", async (event) => {
-    const button = event.currentTarget;
-    if (!button.classList.contains("confirm")) {
-      button.classList.add("confirm");
-      button.querySelector("span").textContent = "Confirmer l'arrêt";
-      setTimeout(() => {
-        if (!button.isConnected) return;
-        button.classList.remove("confirm");
-        button.querySelector("span").textContent = "Arrêter";
-      }, 4000);
-      return;
-    }
-    button.disabled = true;
-    try {
-      await state.github.cancelRun(state.settings.engine, run.id);
-      toast("Arrêt demandé : ce qui est fait reste sur la branche");
-      await pollSession(true);
-    } catch (error) {
-      button.disabled = false;
-      failure(error);
-    }
+  armedTap(session, view.querySelector('[data-action="stop"]'), "Toucher encore pour arrêter", () => stopRun(session, run));
+  armedTap(session, view.querySelector('[data-action="force-stop"]'), "Confirmer l'arrêt forcé", async () => {
+    await state.github.forceCancelRun(state.settings.engine, session.stopping.run);
+    toast("Arrêt forcé demandé : GitHub coupe le passage");
+    await pollSession(true);
   });
   view.querySelector('[data-action="delete"]')?.addEventListener("click", () => openDeleteSessions([session.issue]));
   view.querySelector(".messages").addEventListener("click", (event) => {
@@ -3456,6 +3658,90 @@ async function showSession(number) {
     failure(error);
   }
 }
+
+/** Au-delà, l'arrêt tarde (machine injoignable, GitHub encombré) : « Forcer l'arrêt » paraît. */
+const STOP_PATIENCE = 45_000;
+
+/** Arrête le passage en cours. La session le dit aussitôt (« Arrêt en cours », plus d'étapes
+ * qui paraissent, plus de tâches en bas) et se relit toutes les 1,5 s jusqu'à la fin du passage.
+ * Un passage tout juste lancé, que GitHub ne liste pas encore, est arrêté dès qu'il paraît. */
+async function stopRun(session, run) {
+  session.stopping = { run: run ? run.id : null, at: Date.now() };
+  if (state.session === session) {
+    renderSessionView();
+    renderComposer();
+  }
+  try {
+    if (run) await state.github.cancelRun(state.settings.engine, run.id);
+    toast("Arrêt demandé : ce qui est fait reste sur la branche");
+  } catch (error) {
+    // 409 : le passage venait de finir de lui-même.
+    if (!(error instanceof GitHubError && error.status === 409)) {
+      session.stopping = null;
+      if (state.session === session) renderSessionView();
+      throw error;
+    }
+  }
+  await pollSession(true);
+}
+
+/** Pendant un arrêt : le passage qui paraît enfin est arrêté à son tour ; un passage fini
+ * termine l'arrêt (cinq minutes au plus, au-delà la session redevient normale). */
+async function followStop(session, run, launchWaiting) {
+  const stop = session.stopping;
+  if (!stop) return;
+  // Le passage d'avant, encore seul listé pendant que GitHub enregistre le nouveau, ne compte pas.
+  const fresh = Boolean(run) && !(launchWaiting && run.id === state.launch.before);
+  if (!stop.run && fresh && run.status !== "completed") {
+    stop.run = run.id;
+    await state.github.cancelRun(state.settings.engine, run.id).catch(() => {});
+  }
+  const ended = fresh && run.status === "completed" && (!stop.run || run.id === stop.run);
+  if (ended || (!fresh && !launchWaiting) || Date.now() - stop.at > 5 * 60_000) {
+    session.stopping = null;
+    if (ended && run.conclusion === "cancelled") toast("Passage arrêté : son travail est gardé sur la branche");
+  }
+}
+
+/** Deux appuis pour une action sans retour, qui résistent aux redessins de la session (toutes les
+ * 1,5 à 4 s pendant un passage) : le premier arme le bouton pour 4 s, noté dans la session ; le
+ * second agit. Avant, un redessin entre les deux remettait le bouton à zéro, et le second appui
+ * ne faisait que le réarmer : « Arrêter » semblait ne jamais arrêter. */
+function armedTap(session, button, label, action) {
+  if (!button) return;
+  const name = button.dataset.action;
+  const text = button.querySelector("span").textContent;
+  const armed = () => Boolean(session.armed && session.armed.action === name && Date.now() < session.armed.until);
+  const show = () => {
+    const left = session.armed.until - Date.now();
+    button.classList.add("confirm", "armed");
+    button.style.setProperty("--armed-delay", `-${ARMED_MS - left}ms`);
+    button.querySelector("span").textContent = label;
+    clearTimeout(button.armTimer);
+    button.armTimer = setTimeout(() => {
+      if (!button.isConnected || armed()) return;
+      button.classList.remove("confirm", "armed");
+      button.querySelector("span").textContent = text;
+    }, left + 20);
+  };
+  if (armed()) show();
+  button.addEventListener("click", async () => {
+    if (!armed()) {
+      session.armed = { action: name, until: Date.now() + ARMED_MS };
+      show();
+      return;
+    }
+    session.armed = null;
+    button.disabled = true;
+    try {
+      await action();
+    } catch (error) {
+      button.disabled = false;
+      failure(error);
+    }
+  });
+}
+const ARMED_MS = 4000;
 
 /** Pourquoi un passage a échoué, en clair, d'après ses jobs (« » si rien de sûr). Vu le
  * 24 octobre 2026 : un passage sur une machine de GitHub échouait en deux secondes, sans
@@ -3541,10 +3827,11 @@ async function pollSession(force = false) {
   // L'attente d'un passage lancé depuis l'appli (90 s au plus) change l'affichage d'elle-même.
   const launchWaiting = Boolean(state.launch && state.launch.session === session.number
     && Date.now() - state.launch.at < 90_000);
+  await followStop(session, run, launchWaiting);
   const signature = JSON.stringify([
     issue.updated_at, issue.state, comments.map((comment) => [comment.id, comment.updated_at]),
     run && [run.id, run.status, run.conclusion], session.step, session.failure, session.pull && [session.pull.state, session.pull.merged_at],
-    launchWaiting,
+    launchWaiting, session.stopping && [session.stopping.run, Date.now() - session.stopping.at > STOP_PATIENCE],
   ]);
   // Fin du passage suivi : le quota gratuit a bougé ; pendant le passage, il se relit chaque minute.
   if (session.active && run && run.status === "completed") refreshQuota(true);
@@ -3558,7 +3845,7 @@ async function pollSession(force = false) {
   }
   if (state.session === session && !document.hidden) {
     state.pollTimer = setTimeout(() => pollSession().catch(failure),
-      session.active || jtestWatching(session.number) ? 4000 : 30000);
+      session.stopping ? 1500 : session.active || jtestWatching(session.number) ? 4000 : 30000);
   }
 }
 
