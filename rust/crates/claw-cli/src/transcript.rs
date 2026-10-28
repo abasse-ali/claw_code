@@ -215,6 +215,7 @@ pub fn tool_label(name: &str) -> &str {
         "Font" => "Polices",
         "Ornament" => "Ornement",
         "Component" => "Composants",
+        "Starter" => "Projet de départ",
         "AppIcon" => "Icônes de l'appli",
         "Photo" => "Photos libres",
         "LookAtImage" => "Image regardée",
@@ -330,6 +331,9 @@ fn tool_argument(name: &str, input: &Value) -> Option<String> {
             .filter(|names| !names.is_empty())
             .or_else(|| str_field(input, &["search", "name"]).map(ToOwned::to_owned)),
         "Ornament" => str_field(input, &["kind"]).map(ToOwned::to_owned),
+        "Starter" => str_field(input, &["kind"])
+            .map(ToOwned::to_owned)
+            .or_else(|| Some("react-app".to_string())),
         "AppIcon" => str_field(input, &["svg"]).map(ToOwned::to_owned),
         "Component" => input
             .get("names")
@@ -408,6 +412,7 @@ pub fn running_label(name: &str) -> String {
         "Font" => "Choix des polices…".to_string(),
         "Ornament" => "Tracé de l'ornement…".to_string(),
         "Component" => "Choix des composants…".to_string(),
+        "Starter" => "Préparation du projet et installation des bibliothèques…".to_string(),
         "AppIcon" => "Dessin des icônes de l'appli…".to_string(),
         "Photo" => "Recherche de photos libres…".to_string(),
         "LookAtImage" => "Regard sur l'image…".to_string(),

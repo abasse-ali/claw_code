@@ -1,0 +1,86 @@
+# C2. Applis en React et bibliothèques prêtes ; Claw seul avec son modèle
+
+Point d'entrée de toute session qui reprend ce chantier : ce qui a été décidé, ce qui est fait,
+ce qui reste, et comment vérifier.
+
+## La demande (28 octobre 2026)
+
+> Claw qui fait tourner un model ne demande plus aux autres models quoi que ce soit faut les
+> descriptions d'image. Et dans mettre en ligne ajoute un bouton pour « dépublier le site ».
+> Peut-être pour aider Claw ce serait avoir un maximum de bibliothèque, comme par exemple les
+> bibliothèques de Widget des codes pré configurés, Vite, NodeJS, React. Développé avec React
+> TypeScript Tailwind CSS Vite Framer Motion Node.js Express Python MySQL Redis Socket.IO Rust
+> WebAssembly.
+
+Réponses de l'utilisateur aux questions :
+
+- Autres modèles : **garder la conception et le juge** (et les descriptions d'image). Coupés :
+  la relecture finale, l'avis quand le modèle bloque, la relecture du plan, l'outil `Consult`.
+- Bibliothèques : « **je veux qu'il puisse directement les utiliser au lieu de coder à la
+  main** ».
+- Par défaut : **React + Vite** pour les applis.
+
+## Ce qui est fait
+
+1. **Autres modèles** (`claw-cli/src/models.rs`, `runtime/src/conversation.rs`, `run.py`) :
+   `CLAW_ADVISOR_MODELS=off` (aussi `none`, `non`, `aucun`, `false`, `0`) vide la liste des
+   conseillers ; `ApiClient::can_consult()` est faux sans conseiller, et aucun avis n'est demandé
+   ni annoncé. Claw Web pose `off` par défaut. Le concepteur (`CLAW_DESIGNER_MODEL`), le juge
+   visuel et le lecteur d'images restent.
+2. **« Dépublier le site »** (`claw-web/js/app.js`, `github.js`) : dans « Mettre en ligne », un
+   site en ligne a son bouton (deux appuis), `DELETE /repos/{dépôt}/pages`.
+3. **Projets de départ, outil `Starter`** (`tools/src/starters.rs`, modèles dans
+   `tools/src/starters/`) :
+   - `react-app` (par défaut) : React 19, TypeScript 7, Vite 8, Tailwind CSS 4, Framer Motion,
+     lucide-react, zustand, recharts, radix-ui, date-fns, zod, canvas-confetti, clsx, aux
+     versions figées. Le kit d'appli de Claw en composants React dans `src/kit/` (AppShell,
+     Hero, Tiles, Card, List et Row animées, Meter, BarChart, MonthsChart, Settings, MoneyInput,
+     Switch, EntrySheet, Sheet, Modal, ConfirmModal, toast avec « Annuler », données gardées
+     sur le téléphone avec zustand, copie CSV), habillé par le même `app-kit.css` que les
+     applis sans React (couche `components` de Tailwind : une classe de Tailwind l'emporte sur
+     le kit). `src/App.tsx` est un exemple qui marche (un budget du mois), sans donnée
+     inventée. Construite dans `docs/` (adresses relatives), la page que GitHub Pages publie ;
+     hors ligne par `public/sw.js`.
+   - `node-api` : Express 5, Socket.IO, cors, TypeScript lancé par tsx, tests `node:test`.
+   - `python-api` : FastAPI, WebSocket, pydantic, tests pytest, bibliothèques dans `.venv`.
+   - Les fichiers de `src/kit/` sont récrits à chaque appel ; les autres ne sont écrits que
+     s'ils manquent. L'outil installe les bibliothèques (`npm install`, ou `pip` dans `.venv`).
+   - `src/index.css` importe la feuille du concepteur (`base.css`, ou `claw-base.css`) avant
+     `src/theme.css` quand elle est là.
+4. **Construire avant de mesurer** (`tools/src/vite.rs`, `screenshot::page_url`) : la page
+   d'une appli Vite (son `index.html` qui charge `/src/…`) est construite avant chaque
+   `Screenshot`, `Browser` et `ViewPage` : bibliothèques installées s'il le faut, `npm run
+   build` quand une source est plus récente que la construction, puis la page construite
+   s'ouvre. Une erreur de construction revient au modèle avec sa cause, sans couleurs de
+   terminal ni pile d'appels.
+5. **Vérification** : `npm run typecheck` (choisi d'office par Claw après les modifications)
+   installe ce qui manque (`pretypecheck`), vérifie les types (`tsc --noEmit`), puis construit
+   (`posttypecheck`) : `docs/` est à jour à la fin du passage.
+6. **Méthode** (`runtime/src/web_design.rs`) : une appli perso se construit en React sur
+   `Starter` (`react_app_method`) ; le kit sans React reste pour une demande de « HTML simple »
+   (« sans framework », « vanilla »…) ou une appli déjà faite sans React dans le projet
+   (`kit/app-kit.js`). La note du concepteur et le rappel de `base.css` suivent le même choix.
+7. **Journal de Claw Web** : « Prépare le projet · appli React · 27 fichiers ».
+
+## Non fait, et pourquoi
+
+- **MySQL et Redis** : ni sur le PC de Claw ni sur GitHub Pages ; les serveurs de départ gardent
+  leurs données dans un fichier JSON. À ajouter quand un hébergeur avec base de données sera
+  choisi.
+- **Rust et WebAssembly** : la cible `wasm32-unknown-unknown` et `wasm-bindgen` ne sont pas sur
+  le PC ; un projet de départ sans pouvoir le construire ni le tester serait un piège.
+- **Serveurs en ligne** : GitHub Pages ne publie que des pages statiques ; `node-api` et
+  `python-api` demandent un hébergeur (Render, Railway, Fly.io, un VPS), ce que leur mode
+  d'emploi dit au modèle.
+
+## Vérifier
+
+- `cargo test -p tools --lib -- starters vite` ; l'essai de bout en bout, qui installe les
+  bibliothèques et lance le navigateur :
+  `CLAW_BROWSER=<chrome> cargo test -p tools --lib -- --ignored the_react_starter_builds_and_works_in_a_real_browser`
+  (dans un conteneur en root, un lanceur qui ajoute `--no-sandbox`). Le 28 octobre 2026 : zéro
+  défaut mesuré par la revue de Claw (téléphone et ordinateur, clair et sombre, fenêtres
+  ouvertes), parcours ajout, modification, suppression, « Annuler » et onglets réussi,
+  reconstruction après modification, erreur de construction rendue avec sa cause.
+- `cargo test -p runtime --lib -- web_design conception` pour la méthode.
+- `node-api` : `npm test` (3 tests) ; `python-api` : `.venv/bin/python -m pytest` (3 tests).

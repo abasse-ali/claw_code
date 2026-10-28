@@ -85,6 +85,8 @@ class JournalPhotosTest(unittest.TestCase):
         self.assertEqual(run.describe("Ornament", {"kind": "lines"}), "Ornement : lines")
         self.assertEqual(run.describe("Component", {"names": ["form", "dialog"]}), "Composants : form, dialog")
         self.assertEqual(run.describe("AppIcon", {"svg": "icons/icon.svg"}), "Icônes de l'appli : icons/icon.svg")
+        self.assertEqual(run.describe("Starter", {}), "Projet de départ : appli React")
+        self.assertEqual(run.describe("Starter", {"kind": "node-api"}), "Projet de départ : serveur Node")
         log = Journal()
         log.add({"type": "assistant", "message": {"content": [
             {"type": "tool_use", "name": "Icon", "input": {"names": ["wallet"]}}]}})
@@ -126,6 +128,21 @@ class JournalRequestsTest(unittest.TestCase):
         self.assertTrue(all(before <= event["at"] <= int(time.time()) for event in requests))
         # L'heure précède ce que dit la réponse : le reste du journal ne bouge pas.
         self.assertEqual([event["k"] for event in log.events], ["req", "think", "text", "tool", "req", "text"])
+
+    def test_a_starter_shows_the_files_it_wrote_not_its_guide_for_the_model(self):
+        log = Journal()
+        log.add({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Starter", "input": {"kind": "react-app"}}]}})
+        log.add({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_name": "Starter", "content": json.dumps({
+                "starter": "react-app", "written": ["package.json", "src/App.tsx"], "installed": False,
+                "install_error": "npm install failed", "guide": "React 19 + TypeScript…"})}]}})
+        entry = log.events[-1]
+        self.assertEqual(entry["i"], {"kind": "react-app"})
+        self.assertEqual(entry["r"]["count"], 2)
+        self.assertIn("Bibliothèques non installées : npm install failed", entry["r"]["out"])
+        self.assertIn("src/App.tsx", entry["r"]["out"])
+        self.assertNotIn("TypeScript", entry["r"]["out"])
 
     def test_a_call_that_never_gets_a_result_does_not_shift_the_others(self):
         log = Journal()

@@ -374,12 +374,15 @@ fn project_page(cwd: &Path, path: &Path) -> Result<PathBuf, String> {
 /// local de Claw (`http://127.0.0.1:<port>/…`, voir `local_server`), ou en
 /// `file://` s'il ne peut pas démarrer. En `file://`, le navigateur refuse à
 /// la page son manifeste, son service worker et ses modules : des erreurs que
-/// le site publié n'a pas (vu le 27 octobre 2026, session #35).
+/// le site publié n'a pas (vu le 27 octobre 2026, session #35). La page d'une
+/// appli Vite (React) est d'abord construite : c'est la page construite qui
+/// s'ouvre, celle que le site publie (voir `vite`).
 pub(crate) fn page_url(cwd: &Path, path: &Path) -> Result<String, String> {
-    let full = project_page(cwd, path)?;
+    let path = crate::vite::built_page(cwd, path)?;
+    let full = project_page(cwd, &path)?;
     match crate::local_server::url_for(cwd, &full) {
         Some(url) => Ok(url),
-        None => file_url(cwd, path),
+        None => file_url(cwd, &path),
     }
 }
 

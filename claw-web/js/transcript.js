@@ -123,6 +123,10 @@ function describe(name, input) {
     }
     case "Ornament": return ["tool", "Dessine un ornement", value.kind || raw().kind || ""];
     case "Component": return ["tool", "Prend des composants", (value.names || raw().names || []).join(", ")];
+    case "Starter": {
+      const kind = value.kind || raw().kind || "react-app";
+      return ["tool", "Prépare le projet", { "react-app": "appli React", "node-api": "serveur Node", "python-api": "serveur Python" }[kind] || kind];
+    }
     case "AppIcon": return ["image", "Crée les icônes de l'appli", value.target || ""];
     case "Screenshot": {
       // Le site publié, ou la copie de travail de la session (fichier, serveur local) : pas la
@@ -560,6 +564,7 @@ function quickSide(event) {
   if ((event.n === "bash" || event.n === "PowerShell") && result.code) return `<span class="del">${escapeHtml(result.code)}</span>`;
   if (event.n === "Screenshot" && result.found) return `<span class="del">${plural(result.found, "problème")}</span>`;
   if (event.n === "Photo" && Array.isArray(result.photos)) return plural(result.photos.length, "photo");
+  if (event.n === "Starter" && result.count) return plural(result.count, "fichier");
   return "";
 }
 

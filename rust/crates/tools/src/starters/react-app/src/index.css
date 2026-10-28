@@ -1,0 +1,20 @@
+/* Tailwind, puis le kit (dans la couche « components » : une classe de Tailwind posée sur un
+   bloc du kit l'emporte sur lui), puis les couleurs de l'appli. */
+@import "tailwindcss";
+@import "./kit/app-kit.css" layer(components);
+@import "./theme.css";
+
+/* Les jetons du kit en couleurs de Tailwind : bg-surface, text-muted, border-line, text-accent… */
+@theme inline {
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-income: var(--income);
+  --color-error: var(--error);
+  --color-warn: var(--warn);
+  --radius-card: var(--radius);
+}

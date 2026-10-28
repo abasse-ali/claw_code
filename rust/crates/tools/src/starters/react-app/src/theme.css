@@ -1,0 +1,17 @@
+/* Les couleurs de l'appli : l'accent (boutons, liens, onglet choisi) et le dégradé de la carte
+   principale (--hero-1, --hero-2, --hero-3), en clair puis en sombre. Les surfaces, l'encre et
+   les autres jetons du kit (--paper, --surface, --ink, --muted, --line, --income, --error) se
+   changent ici aussi. Rien d'autre : l'allure des blocs vient du kit. */
+
+:root {
+  --accent: #5b4bd6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --accent: #9a8cf0;
+  }
+}
+:root[data-theme="dark"] {
+  --accent: #9a8cf0;
+}

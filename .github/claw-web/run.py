@@ -213,6 +213,10 @@ def describe(name, data):
         return f"Icônes : {short(names())}"
     if name == "Ornament":
         return f"Ornement : {short(str(data.get('kind', '')))}"
+    if name == "Starter":
+        kinds = {"react-app": "appli React", "node-api": "serveur Node", "python-api": "serveur Python"}
+        kind = str(data.get("kind") or "react-app")
+        return f"Projet de départ : {kinds.get(kind, short(kind))}"
     if name == "Component":
         return f"Composants : {short(names())}"
     if name == "AppIcon":

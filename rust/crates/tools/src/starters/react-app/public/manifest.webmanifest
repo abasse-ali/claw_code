@@ -1,0 +1,10 @@
+{
+  "name": "Mon appli",
+  "short_name": "Appli",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f3ef",
+  "theme_color": "#5b4bd6",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

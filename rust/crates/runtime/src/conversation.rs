@@ -3709,12 +3709,14 @@ where
                 consultation.model
             ),
         });
+        let app = crate::web_design::is_personal_app(&brief);
         let note = crate::web_design::conception_note(
             &consultation.model,
             &plan,
             file.as_ref()
                 .map(|(name, text)| (*name, text.lines().count())),
-            crate::web_design::is_personal_app(&brief),
+            app,
+            app && crate::web_design::react_app(&brief, None, &cwd),
         );
         Some((note, file.map(|(name, text)| (cwd.join(name), text))))
     }
@@ -3746,7 +3748,12 @@ where
         self.api_client.notify(&format!(
             "{name} du modèle de conception remis en place : le modèle de la session met ses règles dans sa propre feuille"
         ));
-        notes.push(crate::web_design::design_base_restored(&name));
+        // L'appli React importe la feuille dans src/index.css : pas de <link>.
+        let react = base.parent().is_some_and(|root| {
+            std::fs::read_to_string(root.join("index.html"))
+                .is_ok_and(|html| html.contains("/src/main.tsx"))
+        });
+        notes.push(crate::web_design::design_base_restored(&name, react));
     }
 
     /// Revue du plan de design avant le code : un autre modèle juge la
@@ -8881,8 +8888,8 @@ mod tests {
         assert!(
             seen.requests[0].contains("Design conception by concepteur")
                 && seen.requests[0].contains("deep gradient balance card")
-                && seen.requests[0].contains("link kit/app-kit.css, then base.css")
-                && seen.requests[0].contains("Build the app on the app kit"),
+                && seen.requests[0].contains("src/index.css imports base.css")
+                && seen.requests[0].contains("Build the app with the Starter tool"),
             "{}",
             seen.requests[0]
         );
