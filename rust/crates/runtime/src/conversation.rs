@@ -1146,13 +1146,13 @@ pub const STOP_HOOK_PREFIX: &str = "[Hook Stop]";
 const EMPTY_RESPONSE_ERROR: &str = "le modèle n'a renvoyé aucun contenu";
 
 /// Relance unique après une réponse vide, au lieu d'échouer.
-const EMPTY_RESPONSE_NUDGE: &str = "[Claw] Your last reply was empty: no text and no tool call. A tool call written only in your reasoning is never executed. If the task is not finished, continue it now by calling the tools; otherwise give the user your final answer, in their language: what you did and what the verification showed.";
+const EMPTY_RESPONSE_NUDGE: &str = "[Claw] Your last reply was empty: no text and no tool call. A tool call written only in your reasoning is never executed. If you were about to write a long file, it did not fit in one reply: write it in parts of at most 150 lines, the first with write_file, each next one with write_file and \"append\": true. If the task is not finished, continue it now by calling the tools; otherwise give the user your final answer, in their language: what you did and what the verification showed.";
 
 /// Relance d'une réponse en texte arrêtée par la limite de sortie du modèle.
 /// Vu le 24 octobre 2026 (session #30, Nemotron 3 Ultra) : une appli entière
 /// préparée pour un seul fichier, la réponse coupée avant l'appel d'outil, et
 /// « continue » relançait le même fichier trop long.
-const CUT_REPLY_NUDGE: &str = "[Claw] Your reply was cut off by the output limit. Continue exactly where you stopped, without repeating anything you already wrote. If you were about to write a file, it does not fit in one reply: split it into several smaller files (the page, its stylesheet, its script), or Write a first part and add the rest with Edit, one call per part.";
+const CUT_REPLY_NUDGE: &str = "[Claw] Your reply was cut off by the output limit. Continue exactly where you stopped, without repeating anything you already wrote. If you were about to write a file, it does not fit in one reply: write it in parts of at most 150 lines, the first with write_file, each next one with write_file and \"append\": true.";
 
 /// Un compte rendu d'au moins cette taille est gardé quand la réponse au
 /// contrôle qui l'a suivi fait moins du tiers de sa longueur.

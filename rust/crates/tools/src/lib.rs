@@ -421,12 +421,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "write_file",
-            description: "Create a text file in the workspace, or replace the whole content of one. `content` is the complete new content of the file. To change part of an existing file, use edit_file. The whole call must fit in one reply: past about 400 lines, split the work into several files (page, stylesheet, script modules) written one call each.",
+            description: "Create a text file in the workspace, or replace the whole content of one. `content` is the complete new content of the file. To change part of an existing file, use edit_file. The whole call must fit in one reply: past about 150 lines, write the file in parts, the first with write_file, each next one with write_file and \"append\": true, which adds it at the end of the file (one call per part of at most 150 lines).",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "content": { "type": "string" }
+                    "content": { "type": "string" },
+                    "append": { "type": "boolean", "description": "true: add content at the end of the file (created if missing) instead of replacing it" }
                 },
                 "required": ["path", "content"],
                 "additionalProperties": false
@@ -1621,8 +1622,19 @@ fn run_read_file(input: ReadFileInput) -> Result<String, String> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_write_file(input: WriteFileInput) -> Result<String, String> {
-    let content = runtime::typography::without_long_dashes(&input.content);
     let before = std::fs::read_to_string(&input.path).ok();
+    // Un gros fichier écrit en plusieurs fois : chaque partie s'ajoute à la
+    // fin. Vu le 28 octobre 2026 (essai #40, Nemotron 3 Ultra) : app.js voulu
+    // en un seul appel, deux réponses vides, et le passage arrêté.
+    let appended = input.append.unwrap_or(false);
+    let whole = match (&before, appended) {
+        (Some(before), true) if !before.is_empty() => {
+            let joint = if before.ends_with('\n') { "" } else { "\n" };
+            format!("{before}{joint}{}", input.content)
+        }
+        _ => input.content.clone(),
+    };
+    let content = runtime::typography::without_long_dashes(&whole);
     let output = to_pretty_json(write_file(&input.path, &content).map_err(io_to_string)?)?;
     let output = with_dash_note(output, &input.content);
     let output = match rewrite_guard::note(Path::new(&input.path), before.as_deref(), &content) {
@@ -2129,6 +2141,9 @@ struct ReadFileInput {
 struct WriteFileInput {
     path: String,
     content: String,
+    /// La suite d'un fichier écrit en plusieurs fois : ajoutée à sa fin.
+    #[serde(default)]
+    append: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -8347,6 +8362,33 @@ Deploy $ARGUMENTS
             write_update_output["structuredPatch"],
             json!([{ "oldStart": 1, "oldLines": 3, "newStart": 1, "newLines": 3,
                      "lines": [" alpha", " beta", "-alpha", "+gamma"] }])
+        );
+
+        // Un gros fichier écrit en plusieurs fois : la suite s'ajoute à la fin
+        // (essai #40 : app.js voulu en un seul appel, réponses vides).
+        execute_tool(
+            "write_file",
+            &json!({ "path": "nested/parts.js", "content": "const a = 1;" }),
+        )
+        .expect("première partie");
+        let appended = execute_tool(
+            "write_file",
+            &json!({ "path": "nested/parts.js", "content": "const b = 2;\n", "append": true }),
+        )
+        .expect("partie ajoutée");
+        assert!(appended.contains("\"type\": \"update\""), "{appended}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("nested/parts.js")).expect("parts"),
+            "const a = 1;\nconst b = 2;\n"
+        );
+        execute_tool(
+            "write_file",
+            &json!({ "path": "nested/new.js", "content": "const c = 3;\n", "append": true }),
+        )
+        .expect("ajout à un fichier absent");
+        assert_eq!(
+            std::fs::read_to_string(root.join("nested/new.js")).expect("new"),
+            "const c = 3;\n"
         );
 
         let read_full = execute_tool("read_file", &json!({ "path": "nested/demo.txt" }))
