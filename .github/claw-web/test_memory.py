@@ -167,6 +167,21 @@ class MemoryTest(unittest.TestCase):
         memory.learn(data, [], [], "Le formulaire ne marche pas", "done", "22", today="2026-10-23")
         self.assertEqual(len(data["defects"]), 2)
 
+    def test_the_user_s_tastes_are_kept_and_shown_first(self):
+        # Vu le 28 octobre 2026 : « Sobre foncé » et « néobanque », dits une fois, oubliés ensuite.
+        data = memory.empty()
+        memory.learn(data, [], [], request="Sobre foncé", state="done", session="35", today="2026-10-27")
+        memory.learn(data, [], [], request="continue", state="done", session="36", today="2026-10-27")
+        memory.learn(data, [], [], request="Je veux une appli. Plus néobanque, avec du vert !", state="done",
+                     session="39", today="2026-10-28")
+        memory.learn(data, [], [], request="sobre foncé", state="done", session="40", today="2026-10-28")
+        self.assertEqual([item["text"] for item in data["tastes"]], ["Plus néobanque, avec du vert", "sobre foncé"])
+        text = memory.memory_text(data)
+        self.assertTrue(text.startswith("## Goûts de l'utilisateur pour ce projet"), text)
+        self.assertIn("- « sobre foncé » (session 40, le 2026-10-28)", text)
+        self.assertEqual(memory.parse(memory.render("a/b", data))["tastes"], data["tastes"])
+        self.assertEqual(memory.taste("Le site fait vieux, c'est juste moche"), "")
+
     def test_the_memory_goes_to_dot_claw_and_back_to_the_sessions_repository(self):
         folder = Path(tempfile.mkdtemp())
         data = memory.learn(memory.empty(), [("npm test", True, "")], ["- Lancer `npm test` depuis web/."],

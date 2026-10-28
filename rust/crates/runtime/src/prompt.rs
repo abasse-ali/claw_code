@@ -73,6 +73,25 @@ const MAX_LESSONS_CHARS: usize = 4_000;
 pub const MEMORY_FILE: &str = "memory.md";
 const MAX_MEMORY_CHARS: usize = 4_000;
 
+/// Les goûts de l'utilisateur gardés dans la mémoire du projet (« Sobre
+/// foncé », « néobanque ») : leur rubrique de `.claw/memory.md`, que le
+/// concepteur et le juge reçoivent avec la demande. Vu le 28 octobre 2026 :
+/// dits une fois, ils étaient oubliés à la session suivante.
+#[must_use]
+pub fn remembered_tastes(cwd: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(cwd.join(".claw").join(MEMORY_FILE)).ok()?;
+    let mut lines = text
+        .lines()
+        .skip_while(|line| !line.starts_with("## Goûts de l'utilisateur"));
+    let title = lines.next()?;
+    let items: Vec<&str> = lines
+        .take_while(|line| !line.starts_with("## "))
+        .filter(|line| line.starts_with("- "))
+        .collect();
+    (!items.is_empty())
+        .then(|| format!("{}\n{}", title.trim_start_matches("## "), items.join("\n")))
+}
+
 /// La mémoire du projet, du début (le plus utile d'abord) dans la limite du
 /// budget, en lignes entières.
 fn read_memory(cwd: &Path) -> Option<String> {
@@ -1202,6 +1221,37 @@ mod tests {
         let rendered = truncate_instruction_content(&content, 4_000);
         assert!(rendered.contains("[truncated]"));
         assert!(rendered.chars().count() <= 4_000 + "\n\n[truncated]".chars().count());
+    }
+
+    #[test]
+    fn the_user_s_tastes_in_the_project_memory_are_found() {
+        // « Sobre foncé », gardé par l'appli web dans la mémoire du dépôt : le
+        // concepteur et le juge le reçoivent avec la demande.
+        let root = temp_dir();
+        fs::create_dir_all(root.join(".claw")).expect("claw dir");
+        fs::write(
+            root.join(".claw").join(super::MEMORY_FILE),
+            "## Goûts de l'utilisateur pour ce projet (à garder, sauf demande contraire)\n- « Sobre foncé » (session 35, le 2026-10-27)\n- « Plus néobanque » (session 39, le 2026-10-28)\n## Défauts signalés par l'utilisateur\n- « moche »\n",
+        )
+        .expect("memory");
+        let tastes = super::remembered_tastes(&root).expect("goûts");
+        assert!(
+            tastes.starts_with("Goûts de l'utilisateur pour ce projet"),
+            "{tastes}"
+        );
+        assert!(tastes.contains("« Sobre foncé »") && tastes.contains("« Plus néobanque »"));
+        assert!(!tastes.contains("moche"));
+        assert_eq!(
+            crate::web_design::requested_theme(&format!("Mon budget\n{tastes}")),
+            Some("dark")
+        );
+        fs::write(
+            root.join(".claw").join(super::MEMORY_FILE),
+            "## Commandes qui ont marché\n- `npm test`\n",
+        )
+        .expect("memory");
+        assert!(super::remembered_tastes(&root).is_none());
+        fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
     #[test]

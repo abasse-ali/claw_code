@@ -418,6 +418,18 @@ fn file_stamp(path: &std::path::Path) -> Option<FileStamp> {
     Some((path.to_path_buf(), metadata.len(), metadata.modified().ok()))
 }
 
+/// La demande suivie des goûts que l'utilisateur a dits aux sessions d'avant
+/// (mémoire du projet), pour le concepteur, le juge et le thème des captures.
+fn with_remembered_tastes(text: String) -> String {
+    match std::env::current_dir()
+        .ok()
+        .and_then(|cwd| crate::prompt::remembered_tastes(&cwd))
+    {
+        Some(tastes) => format!("{text}\n\n{tastes}"),
+        None => text,
+    }
+}
+
 /// Aides au raisonnement, le temps d'un tour.
 // Des états indépendants les uns des autres, pas une machine à états.
 #[allow(clippy::struct_excessive_bools)]
@@ -2055,7 +2067,8 @@ where
                 .as_deref()
                 .is_some_and(crate::web_design::is_interface_request);
         if interface_turn && !aids.work_question {
-            let words = crate::project::user_words_with_history(&request_text);
+            let words =
+                with_remembered_tastes(crate::project::user_words_with_history(&request_text));
             aids.shared_request = crate::web_design::shared_between_people(&words);
             aids.page_theme = crate::web_design::requested_theme(&words);
             aids.figures = crate::web_design::request_figures(&words);
@@ -3674,10 +3687,10 @@ where
         if !asked && (crate::web_design::has_interface_page(&cwd) || ours == Some(true)) {
             return None;
         }
-        let brief = match earlier {
+        let brief = with_remembered_tastes(match earlier {
             Some(earlier) => format!("{earlier}\n{request}"),
             None => request.to_string(),
-        };
+        });
         let dark = crate::web_design::requested_theme(&brief) == Some("dark");
         let consultation = self.api_client.design_conception(
             crate::web_design::DESIGNER_SYSTEM,
@@ -3834,12 +3847,12 @@ where
             return None;
         }
         // Une relance courte (« continue ») se juge avec la demande qu'elle poursuit.
-        let brief = match earlier {
+        let brief = with_remembered_tastes(match earlier {
             Some(earlier) if request.split_whitespace().count() <= 12 => {
                 format!("{earlier}\n{request}")
             }
             _ => request.to_string(),
-        };
+        });
         self.api_client
             .notify("Revue du plan de design par un autre modèle, avant le code…");
         let consultation = self.api_client.consult(
@@ -4466,16 +4479,14 @@ where
             return None;
         }
         let audit = crate::web_design::read_audit(output);
-        // Une relance courte (« plus coloré ») se juge avec la demande qu'elle poursuit.
-        let brief = match earlier {
+        // Une relance courte (« plus coloré ») se juge avec la demande qu'elle
+        // poursuit, et avec les goûts que l'utilisateur a dits aux sessions d'avant.
+        let brief = with_remembered_tastes(match earlier {
             Some(earlier) if request.split_whitespace().count() <= 12 => {
-                format!(
-                    "{earlier}
-{request}"
-                )
+                format!("{earlier}\n{request}")
             }
             _ => request.to_string(),
-        };
+        });
         let bar = crate::web_design::design_bar();
         // Une demande de corrections se juge sur ce qui est mesuré (défauts,
         // régressions) : pas de note de design à atteindre. Vu le 26 octobre

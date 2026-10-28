@@ -29,6 +29,7 @@ MAX_WORKED = 12
 MAX_ERRORS = 12
 MAX_REQUESTS = 8
 MAX_DEFECTS = 8
+MAX_TASTES = 6
 # Échecs d'affilée d'une même commande dans un passage : au-delà, l'agent tournait en rond.
 STUCK_AFTER = 3
 WRITE_TOOLS = {"write_file", "edit_file", "MultiEdit", "NotebookEdit", "apply_patch", "move_file",
@@ -41,6 +42,14 @@ COMPLAINTS = (
     "rien ne", "manque", "y'a pas", "y a pas", "il n'y a pas", "plante", "bloque", "doesn't work",
     "not working", "broken", "wrong", "still",
 )
+# Un message de l'utilisateur qui dit un goût de style (sans accents, en minuscules) : gardé
+# d'une session à l'autre, pour le concepteur et le juge. Vu le 28 octobre 2026 : « sobre
+# foncé » et « néobanque », dits une fois, oubliés à la session suivante.
+TASTES = re.compile(
+    r"\b(sombre|fonce|foncee|dark|clair|claire|sobre|neobanque|revolut|lydia|minimal\w*|epure\w*|"
+    r"colore\w*|pastel\w*|moderne|elegant\w*|luxe|ludique|retro|vintage|flashy|chaleureu\w*|"
+    r"degrade\w*|arrondi\w*|bleu\w*|vert|verte|violet\w*|rose|orange|rouge|noir\w*|jaune|beige|"
+    r"police|typo\w*|serif|style)\b")
 # Mots qui ne disent pas de quoi on parle, pour rapprocher deux plaintes.
 STOP_WORDS = {
     "encore", "toujours", "trop", "tres", "plus", "moins", "c'est", "cest", "elle", "elles", "ils",
@@ -76,7 +85,7 @@ def path_of(repo):
 
 
 def empty():
-    return {"v": VERSION, "lessons": [], "worked": [], "errors": [], "requests": [], "defects": []}
+    return {"v": VERSION, "lessons": [], "worked": [], "errors": [], "requests": [], "defects": [], "tastes": []}
 
 
 def parse(text):
@@ -91,7 +100,7 @@ def parse(text):
         return data
     if not isinstance(stored, dict):
         return data
-    for key in ("lessons", "worked", "errors", "requests", "defects"):
+    for key in ("lessons", "worked", "errors", "requests", "defects", "tastes"):
         value = stored.get(key)
         if isinstance(value, list):
             data[key] = [item for item in value if isinstance(item, (dict if key != "lessons" else str))]
@@ -116,6 +125,10 @@ def memory_text(data):
     """Ce que Claw a relevé lui-même, pour l'agent (`.claw/memory.md`) : les défauts que
     l'utilisateur a signalés, puis les erreurs et ce qui les a réglées, puis ce qui marche."""
     parts = []
+    if data.get("tastes"):
+        parts.append("## Goûts de l'utilisateur pour ce projet (à garder, sauf demande contraire)")
+        for item in data["tastes"]:
+            parts.append(f"- « {item.get('text', '')} » (session {item.get('session', '?')}, le {item.get('last', '?')})")
     if data.get("defects"):
         parts.append("## Défauts signalés par l'utilisateur")
         for item in data["defects"]:
@@ -405,6 +418,21 @@ def _remember_defect(data, request, session, files, today):
     data["defects"] = defects[-MAX_DEFECTS:]
 
 
+def taste(request):
+    """Les phrases du message qui disent un goût de style (« Sobre foncé », « plus néobanque »),
+    en une ligne ; vide s'il n'y en a pas."""
+    sentences = [part.strip() for part in re.split(r"[.!?\n]+", str(request or "")) if part.strip()]
+    kept = [sentence for sentence in sentences if TASTES.search(fold(sentence))]
+    return one_line(" ; ".join(kept), 140)
+
+
+def _remember_taste(data, text, session, today):
+    """Range un goût de l'utilisateur, le plus récent en dernier ; le même redit remonte."""
+    tastes = [item for item in data.setdefault("tastes", []) if fold(item.get("text", "")) != fold(text)]
+    tastes.append({"text": text, "session": str(session), "last": today})
+    data["tastes"] = tastes[-MAX_TASTES:]
+
+
 def learn(data, runs, new_lessons, request="", state="", session="", today=None, files=None):
     """Ajoute à la mémoire ce que ce passage a appris (sur place) et la rend : les leçons, les
     erreurs et ce qui les a réglées, les commandes sur lesquelles l'agent a tourné en rond, ce
@@ -461,6 +489,9 @@ def learn(data, runs, new_lessons, request="", state="", session="", today=None,
         data["requests"] = data["requests"][-MAX_REQUESTS:]
         if complains(request):
             _remember_defect(data, request, session, files, today)
+        liked = taste(request)
+        if liked:
+            _remember_taste(data, liked, session, today)
     return data
 
 
