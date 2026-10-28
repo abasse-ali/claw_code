@@ -4337,7 +4337,7 @@ mod tests {
         }
         std::fs::write(
             dir.join("index.html"),
-            format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Budget</title><style>body {{ margin: 0; font: 16px/1.5 sans-serif; color: #1f1d1a; background: #f5f3f0; }} .frame {{ overflow-x: hidden; }} main {{ padding: 16px; }} .ops {{ margin: 0 -16px; padding: 0; list-style: none; }} .op {{ display: flex; align-items: center; gap: 12px; padding: 8px 0; }} .what {{ display: flex; gap: 0; }} .card {{ width: 300px; padding: 12px; border-radius: 12px; background: #ffffff; }} .card input {{ width: 340px; font: inherit; padding: 8px; }} .head {{ display: flex; align-items: center; justify-content: space-between; width: 230px; }} .head h2 {{ margin: 0; font-size: 26px; }} .head a {{ color: #8a3b12; }}</style></head><body><div class=\"frame\"><main><h1>Mon budget</h1><div class=\"head\"><h2>Dernières opérations</h2><a href=\"#ops\">Voir tout</a></div><ul class=\"ops\" id=\"ops\"><li class=\"op\"><span class=\"date\">28 oct.</span><span class=\"what\"><strong>Alimentaire</strong><span class=\"amount\">-100,00 €</span></span></li></ul><p>Total du mois : 1 235,15 €</p><div class=\"card\"><label for=\"salaire\">Salaire</label><input id=\"salaire\" value=\"1235.15\"></div><svg width=\"300\" height=\"120\" viewBox=\"0 0 300 120\" role=\"img\" aria-label=\"Rentrées des 12 derniers mois\"><rect x=\"10\" y=\"20\" width=\"8\" height=\"70\" fill=\"#2f7d4f\"/>{labels}</svg><details><summary>Détail par mois</summary><table><tr><th>Mois</th><td>0,00 €</td></tr></table></details></main></div></body></html>"),
+            format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Budget</title><style>body {{ margin: 0; font: 16px/1.5 sans-serif; color: #1f1d1a; background: #f5f3f0; }} .frame {{ overflow-x: hidden; }} main {{ padding: 16px; }} .ops {{ margin: 0 -16px; padding: 0; list-style: none; }} .op {{ display: flex; align-items: center; gap: 12px; padding: 8px 0; }} .what {{ display: flex; gap: 0; }} .card {{ width: 300px; padding: 12px; border-radius: 12px; background: #ffffff; }} .card input {{ width: 340px; font: inherit; padding: 8px; }} .head {{ display: flex; align-items: center; justify-content: space-between; width: 230px; }} .head h2 {{ margin: 0; font-size: 26px; }} .head a {{ color: #8a3b12; }}</style></head><body><div class=\"frame\"><main><h1>Mon budget</h1><div class=\"head\"><h2>Dernières opérations</h2><a href=\"#ops\">Voir tout</a></div><ul class=\"ops\" id=\"ops\"><li class=\"op\"><span class=\"date\">28 oct.</span><span class=\"what\"><strong>Alimentaire</strong><span class=\"amount\">-100,00 €</span></span></li></ul><p>Total du mois : 1 235,15 €</p><p>CAF : +103 € à 206 € €</p><p>Claude : 21,6 €</p><div class=\"card\"><label for=\"salaire\">Salaire</label><input id=\"salaire\" value=\"1235.15\"></div><svg width=\"300\" height=\"120\" viewBox=\"0 0 300 120\" role=\"img\" aria-label=\"Rentrées des 12 derniers mois\"><rect x=\"10\" y=\"20\" width=\"8\" height=\"70\" fill=\"#2f7d4f\"/>{labels}</svg><details><summary>Détail par mois</summary><table><tr><th>Mois</th><td>0,00 €</td></tr></table></details></main></div></body></html>"),
         )
         .expect("html");
         let mut request = input(None, Some(&format!("{name}/index.html")));
@@ -4368,6 +4368,17 @@ mod tests {
                 && page.contains("1235.15"),
             "{page}"
         );
+        // Session #39 : l'unité deux fois, un seul chiffre après la virgule.
+        assert!(
+            page.contains("Amounts with their currency written twice") && page.contains("206 € €"),
+            "{page}"
+        );
+        assert!(
+            page.contains("Amounts with a single digit after the decimal mark")
+                && page.contains("21,6 €"),
+            "{page}"
+        );
+        assert!(!page.contains("\"1 235,15 €\""), "{page}");
         // Le tableau du <details> fermé : rien de dit sur lui.
         assert!(!page.contains("drawn on top of each other"), "{page}");
         assert!(!page.contains("\\\"Mois\\\""), "{page}");

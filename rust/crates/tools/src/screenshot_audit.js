@@ -1144,6 +1144,32 @@
     }
   }
 
+  // 16g. Montants mal écrits : l'unité deux fois (« 206 € € »), ou un seul
+  // chiffre après la virgule (« 589,6 € »). Vu le 28 octobre 2026 (session
+  // #39) : les fourchettes « +103 € à 206 € € », les charges à « 21,6 € ».
+  const doubledUnit = [];
+  const oneDecimal = [];
+  {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const parent = node.parentElement;
+      if (!parent || parent.closest("script, style, code, pre, kbd, samp, svg") || !shown(parent)) continue;
+      const text = (parent.innerText || node.textContent).replace(/\s+/g, " ");
+      const doubled = text.match(/\d[\d\s,.]*\s?([€$£])\s?\1(?![\w])/);
+      if (doubled && doubledUnit.length < 4 && !doubledUnit.some((item) => item.el.contains(parent) || parent.contains(item.el))) doubledUnit.push({ el: parent, value: doubled[0].trim() });
+      const single = node.textContent.match(/(?<![\d,.])\d{1,3}(?:[\s  ]\d{3})*[,.]\d(?!\d)\s?[€$£]|[€$£]\s?\d{1,3}(?:,\d{3})*\.\d(?!\d)/);
+      if (single && oneDecimal.length < 4) oneDecimal.push({ el: parent, value: single[0].trim() });
+    }
+  }
+  if (doubledUnit.length) {
+    blame(doubledUnit.map(({ el }) => el));
+    problems.push(`Amounts with their currency written twice: ${list(doubledUnit.map(({ el, value }) => `"${value}" in ${name(el)}`), 3)}. The formatted amount already carries its unit: do not add another one after it (a range reads "103 à 206 €")`);
+  }
+  if (oneDecimal.length) {
+    blame(oneDecimal.map(({ el }) => el));
+    problems.push(`Amounts with a single digit after the decimal mark: ${list(oneDecimal.map(({ el, value }) => `"${value}" in ${name(el)}`), 3)}. Write cents with two digits (21,60 €) or none for a whole amount (450 €): format every amount with Intl.NumberFormat, not by hand`);
+  }
+
   // 17. Icône dessinée en géant : un <svg> sans taille remplit son conteneur
   // (cinq étoiles d'avis devenues larges comme la page). Une icône se
   // reconnaît à son système de coordonnées (une viewBox de 64 unités au plus,
