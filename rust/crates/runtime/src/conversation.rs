@@ -487,6 +487,9 @@ struct TurnAids {
     /// Changements demandés par la dernière revue visuelle : la suivante les
     /// voit et ne demande pas leur contraire.
     judge_asked: Option<String>,
+    /// Barre de la revue de ce tour (celle d'une appli perso ou d'un site),
+    /// fixée à la première revue.
+    design_bar: Option<u8>,
     /// Règles des défauts mesurés sur la page avant le premier changement du
     /// tour (`web_design::problem_key`) : les revues nomment ceux que le tour
     /// a introduits.
@@ -3694,7 +3697,12 @@ where
         let dark = crate::web_design::requested_theme(&brief) == Some("dark");
         let consultation = self.api_client.design_conception(
             crate::web_design::DESIGNER_SYSTEM,
-            &crate::web_design::designer_prompt(&brief, dark, &[], crate::web_design::design_bar()),
+            &crate::web_design::designer_prompt(
+                &brief,
+                dark,
+                &[],
+                crate::web_design::bar_for(&brief),
+            ),
         )?;
         let (plan, css) = crate::web_design::parse_conception(&consultation.text)?;
         let file = css.and_then(|css| {
@@ -3861,7 +3869,7 @@ where
             &crate::web_design::plan_critique_prompt(
                 &brief,
                 &plan,
-                crate::web_design::design_bar(),
+                crate::web_design::bar_for(&brief),
             ),
         )?;
         if let Some(changes) = crate::web_design::plan_changes(&consultation.text) {
@@ -4487,7 +4495,8 @@ where
             }
             _ => request.to_string(),
         });
-        let bar = crate::web_design::design_bar();
+        let bar = crate::web_design::bar_for(&brief);
+        aids.design_bar = Some(bar);
         // Une demande de corrections se juge sur ce qui est mesuré (défauts,
         // régressions) : pas de note de design à atteindre. Vu le 26 octobre
         // 2026 (session #31, passage 4) : 89 minutes après une première
@@ -4687,7 +4696,9 @@ where
             max,
             free_left,
         );
-        let bar = crate::web_design::design_bar();
+        let bar = aids
+            .design_bar
+            .unwrap_or_else(crate::web_design::design_bar);
         let trail = crate::web_design::score_trail(&aids.graded);
         if decision == crate::web_design::Continuation::Continue {
             aids.continuations += 1;
@@ -4738,7 +4749,9 @@ where
         if self.subagent || interrupt_requested() || !harness::enabled(Aid::DesignReview) {
             return false;
         }
-        let bar = crate::web_design::design_bar();
+        let bar = aids
+            .design_bar
+            .unwrap_or_else(crate::web_design::design_bar);
         let Some(&last) = aids.function_scores.last() else {
             return false;
         };

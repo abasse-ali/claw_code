@@ -555,6 +555,32 @@ def agent_env(environ, mock=False):
     return env
 
 
+def app_design_bar(token, call=api):
+    """La barre de la revue d'une appli perso : la note du kit d'appli seul dans la dernière jauge
+    du juge (jauge/<n>.json de la branche des fichiers, écrite par jauge.py), arrondie, entre 5 et
+    8 ; None sans jauge. Vu le 28 octobre 2026 (jauge-1) : le juge gratuit notait 6,9 le kit seul,
+    et la barre à 8 faisait tourner la revue jusqu'au bout du temps."""
+    try:
+        listing = call("GET", f"/repos/{ENGINE}/contents/jauge?ref={FILES_BRANCH}", token)
+    except GitHubError:
+        return None
+    latest = None
+    for entry in listing if isinstance(listing, list) else []:
+        name = str(entry.get("name") or "")
+        if not name.endswith(".json"):
+            continue
+        try:
+            found = call("GET", f"/repos/{ENGINE}/contents/jauge/{name}?ref={FILES_BRANCH}", token)
+            data = json.loads(base64.b64decode(found.get("content") or "").decode("utf-8"))
+        except (GitHubError, ValueError, TypeError):
+            continue
+        kit = next((result for result in data.get("results") or []
+                    if result.get("page") == "kit" and isinstance(result.get("mean"), (int, float))), None)
+        if kit and (latest is None or data.get("at", 0) > latest[0]):
+            latest = (data.get("at", 0), kit["mean"])
+    return None if latest is None else max(5, min(8, round(latest[1])))
+
+
 def translator(environ):
     """Le traducteur des problèmes des captures, avec la clé de NVIDIA du moteur ; None sans
     elle (l'appli montre alors l'anglais)."""
@@ -593,6 +619,10 @@ def main():
     # langue des réponses est fixée (annonces, étapes, réponse finale).
     env.setdefault("CLAW_LANGUAGE", "français")
     model_settings(env, mock=MODEL == "mock")
+    bar = None if MODEL == "mock" else app_design_bar(JOB_TOKEN)
+    if bar:
+        env["CLAW_APP_DESIGN_BAR"] = str(bar)
+        print(f"Barre d'une appli perso : {bar}/10 (la note du kit seul dans la dernière jauge du juge)", flush=True)
     # `claw-github` : l'agent demande une fusion ou une mise en ligne, faite après la poussée
     # par publish.py avec le jeton du dépôt (claw_github.py n'en a aucun).
     tools = WORK / "bin"

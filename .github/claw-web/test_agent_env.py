@@ -31,6 +31,31 @@ class AgentEnvTest(unittest.TestCase):
             self.assertNotIn(token, env)
         self.assertEqual(env["PATH"], "/usr/bin")
 
+    def test_the_app_bar_is_the_kit_s_score_in_the_latest_gauge(self):
+        import base64
+        import json
+
+        files = {
+            "jauge-1.json": {"at": 100, "results": [{"page": "kit", "mean": 6.857}, {"page": "claw39", "mean": 7.7}]},
+            "jauge-2.json": {"at": 50, "results": [{"page": "kit", "mean": 8.9}]},
+            "notes.md": {},
+        }
+
+        def call(method, path, token):
+            if path.endswith("/contents/jauge?ref=claw-web-fichiers"):
+                return [{"name": name} for name in files]
+            name = path.split("/contents/jauge/")[1].split("?")[0]
+            return {"content": base64.b64encode(json.dumps(files[name]).encode()).decode()}
+
+        self.assertEqual(run.app_design_bar("t", call), 7)
+        files["jauge-3.json"] = {"at": 200, "results": [{"page": "kit", "mean": 9.6}]}
+        self.assertEqual(run.app_design_bar("t", call), 8)
+
+        def missing(*_):
+            raise run.GitHubError(404, "absent")
+
+        self.assertIsNone(run.app_design_bar("t", missing))
+
     def test_claw_concludes_twelve_minutes_before_the_job_is_cut(self):
         # Job parti à 1 000 000 : coupé à 120 minutes, Claw conclut à 108.
         self.assertEqual(run.deadline({"CLAW_JOB_STARTED": "1000000"}), str(1_000_000 + 108 * 60))

@@ -59,6 +59,36 @@ pub fn design_bar() -> u8 {
         .clamp(5, 10)
 }
 
+/// Barre d'une appli perso quand aucune jauge n'en donne : la note du kit
+/// seul avec le juge gratuit du 28 octobre 2026 (Nemotron VL, 6,9).
+const DEFAULT_APP_DESIGN_BAR: u8 = 7;
+
+/// Exigence de la revue d'une appli perso : la note du kit d'appli seul avec
+/// le juge du moment (`CLAW_APP_DESIGN_BAR`, tirée de la dernière jauge par
+/// le moteur de Claw Web), jamais au-dessus de la barre d'un site. Vu le
+/// 28 octobre 2026 (jauge-1) : le juge notait 6,9 le kit seul et 7,7 l'appli
+/// de l'essai #39 ; à 8, la revue ne finissait qu'au bout du temps.
+#[must_use]
+pub fn app_design_bar() -> u8 {
+    std::env::var("CLAW_APP_DESIGN_BAR")
+        .ok()
+        .and_then(|value| value.trim().parse::<u8>().ok())
+        .unwrap_or(DEFAULT_APP_DESIGN_BAR)
+        .clamp(5, 10)
+        .min(design_bar())
+}
+
+/// La barre de la revue pour cette demande : celle d'une appli perso, ou
+/// celle d'un site.
+#[must_use]
+pub fn bar_for(request: &str) -> u8 {
+    if is_personal_app(request) {
+        app_design_bar()
+    } else {
+        design_bar()
+    }
+}
+
 /// Poursuites au plus d'un tour de design resté sous la barre
 /// (`CLAW_DESIGN_CONTINUE`, 0 les coupe).
 const DEFAULT_CONTINUATIONS: usize = 2;
@@ -1195,7 +1225,7 @@ pub fn design_guide(request: &str, earlier: Option<&str>) -> Option<String> {
     let app = app_request(request, earlier);
     interface.then(|| {
         let method = if app {
-            app_method(design_bar())
+            app_method(app_design_bar())
         } else {
             design_method(design_bar())
         };
@@ -3713,6 +3743,14 @@ mod tests {
         assert!(critique_scores("No scores here").is_empty());
         // La barre, le seuil de la revue anticipée et la méthode.
         assert_eq!(design_bar(), 8);
+        // Une appli perso : la note du kit seul avec le juge (7 par défaut),
+        // jamais au-dessus de celle d'un site.
+        assert_eq!(super::app_design_bar(), 7);
+        assert_eq!(
+            super::bar_for("Je veux une appli web perso de budget sur téléphone"),
+            7
+        );
+        assert_eq!(super::bar_for("Crée le site vitrine de ma boulangerie"), 8);
         assert_eq!(super::early_review_at(100), 60);
         assert_eq!(super::early_review_at(40), 24);
         assert_eq!(super::early_review_at(10), 12);
