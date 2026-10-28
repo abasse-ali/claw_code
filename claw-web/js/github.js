@@ -426,6 +426,11 @@ export class GitHub {
     return this.request("POST", `/repos/${repo}/pages`, source);
   }
 
+  /** Retire le site de GitHub Pages : l'adresse ne répond plus, le dépôt et ses branches restent. */
+  unpublishPages(repo) {
+    return this.request("DELETE", `/repos/${repo}/pages`);
+  }
+
   /** Le fichier existe-t-il sur cette branche ? */
   async fileExists(repo, path, ref) {
     try {

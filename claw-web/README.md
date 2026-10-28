@@ -418,7 +418,9 @@ sur l'exécuteur `claw-pc` à processeur ARM, et le site y reste en ligne après
 - « Mettre en ligne » : publie un site statique sur GitHub Pages (dossier `docs/` ou racine),
   depuis la branche de la session telle quelle. Sur un compte
   GitHub gratuit, GitHub Pages ne publie que les dépôts publics : l'appli le signale et propose
-  de rendre le dépôt public. Claw (l'agent) n'a aucun jeton GitHub : il agit sur GitHub par les
+  de rendre le dépôt public. Un site déjà en ligne a son bouton « Dépublier le site » (deux
+  appuis) : il quitte GitHub Pages, son adresse ne répond plus, le code et les branches restent.
+  Claw (l'agent) n'a aucun jeton GitHub : il agit sur GitHub par les
   outils du moteur (« Outils MCP »), et demande la fusion ou la mise en ligne de la session à
   `claw-github`, fait après la poussée.
 
