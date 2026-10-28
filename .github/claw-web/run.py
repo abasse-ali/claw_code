@@ -531,13 +531,23 @@ def start_mcp(env):
 DESIGNER_MODELS = "nvidia:z-ai/glm-5.3,gemini:gemini-3.6-flash,nvidia:minimaxai/minimax-m3.1-flash"
 
 
+def other_models_allowed(env):
+    """D'autres modèles que celui de la session peuvent-ils être consultés ? Non par défaut :
+    seule la description des images leur reste (demandé le 28 octobre 2026 : « Ne demande plus
+    aux autres modèles quoi que ce soit sauf les descriptions d'image »). CLAW_OTHER_MODELS=all
+    (variable du dépôt des sessions) les rouvre, pour Claw comme pour le moteur."""
+    return str(env.get("CLAW_OTHER_MODELS") or "").strip().lower() in ("all", "tous", "on", "true", "1")
+
+
 def model_settings(env, mock=False):
-    """Réglages des modèles donnés à Claw, sauf ceux que l'environnement fixe déjà. Le faux
-    modèle n'appelle aucun modèle de conception."""
+    """Réglages des modèles donnés à Claw, sauf ceux que l'environnement fixe déjà. Un seul
+    modèle travaille : pas de modèle de conception sans CLAW_OTHER_MODELS=all. Le faux modèle
+    n'appelle aucun modèle de conception."""
     if mock:
         env["CLAW_DESIGNER_MODEL"] = "off"
         return env
-    env.setdefault("CLAW_DESIGNER_MODEL", DESIGNER_MODELS)
+    env.setdefault("CLAW_OTHER_MODELS", "images")
+    env.setdefault("CLAW_DESIGNER_MODEL", DESIGNER_MODELS if other_models_allowed(env) else "off")
     # Ni escalade, ni tour de design confié à un autre modèle (`designModel` du poste).
     env.setdefault("CLAW_ESCALATION_MODEL", "off")
     env.setdefault("CLAW_DESIGN_MODEL", "off")
@@ -581,13 +591,20 @@ def app_design_bar(token, call=api):
     return None if latest is None else max(5, min(8, round(latest[1])))
 
 
-def translator(environ):
-    """Le traducteur des problèmes des captures, avec la clé de NVIDIA du moteur ; None sans
-    elle (l'appli montre alors l'anglais)."""
+def translator(environ, model=None):
+    """Le traducteur des problèmes des captures, avec la clé de NVIDIA du moteur : le modèle de
+    la session quand NVIDIA le sert, puisqu'aucun autre modèle n'est consulté (le petit modèle de
+    NVIDIA, CLAW_TRANSLATE_MODEL, seulement avec CLAW_OTHER_MODELS=all). None sinon : l'appli
+    montre alors l'anglais."""
+    model = MODEL if model is None else model
     key = str(environ.get("NVIDIA_API_KEY") or "").strip()
-    if not key or MODEL == "mock":
+    if not key or model == "mock":
         return None
-    return Translator(key, environ.get("CLAW_TRANSLATE_MODEL") or None)
+    if other_models_allowed(environ):
+        return Translator(key, environ.get("CLAW_TRANSLATE_MODEL") or None)
+    if not model.startswith("nvidia:"):
+        return None
+    return Translator(key, model.split(":", 1)[1])
 
 
 # Le job `task` du workflow est coupé à 120 minutes ; Claw conclut 12 minutes avant (la

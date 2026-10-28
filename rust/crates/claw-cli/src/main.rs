@@ -2658,6 +2658,10 @@ fn filter_tool_specs(
     // Photos libres : coupées par `CLAW_PHOTOS=0`.
     let photos = runtime::harness::enabled(runtime::harness::Aid::Photos);
     definitions.retain(|definition| definition.name != "Photo" || photos);
+    // Le second avis vient d'autres modèles : sans eux (`otherModels`), l'outil
+    // n'est pas proposé.
+    let others = models::other_models_allowed();
+    definitions.retain(|definition| definition.name != "Consult" || others);
     if allowed_tools.is_some() || !runtime::harness::enabled(runtime::harness::Aid::ToolDiet) {
         return definitions;
     }
@@ -9592,11 +9596,14 @@ impl DefaultRuntimeClient {
                     .as_ref()
                     .and_then(|config| config.small_model().map(ToOwned::to_owned))
             });
-        let summary_chain = small_model.map(|small| {
-            let mut models = vec![resolve_model_alias(&small)];
-            models.extend(chain_models.iter().cloned());
-            api::ModelChain::new(models, cli_client_factory())
-        });
+        // Le petit modèle des résumés est un autre modèle : `otherModels`.
+        let summary_chain = small_model
+            .filter(|_| models::other_models_allowed())
+            .map(|small| {
+                let mut models = vec![resolve_model_alias(&small)];
+                models.extend(chain_models.iter().cloned());
+                api::ModelChain::new(models, cli_client_factory())
+            });
         Ok(Self {
             runtime: tokio::runtime::Runtime::new()?,
             chain: api::ModelChain::new(chain_models, cli_client_factory()),
@@ -9660,10 +9667,17 @@ impl DefaultRuntimeClient {
             return None;
         }
         if self.emit_output {
-            live::show(match purpose {
-                runtime::ConsultPurpose::Review => "Relecture par un autre modèle…",
-                runtime::ConsultPurpose::Design => "Relecture du plan par un autre modèle…",
-                runtime::ConsultPurpose::Unblock => "Diagnostic par un autre modèle…",
+            let own = models.len() == 1 && models[0] == self.chain.primary();
+            live::show(match (purpose, own) {
+                (runtime::ConsultPurpose::Review, true) => {
+                    "Relecture par le modèle de la session, dans une conversation neuve…"
+                }
+                (runtime::ConsultPurpose::Unblock, true) => {
+                    "Diagnostic par le modèle de la session, dans une conversation neuve…"
+                }
+                (runtime::ConsultPurpose::Review, _) => "Relecture par un autre modèle…",
+                (runtime::ConsultPurpose::Design, _) => "Relecture du plan par un autre modèle…",
+                (runtime::ConsultPurpose::Unblock, _) => "Diagnostic par un autre modèle…",
             });
         }
         // La relecture clôt le tour : elle a le temps et la place de finir.
@@ -9951,6 +9965,11 @@ impl ApiClient for DefaultRuntimeClient {
             .collect()
     }
 
+    /// Le juge des captures est un autre modèle : coupé avec `otherModels`.
+    fn critiques_design(&mut self) -> bool {
+        models::other_models_allowed()
+    }
+
     /// Critique de design : les captures jugées par un modèle gratuit qui lit
     /// les images (le lecteur d'images de Claw).
     fn critique_design(
@@ -9959,6 +9978,9 @@ impl ApiClient for DefaultRuntimeClient {
         prompt: &str,
         images: &[runtime::attachments::ImageAttachment],
     ) -> Option<runtime::Consultation> {
+        if !self.critiques_design() {
+            return None;
+        }
         let sources: Vec<api::ImageSource> = images
             .iter()
             .map(|image| api::ImageSource::base64(image.media_type.clone(), image.data.clone()))
@@ -9991,6 +10013,16 @@ impl ApiClient for DefaultRuntimeClient {
         system: &str,
         prompt: &str,
     ) -> Option<runtime::Consultation> {
+        // Sans autre modèle (`otherModels`) : la relecture et le diagnostic par
+        // le modèle de la session, dans une conversation neuve ; la relecture
+        // du plan, qu'il vient d'écrire lui-même, n'apprendrait rien.
+        if !models::other_models_allowed() {
+            if purpose == runtime::ConsultPurpose::Design {
+                return None;
+            }
+            let own = vec![self.chain.primary().to_string()];
+            return self.consult_models(purpose, system, prompt, &own);
+        }
         let models = tools::advisors::configured_models();
         self.consult_models(purpose, system, prompt, &models)
     }
@@ -10002,6 +10034,10 @@ impl ApiClient for DefaultRuntimeClient {
         prompt: &str,
         excluded: &str,
     ) -> Option<runtime::Consultation> {
+        // Un second relecteur serait un autre modèle.
+        if !models::other_models_allowed() {
+            return None;
+        }
         let models = tools::advisors::configured_models()
             .into_iter()
             .filter(|model| model != excluded)
@@ -10154,6 +10190,10 @@ impl ApiClient for DefaultRuntimeClient {
     }
 
     fn team_model(&mut self, role: runtime::team::Role) -> Option<String> {
+        // Les membres de l'équipe sont d'autres modèles : `otherModels`.
+        if !models::other_models_allowed() {
+            return None;
+        }
         let avoid = self
             .team_coder
             .as_deref()
@@ -12692,6 +12732,23 @@ mod tests {
             .map(|spec| spec.name)
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["read_file", "grep_search"]);
+    }
+
+    #[test]
+    fn the_second_opinion_tool_is_not_offered_without_other_models() {
+        let names = |allowed: Option<&super::AllowedToolSet>| {
+            filter_tool_specs(&GlobalToolRegistry::builtin(), allowed)
+                .into_iter()
+                .map(|definition| definition.name)
+                .collect::<Vec<_>>()
+        };
+        assert!(!names(None).contains(&"Consult".to_string()));
+        // Même demandé par son nom (`--allowedTools`).
+        let allowed = ["read_file", "Consult"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(names(Some(&allowed)), ["read_file"]);
     }
 
     #[test]

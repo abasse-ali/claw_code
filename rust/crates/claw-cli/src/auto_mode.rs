@@ -510,13 +510,17 @@ pub fn review(tool: &str, input: &str) -> (Review, bool) {
     }
     let _ = write!(prompt, "\nACTION\n{action}\n");
     let mut models = Vec::new();
-    if let Some(model) = rules.model.clone() {
+    // Le juge du mode auto et le petit modèle sont d'autres modèles : sans
+    // eux (`otherModels`), le modèle de la session juge seul.
+    let others = crate::models::other_models_allowed();
+    if let Some(model) = rules.model.clone().filter(|_| others) {
         models.push(model);
     }
     if let Some(small) = runtime::ConfigLoader::default_for(&cwd)
         .load()
         .ok()
         .and_then(|config| config.small_model().map(str::to_string))
+        .filter(|_| others)
     {
         models.push(small);
     }

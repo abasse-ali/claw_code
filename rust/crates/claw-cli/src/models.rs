@@ -205,9 +205,42 @@ fn scored_free_models(
     scored
 }
 
+/// D'autres modèles que celui de la session peuvent-ils être consultés ? Non
+/// par défaut (réglage `otherModels` : « images ») : seule la description des
+/// images (lecteur d'images, outil `LookAtImage`) reste confiée à un modèle
+/// qui les lit ; la relecture et le diagnostic se font par le modèle de la
+/// session, dans une conversation neuve ; la conception du design, le tour de
+/// design confié à un autre modèle, le juge visuel, l'escalade, les secours,
+/// le mode équipe et le petit modèle des résumés sont coupés. Demandé le 28
+/// octobre 2026 : « Ne demande plus aux autres modèles quoi que ce soit sauf
+/// les descriptions d'image ». `all` (variable `CLAW_OTHER_MODELS` ou réglage
+/// `otherModels`) les rouvre.
+pub(crate) fn other_models_allowed() -> bool {
+    let setting = env::var("CLAW_OTHER_MODELS")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            let cwd = env::current_dir().ok()?;
+            let config = ConfigLoader::default_for(&cwd).load().ok()?;
+            config
+                .get("otherModels")
+                .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        });
+    setting.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "all" | "tous" | "on" | "true" | "1"
+        )
+    })
+}
+
 /// Modèle des tours de design (`designModel`, `CLAW_DESIGN_MODEL`), réglé
-/// par `/models bench --design --appliquer` ; `off` le coupe.
+/// par `/models bench --design --appliquer` ; `off` le coupe, comme
+/// `otherModels` (voir [`other_models_allowed`]).
 pub(crate) fn design_model_setting() -> Option<String> {
+    if !other_models_allowed() {
+        return None;
+    }
     let setting = env::var("CLAW_DESIGN_MODEL")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -224,8 +257,12 @@ pub(crate) fn design_model_setting() -> Option<String> {
 }
 
 /// Modèles de la conception d'une interface, dans l'ordre (`designerModel`,
-/// `CLAW_DESIGNER_MODEL`, séparés par des virgules) ; `off` la coupe.
+/// `CLAW_DESIGNER_MODEL`, séparés par des virgules) ; `off` la coupe, comme
+/// `otherModels`.
 pub(crate) fn designer_models_setting() -> Vec<String> {
+    if !other_models_allowed() {
+        return Vec::new();
+    }
     let listed: Vec<String> = match env::var("CLAW_DESIGNER_MODEL")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -294,6 +331,9 @@ impl Escalation {
                 config.escalation_model().map(ToOwned::to_owned)
             });
         let single_model = env::var("CLAW_FALLBACK").is_ok_and(|value| value.trim() == "0");
+        if !other_models_allowed() {
+            return Self::Off;
+        }
         Self::parse(setting.as_deref(), single_model)
     }
 
@@ -534,12 +574,18 @@ fn provider_fallbacks(primary: &str) -> Option<Vec<String>> {
 /// (liste séparée par des virgules) ou `fallbackModels` de la config. Sans liste
 /// et pour un modèle gratuit d'`OpenRouter`, les meilleurs modèles gratuits du
 /// classement servent de secours ; pour NVIDIA et Gemini, voir
-/// `provider_fallbacks`. `CLAW_FALLBACK=0` désactive la bascule.
+/// `provider_fallbacks`. `CLAW_FALLBACK=0` désactive la bascule, comme
+/// `otherModels` (les secours sont d'autres modèles).
 pub fn model_chain(primary: &str, configured: &[String]) -> Vec<String> {
-    let mut chain = vec![primary.to_string()];
-    if env::var("CLAW_FALLBACK").is_ok_and(|value| value.trim() == "0") {
-        return chain;
+    if env::var("CLAW_FALLBACK").is_ok_and(|value| value.trim() == "0") || !other_models_allowed() {
+        return vec![primary.to_string()];
     }
+    chain_with_fallbacks(primary, configured)
+}
+
+/// Le principal et ses secours (voir [`model_chain`]).
+fn chain_with_fallbacks(primary: &str, configured: &[String]) -> Vec<String> {
+    let mut chain = vec![primary.to_string()];
     let from_env = env::var("CLAW_FALLBACK_MODELS")
         .ok()
         .map(|value| {
@@ -627,8 +673,8 @@ pub fn first_local_model() -> Option<String> {
 pub(crate) fn advisor_models(current: &str) -> Vec<String> {
     static CACHE: std::sync::Mutex<Option<(std::time::Instant, String, Vec<String>)>> =
         std::sync::Mutex::new(None);
-    // Les tests ne consultent personne.
-    if cfg!(test) {
+    // Les tests ne consultent personne ; `otherModels` non plus.
+    if cfg!(test) || !other_models_allowed() {
         return Vec::new();
     }
     let mut cache = CACHE
@@ -2815,8 +2861,25 @@ mod tests {
     }
 
     #[test]
+    fn no_other_model_is_consulted_unless_the_user_allows_it() {
+        // Sans `otherModels` : ni secours, ni escalade, ni concepteur, ni
+        // relecteur ; le modèle de la session travaille seul.
+        assert!(!super::other_models_allowed());
+        assert_eq!(
+            super::model_chain(
+                "nvidia:nvidia/nemotron-3-ultra-550b-a55b",
+                &["free".to_string()]
+            ),
+            ["nvidia:nvidia/nemotron-3-ultra-550b-a55b"]
+        );
+        assert_eq!(super::Escalation::configured(), super::Escalation::Off);
+        assert!(super::designer_models_setting().is_empty());
+        assert_eq!(super::design_model_setting(), None);
+    }
+
+    #[test]
     fn free_keyword_expands_in_place_in_the_fallback_chain() {
-        let chain = super::model_chain(
+        let chain = super::chain_with_fallbacks(
             "qwen/qwen3-coder:free",
             &["free".to_string(), "ollama:qwen2.5-coder:7b".to_string()],
         );

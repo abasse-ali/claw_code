@@ -3,8 +3,10 @@ Claw les écrit en anglais pour le modèle, l'appli les montre à l'utilisateur 
 une capture (demandé le 25 octobre 2026 : « les problèmes au-dessus des captures doivent être
 en français »).
 
-Un petit modèle de NVIDIA traduit, en arrière-plan : le journal n'attend pas, la traduction
-rejoint la capture quand elle arrive. Un même texte n'est traduit qu'une fois par passage.
+Le modèle de la session traduit quand NVIDIA le sert (aucun autre modèle n'est consulté sans
+CLAW_OTHER_MODELS=all ; avec, un petit modèle de NVIDIA), en arrière-plan : le journal n'attend
+pas, la traduction rejoint la capture quand elle arrive. Un même texte n'est traduit qu'une fois
+par passage.
 """
 
 import json
@@ -17,7 +19,8 @@ from concurrent.futures import ThreadPoolExecutor
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 # Rapide et sans quota du jour ; réglable par CLAW_TRANSLATE_MODEL.
 MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
-TIMEOUT = 90
+# Le modèle de la session (Nemotron 3 Ultra : environ 25 jetons par seconde) peut être lent.
+TIMEOUT = 180
 PROMPT = (
     "Traduis en français chacun des textes du tableau JSON ci-dessous. Ce sont des défauts "
     "relevés sur une page web, lus par une personne qui n'est pas informaticienne : écris un "

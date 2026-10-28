@@ -62,17 +62,34 @@ class AgentEnvTest(unittest.TestCase):
         self.assertEqual(run.deadline({}), "")
         self.assertEqual(run.deadline({"CLAW_JOB_STARTED": "hier"}), "")
 
-    def test_a_designer_conceives_and_the_session_model_builds_to_the_end(self):
+    def test_the_session_model_works_alone_unless_other_models_are_allowed(self):
+        # Aucun autre modèle par défaut, sauf pour décrire les images (côté Claw).
         env = run.model_settings({})
-        self.assertEqual(env["CLAW_DESIGNER_MODEL"].split(",")[0], "nvidia:z-ai/glm-5.3")
-        self.assertNotIn("inkling", env["CLAW_DESIGNER_MODEL"])
+        self.assertEqual(env["CLAW_OTHER_MODELS"], "images")
+        self.assertEqual(env["CLAW_DESIGNER_MODEL"], "off")
         self.assertEqual(env["CLAW_ESCALATION_MODEL"], "off")
         self.assertEqual(env["CLAW_DESIGN_MODEL"], "off")
+        # Rouverts : un modèle de conception écrit le plan, celui de la session code tout.
+        env = run.model_settings({"CLAW_OTHER_MODELS": "all"})
+        self.assertEqual(env["CLAW_DESIGNER_MODEL"].split(",")[0], "nvidia:z-ai/glm-5.3")
+        self.assertNotIn("inkling", env["CLAW_DESIGNER_MODEL"])
         # Un réglage déjà là (variable du dépôt de sessions) l'emporte.
         env = run.model_settings({"CLAW_ESCALATION_MODEL": "free", "CLAW_DESIGNER_MODEL": "kimi"})
         self.assertEqual((env["CLAW_ESCALATION_MODEL"], env["CLAW_DESIGNER_MODEL"]), ("free", "kimi"))
         # Le faux modèle n'appelle aucun vrai modèle.
         self.assertEqual(run.model_settings({}, mock=True), {"CLAW_DESIGNER_MODEL": "off"})
+
+    def test_the_problems_are_translated_by_the_session_model_only(self):
+        nvidia = "nvidia:nvidia/nemotron-3-ultra-550b-a55b"
+        keyed = {"NVIDIA_API_KEY": "k"}
+        self.assertEqual(run.translator(keyed, nvidia).model, "nvidia/nemotron-3-ultra-550b-a55b")
+        # Un modèle qu'un autre fournisseur sert : pas de traduction (l'anglais reste).
+        self.assertIsNone(run.translator(keyed, "qwen/qwen3-coder:free"))
+        self.assertIsNone(run.translator({}, nvidia))
+        self.assertIsNone(run.translator(keyed, "mock"))
+        # Autres modèles permis : le petit modèle de NVIDIA, comme avant.
+        allowed = run.translator({**keyed, "CLAW_OTHER_MODELS": "all"}, "qwen/qwen3-coder:free")
+        self.assertEqual(allowed.model, "nvidia/nemotron-3.5-lightning-30b-a3b")
 
     def test_the_mock_model_gets_no_real_key(self):
         env = run.agent_env(SECRETS, mock=True)

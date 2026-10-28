@@ -1875,7 +1875,7 @@ fn run_consult(input: ConsultInput) -> Result<String, String> {
     let (models, spare) = models.split_at(models.len().min(3));
     if models.is_empty() {
         return Err(
-            "no other model is available for a second opinion (set \"advisorModels\" in the settings)"
+            "no other model is consulted in this session (settings \"otherModels\" and \"advisorModels\"): decide on your own"
                 .to_string(),
         );
     }

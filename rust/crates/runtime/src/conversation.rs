@@ -152,6 +152,12 @@ pub trait ApiClient {
         false
     }
 
+    /// Un juge des captures peut-il être consulté (un autre modèle, qui lit
+    /// les images) ? Sans lui, la revue visuelle s'en tient aux défauts mesurés.
+    fn critiques_design(&mut self) -> bool {
+        true
+    }
+
     /// Critique de design : les captures d'une interface jugées par un modèle
     /// qui lit les images. `None` : aucun modèle disponible.
     fn critique_design(
@@ -4532,7 +4538,7 @@ where
         // régressions) : pas de note de design à atteindre. Vu le 26 octobre
         // 2026 (session #31, passage 4) : 89 minutes après une première
         // réponse à 17 minutes, pour une note restée à 4 sur 8.
-        let critique = if images.is_empty() || aids.repair {
+        let critique = if images.is_empty() || aids.repair || !self.api_client.critiques_design() {
             None
         } else {
             self.api_client
@@ -6138,9 +6144,8 @@ where
             return None;
         }
         turn.design_review_tried = true;
-        self.api_client.notify(
-            "Mode projet : un autre modèle relit le cahier des charges et le plan avant le code…",
-        );
+        self.api_client
+            .notify("Mode projet : relecture du cahier des charges et du plan avant le code…");
         let environment = match &self.environment {
             EnvironmentProbe::Done(note) => Some(note.as_str()),
             EnvironmentProbe::Pending | EnvironmentProbe::Off => None,
@@ -6696,8 +6701,7 @@ where
         {
             return None;
         }
-        self.api_client
-            .notify("Relecture des modifications par un autre modèle…");
+        self.api_client.notify("Relecture des modifications…");
         let reference = Self::project_reference(aids);
         let prompt =
             harness::review_prompt_with(request, earlier, answer, &diffs, reference.as_deref());
@@ -6709,16 +6713,16 @@ where
         // été relu (rejoué sur un vrai travail : « LGTM » en 8 s, quand un
         // autre relecteur y trouvait un bogue) : un second relecteur la remplace.
         if harness::bare_approval(&consultation.text) {
-            self.api_client.notify(&format!(
-                "Relecture par {} : approbation sans analyse, un autre modèle relit",
-                consultation.model
-            ));
             if let Some(second) = self.api_client.consult_again(
                 ConsultPurpose::Review,
                 harness::REVIEW_SYSTEM,
                 &prompt,
                 &consultation.model,
             ) {
+                self.api_client.notify(&format!(
+                    "Relecture par {} : approbation sans analyse, {} relit",
+                    consultation.model, second.model
+                ));
                 harness::log_review(&second.model, &second.text);
                 if harness::bare_approval(&second.text) {
                     self.api_client.notify(&format!(
@@ -11894,7 +11898,7 @@ mod tests {
         let observed = observed.borrow();
         assert_eq!(observed.consults.len(), 2);
         assert!(observed.notices.iter().any(|notice| notice
-            == "Relecture par relecteur : approbation sans analyse, un autre modèle relit"));
+            == "Relecture par relecteur : approbation sans analyse, relecteur relit"));
         // Les remarques du second relecteur reviennent à l'agent.
         assert!(observed.requests[3].contains("liste vide non gérée"));
         let _ = std::fs::remove_file(path);
