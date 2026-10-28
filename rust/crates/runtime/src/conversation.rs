@@ -1161,7 +1161,7 @@ pub const LONG_CUT_ERROR: &str =
 /// n'envoie un appel d'outil qu'entier et termine une réponse vers 5 min) :
 /// `index.html` puis `app.js` voulus d'un seul appel, chaque réponse coupée
 /// à 5 min, et la même demande relancée refaisait la même réponse.
-const LONG_CUT_NUDGE: &str = "[Claw] Your last reply was lost: the model provider ended it after several minutes, before it was complete, and nothing of it arrived (a tool call is only received once it is complete). Keep each reply short: write a file of more than 150 lines in parts of at most 150 lines, the first with write_file, each next one with write_file and \"append\": true; split a long edit into several smaller ones the same way. Continue the task now.";
+const LONG_CUT_NUDGE: &str = "[Claw] Your last reply was lost: the model provider ended it after several minutes, before it was complete, and nothing of it arrived (a tool call is only received once it is complete). Keep each reply short, reasoning included: reason briefly, and write a file of more than 150 lines in parts of at most 150 lines, the first with write_file, each next one with write_file and \"append\": true; split a long edit into several smaller ones the same way. Continue the task now.";
 
 /// Relances après une réponse coupée au bout de plusieurs minutes, par tour.
 const MAX_LONG_CUT_NUDGES: u32 = 2;

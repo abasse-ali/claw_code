@@ -10210,7 +10210,7 @@ impl ApiClient for DefaultRuntimeClient {
             model: model.to_string(),
             max_tokens: max_tokens_for_model(model),
             messages: messages_for_model(model, &messages, passback),
-            system: system.clone(),
+            system: with_reply_time_note(model, system.clone()),
             tools: tools.clone(),
             // Annonce demandée par Claw : les outils restent décrits (un
             // historique d'appels sans eux est refusé par certains
@@ -10700,6 +10700,22 @@ impl ApiClient for DefaultRuntimeClient {
                         live::show("Réflexion…");
                     }
                 }
+                // Close sans rien d'utilisable au bout de plusieurs minutes : le
+                // fournisseur l'a fermée pendant qu'un appel d'outil s'écrivait.
+                // Même cause qu'une réponse coupée, même suite.
+                Ok(events) if !text_only && is_long_empty(&events, attempt_started.elapsed()) => {
+                    if emit {
+                        transcript::discard_calls();
+                    }
+                    if let Some(observer) = &self.observer {
+                        observer.reply_discarded();
+                    }
+                    notify(&format!(
+                        "Réponse du modèle close sans rien d'utilisable au bout de {} : Claw lui demande des réponses plus courtes",
+                        format_elapsed(attempt_started.elapsed())
+                    ));
+                    return Err(RuntimeError::new(runtime::LONG_CUT_ERROR));
+                }
                 Ok(events) => {
                     self.reply_cut = cut.get();
                     // La réponse est gardée : l'interface peut la montrer.
@@ -10850,6 +10866,38 @@ const LONG_CUT_AFTER: Duration = Duration::from_mins(2);
 /// Réponse coupée en route au bout de plusieurs minutes.
 fn is_long_cut(error: &str, elapsed: Duration) -> bool {
     elapsed >= LONG_CUT_AFTER && is_broken_stream(error)
+}
+
+/// Réponse venue au bout de plusieurs minutes sans texte ni appel d'outil
+/// (de la réflexion seulement). Vu le 28 octobre 2026 (essai #40, second
+/// passage) : deux réponses de 304 et 312 s ainsi closes, et le tour arrêté.
+fn is_long_empty(events: &[AssistantEvent], elapsed: Duration) -> bool {
+    elapsed >= LONG_CUT_AFTER
+        && !events.iter().any(|event| match event {
+            AssistantEvent::ToolUse { .. } => true,
+            AssistantEvent::TextDelta(text) => !text.trim().is_empty(),
+            _ => false,
+        })
+}
+
+/// Ce que le modèle doit savoir du temps d'une réponse chez NVIDIA, qui
+/// n'envoie un appel d'outil qu'entier : une réponse muette environ 5 min (le
+/// temps d'écrire un gros fichier) est perdue. Vu le 28 octobre 2026 (essai
+/// #40, Nemotron 3 Ultra, environ 25 jetons par seconde) : dix réponses
+/// perdues de 302 à 344 s après le dernier signe du modèle, coupées par notre
+/// délai d'inactivité ou closes vides par le serveur.
+const REPLY_TIME_NOTE: &str = "# Reply time\nThis model provider sends a tool call only once it is complete, and drops a reply that stays silent for about 4 minutes: a tool call that takes longer to write is lost entirely, with the whole reply. Keep each tool call small: write a file of more than 150 lines in parts of at most 150 lines (the first with write_file, each next one with write_file and \"append\": true), and split a long edit into several smaller ones. Reason briefly: long reasoning slows every step.";
+
+/// Le prompt système envoyé à `model`, avec la note du temps d'une réponse
+/// quand son fournisseur coupe les longues réponses.
+fn with_reply_time_note(model: &str, system: Option<String>) -> Option<String> {
+    let limited =
+        api::split_compat_model(model).is_some_and(|(provider, _)| provider.name == "nvidia");
+    match system {
+        _ if !limited => system,
+        Some(prompt) => Some(format!("{prompt}\n\n{REPLY_TIME_NOTE}")),
+        None => Some(REPLY_TIME_NOTE.to_string()),
+    }
 }
 /// La réponse s'est interrompue côté réseau (et non par l'utilisateur ou par
 /// un refus du fournisseur) : la même requête peut être relancée.
@@ -11960,6 +12008,55 @@ mod tests {
         describe_permission_target, expert_command_prompt, parse_permission_answer,
         persist_allow_rule, unmetered_turn_limit, ExpertCommand, PermissionAnswer,
     };
+
+    #[test]
+    fn an_nvidia_model_learns_how_long_a_reply_may_take() {
+        let prompt = Some("system".to_string());
+        let told =
+            super::with_reply_time_note("nvidia:nvidia/nemotron-3-ultra-550b-a55b", prompt.clone())
+                .expect("prompt");
+        assert!(told.starts_with("system\n\n# Reply time"), "{told}");
+        assert!(told.contains("\"append\": true"), "{told}");
+        // Les autres fournisseurs n'ont pas cette limite : rien ne change.
+        assert_eq!(
+            super::with_reply_time_note("qwen/qwen3-coder:free", prompt.clone()),
+            prompt
+        );
+        assert_eq!(
+            super::with_reply_time_note("gemini:gemini-2.5-pro", None),
+            None
+        );
+    }
+
+    #[test]
+    fn a_reply_closed_empty_after_minutes_counts_as_cut() {
+        use runtime::AssistantEvent;
+        use std::time::Duration;
+        let thinking = AssistantEvent::Thinking {
+            thinking: "Let me write app.js in parts.".to_string(),
+            signature: String::new(),
+            redacted: None,
+        };
+        let empty = [thinking.clone(), AssistantEvent::MessageStop];
+        assert!(super::is_long_empty(&empty, Duration::from_secs(304)));
+        // Vide mais rapide : la relance d'une réponse vide s'en charge.
+        assert!(!super::is_long_empty(&empty, Duration::from_secs(30)));
+        // Longue mais utile : gardée.
+        let call = AssistantEvent::ToolUse {
+            id: "1".to_string(),
+            name: "write_file".to_string(),
+            input: "{}".to_string(),
+        };
+        assert!(!super::is_long_empty(
+            &[thinking.clone(), call],
+            Duration::from_secs(304)
+        ));
+        let said = AssistantEvent::TextDelta("J'écris app.js.".to_string());
+        assert!(!super::is_long_empty(
+            &[thinking, said],
+            Duration::from_secs(304)
+        ));
+    }
 
     #[test]
     fn a_reply_cut_after_minutes_is_told_to_the_model_instead_of_replayed() {
