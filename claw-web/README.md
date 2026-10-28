@@ -87,8 +87,10 @@ sinon ce qu'il annonce, sinon sa dernière action) avec une barre découpée par
 et son plan à déplier ; ses quatre dernières actions, la plus récente en haut, les nouvelles
 entrant en glissant l'une après l'autre ; le journal complet, replié. « Claw se prépare » (file
 d'attente, compilation) prend la même forme, et l'arrêt demandé le fait virer au rouge
-(« Arrêt en cours »). Fini, un passage tient en une ligne : son état (fini, arrêté, erreur), sa
-durée et son nombre d'actions ; un toucher déplie son journal.
+(« Arrêt en cours »). Fini, un passage tient en une carte : son état (fini, arrêté, erreur), sa
+durée, sa frise (une barre par action, de la couleur de sa pastille dans le journal, rouge pour
+une action qui a échoué) avec son nombre d'actions, les fichiers modifiés (+ −) et les
+commandes ; un toucher déplie son journal (le fil se trace, les étapes arrivent en cascade).
 
 Le journal commence par ce que le passage a fait, d'un coup d'œil : fichiers modifiés (avec leurs
 lignes ajoutées et retirées, « nouveau » pour un fichier créé), commandes, captures, lectures,
@@ -102,7 +104,13 @@ réparés, encore 3 à corriger », « Laguna S 2.1 ne voit pas les images : un 
 décrit 2 captures »), et une vérification de la page qui ne change rien ne se répète pas. Les
 réflexions de l'agent (souvent en anglais) sont cachées : « Voir ses réflexions » les montre,
 choix gardé sur l'appareil ; ce qu'il se dit en anglais en travaillant tient en une ligne
-« Note de l'agent », à déplier.
+« Note de l'agent », à déplier. Ses messages en français sont en bulles, ses griffes dans la
+pastille. Les lectures (ou recherches) qui se suivent tiennent en une ligne, leur nombre à côté
+du verbe (« Lit 3 index.html, styles.css… »), et se déplient sur chacune. Un long journal a ses
+filtres (« Messages », « Modifications », « Commandes », « Lectures », « Web », « Outils », avec
+leur nombre ; toucher encore la puce remet tout) : les tâches concernées s'ouvrent, les autres
+se retirent, et le filtre reste quand la session se redessine. Au pied, la fiche du passage :
+modèle, requêtes, durée (et coût), puis les requêtes gratuites du jour.
 
 Dans une session, la flèche « Revenir en bas » paraît à droite quand la fin n'est plus à l'écran ;
 si Claw avance pendant que vous lisez plus haut, la page reste où elle est et la flèche devient

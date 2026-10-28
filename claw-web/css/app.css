@@ -825,7 +825,17 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .transcript .side, .ev .side, .file .side { margin-left: auto; flex: none; font-size: .78rem; color: var(--muted); }
 /* Le journal en frise : un trait vertical passe sous les pastilles des actions. */
 .events { position: relative; display: flex; flex-direction: column; margin: 2px 0 4px; padding: 0; }
-.events::before { content: ""; position: absolute; left: 11px; top: 10px; bottom: 10px; width: 2px; border-radius: 2px; background: var(--border); }
+.events::before { content: ""; position: absolute; left: 11px; top: 10px; bottom: 10px; width: 2px; border-radius: 2px; background: var(--border); transform-origin: top; }
+/* Ouverture d'un journal ou d'une tâche : le fil se trace, les étapes arrivent en cascade. */
+:is(.transcript, .task-group).opening[open] > .events::before { animation: draw-line .6s var(--ease) both; }
+@keyframes draw-line { from { transform: scaleY(0); } }
+:is(.transcript, .task-group).opening[open] > .events > *,
+.transcript.opening[open] > .task-groups > * { animation: step-in .32s var(--ease) both; }
+:is(.transcript, .task-group).opening[open] > .events > :nth-child(2), .transcript.opening[open] > .task-groups > :nth-child(2) { animation-delay: .04s; }
+:is(.transcript, .task-group).opening[open] > .events > :nth-child(3), .transcript.opening[open] > .task-groups > :nth-child(3) { animation-delay: .08s; }
+:is(.transcript, .task-group).opening[open] > .events > :nth-child(4), .transcript.opening[open] > .task-groups > :nth-child(4) { animation-delay: .12s; }
+:is(.transcript, .task-group).opening[open] > .events > :nth-child(5), .transcript.opening[open] > .task-groups > :nth-child(5) { animation-delay: .16s; }
+:is(.transcript, .task-group).opening[open] > .events > :nth-child(n+6), .transcript.opening[open] > .task-groups > :nth-child(n+6) { animation-delay: .2s; }
 
 /* Un passage de Claw : une ligne (état, durée, actions) qui déplie son journal. */
 .run-card {
@@ -833,10 +843,11 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
   background: color-mix(in srgb, var(--panel) 82%, transparent); border: 1px solid var(--border);
   transition: border-color .3s var(--ease), box-shadow .3s var(--ease);
 }
-.run-card > .transcript > summary { gap: 11px; padding: 12px 0; color: var(--text); font-size: .9rem; }
+.run-card > .transcript > summary { align-items: flex-start; gap: 11px; padding: 12px 0; color: var(--text); font-size: .9rem; }
+.run-card > .transcript > summary > .run-title, .run-card > .transcript > summary > .side { align-self: center; }
 .run-card > .transcript > summary::before { display: none; }
 .run-card > .transcript > summary::after {
-  content: ""; flex: none; width: 7px; height: 7px; margin: 0 4px 4px 2px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted);
+  content: ""; flex: none; align-self: center; width: 7px; height: 7px; margin: 0 4px 4px 2px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted);
   transform: rotate(45deg); transition: transform .3s var(--spring), margin .3s var(--spring);
 }
 .run-card > .transcript[open] > summary::after { transform: rotate(-135deg); margin-bottom: -4px; }
@@ -865,6 +876,26 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .run-title { flex: 1; min-width: 0; line-height: 1.35; }
 .run-title strong { font-weight: 650; }
 .run-sub { display: block; margin-top: 2px; font-size: .8rem; color: var(--muted); }
+/* Sous le titre replié : la frise du passage (une barre par action, de la couleur de sa
+   pastille), le nombre d'actions, les fichiers modifiés et les commandes. Déplié, le résumé du
+   journal dit les mêmes chiffres : ils se retirent du titre. */
+.run-head { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding-top: 4px; }
+.run-track { display: flex; align-items: center; gap: 10px; }
+.run-strip { flex: 1; min-width: 0; display: flex; gap: 2px; height: 5px; }
+.run-strip span { flex: 1; min-width: 2px; border-radius: 3px; background: var(--cat); opacity: .9; }
+.run-strip .failed { background: var(--error); }
+.run-track [data-actions] { flex: none; color: var(--muted); font-size: .74rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.run-stats { display: flex; flex-wrap: wrap; gap: 4px 11px; color: var(--muted); font-size: .76rem; font-variant-numeric: tabular-nums; }
+.transcript[open] > summary .run-stats { display: none; }
+.rs { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.rs[data-cat]::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--cat); }
+/* Genre d'une étape : la couleur de sa barre, de sa puce de filtre (celle de sa pastille). */
+[data-cat] { --cat: var(--muted); }
+[data-cat="read"] { --cat: var(--info); }
+[data-cat="edit"] { --cat: var(--accent); }
+[data-cat="run"] { --cat: var(--accent-3); }
+[data-cat="web"] { --cat: var(--accent-2); }
+[data-cat="say"] { --cat: var(--accent); }
 /* --- Bloc « Claw travaille » : un passage en cours, en direct --------------------------------
    Les griffes du logo qui grattent, la durée à la seconde et « Arrêter » ; l'étape en cours en
    grand avec l'avancée de la liste de tâches ; les dernières actions, la plus récente en haut ;
@@ -985,7 +1016,6 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .ev.text { padding: 6px 0 6px 34px; overflow-wrap: anywhere; }
 .ev.text p { margin: 0 0 .6em; }
 .ev.text p:last-child { margin-bottom: 0; }
-.ev.meta { padding: 3px 0 3px 34px; font-size: .8rem; color: var(--muted); }
 /* Une annonce de Claw : sa pastille sur la frise, la phrase à côté ; la couleur dit le ton. */
 .ev.notice { --tile: var(--muted); display: flex; align-items: flex-start; gap: 10px; padding: 5px 0; font-size: .82rem; line-height: 1.45; color: var(--muted); }
 .ev.notice > svg {
@@ -1071,6 +1101,76 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .tg-title { flex: 1; min-width: 0; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
 .task-group.open .tg-title { color: var(--muted); }
 .task-group > summary .side { flex: none; margin-left: 0; font-size: .76rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Messages de Claw : en bulle, ses griffes dans la pastille posée sur la frise. */
+.ev.say { display: flex; align-items: flex-start; gap: 10px; padding: 6px 0; }
+.ev.say > .claw-dot {
+  box-sizing: content-box; position: relative; flex: none; width: 14px; height: 14px; padding: 5px; border-radius: 9px; overflow: visible;
+  fill: none; stroke-width: 46; stroke-linecap: round;
+  background: color-mix(in srgb, var(--accent-2) 12%, var(--panel)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-2) 26%, transparent);
+}
+.claw-dot path:nth-child(1) { stroke: #ff8a3d; }
+.claw-dot path:nth-child(2) { stroke: #ff4f80; }
+.claw-dot path:nth-child(3) { stroke: #a873ff; }
+.ev-bubble {
+  flex: 1; min-width: 0; padding: 9px 13px; border-radius: 6px 18px 18px 18px; overflow-wrap: anywhere; line-height: 1.5;
+  background: color-mix(in srgb, var(--panel-2) 85%, transparent); border: 1px solid var(--border);
+}
+.ev-bubble p { margin: 0 0 .6em; }
+.ev-bubble > :first-child { margin-top: 0; }
+.ev-bubble > :last-child { margin-bottom: 0; }
+
+/* Lectures qui se suivent : une ligne, leur nombre à côté du verbe ; dépliée, chacune. */
+.ev-count {
+  flex: none; min-width: 20px; padding: 1px 6px; border-radius: 999px; text-align: center; font-size: .72rem; font-weight: 750;
+  color: var(--tile); background: color-mix(in srgb, var(--tile) 15%, transparent); font-variant-numeric: tabular-nums;
+}
+.ev-bundle { display: flex; flex-direction: column; margin-left: 11px; padding: 0 0 6px 21px; border-left: 2px dotted color-mix(in srgb, var(--tile) 40%, transparent); }
+.ev-bundle .ev { font-size: .84rem; }
+.ev-bundle .ev > .ev-line, .ev-bundle .ev > summary { padding: 3px 0; }
+.ev-bundle .ev[data-kind] > .ev-line > svg:first-child, .ev-bundle .ev[data-kind] > summary > svg:first-child { padding: 0; background: none; box-shadow: none; }
+.ev-bundle .verb { display: none; }
+.ev-bundle .target { color: var(--text); }
+.ev-bundle .ev-body { padding-left: 24px; }
+
+/* Filtres d'un long journal : une puce par genre d'étape, avec leur nombre. */
+.ev-filters { display: flex; gap: 6px; margin: 0 -14px 10px; padding: 2px 14px 4px; overflow-x: auto; scrollbar-width: none; }
+.ev-filters::-webkit-scrollbar { display: none; }
+.ev-filter {
+  flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--panel-2); color: var(--muted); font: inherit; font-size: .78rem; font-weight: 600;
+  transition: color .2s var(--ease), background-color .25s var(--ease), border-color .25s var(--ease), transform .25s var(--spring);
+}
+.ev-filter i { width: 7px; height: 7px; border-radius: 50%; background: var(--cat); }
+.ev-filter[data-cat="say"] i { background: var(--grad); }
+.ev-filter span { font-variant-numeric: tabular-nums; opacity: .65; }
+.ev-filter:active { transform: scale(.94); }
+.ev-filter[aria-pressed="true"] { color: var(--text); border-color: color-mix(in srgb, var(--cat) 55%, var(--border)); background: color-mix(in srgb, var(--cat) 15%, var(--panel-2)); }
+.ev-filter:not([data-cat])[aria-pressed="true"] { border-color: transparent; background: var(--grad); color: var(--accent-text); }
+.transcript[data-filter="say"] :is(.events, .earlier) > [data-cat]:not([data-cat="say"]),
+.transcript[data-filter="edit"] :is(.events, .earlier) > [data-cat]:not([data-cat="edit"]),
+.transcript[data-filter="run"] :is(.events, .earlier) > [data-cat]:not([data-cat="run"]),
+.transcript[data-filter="read"] :is(.events, .earlier) > [data-cat]:not([data-cat="read"]),
+.transcript[data-filter="web"] :is(.events, .earlier) > [data-cat]:not([data-cat="web"]),
+.transcript[data-filter="tool"] :is(.events, .earlier) > [data-cat]:not([data-cat="tool"]) { display: none; }
+/* Filtré : les tâches qui n'ont rien de ce genre se retirent. */
+.transcript[data-filter="say"] .task-group:not(:has(:is(.events, .earlier) > [data-cat="say"])),
+.transcript[data-filter="edit"] .task-group:not(:has(:is(.events, .earlier) > [data-cat="edit"])),
+.transcript[data-filter="run"] .task-group:not(:has(:is(.events, .earlier) > [data-cat="run"])),
+.transcript[data-filter="read"] .task-group:not(:has(:is(.events, .earlier) > [data-cat="read"])),
+.transcript[data-filter="web"] .task-group:not(:has(:is(.events, .earlier) > [data-cat="web"])),
+.transcript[data-filter="tool"] .task-group:not(:has(:is(.events, .earlier) > [data-cat="tool"])) { display: none; }
+.transcript.refilter :is(.events, .earlier) > [data-cat], .transcript.refilter .task-group { animation: step-in .35s var(--ease) both; }
+
+/* Fiche du passage, au pied du journal. */
+.ev-foot { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 12px; padding-top: 12px; border-top: 1px dashed var(--border-strong); }
+.fact {
+  flex: 1 1 0; display: inline-flex; flex-direction: column; gap: 2px; min-width: 0; padding: 7px 11px; border-radius: 12px;
+  background: var(--panel-2); font-size: .8rem; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.fact.wide { flex-basis: 100%; }
+.fact small { color: var(--muted); font-size: .6rem; font-weight: 750; letter-spacing: .09em; text-transform: uppercase; }
+.foot-quota { flex-basis: 100%; margin: 4px 0 0; color: var(--muted); font-size: .76rem; }
 
 /* Étapes d'un passage en cours : arrivées par paquets avec le journal, montrées une par une. */
 .transcript .pending { display: none; }
