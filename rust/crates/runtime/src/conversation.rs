@@ -95,6 +95,13 @@ pub trait ApiClient {
         None
     }
 
+    /// Conception du design d'une interface par le modèle réglé pour cela
+    /// (`designerModel`) : sa réponse (plan et feuille de base), sans outils ;
+    /// `None` sans modèle de conception ou s'il ne répond pas.
+    fn design_conception(&mut self, _system: &str, _prompt: &str) -> Option<Consultation> {
+        None
+    }
+
     /// Le modèle vient de répondre sans appeler d'outil : c'est sa réponse
     /// finale, sauf si un contrôle de Claw le renvoie au travail.
     fn answer_drafted(&mut self) {}
@@ -1899,6 +1906,7 @@ where
         // Interface web : la méthode d'un studio de design (plan avant le
         // code, marques d'une page générée, plancher de qualité, vérification).
         let mut design_guided = false;
+        let mut conceived = false;
         if !self.subagent
             && !question
             && harness::enabled(Aid::DesignGuide)
@@ -1907,6 +1915,12 @@ where
             if let Some(text) = crate::web_design::design_guide(&request_text, earlier.as_deref()) {
                 user_message.blocks.push(ContentBlock::Text { text });
                 design_guided = true;
+                // Le modèle de conception (`designerModel`) écrit le plan et la
+                // feuille de base ; le modèle de la session fait tout le reste.
+                if let Some(note) = self.design_conception(&request_text, earlier.as_deref()) {
+                    user_message.blocks.push(ContentBlock::Text { text: note });
+                    conceived = true;
+                }
                 // Le modèle réglé pour le design (`designModel`) fait le tour ;
                 // le modèle habituel reprend à la fin.
                 if let Some(model) = self.api_client.design_model() {
@@ -1974,6 +1988,9 @@ where
                 .and_then(|cwd| harness::DataSnapshot::take(&cwd)),
             project: project_turn,
             design_guided,
+            // Le plan vient du modèle de conception : ni demandé, ni relu.
+            plan_reviewed: conceived,
+            plan_requested: conceived,
             // Les mots de l'utilisateur seulement : Claw Web y ajoute la
             // conversation et ses consignes (« created from projet-vierge »),
             // qui faisaient passer le passage 5 de la session #31 pour une
@@ -3612,6 +3629,65 @@ where
             snapshot.refresh_all(&cwd);
         }
         feedback
+    }
+
+    /// Conception du design par le modèle réglé pour cela (`designerModel`) :
+    /// au début d'un tour qui crée une interface, il écrit le plan et la
+    /// feuille de base ; Claw écrit la feuille dans le projet et l'agent reçoit
+    /// le plan à suivre. `None` : rien à concevoir (une correction, une suite
+    /// d'un travail déjà conçu), aucun modèle de conception, ou une réponse
+    /// inutilisable.
+    fn design_conception(&mut self, request: &str, earlier: Option<&str>) -> Option<String> {
+        let own = crate::project::own_words(request);
+        if self.subagent || interrupt_requested() || crate::web_design::is_repair_request(own) {
+            return None;
+        }
+        let cwd = std::env::current_dir().ok()?;
+        let asked = crate::web_design::asks_new_design(own);
+        let ours = std::fs::read_to_string(cwd.join(crate::web_design::BASE_CSS))
+            .ok()
+            .map(|text| text.starts_with(crate::web_design::BASE_CSS_MARK));
+        // Une page déjà là sans demande de refonte, ou un travail déjà conçu
+        // que l'on poursuit (« continue ») : la conception est faite.
+        if !asked && (crate::web_design::has_interface_page(&cwd) || ours == Some(true)) {
+            return None;
+        }
+        let brief = match earlier {
+            Some(earlier) => format!("{earlier}\n{request}"),
+            None => request.to_string(),
+        };
+        let dark = crate::web_design::requested_theme(&brief) == Some("dark");
+        let consultation = self.api_client.design_conception(
+            crate::web_design::DESIGNER_SYSTEM,
+            &crate::web_design::designer_prompt(&brief, dark, &[], crate::web_design::design_bar()),
+        )?;
+        let (plan, css) = crate::web_design::parse_conception(&consultation.text)?;
+        let file = css.and_then(|css| {
+            // Un base.css de l'utilisateur n'est jamais écrasé.
+            let name = if ours == Some(false) {
+                "claw-base.css"
+            } else {
+                crate::web_design::BASE_CSS
+            };
+            let text = format!("{}\n{}\n", crate::web_design::BASE_CSS_MARK, css.trim());
+            std::fs::write(cwd.join(name), &text).ok()?;
+            Some((name, text.lines().count()))
+        });
+        self.api_client.notify(&match file {
+            Some((name, lines)) => format!(
+                "Conception du design par {} : plan et feuille de base ({name}, {lines} lignes) ; le modèle de la session code tout le reste",
+                consultation.model
+            ),
+            None => format!(
+                "Conception du design par {} : plan (sans feuille de base) ; le modèle de la session code tout le reste",
+                consultation.model
+            ),
+        });
+        Some(crate::web_design::conception_note(
+            &consultation.model,
+            &plan,
+            file,
+        ))
     }
 
     /// Revue du plan de design avant le code : un autre modèle juge la
@@ -8346,6 +8422,8 @@ mod tests {
         team_steps: Vec<String>,
         /// Dégâts du code signalés au client (mode équipe).
         strikes: Vec<String>,
+        /// Demandes faites au modèle de conception.
+        conceptions: Vec<String>,
     }
 
     /// Rallume les annonces le temps d'un test.
@@ -8453,6 +8531,23 @@ mod tests {
 
         fn free_requests_left(&mut self) -> Option<u64> {
             FREE_LEFT.with(std::cell::Cell::get)
+        }
+
+        fn design_conception(
+            &mut self,
+            _system: &str,
+            prompt: &str,
+        ) -> Option<super::Consultation> {
+            self.observed
+                .borrow_mut()
+                .conceptions
+                .push(prompt.to_string());
+            CONCEPTION
+                .with(std::cell::Cell::get)
+                .map(|text| super::Consultation {
+                    model: "concepteur".to_string(),
+                    text: text.to_string(),
+                })
         }
 
         fn image_defects(
@@ -8632,6 +8727,118 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn the_designer_writes_the_plan_and_base_css_before_the_session_model_builds() {
+        let _serial = crate::test_serial();
+        const REPLY: &str = "## Plan\nBrief: a personal budget app for one person, checked on the phone every evening; it must answer at a glance how much is left this month.\nDirection: a neobank, one deep gradient balance card, everything else calm on paper.\nColor: --paper #F6F5F2, --ink #14161A, --accent #3B5BDB.\nType: Manrope for display, Inter for text.\n\n```css\n:root { --paper: #F6F5F2; --ink: #14161A; --accent: #3B5BDB; }\n.btn { min-height: 44px; }\n```\n";
+        let dir = std::env::temp_dir().join(format!("claw-conception-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dossier");
+        // Le dossier courant revient à sa place même si une assertion échoue.
+        struct Back(PathBuf);
+        impl Drop for Back {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+        let back = Back(std::env::current_dir().expect("dossier courant"));
+        std::env::set_current_dir(&dir).expect("cd");
+        CONCEPTION.with(|reply| reply.set(Some(REPLY)));
+        let write = |path: &str| {
+            tool_step(
+                "write_file",
+                &format!(r#"{{"path":"{path}","content":"<p>x</p>"}}"#),
+            )
+        };
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![write("index.html"), write("app.css")],
+            Vec::new(),
+            vec!["1. [identity] x -> y"],
+            WRITTEN.to_string(),
+        );
+        let _ = runtime.run_turn(
+            "Crée une appli web de budget perso pour mon téléphone",
+            None,
+        );
+        let base = std::fs::read_to_string(dir.join("base.css")).expect("base.css écrit");
+        let seen = observed.borrow();
+        assert_eq!(seen.conceptions.len(), 1);
+        assert!(seen.conceptions[0].contains("budget perso"));
+        assert!(
+            base.starts_with(crate::web_design::BASE_CSS_MARK)
+                && base.contains("--accent: #3B5BDB")
+        );
+        // Le plan part avec la demande : l'agent ne l'écrit pas, personne ne le
+        // relit, et Claw ne le réclame pas après la première écriture.
+        assert!(
+            seen.requests[0].contains("Design conception by concepteur")
+                && seen.requests[0].contains("deep gradient balance card")
+                && seen.requests[0].contains("Link base.css in every page"),
+            "{}",
+            seen.requests[0]
+        );
+        assert!(
+            !seen.requests[0].contains("```css"),
+            "la feuille n'est pas recopiée"
+        );
+        assert!(!seen
+            .consults
+            .iter()
+            .any(|(purpose, _)| *purpose == super::ConsultPurpose::Design));
+        assert!(!seen.requests[1].contains("without the design plan"));
+        assert!(seen.notices.iter().any(|notice| notice
+            == "Conception du design par concepteur : plan et feuille de base (base.css, 3 lignes) ; le modèle de la session code tout le reste"));
+        drop(seen);
+
+        // La suite du travail, même design : la conception est faite.
+        let (mut runtime, observed, _) =
+            aided_runtime_with(Vec::new(), Vec::new(), Vec::new(), WRITTEN.to_string());
+        let _ = runtime.run_turn("Ajoute les réglages à l'appli web, même design", None);
+        assert!(observed.borrow().conceptions.is_empty());
+
+        // Un base.css de l'utilisateur n'est jamais écrasé ; une page déjà là
+        // sans demande de refonte : rien à concevoir.
+        std::fs::write(dir.join("base.css"), "body { margin: 0; }\n").expect("base");
+        let (mut runtime, observed, _) =
+            aided_runtime_with(Vec::new(), Vec::new(), Vec::new(), WRITTEN.to_string());
+        let _ = runtime.run_turn(
+            "Refais entièrement le design de mon appli web de budget",
+            None,
+        );
+        assert_eq!(observed.borrow().conceptions.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("base.css")).expect("base"),
+            "body { margin: 0; }\n"
+        );
+        assert!(dir.join("claw-base.css").exists());
+        std::fs::write(dir.join("index.html"), "<p>x</p>").expect("page");
+        let (mut runtime, observed, _) =
+            aided_runtime_with(Vec::new(), Vec::new(), Vec::new(), WRITTEN.to_string());
+        let _ = runtime.run_turn("Ajoute un graphique joli à l'appli web", None);
+        assert!(observed.borrow().conceptions.is_empty());
+
+        // Aucun modèle de conception n'a répondu : le modèle de la session
+        // conçoit lui-même, comme avant.
+        CONCEPTION.with(|reply| reply.set(None));
+        std::fs::remove_file(dir.join("index.html")).expect("page");
+        std::fs::remove_file(dir.join("base.css")).expect("base");
+        std::fs::remove_file(dir.join("claw-base.css")).expect("base");
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![write("index.html")],
+            Vec::new(),
+            Vec::new(),
+            WRITTEN.to_string(),
+        );
+        let _ = runtime.run_turn("Crée une appli web de budget perso", None);
+        let seen = observed.borrow();
+        assert_eq!(seen.conceptions.len(), 1);
+        assert!(!seen.requests[0].contains("Design conception by"));
+        assert!(!dir.join("base.css").exists());
+        drop(seen);
+        drop(back);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -8885,6 +9092,9 @@ mod tests {
         static CUT_REPLIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         /// Requêtes gratuites restantes annoncées par le client.
         static FREE_LEFT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+        /// Réponse du modèle de conception (`None` : aucun n'a répondu).
+        static CONCEPTION: std::cell::Cell<Option<&'static str>> =
+            const { std::cell::Cell::new(None) };
     }
 
     #[test]

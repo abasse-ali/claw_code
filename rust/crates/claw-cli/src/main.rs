@@ -9996,6 +9996,41 @@ impl ApiClient for DefaultRuntimeClient {
         Some(model)
     }
 
+    fn design_conception(&mut self, system: &str, prompt: &str) -> Option<runtime::Consultation> {
+        let models: Vec<String> = models::designer_models_setting()
+            .into_iter()
+            .filter(|model| api::model_available(model))
+            .collect();
+        if models.is_empty() {
+            return None;
+        }
+        if self.emit_output {
+            live::show("Conception du design par le modèle de conception…");
+        }
+        let prompt = format!(
+            "{prompt}\n\nFont library (the engineer can load only these, through the Font tool): {}.",
+            tools::fonts::families().join(", ")
+        );
+        match tools::advisors::ask_within(
+            &models,
+            system,
+            &prompt,
+            tools::advisors::DESIGN_MAX_TOKENS,
+            tools::advisors::Patience::DESIGN,
+        ) {
+            Ok(opinion) => Some(runtime::Consultation {
+                model: opinion.model,
+                text: opinion.text,
+            }),
+            Err(error) => {
+                self.notify(&format!(
+                    "Conception du design : aucun modèle de conception n'a répondu ({error}) ; le modèle de la session conçoit lui-même"
+                ));
+                None
+            }
+        }
+    }
+
     fn design_model(&mut self) -> Option<String> {
         if self.saved_chain.is_some() || self.design_base.is_some() {
             return None;

@@ -48,7 +48,18 @@ impl Patience {
         per_model: Duration::from_secs(240),
         total: Duration::from_secs(360),
     };
+    /// La conception d'une interface : un plan et une feuille de base écrits
+    /// d'un trait, par un modèle souvent lent (GLM-5.3 ne répondait pas en 45 s
+    /// à l'essai du catalogue, le 28 octobre 2026), une fois par création.
+    pub const DESIGN: Self = Self {
+        per_model: Duration::from_mins(7),
+        total: Duration::from_mins(12),
+    };
 }
+
+/// Jetons de sortie de la conception d'une interface, raisonnement compris :
+/// un plan d'environ 700 mots et une feuille de base d'environ 260 lignes.
+pub const DESIGN_MAX_TOKENS: u32 = 32_000;
 
 /// Jetons de sortie d'une relecture, raisonnement compris. Sur le diff d'une
 /// tâche de cinq fichiers, deux relecteurs gratuits ont raisonné 27 000 et

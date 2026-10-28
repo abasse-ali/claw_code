@@ -150,6 +150,9 @@ pub struct RuntimeFeatureConfig {
     escalation_model: Option<String>,
     /// Modèle des tours de design (interfaces web) : `designModel`.
     design_model: Option<String>,
+    /// Modèles de la conception d'une interface (plan et feuille de base), le
+    /// premier qui répond : `designerModel` (texte, ou liste).
+    designer_models: Vec<String>,
     /// Modèle qui décrit les images à un modèle qui n'en lit pas :
     /// `imageReader` (`"off"` pour ne rien décrire).
     image_reader: Option<String>,
@@ -478,6 +481,7 @@ impl ConfigLoader {
             planner_model: parse_optional_string(&merged_value, "plannerModel"),
             escalation_model: parse_optional_string(&merged_value, "escalationModel"),
             design_model: parse_optional_string(&merged_value, "designModel"),
+            designer_models: parse_designer_models(&merged_value),
             image_reader: parse_optional_string(&merged_value, "imageReader"),
             ultracode: merged_value
                 .as_object()
@@ -670,6 +674,12 @@ impl RuntimeConfig {
     #[must_use]
     pub fn design_model(&self) -> Option<&str> {
         self.feature_config.design_model.as_deref()
+    }
+
+    /// Modèles de la conception d'une interface (`designerModel`), dans l'ordre.
+    #[must_use]
+    pub fn designer_models(&self) -> &[String] {
+        &self.feature_config.designer_models
     }
 
     /// Modèle qui décrit les images à un modèle qui n'en lit pas (`imageReader`).
@@ -1110,6 +1120,24 @@ fn parse_verify(root: &JsonValue) -> crate::harness::VerifySetting {
         }
         _ => VerifySetting::Auto,
     }
+}
+
+/// `designerModel` : un modèle (« nvidia:z-ai/glm-5.3 »), une liste séparée par
+/// des virgules, ou un tableau.
+fn parse_designer_models(root: &JsonValue) -> Vec<String> {
+    let listed = parse_string_list(root, "designerModel");
+    if !listed.is_empty() {
+        return listed;
+    }
+    parse_optional_string(root, "designerModel")
+        .map(|text| {
+            text.split(',')
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn parse_optional_string(root: &JsonValue, key: &str) -> Option<String> {
@@ -1745,6 +1773,26 @@ mod tests {
             config.entries(HookEvent::PermissionRequest)[0].command,
             "approuve.sh"
         );
+    }
+
+    #[test]
+    fn the_designer_models_are_a_list_or_comma_separated_text() {
+        use super::parse_designer_models;
+        let root = JsonValue::parse(r#"{"designerModel":"nvidia:z-ai/glm-5.3, inkling:free ,"}"#)
+            .expect("json");
+        assert_eq!(
+            parse_designer_models(&root),
+            vec![
+                "nvidia:z-ai/glm-5.3".to_string(),
+                "inkling:free".to_string()
+            ]
+        );
+        let root = JsonValue::parse(r#"{"designerModel":["glm","kimi"]}"#).expect("json");
+        assert_eq!(
+            parse_designer_models(&root),
+            vec!["glm".to_string(), "kimi".to_string()]
+        );
+        assert!(parse_designer_models(&JsonValue::parse("{}").expect("json")).is_empty());
     }
 
     fn temp_dir() -> std::path::PathBuf {

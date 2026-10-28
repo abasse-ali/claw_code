@@ -78,6 +78,35 @@ demandé ; texte tapé lisible ; graphique dessiné ; historique non inventé (m
 vides) ; aucune erreur de console en `http` ; manifeste à `start_url` relative et service
 worker (hors-ligne) ; aucun débordement horizontal au téléphone.
 
+## Second volet : la conception par un modèle de design (28 octobre 2026)
+
+Après #36, l'utilisateur : « c'est toujours moche, c'est pas comme Claude, regarde juste la
+différence de niveau ». Défauts nommés : trop de cartes colorées, mise en page cassée, pas de
+hiérarchie, typographie et couleurs. Ses décisions :
+
+- **Priorité** : que Claw fasse beau seul ; l'appli de budget elle-même n'est pas retouchée.
+- **Style** à donner si Claw le demande : **néobanque** (carte du solde en dégradé, pastilles
+  rondes, l'esprit Revolut ou Lydia).
+- **Modèles** : le meilleur gratuit en design pour la **conception** (« plan + base CSS ») ;
+  ensuite **Nemotron 3 Ultra fait tout, jusqu'au bout** : plus de relais du tour à un autre
+  modèle (les relecteurs peuvent toujours donner leur avis). Modèle choisi sans banc.
+- **Livraison** comme avant : essai réel (2 passages au plus), comparaison avec #35 et #36,
+  fusion directe dans `main`.
+
+Choix du modèle de conception (classement *Design Arena*, sites web, octobre 2026) : Kimi K3
+(Elo ~1334) n'est pas gratuit ; **GLM-5.3** (~1308) l'est chez NVIDIA, lent à l'essai d'outil
+du catalogue (pas de réponse en 45 s le 28 octobre) mais la conception n'appelle aucun outil ;
+**Inkling** (`thinkingmachines/inkling:free`, ~1224, OpenRouter gratuit) répond. Réglage de
+Claw Web : `CLAW_DESIGNER_MODEL=nvidia:z-ai/glm-5.3,thinkingmachines/inkling:free` (Inkling si
+GLM ne répond pas), `CLAW_ESCALATION_MODEL=off`, `CLAW_DESIGN_MODEL=off`.
+
+| Lot | Contenu | État |
+|---|---|---|
+| 10. Conception | Réglage `designerModel` (texte ou liste ; `CLAW_DESIGNER_MODEL`, `off` le coupe). Au début d'un tour de création d'interface (méthode de design jointe, pas de page déjà là sauf refonte demandée), le runtime demande au modèle de conception (`ApiClient::design_conception`, patience `Patience::DESIGN` : 7 min par modèle, 12 en tout, 32 000 jetons) un **plan** (brief, direction, 5 à 8 couleurs nommées, deux polices de la bibliothèque de l'outil `Font`, espacements, écrans bloc par bloc, composants, mouvement, marques interdites dont « plusieurs cartes de couleurs différentes côte à côte ») et **`base.css`** (jetons que lit le kit : `--paper`, `--surface`, `--ink`, `--muted`, `--line`, `--accent`, `--on-accent`, `--income`, `--error`, `--field`, `--radius`, `--font-display`, `--font-text` ; clair et sombre ; le socle ; l'allure de base des titres, montants, boutons, surfaces, lignes de liste à pastille, champs, puces). Claw écrit `base.css` (marqué en tête ; `claw-base.css` si l'utilisateur a déjà son `base.css`), joint le plan à la demande (`conception_note` : ne pas écrire d'autre plan, lier `base.css` avant sa propre feuille, ne jamais redéfinir ses jetons), et la revue du plan est sautée (le plan est celui du concepteur). Sans réponse : le modèle de la session conçoit lui-même, comme avant (`web_design.rs` : `designer_prompt`, `parse_conception`, `has_interface_page` ; `conversation.rs` : `design_conception`) | fait (test de conversation, tests unitaires) |
+| 11. Nemotron jusqu'au bout | Claw Web (`run.py`, `model_settings`) : conception par GLM-5.3 puis Inkling, ni escalade ni tour de design confié à un autre modèle ; le faux modèle n'appelle aucun modèle de conception | fait (test Python) |
+| 12. Plancher néobanque | Kit `entries` : chaque opération en ligne de néobanque (pastille ronde de la catégorie, nom, « catégorie · jour » dessous, montant à droite, dernière ligne sans trait). Règle du composant : un montant donné en fourchette compte à son bout le moins favorable (le bas d'un gain, le haut d'une dépense), un montant marqué non sûr reste dehors jusqu'à sa réception, le meilleur des cas peut s'afficher à côté | fait (essais navigateur du kit) |
+| 13. Livraison | Vérification complète, essai réel (2 passages au plus, « Néobanque » si Claw demande le style), comparaison avec #35 et #36, fusion directe dans `main` | en cours |
+
 ## Suite, dans l'ordre
 
 Le chantier est fusionné dans `main`. Ce que l'essai réel a laissé (session #36, ci-dessous) :
@@ -88,11 +117,11 @@ Le chantier est fusionné dans `main`. Ce que l'essai réel a laissé (session #
    réparés ensuite. Piste : que l'outil `Component` écrive les scripts du kit dans le projet
    (`components/entries.js`…), à inclure par `<script src>`, au lieu de les rendre en texte.
 2. **La CAF de 103 à 206 €** a été prise pour un gain non assuré : le reste prudent affiché
-   (745,55 €) l'oublie. La demande dit `+` (gain sûr) avec une fourchette : le bas de la
-   fourchette est sûr. À dire dans la méthode (une fourchette sur un gain sûr : le bas compte
-   dans le prudent, le haut dans le meilleur des cas), puis le vérifier sur t9.
+   (745,55 €) l'oublie. Dit depuis le lot 12 dans la règle du composant `entries` (le bas
+   d'une fourchette de gain compte) ; à vérifier sur t9.
 3. **Pas de question posée** dans #36 : le style (« sobre foncé » dans #35) n'a pas été
-   demandé, et l'appli suit le réglage du téléphone, claire par défaut.
+   demandé, et l'appli suit le réglage du téléphone, claire par défaut. Depuis le lot 10, la
+   direction vient du modèle de conception.
 4. Banc t9 avec le banc d'essai (`run.py t9-budget`), et un second passage de #36
    (« continue ») si l'utilisateur le veut : il reste 9 tâches à l'agent.
 

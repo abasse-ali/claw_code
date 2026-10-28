@@ -78,10 +78,14 @@
         const row = document.createElement("li");
         row.className = `entries__row${item.id === fresh ? " is-new" : ""}`;
         const [year, month, date] = item.date.split("-").map(Number);
-        row.innerHTML = `<span class="entries__date"></span><span class="entries__label"><strong></strong><small></small></span><span class="entries__amount"></span><button class="entries__remove" type="button" data-entries-remove>{{icon:trash-2}}</button>`;
-        row.querySelector(".entries__date").textContent = day.format(new Date(year, month - 1, date));
+        // Une ligne de néobanque : la pastille de la catégorie, le nom, la
+        // catégorie et le jour dessous, le montant à droite.
+        row.innerHTML = `<span class="entries__badge" aria-hidden="true"></span><span class="entries__label"><strong></strong><small></small></span><span class="entries__amount"></span><button class="entries__remove" type="button" data-entries-remove>{{icon:trash-2}}</button>`;
+        const badge = row.querySelector(".entries__badge");
+        badge.textContent = (item.category || item.label).trim().charAt(0).toUpperCase();
+        badge.classList.toggle("is-income", item.amount > 0);
         row.querySelector("strong").textContent = item.label;
-        row.querySelector("small").textContent = item.category;
+        row.querySelector("small").textContent = [item.category, day.format(new Date(year, month - 1, date))].filter(Boolean).join(" · ");
         const amount = row.querySelector(".entries__amount");
         amount.textContent = signed.format(item.amount);
         amount.classList.toggle("is-income", item.amount > 0);

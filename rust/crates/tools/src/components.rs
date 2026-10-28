@@ -208,7 +208,7 @@ const COMPONENTS: &[Component] = &[
         files!("entries"),
         include_str!("components/entries.js"),
         &["toast"],
-        "Put the figures the user gave in the data-entries-seed JSON (label, amount negative for an expense, category): they show at the first launch, in the current month only; never copy them onto the months before. data-entries names the storage key. window.entries (add, remove, month, months, totals, format) feeds the rest of the app, and every change sends entries:change.",
+        "Put the figures the user gave in the data-entries-seed JSON (label, amount negative for an expense, category): they show at the first launch, in the current month only; never copy them onto the months before. An amount given as a range goes in at its least favourable end (the low end of an income, the high end of an expense), so the balance stays prudent; an amount the user marks as not sure stays out until it is received, and the best case can be shown beside the balance. data-entries names the storage key. window.entries (add, remove, month, months, totals, format) feeds the rest of the app, and every change sends entries:change.",
     ),
     component(
         "entry-sheet",

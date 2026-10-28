@@ -520,6 +520,26 @@ def start_mcp(env):
     return host
 
 
+# Modèles d'une interface : le plus fort des gratuits en design (GLM-5.3, Inkling s'il ne
+# répond pas) écrit le plan et la feuille de base ; le modèle de la session code tout le reste,
+# jusqu'au bout. Pas d'escalade vers un autre modèle : vu le 27 octobre 2026 (session #36), le
+# relais à un modèle d'OpenRouter a vidé le quota gratuit du jour et arrêté les revues de design.
+DESIGNER_MODELS = "nvidia:z-ai/glm-5.3,thinkingmachines/inkling:free"
+
+
+def model_settings(env, mock=False):
+    """Réglages des modèles donnés à Claw, sauf ceux que l'environnement fixe déjà. Le faux
+    modèle n'appelle aucun modèle de conception."""
+    if mock:
+        env["CLAW_DESIGNER_MODEL"] = "off"
+        return env
+    env.setdefault("CLAW_DESIGNER_MODEL", DESIGNER_MODELS)
+    # Ni escalade, ni tour de design confié à un autre modèle (`designModel` du poste).
+    env.setdefault("CLAW_ESCALATION_MODEL", "off")
+    env.setdefault("CLAW_DESIGN_MODEL", "off")
+    return env
+
+
 def agent_env(environ, mock=False):
     """Environnement de Claw. Aucun jeton GitHub : il travaille, Claw publie après lui. Les clés
     des fournisseurs passent (OPENROUTER_API_KEY, NVIDIA_API_KEY…), sauf pour le faux modèle :
@@ -568,6 +588,7 @@ def main():
     # L'appli est en français, et le moteur entoure la demande de notes en anglais : la
     # langue des réponses est fixée (annonces, étapes, réponse finale).
     env.setdefault("CLAW_LANGUAGE", "français")
+    model_settings(env, mock=MODEL == "mock")
     # `claw-github` : l'agent demande une fusion ou une mise en ligne, faite après la poussée
     # par publish.py avec le jeton du dépôt (claw_github.py n'en a aucun).
     tools = WORK / "bin"

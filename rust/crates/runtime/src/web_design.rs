@@ -1171,6 +1171,139 @@ input:user-invalid, select:user-invalid, textarea:user-invalid { border-color: v
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } }
 Give every grid or flex container the class grid, split or row (or set min-width: 0 on its children), and every interactive element its own hover style on top of these. With a fixed header, add body { padding-top: var(--header-h); }. When a media query hides one version of a content (a schedule as a list on phones), the same media query shows the other version (a table on desktops): no section is ever empty on one screen. Never give an element a width in vw or in px wider than a phone (100vw, width: 480px): use max-width."#;
 
+/// Feuille de base écrite par le modèle de conception (`designerModel`) dans
+/// le projet ; l'agent la lie avant sa propre feuille.
+pub const BASE_CSS: &str = "base.css";
+/// Première ligne de cette feuille : Claw la reconnaît comme la sienne et peut
+/// la récrire à une nouvelle conception, jamais un `base.css` de l'utilisateur.
+pub const BASE_CSS_MARK: &str =
+    "/* base.css : système de design écrit par le modèle de conception de Claw */";
+
+/// Consigne du modèle de conception : la direction artistique et le système de
+/// design, sans code de page. Décision de l'utilisateur (28 octobre 2026) : « le
+/// meilleur gratuit en design pour la conception, mais après ce sera à
+/// nemotron-3-ultra de tout faire ».
+pub const DESIGNER_SYSTEM: &str = "You are the art director and design-system author of a top product studio, at the level of the best product teams (Linear, Stripe, Revolut, Apple). You do the design conception only: another engineer writes all the code from your plan and your base stylesheet, without seeing anything else from you, and an art director then scores the built pages 1 to 10 on phone, hierarchy, spacing, typography, color, identity and finish. You write no HTML and no JavaScript. Be concrete: exact hex values, rem sizes, pixel spaces, font names, and the order of the blocks on each screen.";
+
+/// Les lignes de CSS du socle de la méthode (`FOUNDATION`), sans les balises.
+fn foundation_css() -> String {
+    FOUNDATION
+        .lines()
+        .filter(|line| {
+            let line = line.trim_start();
+            line.contains('{') && line.contains('}') && !line.starts_with('<')
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Ce que le modèle de conception doit écrire pour la demande `brief` (avec
+/// les réponses de l'utilisateur) : le plan, puis `base.css`. `dark` : le
+/// mode sombre demandé ; `fonts` : les polices que l'outil `Font` sait servir.
+#[must_use]
+pub fn designer_prompt(brief: &str, dark: bool, fonts: &[&str], bar: u8) -> String {
+    let theme = if dark {
+        "The client wants a dark interface: :root holds the dark values, whatever the phone's setting, with color-scheme: dark."
+    } else {
+        "Give :root the light values with color-scheme: light, and the dark values in @media (prefers-color-scheme: dark) { :root { ... } } and again in :root[data-theme=\"dark\"], with color-scheme: dark, so the pages follow the phone."
+    };
+    let fonts = if fonts.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nFont library (the engineer can load only these, through the Font tool): {}.",
+            fonts.join(", ")
+        )
+    };
+    format!("The client's request, with their answers to the questions:\n\"{brief}\"\n\nThe built pages must reach {bar}/10 on each criterion. If the request is an app that keeps the user's own data (a budget, a log), the engineer builds it with ready-made components (screens behind a tab bar, the list of entries with its totals, a sheet to add an entry, a bar chart, offline install) that read your tokens; your base classes style everything else.{fonts}
+
+Write exactly two parts.
+
+Part 1, under the heading \"## Plan\" (at most 700 words), specific to this subject:
+- Brief: the subject, the audience and the main job, one line each.
+- Direction: the style in one sentence, and the one memorable element; everything around it stays quiet.
+- Color: 5 to 8 named tokens with hex values and their role, one accent used sparingly, every text at least 4.5:1 on its background.
+- Type: one display face and one text face from the font library (never Inter, Roboto, Arial, Open Sans, Montserrat, Poppins, Lato, Playfair Display, Space Grotesk or system-ui), the weights, and a scale of 5 to 7 sizes in rem for phones and desktops; figures in tabular numbers.
+- Space, radius and shadow: one spacing scale on multiples of 8px, the radii, one or two shadows.
+- Screens: for each screen, the blocks from top to bottom on a phone, with their content and their size, and what changes on a desktop. The first screen shows the main figure and the main action without scrolling. A list of things (operations, items) is a list of compact rows on one surface, never a pile of colored cards.
+- Components: the anatomy and the states of each repeated element (the main figure, a list row, a button, a field, a chip, a section title), named with the classes of part 2.
+- Motion: what moves, 150 to 250 ms, at most one entrance.
+Never use, because they mark a generated page: rows of identical cards with the same shadow, several cards of different flat colors side by side, a colored band with centered \"Welcome\" text, ALL-CAPS labels above headings, cream with terracotta, near-black with one acid accent, gradients everywhere, emoji.
+
+Part 2, base.css in one ```css block (at most 260 lines), the design system the engineer links first in every page:
+- :root with every token of the plan, including these names, which the ready-made components read: --paper (page background), --surface (card background), --ink (text), --muted (secondary text), --line (dividers), --accent, --on-accent (text on the accent), --income (money in), --error (money out and errors), --field (field background), --radius, --font-display, --font-text. {theme}
+- Then this foundation, with your tokens:
+{foundation}
+- Then the base look of: the type scale (h1, h2, h3, small, .amount with tabular figures, .amount--in, .amount--out), buttons (.btn, .btn--primary, .btn--ghost, .btn--icon, at least 44px high), surfaces (.surface, and .surface--hero for the main figure), lists (.list, .list-row with a leading .badge icon circle, a title and a subtitle, and the amount aligned on the right), fields (input, select, textarea: typed text readable in both modes, colors from the tokens), .chip and .section-title.
+- Tokens, element and class rules only: no layout of a particular page, no IDs, no @import, no !important outside the foundation.
+Write nothing after the css block.", foundation = foundation_css())
+}
+
+/// La réponse du modèle de conception : le plan, et `base.css` s'il l'a écrit.
+#[must_use]
+pub fn parse_conception(text: &str) -> Option<(String, Option<String>)> {
+    let lower = text.to_ascii_lowercase();
+    let (plan, css) = match lower.find("```css") {
+        Some(start) => {
+            let body = start + "```css".len();
+            let end = text[body..]
+                .find("```")
+                .map_or(text.len(), |end| body + end);
+            let css = text[body..end].trim().to_string();
+            (
+                text[..start].to_string(),
+                css.contains(":root").then_some(css),
+            )
+        }
+        None => (text.to_string(), None),
+    };
+    let plan = plan.trim();
+    let plan = plan
+        .strip_prefix("## Plan")
+        .or_else(|| plan.strip_prefix("Part 1"))
+        .unwrap_or(plan)
+        .trim()
+        .to_string();
+    (plan.chars().count() >= 200 || css.is_some()).then_some((plan, css))
+}
+
+/// Ce que l'agent reçoit de la conception : le plan à suivre, et la feuille de
+/// base écrite par Claw dans `file` (`None` : le modèle n'en a pas écrit).
+#[must_use]
+pub fn conception_note(model: &str, plan: &str, file: Option<(&str, usize)>) -> String {
+    let base = match file {
+        Some((file, lines)) => format!(" Claw wrote its design system in {file} ({lines} lines: the tokens of color, type, space, radius and shadow, the foundation, and the base look of text, buttons, surfaces, list rows, fields and chips). Link {file} in every page before your own stylesheet (<link rel=\"stylesheet\" href=\"{file}\">, with the path from the page), use its variables and classes for everything, never redefine its variables or restyle its base classes, and keep your own stylesheet for layout and the parts it does not cover. The method's foundation is already in it: do not copy it again. Load its two fonts with the Font tool."),
+        None => " Write its tokens at the top of your stylesheet, as they are.".to_string(),
+    };
+    format!("Design conception by {model}, the designer Claw chose for this request: it decided the direction; you build everything. Its plan below is your design plan: do not write another one and do not change its direction, colors or fonts; follow it screen by screen, block by block.{base}\n\n{plan}")
+}
+
+/// Le projet a déjà une page HTML (à la racine ou un dossier plus bas, hors
+/// dépendances) : une interface existe.
+#[must_use]
+pub fn has_interface_page(root: &std::path::Path) -> bool {
+    fn walk(dir: &std::path::Path, depth: usize) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        entries.filter_map(Result::ok).any(|entry| {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if path.is_dir() {
+                depth < 2
+                    && !name.starts_with('.')
+                    && !matches!(name.as_str(), "node_modules" | "target" | "dist" | "vendor")
+                    && walk(&path, depth + 1)
+            } else {
+                path.extension().is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("html") || ext.eq_ignore_ascii_case("htm")
+                })
+            }
+        })
+    }
+    walk(root, 0)
+}
+
 /// Pièces du socle (`FOUNDATION`) absentes de toutes les feuilles de style du
 /// projet : ce qui manque, en mots que le modèle reconnaît. Vu dans un essai
 /// réel : le socle était dans la méthode, mais le modèle a écrit son CSS sans
@@ -2388,10 +2521,82 @@ pub fn review_feedback(
 #[cfg(test)]
 mod tests {
     use super::{
-        critique_changes, design_guide, is_interface_file, is_interface_request, page_from_files,
-        page_target, problem_key, read_audit, regression_note, regressions, review_feedback,
-        screenshot_input, Audit,
+        conception_note, critique_changes, design_guide, designer_prompt, has_interface_page,
+        is_interface_file, is_interface_request, page_from_files, page_target, parse_conception,
+        problem_key, read_audit, regression_note, regressions, review_feedback, screenshot_input,
+        Audit,
     };
+
+    #[test]
+    fn the_designer_reply_gives_the_plan_and_base_css() {
+        let plan = "Brief: a budget app. ".repeat(12);
+        let reply = format!("## Plan\n{plan}\n\n```CSS\n:root {{ --paper: #fff; }}\n.btn {{ min-height: 44px; }}\n```\n");
+        let (read, css) = parse_conception(&reply).expect("plan");
+        assert_eq!(read, plan.trim());
+        assert_eq!(
+            css.as_deref(),
+            Some(":root { --paper: #fff; }\n.btn { min-height: 44px; }")
+        );
+        // Une feuille sans jetons n'est pas une feuille de base ; le plan reste.
+        let (_, css) = parse_conception(&format!("{plan}```css\n.btn {{}}\n```")).expect("plan");
+        assert!(css.is_none());
+        // Ni plan ni feuille : rien à transmettre.
+        assert!(parse_conception("Sure, here is a design.").is_none());
+        assert!(parse_conception("").is_none());
+        // Une feuille seule suffit, même si la réponse a été coupée.
+        let (_, css) = parse_conception("```css\n:root { --ink: #111; }").expect("feuille");
+        assert_eq!(css.as_deref(), Some(":root { --ink: #111; }"));
+    }
+
+    #[test]
+    fn the_designer_prompt_asks_for_the_tokens_the_components_read() {
+        let prompt = designer_prompt("Une appli de budget", false, &["Manrope", "Fraunces"], 8);
+        assert!(prompt.contains("\"Une appli de budget\"") && prompt.contains("8/10"));
+        assert!(prompt.contains("Font library") && prompt.contains("Manrope, Fraunces"));
+        for token in [
+            "--paper",
+            "--surface",
+            "--on-accent",
+            "--income",
+            "--field",
+            "--font-display",
+        ] {
+            assert!(prompt.contains(token), "{token}");
+        }
+        assert!(prompt.contains("prefers-color-scheme: dark") && prompt.contains("data-theme"));
+        assert!(
+            prompt.contains("box-sizing: border-box"),
+            "le socle est joint"
+        );
+        assert!(
+            !prompt.contains("<link"),
+            "pas de balise HTML dans le socle d'une feuille"
+        );
+        let dark = designer_prompt("Une appli sombre", true, &[], 8);
+        assert!(dark.contains("dark interface") && !dark.contains("Font library"));
+        let note = conception_note("glm", "Direction: calm.", Some(("base.css", 120)));
+        assert!(
+            note.contains("by glm")
+                && note.contains("base.css (120 lines")
+                && note.ends_with("Direction: calm.")
+        );
+        assert!(conception_note("glm", "x", None).contains("top of your stylesheet"));
+    }
+
+    #[test]
+    fn an_interface_page_is_found_outside_the_dependencies() {
+        let root = std::env::temp_dir().join(format!("claw-page-trouvee-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("node_modules/kit")).expect("dossier");
+        std::fs::write(root.join("node_modules/kit/index.html"), "x").expect("page");
+        std::fs::write(root.join("notes.md"), "x").expect("notes");
+        assert!(!has_interface_page(&root));
+        std::fs::create_dir_all(root.join("public")).expect("dossier");
+        std::fs::write(root.join("public/Index.HTML"), "x").expect("page");
+        assert!(has_interface_page(&root));
+        assert!(!has_interface_page(&root.join("absent")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn the_figures_of_session_35_are_the_ones_a_page_must_show() {

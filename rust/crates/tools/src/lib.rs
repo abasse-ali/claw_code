@@ -16,7 +16,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 mod components;
-mod fonts;
+pub mod fonts;
 mod icons;
 mod local_server;
 mod ornaments;
