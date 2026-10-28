@@ -23,6 +23,8 @@ mod ornaments;
 mod page_view;
 mod photos;
 mod screenshot;
+mod starters;
+mod vite;
 mod wireframe;
 
 /// Un navigateur est installé : les outils `ViewPage` et `Screenshot` peuvent
@@ -917,12 +919,25 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "Component",
-            description: "Interactive components that work as soon as they are pasted (HTML, CSS and dependency-free JS), accessible, in the plan's colors, with icons from the icon set: nav-menu (header and phone menu), accordion (FAQ), tabs, dialog (modal), toast (confirmation messages), carousel, booking (days, slots, places left, calendar file), filter (tags and search), form (validation, sending, success), cart (basket or quote), theme-toggle (dark mode), copy, share, open-now (live opening hours), directions (route, call, map), reveal (appear on scroll), count-up (key figures), scroll-effects (reading progress, parallax), page-transitions. For a personal app that keeps the user's data (budget, log, habits, collection): app-kit, the look and working of a recent phone app (Claw writes kit/app-kit.css and kit/app-kit.js into the project and gives the page skeleton: app bar with the month, screens behind a floating tab bar with an add button, balance card, tiles, cards with lists, meters, bar chart, settings, a sheet to add or edit an entry, undo, light and dark), with pwa (manifest, service worker, offline). Use them instead of writing these by hand: every button then does what it says. Ask for several by name in one call; without names you get the list.",
+            description: "Interactive components that work as soon as they are pasted (HTML, CSS and dependency-free JS), accessible, in the plan's colors, with icons from the icon set: nav-menu (header and phone menu), accordion (FAQ), tabs, dialog (modal), toast (confirmation messages), carousel, booking (days, slots, places left, calendar file), filter (tags and search), form (validation, sending, success), cart (basket or quote), theme-toggle (dark mode), copy, share, open-now (live opening hours), directions (route, call, map), reveal (appear on scroll), count-up (key figures), scroll-effects (reading progress, parallax), page-transitions. For a personal app that keeps the user's data (budget, log, habits, collection) made without React (a new app is built with the Starter tool's react-app): app-kit, the look and working of a recent phone app (Claw writes kit/app-kit.css and kit/app-kit.js into the project and gives the page skeleton: app bar with the month, screens behind a floating tab bar with an add button, balance card, tiles, cards with lists, meters, bar chart, settings, a sheet to add or edit an entry, undo, light and dark), with pwa (manifest, service worker, offline). Use them instead of writing these by hand: every button then does what it says. Ask for several by name in one call; without names you get the list.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "names": { "type": "array", "items": { "type": "string" }, "description": "Component names, for example [\"nav-menu\", \"booking\", \"open-now\"] or [\"app-kit\", \"pwa\"]" },
                     "dir": { "type": "string", "description": "Folder of the app's index.html, relative to the project (default: the project's root); app-kit writes its files in its kit/ folder" }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
+            name: "Starter",
+            description: "Ready projects with their libraries installed, to build on instead of writing everything by hand. react-app (the default for an app or an interactive page): React 19, TypeScript, Vite, Tailwind CSS, Framer Motion, lucide-react, zustand, recharts, radix-ui, date-fns and zod, with Claw's app kit as React components (app shell with a tab bar, main figure card, tiles, cards with animated lists, meters, bar chart, settings, add sheet, undo messages, offline install, light and dark) and a working example in src/App.tsx; Claw builds it into docs/, the page GitHub Pages publishes, before every Screenshot or Browser call. node-api: an Express API with Socket.IO live updates in TypeScript, with tests. python-api: a FastAPI API with a WebSocket, with tests. Claw writes the files, installs the libraries and returns how to use them. Call it once at the start of a new project, in the project's root.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["react-app", "node-api", "python-api"], "description": "The project to start (default react-app)" },
+                    "dir": { "type": "string", "description": "Folder of the project, relative to the working directory (default: its root; a React app published on GitHub Pages stays at the root)" }
                 },
                 "additionalProperties": false
             }),
@@ -1504,6 +1519,9 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
             .and_then(to_pretty_json),
         "Component" => from_value::<components::ComponentInput>(input)
             .and_then(|input| components::component_tool(&input))
+            .and_then(to_pretty_json),
+        "Starter" => from_value::<starters::StarterInput>(input)
+            .and_then(|input| starters::starter_tool(&input))
             .and_then(to_pretty_json),
         "AppIcon" => from_value::<screenshot::app_icons::AppIconInput>(input)
             .and_then(|input| screenshot::app_icons::app_icon(&input))

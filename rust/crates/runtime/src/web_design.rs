@@ -1194,13 +1194,71 @@ pub fn design_guide(request: &str, earlier: Option<&str>) -> Option<String> {
         is_interface_request(request) || (short && earlier.is_some_and(is_interface_request));
     let app = app_request(request, earlier);
     interface.then(|| {
-        let method = if app {
+        let root = std::env::current_dir().unwrap_or_default();
+        let method = if app && react_app(request, earlier, &root) {
+            react_app_method(design_bar())
+        } else if app {
             app_method(design_bar())
         } else {
             design_method(design_bar())
         };
         format!("{GUIDE_PREFIX} {method}")
     })
+}
+
+/// Marques d'une demande de page sans React : l'appli se fait alors avec le
+/// kit en HTML, CSS et JavaScript.
+const PLAIN_HTML_WORDS: &[&str] = &[
+    "html simple",
+    "simple html",
+    "plain html",
+    "html pur",
+    "pur html",
+    "html/css/js",
+    "html, css et javascript",
+    "html, css et js",
+    "html css js",
+    "javascript pur",
+    "js pur",
+    "vanilla",
+    "sans react",
+    "without react",
+    "no react",
+    "sans framework",
+    "without framework",
+    "no framework",
+    "un seul fichier html",
+    "single html file",
+];
+
+/// La demande veut une page sans React.
+#[must_use]
+pub fn plain_html_requested(text: &str) -> bool {
+    let folded = crate::team::without_accents(&text.to_lowercase());
+    has_any(&folded, PLAIN_HTML_WORDS)
+}
+
+/// Une appli faite avec le kit sans React (`kit/app-kit.js`) est déjà dans le
+/// projet, à sa racine ou un dossier plus bas : elle continue ainsi.
+fn html_app_in(root: &Path) -> bool {
+    let kit = |dir: &Path| dir.join("kit").join("app-kit.js").is_file();
+    kit(root)
+        || std::fs::read_dir(root).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.path().is_dir() && kit(&entry.path()))
+        })
+}
+
+/// Une appli perso se construit en React, sur le projet de départ `react-app`
+/// de l'outil `Starter` (décision de l'utilisateur, 28 octobre 2026 : React et
+/// Vite par défaut), sauf quand la demande veut une page sans React ou qu'une
+/// appli faite sans React est déjà dans le projet `root`.
+#[must_use]
+pub fn react_app(request: &str, earlier: Option<&str>, root: &Path) -> bool {
+    !plain_html_requested(request)
+        && !earlier.is_some_and(plain_html_requested)
+        && !html_app_in(root)
 }
 
 /// Le tour construit une appli perso : sa demande, ou celle qu'un message
@@ -1224,6 +1282,21 @@ fn app_method(bar: u8) -> String {
 4. Screens. 3 to 5 tabs, each with one clear job. The first screen leads with the main figure in the hero (what is left to spend, a streak, a total) and the main action is the add button of the tab bar; the entries are a card of compact rows; summaries are tiles, meters and the chart; the settings hold the user's figures as values to adjust; every list has its empty state. Short labels; amounts in the user's currency and format (1 235,15 €), the cents only where they matter.
 5. Make everything work: every button does what its label says; adding an entry updates every total and list at once; an entry can be changed and deleted, with Undo; the data stay after a reload; nothing shows NaN, Infinity or undefined.
 6. Check before you answer: Screenshot with windows and explore true (phone and desktop), then Browser in ONE call with action \"steps\": the user's day in the app (open it, add an entry, see it in the list and in the totals, change it, delete it, Undo, open every tab), each step with \"expect\" set to what must then show, so the call proves the results. Fix every measured problem. Say in your answer only what these checks saw.")
+}
+
+/// Méthode d'une appli perso en React : le projet de départ `react-app` de
+/// l'outil `Starter` (le kit d'appli en composants React, les bibliothèques
+/// installées, un exemple qui marche) ; le modèle fait les données, les écrans
+/// et la logique propre de l'appli, avec les composants et les bibliothèques
+/// au lieu de les écrire à la main.
+fn react_app_method(bar: u8) -> String {
+    format!("This request builds a personal app: a tool the user opens every day on their phone to keep their own data. The bar is a recent phone app at the level of the best (Revolut, Lydia, Apple's own apps): the figure that matters first, calm surfaces, every screen working, light and dark, never a website. When you finish, Claw has the screens scored by an art director, 1 to 10 on seven criteria (phone, hierarchy, spacing, typography, color, identity, finish), and sends back every criterion under {bar}.
+1. Brief. One line each: who uses it, the figures that matter most, the main daily action (add an expense, log a session). Use the user's own words and figures, in their language. Never write a fact the user did not give (a rule, a promise, an amount): what only the user knows is asked in your answer. No technical word on screen (CSV, JSON, local storage, sync, database).
+2. Plan, in your reply before any code: the app's colors as hex values (the accent; the three hues of the gradient of its main card; the page and card surfaces, light and dark), then each screen with the kit's components from top to bottom and their content, and the add sheet's categories with a Lucide icon each. Data first. The figures the user gave are in the app from the first launch, as values they can change in its settings, never an empty app at 0. A figure given as a range counts at its least favourable end in the prudent total (the low end of an income, the high end of an expense), with the best case shown beside it; a figure marked as not sure stays out of the prudent total until it is received. Never fill the months before with copies of this month.
+3. Build in React, on the Starter tool: one call with kind \"react-app\", at the project's root. Claw writes a React + TypeScript + Vite + Tailwind CSS + Framer Motion project with Claw's app kit as React components, installs its libraries and returns how to use them; src/App.tsx is a working example to rewrite for this app. Compose every screen only with the kit's components, imported from \"./kit\": AppShell with its tabs and add button, MonthBar or AppBar, Hero with the main figure, Tiles, Card holding a List of Row or EntryList, Badge, Meters, BarChart or MonthsChart, Settings with MoneyInput or Switch, Empty, Button, EntrySheet, ConfirmModal, and toast with an Undo: no cards, lists, buttons or fields of your own, which would look different and break. The user's figures go in SEED (seedOnce) and in a persistentStore for their settings. src/theme.css only sets the app's tokens (its accent and its gradient, for light and dark); Tailwind classes lay out the little the kit lacks; never edit src/kit/ or docs/. Use the installed libraries instead of writing their work by hand: framer-motion for motion, recharts for other charts, date-fns for dates, zod to check an input, radix-ui for a menu, a slider or a popover. Keep the phone's own font, the kit's: a web typeface looks out of place in an app and is lost offline. Icons come from lucide-react (import {{ Wallet }} from \"lucide-react\"); emoji are forbidden everywhere, even if the brief sounds playful. Name the app in index.html's <title> and in public/manifest.webmanifest; draw public/icon.svg with the Icon tool on the accent, then the AppIcon tool (folder public) makes the PNG icons: list them in the manifest's icons and link the iPhone's in index.html, written without public/ (\"/apple-touch-icon.png\").
+4. Screens. 3 to 5 tabs, each with one clear job. The first screen leads with the main figure in the Hero (what is left to spend, a streak, a total) and the main action is the add button of the tab bar; the entries are a card of compact rows; summaries are tiles, meters and the chart; the settings hold the user's figures as values to adjust; every list has its empty state. Short labels; amounts in the user's currency and format (1 235,15 €, money()), the cents only where they matter.
+5. Make everything work: every button does what its label says; adding an entry updates every total and list at once; an entry can be changed and deleted, with Undo; the data stay after a reload; nothing shows NaN, Infinity or undefined.
+6. Check before you answer: npm run typecheck until it passes (the types, then the build Claw publishes, in docs/). Then Screenshot of index.html with windows and explore true (phone and desktop: Claw builds the app first, and shows its build errors), then Browser in ONE call with action \"steps\": the user's day in the app (open index.html, add an entry, see it in the list and in the totals, change it, delete it, Undo, open every tab), each step with \"expect\" set to what must then show, so the call proves the results. Fix every measured problem. Say in your answer only what these checks saw.")
 }
 
 /// Socle de code à recopier au début de la feuille de styles : il évite les
@@ -1373,8 +1446,15 @@ pub fn parse_conception(text: &str) -> Option<(String, Option<String>)> {
 /// Ce que l'agent reçoit de la conception : le plan à suivre, et la feuille de
 /// base écrite par Claw dans `file` (`None` : le modèle n'en a pas écrit).
 #[must_use]
-pub fn conception_note(model: &str, plan: &str, file: Option<(&str, usize)>, app: bool) -> String {
+pub fn conception_note(
+    model: &str,
+    plan: &str,
+    file: Option<(&str, usize)>,
+    app: bool,
+    react: bool,
+) -> String {
     let base = match file {
+        Some((file, lines)) if app && react => format!(" Claw already wrote the app's colors in {file} ({lines} lines of tokens: the accent, the hero's gradient, the surfaces and the text, light and dark): never write or edit it. Build the app with the Starter tool (kind \"react-app\"): its src/index.css imports {file} before src/theme.css, so these colors apply as they are; leave src/theme.css as it is, and never redefine the tokens of {file}. Keep the phone's own font: no web typeface."),
         Some((file, lines)) if app => format!(" Claw already wrote the app's colors in {file} ({lines} lines of tokens: the accent, the hero's gradient, the surfaces and the text, light and dark): never write or edit it. Build the app on the app kit (Component with names [\"app-kit\", \"pwa\"]), and in the <head> link kit/app-kit.css, then {file}, then your own stylesheet, which only adds what the kit lacks: never redefine the tokens of {file}. Keep the phone's own font: no web typeface."),
         Some((file, lines)) => format!(" Claw already wrote its design system in {file} ({lines} lines: the tokens of color, type, space, radius and shadow, the foundation, and the base look of text, buttons, surfaces, list rows, fields and chips): read it before writing the pages, and never write or edit it. Link {file} in every page before your own stylesheet (<link rel=\"stylesheet\" href=\"{file}\">, with the path from the page), use its variables and classes for everything, never redefine its variables or restyle its base classes, and keep your own stylesheet for layout and the parts it does not cover. The method's foundation is already in it: do not copy it again. Load its two fonts with the Font tool."),
         None => " Write its tokens at the top of your stylesheet, as they are.".to_string(),
@@ -1385,7 +1465,10 @@ pub fn conception_note(model: &str, plan: &str, file: Option<(&str, usize)>, app
 /// La feuille de base du modèle de conception, réécrite par le modèle de la
 /// session, a été remise en place.
 #[must_use]
-pub fn design_base_restored(file: &str) -> String {
+pub fn design_base_restored(file: &str, react: bool) -> String {
+    if react {
+        return format!("[Claw] {file} holds the app's colors written by the designer for this request, and Claw put it back as it was: never write or edit {file}. src/index.css imports it before src/theme.css: lay out what the kit lacks with Tailwind classes, and set a token only in src/theme.css.");
+    }
     format!("[Claw] {file} is the design system the designer wrote for this request, and Claw put it back as it was: never write or edit {file}. Read it to know its tokens and classes, link it first in every page, and put your own rules (the layout of each screen, the parts it does not cover, any override) in your own stylesheet, styles.css, linked after it.")
 }
 
@@ -1518,7 +1601,7 @@ fn design_method(bar: u8) -> String {
 - Space: one spacing scale on multiples of 8px (for example 8, 16, 24, 40, 64, 96) and nothing else; the same vertical padding for sections of the same rank; no empty band taller than half a screen.
 - Layout: an ASCII wireframe of the first screen (phone and desktop), drawn with the Wireframe tool and pasted as it is in a ``` block (never drawn or retouched by hand: hand-drawn boxes come out misaligned and overflow), and the order of the sections. Text left-aligned (center only one-line titles and short captions). Vary the composition from one section to the next (split, full width, grid, list, offset), never the same centered title over a grid each time.
 - One memorable element (a hero treatment, an illustration, a typographic idea, an interaction), with everything around it quiet and disciplined.
-- Interactions: what the visitor can do on the page, from the Component tool, chosen for this subject: booking for classes, tables or appointments; open-now and directions for a shop, a restaurant or a studio; filter for a schedule, a menu or a catalog; cart for products or a quote; accordion for questions; carousel for a gallery; copy and share for an address or an event; theme-toggle when the brand suits a dark mode. Two or three that serve the visitor, not all of them. A personal app that keeps the user's own data (a budget, a training log, habits, a collection) is built on the app kit instead: Component with names [\"app-kit\", \"pwa\"] writes the kit into the project and gives the page skeleton to start from.
+- Interactions: what the visitor can do on the page, from the Component tool, chosen for this subject: booking for classes, tables or appointments; open-now and directions for a shop, a restaurant or a studio; filter for a schedule, a menu or a catalog; cart for products or a quote; accordion for questions; carousel for a gallery; copy and share for an address or an event; theme-toggle when the brand suits a dark mode. Two or three that serve the visitor, not all of them. A personal app that keeps the user's own data (a budget, a training log, habits, a collection) is built with the Starter tool instead (kind \"react-app\": React with Claw's app kit, its libraries installed).
 - Motion: one entrance on the first screen, then reveal on a few chosen blocks (a list of cards, a key figure), count-up for key figures, at most one scroll effect (reading progress or a slow parallax on the hero picture), and micro-interactions on every link, button and card.
 Forbidden unless the brief asks for it, because they mark a generated page: a plain colored band with centered \"Welcome\" text as the hero; rows of identical cards with the same soft shadow; a short line under every heading; ALL-CAPS badges or small labels above headings; one repeated icon standing in for pictures; cream with terracotta, or near-black with one acid accent; 01/02/03 markers on things that are not steps; a fade-in on every section; decorative gradients everywhere. Check your plan against this list and say in one line that it uses none of them. Emoji are forbidden everywhere, with no exception, even if the brief sounds playful: emoji are drawn by the device's own font and look different on every phone and computer. Every icon and pictogram comes from the Icon tool (polished Lucide line icons, ready-to-paste inline SVG: ask for several names in one call; set their `color`, `style` \"duotone\", `background` badge, `corners` or `rotate` in the call, and ask `sprite` for icons used many times), pasted as it is: never write an icon's shapes yourself, not even a simple arrow, check, cross, star, menu or social logo, and not in a CSS data URL either (a select's arrow is the chevron-down icon); Claw compares every small SVG of the page with the icon set and sends back any drawn by hand; every decorative shape (an organic blob behind a title, layered waves at the edge of a hero, an arch framing a picture, a medallion around an initial, a branch, a sun, a dot, line, contour or grain texture) comes from the Ornament tool in the plan's colors: shapes drawn by hand look crude, and these are drawn from formulas.{photos} An illustration you still draw yourself stays simple and geometric (with width, height and aria-hidden=\"true\", or role=\"img\" and an aria-label when it carries meaning); no emoji appears in any heading, button, label or paragraph.
 3. Build. One file per role (index.html, styles.css, app.js, and the manifest and service worker of an app), each short enough to be written in one call (under about 400 lines; split a bigger script into modules): never the whole app packed into one huge HTML file, which a reply cuts before it is written. An app meant to work offline loads nothing from a CDN or another site (draw charts in inline SVG or on a canvas, keep every script and font it needs in the project, and list them in the service worker's cache), and its manifest icon is a real drawing: one SVG file (\"sizes\": \"any\", \"type\": \"image/svg+xml\"), from which the AppIcon tool draws the PNG icons phones ask for (192, 512, maskable, and the iPhone's 180); never an empty or 1x1 placeholder PNG written by hand. CSS custom properties for every color, size and space of the plan, and no raw values outside them (except 0 and 1px borders). Semantic HTML (header, nav, main, section, footer) with exactly one h1 and no skipped heading levels; mobile first. On phones the navigation folds into a menu button that opens and closes it (aria-expanded), and a fixed header never covers content (offset the page by its height). Every link, button and field has hover, :focus-visible and active states, with transitions of 150 to 250ms, and @media (prefers-reduced-motion: reduce) stops the motion. Animate only transform and opacity (never width, height, margin or top): 150 to 250ms for hover and press, 400 to 700ms for an entrance, with an ease-out curve; nothing loops forever except one slow decorative detail; content never waits for a script to be visible. Tap targets of at least 44x44px on phones. Pictures: the user's images{photo_pictures}, Ornament shapes, or simple illustrations in inline SVG (each with an explicit width and height) or CSS, never broken or placeholder images. Forms: styled like the rest of the page (font: inherit), a visible label on every field, errors shown only after the user acts (:user-invalid, or on submit), a clear confirmation in the page. Watch CSS specificity: a .section rule and a .cta rule can cancel each other's spacing.
@@ -2707,16 +2790,41 @@ mod tests {
         );
         let dark = designer_prompt("Une appli sombre", true, &[], 8);
         assert!(dark.contains("dark interface") && !dark.contains("Font library"));
-        let note = conception_note("glm", "Direction: calm.", Some(("base.css", 120)), false);
+        let note = conception_note(
+            "glm",
+            "Direction: calm.",
+            Some(("base.css", 120)),
+            false,
+            false,
+        );
         assert!(
             note.contains("by glm")
                 && note.contains("base.css (120 lines")
                 && note.ends_with("Direction: calm.")
         );
-        assert!(conception_note("glm", "x", None, false).contains("top of your stylesheet"));
+        assert!(conception_note("glm", "x", None, false, false).contains("top of your stylesheet"));
         // Une appli perso : les couleurs du concepteur, le kit pour le reste.
-        let app = conception_note("gemini", "Screens: Accueil.", Some(("base.css", 40)), true);
+        let app = conception_note(
+            "gemini",
+            "Screens: Accueil.",
+            Some(("base.css", 40)),
+            true,
+            false,
+        );
         assert!(app.contains("kit/app-kit.css, then base.css") && app.contains("no web typeface"));
+        // En React : le projet de départ importe la feuille du concepteur.
+        let react = conception_note(
+            "gemini",
+            "Screens: Accueil.",
+            Some(("base.css", 40)),
+            true,
+            true,
+        );
+        assert!(
+            react.contains("Starter tool (kind \"react-app\")")
+                && react.contains("src/index.css imports base.css")
+                && !react.contains("kit/app-kit.css")
+        );
     }
 
     #[test]
@@ -2734,14 +2842,23 @@ mod tests {
         assert!(!is_personal_app(
             "Mon budget pour le site est de 500 euros, crée la page d'accueil"
         ));
+        // React par défaut (décision du 28 octobre 2026), sur le projet de départ.
         let guide = design_guide(budget, None).expect("méthode");
-        assert!(guide.contains("app kit") && guide.contains("names [\"app-kit\", \"pwa\"]"));
+        assert!(guide.contains("Starter tool") && guide.contains("kind \"react-app\""));
+        assert!(guide.contains("app kit") && guide.contains("npm run typecheck"));
         assert!(guide.contains("phone's own font") && !guide.contains("never Inter"));
         assert!(!guide.contains("Wireframe tool") && !guide.contains("Ornament tool"));
         // « continue » après une demande d'appli : toujours une appli.
         assert!(design_guide("continue", Some(budget))
             .expect("suite")
             .contains("app kit"));
+        // Une appli demandée en HTML simple : le kit sans React.
+        let plain = design_guide(
+            "Crée une appli web perso pour suivre mes dépenses, en HTML simple sans framework",
+            None,
+        )
+        .expect("html");
+        assert!(plain.contains("names [\"app-kit\", \"pwa\"]") && !plain.contains("Starter tool"));
         // Un site garde la méthode d'un studio.
         let site = design_guide("Crée le site vitrine de ma boulangerie", None).expect("site");
         assert!(

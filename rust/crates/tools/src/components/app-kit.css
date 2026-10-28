@@ -335,7 +335,7 @@
 
 /* Fenêtres : un volet qui monte du bas au téléphone, une carte au centre ailleurs. */
 dialog.sheet, dialog.modal {
-  width: min(100% - 32px, 440px); max-height: min(90dvh, 720px); padding: 0;
+  width: min(100% - 32px, 440px); margin: auto; max-height: min(90dvh, 720px); padding: 0;
   border: 0; border-radius: calc(var(--radius) + 6px);
   background: var(--paper); color: var(--ink);
   box-shadow: 0 30px 80px -20px rgb(0 0 0 / 0.45);

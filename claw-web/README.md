@@ -411,6 +411,21 @@ tester sur mon iPhone ») : après sa réponse, le lien arrive dans la session.
 Il faut le serveur gratuit d'Oracle (« Sessions sur votre machine » ci-dessous) : JTest tourne
 sur l'exécuteur `claw-pc` à processeur ARM, et le site y reste en ligne après le passage.
 
+## Applis en React, bibliothèques prêtes
+
+Une appli perso (budget, suivi, habitudes, collection) se construit en **React** : Claw part
+d'un projet prêt, avec ses bibliothèques déjà installées (React, TypeScript, Vite, Tailwind
+CSS, Framer Motion, des icônes, des graphiques, des menus et des curseurs accessibles), et
+compose les écrans avec les composants de son kit d'appli au lieu de tout écrire à la main.
+Le journal le dit en une ligne : « Prépare le projet · appli React ». Avant de regarder l'appli,
+Claw la construit dans le dossier `docs/`, celui que « Mettre en ligne » publie. Pour une page
+sans React, demandez-la « en HTML simple ». Claw sait aussi poser un serveur Node (Express,
+Socket.IO) ou Python (FastAPI) ; ceux-là demandent un hébergeur, GitHub Pages ne publiant que
+des pages.
+
+Le modèle choisi travaille seul : il ne demande plus d'avis à d'autres modèles, sauf pour la
+conception du design, la note des écrans et la description des images.
+
 ## Fusionner, mettre en ligne
 
 - « Fusionner » (seulement pour une ancienne session dont la pull request est restée ouverte,
@@ -418,7 +433,9 @@ sur l'exécuteur `claw-pc` à processeur ARM, et le site y reste en ligne après
 - « Mettre en ligne » : publie un site statique sur GitHub Pages (dossier `docs/` ou racine),
   depuis la branche de la session telle quelle. Sur un compte
   GitHub gratuit, GitHub Pages ne publie que les dépôts publics : l'appli le signale et propose
-  de rendre le dépôt public. Claw (l'agent) n'a aucun jeton GitHub : il agit sur GitHub par les
+  de rendre le dépôt public. Un site déjà en ligne a son bouton « Dépublier le site » (deux
+  appuis) : il quitte GitHub Pages, son adresse ne répond plus, le code et les branches restent.
+  Claw (l'agent) n'a aucun jeton GitHub : il agit sur GitHub par les
   outils du moteur (« Outils MCP »), et demande la fusion ou la mise en ligne de la session à
   `claw-github`, fait après la poussée.
 

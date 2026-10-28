@@ -9929,6 +9929,10 @@ impl ApiClient for DefaultRuntimeClient {
         }
     }
 
+    fn can_consult(&mut self) -> bool {
+        !tools::advisors::configured_models().is_empty()
+    }
+
     fn consult(
         &mut self,
         purpose: runtime::ConsultPurpose,

@@ -102,6 +102,12 @@ pub trait ApiClient {
         None
     }
 
+    /// D'autres modèles peuvent être consultés (relecture, avis, revue du plan) : faux quand
+    /// l'utilisateur les a coupés (`CLAW_ADVISOR_MODELS=off`) ; Claw ne l'annonce alors pas.
+    fn can_consult(&mut self) -> bool {
+        true
+    }
+
     /// Le modèle vient de répondre sans appeler d'outil : c'est sa réponse
     /// finale, sauf si un contrôle de Claw le renvoie au travail.
     fn answer_drafted(&mut self) {}
@@ -3703,12 +3709,14 @@ where
                 consultation.model
             ),
         });
+        let app = crate::web_design::is_personal_app(&brief);
         let note = crate::web_design::conception_note(
             &consultation.model,
             &plan,
             file.as_ref()
                 .map(|(name, text)| (*name, text.lines().count())),
-            crate::web_design::is_personal_app(&brief),
+            app,
+            app && crate::web_design::react_app(&brief, None, &cwd),
         );
         Some((note, file.map(|(name, text)| (cwd.join(name), text))))
     }
@@ -3740,7 +3748,12 @@ where
         self.api_client.notify(&format!(
             "{name} du modèle de conception remis en place : le modèle de la session met ses règles dans sa propre feuille"
         ));
-        notes.push(crate::web_design::design_base_restored(&name));
+        // L'appli React importe la feuille dans src/index.css : pas de <link>.
+        let react = base.parent().is_some_and(|root| {
+            std::fs::read_to_string(root.join("index.html"))
+                .is_ok_and(|html| html.contains("/src/main.tsx"))
+        });
+        notes.push(crate::web_design::design_base_restored(&name, react));
     }
 
     /// Revue du plan de design avant le code : un autre modèle juge la
@@ -3837,6 +3850,9 @@ where
             }
             _ => request.to_string(),
         };
+        if !self.api_client.can_consult() {
+            return None;
+        }
         self.api_client
             .notify("Revue du plan de design par un autre modèle, avant le code…");
         let consultation = self.api_client.consult(
@@ -4945,7 +4961,11 @@ where
     /// L'agent n'avance plus : un autre modèle lit la fin de la session et
     /// propose une cause et une prochaine étape (une fois par tour).
     fn advice_when_stuck(&mut self, aids: &mut TurnAids, latest: Option<&str>) -> Option<String> {
-        if aids.advised || self.subagent || !harness::enabled(Aid::Council) {
+        if aids.advised
+            || self.subagent
+            || !harness::enabled(Aid::Council)
+            || !self.api_client.can_consult()
+        {
             return None;
         }
         aids.advised = true;
@@ -6061,6 +6081,7 @@ where
             || !self.review
             || interrupt_requested()
             || !harness::enabled(Aid::Review)
+            || !self.api_client.can_consult()
         {
             return None;
         }
@@ -6624,6 +6645,7 @@ where
             || !self.review
             || interrupt_requested()
             || !harness::enabled(Aid::Review)
+            || !self.api_client.can_consult()
         {
             return None;
         }
@@ -8590,6 +8612,10 @@ mod tests {
             FREE_LEFT.with(std::cell::Cell::get)
         }
 
+        fn can_consult(&mut self) -> bool {
+            !NO_ADVISORS.with(std::cell::Cell::get)
+        }
+
         fn design_conception(
             &mut self,
             _system: &str,
@@ -8862,8 +8888,8 @@ mod tests {
         assert!(
             seen.requests[0].contains("Design conception by concepteur")
                 && seen.requests[0].contains("deep gradient balance card")
-                && seen.requests[0].contains("link kit/app-kit.css, then base.css")
-                && seen.requests[0].contains("Build the app on the app kit"),
+                && seen.requests[0].contains("src/index.css imports base.css")
+                && seen.requests[0].contains("Build the app with the Starter tool"),
             "{}",
             seen.requests[0]
         );
@@ -9217,6 +9243,8 @@ mod tests {
         /// Réponse du modèle de conception (`None` : aucun n'a répondu).
         static CONCEPTION: std::cell::Cell<Option<&'static str>> =
             const { std::cell::Cell::new(None) };
+        /// L'utilisateur a coupé les autres modèles (`CLAW_ADVISOR_MODELS=off`).
+        static NO_ADVISORS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     #[test]
@@ -11740,6 +11768,36 @@ mod tests {
         assert!(observed.notices.iter().any(
             |notice| notice == "Relecture par relecteur : 1 remarque(s) transmise(s) à l'agent"
         ));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn no_other_model_is_asked_or_announced_when_the_user_turned_them_off() {
+        let _serial = crate::test_serial();
+        NO_ADVISORS.with(|off| off.set(true));
+        let (path, output) = written_file("sans-conseillers");
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![
+                tool_step("write_file", r#"{"path":"total.py","content":"x"}"#),
+                text_step("C'est fait."),
+                text_step("Exigences vérifiées."),
+            ],
+            vec![PASSING],
+            vec!["total.py:2 - liste vide non gérée - renvoyer 0"],
+            output,
+        );
+        let _ = runtime.run_turn("écris total.py", None);
+        NO_ADVISORS.with(|off| off.set(false));
+        let observed = observed.borrow();
+        assert!(observed.consults.is_empty(), "{:?}", observed.consults);
+        assert!(
+            !observed
+                .notices
+                .iter()
+                .any(|notice| notice.contains("autre modèle")),
+            "{:?}",
+            observed.notices
+        );
         let _ = std::fs::remove_file(path);
     }
 

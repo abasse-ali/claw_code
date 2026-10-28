@@ -52,6 +52,12 @@ pour #36), puis les défauts de tous les écrans mesurés avec leurs règles CSS
 feuille de style rapiécée signalée dès l'écriture (lot 19) ; fusionnés dans `main` le
 28 octobre 2026.
 
+Le même jour, [suivi/c2-react-bibliotheques.md](suivi/c2-react-bibliotheques.md) : le modèle de
+la session ne consulte plus d'autre modèle (sauf conception, juge et descriptions d'image),
+« Dépublier le site » dans Claw Web, et les applis en React + Vite par défaut sur des projets
+de départ prêts (outil `Starter` : React avec le kit d'appli, serveur Node, serveur Python),
+construits par Claw avant chaque mesure.
+
 Reprise automatique : arrêtée. Le 12 octobre 2026, l'utilisateur avait demandé que la
 session reprenne d'elle-même (« continue ») à 6 h 22 puis toutes les 5 heures. Le 14 octobre
 à 0 h 15, il a choisi d'arrêter : les tâches planifiées ont été supprimées. Une nouvelle

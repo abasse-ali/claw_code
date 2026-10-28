@@ -345,6 +345,8 @@ class Journal:
             return {"desc": excerpt(data.get("description", ""), 300)}
         if name == "Photo":
             return {"search": excerpt(data.get("search", ""), 120)}
+        if name == "Starter":
+            return {"kind": excerpt(data.get("kind") or "react-app", 40)}
         if name in ("Icon", "Component"):
             names = data.get("names") or [data.get("name") or ""]
             return {"names": [excerpt(item, 40) for item in names[:20] if isinstance(item, str)]}
@@ -432,6 +434,12 @@ class Journal:
         if name in ("Icon", "Ornament", "Component"):
             # Du SVG et du CSS pour le modèle : rien à lire pour l'utilisateur.
             return {}
+        if name == "Starter" and isinstance(value, dict):
+            # Le mode d'emploi est pour le modèle : l'utilisateur voit ce qui a été posé.
+            written = [rel(str(item)) for item in value.get("written") or []]
+            missing = [] if value.get("installed") else [
+                f"Bibliothèques non installées : {value.get('install_error', '')}", ""]
+            return {"count": len(written), "out": excerpt("\n".join(missing + written[:40]), 1200)}
         if name == "AppIcon" and isinstance(value, dict):
             return {"out": excerpt("\n".join(rel(str(item.get("path", ""))) for item in value.get("written", [])[:6] if isinstance(item, dict)), 600)}
         return {"out": excerpt(rel(json.dumps(value, ensure_ascii=False)), 800)}

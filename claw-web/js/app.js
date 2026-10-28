@@ -4344,8 +4344,11 @@ async function openPublish(session) {
       <div class="sheet-head"><strong>Mettre en ligne (GitHub Pages)</strong>
         <button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button></div>
       <form class="publish-form">
-        ${pages && pages.html_url ? `<p>Publié en ce moment : <a href="${escapeHtml(pages.html_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(pages.html_url)}</a>
-          (${escapeHtml((pages.source && pages.source.branch) || "?")}, ${escapeHtml((pages.source && pages.source.path) || "/")}).</p>` : ""}
+        ${pages && pages.html_url ? `<div class="published">
+          <p>Publié en ce moment : <a href="${escapeHtml(pages.html_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(pages.html_url)}</a>
+            (${escapeHtml((pages.source && pages.source.branch) || "?")}, ${escapeHtml((pages.source && pages.source.path) || "/")}).</p>
+          <button type="button" class="small-link danger" data-action="unpublish">${ICON.trash}<span>Dépublier le site</span></button>
+        </div>` : ""}
         <fieldset class="choices">
           ${choices.map((choice, index) => `
             <label class="check"><input type="radio" name="choice" value="${choice.value}"${index === 0 ? " checked" : ""}>
@@ -4357,6 +4360,18 @@ async function openPublish(session) {
         <p class="help result" hidden></p>
       </form>`;
     const form = sheet.querySelector(".publish-form");
+    // Dépublier : le site quitte GitHub Pages (deux appuis) ; le code et les branches restent.
+    const unpublish = form.querySelector('[data-action="unpublish"]');
+    if (unpublish) {
+      twoTaps(unpublish, async () => {
+        unpublish.querySelector("span").textContent = "Retrait…";
+        await state.github.unpublishPages(repo);
+        session.site = null;
+        toast("Site dépublié : son adresse ne répond plus d'ici une minute ou deux");
+        pollSession(true).catch(() => {});
+        openPublish(session);
+      });
+    }
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const choice = choices.find((item) => item.value === form.elements.choice.value);
