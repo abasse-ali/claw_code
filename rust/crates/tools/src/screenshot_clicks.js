@@ -66,11 +66,15 @@
   // L'envoi est arrete en dernier (a la fenetre, apres les gestionnaires de
   // la page) : on sait ainsi si la page l'a pris en charge ou l'aurait laisse
   // recharger la page.
+  // Un formulaire en method="dialog" ne recharge rien : il ferme sa fenêtre.
+  // Vu le 28 octobre 2026 : son bouton « Fermer », arrêté ici, passait pour un
+  // bouton qui ne ferme pas la fenêtre.
   let lastSubmit = null;
   window.addEventListener("submit", (event) => {
     count();
-    lastSubmit = { form: event.target, handled: event.defaultPrevented };
-    event.preventDefault();
+    const method = ((event.submitter && event.submitter.getAttribute("formmethod")) || event.target.getAttribute("method") || "").toLowerCase();
+    lastSubmit = { form: event.target, handled: event.defaultPrevented || method === "dialog" };
+    if (method !== "dialog") event.preventDefault();
   });
   let lastClick = null;
   window.addEventListener("click", (event) => {

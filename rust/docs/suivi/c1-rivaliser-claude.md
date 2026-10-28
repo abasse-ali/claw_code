@@ -154,7 +154,23 @@ sa carte, cadre de page en `overflow-x: hidden` qui cachait les débordements).
 | 14. Kit d'appli refait (`a2de1f1`) | Composant `app-kit` (les noms `app-tabs`, `entries`, `entry-sheet`, `chart` y mènent) : l'outil `Component` écrit `kit/app-kit.css` et `kit/app-kit.js` dans le dossier de la page (`dir`), rend le squelette de la page et un exemple de script d'appli (`app-kit-example.js`, l'appli de budget de la demande). Barre du haut avec le mois, écrans derrière une barre d'onglets flottante avec bouton d'ajout, carte du solde en dégradé (teinte de l'accent tournée), pavés, cartes et lignes à pastilles, pastilles d'état, jauges, graphique (noms des mois espacés), réglages, état vide, volet d'ajout et de modification (montant en grand, montants rapides, catégories), messages avec « Annuler », clair et sombre. Jetons posés sans poids (`:where`) : ceux de l'appli gagnent toujours ; texte sur l'accent et accent en texte lisibles quel que soit l'accent. Mesures : toute couleur CSS lue (pas seulement `rgb()`) ; une appli (barre d'onglets et écrans) n'est plus poussée vers un titre d'affiche ni une police « à soi » | fait (essai navigateur du kit) |
 | 15. Méthode d'appli (`a02908e`) | `is_personal_app` (appli, app, PWA, avec budget, perso, carnet, suivi…) : méthode d'appli (`app_method` : les chiffres de l'utilisateur d'abord, le kit en un appel, le squelette suivi, les blocs du kit seulement, la police du téléphone, le parcours vérifié en un appel), concepteur d'appli (jetons de couleur et plan des écrans en blocs du kit, aucune police), note de conception (lier `kit/app-kit.css`, puis `base.css`, puis la feuille de l'appli), juge et revue du plan d'une appli de téléphone (Revolut, Lydia), pas d'un site. Kit : accent en texte mêlé à l'encre (juste aussi en sombre imposé), graphique de l'exemple dessiné dès le premier lancement | fait (tests de conversation et unitaires) |
 | 16. Bugs graphiques mesurés (`df1e9cd`) | Audit de `Screenshot` : textes qui se touchent sur une ligne, étiquettes d'un graphique superposées, élément sorti sur le côté de sa carte, libellé court coupé sur deux lignes, nombres écrits de deux façons (page en français), texte collé au bord étendu aux dates et montants, cadre de page en `overflow-x: hidden` ignoré, contenu d'un `<details>` fermé non compté | fait (essai navigateur des défauts de #36, aucune fausse alerte sur l'appli de Claude ni sur le kit) |
-| 17. Livraison | Essai réel avec l'accord de l'utilisateur, comparaison avec #35, #36 et #38, fusion directe dans `main` | à faire |
+| 17. Livraison | Essai réel #39 avec l'accord de l'utilisateur (deux passages au plus), comparaison avec #35, #36 et #38, fusion directe dans `main` | premier passage fait, second en cours |
+| 18. Défauts de tous les écrans | Les bugs graphiques mesurés aussi dans les écrans et les fenêtres ouverts (montants, textes coupés ou serrés, libellés sur deux lignes, débordements, icônes, emoji), avec les règles CSS en cause ; une fenêtre ouverte mesurée seule (la page couverte ne compte plus) ; choix d'un groupe (`label` à bouton radio) coupé sur deux lignes ; bouton « + » décentré dans la barre d'onglets ; barre fixée en bas posée au bout de la page dans les captures de la page entière (elle se dessinait au milieu, par-dessus les cartes) ; rang de puces qui défile d'un bord à l'autre accepté ; bouton « Fermer » d'un formulaire en `method="dialog"` laissé fermer sa fenêtre (il passait pour un bouton qui ne ferme pas). Kit : dépenses du graphique en `--error` (deux verts quand l'accent est vert), pas d'anneau sur le titre d'un écran qui reçoit le focus, choix du volet avec une marge | fait (essais navigateur, aucune fausse alerte sur l'appli de Claude ni sur le kit) |
+
+Essai réel #39 (moteur `6dd8bcf`, Nemotron 3 Ultra, premier passage de 6 h 52 à 8 h 42,
+238 requêtes) : appli de style néobanque en vert, carte du solde en dégradé, barre d'onglets
+flottante, volet d'ajout, clair et sombre ; les montants de l'utilisateur au premier lancement,
+« 589,60 € » et « 103 à 206 € » justes à la fin (« 589,6 € » et « 206 € € » en cours de
+route). Banc t9 : 11/12 (#35 : 4/12, #36 : 8/12 ; #38 arrêté), seul « sombre même sur un
+téléphone en clair » manque, comme le kit seul. Ce qui reste : le choix coché du volet
+d'ajout invisible en clair (1,0:1 de contraste, blanc sur blanc), que l'agent n'a pas su
+réparer en quinze règles empilées sur le même élément (`styles.css` de 1 091 lignes, 217
+`!important`) ; le bouton « + » entre le deuxième et le troisième onglet (un onglet retiré) ;
+« charges incompressibles » serré mot par mot dans l'écran Analyse ; dans les captures, les
+titres d'écran encadrés (anneau du focus du kit) et la barre d'onglets au milieu de la page,
+que le relecteur avait fait « fixer » alors qu'elle l'était (elle a perdu sa forme flottante).
+Le lot 18 mesure ces défauts et nomme les règles en cause ; le second passage (« continue »)
+part de ce moteur.
 
 Banc t9-budget sur l'appli d'exemple du kit (squelette et exemple tels quels) : 11/12 quand
 elle suit le téléphone (seul « sombre même sur un téléphone en clair » manque, la demande
@@ -166,6 +182,7 @@ Essais : `the_app_kit_makes_a_budget_app_that_works_in_a_real_browser` (l'appli 
 mesurée et parcourue : ajout, modification, suppression, « Annuler » ; `CLAW_KIT_DEMO=dossier`
 en garde une copie), `the_app_kit_is_written_into_the_page_folder_and_the_old_names_lead_to_it`,
 `the_graphic_bugs_of_session_36_are_measured_in_a_real_browser`,
+`the_graphic_bugs_of_session_39_are_measured_in_every_screen_in_a_real_browser`,
 `a_personal_app_gets_the_app_method_the_app_designer_and_the_app_judge`.
 
 ## Suite, dans l'ordre

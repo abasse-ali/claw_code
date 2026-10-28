@@ -45,7 +45,20 @@
     }
     return style;
   };
+  // Une fenêtre ouverte par-dessus la page (volet, boîte de dialogue) : son
+  // contenu se mesure comme la page ; la page derrière, couverte, ne compte
+  // plus. Vu le 28 octobre 2026 (session #39) : les choix « Dépense fixe »,
+  // « Revenu garanti » du volet d'ajout, coupés sur deux lignes, jamais mesurés.
+  const modal = [...document.querySelectorAll("dialog[open], [aria-modal=true]")].find((el) => {
+    try {
+      if (el.tagName === "DIALOG" && !el.matches(":modal")) return false;
+    } catch (error) { /* :modal inconnu : la fenêtre compte */ }
+    const style = css(el);
+    const rect = el.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+  });
   const shown = (el) => {
+    if (modal && !modal.contains(el)) return false;
     const style = css(el);
     if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
     for (let node = el; node && node !== document.documentElement; node = node.parentElement) {
@@ -80,10 +93,11 @@
   const box = new Map(visible.map((el) => [el, el.getBoundingClientRect()]));
   const pinned = (el) => {
     for (let node = el; node && node !== document.body; node = node.parentElement) {
+      if (node === modal) return false;
       const position = css(node).position;
       if (position === "fixed" || position === "sticky") return true;
     }
-    return false;
+    return Boolean(modal);
   };
   // Ancêtre qui défile ou coupe dans sa propre largeur : ce qui le dépasse y reste.
   const scroller = (el) => {
@@ -97,9 +111,13 @@
   // défilement de côté) n'en est pas un. Vu le 28 octobre 2026 (session #36) :
   // l'écran entier ainsi cadré cachait les dates collées au bord et les champs
   // sortis de leur carte.
+  // Un rang de puces qui défile vraiment de côté, d'un bord à l'autre de
+  // l'écran, en est un aussi (ses puces passent sous le bord exprès).
   const sideScroller = (el) => {
     for (let node = el.parentElement; node && node !== document.body && node !== document.documentElement; node = node.parentElement) {
-      if (["auto", "scroll", "hidden", "clip"].includes(css(node).overflowX) && node.getBoundingClientRect().width < W - 2) return node;
+      const overflow = css(node).overflowX;
+      if (["auto", "scroll", "hidden", "clip"].includes(overflow) && node.getBoundingClientRect().width < W - 2) return node;
+      if (["auto", "scroll"].includes(overflow) && node.scrollWidth > node.clientWidth + 1) return node;
     }
     return null;
   };
@@ -972,6 +990,22 @@
     }
   }
 
+  // L'étendue réelle des lettres d'un élément, rognée par ce qui les coupe (un
+  // nom terminé par « … » ne va pas jusqu'au bout de son texte entier).
+  const lettersOf = (el) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const r = range.getBoundingClientRect();
+    let { left, top, right, bottom } = r;
+    for (let node = el; node && node !== document.body; node = node.parentElement) {
+      if (css(node).overflowX === "visible") continue;
+      const frame = node.getBoundingClientRect();
+      left = Math.max(left, frame.left);
+      right = Math.min(right, frame.right);
+    }
+    return { left, top, right, bottom, width: right - left, height: bottom - top };
+  };
+
   // 16. Texte collé au bord de l'écran (téléphone) : l'étendue réelle des
   // lettres, pas la boîte du paragraphe (un texte centré n'y touche pas).
   if (mobile) {
@@ -979,9 +1013,7 @@
     const touching = visible.filter((el) => ownText(el) && !pinned(el) && !sideScroller(el)
       && el.matches("p, h1, h2, h3, h4, li, blockquote, figcaption, label, dt, dd, span, a, time, small, strong, b, em, td, th, div"))
       .filter((el) => {
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        const text = range.getBoundingClientRect();
+        const text = lettersOf(el);
         return text.width > 0 && text.bottom > 0 && (text.left < edge || text.right > W - edge);
       });
     const outer = touching.filter((el) => !touching.some((other) => other !== el && other.contains(el)));
@@ -996,19 +1028,6 @@
   // leurs lettres. L'étendue réelle des lettres, rognée par ce qui les coupe
   // (un nom terminé par « … »). Vu le 28 octobre 2026 (session #36) : les
   // lignes des opérations de l'appli de budget.
-  const lettersOf = (el) => {
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    const r = range.getBoundingClientRect();
-    let { left, top, right, bottom } = r;
-    for (let node = el; node && node !== document.body; node = node.parentElement) {
-      if (css(node).overflowX === "visible") continue;
-      const frame = node.getBoundingClientRect();
-      left = Math.max(left, frame.left);
-      right = Math.min(right, frame.right);
-    }
-    return { left, top, right, bottom, width: right - left, height: bottom - top };
-  };
   const flowing = (el) => css(el).display.startsWith("inline");
   const texts = visible.filter((el) => ownText(el) && !pinned(el) && !el.closest("svg, select, option"))
     .slice(0, 500).map((el) => ({ el, r: lettersOf(el) })).filter(({ r }) => r.width > 1 && r.height > 1)
@@ -1110,7 +1129,9 @@
     }
     return false;
   };
-  const brokenLabels = visible.filter((el) => el.matches("a, button, [role=button], [role=tab]") && !pinned(el))
+  // Les choix d'un groupe (« Dépense fixe » dans un sélecteur à trois cases)
+  // comptent comme des boutons.
+  const brokenLabels = visible.filter((el) => el.matches("a, button, [role=button], [role=tab], label:has(> input[type=radio], > input[type=checkbox])") && !pinned(el))
     .filter((el) => {
       const text = (el.innerText || "").trim();
       const count = text.split(/\s+/).filter(Boolean).length;
@@ -1168,6 +1189,22 @@
   if (oneDecimal.length) {
     blame(oneDecimal.map(({ el }) => el));
     problems.push(`Amounts with a single digit after the decimal mark: ${list(oneDecimal.map(({ el, value }) => `"${value}" in ${name(el)}`), 3)}. Write cents with two digits (21,60 €) or none for a whole amount (450 €): format every amount with Intl.NumberFormat, not by hand`);
+  }
+
+  // 16h. Bouton d'ajout de la barre d'onglets décentré : deux onglets d'un
+  // côté, un de l'autre. Vu le 28 octobre 2026 (session #39) : un onglet
+  // retiré, le bouton « + » restait entre le deuxième et le troisième.
+  for (const bar of document.querySelectorAll(".tabbar, [data-app-tabs]")) {
+    const add = bar.querySelector(":scope > .tabbar__add");
+    if (!add || !shown(bar) || !shown(add)) continue;
+    const items = [...bar.children].filter(shown);
+    const before = items.indexOf(add);
+    const after = items.length - 1 - before;
+    if (Math.abs(before - after) === 1) {
+      blame([add]);
+      problems.push(`The add button of the tab bar sits off-centre, ${before} tab${before > 1 ? "s" : ""} on its left and ${after} on its right: ${name(add)}. Keep as many tabs on each side of it (two and two), or move it out of the bar`);
+      break;
+    }
   }
 
   // 17. Icône dessinée en géant : un <svg> sans taille remplit son conteneur
