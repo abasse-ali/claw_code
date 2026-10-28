@@ -379,10 +379,33 @@ def process_tree(root):
     return tree
 
 
-def stop_tree(root, alive=lambda: True, grace=5):
+def session_members(sid):
+    """Les processus de la session `sid` (Linux : /proc). Une commande lancée en arrière-plan par
+    l'agent (un serveur `… &`) y reste quand son parent meurt, alors qu'elle quitte l'arbre des
+    parents : vu le 27 octobre 2026 (session #32), un `python3 -m http.server 8080 &` survivait à
+    l'arrêt, tué seulement par GitHub à la fin du job."""
+    members = []
+    if os.path.isdir("/proc"):
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/stat", encoding="utf-8", errors="replace") as handle:
+                    if int(handle.read().rsplit(")", 1)[1].split()[3]) == sid:
+                        members.append(int(entry))
+            except (OSError, ValueError, IndexError):
+                continue
+    return members
+
+
+def stop_tree(root, alive=lambda: True, grace=5, session=False):
     """Arrête l'agent et les commandes qu'il a lancées (serveur, tests...) : rien ne doit plus
-    écrire dans le dépôt pendant la publication. SIGTERM, puis SIGKILL après `grace` s."""
+    écrire dans le dépôt pendant la publication. SIGTERM, puis SIGKILL après `grace` s. Avec
+    `session`, `root` mène sa propre session (lancé avec `start_new_session`) : tous ses membres
+    s'arrêtent aussi, même ceux que l'arbre des parents a perdus."""
     tree = process_tree(root)
+    if session:
+        tree = list(dict.fromkeys(tree + session_members(root)))
 
     def send(sig):
         for pid in tree:

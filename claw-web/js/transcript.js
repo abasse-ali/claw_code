@@ -84,7 +84,7 @@ function describe(name, input) {
     case "move_file": return ["edit", "Déplacement", `${value.from || ""} → ${value.to || ""}`];
     case "delete_file": return ["edit", "Suppression", value.path || ""];
     case "read_many_files": return ["file", "Lecture", (value.paths || []).join(", ")];
-    case "Wireframe": return ["list", "Wireframe", value.title || ""];
+    case "Wireframe": return ["list", "Maquette", value.title || ""];
     case "file_outline": return ["file", "Plan du fichier", value.path || ""];
     case "replace_in_files": return ["edit", value.preview ? "Aperçu du remplacement" : "Remplacement", `${value.pattern || ""} → ${value.replacement || ""}${value.glob ? ` · ${value.glob}` : ""}`];
     case "run_tests": return ["terminal", "Tests", value.cmd || "tests du projet"];
@@ -490,12 +490,44 @@ function repeatedInAnswer(events, answer) {
   return repeated;
 }
 
+/** Ce qu'une action a donné, en quelques signes, pour la liste du bloc « Claw travaille ». */
+function quickSide(event) {
+  const result = event.r;
+  if (!result) return '<span class="spinner" aria-label="en cours"></span>';
+  if (["write_file", "edit_file", "MultiEdit"].includes(event.n) && (result.add || result.del)) return counts(result.add, result.del);
+  if (Array.isArray(result.files)) {
+    return counts(result.files.reduce((sum, file) => sum + (file.add || 0), 0), result.files.reduce((sum, file) => sum + (file.del || 0), 0));
+  }
+  if (event.n === "read_file" && result.count) return plural(result.count, "ligne");
+  if ((event.n === "bash" || event.n === "PowerShell") && result.code) return `<span class="del">${escapeHtml(result.code)}</span>`;
+  if (event.n === "Screenshot" && result.found) return `<span class="del">${plural(result.found, "problème")}</span>`;
+  if (event.n === "Photo" && Array.isArray(result.photos)) return plural(result.photos.length, "photo");
+  return "";
+}
+
+/** Les dernières actions d'un passage en cours, la plus récente d'abord : icône, verbe, cible et
+ * ce qu'elle a donné. Celles d'après `seen` (rang dans le journal) viennent d'arriver : elles
+ * entrent en glissant, l'une après l'autre. */
+export function recentActions(events, count = 4, seen = Infinity) {
+  return events.map((event, index) => ({ event, index }))
+    .filter(({ event }) => event.k === "tool" && event.n !== "TodoWrite")
+    .slice(-count).reverse()
+    .map(({ event, index }) => {
+      const [icon, verb, target] = describe(event.n, event.i);
+      const state = !event.r ? " running" : event.e ? " failed" : "";
+      return `<li class="lr-action${state}${index >= seen ? " arrived" : ""}">${ICONS[icon] || ICONS.tool}`
+        + `<span class="verb">${escapeHtml(verb)}</span><span class="target">${escapeHtml(target)}</span>`
+        + `<span class="side">${quickSide(event)}</span></li>`;
+    }).join("");
+}
+
 /** Étapes d'un journal montrées d'emblée ; les précédentes se déplient. */
 const RECENT_STEPS = 30;
 
 /** Pastille d'état d'un passage : en cours, fini, arrêté, erreur. */
 const STATE_ICONS = {
   running: '<span class="spinner" aria-label="en cours"></span>',
+  stopping: '<span class="spinner" aria-label="arrêt en cours"></span>',
   done: ICONS.check,
   stopped: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>',
   failed: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v6M12 16.5h.01"/></svg>',

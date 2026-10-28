@@ -6,7 +6,7 @@
 import { ANSWER, GitHub, GitHubError, LABEL, PROGRESS } from "./github.js";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 import { sealedBox } from "./sealed-box.js";
-import { LOG, changesHtml, decodeLog, photoLink, photoView, transcriptHtml, withoutCallMarkup } from "./transcript.js";
+import { LOG, changesHtml, decodeLog, photoLink, photoView, recentActions, transcriptHtml, withoutCallMarkup } from "./transcript.js";
 import { highlightLines, languageOf } from "./highlight.js";
 import { accountStatus, allFreeModels, freeModels, resetTime } from "./openrouter.js";
 import { extras } from "./tools.js";
@@ -67,10 +67,19 @@ const ICON = {
   chevron: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>',
   tasks: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6h10M10 12h10M10 18h10"/><path d="M3.5 6l1.5 1.5L8 4.5M3.5 12l1.5 1.5L8 10.5M3.5 18l1.5 1.5L8 16.5"/></svg>',
   check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  alert: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v6M12 16.5h.01"/></svg>',
+  bug: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="6.5" width="8" height="13" rx="4"/><path d="M12 11v8.5M8 13H4.5M19.5 13H16M9.5 6.5 7.5 4.5M14.5 6.5l2-2M8.3 17.5 5 19.5M15.7 17.5l3.3 2"/></svg>',
+  calendar: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5.5" width="16" height="14.5" rx="2.5"/><path d="M4 10h16M8.5 3.5v4M15.5 3.5v4"/></svg>',
   // Icons: Lucide, ISC license (lightbulb, square-slash).
   bulb: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6M10 22h4"/></svg>',
   slash: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 15l6-6"/></svg>',
 };
+
+/** Les trois griffes du logo, qui se tracent l'une après l'autre tant que Claw travaille. */
+const CLAWS = '<svg class="claws" viewBox="116 100 320 320" aria-hidden="true">'
+  + '<path pathLength="1" d="M152 384C196 306 214 226 202 132"/>'
+  + '<path pathLength="1" d="M250 398C294 316 312 230 298 122"/>'
+  + '<path pathLength="1" d="M346 382C386 304 400 228 384 140"/></svg>';
 
 const state = {
   settings: loadSettings(),
@@ -119,6 +128,8 @@ const state = {
   drafts: new Map(),
   // Étapes du journal déjà montrées, par passage : les suivantes paraissent une par une.
   revealed: new Map(),
+  // Actions déjà vues dans le bloc « Claw travaille », par passage : les nouvelles y entrent.
+  liveSeen: new Map(),
   // Bloc au-dessus de la zone de saisie : questions de Claw (carte montrée, choix faits).
   dockQuestions: null,
 };
@@ -244,14 +255,94 @@ function saveSettings() {
 
 // --- Petits outils -------------------------------------------------------------------------
 
+/** « Réduire les animations » demandé par le téléphone : les sorties animées n'attendent pas. */
+const calm = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/** Rejoue l'animation d'arrivée d'un élément déjà affiché (un message remplacé par un autre). */
+function replay(element) {
+  element.style.animation = "none";
+  void element.offsetWidth;
+  element.style.animation = "";
+}
+
 function toast(message, kind = "info") {
   const box = $("#toast");
+  const shown = !box.hidden;
   box.textContent = message;
   box.className = `toast ${kind}`;
   box.hidden = false;
+  if (shown) replay(box);
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => { box.hidden = true; }, kind === "error" ? 7000 : 3500);
+  clearTimeout(toast.leave);
+  toast.timer = setTimeout(hideToast, kind === "error" ? 7000 : 3500);
 }
+
+/** Le message s'efface en glissant vers le bas (un toucher le chasse aussi). */
+function hideToast() {
+  const box = $("#toast");
+  clearTimeout(toast.timer);
+  if (box.hidden) return;
+  if (calm()) {
+    box.hidden = true;
+    return;
+  }
+  box.classList.add("leaving");
+  toast.leave = setTimeout(() => {
+    box.hidden = true;
+    box.classList.remove("leaving");
+  }, 220);
+}
+
+/** Ferme la fenêtre ouverte : elle redescend (un fondu sur ordinateur), puis se vide. Une autre
+ * fenêtre ouverte entre-temps (un choix qui en ouvre une autre) reste ouverte. */
+function hideSheet() {
+  const sheet = $("#sheet");
+  const panel = sheet.querySelector(".sheet-panel");
+  if (sheet.hidden || !panel || calm()) {
+    sheet.hidden = true;
+    sheet.innerHTML = "";
+    return;
+  }
+  sheet.classList.add("closing");
+  setTimeout(() => {
+    if (sheet.querySelector(".sheet-panel") !== panel) return;
+    sheet.classList.remove("closing");
+    sheet.hidden = true;
+    sheet.innerHTML = "";
+  }, 220);
+}
+
+/** Fait entrer l'un après l'autre les éléments d'une liste qui vient d'arriver. Une seule fois :
+ * la même liste redessinée ensuite (un filtre, une case cochée) ne rejoue rien. */
+function animateIn(list) {
+  if (!list || calm()) return;
+  list.classList.remove("stagger");
+  void list.offsetWidth;
+  list.classList.add("stagger");
+  clearTimeout(list.staggerTimer);
+  list.staggerTimer = setTimeout(() => list.classList.remove("stagger"), 900);
+}
+
+/** Les animations sans fin (roues d'attente, contour d'un passage en cours, point d'une session
+ * au travail) calées sur l'horloge : une vue redessinée (toutes les 4 s pendant un passage) les
+ * reprend où elles en étaient, sans saut. */
+function keepInStep(root) {
+  for (const element of root.querySelectorAll(".spinner, .claws path, .lr-sweep span, .lr-segments .doing, .live-run.stopping, .live-dot, .dot.running, .dot.queued, .dock-todos li.doing .box")) {
+    if (element.dataset.inStep) continue;
+    const style = getComputedStyle(element);
+    const period = Number.parseFloat(style.animationDuration) * 1000;
+    if (!(period > 0)) continue;
+    // Le décalage de la feuille de style (les griffes l'une après l'autre) est gardé.
+    const offset = (Number.parseFloat(style.animationDelay) || 0) * 1000;
+    element.dataset.inStep = "1";
+    element.style.animationDelay = `${offset - (Date.now() % period)}ms`;
+  }
+}
+
+/** Lignes fantômes le temps qu'une liste de sessions arrive (le texte reste pour les lecteurs
+ * d'écran). */
+const sessionSkeletons = (count) => '<li class="visually-hidden">Chargement…</li>'
+  + '<li class="skeleton" aria-hidden="true"><span class="sk-dot"></span><span class="sk-lines"><span></span><span></span></span></li>'.repeat(count);
 
 function failure(error) {
   console.error(error);
@@ -338,8 +429,7 @@ function openImage(path) {
     </div>`;
   sheet.onclick = (event) => {
     if (backdropTap(event, sheet) || event.target.closest("[data-close]")) {
-      sheet.hidden = true;
-      sheet.innerHTML = "";
+      hideSheet();
     }
   };
   sheet.hidden = false;
@@ -360,8 +450,7 @@ function openPhoto({ photo, credit, source }) {
     </div>`;
   sheet.onclick = (event) => {
     if (backdropTap(event, sheet) || event.target.closest("[data-close]")) {
-      sheet.hidden = true;
-      sheet.innerHTML = "";
+      hideSheet();
     }
   };
   sheet.hidden = false;
@@ -462,8 +551,7 @@ function openCloudRunner() {
     </div>`;
   sheet.onclick = (event) => {
     if (backdropTap(event, sheet) || event.target.closest("[data-close]")) {
-      sheet.hidden = true;
-      sheet.innerHTML = "";
+      hideSheet();
     }
   };
   let script = "";
@@ -604,8 +692,7 @@ async function openShot({ shot, thumb, label, problems, count, french }) {
     </div>`;
   sheet.onclick = (event) => {
     if (backdropTap(event, sheet) || event.target.closest("[data-close]")) {
-      sheet.hidden = true;
-      sheet.innerHTML = "";
+      hideSheet();
     }
   };
   sheet.hidden = false;
@@ -984,10 +1071,8 @@ function openPicker({ title, items, current, placeholder, onPick, onRemove, onAc
       </button>${removable ? `<button type="button" class="icon-button" data-remove="${escapeHtml(item.value)}" aria-label="Supprimer ${escapeHtml(item.label)}">${ICON.trash}</button>` : ""}</li>`;
   };
   draw();
-  const close = () => {
-    sheet.hidden = true;
-    sheet.innerHTML = "";
-  };
+  animateIn(list);
+  const close = hideSheet;
   sheet.onclick = (event) => {
     if (backdropTap(event, sheet) || event.target.closest("[data-close]")) close();
     if (event.target.closest(".sheet-action-button")) {
@@ -1104,10 +1189,7 @@ async function openDeleteRepo(repo) {
     </div>`;
   const form = sheet.querySelector(".delete-repo");
   const submit = form.querySelector("button[type=submit]");
-  const close = () => {
-    sheet.hidden = true;
-    sheet.innerHTML = "";
-  };
+  const close = hideSheet;
   form.elements.confirm.addEventListener("input", () => {
     submit.disabled = form.elements.confirm.value.trim() !== fullName;
   });
@@ -1194,10 +1276,7 @@ function openCreateRepo(prefill = "") {
   fields.repo_name.addEventListener("input", () => {
     slug.textContent = fields.repo_name.value.trim() || "mon-projet";
   });
-  const close = () => {
-    sheet.hidden = true;
-    sheet.innerHTML = "";
-  };
+  const close = hideSheet;
   sheet.onclick = (event) => {
     if (backdropTap(event, sheet) || event.target.closest("[data-close]")) close();
   };
@@ -1283,10 +1362,7 @@ async function openBranches({ repo, current, title, onPick }) {
       <div class="branch-body"></div>
     </div>`;
   const body = sheet.querySelector(".branch-body");
-  const close = () => {
-    sheet.hidden = true;
-    sheet.innerHTML = "";
-  };
+  const close = hideSheet;
   const showList = () => {
     body.innerHTML = `
       <button type="button" class="sheet-item pinned" data-new><span class="sheet-label">${ICON.plus}<span>Nouvelle branche</span></span>
@@ -1446,6 +1522,7 @@ async function openBranches({ repo, current, title, onPick }) {
     }
   };
   showList();
+  animateIn(body.querySelector(".sheet-list"));
   sheet.hidden = false;
 }
 
@@ -1535,7 +1612,7 @@ async function searchCatalogue(provider) {
     data = null;
   }
   if (!data || data.at * 1000 < started - 120000) {
-    throw new Error(`La recherche a échoué dans le moteur (${run.conclusion}) : le workflow claw-web.yml du moteur est-il à jour ?`);
+    throw new Error(`La recherche a échoué dans le moteur (${run.conclusion}) : le fichier claw-web.yml du moteur est-il à jour ?`);
   }
   keepCatalogue(provider, data);
   return data;
@@ -1907,10 +1984,7 @@ async function openQuota() {
   const sheet = $("#sheet");
   // Clés des fournisseurs posées dans le moteur (noms seulement, demandés une fois).
   const secrets = await engineProviderSecrets();
-  const close = () => {
-    sheet.hidden = true;
-    sheet.innerHTML = "";
-  };
+  const close = hideSheet;
   const draw = () => {
     const free = state.quota && state.quota.free;
     const balance = state.quota && state.quota.balance;
@@ -2007,24 +2081,23 @@ function renderComposer() {
       const label = composer.querySelector(`[data-action="${action}"] span`);
       if (label && label.textContent !== text) label.textContent = text;
     };
-    chip("repo", repo || "Choisir un dépôt");
-    chip("branch", branch || "branche");
     chip("model", modelLabel(state.settings.model));
+    const textarea = composer.querySelector("textarea");
+    if (textarea.placeholder !== promptPlaceholder(followUp, repo)) textarea.placeholder = promptPlaceholder(followUp, repo);
     chip("effort", effortLabel());
     composer.querySelector('[data-action="effort"]')?.classList.toggle("on", Boolean(state.settings.effort));
     drawAids();
     renderDock();
     composer.refresh?.();
+    drawWorkspace();
     return;
   }
   composer.dataset.key = key;
-  // En suivi de session, le dépôt et la branche sont dans l'en-tête : seul le modèle se choisit.
+  // Le dépôt et la branche se choisissent ailleurs (carte « Espace de travail » de l'accueil,
+  // en-tête d'une session) : ici, le modèle et la réflexion.
   composer.innerHTML = `
     <div class="dock" hidden></div>
     <div class="chips">
-      ${followUp ? "" : `
-      <button class="chip" data-action="repo">${ICON.repo}<span>${escapeHtml(repo || "Choisir un dépôt")}</span></button>
-      <button class="chip" data-action="branch">${ICON.branch}<span>${escapeHtml(branch || "branche")}</span></button>`}
       <button class="chip" data-action="model">${ICON.model}<span>${escapeHtml(modelLabel(state.settings.model))}</span></button>
       <button class="chip${state.settings.effort ? " on" : ""}" data-action="effort" aria-label="Niveau de réflexion">${ICON.bulb}<span>${escapeHtml(effortLabel())}</span></button>
     </div>
@@ -2041,7 +2114,7 @@ function renderComposer() {
       <button class="slash" type="button" aria-label="Commandes">${ICON.slash}</button>
       <div class="slash-menu" role="listbox" aria-label="Commandes" hidden></div>
       <input class="file-input" type="file" accept="image/*" multiple hidden>
-      <textarea rows="1" name="text" placeholder="${followUp ? "Répondez ou donnez une nouvelle consigne." : "Décrivez une tâche ou posez une question."}" aria-label="Message pour Claw"></textarea>
+      <textarea rows="1" name="text" placeholder="${escapeHtml(promptPlaceholder(followUp, repo))}" aria-label="Message pour Claw"></textarea>
       <button class="send" type="submit" aria-label="Envoyer" disabled>${ICON.send}</button>
     </form>`;
   const textarea = composer.querySelector("textarea");
@@ -2076,8 +2149,6 @@ function renderComposer() {
     if (followUp) followUpSession(text, textarea);
     else startSession(text, textarea);
   });
-  composer.querySelector('[data-action="repo"]')?.addEventListener("click", pickRepo);
-  composer.querySelector('[data-action="branch"]')?.addEventListener("click", pickBranch);
   composer.querySelector('[data-action="model"]').addEventListener("click", () => pickModel());
   composer.querySelector('[data-action="effort"]').addEventListener("click", pickEffort);
   const picker = composer.querySelector(".file-input");
@@ -2108,6 +2179,13 @@ function renderComposer() {
   resize();
   // Tout de suite, pas au rappel de l'observateur : le défilement vers le bas suit.
   updateComposerSpace();
+  drawWorkspace();
+}
+
+/** Le texte d'attente du champ : la session, ou le dépôt où Claw travaillera. */
+function promptPlaceholder(followUp, repo) {
+  if (followUp) return "Répondez ou donnez une nouvelle consigne.";
+  return repo ? `Une tâche pour ${repo.split("/").pop()} ? Décrivez-la ici.` : "Choisissez d'abord un dépôt, en haut de l'écran.";
 }
 
 // --- Sessions --------------------------------------------------------------------------------
@@ -2228,7 +2306,7 @@ function sessionItem(issue, selectable = false) {
       <span class="dot ${status ? status.key : "idle"}" aria-hidden="true"></span>
       <span class="session-text">
         <strong><span class="num">#${numberOf(issue)}</span> ${escapeHtml(issue.title)}</strong>
-        <small>${escapeHtml(settings.repo || "")} · ${status ? escapeHtml(status.label) : "en attente"} · ${since(issue.updated_at)}</small>
+        <small>${escapeHtml(settings.repo || "")} · <span class="state-label ${status ? status.key : "idle"}">${status ? escapeHtml(status.label) : "en attente"}</span> · ${since(issue.updated_at)}</small>
       </span>`;
   if (selectable) {
     return `
@@ -2246,6 +2324,7 @@ function drawDrawerList() {
   const list = $("#drawer .sessions");
   list.innerHTML = state.drawerSessions.map((issue) => sessionItem(issue, state.selecting)).join("")
     || '<li class="empty">Aucune session pour l\'instant.</li>';
+  keepInStep(list);
   const toggle = $("#drawer .select-toggle");
   if (toggle) {
     toggle.textContent = state.selecting ? "Annuler" : "Choisir";
@@ -2262,13 +2341,16 @@ function drawDrawerList() {
 
 async function renderDrawer() {
   const list = $("#drawer .sessions");
-  list.innerHTML = '<li class="empty">Chargement…</li>';
+  // Liste déjà lue : elle reste le temps de la relire, sans lignes fantômes.
+  if (!state.drawerSessions.length) list.innerHTML = sessionSkeletons(5);
   try {
     const [sessions] = await Promise.all([state.github.sessions(state.settings.engine), refreshRuns()]);
     await numberOldSessions(sessions);
+    const first = !state.drawerSessions.length;
     state.drawerSessions = sessions;
     state.selected = new Set([...state.selected].filter((number) => sessions.some((issue) => issue.number === number)));
     drawDrawerList();
+    if (first) animateIn(list);
   } catch (error) {
     list.innerHTML = '<li class="empty">Sessions indisponibles.</li>';
     failure(error);
@@ -2307,6 +2389,9 @@ function setupDrawerSelection() {
 }
 
 function openDrawer() {
+  clearTimeout(state.drawerTimer);
+  $("#drawer").classList.remove("closing");
+  $("#app").classList.remove("drawer-closing");
   $("#drawer").hidden = false;
   $("#app").classList.add("drawer-open");
   showDrawerPane(state.drawerPane);
@@ -2330,11 +2415,25 @@ function showDrawerPane(pane) {
   }
 }
 
+/** Le tiroir repart vers la gauche et le voile s'efface, puis il se cache. */
 function closeDrawer() {
-  $("#drawer").hidden = true;
-  $("#app").classList.remove("drawer-open");
+  const drawer = $("#drawer");
+  const app = $("#app");
   state.selecting = false;
   state.selected.clear();
+  clearTimeout(state.drawerTimer);
+  const done = () => {
+    drawer.hidden = true;
+    drawer.classList.remove("closing");
+    app.classList.remove("drawer-open", "drawer-closing");
+  };
+  if (drawer.hidden || calm()) {
+    done();
+    return;
+  }
+  drawer.classList.add("closing");
+  app.classList.add("drawer-closing");
+  state.drawerTimer = setTimeout(done, 240);
 }
 
 /** Session au travail (passage en file ou en cours) : elle s'arrête avant d'être supprimée. */
@@ -2350,17 +2449,14 @@ async function openDeleteSessions(issues) {
   const running = issues.filter(sessionRunning);
   const chosen = issues.filter((issue) => !running.includes(issue));
   const many = chosen.length > 1;
-  const close = () => {
-    sheet.hidden = true;
-    sheet.innerHTML = "";
-  };
+  const close = hideSheet;
   sheet.innerHTML = `
     <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="Supprimer">
       <div class="sheet-head">
         <strong>${many ? `Supprimer ${chosen.length} sessions` : "Supprimer la session"}</strong>
         <button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button>
       </div>
-      <p class="empty">Lecture des pull requests…</p>
+      <p class="empty loading">Lecture des pull requests…</p>
     </div>`;
   sheet.onclick = (event) => {
     if (backdropTap(event, sheet) || event.target.closest("[data-close]")) close();
@@ -2481,36 +2577,250 @@ async function openDeleteSessions(issues) {
   });
 }
 
+// --- Accueil : salutation, espace de travail, passages en cours, idées, sessions ------------
+
+/** Demandes toutes prêtes de l'accueil : un toucher les met dans le champ, à compléter ou à
+ * envoyer telles quelles (les commandes « / » de Claw). */
+const STARTERS = [
+  { icon: "spark", title: "Créer une appli", detail: "De l'idée à une appli qui marche", text: "Crée une application web qui " },
+  { icon: "bug", title: "Corriger un problème", detail: "Claw trouve la cause et répare", text: "/fix " },
+  { icon: "diff", title: "Relire mes changements", detail: "Une revue, sans rien modifier", text: "/review " },
+  { icon: "check", title: "Vérifier que tout marche", detail: "Tests, lancement, essai", text: "/verify " },
+  { icon: "phone", title: "Essayer sur mon téléphone", detail: "Un lien à ouvrir sur l'iPhone", text: "/jtest " },
+  { icon: "globe", title: "Mettre le site en ligne", detail: "GitHub Pages et son adresse", text: "/pages " },
+];
+
+/** Salutation selon l'heure de l'appareil. */
+function greetingWord(hour = new Date().getHours()) {
+  if (hour >= 5 && hour < 12) return "Bonjour";
+  if (hour >= 12 && hour < 18) return "Bon après-midi";
+  if (hour >= 18 && hour < 23) return "Bonsoir";
+  return "Bonne nuit";
+}
+
+/** Groupe d'une session dans la frise de l'accueil, d'après sa dernière activité. */
+function dayGroup(date) {
+  const day = (value) => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+  const days = Math.round((day(new Date()) - day(new Date(date))) / 86_400_000);
+  if (days <= 0) return "Aujourd'hui";
+  if (days === 1) return "Hier";
+  return days < 7 ? "Cette semaine" : "Plus tôt";
+}
+
+/** Deux lettres pour la tuile d'un dépôt (« budget-app » : BA). */
+function repoInitials(name) {
+  const words = String(name || "?").split(/[-_.\s]+/).filter(Boolean);
+  return ((words[0] || "?")[0] + (words[1] ? words[1][0] : (words[0] || "").slice(1, 2))).toUpperCase();
+}
+
+/** Carte d'une session dans la frise : pastille d'état, titre sur deux lignes, dépôt et heure. */
+function sessionCard(issue) {
+  const settings = settingsOf(issue);
+  const status = issue.state === "closed" ? { key: "archived", label: "Archivée" } : runStatus(latestRun(settings.repo, issue.number));
+  const key = status ? status.key : "idle";
+  const badge = { done: ICON.check, failed: ICON.alert, running: '<span class="spinner" aria-hidden="true"></span>', queued: ICON.clock, archived: ICON.archive }[key] || ICON.chat;
+  return `<li><a class="session-card ${key}" href="#/session/${issue.number}">
+    <span class="sc-badge ${key}">${badge}</span>
+    <span class="sc-body">
+      <strong class="sc-title">${escapeHtml(issue.title)}</strong>
+      <span class="sc-meta"><span class="sc-repo">${ICON.repo}${escapeHtml((settings.repo || "").split("/").pop())}</span>
+        <span class="state-label ${key}">${status ? escapeHtml(status.label) : "en attente"}</span><span>${since(issue.updated_at)}</span></span>
+    </span>
+    <span class="sc-num">#${numberOf(issue)}</span>
+  </a></li>`;
+}
+
+/** Carte d'une session au travail : les griffes qui grattent, son état et sa durée à la seconde. */
+function liveCard(issue, run) {
+  const settings = settingsOf(issue);
+  const queued = run.status !== "in_progress";
+  const start = Date.parse(run.run_started_at || run.created_at);
+  return `<a class="live-card${queued ? " queued" : ""}" href="#/session/${issue.number}">
+    <span class="lr-mark">${CLAWS}</span>
+    <span class="lc-body">
+      <span class="lc-top"><strong>${queued ? "En attente d'une machine" : "Claw travaille"}</strong>
+        ${Number.isFinite(start) ? `<span class="lc-clock">depuis <span class="clock" data-since="${start}">${clockText(Math.max(0, Math.floor((Date.now() - start) / 1000)))}</span></span>` : ""}</span>
+      <span class="lc-title"><span class="num">#${numberOf(issue)}</span> ${escapeHtml(issue.title)}</span>
+      <span class="lc-meta">${ICON.repo}<span>${escapeHtml((settings.repo || "").split("/").pop())}</span>${ICON.branch}<span>${escapeHtml(branchOf(issue))}</span></span>
+    </span>
+    <span class="lc-go">${ICON.chevron}</span>
+    <span class="lr-sweep" aria-hidden="true"><span></span></span>
+  </a>`;
+}
+
+/** Carte « Espace de travail » de l'accueil : le dépôt et la branche où Claw travaillera, à
+ * changer d'un toucher. Redessinée avec la zone de saisie (dépôt ou branche changés). */
+function drawWorkspace() {
+  const box = document.querySelector("#view .workspace");
+  if (!box || state.session) return;
+  const full = state.settings.repo || "";
+  const branch = state.settings.branch || "main";
+  const info = (state.repos || []).find((repo) => repo.full_name === full);
+  const [owner, name] = full ? full.split("/") : ["", ""];
+  const signature = JSON.stringify([full, branch, info && [info.private, info.pushed_at]]);
+  if (box.dataset.signature === signature) return;
+  box.dataset.signature = signature;
+  box.innerHTML = full ? `
+    <button type="button" class="ws-main" data-home="repo">
+      <span class="ws-avatar" aria-hidden="true">${escapeHtml(repoInitials(name))}</span>
+      <span class="ws-text">
+        <small>Espace de travail</small>
+        <strong>${escapeHtml(name)}</strong>
+        <span class="ws-sub">${escapeHtml(owner)}${info ? ` · ${info.private ? "privé" : "public"} · poussé ${since(info.pushed_at)}` : ""}</span>
+      </span>
+      <span class="ws-change">Changer</span>
+    </button>
+    <div class="ws-row">
+      <button type="button" class="ws-pill" data-home="branch">${ICON.branch}<span>${escapeHtml(branch)}</span></button>
+      <button type="button" class="ws-pill" data-home="files">${ICON.folder}<span>Fichiers</span></button>
+      <button type="button" class="ws-pill" data-home="new-repo">${ICON.plus}<span>Nouveau dépôt</span></button>
+    </div>` : `
+    <button type="button" class="ws-main ws-empty" data-home="repo">
+      <span class="ws-avatar" aria-hidden="true">${ICON.repo}</span>
+      <span class="ws-text"><small>Pour commencer</small><strong>Choisissez un dépôt</strong><span class="ws-sub">ou créez-en un neuf</span></span>
+      <span class="ws-change">Choisir</span>
+    </button>`;
+}
+
+/** Les blocs de l'accueil qui dépendent des sessions : chiffres, sessions au travail, frise. */
+function drawHomeSessions(view, sessions, first) {
+  const open = sessions.filter((issue) => issue.state === "open");
+  const working = open.map((issue) => ({ issue, run: latestRun(settingsOf(issue).repo, issue.number) }))
+    .filter(({ run }) => runStatus(run) && ["running", "queued"].includes(runStatus(run).key));
+  const week = state.runs.filter((run) => run.conclusion === "success" && Date.now() - Date.parse(run.updated_at) < 7 * 86_400_000).length;
+  const stats = view.querySelector(".hello-stats");
+  if (stats) {
+    stats.innerHTML = `
+      <div class="stat${working.length ? " busy" : ""}"><strong>${working.length}</strong><span>au travail</span></div>
+      <div class="stat"><strong>${week}</strong><span>réussies · 7 j</span></div>
+      <button type="button" class="stat stat-model" data-home="model"><strong>${escapeHtml(modelLabel(state.settings.model))}</strong><span>modèle ${ICON.chevron}</span></button>`;
+  }
+  const pulse = view.querySelector(".hello-sub");
+  if (pulse) {
+    pulse.textContent = working.length
+      ? `Claw travaille sur ${working.length > 1 ? `${working.length} sessions` : "une session"} en ce moment.`
+      : "Claw est prêt. Que construit-on aujourd'hui ?";
+  }
+  const liveBlock = view.querySelector(".live-block");
+  if (liveBlock) {
+    liveBlock.hidden = !working.length;
+    liveBlock.querySelector(".live-list").innerHTML = working.map(({ issue, run }) => liveCard(issue, run)).join("");
+  }
+  const timeline = view.querySelector(".timeline");
+  if (!timeline) return;
+  const busy = new Set(working.map(({ issue }) => issue.number));
+  const recent = open.filter((issue) => !busy.has(issue.number)).slice(0, 10);
+  if (!recent.length) {
+    timeline.innerHTML = working.length ? '<p class="empty">Aucune autre session ouverte.</p>' : `
+      <div class="home-empty">
+        <span class="logo" aria-hidden="true"></span>
+        <strong>Votre première tâche commence ici</strong>
+        <span>Choisissez une idée ci-dessus, ou décrivez ce que Claw doit faire dans le champ en bas.</span>
+      </div>`;
+  } else {
+    const groups = [];
+    for (const issue of recent) {
+      const label = dayGroup(issue.updated_at);
+      if (!groups.length || groups[groups.length - 1].label !== label) groups.push({ label, issues: [] });
+      groups[groups.length - 1].issues.push(issue);
+    }
+    timeline.innerHTML = groups.map((group) => `
+      <section class="day">
+        <h3 class="day-title">${escapeHtml(group.label)}</h3>
+        <ul class="day-list">${group.issues.map((issue) => sessionCard(issue)).join("")}</ul>
+      </section>`).join("");
+  }
+  keepInStep(view);
+  if (first) {
+    animateIn(view.querySelector(".live-list"));
+    for (const list of view.querySelectorAll(".day-list")) animateIn(list);
+  }
+}
+
 async function showHome() {
   state.session = null;
   const view = $("#view");
   const name = state.user ? state.user.name || state.user.login : "";
+  const today = new Date().toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
   view.innerHTML = `
     <section class="home">
-      <h1 class="greeting"><span class="logo" aria-hidden="true"></span>Quoi de prévu${name ? `, ${escapeHtml(name.split(" ")[0])}` : ""} ?</h1>
-      <h2 class="section-title">Sessions récentes</h2>
-      <ul class="sessions recent"><li class="empty">Chargement…</li></ul>
+      <header class="hello">
+        <p class="hello-date">${ICON.calendar}<span>${escapeHtml(today.charAt(0).toUpperCase() + today.slice(1))}</span></p>
+        <h1 class="hello-title">${greetingWord()}${name ? `, <span class="name">${escapeHtml(name.split(" ")[0])}</span>` : ""}</h1>
+        <p class="hello-sub">Claw est prêt. Que construit-on aujourd'hui ?</p>
+        <div class="hello-stats">
+          <div class="stat sk"></div><div class="stat sk"></div><div class="stat sk"></div>
+        </div>
+      </header>
+      <section class="workspace" aria-label="Espace de travail"></section>
+      <section class="home-block live-block" aria-label="En ce moment" hidden>
+        <h2 class="block-title"><span class="live-dot" aria-hidden="true"></span>En ce moment</h2>
+        <div class="live-list"></div>
+      </section>
+      <section class="home-block" aria-label="Pour démarrer">
+        <h2 class="block-title">Pour démarrer</h2>
+        <div class="starters">${STARTERS.map((starter, index) => `
+          <button type="button" class="starter" data-starter="${index}">
+            <span class="starter-icon">${ICON[starter.icon]}</span>
+            <strong>${escapeHtml(starter.title)}</strong>
+            <small>${escapeHtml(starter.detail)}</small>
+          </button>`).join("")}
+        </div>
+      </section>
+      <section class="home-block" aria-label="Sessions récentes">
+        <h2 class="block-title">Sessions récentes<button type="button" class="block-link" data-home="all">Tout voir ${ICON.chevron}</button></h2>
+        <div class="timeline"><ul class="day-list">${sessionSkeletons(3)}</ul></div>
+      </section>
     </section>`;
-  if (!state.settings.repo) {
-    loadRepos().then((repos) => {
-      if (!state.settings.repo && repos.length) {
-        state.settings.repo = repos[0].full_name;
-        state.settings.branch = repos[0].default_branch;
-        saveSettings();
-        renderComposer();
-      }
-    }).catch(failure);
-  }
+  view.querySelector(".home").addEventListener("click", (event) => {
+    const starter = event.target.closest("[data-starter]");
+    if (starter) {
+      const textarea = document.querySelector("#composer textarea");
+      if (!textarea) return;
+      textarea.value = STARTERS[Number(starter.dataset.starter)].text;
+      textarea.dispatchEvent(new Event("input"));
+      textarea.focus();
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+      return;
+    }
+    const action = event.target.closest("[data-home]");
+    if (!action) return;
+    const kind = action.dataset.home;
+    if (kind === "repo") pickRepo();
+    else if (kind === "branch") pickBranch();
+    else if (kind === "new-repo") openCreateRepo();
+    else if (kind === "model") pickModel();
+    else if (kind === "all") openDrawer();
+    else if (kind === "files" && state.settings.repo) {
+      location.hash = filesHash({ repo: state.settings.repo, ref: state.settings.branch || "main" });
+    }
+  });
+  animateIn(view.querySelector(".starters"));
+  loadRepos().then((repos) => {
+    if (!state.settings.repo && repos.length) {
+      state.settings.repo = repos[0].full_name;
+      state.settings.branch = repos[0].default_branch;
+      saveSettings();
+      renderComposer();
+    }
+    drawWorkspace();
+  }).catch(failure);
   renderComposer();
-  try {
+  let first = true;
+  const refresh = async () => {
     const [sessions] = await Promise.all([state.github.sessions(state.settings.engine), refreshRuns()]);
     await numberOldSessions(sessions);
-    const recent = view.querySelector(".recent");
-    if (recent) {
-      // Pas `map(sessionItem)` : l'indice passé en second deviendrait « à cocher ».
-      recent.innerHTML = sessions.filter((issue) => issue.state === "open").slice(0, 8).map((issue) => sessionItem(issue)).join("")
-        || '<li class="empty">Décrivez une tâche ci-dessous : Claw la fera dans le dépôt choisi et proposera une pull request.</li>';
+    if (!view.querySelector(".home")) return;
+    drawHomeSessions(view, sessions, first);
+    first = false;
+    // Une session au travail : l'accueil se relit toutes les 20 s (son état, sa fin).
+    clearTimeout(state.pollTimer);
+    if (view.querySelector(".live-card") && !document.hidden) {
+      state.pollTimer = setTimeout(() => refresh().catch(() => {}), 20_000);
     }
+  };
+  try {
+    await refresh();
   } catch (error) {
     failure(error);
   }
@@ -2773,7 +3083,7 @@ function answerFoot(foot) {
     if (!item) continue;
     let match = item.match(/^Pull request : (https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+))\s*$/);
     if (match) {
-      chips.push(`<a class="foot-chip" href="${escapeHtml(match[1])}" target="_blank" rel="noopener noreferrer">${ICON.pull}<span>PR #${match[2]}</span></a>`);
+      chips.push(`<a class="foot-chip" href="${escapeHtml(match[1])}" target="_blank" rel="noopener noreferrer">${ICON.pull}<span>Pull request n° ${match[2]}</span></a>`);
       continue;
     }
     match = item.match(/^Branche `[^`]+` : (\d+) fichiers? \S+, \+([\d\s ]+) lignes?, [−-]([\d\s ]+) lignes?$/);
@@ -2784,7 +3094,7 @@ function answerFoot(foot) {
     }
     match = item.match(/^\[Détail du job\]\((https:\/\/github\.com\/\S+)\)$/);
     if (match) {
-      chips.push(`<a class="foot-chip" href="${escapeHtml(match[1])}" target="_blank" rel="noopener noreferrer">${ICON.external}<span>Job</span></a>`);
+      chips.push(`<a class="foot-chip" href="${escapeHtml(match[1])}" target="_blank" rel="noopener noreferrer">${ICON.external}<span>Exécution</span></a>`);
       continue;
     }
     lines.push(item);
@@ -2922,6 +3232,7 @@ function renderDock() {
   }
   dock.innerHTML = parts.join("");
   dock.hidden = !parts.length;
+  keepInStep(dock);
   dock.querySelector(".dock-tasks")?.addEventListener("toggle", (event) => {
     try {
       localStorage.setItem(DOCK_TASKS_KEY, event.currentTarget.open ? "open" : "closed");
@@ -3040,10 +3351,23 @@ function messageHtml(comment, isLastProgress, answer = "") {
   if (body.includes(PROGRESS)) {
     const run = runOf(body);
     const events = run ? journalOf(run) : [];
-    const head = body.split("\n").find((line) => line.startsWith("**Claw")) || "";
-    const kind = runKind(head);
+    let head = body.split("\n").find((line) => line.startsWith("**Claw")) || "";
+    let kind = runKind(head);
+    const live = Boolean(state.session && state.session.live);
+    const stopping = kind === "running" && isLastProgress && Boolean(state.session && state.session.stopping);
+    if (stopping) {
+      // Arrêt demandé : dit tout de suite, sans attendre la dernière progression du moteur.
+      head = head.replace("**Claw travaille** depuis", "**Arrêt en cours** après");
+      kind = "stopping";
+    } else if (kind === "running" && !(isLastProgress && live)) {
+      // « Claw travaille » sur un passage qui ne travaille plus : le moteur a été coupé avant
+      // d'écrire sa fin. Plus de roue qui tourne pour rien.
+      head = head.replace("**Claw travaille** depuis", "**Claw s'est interrompu** après");
+      kind = "stopped";
+    }
     // Passage qui travaille encore : sa durée avance à chaque seconde.
-    const ticking = kind === "running" && isLastProgress && Boolean(state.session && state.session.live);
+    const ticking = kind === "running" && isLastProgress && live;
+    if (events.length && (ticking || stopping)) return liveRunHtml({ body, head, events, run, comment, answer, stopping });
     if (events.length) {
       // « · 161 action(s) » : le compte est déjà dans la pastille du journal.
       // Durée insécable : « 12 min 05 s » ne se coupe pas.
@@ -3052,16 +3376,85 @@ function messageHtml(comment, isLastProgress, answer = "") {
       // Passage en cours : ce qui était déjà là à l'ouverture est montré d'un coup, ce qui arrive
       // ensuite paraît une étape à la fois.
       const key = `run${run}`;
-      if (!state.revealed.has(key) || !isLastProgress) state.revealed.set(key, events.length);
+      // Arrêt demandé : les étapes encore à paraître sont montrées d'un coup, aucune action ne
+      // semble continuer après l'arrêt.
+      if (!state.revealed.has(key) || !isLastProgress || stopping) state.revealed.set(key, events.length);
       const shown = Math.min(state.revealed.get(key), events.length);
       const clocked = ticking ? liveClock(title, comment) : title;
-      return `<div class="run-card ${kind}">${transcriptHtml(events, { key, live: isLastProgress, answer, title: clocked, kind, shown })}</div>`;
+      return `<div class="run-card ${kind}${ticking ? " live" : ""}">${transcriptHtml(events, { key, live: isLastProgress, answer, title: clocked, kind, shown })}</div>`;
     }
-    const card = renderMarkdown(withoutCallMarkup(body));
+    // « Détail du job », écrit par le moteur : en français dans l'appli.
+    const progressText = body.replace(/^\*\*Claw travaille\*\* depuis.*$/m, head);
+    const card = renderMarkdown(withoutCallMarkup(progressText).replace(/\[Détail du job\]\(/g, "[Détail de l'exécution]("));
     return `<div class="progress-card ${kind}${isLastProgress ? "" : " old"}">${ticking ? liveClock(card, comment) : card}</div>`;
   }
   if (body.includes(ANSWER)) return answerHtml(body, comment.id);
   return userMessageHtml(comment.user ? comment.user.login : "", body);
+}
+
+/** Le bloc « Claw travaille » d'un passage en cours : les griffes qui grattent, la durée à la
+ * seconde et « Arrêter » ; l'étape en cours, en grand, et l'avancée de sa liste de tâches ; ses
+ * dernières actions, la plus récente en haut (les nouvelles entrent en glissant) ; le journal
+ * complet, replié. Demandé le 28 octobre 2026 : la carte d'avant n'était que le journal brut. */
+function liveRunHtml({ body, head, events, run, comment, answer, stopping }) {
+  const key = `run${run}`;
+  // Tout est montré d'un coup : les nouvelles actions entrent dans la liste du bloc.
+  state.revealed.set(key, events.length);
+  const tools = events.filter((event) => event.k === "tool");
+  const lastTool = events.map((event) => event.k === "tool").lastIndexOf(true);
+  const seen = state.liveSeen.has(key) ? state.liveSeen.get(key) : lastTool + 1;
+  state.liveSeen.set(key, lastTool + 1);
+  const todo = [...events].reverse().find((event) => event.k === "tool" && event.n === "TodoWrite"
+    && event.i && Array.isArray(event.i.todos) && event.i.todos.length);
+  const todos = todo ? todo.i.todos : [];
+  const doing = todos.find(([status]) => status === "in_progress");
+  const line = (label) => ((body.match(new RegExp(`^\\*\\*${label}\\*\\* : (.+)$`, "m")) || [])[1] || "").trim();
+  const said = line("En ce moment");
+  const plan = line("Ce que Claw compte faire");
+  const last = [...events].reverse().find((event) => event.k === "tool" && event.n !== "TodoWrite");
+  const now = stopping ? "Claw s'arrête, puis range son travail sur la branche."
+    : doing ? doing[1] : said || (last ? recentActions([last], 1).replace(/<span class="side">[\s\S]*$/, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : "Claw lit la demande et prépare son plan.");
+  const elapsed = (head.match(/(?:depuis|après) ((?:\d+ min )?\d+ s)/) || [])[1] || "";
+  const clock = stopping ? (elapsed ? `après ${elapsed}` : "") : elapsed ? liveClock(`depuis ${elapsed}`, comment) : "";
+  const done = todos.filter(([status]) => status === "completed").length;
+  const bar = todos.length
+    ? `<div class="lr-progress" role="img" aria-label="${done} tâche${done > 1 ? "s" : ""} faite${done > 1 ? "s" : ""} sur ${todos.length}">
+        <span class="lr-segments">${todos.map(([status]) => `<span class="${status === "completed" ? "done" : status === "in_progress" ? "doing" : ""}"></span>`).join("")}</span>
+        <span class="lr-count">${done} sur ${todos.length}</span></div>`
+    : '<div class="lr-progress"><span class="lr-sweep"><span></span></span></div>';
+  return `<section class="live-run${stopping ? " stopping" : ""}" aria-label="${stopping ? "Arrêt en cours" : "Claw travaille"}">
+    <header class="lr-head">
+      <span class="lr-mark">${CLAWS}</span>
+      <span class="lr-title"><strong>${stopping ? "Arrêt en cours" : "Claw travaille"}</strong>
+        <span class="lr-sub">${clock || (stopping ? "" : "au travail")}</span></span>
+      ${stopping ? "" : `<button type="button" class="small-link stop lr-stop" data-action="stop">${ICON.stop}<span>Arrêter</span></button>`}
+    </header>
+    <div class="lr-now">
+      <span class="lr-label">${stopping ? "Arrêt demandé" : "En ce moment"}</span>
+      <p class="lr-step">${escapeHtml(now)}</p>
+      ${bar}
+      ${plan && !stopping ? `<details class="lr-plan" data-key="${key}:plan"><summary>Le plan de Claw</summary><p>${escapeHtml(plan)}</p></details>` : ""}
+    </div>
+    ${tools.length ? `<ul class="lr-actions">${recentActions(events, 4, seen)}</ul>` : ""}
+    <div class="lr-journal">${transcriptHtml(events, { key, live: false, answer, title: "Journal complet", shown: events.length })}</div>
+  </section>`;
+}
+
+/** Le bloc « Claw travaille » à l'écran : les tâches du bloc au-dessus de la saisie, qu'il montre
+ * déjà, se retirent ; elles reviennent dès qu'on remonte dans la conversation. */
+function watchLivePanel(view) {
+  state.panelWatch?.disconnect();
+  const composer = $("#composer");
+  const panel = view.querySelector(".live-run:not(.preparing)");
+  if (!panel || !("IntersectionObserver" in window)) {
+    composer.classList.remove("panel-visible");
+    return;
+  }
+  state.panelWatch = new IntersectionObserver(([entry]) => {
+    composer.classList.toggle("panel-visible", entry.isIntersecting);
+    updateComposerSpace();
+  }, { threshold: 0.35 });
+  state.panelWatch.observe(panel);
 }
 
 /** Durée lisible, comme celle du moteur : « 45 s », « 3 min 05 s » (insécable). */
@@ -3107,10 +3500,14 @@ function preparingHtml(run, status, step) {
   const detail = !run ? "Lancement du passage"
     : status && status.key === "queued" ? status.label
       : PREPARING_STEPS[step] || step || (status ? status.label : "");
-  return `<div class="run-card preparing"><div class="preparing-row">
-    <span class="run-state running"><span class="spinner" aria-label="en cours"></span></span>
-    <span class="run-title"><strong>Claw se prépare</strong><span class="run-sub">${escapeHtml(detail)}</span></span>
-  </div></div>`;
+  return `<section class="live-run preparing" aria-label="Claw se prépare">
+    <header class="lr-head">
+      <span class="lr-mark">${CLAWS}</span>
+      <span class="lr-title"><strong>Claw se prépare</strong><span class="lr-sub">${escapeHtml(detail)}</span></span>
+      ${run ? `<button type="button" class="small-link stop lr-stop" data-action="stop">${ICON.stop}<span>Arrêter</span></button>` : ""}
+    </header>
+    <div class="lr-progress"><span class="lr-sweep"><span></span></span></div>
+  </section>`;
 }
 
 /** Message de l'utilisateur en bulle ; le nom seulement quand c'est quelqu'un d'autre. */
@@ -3154,7 +3551,11 @@ function renderSessionView() {
   const talk = comments.filter((comment) => !(comment.body || "").startsWith(JTEST_MARK));
   const answered = talk.length && (talk[talk.length - 1].body || "").includes(ANSWER);
   const active = waiting || (status && (status.key === "queued" || status.key === "running"));
-  session.live = Boolean(active);
+  // Arrêt demandé : montré tout de suite. GitHub met une dizaine de secondes à finir le passage
+  // (Claw s'arrête, puis range et pousse son travail) ; la session se relit entre-temps.
+  const stopping = Boolean(active && session.stopping);
+  const slowStop = stopping && Date.now() - session.stopping.at > STOP_PATIENCE;
+  session.live = Boolean(active) && !stopping;
   const step = session.step ? ` · ${escapeHtml(session.step)}` : "";
   const pull = session.pull;
   const pullBadge = pull ? (pull.merged_at ? "fusionnée" : pull.state === "open" ? "ouverte" : "fermée") : "";
@@ -3170,6 +3571,9 @@ function renderSessionView() {
   // Questions de la dernière réponse, tant que rien ne l'a suivie : dans le bloc au-dessus de la
   // zone de saisie, en cartes à feuilleter.
   session.openQuestions = answered && !active ? lastQuestions(comments) : null;
+  // Blocs de la conversation déjà à l'écran : ceux qui arrivent ensuite (votre message, la
+  // réponse de Claw) entrent en glissant ; la première vue de la session, elle, arrive d'un bloc.
+  const before = view.dataset.session === String(session.number) ? view.querySelectorAll(".messages > *").length : 0;
   view.innerHTML = `
     <section class="session">
       <header class="session-head">
@@ -3177,7 +3581,7 @@ function renderSessionView() {
         <div class="session-meta">
           <a class="meta-link" href="https://github.com/${escapeHtml(settings.repo || "")}" target="_blank" rel="noopener noreferrer">${ICON.repo}<span>${escapeHtml(settings.repo || "?")}</span></a>
           <span class="meta-link">${ICON.branch}<span>${escapeHtml(branchOf(session.issue))}</span></span>
-          ${pull ? `<a class="meta-link pull ${pullBadge}" href="${escapeHtml(pull.html_url)}" target="_blank" rel="noopener noreferrer">${ICON.pull}<span>PR #${pull.number} ${pullBadge}</span></a>` : ""}
+          ${pull ? `<a class="meta-link pull ${pullBadge}" href="${escapeHtml(pull.html_url)}" target="_blank" rel="noopener noreferrer">${ICON.pull}<span>Pull request n° ${pull.number} ${pullBadge}</span></a>` : ""}
           ${pull && pull.state === "open" && !pull.merged_at && !active ? `<button class="meta-link action" data-action="merge">${ICON.merge}<span>Fusionner</span></button>` : ""}
           ${session.site ? `<a class="meta-link site" href="${escapeHtml(session.site)}" target="_blank" rel="noopener noreferrer">${ICON.globe}<span>Site en ligne</span></a>` : ""}
         </div>
@@ -3192,18 +3596,22 @@ function renderSessionView() {
       </div>
       ${unsent ? `<div class="unsent">Ce message n'a pas encore été envoyé à Claw (aucun passage lancé depuis).
         <button class="small-link primary-link" data-action="retry">${ICON.retry}<span>Lancer le passage</span></button></div>` : ""}
-      <div class="run-status ${active ? "active" : status ? status.key : ""}">
-        ${active && !preparing ? `<span class="spinner" aria-hidden="true"></span><span>${run ? escapeHtml(status.label) : "Lancement du passage"}${step}</span>` : ""}
+      <div class="run-status ${stopping ? "stopping" : active ? "active" : status ? status.key : ""}">
+        ${stopping ? `<span class="spinner${slowStop ? "" : " run-line"}" aria-hidden="true"></span><span${slowStop ? "" : ' class="run-line"'}>${slowStop
+          ? "GitHub tarde à arrêter le passage. « Forcer l'arrêt » le coupe tout de suite, sans pousser le travail de ce passage."
+          : "Arrêt en cours : Claw s'arrête, puis range son travail sur la branche."}</span>` : ""}
+        ${active && !preparing && !stopping ? `<span class="spinner run-line" aria-hidden="true"></span><span class="run-line">${run ? escapeHtml(status.label) : "Lancement du passage"}${step}</span>` : ""}
         ${!active && status && status.key === "failed" && !answered ? `<span>Le dernier passage a échoué${session.failure ? ` : ${escapeHtml(session.failure)}` : "."}</span>` : ""}
         <span class="run-actions">
-          ${active && run ? `<button class="small-link stop" data-action="stop">${ICON.stop}<span>Arrêter</span></button>` : ""}
+          ${active && !stopping ? `<button class="small-link stop" data-action="stop">${ICON.stop}<span>Arrêter</span></button>` : ""}
+          ${slowStop && session.stopping.run ? `<button class="small-link stop" data-action="force-stop">${ICON.stop}<span>Forcer l'arrêt</span></button>` : ""}
           ${!active && !unsent ? `<button class="small-link" data-action="retry">${ICON.retry}<span>Relancer</span></button>` : ""}
           ${!active ? `<button class="small-link" data-action="publish-site">${ICON.globe}<span>Mettre en ligne</span></button>` : ""}
           ${!active ? `<button class="small-link" data-action="jtest">${ICON.phone}<span>JTest</span></button>` : ""}
           <details class="more-menu">
             <summary class="small-link" aria-label="Autres actions"><span class="dots" aria-hidden="true">•••</span></summary>
             <div class="menu-list">
-              ${run ? `<a href="${escapeHtml(run.html_url)}" target="_blank" rel="noopener noreferrer" class="menu-item">${ICON.external}<span>Job sur GitHub</span></a>` : ""}
+              ${run ? `<a href="${escapeHtml(run.html_url)}" target="_blank" rel="noopener noreferrer" class="menu-item">${ICON.external}<span>Exécution sur GitHub</span></a>` : ""}
               <a href="${escapeHtml(session.issue.html_url)}" target="_blank" rel="noopener noreferrer" class="menu-item">${ICON.external}<span>Session sur GitHub</span></a>
               ${session.issue.state === "open" ? `<button class="menu-item" data-action="archive">${ICON.archive}<span>Archiver</span></button>` : ""}
               ${!active ? `<button class="menu-item danger-item" data-action="delete">${ICON.trash}<span>Supprimer</span></button>` : ""}
@@ -3215,6 +3623,27 @@ function renderSessionView() {
   for (const details of view.querySelectorAll("details[data-key]")) {
     if (opened.has(details.dataset.key)) details.open = opened.get(details.dataset.key);
   }
+  // Le bloc « Claw travaille » (ou « Claw se prépare ») dit déjà l'état et porte « Arrêter » : la
+  // ligne d'état ne le répète pas.
+  if (view.querySelector(".live-run")) {
+    for (const element of view.querySelectorAll(".run-status .run-line")) element.remove();
+    const stops = view.querySelectorAll('[data-action="stop"]');
+    if (stops.length > 1) stops[stops.length - 1].remove();
+  }
+  watchLivePanel(view);
+  view.dataset.session = String(session.number);
+  // La relecture qui suit un envoi redessine la vue en pleine entrée : l'animation des blocs
+  // arrivés reprend où elle en était, au lieu de s'arrêter net.
+  const blocks = [...view.querySelectorAll(".messages > *")];
+  if (before && blocks.length > before) session.arrivals = { from: before, at: Date.now() };
+  const arrivals = session.arrivals;
+  if (arrivals && Date.now() - arrivals.at < 700) {
+    for (const block of blocks.slice(arrivals.from)) {
+      block.classList.add("fresh");
+      block.style.animationDelay = `-${Date.now() - arrivals.at}ms`;
+    }
+  }
+  keepInStep(view);
   // Menu « ••• » : se ferme en touchant ailleurs dans la session, ou après un choix.
   const menu = view.querySelector(".more-menu");
   menu?.addEventListener("toggle", () => {
@@ -3256,27 +3685,10 @@ function renderSessionView() {
       }
     });
   }
-  view.querySelector('[data-action="merge"]')?.addEventListener("click", async (event) => {
-    const button = event.currentTarget;
-    if (!button.classList.contains("confirm")) {
-      button.classList.add("confirm");
-      button.querySelector("span").textContent = "Confirmer la fusion";
-      setTimeout(() => {
-        if (!button.isConnected) return;
-        button.classList.remove("confirm");
-        button.querySelector("span").textContent = "Fusionner";
-      }, 4000);
-      return;
-    }
-    button.disabled = true;
-    try {
-      await state.github.mergePull(settings.repo, pull.number);
-      toast(`Pull request n° ${pull.number} fusionnée dans ${settings.base || "main"}`);
-      await pollSession(true);
-    } catch (error) {
-      button.disabled = false;
-      failure(error);
-    }
+  armedTap(session, view.querySelector('[data-action="merge"]'), "Confirmer la fusion", async () => {
+    await state.github.mergePull(settings.repo, pull.number);
+    toast(`Pull request n° ${pull.number} fusionnée dans ${settings.base || "main"}`);
+    await pollSession(true);
   });
   view.querySelector('[data-action="publish-site"]')?.addEventListener("click", () => openPublish(session));
   for (const button of view.querySelectorAll('[data-action="jtest"]')) {
@@ -3292,35 +3704,16 @@ function renderSessionView() {
       }
     });
   }
-  const jtestStop = view.querySelector('[data-action="jtest-stop"]');
-  if (jtestStop) {
-    twoTaps(jtestStop, async () => {
-      await dispatchJtest(session, true);
-      toast("JTest arrêté dans la minute");
-    });
-  }
+  armedTap(session, view.querySelector('[data-action="jtest-stop"]'), "Confirmer", async () => {
+    await dispatchJtest(session, true);
+    toast("JTest arrêté dans la minute");
+  });
   // Deux appuis pour arrêter (pas de fenêtre de confirmation, comme le reste de l'appli).
-  view.querySelector('[data-action="stop"]')?.addEventListener("click", async (event) => {
-    const button = event.currentTarget;
-    if (!button.classList.contains("confirm")) {
-      button.classList.add("confirm");
-      button.querySelector("span").textContent = "Confirmer l'arrêt";
-      setTimeout(() => {
-        if (!button.isConnected) return;
-        button.classList.remove("confirm");
-        button.querySelector("span").textContent = "Arrêter";
-      }, 4000);
-      return;
-    }
-    button.disabled = true;
-    try {
-      await state.github.cancelRun(state.settings.engine, run.id);
-      toast("Arrêt demandé : ce qui est fait reste sur la branche");
-      await pollSession(true);
-    } catch (error) {
-      button.disabled = false;
-      failure(error);
-    }
+  armedTap(session, view.querySelector('[data-action="stop"]'), "Toucher encore pour arrêter", () => stopRun(session, run));
+  armedTap(session, view.querySelector('[data-action="force-stop"]'), "Confirmer l'arrêt forcé", async () => {
+    await state.github.forceCancelRun(state.settings.engine, session.stopping.run);
+    toast("Arrêt forcé demandé : GitHub coupe le passage");
+    await pollSession(true);
   });
   view.querySelector('[data-action="delete"]')?.addEventListener("click", () => openDeleteSessions([session.issue]));
   view.querySelector(".messages").addEventListener("click", (event) => {
@@ -3347,7 +3740,7 @@ function renderSessionView() {
 async function showSession(number) {
   const view = $("#view");
   if (!state.session || state.session.number !== number) {
-    view.innerHTML = '<section class="session"><p class="empty">Chargement de la session…</p></section>';
+    view.innerHTML = '<section class="session"><p class="empty loading">Chargement de la session…</p></section>';
     state.session = { number, issue: null, comments: [], settings: {}, pull: null, step: "", signature: "", logs: new Map() };
   } else if (state.session.issue) {
     // Déjà connue (session à peine créée, retour sur la page) : montrée avant la relecture.
@@ -3360,6 +3753,90 @@ async function showSession(number) {
     failure(error);
   }
 }
+
+/** Au-delà, l'arrêt tarde (machine injoignable, GitHub encombré) : « Forcer l'arrêt » paraît. */
+const STOP_PATIENCE = 45_000;
+
+/** Arrête le passage en cours. La session le dit aussitôt (« Arrêt en cours », plus d'étapes
+ * qui paraissent, plus de tâches en bas) et se relit toutes les 1,5 s jusqu'à la fin du passage.
+ * Un passage tout juste lancé, que GitHub ne liste pas encore, est arrêté dès qu'il paraît. */
+async function stopRun(session, run) {
+  session.stopping = { run: run ? run.id : null, at: Date.now() };
+  if (state.session === session) {
+    renderSessionView();
+    renderComposer();
+  }
+  try {
+    if (run) await state.github.cancelRun(state.settings.engine, run.id);
+    toast("Arrêt demandé : ce qui est fait reste sur la branche");
+  } catch (error) {
+    // 409 : le passage venait de finir de lui-même.
+    if (!(error instanceof GitHubError && error.status === 409)) {
+      session.stopping = null;
+      if (state.session === session) renderSessionView();
+      throw error;
+    }
+  }
+  await pollSession(true);
+}
+
+/** Pendant un arrêt : le passage qui paraît enfin est arrêté à son tour ; un passage fini
+ * termine l'arrêt (cinq minutes au plus, au-delà la session redevient normale). */
+async function followStop(session, run, launchWaiting) {
+  const stop = session.stopping;
+  if (!stop) return;
+  // Le passage d'avant, encore seul listé pendant que GitHub enregistre le nouveau, ne compte pas.
+  const fresh = Boolean(run) && !(launchWaiting && run.id === state.launch.before);
+  if (!stop.run && fresh && run.status !== "completed") {
+    stop.run = run.id;
+    await state.github.cancelRun(state.settings.engine, run.id).catch(() => {});
+  }
+  const ended = fresh && run.status === "completed" && (!stop.run || run.id === stop.run);
+  if (ended || (!fresh && !launchWaiting) || Date.now() - stop.at > 5 * 60_000) {
+    session.stopping = null;
+    if (ended && run.conclusion === "cancelled") toast("Passage arrêté : son travail est gardé sur la branche");
+  }
+}
+
+/** Deux appuis pour une action sans retour, qui résistent aux redessins de la session (toutes les
+ * 1,5 à 4 s pendant un passage) : le premier arme le bouton pour 4 s, noté dans la session ; le
+ * second agit. Avant, un redessin entre les deux remettait le bouton à zéro, et le second appui
+ * ne faisait que le réarmer : « Arrêter » semblait ne jamais arrêter. */
+function armedTap(session, button, label, action) {
+  if (!button) return;
+  const name = button.dataset.action;
+  const text = button.querySelector("span").textContent;
+  const armed = () => Boolean(session.armed && session.armed.action === name && Date.now() < session.armed.until);
+  const show = () => {
+    const left = session.armed.until - Date.now();
+    button.classList.add("confirm", "armed");
+    button.style.setProperty("--armed-delay", `-${ARMED_MS - left}ms`);
+    button.querySelector("span").textContent = label;
+    clearTimeout(button.armTimer);
+    button.armTimer = setTimeout(() => {
+      if (!button.isConnected || armed()) return;
+      button.classList.remove("confirm", "armed");
+      button.querySelector("span").textContent = text;
+    }, left + 20);
+  };
+  if (armed()) show();
+  button.addEventListener("click", async () => {
+    if (!armed()) {
+      session.armed = { action: name, until: Date.now() + ARMED_MS };
+      show();
+      return;
+    }
+    session.armed = null;
+    button.disabled = true;
+    try {
+      await action();
+    } catch (error) {
+      button.disabled = false;
+      failure(error);
+    }
+  });
+}
+const ARMED_MS = 4000;
 
 /** Pourquoi un passage a échoué, en clair, d'après ses jobs (« » si rien de sûr). Vu le
  * 24 octobre 2026 : un passage sur une machine de GitHub échouait en deux secondes, sans
@@ -3377,7 +3854,7 @@ async function failureOf(engine, run) {
         + "(quota du mois épuisé, ou facturation bloquée). Choisissez « Ma machine » dans Réglages, Sessions, puis relancez.";
   }
   const step = steps.find((each) => each.conclusion === "failure");
-  return step ? `étape « ${step.name} » en échec (détail dans le job sur GitHub, menu •••).` : "";
+  return step ? `étape « ${step.name} » en échec (détail dans l'exécution sur GitHub, menu •••).` : "";
 }
 
 /** Relit la session (messages, passage, pull request) et ne redessine que si elle a changé. */
@@ -3445,10 +3922,11 @@ async function pollSession(force = false) {
   // L'attente d'un passage lancé depuis l'appli (90 s au plus) change l'affichage d'elle-même.
   const launchWaiting = Boolean(state.launch && state.launch.session === session.number
     && Date.now() - state.launch.at < 90_000);
+  await followStop(session, run, launchWaiting);
   const signature = JSON.stringify([
     issue.updated_at, issue.state, comments.map((comment) => [comment.id, comment.updated_at]),
     run && [run.id, run.status, run.conclusion], session.step, session.failure, session.pull && [session.pull.state, session.pull.merged_at],
-    launchWaiting,
+    launchWaiting, session.stopping && [session.stopping.run, Date.now() - session.stopping.at > STOP_PATIENCE],
   ]);
   // Fin du passage suivi : le quota gratuit a bougé ; pendant le passage, il se relit chaque minute.
   if (session.active && run && run.status === "completed") refreshQuota(true);
@@ -3462,7 +3940,7 @@ async function pollSession(force = false) {
   }
   if (state.session === session && !document.hidden) {
     state.pollTimer = setTimeout(() => pollSession().catch(failure),
-      session.active || jtestWatching(session.number) ? 4000 : 30000);
+      session.stopping ? 1500 : session.active || jtestWatching(session.number) ? 4000 : 30000);
   }
 }
 
@@ -3605,7 +4083,7 @@ async function ensureExplorer() {
 
 async function renderExplorer() {
   const pane = $("#drawer .explorer");
-  pane.innerHTML = '<p class="empty">Lecture…</p>';
+  pane.innerHTML = '<p class="empty loading">Lecture…</p>';
   try {
     await ensureExplorer();
   } catch (error) {
@@ -3638,7 +4116,7 @@ async function drawExplorer() {
     ...parts.map((part, index) => (index === parts.length - 1 ? `<span>${escapeHtml(part)}</span>`
       : `<button type="button" data-path="${escapeHtml(parts.slice(0, index + 1).join("/"))}">${escapeHtml(part)}</button>`)),
   ].join('<span class="sep">/</span>')}</p>`;
-  pane.innerHTML = `${head}${crumbs}<p class="empty">Lecture…</p>`;
+  pane.innerHTML = `${head}${crumbs}<p class="empty loading">Lecture…</p>`;
   let body;
   try {
     const items = await state.github.contents(explorer.repo, explorer.path, explorer.ref);
@@ -3653,6 +4131,7 @@ async function drawExplorer() {
   }
   if (state.explorer !== explorer || `${explorer.repo}@${explorer.ref}:${explorer.path}` !== where) return;
   pane.innerHTML = `${head}${crumbs}${body}`;
+  animateIn(pane.querySelector(".file-list"));
 }
 
 function onExplorerClick(event) {
@@ -3711,7 +4190,7 @@ async function showFiles({ repo, ref, path, number }) {
     <section class="files">
       ${back}
       <h1>Fichiers</h1>
-      <p class="empty">Lecture…</p>
+      <p class="empty loading">Lecture…</p>
     </section>`;
   const here = location.hash;
   try {
@@ -3753,7 +4232,11 @@ async function showFiles({ repo, ref, path, number }) {
   } catch (error) {
     if (error instanceof GitHubError && error.status === 404) {
       const section = view.querySelector(".files");
-      if (section) section.querySelector(".empty").textContent = "Introuvable sur cette branche.";
+      const empty = section && section.querySelector(".empty");
+      if (empty) {
+        empty.classList.remove("loading");
+        empty.textContent = "Introuvable sur cette branche.";
+      }
       return;
     }
     failure(error);
@@ -3801,15 +4284,12 @@ async function openPublish(session) {
   const base = session.settings.base || "main";
   const branch = branchOf(session.issue);
   const pull = session.pull;
-  const close = () => {
-    sheet.hidden = true;
-    sheet.innerHTML = "";
-  };
+  const close = hideSheet;
   sheet.innerHTML = `
     <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="Mettre en ligne">
       <div class="sheet-head"><strong>Mettre en ligne (GitHub Pages)</strong>
         <button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button></div>
-      <p class="empty">Lecture du dépôt…</p>
+      <p class="empty loading">Lecture du dépôt…</p>
     </div>`;
   sheet.onclick = (event) => {
     if (backdropTap(event, sheet) || event.target.closest("[data-close]")) close();
@@ -3897,7 +4377,7 @@ async function showChanges(number) {
   view.innerHTML = `
     <section class="changes">
       ${sessionTop(number, "modifications")}
-      <p class="empty">Lecture des différences…</p>
+      <p class="empty loading">Lecture des différences…</p>
     </section>`;
   try {
     const issue = await state.github.issue(state.settings.engine, number);
@@ -3963,9 +4443,9 @@ async function engineChecks() {
   }
   try {
     await state.github.workflow(engine);
-    add(true, "Workflow claw-web.yml présent");
+    add(true, "Fichier claw-web.yml présent dans le moteur");
   } catch {
-    add(false, "Workflow claw-web.yml absent du moteur");
+    add(false, "Fichier claw-web.yml absent du moteur");
   }
   for (const name of ["OPENROUTER_API_KEY", "CLAW_REPO_TOKEN"]) {
     try {
@@ -4119,7 +4599,7 @@ function showSettings(first = false, justConnected = false) {
       <div class="group">
         <details class="disclosure engine-state">
           <summary class="row"><span class="row-icon state"></span>${text("Vérification…", "")}${ICON.chevron}</summary>
-          <ul class="checks"><li>Vérification…</li></ul>
+          <ul class="checks"><li class="loading">Vérification…</li></ul>
         </details>
         <details class="disclosure"${justConnected ? " open" : ""}>
           <summary class="row"><span class="row-icon">${ICON.key}</span>${text("Clés des modèles", ["OpenRouter", ...KEYED_PROVIDERS.map((provider) => provider.label)].join(", "))}${ICON.chevron}</summary>
@@ -4649,6 +5129,7 @@ const pages = extras({
   icon: ICON,
   toast,
   failure,
+  animateIn,
   twoTaps,
   sendToSession,
   github: () => state.github,
@@ -4665,6 +5146,11 @@ function route() {
   if (document.body.classList.contains("locked")) return;
   clearTimeout(state.pollTimer);
   closeDrawer();
+  // Chaque page arrive d'un léger glissé ; la même page redessinée en direct ne bouge pas.
+  const view = $("#view");
+  view.classList.remove("view-enter");
+  void view.offsetWidth;
+  view.classList.add("view-enter");
   const hash = location.hash || "#/";
   const onSettings = hash.startsWith("#/reglages");
   $("#settings-button").classList.toggle("active", onSettings);
@@ -4722,7 +5208,7 @@ function applyTheme() {
   if (theme) document.documentElement.dataset.theme = theme;
   else delete document.documentElement.dataset.theme;
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() || "#1b1a18";
+  if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() || "#0c0b11";
 }
 
 /** La zone de saisie est fixée en bas : le contenu garde en dessous la place qu'elle prend
@@ -4824,9 +5310,43 @@ function watchScrollLock() {
   update();
 }
 
+/** La barre du haut prend un filet et une ombre dès que la page défile sous elle. */
+function watchTopbar() {
+  const bar = document.querySelector(".topbar");
+  let queued = false;
+  const update = () => {
+    queued = false;
+    bar.classList.toggle("scrolled", window.scrollY > 4);
+  };
+  window.addEventListener("scroll", () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(update);
+  }, { passive: true });
+  update();
+}
+
+/** Petits mouvements de toute l'appli : un bloc ouvert d'un toucher glisse en place, une
+ * fenêtre qui en remplace une autre en train de se fermer s'ouvre normalement, un toucher
+ * chasse le message du bas. */
+function watchMotion() {
+  document.addEventListener("click", (event) => {
+    const summary = event.target.closest("summary");
+    const details = summary && summary.parentElement;
+    if (!details || details.tagName !== "DETAILS" || details.open || summary !== details.querySelector(":scope > summary")) return;
+    details.classList.add("opening");
+    setTimeout(() => details.classList.remove("opening"), 450);
+  });
+  const sheet = $("#sheet");
+  new MutationObserver(() => sheet.classList.remove("closing")).observe(sheet, { childList: true });
+  $("#toast").addEventListener("click", hideToast);
+}
+
 async function boot() {
   applyTheme();
   watchScrollLock();
+  watchTopbar();
+  watchMotion();
   const moved = MOVED_ENGINES[state.settings.engine];
   if (moved) {
     state.settings.engine = moved;

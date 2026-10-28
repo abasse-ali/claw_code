@@ -72,6 +72,7 @@ export function extras(app) {
           </ul>
         </details>`).join("")}
       <p class="empty tools-none" hidden>Aucun outil ne correspond.</p>`;
+    app.animateIn(body);
     const filter = body.querySelector(".tools-filter");
     filter.addEventListener("input", () => {
       const words = filter.value.toLowerCase().split(/\s+/).filter(Boolean);
@@ -105,7 +106,7 @@ export function extras(app) {
   }
 
   async function showDocuments() {
-    const body = page("Documents", '<p class="empty">Chargement…</p>',
+    const body = page("Documents", '<p class="empty loading">Chargement…</p>',
       "Les documents que Claw a écrits pour vous (rapports, plans, notes), avec leurs onglets et leurs commentaires.");
     const here = location.hash;
     try {
@@ -118,6 +119,7 @@ export function extras(app) {
           <small>${escapeHtml(dateTime(doc.updated_at))}${open ? ` · ${open} commentaire${open > 1 ? "s" : ""}` : ""}</small></a></li>`;
       }).join("")}</ul>`
         : '<p class="empty">Aucun document pour l\'instant. Demandez-en un à Claw (« fais-moi un rapport… »).</p>';
+      app.animateIn(body.querySelector(".file-list"));
     } catch (error) {
       body.innerHTML = '<p class="empty">Documents indisponibles.</p>';
       failure(error);
@@ -137,7 +139,7 @@ export function extras(app) {
   }
 
   async function showDocument(id) {
-    const body = page("Document", '<p class="empty">Chargement…</p>');
+    const body = page("Document", '<p class="empty loading">Chargement…</p>');
     const here = location.hash;
     try {
       const root = `documents/${id}`;
@@ -256,7 +258,7 @@ export function extras(app) {
     if (routine.cron_expression) {
       const zone = (routine.cron_expression.match(/^CRON_TZ=(\S+)\s/) || [])[1];
       const fields = routine.cron_expression.replace(/^CRON_TZ=\S+\s+/, "");
-      return `cron <code>${escapeHtml(fields)}</code> (${escapeHtml(zone || "UTC")})`;
+      return `programmée <code>${escapeHtml(fields)}</code> (${escapeHtml(zone || "UTC")})`;
     }
     if (routine.run_once_at) return `une fois, le ${escapeHtml(dateTime(routine.run_once_at))}`;
     return "sur demande";
@@ -269,7 +271,7 @@ export function extras(app) {
   }
 
   async function showRoutines() {
-    const body = page("Routines", '<p class="empty">Chargement…</p>',
+    const body = page("Routines", '<p class="empty loading">Chargement…</p>',
       "Messages programmés que Claw envoie à une session (ou à une nouvelle session), pull requests suivies et "
       + "adresses surveillées. Le programmateur du dépôt des sessions passe toutes les heures.");
     const here = location.hash;
@@ -313,6 +315,7 @@ export function extras(app) {
             <span class="name">${escapeHtml(watch.url)} → <a href="#/session/${encodeURIComponent(watch.session)}">session ${escapeHtml(watch.session)}</a></span>
             <button type="button" class="small-link stop" data-unfollow>Arrêter</button></li>`).join("")}</ul>`
           : '<p class="empty">Aucune pull request suivie, aucune adresse surveillée.</p>'}`;
+      app.animateIn(body.querySelector(".routine-list"));
       const save = (message, update) => app.github().updateJson(engine(), ROUTINES, FILES_BRANCH, message, update,
         () => ({ version: 1, routines: [] }));
       for (const row of body.querySelectorAll(".routine-row")) {

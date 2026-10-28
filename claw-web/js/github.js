@@ -143,11 +143,11 @@ export class GitHub {
     } catch (error) {
       // Workflow du dépôt des sessions d'avant le choix de la machine : il refuse l'entrée.
       if (error instanceof GitHubError && error.status === 422 && "project" in inputs && /project/.test(error.message)) {
-        throw new GitHubError(422, `Le workflow claw-web.yml de ${engine} ne connaît pas encore le mode projet : `
+        throw new GitHubError(422, `Le fichier claw-web.yml de ${engine} ne connaît pas encore le mode projet : `
           + "mettez-le à jour (Réglages, Moteur), ou coupez « Mode projet » dans les options.");
       }
       if (error instanceof GitHubError && error.status === 422 && "runner" in inputs && /runner/.test(error.message)) {
-        throw new GitHubError(422, `Le workflow claw-web.yml de ${engine} ne connaît pas encore le choix « Ma machine » : `
+        throw new GitHubError(422, `Le fichier claw-web.yml de ${engine} ne connaît pas encore le choix « Ma machine » : `
           + "mettez-le à jour (.github/claw-web/pc/README.md du code de Claw), ou repassez sur « Machine de GitHub » dans les réglages.");
       }
       throw error;
@@ -388,6 +388,12 @@ export class GitHub {
   /** Arrête un passage : le moteur garde ce qui est fait sur la branche de la session. */
   cancelRun(engine, runId) {
     return this.request("POST", `/repos/${engine}/actions/runs/${runId}/cancel`);
+  }
+
+  /** Arrêt forcé : GitHub coupe le passage sans attendre ses étapes de fin (la poussée du
+   * travail et la réponse comprises). */
+  forceCancelRun(engine, runId) {
+    return this.request("POST", `/repos/${engine}/actions/runs/${runId}/force-cancel`);
   }
 
   async jobs(engine, runId) {
