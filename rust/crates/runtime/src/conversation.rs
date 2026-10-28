@@ -456,6 +456,9 @@ struct TurnAids {
     plan_reviewed: bool,
     /// Le modèle a écrit l'interface sans plan : il lui a été demandé.
     plan_requested: bool,
+    /// Feuille de base écrite par le modèle de conception (chemin, texte) :
+    /// remise en place si le modèle de la session la réécrit.
+    design_base: Option<(std::path::PathBuf, String)>,
     /// Wireframe du plan mal aligné : signalé une fois par tour.
     wireframe_flagged: bool,
     /// Un autre modèle a repris après deux réponses vides de suite.
@@ -1907,6 +1910,7 @@ where
         // code, marques d'une page générée, plancher de qualité, vérification).
         let mut design_guided = false;
         let mut conceived = false;
+        let mut design_base = None;
         if !self.subagent
             && !question
             && harness::enabled(Aid::DesignGuide)
@@ -1917,9 +1921,12 @@ where
                 design_guided = true;
                 // Le modèle de conception (`designerModel`) écrit le plan et la
                 // feuille de base ; le modèle de la session fait tout le reste.
-                if let Some(note) = self.design_conception(&request_text, earlier.as_deref()) {
+                if let Some((note, base)) =
+                    self.design_conception(&request_text, earlier.as_deref())
+                {
                     user_message.blocks.push(ContentBlock::Text { text: note });
                     conceived = true;
+                    design_base = base;
                 }
                 // Le modèle réglé pour le design (`designModel`) fait le tour ;
                 // le modèle habituel reprend à la fin.
@@ -1991,6 +1998,7 @@ where
             // Le plan vient du modèle de conception : ni demandé, ni relu.
             plan_reviewed: conceived,
             plan_requested: conceived,
+            design_base,
             // Les mots de l'utilisateur seulement : Claw Web y ajoute la
             // conversation et ses consignes (« created from projet-vierge »),
             // qui faisaient passer le passage 5 de la session #31 pour une
@@ -3185,6 +3193,7 @@ where
                     notes.push(crate::code_checks::pitfalls_feedback(&path, &fresh));
                 }
             }
+            self.design_base_guard(&path, aids, notes);
             self.interface_file_notes(&path, aids, notes);
             self.code_file_notes(&path, aids, notes);
         }
@@ -3637,7 +3646,11 @@ where
     /// le plan à suivre. `None` : rien à concevoir (une correction, une suite
     /// d'un travail déjà conçu), aucun modèle de conception, ou une réponse
     /// inutilisable.
-    fn design_conception(&mut self, request: &str, earlier: Option<&str>) -> Option<String> {
+    fn design_conception(
+        &mut self,
+        request: &str,
+        earlier: Option<&str>,
+    ) -> Option<(String, Option<(std::path::PathBuf, String)>)> {
         let own = crate::project::own_words(request);
         if self.subagent || interrupt_requested() || crate::web_design::is_repair_request(own) {
             return None;
@@ -3671,23 +3684,56 @@ where
             };
             let text = format!("{}\n{}\n", crate::web_design::BASE_CSS_MARK, css.trim());
             std::fs::write(cwd.join(name), &text).ok()?;
-            Some((name, text.lines().count()))
+            Some((name, text))
         });
-        self.api_client.notify(&match file {
-            Some((name, lines)) => format!(
-                "Conception du design par {} : plan et feuille de base ({name}, {lines} lignes) ; le modèle de la session code tout le reste",
-                consultation.model
+        self.api_client.notify(&match &file {
+            Some((name, text)) => format!(
+                "Conception du design par {} : plan et feuille de base ({name}, {} lignes) ; le modèle de la session code tout le reste",
+                consultation.model,
+                text.lines().count()
             ),
             None => format!(
                 "Conception du design par {} : plan (sans feuille de base) ; le modèle de la session code tout le reste",
                 consultation.model
             ),
         });
-        Some(crate::web_design::conception_note(
+        let note = crate::web_design::conception_note(
             &consultation.model,
             &plan,
-            file,
-        ))
+            file.as_ref()
+                .map(|(name, text)| (*name, text.lines().count())),
+        );
+        Some((note, file.map(|(name, text)| (cwd.join(name), text))))
+    }
+
+    /// La feuille de base du modèle de conception vient d'être réécrite ou
+    /// modifiée par le modèle de la session : Claw la remet en place, et lui
+    /// dit où mettre ses propres règles. Vu le 28 octobre 2026 (session #38) :
+    /// Nemotron a réécrit `base.css` de mémoire, sans l'avoir lu, dès la
+    /// deuxième écriture du tour.
+    fn design_base_guard(&mut self, path: &str, aids: &TurnAids, notes: &mut Vec<String>) {
+        let Some((base, text)) = &aids.design_base else {
+            return;
+        };
+        let written = std::path::Path::new(path);
+        let written = if written.is_absolute() {
+            written.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(written)
+        };
+        if written != *base || std::fs::read_to_string(base).is_ok_and(|now| now == *text) {
+            return;
+        }
+        if std::fs::write(base, text).is_err() {
+            return;
+        }
+        let name = base
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().to_string());
+        self.api_client.notify(&format!(
+            "{name} du modèle de conception remis en place : le modèle de la session met ses règles dans sa propre feuille"
+        ));
+        notes.push(crate::web_design::design_base_restored(&name));
     }
 
     /// Revue du plan de design avant le code : un autre modèle juge la
@@ -8838,6 +8884,40 @@ mod tests {
         assert!(!dir.join("base.css").exists());
         drop(seen);
         drop(back);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_designer_base_css_is_put_back_when_the_session_model_rewrites_it() {
+        let _serial = crate::test_serial();
+        let (mut runtime, observed, _) = aided_runtime(Vec::new(), Vec::new());
+        let dir = std::env::temp_dir().join(format!("claw-base-gardee-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let base = dir.join("base.css");
+        let original = format!(
+            "{}\n:root {{ --accent: #3B5BDB; }}\n",
+            crate::web_design::BASE_CSS_MARK
+        );
+        std::fs::write(&base, &original).expect("base");
+        let aids = super::TurnAids {
+            design_base: Some((base.clone(), original.clone())),
+            ..super::TurnAids::default()
+        };
+        // Intacte, ou un autre fichier : rien.
+        let mut notes = Vec::new();
+        runtime.design_base_guard(&base.to_string_lossy(), &aids, &mut notes);
+        runtime.design_base_guard(&dir.join("styles.css").to_string_lossy(), &aids, &mut notes);
+        assert!(notes.is_empty());
+        // Réécrite de mémoire : remise en place, et le modèle sait où écrire.
+        std::fs::write(&base, ":root { --accent: red; }\n").expect("réécrite");
+        runtime.design_base_guard(&base.to_string_lossy(), &aids, &mut notes);
+        assert_eq!(std::fs::read_to_string(&base).expect("base"), original);
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0].contains("never write or edit base.css") && notes[0].contains("styles.css")
+        );
+        assert!(observed.borrow().notices.iter().any(|notice| notice
+            == "base.css du modèle de conception remis en place : le modèle de la session met ses règles dans sa propre feuille"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

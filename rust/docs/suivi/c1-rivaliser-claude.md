@@ -108,6 +108,13 @@ conception n'a répondu (GLM-5.3 : pas de réponse après 20 s) ». Une consulta
 patience porte désormais ce délai (`Patience::first_sign`) : 2 min pour la conception, 20 s
 ailleurs comme avant.
 
+Deuxième essai (session #38) : GLM-5.3 muet même en 2 min, **Gemini 3.6 Flash** a conçu (plan
+et `base.css` de 102 lignes, Newsreader et Plus Jakarta Sans). Mais Nemotron a réécrit
+`base.css` de mémoire, sans l'avoir lu, dès sa deuxième écriture. Depuis : la note lui dit de
+lire la feuille et de ne jamais l'écrire ni la modifier, et si elle change pendant le tour,
+Claw la remet en place et lui dit de mettre ses règles dans `styles.css`
+(`design_base_guard`, `design_base_restored`).
+
 | Lot | Contenu | État |
 |---|---|---|
 | 10. Conception | Réglage `designerModel` (texte ou liste ; `CLAW_DESIGNER_MODEL`, `off` le coupe). Au début d'un tour de création d'interface (méthode de design jointe, pas de page déjà là sauf refonte demandée), le runtime demande au modèle de conception (`ApiClient::design_conception`, patience `Patience::DESIGN` : 2 min pour un premier signe de vie, 7 min par modèle, 12 en tout, 32 000 jetons) un **plan** (brief, direction, 5 à 8 couleurs nommées, deux polices de la bibliothèque de l'outil `Font`, espacements, écrans bloc par bloc, composants, mouvement, marques interdites dont « plusieurs cartes de couleurs différentes côte à côte ») et **`base.css`** (jetons que lit le kit : `--paper`, `--surface`, `--ink`, `--muted`, `--line`, `--accent`, `--on-accent`, `--income`, `--error`, `--field`, `--radius`, `--font-display`, `--font-text` ; clair et sombre ; le socle ; l'allure de base des titres, montants, boutons, surfaces, lignes de liste à pastille, champs, puces). Claw écrit `base.css` (marqué en tête ; `claw-base.css` si l'utilisateur a déjà son `base.css`), joint le plan à la demande (`conception_note` : ne pas écrire d'autre plan, lier `base.css` avant sa propre feuille, ne jamais redéfinir ses jetons), et la revue du plan est sautée (le plan est celui du concepteur). Sans réponse : le modèle de la session conçoit lui-même, comme avant (`web_design.rs` : `designer_prompt`, `parse_conception`, `has_interface_page` ; `conversation.rs` : `design_conception`) | fait (test de conversation, tests unitaires) |

@@ -1272,10 +1272,17 @@ pub fn parse_conception(text: &str) -> Option<(String, Option<String>)> {
 #[must_use]
 pub fn conception_note(model: &str, plan: &str, file: Option<(&str, usize)>) -> String {
     let base = match file {
-        Some((file, lines)) => format!(" Claw wrote its design system in {file} ({lines} lines: the tokens of color, type, space, radius and shadow, the foundation, and the base look of text, buttons, surfaces, list rows, fields and chips). Link {file} in every page before your own stylesheet (<link rel=\"stylesheet\" href=\"{file}\">, with the path from the page), use its variables and classes for everything, never redefine its variables or restyle its base classes, and keep your own stylesheet for layout and the parts it does not cover. The method's foundation is already in it: do not copy it again. Load its two fonts with the Font tool."),
+        Some((file, lines)) => format!(" Claw already wrote its design system in {file} ({lines} lines: the tokens of color, type, space, radius and shadow, the foundation, and the base look of text, buttons, surfaces, list rows, fields and chips): read it before writing the pages, and never write or edit it. Link {file} in every page before your own stylesheet (<link rel=\"stylesheet\" href=\"{file}\">, with the path from the page), use its variables and classes for everything, never redefine its variables or restyle its base classes, and keep your own stylesheet for layout and the parts it does not cover. The method's foundation is already in it: do not copy it again. Load its two fonts with the Font tool."),
         None => " Write its tokens at the top of your stylesheet, as they are.".to_string(),
     };
     format!("Design conception by {model}, the designer Claw chose for this request: it decided the direction; you build everything. Its plan below is your design plan: do not write another one and do not change its direction, colors or fonts; follow it screen by screen, block by block.{base}\n\n{plan}")
+}
+
+/// La feuille de base du modèle de conception, réécrite par le modèle de la
+/// session, a été remise en place.
+#[must_use]
+pub fn design_base_restored(file: &str) -> String {
+    format!("[Claw] {file} is the design system the designer wrote for this request, and Claw put it back as it was: never write or edit {file}. Read it to know its tokens and classes, link it first in every page, and put your own rules (the layout of each screen, the parts it does not cover, any override) in your own stylesheet, styles.css, linked after it.")
 }
 
 /// Le projet a déjà une page HTML (à la racine ou un dossier plus bas, hors
