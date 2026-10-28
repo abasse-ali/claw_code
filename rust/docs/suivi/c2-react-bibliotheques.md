@@ -62,6 +62,26 @@ Réponses de l'utilisateur aux questions :
    (`kit/app-kit.js`). La note du concepteur et le rappel de `base.css` suivent le même choix.
 7. **Journal de Claw Web** : « Prépare le projet · appli React · 27 fichiers ».
 
+## Essai réel #41 (28 octobre 2026, `budget_claw`, branche `claw/session-15`)
+
+La demande de la session #35, sur `main` après la fusion (#127), sur l'exécuteur `claw-cloud`
+(ARM64). Claw appelle `Starter` au premier tour ; installation, `npm run typecheck` et
+construction marchent ; deux erreurs de TypeScript trouvées et corrigées par le modèle. Mais
+ses captures lui signalaient à tort, à cause du kit React :
+
+- des liens vers des écrans « qui n'existent pas » (`#analyse`, `#reglages`) : seul l'écran
+  ouvert était dans la page. Du même coup la revue ne reconnaissait pas une appli à onglets et
+  réclamait un grand titre. Corrigé : `AppShell` garde chaque écran dans la page, les autres
+  cachés (`hidden`), comme le kit sans React ;
+- des icônes « dessinées à la main » : `settings`, `receipt` et `shopping-cart` de lucide-react
+  1.63 ont un tracé plus récent que celui de Claw. Corrigé : une icône marquée
+  `class="lucide lucide-<nom>"` par un paquet de Lucide vient du jeu (`icon_set::exempt`) ;
+- trois pastilles de la carte du solde serrées (« Revenus prudents » sur 47 px), et des
+  lettres trop rapprochées sous 32 px. Corrigé dans `app-kit.css` (pour les deux kits) : deux
+  pastilles par ligne au téléphone, `letter-spacing: -0.01em` pour les tuiles et les titres.
+
+L'essai de bout en bout vérifie désormais ces défauts aussi, avec trois pastilles.
+
 ## Non fait, et pourquoi
 
 - **MySQL et Redis** : ni sur le PC de Claw ni sur GitHub Pages ; les serveurs de départ gardent

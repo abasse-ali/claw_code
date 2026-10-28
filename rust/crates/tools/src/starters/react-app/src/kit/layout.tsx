@@ -5,6 +5,7 @@ import { MotionConfig } from "framer-motion";
 import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
 import {
   Children,
+  cloneElement,
   isValidElement,
   useEffect,
   useRef,
@@ -31,12 +32,12 @@ export function useScreen(): [string, (id: string) => void] {
   return [hash, (id: string) => { window.location.hash = id; }];
 }
 
-type ScreenProps = { id: string; title?: string; label?: string; children: ReactNode };
+type ScreenProps = { id: string; title?: string; label?: string; hidden?: boolean; children: ReactNode };
 
 /** Un écran de l'appli ; `title` s'affiche en haut (l'accueil n'en a souvent pas, `label` le nomme alors). */
-export function Screen({ id, title, label, children }: ScreenProps) {
+export function Screen({ id, title, label, hidden, children }: ScreenProps) {
   return (
-    <section className="app-screen" id={id} data-screen aria-label={title ? undefined : label ?? id} aria-labelledby={title ? `${id}-titre` : undefined}>
+    <section className="app-screen" id={id} data-screen hidden={hidden} aria-label={title ? undefined : label ?? id} aria-labelledby={title ? `${id}-titre` : undefined}>
       {title && <h2 className="app-screen__title" id={`${id}-titre`}>{title}</h2>}
       {children}
     </section>
@@ -105,7 +106,7 @@ export function AppShell({ bar, tabs, onAdd, addLabel = "Ajouter", children }: A
       return;
     }
     window.scrollTo({ top: 0 });
-    const title = document.querySelector<HTMLElement>(".app-screen h1, .app-screen h2");
+    const title = document.querySelector<HTMLElement>(".app-screen:not([hidden]) h1, .app-screen:not([hidden]) h2");
     if (title) {
       title.tabIndex = -1;
       title.focus({ preventScroll: true });
@@ -122,7 +123,9 @@ export function AppShell({ bar, tabs, onAdd, addLabel = "Ajouter", children }: A
     <MotionConfig reducedMotion="user">
       <div className="app">
         {bar}
-        <main key={shownId}>{shown}</main>
+        {/* Chaque écran reste dans la page, les autres cachés : un lien vers #bilan trouve
+            son écran, et chacun garde son état d'un onglet à l'autre. */}
+        <main>{screens.map((screen) => cloneElement(screen, { key: screen.props.id, hidden: screen !== shown }))}</main>
         <nav className="tabbar" aria-label="Écrans de l'appli">
           {tabs.slice(0, half).map(tab)}
           {onAdd && (

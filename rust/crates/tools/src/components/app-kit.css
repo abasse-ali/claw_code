@@ -146,7 +146,7 @@
 .app-screen { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 16px; padding: 4px var(--gutter) 24px; }
 .app-screen[hidden] { display: none; }
 .app-screen:not([hidden]) { animation: kit-in 0.25s ease-out; }
-.app-screen__title { margin: 4px 4px 0; font: 800 1.75rem/1.15 var(--font-display); letter-spacing: -0.02em; }
+.app-screen__title { margin: 4px 4px 0; font: 800 1.75rem/1.15 var(--font-display); letter-spacing: -0.01em; }
 .section-title { margin: 8px 4px -4px; color: var(--faint); font-size: 0.8125rem; font-weight: 600; letter-spacing: 0.02em; }
 
 /* Carte du solde : le chiffre qui compte, sur le dégradé de l'appli. */
@@ -165,7 +165,8 @@
 .hero__amount { margin: 4px 0 2px; font: 800 2.75rem/1.08 var(--font-display); letter-spacing: -0.03em; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .hero__sub { font-size: 0.875rem; opacity: 0.9; }
 .hero__sub b { font-weight: 700; }
-.hero__pills { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 10px; margin-top: 16px; }
+/* Deux par ligne au téléphone : une troisième passe dessous au lieu de serrer ses mots. */
+.hero__pills { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 8.5rem), 1fr)); gap: 10px; margin-top: 16px; }
 .hero__pill { min-width: 0; padding: 10px 12px; border-radius: 14px; background: rgb(255 255 255 / 0.15); }
 .hero__pill > span { display: block; font-size: 0.75rem; opacity: 0.85; }
 .hero__pill > b { display: block; font-size: 1.125rem; font-weight: 750; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -179,7 +180,7 @@
 .tile { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
 .tile__label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 0.8125rem; font-weight: 500; }
 .tile__label .icon { width: 16px; height: 16px; color: var(--accent); }
-.tile__value { margin-top: 2px; font: 750 1.375rem/1.2 var(--font-display); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile__value { margin-top: 2px; font: 750 1.375rem/1.2 var(--font-display); letter-spacing: -0.01em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tile__note { margin-top: 2px; color: var(--faint); font-size: 0.75rem; }
 
 /* Cartes : une surface calme, un titre, une liste ou des réglages. */
@@ -347,7 +348,7 @@ dialog.sheet[open], dialog.modal[open] { animation: kit-pop 0.22s ease-out; }
 .modal__body { padding: 20px; }
 .sheet__grip { width: 40px; height: 5px; margin: 0 auto; border-radius: 99px; background: color-mix(in srgb, var(--muted) 40%, transparent); }
 .sheet__head, .modal__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.sheet__title, .modal__title { font: 700 1.25rem/1.25 var(--font-display); letter-spacing: -0.02em; }
+.sheet__title, .modal__title { font: 700 1.25rem/1.25 var(--font-display); letter-spacing: -0.01em; }
 .modal__body > p { color: var(--muted); }
 .sheet__amount { display: flex; align-items: baseline; justify-content: center; gap: 6px; padding: 4px 0; }
 .sheet__amount input { flex: 1; width: 100%; min-width: 0; padding: 0; border: 0; background: none; color: var(--ink); font: 800 3rem/1.1 var(--font-display); letter-spacing: -0.03em; text-align: right; font-variant-numeric: tabular-nums; }

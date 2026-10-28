@@ -589,6 +589,11 @@ fn meaning(attributes: &[(String, String)], inner: &str) -> Vec<String> {
 /// href="#…">`, contrôlé là où il est défini). Un logo, une marque ou un
 /// drapeau ne le sont plus : ils se récupèrent (paquet officiel, fichier de la
 /// marque), jamais ne se dessinent (demande de l'utilisateur, 23 octobre 2026).
+/// Une icône rendue par un paquet de Lucide (`lucide-react`, `lucide`), qui
+/// la marque `class="lucide lucide-<nom>"`, vient du jeu même quand sa
+/// version du tracé est plus récente que celle de Claw. Vu le 28 octobre 2026
+/// (session #41, appli React) : `settings`, `receipt` et `shopping-cart` de
+/// lucide-react 1.63 dits « dessinés à la main ».
 fn exempt(attributes: &[(String, String)], inner: &str) -> bool {
     let names: String = ["class", "classname", "id", "aria-label", "role"]
         .iter()
@@ -597,7 +602,21 @@ fn exempt(attributes: &[(String, String)], inner: &str) -> bool {
         .join(" ")
         .to_ascii_lowercase();
     let lower = inner.to_ascii_lowercase();
-    ["ornament"].iter().any(|word| names.contains(word))
+    let classes: Vec<String> = attribute(attributes, "class")
+        .or_else(|| attribute(attributes, "classname"))
+        .map(|class| {
+            class
+                .split_whitespace()
+                .map(str::to_ascii_lowercase)
+                .collect()
+        })
+        .unwrap_or_default();
+    let lucide_package = classes.iter().any(|class| class == "lucide")
+        && classes
+            .iter()
+            .any(|class| class.len() > "lucide-".len() && class.starts_with("lucide-"));
+    lucide_package
+        || ["ornament"].iter().any(|word| names.contains(word))
         || ["<text", "<image", "<foreignobject"]
             .iter()
             .any(|tag| lower.contains(tag))
@@ -1010,5 +1029,22 @@ mod tests {
         assert_eq!(drawn_icons(logo).len(), 1);
         super::learn_fetched(&serde_json::json!({ "content": logo }).to_string());
         assert!(drawn_icons(logo).is_empty());
+    }
+
+    #[test]
+    fn an_icon_rendered_by_a_lucide_package_comes_from_the_set() {
+        // Session #41 (28 octobre 2026) : la roue des réglages de lucide-react
+        // 1.63, d'un tracé plus récent que celui de Claw, dite dessinée à la main.
+        let newer = "<path d=\"M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915\"></path><circle cx=\"12\" cy=\"12\" r=\"3\"></circle>";
+        let package = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" class=\"lucide lucide-settings icon\" aria-hidden=\"true\">{newer}</svg>");
+        assert!(
+            drawn_icons(&package).is_empty(),
+            "{:?}",
+            drawn_icons(&package)
+        );
+        // Le mot seul ne suffit pas : un dessin nommé « lucide » reste un dessin
+        // (un tracé à lui : la liste des tracés récupérés est commune aux tests).
+        let named = "<svg viewBox=\"0 0 24 24\" class=\"lucide\"><path d=\"M4 5 L20 5 L12 19 Z M9 9 L15 9\"/></svg>";
+        assert_eq!(drawn_icons(named).len(), 1);
     }
 }

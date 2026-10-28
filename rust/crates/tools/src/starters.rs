@@ -546,6 +546,11 @@ mod tests {
             .replace(
                 "persistentStore(\"budget\", { monthly: 0 })",
                 "persistentStore(\"budget\", { monthly: 900 })",
+            )
+            // Trois pastilles dans la carte du solde, comme dans la session #41.
+            .replace(
+                "{ label: \"Dépensé\", value: money(spending), note: \"ce mois-ci\" },",
+                "{ label: \"Dépensé\", value: money(spending), note: \"ce mois-ci\" },\n              { label: \"Revenus prudents\", value: money(income), note: \"incompressibles\" },",
             );
         assert_ne!(
             seeded, source,
@@ -627,6 +632,16 @@ mod tests {
                 "is shown nowhere",
                 "cut off by the edge of a box",
                 "Not reached",
+                // Session #41 (28 octobre 2026) : défauts que le kit React faisait
+                // signaler à tort (écrans absents de la page, icônes de lucide-react,
+                // trois pastilles serrées, lettres trop rapprochées).
+                "Links to sections that do not exist",
+                "broken links",
+                "drawn by hand",
+                "The main title",
+                "Words that run together",
+                "squeezed into a column",
+                "Text cut off",
             ] {
                 assert!(!text.contains(defect), "{defect}: {text}");
             }
