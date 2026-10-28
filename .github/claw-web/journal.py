@@ -215,7 +215,8 @@ class Journal:
             self.reply = self.reply_text = None
             self.folded, self.kept = [], []
         elif kind == "system" and event.get("subtype") == "notice":
-            self._push({"k": "notice", "t": " ".join(str(event.get("text", "")).split())})
+            self._push({"k": "notice", "t": " ".join(str(event.get("text", "")).split()),
+                        "at": int(time.time())})
         elif kind == "system" and event.get("subtype") == "answer_superseded":
             # Un contrôle de Claw renvoie le modèle au travail : sa réponse (avec celle qu'un
             # contrôle précédent avait fait garder) devient un brouillon, replié par l'appli.
@@ -261,6 +262,10 @@ class Journal:
                     continue
                 entry = self._waiting_for(part.get("tool_name"))
                 entry["r"] = self._result(entry["n"], part.get("content"))
+                # L'heure de la fin de l'action : entre elle et la requête suivante, le temps
+                # du modèle. Vu le 28 octobre 2026 (essai #39) : une étape de 19 min, sans rien
+                # pour dire si l'attente venait d'une capture ou du modèle.
+                entry["at"] = int(time.time())
                 if part.get("is_error"):
                     entry["e"] = True
                 self.dirty = True

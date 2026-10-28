@@ -127,6 +127,18 @@ class JournalRequestsTest(unittest.TestCase):
         # L'heure précède ce que dit la réponse : le reste du journal ne bouge pas.
         self.assertEqual([event["k"] for event in log.events], ["req", "think", "text", "tool", "req", "text"])
 
+    def test_each_result_and_notice_has_its_time(self):
+        log = Journal()
+        before = int(time.time())
+        log.add(tool("reply-1"))
+        log.add({"type": "system", "subtype": "notice", "text": "Claw vérifie la page"})
+        log.add(RESULT)
+        call, notice = log.events[1], log.events[2]
+        # Entre la fin d'une action et la requête suivante : le temps du modèle.
+        self.assertTrue(before <= call["at"] <= int(time.time()))
+        self.assertTrue(before <= notice["at"] <= int(time.time()))
+        self.assertEqual((call["k"], notice["k"]), ("tool", "notice"))
+
     def test_a_call_that_never_gets_a_result_does_not_shift_the_others(self):
         log = Journal()
         # Un appel annoncé sans résultat (vu le 25 octobre 2026) : la capture recevait le
