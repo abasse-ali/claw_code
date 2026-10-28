@@ -313,7 +313,9 @@ le temps de les écrire), des commentaires. Un commentaire s'ajoute sous le docu
 document. Téléchargement en Markdown ou en page HTML depuis l'appli ; Claw sait aussi en faire un
 PDF ou un document Word (`export`), rangé avec le document. Les documents sont sur la branche
 `claw-web-fichiers` du dépôt des sessions, dans `documents/<identifiant>/` (`doc.json`, un
-fichier `.md` par onglet, `exports/`).
+fichier `.md` par onglet, `exports/`). Sans document, la page le dit et propose « Demander à
+Claw » : une demande de rapport toute prête attend dans la saisie de l'accueil, à envoyer telle
+quelle ou à changer.
 
 ## Routines et suivis
 
@@ -322,6 +324,8 @@ issues », « relance les tests dans deux heures »), créer une session neuve �
 une pull request (nouveaux commentaires, revues, vérifications finies, fusion : écrits dans la
 session, qui repart) ou surveiller une adresse. Menu, « Routines » : la liste, l'interrupteur de
 chacune, « Lancer maintenant » et « Supprimer » (deux appuis), et les suivis, avec « Arrêter ».
+Sans routine, « Demander à Claw » met une demande d'exemple (un point chaque matin à 9 h) dans la
+saisie de l'accueil.
 
 Le programmateur est un workflow du dépôt des sessions qui passe toutes les heures (le plus
 petit intervalle, comme dans Claude Code) : une routine part à l'heure près. Il faut l'ajouter

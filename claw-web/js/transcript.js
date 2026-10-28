@@ -574,12 +574,12 @@ export function changesHtml(compare) {
   const open = files.length <= 4;
   return `
     <p class="help">${plural(compare.total_commits || 0, "commit")} · ${plural(files.length, "fichier")} · ${counts(added, removed)}</p>
-    ${files.map((file) => `
+    <div class="file-group">${files.map((file) => `
       <details class="file" data-key="file:${escapeHtml(file.filename)}"${open ? " open" : ""}>
         <summary><span class="file-status ${escapeHtml(file.status)}">${escapeHtml(label[file.status] || file.status)}</span>
           <span class="path">${escapeHtml(file.filename)}</span>
           <span class="side">${counts(file.additions, file.deletions)}</span></summary>
         ${file.patch ? unifiedDiffHtml(file.patch, languageOf(file.filename))
           : `<p class="help">Différence non fournie par GitHub (fichier binaire ou trop grand) : <a href="${escapeHtml(file.blob_url || "#")}" target="_blank" rel="noopener noreferrer">voir le fichier</a>.</p>`}
-      </details>`).join("")}`;
+      </details>`).join("")}</div>`;
 }

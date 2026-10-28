@@ -9,7 +9,7 @@ import { sealedBox } from "./sealed-box.js";
 import { LOG, changesHtml, decodeLog, photoLink, photoView, recentActions, transcriptHtml, withoutCallMarkup } from "./transcript.js";
 import { highlightLines, languageOf } from "./highlight.js";
 import { accountStatus, allFreeModels, freeModels, resetTime } from "./openrouter.js";
-import { extras } from "./tools.js";
+import { emptyState, extras } from "./tools.js";
 import {
   LOCK_AFTER_MS, MIN_CODE, SECRET_FIELDS, codeFromFace, createFaceKey, createVault, disableFace, enableFace,
   faceAvailable, faceEnabled, openVault, removeVault, seal, vault, waitLeft,
@@ -4209,7 +4209,7 @@ async function showFiles({ repo, ref, path, number }) {
         <li><a class="file-row" href="${link(entry.path)}">${entry.type === "dir" ? ICON.folder : ICON.file}
           <span class="name">${escapeHtml(entry.name)}</span>
           <small>${entry.type === "dir" ? "" : sizeLabel(entry.size || 0)}</small></a></li>`).join("")}</ul>`
-        : '<p class="empty">Dossier vide.</p>';
+        : emptyState({ icon: ICON.folder, title: "Dossier vide", text: "Aucun fichier ici sur cette branche.", compact: true });
     } else {
       body = await fileHtml(repo, item, ref);
     }
@@ -4390,16 +4390,20 @@ async function showChanges(number) {
       const compare = await state.github.compare(settings.repo, settings.base || "main", branch);
       content = compare.files && compare.files.length
         ? changesHtml(compare)
-        : `<p class="empty">Aucune différence entre <code>${escapeHtml(branch)}</code> et <code>${escapeHtml(settings.base || "main")}</code>.</p>`;
+        : emptyState({ icon: ICON.check, title: "Aucune différence",
+          text: `<code>${escapeHtml(branch)}</code> est identique à <code>${escapeHtml(settings.base || "main")}</code>.` });
     } catch (error) {
       if (!(error instanceof GitHubError) || error.status !== 404) throw error;
-      content = `<p class="empty">Pas encore de branche <code>${escapeHtml(branch)}</code> dans ${escapeHtml(settings.repo || "")} : Claw n'y a encore rien publié.</p>`;
+      content = emptyState({ icon: ICON.branch, title: "Rien de publié pour l'instant",
+        text: `Pas encore de branche <code>${escapeHtml(branch)}</code> dans ${escapeHtml(settings.repo || "")} : les changements de Claw arriveront ici.` });
     }
     if (!location.hash.startsWith(`#/session/${number}/modifications`)) return;
+    const base = escapeHtml(settings.base || "main");
     section.innerHTML = `
       ${sessionTop(number, "modifications", issue)}
-      <p class="help"><code>${escapeHtml(branch)}</code> comparée à <code>${escapeHtml(settings.base || "main")}</code> dans
-        <a href="https://github.com/${escapeHtml(settings.repo || "")}/compare/${escapeHtml(settings.base || "main")}...${escapeHtml(branch)}" target="_blank" rel="noopener noreferrer">${escapeHtml(settings.repo || "")}</a></p>
+      <p class="compare-head"><span class="ref">${ICON.branch}<span>${escapeHtml(branch)}</span></span>
+        <span class="compare-arrow" aria-label="vers">→</span><span class="ref">${base}</span>
+        <a class="compare-repo" href="https://github.com/${escapeHtml(settings.repo || "")}/compare/${base}...${escapeHtml(branch)}" target="_blank" rel="noopener noreferrer">${escapeHtml(settings.repo || "")}${ICON.external}</a></p>
       ${content}`;
   } catch (error) {
     failure(error);
@@ -5132,6 +5136,19 @@ const pages = extras({
   animateIn,
   twoTaps,
   sendToSession,
+  // Bouton « Demander à Claw » d'une page vide : la demande attend dans la saisie de l'accueil.
+  askClaw(text) {
+    state.drafts.set("home", text);
+    location.hash = "#/";
+    setTimeout(() => {
+      const textarea = document.querySelector("#composer textarea");
+      if (!textarea) return;
+      textarea.value = text;
+      textarea.dispatchEvent(new Event("input"));
+      textarea.focus();
+      textarea.setSelectionRange(text.length, text.length);
+    }, 120);
+  },
   github: () => state.github,
   settings: () => state.settings,
   engineRef: () => state.engineRef || "main",

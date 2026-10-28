@@ -1141,6 +1141,19 @@ a.file-row:active, button.file-row:active { background: var(--panel-3); }
 
 /* --- Modifications d'une session ---------------------------------------------------------- */
 .changes code { font-size: .85em; }
+/* La branche de Claw → la branche de départ, puis le dépôt : en pastilles, comme ailleurs. */
+.compare-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 2px 0 12px; font-size: .85rem; }
+.compare-head .ref { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 4px 11px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); font: .78rem var(--mono); color: var(--text); overflow-wrap: anywhere; }
+.compare-head .ref svg { width: 14px; height: 14px; color: var(--accent); }
+.compare-arrow { color: var(--muted); }
+.compare-repo { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; color: var(--accent); font-weight: 550; text-decoration: none; overflow-wrap: anywhere; }
+.compare-repo svg { width: 14px; height: 14px; }
+/* Les fichiers modifiés : une seule liste, un trait entre deux (pas une carte par fichier). */
+.file-group { margin: 10px 0; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: color-mix(in srgb, var(--panel) 80%, transparent); }
+.file-group > .file { margin: 0; border: 0; border-radius: 0; background: transparent; }
+.file-group > .file + .file { border-top: 1px solid var(--border); }
+.file-group > .file > summary { background: transparent; }
+.file-group > .file[open] > summary { background: var(--panel-2); }
 .file { margin: 10px 0; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; background: var(--panel); }
 .file > summary { display: flex; align-items: center; gap: 9px; padding: 10px 12px; background: var(--panel); font-size: .88rem; min-width: 0; transition: background-color .2s var(--ease); }
 .file > summary:hover { background: var(--panel-2); }
@@ -1226,10 +1239,12 @@ a.file-row:active, button.file-row:active { background: var(--panel-3); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* --- Zone de saisie : une carte de verre posée en bas ------------------------------------- */
+/* Le fond est plein sous les pastilles et la saisie, le fondu seulement au-dessus : le texte de la
+   page ne passe plus entre les pastilles (« Claw a été arrêté » lu derrière « Réflexion »). */
 .composer {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 4;
-  padding: 10px 12px calc(12px + env(safe-area-inset-bottom));
-  background: linear-gradient(to top, var(--bg) 55%, color-mix(in srgb, var(--bg) 0%, transparent));
+  padding: 24px 12px calc(12px + env(safe-area-inset-bottom));
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--bg) 0%, transparent), var(--bg) 22px);
   animation: composer-in .55s var(--ease) backwards;
 }
 @keyframes composer-in { from { opacity: 0; transform: translateY(24px); } }
@@ -1858,6 +1873,33 @@ label.choice { cursor: pointer; }
 .dock-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .dock-foot .choices-hint { margin: 0; color: var(--muted); font-size: .8rem; }
 
+/* --- État vide d'une page : la pastille, ce qui viendra là, et de quoi le demander --------- */
+.empty-state {
+  display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 30px 22px 26px; text-align: center;
+  border: 1px dashed var(--border-strong); border-radius: var(--radius);
+  background: radial-gradient(120% 90% at 50% 0%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 70%),
+    color-mix(in srgb, var(--panel) 60%, transparent);
+  animation: pop-in .45s var(--spring) backwards;
+}
+.empty-icon {
+  display: grid; place-items: center; width: 54px; height: 54px; border-radius: 18px;
+  background: var(--grad-soft); color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent), 0 14px 30px -18px var(--glow);
+  animation: float 6s ease-in-out infinite;
+}
+.empty-icon svg { width: 25px; height: 25px; }
+.empty-text { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.empty-text strong { font: 700 1.08rem/1.3 var(--font-display); letter-spacing: -.01em; }
+.empty-text p { margin: 0; max-width: 32ch; color: var(--muted); font-size: .9rem; line-height: 1.5; overflow-wrap: anywhere; }
+.empty-state .small-link { margin-top: 6px; min-height: 42px; padding-inline: 16px; }
+/* Une ligne : la pastille à gauche, sans bouton (suivis, dossier vide, filtre sans résultat). */
+.empty-state.compact { flex-direction: row; align-items: center; gap: 14px; padding: 14px 16px; text-align: left; }
+.empty-state.compact .empty-icon { width: 40px; height: 40px; border-radius: 13px; animation: none; flex: none; }
+.empty-state.compact .empty-icon svg { width: 19px; height: 19px; }
+.empty-state.compact .empty-text strong { font-size: .95rem; }
+.empty-state.compact .empty-text p { max-width: none; font-size: .84rem; }
+@media (prefers-reduced-motion: reduce) { .empty-icon { animation: none; } }
+
 /* --- Outils MCP, documents et routines (js/tools.js) -------------------------------------- */
 .tools-page .lead { color: var(--muted); margin: 6px 0 16px; line-height: 1.5; }
 .tools-body { display: flex; flex-direction: column; gap: 14px; }
@@ -1875,12 +1917,23 @@ label.choice { cursor: pointer; }
 .tools-group > summary small { margin-left: auto; padding: 1px 9px; border-radius: 999px; background: var(--grad-soft); color: var(--accent); font-weight: 650; font-size: .76rem; }
 .tools-group .about { margin: 0 0 12px; color: var(--muted); font-size: .9rem; line-height: 1.45; }
 .tools-group .file-list { background: transparent; }
-.tool-row { display: flex; flex-direction: column; gap: 3px; padding: 11px 13px; }
+/* Le libellé d'abord, le nom de l'outil dessous en petit (le groupe dit déjà son serveur). */
+.tool-row { display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; }
 .tool-row[hidden] { display: none; }
-.tool-name { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.tool-name code { font-size: .84rem; overflow-wrap: anywhere; }
+.tool-name { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.tool-name code { padding: 0; background: none; color: var(--muted); font-size: .76rem; overflow-wrap: anywhere; }
 .tool-badge { padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); font-size: .7rem; font-weight: 650; }
-.tool-title { font-size: .92rem; }
+.tool-title { font-size: .95rem; font-weight: 550; line-height: 1.35; }
+.tools-none[hidden] { display: none; }
+/* Documents : le titre sur sa ligne, la date et les commentaires dessous. */
+.doc-row { gap: 12px; padding: 13px 14px; }
+.doc-row .row-sub b { color: var(--accent); font-weight: 650; white-space: nowrap; }
+.doc-row .row-icon svg { color: inherit; }
+.doc-row > svg:last-child { width: 18px; height: 18px; color: var(--muted); transition: transform .25s var(--spring); }
+.doc-row:hover > svg:last-child { transform: translateX(3px); }
+.doc-list li:nth-child(4n + 2) .row-icon { --tile: var(--accent-2); }
+.doc-list li:nth-child(4n + 3) .row-icon { --tile: var(--accent-3); }
+.doc-list li:nth-child(4n + 4) .row-icon { --tile: var(--info); }
 .tool-note { color: var(--warn); font-size: .8rem; line-height: 1.35; }
 .doc-tabs { padding-bottom: 0; }
 .doc-tabs .chip { text-decoration: none; color: var(--text); background: var(--panel); -webkit-backdrop-filter: none; backdrop-filter: none; }

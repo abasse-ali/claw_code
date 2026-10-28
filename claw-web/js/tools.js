@@ -28,6 +28,16 @@ jobs:
 
 const dateTime = (iso) => (iso ? new Date(iso).toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short" }) : "");
 
+/** État vide d'une page : l'icône en pastille, ce qui viendra là, et un bouton qui met une
+ * demande toute prête dans la saisie de l'accueil (`ask`). `compact` : une ligne, sans bouton. */
+export function emptyState({ icon, title, text, ask = "", action = "", compact = false }) {
+  return `<div class="empty-state${compact ? " compact" : ""}">
+    <span class="empty-icon" aria-hidden="true">${icon}</span>
+    <div class="empty-text"><strong>${escapeHtml(title)}</strong><p>${text}</p></div>
+    ${ask && !compact ? `<button type="button" class="small-link primary-link" data-ask-claw="${escapeHtml(ask)}">${action}<span>Demander à Claw</span></button>` : ""}
+  </div>`;
+}
+
 /** Les pages, avec ce dont elles ont besoin de l'appli. */
 export function extras(app) {
   const { icon, toast, failure } = app;
@@ -44,7 +54,12 @@ export function extras(app) {
         ${lead ? `<p class="lead">${lead}</p>` : ""}
         <div class="tools-body">${body}</div>
       </section>`;
-    return view().querySelector(".tools-body");
+    const tools = view().querySelector(".tools-body");
+    tools.addEventListener("click", (event) => {
+      const ask = event.target.closest("[data-ask-claw]");
+      if (ask) app.askClaw(ask.dataset.askClaw);
+    });
+    return tools;
   }
 
   // --- Outils MCP ------------------------------------------------------------------------------
@@ -64,14 +79,15 @@ export function extras(app) {
           <p class="about">${escapeHtml(server.about)}</p>
           <ul class="file-list tools-list">${server.tools.map((tool) => `
             <li class="tool-row" data-search="${escapeHtml(`${server.server} ${tool.name} ${tool.title} ${tool.note || ""}`.toLowerCase())}">
-              <div class="tool-name"><code>${escapeHtml(server.server)} • ${escapeHtml(tool.name)}</code>
-                ${tool.read_only ? '<span class="tool-badge">lecture</span>' : ""}</div>
               <span class="tool-title">${escapeHtml(tool.title)}</span>
+              <div class="tool-name"><code>${escapeHtml(tool.name)}</code>
+                ${tool.read_only ? '<span class="tool-badge">lecture</span>' : ""}</div>
               ${tool.note ? `<small class="tool-note">${escapeHtml(tool.note)}</small>` : ""}
             </li>`).join("")}
           </ul>
         </details>`).join("")}
-      <p class="empty tools-none" hidden>Aucun outil ne correspond.</p>`;
+      <div class="tools-none" hidden>${emptyState({ icon: icon.tools, title: "Aucun outil ne correspond",
+        text: "Essayez un autre mot\u00a0: «\u00a0issue\u00a0», «\u00a0branche\u00a0», «\u00a0document\u00a0»…", compact: true })}</div>`;
     app.animateIn(body);
     const filter = body.querySelector(".tools-filter");
     filter.addEventListener("input", () => {
@@ -112,13 +128,19 @@ export function extras(app) {
     try {
       const docs = await documents();
       if (location.hash !== here) return;
-      body.innerHTML = docs.length ? `<ul class="file-list">${docs.map((doc) => {
+      body.innerHTML = docs.length ? `<ul class="file-list doc-list">${docs.map((doc) => {
         const open = (doc.comments || []).filter((comment) => !comment.parent && !comment.resolved).length;
-        return `<li><a class="file-row" href="#/document/${encodeURIComponent(doc.id)}">${icon.file}
-          <span class="name">${escapeHtml(doc.title || doc.id)}</span>
-          <small>${escapeHtml(dateTime(doc.updated_at))}${open ? ` · ${open} commentaire${open > 1 ? "s" : ""}` : ""}</small></a></li>`;
+        const tabs = (doc.tabs || []).length;
+        return `<li><a class="file-row doc-row" href="#/document/${encodeURIComponent(doc.id)}">
+          <span class="row-icon">${icon.file}</span>
+          <span class="row-main"><span class="row-title">${escapeHtml(doc.title || doc.id)}</span>
+            <span class="row-sub">${escapeHtml(dateTime(doc.updated_at))}${tabs > 1 ? ` · ${tabs} onglets` : ""}${open ? ` · <b>${open} commentaire${open > 1 ? "s" : ""}</b>` : ""}</span></span>
+          ${icon.chevron}</a></li>`;
       }).join("")}</ul>`
-        : '<p class="empty">Aucun document pour l\'instant. Demandez-en un à Claw (« fais-moi un rapport… »).</p>';
+        : emptyState({ icon: icon.file, title: "Aucun document pour l'instant",
+          text: "Les rapports, plans et notes que Claw écrit pour vous arrivent ici, avec leurs onglets et vos commentaires.",
+          ask: "Fais-moi un rapport sur l'état du projet : ce qui marche, ce qui reste à faire, et la suite que tu proposes.",
+          action: icon.spark });
       app.animateIn(body.querySelector(".file-list"));
     } catch (error) {
       body.innerHTML = '<p class="empty">Documents indisponibles.</p>';
@@ -303,7 +325,9 @@ export function extras(app) {
               <button type="button" class="small-link stop" data-delete>${icon.trash}<span>Supprimer</span></button>
             </div>
           </li>`).join("")}</ul>`
-          : '<p class="empty">Aucune routine. Demandez-en une à Claw (« chaque matin à 9 h, fais le point sur les issues »).</p>'}
+          : emptyState({ icon: icon.clock, title: "Aucune routine",
+            text: "Un message que Claw envoie tout seul à l'heure dite : un point chaque matin, une vérification chaque semaine.",
+            ask: "Chaque matin à 9 h, fais le point sur les issues ouvertes et dis-moi ce qui bloque.", action: icon.spark })}
         <h2 class="doc-subtitle">Suivis</h2>
         ${pulls.length || urls.length ? `<ul class="file-list">${pulls.map((pull) => `
           <li class="file-row" data-pull="${escapeHtml(pull.id)}">${icon.branch}
@@ -314,7 +338,8 @@ export function extras(app) {
           <li class="file-row" data-watch="${escapeHtml(watch.id)}">${icon.file}
             <span class="name">${escapeHtml(watch.url)} → <a href="#/session/${encodeURIComponent(watch.session)}">session ${escapeHtml(watch.session)}</a></span>
             <button type="button" class="small-link stop" data-unfollow>Arrêter</button></li>`).join("")}</ul>`
-          : '<p class="empty">Aucune pull request suivie, aucune adresse surveillée.</p>'}`;
+          : emptyState({ icon: icon.pull, title: "Rien de suivi",
+            text: "Claw peut suivre une pull request (revues, tests) ou surveiller une adresse, et vous prévenir.", compact: true })}`;
       app.animateIn(body.querySelector(".routine-list"));
       const save = (message, update) => app.github().updateJson(engine(), ROUTINES, FILES_BRANCH, message, update,
         () => ({ version: 1, routines: [] }));
