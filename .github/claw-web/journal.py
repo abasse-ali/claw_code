@@ -244,7 +244,10 @@ class Journal:
             for part in message.get("content") or []:
                 what = part.get("type")
                 if what == "thinking" and str(part.get("thinking", "")).strip():
-                    self._push({"k": "think", "t": excerpt(part["thinking"].strip(), 600)})
+                    # Sa longueur entière (`c`, en caractères) : une étape de 19 min sans
+                    # erreur dans l'essai #39 était peut-être une réflexion sans fin.
+                    thought = part["thinking"].strip()
+                    self._push({"k": "think", "t": excerpt(thought, 600), "c": len(thought)})
                 elif what == "text" and str(part.get("text", "")).strip():
                     self._push({"k": "text", "t": excerpt(part["text"].strip(), 8000)})
                     self.reply_text = len(self.events) - 1

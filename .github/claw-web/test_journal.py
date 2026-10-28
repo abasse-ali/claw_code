@@ -124,6 +124,8 @@ class JournalRequestsTest(unittest.TestCase):
         requests = [event for event in log.events if event["k"] == "req"]
         self.assertEqual(len(requests), 2)
         self.assertTrue(all(before <= event["at"] <= int(time.time()) for event in requests))
+        # La réflexion garde sa longueur entière, son texte est coupé.
+        self.assertEqual(log.events[1]["c"], len("Read the plan first."))
         # L'heure précède ce que dit la réponse : le reste du journal ne bouge pas.
         self.assertEqual([event["k"] for event in log.events], ["req", "think", "text", "tool", "req", "text"])
 
