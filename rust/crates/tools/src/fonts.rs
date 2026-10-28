@@ -759,6 +759,12 @@ fn unknown(name: &str) -> String {
     }
 }
 
+/// Les familles de la bibliothèque, pour le modèle de conception.
+#[must_use]
+pub fn families() -> Vec<&'static str> {
+    FONTS.iter().map(|font| font.name).collect()
+}
+
 /// Ce que l'outil `Font` rend au modèle.
 pub(crate) fn fonts(input: &FontInput) -> Result<Value, String> {
     let query = input.search.as_deref().map(str::trim).unwrap_or_default();

@@ -9,6 +9,13 @@
   }
   const W = document.documentElement.clientWidth || window.innerWidth;
   const mobile = W < 900;
+  // Une appli (barre d'onglets du kit, ou toute nav fixée en bas avec ses
+  // écrans) : son titre est celui de sa barre, petit comme sur un téléphone,
+  // la police du téléphone y est le bon choix, et le chiffre principal fait
+  // le point focal. Les règles de vitrine (titre géant, police à soi) ne s'y
+  // appliquent pas. Vu le 28 octobre 2026 : ces remarques poussaient une
+  // appli de budget vers un titre d'affiche et une police à empattements.
+  const appShell = Boolean(document.querySelector("[data-app-tabs], .tabbar, .app-tabs")) && document.querySelectorAll("[data-screen]").length >= 2;
   const problems = [];
   // Éléments en cause : Claw demande au navigateur les règles CSS qui les
   // dessinent (fichier et ligne), pour que le modèle aille droit à la règle
@@ -38,7 +45,20 @@
     }
     return style;
   };
+  // Une fenêtre ouverte par-dessus la page (volet, boîte de dialogue) : son
+  // contenu se mesure comme la page ; la page derrière, couverte, ne compte
+  // plus. Vu le 28 octobre 2026 (session #39) : les choix « Dépense fixe »,
+  // « Revenu garanti » du volet d'ajout, coupés sur deux lignes, jamais mesurés.
+  const modal = [...document.querySelectorAll("dialog[open], [aria-modal=true]")].find((el) => {
+    try {
+      if (el.tagName === "DIALOG" && !el.matches(":modal")) return false;
+    } catch (error) { /* :modal inconnu : la fenêtre compte */ }
+    const style = css(el);
+    const rect = el.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+  });
   const shown = (el) => {
+    if (modal && !modal.contains(el)) return false;
     const style = css(el);
     if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
     for (let node = el; node && node !== document.documentElement; node = node.parentElement) {
@@ -46,6 +66,8 @@
     }
     const box = el.getBoundingClientRect();
     if (box.width <= 0 || box.height <= 0) return false;
+    // Le contenu d'un <details> fermé n'est pas dessiné, même avec une boîte.
+    if (el.closest("details:not([open]) > :not(summary)")) return false;
     // Texte réservé aux lecteurs d'écran (.sr-only, .visually-hidden) : caché
     // exprès, ni coupé ni illisible.
     const clipped = (style.clip && style.clip !== "auto") || /inset\(\s*50%/.test(style.clipPath || "");
@@ -71,15 +93,31 @@
   const box = new Map(visible.map((el) => [el, el.getBoundingClientRect()]));
   const pinned = (el) => {
     for (let node = el; node && node !== document.body; node = node.parentElement) {
+      if (node === modal) return false;
       const position = css(node).position;
       if (position === "fixed" || position === "sticky") return true;
     }
-    return false;
+    return Boolean(modal);
   };
   // Ancêtre qui défile ou coupe dans sa propre largeur : ce qui le dépasse y reste.
   const scroller = (el) => {
     for (let node = el.parentElement; node && node !== document.body && node !== document.documentElement; node = node.parentElement) {
       if (["auto", "scroll", "hidden", "clip"].includes(css(node).overflowX)) return node;
+    }
+    return null;
+  };
+  // Un vrai rang qui défile ou qui coupe (carrousel, puces), plus étroit que
+  // l'écran : un cadre de toute la page en overflow-x: hidden (contre le
+  // défilement de côté) n'en est pas un. Vu le 28 octobre 2026 (session #36) :
+  // l'écran entier ainsi cadré cachait les dates collées au bord et les champs
+  // sortis de leur carte.
+  // Un rang de puces qui défile vraiment de côté, d'un bord à l'autre de
+  // l'écran, en est un aussi (ses puces passent sous le bord exprès).
+  const sideScroller = (el) => {
+    for (let node = el.parentElement; node && node !== document.body && node !== document.documentElement; node = node.parentElement) {
+      const overflow = css(node).overflowX;
+      if (["auto", "scroll", "hidden", "clip"].includes(overflow) && node.getBoundingClientRect().width < W - 2) return node;
+      if (["auto", "scroll"].includes(overflow) && node.scrollWidth > node.clientWidth + 1) return node;
     }
     return null;
   };
@@ -216,7 +254,8 @@
   }
 
   // 3. Éléments les uns sur les autres (hors barres fixes, sous lesquelles le contenu défile exprès).
-  const candidates = visible.filter((el) => (interactive(el) || el.matches("input, textarea, img, h1, h2, h3, h4, h5, h6") || ownText(el)) && !pinned(el)).slice(0, 400);
+  // Les étiquettes d'un graphique (texte SVG) ont leur propre mesure, plus bas.
+  const candidates = visible.filter((el) => (interactive(el) || el.matches("input, textarea, img, h1, h2, h3, h4, h5, h6") || ownText(el)) && !pinned(el) && !el.closest("svg")).slice(0, 400);
   // La partie visible d'un élément : un parent qui découpe (overflow) rogne
   // une image agrandie ou décalée dans son cadre (parallaxe, zoom au survol).
   const seen = new Map();
@@ -287,7 +326,7 @@
     // serré, que l'utilisateur lisait « FCVoisins ».
     const h1 = document.querySelector("h1");
     const bodySize = parseFloat(css(document.body).fontSize) || 16;
-    if (h1 && shown(h1) && parseFloat(css(h1).fontSize) <= bodySize * 1.15) {
+    if (h1 && shown(h1) && !appShell && parseFloat(css(h1).fontSize) <= bodySize * 1.15) {
       blame([h1]);
       problems.push(`The main title ${name(h1)} is ${css(h1).fontSize} on this phone, no bigger than the body text (${bodySize}px): nobody sees what the page is about. Give it at least 1.6 times the body size on phones (font-size: clamp(1.6rem, 6vw, 3rem))`);
     }
@@ -320,11 +359,39 @@
   }
 
   // 7. Texte trop pâle sur son fond (fond uni seulement : une image de fond n'est pas jugée).
-  const parse = (color) => {
-    const found = /rgba?\(([^)]+)\)/.exec(color || "");
+  // Toute couleur CSS en rouge, vert, bleu et opacité : rgb() se lit tout de
+  // suite, les autres (color-mix(), oklch(), lab()...) le navigateur les peint
+  // sur un pixel et les relit. Vu le 28 octobre 2026 : seules les couleurs
+  // rgb() étaient lues, et le contraste des textes en color-mix() (gris doux,
+  // accent foncé) ou en oklch() n'était jamais mesuré.
+  const painter = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+  const painted = new Map();
+  const rgbOf = (text) => {
+    const found = /rgba?\(([^)]+)\)/.exec(text || "");
     if (!found) return null;
     const parts = found[1].split(/[\s,/]+/).filter(Boolean).map(Number);
     return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
+  };
+  const parse = (color) => {
+    const text = String(color || "").trim();
+    if (!text) return null;
+    if (/^rgba?\([^)]*\)$/.test(text)) return rgbOf(text);
+    if (painted.has(text)) return painted.get(text);
+    let value = null;
+    if (painter) {
+      painter.fillStyle = "#010203";
+      painter.fillStyle = text;
+      if (painter.fillStyle !== "#010203") {
+        painter.clearRect(0, 0, 1, 1);
+        painter.fillRect(0, 0, 1, 1);
+        const [r, g, b, a] = painter.getImageData(0, 0, 1, 1).data;
+        value = { r, g, b, a: a / 255 };
+      }
+    }
+    // Une valeur composée (une ombre, un dégradé) : sa première couleur rgb().
+    if (!value) value = rgbOf(text);
+    painted.set(text, value);
+    return value;
   };
   const blend = (top, under) => ({
     r: top.r * top.a + under.r * (1 - top.a),
@@ -923,22 +990,227 @@
     }
   }
 
+  // L'étendue réelle des lettres d'un élément, rognée par ce qui les coupe (un
+  // nom terminé par « … » ne va pas jusqu'au bout de son texte entier).
+  const lettersOf = (el) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const r = range.getBoundingClientRect();
+    let { left, top, right, bottom } = r;
+    for (let node = el; node && node !== document.body; node = node.parentElement) {
+      if (css(node).overflowX === "visible") continue;
+      const frame = node.getBoundingClientRect();
+      left = Math.max(left, frame.left);
+      right = Math.min(right, frame.right);
+    }
+    return { left, top, right, bottom, width: right - left, height: bottom - top };
+  };
+
   // 16. Texte collé au bord de l'écran (téléphone) : l'étendue réelle des
   // lettres, pas la boîte du paragraphe (un texte centré n'y touche pas).
   if (mobile) {
     const edge = 8;
-    const touching = visible.filter((el) => ownText(el) && !pinned(el) && !scroller(el)
-      && el.matches("p, h1, h2, h3, h4, li, blockquote, figcaption, label, dt, dd, span, a"))
+    const touching = visible.filter((el) => ownText(el) && !pinned(el) && !sideScroller(el)
+      && el.matches("p, h1, h2, h3, h4, li, blockquote, figcaption, label, dt, dd, span, a, time, small, strong, b, em, td, th, div"))
       .filter((el) => {
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        const text = range.getBoundingClientRect();
+        const text = lettersOf(el);
         return text.width > 0 && text.bottom > 0 && (text.left < edge || text.right > W - edge);
       });
     const outer = touching.filter((el) => !touching.some((other) => other !== el && other.contains(el)));
     if (outer.length) {
       blame([outer[0], outer[0].parentElement]);
       problems.push(`Text touches the edge of the ${W}px-wide phone screen, with no side margin: ${list(outer.map(name))}. Give the page's containers a side padding (at least 16px on phones)`);
+    }
+  }
+
+  // 16b. Textes qui se touchent sur une même ligne : un libellé collé à son
+  // montant (« Alimentaire-100,00 € »), deux blocs voisins sans espace entre
+  // leurs lettres. L'étendue réelle des lettres, rognée par ce qui les coupe
+  // (un nom terminé par « … »). Vu le 28 octobre 2026 (session #36) : les
+  // lignes des opérations de l'appli de budget.
+  const flowing = (el) => css(el).display.startsWith("inline");
+  const texts = visible.filter((el) => ownText(el) && !pinned(el) && !el.closest("svg, select, option"))
+    .slice(0, 500).map((el) => ({ el, r: lettersOf(el) })).filter(({ r }) => r.width > 1 && r.height > 1)
+    .sort((x, y) => x.r.top - y.r.top);
+  const touchingTexts = [];
+  for (let i = 0; i < texts.length && touchingTexts.length < 6; i += 1) {
+    const a = texts[i];
+    for (let j = i + 1; j < texts.length; j += 1) {
+      const b = texts[j];
+      if (b.r.top >= a.r.bottom) break;
+      if (a.el.contains(b.el) || b.el.contains(a.el)) continue;
+      const shared = Math.min(a.r.bottom, b.r.bottom) - Math.max(a.r.top, b.r.top);
+      if (shared < Math.min(a.r.height, b.r.height) * 0.5) continue;
+      const gap = Math.max(a.r.left, b.r.left) - Math.min(a.r.right, b.r.right);
+      // Du texte qui coule dans un paragraphe : ses espaces le séparent déjà ;
+      // deux textes l'un sur l'autre : « drawn on top of each other » le dit.
+      if (gap >= 2 || (flowing(a.el) && flowing(b.el)) || gap < -Math.min(a.r.width, b.r.width) * 0.5) continue;
+      const [first, second] = a.r.left <= b.r.left ? [a.el, b.el] : [b.el, a.el];
+      touchingTexts.push({ first, second });
+      break;
+    }
+  }
+  if (touchingTexts.length) {
+    blame([touchingTexts[0].first, touchingTexts[0].second]);
+    problems.push(`Texts that touch or run into each other on the same line: ${list(touchingTexts.map(({ first, second }) => `"${words(first).slice(0, 30)}" and "${words(second).slice(0, 30)}" (${name(first)}, ${name(second)})`), 3)}. Keep a gap between them (gap: 8px or more on their row) and let the label shrink with an ellipsis (min-width: 0; overflow: hidden; text-overflow: ellipsis) instead of running into the next text`);
+  }
+
+  // 16c. Étiquettes d'un graphique tracées les unes sur les autres : les noms
+  // des douze mois sur un axe trop étroit. Vu le 28 octobre 2026 (session
+  // #36) : « novdécjanvfévmarsavr » sous le graphique du bilan.
+  const crowded = [];
+  for (const svg of document.querySelectorAll("svg")) {
+    if (crowded.length >= 3 || !shown(svg)) continue;
+    const labels = [...svg.querySelectorAll("text")].map((text) => ({ text, r: text.getBoundingClientRect() }))
+      .filter(({ r }) => r.width > 0 && r.height > 0);
+    let pairs = 0;
+    let example = "";
+    for (let i = 0; i < labels.length; i += 1) {
+      for (let j = i + 1; j < labels.length; j += 1) {
+        const a = labels[i].r;
+        const b = labels[j].r;
+        const across = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+        const down = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+        if (across <= 1 || down <= 2) continue;
+        pairs += 1;
+        if (!example) example = `"${labels[i].text.textContent.trim()}" and "${labels[j].text.textContent.trim()}"`;
+      }
+    }
+    if (pairs) crowded.push({ svg, line: `${name(svg)}: ${example}${pairs > 1 ? ` and ${pairs - 1} more pair${pairs > 2 ? "s" : ""}` : ""}` });
+  }
+  if (crowded.length) {
+    blame(crowded.map(({ svg }) => svg));
+    problems.push(`Labels of a chart drawn over each other: ${list(crowded.map(({ line }) => line), 3)}. When the labels do not fit, show one in two or three, or shorter ones (« j », « f », « m »), never all of them on top of each other`);
+  }
+
+  // 16d. Élément qui dépasse sur le côté de la carte où il est posé (un champ
+  // plus large que sa carte). Vu le 28 octobre 2026 (session #36) : les
+  // montants de l'écran Réglages, 299px de large, sortaient de leur carte.
+  const surfaced = (el) => {
+    const style = css(el);
+    const paint = parse(style.backgroundColor);
+    return Boolean(paint && paint.a > 0.02) || parseFloat(style.borderLeftWidth) > 0
+      || parseFloat(style.borderRightWidth) > 0 || style.boxShadow !== "none";
+  };
+  const sticking = [];
+  for (const el of visible) {
+    if (sticking.length >= 6) break;
+    const rect = box.get(el);
+    if (!rect || rect.width < 8 || rect.height < 8 || el.closest("svg") || pinned(el) || sideScroller(el)
+      || ["absolute", "fixed"].includes(css(el).position)) continue;
+    let frame = null;
+    for (let node = el.parentElement; node && node !== document.body; node = node.parentElement) {
+      if (surfaced(node)) { frame = node; break; }
+    }
+    if (!frame) continue;
+    const edges = frame.getBoundingClientRect();
+    // Le fond de toute la page (une colonne pleine largeur) n'est pas une carte.
+    if (edges.width >= W - 2) continue;
+    const beyond = Math.max(rect.right - edges.right, edges.left - rect.left);
+    if (beyond <= 2 || sticking.some((item) => item.el.contains(el))) continue;
+    sticking.push({ el, frame, beyond });
+  }
+  if (sticking.length) {
+    blame([sticking[0].el, sticking[0].frame]);
+    problems.push(`Elements sticking out of the box they sit in: ${list(sticking.map(({ el, frame, beyond }) => `${name(el)} passes ${Math.round(beyond)}px beyond the side of ${name(frame)}`), 3)}. Size them to their box (width: 100%; min-width: 0; box-sizing: border-box) rather than with a fixed width`);
+  }
+
+  // 16e. Libellé court d'un bouton ou d'un lien coupé sur deux lignes
+  // (« Voir / tout ») : la place lui manque. Vu le 28 octobre 2026 (session
+  // #36) : « Voir tout » sur deux lignes, à côté d'un titre lui aussi coupé.
+  const wrapsLine = (el) => {
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (!node.textContent.trim()) continue;
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const tops = new Set([...range.getClientRects()].filter((rect) => rect.width > 1).map((rect) => Math.round(rect.top)));
+      if (tops.size > 1) return true;
+    }
+    return false;
+  };
+  // Les choix d'un groupe (« Dépense fixe » dans un sélecteur à trois cases)
+  // comptent comme des boutons.
+  const brokenLabels = visible.filter((el) => el.matches("a, button, [role=button], [role=tab], label:has(> input[type=radio], > input[type=checkbox])") && !pinned(el))
+    .filter((el) => {
+      const text = (el.innerText || "").trim();
+      const count = text.split(/\s+/).filter(Boolean).length;
+      return count >= 2 && count <= 3 && text.length <= 24 && wrapsLine(el);
+    });
+  if (brokenLabels.length) {
+    blame(brokenLabels);
+    problems.push(`Short labels broken over two lines: ${list(brokenLabels.map(name), 4)}. Keep a label of a few words on one line (white-space: nowrap) and give it the room it needs (flex: none beside a title that can shrink)`);
+  }
+
+  // 16f. Nombres écrits de deux façons sur une page en français : « 1235.15 »
+  // à côté de « 1 235,15 € ». Vu le 28 octobre 2026 (session #36) : les
+  // montants des réglages avec un point, ceux de l'accueil avec une virgule.
+  if (/^fr\b/i.test(document.documentElement.lang || "")) {
+    const dotted = [];
+    let commaUsed = false;
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const parent = node.parentElement;
+      if (!parent || parent.closest("script, style, code, pre, kbd, samp, svg") || !shown(parent)) continue;
+      if (/\d,\d{1,2}(?!\d)/.test(node.textContent)) commaUsed = true;
+      const found = node.textContent.match(/(?<![\w.,])\d{1,7}\.\d{1,2}(?![\w.])/);
+      if (found && dotted.length < 4) dotted.push({ el: parent, value: found[0] });
+    }
+    for (const field of document.querySelectorAll("input:not([type]), input[type=text], input[inputmode=decimal]")) {
+      if (dotted.length < 4 && shown(field) && /^\s*\d{1,7}\.\d{1,2}\s*$/.test(field.value)) dotted.push({ el: field, value: field.value.trim() });
+    }
+    if (dotted.length && commaUsed) {
+      blame(dotted.map(({ el }) => el));
+      problems.push(`Numbers written two ways on this French page: ${list(dotted.map(({ el, value }) => `"${value}" in ${name(el)}`), 3)}, while others use a decimal comma (1 235,15). Write every amount the French way: Intl.NumberFormat("fr-FR") for the text, a comma in the fields' values`);
+    }
+  }
+
+  // 16g. Montants mal écrits : l'unité deux fois (« 206 € € »), ou un seul
+  // chiffre après la virgule (« 589,6 € »). Vu le 28 octobre 2026 (session
+  // #39) : les fourchettes « +103 € à 206 € € », les charges à « 21,6 € ».
+  const doubledUnit = [];
+  const oneDecimal = [];
+  {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const parent = node.parentElement;
+      if (!parent || parent.closest("script, style, code, pre, kbd, samp, svg") || !shown(parent)) continue;
+      const text = (parent.innerText || node.textContent).replace(/\s+/g, " ");
+      const doubled = text.match(/\d[\d\s,.]*\s?([€$£])\s?\1(?![\w])/);
+      if (doubled && doubledUnit.length < 4 && !doubledUnit.some((item) => item.el.contains(parent) || parent.contains(item.el))) doubledUnit.push({ el: parent, value: doubled[0].trim() });
+      const single = node.textContent.match(/(?<![\d,.])\d{1,3}(?:[\s  ]\d{3})*[,.]\d(?!\d)\s?[€$£]|[€$£]\s?\d{1,3}(?:,\d{3})*\.\d(?!\d)/);
+      if (single && oneDecimal.length < 4) oneDecimal.push({ el: parent, value: single[0].trim() });
+    }
+  }
+  if (doubledUnit.length) {
+    blame(doubledUnit.map(({ el }) => el));
+    problems.push(`Amounts with their currency written twice: ${list(doubledUnit.map(({ el, value }) => `"${value}" in ${name(el)}`), 3)}. The formatted amount already carries its unit: do not add another one after it (a range reads "103 à 206 €")`);
+  }
+  if (oneDecimal.length) {
+    blame(oneDecimal.map(({ el }) => el));
+    problems.push(`Amounts with a single digit after the decimal mark: ${list(oneDecimal.map(({ el, value }) => `"${value}" in ${name(el)}`), 3)}. Write cents with two digits (21,60 €) or none for a whole amount (450 €): format every amount with Intl.NumberFormat, not by hand`);
+  }
+
+  // 16h. Bouton d'ajout de la barre d'onglets décentré : deux onglets d'un
+  // côté, un de l'autre. Vu le 28 octobre 2026 (session #39) : un onglet
+  // retiré, le bouton « + » restait entre le deuxième et le troisième.
+  // Les onglets eux-mêmes, de part et d'autre du bouton : une cale vide ou
+  // des onglets rangés dans deux blocs (vus dans le second passage de #39)
+  // ne le centrent pas.
+  const middle = (el) => {
+    const rect = el.getBoundingClientRect();
+    return rect.left + rect.width / 2;
+  };
+  for (const bar of document.querySelectorAll(".tabbar, [data-app-tabs]")) {
+    const add = bar.querySelector(".tabbar__add");
+    if (!add || !shown(bar) || !shown(add)) continue;
+    const tabs = [...bar.querySelectorAll("a, button, [role=tab]")].filter((el) => el !== add && shown(el) && !add.contains(el) && !el.parentElement.closest("a, button"));
+    const before = tabs.filter((el) => middle(el) < middle(add)).length;
+    const after = tabs.length - before;
+    if (Math.abs(before - after) === 1) {
+      blame([add]);
+      problems.push(`The add button of the tab bar sits off-centre, ${before} tab${before > 1 ? "s" : ""} on its left and ${after} on its right: ${name(add)}. Keep as many tabs on each side of it (two and two), or move it out of the bar`);
+      break;
     }
   }
 
@@ -1229,8 +1501,8 @@
     const families = new Set([document.body, ...document.querySelectorAll("h1, h2, h3")].filter(Boolean)
       .map((el) => css(el).fontFamily.split(",")[0].replace(/["']/g, "").trim()));
     const generic = [...families].filter((family) => common.includes(family.toLowerCase()));
-    if (generic.length) blameNote([document.body, document.querySelector("h1, h2")]);
-    if (generic.length) notes.push(`Typefaces ${generic.join(" and ")} are among the most frequent defaults of generated pages: a typeface chosen for this subject would give the page its own voice`);
+    if (generic.length && !appShell) blameNote([document.body, document.querySelector("h1, h2")]);
+    if (generic.length && !appShell) notes.push(`Typefaces ${generic.join(" and ")} are among the most frequent defaults of generated pages: a typeface chosen for this subject would give the page its own voice`);
     // 38em, soit environ 75 caractères : la mesure confortable d'un studio.
     const wide = visible.filter((el) => el.matches("p, li") && ownText(el) && words(el).length > 140
       && box.get(el).width / parseFloat(css(el).fontSize) > 38);
@@ -1250,7 +1522,7 @@
     // Un titre à peine plus grand que le texte : la hiérarchie ne se voit pas.
     const h1 = document.querySelector("h1");
     const bodySize = parseFloat(css(document.body).fontSize) || 16;
-    if (h1 && shown(h1) && parseFloat(css(h1).fontSize) / bodySize < 2.2) {
+    if (h1 && shown(h1) && !appShell && parseFloat(css(h1).fontSize) / bodySize < 2.2) {
       blameNote([h1]);
       notes.push(`The h1 is only ${(parseFloat(css(h1).fontSize) / bodySize).toFixed(1)} times the body text (${css(h1).fontSize}): a first screen needs a clear focal point, at least 2.5 times the body size on desktops`);
     }
@@ -1406,9 +1678,9 @@
     // Accent omniprésent : la couleur la plus saturée couvre plus de 15 % de
     // la page, elle n'accentue plus rien.
     const sat = (color) => {
-      const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
-      if (!match || (match[4] !== undefined && parseFloat(match[4]) < 0.5)) return null;
-      const [r, g, b] = [match[1], match[2], match[3]].map(Number);
+      const found = parse(color);
+      if (!found || found.a < 0.5) return null;
+      const { r, g, b } = found;
       const max = Math.max(r, g, b);
       const min = Math.min(r, g, b);
       return max === 0 ? 0 : (max - min) / max;

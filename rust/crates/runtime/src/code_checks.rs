@@ -2,10 +2,12 @@
 //! la syntaxe des langages que le contrôle de base ne lisait pas (`PowerShell`,
 //! `TypeScript`, CSS, TOML), puis les pièges qui font un code faux sans erreur
 //! de syntaxe (un nom jamais défini en Python, `>` pris pour une comparaison
-//! en `PowerShell`, une variable lue avec `%` dans un bloc d'un `.bat`…).
+//! en `PowerShell`, une variable lue avec `%` dans un bloc d'un `.bat`, une
+//! même règle CSS redite dans dix règles de plus en plus longues…).
 //! Chaque constat dit sa ligne et la correction : un petit modèle corrige ce
 //! qu'on lui montre, rarement ce qu'il ne voit pas.
 
+use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -311,6 +313,9 @@ pub fn pitfalls(path: &Path) -> Vec<String> {
                     .collect()
             })
             .unwrap_or_default(),
+        "css" => read(path)
+            .map(|text| css_pitfalls(&text))
+            .unwrap_or_default(),
         "html" | "htm" | "js" | "mjs" | "jsx" | "ts" | "tsx" | "vue" | "svelte" | "json" => read(path)
             .map(|text| {
                 let mut found = injected_test_data(&text);
@@ -452,6 +457,307 @@ pub fn pitfalls_feedback(path: &str, findings: &[String]) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     )
+}
+
+/// Règles rapiécées dites au plus par feuille : les plus redites d'abord.
+const MAX_PATCHED_RULES: usize = 3;
+/// `!important` au-delà desquels une feuille se bat contre elle-même.
+const MAX_IMPORTANT: usize = 20;
+
+/// Par endroit (`@media`…) et sélecteur : chaque propriété et le nombre de
+/// règles qui la posent.
+type CssRules = BTreeMap<(String, String), BTreeMap<String, usize>>;
+
+/// Par endroit et sélecteur retenu : les propriétés redites, le nombre de
+/// règles, et si des sélecteurs plus longs du même élément en font partie.
+type CssPiles = BTreeMap<(String, String), Vec<(String, usize, bool)>>;
+
+/// Un bloc ouvert d'une feuille de style : une règle `@` (`@media`…) ou une
+/// règle de style, avec les propriétés déjà comptées dans ce bloc.
+enum CssBlock {
+    At(String),
+    Style {
+        selectors: Vec<String>,
+        counted: Vec<String>,
+    },
+}
+
+/// Les règles `@` qui entourent l'endroit lu (« @media (prefers-color-scheme:
+/// dark) ») : une même règle redite en clair et en sombre n'est pas rapiécée.
+fn css_context(stack: &[CssBlock]) -> String {
+    stack
+        .iter()
+        .filter_map(|block| match block {
+            CssBlock::At(prelude) => Some(prelude.as_str()),
+            CssBlock::Style { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Les sélecteurs d'une règle, séparés aux virgules hors parenthèses
+/// (`:is(a, b)`), placés sous ceux de la règle parente quand elle est imbriquée.
+fn css_selectors(prelude: &str, parents: Option<&[String]>) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0_i32;
+    let mut current = String::new();
+    for ch in prelude.chars() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(ch);
+    }
+    parts.push(current);
+    parts
+        .iter()
+        .map(|part| css_tidy_selector(part))
+        .filter(|part| !part.is_empty())
+        .flat_map(|part| match parents {
+            Some(parents) if !parents.is_empty() => parents
+                .iter()
+                .map(|parent| {
+                    if part.contains('&') {
+                        part.replace('&', parent)
+                    } else {
+                        format!("{parent} {part}")
+                    }
+                })
+                .collect(),
+            _ => vec![part],
+        })
+        .collect()
+}
+
+/// Un sélecteur écrit d'une seule façon : les combinateurs (`>`, `+`, `~`)
+/// entourés d'une espace, hors parenthèses et crochets, les espaces réduites.
+fn css_tidy_selector(selector: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0_i32;
+    for ch in selector.chars() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            '>' | '+' | '~' if depth == 0 => {
+                out.push(' ');
+                out.push(ch);
+                out.push(' ');
+                continue;
+            }
+            _ => {}
+        }
+        out.push(ch);
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Une déclaration lue (`color: red !important`) : ses `!important` comptés,
+/// sa propriété comptée une fois pour chaque sélecteur de la règle.
+fn css_declaration(
+    text: &str,
+    stack: &mut [CssBlock],
+    context: &str,
+    rules: &mut CssRules,
+    important: &mut usize,
+) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    if let Some(at) = text.rfind('!') {
+        if text[at + 1..]
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("important")
+        {
+            *important += 1;
+        }
+    }
+    let Some(CssBlock::Style { selectors, counted }) = stack.last_mut() else {
+        return;
+    };
+    let Some((property, _)) = text.split_once(':') else {
+        return;
+    };
+    let property = property.trim().to_ascii_lowercase();
+    if property.is_empty() || property.contains(char::is_whitespace) || counted.contains(&property)
+    {
+        return;
+    }
+    counted.push(property.clone());
+    for selector in selectors.iter() {
+        *rules
+            .entry((context.to_string(), selector.clone()))
+            .or_default()
+            .entry(property.clone())
+            .or_default() += 1;
+    }
+}
+
+/// Les règles rapiécées d'une feuille, les plus redites d'abord.
+fn css_piles(rules: &CssRules) -> Vec<String> {
+    // Par endroit et par propriété : les sélecteurs qui la posent, et dans
+    // combien de règles. Un même élément visé par des sélecteurs de plus en
+    // plus longs (`.seg span`, `.sheet .seg span`, `dialog.sheet .seg span`)
+    // compte pour un : l'agent qui ne sait plus quelle règle gagne en
+    // ajoute une plus précise. Cinq règles au moins pour ce groupe, trois
+    // pour un sélecteur redit tel quel.
+    let mut by_place: BTreeMap<(String, String), Vec<(String, usize)>> = BTreeMap::new();
+    for ((context, selector), properties) in rules {
+        for (property, count) in properties {
+            by_place
+                .entry((context.clone(), property.clone()))
+                .or_default()
+                .push((selector.clone(), *count));
+        }
+    }
+    let mut piles = CssPiles::new();
+    for ((context, property), selectors) in &by_place {
+        let mut candidates: Vec<(&str, usize, bool)> = Vec::new();
+        for (selector, own) in selectors {
+            let longer = format!(" {selector}");
+            let total: usize = selectors
+                .iter()
+                .filter(|(other, _)| other == selector || other.ends_with(&longer))
+                .map(|(_, count)| count)
+                .sum();
+            if *own >= 3 || (total >= 5 && selector.contains(['.', '#', '['])) {
+                candidates.push((selector, total, total > *own));
+            }
+        }
+        // Le plus redit d'abord, le plus court à égalité ; un sélecteur plus
+        // long du même élément est déjà dans son groupe.
+        candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.len().cmp(&b.0.len())));
+        let mut picked: Vec<&str> = Vec::new();
+        for (selector, count, longer) in candidates {
+            let same = |other: &&str| {
+                *other == selector
+                    || selector.ends_with(&format!(" {other}"))
+                    || other.ends_with(&format!(" {selector}"))
+            };
+            if picked.iter().any(same) {
+                continue;
+            }
+            picked.push(selector);
+            piles
+                .entry((context.clone(), selector.to_string()))
+                .or_default()
+                .push((property.clone(), count, longer));
+        }
+    }
+    let mut patched: Vec<(usize, String)> = Vec::new();
+    for ((context, selector), mut repeated) in piles {
+        repeated.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let what = repeated
+            .iter()
+            .take(3)
+            .map(|(property, count, _)| format!("{property} in {count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let place = if context.is_empty() {
+            String::new()
+        } else {
+            format!(" (inside {context})")
+        };
+        let longer = if repeated.iter().any(|(_, _, longer)| *longer) {
+            ", some with longer selectors for the same element"
+        } else {
+            ""
+        };
+        patched.push((
+            repeated[0].1,
+            format!("`{selector}`{place} is styled again and again in separate rules{longer} ({what} rules): only one of them paints it, and the pile hides which one wins. Keep a single rule for it and change that rule in place (edit_file), instead of adding another one further down"),
+        ));
+    }
+    patched.sort_by_key(|item| std::cmp::Reverse(item.0));
+    patched.into_iter().map(|(_, line)| line).collect()
+}
+
+/// Feuille de style rapiécée : la même propriété d'un même sélecteur posée
+/// dans trois règles ou plus au même endroit (hors `@media`, ou dans le même
+/// `@media`) au lieu d'être changée sur place, et des `!important` partout.
+/// Vu le 28 octobre 2026 (session #39) : un `styles.css` de 1 091 lignes et
+/// 217 `!important`, la couleur du choix coché du volet d'ajout posée dans
+/// quinze règles ; l'agent n'a plus su laquelle l'emportait (blanc sur blanc).
+#[must_use]
+pub fn css_pitfalls(text: &str) -> Vec<String> {
+    let mut stack: Vec<CssBlock> = Vec::new();
+    let mut rules = CssRules::new();
+    let mut important = 0;
+    let mut buffer = String::new();
+    let mut chars = text.chars().peekable();
+    let mut quote: Option<char> = None;
+    while let Some(ch) = chars.next() {
+        if let Some(q) = quote {
+            buffer.push(ch);
+            if ch == '\\' {
+                if let Some(next) = chars.next() {
+                    buffer.push(next);
+                }
+            } else if ch == q || ch == '\n' {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut previous = ' ';
+                for inner in chars.by_ref() {
+                    if previous == '*' && inner == '/' {
+                        break;
+                    }
+                    previous = inner;
+                }
+            }
+            '"' | '\'' => {
+                quote = Some(ch);
+                buffer.push(ch);
+            }
+            '{' => {
+                let prelude = buffer.split_whitespace().collect::<Vec<_>>().join(" ");
+                buffer.clear();
+                if prelude.starts_with('@') {
+                    stack.push(CssBlock::At(prelude));
+                } else {
+                    let parents = stack.iter().rev().find_map(|block| match block {
+                        CssBlock::Style { selectors, .. } => Some(selectors.clone()),
+                        CssBlock::At(_) => None,
+                    });
+                    let selectors = css_selectors(&prelude, parents.as_deref());
+                    stack.push(CssBlock::Style {
+                        selectors,
+                        counted: Vec::new(),
+                    });
+                }
+            }
+            ';' | '}' => {
+                let context = css_context(&stack);
+                css_declaration(&buffer, &mut stack, &context, &mut rules, &mut important);
+                buffer.clear();
+                if ch == '}' {
+                    stack.pop();
+                }
+            }
+            _ => buffer.push(ch),
+        }
+    }
+    let mut found: Vec<String> = css_piles(&rules)
+        .into_iter()
+        .take(MAX_PATCHED_RULES)
+        .collect();
+    if important > MAX_IMPORTANT {
+        found.push(format!(
+            "!important written {} times or more: each one overrides the kit and the previous fix, and the next fix needs another one. Remove them and give each rule the selector it needs (!important only for [hidden] and reduced motion)",
+            important / 10 * 10
+        ));
+    }
+    found
 }
 
 /// Script Python lancé sur le fichier : noms jamais définis, f oublié devant
@@ -1094,6 +1400,68 @@ mod tests {
         )
         .is_none());
         assert!(bash_powershell_quoting("powershell -Command \"Get-Date\"").is_none());
+    }
+
+    /// Session #39 (28 octobre 2026) : le choix coché du volet d'ajout posé
+    /// dans des règles de plus en plus longues, en clair, en sombre et
+    /// ailleurs, avec des `!important` partout.
+    #[test]
+    fn a_patched_stylesheet_names_its_pile_of_rules() {
+        use std::fmt::Write as _;
+        let mut sheet = String::from(
+            ".seg.seg--choice label span { color: #333; padding: 8px; }\n\
+             .sheet .seg.seg--choice label span { color: #111 !important; }\n\
+             .sheet__body .seg.seg--choice label span { color: #000 !important; }\n\
+             dialog.sheet .sheet__body .seg.seg--choice label span { color: #0f172a !important; }\n\
+             .sheet .sheet__body .seg.seg--choice label span{color:#0f172a!important}\n\
+             @media (prefers-color-scheme: dark) { .seg.seg--choice label span { color: #f5f5f5; } }\n\
+             .row__amount { color: red; }\n.row__amount { color: green; }\n.row__amount { color: var(--income); }\n",
+        );
+        for index in 0..18 {
+            let _ = writeln!(sheet, ".extra-{index} {{ margin: 0 !important; }}");
+        }
+        let found = super::css_pitfalls(&sheet);
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(
+            found[0].starts_with("`.seg.seg--choice label span` is styled again and again in separate rules, some with longer selectors for the same element (color in 5 rules"),
+            "{found:?}"
+        );
+        assert!(
+            found[1].starts_with(
+                "`.row__amount` is styled again and again in separate rules (color in 3 rules)"
+            ),
+            "{found:?}"
+        );
+        assert!(
+            found[2].starts_with("!important written 20 times or more"),
+            "{found:?}"
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|line| line.contains("prefers-color-scheme")),
+            "{found:?}"
+        );
+    }
+
+    /// Une feuille tenue : jetons du clair et du sombre, tailles d'écran,
+    /// repli dans une même règle, variantes d'un même élément selon son
+    /// conteneur ; le kit d'appli aussi.
+    #[test]
+    fn a_tidy_stylesheet_has_no_pile_of_rules() {
+        let sheet = ":root { --accent: #5b4bd6; }\n\
+            @media (prefers-color-scheme: dark) { :root { --accent: #9085e9; } }\n\
+            :root[data-theme=\"dark\"] { --accent: #9085e9; }\n\
+            .card { padding: 12px; background: #fff; background: color-mix(in srgb, #fff 90%, var(--accent)); }\n\
+            @media (min-width: 600px) { .card { padding: 16px; } }\n\
+            @media (min-width: 900px) { .card { padding: 20px; } }\n\
+            .row span { color: #333; }\n.card .row span { color: #555; }\n.hero .row span { color: #fff; }\n\
+            .seg span { color: #555; }\n.seg input:checked + span { color: #111; }\n\
+            a[href~=\"x\"] > b { color: red; } /* .row span { color: blue } */\n\
+            [hidden] { display: none !important; }\n";
+        assert_eq!(super::css_pitfalls(sheet), Vec::<String>::new());
+        let kit = include_str!("../../tools/src/components/app-kit.css");
+        assert_eq!(super::css_pitfalls(kit), Vec::<String>::new());
     }
 
     #[test]

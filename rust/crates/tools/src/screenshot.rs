@@ -2709,6 +2709,43 @@ fn slice_cut(start: f64, screen: f64, content: f64, blocks: &[(f64, f64)]) -> f6
         .unwrap_or(limit)
 }
 
+/// Les barres fixées au bas de l'écran (onglets, bouton d'action), posées au
+/// bout de la page le temps d'une capture de la page entière : le navigateur
+/// les dessinait au bas du premier écran, au milieu de la capture, par-dessus
+/// les cartes. Vu le 28 octobre 2026 (session #39) : le relecteur avait fait
+/// « fixer » une barre d'onglets qui l'était déjà, et elle avait perdu sa
+/// forme. Rend le nombre de barres déplacées ; `UNPIN_BARS_SCRIPT` les remet.
+const PIN_BARS_SCRIPT: &str = r#"(() => {
+  const H = innerHeight;
+  const end = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
+  const moved = [];
+  for (const el of document.querySelectorAll("body *")) {
+    const style = getComputedStyle(el);
+    const sticky = style.position === "sticky" && style.bottom !== "auto";
+    if (style.position !== "fixed" && !sticky) continue;
+    if (el.closest("dialog[open], [aria-modal=true]") || moved.some(([other]) => other.contains(el))) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 40 || r.height < 16 || r.height > H / 3 || r.top < H / 2 || r.bottom < H - 48) continue;
+    moved.push([el, el.getAttribute("style")]);
+    if (sticky) {
+      el.style.setProperty("position", "relative", "important");
+      el.style.setProperty("bottom", "auto", "important");
+    } else {
+      el.style.setProperty("top", `${end - (H - r.top) - scrollY}px`, "important");
+      el.style.setProperty("bottom", "auto", "important");
+    }
+  }
+  window.__clawPinnedBars = moved;
+  return moved.length;
+})()"#;
+
+const UNPIN_BARS_SCRIPT: &str = r#"(() => {
+  for (const [el, style] of window.__clawPinnedBars || []) {
+    if (style === null) el.removeAttribute("style"); else el.setAttribute("style", style);
+  }
+  window.__clawPinnedBars = [];
+})()"#;
+
 fn picture(
     devtools: &mut DevTools,
     viewport: &Viewport,
@@ -2727,7 +2764,18 @@ fn picture(
             .unwrap_or(0.0);
         (top, f64::from(viewport.height))
     };
-    let picture = devtools.call("Page.captureScreenshot", params)?;
+    // La vignette, prise ensuite, garde la barre à sa place sur le premier écran.
+    let pinned = area.is_some()
+        && devtools
+            .evaluate(PIN_BARS_SCRIPT)
+            .ok()
+            .and_then(|count| count.as_u64())
+            .is_some_and(|count| count > 0);
+    let picture = devtools.call("Page.captureScreenshot", params);
+    if pinned {
+        let _ = devtools.evaluate(UNPIN_BARS_SCRIPT);
+    }
+    let picture = picture?;
     let jpeg = picture["data"]
         .as_str()
         .filter(|data| !data.is_empty())
@@ -2935,6 +2983,15 @@ fn view_shots(
 /// Ce que l'écran ouvert montre de faux (graphique vide, valeur de script,
 /// champ illisible) et que la page de départ ne montrait pas.
 fn shown_view_problems(devtools: &mut DevTools, view: &View, known: &[String]) -> Vec<String> {
+    // Les défauts de la page de départ, sans leurs règles CSS : un même défaut
+    // revu dans l'écran (la barre d'onglets de chaque écran) ne se redit pas.
+    let bare = |line: &str| {
+        line.split(" (CSS rules: ")
+            .next()
+            .unwrap_or(line)
+            .to_string()
+    };
+    let known: Vec<String> = known.iter().map(|line| bare(line)).collect();
     let mut problems = Vec::new();
     if let Ok(audit) = devtools.evaluate(AUDIT_SCRIPT) {
         let place = match view.kind {
@@ -2943,8 +3000,24 @@ fn shown_view_problems(devtools: &mut DevTools, view: &View, known: &[String]) -
             "view" => format!("In the screen opened by {}", view.label),
             _ => format!("In the menu opened by {}", view.label),
         };
-        for problem in strings(&audit["problems"]) {
-            if view_problem(&problem) && !known.contains(&problem) {
+        let mut found = strings(&audit["problems"]);
+        let fresh: Vec<bool> = found
+            .iter()
+            .map(|problem| view_problem(problem, view.kind) && !known.contains(problem))
+            .collect();
+        // Les règles CSS en cause, comme pour la page. Vu le 28 octobre 2026
+        // (session #39) : un choix du volet d'ajout à 1,0:1 de contraste, et
+        // quinze règles empilées sur lui sans savoir laquelle l'emportait.
+        if fresh.contains(&true) {
+            let culprits = audit["culprits"].as_array().cloned().unwrap_or_default();
+            for (is_note, index, rules) in blamed_rules(devtools, &culprits) {
+                if let Some(line) = found.get_mut(index).filter(|_| !is_note) {
+                    let _ = write!(line, " (CSS rules: {})", rules.join("; "));
+                }
+            }
+        }
+        for (problem, keep) in found.into_iter().zip(fresh) {
+            if keep {
                 problems.push(format!("{place}: {problem}"));
             }
         }
@@ -2965,7 +3038,7 @@ fn shown_view_problems(devtools: &mut DevTools, view: &View, known: &[String]) -
                 let measured = problem
                     .split_once("): ")
                     .map_or(problem.as_str(), |(_, rest)| rest);
-                if view_problem(measured) && !known.contains(&problem) {
+                if view_problem(measured, view.kind) && !known.contains(&bare(&problem)) {
                     problems.push(format!("{place}: {problem}"));
                 }
             }
@@ -2986,13 +3059,43 @@ fn session_theme(devtools: &mut DevTools) -> String {
 }
 
 /// Défauts qu'un écran ouvert (fenêtre, onglet, écran d'une appli) ajoute à
-/// ceux de la page de départ : ce qu'il montre, pas sa mise en page.
-fn view_problem(line: &str) -> bool {
+/// ceux de la page de départ : ce qu'il montre, pas ce qui tient à toute la
+/// page (police, titres, liens).
+///
+/// Ses bugs graphiques aussi : vu le 28 octobre 2026 (session #39), les
+/// montants « 206 € € », le nom « Espèc… » coupé de l'écran Bilan et les choix
+/// du volet d'ajout sur deux lignes, mesurés sur l'accueil seulement. Un
+/// menu ouvert passe par-dessus la page exprès : ses éléments posés sur
+/// d'autres ne comptent pas.
+fn view_problem(line: &str, kind: &str) -> bool {
+    if kind == "menu" && line.starts_with("Elements drawn on top of each other") {
+        return false;
+    }
     [
         "Charts that show nothing",
         "A script value shown as text",
         "Fields whose typed text cannot be read",
         "Text with too little contrast",
+        "Content goes past the edge",
+        "Text cut off",
+        "Text partly cut off",
+        "Text wider than its button",
+        "Elements drawn on top of each other",
+        "Elements with the hidden attribute",
+        "Texts that touch",
+        "Text touches the edge",
+        "Labels of a chart drawn over each other",
+        "Elements sticking out",
+        "Short labels broken",
+        "Numbers written two ways",
+        "Amounts with",
+        "Words cut in two",
+        "Text squeezed",
+        "Icons drawn far larger",
+        "Line icons drawn as filled shapes",
+        "Icons that cannot be seen",
+        "Emoji in the page",
+        "A count of",
     ]
     .iter()
     .any(|start| line.starts_with(start))
@@ -4305,6 +4408,139 @@ mod tests {
             "document.getElementById('details').addEventListener('click', () => window.print());",
         );
         assert!(!printed.contains("do nothing when clicked"), "{printed}");
+    }
+
+    /// Session #36 (28 octobre 2026), l'appli de budget « qui fait vieux,
+    /// moche, pleine d'incohérences et de bugs graphiques » : libellé collé à
+    /// son montant, dates collées au bord dans un cadre en overflow-x: hidden,
+    /// noms des mois superposés, champ sorti de sa carte, « Voir tout » sur
+    /// deux lignes, montants écrits avec un point et avec une virgule. Le
+    /// contenu d'un <details> fermé n'est pas dessiné : rien n'y est dit.
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn the_graphic_bugs_of_session_36_are_measured_in_a_real_browser() {
+        use std::fmt::Write as _;
+        let cwd = std::env::current_dir().expect("dossier");
+        let name = format!("claw-bugs-{}", std::process::id());
+        let dir = cwd.join(&name);
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let mut labels = String::new();
+        for (index, month) in [
+            "juil", "août", "sept", "oct", "nov", "déc", "janv", "févr", "mars", "avr", "mai",
+            "juin",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let _ = write!(
+                labels,
+                "<text x=\"{}\" y=\"110\" font-size=\"13\">{month}</text>",
+                12 + index * 22
+            );
+        }
+        std::fs::write(
+            dir.join("index.html"),
+            format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Budget</title><style>body {{ margin: 0; font: 16px/1.5 sans-serif; color: #1f1d1a; background: #f5f3f0; }} .frame {{ overflow-x: hidden; }} main {{ padding: 16px; }} .ops {{ margin: 0 -16px; padding: 0; list-style: none; }} .op {{ display: flex; align-items: center; gap: 12px; padding: 8px 0; }} .what {{ display: flex; gap: 0; }} .card {{ width: 300px; padding: 12px; border-radius: 12px; background: #ffffff; }} .card input {{ width: 340px; font: inherit; padding: 8px; }} .head {{ display: flex; align-items: center; justify-content: space-between; width: 230px; }} .head h2 {{ margin: 0; font-size: 26px; }} .head a {{ color: #8a3b12; }}</style></head><body><div class=\"frame\"><main><h1>Mon budget</h1><div class=\"head\"><h2>Dernières opérations</h2><a href=\"#ops\">Voir tout</a></div><ul class=\"ops\" id=\"ops\"><li class=\"op\"><span class=\"date\">28 oct.</span><span class=\"what\"><strong>Alimentaire</strong><span class=\"amount\">-100,00 €</span></span></li></ul><p>Total du mois : 1 235,15 €</p><p>CAF : +103 € à 206 € €</p><p>Claude : 21,6 €</p><div class=\"card\"><label for=\"salaire\">Salaire</label><input id=\"salaire\" value=\"1235.15\"></div><svg width=\"300\" height=\"120\" viewBox=\"0 0 300 120\" role=\"img\" aria-label=\"Rentrées des 12 derniers mois\"><rect x=\"10\" y=\"20\" width=\"8\" height=\"70\" fill=\"#2f7d4f\"/>{labels}</svg><details><summary>Détail par mois</summary><table><tr><th>Mois</th><td>0,00 €</td></tr></table></details></main></div></body></html>"),
+        )
+        .expect("html");
+        let mut request = input(None, Some(&format!("{name}/index.html")));
+        request.viewports = Some(json!(["phone"]));
+        let result = super::take(&request);
+        let _ = std::fs::remove_dir_all(&dir);
+        let page = result.expect("capture")["captures"][0]["problems"].to_string();
+        assert!(page.contains("Texts that touch or run into each other on the same line: \\\"Alimentaire\\\" and \\\"-100,00 €\\\""), "{page}");
+        assert!(
+            page.contains("Text touches the edge of the 390px-wide phone screen")
+                && page.contains("28 oct."),
+            "{page}"
+        );
+        assert!(
+            page.contains("Labels of a chart drawn over each other"),
+            "{page}"
+        );
+        assert!(
+            page.contains("Elements sticking out of the box they sit in: input#salaire"),
+            "{page}"
+        );
+        assert!(
+            page.contains("Short labels broken over two lines: a \\\"Voir tout\\\""),
+            "{page}"
+        );
+        assert!(
+            page.contains("Numbers written two ways on this French page")
+                && page.contains("1235.15"),
+            "{page}"
+        );
+        // Session #39 : l'unité deux fois, un seul chiffre après la virgule.
+        assert!(
+            page.contains("Amounts with their currency written twice") && page.contains("206 € €"),
+            "{page}"
+        );
+        assert!(
+            page.contains("Amounts with a single digit after the decimal mark")
+                && page.contains("21,6 €"),
+            "{page}"
+        );
+        assert!(!page.contains("\"1 235,15 €\""), "{page}");
+        // Le tableau du <details> fermé : rien de dit sur lui.
+        assert!(!page.contains("drawn on top of each other"), "{page}");
+        assert!(!page.contains("\\\"Mois\\\""), "{page}");
+    }
+
+    /// Session #39 (28 octobre 2026), l'appli de budget : les bugs graphiques
+    /// des autres écrans et du volet d'ajout, que seule la page d'accueil
+    /// faisait mesurer, et le bouton « + » décentré dans la barre d'onglets,
+    /// même poussé au milieu par une cale vide ou des onglets rangés en blocs.
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn the_graphic_bugs_of_session_39_are_measured_in_every_screen_in_a_real_browser() {
+        let cwd = std::env::current_dir().expect("dossier");
+        let name = format!("claw-ecrans-{}", std::process::id());
+        let dir = cwd.join(&name);
+        std::fs::create_dir_all(&dir).expect("dossier");
+        std::fs::write(
+            dir.join("index.html"),
+            "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Budget</title><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main><section id=\"accueil\" data-screen><h1>Mon budget</h1><p>Reste à vivre : 848,55 €</p></section><section id=\"bilan\" data-screen hidden><h2>Bilan</h2><div class=\"row\"><span class=\"row__text\">Espèces</span><b>+80 € à 200 € €</b></div></section><section id=\"reglages\" data-screen hidden><h2>Réglages</h2><p>Mes rentrées</p></section></main><nav class=\"tabbar\" data-app-tabs aria-label=\"Écrans\"><div class=\"tabbar__group\"><a href=\"#accueil\">Accueil</a><a href=\"#bilan\">Bilan</a></div><button class=\"tabbar__add\" type=\"button\" aria-label=\"Ajouter une opération\" onclick=\"document.getElementById('ajout').showModal()\">+</button><span class=\"tabbar__spacer\"></span><div class=\"tabbar__group\"><a href=\"#reglages\">Réglages</a></div></nav><dialog id=\"ajout\" aria-label=\"Nouvelle opération\"><form method=\"dialog\"><fieldset class=\"seg\"><legend>Genre</legend><label><input type=\"radio\" name=\"genre\" checked><span>Dépense fixe</span></label><label><input type=\"radio\" name=\"genre\"><span>Revenu garanti</span></label><label><input type=\"radio\" name=\"genre\"><span>Gain non assuré</span></label></fieldset><button>Fermer</button></form></dialog><script>const show = () => { const id = location.hash.slice(1) || 'accueil'; document.querySelectorAll('[data-screen]').forEach((screen) => { screen.hidden = screen.id !== id; }); }; addEventListener('hashchange', show); show();</script></body></html>",
+        )
+        .expect("html");
+        std::fs::write(dir.join("styles.css"), "body { margin: 0; font: 16px/1.5 sans-serif; color: #1f1d1a; background: #f5f3f0; }\nmain { padding: 16px 16px 120px; }\n.row { display: flex; align-items: center; gap: 12px; width: 150px; }\n.row__text { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }\n.row b { flex: none; }\n.tabbar { position: fixed; left: 12px; right: 12px; bottom: 12px; display: flex; align-items: center; height: 64px; background: #ffffff; border-radius: 20px; }\n.tabbar a { flex: 1; padding: 12px 0; color: #1f1d1a; text-align: center; }\n.tabbar__group { display: flex; flex: 1; }\n.tabbar__add { flex: none; width: 56px; height: 56px; border: 0; border-radius: 18px; color: #ffffff; background: #4a3bbf; font: inherit; }\n.tabbar__spacer { flex: 1; }\ndialog { box-sizing: border-box; width: 100%; max-width: 360px; padding: 16px; border: 0; }\n.seg { display: flex; gap: 4px; margin: 0 0 16px; padding: 0; border: 0; }\n.seg legend { padding: 0 0 8px; }\n.seg label { flex: 1; min-width: 0; position: relative; }\n.seg input { position: absolute; opacity: 0; }\n.seg span { display: block; padding: 8px; font-weight: 700; text-align: center; }\ndialog button { font: inherit; padding: 12px; }\n").expect("css");
+        let mut request = input(None, Some(&format!("{name}/index.html")));
+        request.viewports = Some(json!(["phone"]));
+        request.windows = Some(true);
+        let result = super::take(&request);
+        let _ = std::fs::remove_dir_all(&dir);
+        let result = result.expect("capture");
+        let text = result.to_string();
+        let page = result["captures"][0]["problems"].to_string();
+        assert!(
+            page.contains("The add button of the tab bar sits off-centre, 2 tabs on its left and 1 on its right"),
+            "{page}"
+        );
+        // L'écran Bilan : ses défauts dits pour lui, l'accueil n'en a pas.
+        assert!(
+            !page.contains("Amounts with their currency written twice"),
+            "{page}"
+        );
+        assert!(
+            text.contains("In the screen opened by a \\\"Bilan\\\": Amounts with their currency written twice"),
+            "{text}"
+        );
+        assert!(
+            text.contains("In the screen opened by a \\\"Bilan\\\": Text cut off")
+                && text.contains("Espèces"),
+            "{text}"
+        );
+        // Le volet d'ajout : ses choix sur deux lignes, avec la règle CSS qui
+        // les dessine ; la page derrière ne compte pas.
+        assert!(
+            text.contains(": Short labels broken over two lines: label")
+                && text.contains("Gain non assuré")
+                && text.contains("(CSS rules: styles.css:14 .seg label)"),
+            "{text}"
+        );
+        assert!(!text.contains("Texts that touch"), "{text}");
+        // Son bouton « Fermer » (un formulaire en method="dialog") la ferme.
+        assert!(!text.contains("does not close"), "{text}");
     }
 
     /// Session #35 (27 octobre 2026), l'appli de budget : servie en http (plus

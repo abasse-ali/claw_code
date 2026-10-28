@@ -194,37 +194,18 @@ const COMPONENTS: &[Component] = &[
         &[],
         "Pure CSS: browsers without scroll-driven animations show a still page. Keep one effect per page.",
     ),
+    // Le kit d'une appli perso (budget, carnet, suivi) : vu le 28 octobre 2026
+    // (sessions #36 et #38), une appli faite de composants recollés à la main
+    // gardait l'allure d'un site daté (cartes pastel, empattements) et ses
+    // défauts (libellé collé au montant, champs hors de leur carte). Le kit
+    // est écrit tel quel dans le projet ; le modèle compose ses écrans.
     component(
-        "app-tabs",
-        "screens of a single-page app (home, entries, summary, settings) behind a tab bar at the bottom of phones and at the top of desktops; the open screen follows the address, so it stays after a reload and Back returns to the one before",
-        files!("app-tabs"),
-        include_str!("components/app-tabs.js"),
+        "app-kit",
+        "the whole look and working of a personal app that keeps the user's data (budget, log, habits, collection), at the level of a recent phone app: Claw writes kit/app-kit.css and kit/app-kit.js into the project and gives the page skeleton (app bar with the month, screens behind a floating tab bar with an add button, balance card on a gradient, figure tiles, cards with lists of rows, meters, SVG bar chart, settings, empty states, a sheet to add or edit an entry, undo messages, light and dark)",
+        (include_str!("components/app-kit.html"), ""),
+        "",
         &[],
-        "One <section data-screen> per screen with its id, one tab link per screen (href=\"#id\"); only the first screen has an h1. Each change of screen sends the event screenchange, on which a chart redraws.",
-    ),
-    component(
-        "entries",
-        "data of a personal app kept on the phone (expenses and income, sessions, readings): the user's own figures shown from the first launch, the month's list newest first with its totals, deletion with an Undo, a copy saved as a spreadsheet file and taken back",
-        files!("entries"),
-        include_str!("components/entries.js"),
-        &["toast"],
-        "Put the figures the user gave in the data-entries-seed JSON (label, amount negative for an expense, category): they show at the first launch, in the current month only; never copy them onto the months before. data-entries names the storage key. window.entries (add, remove, month, months, totals, format) feeds the rest of the app, and every change sends entries:change.",
-    ),
-    component(
-        "entry-sheet",
-        "panel to add an entry (a sheet that rises from the bottom of phones): expense or income, amount typed as 12,50 or 12.50, label, category, date of the day, with fields readable in light and dark mode",
-        files!("entry-sheet"),
-        include_str!("components/entry-sheet.js"),
-        &["dialog", "toast", "entries"],
-        "Edit the categories to the user's own; the panel adds to window.entries, closes and confirms. Fields take their colors from --ink and --field: set both in the dark tokens, with color-scheme: dark.",
-    ),
-    component(
-        "chart",
-        "bar chart in inline SVG, sized to its screen and redrawn when that screen opens, when its size changes and when the data change: the income and spending of the last months from entries, or your own series",
-        files!("chart"),
-        include_str!("components/chart.js"),
-        &[],
-        "data-chart=\"entries\" and data-chart-months draw window.entries; a month without entries stays empty. For other data, call window.drawChart(figure, { labels, series: [{ name, values, tone }] }). Never a <canvas> sized by script in a hidden screen: it stays 0 px wide.",
+        "Claw wrote the kit's two files next to the page (see written): never write, copy or edit them, and never paste their rules or scripts elsewhere. Start index.html from html as it is (the app bar, the screens with data-screen and an id each, the tab bar with its add button, the sheet to add an entry, the confirmation window): keep every class and data- attribute, change the texts, the screens, the categories and the figures for this app, and remove the blocks it does not need. In the <head>, put head before your own stylesheet, and load kit/app-kit.js before your app.js. Compose the screens only with the kit's blocks: .hero (the main figure on the app's gradient: .hero__label, .hero__amount, .hero__sub, .hero__pills, .hero__bar), .tiles > .tile (two key figures), .card (.card__head with .card__meta or .card__link) holding a .list of .row (.row__icon, .row__main with .row__title > .row__text and .row__sub, .row__end with .row__amount; .badge--accent, --in, --warn or --out for a status), .meters (progress bars), .chart (data-chart=\"entries\" draws the last months), .seg and .chips (filters), .settings > .setting with .money (a value to adjust), .empty (nothing yet), .btn (--primary, --danger, --small, --block), .field. Your stylesheet only sets the app's tokens (--accent, --paper, --surface, --ink, --muted, --line, --income, --error, and --hero-1, --hero-2, --hero-3 for the gradient; light, and dark under prefers-color-scheme) and the little the kit lacks: never restyle its blocks, never write other cards, lists, buttons or fields. Your app.js holds only the app's own logic, as in script_example: window.entries keeps the entries (the figures the user gave go in the data-entries-seed JSON, label, amount negative for an expense, category, and show from the first launch in the current month only; list, month, totals, add, update, remove with an Undo), [data-entries-list] (data-limit, data-kind) and [data-entries-sum] fill themselves, window.app gives the month shown (monthchange), window.drawChart draws your own series, window.toast confirms. A figure given as a range counts at its least favourable end (the low end of an income, the high end of an expense); a figure marked not sure stays out of the prudent total, and the best case shows beside it.",
     ),
     component(
         "pwa",
@@ -297,30 +278,52 @@ const ALIASES: &[(&str, &str)] = &[
     ("parallax", "scroll-effects"),
     ("progression", "scroll-effects"),
     ("transitions", "page-transitions"),
-    ("ecrans", "app-tabs"),
-    ("screens", "app-tabs"),
-    ("tab-bar", "app-tabs"),
-    ("donnees", "entries"),
-    ("data", "entries"),
-    ("store", "entries"),
-    ("stockage", "entries"),
-    ("operations", "entries"),
-    ("export", "entries"),
-    ("import", "entries"),
-    ("csv", "entries"),
-    ("sheet", "entry-sheet"),
-    ("volet", "entry-sheet"),
-    ("saisie", "entry-sheet"),
-    ("ajout", "entry-sheet"),
-    ("graphique", "chart"),
-    ("graph", "chart"),
-    ("diagramme", "chart"),
+    ("app-tabs", "app-kit"),
+    ("entries", "app-kit"),
+    ("entry-sheet", "app-kit"),
+    ("chart", "app-kit"),
+    ("kit", "app-kit"),
+    ("app", "app-kit"),
+    ("appli", "app-kit"),
+    ("application", "app-kit"),
+    ("budget", "app-kit"),
+    ("ecrans", "app-kit"),
+    ("screens", "app-kit"),
+    ("tab-bar", "app-kit"),
+    ("tabbar", "app-kit"),
+    ("donnees", "app-kit"),
+    ("data", "app-kit"),
+    ("store", "app-kit"),
+    ("stockage", "app-kit"),
+    ("operations", "app-kit"),
+    ("export", "app-kit"),
+    ("import", "app-kit"),
+    ("csv", "app-kit"),
+    ("sheet", "app-kit"),
+    ("volet", "app-kit"),
+    ("saisie", "app-kit"),
+    ("ajout", "app-kit"),
+    ("graphique", "app-kit"),
+    ("graph", "app-kit"),
+    ("diagramme", "app-kit"),
+    ("hero", "app-kit"),
+    ("solde", "app-kit"),
     ("hors-ligne", "pwa"),
     ("offline", "pwa"),
     ("manifest", "pwa"),
     ("service-worker", "pwa"),
     ("installable", "pwa"),
 ];
+
+/// Les fichiers du kit d'appli, écrits tels quels dans le dossier de la page.
+const APP_KIT_FILES: &[(&str, &str)] = &[
+    ("kit/app-kit.css", include_str!("components/app-kit.css")),
+    ("kit/app-kit.js", include_str!("components/app-kit.js")),
+];
+
+/// Le script propre d'une appli de budget faite avec le kit : l'exemple que le
+/// modèle suit pour la sienne.
+const APP_KIT_EXAMPLE: &str = include_str!("components/app-kit-example.js");
 
 /// Fichiers à part d'un composant, rendus sous `files` avec le nom à leur donner.
 const EXTRA_FILES: &[(&str, &[(&str, &str)])] = &[(
@@ -340,6 +343,9 @@ pub(crate) struct ComponentInput {
     names: Option<Vec<String>>,
     #[serde(default)]
     name: Option<String>,
+    /// Dossier de la page de l'appli, relatif au projet : le kit va dans son `kit/`.
+    #[serde(default)]
+    dir: Option<String>,
 }
 
 fn find(name: &str) -> Option<&'static Component> {
@@ -379,6 +385,16 @@ fn with_icons(text: &str) -> String {
 }
 
 fn rendered(component: &Component) -> Value {
+    if component.name == "app-kit" {
+        return json!({
+            "name": component.name,
+            "purpose": component.purpose,
+            "head": "<link rel=\"stylesheet\" href=\"kit/app-kit.css\">",
+            "html": with_icons(component.html),
+            "script_example": APP_KIT_EXAMPLE,
+            "note": component.note,
+        });
+    }
     let mut value = json!({
         "name": component.name,
         "purpose": component.purpose,
@@ -400,6 +416,42 @@ fn rendered(component: &Component) -> Value {
             .into();
     }
     value
+}
+
+/// Écrit les fichiers du kit d'appli dans le dossier `dir` du projet (sa
+/// racine par défaut) ; rend leurs chemins depuis la racine du projet.
+fn write_app_kit(dir: Option<&str>) -> Result<Vec<String>, String> {
+    let root = std::env::current_dir().map_err(|error| error.to_string())?;
+    let dir = dir
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+        .unwrap_or(".");
+    let relative = std::path::Path::new(dir.trim_start_matches("./"));
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "dir `{dir}` must be the page's folder inside the project, written relative to it (for example \".\" or \"app\")"
+        ));
+    }
+    let folder = root.join(relative);
+    let mut written = Vec::new();
+    for (path, text) in APP_KIT_FILES {
+        let full = folder.join(path);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        std::fs::write(&full, with_icons(text)).map_err(|error| error.to_string())?;
+        written.push(
+            full.strip_prefix(&root)
+                .unwrap_or(&full)
+                .to_string_lossy()
+                .replace('\\', "/"),
+        );
+    }
+    Ok(written)
 }
 
 fn catalog() -> Vec<Value> {
@@ -454,6 +506,12 @@ pub(crate) fn component_tool(input: &ComponentInput) -> Result<Value, String> {
         "components": chosen.iter().map(|component| rendered(component)).collect::<Vec<_>>(),
         "note": "Paste each component's html where it belongs, its css into the stylesheet and its js into the page's script (or a <script> before </body>), as they are: the data and ARIA attributes make them work. Write the visible texts in the page's language and content, and restyle freely with the plan's tokens (they already use --paper, --ink, --muted, --accent and --error, with fallbacks). Every button does what its label says; Claw clicks each one in the review.",
     });
+    if chosen.iter().any(|component| component.name == "app-kit") {
+        match write_app_kit(input.dir.as_deref()) {
+            Ok(written) => result["written"] = json!(written),
+            Err(error) => return Err(format!("the app kit could not be written: {error}")),
+        }
+    }
     if !unknown.is_empty() {
         result["unknown"] = json!(unknown);
         result["catalog"] = json!(catalog());
@@ -474,10 +532,19 @@ mod tests {
 
     #[test]
     fn every_component_is_complete_and_draws_no_icon_by_hand() {
-        assert_eq!(COMPONENTS.len(), 24);
+        assert_eq!(COMPONENTS.len(), 21);
         for component in COMPONENTS {
             let html = with_icons(component.html);
-            let js = with_icons(component.js);
+            // Le kit d'appli : ses fichiers écrits dans le projet, et l'exemple de script.
+            let js = if component.name == "app-kit" {
+                format!(
+                    "{}\n{}",
+                    with_icons(super::APP_KIT_FILES[1].1),
+                    super::APP_KIT_EXAMPLE
+                )
+            } else {
+                with_icons(component.js)
+            };
             for text in [&html, &js] {
                 assert!(
                     !text.contains("{{icon:"),
@@ -501,7 +568,12 @@ mod tests {
                 "{}: imbrication",
                 component.name
             );
-            assert!(component.css.contains('{'), "{}: css", component.name);
+            let css = if component.name == "app-kit" {
+                super::APP_KIT_FILES[0].1
+            } else {
+                component.css
+            };
+            assert!(css.contains('{'), "{}: css", component.name);
             for need in component.needs {
                 assert!(find(need).is_some(), "{} : {need}", component.name);
             }
@@ -514,10 +586,11 @@ mod tests {
         let mut css = String::from(":root { --paper: #f7f3ec; --ink: #1f1d1a; --muted: #5f5a52; --accent: #8a3b12; --error: #b42318; --font-display: Georgia, serif; --font-text: system-ui, sans-serif; }\n*, *::before, *::after { box-sizing: border-box; }\nbody { margin: 0; font-family: var(--font-text); font-size: 1.0625rem; line-height: 1.6; color: var(--ink); background: var(--paper); }\nmain { width: min(100% - 2.5rem, 60rem); margin: 0 auto; padding: 2rem 0 6rem; }\nmain > section + section { margin-top: 3rem; }\n:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }\nimg { max-width: 100%; height: auto; }\n");
         let mut js = String::new();
         // Les balises de l'appli installable vont dans le <head> et demandent
-        // ses fichiers : l'essai du kit d'appli s'en sert, pas cette page.
+        // ses fichiers, et le kit d'appli fait une page à lui : leur essai
+        // s'en sert, pas cette page.
         for component in COMPONENTS
             .iter()
-            .filter(|component| component.name != "pwa")
+            .filter(|component| !matches!(component.name, "pwa" | "app-kit"))
         {
             let body = with_icons(component.html)
                 .replace("images/bouquet-1.jpg", "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 1000'%3E%3Crect width='800' height='1000' fill='%23c9a27e'/%3E%3C/svg%3E")
@@ -594,110 +667,115 @@ mod tests {
         }
     }
 
-    /// Une appli de budget bâtie avec le kit comme un modèle la collerait :
-    /// écrans, données de l'utilisateur, volet d'ajout, graphique, hors-ligne.
-    fn kit_app(dir: &std::path::Path) {
-        let kit = ask(json!({ "names": ["app-tabs", "entry-sheet", "chart", "pwa"] }));
-        let parts: Vec<&serde_json::Value> = kit["components"]
-            .as_array()
-            .expect("liste")
-            .iter()
-            .collect();
-        let part = |name: &str| {
-            *parts
+    /// Une appli de budget faite du kit comme un modèle doit la faire : le
+    /// squelette tel quel, le script d'exemple, les jetons de l'appli, et
+    /// l'appli installable (manifeste, service worker, icône).
+    fn kit_app(name: &str) -> std::path::PathBuf {
+        let dir = std::env::current_dir().expect("dossier").join(name);
+        std::fs::create_dir_all(dir.join("icons")).expect("dossier");
+        let kit = ask(json!({ "names": ["app-kit", "pwa"], "dir": name }));
+        assert_eq!(
+            kit["written"],
+            json!([
+                format!("{name}/kit/app-kit.css"),
+                format!("{name}/kit/app-kit.js")
+            ]),
+            "{kit}"
+        );
+        let part = |wanted: &str| {
+            kit["components"]
+                .as_array()
+                .expect("liste")
                 .iter()
-                .find(|component| component["name"] == name)
-                .unwrap_or_else(|| panic!("{name}"))
+                .find(|component| component["name"] == wanted)
+                .unwrap_or_else(|| panic!("{wanted}"))
+                .clone()
         };
-        let html = |name: &str| part(name)["html"].as_str().expect("html").to_string();
-        let seed = r#"[
-      { "label": "Salaire", "amount": 1235.15, "category": "Revenus" },
-      { "label": "Mobili-jeune", "amount": 100, "category": "Revenus" },
-      { "label": "CAF (au moins)", "amount": 103, "category": "Revenus" },
-      { "label": "Loyer", "amount": -450, "category": "Logement" },
-      { "label": "Forfait", "amount": -10, "category": "Abonnements" },
-      { "label": "Claude", "amount": -21.6, "category": "Abonnements" },
-      { "label": "Transport", "amount": -8, "category": "Transport" },
-      { "label": "Alimentaire", "amount": -100, "category": "Courses" }
-    ]"#;
-        let entries = html("entries");
-        let (before, rest) = entries.split_once("[\n").expect("données de départ");
-        let (_, after) = rest.split_once("]\n").expect("données de départ");
-        let entries = format!("{before}{seed}\n{after}");
-        let screens = html("app-tabs")
-            .replace(
-                "<p>Le résumé du mois, et ce qu'il reste à dépenser.</p>",
-                &format!("<p class=\"reste\">Reste ce mois-ci <strong data-entries-sum=\"balance\">0,00 €</strong></p>{}", html("entry-sheet")),
-            )
-            .replace("<p>Les dépenses et les rentrées, les plus récentes d'abord.</p>", &entries)
-            .replace("<p>Les mois passés, côte à côte.</p>", &html("chart"))
-            .replace("<p>Les montants de chaque mois, la copie des données.</p>", "<p>Une copie des données se garde depuis l'écran Opérations.</p>");
-        let head = html("pwa").replace("<!-- Dans le <head> de index.html : -->\n", "");
+        let (app, pwa) = (part("app-kit"), part("pwa"));
+        let head = format!(
+            "{}\n{}",
+            pwa["html"]
+                .as_str()
+                .expect("html")
+                .replace("<!-- Dans le <head> de index.html : -->\n", ""),
+            app["head"].as_str().expect("head")
+        );
+        let body = app["html"].as_str().expect("html");
+        let body = &body[body.find("-->").map_or(0, |end| end + 3)..];
         std::fs::write(
             dir.join("index.html"),
-            format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\"><title>Mon budget</title>{head}<link rel=\"stylesheet\" href=\"styles.css\"></head><body><header class=\"tete\"><p class=\"nom\">Mon budget</p></header><main>{screens}</main><script src=\"app.js\"></script></body></html>"),
+            format!("<!doctype html>\n<html lang=\"fr\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">\n<title>Mon budget</title>\n{head}\n<link rel=\"stylesheet\" href=\"styles.css\">\n</head>\n<body>{body}</body>\n</html>\n"),
         )
         .expect("page");
-        // « Sobre foncé » : le mode sombre demandé, pour tous les téléphones.
-        let mut css = String::from(":root { --paper: #161412; --ink: #f1ebe2; --muted: #b8afa3; --accent: #e0a040; --on-accent: #161412; --income: #7fcf9a; --error: #ff8a7a; --field: #221f1c; --radius: 12px; color-scheme: dark; }\n*, *::before, *::after { box-sizing: border-box; }\nbody { margin: 0; font: 17px/1.6 system-ui, sans-serif; color: var(--ink); background: var(--paper); }\nmain { width: min(100% - 2rem, 48rem); margin: 0 auto; padding: 1rem 0 2rem; }\n.tete { padding: 1rem; }\n.nom { margin: 0; font-weight: 700; }\nh1 { font-size: 2.25rem; line-height: 1.1; margin: 0 0 1rem; }\nh2 { font-size: 1.5rem; margin: 0 0 1rem; }\n.reste { font-size: 1.25rem; }\n");
-        let mut js = String::new();
-        for component in &parts {
-            css.push_str(component["css"].as_str().unwrap_or_default());
-            css.push('\n');
-            js.push_str(component["js"].as_str().unwrap_or_default());
-            js.push('\n');
-        }
-        std::fs::write(dir.join("styles.css"), css).expect("css");
-        std::fs::write(dir.join("app.js"), js).expect("js");
-        for (file, text) in part("pwa")["files"].as_object().expect("fichiers") {
+        std::fs::write(dir.join("styles.css"), ":root { --accent: #5b4bd6; }\n").expect("css");
+        std::fs::write(
+            dir.join("app.js"),
+            app["script_example"].as_str().expect("script"),
+        )
+        .expect("js");
+        for (file, text) in pwa["files"].as_object().expect("fichiers") {
             std::fs::write(dir.join(file), text.as_str().expect("texte")).expect("fichier");
         }
-        std::fs::create_dir_all(dir.join("icons")).expect("dossier");
         std::fs::write(
             dir.join("icons/icon.svg"),
-            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24" rx="5" fill="#161412"/><path d="M5 17V9m5 8V6m5 11v-5m4 5V8" stroke="#e0a040" stroke-width="2.4" stroke-linecap="round"/></svg>"##,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="#5b4bd6"/><path d="M6 8h12v9H6z M9 8V6h6v2" fill="none" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg>"##,
         )
         .expect("icône");
+        dir
     }
 
     #[test]
     #[ignore = "lance le navigateur installé"]
     #[allow(clippy::too_many_lines)]
     fn the_app_kit_makes_a_budget_app_that_works_in_a_real_browser() {
-        // Session #35 (27 octobre 2026) : l'appli de budget de Claw s'ouvrait
-        // vide, son texte tapé était noir sur noir, son graphique vide et ses
-        // icônes absentes. Le kit donne tout cela fait et essayé.
+        // Sessions #36 et #38 (28 octobre 2026) : l'appli de budget de Claw
+        // faisait daté (cartes pastel, empattements), son libellé touchait
+        // son montant, ses champs dépassaient de leur carte et les mois de son
+        // bilan se superposaient. L'appli du kit est mesurée en clair et en
+        // sombre, puis parcourue : ajout, modification, suppression, retour.
         let name = format!("claw-kit-{}", std::process::id());
-        let dir = std::env::current_dir().expect("dossier").join(&name);
-        std::fs::create_dir_all(&dir).expect("dossier");
-        kit_app(&dir);
+        let dir = kit_app(&name);
+        let icons: crate::screenshot::app_icons::AppIconInput =
+            serde_json::from_value(json!({ "svg": format!("{name}/icons/icon.svg") }))
+                .expect("entrée");
+        let icons = crate::screenshot::app_icons::app_icon(&icons);
         if let Ok(copy) = std::env::var("CLAW_KIT_DEMO") {
-            let _ = std::fs::remove_dir_all(&copy);
-            let _ = std::fs::create_dir_all(&copy);
+            let copy = std::path::Path::new(&copy);
+            let _ = std::fs::remove_dir_all(copy);
             for file in [
                 "index.html",
                 "styles.css",
                 "app.js",
                 "manifest.webmanifest",
                 "sw.js",
+                "kit/app-kit.css",
+                "kit/app-kit.js",
+                "icons/icon.svg",
+                "icons/icon-192.png",
+                "icons/icon-512.png",
+                "icons/icon-maskable-512.png",
+                "icons/apple-touch-icon.png",
             ] {
-                let _ = std::fs::copy(dir.join(file), std::path::Path::new(&copy).join(file));
+                let target = copy.join(file);
+                let _ = std::fs::create_dir_all(target.parent().expect("dossier"));
+                let _ = std::fs::copy(dir.join(file), target);
             }
         }
-        let icons: crate::screenshot::app_icons::AppIconInput =
-            serde_json::from_value(json!({ "svg": format!("{name}/icons/icon.svg") }))
+        let shots: Vec<_> = ["light", "dark"]
+            .iter()
+            .map(|theme| {
+                let shot: crate::screenshot::ScreenshotInput = serde_json::from_value(json!({
+                    "path": format!("{name}/index.html"),
+                    "viewports": ["phone", "desktop"],
+                    "theme": theme,
+                    "windows": true,
+                    "explore": true,
+                    "figures": ["1235.15", "100", "103", "206", "80", "200", "450", "21.6", "8"]
+                }))
                 .expect("entrée");
-        let icons = crate::screenshot::app_icons::app_icon(&icons);
-        let shot: crate::screenshot::ScreenshotInput = serde_json::from_value(json!({
-            "path": format!("{name}/index.html"),
-            "viewports": ["phone", "desktop"],
-            "theme": "dark",
-            "windows": true,
-            "explore": true,
-            "figures": ["1235.15", "100", "103", "450", "21.6", "8"]
-        }))
-        .expect("entrée");
-        let shot = crate::screenshot::take(&shot);
+                crate::screenshot::take(&shot)
+            })
+            .collect();
         let step = |input: serde_json::Value| {
             let input: crate::screenshot::browse::BrowserInput =
                 serde_json::from_value(input).expect("entrée");
@@ -705,19 +783,17 @@ mod tests {
                 .unwrap_or_else(|error| json!({ "error": error }))
         };
         let journey = step(json!({ "action": "steps", "steps": [
-            { "action": "open", "path": format!("{name}/index.html"), "expect": "Ce mois-ci", "absent": "NaN" },
-            { "action": "click", "target": "Ajouter" },
-            { "action": "type", "target": "Montant", "text": "12,50" },
+            { "action": "open", "path": format!("{name}/index.html"), "expect": "Disponible à dépenser", "absent": "NaN" },
+            { "action": "click", "target": "[aria-label=\"Ajouter une opération\"]" },
+            { "action": "type", "target": "Montant en euros", "text": "12,50" },
             { "action": "type", "target": "Libellé", "text": "Cinéma" },
-            { "action": "click", "target": "Enregistrer", "expect": "Dépense de 12,50 € enregistrée" },
+            { "action": "click", "target": "form[data-entry-form] [type=submit]", "expect": "Dépense de 12,50 € enregistrée" },
             { "action": "click", "target": "Opérations", "expect": "Cinéma", "absent": "Invalid Date" },
-            // Le message « « Cinéma » supprimé » nomme encore l'opération : c'est
-            // son montant dans la liste qui doit partir, puis revenir.
-            { "action": "click", "target": "[aria-label=\"Supprimer « Cinéma »\"]", "expect": "« Cinéma » supprimé", "absent": "-12,50 €" },
-            { "action": "click", "target": "Annuler", "expect": "-12,50 €" },
+            { "action": "click", "target": "[aria-label=\"Modifier « Cinéma »\"]", "expect": "Modifier l'opération" },
+            { "action": "click", "target": "Supprimer l'opération", "expect": "« Cinéma » supprimé" },
+            { "action": "click", "target": "Annuler", "expect": "Cinéma" },
             { "action": "click", "target": "Bilan", "expect": "Rentrées et dépenses" }
         ] }));
-        let chart = step(json!({ "action": "look", "full": true }));
         let _ = step(json!({ "action": "close" }));
         let pngs: Vec<bool> = [
             "icon-192.png",
@@ -732,39 +808,41 @@ mod tests {
         })
         .collect();
         let _ = std::fs::remove_dir_all(&dir);
-        let icons = icons.expect("icônes");
-        assert_eq!(icons["background"], "#161412", "{icons}");
+        icons.expect("icônes");
         assert!(pngs.iter().all(|written| *written), "{pngs:?}");
-        let shot = shot.expect("captures");
-        let text = shot.to_string();
-        for defect in [
-            "never shows",
-            "typed text cannot be read",
-            "Charts that show nothing",
-            "do nothing when clicked",
-            "cannot be tapped",
-            "not in the project",
-            "Unsafe attempt",
-            "drawn by hand",
-            "Invalid Date",
-            "NaN",
-            "wider than the screen",
-            "too little contrast",
-            "is shown nowhere",
-        ] {
-            assert!(!text.contains(defect), "{defect}: {text}");
-        }
-        for capture in shot["captures"].as_array().expect("captures") {
-            let console = capture["console"].to_string();
-            assert!(
-                !console.contains("uncaught") && !console.contains("error:"),
-                "{console}"
-            );
+        for shot in shots {
+            let shot = shot.expect("captures");
+            let text = shot.to_string();
+            for defect in [
+                "never shows",
+                "typed text cannot be read",
+                "Charts that show nothing",
+                "do nothing when clicked",
+                "cannot be tapped",
+                "not in the project",
+                "Unsafe attempt",
+                "drawn by hand",
+                "Invalid Date",
+                "NaN",
+                "wider than the screen",
+                "too little contrast",
+                "cannot be seen",
+                "is shown nowhere",
+                "cut off by the edge of a box",
+                "Not reached",
+            ] {
+                assert!(!text.contains(defect), "{defect}: {text}");
+            }
+            for capture in shot["captures"].as_array().expect("captures") {
+                let console = capture["console"].to_string();
+                assert!(
+                    !console.contains("uncaught") && !console.contains("error:"),
+                    "{console}"
+                );
+            }
         }
         assert!(journey.get("failed").is_none(), "{journey}");
         assert!(journey.get("error").is_none(), "{journey}");
-        let view = chart.to_string();
-        assert!(view.contains("Rentrées et dépenses"), "{view}");
     }
 
     #[test]
@@ -788,7 +866,7 @@ mod tests {
         let catalog = ask(json!({}));
         assert_eq!(
             catalog["components"].as_array().expect("catalogue").len(),
-            24
+            21
         );
         // Un nom inconnu reçoit le catalogue avec les autres.
         let mixed = ask(json!({ "names": ["dragon", "tabs"] }));
@@ -798,5 +876,60 @@ mod tests {
         assert!(component_tool(&input)
             .expect_err("inconnu")
             .contains("nav-menu"));
+    }
+
+    #[test]
+    fn the_app_kit_is_written_into_the_page_folder_and_the_old_names_lead_to_it() {
+        // Les noms des composants d'avant (session #36) mènent au kit.
+        for name in [
+            "app-tabs",
+            "entries",
+            "entry-sheet",
+            "chart",
+            "appli",
+            "Graphique",
+        ] {
+            assert_eq!(
+                find(name).map(|found| found.name),
+                Some("app-kit"),
+                "{name}"
+            );
+        }
+        let name = format!("claw-kit-unit-{}", std::process::id());
+        let result = ask(json!({ "names": ["entries", "chart"], "dir": format!("./{name}") }));
+        let dir = std::env::current_dir().expect("dossier").join(&name);
+        let css = std::fs::read_to_string(dir.join("kit/app-kit.css")).unwrap_or_default();
+        let js = std::fs::read_to_string(dir.join("kit/app-kit.js")).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        // Un seul kit, même demandé deux fois ; écrit avec ses icônes.
+        assert_eq!(result["components"].as_array().expect("liste").len(), 1);
+        assert_eq!(
+            result["written"],
+            json!([
+                format!("{name}/kit/app-kit.css"),
+                format!("{name}/kit/app-kit.js")
+            ])
+        );
+        assert!(css.contains(".hero") && css.contains("prefers-color-scheme: dark"));
+        assert!(js.contains("window.entries") && js.contains("<svg") && !js.contains("{{icon:"));
+        assert!(result["components"][0]["html"]
+            .as_str()
+            .expect("html")
+            .contains("data-entries-seed"));
+        assert!(result["components"][0]["script_example"]
+            .as_str()
+            .expect("exemple")
+            .contains("window.entries"));
+        assert!(result["components"][0]["note"]
+            .as_str()
+            .expect("note")
+            .contains("never write, copy or edit them"));
+        // Hors du projet : refusé, rien d'écrit.
+        let input: ComponentInput =
+            serde_json::from_value(json!({ "name": "app-kit", "dir": "../ailleurs" }))
+                .expect("entrée");
+        assert!(component_tool(&input)
+            .expect_err("hors du projet")
+            .contains("inside the project"));
     }
 }

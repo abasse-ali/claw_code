@@ -37,6 +37,18 @@ class AgentEnvTest(unittest.TestCase):
         self.assertEqual(run.deadline({}), "")
         self.assertEqual(run.deadline({"CLAW_JOB_STARTED": "hier"}), "")
 
+    def test_a_designer_conceives_and_the_session_model_builds_to_the_end(self):
+        env = run.model_settings({})
+        self.assertEqual(env["CLAW_DESIGNER_MODEL"].split(",")[0], "nvidia:z-ai/glm-5.3")
+        self.assertNotIn("inkling", env["CLAW_DESIGNER_MODEL"])
+        self.assertEqual(env["CLAW_ESCALATION_MODEL"], "off")
+        self.assertEqual(env["CLAW_DESIGN_MODEL"], "off")
+        # Un réglage déjà là (variable du dépôt de sessions) l'emporte.
+        env = run.model_settings({"CLAW_ESCALATION_MODEL": "free", "CLAW_DESIGNER_MODEL": "kimi"})
+        self.assertEqual((env["CLAW_ESCALATION_MODEL"], env["CLAW_DESIGNER_MODEL"]), ("free", "kimi"))
+        # Le faux modèle n'appelle aucun vrai modèle.
+        self.assertEqual(run.model_settings({}, mock=True), {"CLAW_DESIGNER_MODEL": "off"})
+
     def test_the_mock_model_gets_no_real_key(self):
         env = run.agent_env(SECRETS, mock=True)
         self.assertNotIn("OPENROUTER_API_KEY", env)

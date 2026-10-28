@@ -223,6 +223,39 @@ pub(crate) fn design_model_setting() -> Option<String> {
     }
 }
 
+/// Modèles de la conception d'une interface, dans l'ordre (`designerModel`,
+/// `CLAW_DESIGNER_MODEL`, séparés par des virgules) ; `off` la coupe.
+pub(crate) fn designer_models_setting() -> Vec<String> {
+    let listed: Vec<String> = match env::var("CLAW_DESIGNER_MODEL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(value) => value
+            .split(',')
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        None => env::current_dir()
+            .ok()
+            .and_then(|cwd| ConfigLoader::default_for(&cwd).load().ok())
+            .map(|config| config.designer_models().to_vec())
+            .unwrap_or_default(),
+    };
+    if listed.iter().any(|model| {
+        matches!(
+            model.to_ascii_lowercase().as_str(),
+            "off" | "none" | "non" | "aucun" | "false" | "0"
+        )
+    }) {
+        return Vec::new();
+    }
+    listed
+        .iter()
+        .map(|model| api::resolve_model_alias(model))
+        .collect()
+}
+
 /// Modèle qui reprend la fin d'un tour quand l'agent n'avance plus
 /// (`escalationModel`, `CLAW_ESCALATION_MODEL`).
 #[derive(Debug, Clone, PartialEq, Eq)]

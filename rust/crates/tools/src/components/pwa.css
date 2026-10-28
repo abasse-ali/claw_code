@@ -1,2 +1,2 @@
 /* Ouverte depuis l'écran d'accueil, l'appli passe sous la barre d'état : le haut de la page s'en écarte. */
-@media (display-mode: standalone) { body { padding-top: env(safe-area-inset-top); } }
+@media (display-mode: standalone) { body:not(:has(.app-bar)) { padding-top: env(safe-area-inset-top); } }

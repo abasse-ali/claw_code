@@ -31,10 +31,25 @@
     }
     return name;
   };
+  // Toute couleur CSS en #rrggbb : rgb() se lit, les autres (color-mix(),
+  // oklch()...) le navigateur les peint sur un pixel.
+  const painter = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
   const hex = (color) => {
-    const match = /rgba?\(([^)]+)\)/.exec(color || "");
-    if (!match) return color;
-    const [r, g, b, a] = match[1].split(",").map(Number);
+    const text = String(color || "").trim();
+    let r; let g; let b; let a = 1;
+    const match = /^rgba?\(([^)]+)\)$/.exec(text);
+    if (match) {
+      [r, g, b, a = 1] = match[1].split(/[\s,/]+/).filter(Boolean).map(Number);
+    } else if (painter) {
+      painter.fillStyle = "#010203";
+      painter.fillStyle = text;
+      if (painter.fillStyle === "#010203") return color;
+      painter.clearRect(0, 0, 1, 1);
+      painter.fillRect(0, 0, 1, 1);
+      const data = painter.getImageData(0, 0, 1, 1).data;
+      [r, g, b] = data;
+      a = data[3] / 255;
+    } else return color;
     if (a === 0) return "transparent";
     return `#${[r, g, b].map((value) => Math.round(value).toString(16).padStart(2, "0")).join("")}`;
   };
