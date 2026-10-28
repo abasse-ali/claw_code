@@ -460,7 +460,8 @@
       mark(false);
       if (form.elements.date) form.elements.date.value = item ? item.date : today();
       if (item) {
-        if (amount) amount.value = String(Math.abs(item.amount)).replace(".", ",");
+        const value = Math.abs(item.amount);
+        if (amount) amount.value = Number.isInteger(value) ? String(value) : value.toFixed(2).replace(".", ",");
         if (form.elements.label) form.elements.label.value = item.label;
         const kind = form.querySelector(`input[name=kind][value="${item.amount > 0 ? "in" : "out"}"]`);
         if (kind) kind.checked = true;

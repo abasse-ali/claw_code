@@ -4307,6 +4307,72 @@ mod tests {
         assert!(!printed.contains("do nothing when clicked"), "{printed}");
     }
 
+    /// Session #36 (28 octobre 2026), l'appli de budget « qui fait vieux,
+    /// moche, pleine d'incohérences et de bugs graphiques » : libellé collé à
+    /// son montant, dates collées au bord dans un cadre en overflow-x: hidden,
+    /// noms des mois superposés, champ sorti de sa carte, « Voir tout » sur
+    /// deux lignes, montants écrits avec un point et avec une virgule. Le
+    /// contenu d'un <details> fermé n'est pas dessiné : rien n'y est dit.
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn the_graphic_bugs_of_session_36_are_measured_in_a_real_browser() {
+        use std::fmt::Write as _;
+        let cwd = std::env::current_dir().expect("dossier");
+        let name = format!("claw-bugs-{}", std::process::id());
+        let dir = cwd.join(&name);
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let mut labels = String::new();
+        for (index, month) in [
+            "juil", "août", "sept", "oct", "nov", "déc", "janv", "févr", "mars", "avr", "mai",
+            "juin",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let _ = write!(
+                labels,
+                "<text x=\"{}\" y=\"110\" font-size=\"13\">{month}</text>",
+                12 + index * 22
+            );
+        }
+        std::fs::write(
+            dir.join("index.html"),
+            format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Budget</title><style>body {{ margin: 0; font: 16px/1.5 sans-serif; color: #1f1d1a; background: #f5f3f0; }} .frame {{ overflow-x: hidden; }} main {{ padding: 16px; }} .ops {{ margin: 0 -16px; padding: 0; list-style: none; }} .op {{ display: flex; align-items: center; gap: 12px; padding: 8px 0; }} .what {{ display: flex; gap: 0; }} .card {{ width: 300px; padding: 12px; border-radius: 12px; background: #ffffff; }} .card input {{ width: 340px; font: inherit; padding: 8px; }} .head {{ display: flex; align-items: center; justify-content: space-between; width: 230px; }} .head h2 {{ margin: 0; font-size: 26px; }} .head a {{ color: #8a3b12; }}</style></head><body><div class=\"frame\"><main><h1>Mon budget</h1><div class=\"head\"><h2>Dernières opérations</h2><a href=\"#ops\">Voir tout</a></div><ul class=\"ops\" id=\"ops\"><li class=\"op\"><span class=\"date\">28 oct.</span><span class=\"what\"><strong>Alimentaire</strong><span class=\"amount\">-100,00 €</span></span></li></ul><p>Total du mois : 1 235,15 €</p><div class=\"card\"><label for=\"salaire\">Salaire</label><input id=\"salaire\" value=\"1235.15\"></div><svg width=\"300\" height=\"120\" viewBox=\"0 0 300 120\" role=\"img\" aria-label=\"Rentrées des 12 derniers mois\"><rect x=\"10\" y=\"20\" width=\"8\" height=\"70\" fill=\"#2f7d4f\"/>{labels}</svg><details><summary>Détail par mois</summary><table><tr><th>Mois</th><td>0,00 €</td></tr></table></details></main></div></body></html>"),
+        )
+        .expect("html");
+        let mut request = input(None, Some(&format!("{name}/index.html")));
+        request.viewports = Some(json!(["phone"]));
+        let result = super::take(&request);
+        let _ = std::fs::remove_dir_all(&dir);
+        let page = result.expect("capture")["captures"][0]["problems"].to_string();
+        assert!(page.contains("Texts that touch or run into each other on the same line: \\\"Alimentaire\\\" and \\\"-100,00 €\\\""), "{page}");
+        assert!(
+            page.contains("Text touches the edge of the 390px-wide phone screen")
+                && page.contains("28 oct."),
+            "{page}"
+        );
+        assert!(
+            page.contains("Labels of a chart drawn over each other"),
+            "{page}"
+        );
+        assert!(
+            page.contains("Elements sticking out of the box they sit in: input#salaire"),
+            "{page}"
+        );
+        assert!(
+            page.contains("Short labels broken over two lines: a \\\"Voir tout\\\""),
+            "{page}"
+        );
+        assert!(
+            page.contains("Numbers written two ways on this French page")
+                && page.contains("1235.15"),
+            "{page}"
+        );
+        // Le tableau du <details> fermé : rien de dit sur lui.
+        assert!(!page.contains("drawn on top of each other"), "{page}");
+        assert!(!page.contains("\\\"Mois\\\""), "{page}");
+    }
+
     /// Session #35 (27 octobre 2026), l'appli de budget : servie en http (plus
     /// d'erreur `file://`), menu en tiroir hors de l'écran (pas « déjà là »),
     /// menu refermé après son essai (aucun bouton « impossible à toucher »),

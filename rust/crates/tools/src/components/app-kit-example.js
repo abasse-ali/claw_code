@@ -81,10 +81,12 @@
     if (field === "max") label.insertAdjacentHTML("beforeend", "<small>au plus</small>");
     else if (kind === "incomes" && item.min !== item.max) label.insertAdjacentHTML("beforeend", "<small>au moins</small>");
     const input = row.querySelector("input");
-    input.value = String(item[field]).replace(".", ",");
+    // « 21,60 », « 450 » : les centimes seulement quand il y en a.
+    const written = (value) => (Number.isInteger(value) ? String(value) : value.toFixed(2).replace(".", ","));
+    input.value = written(item[field]);
     input.addEventListener("change", () => {
       const value = window.entries.parseAmount(input.value);
-      if (!(value >= 0)) { input.value = String(item[field]).replace(".", ","); window.toast("Un montant comme 12,50.", { tone: "error" }); return; }
+      if (!(value >= 0)) { input.value = written(item[field]); window.toast("Un montant comme 12,50.", { tone: "error" }); return; }
       item[field] = Math.round(value * 100) / 100;
       if (kind === "incomes" && item.min > item.max) item.max = item.min;
       save();

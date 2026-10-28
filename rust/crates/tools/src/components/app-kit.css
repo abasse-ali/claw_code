@@ -276,7 +276,7 @@
 .form { display: grid; gap: 14px; }
 .field { display: grid; gap: 6px; min-width: 0; }
 .field > label, .field__label { color: var(--muted); font-size: 0.8125rem; font-weight: 600; }
-.input, .money > input, .field input:not([type="checkbox"], [type="radio"], [type="range"]), .field select, .field textarea {
+.input, .money, .field input:not([type="checkbox"], [type="radio"], [type="range"]), .field select, .field textarea {
   width: 100%; min-width: 0; min-height: 48px; padding: 0 14px;
   border: 1px solid var(--line); border-radius: var(--radius-sm);
   background: var(--field); color: var(--ink); font-size: 1rem;
@@ -285,16 +285,18 @@
 .field textarea { min-height: 96px; padding: 12px 14px; resize: vertical; }
 .field select { appearance: none; padding-right: 40px; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 20px) 21px, calc(100% - 15px) 21px; background-size: 5px 5px; background-repeat: no-repeat; }
 .input::placeholder, .field input::placeholder, .field textarea::placeholder { color: var(--faint); opacity: 1; }
-.input:focus, .money > input:focus, .field input:focus, .field select:focus, .field textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.input:focus, .money:focus-within, .field input:focus, .field select:focus, .field textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .field select option { background: var(--surface); color: var(--ink); }
 .field__help { color: var(--faint); font-size: 0.75rem; }
 .field__error { display: none; color: var(--error); font-size: 0.8125rem; }
 .field.is-invalid input, .field.is-invalid select { border-color: var(--error); }
 .field.is-invalid .field__error { display: block; }
 .field-row { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 10px; }
-.money { position: relative; }
-.money > input { padding-right: 40px; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
-.money > span { position: absolute; top: 50%; right: 14px; color: var(--faint); font-weight: 600; transform: translateY(-50%); pointer-events: none; }
+/* Un montant : le cadre d'un champ, le nombre à droite, l'unité à côté (jamais posée sur le champ). */
+.money { display: flex; align-items: center; gap: 6px; padding: 0 14px 0 0; cursor: text; }
+.money > input { flex: 1; width: 100%; min-width: 0; min-height: 46px; padding: 0 0 0 14px; border: 0; background: transparent; color: var(--ink); text-align: right; font-size: 1rem; font-variant-numeric: tabular-nums; font-weight: 600; }
+.money > input:focus { outline: none; }
+.money > span { flex: none; color: var(--faint); font-weight: 600; }
 .settings { display: grid; }
 .settings > .setting { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 8px 0; border-top: 1px solid var(--line); }
 .settings > .setting:first-child { border-top: 0; }
@@ -374,7 +376,7 @@ body:has(dialog[open]) { overflow: hidden; }
 .chart__plot { min-height: 180px; }
 .chart__plot svg { display: block; width: 100%; height: auto; overflow: visible; }
 .chart__grid { stroke: var(--line); stroke-width: 1; }
-.chart__axis { fill: var(--faint); font: 500 11px var(--font-text); font-variant-numeric: tabular-nums; }
+.chart__axis { fill: var(--faint); font: 500 12px var(--font-text); font-variant-numeric: tabular-nums; }
 .chart__bar { transform-box: fill-box; transform-origin: bottom; animation: kit-grow 0.5s ease-out both; }
 .chart__bar--in { fill: var(--income); }
 .chart__bar--out { fill: var(--accent); }
