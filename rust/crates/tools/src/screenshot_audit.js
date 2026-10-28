@@ -1194,14 +1194,19 @@
   // 16h. Bouton d'ajout de la barre d'onglets décentré : deux onglets d'un
   // côté, un de l'autre. Vu le 28 octobre 2026 (session #39) : un onglet
   // retiré, le bouton « + » restait entre le deuxième et le troisième.
+  // Les onglets eux-mêmes, de part et d'autre du bouton : une cale vide ou
+  // des onglets rangés dans deux blocs (vus dans le second passage de #39)
+  // ne le centrent pas.
+  const middle = (el) => {
+    const rect = el.getBoundingClientRect();
+    return rect.left + rect.width / 2;
+  };
   for (const bar of document.querySelectorAll(".tabbar, [data-app-tabs]")) {
-    const add = bar.querySelector(":scope > .tabbar__add");
+    const add = bar.querySelector(".tabbar__add");
     if (!add || !shown(bar) || !shown(add)) continue;
-    // Les onglets seulement : une cale vide posée pour pousser le bouton au
-    // milieu (vu dans le second passage de #39) ne compte pas.
-    const items = [...bar.children].filter((el) => shown(el) && (el === add || el.matches("a, button, [role=tab]") || words(el)));
-    const before = items.indexOf(add);
-    const after = items.length - 1 - before;
+    const tabs = [...bar.querySelectorAll("a, button, [role=tab]")].filter((el) => el !== add && shown(el) && !add.contains(el) && !el.parentElement.closest("a, button"));
+    const before = tabs.filter((el) => middle(el) < middle(add)).length;
+    const after = tabs.length - before;
     if (Math.abs(before - after) === 1) {
       blame([add]);
       problems.push(`The add button of the tab bar sits off-centre, ${before} tab${before > 1 ? "s" : ""} on its left and ${after} on its right: ${name(add)}. Keep as many tabs on each side of it (two and two), or move it out of the bar`);

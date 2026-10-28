@@ -47,8 +47,10 @@ design (GLM-5.3, sinon Gemini 3.6 Flash ou MiniMax M3.1 Flash) écrit le plan et
 jusqu'au bout ; lots 10 à 13 et la suite dans ce fichier. Troisième volet le même jour (« le site
 fait vieux… plein d'incohérences et bugs graphiques ») : kit d'appli refait au niveau de l'appli de
 Claude et écrit dans le projet, méthode, concepteur et juge propres aux applis perso, bugs
-graphiques mesurés (lots 14 à 17) ; essai réel #39 : 11/12 au banc t9 au premier passage,
-puis les défauts de tous les écrans mesurés avec leurs règles CSS (lot 18) avant le second.
+graphiques mesurés (lots 14 à 17) ; essai réel #39 en deux passages, 11/12 au banc t9 (8/12
+pour #36), puis les défauts de tous les écrans mesurés avec leurs règles CSS (lot 18) et la
+feuille de style rapiécée signalée dès l'écriture (lot 19) ; fusionnés dans `main` le
+28 octobre 2026.
 
 Reprise automatique : arrêtée. Le 12 octobre 2026, l'utilisateur avait demandé que la
 session reprenne d'elle-même (« continue ») à 6 h 22 puis toutes les 5 heures. Le 14 octobre
