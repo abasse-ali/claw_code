@@ -120,7 +120,53 @@ Claw la remet en place et lui dit de mettre ses règles dans `styles.css`
 | 10. Conception | Réglage `designerModel` (texte ou liste ; `CLAW_DESIGNER_MODEL`, `off` le coupe). Au début d'un tour de création d'interface (méthode de design jointe, pas de page déjà là sauf refonte demandée), le runtime demande au modèle de conception (`ApiClient::design_conception`, patience `Patience::DESIGN` : 2 min pour un premier signe de vie, 7 min par modèle, 12 en tout, 32 000 jetons) un **plan** (brief, direction, 5 à 8 couleurs nommées, deux polices de la bibliothèque de l'outil `Font`, espacements, écrans bloc par bloc, composants, mouvement, marques interdites dont « plusieurs cartes de couleurs différentes côte à côte ») et **`base.css`** (jetons que lit le kit : `--paper`, `--surface`, `--ink`, `--muted`, `--line`, `--accent`, `--on-accent`, `--income`, `--error`, `--field`, `--radius`, `--font-display`, `--font-text` ; clair et sombre ; le socle ; l'allure de base des titres, montants, boutons, surfaces, lignes de liste à pastille, champs, puces). Claw écrit `base.css` (marqué en tête ; `claw-base.css` si l'utilisateur a déjà son `base.css`), joint le plan à la demande (`conception_note` : ne pas écrire d'autre plan, lier `base.css` avant sa propre feuille, ne jamais redéfinir ses jetons), et la revue du plan est sautée (le plan est celui du concepteur). Sans réponse : le modèle de la session conçoit lui-même, comme avant (`web_design.rs` : `designer_prompt`, `parse_conception`, `has_interface_page` ; `conversation.rs` : `design_conception`) | fait (test de conversation, tests unitaires) |
 | 11. Nemotron jusqu'au bout | Claw Web (`run.py`, `model_settings`) : conception par GLM-5.3, puis Gemini 3.6 Flash et MiniMax M3.1 Flash, ni escalade ni tour de design confié à un autre modèle ; le faux modèle n'appelle aucun modèle de conception | fait (test Python) |
 | 12. Plancher néobanque | Kit `entries` : chaque opération en ligne de néobanque (pastille ronde de la catégorie, nom, « catégorie · jour » dessous, montant à droite, dernière ligne sans trait). Règle du composant : un montant donné en fourchette compte à son bout le moins favorable (le bas d'un gain, le haut d'une dépense), un montant marqué non sûr reste dehors jusqu'à sa réception, le meilleur des cas peut s'afficher à côté | fait (essais navigateur du kit) |
-| 13. Livraison | Vérification complète, essai réel (2 passages au plus, « Néobanque » si Claw demande le style), comparaison avec #35 et #36, fusion directe dans `main` | en cours |
+| 13. Livraison | Vérification complète, essai réel (2 passages au plus, « Néobanque » si Claw demande le style), comparaison avec #35 et #36, fusion directe dans `main` | repris au lot 17 (troisième volet) : #37 arrêté au bout de 3 min, #38 arrêté à 4 h 49 |
+
+## Troisième volet : le kit d'appli refait (28 octobre 2026)
+
+Le 28 octobre 2026 vers 4 h 40, l'utilisateur, sur l'appli de #36 et l'essai #38 en cours :
+« Le site fait vieux et pas du tout à la hauteur de mes exigences, c'est juste moche et plein
+d'incohérences et bugs graphiques ». Choix demandé (deux sessions travaillaient en même
+temps) : **« Tout reprendre ici »** (session `017wjLwq`), l'autre session arrêtée ; #38
+arrêté à 4 h 49. Ce volet part de la branche `claude/eloquent-mccarthy-17goou` (lots 10 à
+12) et garde ses décisions (gratuit, conception par un modèle de design, Nemotron jusqu'au
+bout, style néobanque).
+
+Ce qui se voyait au téléphone (captures de #36 rejouées ; captures de #38 sur la branche
+`claw-web-fichiers` de `claw-sessions`) : #36, pas de barre du haut, carte du solde collée
+en haut, cartes pastel bordées (vert, brun, jaune), « Alimentaire-100,00 € » (libellé
+collé au montant), « Dernières opérations » et « Voir tout » coupés sur deux lignes, dates
+collées au bord de l'écran, noms des douze mois du bilan superposés, champs des réglages
+sortis de leur carte, « 1235.15 » à côté de « 1 235,15 € ». #38 : Newsreader (empattements)
+pour les titres et les montants, « Budget Personal », « + + Saisie rapide », grande carte
+blanche vide pour le solde. L'appli de Claude (`budget_claude`) sert de mesure : carte du
+solde en dégradé, cartes neutres, lignes à pastilles, barre d'onglets flottante avec bouton
+d'ajout, volet d'ajout soigné, police du téléphone, clair et sombre.
+
+Causes dans Claw : la méthode et le juge d'un site vitrine appliqués à une appli (police
+« à soi », jamais `system-ui`, titre d'affiche, ornements), un kit fait de composants que le
+modèle recopiait et retouchait, et des mesures aveugles à ces défauts (couleurs
+`color-mix()` jamais lues, textes qui se touchent, étiquettes superposées, élément sorti de
+sa carte, cadre de page en `overflow-x: hidden` qui cachait les débordements).
+
+| Lot | Contenu | État |
+|---|---|---|
+| 14. Kit d'appli refait (`a2de1f1`) | Composant `app-kit` (les noms `app-tabs`, `entries`, `entry-sheet`, `chart` y mènent) : l'outil `Component` écrit `kit/app-kit.css` et `kit/app-kit.js` dans le dossier de la page (`dir`), rend le squelette de la page et un exemple de script d'appli (`app-kit-example.js`, l'appli de budget de la demande). Barre du haut avec le mois, écrans derrière une barre d'onglets flottante avec bouton d'ajout, carte du solde en dégradé (teinte de l'accent tournée), pavés, cartes et lignes à pastilles, pastilles d'état, jauges, graphique (noms des mois espacés), réglages, état vide, volet d'ajout et de modification (montant en grand, montants rapides, catégories), messages avec « Annuler », clair et sombre. Jetons posés sans poids (`:where`) : ceux de l'appli gagnent toujours ; texte sur l'accent et accent en texte lisibles quel que soit l'accent. Mesures : toute couleur CSS lue (pas seulement `rgb()`) ; une appli (barre d'onglets et écrans) n'est plus poussée vers un titre d'affiche ni une police « à soi » | fait (essai navigateur du kit) |
+| 15. Méthode d'appli (`a02908e`) | `is_personal_app` (appli, app, PWA, avec budget, perso, carnet, suivi…) : méthode d'appli (`app_method` : les chiffres de l'utilisateur d'abord, le kit en un appel, le squelette suivi, les blocs du kit seulement, la police du téléphone, le parcours vérifié en un appel), concepteur d'appli (jetons de couleur et plan des écrans en blocs du kit, aucune police), note de conception (lier `kit/app-kit.css`, puis `base.css`, puis la feuille de l'appli), juge et revue du plan d'une appli de téléphone (Revolut, Lydia), pas d'un site. Kit : accent en texte mêlé à l'encre (juste aussi en sombre imposé), graphique de l'exemple dessiné dès le premier lancement | fait (tests de conversation et unitaires) |
+| 16. Bugs graphiques mesurés (`df1e9cd`) | Audit de `Screenshot` : textes qui se touchent sur une ligne, étiquettes d'un graphique superposées, élément sorti sur le côté de sa carte, libellé court coupé sur deux lignes, nombres écrits de deux façons (page en français), texte collé au bord étendu aux dates et montants, cadre de page en `overflow-x: hidden` ignoré, contenu d'un `<details>` fermé non compté | fait (essai navigateur des défauts de #36, aucune fausse alerte sur l'appli de Claude ni sur le kit) |
+| 17. Livraison | Essai réel avec l'accord de l'utilisateur, comparaison avec #35, #36 et #38, fusion directe dans `main` | à faire |
+
+Banc t9-budget sur l'appli d'exemple du kit (squelette et exemple tels quels) : 11/12 quand
+elle suit le téléphone (seul « sombre même sur un téléphone en clair » manque, la demande
+n'ayant pas « sobre foncé »), 12/12 avec des jetons sombres imposés comme le concepteur les
+écrirait. Mesures de `Screenshot` (phone et desktop, clair et sombre, fenêtres et écrans
+explorés) : aucun défaut.
+
+Essais : `the_app_kit_makes_a_budget_app_that_works_in_a_real_browser` (l'appli du kit,
+mesurée et parcourue : ajout, modification, suppression, « Annuler » ; `CLAW_KIT_DEMO=dossier`
+en garde une copie), `the_app_kit_is_written_into_the_page_folder_and_the_old_names_lead_to_it`,
+`the_graphic_bugs_of_session_36_are_measured_in_a_real_browser`,
+`a_personal_app_gets_the_app_method_the_app_designer_and_the_app_judge`.
 
 ## Suite, dans l'ordre
 

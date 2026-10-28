@@ -44,7 +44,10 @@ barres gardées à 8) : les neuf lots sont faits et fusionnés dans `main` le 27
 (essai réel : session #36, 8/12 au banc t9 contre 4/12 pour #35, en 62 min au lieu de 109).
 Second volet le 28 octobre 2026 (« c'est toujours moche ») : le meilleur modèle gratuit en
 design (GLM-5.3, sinon Gemini 3.6 Flash ou MiniMax M3.1 Flash) écrit le plan et `base.css`, puis Nemotron 3 Ultra code tout,
-jusqu'au bout ; lots 10 à 13 et la suite dans ce fichier.
+jusqu'au bout ; lots 10 à 13 et la suite dans ce fichier. Troisième volet le même jour (« le site
+fait vieux… plein d'incohérences et bugs graphiques ») : kit d'appli refait au niveau de l'appli de
+Claude et écrit dans le projet, méthode, concepteur et juge propres aux applis perso, bugs
+graphiques mesurés (lots 14 à 17).
 
 Reprise automatique : arrêtée. Le 12 octobre 2026, l'utilisateur avait demandé que la
 session reprenne d'elle-même (« continue ») à 6 h 22 puis toutes les 5 heures. Le 14 octobre
