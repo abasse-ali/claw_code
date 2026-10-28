@@ -30,6 +30,8 @@ const PER_MODEL: Duration = Duration::from_secs(50);
 /// et en tout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Patience {
+    /// Délai pour un premier signe de vie ; au-delà, le modèle suivant.
+    pub first_sign: Duration,
     pub per_model: Duration,
     pub total: Duration,
 }
@@ -37,6 +39,7 @@ pub struct Patience {
 impl Patience {
     /// Un conseil attendu pendant le travail : l'agent ne patiente pas longtemps.
     pub const SHORT: Self = Self {
+        first_sign: FIRST_SIGN,
         per_model: PER_MODEL,
         total: TIMEOUT,
     };
@@ -45,13 +48,17 @@ impl Patience {
     /// les trois relecteurs échouaient ainsi (réponse inachevée, ou sans
     /// texte) et le travail partait sans avoir été relu.
     pub const REVIEW: Self = Self {
+        first_sign: FIRST_SIGN,
         per_model: Duration::from_secs(240),
         total: Duration::from_secs(360),
     };
     /// La conception d'une interface : un plan et une feuille de base écrits
-    /// d'un trait, par un modèle souvent lent (GLM-5.3 ne répondait pas en 45 s
-    /// à l'essai du catalogue, le 28 octobre 2026), une fois par création.
+    /// d'un trait, par un modèle souvent lent, une fois par création. Vu le 28
+    /// octobre 2026 (session #37) : GLM-5.3 ne donnait pas signe de vie en 20 s
+    /// chez NVIDIA (ni en 45 s à l'essai du catalogue), et le modèle de la
+    /// session concevait lui-même.
     pub const DESIGN: Self = Self {
+        first_sign: Duration::from_mins(2),
         per_model: Duration::from_mins(7),
         total: Duration::from_mins(12),
     };
@@ -179,7 +186,12 @@ fn empty_reply_reason(reply: &Reply, again: bool) -> String {
 }
 
 /// Réponse de `model`, lue en flux jusqu'à `deadline`.
-async fn answer(model: &str, request: &MessageRequest, deadline: Instant) -> Result<Reply, String> {
+async fn answer(
+    model: &str,
+    request: &MessageRequest,
+    first_sign: Duration,
+    deadline: Instant,
+) -> Result<Reply, String> {
     let started = Instant::now();
     let client = ProviderClient::from_model(model).map_err(|error| failure(model, &error))?;
     let opening = async {
@@ -187,7 +199,7 @@ async fn answer(model: &str, request: &MessageRequest, deadline: Instant) -> Res
         let first = stream.next_event().await?;
         Ok::<_, ApiError>((stream, first))
     };
-    let patience = FIRST_SIGN.min(deadline.saturating_duration_since(Instant::now()));
+    let patience = first_sign.min(deadline.saturating_duration_since(Instant::now()));
     let Ok(opened) = tokio::time::timeout(patience, opening).await else {
         api::mark_model_unavailable(model, SET_ASIDE);
         return Err(format!("pas de réponse après {} s", patience.as_secs()));
@@ -356,40 +368,42 @@ fn ask_with(
                 let mut failures = Vec::new();
                 for model in available.into_iter().chain(set_aside) {
                     let mut asked_again = false;
-                    let reason =
-                        loop {
-                            let now = Instant::now();
-                            if now >= deadline {
-                                break None;
+                    let reason = loop {
+                        let now = Instant::now();
+                        if now >= deadline {
+                            break None;
+                        }
+                        let request = build(&model);
+                        let answered = runtime.block_on(runtime::interrupt::interruptible(answer(
+                            &model,
+                            &request,
+                            patience.first_sign,
+                            deadline.min(now + patience.per_model),
+                        )));
+                        match answered {
+                            Ok(reply) if !reply.text.is_empty() => {
+                                return Ok(Opinion {
+                                    model,
+                                    text: reply.text,
+                                })
                             }
-                            let request = build(&model);
-                            let answered = runtime.block_on(runtime::interrupt::interruptible(
-                                answer(&model, &request, deadline.min(now + patience.per_model)),
-                            ));
-                            match answered {
-                                Ok(reply) if !reply.text.is_empty() => {
-                                    return Ok(Opinion {
-                                        model,
-                                        text: reply.text,
-                                    })
+                            Ok(reply) => {
+                                // Tout son budget est parti en raisonnement : le
+                                // flux lui a retiré un cran (`reasoning_exhausted`),
+                                // il est consulté une seconde fois.
+                                let lowered = api::take_reasoning_notice().is_some();
+                                if lowered && !asked_again {
+                                    asked_again = true;
+                                    continue;
                                 }
-                                Ok(reply) => {
-                                    // Tout son budget est parti en raisonnement : le
-                                    // flux lui a retiré un cran (`reasoning_exhausted`),
-                                    // il est consulté une seconde fois.
-                                    let lowered = api::take_reasoning_notice().is_some();
-                                    if lowered && !asked_again {
-                                        asked_again = true;
-                                        continue;
-                                    }
-                                    break Some(empty_reply_reason(&reply, asked_again));
-                                }
-                                Err(_) if runtime::interrupt::interrupt_requested() => {
-                                    return Err("consultation interrompue".to_string());
-                                }
-                                Err(error) => break Some(error.to_string()),
+                                break Some(empty_reply_reason(&reply, asked_again));
                             }
-                        };
+                            Err(_) if runtime::interrupt::interrupt_requested() => {
+                                return Err("consultation interrompue".to_string());
+                            }
+                            Err(error) => break Some(error.to_string()),
+                        }
+                    };
                     let Some(reason) = reason else {
                         break;
                     };

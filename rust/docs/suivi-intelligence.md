@@ -43,7 +43,7 @@ l'utilisateur (deux passages réels au plus, fusion directe dans `main`, gratuit
 barres gardées à 8) : les neuf lots sont faits et fusionnés dans `main` le 27 octobre 2026
 (essai réel : session #36, 8/12 au banc t9 contre 4/12 pour #35, en 62 min au lieu de 109).
 Second volet le 28 octobre 2026 (« c'est toujours moche ») : le meilleur modèle gratuit en
-design (GLM-5.3, Inkling sinon) écrit le plan et `base.css`, puis Nemotron 3 Ultra code tout,
+design (GLM-5.3, sinon Gemini 3.6 Flash ou MiniMax M3.1 Flash) écrit le plan et `base.css`, puis Nemotron 3 Ultra code tout,
 jusqu'au bout ; lots 10 à 13 et la suite dans ce fichier.
 
 Reprise automatique : arrêtée. Le 12 octobre 2026, l'utilisateur avait demandé que la

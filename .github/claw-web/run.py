@@ -520,11 +520,13 @@ def start_mcp(env):
     return host
 
 
-# Modèles d'une interface : le plus fort des gratuits en design (GLM-5.3, Inkling s'il ne
-# répond pas) écrit le plan et la feuille de base ; le modèle de la session code tout le reste,
-# jusqu'au bout. Pas d'escalade vers un autre modèle : vu le 27 octobre 2026 (session #36), le
-# relais à un modèle d'OpenRouter a vidé le quota gratuit du jour et arrêté les revues de design.
-DESIGNER_MODELS = "nvidia:z-ai/glm-5.3,thinkingmachines/inkling:free"
+# Modèles d'une interface : le plus fort des gratuits en design (GLM-5.3, puis Gemini 3.6 Flash
+# et MiniMax M3.1 Flash s'il ne répond pas) écrit le plan et la feuille de base ; le modèle de la
+# session code tout le reste, jusqu'au bout. Inkling n'en est pas : OpenRouter le refuse à la
+# clé de Claw (« only available on agentic harnesses », 403). Pas d'escalade vers un autre
+# modèle : vu le 27 octobre 2026 (session #36), le relais à un modèle d'OpenRouter a vidé le
+# quota gratuit du jour et arrêté les revues de design.
+DESIGNER_MODELS = "nvidia:z-ai/glm-5.3,gemini:gemini-3.6-flash,nvidia:minimaxai/minimax-m3.1-flash"
 
 
 def model_settings(env, mock=False):

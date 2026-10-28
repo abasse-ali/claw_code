@@ -52,6 +52,7 @@ const QUICK_TOKENS: u32 = 8_000;
 /// et le modèle aveugle ne la voyait pas ; l'essai image-check a mesuré
 /// jusqu'à 440 s pour trois appels.
 const QUICK_PATIENCE: tools::advisors::Patience = tools::advisors::Patience {
+    first_sign: tools::advisors::Patience::SHORT.first_sign,
     per_model: std::time::Duration::from_secs(200),
     total: std::time::Duration::from_secs(300),
 };
@@ -60,6 +61,7 @@ const QUICK_PATIENCE: tools::advisors::Patience = tools::advisors::Patience {
 /// raisonnement, sans un mot de critique.
 const CRITIQUE_TOKENS: u32 = 12_000;
 const CRITIQUE_PATIENCE: tools::advisors::Patience = tools::advisors::Patience {
+    first_sign: tools::advisors::Patience::SHORT.first_sign,
     per_model: std::time::Duration::from_secs(150),
     total: std::time::Duration::from_secs(240),
 };

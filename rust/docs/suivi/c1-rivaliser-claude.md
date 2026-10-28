@@ -95,15 +95,23 @@ hiérarchie, typographie et couleurs. Ses décisions :
 
 Choix du modèle de conception (classement *Design Arena*, sites web, octobre 2026) : Kimi K3
 (Elo ~1334) n'est pas gratuit ; **GLM-5.3** (~1308) l'est chez NVIDIA, lent à l'essai d'outil
-du catalogue (pas de réponse en 45 s le 28 octobre) mais la conception n'appelle aucun outil ;
-**Inkling** (`thinkingmachines/inkling:free`, ~1224, OpenRouter gratuit) répond. Réglage de
-Claw Web : `CLAW_DESIGNER_MODEL=nvidia:z-ai/glm-5.3,thinkingmachines/inkling:free` (Inkling si
-GLM ne répond pas), `CLAW_ESCALATION_MODEL=off`, `CLAW_DESIGN_MODEL=off`.
+du catalogue (pas de réponse en 45 s le 28 octobre) mais la conception n'appelle aucun outil.
+Inkling (~1224) était prévu en second, mais OpenRouter le refuse à la clé de Claw (« only
+available on agentic harnesses », 403, déjà vu en session #32) : remplacé par **Gemini 3.6
+Flash** (clé Gemini de Claw Web, répond en 2 s) puis **MiniMax M3.1 Flash** (NVIDIA, 3 s).
+Réglage de Claw Web : `CLAW_DESIGNER_MODEL=nvidia:z-ai/glm-5.3,gemini:gemini-3.6-flash,nvidia:minimaxai/minimax-m3.1-flash`,
+`CLAW_ESCALATION_MODEL=off`, `CLAW_DESIGN_MODEL=off`.
+
+Premier essai (session #37, 28 octobre 2026, arrêté au bout de 3 min) : « aucun modèle de
+conception n'a répondu (GLM-5.3 : pas de réponse après 20 s) ». Une consultation donnait 20 s
+à chaque modèle pour un premier signe de vie, et Inkling avait été écarté par son refus. La
+patience porte désormais ce délai (`Patience::first_sign`) : 2 min pour la conception, 20 s
+ailleurs comme avant.
 
 | Lot | Contenu | État |
 |---|---|---|
-| 10. Conception | Réglage `designerModel` (texte ou liste ; `CLAW_DESIGNER_MODEL`, `off` le coupe). Au début d'un tour de création d'interface (méthode de design jointe, pas de page déjà là sauf refonte demandée), le runtime demande au modèle de conception (`ApiClient::design_conception`, patience `Patience::DESIGN` : 7 min par modèle, 12 en tout, 32 000 jetons) un **plan** (brief, direction, 5 à 8 couleurs nommées, deux polices de la bibliothèque de l'outil `Font`, espacements, écrans bloc par bloc, composants, mouvement, marques interdites dont « plusieurs cartes de couleurs différentes côte à côte ») et **`base.css`** (jetons que lit le kit : `--paper`, `--surface`, `--ink`, `--muted`, `--line`, `--accent`, `--on-accent`, `--income`, `--error`, `--field`, `--radius`, `--font-display`, `--font-text` ; clair et sombre ; le socle ; l'allure de base des titres, montants, boutons, surfaces, lignes de liste à pastille, champs, puces). Claw écrit `base.css` (marqué en tête ; `claw-base.css` si l'utilisateur a déjà son `base.css`), joint le plan à la demande (`conception_note` : ne pas écrire d'autre plan, lier `base.css` avant sa propre feuille, ne jamais redéfinir ses jetons), et la revue du plan est sautée (le plan est celui du concepteur). Sans réponse : le modèle de la session conçoit lui-même, comme avant (`web_design.rs` : `designer_prompt`, `parse_conception`, `has_interface_page` ; `conversation.rs` : `design_conception`) | fait (test de conversation, tests unitaires) |
-| 11. Nemotron jusqu'au bout | Claw Web (`run.py`, `model_settings`) : conception par GLM-5.3 puis Inkling, ni escalade ni tour de design confié à un autre modèle ; le faux modèle n'appelle aucun modèle de conception | fait (test Python) |
+| 10. Conception | Réglage `designerModel` (texte ou liste ; `CLAW_DESIGNER_MODEL`, `off` le coupe). Au début d'un tour de création d'interface (méthode de design jointe, pas de page déjà là sauf refonte demandée), le runtime demande au modèle de conception (`ApiClient::design_conception`, patience `Patience::DESIGN` : 2 min pour un premier signe de vie, 7 min par modèle, 12 en tout, 32 000 jetons) un **plan** (brief, direction, 5 à 8 couleurs nommées, deux polices de la bibliothèque de l'outil `Font`, espacements, écrans bloc par bloc, composants, mouvement, marques interdites dont « plusieurs cartes de couleurs différentes côte à côte ») et **`base.css`** (jetons que lit le kit : `--paper`, `--surface`, `--ink`, `--muted`, `--line`, `--accent`, `--on-accent`, `--income`, `--error`, `--field`, `--radius`, `--font-display`, `--font-text` ; clair et sombre ; le socle ; l'allure de base des titres, montants, boutons, surfaces, lignes de liste à pastille, champs, puces). Claw écrit `base.css` (marqué en tête ; `claw-base.css` si l'utilisateur a déjà son `base.css`), joint le plan à la demande (`conception_note` : ne pas écrire d'autre plan, lier `base.css` avant sa propre feuille, ne jamais redéfinir ses jetons), et la revue du plan est sautée (le plan est celui du concepteur). Sans réponse : le modèle de la session conçoit lui-même, comme avant (`web_design.rs` : `designer_prompt`, `parse_conception`, `has_interface_page` ; `conversation.rs` : `design_conception`) | fait (test de conversation, tests unitaires) |
+| 11. Nemotron jusqu'au bout | Claw Web (`run.py`, `model_settings`) : conception par GLM-5.3, puis Gemini 3.6 Flash et MiniMax M3.1 Flash, ni escalade ni tour de design confié à un autre modèle ; le faux modèle n'appelle aucun modèle de conception | fait (test Python) |
 | 12. Plancher néobanque | Kit `entries` : chaque opération en ligne de néobanque (pastille ronde de la catégorie, nom, « catégorie · jour » dessous, montant à droite, dernière ligne sans trait). Règle du composant : un montant donné en fourchette compte à son bout le moins favorable (le bas d'un gain, le haut d'une dépense), un montant marqué non sûr reste dehors jusqu'à sa réception, le meilleur des cas peut s'afficher à côté | fait (essais navigateur du kit) |
 | 13. Livraison | Vérification complète, essai réel (2 passages au plus, « Néobanque » si Claw demande le style), comparaison avec #35 et #36, fusion directe dans `main` | en cours |
 

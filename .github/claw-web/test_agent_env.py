@@ -39,7 +39,8 @@ class AgentEnvTest(unittest.TestCase):
 
     def test_a_designer_conceives_and_the_session_model_builds_to_the_end(self):
         env = run.model_settings({})
-        self.assertEqual(env["CLAW_DESIGNER_MODEL"], "nvidia:z-ai/glm-5.3,thinkingmachines/inkling:free")
+        self.assertEqual(env["CLAW_DESIGNER_MODEL"].split(",")[0], "nvidia:z-ai/glm-5.3")
+        self.assertNotIn("inkling", env["CLAW_DESIGNER_MODEL"])
         self.assertEqual(env["CLAW_ESCALATION_MODEL"], "off")
         self.assertEqual(env["CLAW_DESIGN_MODEL"], "off")
         # Un réglage déjà là (variable du dépôt de sessions) l'emporte.
