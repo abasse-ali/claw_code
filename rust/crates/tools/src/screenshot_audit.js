@@ -1197,7 +1197,9 @@
   for (const bar of document.querySelectorAll(".tabbar, [data-app-tabs]")) {
     const add = bar.querySelector(":scope > .tabbar__add");
     if (!add || !shown(bar) || !shown(add)) continue;
-    const items = [...bar.children].filter(shown);
+    // Les onglets seulement : une cale vide posée pour pousser le bouton au
+    // milieu (vu dans le second passage de #39) ne compte pas.
+    const items = [...bar.children].filter((el) => shown(el) && (el === add || el.matches("a, button, [role=tab]") || words(el)));
     const before = items.indexOf(add);
     const after = items.length - 1 - before;
     if (Math.abs(before - after) === 1) {
