@@ -5,6 +5,7 @@
 
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 import { highlight, languageOf } from "./highlight.js";
+import { looksEnglish, modelName, plainNotice } from "./phrases.js";
 
 export const LOG = "<!-- claw-web:log";
 const DATA = "<!-- claw-web:data ";
@@ -22,6 +23,9 @@ const ICONS = {
   think: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l1.8 4.7 4.7 1.8-4.7 1.8L12 16.5l-1.8-4.7L5.5 10l4.7-1.8z"/><path d="M18.5 15.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>',
   check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
   image: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M20.5 16l-5-5-8.5 8.5"/></svg>',
+  branch: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="7" r="2"/><path d="M6 7v10M18 9c0 5-6 4-12 8"/></svg>',
+  alert: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v5M12 16h.01"/></svg>',
+  info: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8h.01"/></svg>',
 };
 
 // Photos trouvées par l'agent (outil Photo) : la vignette est dans le journal (adresse `data:`,
@@ -53,7 +57,6 @@ function duration(ms) {
   return seconds >= 60 ? `${Math.floor(seconds / 60)} min ${String(seconds % 60).padStart(2, "0")} s` : `${seconds} s`;
 }
 
-const shortModel = (model) => String(model || "").replace(/:free$/, "").split("/").pop();
 
 /** Le journal d'un commentaire du moteur : { run, page, events }, ou null. */
 export async function decodeLog(body) {
@@ -70,49 +73,77 @@ export async function decodeLog(body) {
   return { run: meta.run, page: meta.page, events: Array.isArray(data.events) ? data.events : [] };
 }
 
-/** Icône, verbe et cible d'un appel d'outil, comme dans l'interface locale de Claw. */
+/** Les champs d'une entrée que le moteur garde en JSON brut (outils qu'il ne résume pas). */
+function rawInput(value) {
+  try {
+    const data = JSON.parse(String((value || {}).raw || "{}"));
+    return data && typeof data === "object" ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+const quoted = (text) => (text ? `«\u00a0${text}\u00a0»` : "");
+
+/** Une action de Claw en une phrase simple : icône, ce qu'il fait (au présent, comme on le
+ * raconte) et sur quoi. « Modifie · styles.css », « Cherche · « total » dans app.js ». */
 function describe(name, input) {
   const value = input || {};
+  const raw = () => rawInput(value);
   switch (name) {
-    case "bash": case "PowerShell": return ["terminal", "Commande", value.desc || value.cmd || ""];
-    case "read_file": return ["file", "Lecture", value.path || ""];
-    case "write_file": return ["filePlus", "Écriture", value.path || ""];
-    case "edit_file": case "NotebookEdit": return ["edit", "Modification", value.path || ""];
-    case "MultiEdit": return ["edit", "Modifications", value.path || ""];
-    case "apply_patch": return ["edit", "Correctif", (value.paths || []).join(", ")];
-    case "list_directory": return ["search", "Dossier", value.path || "."];
-    case "move_file": return ["edit", "Déplacement", `${value.from || ""} → ${value.to || ""}`];
-    case "delete_file": return ["edit", "Suppression", value.path || ""];
-    case "read_many_files": return ["file", "Lecture", (value.paths || []).join(", ")];
-    case "Wireframe": return ["list", "Maquette", value.title || ""];
-    case "file_outline": return ["file", "Plan du fichier", value.path || ""];
-    case "replace_in_files": return ["edit", value.preview ? "Aperçu du remplacement" : "Remplacement", `${value.pattern || ""} → ${value.replacement || ""}${value.glob ? ` · ${value.glob}` : ""}`];
-    case "run_tests": return ["terminal", "Tests", value.cmd || "tests du projet"];
-    case "git": return ["terminal", "Git", `${value.action || ""}${value.target ? ` ${value.target}` : ""}`];
-    case "git_commit": return ["terminal", "Commit", value.message || ""];
-    case "http_request": return ["globe", "Requête HTTP", value.target || ""];
-    case "glob_search": return ["search", "Fichiers", value.pattern || ""];
-    case "grep_search": return ["search", "Recherche", (value.pattern || "") + (value.path ? ` · ${value.path}` : "")];
-    case "WebFetch": case "ViewPage": return ["globe", "Page web", value.target || ""];
-    case "WebSearch": return ["globe", "Recherche web", value.target || ""];
-    case "Agent": return ["bot", "Sous-agent", value.desc || ""];
-    case "Photo": return ["image", "Photos", value.search ? `« ${value.search} »` : ""];
-    case "Icon": return ["tool", "Icônes", (value.names || []).join(", ")];
-    case "Font": return ["tool", "Polices", [value.display, value.text, value.mono].filter(Boolean).join(", ") || value.search || ""];
-    case "Ornament": return ["tool", "Ornement", value.kind || ""];
-    case "Component": return ["tool", "Composants", (value.names || []).join(", ")];
-    case "AppIcon": return ["image", "Icônes de l'appli", value.target || ""];
+    case "bash": case "PowerShell": return ["terminal", "Lance une commande", value.desc || value.cmd || ""];
+    case "read_file": return ["file", "Lit", value.path || ""];
+    case "write_file": return ["filePlus", "Écrit", value.path || ""];
+    case "edit_file": case "NotebookEdit": case "MultiEdit": return ["edit", "Modifie", value.path || ""];
+    case "apply_patch": return ["edit", "Modifie", (value.paths || []).join(", ")];
+    case "list_directory": return ["search", "Regarde le dossier", value.path || "."];
+    case "move_file": return ["edit", "Déplace", `${value.from || ""} → ${value.to || ""}`];
+    case "delete_file": return ["edit", "Supprime", value.path || ""];
+    case "read_many_files": return ["file", "Lit", (value.paths || []).join(", ")];
+    case "Wireframe": return ["list", "Dessine la maquette", value.title || ""];
+    case "file_outline": return ["file", "Parcourt", value.path || ""];
+    case "replace_in_files": return ["edit", value.preview ? "Prépare un remplacement" : "Remplace", `${quoted(value.pattern)} → ${quoted(value.replacement)}${value.glob ? ` dans ${value.glob}` : ""}`];
+    case "run_tests": return ["terminal", "Lance les tests", value.cmd || ""];
+    case "git": return ["terminal", "Consulte Git", `${value.action || ""}${value.target ? ` ${value.target}` : ""}`];
+    case "git_commit": return ["terminal", "Enregistre un commit", value.message || ""];
+    case "http_request": return ["globe", "Appelle une adresse", value.target || ""];
+    case "glob_search": return ["search", "Cherche des fichiers", value.pattern || ""];
+    case "grep_search": return ["search", "Cherche", `${quoted(value.pattern)}${value.path ? ` dans ${value.path}` : ""}`];
+    case "WebFetch": return ["globe", "Lit la page", value.target || ""];
+    case "ViewPage": return ["globe", "Ouvre la page", value.target || ""];
+    case "WebSearch": return ["globe", "Cherche sur le web", value.target || ""];
+    case "Agent": return ["bot", "Confie une tâche à un sous-agent", value.desc || ""];
+    case "Photo": return ["image", "Cherche des photos", quoted(value.search)];
+    case "Icon": return ["tool", "Prend des icônes", (value.names || raw().names || []).join(", ")];
+    case "Font": {
+      const font = { ...raw(), ...value };
+      return ["tool", "Choisit les polices", [font.display, font.text, font.mono].filter(Boolean).join(", ") || quoted(font.search)];
+    }
+    case "Ornament": return ["tool", "Dessine un ornement", value.kind || raw().kind || ""];
+    case "Component": return ["tool", "Prend des composants", (value.names || raw().names || []).join(", ")];
+    case "AppIcon": return ["image", "Crée les icônes de l'appli", value.target || ""];
     case "Screenshot": {
       // Le site publié, ou la copie de travail de la session (fichier, serveur local) : pas la
       // même version de l'appli (vu le 21 octobre 2026, l'ancienne prise pour la nouvelle).
       const target = String(value.target || "");
       const local = !/^https?:\/\//.test(target) || /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?:[:/]|$)/.test(target);
-      return ["globe", local ? "Capture de la session" : "Capture en ligne", target.replace(/^https?:\/\//, "")];
+      return ["image", local ? "Regarde la page" : "Regarde le site en ligne", local ? "" : target.replace(/^https?:\/\//, "")];
     }
-    case "AskUserQuestion": return ["list", "Questions", (value.q || []).join(" · ")];
+    case "Browser": {
+      const action = raw();
+      const steps = Array.isArray(action.steps) ? action.steps.length : 0;
+      return ["globe", "Essaie la page", steps ? `${steps} étape${steps > 1 ? "s" : ""}` : ""];
+    }
+    case "LookAtImage": return ["image", "Regarde une capture de près", ""];
+    case "KillShell": return ["terminal", "Arrête une commande", ""];
+    case "BashOutput": return ["terminal", "Relit la sortie d'une commande", ""];
+    case "FinalAnswer": return ["check", "Donne sa réponse", ""];
+    case "ExitPlanMode": return ["list", "Présente son plan", ""];
+    case "Remember": return ["think", "Prend une note", ""];
+    case "AskUserQuestion": return ["list", "Vous pose des questions", (value.q || []).join(" · ")];
     case "TodoWrite": {
       const todos = value.todos || [];
-      return ["list", "Tâches", `${todos.filter((todo) => todo[0] === "completed").length}/${todos.length} terminées`];
+      return ["list", "Met à jour ses tâches", `${todos.filter((todo) => todo[0] === "completed").length} sur ${todos.length} faites`];
     }
     default: {
       // Outils MCP du moteur : « GitHub : Lire une issue #12 », titre posé par le journal.
@@ -120,7 +151,7 @@ function describe(name, input) {
         const [group, ...rest] = String(value.title).split(" : ");
         return [group === "GitHub" ? "branch" : group === "Documents" ? "file" : "bot", group, rest.join(" : ")];
       }
-      return ["tool", name, String(value.raw || "").slice(0, 140)];
+      return ["tool", "Utilise l'outil", String(name || "")];
     }
   }
 }
@@ -401,37 +432,61 @@ function toolHtml(event, key, openTodo) {
   const summary = `${ICONS[icon] || ICONS.tool}<span class="verb">${escapeHtml(verb)}</span>`
     + `<span class="target">${escapeHtml(target)}</span>`
     + `<span class="side">${!result ? '<span class="spinner" aria-label="en cours"></span>' : side}</span>`;
-  if (photos) return `<div class="ev tool photos${state}"><div class="ev-line">${summary}</div>${photosHtml(photos)}</div>`;
-  if (shots) return `<div class="ev tool photos${state}"><div class="ev-line">${summary}</div>${shotsHtml(shots)}</div>`;
-  if (!body) return `<div class="ev tool${state}"><div class="ev-line">${summary}</div></div>`;
-  return `<details class="ev tool${state}" data-key="${key}"${openTodo ? " open" : ""}><summary>${summary}</summary><div class="ev-body">${body}</div></details>`;
+  // `data-kind` : la couleur de la pastille de l'action (fichier, commande, capture…).
+  const kind = `data-kind="${icon}"`;
+  if (photos) return `<div class="ev tool photos${state}" ${kind}><div class="ev-line">${summary}</div>${photosHtml(photos)}</div>`;
+  if (shots) return `<div class="ev tool photos${state}" ${kind}><div class="ev-line">${summary}</div>${shotsHtml(shots)}</div>`;
+  if (!body) return `<div class="ev tool${state}" ${kind}><div class="ev-line">${summary}</div></div>`;
+  return `<details class="ev tool${state}" ${kind} data-key="${key}"${openTodo ? " open" : ""}><summary>${summary}</summary><div class="ev-body">${body}</div></details>`;
 }
 
-function eventHtml(event, key, lastTodo) {
+/** Une ligne du journal. `context` garde, d'une ligne à la suivante, le nombre de défauts de la
+ * dernière vérification de la page : une vérification qui ne change rien ne se répète pas
+ * (« Claw vérifie la page après la modification » revenait 30 fois de suite, à l'identique). */
+function eventHtml(event, key, lastTodo, context = {}) {
   switch (event.k) {
     case "init":
-      return `<div class="ev meta">Modèle : ${escapeHtml(shortModel(event.model))}</div>`;
-    case "think":
-      return `<details class="ev think" data-key="${key}"><summary>${ICONS.think}<span class="verb">Réflexion</span>`
-        + `<span class="target">${escapeHtml(String(event.t || "").replace(/\s+/g, " ").slice(0, 120))}</span></summary>`
-        + `<div class="ev-body think-text">${escapeHtml(event.t || "")}</div></details>`;
+      return `<div class="ev meta">Modèle : ${escapeHtml(modelName(event.model))}</div>`;
+    case "think": {
+      // Le modèle réfléchit souvent en anglais : la ligne le dit, le texte reste à déplier.
+      const text = String(event.t || "");
+      const english = looksEnglish(text);
+      return `<details class="ev think" data-key="${key}" data-kind="think"><summary>${ICONS.think}<span class="verb">Réfléchit</span>`
+        + `<span class="target">${english ? "" : escapeHtml(text.replace(/\s+/g, " ").slice(0, 120))}</span>`
+        + `${english ? '<span class="side">en anglais</span>' : ""}</summary>`
+        + `<div class="ev-body think-text">${escapeHtml(text)}</div></details>`;
+    }
     case "text": {
       const text = withoutCallMarkup(event.t);
-      return text ? `<div class="ev text">${renderMarkdown(text)}</div>` : "";
+      if (!text) return "";
+      // Ce que l'agent se dit en anglais en travaillant : une ligne, le texte à déplier.
+      if (looksEnglish(text)) {
+        return `<details class="ev aside" data-key="${key}" data-kind="think"><summary>${ICONS.bot}<span class="verb">Note de l'agent</span>`
+          + `<span class="target"></span><span class="side">en anglais</span></summary><div class="ev-body ev text">${renderMarkdown(text)}</div></details>`;
+      }
+      return `<div class="ev text">${renderMarkdown(text)}</div>`;
     }
     // Réponse qu'un contrôle de Claw lui a fait reprendre (marquée par le moteur).
     case "draft":
       return draftHtml(event, key);
-    case "notice":
-      // « nvidia:nvidia/nemotron-3-super-120b-a12b » devient « nemotron-3-super-120b-a12b ».
-      return `<div class="ev notice">${escapeHtml(String(event.t || "").replace(/\b(?:nvidia|gemini|ollama):(?:[\w.-]+\/)?([\w.:-]+)/g, "$1"))}</div>`;
+    case "notice": {
+      const notice = plainNotice(event.t);
+      if (notice.kind === "check") {
+        const same = context.check === notice.left && !notice.changed;
+        context.check = notice.left;
+        if (same) return "";
+      }
+      const icon = notice.kind === "check" ? (notice.left ? ICONS.alert : ICONS.check) : notice.kind === "warn" ? ICONS.alert : ICONS.info;
+      const tone = notice.kind === "check" ? `check${notice.left ? "" : " clean"}` : notice.kind;
+      return `<div class="ev notice ${tone}">${icon}<span>${escapeHtml(notice.text)}</span></div>`;
+    }
     case "tool":
       return toolHtml(event, key, lastTodo);
     case "quota":
       return `<div class="ev meta">Requêtes gratuites : ${event.run !== null && event.run !== undefined ? `${plural(event.run, "requête")} pour ce passage · ` : ""}`
         + `${event.used}/${event.limit} utilisées aujourd'hui (${event.remaining} restantes)</div>`;
     case "end": {
-      const parts = [shortModel(event.model), event.turns ? plural(event.turns, "requête") : "", event.ms ? duration(event.ms) : "", event.cost || ""];
+      const parts = [modelName(event.model), event.turns ? plural(event.turns, "requête") : "", event.ms ? duration(event.ms) : "", event.cost || ""];
       return `<div class="ev meta">${escapeHtml(parts.filter(Boolean).join(" · "))}</div>`;
     }
     default:
@@ -543,25 +598,173 @@ function marked(html, index, pending) {
   return html.replace(/class="/, `data-step="${index}" class="${pending ? "pending " : ""}`);
 }
 
+const THINKING = "claw-web.journal.reflexions";
+
+/** Les réflexions de l'agent sont montrées dans le journal (choix gardé sur l'appareil). */
+export function thinkingShown() {
+  try {
+    return localStorage.getItem(THINKING) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Montre ou cache les réflexions de l'agent dans tous les journaux de la page. */
+export function toggleThinking() {
+  const shown = !thinkingShown();
+  try {
+    localStorage.setItem(THINKING, shown ? "1" : "0");
+  } catch {
+    // Navigation privée : le choix vaut pour cette page seulement.
+  }
+  for (const transcript of document.querySelectorAll(".transcript")) transcript.classList.toggle("thinking", shown);
+  for (const button of document.querySelectorAll("[data-journal-thinking]")) {
+    button.setAttribute("aria-pressed", String(shown));
+    button.querySelector("span").textContent = shown ? "Cacher ses réflexions" : "Voir ses réflexions";
+  }
+}
+
+/** Ce que le passage a fait, d'un coup d'œil, avant le détail : les fichiers écrits ou modifiés
+ * (avec leurs lignes), les commandes, les captures et ce qu'elles ont trouvé, les échecs. */
+function digestHtml(events) {
+  const files = new Map();
+  const touch = (path, add, del, created) => {
+    if (!path) return;
+    const file = files.get(path) || { add: 0, del: 0, created: false };
+    file.add += add || 0;
+    file.del += del || 0;
+    file.created = file.created || (created && !files.has(path));
+    files.set(path, file);
+  };
+  let commands = 0;
+  let failedCommands = 0;
+  let shots = 0;
+  let lastFound = null;
+  let reads = 0;
+  for (const event of events) {
+    if (event.k !== "tool") continue;
+    const result = event.r || {};
+    const input = event.i || {};
+    if (["write_file", "edit_file", "MultiEdit", "NotebookEdit"].includes(event.n)) {
+      if (result.add || result.del || event.n === "write_file") touch(input.path, result.add, result.del, event.n === "write_file");
+    } else if (Array.isArray(result.files)) {
+      for (const file of result.files) touch(file.path, file.add, file.del, file.kind === "create");
+    } else if (["bash", "PowerShell", "run_tests"].includes(event.n)) {
+      commands += 1;
+      if (result.code || event.e) failedCommands += 1;
+    } else if (event.n === "Screenshot") {
+      shots += 1;
+      if (typeof result.found === "number") lastFound = result.found;
+    } else if (["read_file", "read_many_files", "grep_search", "glob_search", "file_outline"].includes(event.n)) {
+      reads += 1;
+    }
+  }
+  const thoughts = events.filter((event) => event.k === "think").length;
+  const toggle = thoughts ? `<button type="button" class="dg-toggle" data-journal-thinking aria-pressed="${thinkingShown()}">${ICONS.think}<span>${thinkingShown() ? "Cacher ses réflexions" : "Voir ses réflexions"}</span></button>` : "";
+  if (!files.size && !commands && !shots && !reads) return toggle ? `<div class="digest">${toggle}</div>` : "";
+  const stat = (count, one, many, extra = "") => (count ? `<span class="dg-stat${extra}"><strong>${count}</strong>${count > 1 ? many : one}</span>` : "");
+  const sorted = [...files.entries()].sort((a, b) => (b[1].add + b[1].del) - (a[1].add + a[1].del));
+  const shown = sorted.slice(0, 6);
+  return `<div class="digest">
+    <div class="dg-stats">
+      ${stat(files.size, "fichier modifié", "fichiers modifiés")}
+      ${stat(commands, "commande", "commandes")}
+      ${stat(shots, "capture", "captures")}
+      ${stat(reads, "lecture", "lectures")}
+    </div>
+    ${failedCommands || lastFound ? `<p class="dg-alert">${ICONS.alert}<span>${[
+      failedCommands ? `${plural(failedCommands, "commande")} en échec` : "",
+      lastFound ? `la dernière capture montre encore ${plural(lastFound, "problème")}` : "",
+    ].filter(Boolean).join(" · ")}</span></p>` : ""}
+    ${toggle}
+    ${shown.length ? `<ul class="dg-files">${shown.map(([path, file]) => `
+      <li>${file.created ? ICONS.filePlus : ICONS.edit}<span class="path">${escapeHtml(path)}</span>
+        ${file.created ? '<span class="dg-new">nouveau</span>' : ""}<span class="side">${counts(file.add, file.del)}</span></li>`).join("")}
+      ${sorted.length > shown.length ? `<li class="dg-more">et ${plural(sorted.length - shown.length, "autre fichier", "autres fichiers")}</li>` : ""}
+    </ul>` : ""}
+  </div>`;
+}
+
+/** Les tâches du passage, dans l'ordre où Claw les a menées : chaque fois que sa liste de tâches
+ * (TodoWrite) en met une autre « en cours », un nouveau groupe commence. Avant la première : la
+ * préparation ; après la dernière : la vérification et la réponse. Rien sans liste de tâches. */
+function taskGroups(events) {
+  const lists = events.filter((event) => event.k === "tool" && event.n === "TodoWrite" && Array.isArray((event.i || {}).todos));
+  if (!lists.length) return [];
+  const final = lists[lists.length - 1].i.todos;
+  const groups = [{ title: "Préparation", start: 0, status: "done", position: -1 }];
+  events.forEach((event, index) => {
+    if (!(event.k === "tool" && event.n === "TodoWrite" && Array.isArray((event.i || {}).todos))) return;
+    const todos = event.i.todos;
+    const position = todos.findIndex(([status]) => status === "in_progress");
+    const current = groups[groups.length - 1];
+    if (position < 0) {
+      if (todos.every(([status]) => status === "completed") && current.title !== "Vérification et réponse") {
+        groups.push({ title: "Vérification et réponse", start: index, status: "done", position: -1 });
+      }
+      return;
+    }
+    const title = todos[position][1];
+    if (title === current.title) return;
+    // Le texte d'une tâche change quand elle passe de « en cours » à « faite » : l'état final se
+    // lit à sa place dans la dernière liste.
+    const end = final[position];
+    groups.push({ title, start: index, position, status: end ? (end[0] === "completed" ? "done" : end[0] === "in_progress" ? "doing" : "open") : "open" });
+  });
+  // Une tâche sans action (cochée aussitôt, ou reprise par la suivante) rejoint la précédente.
+  const actions = (from, to) => events.slice(from, to).filter((event) => event.k === "tool" && event.n !== "TodoWrite").length;
+  return groups.filter((group, at) => {
+    const next = groups[at + 1];
+    return at === 0 || actions(group.start, next ? next.start : events.length) > 0;
+  });
+}
+
 export function transcriptHtml(events, { key, live, answer = "", title = "Journal du passage", kind = "", shown = events.length }) {
   const lastTodo = events.map((event) => event.k === "tool" && event.n === "TodoWrite").lastIndexOf(true);
   const repeated = repeatedInAnswer(events, answer);
   const drafts = draftAnswers(events, repeated);
+  const groups = taskGroups(events);
+  const grouped = groups.length > 1;
+  const context = {};
   const rows = events.map((event, index) => {
     if (repeated.has(index)) return "";
+    // Rangé par tâches, le journal n'a plus besoin des mises à jour de la liste : chaque groupe
+    // dit sa tâche et son état.
+    if (grouped && event.k === "tool" && event.n === "TodoWrite") return "";
     const html = drafts.has(index) ? draftHtml(event, `${key}:${index}`)
-      : eventHtml(event, `${key}:${index}`, live && index === lastTodo);
+      : eventHtml(event, `${key}:${index}`, live && index === lastTodo, context);
     return html ? marked(html, index, index >= shown) : "";
-  }).filter(Boolean);
+  });
   const tools = events.filter((event, index) => event.k === "tool" && index < shown).length;
-  // Long journal : les dernières étapes en vue, les précédentes à déplier.
-  const older = rows.length > RECENT_STEPS + 10 ? rows.splice(0, rows.length - RECENT_STEPS) : [];
-  const earlier = older.length
-    ? `<details class="earlier" data-key="${key}:earlier"><summary>${plural(older.length, "étape")} plus tôt</summary>${older.join("")}</details>`
-    : "";
-  return `<details class="transcript" data-key="${key}"${live ? " open" : ""}>
+  const digest = digestHtml(events.slice(0, shown));
+  let body;
+  if (grouped) {
+    body = groups.map((group, at) => {
+      const end = at + 1 < groups.length ? groups[at + 1].start : events.length;
+      const inside = rows.slice(group.start, end).filter(Boolean);
+      const actions = events.slice(group.start, end).filter((event) => event.k === "tool" && event.n !== "TodoWrite").length;
+      const last = at === groups.length - 1;
+      // Un passage fini n'a plus de tâche « en cours » : celles qui l'étaient restent à finir.
+      const status = live && last && group.status !== "done" ? "doing" : group.status === "doing" ? "open" : group.status;
+      const older = inside.length > RECENT_STEPS + 10 ? inside.splice(0, inside.length - RECENT_STEPS) : [];
+      return `<details class="task-group ${status}" data-key="${key}:task${at}"${last ? " open" : ""}>
+        <summary><span class="tg-dot">${status === "done" ? ICONS.check : ""}</span><span class="tg-title">${escapeHtml(group.title)}</span>
+          <span class="side">${plural(actions, "action")}</span></summary>
+        <div class="events">${older.length ? `<details class="earlier" data-key="${key}:task${at}:earlier"><summary>${plural(older.length, "étape")} plus tôt</summary>${older.join("")}</details>` : ""}${inside.join("")}</div>
+      </details>`;
+    }).join("");
+  } else {
+    const flat = rows.filter(Boolean);
+    // Long journal : les dernières étapes en vue, les précédentes à déplier.
+    const older = flat.length > RECENT_STEPS + 10 ? flat.splice(0, flat.length - RECENT_STEPS) : [];
+    const earlier = older.length
+      ? `<details class="earlier" data-key="${key}:earlier"><summary>${plural(older.length, "étape")} plus tôt</summary>${older.join("")}</details>`
+      : "";
+    body = `<div class="events">${earlier}${flat.join("")}</div>`;
+  }
+  return `<details class="transcript${grouped ? " by-task" : ""}${thinkingShown() ? " thinking" : ""}" data-key="${key}"${live ? " open" : ""}>
     <summary>${kind ? `<span class="run-state ${kind}">${STATE_ICONS[kind] || ""}</span>` : ""}<span class="run-title">${title}</span><span class="side" data-actions="${tools}">${plural(tools, "action")}</span></summary>
-    <div class="events">${earlier}${rows.join("")}</div>
+    ${digest}${grouped ? `<div class="task-groups">${body}</div>` : body}
   </details>`;
 }
 

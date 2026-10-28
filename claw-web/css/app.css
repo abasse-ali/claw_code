@@ -823,7 +823,9 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 }
 .transcript[open] > summary::before, .ev[open] > summary::before, .file[open] > summary::before { transform: rotate(45deg); }
 .transcript .side, .ev .side, .file .side { margin-left: auto; flex: none; font-size: .78rem; color: var(--muted); }
-.events { display: flex; flex-direction: column; border-left: 2px solid var(--border); margin: 2px 0 4px 3px; padding-left: 12px; }
+/* Le journal en frise : un trait vertical passe sous les pastilles des actions. */
+.events { position: relative; display: flex; flex-direction: column; margin: 2px 0 4px; padding: 0; }
+.events::before { content: ""; position: absolute; left: 11px; top: 10px; bottom: 10px; width: 2px; border-radius: 2px; background: var(--border); }
 
 /* Un passage de Claw : une ligne (état, durée, actions) qui déplie son journal. */
 .run-card {
@@ -839,7 +841,7 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 }
 .run-card > .transcript[open] > summary::after { transform: rotate(-135deg); margin-bottom: -4px; }
 .run-card > .transcript[open] > summary { border-bottom: 1px solid var(--border); margin-bottom: 8px; }
-.run-card .events { margin: 0 0 10px 12px; }
+.run-card .events { margin: 0 0 10px; }
 .run-card > .transcript > summary .side { padding: 2px 10px; border-radius: 999px; background: var(--panel-2); font-variant-numeric: tabular-nums; }
 .run-state { flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; color: var(--muted); background: color-mix(in srgb, var(--muted) 16%, transparent); }
 .run-state svg { width: 14px; height: 14px; stroke-width: 2.6; }
@@ -979,12 +981,22 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 .ev.running .verb { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .ev.running > .ev-line > svg, .ev.running > summary > svg { color: var(--accent); }
 .ev .spinner { width: 13px; height: 13px; }
-.ev-body { padding: 2px 0 8px 25px; min-width: 0; }
-.ev.text { padding: 6px 0; overflow-wrap: anywhere; }
+.ev-body { padding: 2px 0 8px 34px; min-width: 0; }
+.ev.text { padding: 6px 0 6px 34px; overflow-wrap: anywhere; }
 .ev.text p { margin: 0 0 .6em; }
 .ev.text p:last-child { margin-bottom: 0; }
-.ev.notice, .ev.meta { padding: 3px 0; font-size: .8rem; color: var(--muted); }
-.ev.notice::before { content: "› "; color: var(--accent); font-weight: 700; }
+.ev.meta { padding: 3px 0 3px 34px; font-size: .8rem; color: var(--muted); }
+/* Une annonce de Claw : sa pastille sur la frise, la phrase à côté ; la couleur dit le ton. */
+.ev.notice { --tile: var(--muted); display: flex; align-items: flex-start; gap: 10px; padding: 5px 0; font-size: .82rem; line-height: 1.45; color: var(--muted); }
+.ev.notice > svg {
+  box-sizing: content-box; flex: none; width: 13px; height: 13px; margin: 1px 2px 0; padding: 4px; border-radius: 50%;
+  color: var(--tile); background: color-mix(in srgb, var(--tile) 16%, var(--panel)); stroke-width: 2.2;
+}
+.ev.notice > span { min-width: 0; overflow-wrap: anywhere; }
+.ev.notice.check { --tile: var(--info); }
+.ev.notice.check.clean, .ev.notice.check.clean > span { --tile: var(--ok); }
+.ev.notice.warn { --tile: var(--warn); }
+.ev.notice.warn > span { color: color-mix(in srgb, var(--warn) 60%, var(--text)); }
 .think-text { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font-size: .84rem; }
 .io { display: flex; flex-direction: column; gap: 5px; }
 .io-k { font-size: .66rem; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
@@ -994,6 +1006,71 @@ th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; ve
 }
 .io-v .none { color: var(--muted); font-style: italic; }
 .io-note { font-size: .78rem; color: var(--muted); }
+
+/* Pastille de chaque action, posée sur la frise, d'une couleur par sorte : fichiers écrits ou
+   modifiés, lectures et recherches, commandes, captures et pages, tâches, réflexions. */
+.ev[data-kind] { --tile: var(--muted); }
+.ev[data-kind="edit"], .ev[data-kind="filePlus"] { --tile: var(--accent); }
+.ev[data-kind="file"], .ev[data-kind="search"] { --tile: var(--info); }
+.ev[data-kind="terminal"] { --tile: var(--accent-3); }
+.ev[data-kind="image"], .ev[data-kind="globe"] { --tile: var(--accent-2); }
+.ev[data-kind="list"], .ev[data-kind="check"] { --tile: var(--ok); }
+.ev[data-kind] > summary > svg:first-child, .ev[data-kind] > .ev-line > svg:first-child {
+  box-sizing: content-box; width: 14px; height: 14px; padding: 5px; border-radius: 9px;
+  color: var(--tile); background: color-mix(in srgb, var(--tile) 15%, var(--panel));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tile) 24%, transparent);
+}
+.ev.failed[data-kind] { --tile: var(--error); }
+.ev[data-kind] > summary, .ev[data-kind] > .ev-line { gap: 10px; }
+.ev[data-kind] .verb { font-weight: 600; }
+.ev.think .verb, .ev.aside .verb { color: var(--muted); font-weight: 550; }
+/* Les réflexions de l'agent : cachées tant qu'on ne demande pas à les voir. */
+.transcript:not(.thinking) .ev.think { display: none; }
+.dg-toggle {
+  align-self: flex-start; display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; border-radius: 999px;
+  border: 1px solid var(--border); background: transparent; color: var(--muted); font: inherit; font-size: .8rem; cursor: pointer;
+  transition: color .2s var(--ease), border-color .2s var(--ease), background-color .2s var(--ease);
+}
+.dg-toggle:hover { color: var(--text); border-color: var(--border-strong); }
+.dg-toggle[aria-pressed="true"] { color: var(--text); background: var(--grad-soft); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.dg-toggle svg { width: 15px; height: 15px; color: var(--accent-3); }
+
+/* En tête du journal : ce que le passage a fait, d'un coup d'œil. */
+.digest { display: flex; flex-direction: column; gap: 10px; margin: 4px 0 12px; padding: 12px; border-radius: 16px; border: 1px solid var(--border); background: color-mix(in srgb, var(--panel-2) 65%, transparent); }
+.dg-stats { display: flex; flex-wrap: wrap; gap: 6px; }
+.dg-stat { display: inline-flex; align-items: baseline; gap: 5px; padding: 5px 11px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel); color: var(--muted); font-size: .8rem; }
+.dg-stat strong { color: var(--text); font: 700 .95rem var(--font-display); font-variant-numeric: tabular-nums; }
+.dg-alert { display: flex; align-items: center; gap: 7px; margin: 0; color: var(--warn); font-size: .82rem; line-height: 1.4; }
+.dg-alert svg { width: 15px; height: 15px; flex: none; color: var(--warn); }
+.dg-files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.dg-files li { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 5px 2px; font-size: .82rem; }
+.dg-files li + li { border-top: 1px solid var(--border); }
+.dg-files svg { width: 15px; height: 15px; flex: none; color: var(--accent); }
+.dg-files .path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: .78rem var(--mono); }
+.dg-files .side { font-size: .76rem; }
+.dg-new { flex: none; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); font-size: .68rem; font-weight: 650; }
+.dg-more { padding-left: 25px !important; color: var(--muted); }
+
+/* Le détail rangé par tâches de Claw : une carte par tâche, repliée sauf la dernière. */
+.task-groups { display: flex; flex-direction: column; gap: 8px; margin: 0 0 10px; }
+.task-group { border: 1px solid var(--border); border-radius: 16px; background: color-mix(in srgb, var(--panel) 55%, transparent); overflow: hidden; }
+.task-group > summary { display: flex; align-items: center; gap: 10px; padding: 10px 12px; list-style: none; cursor: pointer; font-size: .88rem; transition: background-color .2s var(--ease); }
+.task-group > summary::-webkit-details-marker { display: none; }
+.task-group > summary:hover { background: color-mix(in srgb, var(--panel-2) 60%, transparent); }
+.task-group > summary::after {
+  content: ""; flex: none; width: 6px; height: 6px; margin: 0 3px 3px 0; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted);
+  transform: rotate(45deg); transition: transform .25s var(--spring), margin .25s var(--spring);
+}
+.task-group[open] > summary::after { transform: rotate(-135deg); margin-bottom: -3px; }
+.task-group[open] > summary { border-bottom: 1px solid var(--border); }
+.task-group > .events { padding: 6px 10px 8px; }
+.tg-dot { flex: none; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--border-strong); }
+.tg-dot svg { width: 12px; height: 12px; color: #fff; stroke-width: 3; }
+.task-group.done .tg-dot { border-color: var(--ok); background: var(--ok); }
+.task-group.doing .tg-dot { border-color: var(--accent); box-shadow: inset 0 0 0 3px var(--panel), inset 0 0 0 10px var(--accent); }
+.tg-title { flex: 1; min-width: 0; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.task-group.open .tg-title { color: var(--muted); }
+.task-group > summary .side { flex: none; margin-left: 0; font-size: .76rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 /* Étapes d'un passage en cours : arrivées par paquets avec le journal, montrées une par une. */
 .transcript .pending { display: none; }
@@ -1806,20 +1883,24 @@ label.choice { cursor: pointer; }
 @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 16px) scale(.94); } }
 @keyframes toast-out { to { opacity: 0; transform: translate(-50%, 10px) scale(.96); } }
 
-/* Flèche « Revenir en bas » : au-dessus de la zone de saisie (et de son bloc de tâches). */
+/* Flèche « Revenir en bas » : à droite, au-dessus de la zone de saisie (et de son bloc de
+   tâches), pas au milieu du texte. Du nouveau en dessous : elle s'élargit en « Nouvelles actions ». */
 .to-bottom {
-  position: fixed; left: 50%; bottom: calc(var(--composer-space, 150px) + 14px); z-index: 5;
-  display: grid; place-items: center; width: 42px; height: 42px; padding: 0; border-radius: 50%;
-  border: 1px solid var(--border-strong); background: var(--glass-strong); color: var(--text);
+  position: fixed; right: max(14px, calc((100vw - var(--width)) / 2 + 6px)); bottom: calc(var(--composer-space, 150px) + 10px); z-index: 5;
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 40px; height: 40px; padding: 0 10px; border-radius: 999px;
+  border: 1px solid var(--border-strong); background: var(--glass-strong); color: var(--text); font: inherit; font-size: .84rem; font-weight: 600;
   -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
   box-shadow: 0 10px 26px -10px var(--shadow); cursor: pointer;
-  transform: translateX(-50%); animation: bounce-in .45s var(--spring);
-  transition: transform .2s var(--spring);
+  animation: bounce-in .45s var(--spring);
+  transition: transform .2s var(--spring), background-color .25s var(--ease), color .25s var(--ease);
 }
-.to-bottom:active { transform: translateX(-50%) scale(.88); }
-.to-bottom svg { width: 20px; height: 20px; stroke-width: 2.2; }
+.to-bottom:active { transform: scale(.9); }
+.to-bottom svg { width: 19px; height: 19px; stroke-width: 2.2; }
+.to-bottom .tb-label { display: none; }
+.to-bottom.fresh { padding: 0 14px 0 11px; border-color: transparent; background: var(--grad); color: #fff; box-shadow: 0 12px 28px -12px var(--glow); }
+.to-bottom.fresh .tb-label { display: inline; }
 .to-bottom[hidden] { display: none; }
-@keyframes bounce-in { from { opacity: 0; transform: translate(-50%, 12px) scale(.7); } }
+@keyframes bounce-in { from { opacity: 0; transform: translateY(12px) scale(.7); } }
 
 /* --- Bloc au-dessus de la zone de saisie : tâches de Claw (pliables) et ses questions ------ */
 .dock { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; max-height: 46vh; overflow-y: auto; overscroll-behavior: contain; }

@@ -6,7 +6,7 @@
 import { ANSWER, GitHub, GitHubError, LABEL, PROGRESS } from "./github.js";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 import { sealedBox } from "./sealed-box.js";
-import { LOG, changesHtml, decodeLog, photoLink, photoView, recentActions, transcriptHtml, withoutCallMarkup } from "./transcript.js";
+import { LOG, changesHtml, decodeLog, photoLink, photoView, recentActions, toggleThinking, transcriptHtml, withoutCallMarkup } from "./transcript.js";
 import { highlightLines, languageOf } from "./highlight.js";
 import { accountStatus, allFreeModels, freeModels, resetTime } from "./openrouter.js";
 import { emptyState, extras } from "./tools.js";
@@ -3933,6 +3933,11 @@ async function pollSession(force = false) {
   else if (session.active) refreshQuota();
   if (force || signature !== session.signature) {
     const atBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
+    // Du nouveau pendant qu'on lit plus haut : la flèche le dit, la page reste où elle est.
+    if (!atBottom && !force && session.signature && session.active) {
+      state.freshBelow = true;
+      state.bottomButton?.();
+    }
     session.signature = signature;
     renderSessionView();
     renderComposer();
@@ -5271,24 +5276,32 @@ async function announceMove(engine, reachable) {
 
 /** Flèche « Revenir en bas » d'une session, au-dessus de la zone de saisie, quand la fin de
  * la discussion n'est plus à l'écran (comme dans l'appli Claude ; demandée le 24 octobre
- * 2026). */
+ * 2026). Posée à droite, pas au milieu du texte qu'on lit ; « Nouvelles actions » quand Claw
+ * avance pendant qu'on lit plus haut (la page ne saute pas d'elle-même). */
 function watchBottomButton() {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "to-bottom";
   button.setAttribute("aria-label", "Revenir en bas");
-  button.innerHTML = ICON.down;
+  button.innerHTML = `${ICON.down}<span class="tb-label">Nouvelles actions</span>`;
   button.hidden = true;
   document.body.append(button);
-  button.addEventListener("click", () => window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }));
+  button.addEventListener("click", () => {
+    state.freshBelow = false;
+    window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+  });
   let queued = false;
   const update = () => {
     queued = false;
     const composer = $("#composer");
     const far = document.body.scrollHeight - (window.innerHeight + window.scrollY) > 320;
+    if (!far) state.freshBelow = false;
     button.hidden = !(far && state.session && composer && !composer.hidden
       && !document.documentElement.classList.contains("scroll-locked"));
+    button.classList.toggle("fresh", Boolean(state.freshBelow));
+    button.setAttribute("aria-label", state.freshBelow ? "Nouvelles actions : revenir en bas" : "Revenir en bas");
   };
+  state.bottomButton = () => later();
   const later = () => {
     if (queued) return;
     queued = true;
@@ -5393,6 +5406,10 @@ async function boot() {
   });
   $("#settings-button").addEventListener("click", () => { location.hash = "#/reglages"; });
   $("#scrim").addEventListener("click", closeDrawer);
+  // « Voir ses réflexions », dans le résumé d'un journal : pour tous les journaux de la page.
+  document.addEventListener("click", (event) => {
+    if (event.target.closest("[data-journal-thinking]")) toggleThinking();
+  });
   for (const tab of document.querySelectorAll("#drawer .drawer-tab")) tab.addEventListener("click", () => showDrawerPane(tab.dataset.pane));
   $("#drawer .explorer").addEventListener("click", onExplorerClick);
   // Le menu Équipe / Ultracode se ferme en touchant ailleurs, ou avec Échap.

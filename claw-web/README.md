@@ -88,8 +88,25 @@ et son plan à déplier ; ses quatre dernières actions, la plus récente en hau
 entrant en glissant l'une après l'autre ; le journal complet, replié. « Claw se prépare » (file
 d'attente, compilation) prend la même forme, et l'arrêt demandé le fait virer au rouge
 (« Arrêt en cours »). Fini, un passage tient en une ligne : son état (fini, arrêté, erreur), sa
-durée et son nombre d'actions ; un toucher déplie son journal, dont les 30 dernières étapes sont
-en vue (les précédentes se déplient à leur tour).
+durée et son nombre d'actions ; un toucher déplie son journal.
+
+Le journal commence par ce que le passage a fait, d'un coup d'œil : fichiers modifiés (avec leurs
+lignes ajoutées et retirées, « nouveau » pour un fichier créé), commandes, captures, lectures,
+commandes en échec et défauts que montre encore la dernière capture. Le détail suit, rangé par
+tâche de Claw (« Préparation », puis chaque tâche de sa liste, puis « Vérification et réponse ») :
+une carte par tâche, avec son état et son nombre d'actions, repliée sauf la dernière ; sans liste
+de tâches, les 30 dernières étapes sont en vue. Chaque action est une phrase simple, avec sa
+pastille de couleur sur une frise (« Lit index.html », « Modifie styles.css », « Lance une
+commande », « Regarde la page ») ; les annonces de Claw aussi (« Page vérifiée : 2 défauts
+réparés, encore 3 à corriger », « Laguna S 2.1 ne voit pas les images : un autre modèle lui
+décrit 2 captures »), et une vérification de la page qui ne change rien ne se répète pas. Les
+réflexions de l'agent (souvent en anglais) sont cachées : « Voir ses réflexions » les montre,
+choix gardé sur l'appareil ; ce qu'il se dit en anglais en travaillant tient en une ligne
+« Note de l'agent », à déplier.
+
+Dans une session, la flèche « Revenir en bas » paraît à droite quand la fin n'est plus à l'écran ;
+si Claw avance pendant que vous lisez plus haut, la page reste où elle est et la flèche devient
+« Nouvelles actions ».
 Les tâches de Claw restent dans un petit bloc pliable au-dessus de la saisie (caché tant que le
 bloc « Claw travaille », qui les montre déjà, est à l'écran), ses questions dans le même bloc, en
 cartes à faire défiler à gauche et à droite. Sous une réponse, les fichiers modifiés sur la branche et
