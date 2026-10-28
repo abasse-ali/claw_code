@@ -130,6 +130,9 @@ const state = {
   revealed: new Map(),
   // Actions déjà vues dans le bloc « Claw travaille », par passage : les nouvelles y entrent.
   liveSeen: new Map(),
+  // Filtre choisi de chaque journal (« edit », « run »…), par passage.
+  journalFilters: new Map(),
+  refilterTimer: null,
   // Bloc au-dessus de la zone de saisie : questions de Claw (carte montrée, choix faits).
   dockQuestions: null,
 };
@@ -3004,7 +3007,7 @@ function revealSteps(view) {
     step.classList.remove("pending");
     step.classList.add("arrived");
     if (key) state.revealed.set(key, Math.max(state.revealed.get(key) || 0, index + 1));
-    const count = transcript?.querySelector(":scope > summary .side[data-actions]");
+    const count = transcript?.querySelector(":scope > summary [data-actions]");
     if (count && step.matches(".ev.tool, .ev.tool *, [data-step].tool")) {
       const actions = Number(count.dataset.actions) + 1;
       count.dataset.actions = String(actions);
@@ -3016,6 +3019,20 @@ function revealSteps(view) {
     if (left) state.revealTimer = setTimeout(next, Math.max(300, Math.min(1500, 10000 / left)));
   };
   if (view.querySelector(".transcript .pending")) state.revealTimer = setTimeout(next, 150);
+}
+
+/** Ne montre d'un journal qu'un genre d'étape (« edit », « run »…), ou tout (« »). Les tâches
+ * qui en ont s'ouvrent ; celles qui n'en ont pas se cachent (feuille de style). */
+function filterJournal(transcript, filter) {
+  if (filter) transcript.dataset.filter = filter;
+  else delete transcript.dataset.filter;
+  for (const chip of transcript.querySelectorAll(":scope > .ev-filters .ev-filter")) {
+    chip.setAttribute("aria-pressed", String(chip.dataset.filter === filter));
+  }
+  if (!filter) return;
+  for (const group of transcript.querySelectorAll(".task-group")) {
+    if (group.querySelector(`.events > [data-cat="${filter}"], .earlier > [data-cat="${filter}"]`)) group.open = true;
+  }
 }
 
 /** Montre la page voisine (`step` : -1 ou 1) d'un groupe de passages. */
@@ -3436,7 +3453,7 @@ function liveRunHtml({ body, head, events, run, comment, answer, stopping }) {
       ${plan && !stopping ? `<details class="lr-plan" data-key="${key}:plan"><summary>Le plan de Claw</summary><p>${escapeHtml(plan)}</p></details>` : ""}
     </div>
     ${tools.length ? `<ul class="lr-actions">${recentActions(events, 4, seen)}</ul>` : ""}
-    <div class="lr-journal">${transcriptHtml(events, { key, live: false, answer, title: "Journal complet", shown: events.length })}</div>
+    <div class="lr-journal">${transcriptHtml(events, { key, live: false, answer, title: "Journal complet", shown: events.length, stats: false })}</div>
   </section>`;
 }
 
@@ -3622,6 +3639,11 @@ function renderSessionView() {
     </section>`;
   for (const details of view.querySelectorAll("details[data-key]")) {
     if (opened.has(details.dataset.key)) details.open = opened.get(details.dataset.key);
+  }
+  for (const transcript of view.querySelectorAll(".transcript[data-key]")) {
+    // Sans sa puce, un filtre cacherait des étapes sans moyen de tout remontrer.
+    const filter = state.journalFilters.get(transcript.dataset.key);
+    if (filter && transcript.querySelector(`:scope > .ev-filters [data-filter="${filter}"]`)) filterJournal(transcript, filter);
   }
   // Le bloc « Claw travaille » (ou « Claw se prépare ») dit déjà l'état et porte « Arrêter » : la
   // ligne d'état ne le répète pas.
@@ -5365,7 +5387,22 @@ function watchMotion() {
     const details = summary && summary.parentElement;
     if (!details || details.tagName !== "DETAILS" || details.open || summary !== details.querySelector(":scope > summary")) return;
     details.classList.add("opening");
-    setTimeout(() => details.classList.remove("opening"), 450);
+    setTimeout(() => details.classList.remove("opening"), 700);
+  });
+  // Filtres d'un journal : une puce montre ce genre d'étape seul, la toucher encore montre tout.
+  // Gardés d'une relecture de la session à l'autre.
+  document.addEventListener("click", (event) => {
+    const chip = event.target.closest(".ev-filter");
+    const transcript = chip && chip.closest(".transcript");
+    if (!transcript) return;
+    const filter = chip.dataset.filter === (transcript.dataset.filter || "") ? "" : chip.dataset.filter;
+    state.journalFilters.set(transcript.dataset.key, filter);
+    filterJournal(transcript, filter);
+    transcript.classList.remove("refilter");
+    void transcript.offsetWidth;
+    transcript.classList.add("refilter");
+    clearTimeout(state.refilterTimer);
+    state.refilterTimer = setTimeout(() => transcript.classList.remove("refilter"), 500);
   });
   const sheet = $("#sheet");
   new MutationObserver(() => sheet.classList.remove("closing")).observe(sheet, { childList: true });
