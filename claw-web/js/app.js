@@ -6,10 +6,10 @@
 import { ANSWER, GitHub, GitHubError, LABEL, PROGRESS } from "./github.js";
 import { escapeHtml, renderMarkdown } from "./markdown.js";
 import { sealedBox } from "./sealed-box.js";
-import { LOG, changesHtml, decodeLog, photoLink, photoView, recentActions, transcriptHtml, withoutCallMarkup } from "./transcript.js";
+import { LOG, changesHtml, decodeLog, photoLink, photoView, recentActions, toggleThinking, transcriptHtml, withoutCallMarkup } from "./transcript.js";
 import { highlightLines, languageOf } from "./highlight.js";
 import { accountStatus, allFreeModels, freeModels, resetTime } from "./openrouter.js";
-import { extras } from "./tools.js";
+import { emptyState, extras } from "./tools.js";
 import {
   LOCK_AFTER_MS, MIN_CODE, SECRET_FIELDS, codeFromFace, createFaceKey, createVault, disableFace, enableFace,
   faceAvailable, faceEnabled, openVault, removeVault, seal, vault, waitLeft,
@@ -130,6 +130,9 @@ const state = {
   revealed: new Map(),
   // Actions déjà vues dans le bloc « Claw travaille », par passage : les nouvelles y entrent.
   liveSeen: new Map(),
+  // Filtre choisi de chaque journal (« edit », « run »…), par passage.
+  journalFilters: new Map(),
+  refilterTimer: null,
   // Bloc au-dessus de la zone de saisie : questions de Claw (carte montrée, choix faits).
   dockQuestions: null,
 };
@@ -3004,7 +3007,7 @@ function revealSteps(view) {
     step.classList.remove("pending");
     step.classList.add("arrived");
     if (key) state.revealed.set(key, Math.max(state.revealed.get(key) || 0, index + 1));
-    const count = transcript?.querySelector(":scope > summary .side[data-actions]");
+    const count = transcript?.querySelector(":scope > summary [data-actions]");
     if (count && step.matches(".ev.tool, .ev.tool *, [data-step].tool")) {
       const actions = Number(count.dataset.actions) + 1;
       count.dataset.actions = String(actions);
@@ -3016,6 +3019,20 @@ function revealSteps(view) {
     if (left) state.revealTimer = setTimeout(next, Math.max(300, Math.min(1500, 10000 / left)));
   };
   if (view.querySelector(".transcript .pending")) state.revealTimer = setTimeout(next, 150);
+}
+
+/** Ne montre d'un journal qu'un genre d'étape (« edit », « run »…), ou tout (« »). Les tâches
+ * qui en ont s'ouvrent ; celles qui n'en ont pas se cachent (feuille de style). */
+function filterJournal(transcript, filter) {
+  if (filter) transcript.dataset.filter = filter;
+  else delete transcript.dataset.filter;
+  for (const chip of transcript.querySelectorAll(":scope > .ev-filters .ev-filter")) {
+    chip.setAttribute("aria-pressed", String(chip.dataset.filter === filter));
+  }
+  if (!filter) return;
+  for (const group of transcript.querySelectorAll(".task-group")) {
+    if (group.querySelector(`.events > [data-cat="${filter}"], .earlier > [data-cat="${filter}"]`)) group.open = true;
+  }
 }
 
 /** Montre la page voisine (`step` : -1 ou 1) d'un groupe de passages. */
@@ -3436,7 +3453,7 @@ function liveRunHtml({ body, head, events, run, comment, answer, stopping }) {
       ${plan && !stopping ? `<details class="lr-plan" data-key="${key}:plan"><summary>Le plan de Claw</summary><p>${escapeHtml(plan)}</p></details>` : ""}
     </div>
     ${tools.length ? `<ul class="lr-actions">${recentActions(events, 4, seen)}</ul>` : ""}
-    <div class="lr-journal">${transcriptHtml(events, { key, live: false, answer, title: "Journal complet", shown: events.length })}</div>
+    <div class="lr-journal">${transcriptHtml(events, { key, live: false, answer, title: "Journal complet", shown: events.length, stats: false })}</div>
   </section>`;
 }
 
@@ -3622,6 +3639,11 @@ function renderSessionView() {
     </section>`;
   for (const details of view.querySelectorAll("details[data-key]")) {
     if (opened.has(details.dataset.key)) details.open = opened.get(details.dataset.key);
+  }
+  for (const transcript of view.querySelectorAll(".transcript[data-key]")) {
+    // Sans sa puce, un filtre cacherait des étapes sans moyen de tout remontrer.
+    const filter = state.journalFilters.get(transcript.dataset.key);
+    if (filter && transcript.querySelector(`:scope > .ev-filters [data-filter="${filter}"]`)) filterJournal(transcript, filter);
   }
   // Le bloc « Claw travaille » (ou « Claw se prépare ») dit déjà l'état et porte « Arrêter » : la
   // ligne d'état ne le répète pas.
@@ -3933,6 +3955,11 @@ async function pollSession(force = false) {
   else if (session.active) refreshQuota();
   if (force || signature !== session.signature) {
     const atBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
+    // Du nouveau pendant qu'on lit plus haut : la flèche le dit, la page reste où elle est.
+    if (!atBottom && !force && session.signature && session.active) {
+      state.freshBelow = true;
+      state.bottomButton?.();
+    }
     session.signature = signature;
     renderSessionView();
     renderComposer();
@@ -4209,7 +4236,7 @@ async function showFiles({ repo, ref, path, number }) {
         <li><a class="file-row" href="${link(entry.path)}">${entry.type === "dir" ? ICON.folder : ICON.file}
           <span class="name">${escapeHtml(entry.name)}</span>
           <small>${entry.type === "dir" ? "" : sizeLabel(entry.size || 0)}</small></a></li>`).join("")}</ul>`
-        : '<p class="empty">Dossier vide.</p>';
+        : emptyState({ icon: ICON.folder, title: "Dossier vide", text: "Aucun fichier ici sur cette branche.", compact: true });
     } else {
       body = await fileHtml(repo, item, ref);
     }
@@ -4390,16 +4417,20 @@ async function showChanges(number) {
       const compare = await state.github.compare(settings.repo, settings.base || "main", branch);
       content = compare.files && compare.files.length
         ? changesHtml(compare)
-        : `<p class="empty">Aucune différence entre <code>${escapeHtml(branch)}</code> et <code>${escapeHtml(settings.base || "main")}</code>.</p>`;
+        : emptyState({ icon: ICON.check, title: "Aucune différence",
+          text: `<code>${escapeHtml(branch)}</code> est identique à <code>${escapeHtml(settings.base || "main")}</code>.` });
     } catch (error) {
       if (!(error instanceof GitHubError) || error.status !== 404) throw error;
-      content = `<p class="empty">Pas encore de branche <code>${escapeHtml(branch)}</code> dans ${escapeHtml(settings.repo || "")} : Claw n'y a encore rien publié.</p>`;
+      content = emptyState({ icon: ICON.branch, title: "Rien de publié pour l'instant",
+        text: `Pas encore de branche <code>${escapeHtml(branch)}</code> dans ${escapeHtml(settings.repo || "")} : les changements de Claw arriveront ici.` });
     }
     if (!location.hash.startsWith(`#/session/${number}/modifications`)) return;
+    const base = escapeHtml(settings.base || "main");
     section.innerHTML = `
       ${sessionTop(number, "modifications", issue)}
-      <p class="help"><code>${escapeHtml(branch)}</code> comparée à <code>${escapeHtml(settings.base || "main")}</code> dans
-        <a href="https://github.com/${escapeHtml(settings.repo || "")}/compare/${escapeHtml(settings.base || "main")}...${escapeHtml(branch)}" target="_blank" rel="noopener noreferrer">${escapeHtml(settings.repo || "")}</a></p>
+      <p class="compare-head"><span class="ref">${ICON.branch}<span>${escapeHtml(branch)}</span></span>
+        <span class="compare-arrow" aria-label="vers">→</span><span class="ref">${base}</span>
+        <a class="compare-repo" href="https://github.com/${escapeHtml(settings.repo || "")}/compare/${base}...${escapeHtml(branch)}" target="_blank" rel="noopener noreferrer">${escapeHtml(settings.repo || "")}${ICON.external}</a></p>
       ${content}`;
   } catch (error) {
     failure(error);
@@ -5132,6 +5163,19 @@ const pages = extras({
   animateIn,
   twoTaps,
   sendToSession,
+  // Bouton « Demander à Claw » d'une page vide : la demande attend dans la saisie de l'accueil.
+  askClaw(text) {
+    state.drafts.set("home", text);
+    location.hash = "#/";
+    setTimeout(() => {
+      const textarea = document.querySelector("#composer textarea");
+      if (!textarea) return;
+      textarea.value = text;
+      textarea.dispatchEvent(new Event("input"));
+      textarea.focus();
+      textarea.setSelectionRange(text.length, text.length);
+    }, 120);
+  },
   github: () => state.github,
   settings: () => state.settings,
   engineRef: () => state.engineRef || "main",
@@ -5254,24 +5298,32 @@ async function announceMove(engine, reachable) {
 
 /** Flèche « Revenir en bas » d'une session, au-dessus de la zone de saisie, quand la fin de
  * la discussion n'est plus à l'écran (comme dans l'appli Claude ; demandée le 24 octobre
- * 2026). */
+ * 2026). Posée à droite, pas au milieu du texte qu'on lit ; « Nouvelles actions » quand Claw
+ * avance pendant qu'on lit plus haut (la page ne saute pas d'elle-même). */
 function watchBottomButton() {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "to-bottom";
   button.setAttribute("aria-label", "Revenir en bas");
-  button.innerHTML = ICON.down;
+  button.innerHTML = `${ICON.down}<span class="tb-label">Nouvelles actions</span>`;
   button.hidden = true;
   document.body.append(button);
-  button.addEventListener("click", () => window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }));
+  button.addEventListener("click", () => {
+    state.freshBelow = false;
+    window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+  });
   let queued = false;
   const update = () => {
     queued = false;
     const composer = $("#composer");
     const far = document.body.scrollHeight - (window.innerHeight + window.scrollY) > 320;
+    if (!far) state.freshBelow = false;
     button.hidden = !(far && state.session && composer && !composer.hidden
       && !document.documentElement.classList.contains("scroll-locked"));
+    button.classList.toggle("fresh", Boolean(state.freshBelow));
+    button.setAttribute("aria-label", state.freshBelow ? "Nouvelles actions : revenir en bas" : "Revenir en bas");
   };
+  state.bottomButton = () => later();
   const later = () => {
     if (queued) return;
     queued = true;
@@ -5335,7 +5387,22 @@ function watchMotion() {
     const details = summary && summary.parentElement;
     if (!details || details.tagName !== "DETAILS" || details.open || summary !== details.querySelector(":scope > summary")) return;
     details.classList.add("opening");
-    setTimeout(() => details.classList.remove("opening"), 450);
+    setTimeout(() => details.classList.remove("opening"), 700);
+  });
+  // Filtres d'un journal : une puce montre ce genre d'étape seul, la toucher encore montre tout.
+  // Gardés d'une relecture de la session à l'autre.
+  document.addEventListener("click", (event) => {
+    const chip = event.target.closest(".ev-filter");
+    const transcript = chip && chip.closest(".transcript");
+    if (!transcript) return;
+    const filter = chip.dataset.filter === (transcript.dataset.filter || "") ? "" : chip.dataset.filter;
+    state.journalFilters.set(transcript.dataset.key, filter);
+    filterJournal(transcript, filter);
+    transcript.classList.remove("refilter");
+    void transcript.offsetWidth;
+    transcript.classList.add("refilter");
+    clearTimeout(state.refilterTimer);
+    state.refilterTimer = setTimeout(() => transcript.classList.remove("refilter"), 500);
   });
   const sheet = $("#sheet");
   new MutationObserver(() => sheet.classList.remove("closing")).observe(sheet, { childList: true });
@@ -5376,6 +5443,10 @@ async function boot() {
   });
   $("#settings-button").addEventListener("click", () => { location.hash = "#/reglages"; });
   $("#scrim").addEventListener("click", closeDrawer);
+  // « Voir ses réflexions », dans le résumé d'un journal : pour tous les journaux de la page.
+  document.addEventListener("click", (event) => {
+    if (event.target.closest("[data-journal-thinking]")) toggleThinking();
+  });
   for (const tab of document.querySelectorAll("#drawer .drawer-tab")) tab.addEventListener("click", () => showDrawerPane(tab.dataset.pane));
   $("#drawer .explorer").addEventListener("click", onExplorerClick);
   // Le menu Équipe / Ultracode se ferme en touchant ailleurs, ou avec Échap.
