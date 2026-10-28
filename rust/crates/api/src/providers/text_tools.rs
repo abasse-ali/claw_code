@@ -19,20 +19,58 @@ const CLOSE_TAG: &str = "</tool_call>";
 static TEXT_MODE_MODELS: RwLock<BTreeSet<String>> = RwLock::new(BTreeSet::new());
 
 /// Mode texte imposé (`CLAW_TOOL_MODE=text`), configuré pour le fournisseur
-/// (`"toolMode": "text"`), ou appris après un refus du serveur.
+/// (`"toolMode": "text"`, et NVIDIA d'office), ou appris après un refus du
+/// serveur. `CLAW_TOOL_MODE=native` rend ses outils natifs à un fournisseur
+/// réglé en mode texte.
 #[must_use]
 pub fn text_tools_enabled(model: &str) -> bool {
-    if std::env::var("CLAW_TOOL_MODE").is_ok_and(|value| value.trim().eq_ignore_ascii_case("text"))
-    {
+    let mode = std::env::var("CLAW_TOOL_MODE")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    if mode == "text" {
         return true;
     }
-    if super::compat::split_compat_model(model).is_some_and(|(provider, _)| provider.text_tools) {
+    if mode != "native"
+        && super::compat::split_compat_model(model).is_some_and(|(provider, _)| provider.text_tools)
+    {
         return true;
     }
     TEXT_MODE_MODELS
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .contains(model)
+}
+
+/// Forme des appels d'outils écrits en texte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolDialect {
+    /// `<tool_call>{"name": …, "arguments": {…}}</tool_call>` (format Hermes).
+    Json,
+    /// `<tool_call><function=nom><parameter=clé>valeur</parameter></function></tool_call>`
+    /// (format de Qwen3-Coder, celui de Nemotron) : une valeur s'écrit telle
+    /// quelle, sans guillemets ni échappement, ce qui convient au contenu d'un
+    /// fichier.
+    Xml,
+}
+
+/// La forme d'appel en mode texte : celle de Nemotron pour les modèles servis
+/// par NVIDIA, le format Hermes pour les autres.
+///
+/// Vu le 28 octobre 2026 (essai #40, Nemotron 3 Ultra) : avec les outils
+/// natifs, le serveur de NVIDIA lit ce format dans la sortie du modèle et ne
+/// transmet un paramètre qu'une fois fermé. Pendant l'écriture d'un gros
+/// fichier, le flux restait muet ; au bout d'environ 300 s, notre délai
+/// d'inactivité ou celui du serveur coupait la réponse, perdue en entier. En
+/// mode texte, le même appel arrive au fil de l'eau.
+#[must_use]
+pub fn dialect_for(model: &str) -> ToolDialect {
+    if super::compat::split_compat_model(model)
+        .is_some_and(|(provider, _)| provider.name == "nvidia")
+    {
+        ToolDialect::Xml
+    } else {
+        ToolDialect::Json
+    }
 }
 
 /// Retient qu'un modèle doit passer par le mode texte.
@@ -83,6 +121,71 @@ pub fn tool_protocol_prompt(tools: &[ToolDefinition]) -> String {
     prompt
 }
 
+/// Section du prompt système décrivant les outils et le format d'appel de
+/// `dialect`.
+#[must_use]
+pub fn tool_protocol_prompt_in(dialect: ToolDialect, tools: &[ToolDefinition]) -> String {
+    if dialect == ToolDialect::Json {
+        return tool_protocol_prompt(tools);
+    }
+    let mut prompt = String::from(
+        "# Tool calling\nYou can call tools. To call one, write a block exactly like this, one block per call:\n<tool_call>\n<function=tool_name>\n<parameter=param_name>\nvalue\n</parameter>\n</function>\n</tool_call>\nWrite each value as it is, without quotes or escaping: a file content goes in raw, over as many lines as it needs. Write a number, a boolean, a list or an object in JSON. Leave out the optional parameters you do not need. Several calls in one reply follow each other. After your tool calls, stop writing and wait: the results come back in <tool_result> blocks. Never invent tool results. When the task is done, answer normally, without any <tool_call> block.\n\n## Available tools\n",
+    );
+    for tool in tools {
+        let _ = writeln!(
+            prompt,
+            "\n### {}\n{}",
+            tool.name,
+            tool.description.as_deref().unwrap_or("").trim()
+        );
+        prompt.push_str(&parameter_lines(&tool.input_schema));
+    }
+    prompt
+}
+
+/// Les paramètres d'un outil, un par ligne : nom, type, obligatoire ou non,
+/// description, valeurs permises, et forme des éléments d'une liste ou des
+/// champs d'un objet.
+fn parameter_lines(schema: &Value) -> String {
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return String::new();
+    };
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let mut lines = String::from("Parameters:\n");
+    for (name, property) in properties {
+        let kind = property.get("type").map_or_else(
+            || "any".to_string(),
+            |kind| {
+                kind.as_str()
+                    .map_or_else(|| kind.to_string(), ToOwned::to_owned)
+            },
+        );
+        let mut line = format!("- {name} ({kind}");
+        if required.contains(&name.as_str()) {
+            line.push_str(", required");
+        }
+        line.push(')');
+        if let Some(description) = property.get("description").and_then(Value::as_str) {
+            let _ = write!(line, ": {}", description.trim().replace('\n', " "));
+        }
+        if let Some(values) = property.get("enum") {
+            let _ = write!(line, " One of {values}.");
+        }
+        for nested in ["items", "properties"] {
+            if let Some(shape) = property.get(nested) {
+                let _ = write!(line, " {nested}: {shape}");
+            }
+        }
+        lines.push_str(&line);
+        lines.push('\n');
+    }
+    lines
+}
+
 /// Schéma JSON réduit à l'essentiel (propriétés, types, champs requis).
 fn compact_schema(schema: &Value) -> String {
     let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
@@ -120,6 +223,86 @@ pub fn render_tool_call(name: &str, input: &Value) -> String {
         "{OPEN_TAG}\n{}\n{CLOSE_TAG}",
         json!({ "name": name, "arguments": input })
     )
+}
+
+/// Un appel de l'historique écrit dans la forme de `dialect`.
+#[must_use]
+pub fn render_tool_call_in(dialect: ToolDialect, name: &str, input: &Value) -> String {
+    let Some(arguments) = input.as_object().filter(|_| dialect == ToolDialect::Xml) else {
+        return render_tool_call(name, input);
+    };
+    let mut text = format!("{OPEN_TAG}\n{FUNCTION_TAG}{name}>\n");
+    for (key, value) in arguments {
+        let raw = match value {
+            Value::String(raw) => raw.clone(),
+            other => other.to_string(),
+        };
+        let _ = write!(
+            text,
+            "{FUNCTION_PARAMETER_TAG}{key}>\n{raw}\n{PARAMETER_CLOSE}\n"
+        );
+    }
+    let _ = write!(text, "{FUNCTION_CLOSE}\n{CLOSE_TAG}");
+    text
+}
+
+/// Appels écrits au format de Qwen3-Coder dans des blocs `<tool_call>`, où
+/// qu'ils soient hors d'un bloc de code, et le texte qui les entoure (à
+/// afficher). Un bloc resté ouvert (réponse coupée) n'est jamais un appel : un
+/// fichier tronqué ne doit pas être écrit. Un outil inconnu passe tel quel :
+/// le modèle apprendra qu'il n'existe pas.
+#[must_use]
+pub fn extract_xml_calls(text: &str, tools: &[ToolDefinition]) -> (String, Vec<(String, Value)>) {
+    // Morceaux de texte entre les appels, joints par une ligne vide.
+    let mut pieces: Vec<&str> = Vec::new();
+    let mut calls = Vec::new();
+    let mut piece_start = 0;
+    let mut from = 0;
+    while let Some(found) = text.get(from..).and_then(|rest| rest.find(OPEN_TAG)) {
+        let start = from + found;
+        let body_start = start + OPEN_TAG.len();
+        // Un exemple dans un bloc de code : du texte.
+        if !text[..start].matches("```").count().is_multiple_of(2) {
+            from = body_start;
+            continue;
+        }
+        pieces.push(&text[piece_start..start]);
+        let Some(length) = text[body_start..].find(CLOSE_TAG) else {
+            piece_start = text.len();
+            break;
+        };
+        if let Some(call) = xml_call(&text[body_start..body_start + length], tools) {
+            calls.push(call);
+        }
+        from = body_start + length + CLOSE_TAG.len();
+        piece_start = from;
+    }
+    pieces.push(&text[piece_start..]);
+    let visible = pieces
+        .iter()
+        .map(|piece| piece.trim())
+        .filter(|piece| !piece.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (visible, calls)
+}
+
+/// L'appel d'un bloc `<tool_call>` : `<function=nom>` et ses paramètres.
+fn xml_call(body: &str, tools: &[ToolDefinition]) -> Option<(String, Value)> {
+    let (name, after) = body
+        .trim_start()
+        .strip_prefix(FUNCTION_TAG)?
+        .split_once('>')?;
+    let name = name.trim();
+    let end = after.rfind(FUNCTION_CLOSE)?;
+    let schema = tools
+        .iter()
+        .find(|tool| tool.name == name)
+        .map_or(Value::Null, |tool| tool.input_schema.clone());
+    Some((
+        name.to_string(),
+        function_arguments(&after[..end], &schema)?,
+    ))
 }
 
 #[must_use]
@@ -568,8 +751,13 @@ impl InvokeFilter {
     }
 }
 
+/// Balises à partir desquelles le texte d'un modèle en mode texte est un
+/// appel : `<tool_call>`, ou `<function=` quand le modèle oublie l'enveloppe.
+const TEXT_CALL_TAGS: [&str; 2] = [OPEN_TAG, FUNCTION_TAG];
+
 /// Filtre l'affichage en continu : le texte passe, sauf à partir d'un bloc
-/// `<tool_call>` (y compris un début de balise en fin de morceau).
+/// `<tool_call>` ou d'un appel `<function=` (y compris un début de balise en
+/// fin de morceau).
 #[derive(Debug, Default)]
 pub struct TextToolFilter {
     raw: String,
@@ -585,16 +773,25 @@ impl TextToolFilter {
             return String::new();
         }
         let pending = &self.raw[self.emitted..];
-        if let Some(position) = pending.find(OPEN_TAG) {
+        if let Some(position) = TEXT_CALL_TAGS
+            .iter()
+            .filter_map(|tag| pending.find(tag))
+            .min()
+        {
             self.hidden = true;
             let visible = pending[..position].to_string();
             self.emitted = self.raw.len();
             return visible;
         }
-        // Garde en réserve une éventuelle balise coupée (`<tool_ca`).
-        let keep = (1..OPEN_TAG.len())
-            .rev()
-            .find(|length| pending.ends_with(&OPEN_TAG[..*length]))
+        // Garde en réserve une éventuelle balise coupée (`<tool_ca`, `<func`).
+        let keep = TEXT_CALL_TAGS
+            .iter()
+            .filter_map(|tag| {
+                (1..tag.len())
+                    .rev()
+                    .find(|length| pending.ends_with(&tag[..*length]))
+            })
+            .max()
             .unwrap_or(0);
         let cut = pending.len() - keep;
         let visible = pending[..cut].to_string();
@@ -617,8 +814,9 @@ impl TextToolFilter {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_tool_calls, is_tools_unsupported_error, salvage_invoke_calls,
-        salvage_json_tool_calls, InvokeFilter, TextToolFilter,
+        dialect_for, extract_tool_calls, extract_xml_calls, is_tools_unsupported_error,
+        render_tool_call_in, salvage_invoke_calls, salvage_json_tool_calls,
+        tool_protocol_prompt_in, InvokeFilter, TextToolFilter, ToolDialect,
     };
     use crate::types::ToolDefinition;
     use serde_json::json;
@@ -643,6 +841,106 @@ mod tests {
                 }}),
             },
         ]
+    }
+
+    fn write_tools() -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "write_file".to_string(),
+            description: Some("Write a text file.".to_string()),
+            input_schema: json!({"type": "object", "properties": {
+                "path": {"type": "string", "description": "Where to write."},
+                "content": {"type": "string"},
+                "append": {"type": "boolean", "description": "Add at the end."}
+            }, "required": ["path", "content"]}),
+        }]
+    }
+
+    #[test]
+    fn nvidia_models_write_their_calls_in_their_own_xml_form() {
+        assert_eq!(
+            dialect_for("nvidia:nvidia/nemotron-3-ultra-550b-a55b"),
+            ToolDialect::Xml
+        );
+        assert_eq!(dialect_for("ollama:qwen3-coder"), ToolDialect::Json);
+        assert_eq!(dialect_for("qwen/qwen3-coder:free"), ToolDialect::Json);
+        // Le prompt montre la forme, et chaque paramètre avec sa description.
+        let prompt = tool_protocol_prompt_in(ToolDialect::Xml, &write_tools());
+        assert!(
+            prompt.contains("<function=tool_name>\n<parameter=param_name>"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("### write_file\nWrite a text file."),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("- path (string, required): Where to write."),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("- append (boolean): Add at the end."),
+            "{prompt}"
+        );
+        // L'historique est écrit dans la même forme : le texte brut, le reste en JSON.
+        let call = render_tool_call_in(
+            ToolDialect::Xml,
+            "write_file",
+            &json!({"path": "app.js", "content": "const a = \"x\";\n", "append": true}),
+        );
+        assert_eq!(
+            call,
+            "<tool_call>\n<function=write_file>\n<parameter=append>\ntrue\n</parameter>\n<parameter=content>\nconst a = \"x\";\n\n</parameter>\n<parameter=path>\napp.js\n</parameter>\n</function>\n</tool_call>"
+        );
+        let tools = write_tools();
+        let (_, calls) = extract_xml_calls(&call, &tools);
+        assert_eq!(
+            calls,
+            [(
+                "write_file".to_string(),
+                json!({"path": "app.js", "content": "const a = \"x\";\n", "append": true})
+            )]
+        );
+        assert_eq!(
+            render_tool_call_in(ToolDialect::Json, "bash", &json!({"command": "ls"})),
+            "<tool_call>\n{\"arguments\":{\"command\":\"ls\"},\"name\":\"bash\"}\n</tool_call>"
+        );
+    }
+
+    #[test]
+    fn xml_calls_keep_a_file_as_written_and_never_run_a_cut_one() {
+        let tools = write_tools();
+        // Un fichier HTML avec du JSON dedans : rien n'en est un appel, tout est
+        // gardé tel quel ; le texte autour et un second appel aussi.
+        let page =
+            "<!doctype html>\n<script>const seed = {\"name\": \"Eau\", \"goal\": 1.5};</script>\n";
+        let text = format!(
+            "J'écris la page.\n<tool_call>\n<function=write_file>\n<parameter=path>\nindex.html\n</parameter>\n<parameter=content>\n{page}\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=read_file>\n<parameter=path>\nREADME.md\n</parameter>\n</function>\n</tool_call>\nJ'attends."
+        );
+        let (visible, calls) = extract_xml_calls(&text, &tools);
+        assert_eq!(visible, "J'écris la page.\n\nJ'attends.");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].1["content"], page);
+        // Outil inconnu : passé tel quel, le modèle apprendra qu'il n'existe pas.
+        assert_eq!(
+            calls[1],
+            ("read_file".to_string(), json!({"path": "README.md"}))
+        );
+        // Réponse coupée en plein contenu : aucun appel, rien d'écrit.
+        let cut = "<tool_call>\n<function=write_file>\n<parameter=path>\napp.js\n</parameter>\n<parameter=content>\nfunction start() {";
+        assert!(extract_xml_calls(cut, &tools).1.is_empty());
+        // Un exemple dans un bloc de code n'est pas un appel.
+        let fenced = "Format :\n```\n<tool_call>\n<function=write_file>\n<parameter=path>\na\n</parameter>\n<parameter=content>\nb\n</parameter>\n</function>\n</tool_call>\n```";
+        assert!(extract_xml_calls(fenced, &tools).1.is_empty());
+    }
+
+    #[test]
+    fn the_text_filter_hides_a_call_written_without_its_envelope() {
+        let mut filter = TextToolFilter::default();
+        let mut shown = filter.push("Je lis le fichier.\n<func");
+        shown.push_str(
+            &filter.push("tion=read_file>\n<parameter=path>\na\n</parameter>\n</function>"),
+        );
+        assert_eq!(shown, "Je lis le fichier.\n");
     }
 
     #[test]

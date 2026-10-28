@@ -10210,7 +10210,7 @@ impl ApiClient for DefaultRuntimeClient {
             model: model.to_string(),
             max_tokens: max_tokens_for_model(model),
             messages: messages_for_model(model, &messages, passback),
-            system: with_reply_time_note(model, system.clone()),
+            system: with_reply_time_note(model, system.clone(), api::text_tools_enabled(model)),
             tools: tools.clone(),
             // Annonce demandée par Claw : les outils restent décrits (un
             // historique d'appels sans eux est refusé par certains
@@ -10889,16 +10889,18 @@ fn is_long_empty(events: &[AssistantEvent], elapsed: Duration) -> bool {
 const REPLY_TIME_NOTE: &str = "# Reply time\nThis model provider sends a tool call only once it is complete, and drops a reply that stays silent for about 4 minutes: a tool call that takes longer to write is lost entirely, with the whole reply. Keep each tool call small: write a file of more than 150 lines in parts of at most 150 lines (the first with write_file, each next one with write_file and \"append\": true), and split a long edit into several smaller ones. Reason briefly: long reasoning slows every step.";
 
 /// Le prompt système envoyé à `model`, avec la note du temps d'une réponse
-/// quand son fournisseur coupe les longues réponses.
-fn with_reply_time_note(model: &str, system: Option<String>) -> Option<String> {
-    let limited =
-        api::split_compat_model(model).is_some_and(|(provider, _)| provider.name == "nvidia");
+/// quand son fournisseur coupe les longues réponses. En mode texte (NVIDIA
+/// d'office), les appels arrivent au fil de l'eau : la note ne s'applique pas.
+fn with_reply_time_note(model: &str, system: Option<String>, text_mode: bool) -> Option<String> {
+    let limited = !text_mode
+        && api::split_compat_model(model).is_some_and(|(provider, _)| provider.name == "nvidia");
     match system {
         _ if !limited => system,
         Some(prompt) => Some(format!("{prompt}\n\n{REPLY_TIME_NOTE}")),
         None => Some(REPLY_TIME_NOTE.to_string()),
     }
 }
+
 /// La réponse s'est interrompue côté réseau (et non par l'utilisateur ou par
 /// un refus du fournisseur) : la même requête peut être relancée.
 /// Erreur interne d'une réponse qui invente un message de l'utilisateur.
@@ -12012,18 +12014,24 @@ mod tests {
     #[test]
     fn an_nvidia_model_learns_how_long_a_reply_may_take() {
         let prompt = Some("system".to_string());
-        let told =
-            super::with_reply_time_note("nvidia:nvidia/nemotron-3-ultra-550b-a55b", prompt.clone())
-                .expect("prompt");
+        let nvidia = "nvidia:nvidia/nemotron-3-ultra-550b-a55b";
+        // En mode texte (d'office chez NVIDIA), les appels arrivent au fil de
+        // l'eau : pas de note. Avec ses outils natifs, le modèle l'apprend.
+        assert!(api::text_tools_enabled(nvidia));
+        assert_eq!(
+            super::with_reply_time_note(nvidia, prompt.clone(), true),
+            prompt
+        );
+        let told = super::with_reply_time_note(nvidia, prompt.clone(), false).expect("prompt");
         assert!(told.starts_with("system\n\n# Reply time"), "{told}");
         assert!(told.contains("\"append\": true"), "{told}");
         // Les autres fournisseurs n'ont pas cette limite : rien ne change.
         assert_eq!(
-            super::with_reply_time_note("qwen/qwen3-coder:free", prompt.clone()),
+            super::with_reply_time_note("qwen/qwen3-coder:free", prompt.clone(), false),
             prompt
         );
         assert_eq!(
-            super::with_reply_time_note("gemini:gemini-2.5-pro", None),
+            super::with_reply_time_note("gemini:gemini-2.5-pro", None, false),
             None
         );
     }

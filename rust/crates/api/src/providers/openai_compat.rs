@@ -14,7 +14,7 @@ use crate::types::{
 };
 
 use super::reasoning::{self, ReasoningEffort, ThinkTagFilter};
-use super::text_tools::{self, InvokeFilter, TextToolFilter};
+use super::text_tools::{self, InvokeFilter, TextToolFilter, ToolDialect};
 use super::{Provider, ProviderFuture};
 
 pub const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1";
@@ -903,6 +903,8 @@ struct StreamState {
     tool_calls: BTreeMap<u32, ToolCallState>,
     /// Appels d'outils écrits dans le texte (`<tool_call>`), extraits en fin de flux.
     text_mode: bool,
+    /// Forme de ces appels (celle du modèle de la requête).
+    dialect: ToolDialect,
     text_filter: TextToolFilter,
     /// Raisonnement écrit entre `<think>` dans le texte.
     think_filter: ThinkTagFilter,
@@ -947,6 +949,7 @@ impl StreamState {
             usage: None,
             tool_calls: BTreeMap::new(),
             text_mode: false,
+            dialect: ToolDialect::Json,
             text_filter: TextToolFilter::default(),
             think_filter: ThinkTagFilter::default(),
             known_tools: Vec::new(),
@@ -977,6 +980,7 @@ impl StreamState {
     /// qu'elle peut être un appel écrit en JSON.
     fn with_tools(mut self, request: &MessageRequest, text_mode: bool) -> Self {
         self.text_mode = text_mode;
+        self.dialect = text_tools::dialect_for(&request.model);
         self.tools = request.tools.clone().unwrap_or_default();
         self.known_tools = self.tools.iter().map(|tool| tool.name.clone()).collect();
         if !text_mode && !self.known_tools.is_empty() {
@@ -1139,6 +1143,15 @@ impl StreamState {
     fn finish_text_tools(&mut self, events: &mut Vec<StreamEvent>) {
         let (rest, raw) = self.text_filter.finish();
         self.push_text(rest, events);
+        // Format de Nemotron d'abord : le contenu d'un fichier y est brut, et un
+        // objet JSON qu'il contiendrait ne doit pas passer pour un appel.
+        if self.dialect == ToolDialect::Xml {
+            let (_, calls) = text_tools::extract_xml_calls(&raw, &self.tools);
+            if !calls.is_empty() {
+                self.push_text_tool_calls(calls, events);
+                return;
+            }
+        }
         let (_, mut calls) = text_tools::extract_tool_calls(&raw);
         if calls.is_empty() {
             calls =
@@ -1652,13 +1665,21 @@ fn build_chat_completion_request_with(
             .is_some_and(|tools| !tools.is_empty());
     let mut messages = Vec::new();
     let mut system = request.system.clone().unwrap_or_default();
+    let dialect = text_tools::dialect_for(&request.model);
     if text_mode {
         if !system.is_empty() {
             system.push_str("\n\n");
         }
-        system.push_str(&text_tools::tool_protocol_prompt(
+        system.push_str(&text_tools::tool_protocol_prompt_in(
+            dialect,
             request.tools.as_deref().unwrap_or_default(),
         ));
+        // Réponse en texte seul (annonce, conclusion) : en mode natif le
+        // serveur interdit les appels (`tool_choice: none`) ; ici, le modèle
+        // l'apprend.
+        if matches!(request.tool_choice, Some(ToolChoice::None)) {
+            system.push_str(TEXT_ONLY_NOTE);
+        }
     }
     if !system.is_empty() {
         messages.push(json!({
@@ -1667,7 +1688,7 @@ fn build_chat_completion_request_with(
         }));
     }
     if text_mode {
-        messages.extend(translate_messages_as_text(&request.messages));
+        messages.extend(translate_messages_as_text(&request.messages, dialect));
     } else {
         // Le tour en cours commence à la dernière vraie demande de l'utilisateur
         // (un message `user` qui ne porte que des résultats d'outils n'en est pas une).
@@ -1709,9 +1730,12 @@ fn build_chat_completion_request_with(
     payload
 }
 
+/// Fin du prompt d'une réponse en texte seul, en mode texte.
+const TEXT_ONLY_NOTE: &str = "\n\nFor this reply, tools are not available: answer in plain text, without any <tool_call> block.";
+
 /// Historique en mode texte : appels et résultats d'outils écrits en clair,
 /// messages `user`/`assistant` uniquement (pas de rôle `tool`).
-fn translate_messages_as_text(messages: &[InputMessage]) -> Vec<Value> {
+fn translate_messages_as_text(messages: &[InputMessage], dialect: ToolDialect) -> Vec<Value> {
     let mut names = BTreeMap::new();
     let mut translated: Vec<Value> = Vec::new();
     for message in messages {
@@ -1725,7 +1749,7 @@ fn translate_messages_as_text(messages: &[InputMessage]) -> Vec<Value> {
                 InputContentBlock::Text { text } => parts.push(text.clone()),
                 InputContentBlock::ToolUse { id, name, input } => {
                     names.insert(id.clone(), name.clone());
-                    parts.push(text_tools::render_tool_call(name, input));
+                    parts.push(text_tools::render_tool_call_in(dialect, name, input));
                 }
                 InputContentBlock::ToolResult {
                     tool_use_id,
@@ -1969,7 +1993,11 @@ fn normalize_response(
         .filter(|value| !value.is_empty())
     {
         let (mut visible, mut calls) = if text_mode {
-            text_tools::extract_tool_calls(&text)
+            // Format de Nemotron d'abord, comme dans le flux.
+            (text_tools::dialect_for(model) == ToolDialect::Xml)
+                .then(|| text_tools::extract_xml_calls(&text, tools))
+                .filter(|(_, calls)| !calls.is_empty())
+                .unwrap_or_else(|| text_tools::extract_tool_calls(&text))
         } else {
             (text.clone(), Vec::new())
         };
@@ -2456,16 +2484,16 @@ mod passback_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_chat_completion_request, chat_completions_endpoint, normalize_finish_reason,
-        openai_tool_choice, parse_sse_frame, parse_tool_arguments, OpenAiCompatClient,
-        OpenAiCompatConfig, StreamState,
+        build_chat_completion_request, build_chat_completion_request_with,
+        chat_completions_endpoint, normalize_finish_reason, openai_tool_choice, parse_sse_frame,
+        parse_tool_arguments, text_tools, OpenAiCompatClient, OpenAiCompatConfig, StreamState,
     };
     use crate::error::ApiError;
     use crate::types::{
         InputContentBlock, InputMessage, MessageRequest, ToolChoice, ToolDefinition,
         ToolResultContentBlock,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::sync::{Mutex, OnceLock};
 
     #[test]
@@ -2981,6 +3009,137 @@ mod tests {
         assert_eq!(
             texts_and_tools(&other),
             ("{\"total\": 3}".to_string(), Vec::new())
+        );
+    }
+
+    /// Une page écrite par Nemotron chez NVIDIA, en mode texte : l'appel arrive
+    /// par petits morceaux, le texte avant lui s'affiche, l'appel jamais.
+    #[test]
+    fn an_nvidia_call_streams_as_text_and_becomes_a_tool_call() {
+        let model = "nvidia:nvidia/nemotron-3-ultra-550b-a55b";
+        let request = MessageRequest {
+            model: model.to_string(),
+            max_tokens: 64,
+            messages: vec![InputMessage::user_text("Écris la page")],
+            system: Some("system".to_string()),
+            tools: Some(vec![ToolDefinition {
+                name: "write_file".to_string(),
+                description: Some("Write a text file.".to_string()),
+                input_schema: json!({"type": "object", "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "append": {"type": "boolean"}
+                }}),
+            }]),
+            tool_choice: None,
+            stream: true,
+        };
+        assert!(text_tools::text_tools_enabled(model));
+        let mut state = StreamState::new(model.to_string()).with_tools(&request, true);
+        let content = "<!doctype html>\n<p class=\"note\">Bonjour</p>\n";
+        let reply = format!(
+            "J'écris la page.\n<tool_call>\n<function=write_file>\n<parameter=path>\nindex.html\n</parameter>\n<parameter=content>\n{content}\n</parameter>\n<parameter=append>\nfalse\n</parameter>\n</function>\n</tool_call>"
+        );
+        let mut events = Vec::new();
+        // Des morceaux de 7 caractères : les balises arrivent coupées.
+        let chars: Vec<char> = reply.chars().collect();
+        for piece in chars.chunks(7) {
+            let piece: String = piece.iter().collect();
+            let frame = format!(
+                "data: {}",
+                json!({"id": "c", "choices": [{"index": 0, "delta": {"content": piece}}]})
+            );
+            let chunk = parse_sse_frame(&frame).expect("frame").expect("chunk");
+            events.extend(state.ingest_chunk(chunk).expect("morceau"));
+        }
+        events.extend(state.finish());
+        let (text, tools) = texts_and_tools(&events);
+        assert_eq!(text.trim(), "J'écris la page.");
+        assert_eq!(tools, ["write_file"]);
+        let input: String = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::types::StreamEvent::ContentBlockDelta(delta) => match &delta.delta {
+                    crate::types::ContentBlockDelta::InputJsonDelta { partial_json } => {
+                        Some(partial_json.clone())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        let input: Value = serde_json::from_str(&input).expect("arguments");
+        assert_eq!(
+            input,
+            json!({"path": "index.html", "content": content, "append": false})
+        );
+    }
+
+    /// La requête d'un modèle de NVIDIA : sans `tools`, la forme XML dans le
+    /// prompt système, et l'historique écrit dans cette forme.
+    #[test]
+    fn an_nvidia_request_describes_its_tools_in_text() {
+        let request = MessageRequest {
+            model: "nvidia:nvidia/nemotron-3-ultra-550b-a55b".to_string(),
+            max_tokens: 64,
+            messages: vec![
+                InputMessage::user_text("Lis le plan"),
+                InputMessage {
+                    role: "assistant".to_string(),
+                    content: vec![InputContentBlock::ToolUse {
+                        id: "1".to_string(),
+                        name: "read_file".to_string(),
+                        input: json!({"path": "PLAN.md"}),
+                    }],
+                },
+                InputMessage {
+                    role: "user".to_string(),
+                    content: vec![InputContentBlock::ToolResult {
+                        tool_use_id: "1".to_string(),
+                        content: vec![crate::types::ToolResultContentBlock::Text {
+                            text: "# Plan".to_string(),
+                        }],
+                        is_error: false,
+                    }],
+                },
+            ],
+            system: Some("system".to_string()),
+            tools: Some(vec![ToolDefinition {
+                name: "read_file".to_string(),
+                description: Some("Read a file.".to_string()),
+                input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            }]),
+            tool_choice: Some(ToolChoice::Auto),
+            stream: true,
+        };
+        let payload = build_chat_completion_request_with(&request, true, false);
+        assert!(payload.get("tools").is_none() && payload.get("tool_choice").is_none());
+        let messages = payload["messages"].as_array().expect("messages");
+        let system = messages[0]["content"].as_str().expect("system");
+        assert!(system.starts_with("system\n\n# Tool calling"), "{system}");
+        assert!(system.contains("<function=tool_name>"), "{system}");
+        assert!(system.contains("### read_file\nRead a file."), "{system}");
+        assert_eq!(
+            messages[2]["content"],
+            "<tool_call>\n<function=read_file>\n<parameter=path>\nPLAN.md\n</parameter>\n</function>\n</tool_call>"
+        );
+        assert!(messages[3]["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("<tool_result name=\"read_file\">\n# Plan")));
+        assert!(!system.contains("tools are not available"), "{system}");
+
+        // Réponse en texte seul : le modèle apprend que les outils sont fermés.
+        let text_only = MessageRequest {
+            tool_choice: Some(ToolChoice::None),
+            ..request
+        };
+        let payload = build_chat_completion_request_with(&text_only, true, false);
+        let system = payload["messages"][0]["content"].as_str().expect("system");
+        assert!(
+            system.ends_with(
+                "tools are not available: answer in plain text, without any <tool_call> block."
+            ),
+            "{system}"
         );
     }
 

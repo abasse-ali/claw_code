@@ -154,7 +154,9 @@ fn preset_provider(preset: &Preset) -> CompatProvider {
         context_window: (preset.name == "nvidia").then_some(NVIDIA_CONTEXT_WINDOW),
         max_output_tokens: None,
         headers: Vec::new(),
-        text_tools: false,
+        // NVIDIA : appels d'outils en texte, au format de Nemotron, qui arrivent
+        // au fil de l'eau (voir `text_tools::dialect_for`).
+        text_tools: preset.name == "nvidia",
     }
 }
 
