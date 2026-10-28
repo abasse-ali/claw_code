@@ -1192,7 +1192,7 @@ pub fn design_guide(request: &str, earlier: Option<&str>) -> Option<String> {
     let short = request.split_whitespace().count() <= 12;
     let interface =
         is_interface_request(request) || (short && earlier.is_some_and(is_interface_request));
-    let app = is_personal_app(request) || (short && earlier.is_some_and(is_personal_app));
+    let app = app_request(request, earlier);
     interface.then(|| {
         let method = if app {
             app_method(design_bar())
@@ -1203,6 +1203,14 @@ pub fn design_guide(request: &str, earlier: Option<&str>) -> Option<String> {
     })
 }
 
+/// Le tour construit une appli perso : sa demande, ou celle qu'un message
+/// court (« continue ») poursuit.
+#[must_use]
+pub fn app_request(request: &str, earlier: Option<&str>) -> bool {
+    is_personal_app(request)
+        || (request.split_whitespace().count() <= 12 && earlier.is_some_and(is_personal_app))
+}
+
 /// Méthode d'une appli perso : le kit d'appli fait l'allure et le
 /// fonctionnement communs, le modèle fait les données, les écrans et le
 /// script propre de l'appli. Une appli de téléphone récente (néobanque) est
@@ -1211,7 +1219,7 @@ pub fn design_guide(request: &str, earlier: Option<&str>) -> Option<String> {
 fn app_method(bar: u8) -> String {
     format!("This request builds a personal app: a tool the user opens every day on their phone to keep their own data. The bar is a recent phone app at the level of the best (Revolut, Lydia, Apple's own apps): the figure that matters first, calm surfaces, every screen working, light and dark, never a website. When you finish, Claw has the screens scored by an art director, 1 to 10 on seven criteria (phone, hierarchy, spacing, typography, color, identity, finish), and sends back every criterion under {bar}.
 1. Brief. One line each: who uses it, the figures that matter most, the main daily action (add an expense, log a session). Use the user's own words and figures, in their language. Never write a fact the user did not give (a rule, a promise, an amount): what only the user knows is asked in your answer. No technical word on screen (CSV, JSON, local storage, sync, database).
-2. Data first. The figures the user gave are in the app from the first launch, as values they can change in its settings, never an empty app at 0. A figure given as a range counts at its least favourable end in the prudent total (the low end of an income, the high end of an expense), with the best case shown beside it; a figure marked as not sure stays out of the prudent total until it is received. Never fill the months before with copies of this month.
+2. Plan, in your reply before any code: the app's colors as hex values (the accent; the three hues of the gradient of its main card; the page and card surfaces, light and dark), then each screen with the kit's blocks from top to bottom and their content, and the add sheet's categories. Data first. The figures the user gave are in the app from the first launch, as values they can change in its settings, never an empty app at 0. A figure given as a range counts at its least favourable end in the prudent total (the low end of an income, the high end of an expense), with the best case shown beside it; a figure marked as not sure stays out of the prudent total until it is received. Never fill the months before with copies of this month.
 3. Build on the app kit, in one call to the Component tool: names [\"app-kit\", \"pwa\"]. Claw writes kit/app-kit.css and kit/app-kit.js into the project and gives the page skeleton, the kit's blocks and an example of the app's own script: never write, copy or edit the kit's files. index.html starts from the skeleton as it is: change its texts, screens, categories and figures for this app, and compose every screen only with the kit's blocks (the hero with the main figure, tiles, cards holding lists of rows, badges, meters, the bar chart, settings, empty states, buttons, fields): no cards, lists, buttons or fields of your own, which would look different and break. styles.css only sets the app's tokens (its accent and its gradient, for light and dark) and the little the kit lacks; app.js holds only the app's logic, as in the example (window.entries, window.app, window.drawChart, window.toast). Keep the phone's own font, the kit's: a web typeface looks out of place in an app and is lost offline. Icons come from the kit and the Icon tool; emoji are forbidden everywhere, even if the brief sounds playful. The pwa component gives manifest.webmanifest and sw.js for the app's root (list every file of the app in FILES, the kit's two files included); draw icons/icon.svg with the Icon tool on the accent, then the AppIcon tool makes the PNG icons.
 4. Screens. 3 to 5 tabs, each with one clear job. The first screen leads with the main figure in the hero (what is left to spend, a streak, a total) and the main action is the add button of the tab bar; the entries are a card of compact rows; summaries are tiles, meters and the chart; the settings hold the user's figures as values to adjust; every list has its empty state. Short labels; amounts in the user's currency and format (1 235,15 €), the cents only where they matter.
 5. Make everything work: every button does what its label says; adding an entry updates every total and list at once; an entry can be changed and deleted, with Undo; the data stay after a reload; nothing shows NaN, Infinity or undefined.
@@ -2050,6 +2058,9 @@ pub fn looks_like_design_plan(text: &str) -> bool {
 
 /// Message joint au premier fichier d'interface écrit sans plan de design.
 pub const PLAN_REQUEST: &str = "[Claw] You started writing the page without the design plan the method asks for. Before going further, write the plan in your reply: the brief, 4 to 6 named hex colors, the two typefaces and the type scale, the spacing scale, an ASCII wireframe of the first screen drawn with the Wireframe tool, the memorable element, and one line saying it uses none of the forbidden marks. Then change in this file only what the plan changes, with edit_file: it is already written, do not send it again whole. An art director reviews the plan before the rest of the page is built.";
+
+/// Message joint au premier fichier d'une appli perso écrit sans son plan.
+pub const APP_PLAN_REQUEST: &str = "[Claw] You started writing the app without the plan the method asks for. Before going further, write it in your reply: the brief, the app's colors as hex values (the accent, the three hues of the main card's gradient, the page and card surfaces, light and dark), and each screen with the app kit's blocks from top to bottom and their content. Then change in this file only what the plan changes, with edit_file: it is already written, do not send it again whole. A reviewer reads the plan before the rest of the app is built.";
 
 /// Message joint au premier fichier d'interface écrit après le plan.
 #[must_use]

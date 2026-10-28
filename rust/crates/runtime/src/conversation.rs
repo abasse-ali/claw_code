@@ -449,6 +449,9 @@ struct TurnAids {
     interface_commands: std::collections::BTreeSet<String>,
     /// La méthode de design est jointe à la demande de ce tour.
     design_guided: bool,
+    /// Ce tour construit une appli perso : la méthode d'appli, le kit d'appli
+    /// pour socle (pas celui d'un site), son propre plan.
+    personal_app: bool,
     /// Le message du tour demande des corrections, pas une création : la
     /// revue renvoie ce qui est mesuré, sans note de design à atteindre.
     repair: bool,
@@ -1995,6 +1998,8 @@ where
                 .and_then(|cwd| harness::DataSnapshot::take(&cwd)),
             project: project_turn,
             design_guided,
+            personal_app: design_guided
+                && crate::web_design::app_request(&request_text, earlier.as_deref()),
             // Le plan vient du modèle de conception : ni demandé, ni relu.
             plan_reviewed: conceived,
             plan_requested: conceived,
@@ -3264,7 +3269,8 @@ where
         let is_stylesheet = file
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("css") || ext.eq_ignore_ascii_case("scss"));
-        if is_stylesheet && aids.design_guided && !aids.foundation_noted {
+        // Une appli perso a le kit d'appli pour socle, pas celui d'un site.
+        if is_stylesheet && aids.design_guided && !aids.personal_app && !aids.foundation_noted {
             let root = std::env::current_dir().unwrap_or_default();
             let gaps = crate::web_design::foundation_gaps(&crate::web_design::project_css(&root));
             if gaps.len() >= 2 {
@@ -3798,7 +3804,11 @@ where
             aids.plan_requested = true;
             self.api_client
                 .notify("Pas de plan de design avant le code : demandé à l'agent");
-            return Some(crate::web_design::PLAN_REQUEST.to_string());
+            return Some(if aids.personal_app {
+                crate::web_design::APP_PLAN_REQUEST.to_string()
+            } else {
+                crate::web_design::PLAN_REQUEST.to_string()
+            });
         }
         // Un wireframe dessiné à la main, aux bords décalés : à redessiner avec l'outil avant
         // que le juge relise le plan (vu le 21 octobre 2026 : bords et textes qui débordent).
@@ -8774,6 +8784,35 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn a_personal_app_written_without_its_plan_gets_the_app_plan_request() {
+        // Une appli perso sans modèle de conception : le plan demandé est celui
+        // d'une appli (couleurs, écrans en blocs du kit), pas celui d'un site
+        // (polices, maquette ASCII), et le socle d'un site n'est pas réclamé.
+        let write = |path: &str| {
+            tool_step(
+                "write_file",
+                &format!(r#"{{"path":"{path}","content":"x"}}"#),
+            )
+        };
+        let (mut runtime, observed, _) = aided_runtime_with(
+            vec![write("appli-essai.css"), write("appli-essai.html")],
+            Vec::new(),
+            vec!["1. [identity] x -> y"],
+            WRITTEN.to_string(),
+        );
+        let _ = runtime.run_turn(
+            "Je veux une appli web perso pour gérer mon budget sur mon téléphone",
+            None,
+        );
+        let observed = observed.borrow();
+        let all = observed.requests.join("\n");
+        assert!(observed.requests[0].contains("This request builds a personal app"));
+        assert!(all.contains("You started writing the app without the plan the method asks for"));
+        assert!(!all.contains("without the design plan the method asks for"));
+        assert!(!all.contains("lack parts of the foundation"));
     }
 
     #[test]
