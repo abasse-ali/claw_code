@@ -4230,7 +4230,7 @@ pub fn developer_signs(answer: &str) -> Vec<String> {
         .iter()
         .any(|word| lower.contains(word))
     {
-        signs.push("it talks about Claw's reviewer or notes".to_string());
+        signs.push(REVIEWER_SIGN.to_string());
     }
     let spans: Vec<&str> = answer
         .split('`')
@@ -4299,6 +4299,37 @@ pub fn developer_signs(answer: &str) -> Vec<String> {
         signs.push(format!("technical words such as {}", technical[0]));
     }
     signs
+}
+
+/// Signe d'une réponse qui parle du relecteur ou des notes de Claw.
+pub const REVIEWER_SIGN: &str = "it talks about Claw's reviewer or notes";
+
+/// Signe d'une réponse qui envoie l'utilisateur sur une adresse locale.
+pub const LOCAL_ADDRESS_SIGN: &str = "it sends the user to a localhost address";
+
+/// Une adresse de cette machine dans la réponse (`localhost`, `127.0.0.1`,
+/// `0.0.0.0`) quand l'utilisateur n'y est pas : elle ne lui ouvre rien. Vu le
+/// 28 octobre 2026 (essai #40, troisième passage) : « Ouvrez
+/// http://localhost:8080 → Ajouter à l'écran d'accueil », lu sur un téléphone,
+/// pour une appli qui tournait sur la machine de travail de Claw.
+/// `test_link` : Claw peut donner un lien d'essai ou publier le site
+/// (`claw-github`).
+#[must_use]
+pub fn local_address_sign(answer: &str, test_link: bool) -> Option<String> {
+    let lower = answer.to_lowercase();
+    ["localhost", "127.0.0.1", "0.0.0.0"]
+        .iter()
+        .any(|address| lower.contains(address))
+        .then(|| {
+            format!(
+                "{LOCAL_ADDRESS_SIGN}, but they are not on the machine you work on (they read this from their phone): it opens nothing for them. {}",
+                if test_link {
+                    "Give them a link they can open (`claw-github jtest` for a test link, or `claw-github pages` to publish the site), or say plainly that it is not online yet"
+                } else {
+                    "Say how they can open it on their own device, or say plainly that it is not online yet"
+                }
+            )
+        })
 }
 
 /// Message renvoyé au modèle dont la réponse sur une page est écrite pour un
@@ -4706,7 +4737,7 @@ pub fn review_findings(answer: &str) -> Option<String> {
 #[must_use]
 pub fn review_feedback(findings: &str) -> String {
     format!(
-        "[Claw] Another model reviewed your changes and raised these points (they come from Claw's reviewer, not from the user, who does not see them):\n{findings}\n\nCheck each point against the code and the user's request. Fix the ones that are real problems; ignore a point that is wrong and say why in one sentence. Do not rewrite what already works. {FINAL_ANSWER_RULE}"
+        "[Claw] Claw's reviewer looked at your changes and raised these points (they come from Claw's reviewer, not from the user, who does not see them):\n{findings}\n\nCheck each point against the code and the user's request. Fix the ones that are real problems; ignore a point that is wrong, without arguing about it in your answer: the user never sees these points. Do not rewrite what already works. {FINAL_ANSWER_RULE}"
     )
 }
 
@@ -5401,6 +5432,21 @@ mod invented_turn_tests {
 #[cfg(test)]
 mod plain_answer_tests {
     use super::developer_signs;
+
+    #[test]
+    fn a_local_address_opens_nothing_for_a_user_on_another_device() {
+        let sign =
+            super::local_address_sign("Ouvrez http://localhost:8080 sur votre téléphone.", true)
+                .expect("adresse locale");
+        assert!(sign.starts_with(super::LOCAL_ADDRESS_SIGN), "{sign}");
+        assert!(sign.contains("claw-github jtest"), "{sign}");
+        let plain = super::local_address_sign("Allez sur 127.0.0.1:3000", false).expect("adresse");
+        assert!(!plain.contains("claw-github"), "{plain}");
+        assert_eq!(
+            super::local_address_sign("Votre appli est en ligne.", true),
+            None
+        );
+    }
 
     #[test]
     fn an_answer_written_for_a_developer_is_told_from_a_plain_one() {

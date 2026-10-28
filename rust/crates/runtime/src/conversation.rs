@@ -5846,7 +5846,6 @@ where
     /// simples, sur le plan de `FINAL_ANSWER_SHAPE`.
     fn plain_answer_gate(&mut self, aids: &mut TurnAids, answer: &str) -> Option<String> {
         if aids.plain_asked >= 2
-            || (aids.plain_asked == 1 && !aids.edited_since_plain)
             || self.subagent
             || interrupt_requested()
             || !harness::enabled(Aid::DesignReview)
@@ -5854,8 +5853,26 @@ where
         {
             return None;
         }
-        let signs = harness::developer_signs(answer);
+        let mut signs = harness::developer_signs(answer);
+        // L'utilisateur n'est pas sur cette machine (appli web de Claw) : une
+        // adresse locale ne lui ouvre rien.
+        if std::env::var("CLAW_NO_BROWSER").is_ok_and(|value| value.trim() == "1") {
+            let test_link = std::env::var_os("CLAW_WEB_REPO_DIR").is_some();
+            signs.extend(harness::local_address_sign(answer, test_link));
+        }
         if signs.is_empty() {
+            return None;
+        }
+        // Une seconde fois après une modification seulement, sauf si la réponse
+        // parle encore du relecteur ou d'une adresse locale. Vu le 28 octobre
+        // 2026 (essai #40) : la relecture venue après la première demande, et
+        // la réponse finale ouverte par « Tous les points du reviewer sont
+        // incorrects ».
+        let misleading = signs.iter().any(|sign| {
+            sign.starts_with(harness::REVIEWER_SIGN)
+                || sign.starts_with(harness::LOCAL_ADDRESS_SIGN)
+        });
+        if aids.plain_asked == 1 && !aids.edited_since_plain && !misleading {
             return None;
         }
         aids.plain_asked += 1;
@@ -10983,6 +11000,41 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_that_argues_with_the_reviewer_or_sends_to_localhost_is_sent_back_again() {
+        let _serial = crate::test_serial();
+        // Essai #40, troisième passage (28 octobre 2026) : après une première
+        // réécriture, la réponse finale s'ouvrait sur « Tous les points du
+        // reviewer sont incorrects » et envoyait sur http://localhost:8080 un
+        // utilisateur qui lisait sur son téléphone.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        std::env::set_var("CLAW_NO_BROWSER", "1");
+        let page = measured_page("relecteur");
+        let steps = vec![
+            text_step("Fini : `styles.css` et `app.js` sont prêts."),
+            text_step("Tous les points du reviewer sont incorrects. Ouvrez http://localhost:8080 sur votre téléphone."),
+            text_step("Votre appli de suivi est prête."),
+        ];
+        let ((mut runtime, observed, _), _) = measured_runtime(steps, vec![Some(MEASURED)]);
+        runtime.page_target = Some(format!("path:{}", page.display()));
+        let summary = runtime
+            .run_turn("une appli d'habitudes", None)
+            .expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        std::env::remove_var("CLAW_NO_BROWSER");
+        let observed = observed.borrow();
+        // Renvoyée deux fois, sans modification entre les deux.
+        assert_eq!(observed.requests.len(), 3, "{:?}", observed.notices);
+        let second = &observed.requests[2];
+        assert!(
+            second.contains(super::harness::REVIEWER_SIGN)
+                && second.contains("it sends the user to a localhost address, but they are not on the machine you work on"),
+            "{second}"
+        );
+        let last = super::message_text(summary.assistant_messages.last().expect("réponse"));
+        assert_eq!(last, "Votre appli de suivi est prête.");
+    }
+
+    #[test]
     fn the_same_capture_without_any_change_is_not_rendered_again() {
         let _serial = crate::test_serial();
         // Session #31 (26 octobre 2026, passage 4) : 74 captures du modèle,
@@ -11951,7 +12003,7 @@ mod tests {
         assert!(observed.requests[2].contains("check your work against every requirement"));
         assert!(observed.requests[2].contains(r"word for word:\n<<<\nécris total.py\n>>>"));
         // … puis les remarques du relecteur lui reviennent.
-        assert!(observed.requests[3].contains("Another model reviewed your changes"));
+        assert!(observed.requests[3].contains("Claw's reviewer looked at your changes"));
         assert!(observed.requests[3].contains("liste vide non gérée"));
         assert!(observed.notices.iter().any(
             |notice| notice == "Relecture par relecteur : 1 remarque(s) transmise(s) à l'agent"
