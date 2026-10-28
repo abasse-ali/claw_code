@@ -541,6 +541,10 @@ def model_settings(env, mock=False):
     # Ni escalade, ni tour de design confié à un autre modèle (`designModel` du poste).
     env.setdefault("CLAW_ESCALATION_MODEL", "off")
     env.setdefault("CLAW_DESIGN_MODEL", "off")
+    # Décidé le 28 octobre 2026 : le modèle de la session ne demande plus rien aux autres
+    # modèles (ni relecture, ni avis, ni revue du plan, ni second avis), sauf la conception du
+    # design, la note du juge sur les captures et la description des images qu'il ne voit pas.
+    env.setdefault("CLAW_ADVISOR_MODELS", "off")
     return env
 
 

@@ -43,6 +43,8 @@ class AgentEnvTest(unittest.TestCase):
         self.assertNotIn("inkling", env["CLAW_DESIGNER_MODEL"])
         self.assertEqual(env["CLAW_ESCALATION_MODEL"], "off")
         self.assertEqual(env["CLAW_DESIGN_MODEL"], "off")
+        # Plus de relecture ni d'avis d'un autre modèle ; la conception et le juge restent.
+        self.assertEqual(env["CLAW_ADVISOR_MODELS"], "off")
         # Un réglage déjà là (variable du dépôt de sessions) l'emporte.
         env = run.model_settings({"CLAW_ESCALATION_MODEL": "free", "CLAW_DESIGNER_MODEL": "kimi"})
         self.assertEqual((env["CLAW_ESCALATION_MODEL"], env["CLAW_DESIGNER_MODEL"]), ("free", "kimi"))

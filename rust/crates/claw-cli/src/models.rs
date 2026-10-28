@@ -223,6 +223,14 @@ pub(crate) fn design_model_setting() -> Option<String> {
     }
 }
 
+/// Un réglage de modèle qui coupe la fonction : « off », « aucun »…
+fn is_off(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "off" | "none" | "non" | "aucun" | "false" | "0"
+    )
+}
+
 /// Modèles de la conception d'une interface, dans l'ordre (`designerModel`,
 /// `CLAW_DESIGNER_MODEL`, séparés par des virgules) ; `off` la coupe.
 pub(crate) fn designer_models_setting() -> Vec<String> {
@@ -242,12 +250,7 @@ pub(crate) fn designer_models_setting() -> Vec<String> {
             .map(|config| config.designer_models().to_vec())
             .unwrap_or_default(),
     };
-    if listed.iter().any(|model| {
-        matches!(
-            model.to_ascii_lowercase().as_str(),
-            "off" | "none" | "non" | "aucun" | "false" | "0"
-        )
-    }) {
+    if listed.iter().any(|model| is_off(model)) {
         return Vec::new();
     }
     listed
@@ -630,6 +633,24 @@ pub(crate) fn advisor_models(current: &str) -> Vec<String> {
     // Les tests ne consultent personne.
     if cfg!(test) {
         return Vec::new();
+    }
+    // `CLAW_ADVISOR_MODELS` : la liste, ou `off` pour ne consulter personne (relecture, avis,
+    // revue du plan, second avis). La conception, le juge du design et le lecteur d'images ont
+    // leurs propres réglages.
+    if let Some(setting) = std::env::var("CLAW_ADVISOR_MODELS")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        if is_off(&setting) {
+            return Vec::new();
+        }
+        return setting
+            .split(',')
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(api::resolve_model_alias)
+            .filter(|model| model != current)
+            .collect();
     }
     let mut cache = CACHE
         .lock()
