@@ -15,8 +15,8 @@ import os
 import re
 import subprocess
 
-from common import (ANSWER, MCP_TOKEN_FILE, NOTES, WORK, GitHubError, api, clean_answer, clean_notice, explain_error,
-                    french_shortstat, post_comment, questions_block, run_url, stop_tree, usage_lines)
+from common import (ANSWER, MCP_TOKEN_FILE, NOTES, WORK, GitHubError, aids_line, api, clean_answer, clean_notice,
+                    explain_error, french_shortstat, post_comment, questions_block, run_url, stop_tree, usage_lines)
 from on_github import Actor, load_requests
 from sessions import Sessions
 
@@ -202,6 +202,14 @@ def main():
     except ValueError:
         usage = {}
     footer.extend(usage_lines(usage.get("model", ""), usage.get("requests"), quota))
+    # Aides de Claw choisies dans l'appli (setup.py) : chaque réponse dit avec quoi le modèle a
+    # travaillé, pour comparer les essais.
+    try:
+        aids = json.loads(read("options.json") or "{}").get("aids")
+    except (ValueError, AttributeError):
+        aids = None
+    if isinstance(aids, list):
+        footer.append(aids_line(aids))
     footer.append(f"[Détail du job]({run_url()})")
     parts.append("---\n" + "\n".join(f"- {line}" for line in footer))
     try:

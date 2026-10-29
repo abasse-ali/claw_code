@@ -1950,6 +1950,24 @@ label.choice { cursor: pointer; }
 .checks li.ko::before { content: "!"; border: 0; color: var(--error); background: color-mix(in srgb, var(--error) 16%, transparent); }
 .group-foot { margin: 9px 8px 0; font-size: .82rem; line-height: 1.5; color: var(--muted); }
 .group-foot p { margin: 0 0 6px; }
+
+/* Aides de Claw : le compte des aides allumées, une barre qui se remplit, une carte par famille
+   d'aides (son compte à côté du titre). */
+a.chip, .settings a.row { text-decoration: none; }
+.aids-meter {
+  display: flex; flex-direction: column; gap: 11px; margin: 18px 0 0; padding: 16px; border-radius: 20px;
+  border: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 80%, transparent);
+  box-shadow: 0 14px 34px -26px var(--shadow);
+}
+.aids-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.aids-count { color: var(--muted); font-size: .9rem; font-variant-numeric: tabular-nums; }
+.aids-count strong { margin-right: 2px; color: var(--text); font: 800 2rem/1 var(--font-display); letter-spacing: -.02em; }
+.aids-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.aids-bar { position: relative; height: 8px; overflow: hidden; border-radius: 999px; background: var(--panel-3); }
+.aids-bar span { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: inherit; background: var(--grad); transition: width .5s var(--spring); }
+.aids-note { margin: 0; color: var(--muted); font-size: .84rem; line-height: 1.45; overflow-wrap: anywhere; }
+.aids-title { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.aids-title small { font-size: .72rem; font-weight: 650; letter-spacing: 0; text-transform: none; font-variant-numeric: tabular-nums; }
 .more > summary { display: inline-flex; align-items: center; gap: 4px; list-style: none; cursor: pointer; color: var(--accent); font-weight: 600; }
 .more > summary::-webkit-details-marker { display: none; }
 .more > summary::after { content: "›"; display: inline-block; transition: transform .3s var(--spring); }

@@ -21,8 +21,8 @@ import time
 import urllib.request
 from pathlib import Path
 
-from common import (EFFORTS, FILES_BRANCH, MCP_TOKEN_FILE, PROGRESS, WORK, GitHubError, api, clean_notice,
-                    edit_comment, output, post_comment, run_url, stop_tree)
+from common import (AID_KEYS, EFFORTS, FILES_BRANCH, MCP_TOKEN_FILE, PROGRESS, WORK, GitHubError, aid_variable,
+                    aids_line, api, clean_notice, edit_comment, output, post_comment, run_url, stop_tree)
 from journal import Journal
 from translate import Translator
 from mcp_server import Context, Host, build, describe_call
@@ -56,6 +56,31 @@ def session_effort(path):
     except (OSError, ValueError, AttributeError):
         return ""
     return effort if effort in EFFORTS else ""
+
+
+def session_aids(path):
+    """Les aides de Claw choisies dans l'appli pour ce passage (notées par setup.py) : les clés
+    connues, ou None (toutes les aides de Claw)."""
+    try:
+        aids = json.loads(Path(path).read_text(encoding="utf-8")).get("aids")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return [key for key in AID_KEYS if key in aids] if isinstance(aids, list) else None
+
+
+def apply_aids(env, aids):
+    """Coupe les aides de Claw que l'appli n'a pas choisies (`CLAW_VERIFY=0`…). Pas
+    `CLAW_HARNESS=0` : il couperait aussi le mode projet, le mode équipe et Ultracode, que
+    l'utilisateur choisit à part."""
+    if aids is None:
+        return
+    for key in AID_KEYS:
+        if key in aids:
+            env.pop(aid_variable(key), None)
+        else:
+            env[aid_variable(key)] = "0"
+
+
 # Mise à jour du commentaire de progression au plus toutes les N secondes, du journal
 # détaillé (plus lourd) au plus toutes les LOG_EVERY secondes.
 PROGRESS_EVERY = 12
@@ -617,6 +642,12 @@ def main():
     if effort:
         env["CLAW_REASONING"] = effort
         print(f"Option : réflexion {effort}", flush=True)
+    # Aides de Claw choisies dans l'appli (page « Aides de Claw ») : essayer un modèle seul,
+    # puis avec une aide de plus à chaque fois. Demandé le 29 octobre 2026.
+    aids = session_aids(WORK / "options.json")
+    apply_aids(env, aids)
+    if aids is not None:
+        print(aids_line(aids), flush=True)
     # Options choisies dans l'appli : mode équipe, Ultracode (comme les boutons de l'interface
     # locale de Claw).
     for choice, variable, label in (("TEAM", "CLAW_TEAM", "mode équipe"), ("ULTRACODE", "CLAW_ULTRACODE", "Ultracode")):
