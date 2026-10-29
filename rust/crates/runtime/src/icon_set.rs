@@ -597,7 +597,21 @@ fn exempt(attributes: &[(String, String)], inner: &str) -> bool {
         .join(" ")
         .to_ascii_lowercase();
     let lower = inner.to_ascii_lowercase();
-    ["ornament"].iter().any(|word| names.contains(word))
+    // Une icône de lucide-react porte « lucide lucide-receipt » : elle vient du jeu, même quand
+    // la version installée l'a redessinée. Vu le 29 octobre 2026 (essai C3) : `receipt` de
+    // lucide-react 1.63, d'un autre tracé que celui du jeu de Claw, dite dessinée à la main.
+    let classes: Vec<&str> = attribute(attributes, "class")
+        .or_else(|| attribute(attributes, "classname"))
+        .map(|class| class.split_whitespace().collect())
+        .unwrap_or_default();
+    let from_lucide = classes.contains(&"lucide")
+        && classes.iter().any(|class| {
+            class
+                .strip_prefix("lucide-")
+                .is_some_and(|name| !name.is_empty())
+        });
+    from_lucide
+        || ["ornament"].iter().any(|word| names.contains(word))
         || ["<text", "<image", "<foreignobject"]
             .iter()
             .any(|tag| lower.contains(tag))
@@ -907,6 +921,20 @@ mod tests {
             .and_then(|line| line.splitn(3, '\t').nth(2))
             .expect("icône");
         format!("<svg xmlns=\"http://www.w3.org/2000/svg\" class=\"icon icon-{name}\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\">{inner}</svg>")
+    }
+
+    #[test]
+    fn an_icon_marked_by_lucide_react_comes_from_the_set_even_redrawn() {
+        // lucide-react 1.63 : `receipt` redessinée, d'un autre tracé que celui du jeu (essai C3).
+        let outline = "M4 3a1 1 0 0 1 1-1 1.3 1.3 0 0 1 .7.2l.933.6a1.3 1.3 0 0 0 1.4 0l.934-.6a1.3 1.3 0 0 1 1.4 0l.933.6a1.3 1.3 0 0 0 1.4 0l.933-.6a1.3 1.3 0 0 1 1.4 0l.934.6a1.3 1.3 0 0 0 1.4 0l.933-.6A1.3 1.3 0 0 1 19 2a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1 1.3 1.3 0 0 1-.7-.2l-.933-.6a1.3 1.3 0 0 0-1.4 0l-.934.6a1.3 1.3 0 0 1-1.4 0l-.933-.6a1.3 1.3 0 0 0-1.4 0l-.933.6a1.3 1.3 0 0 1-1.4 0l-.934-.6a1.3 1.3 0 0 0-1.4 0l-.933.6a1.3 1.3 0 0 1-.7.2 1 1 0 0 1-1-1z";
+        let svg = |class: &str| {
+            format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="{class}" aria-hidden="true"><path d="M12 17V7"/><path d="M16 8h-6a2 2 0 0 0 0 4h4a2 2 0 0 1 0 4H8"/><path d="{outline}"/></svg>"#
+            )
+        };
+        assert!(drawn_icons(&svg("lucide lucide-receipt")).is_empty());
+        // Sans la marque de lucide-react, ce tracé inconnu du jeu reste dit dessiné à la main.
+        assert_eq!(drawn_icons(&svg("icon")).len(), 1);
     }
 
     #[test]

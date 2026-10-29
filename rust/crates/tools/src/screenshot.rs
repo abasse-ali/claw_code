@@ -2252,8 +2252,21 @@ fn lost_on_reload(devtools: &mut DevTools, kept: &Value) -> Vec<String> {
         && devtools
             .wait_for("Page.loadEventFired", LOAD_LIMIT)
             .unwrap_or(false);
+    // Une appli à écrans (#participants, #soldes) : le parcours a pu en ouvrir un autre après
+    // l'envoi ; l'ajout se relit sur l'écran du formulaire. Vu le 29 octobre 2026 (essai C3) :
+    // un participant bien gardé, dit perdu parce que la page rechargée montrait les virements.
+    let hash = kept
+        .iter()
+        .find_map(|item| item["hash"].as_str().filter(|hash| hash.len() > 1))
+        .unwrap_or("");
     let text = if reloaded {
         let _ = devtools.pump(Duration::from_millis(800));
+        if !hash.is_empty() {
+            let _ = devtools.evaluate(&format!(
+                "(async () => {{ if (location.hash !== {0}) {{ location.hash = {0}; await new Promise((done) => setTimeout(done, 400)); }} return true; }})()",
+                json!(hash)
+            ));
+        }
         devtools.evaluate(&format!(
             "({{ text: document.body ? document.body.innerText : '', snapshot: {SNAPSHOT_SCRIPT} }})"
         ))
@@ -2329,8 +2342,7 @@ fn capture(
         .map_err(|error| format!("the layout check failed in the page: {error}"))?;
     // Les vues de la page à son arrivée, avant que les essais la changent : la
     // suite n'a pas à rouvrir la page pour les chercher.
-    let views = (session.windows && viewport.mobile && session.actions.is_empty())
-        .then(|| found_views(devtools));
+    let views = (viewport.mobile && session.actions.is_empty()).then(|| found_views(devtools));
     let mut problems = strings(&audit["problems"]);
     problems.extend(drawn_icons_problem(&audit["svgIcons"]));
     if session.actions.is_empty() {
@@ -2845,12 +2857,17 @@ const VIEWS_SCRIPT: &str = r#"(() => {
   const seenViews = new Set();
   const views = [];
   for (const el of document.querySelectorAll("a[href^='#'], [data-tab], [data-view], [data-screen], [data-page], [data-target]")) {
-    if (views.length >= 3 || el.closest("dialog, [role=dialog]")) continue;
+    if (views.length >= 4 || el.closest("dialog, [role=dialog]")) continue;
     const key = (el.getAttribute("href") || "").slice(1) || el.dataset.tab || el.dataset.view || el.dataset.screen || el.dataset.page || (el.dataset.target || "").replace(/^#/, "");
     if (!key || seenViews.has(key)) continue;
     let target = null;
     try { target = document.getElementById(decodeURIComponent(key)) || document.querySelector(`[data-view="${CSS.escape(key)}"], [data-screen="${CSS.escape(key)}"], [data-tab-panel="${CSS.escape(key)}"]`); } catch (_) { target = null; }
-    if (!target || shown(target) || target.contains(el)) continue;
+    // Un onglet d'appli (#depenses dans une barre d'onglets) : son écran n'est dans la page
+    // qu'une fois ouvert (le kit React de Claw, un routeur). Vu le 29 octobre 2026 (essai C3) :
+    // seul l'accueil était capturé, jamais les écrans Dépenses, Soldes et Remboursements.
+    const tab = !target && el.matches("a[href^='#']") && el.closest("nav, [role=tablist], [data-app-tabs], .tabbar, .app-tabs")
+      && el.getAttribute("aria-current") !== "page" && el.getAttribute("aria-selected") !== "true" && shown(el);
+    if (!tab && (!target || shown(target) || target.contains(el))) continue;
     seenViews.add(key);
     views.push({ kind: "view", label: label(el), selector: path(el) });
   }
@@ -2937,13 +2954,15 @@ fn view_shots(
         }
         // Une fenêtre doit s'être ouverte ; un menu, un onglet ou un écran se
         // montre tel quel.
-        let check = if view.kind == "window" {
-            "[...document.querySelectorAll('dialog[open], [role=dialog], [aria-modal=true]')].some((box) => { const s = getComputedStyle(box); if (s.display === 'none' || s.visibility === 'hidden') return false; return [box, ...[...box.querySelectorAll('*')].slice(0, 300)].some((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'; }); })"
-        } else {
-            "true"
+        // Un écran (#depenses) doit avoir changé ce que la page montre : un lien vers une
+        // section absente ne s'y capture pas une seconde fois.
+        let check = match view.kind {
+            "window" => "[...document.querySelectorAll('dialog[open], [role=dialog], [aria-modal=true]')].some((box) => { const s = getComputedStyle(box); if (s.display === 'none' || s.visibility === 'hidden') return false; return [box, ...[...box.querySelectorAll('*')].slice(0, 300)].some((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'; }); })",
+            "view" => "document.body.innerText !== before",
+            _ => "true",
         };
         let open = format!(
-            "(async () => {{ const el = document.querySelector({}); if (!el) return false; el.scrollIntoView({{ block: '{}' }}); el.click(); await new Promise((done) => setTimeout(done, 500)); return {check}; }})()",
+            "(async () => {{ const el = document.querySelector({}); if (!el) return false; const before = document.body.innerText; el.scrollIntoView({{ block: '{}' }}); el.click(); await new Promise((done) => setTimeout(done, 500)); return {check}; }})()",
             json!(view.selector),
             if matches!(view.kind, "tab" | "view") { "start" } else { "center" }
         );
@@ -3129,7 +3148,17 @@ const SCREEN_SCRIPT: &str = r#"(async () => {
   }
   if (!shown(el)) return { ok: false, errors, text: "" };
   el.scrollIntoView({ block: "center" });
-  press(el);
+  // Un onglet (#reglages) : l'adresse change, même quand un formulaire renvoyé a laissé une
+  // fenêtre ouverte qui rend le reste de la page inerte. Vu le 29 octobre 2026 : l'écran
+  // Réglages du kit, « Not reached ».
+  const href = el.matches("a[href^='#']") ? el.getAttribute("href").trim() : "";
+  if (href.length > 1) {
+    for (const box of document.querySelectorAll("dialog[open]")) box.close();
+    window.__clawLetHash = true;
+    location.hash = href;
+  } else {
+    press(el);
+  }
   await wait(500);
   if (code) {
     const box = [...document.querySelectorAll("dialog[open], [role=dialog], [aria-modal=true]")].find((item) => [...item.querySelectorAll("input")].some(shown));
@@ -3843,15 +3872,25 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
         }
         coverage.push("Only what is listed here was seen: do not say in your answer that anything else was checked.".to_string());
     }
-    // Fenêtres, menu et onglets, au téléphone de préférence : là où un parent les ouvre.
-    if session.windows {
+    // Fenêtres, menu et onglets, au téléphone de préférence : là où un parent les ouvre. Les
+    // écrans d'une appli (onglets, #depenses) toujours, les fenêtres et le menu quand ils sont
+    // demandés (`windows`). Vu le 29 octobre 2026 (essai C3) : appelé sans `windows`, Screenshot
+    // ne capturait que l'accueil, et ni le modèle ni l'utilisateur ne voyaient les autres écrans.
+    let screens_only = !session.windows;
+    let arrival = arrival.take().map(|views| {
+        views
+            .into_iter()
+            .filter(|view| !screens_only || matches!(view.kind, "view" | "tab"))
+            .collect::<Vec<_>>()
+    });
+    if session.windows || arrival.as_ref().is_some_and(|views| !views.is_empty()) {
         if let Some(viewport) = sizes.iter().find(|size| size.mobile).or(sizes.first()) {
             let shots = view_shots(
                 &mut devtools,
                 &session,
                 viewport,
-                &openers,
-                arrival.take(),
+                if screens_only { &[] } else { &openers },
+                arrival,
                 &known,
             );
             for (number, extra) in shots.into_iter().enumerate() {

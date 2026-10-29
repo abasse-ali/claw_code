@@ -15,7 +15,7 @@ export const AID_GROUPS = [
       ["run_scripts", "Script jamais lancé", "Un script écrit et jamais lancé : le modèle doit l'essayer avant de répondre."],
       ["entry_point", "Script muet", "Un script Python qui définit main() sans l'appeler : Claw le dit au modèle."],
       ["checklist", "Contrôle des exigences", "Avant de conclure, le modèle confronte son travail à chaque partie de la demande, preuve à l'appui."],
-      ["review", "Relecture par un autre modèle", "Les modifications sont relues par un autre modèle avant de vous rendre la main."],
+      ["review", "Relecture à froid", "Avant de vous rendre la main, le modèle relit ses modifications dans une conversation neuve, sans le chemin qui l'y a mené."],
       ["test_guard", "Test réécrit", "Un test réécrit après un échec est signalé : faire passer un test n'est pas corriger."],
       ["design_review", "Revue visuelle", "Interface modifiée : Claw prend des captures et les fait noter par un modèle qui voit."],
       ["tried_commands", "Commandes essayées", "Une réponse conseille des commandes jamais lancées : le modèle est renvoyé les essayer."],

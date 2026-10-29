@@ -2,7 +2,8 @@
 // téléphone (néobanque). Composez les écrans avec ces composants ; app-kit.css les habille, en
 // clair et en sombre, aux couleurs de src/theme.css. Ne modifiez pas les fichiers de ce dossier.
 //
-// Cadre      AppShell (bar, tabs, onAdd, addLabel ; enfants : des Screen), Screen (id, title),
+// Cadre      AppShell (bar, tabs, onAdd, addLabel ; enfants : des Screen ; sur un ordinateur, les
+//            onglets passent dans une colonne à gauche et les cartes côte à côte), Screen (id, title),
 //            MonthBar (mois affiché), AppBar (title), IconButton (icon, label, onClick | href),
 //            useScreen() → [écran ouvert, go("id")].
 // Blocs      Hero (label, amount | value, sub, pills [{ label, value, note }], progress

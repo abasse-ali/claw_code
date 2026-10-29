@@ -205,9 +205,11 @@ celles de Claw. Le mode projet, le mode équipe et Ultracode restent dans le men
 images pour un modèle qui ne les voit pas et le passage à un autre modèle en panne restent actifs.
 
 Claw Web ne consulte d'habitude aucun autre modèle (`CLAW_ADVISOR_MODELS=off`,
-`CLAW_ESCALATION_MODEL=off`) : « Relecture par un autre modèle » ou « Conseil et second avis »
-cochées rallument les relecteurs, « Escalade » le modèle qui reprend la main, pour le passage
-qui les a choisies. Vu le 29 octobre 2026 : la relecture choisie ne s'était jamais lancée.
+`CLAW_ESCALATION_MODEL=off`) : « Conseil et second avis » cochée rallume les autres modèles,
+« Escalade » le modèle qui reprend la main, pour le passage qui les a choisies. La « Relecture à
+froid » n'en a pas besoin : le modèle de la session relit lui-même ses modifications, dans une
+conversation neuve (demandé le 29 octobre 2026 : attendre les relecteurs gratuits prenait des
+minutes).
 
 ## Ce que Claw compte faire
 

@@ -116,7 +116,7 @@
 /* Le titre d'un écran reçoit le focus à son ouverture, pour les lecteurs d'écran : il ne se touche pas, pas d'anneau. */
 [data-screen] [tabindex="-1"]:focus { outline: none !important; }
 
-/* Cadre de l'appli : une colonne de téléphone, centrée sur un ordinateur. */
+/* Cadre de l'appli : une colonne de téléphone ; sur un ordinateur, la mise en page du bas. */
 .app { width: 100%; max-width: 560px; min-height: 100dvh; margin-inline: auto; padding-bottom: calc(env(safe-area-inset-bottom) + 104px); }
 
 /* Barre du haut : le mois (ou le nom de l'écran) et ses boutons. */
@@ -396,6 +396,50 @@ body:has(dialog[open]) { overflow: hidden; }
 .toast__action { flex: none; min-height: 36px; padding: 0 12px; border: 0; border-radius: 10px; background: color-mix(in srgb, var(--paper) 16%, var(--ink)); color: var(--paper); font-weight: 750; }
 .toast.is-error { background: var(--error); color: #fff; }
 .toast.is-leaving { opacity: 0; transform: translateY(8px); transition: opacity 0.2s, transform 0.2s; }
+
+/* Ordinateur : une mise en page à soi, pas le téléphone étiré. Les onglets passent dans une
+   colonne à gauche, le bouton d'ajout en tête avec son nom ; les cartes d'un écran se rangent
+   en colonnes (une carte seule prend toute la largeur), le titre et le solde au-dessus.
+   Demandé le 29 octobre 2026 : sur ordinateur, l'appli n'était qu'une colonne de téléphone
+   centrée, sa barre d'onglets en bas d'un grand écran vide. */
+@media (min-width: 1024px) {
+  .app {
+    display: grid;
+    grid-template-columns: 236px minmax(0, 1fr);
+    grid-template-areas: "nav bar" "nav main";
+    grid-template-rows: auto 1fr;
+    column-gap: 36px;
+    max-width: 1240px;
+    padding: 24px 36px 48px;
+  }
+  .app > .app-bar { grid-area: bar; margin: 0 -8px; padding: 6px 0; background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; }
+  .app > main { grid-area: main; min-width: 0; }
+  .app-bar__title { font-size: 1.375rem; }
+  .app-screen { gap: 20px; padding: 4px 0 24px; }
+  /* Deux cartes ou plus : côte à côte, deux par rangée ; le reste prend toute la largeur. */
+  .app-screen:has(> .card ~ .card) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .app-screen > :not(.card) { grid-column: 1 / -1; }
+  .app-screen__title { font-size: 2.25rem; }
+  .hero { padding: 28px 32px 26px; }
+  .hero__amount { font-size: 3.5rem; }
+  .hero__pills { max-width: 720px; }
+  .tiles { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; }
+  .tabbar {
+    grid-area: nav; align-self: start;
+    position: sticky; top: 24px; left: auto; bottom: auto; transform: none;
+    flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 4px;
+    width: auto; height: auto; padding: 12px;
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .tabbar__tab { grid-auto-flow: column; justify-content: start; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 14px; font-size: 0.9375rem; }
+  .tabbar__tab:hover { background: var(--surface-2); }
+  .tabbar__tab[aria-current="page"] { background: var(--accent-soft); }
+  .tabbar__add { order: -1; display: flex; justify-content: center; gap: 8px; width: 100%; height: 48px; margin: 0 0 8px; border-radius: 14px; }
+  .tabbar__add .icon { width: 22px; height: 22px; }
+  .tabbar__add::after { content: attr(aria-label); font-weight: 700; font-size: 0.9375rem; }
+  .toasts { bottom: 28px; }
+}
 
 @keyframes kit-in { from { opacity: 0; transform: translateY(6px); } }
 @keyframes kit-pop { from { opacity: 0; transform: translateY(10px) scale(0.98); } }

@@ -24,7 +24,7 @@ from pathlib import Path
 from common import (AID_KEYS, EFFORTS, FILES_BRANCH, MCP_TOKEN_FILE, PROGRESS, WORK, GitHubError, aid_variable,
                     aids_line, api, clean_notice, edit_comment, output, post_comment, run_url, stop_tree)
 from journal import Journal
-from translate import Translator
+from translate import Translator, gemini as translate_gemini
 from mcp_server import Context, Host, build, describe_call
 from on_github import REQUESTS_FILE, STATE_FILE
 import memory
@@ -80,9 +80,10 @@ def apply_aids(env, aids):
         else:
             env[aid_variable(key)] = "0"
     # Une aide qui fait appel à un autre modèle, cochée dans l'appli, l'emporte sur le réglage
-    # de Claw Web qui n'en consulte aucun (model_settings) : sans lui, elle ne fait rien. Vu le
-    # 29 octobre 2026 (essai C2) : « Relecture par un autre modèle » choisie, jamais lancée.
-    if {"review", "council"} & set(aids) and env.get("CLAW_ADVISOR_MODELS") == "off":
+    # de Claw Web qui n'en consulte aucun (model_settings) : sans lui, elle ne fait rien (vu le
+    # 29 octobre 2026, essai C2). La relecture à froid n'en a plus besoin : le modèle de la
+    # session relit lui-même, dans une conversation neuve.
+    if "council" in aids and env.get("CLAW_ADVISOR_MODELS") == "off":
         env.pop("CLAW_ADVISOR_MODELS")
     if "escalation" in aids and env.get("CLAW_ESCALATION_MODEL") == "off":
         env.pop("CLAW_ESCALATION_MODEL")
@@ -596,12 +597,16 @@ def agent_env(environ, mock=False):
 
 
 def translator(environ):
-    """Le traducteur des problèmes des captures, avec la clé de NVIDIA du moteur ; None sans
-    elle (l'appli montre alors l'anglais)."""
+    """Le traducteur des problèmes des captures : NVIDIA, et Gemini en relais ; None sans
+    aucune des deux clés (l'appli montre alors l'anglais)."""
     key = str(environ.get("NVIDIA_API_KEY") or "").strip()
-    if not key or MODEL == "mock":
+    relay = str(environ.get("GEMINI_API_KEY") or "").strip()
+    if not (key or relay) or MODEL == "mock":
         return None
-    return Translator(key, environ.get("CLAW_TRANSLATE_MODEL") or None)
+    fallback = translate_gemini(relay) if relay else None
+    if not key:
+        return Translator(None, call=fallback)
+    return Translator(key, environ.get("CLAW_TRANSLATE_MODEL") or None, fallback=fallback)
 
 
 # Le job `task` du workflow est coupé à 120 minutes ; Claw conclut 12 minutes avant (la
