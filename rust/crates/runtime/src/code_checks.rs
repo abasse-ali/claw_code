@@ -400,6 +400,85 @@ pub fn access_codes(text: &str) -> Vec<String> {
     codes
 }
 
+/// Débuts de nom d'une fonction qui répond à l'utilisateur : un bouton, un lien
+/// ou un événement de la page l'appelle (`handleRemoveExpense`, `onDelete`,
+/// `confirmRemove`…), suivis d'une majuscule.
+const HANDLER_PREFIXES: &[&str] = &[
+    "handle", "on", "remove", "delete", "add", "edit", "update", "save", "confirm", "toggle",
+    "open", "close", "clear", "reset", "submit", "select", "undo", "cancel", "ask", "request",
+    "export", "import", "share", "move", "rename", "archive",
+];
+
+/// Fonctions d'une page qui répondent à l'utilisateur, définies et jamais
+/// appelées ni passées à un bouton : ce qu'elles font est hors de sa portée.
+/// Vu le 29 octobre 2026 (essais C1 et C2 de Claw Web, deux fois de suite) :
+/// la suppression d'une dépense écrite avec sa fenêtre de confirmation, aucun
+/// bouton pour l'ouvrir, et la réponse la disait faite. Une fonction exportée
+/// sert à d'autres fichiers : elle n'est pas comptée. Au plus `MAX_FINDINGS`.
+#[must_use]
+pub fn unwired_handlers(text: &str) -> Vec<String> {
+    let declaration = Regex::new(
+        r"(?m)^[ \t]*(?:(?:const|let)[ \t]+([A-Za-z_$][\w$]*)[ \t]*(?::[^=\n]+)?=[ \t]*(?:useCallback\([ \t]*)?(?:async[ \t]*)?(?:\([^)\n]*\)|[A-Za-z_$][\w$]*)[ \t]*(?::[^=\n]+)?=>|(?:async[ \t]+)?function[ \t]+([A-Za-z_$][\w$]*)[ \t]*\()",
+    )
+    .expect("regex");
+    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let uses = |name: &str| {
+        text.match_indices(name)
+            .filter(|(at, _)| {
+                !text[..*at].chars().next_back().is_some_and(word)
+                    && !text[at + name.len()..].chars().next().is_some_and(word)
+            })
+            .count()
+    };
+    let mut found = Vec::new();
+    for captures in declaration.captures_iter(text) {
+        let Some(name) = captures.get(1).or_else(|| captures.get(2)) else {
+            continue;
+        };
+        let name = name.as_str();
+        let handler = HANDLER_PREFIXES.iter().any(|prefix| {
+            name.strip_prefix(prefix)
+                .and_then(|rest| rest.chars().next())
+                .is_some_and(char::is_uppercase)
+        });
+        if !handler || uses(name) > 1 {
+            continue;
+        }
+        let line = text[..captures.get(0).map_or(0, |whole| whole.start())]
+            .matches('\n')
+            .count()
+            + 1;
+        found.push(format!(
+            "line {line}: `{name}` is defined but nothing calls it (no button, link or event of the page uses it), so what it does is out of the user's reach"
+        ));
+        if found.len() == MAX_FINDINGS {
+            break;
+        }
+    }
+    found
+}
+
+/// Les fonctions jamais branchées des fichiers modifiés, pour le contrôle des
+/// exigences : `(chemin montré, constats)`. Vide quand il n'y en a pas.
+#[must_use]
+pub fn unwired_handlers_note(files: &[(String, Vec<String>)]) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let listed = files
+        .iter()
+        .flat_map(|(path, findings)| {
+            findings
+                .iter()
+                .map(move |finding| format!("- {path}, {finding}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "\n\nClaw also read the files you changed: these functions are written for the user and nothing calls them.\n{listed}\nA part of the request that one of them implements is not done until the user can reach it: wire it to the control the request asks for (a button on the row, in the sheet or in the menu) and check it, or remove the function if the request does not need it."
+    )
+}
+
 /// Dates d'un fichier toutes passées (`AAAA-MM-JJ`, trois au moins) : les
 /// exemples d'une appli de calendrier ou d'événements datés d'avant aujourd'hui
 /// (`today`, même format). Vu le 25 octobre 2026 (session #31) : un site de club
@@ -1246,6 +1325,42 @@ mod tests {
             "2026-10-25"
         )
         .is_empty());
+    }
+
+    #[test]
+    fn functions_written_for_the_user_and_never_wired_are_found() {
+        // Essai C2 du 29 octobre 2026 : la suppression d'une dépense, sans bouton.
+        let page = r"
+export default function App() {
+  const [confirm, setConfirm] = useState<Expense | null>(null);
+  const handleRemoveExpense = (expense: Expense) => {
+    setConfirm(expense);
+  };
+  const confirmRemoveExpense = () => { remove(confirm.id); };
+  const openAddExpense = useCallback(() => setOpen(true), []);
+  function handleSubmit(event: FormEvent) { event.preventDefault(); }
+  const formatted = (value: number) => money(value);
+  return <form onSubmit={handleSubmit}><Button onClick={openAddExpense} /><ConfirmModal onConfirm={confirmRemoveExpense} /></form>;
+}
+export const onShared = () => {};
+";
+        let found = super::unwired_handlers(page);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].starts_with("line 4: `handleRemoveExpense` is defined but nothing calls it"),
+            "{found:?}"
+        );
+        // Sans constat, rien n'est ajouté au contrôle des exigences.
+        assert!(super::unwired_handlers_note(&[]).is_empty());
+        let note = super::unwired_handlers_note(&[("src/App.tsx".to_string(), found)]);
+        assert!(
+            note.contains("- src/App.tsx, line 4: `handleRemoveExpense`"),
+            "{note}"
+        );
+        assert!(
+            note.contains("wire it to the control the request asks for"),
+            "{note}"
+        );
     }
 
     #[test]

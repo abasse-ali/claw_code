@@ -26,6 +26,9 @@
 // Messages   toast(message, { tone: "error", action: { label, run } }).
 // Formats    money(1235.15) « 1 235,15 € », signed(), parseAmount("12,50"), today(), monthOf(),
 //            shiftMonth(), monthName(), shortMonth(), dayLabel(), daysLeft().
+// Montants   partout en euros, un nombre à virgule (12.5 pour 12,50 €) : Hero, Tile, Row et
+//            Amount, money(), signed(), useEntries. Une appli qui compte en centimes les divise
+//            par 100 avant de les donner au kit (5149 centimes tels quels : « 5 149,00 € »).
 // Icônes     Icon (icon, size), iconFor(catégorie) ; toutes les icônes de lucide-react.
 //
 // Aussi installés, à importer directement : framer-motion (mouvements, motion.div), recharts

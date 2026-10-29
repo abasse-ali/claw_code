@@ -8,7 +8,7 @@ import { Icon, type LucideIcon } from "./icons";
 
 export type Tone = "in" | "out" | "accent" | "warn";
 
-/** Un montant qui défile jusqu'à sa nouvelle valeur quand il change. */
+/** Un montant en euros qui défile jusqu'à sa nouvelle valeur quand il change. */
 export function Amount({ value, format = money }: { value: number; format?: (value: number) => string }) {
   const motionValue = useMotionValue(value);
   const text = useTransform(motionValue, (current) => format(current));
@@ -135,7 +135,8 @@ type RowProps = {
   title: ReactNode;
   badge?: ReactNode;
   sub?: ReactNode;
-  /** Un montant à droite, signé (+100,00 €, −8,00 €), vert quand il est positif. */
+  /** Un montant à droite en euros (12.5, pas 1250 centimes), signé (+100,00 €, −8,00 €), vert
+   * quand il est positif. */
   amount?: number;
   /** Ou autre chose à droite, avec une petite note dessous. */
   end?: ReactNode;

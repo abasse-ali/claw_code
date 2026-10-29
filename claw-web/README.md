@@ -204,6 +204,11 @@ et les requêtes). Toutes allumées, la pastille disparaît et le message part s
 celles de Claw. Le mode projet, le mode équipe et Ultracode restent dans le menu ✦ ; la lecture des
 images pour un modèle qui ne les voit pas et le passage à un autre modèle en panne restent actifs.
 
+Claw Web ne consulte d'habitude aucun autre modèle (`CLAW_ADVISOR_MODELS=off`,
+`CLAW_ESCALATION_MODEL=off`) : « Relecture par un autre modèle » ou « Conseil et second avis »
+cochées rallument les relecteurs, « Escalade » le modèle qui reprend la main, pour le passage
+qui les a choisies. Vu le 29 octobre 2026 : la relecture choisie ne s'était jamais lancée.
+
 ## Ce que Claw compte faire
 
 Pendant qu'il travaille, la progression de la session commence par **Ce que Claw compte faire** :

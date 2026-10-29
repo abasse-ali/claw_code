@@ -65,6 +65,28 @@ class AidsTest(unittest.TestCase):
         run.apply_aids(env, None)
         self.assertEqual(env, {"PATH": "/usr/bin"})
 
+    def test_an_aid_that_asks_another_model_gets_one(self):
+        """Claw Web ne consulte aucun autre modèle (model_settings) ; la relecture, le conseil ou
+        l'escalade cochés dans l'appli en ont besoin pour faire quelque chose."""
+        env = run.model_settings({})
+        self.assertEqual((env["CLAW_ADVISOR_MODELS"], env["CLAW_ESCALATION_MODEL"]), ("off", "off"))
+        run.apply_aids(env, ["checklist", "review"])
+        self.assertNotIn("CLAW_ADVISOR_MODELS", env)
+        self.assertEqual(env["CLAW_ESCALATION_MODEL"], "off")
+        env = run.model_settings({})
+        run.apply_aids(env, ["council", "escalation"])
+        self.assertNotIn("CLAW_ADVISOR_MODELS", env)
+        self.assertNotIn("CLAW_ESCALATION_MODEL", env)
+        # Sans elles, ou sans choix dans l'appli (toutes les aides), le réglage de Claw Web reste.
+        for aids in (["checklist", "verify"], None):
+            env = run.model_settings({})
+            run.apply_aids(env, aids)
+            self.assertEqual((env["CLAW_ADVISOR_MODELS"], env["CLAW_ESCALATION_MODEL"]), ("off", "off"))
+        # Une liste de relecteurs réglée à part n'est pas touchée.
+        env = run.model_settings({"CLAW_ADVISOR_MODELS": "a/b:free"})
+        run.apply_aids(env, ["review"])
+        self.assertEqual(env["CLAW_ADVISOR_MODELS"], "a/b:free")
+
     def test_the_choice_goes_from_setup_to_run_through_options(self):
         folder = Path(tempfile.mkdtemp())
         options = folder / "options.json"
