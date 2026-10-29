@@ -319,6 +319,85 @@ def effort_of(text):
     return EFFORT.sub("", text or "").strip(), (found[-1] if found else "")
 
 
+# Aides au raisonnement de Claw (rust/crates/runtime/src/harness.rs) que l'appli laisse choisir,
+# page « Aides de Claw » : clé de la marque (sa variable est CLAW_ suivi de la clé en
+# majuscules) et nom. Le mode projet, le mode équipe et Ultracode ont leurs propres options ; les
+# erreurs de l'éditeur (VS Code) et le modèle de planification (mode plan) n'agissent pas dans un
+# passage de Claw Web. Même liste, dans le même ordre, dans claw-web/js/aides.js.
+AIDS = (
+    ("verify", "Vérification imposée"),
+    ("diagnostics", "Syntaxe immédiate"),
+    ("pitfalls", "Pièges du code"),
+    ("run_scripts", "Script jamais lancé"),
+    ("entry_point", "Script muet"),
+    ("checklist", "Contrôle des exigences"),
+    ("review", "Relecture par un autre modèle"),
+    ("test_guard", "Test réécrit"),
+    ("design_review", "Revue visuelle"),
+    ("tried_commands", "Commandes essayées"),
+    ("code_guide", "Méthode de code"),
+    ("design_guide", "Méthode de design"),
+    ("edge_cases", "Cas limites"),
+    ("problem_guide", "Signalement d'un problème"),
+    ("announce", "Annonce du plan"),
+    ("work_questions", "Question sur le travail"),
+    ("stall_guard", "Détection de blocage"),
+    ("persistence", "Persévérance"),
+    ("open_tasks", "Tâches finies"),
+    ("announced_work", "Travail annoncé"),
+    ("empty_titles", "Titres sans contenu"),
+    ("cut_replies", "Réponse coupée"),
+    ("kept_answer", "Compte rendu gardé"),
+    ("questions", "Questions reposées"),
+    ("batch_calls", "Essais regroupés"),
+    ("repeated_reads", "Relecture inutile"),
+    ("placeholder_guard", "Contenu abrégé"),
+    ("data_guard", "Données réécrites"),
+    ("lost_edits", "Modifications perdues"),
+    ("path_help", "Chemins"),
+    ("repo_map", "Carte du projet"),
+    ("small_project", "Petit projet"),
+    ("file_view", "Fichier montré après modification"),
+    ("error_sites", "Lignes des erreurs"),
+    ("lean_results", "Contexte allégé"),
+    ("tool_diet", "Outils utiles seulement"),
+    ("reasoning_passback", "Raisonnement conservé"),
+    ("lessons", "Leçons"),
+    ("photos", "Photos libres"),
+    ("council", "Conseil et second avis"),
+    ("escalation", "Escalade"),
+)
+AID_KEYS = tuple(key for key, _ in AIDS)
+AIDS_MARK = re.compile(r"\n*<!--\s*claw-web:aides\s+([a-z_,]*)\s*-->")
+
+
+def aid_variable(key):
+    """La variable qui coupe une aide : « stall_guard » -> CLAW_STALL_GUARD."""
+    return f"CLAW_{key.upper()}"
+
+
+def aids_of(text):
+    """Le texte sans ses marques d'aides, et les aides choisies par la dernière : les clés
+    connues qu'elle nomme (« aucune » : liste vide), ou None sans marque (toutes les aides de
+    Claw)."""
+    found = AIDS_MARK.findall(text or "")
+    cleaned = AIDS_MARK.sub("", text or "").strip()
+    if not found:
+        return cleaned, None
+    named = found[-1].split(",")
+    return cleaned, [key for key in AID_KEYS if key in named]
+
+
+def aids_line(aids):
+    """Pied d'une réponse : les aides de Claw du passage, quand l'appli en a choisi."""
+    if aids is None:
+        return ""
+    if not aids:
+        return f"Aides de Claw : aucune (les {len(AIDS)} coupées)"
+    names = [name for key, name in AIDS if key in aids]
+    return f"Aides de Claw : {len(names)} sur {len(AIDS)} ({', '.join(names)})"
+
+
 # Commandes propres à Claw Web (menu « / » de l'appli) : ce que la commande demande, en mots.
 # Les commandes de Claw (/review, /fix, /verify...) passent telles quelles : Claw les déplie.
 WEB_COMMANDS = {
