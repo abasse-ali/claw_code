@@ -5111,6 +5111,33 @@ where
             .notify("Claw fait confronter le travail à chaque exigence avant de conclure");
         let mut prompt =
             harness::checklist_prompt(request, earlier, crate::permissions::user_away());
+        // Une fonction écrite pour l'utilisateur et jamais branchée (la suppression d'une
+        // dépense sans bouton, essais C1 et C2 du 29 octobre 2026) : la partie de la demande
+        // qu'elle fait n'est pas faite, même quand ses tests passent.
+        let unwired: Vec<(String, Vec<String>)> = aids
+            .originals
+            .keys()
+            .filter(|path| {
+                let lower = path.to_lowercase();
+                [".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".html"]
+                    .iter()
+                    .any(|extension| lower.ends_with(extension))
+                    && !lower.contains(".test.")
+                    && !lower.contains(".spec.")
+            })
+            .filter_map(|path| {
+                let text = std::fs::read_to_string(path).ok()?;
+                let found = crate::code_checks::unwired_handlers(&text);
+                (!found.is_empty()).then(|| (harness::shown_path(path), found))
+            })
+            .collect();
+        if !unwired.is_empty() {
+            self.api_client.notify(&format!(
+                "Fonctions écrites pour l'utilisateur et jamais branchées : {}, signalées au modèle",
+                unwired.iter().map(|(_, found)| found.len()).sum::<usize>()
+            ));
+        }
+        prompt.push_str(&crate::code_checks::unwired_handlers_note(&unwired));
         if let Some(reference) = Self::project_reference(aids) {
             prompt.push_str("\n\n");
             prompt.push_str(&reference);

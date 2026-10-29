@@ -10,10 +10,10 @@ const shortMonthFormat = new Intl.DateTimeFormat(lang, { month: "short" });
 
 const pad = (value: number) => String(value).padStart(2, "0");
 
-/** « 1 235,15 € ». */
+/** « 1 235,15 € » pour 1235.15 : des euros, pas des centimes (divisez-les par 100 avant). */
 export const money = (value: number) => moneyFormat.format(Number.isFinite(value) ? value : 0);
 
-/** « +100,00 € », « −8,00 € ». */
+/** « +100,00 € », « −8,00 € » : des euros, comme money(). */
 export const signed = (value: number) => signedFormat.format(Number.isFinite(value) ? value : 0);
 
 /** « 1 235,15 € », « 1235.15 », « -8 », « 12,5 » : un nombre, ou NaN. Le dernier séparateur

@@ -79,6 +79,13 @@ def apply_aids(env, aids):
             env.pop(aid_variable(key), None)
         else:
             env[aid_variable(key)] = "0"
+    # Une aide qui fait appel à un autre modèle, cochée dans l'appli, l'emporte sur le réglage
+    # de Claw Web qui n'en consulte aucun (model_settings) : sans lui, elle ne fait rien. Vu le
+    # 29 octobre 2026 (essai C2) : « Relecture par un autre modèle » choisie, jamais lancée.
+    if {"review", "council"} & set(aids) and env.get("CLAW_ADVISOR_MODELS") == "off":
+        env.pop("CLAW_ADVISOR_MODELS")
+    if "escalation" in aids and env.get("CLAW_ESCALATION_MODEL") == "off":
+        env.pop("CLAW_ESCALATION_MODEL")
 
 
 # Mise à jour du commentaire de progression au plus toutes les N secondes, du journal
