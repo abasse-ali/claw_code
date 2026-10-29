@@ -138,8 +138,19 @@ Corrigé :
   (`.hero { --hero-1: … }`) restent permis. Sur le `theme.css` de #41 : 33 règles relevées à la
   ligne 51, dès la première écriture.
 
-À décider avec l'utilisateur : les revues 4 et 5 n'ont rien apporté (note en plateau autour de
-6/10, barre à 8), 5 minutes ; et des captures après chaque petite retouche, une minute chacune.
+Décidé avec l'utilisateur le 29 octobre 2026 (« Oui les deux ») :
+
+- **Revues en plateau** (`web_design::plateau`, `review_plateau`) : un progrès est une hausse
+  d'un demi-point au moins de la meilleure note d'avant (`MIN_GAIN`, 0,2 auparavant ; en
+  dessous, c'est l'humeur du juge). Après deux revues de suite sans progrès, Claw arrête les
+  revues du tour (ni revue de base, ni poursuite, ni revue « de structure ») et le dit une fois,
+  sauf si le fonctionnement est en train de se réparer. Sur #41 : 6,3 n'aurait pas valu de
+  poursuite simple (+0,3), une revue de structure au plus, puis l'arrêt : 4 revues au lieu de 5.
+- **Captures retenues** (`capture_check`) : le modèle redemande la même capture (même page,
+  thème, tailles, actions) après une seule modification de l'interface alors que la précédente
+  relevait 3 problèmes ou plus : Claw lui rend la liste de ces problèmes à corriger d'abord, sans
+  lancer le navigateur. Redemandée tout de suite, la capture passe (une seule retenue par capture).
+  Sans aucune modification, la même capture rendait déjà son résultat sans nouveau rendu.
 
 ## Non fait, et pourquoi
 

@@ -67,8 +67,12 @@ pub const CONTINUATION_REQUESTS: usize = 60;
 /// Requêtes gratuites gardées pour la journée : en dessous, pas de poursuite.
 pub const CONTINUATION_RESERVE: u64 = 150;
 /// Hausse de la note moyenne en dessous de laquelle une revue n'a rien
-/// gagné : la page ne progresse plus, poursuivre gaspillerait le quota.
-const MIN_GAIN: f32 = 0.2;
+/// gagné : la page ne progresse plus, poursuivre gaspillerait le quota. Un
+/// demi-point : en dessous, c'est l'humeur du juge. Vu le 28 octobre 2026
+/// (session #41) : 5,4 puis 6,0, 6,3, 6,0 et 5,9 ; deux revues de plus,
+/// cinq minutes, pour rien (décision de l'utilisateur, 29 octobre 2026 :
+/// arrêter d'insister après deux revues sans progrès).
+const MIN_GAIN: f32 = 0.5;
 
 /// Poursuites au plus d'un tour de design.
 #[must_use]
@@ -148,6 +152,24 @@ pub fn continuation(
         return Continuation::Stalled;
     }
     Continuation::Continue
+}
+
+/// La note plafonne sous la barre : les deux dernières revues n'ont pas fait
+/// monter la meilleure note d'avant elles d'au moins `MIN_GAIN`. Une revue de
+/// plus ne servirait pas.
+#[must_use]
+pub fn plateau(graded: &[Graded]) -> bool {
+    let count = graded.len();
+    if count < 3 || graded[count - 1].under.is_empty() {
+        return false;
+    }
+    (count - 2..count).all(|index| {
+        let best = graded[..index]
+            .iter()
+            .map(|graded| graded.mean)
+            .fold(f32::MIN, f32::max);
+        graded[index].mean < best + MIN_GAIN
+    })
 }
 
 /// Design atteint : la moyenne des critères à la barre au moins, et aucun
@@ -3662,6 +3684,39 @@ mod tests {
             Continuation::LowQuota
         );
         assert_eq!(score_trail(&rising), "6,0 puis 7,3");
+        // Session #41 : 5,4 puis 6,0 puis 6,3 (moins d'un demi-point) : plus de
+        // poursuite pour si peu, une revue de structure au plus, puis l'arrêt.
+        let s41 = [
+            graded(5.4, &["finish"]),
+            graded(6.0, &["finish"]),
+            graded(6.3, &["finish"]),
+        ];
+        assert_eq!(
+            continuation(&s41, 2, 0, 2, Some(600)),
+            Continuation::Stalled
+        );
+        assert!(!super::plateau(&s41), "une seule revue sans progrès");
+        let s41 = [
+            s41[0].clone(),
+            s41[1].clone(),
+            s41[2].clone(),
+            graded(6.0, &["finish"]),
+        ];
+        assert!(super::plateau(&s41), "deux revues sans progrès");
+        assert!(!super::plateau(&[
+            graded(5.0, &["finish"]),
+            graded(5.1, &["finish"])
+        ]));
+        assert!(!super::plateau(&[
+            graded(6.0, &["phone"]),
+            graded(7.0, &["phone"]),
+            graded(7.1, &["phone"])
+        ]));
+        assert!(!super::plateau(&[
+            graded(7.9, &["phone"]),
+            graded(7.9, &["phone"]),
+            graded(8.2, &[])
+        ]));
         assert!(stop_reason(Continuation::Stalled).is_some());
         assert_eq!(stop_reason(Continuation::Reached), None);
         assert_eq!(super::max_continuations(), 2);

@@ -235,6 +235,25 @@ pub fn verify_commands(setting: &VerifySetting, root: &Path) -> Vec<String> {
     verify_commands_for(setting, root, &[])
 }
 
+/// Capture retenue : ce qui est dit au modèle (voir `capture_check`).
+#[must_use]
+pub fn capture_held_note(edits: u32, problems: &[String]) -> String {
+    let changed = format!("you changed the interface {edits} time(s)");
+    let list = if problems.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " It listed:\n{}",
+            problems
+                .iter()
+                .map(|problem| format!("- {problem}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+    format!("[Claw] Capture held: since your last capture of this page {changed}, and it found {} problem(s). Each capture takes about a minute (the browser, the phone and desktop sizes, and the description of the images): fix every real problem of the last one first, in as few edits as you can, then capture once.{list}\nIf they are all fixed already, or a problem is not real, call Screenshot again: it will run.", problems.len())
+}
+
 /// Commandes de vérification du projet, connaissant les fichiers modifiés
 /// pendant le tour. Quand la racine ne porte aucun manifeste (projet rangé en
 /// `backend/` et `frontend/`), la vérification est celle du dossier le plus
