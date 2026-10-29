@@ -335,6 +335,7 @@ AIDS = (
     ("test_guard", "Test réécrit"),
     ("design_review", "Revue visuelle"),
     ("tried_commands", "Commandes essayées"),
+    ("visual_check", "Vérification visuelle"),
     ("code_guide", "Méthode de code"),
     ("design_guide", "Méthode de design"),
     ("edge_cases", "Cas limites"),
