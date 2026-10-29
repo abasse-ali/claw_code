@@ -5,19 +5,26 @@ en français »).
 
 Un petit modèle de NVIDIA traduit, en arrière-plan : le journal n'attend pas, la traduction
 rejoint la capture quand elle arrive. Un même texte n'est traduit qu'une fois par passage.
+
+La traduction ne retient jamais la fin du passage : un fil d'arrière-plan qui meurt avec le
+programme, l'attente de fin bornée en tout, et plus aucun appel après deux échecs de suite. Vu
+le 28 octobre 2026 (session #41) : onze traductions en échec mises en file, une minute et demie
+chacune, la session finie mais la branche poussée 13 minutes plus tard.
 """
 
 import json
+import queue
 import re
 import threading
+import time
 import urllib.request
-
-from concurrent.futures import ThreadPoolExecutor
 
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 # Rapide et sans quota du jour ; réglable par CLAW_TRANSLATE_MODEL.
 MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
-TIMEOUT = 90
+TIMEOUT = 45
+# Échecs de suite après lesquels le passage garde l'anglais sans plus rien demander.
+MAX_FAILURES = 2
 PROMPT = (
     "Traduis en français chacun des textes du tableau JSON ci-dessous. Ce sont des défauts "
     "relevés sur une page web, lus par une personne qui n'est pas informaticienne : écris un "
@@ -57,10 +64,14 @@ class Translator:
         self.key = key
         self.model = model or MODEL
         self.cache = {}
-        self.pool = ThreadPoolExecutor(max_workers=1)
-        self.pending = []
-        self.lock = threading.Lock()
         self.call = call or self._post
+        self.jobs = queue.Queue()
+        self.lock = threading.Lock()
+        self.idle = threading.Condition(self.lock)
+        self.queued = 0
+        self.failures = 0
+        self.stopped = False
+        self.worker = None
 
     def __call__(self, texts, done):
         """`done(traductions)` reçoit les traductions de `texts`, dans l'ordre, dès qu'elles
@@ -72,29 +83,53 @@ class Translator:
             return
 
         def work():
+            if self.stopped or self.failures >= MAX_FAILURES:
+                return
             try:
                 translated = self.call(missing)
             except Exception as error:  # le journal garde l'anglais
+                self.failures += 1
                 print(f"Traduction des problèmes impossible : {type(error).__name__}", flush=True)
                 return
             if not translated or len(translated) != len(missing):
+                self.failures += 1
                 print("Traduction des problèmes illisible : l'anglais reste", flush=True)
                 return
+            self.failures = 0
             self.cache.update(zip(missing, translated))
             done([self.cache[text] for text in texts])
 
         with self.lock:
-            self.pending.append(self.pool.submit(work))
+            if self.stopped or self.failures >= MAX_FAILURES:
+                return
+            self.queued += 1
+            if self.worker is None:
+                # Un fil « démon » : il ne retient pas la fin du programme.
+                self.worker = threading.Thread(target=self._run, daemon=True)
+                self.worker.start()
+        self.jobs.put(work)
+
+    def _run(self):
+        while True:
+            work = self.jobs.get()
+            try:
+                work()
+            finally:
+                with self.idle:
+                    self.queued -= 1
+                    self.idle.notify_all()
 
     def wait(self, timeout):
-        """Attend les traductions en cours, `timeout` secondes au plus (fin du passage)."""
-        with self.lock:
-            pending, self.pending = self.pending, []
-        for future in pending:
-            try:
-                future.result(timeout=timeout)
-            except Exception:  # délai dépassé ou échec : l'anglais reste
-                return
+        """Attend les traductions en cours, `timeout` secondes au plus en tout (fin du
+        passage) ; au-delà, celles qui restent ne sont plus demandées."""
+        deadline = time.monotonic() + timeout
+        with self.idle:
+            while self.queued > 0:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    self.stopped = True
+                    return
+                self.idle.wait(left)
 
     def _post(self, texts):
         body = json.dumps({

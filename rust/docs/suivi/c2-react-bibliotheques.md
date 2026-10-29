@@ -103,6 +103,44 @@ Corrigé ensuite :
   un code, et les textes de la page ne comprennent plus `package-lock.json` ni la construction
   d'une appli Vite (`docs/` à côté d'un `vite.config`).
 
+### Où sont passées les 61 minutes de #41
+
+Le modèle a travaillé 47 minutes (116 requêtes, 121 outils), puis la session a mis 14 minutes
+de plus à finir :
+
+| Poste | Temps | Part |
+|---|---|---|
+| Captures demandées par le modèle (13, souvent après une ligne de CSS ; chacune décrite par un modèle qui voit, Nemotron ne lisant pas les images) | 12 min 29 s | 27 % |
+| Revues visuelles du juge (5 : 5,4 puis 6,0, 6,3, 6,0, 5,9/10) | 10 min 37 s | 23 % |
+| Écritures et modifications (40, dont 3 ratées) | 7 min 16 s | 16 % |
+| Vérification des types et construction (33 commandes) | 6 min 04 s | 13 % |
+| Réflexion, réponse, compactage du contexte | 3 min 55 s | 8 % |
+| Lectures (21, surtout le kit au début) | 3 min 16 s | 7 % |
+| Parcours dans le navigateur (9) | 3 min 05 s | 7 % |
+| **Après la fin** : traduction en français des remarques des captures, 11 échecs de 70 à 90 s mis en file, que le programme attendait avant de pousser la branche | 13 min | |
+
+Les défauts visibles viennent de deux causes :
+
+1. Les fausses alertes de Claw (liens, icônes, titre, pastilles, faux code) : une dizaine
+   d'allers-retours sur des défauts qui n'en étaient pas (corrigé ci-dessus).
+2. Le modèle a récrit l'allure du kit dans `src/theme.css` (33 règles sur ses blocs) au lieu
+   d'y poser des couleurs : c'est là que naissent la légende illisible et les pastilles collées
+   à leur bord. Rien ne le lui disait.
+
+Corrigé :
+
+- **Traduction** (`.github/claw-web/translate.py`) : un fil d'arrière-plan qui ne retient plus la
+  fin du programme, une attente finale bornée à 30 s en tout, plus aucun appel après deux échecs
+  de suite, délai de 45 s au lieu de 90.
+- **Kit récrit** (`code_checks::kit_restyled`) : la feuille de l'appli posée à côté de
+  `kit/app-kit.css` (React : `src/theme.css` ; sans React : `styles.css`) qui vise les classes
+  du kit est signalée dès l'écriture, avec ses règles ; des jetons posés pour un bloc
+  (`.hero { --hero-1: … }`) restent permis. Sur le `theme.css` de #41 : 33 règles relevées à la
+  ligne 51, dès la première écriture.
+
+À décider avec l'utilisateur : les revues 4 et 5 n'ont rien apporté (note en plateau autour de
+6/10, barre à 8), 5 minutes ; et des captures après chaque petite retouche, une minute chacune.
+
 ## Non fait, et pourquoi
 
 - **MySQL et Redis** : ni sur le PC de Claw ni sur GitHub Pages ; les serveurs de départ gardent
