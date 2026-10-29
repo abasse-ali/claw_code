@@ -331,7 +331,7 @@ AIDS = (
     ("run_scripts", "Script jamais lancé"),
     ("entry_point", "Script muet"),
     ("checklist", "Contrôle des exigences"),
-    ("review", "Relecture par un autre modèle"),
+    ("review", "Relecture à froid"),
     ("test_guard", "Test réécrit"),
     ("design_review", "Revue visuelle"),
     ("tried_commands", "Commandes essayées"),

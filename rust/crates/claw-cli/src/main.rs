@@ -9592,10 +9592,9 @@ impl DefaultRuntimeClient {
         self
     }
 
-    /// Avis du premier de ces modèles qui répond (relecture, diagnostic).
+    /// Diagnostic du premier de ces modèles qui répond, quand l'agent n'avance plus.
     fn consult_models(
         &mut self,
-        purpose: runtime::ConsultPurpose,
         system: &str,
         prompt: &str,
         models: &[String],
@@ -9604,56 +9603,56 @@ impl DefaultRuntimeClient {
             return None;
         }
         if self.emit_output {
-            live::show(match purpose {
-                runtime::ConsultPurpose::Review => "Relecture par un autre modèle…",
-                runtime::ConsultPurpose::Design => "Relecture du plan par un autre modèle…",
-                runtime::ConsultPurpose::Unblock => "Diagnostic par un autre modèle…",
-            });
+            live::show("Diagnostic par un autre modèle…");
         }
-        // La relecture clôt le tour : elle a le temps et la place de finir.
-        let opinion = match purpose {
-            runtime::ConsultPurpose::Review | runtime::ConsultPurpose::Design => {
-                tools::advisors::ask_within(
-                    models,
-                    system,
-                    prompt,
-                    tools::advisors::REVIEW_MAX_TOKENS,
-                    tools::advisors::Patience::REVIEW,
-                )
-            }
-            runtime::ConsultPurpose::Unblock => tools::advisors::ask(models, system, prompt, 3_000),
-        };
-        match opinion {
+        match tools::advisors::ask(models, system, prompt, 3_000) {
             Ok(opinion) => Some(runtime::Consultation {
                 model: opinion.model,
                 text: opinion.text,
             }),
             Err(error) => {
-                // Aucun autre modèle n'a répondu (relecteurs gratuits saturés) :
-                // le modèle de la session relit, dans une conversation neuve,
-                // plutôt que de laisser le travail sans relecture. Essai réel t4 :
-                // sans relecture, le livre mis de côté redevenait un prêt d'office.
-                if purpose != runtime::ConsultPurpose::Unblock {
-                    let own = self.chain.primary().to_string();
-                    if !own.is_empty() && !models.contains(&own) {
-                        if let Ok(opinion) = tools::advisors::ask_within(
-                            std::slice::from_ref(&own),
-                            system,
-                            prompt,
-                            tools::advisors::REVIEW_MAX_TOKENS,
-                            tools::advisors::Patience::REVIEW,
-                        ) {
-                            self.notify(&format!(
-                                "Aucun autre modèle n'a répondu ({error}) : le modèle de la session relit, dans une conversation neuve"
-                            ));
-                            return Some(runtime::Consultation {
-                                model: opinion.model,
-                                text: opinion.text,
-                            });
-                        }
-                    }
-                }
                 self.notify(&format!("Aucun autre modèle n'a répondu ({error})"));
+                None
+            }
+        }
+    }
+
+    /// Relecture des modifications ou du plan par le modèle de la session lui-même, dans
+    /// une conversation neuve : il ne voit que la demande, le travail et la consigne du
+    /// relecteur, pas le chemin qui l'y a mené. Demandé le 29 octobre 2026 : les relecteurs
+    /// gratuits d'OpenRouter faisaient attendre (essai C3 de Claw Web : 6 min 30, trois
+    /// modèles sans réponse) avant ce même relecteur, qui n'était qu'un secours.
+    fn fresh_review(
+        &mut self,
+        purpose: runtime::ConsultPurpose,
+        system: &str,
+        prompt: &str,
+    ) -> Option<runtime::Consultation> {
+        let own = self.chain.primary().to_string();
+        if own.is_empty() {
+            return None;
+        }
+        if self.emit_output {
+            live::show(if purpose == runtime::ConsultPurpose::Design {
+                "Relecture du plan dans une conversation neuve…"
+            } else {
+                "Relecture dans une conversation neuve…"
+            });
+        }
+        // La relecture clôt le tour : elle a le temps et la place de finir.
+        match tools::advisors::ask_within(
+            std::slice::from_ref(&own),
+            system,
+            prompt,
+            tools::advisors::REVIEW_MAX_TOKENS,
+            tools::advisors::Patience::REVIEW,
+        ) {
+            Ok(opinion) => Some(runtime::Consultation {
+                model: opinion.model,
+                text: opinion.text,
+            }),
+            Err(error) => {
+                self.notify(&format!("Relecture impossible ({error})"));
                 None
             }
         }
@@ -9939,8 +9938,11 @@ impl ApiClient for DefaultRuntimeClient {
         system: &str,
         prompt: &str,
     ) -> Option<runtime::Consultation> {
+        if purpose != runtime::ConsultPurpose::Unblock {
+            return self.fresh_review(purpose, system, prompt);
+        }
         let models = tools::advisors::configured_models();
-        self.consult_models(purpose, system, prompt, &models)
+        self.consult_models(system, prompt, &models)
     }
 
     fn consult_again(
@@ -9950,11 +9952,15 @@ impl ApiClient for DefaultRuntimeClient {
         prompt: &str,
         excluded: &str,
     ) -> Option<runtime::Consultation> {
+        // Une approbation sans analyse : le modèle relit encore, dans une autre conversation neuve.
+        if purpose != runtime::ConsultPurpose::Unblock {
+            return self.fresh_review(purpose, system, prompt);
+        }
         let models = tools::advisors::configured_models()
             .into_iter()
             .filter(|model| model != excluded)
             .collect::<Vec<_>>();
-        self.consult_models(purpose, system, prompt, &models)
+        self.consult_models(system, prompt, &models)
     }
 
     fn escalate(&mut self) -> Option<String> {

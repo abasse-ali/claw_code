@@ -66,13 +66,17 @@ class AidsTest(unittest.TestCase):
         self.assertEqual(env, {"PATH": "/usr/bin"})
 
     def test_an_aid_that_asks_another_model_gets_one(self):
-        """Claw Web ne consulte aucun autre modèle (model_settings) ; la relecture, le conseil ou
-        l'escalade cochés dans l'appli en ont besoin pour faire quelque chose."""
+        """Claw Web ne consulte aucun autre modèle (model_settings) ; le conseil ou l'escalade
+        cochés dans l'appli en ont besoin pour faire quelque chose."""
         env = run.model_settings({})
         self.assertEqual((env["CLAW_ADVISOR_MODELS"], env["CLAW_ESCALATION_MODEL"]), ("off", "off"))
-        run.apply_aids(env, ["checklist", "review"])
+        run.apply_aids(env, ["checklist", "council"])
         self.assertNotIn("CLAW_ADVISOR_MODELS", env)
         self.assertEqual(env["CLAW_ESCALATION_MODEL"], "off")
+        # La relecture à froid : le modèle de la session relit, aucun autre n'est consulté.
+        env = run.model_settings({})
+        run.apply_aids(env, ["review"])
+        self.assertEqual(env["CLAW_ADVISOR_MODELS"], "off")
         env = run.model_settings({})
         run.apply_aids(env, ["council", "escalation"])
         self.assertNotIn("CLAW_ADVISOR_MODELS", env)
@@ -84,7 +88,7 @@ class AidsTest(unittest.TestCase):
             self.assertEqual((env["CLAW_ADVISOR_MODELS"], env["CLAW_ESCALATION_MODEL"]), ("off", "off"))
         # Une liste de relecteurs réglée à part n'est pas touchée.
         env = run.model_settings({"CLAW_ADVISOR_MODELS": "a/b:free"})
-        run.apply_aids(env, ["review"])
+        run.apply_aids(env, ["council"])
         self.assertEqual(env["CLAW_ADVISOR_MODELS"], "a/b:free")
 
     def test_the_choice_goes_from_setup_to_run_through_options(self):
@@ -103,7 +107,7 @@ class AidsTest(unittest.TestCase):
         self.assertEqual(common.aids_line(None), "")
         self.assertEqual(common.aids_line([]), f"Aides de Claw : aucune (les {len(common.AIDS)} coupées)")
         self.assertEqual(common.aids_line(["review", "verify"]), f"Aides de Claw : 2 sur {len(common.AIDS)} "
-                         "(Vérification imposée, Relecture par un autre modèle)")
+                         "(Vérification imposée, Relecture à froid)")
 
     def test_every_aid_is_one_of_claw(self):
         """Chaque clé coupe une vraie aide de Claw ; les seules laissées de côté ont leur raison."""

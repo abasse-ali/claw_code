@@ -77,15 +77,18 @@
     if (method !== "dialog") event.preventDefault();
   });
   let lastClick = null;
+  // Vrai le temps d'essayer un onglet (#depenses) : ce changement d'écran dans la même page
+  // passe, rien d'autre.
+  let letHashThrough = false;
   window.addEventListener("click", (event) => {
     lastClick = { target: event.target, handled: event.defaultPrevented };
     const link = event.target.closest && event.target.closest("a[href]");
-    if (link) event.preventDefault();
+    if (link && !letHashThrough) event.preventDefault();
   });
   if (window.navigation) {
     window.navigation.addEventListener("navigate", (event) => {
       count();
-      if (event.cancelable) event.preventDefault();
+      if (event.cancelable && !(letHashThrough && event.hashChange)) event.preventDefault();
     });
   }
   // Mode « formulaires seuls » (`clawOnlyForms`) : Screenshot renvoie les
@@ -165,6 +168,8 @@
 
   // --- Liens -----------------------------------------------------------------
   const links = [];
+  // Liens #ecran sans section : essayés plus bas, une fois les écrans repérables.
+  const routeLinks = [];
   const anchors = new Map();
   const pages = new Map();
   const here = location.href.split("#")[0];
@@ -176,7 +181,7 @@
       let id = href.slice(1);
       try { id = decodeURIComponent(id); } catch (_) { /* laisse tel quel */ }
       if (!document.getElementById(id) && !document.getElementsByName(id).length) {
-        links.push(`${label(link)} points to #${id}, but the page has no element with that id`);
+        routeLinks.push({ link, id });
       } else if (document.getElementById(id) && !anchors.has(id)) anchors.set(id, link);
     } else if (/^tel:/i.test(href)) {
       const number = href.slice(4).replace(/[\s.()-]/g, "");
@@ -512,7 +517,9 @@
       const field = (markedField.labels && markedField.labels[0] ? markedField.labels[0].innerText : markedField.name || markedField.id || "").replace(/\s+/g, " ").trim().slice(0, 40);
       unnamed.push(`Sending ${name} changes the page ("${counted.slice(0, 90)}") but the entry typed in it ("${marker}" in the field "${field}") appears in no list, only in a passing message at best: the list of entries does not show the new one. Show each new entry in its list (on the screen or one tap away), and keep it after a reload; do not add fields to the form for this`);
     }
-    if (added || appeared.length) kept.push({ form: name, marker, shown: added, appeared });
+    // L'écran de l'appli où le formulaire a été envoyé (#participants) : c'est là que l'ajout
+    // se relit après le rechargement, pas sur l'écran qu'un clic a ouvert ensuite.
+    if (added || appeared.length) kept.push({ form: name, marker, shown: added, appeared, hash: location.hash });
   };
 
   for (const form of [...document.forms].filter(shown).slice(0, 6)) await tryForm(form);
@@ -866,6 +873,27 @@
         break;
       }
     }
+  }
+  // Un lien #ecran sans section : l'onglet d'une appli qui ne met dans la page que l'écran
+  // ouvert (le kit React de Claw, un routeur). Essayé : s'il ouvre un écran, c'est un onglet,
+  // noté pour être exploré et capturé ; sinon le lien est cassé. Vu le 29 octobre 2026 (essai
+  // C3) : les onglets Dépenses, Soldes et Remboursements dits cassés, et jamais capturés.
+  const startHash = location.hash;
+  for (const { link, id } of routeLinks) {
+    let route = false;
+    if (link.isConnected && shown(link)) {
+      const before = regions();
+      const seen = watch();
+      letHashThrough = true;
+      location.hash = `#${id}`;
+      await wait(300);
+      seen.stop();
+      route = Boolean(noteScreen(link, before)) || Boolean(document.getElementById(id))
+        || (location.hash === `#${id}` && seen.mutations > 0);
+      if (location.hash !== startHash) { location.hash = startHash; await wait(300); }
+      letHashThrough = false;
+    }
+    if (!route) links.push(`${label(link)} points to #${id}, but the page has no element with that id`);
   }
   // Les autres écrans, après l'espace à code : leurs essais (« Annuler ma
   // réservation ») videraient ce que l'espace devait montrer.

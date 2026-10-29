@@ -15,7 +15,11 @@
   // le point focal. Les règles de vitrine (titre géant, police à soi) ne s'y
   // appliquent pas. Vu le 28 octobre 2026 : ces remarques poussaient une
   // appli de budget vers un titre d'affiche et une police à empattements.
-  const appShell = Boolean(document.querySelector("[data-app-tabs], .tabbar, .app-tabs")) && document.querySelectorAll("[data-screen]").length >= 2;
+  // L'AppShell du kit React ne met dans la page que l'écran ouvert : un écran et deux onglets
+  // suffisent (vu le 29 octobre 2026, essai C3 : un titre de barre de 18 px jugé trop petit).
+  const appShell = Boolean(document.querySelector("[data-app-tabs], .tabbar, .app-tabs"))
+    && (document.querySelectorAll("[data-screen]").length >= 2
+      || (document.querySelector("[data-screen]") && document.querySelectorAll("[data-app-tabs] a, .tabbar a, .app-tabs a").length >= 2));
   const problems = [];
   // Éléments en cause : Claw demande au navigateur les règles CSS qui les
   // dessinent (fichier et ligne), pour que le modèle aille droit à la règle
@@ -836,9 +840,15 @@
     if (dead.length) {
       problems.push(`Links that go nowhere (href="#" or javascript:): ${list(dead.map(name))}. Point each to a real page, section or address (mailto:, tel:, the real social profile), or make it a <button> if it runs an action`);
     }
+    // Les onglets d'une appli (une barre où l'un est marqué aria-current) ouvrent un écran que
+    // la page ne contient pas encore : le parcours des clics les essaie, eux ne se jugent pas ici.
+    const routed = (a) => {
+      const bar = a.closest("nav, [role=tablist], [data-app-tabs], .tabbar, .app-tabs");
+      return Boolean(bar && bar.querySelector("[aria-current], [aria-selected=true]"));
+    };
     const missing = links.filter((a) => {
       const href = a.getAttribute("href").trim();
-      if (!/^#[^\s#]+$/.test(href)) return false;
+      if (!/^#[^\s#]+$/.test(href) || routed(a)) return false;
       try {
         return !document.getElementById(decodeURIComponent(href.slice(1)));
       } catch (_) {
@@ -968,9 +978,13 @@
     const focusable = [...document.querySelectorAll("a[href], button, input:not([type=hidden]), select, textarea")].filter(shown).slice(0, 12);
     const previous = document.activeElement;
     // Une transition (color 0.2s) rendrait encore l'ancien style au moment de
-    // la mesure : elles sont coupées le temps de l'essai.
+    // la mesure : elles sont coupées le temps de l'essai. Les animations sont
+    // seulement mises en pause : coupées puis rendues, elles repartaient de zéro,
+    // et l'écran d'une appli (son entrée en fondu) était capturé presque
+    // transparent. Vu le 29 octobre 2026 (essai C3) : les captures sur ordinateur
+    // montraient la page délavée.
     const still = document.createElement("style");
-    still.textContent = "*, *::before, *::after { transition: none !important; animation: none !important; }";
+    still.textContent = "*, *::before, *::after { transition: none !important; animation-play-state: paused !important; }";
     document.head.appendChild(still);
     const silent = [];
     let tried = 0;

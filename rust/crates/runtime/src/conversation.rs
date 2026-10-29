@@ -3757,7 +3757,8 @@ where
         notes.push(crate::web_design::design_base_restored(&name, react));
     }
 
-    /// Revue du plan de design avant le code : un autre modèle juge la
+    /// Revue du plan de design avant le code : le modèle, dans une conversation
+    /// neuve, juge la
     /// direction (identité, hiérarchie, typographie, couleur, composition)
     /// quand le modèle s'apprête à écrire un fichier d'interface après l'avoir
     /// posée. Changer un plan ne coûte rien ; changer une page faite coûte une
@@ -3851,11 +3852,8 @@ where
             }
             _ => request.to_string(),
         };
-        if !self.api_client.can_consult() {
-            return None;
-        }
         self.api_client
-            .notify("Revue du plan de design par un autre modèle, avant le code…");
+            .notify("Revue du plan de design dans une conversation neuve, avant le code…");
         let consultation = self.api_client.consult(
             ConsultPurpose::Design,
             crate::web_design::PLAN_CRITIC_SYSTEM,
@@ -6115,7 +6113,7 @@ where
     }
 
     /// Mode projet : le cahier des charges et le plan sont écrits et lisibles.
-    /// Avant le code, un autre modèle les relit, une fois par contenu (de
+    /// Avant le code, le modèle les relit dans une conversation neuve, une fois par contenu (de
     /// nouveau si des exigences ou des jalons changent) ; ses remarques vont au
     /// modèle. Sans relecteur, elle sera tentée au tour suivant.
     fn design_review(&mut self, turn: &mut project::Turn) -> Option<String> {
@@ -6123,7 +6121,6 @@ where
             || !self.review
             || interrupt_requested()
             || !harness::enabled(Aid::Review)
-            || !self.api_client.can_consult()
         {
             return None;
         }
@@ -6140,7 +6137,7 @@ where
         }
         turn.design_review_tried = true;
         self.api_client.notify(
-            "Mode projet : un autre modèle relit le cahier des charges et le plan avant le code…",
+            "Mode projet : le cahier des charges et le plan sont relus dans une conversation neuve avant le code…",
         );
         let environment = match &self.environment {
             EnvironmentProbe::Done(note) => Some(note.as_str()),
@@ -6670,7 +6667,7 @@ where
     }
 
     /// Relecture imposée : quand le tour a modifié assez de code et que la
-    /// vérification passe, un autre modèle relit le diff et la réponse que
+    /// vérification passe, le modèle relit dans une conversation neuve le diff et la réponse que
     /// l'agent s'apprête à donner. Ses remarques sont renvoyées au modèle
     /// (une relecture par tour). `None` : rien à corriger.
     fn review_gate(
@@ -6687,7 +6684,6 @@ where
             || !self.review
             || interrupt_requested()
             || !harness::enabled(Aid::Review)
-            || !self.api_client.can_consult()
         {
             return None;
         }
@@ -6699,7 +6695,7 @@ where
             return None;
         }
         self.api_client
-            .notify("Relecture des modifications par un autre modèle…");
+            .notify("Relecture des modifications dans une conversation neuve…");
         let reference = Self::project_reference(aids);
         let prompt =
             harness::review_prompt_with(request, earlier, answer, &diffs, reference.as_deref());
@@ -6709,10 +6705,10 @@ where
         harness::log_review(&consultation.model, &consultation.text);
         // Une approbation sans aucune analyse ne prouve pas que le travail a
         // été relu (rejoué sur un vrai travail : « LGTM » en 8 s, quand un
-        // autre relecteur y trouvait un bogue) : un second relecteur la remplace.
+        // autre relecteur y trouvait un bogue) : une seconde relecture la remplace.
         if harness::bare_approval(&consultation.text) {
             self.api_client.notify(&format!(
-                "Relecture par {} : approbation sans analyse, un autre modèle relit",
+                "Relecture par {} : approbation sans analyse, nouvelle relecture dans une autre conversation neuve",
                 consultation.model
             ));
             if let Some(second) = self.api_client.consult_again(
@@ -11843,7 +11839,7 @@ mod tests {
     }
 
     #[test]
-    fn no_other_model_is_asked_or_announced_when_the_user_turned_them_off() {
+    fn with_other_models_turned_off_the_session_model_still_reviews_its_work() {
         let _serial = crate::test_serial();
         NO_ADVISORS.with(|off| off.set(true));
         let (path, output) = written_file("sans-conseillers");
@@ -11860,7 +11856,20 @@ mod tests {
         let _ = runtime.run_turn("écris total.py", None);
         NO_ADVISORS.with(|off| off.set(false));
         let observed = observed.borrow();
-        assert!(observed.consults.is_empty(), "{:?}", observed.consults);
+        // La relecture à froid n'a besoin d'aucun autre modèle : le modèle de la session
+        // relit, dans une conversation neuve (demandé le 29 octobre 2026).
+        assert!(
+            observed
+                .consults
+                .iter()
+                .all(|(purpose, _)| *purpose == super::ConsultPurpose::Review),
+            "{:?}",
+            observed.consults
+        );
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice == "Relecture des modifications dans une conversation neuve…"));
         assert!(
             !observed
                 .notices
@@ -11896,7 +11905,7 @@ mod tests {
         let observed = observed.borrow();
         assert_eq!(observed.consults.len(), 2);
         assert!(observed.notices.iter().any(|notice| notice
-            == "Relecture par relecteur : approbation sans analyse, un autre modèle relit"));
+            == "Relecture par relecteur : approbation sans analyse, nouvelle relecture dans une autre conversation neuve"));
         // Les remarques du second relecteur reviennent à l'agent.
         assert!(observed.requests[3].contains("liste vide non gérée"));
         let _ = std::fs::remove_file(path);
