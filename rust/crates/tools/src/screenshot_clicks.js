@@ -78,17 +78,19 @@
   });
   let lastClick = null;
   // Vrai le temps d'essayer un onglet (#depenses) : ce changement d'écran dans la même page
-  // passe, rien d'autre.
+  // passe, rien d'autre. `__clawLetHash` : Screenshot rouvre un écran par son onglet dans une
+  // page où ces gardes sont restées (formulaires renvoyés).
   let letHashThrough = false;
+  const hashFree = () => letHashThrough || window.__clawLetHash === true;
   window.addEventListener("click", (event) => {
     lastClick = { target: event.target, handled: event.defaultPrevented };
     const link = event.target.closest && event.target.closest("a[href]");
-    if (link && !letHashThrough) event.preventDefault();
+    if (link && !hashFree()) event.preventDefault();
   });
   if (window.navigation) {
     window.navigation.addEventListener("navigate", (event) => {
       count();
-      if (event.cancelable && !(letHashThrough && event.hashChange)) event.preventDefault();
+      if (event.cancelable && !(hashFree() && event.hashChange)) event.preventDefault();
     });
   }
   // Mode « formulaires seuls » (`clawOnlyForms`) : Screenshot renvoie les
@@ -879,20 +881,30 @@
   // noté pour être exploré et capturé ; sinon le lien est cassé. Vu le 29 octobre 2026 (essai
   // C3) : les onglets Dépenses, Soldes et Remboursements dits cassés, et jamais capturés.
   const startHash = location.hash;
+  const routes = new Map();
   for (const { link, id } of routeLinks) {
+    // Un même écran (#operations par l'onglet et par « Tout voir ») ne s'essaie qu'une fois.
+    if (routes.has(id)) {
+      if (!routes.get(id)) links.push(`${label(link)} points to #${id}, but the page has no element with that id`);
+      continue;
+    }
+    // L'essai d'un écran précédent a pu redessiner la page : le lien se retrouve par son adresse.
+    const current = link.isConnected ? link
+      : [...document.querySelectorAll("a[href]")].find((item) => item.getAttribute("href").trim() === `#${id}` && shown(item));
     let route = false;
-    if (link.isConnected && shown(link)) {
+    if (current && current.isConnected && shown(current)) {
       const before = regions();
       const seen = watch();
       letHashThrough = true;
       location.hash = `#${id}`;
       await wait(300);
       seen.stop();
-      route = Boolean(noteScreen(link, before)) || Boolean(document.getElementById(id))
+      route = Boolean(noteScreen(current, before)) || Boolean(document.getElementById(id))
         || (location.hash === `#${id}` && seen.mutations > 0);
       if (location.hash !== startHash) { location.hash = startHash; await wait(300); }
       letHashThrough = false;
     }
+    routes.set(id, route);
     if (!route) links.push(`${label(link)} points to #${id}, but the page has no element with that id`);
   }
   // Les autres écrans, après l'espace à code : leurs essais (« Annuler ma

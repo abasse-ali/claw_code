@@ -842,10 +842,11 @@
     }
     // Les onglets d'une appli (une barre où l'un est marqué aria-current) ouvrent un écran que
     // la page ne contient pas encore : le parcours des clics les essaie, eux ne se jugent pas ici.
-    const routed = (a) => {
-      const bar = a.closest("nav, [role=tablist], [data-app-tabs], .tabbar, .app-tabs");
-      return Boolean(bar && bar.querySelector("[aria-current], [aria-selected=true]"));
-    };
+    const barOf = (a) => a.closest("nav, [role=tablist], [data-app-tabs], .tabbar, .app-tabs");
+    const inRoutedBar = (a) => { const bar = barOf(a); return Boolean(bar && bar.querySelector("[aria-current], [aria-selected=true]")); };
+    // « Tout voir » ou le bouton Réglages de la barre du haut visent un écran de la barre d'onglets.
+    const tabHrefs = new Set(links.filter(inRoutedBar).map((a) => a.getAttribute("href").trim()));
+    const routed = (a) => inRoutedBar(a) || tabHrefs.has(a.getAttribute("href").trim());
     const missing = links.filter((a) => {
       const href = a.getAttribute("href").trim();
       if (!/^#[^\s#]+$/.test(href) || routed(a)) return false;

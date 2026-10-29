@@ -3148,7 +3148,17 @@ const SCREEN_SCRIPT: &str = r#"(async () => {
   }
   if (!shown(el)) return { ok: false, errors, text: "" };
   el.scrollIntoView({ block: "center" });
-  press(el);
+  // Un onglet (#reglages) : l'adresse change, même quand un formulaire renvoyé a laissé une
+  // fenêtre ouverte qui rend le reste de la page inerte. Vu le 29 octobre 2026 : l'écran
+  // Réglages du kit, « Not reached ».
+  const href = el.matches("a[href^='#']") ? el.getAttribute("href").trim() : "";
+  if (href.length > 1) {
+    for (const box of document.querySelectorAll("dialog[open]")) box.close();
+    window.__clawLetHash = true;
+    location.hash = href;
+  } else {
+    press(el);
+  }
   await wait(500);
   if (code) {
     const box = [...document.querySelectorAll("dialog[open], [role=dialog], [aria-modal=true]")].find((item) => [...item.querySelectorAll("input")].some(shown));
