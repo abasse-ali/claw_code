@@ -19,6 +19,7 @@ export const AID_GROUPS = [
       ["test_guard", "Test réécrit", "Un test réécrit après un échec est signalé : faire passer un test n'est pas corriger."],
       ["design_review", "Revue visuelle", "Interface modifiée : Claw prend des captures et les fait noter par un modèle qui voit."],
       ["tried_commands", "Commandes essayées", "Une réponse conseille des commandes jamais lancées : le modèle est renvoyé les essayer."],
+      ["visual_check", "Vérification visuelle", "Après chaque modification de l'interface, Claw ouvre la page sur un téléphone, la mesure et dit au modèle ce qui est cassé ; une page dite « vérifiée » est mesurée avant la réponse."],
     ],
   },
   {

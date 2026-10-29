@@ -3314,6 +3314,7 @@ where
         if aids.style_searches < harness::STYLE_SEARCHES_BEFORE_NOTE
             || aids.style_search_notes >= harness::MAX_STYLE_SEARCH_NOTES
             || self.subagent
+            || !harness::enabled(Aid::BatchCalls)
             || self.page_to_review(aids).is_none()
         {
             return None;
@@ -4077,6 +4078,7 @@ where
         if aids.blind_edits == 0
             || aids.blind_measures >= harness::MAX_VISUAL_CHECKS
             || aids.pending_check.is_some()
+            || !harness::enabled(Aid::VisualCheck)
         {
             return None;
         }
@@ -4331,7 +4333,7 @@ where
         aids: &mut TurnAids,
         prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> String {
-        if aids.blind_edits == 0 {
+        if aids.blind_edits == 0 || !harness::enabled(Aid::VisualCheck) {
             return String::new();
         }
         self.api_client
@@ -4356,7 +4358,12 @@ where
         answer: &str,
         prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> Option<String> {
-        if aids.claim_checked || aids.blind_edits == 0 || self.subagent || interrupt_requested() {
+        if aids.claim_checked
+            || aids.blind_edits == 0
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::VisualCheck)
+        {
             return None;
         }
         let sentence = harness::verification_claim(answer)?;
@@ -5591,7 +5598,11 @@ where
         input: &str,
         aids: &mut TurnAids,
     ) -> Option<String> {
-        if tool_name != "AskUserQuestion" || aids.questions_checked || self.subagent {
+        if tool_name != "AskUserQuestion"
+            || aids.questions_checked
+            || self.subagent
+            || !harness::enabled(Aid::Questions)
+        {
             return None;
         }
         aids.questions_checked = true;
@@ -5727,7 +5738,11 @@ where
     /// (session #32) : 19 photos (11 Mo) dans images/, aucune dans la page,
     /// dont « baguette-1.jpg » qui montrait un pot d'ajvar.
     fn unused_photos_gate(&mut self, aids: &mut TurnAids) -> Option<String> {
-        if aids.photos_checked || self.subagent || interrupt_requested() {
+        if aids.photos_checked
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::Photos)
+        {
             return None;
         }
         let cwd = std::env::current_dir().ok()?;
@@ -10046,6 +10061,35 @@ mod tests {
 
     const TWO_PROBLEMS: &str = r#"{"captures":[{"screen":"phone 390x844","problems":["Words that run together: a letter-spacing of -0.02em or tighter on text under 32px eats the space between words (h1.hero-title \"U11 vs FC Voisins\" 14px, letter-spacing -0.28px)","The page is 430px wide on a 390px-wide screen and scrolls sideways (because of decorations drawn past the edge: div.hero-card::before)"]}]}"#;
     const WIDE_ONLY: &str = r#"{"captures":[{"screen":"phone 390x844","problems":["The page is 430px wide on a 390px-wide screen and scrolls sideways (because of decorations drawn past the edge: div.hero-card::before)"]}]}"#;
+
+    #[test]
+    fn the_visual_check_is_an_aid_that_can_be_switched_off() {
+        let _serial = crate::test_serial();
+        // Demandé le 29 octobre 2026 : essayer un modèle sans aucune aide de
+        // Claw ; la vérification visuelle tournait même avec toutes coupées.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        std::env::set_var("CLAW_VISUAL_CHECK", "0");
+        let page = measured_page("coupee");
+        let write = || {
+            tool_step(
+                "write_file",
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                    .to_string(),
+            )
+        };
+        let steps = vec![write(), write(), text_step("Corrigé.")];
+        let ((mut runtime, observed, _), shots) =
+            measured_runtime(steps, vec![Some(MEASURED), Some(MEASURED)]);
+        runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_VISUAL_CHECK");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        assert_eq!(shots.get(), 0);
+        assert!(observed
+            .borrow()
+            .requests
+            .iter()
+            .all(|request| !request.contains("Claw looked at")));
+    }
 
     #[test]
     fn claw_looks_at_the_page_after_each_change_and_says_what_it_broke_or_fixed() {

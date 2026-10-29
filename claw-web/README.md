@@ -191,7 +191,7 @@ Claw (`CLAW_REASONING`).
 
 Autour du modèle, Claw vérifie, guide et recadre son travail : ses « aides au raisonnement »
 (voir `rust/README.md`). Réglages, « Aides de Claw » (ou la pastille « Sans aides » de la saisie)
-les montre toutes, 41 en six familles (vérifier le travail, guider le modèle, le remettre sur les
+les montre toutes, 42 en six familles (vérifier le travail, guider le modèle, le remettre sur les
 rails, protéger les fichiers, contexte et outils, appeler d'autres modèles), chacune avec ce
 qu'elle fait et son interrupteur, « Tout couper » et « Tout rallumer ».
 
@@ -199,7 +199,7 @@ Demandé le 29 octobre 2026 : elles sont **toutes coupées** tant que rien n'est
 chaque modèle seul, puis les rallumer une à une et garder celles qui lui vont. Le choix part avec
 chaque message (une marque invisible) ; le moteur coupe les autres (`CLAW_VERIFY=0`…, pas
 `CLAW_HARNESS=0`, qui couperait aussi les options de la saisie), et chaque réponse dit à son pied
-avec quelles aides elle a été faite (« Sans aides », « 3 aides sur 41 », leurs noms avec le modèle
+avec quelles aides elle a été faite (« Sans aides », « 3 aides sur 42 », leurs noms avec le modèle
 et les requêtes). Toutes allumées, la pastille disparaît et le message part sans marque : ce sont
 celles de Claw. Le mode projet, le mode équipe et Ultracode restent dans le menu ✦ ; la lecture des
 images pour un modèle qui ne les voit pas et le passage à un autre modèle en panne restent actifs.
