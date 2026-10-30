@@ -2126,6 +2126,7 @@ fn click_problems(devtools: &mut DevTools) -> (Vec<String>, Vec<(String, String)
     problems.extend(strings(&result["addGone"]));
     problems.extend(strings(&result["scaled"]));
     problems.extend(strings(&result["keptOpen"]));
+    problems.extend(strings(&result["commaLost"]));
     problems.extend(lost_on_reload(devtools, &result["kept"]));
     (problems, openers, explore)
 }
@@ -4908,6 +4909,42 @@ mod tests {
         ] {
             assert!(broken.contains(expected), "{expected}: {broken}");
         }
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn loose_fields_are_filled_and_an_amount_typed_in_a_number_field_is_found() {
+        // Essai C9 du 30 octobre 2026 : le prénom et son bouton « Ajouter » posés dans une carte,
+        // sans <form> : le parcours disait « Ajouter » mort et n'ajoutait personne ; et « 45,50 »
+        // tapé dans un <input type=number> était refusé, ou lu 4550 au clavier.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-champs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |amount: &str| {
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Voyage</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button, input {{ font: inherit; padding: 10px; }}</style></head><body><h1>Voyage</h1><section><h2>Ajouter un participant</h2><div class=\"ajout\"><label for=\"prenom\">Prénom</label> <input id=\"prenom\"> <button id=\"ajouter\">Ajouter</button></div><ul id=\"gens\"></ul></section><form id=\"depense\"><h2>Nouvelle dépense</h2><label for=\"libelle\">Libellé</label> <input id=\"libelle\"> <label for=\"montant\">Montant</label> <input id=\"montant\" {amount}> <button>Ajouter la dépense</button></form><ul id=\"depenses\"></ul><script>const saved = JSON.parse(localStorage.getItem('voyage') || '{{\"gens\":[],\"depenses\":[]}}'); const show = () => {{ document.getElementById('gens').innerHTML = saved.gens.map((name) => '<li>' + name + '</li>').join(''); document.getElementById('depenses').innerHTML = saved.depenses.map((item) => '<li>' + item + '</li>').join(''); }}; show(); document.getElementById('ajouter').addEventListener('click', () => {{ const field = document.getElementById('prenom'); const name = field.value.trim(); if (!name) return; saved.gens.push(name); localStorage.setItem('voyage', JSON.stringify(saved)); field.value = ''; show(); }}); document.getElementById('depense').addEventListener('submit', (event) => {{ event.preventDefault(); const label = document.getElementById('libelle').value.trim(); const value = Number(document.getElementById('montant').value.replace(',', '.')); if (!label || !(value > 0)) return; saved.depenses.push(label + ' : ' + value.toLocaleString('fr-FR', {{ minimumFractionDigits: 2 }}) + ' €'); localStorage.setItem('voyage', JSON.stringify(saved)); event.target.reset(); show(); }});</script></body></html>"),
+            )
+            .expect("html");
+        };
+        let page = format!("claw-champs-{}/index.html", std::process::id());
+        let capture = || {
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            super::take(&request).expect("capture")["captures"][0]["problems"].to_string()
+        };
+        write("inputmode=\"decimal\"");
+        let sound = capture();
+        write("type=\"number\"");
+        let broken = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        for absent in ["do nothing when clicked", "type=number", "gone after"] {
+            assert!(!sound.contains(absent), "{absent}: {sound}");
+        }
+        assert!(
+            broken.contains("The amount field \\\"Montant\\\" is an <input type=number>"),
+            "{broken}"
+        );
     }
 
     #[test]

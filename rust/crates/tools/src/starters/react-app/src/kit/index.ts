@@ -10,8 +10,8 @@
 // Blocs      Hero (label, amount | value, sub, pills [{ label, value, note }], progress
 //            { value 0..1, label, start, end }), Tiles > Tile (icon, label, value, note),
 //            Card (title, meta, link { label, href | onClick }, level), List > Row (key, icon,
-//            tone "in" | "out" | "accent" | "warn", title, badge, sub, amount | end, endNote,
-//            action { icon, label, onClick }), Badge (tone), Meters > Meter (name, value 0..1,
+//            tone "in" | "out" | "accent" | "warn", title, badge, sub, amount, end (un bouton,
+//            sous le montant), endNote, action { icon, label, onClick }), Badge (tone), Meters > Meter (name, value 0..1,
 //            valueText, note, tone), Empty (icon, text, action), Amount (value : un montant qui
 //            défile quand il change).
 // Données    useEntries (zustand, gardé sur le téléphone : entries, month, add, update,
@@ -22,7 +22,8 @@
 // Fenêtres   EntrySheet (categories [{ name, icon }], kinds, quick), openEntrySheet(entry?),
 //            Sheet, Modal, ConfirmModal (open, onClose, title, text, confirmLabel, onConfirm).
 // Champs     Button (variant "primary" | "danger", small, block, icon), ButtonRow, Segmented,
-//            Chips, TextField, MoneyInput, Switch, Settings > Setting (name, note).
+//            Chips (value ; une liste pour plusieurs choix : pour qui), TextField (type
+//            "number" garde la virgule), MoneyInput, Switch, Settings > Setting (name, note).
 // Graphiques BarChart (labels, series [{ name, tone, values }]), MonthsChart (months) ; recharts
 //            pour le reste.
 // Messages   toast(message, { tone: "error", action: { label, run } }).

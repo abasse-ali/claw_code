@@ -138,7 +138,8 @@ type RowProps = {
   /** Un montant à droite en euros (12.5, pas 1250 centimes), signé (+100,00 €, −8,00 €), vert
    * quand il est positif. */
   amount?: number;
-  /** Ou autre chose à droite, avec une petite note dessous. */
+  /** Autre chose à droite (un badge, un bouton), sous le montant s'il y en a un, avec une petite
+   * note dessous. */
   end?: ReactNode;
   endNote?: ReactNode;
   /** Un bouton au bout de la ligne (modifier, supprimer). */
@@ -164,11 +165,10 @@ export function Row({ icon, tone = "accent", title, badge, sub, amount, end, end
       </span>
       {(amount !== undefined || end !== undefined) && (
         <span className="row__end">
-          {amount !== undefined ? (
-            <span className={`row__amount${amount > 0 ? " row__amount--in" : ""}`}>{signed(amount)}</span>
-          ) : (
-            end
-          )}
+          {/* Le montant et ce qui suit : un bouton « Supprimer » donné avec le montant restait
+              caché, sans un mot (essais C7 et C9 de Claw Web, 30 octobre 2026). */}
+          {amount !== undefined && <span className={`row__amount${amount > 0 ? " row__amount--in" : ""}`}>{signed(amount)}</span>}
+          {end}
           {endNote && <small>{endNote}</small>}
         </span>
       )}

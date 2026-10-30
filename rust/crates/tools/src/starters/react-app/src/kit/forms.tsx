@@ -1,6 +1,6 @@
 // Boutons, choix, champs et réglages.
 
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type JSX, type ReactNode } from "react";
 import { parseAmount } from "./format";
 import { Icon, type LucideIcon } from "./icons";
 
@@ -45,12 +45,28 @@ export function Segmented<T extends string>({ options, value, onChange, label }:
   );
 }
 
-/** Des filtres en pastilles qui défilent (catégories) ; la valeur "" : tout. */
-export function Chips<T extends string>({ options, value, onChange, label }: { options: Option<T>[]; value: T; onChange: (value: T) => void; label: string }) {
+type ChipsProps<T extends string> = { options: Option<T>[]; label: string };
+
+/** Des filtres en pastilles qui défilent (catégories) ; la valeur "" : tout. Avec une liste pour
+ * valeur, plusieurs pastilles se choisissent (pour qui est une dépense) : chacune s'allume ou
+ * s'éteint au toucher. */
+export function Chips<T extends string>(props: ChipsProps<T> & { value: T[]; onChange: (value: T[]) => void }): JSX.Element;
+export function Chips<T extends string>(props: ChipsProps<T> & { value: T; onChange: (value: T) => void }): JSX.Element;
+export function Chips<T extends string>({ options, value, onChange, label }: ChipsProps<T> & { value: T | T[]; onChange: ((value: T[]) => void) | ((value: T) => void) }) {
+  const pick = (choice: T) => {
+    if (Array.isArray(value)) (onChange as (value: T[]) => void)(value.includes(choice) ? value.filter((item) => item !== choice) : [...value, choice]);
+    else (onChange as (value: T) => void)(choice);
+  };
   return (
     <div className="chips" role="group" aria-label={label}>
       {options.map((option) => (
-        <button key={option.value} className="chip" type="button" aria-pressed={option.value === value} onClick={() => onChange(option.value)}>
+        <button
+          key={option.value}
+          className="chip"
+          type="button"
+          aria-pressed={Array.isArray(value) ? value.includes(option.value) : option.value === value}
+          onClick={() => pick(option.value)}
+        >
           {option.label}
         </button>
       ))}
@@ -68,13 +84,17 @@ type TextFieldProps = {
   error?: string;
 };
 
-/** Un champ avec son nom au-dessus, une aide et une erreur dessous. */
+/** Un champ avec son nom au-dessus, une aide et une erreur dessous. `type="number"` : le clavier
+ * des chiffres, et la valeur telle qu'elle est tapée, virgule comprise (« 12,50 » ; parseAmount()
+ * la lit). Un vrai <input type="number"> refuse la virgule, ou la perd au clavier d'un ordinateur
+ * (12,50 devenait 1250 : essai C9 de Claw Web, 30 octobre 2026). */
 export function TextField({ label, value, onChange, type = "text", placeholder, help, error }: TextFieldProps) {
   const id = useId();
+  const number = type === "number";
   return (
     <div className={`field${error ? " is-invalid" : ""}`}>
       <label htmlFor={id}>{label}</label>
-      <input id={id} type={type} value={value} placeholder={placeholder} autoComplete="off" aria-invalid={Boolean(error)} onChange={(event) => onChange(event.target.value)} />
+      <input id={id} type={number ? "text" : type} inputMode={number ? "decimal" : undefined} value={value} placeholder={placeholder} autoComplete="off" aria-invalid={Boolean(error)} onChange={(event) => onChange(event.target.value)} />
       {help && <p className="field__help">{help}</p>}
       {error && <p className="field__error">{error}</p>}
     </div>
