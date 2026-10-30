@@ -161,6 +161,8 @@ export function ProgressRing({ value, label, size = 96, children }: {
   const still = useReducedMotion();
   const progress = useMotionValue(still ? clamped : 0);
   const offset = useTransform(progress, (current) => 100 - current * 100);
+  // À zéro, le bout arrondi du trait laisserait un point.
+  const visible = useTransform(progress, (current) => (current > 0.004 ? 1 : 0));
   useEffect(() => {
     if (still) {
       progress.set(clamped);
@@ -173,7 +175,7 @@ export function ProgressRing({ value, label, size = 96, children }: {
     <span className="progress-ring" style={{ width: size, height: size }} role="img" aria-label={`${label} : ${Math.round(clamped * 100)} %`}>
       <svg viewBox="0 0 36 36" width={size} height={size} aria-hidden="true">
         <circle className="progress-ring__track" cx="18" cy="18" r="15.9155" pathLength={100} />
-        <motion.circle className="progress-ring__value" cx="18" cy="18" r="15.9155" pathLength={100} strokeDasharray="100 100" style={{ strokeDashoffset: offset }} />
+        <motion.circle className="progress-ring__value" cx="18" cy="18" r="15.9155" pathLength={100} strokeDasharray="100 100" style={{ strokeDashoffset: offset, opacity: visible }} />
       </svg>
       <span className="progress-ring__text">{children ?? `${Math.round(clamped * 100)} %`}</span>
     </span>

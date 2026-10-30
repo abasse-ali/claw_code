@@ -44,6 +44,13 @@
 //            Stat (label, value, delta en %, goodWhenUp), DetailList (items [{ label, value }]),
 //            CopyButton (text), ToggleButton (pressed, onChange, icon, label : favori),
 //            LockScreen (check(code), length : autour d'AppShell).
+// Téléphone  SwipeRow (comme Row, + onDelete à gauche, onDone à droite), Checklist (items
+//            [{ id, text, done }], onChange), TagsField (value [textes], suggestions), ColorPicker,
+//            IconPicker (value : un nom de ICONS ; iconByName(nom) le dessine), Timer (minutes,
+//            onDone), Stopwatch, YearHeatmap (values : jours faits ou { jour: nombre }),
+//            DonutChart (data [{ name, value }], center, format), Sparkline (values),
+//            SortableList (items, onReorder, itemKey, itemLabel, render), PhotoField (value :
+//            texte de shrinkPhoto), ShareButton (title, text, url), InstallBanner.
 // Animations Appear (delay, onScroll : en défilant), Stagger (ses enfants l'un après l'autre),
 //            Reveal (open : se déplie), Swap (id, direction ±1 : le mois suivant glisse), Pop et
 //            Shake (trigger : rebond, secousse d'erreur), Pulse (active : halo), SuccessCheck,
@@ -75,6 +82,7 @@ export * from "./format";
 export * from "./forms";
 export * from "./icons";
 export * from "./layout";
+export * from "./more";
 export * from "./motion";
 export * from "./offline";
 export * from "./settings";
