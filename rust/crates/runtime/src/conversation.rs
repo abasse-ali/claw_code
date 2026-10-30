@@ -4269,12 +4269,19 @@ where
             );
             return Some((ConversationMessage::user_text(text), 1));
         }
+        // L'adresse d'un serveur que le modèle a regardée (`url:http://localhost:5173`) : le
+        // serveur arrêté, la vérification revient à la page du projet. Vu le 30 octobre 2026
+        // (essai C10) : le test lisait `http://` au début de `url:http://…`, ne le trouvait
+        // jamais, et dix-sept minutes de modifications sont passées sans vérification.
         if self
             .page_target
             .as_deref()
-            .is_some_and(|page| page.starts_with("http://") || page.starts_with("https://"))
+            .is_some_and(|page| page.starts_with("url:"))
         {
             self.page_target = None;
+            self.api_client.notify(
+                "Claw vérifie la page après la modification : son serveur ne répond plus, la vérification revient à la page du projet",
+            );
             return None;
         }
         aids.blind_measures = harness::MAX_VISUAL_CHECKS;
@@ -10347,6 +10354,42 @@ mod tests {
             "{:?}",
             observed.notices
         );
+        assert!(!observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("plus de vérification")));
+    }
+
+    #[test]
+    fn a_stopped_server_sends_the_checks_back_to_the_project_page() {
+        let _serial = crate::test_serial();
+        // Essai C10 du 30 octobre 2026 : le modèle regarde son serveur de développement, puis
+        // l'arrête ; la vérification suivante échouait sur cette adresse, et plus aucune n'avait
+        // lieu pendant dix-sept minutes de modifications.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("serveur");
+        let write = || {
+            tool_step(
+                "write_file",
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                    .to_string(),
+            )
+        };
+        const STOPPED: &str = "ERR:http://localhost:5173 could not be opened (net::ERR_CONNECTION_REFUSED): is the server running and the address right?";
+        let steps = vec![write(), write(), text_step("Corrigé.")];
+        let ((mut runtime, observed, _), shots) =
+            measured_runtime(steps, vec![Some(STOPPED), Some(MEASURED)]);
+        runtime.page_target = Some("url:http://localhost:5173".to_string());
+        runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        // Deux vérifications : l'adresse arrêtée, puis la page du projet.
+        assert_eq!(shots.get(), 2, "{:?}", observed.notices);
+        assert_eq!(runtime.page_target, None);
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("son serveur ne répond plus")));
         assert!(!observed
             .notices
             .iter()
