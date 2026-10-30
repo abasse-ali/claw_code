@@ -9628,7 +9628,10 @@ impl DefaultRuntimeClient {
         system: &str,
         prompt: &str,
     ) -> Option<runtime::Consultation> {
-        let own = self.chain.primary().to_string();
+        // Les modèles de la session dans l'ordre où la chaîne les essaie : celui qui répond
+        // d'abord. Vu le 30 octobre 2026 (essai C4) : le modèle principal en panne (503), la
+        // session passée à son remplaçant, et la relecture demandée au seul principal échouait.
+        let own = self.chain.attempt_order();
         if own.is_empty() {
             return None;
         }
@@ -9641,7 +9644,7 @@ impl DefaultRuntimeClient {
         }
         // La relecture clôt le tour : elle a le temps et la place de finir.
         match tools::advisors::ask_within(
-            std::slice::from_ref(&own),
+            &own,
             system,
             prompt,
             tools::advisors::REVIEW_MAX_TOKENS,
