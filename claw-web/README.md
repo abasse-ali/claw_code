@@ -441,6 +441,8 @@ Une appli perso (budget, suivi, habitudes, collection) se construit en **React**
 d'un projet prêt, avec ses bibliothèques déjà installées (React, TypeScript, Vite, Tailwind
 CSS, Framer Motion, des icônes, des graphiques, des menus et des curseurs accessibles), et
 compose les écrans avec les composants de son kit d'appli au lieu de tout écrire à la main.
+Chaque écran peut vivre dans son propre composant, avec son bouton + à lui (ouvrir la fenêtre
+d'ajout de cet écran) : les onglets les suivent de la même façon.
 Le journal le dit en une ligne : « Prépare le projet · appli React ». Avant de regarder l'appli,
 Claw la construit dans le dossier `docs/`, celui que « Mettre en ligne » publie. Pour une page
 sans React, demandez-la « en HTML simple ». Claw sait aussi poser un serveur Node (Express,
