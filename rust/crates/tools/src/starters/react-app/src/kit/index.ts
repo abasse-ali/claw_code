@@ -31,6 +31,12 @@
 // Suivis     WeekChecks (done [jours], onToggle(jour), label : les 7 derniers jours à cocher),
 //            currentStreak(done) (jusqu'à hier tant qu'aujourd'hui n'est pas coché),
 //            bestStreak(done), successRate(done) → 43.
+// Widgets   Tabs (tabs [{ id, label, content }] : dans un écran), Accordion (items), Combobox
+//            (label, value, options : on cherche en tapant), Menu (label, items [{ label, icon,
+//            onSelect, danger }] : le « ⋯ »), Hint (text : infobulle), DataTable (columns, rows,
+//            rowKey : triable, paginé), Skeleton, Spinner, Steps (steps, current), QuantityInput,
+//            Rating, Slider, CodeInput (code reçu par SMS), FileDrop (onFiles), MonthCalendar
+//            (value, onChange, marked : jours marqués).
 // Graphiques BarChart (labels, series [{ name, tone, values }]), MonthsChart (months) ; recharts
 //            pour le reste.
 // Messages   toast(message, { tone: "error", action: { label, run } }).
@@ -62,3 +68,4 @@ export * from "./sheet";
 export * from "./store";
 export * from "./toast";
 export * from "./tracker";
+export * from "./widgets";
