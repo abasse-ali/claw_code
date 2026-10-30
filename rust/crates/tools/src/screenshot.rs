@@ -2123,6 +2123,7 @@ fn click_problems(devtools: &mut DevTools) -> (Vec<String>, Vec<(String, String)
         ));
     }
     problems.extend(strings(&result["underBar"]));
+    problems.extend(strings(&result["addGone"]));
     problems.extend(lost_on_reload(devtools, &result["kept"]));
     (problems, openers, explore)
 }
@@ -2286,16 +2287,28 @@ fn lost_on_reload(devtools: &mut DevTools, kept: &Value) -> Vec<String> {
         .iter()
         .find_map(|item| item["hash"].as_str().filter(|hash| hash.len() > 1))
         .unwrap_or("");
+    // Le texte de chaque écran de l'appli (ses onglets, et l'écran de chaque ajout) : une entrée
+    // se relit là où elle est rangée, pas seulement sur l'écran du formulaire.
+    let hashes: Vec<&str> = kept
+        .iter()
+        .filter_map(|item| item["hash"].as_str().filter(|hash| hash.len() > 1))
+        .collect();
     let text = if reloaded {
         let _ = devtools.pump(Duration::from_millis(800));
-        if !hash.is_empty() {
-            let _ = devtools.evaluate(&format!(
-                "(async () => {{ if (location.hash !== {0}) {{ location.hash = {0}; await new Promise((done) => setTimeout(done, 400)); }} return true; }})()",
-                json!(hash)
-            ));
-        }
         devtools.evaluate(&format!(
-            "({{ text: document.body ? document.body.innerText : '', snapshot: {SNAPSHOT_SCRIPT} }})"
+            "(async () => {{
+  const pause = () => new Promise((done) => setTimeout(done, 400));
+  const texts = [document.body ? document.body.innerText : ''];
+  const tabs = [...document.querySelectorAll('nav a[href^=\"#\"], [role=tablist] a[href^=\"#\"], .tabbar a[href^=\"#\"]')].map((link) => link.getAttribute('href'));
+  for (const hash of [...new Set([...{hashes}, ...tabs])].filter((hash) => hash && hash.length > 1).slice(0, 8)) {{
+    if (location.hash !== hash) {{ location.hash = hash; await pause(); }}
+    texts.push(document.body ? document.body.innerText : '');
+  }}
+  if ({first} && location.hash !== {first}) {{ location.hash = {first}; await pause(); }}
+  return {{ text: texts.join('\\n'), snapshot: {SNAPSHOT_SCRIPT} }};
+}})()",
+            hashes = json!(hashes),
+            first = json!(hash),
         ))
     } else {
         Err(String::new())
@@ -2315,6 +2328,17 @@ fn lost_on_reload(devtools: &mut DevTools, kept: &Value) -> Vec<String> {
         .filter_map(|item| {
             let marker = item["marker"].as_str()?;
             let form = item["form"].as_str().unwrap_or("a form");
+            // Envoyé et accepté, mais visible sur aucun écran : après le rechargement, l'entrée
+            // se voit (l'écran ne se met pas à jour) ou non (elle est perdue). Vu le 30 octobre
+            // 2026 (essai C7) : participants et dépenses gardés, visibles après un rechargement
+            // seulement.
+            if item["missing"].as_bool() == Some(true) {
+                return Some(if text.contains(marker) {
+                    format!("{form} was sent and accepted (its window closed or its field emptied), but \"{marker}\" showed on no screen of the app until the page was reloaded: the screen does not update when an entry is added. What shows the list reads a copy taken before the entry was added (a useMemo or a variable the add does not change): read the list from where it is kept at each render, so the new entry shows at once")
+                } else {
+                    format!("{form} was sent and accepted (its window closed or its field emptied), but \"{marker}\" shows on no screen of the app, not even after a reload: the entry is lost or never listed. Keep it and show it in its list, right after sending")
+                });
+            }
             if item["shown"].as_bool().unwrap_or(true) {
                 (!text.contains(marker)).then(|| {
                     format!("{form} adds \"{marker}\" to the page, but it is gone after a reload: {advice}")
@@ -4784,6 +4808,56 @@ mod tests {
         assert!(
             !all.contains("A <dialog> keeps the browser's max-width"),
             "{all}"
+        );
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn entries_sent_from_a_window_without_a_form_are_followed_until_they_show() {
+        // Essai C7 du 30 octobre 2026 : « Nouveau voyage » (des champs et un bouton « Créer »,
+        // sans <form>) jamais rempli ; les participants gardés mais visibles après un
+        // rechargement seulement ; « Ajouter une dépense » dans la liste vide seulement.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-carnet-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |shown: &str, opener: &str| {
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Carnet</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button, input {{ font: inherit; padding: 10px; }} dialog {{ max-width: calc(100vw - 32px); }}</style></head><body><h1>Carnet</h1>{opener}<ul id=\"notes\"></ul><dialog id=\"fenetre\"><h2>Nouvelle note</h2><label for=\"titre\">Titre</label> <input id=\"titre\"> <button id=\"creer\">Créer</button> <button id=\"fermer\">Fermer</button></dialog><script>const notes = JSON.parse(localStorage.getItem('notes') || '[]'); const list = document.getElementById('notes'); const draw = () => {{ list.replaceChildren(...notes.map((note) => {{ const item = document.createElement('li'); item.textContent = note; return item; }})); const empty = document.getElementById('vide'); if (empty) empty.hidden = notes.length > 0; }}; draw(); const box = document.getElementById('fenetre'); document.querySelectorAll('[data-ouvre]').forEach((button) => button.addEventListener('click', () => box.showModal())); document.getElementById('fermer').addEventListener('click', () => box.close()); document.getElementById('creer').addEventListener('click', () => {{ const field = document.getElementById('titre'); if (!field.value.trim()) return; notes.push(field.value.trim()); localStorage.setItem('notes', JSON.stringify(notes)); field.value = ''; box.close(); {shown} }});</script></body></html>"),
+            )
+            .expect("html");
+        };
+        let page = format!("claw-carnet-{}/index.html", std::process::id());
+        let capture = || {
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            request.windows = Some(true);
+            super::take(&request).expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let header = "<button data-ouvre>Nouvelle note</button>";
+        let empty = "<p id=\"vide\">Aucune note. <button data-ouvre>Ajouter une note</button></p>";
+        write("draw();", header);
+        let sound = capture();
+        write("", header);
+        let stale = capture();
+        write("draw();", empty);
+        let single = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        for absent in [
+            "until the page was reloaded",
+            "shows on no screen",
+            "nothing on the screen adds another",
+        ] {
+            assert!(!sound.contains(absent), "{absent}: {sound}");
+        }
+        assert!(
+            stale.contains("the window \\\"Nouvelle note\\\" was sent and accepted")
+                && stale.contains("showed on no screen of the app until the page was reloaded"),
+            "{stale}"
+        );
+        assert!(
+            single.contains("After a first entry is added with button \\\"Ajouter une note\\\", nothing on the screen adds another"),
+            "{single}"
         );
     }
 
