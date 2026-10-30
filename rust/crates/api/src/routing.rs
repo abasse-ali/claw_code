@@ -464,7 +464,8 @@ impl ModelChain {
 
     /// Ordre d'essai : les modèles disponibles d'abord, puis ceux mis de côté
     /// (mieux vaut réessayer que d'échouer sans rien tenter).
-    fn attempt_order(&self) -> Vec<String> {
+    #[must_use]
+    pub fn attempt_order(&self) -> Vec<String> {
         let (available, cooling): (Vec<_>, Vec<_>) = self
             .models
             .iter()
