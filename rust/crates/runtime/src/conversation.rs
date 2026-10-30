@@ -5203,6 +5203,33 @@ where
             ));
         }
         prompt.push_str(&crate::code_checks::unwired_handlers_note(&unwired));
+        // Des centimes donnés au kit, qui montre des euros : tous les montants cent fois trop
+        // grands (essais C2, C6 et C8, 29 et 30 octobre 2026).
+        let cents: Vec<(String, Vec<String>)> = aids
+            .originals
+            .keys()
+            .filter(|path| {
+                let lower = path.to_lowercase();
+                [".jsx", ".tsx", ".js", ".ts"]
+                    .iter()
+                    .any(|extension| lower.ends_with(extension))
+                    && !lower.contains(".test.")
+                    && !lower.contains(".spec.")
+                    && !lower.contains("/kit/")
+            })
+            .filter_map(|path| {
+                let text = std::fs::read_to_string(path).ok()?;
+                let found = crate::code_checks::cents_shown_as_euros(&text);
+                (!found.is_empty()).then(|| (harness::shown_path(path), found))
+            })
+            .collect();
+        if !cents.is_empty() {
+            self.api_client.notify(&format!(
+                "Montants en centimes donnés au kit, qui montre des euros : {}, signalés au modèle",
+                cents.iter().map(|(_, found)| found.len()).sum::<usize>()
+            ));
+        }
+        prompt.push_str(&crate::code_checks::cents_shown_as_euros_note(&cents));
         if let Some(reference) = Self::project_reference(aids) {
             prompt.push_str("\n\n");
             prompt.push_str(&reference);
