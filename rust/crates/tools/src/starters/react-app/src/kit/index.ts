@@ -37,6 +37,13 @@
 //            rowKey : triable, paginé), Skeleton, Spinner, Steps (steps, current), QuantityInput,
 //            Rating, Slider, CodeInput (code reçu par SMS), FileDrop (onFiles), MonthCalendar
 //            (value, onChange, marked : jours marqués).
+// Encore     TextArea (max : caractères restants), PasswordField (strength : solidité),
+//            Alert (tone "info" | "success" | "warn" | "error", title, action, onClose), Chat
+//            (messages [{ id, mine, name, text, time }], onSend), Timeline (items [{ id, title,
+//            time, text, icon, tone, done }]), Carousel (items, label), Countdown (to, label),
+//            Stat (label, value, delta en %, goodWhenUp), DetailList (items [{ label, value }]),
+//            CopyButton (text), ToggleButton (pressed, onChange, icon, label : favori),
+//            LockScreen (check(code), length : autour d'AppShell).
 // Animations Appear (delay, onScroll : en défilant), Stagger (ses enfants l'un après l'autre),
 //            Reveal (open : se déplie), Swap (id, direction ±1 : le mois suivant glisse), Pop et
 //            Shake (trigger : rebond, secousse d'erreur), Pulse (active : halo), SuccessCheck,
@@ -63,6 +70,7 @@ export * from "./blocks";
 export * from "./chart";
 export * from "./csv";
 export * from "./entries";
+export * from "./extras";
 export * from "./format";
 export * from "./forms";
 export * from "./icons";
