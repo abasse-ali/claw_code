@@ -445,6 +445,11 @@ struct TurnAids {
     /// Défauts relevés par la vérification précédente : la suivante dit ce
     /// que la modification a cassé ou réparé.
     last_checked: Option<Vec<String>>,
+    /// Erreur de construction déjà transmise par la vérification : la même
+    /// n'est pas redite à chaque modification.
+    build_error: Option<String>,
+    /// Erreur de la dernière capture faite par Claw, pour la vérification.
+    check_error: Option<String>,
     /// Une réponse « vérifié » sans regard sur la page a déjà été renvoyée.
     claim_checked: bool,
     /// Recherches dans les styles à la suite, sans modification ni capture.
@@ -2142,9 +2147,13 @@ where
             // sans aucun contrôle.
             // Sans page à capturer (un module `TypeScript`, un script), rien
             // n'est annoncé : vu dans un essai réel, l'annonce revenait à
-            // chaque modification d'un `.ts`, sans aucune revue.
+            // chaque modification d'un `.ts`, sans aucune revue. Revue coupée
+            // (aide « Revue visuelle ») : rien non plus, la revue ne viendrait
+            // jamais ; vu le 30 octobre 2026 (essai C6), l'annonce redite à
+            // chacune des quarante dernières requêtes.
             if !wrapping_up
                 && limit > 0
+                && harness::enabled(Aid::DesignReview)
                 && aids.interface_dirty
                 && aids.interface_rounds == 0
                 && iterations >= crate::web_design::early_review_at(limit)
@@ -4045,6 +4054,7 @@ where
         let images = std::mem::take(&mut self.tool_images);
         let (output, is_error) = tool_result_parts(&message)?;
         if is_error {
+            aids.check_error = Some(output.to_string());
             return None;
         }
         aids.blind_edits = 0;
@@ -4108,8 +4118,14 @@ where
             return None;
         }
         let Some((target, audit, images)) = self.render_page(aids, prompter, true) else {
-            // La page ne s'ouvre pas en fichier (une appli qui veut son
+            // La capture a échoué : même suite qu'en arrière-plan. Sans erreur
+            // (page qui ne s'ouvre pas en fichier, une appli qui veut son
             // serveur) : pas d'autre essai pendant ce tour.
+            if let Some(error) = aids.check_error.take() {
+                return self
+                    .check_failed(aids, &target, &error)
+                    .map(|(message, _)| message);
+            }
             aids.blind_measures = harness::MAX_VISUAL_CHECKS;
             return None;
         };
@@ -4194,18 +4210,24 @@ where
 
     /// La vérification lancée en arrière-plan, attendue (le plus souvent déjà
     /// finie : elle a tourné pendant la requête du modèle) : son message et le
-    /// nombre de défauts nouveaux. Une page qui ne s'ouvre pas arrête les
-    /// vérifications du tour, comme avant.
+    /// nombre de défauts nouveaux. Une appli qui ne se construit pas : son
+    /// erreur va au modèle, et la vérification reprend après sa prochaine
+    /// modification. L'adresse d'un serveur que le modèle a lancé puis arrêté :
+    /// la vérification revient à la page du projet. Une page qui ne s'ouvre
+    /// pas du tout arrête les vérifications du tour, et l'utilisateur le voit.
+    /// Vu le 30 octobre 2026 (essai C6) : trois vérifications au début, puis
+    /// cinquante minutes sans aucune, sans un mot, pendant que l'appli changeait.
     fn finish_visual_check(&mut self, aids: &mut TurnAids) -> Option<(ConversationMessage, usize)> {
         let pending = aids.pending_check.take()?;
         let (result, images) = pending
             .handle
             .join()
             .unwrap_or_else(|_| (Err("la vérification s'est arrêtée".to_string()), Vec::new()));
-        let Ok(output) = result else {
-            aids.blind_measures = harness::MAX_VISUAL_CHECKS;
-            return None;
+        let output = match result {
+            Ok(output) => output,
+            Err(error) => return self.check_failed(aids, &pending.target, &error),
         };
+        aids.build_error = None;
         let audit = crate::web_design::read_audit(&output);
         aids.last_checked = Some(
             audit
@@ -4222,6 +4244,51 @@ where
             &audit,
             images,
         ))
+    }
+
+    /// Une vérification de la page qui n'a pas abouti (voir
+    /// `finish_visual_check`) : l'erreur de construction pour le modèle, une
+    /// fois ; ou rien, et la suivante essaie la page du projet ; ou la fin des
+    /// vérifications du tour, dite à l'utilisateur.
+    fn check_failed(
+        &mut self,
+        aids: &mut TurnAids,
+        target: &str,
+        error: &str,
+    ) -> Option<(ConversationMessage, usize)> {
+        if error.contains("did not build") {
+            if aids.build_error.as_deref() == Some(error) {
+                return None;
+            }
+            aids.build_error = Some(error.to_string());
+            self.api_client.notify(
+                "Claw vérifie la page après la modification : l'appli ne se construit pas, l'erreur est transmise à l'agent",
+            );
+            let text = format!(
+                "[Claw] {target} was checked after your change: {error}\nClaw checks the page again after your next change."
+            );
+            return Some((ConversationMessage::user_text(text), 1));
+        }
+        if self
+            .page_target
+            .as_deref()
+            .is_some_and(|page| page.starts_with("http://") || page.starts_with("https://"))
+        {
+            self.page_target = None;
+            return None;
+        }
+        aids.blind_measures = harness::MAX_VISUAL_CHECKS;
+        let reason: String = error
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(160)
+            .collect();
+        self.api_client.notify(&format!(
+            "Claw ne peut pas ouvrir la page pour la vérifier ({reason}) : plus de vérification après chaque modification dans ce tour"
+        ));
+        None
     }
 
     /// La première version complète d'une page créée dans ce tour (tous ses
@@ -10023,6 +10090,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn no_visual_review_is_announced_when_the_review_is_switched_off() {
+        let _serial = crate::test_serial();
+        // Essai C6 du 30 octobre 2026 : aide « Revue visuelle » coupée,
+        // l'annonce « revue maintenant » redite à chacune des quarante
+        // dernières requêtes, sans aucune revue.
+        std::env::set_var("CLAW_DESIGN_REVIEW", "0");
+        let page = measured_page("revue-coupee");
+        let mut steps: Vec<Vec<AssistantEvent>> = (0..14)
+            .map(|_| {
+                tool_step(
+                    "write_file",
+                    &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                        .to_string(),
+                )
+            })
+            .collect();
+        steps.push(text_step("Page écrite."));
+        let ((runtime, observed, _), _) = measured_runtime(steps, vec![Some(MEASURED)]);
+        let mut runtime = runtime.with_turn_request_limit(20);
+        runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW");
+        let observed = observed.borrow();
+        assert!(
+            !observed
+                .notices
+                .iter()
+                .any(|notice| notice.contains("sans revue visuelle")),
+            "{:?}",
+            observed.notices
+        );
+    }
+
     /// Un runtime d'essai dont l'outil `Screenshot` rend les mesures données,
     /// et une page `index.html` réelle dans un dossier temporaire.
     fn measured_page(tag: &str) -> std::path::PathBuf {
@@ -10034,7 +10134,8 @@ mod tests {
     }
 
     /// `measured` : ce que rend chaque appel de `Screenshot`, dans l'ordre
-    /// (`None` : une erreur) ; le dernier se répète.
+    /// (`None` : une erreur ; `ERR:` devant un texte : cette erreur) ; le
+    /// dernier se répète.
     fn measured_runtime(
         steps: Vec<Vec<AssistantEvent>>,
         measured: Vec<Option<&'static str>>,
@@ -10054,9 +10155,13 @@ mod tests {
             .register("Screenshot", move |_| {
                 let index = (counted.get() as usize).min(measured.len() - 1);
                 counted.set(counted.get() + 1);
-                measured[index]
-                    .map(ToString::to_string)
-                    .ok_or_else(|| super::ToolError::new("la page ne s'ouvre pas"))
+                match measured[index] {
+                    Some(text) if text.starts_with("ERR:") => {
+                        Err(super::ToolError::new(&text["ERR:".len()..]))
+                    }
+                    Some(text) => Ok(text.to_string()),
+                    None => Err(super::ToolError::new("la page ne s'ouvre pas")),
+                }
             });
         let runtime = ConversationRuntime::new(
             Session::new(),
@@ -10168,6 +10273,57 @@ mod tests {
         assert!(!third.contains("Broken by your last change"), "{third}");
         assert!(observed.notices.iter().any(|notice| notice
             .contains("Claw vérifie la page après la modification : 1 défaut(s) nouveau(x)")));
+    }
+
+    #[test]
+    fn an_app_that_does_not_build_is_said_once_and_the_checks_go_on() {
+        let _serial = crate::test_serial();
+        // Essai C6 du 30 octobre 2026 : trois vérifications au début, puis
+        // cinquante minutes sans aucune et sans un mot, l'appli changeant encore.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("construction");
+        let write = || {
+            tool_step(
+                "write_file",
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                    .to_string(),
+            )
+        };
+        const BROKEN: &str = "ERR:the app did not build (npm run build in .), so it cannot be shown. Fix this error, then look again:\nsrc/App.tsx: \"Badge\" is not exported by \"src/kit/index.ts\"";
+        let steps = vec![write(), write(), write(), text_step("Corrigé.")];
+        let ((mut runtime, observed, _), shots) =
+            measured_runtime(steps, vec![Some(BROKEN), Some(BROKEN), Some(MEASURED)]);
+        runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        // La vérification continue après l'erreur : trois captures, la dernière lue.
+        assert_eq!(shots.get(), 3);
+        let told = |index: usize| {
+            observed.requests[index]
+                .matches("is not exported by")
+                .count()
+        };
+        assert_eq!((told(1), told(2)), (1, 1), "{:?}", observed.requests);
+        assert!(observed.requests[1].contains("Claw checks the page again after your next change"));
+        assert!(
+            observed.requests[3].contains("Claw looked at"),
+            "{}",
+            observed.requests[3]
+        );
+        assert_eq!(
+            observed
+                .notices
+                .iter()
+                .filter(|notice| notice.contains("l'appli ne se construit pas"))
+                .count(),
+            1,
+            "{:?}",
+            observed.notices
+        );
+        assert!(!observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("plus de vérification")));
     }
 
     #[test]
