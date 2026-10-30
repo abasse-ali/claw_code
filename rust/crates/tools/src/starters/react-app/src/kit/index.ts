@@ -37,6 +37,11 @@
 //            rowKey : triable, paginé), Skeleton, Spinner, Steps (steps, current), QuantityInput,
 //            Rating, Slider, CodeInput (code reçu par SMS), FileDrop (onFiles), MonthCalendar
 //            (value, onChange, marked : jours marqués).
+// Animations Appear (delay, onScroll : en défilant), Stagger (ses enfants l'un après l'autre),
+//            Reveal (open : se déplie), Swap (id, direction ±1 : le mois suivant glisse), Pop et
+//            Shake (trigger : rebond, secousse d'erreur), Pulse (active : halo), SuccessCheck,
+//            ProgressRing (value 0..1, label), celebrate(big) (confettis). Toutes se calment
+//            quand le téléphone demande moins de mouvement.
 // Graphiques BarChart (labels, series [{ name, tone, values }]), MonthsChart (months) ; recharts
 //            pour le reste.
 // Messages   toast(message, { tone: "error", action: { label, run } }).
@@ -62,6 +67,7 @@ export * from "./format";
 export * from "./forms";
 export * from "./icons";
 export * from "./layout";
+export * from "./motion";
 export * from "./offline";
 export * from "./settings";
 export * from "./sheet";

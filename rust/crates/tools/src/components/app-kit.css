@@ -555,3 +555,15 @@ body:has(dialog[open]) { overflow: hidden; }
 .calendar__day[aria-pressed="true"] { background: var(--accent); color: var(--paper); }
 .calendar__day.is-marked::after { content: ""; position: absolute; bottom: 5px; left: 50%; width: 5px; height: 5px; margin-left: -2.5px; border-radius: 50%; background: var(--accent); }
 .calendar__day[aria-pressed="true"].is-marked::after { background: var(--paper); }
+
+/* Animations (motion.tsx) */
+.pulse { position: relative; display: inline-flex; border-radius: 999px; }
+.pulse.is-active::after { content: ""; position: absolute; inset: -4px; border-radius: inherit; border: 2px solid var(--accent); opacity: 0; animation: kit-halo 1.8s ease-out infinite; pointer-events: none; }
+@keyframes kit-halo { 0% { opacity: 0.7; transform: scale(0.92); } 100% { opacity: 0; transform: scale(1.25); } }
+.success-check { display: block; margin: 0 auto; stroke: var(--accent); }
+.progress-ring { position: relative; display: inline-grid; flex: none; place-items: center; }
+.progress-ring svg { position: absolute; inset: 0; transform: rotate(-90deg); }
+.progress-ring circle { fill: none; stroke-width: 3.2; }
+.progress-ring__track { stroke: var(--surface-2); }
+.progress-ring__value { stroke: var(--accent); stroke-linecap: round; }
+.progress-ring__text { position: relative; font-weight: 750; font-variant-numeric: tabular-nums; text-align: center; line-height: 1.1; }
