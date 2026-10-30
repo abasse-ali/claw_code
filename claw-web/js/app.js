@@ -11,6 +11,7 @@ import { highlightLines, languageOf } from "./highlight.js";
 import { accountStatus, allFreeModels, freeModels, resetTime } from "./openrouter.js";
 import { emptyState, extras } from "./tools.js";
 import { AID_GROUPS, AID_KEYS } from "./aides.js";
+import { currentSubscription, disableNotifications, enableNotifications, pushSupport, testNotification } from "./notifications.js";
 import {
   LOCK_AFTER_MS, MIN_CODE, SECRET_FIELDS, codeFromFace, createFaceKey, createVault, disableFace, enableFace,
   faceAvailable, faceEnabled, openVault, removeVault, seal, vault, waitLeft,
@@ -72,6 +73,7 @@ const ICON = {
   bug: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="6.5" width="8" height="13" rx="4"/><path d="M12 11v8.5M8 13H4.5M19.5 13H16M9.5 6.5 7.5 4.5M14.5 6.5l2-2M8.3 17.5 5 19.5M15.7 17.5l3.3 2"/></svg>',
   calendar: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5.5" width="16" height="14.5" rx="2.5"/><path d="M4 10h16M8.5 3.5v4M15.5 3.5v4"/></svg>',
   // Icons: Lucide, ISC license (lightbulb, square-slash).
+  bell: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15L6 16Z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg>',
   lifebuoy: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.5"/><path d="M6 6l3.5 3.5M14.5 14.5L18 18M18 6l-3.5 3.5M9.5 14.5L6 18"/></svg>',
   bulb: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6M10 22h4"/></svg>',
   slash: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 15l6-6"/></svg>',
@@ -4486,6 +4488,54 @@ async function showChanges(number) {
 
 // --- Réglages --------------------------------------------------------------------------------
 
+/** Le groupe Notifications des réglages : état de cet appareil, et ses trois boutons. */
+function wirePush() {
+  const group = $("#view .push-group");
+  if (!group) return;
+  const engine = state.settings.engine;
+  const sub = group.querySelector(".row .row-sub");
+  const pill = group.querySelector(".pill");
+  const button = (action) => group.querySelector(`[data-action="${action}"]`);
+  const show = async () => {
+    const support = pushSupport();
+    const subscription = await currentSubscription().catch(() => null);
+    // Un abonnement n'existe qu'avec la permission donnée.
+    const on = Boolean(subscription);
+    sub.textContent = support === "home-screen" ? "Ouvrez Claw Web depuis l'écran d'accueil pour les activer"
+      : support !== "ok" ? "Ce navigateur ne reçoit pas de notifications"
+        : on ? "Question, travail fini ou arrêt d'une session"
+          : window.Notification?.permission === "denied" ? "Refusées : autorisez-les dans les réglages du téléphone" : "Coupées";
+    pill.hidden = !on;
+    pill.className = "pill ok";
+    pill.textContent = "Actives";
+    button("push-on").hidden = on || support !== "ok";
+    button("push-test").hidden = !on;
+    button("push-off").hidden = !on;
+  };
+  const act = (action, run) => button(action).addEventListener("click", async (event) => {
+    const target = event.currentTarget;
+    target.disabled = true;
+    try {
+      await run();
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      target.disabled = false;
+      await show();
+    }
+  });
+  act("push-on", async () => {
+    const count = await enableNotifications(state.github, engine, sealedBox);
+    toast(`Notifications activées${count > 1 ? ` (${count} appareils abonnés)` : ""}`);
+  });
+  act("push-test", testNotification);
+  act("push-off", async () => {
+    await disableNotifications(state.github, engine);
+    toast("Notifications coupées sur cet appareil");
+  });
+  show();
+}
+
 /** Étiquette des sessions et secrets du moteur (chiffrés ici pour sa clé publique) ; rend les
  * noms des secrets posés. */
 async function configureEngine(openrouterKey, shareToken, providerKeys = {}) {
@@ -4685,6 +4735,7 @@ function showSettings(first = false, justConnected = false) {
   const perms = [
     ["Toujours", ["Actions", "Contents", "Issues", "Pull requests", "Secrets"]],
     ["Serveur gratuit et robot", ["Administration", "Variables"]],
+    ["Notifications", ["Variables"]],
     ["Créer des dépôts", ["All repositories", "Administration"]],
     ["Mettre un site en ligne", ["Pages"]],
   ];
@@ -4779,6 +4830,17 @@ function showSettings(first = false, justConnected = false) {
       <h2 class="group-title">Claw</h2>
       <div class="group">
         <a class="row link-row" href="#/reglages/aides"><span class="row-icon">${ICON.lifebuoy}</span>${text("Aides de Claw", aidsSummary())}${ICON.chevron}</a>
+      </div>
+
+      <h2 class="group-title">Notifications</h2>
+      <div class="group push-group">
+        <div class="row"><span class="row-icon">${ICON.bell}</span>${text("Sur cet appareil", "Vérification…")}<span class="pill" hidden></span></div>
+        <button type="button" class="row" data-action="push-on" hidden><span class="row-icon">${ICON.bell}</span>${text("Activer les notifications", "Quand Claw a une question, quand il a fini, ou s'il s'arrête")}</button>
+        <button type="button" class="row" data-action="push-test" hidden><span class="row-icon">${ICON.bell}</span>${text("Montrer une notification d'essai", "")}</button>
+        <button type="button" class="row" data-action="push-off" hidden><span class="row-icon">${ICON.bell}</span>${text("Couper les notifications ici", "Les autres appareils abonnés les gardent")}</button>
+      </div>
+      <div class="group-foot">
+        <p>Même l'appli fermée. Sur iPhone : ajoutez d'abord Claw Web à l'écran d'accueil (Partager, « Sur l'écran d'accueil ») et ouvrez-le depuis son icône.</p>
       </div>
 
       <h2 class="group-title">Sessions</h2>
@@ -4955,6 +5017,7 @@ function showSettings(first = false, justConnected = false) {
       }
     });
     $("#view").querySelector('[data-action="cloud-runner"]')?.addEventListener("click", openCloudRunner);
+    wirePush();
     for (const radio of $("#view").querySelectorAll('input[name="runner"]')) {
       radio.addEventListener("change", async () => {
         if (radio.value) state.settings.runner = radio.value;
@@ -5601,6 +5664,10 @@ async function boot() {
   });
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("sw.js").catch(() => {});
+    // Une notification touchée alors que l'appli était ouverte : sa session s'affiche ici.
+    navigator.serviceWorker.addEventListener("message", (event) => {
+      if (event.data && event.data.open) location.hash = new URL(event.data.open).hash || "#/";
+    });
   }
   // Verrou : sans le code, aucune clé ; un jeton encore en clair (avant le verrou) le fait poser.
   // Sans verrou ni jeton (appareil neuf, autre navigateur) : la connexion d'abord, aucune page

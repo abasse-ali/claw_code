@@ -402,6 +402,22 @@ Il prend une minute d'Actions par heure au plus ; aucune sur « Ma machine » (v
 `CLAW_RUNNER` = `claw-pc`). Les routines et les suivis sont rangés sur `claw-web-fichiers`,
 dans `routines/`.
 
+## Notifications
+
+Réglages, Notifications, « Activer les notifications » : chaque appareil abonné est prévenu quand
+Claw lui pose une question, quand il a fini un passage, ou s'il s'est arrêté (pas pour un passage
+que vous avez annulé), même l'appli fermée. Toucher la notification ouvre la session. Sur iPhone,
+ajoutez d'abord Claw Web à l'écran d'accueil (Partager, « Sur l'écran d'accueil ») et ouvrez-le
+depuis son icône : Safari n'envoie de notifications qu'aux applis installées.
+
+Ce sont des notifications Web Push : la première activation crée la paire de clés VAPID du
+moteur ; la clé privée part chiffrée dans le secret `CLAW_PUSH_VAPID_PRIVATE` du dépôt des
+sessions (elle ne reste pas sur l'appareil), la clé publique et les appareils abonnés vont dans
+ses variables `CLAW_PUSH_VAPID_PUBLIC` et `CLAW_PUSH_SUBSCRIPTIONS` (le jeton a besoin de
+l'autorisation Variables). À la fin d'un passage, le moteur (`.github/claw-web/push.py`) chiffre
+la notification pour chaque appareil (RFC 8291) et l'envoie ; un appareil désabonné ou effacé
+est retiré de la liste. « Couper les notifications ici » ne coupe que cet appareil.
+
 ## JTest : essayer sur le téléphone
 
 « JTest » (sous la conversation d'une session) lance le travail de la session sur votre serveur

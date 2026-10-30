@@ -217,6 +217,39 @@ def main():
     except GitHubError as failure:
         print(f"::error::réponse non publiée : {failure}")
         raise SystemExit(1)
+    write_notification(finished, result, error)
+
+
+def plain(text, limit=160):
+    """Une ligne lisible dans une notification : sans balises Markdown ni commentaires."""
+    text = re.sub(r"<!--.*?-->", " ", text or "", flags=re.S)
+    text = re.sub(r"[*_`#>|]+", "", text)
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def write_notification(finished, result, error):
+    """La notification du passage pour le téléphone (push.py l'envoie) : une question de Claw, son
+    travail fini, ou un arrêt. Rien pour un passage que l'utilisateur a lui-même annulé."""
+    try:
+        questions = json.loads(read("questions.json") or "[]")
+    except ValueError:
+        questions = []
+    first = next((item.get("question", "") for item in questions if isinstance(item, dict)), "")
+    if finished and first:
+        title, body = "Claw a une question", plain(first)
+    elif finished:
+        lead = plain(result.split("\n\n")[0], 120) if result else ""
+        title, body = "Claw a fini", plain(TITLE + (f" : {lead}" if lead else ""))
+    elif OUTCOME == "cancelled":
+        return
+    else:
+        title, body = "Claw s'est arrêté", plain(f"{TITLE} : {'erreur' if error else 'travail inachevé'}, "
+                                                 "envoyez « continue » pour reprendre")
+    (WORK / "notify.json").write_text(json.dumps({"title": title, "body": body, "session": SESSION,
+                                                  "tag": f"claw-session-{SESSION}"}, ensure_ascii=False),
+                                      encoding="utf-8")
 
 
 if __name__ == "__main__":
