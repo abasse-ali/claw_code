@@ -280,6 +280,8 @@
   // Envois qui changent un compteur sans montrer le nom donne.
   const unnamed = [];
   const tested = new Set();
+  // Les boutons déjà touchés (ou envoyés avec leurs champs) ne s'essaient plus.
+  const tried = new Set();
   // Un nom par formulaire : au rechargement, on sait lequel a perdu son ajout.
   const base = `Camille Claw${Math.floor(1000 + Math.random() * 9000)}`;
   let marker = base;
@@ -312,6 +314,9 @@
     if (type === "month") return day(31).slice(0, 7);
     if (type === "week") return "";
     if (type === "color") return "#336699";
+    // Un montant dans un <input type=number> : tapé à la française, avec sa virgule. Vu le 30
+    // octobre 2026 (essai C9) : « 45,50 » refusé, ou lu 4550 au clavier d'un ordinateur.
+    if (type === "number" && /montant|amount|prix|price|somme|€/.test(words)) return `${12 + tested.size},50`;
     if (type === "number" || type === "range") {
       // Un nombre par formulaire : deux formulaires qui ajoutent autant de places
       // donneraient le meme total, et l'un passerait pour l'autre.
@@ -339,6 +344,8 @@
   // ne doit plus le montrer, et le montant doit se lire à la même échelle sur les écrans.
   let sentValues = [];
   let sentAmount = null;
+  // Les montants tapés dans un <input type=number>, qui perd la virgule.
+  const commaLost = [];
   const fill = (form) => {
     let named = false;
     markedField = null;
@@ -379,6 +386,17 @@
           setValue(field, value);
           if (value === marker || amount) sentValues.push(value);
           if (amount) sentAmount = value;
+          // La virgule refusée par un <input type=number> : c'est dit, puis le montant passe avec
+          // un point pour que l'entrée suive son cours (sa validité, que React règle au rendu
+          // suivant, n'est pas lue ici).
+          if (amount && field.type === "number" && !field.value) {
+            if (!commaLost.length) {
+              const named = field.labels && field.labels[0] ? `"${field.labels[0].innerText.replace(/\s+/g, " ").trim().slice(0, 40)}"` : label(field);
+              commaLost.push(`The amount field ${named} is an <input type=number>: an amount typed the French way ("${value}") is refused there, and typed on a computer keyboard it loses its comma (${value} becomes ${value.replace(",", "")}, a hundred times too much). Use a text field that keeps the comma (inputmode="decimal", read with parseAmount; the kit's TextField type="number" or MoneyInput)`);
+            }
+            setValue(field, value.replace(",", "."));
+            continue;
+          }
         }
       }
       // Un motif (pattern) que le navigateur ne lit pas lève une erreur ici.
@@ -572,6 +590,13 @@
     if (added || appeared.length) kept.push({ form: name, marker, shown: added, appeared, hash });
     return { added };
   };
+  // Les groupes de choix sans choix fait (qui a payé) d'un formulaire ou d'une fenêtre.
+  const emptyChoices = (box) => [...box.querySelectorAll("[role=group], [role=radiogroup]")].filter(shown).map((group) => ({
+    group,
+    choices: [...group.querySelectorAll("button[aria-pressed], [role=radio]")].filter(shown),
+  })).filter(({ choices }) => choices.length
+    && !choices.some((choice) => choice.getAttribute("aria-pressed") === "true" || choice.getAttribute("aria-checked") === "true"));
+  const choiceNames = (groups) => groups.map(({ group }) => `"${(group.getAttribute("aria-label") || label(group)).slice(0, 30)}"`).join(", ");
   const tryForm = async (form) => {
     tested.add(form);
     if (form.getAttribute("method") === "dialog" || !form.querySelector("input, select, textarea")) return;
@@ -634,8 +659,28 @@
       return;
     }
     if (lastSubmit.handled && seen.mutations === 0 && effects === before.effects + 1) {
-      forms.push(`sending ${name} shows nothing: no confirmation, no error, no change in the page`);
-      return;
+      // Un choix manquant (qui a payé) : fait, puis le formulaire renvoyé, comme pour une fenêtre.
+      // Vu le 30 octobre 2026 : la version naïve de l'appli de dépenses refusait sans un mot.
+      const groups = emptyChoices(form);
+      if (!groups.length) {
+        forms.push(`sending ${name} shows nothing: no confirmation, no error, no change in the page`);
+        return;
+      }
+      for (const { choices } of groups) tap(choices[0]);
+      await wait(150);
+      const again = watch();
+      try {
+        const button = form.querySelector("button[type=submit], button:not([type]), input[type=submit]");
+        if (button && shown(button)) tap(button);
+        else form.requestSubmit();
+      } catch (error) { errors.push(String((error && error.message) || error)); }
+      await wait(600);
+      again.stop();
+      if (!again.mutations) {
+        forms.push(`sending ${name} shows nothing, even with a choice made in ${choiceNames(groups)}: no confirmation, no error, no change in the page`);
+        return;
+      }
+      forms.push(`sending ${name} does nothing and says nothing until a choice is made in ${choiceNames(groups)}: choose a sensible default (the first person), or say what is missing`);
     }
     return judgeEntry(form, name, personal, prior);
   };
@@ -644,20 +689,29 @@
   // formulaire. Vu le 30 octobre 2026 (essai C7) : « Nouveau voyage » jamais rempli, aucun
   // voyage créé, et chaque écran de l'appli exploré vide.
   const sending = /^\s*(\+\s*)?(ajouter|cr[ée]er|enregistrer|valider|ok|envoyer|confirmer|add|create|save|submit)\b/i;
-  const tryWindow = async (box) => {
+  const sendWords = (el) => el.innerText || el.value || el.getAttribute("aria-label") || "";
+  const fillable = (field) => shown(field) && !field.closest("form")
+    && !["hidden", "submit", "button", "reset", "file", "image", "checkbox", "radio", "search", "password"].includes((field.type || "").toLowerCase());
+  // `given` : le bouton d'envoi de champs posés dans l'écran, sans <form> ni fenêtre.
+  const tryWindow = async (box, given = null) => {
     if (tested.has(box) || tested.size >= 10) return null;
-    const fields = [...box.querySelectorAll("input, textarea, select")].filter((field) => shown(field) && !field.closest("form")
-      && !["hidden", "submit", "button", "reset", "file", "image", "checkbox", "radio", "search", "password"].includes((field.type || "").toLowerCase()));
+    const fields = [...box.querySelectorAll("input, textarea, select")].filter(fillable);
     if (!fields.length) return null;
-    const send = [...box.querySelectorAll("button, [role=button], input[type=button]")]
+    if (given && (!given.isConnected || !shown(given))) return null;
+    const send = given || [...box.querySelectorAll("button, [role=button], input[type=button]")]
       .filter((el) => shown(el) && !el.closest("form"))
-      .find((el) => sending.test(el.innerText || el.value || el.getAttribute("aria-label") || ""));
+      .find((el) => sending.test(sendWords(el)));
     if (!send) return null;
     tested.add(box);
     marker = `${base}${String.fromCharCode(65 + tested.size)}`;
-    const heading = box.querySelector("h1, h2, h3, [role=heading]");
+    // Le titre des champs libres est souvent celui de leur carte, juste au-dessus.
+    let heading = box.querySelector("h1, h2, h3, [role=heading]");
+    for (let node = box.parentElement, depth = 0; given && !heading && node && depth < 2; node = node.parentElement, depth += 1) {
+      heading = node.querySelector("h1, h2, h3, [role=heading]");
+    }
     const title = heading ? heading.innerText.replace(/\s+/g, " ").trim().slice(0, 40) : "";
-    const name = title ? `the window "${title}"` : `the window of ${label(send)}`;
+    const name = given ? (title ? `the fields of "${title}"` : `the fields next to ${label(send)}`)
+      : title ? `the window "${title}"` : `the window of ${label(send)}`;
     const refused = fill(box);
     if (refused.length) {
       forms.push(`${name} refuses plausible entries: ${refused.slice(0, 3).join("; ")}`);
@@ -685,11 +739,7 @@
       // Un groupe de choix sans choix fait (qui a payé) : le visiteur en touche un et renvoie.
       // Le refus muet est dit, puis l'entrée suit son cours. Vu le 30 octobre 2026 (essai C8) :
       // « Ajouter » sans payeur choisi ne faisait rien, et rien ne le disait.
-      const groups = [...box.querySelectorAll("[role=group], [role=radiogroup]")].filter(shown).map((group) => ({
-        group,
-        choices: [...group.querySelectorAll("button[aria-pressed], [role=radio]")].filter(shown),
-      })).filter(({ choices }) => choices.length
-        && !choices.some((choice) => choice.getAttribute("aria-pressed") === "true" || choice.getAttribute("aria-checked") === "true"));
+      const groups = emptyChoices(box);
       if (!groups.length || !send.isConnected) {
         forms.push(`sending ${name} does nothing: no change in the page`);
         return null;
@@ -700,7 +750,7 @@
       try { tap(send); } catch (error) { errors.push(String((error && error.message) || error)); }
       await wait(600);
       again.stop();
-      const named = groups.map(({ group }) => `"${(group.getAttribute("aria-label") || label(group)).slice(0, 30)}"`).join(", ");
+      const named = choiceNames(groups);
       if (!again.mutations) {
         forms.push(`sending ${name} does nothing, even with a choice made in ${named}: no change in the page`);
         return null;
@@ -710,7 +760,45 @@
     return judgeEntry(box, name, personal, prior);
   };
 
-  for (const form of [...document.forms].filter(shown).slice(0, 6)) await tryForm(form);
+  // Des champs et leur bouton d'envoi posés dans l'écran, sans <form> ni fenêtre : remplis et
+  // envoyés comme une fenêtre. Vu le 30 octobre 2026 (essai C9) : le prénom et son bouton
+  // « Ajouter » dans une carte ; le parcours touchait « Ajouter » champ vide, le disait mort, et
+  // aucun participant, donc aucune dépense, n'était jamais essayé.
+  const looseSend = (el) => shown(el) && !el.closest("form, dialog, [role=dialog], [aria-modal=true], nav, header") && sending.test(sendWords(el));
+  const looseGroups = (scope) => {
+    const groups = [];
+    for (const send of [...scope.querySelectorAll("button, [role=button], input[type=button]")].filter(looseSend)) {
+      if (groups.length >= 3) break;
+      let box = send.parentElement;
+      for (let depth = 0; box && box !== scope && box !== document.body && depth < 4 && ![...box.querySelectorAll("input, textarea, select")].some(fillable); depth += 1) {
+        box = box.parentElement;
+      }
+      if (!box || tested.has(box) || groups.some((group) => group.box === box)) continue;
+      // Un seul bouton d'envoi dans le bloc : « Ajouter le premier » de la liste vide, qui ne fait
+      // que donner la main au champ, n'est pas l'envoi des champs de tout l'écran.
+      const sends = [...box.querySelectorAll("button, [role=button], input[type=button]")].filter(looseSend);
+      const fields = [...box.querySelectorAll("input, textarea, select")].filter(fillable);
+      if (sends.length === 1 && fields.length && fields.length <= 6) groups.push({ box, send });
+    }
+    return groups;
+  };
+
+  // Formulaires et champs libres envoyés dans l'ordre de la page : le participant avant la
+  // dépense qui le demande.
+  const sendInOrder = async (formsHere, groups) => {
+    const items = [...formsHere.map((form) => ({ form, at: form })), ...groups.map((group) => ({ ...group, at: group.box }))]
+      .sort((a, b) => (a.at.compareDocumentPosition(b.at) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+    for (const item of items) {
+      if (tested.size >= 10) break;
+      if (item.form) {
+        if (!tested.has(item.form) && item.form.isConnected) await tryForm(item.form);
+      } else {
+        tried.add(item.send);
+        await tryWindow(item.box, item.send);
+      }
+    }
+  };
+  await sendInOrder([...document.forms].filter(shown).slice(0, 6), looseGroups(document.body));
   if (onlyForms) return { typed, forms };
 
   // --- Boutons ---------------------------------------------------------------
@@ -814,7 +902,6 @@
     const heading = early.querySelector("h1, h2, h3");
     gateOpen.push(`${label(el)} shows "${(heading ? heading.innerText : label(early)).replace(/\s+/g, " ").trim().slice(0, 50)}" behind its code window before any code is typed`);
   };
-  const tried = new Set();
   const deadEls = [];
   const noteScreen = (el, before, code) => {
     if (el.matches("summary, [aria-expanded], [aria-controls]") || el.closest("details")) return null;
@@ -1003,6 +1090,9 @@
     const inner = () => [...region.querySelectorAll("button, [role=button], input[type=button], summary")]
       .filter((el) => shown(el) && !tried.has(el) && !el.disabled && el.getAttribute("aria-disabled") !== "true"
         && !(el.type === "submit" && el.form));
+    // Ses formulaires et ses champs libres s'envoient d'abord, comme sur l'écran de départ : ses
+    // boutons (« Aucun », une pastille de « pour qui ») changeraient sinon ce qu'ils envoient.
+    await sendInOrder([...region.querySelectorAll("form")].filter((item) => shown(item) && !tested.has(item)).slice(0, 2), looseGroups(region));
     for (let round = 0; round < 10; round += 1) {
       if (!region.isConnected) return;
       if (!shown(region) && !(await reopen())) return;
@@ -1202,5 +1292,5 @@
     else kept.splice(index, 1);
   }
   const sitePages = [...pages].map(([url, { from }]) => ({ url, from }));
-  return { checked: tried.size, windowLayout, dead, failing, covered, buried, stuck, links, files, forms, unnamed, underBar, kept, openers, dragged, screens, pages: sitePages, typed, codeShown, gateOpen, addGone, scaled, keptOpen };
+  return { checked: tried.size, windowLayout, dead, failing, covered, buried, stuck, links, files, forms, unnamed, underBar, kept, openers, dragged, screens, pages: sitePages, typed, codeShown, gateOpen, addGone, scaled, keptOpen, commaLost };
 })()
