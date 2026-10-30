@@ -73,3 +73,33 @@ export function daysLeft(month = monthOf(today())): number {
   const current = now.getFullYear() === year && now.getMonth() + 1 === number;
   return current ? last - now.getDate() + 1 : last;
 }
+
+const weekdayFormat = new Intl.DateTimeFormat(lang, { weekday: "short" });
+const longDayFormat = new Intl.DateTimeFormat(lang, { weekday: "long", day: "numeric", month: "long" });
+const parseDay = (date: string) => {
+  const [year, month, day] = date.split("-").map(Number);
+  return new Date(year, month - 1, day);
+};
+
+/** Le jour `step` jours plus tard (ou plus tôt), « 2026-10-27 », à l'heure du téléphone. Jamais
+ * `toISOString()` pour un jour : en France, entre minuit et 1 h ou 2 h, elle donne la veille. */
+export function shiftDay(date: string, step: number): string {
+  const day = parseDay(date);
+  day.setDate(day.getDate() + step);
+  return `${day.getFullYear()}-${pad(day.getMonth() + 1)}-${pad(day.getDate())}`;
+}
+
+/** Les `count` derniers jours, du plus ancien à `until` (aujourd'hui) compris. */
+export function lastDays(count = 7, until = today()): string[] {
+  return Array.from({ length: count }, (_, index) => shiftDay(until, index - count + 1));
+}
+
+/** « lun. 26 ». */
+export function weekdayLabel(date: string): string {
+  return `${weekdayFormat.format(parseDay(date))} ${parseDay(date).getDate()}`;
+}
+
+/** « lundi 26 octobre ». */
+export function longDayLabel(date: string): string {
+  return longDayFormat.format(parseDay(date));
+}

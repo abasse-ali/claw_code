@@ -1,6 +1,7 @@
 // Boutons, choix, champs et réglages.
 
-import { useEffect, useId, useState, type JSX, type ReactNode } from "react";
+import { Plus, Search, X } from "lucide-react";
+import { useEffect, useId, useState, type FormEvent, type JSX, type ReactNode } from "react";
 import { parseAmount } from "./format";
 import { Icon, type LucideIcon } from "./icons";
 
@@ -152,5 +153,115 @@ export function Setting({ name, note, children }: { name: ReactNode; note?: Reac
       <span className="setting__name">{name}{note && <small>{note}</small>}</span>
       {children}
     </div>
+  );
+}
+
+/** Une liste de choix (qui a payé, la catégorie), dessinée comme les autres champs. */
+export function Select<T extends string>({ label, value, onChange, options, placeholder, help, error }: {
+  label: string; value: T | ""; onChange: (value: T) => void; options: Option<T>[]; placeholder?: string; help?: string; error?: string;
+}) {
+  const id = useId();
+  return (
+    <div className={`field${error ? " is-invalid" : ""}`}>
+      <label htmlFor={id}>{label}</label>
+      <select id={id} value={value} aria-invalid={Boolean(error)} onChange={(event) => onChange(event.target.value as T)}>
+        {placeholder !== undefined && <option value="" disabled>{placeholder}</option>}
+        {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+      </select>
+      {help && <p className="field__help">{help}</p>}
+      {error && <p className="field__error">{error}</p>}
+    </div>
+  );
+}
+
+/** Une date, « 2026-10-28 » (today() par défaut), qui garde sa place sur iPhone. */
+export function DateField({ label, value, onChange, min, max, help, error }: {
+  label: string; value: string; onChange: (value: string) => void; min?: string; max?: string; help?: string; error?: string;
+}) {
+  const id = useId();
+  return (
+    <div className={`field${error ? " is-invalid" : ""}`}>
+      <label htmlFor={id}>{label}</label>
+      <input id={id} type="date" value={value} min={min} max={max} aria-invalid={Boolean(error)} onChange={(event) => onChange(event.target.value)} />
+      {help && <p className="field__help">{help}</p>}
+      {error && <p className="field__error">{error}</p>}
+    </div>
+  );
+}
+
+/** Une recherche dans une liste : la loupe, le champ, et la croix qui l'efface. */
+export function SearchField({ value, onChange, placeholder = "Rechercher", label = "Rechercher" }: {
+  value: string; onChange: (value: string) => void; placeholder?: string; label?: string;
+}) {
+  return (
+    <div className="search" role="search">
+      <Icon icon={Search} size={18} />
+      <input type="search" value={value} placeholder={placeholder} aria-label={label} autoComplete="off" onChange={(event) => onChange(event.target.value)} />
+      {value && (
+        <button type="button" className="search__clear" aria-label="Effacer la recherche" onClick={() => onChange("")}>
+          <Icon icon={X} size={16} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** Un champ et son bouton « Ajouter », sur une ligne (un prénom, une habitude). `onAdd` reçoit le
+ * texte sans espaces autour ; il rend un message d'erreur (« Ce prénom existe déjà ») pour garder
+ * le texte et le dire, rien pour accepter : le champ se vide. Entrée envoie aussi. */
+export function AddField({ label, placeholder, buttonLabel = "Ajouter", onAdd }: {
+  label: string; placeholder?: string; buttonLabel?: string; onAdd: (text: string) => string | void;
+}) {
+  const id = useId();
+  const [text, setText] = useState("");
+  const [error, setError] = useState("");
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const value = text.trim();
+    if (!value) {
+      setError(`Écrivez d'abord ${label.toLowerCase()}.`);
+      return;
+    }
+    const refused = onAdd(value);
+    if (refused) {
+      setError(refused);
+      return;
+    }
+    setText("");
+    setError("");
+  };
+  return (
+    <form className={`add-field field${error ? " is-invalid" : ""}`} onSubmit={submit} noValidate>
+      <label htmlFor={id}>{label}</label>
+      <div className="add-field__row">
+        <input id={id} value={text} placeholder={placeholder} autoComplete="off" aria-invalid={Boolean(error)}
+          onChange={(event) => { setText(event.target.value); if (error) setError(""); }} />
+        <button className="btn btn--primary" type="submit"><Icon icon={Plus} size={18} />{buttonLabel}</button>
+      </div>
+      {error && <p className="field__error" role="alert">{error}</p>}
+    </form>
+  );
+}
+
+/** Un formulaire entier : ses champs, l'erreur générale au-dessus du bouton, et le bouton d'envoi
+ * en bas. `onSubmit` rend un message d'erreur pour refuser (« Choisissez qui a payé »), rien pour
+ * accepter. */
+export function Form({ onSubmit, submitLabel = "Enregistrer", children, secondary }: {
+  onSubmit: () => string | void; submitLabel?: string; children: ReactNode; secondary?: ReactNode;
+}) {
+  const [error, setError] = useState("");
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    setError(onSubmit() || "");
+  };
+  return (
+    <form className="form" onSubmit={submit} noValidate>
+      {children}
+      {error && <p className="form__error" role="alert">{error}</p>}
+      <div className="btn-row">
+        {secondary}
+        <button className="btn btn--primary btn--block" type="submit">{submitLabel}</button>
+      </div>
+    </form>
   );
 }
