@@ -1783,7 +1783,7 @@ fn console_lines(events: &[Value]) -> Vec<String> {
                             .join(" ")
                     })
                     .unwrap_or_default();
-                format!("{kind}: {text}")
+                format!("{kind}: {}", react_error(&text).unwrap_or(text))
             }
             Some("Runtime.exceptionThrown") => {
                 let details = &params["exceptionDetails"];
@@ -1809,7 +1809,11 @@ fn console_lines(events: &[Value]) -> Vec<String> {
                         line.map_or_else(String::new, |line| format!(":{}", line + 1))
                     )
                 });
-                format!("uncaught: {}{at}", text.lines().next().unwrap_or(text))
+                let first = text.lines().next().unwrap_or(text);
+                format!(
+                    "uncaught: {}{at}",
+                    react_error(first).unwrap_or_else(|| first.to_owned())
+                )
             }
             Some("Log.entryAdded") => {
                 let entry = &params["entry"];
@@ -1854,6 +1858,29 @@ fn console_lines(events: &[Value]) -> Vec<String> {
     }
     lines.truncate(MAX_CONSOLE);
     lines
+}
+
+/// Une erreur de React construit pour la production n'a qu'un numéro (« Minified React
+/// error #185; visit https://react.dev/errors/185 ») : son sens et sa cause habituelle, en
+/// clair. Vu le 30 octobre 2026 (essai C5) : un sélecteur zustand qui rendait un tableau neuf
+/// faisait boucler l'appli, et la console ne disait que « #185 ».
+fn react_error(text: &str) -> Option<String> {
+    let code: String = text
+        .split("Minified React error #")
+        .nth(1)?
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    let meaning = match code.as_str() {
+        "185" => "maximum update depth: a component updates state at every render, often a store selector returning a new array or object at each read (s.getItems(), .filter(), .map(), {…}); select stored values, compute the rest with useMemo",
+        "301" => "too many re-renders: state is set while rendering, such as onClick={setOpen(true)} instead of onClick={() => setOpen(true)}",
+        "130" => "a JSX tag names something that is not a component (undefined): a missing or misspelled import, or a component the module does not export",
+        "31" => "an object is rendered as text in JSX: show one of its fields, or format it",
+        "300" | "310" => "a component calls a different number of hooks than at its previous render: a hook after an early return or inside a condition",
+        "321" => "a hook is called outside the body of a component (in a callback, a loop or a plain function)",
+        _ => return None,
+    };
+    Some(format!("React error #{code}: {meaning}"))
 }
 
 /// Le nom du fichier d'une adresse, sans dossier, requête ni ancre.
@@ -6038,6 +6065,9 @@ mod tests {
             // La commande ouverte dans l'application SMS du visiteur.
             json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Failed to launch 'sms:0612345678?body=Commande' because the scheme does not have a registered handler.", "url": "file:///C:/site/index.html" } } }),
             json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Not allowed to launch 'sms:+33612345678?body=Commande' because a user gesture is required.", "url": "file:///C:/site/index.html" } } }),
+            // React construit pour la production : un numéro seul, dit en clair.
+            json!({ "method": "Runtime.exceptionThrown", "params": { "exceptionDetails": { "text": "Uncaught", "exception": { "description": "Error: Minified React error #185; visit https://react.dev/errors/185 for the full message or use the non-minified dev environment for full errors and additional helpful warnings.\n    at Vp (index-BA5eOwFN.js:9:1)" } } } }),
+            json!({ "method": "Runtime.consoleAPICalled", "params": { "type": "error", "args": [{ "type": "string", "value": "Minified React error #9999; visit https://react.dev/errors/9999" }] } }),
         ];
         assert_eq!(
             console_lines(&events),
@@ -6048,6 +6078,8 @@ mod tests {
                 "error: Failed to load resource: 404 (http://h/a.css)",
                 "error: Failed to load resource: net::ERR_FAILED (http://h/b.js)",
                 "error: the page loads manifest.json, which is not in the project: add the file, or remove what asks for it",
+                "uncaught: React error #185: maximum update depth: a component updates state at every render, often a store selector returning a new array or object at each read (s.getItems(), .filter(), .map(), {…}); select stored values, compute the rest with useMemo",
+                "error: Minified React error #9999; visit https://react.dev/errors/9999",
             ]
         );
     }
