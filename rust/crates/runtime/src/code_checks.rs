@@ -552,6 +552,65 @@ pub fn fresh_selectors(text: &str) -> Vec<String> {
     found
 }
 
+/// Des centimes passés tels quels à ce qui montre des euros (le kit de Claw : `amount=` de Row,
+/// Hero, Tile et Amount, `money()`, `signed()`) : 1250 centimes s'affichent « 1 250,00 € ». Vu
+/// les 29 et 30 octobre 2026 (essais C2, C6 et C8) : 100 € affichés 10 000,00 €, malgré le
+/// guide du kit. Au plus `MAX_FINDINGS`.
+#[must_use]
+pub fn cents_shown_as_euros(text: &str) -> Vec<String> {
+    let shown = Regex::new(
+        r"\bamount=\{([^}\n]*)\}|\b(?:money|signed)\(([^()\n]*(?:\([^()\n]*\))?[^()\n]*)\)",
+    )
+    .expect("regex");
+    let cents = Regex::new(r"(?i)cents?\b|cents?[A-Z_.]|centimes").expect("regex");
+    let mut found = Vec::new();
+    for captures in shown.captures_iter(text) {
+        let Some(value) = captures.get(1).or_else(|| captures.get(2)) else {
+            continue;
+        };
+        let value = value.as_str();
+        let divided = [
+            "/ 100", "/100", "* 0.01", "*0.01", "format", "toEuros", "euros(",
+        ]
+        .iter()
+        .any(|sign| value.contains(sign));
+        if divided || !cents.is_match(value) {
+            continue;
+        }
+        let at = captures.get(0).map_or(0, |whole| whole.start());
+        let line = text[..at].matches('\n').count() + 1;
+        let whole: String = captures[0].chars().take(80).collect();
+        found.push(format!(
+            "line {line}: `{whole}` hands an amount in cents to what shows euros, so 1250 cents show \"1 250,00 €\": divide it by 100 there"
+        ));
+        if found.len() == MAX_FINDINGS {
+            break;
+        }
+    }
+    found
+}
+
+/// Les centimes passés au kit dans les fichiers modifiés, pour le contrôle des exigences :
+/// `(chemin montré, constats)`. Vide quand il n'y en a pas.
+#[must_use]
+pub fn cents_shown_as_euros_note(files: &[(String, Vec<String>)]) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let listed = files
+        .iter()
+        .flat_map(|(path, findings)| {
+            findings
+                .iter()
+                .map(move |finding| format!("- {path}, {finding}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "\n\nClaw also read how amounts are shown: these give amounts in cents to the kit, which takes euros (12.5 for 12,50 €).\n{listed}\nEvery amount on the screens is then 100 times too much: divide by 100 where it is shown, and check that 12,50 typed shows 12,50 €."
+    )
+}
+
 /// Les fonctions jamais branchées des fichiers modifiés, pour le contrôle des
 /// exigences : `(chemin montré, constats)`. Vide quand il n'y en a pas.
 #[must_use]
@@ -1480,6 +1539,37 @@ function ExpensesScreen() {
             note.contains("wire it to the control the request asks for"),
             "{note}"
         );
+    }
+
+    #[test]
+    fn amounts_in_cents_handed_to_the_kit_are_found() {
+        // Essai C8 du 30 octobre 2026 : 100 € affichés 10 000,00 €.
+        let page = r"
+<Row title={expense.label} amount={-expense.amountCents} />
+<Row title={balance.name} amount={balance.amountCents / 100} />
+<Hero label=Total amount={totalCents} />
+<p>{money(totalCents)}</p>
+<p>{money(total)}</p>
+<p>{formatCents(totalCents)}</p>
+<Tile value={money(sumCents / 100)} />
+";
+        let found = super::cents_shown_as_euros(page);
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(
+            found[0].starts_with("line 2: `amount={-expense.amountCents}`"),
+            "{found:?}"
+        );
+        assert!(
+            found[1].starts_with("line 4: `amount={totalCents}`"),
+            "{found:?}"
+        );
+        assert!(
+            found[2].starts_with("line 5: `money(totalCents)`"),
+            "{found:?}"
+        );
+        assert!(super::cents_shown_as_euros_note(&[]).is_empty());
+        let note = super::cents_shown_as_euros_note(&[("src/App.tsx".to_string(), found)]);
+        assert!(note.contains("- src/App.tsx, line 2:"), "{note}");
     }
 
     #[test]

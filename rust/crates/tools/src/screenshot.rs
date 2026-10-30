@@ -2124,6 +2124,8 @@ fn click_problems(devtools: &mut DevTools) -> (Vec<String>, Vec<(String, String)
     }
     problems.extend(strings(&result["underBar"]));
     problems.extend(strings(&result["addGone"]));
+    problems.extend(strings(&result["scaled"]));
+    problems.extend(strings(&result["keptOpen"]));
     problems.extend(lost_on_reload(devtools, &result["kept"]));
     (problems, openers, explore)
 }
@@ -4859,6 +4861,53 @@ mod tests {
             single.contains("After a first entry is added with button \\\"Ajouter une note\\\", nothing on the screen adds another"),
             "{single}"
         );
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn amounts_shown_a_hundred_times_too_big_and_a_window_that_keeps_its_entry_are_found() {
+        // Essai C8 du 30 octobre 2026 : « Ajouter » sans payeur choisi ne faisait rien, 100 €
+        // s'affichaient 10 000,00 €, et la fenêtre gardait la dépense précédente.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-depenses-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |payer: &str, scale: &str, reset: &str| {
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Dépenses</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button, input {{ font: inherit; padding: 10px; }} dialog {{ max-width: calc(100vw - 32px); }} [aria-pressed=true] {{ font-weight: 700; }}</style></head><body><h1>Dépenses</h1><button id=\"nouvelle\">Nouvelle dépense</button><ul id=\"liste\"></ul><dialog id=\"fenetre\"><h2>Nouvelle dépense</h2><label for=\"libelle\">Libellé</label> <input id=\"libelle\"> <label for=\"montant\">Montant</label> <input id=\"montant\" inputmode=\"decimal\"><div role=\"group\" aria-label=\"Payé par\"><button type=\"button\" aria-pressed=\"false\">Alice</button><button type=\"button\" aria-pressed=\"false\">Bob</button></div><button id=\"ajouter\">Ajouter</button> <button id=\"fermer\">Fermer</button></dialog><script>const box = document.getElementById('fenetre'); const choices = [...box.querySelectorAll('[role=group] button')]; let payer = null; const choose = (button) => {{ payer = button ? button.textContent : null; choices.forEach((item) => item.setAttribute('aria-pressed', String(item === button))); }}; choices.forEach((button) => button.addEventListener('click', () => choose(button))); document.getElementById('nouvelle').addEventListener('click', () => {{ {reset} {payer} box.showModal(); }}); document.getElementById('fermer').addEventListener('click', () => box.close()); document.getElementById('ajouter').addEventListener('click', () => {{ const label = document.getElementById('libelle').value.trim(); const cents = Math.round(Number(document.getElementById('montant').value.replace(',', '.')) * 100); if (!label || !(cents > 0) || !payer) return; const item = document.createElement('li'); item.textContent = label + ' : ' + ({scale}).toLocaleString('fr-FR', {{ minimumFractionDigits: 2 }}) + ' € (' + payer + ')'; document.getElementById('liste').append(item); box.close(); }});</script></body></html>"),
+            )
+            .expect("html");
+        };
+        let page = format!("claw-depenses-{}/index.html", std::process::id());
+        let capture = || {
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            request.windows = Some(true);
+            super::take(&request).expect("capture")["captures"][0]["problems"].to_string()
+        };
+        write(
+            "choose(choices[0]);",
+            "cents / 100",
+            "document.getElementById('libelle').value = ''; document.getElementById('montant').value = '';",
+        );
+        let sound = capture();
+        write("", "cents", "");
+        let broken = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        for absent in [
+            "until a choice is made",
+            "100 times too much",
+            "still holds that entry",
+        ] {
+            assert!(!sound.contains(absent), "{absent}: {sound}");
+        }
+        for expected in [
+            "until a choice is made in \\\"Payé par\\\"",
+            "100 times too much",
+            "its window still holds that entry",
+        ] {
+            assert!(broken.contains(expected), "{expected}: {broken}");
+        }
     }
 
     #[test]
