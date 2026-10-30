@@ -255,6 +255,14 @@ def detect(root, requested=None, port=0):
     site = None if options.get("cwd") else nearest_page(root)
     if site is not None:
         where = site.relative_to(root).as_posix()
+        # Un projet Node rangé dans un dossier au nom libre : son `index.html` est la page de Vite,
+        # qui appelle `/src/main.tsx` ; servie telle quelle, elle restait blanche sur le téléphone
+        # (essai D1 de Claw Web, 30 octobre 2026 : l'appli dans `habits-app/`).
+        plan = node_plan(site, port) if (site / "package.json").is_file() else None
+        if plan:
+            plan.cwd, plan.port = where, port
+            plan.path = str(options.get("path") or plan.path)
+            return plan
         return Plan("web", f"Site statique ({where}/)",
                     f"python3 -m http.server {port} --bind 127.0.0.1 --directory {where}", port=port)
     raise JTestError("JTest ne sait pas lancer ce projet : ajoutez à la racine un fichier `jtest.json`, par "

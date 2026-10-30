@@ -91,6 +91,14 @@ class DetectTest(unittest.TestCase):
         # Les dépendances et les dossiers cachés ne sont pas un site.
         with self.assertRaises(jtest.JTestError):
             self.plan({"node_modules/x/index.html": "", ".claw/index.html": "", "README.md": "x"})
+        # Essai D1 (30 octobre 2026) : une appli Vite dans `habits-app/`, lancée par Vite, pas sa
+        # page source servie telle quelle (blanche : `/src/main.tsx` n'est pas compilé).
+        plan = self.plan({"habits-app/package.json": {"devDependencies": {"vite": "7"}, "scripts": {"dev": "vite"}},
+                          "habits-app/package-lock.json": "{}",
+                          "habits-app/index.html": '<script type="module" src="/src/main.tsx"></script>',
+                          "habits-app/docs/index.html": "<h1>Construit</h1>", "README.md": "x"})
+        self.assertEqual((plan.label, plan.cwd, plan.install), ("Vite", "habits-app", ["npm ci"]))
+        self.assertEqual(plan.command, "npx vite --host 127.0.0.1 --port 4321 --strictPort")
         # Session #30 : une page avec le package.json de `npm init` (« main » : son script).
         plan = self.plan({"package.json": {"main": "app.js", "scripts": {"test": "exit 1"}},
                           "index.html": "<h1>IronLog</h1>", "app.js": "document.title = 'x';"})
