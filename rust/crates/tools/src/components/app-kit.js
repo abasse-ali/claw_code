@@ -449,6 +449,8 @@
     const remove = form.querySelector("[data-entry-delete]");
     const submit = form.querySelector("[type=submit]");
     const words = { title: title ? title.textContent : "", submit: submit ? submit.textContent : "" };
+    // La case du montant prend la largeur du nombre : « 558 € » reste centré (app-kit.css).
+    const fit = () => { if (amount && amount.closest(".sheet__amount")) amount.style.width = `${Math.max(1, amount.value.length) + 0.4}ch`; };
     const mark = (bad) => {
       if (amountBox) amountBox.classList.toggle("is-invalid", bad);
       if (amount) amount.setAttribute("aria-invalid", String(bad));
@@ -469,6 +471,7 @@
         if (category) category.checked = true;
         else if (form.elements.category && form.elements.category.tagName === "SELECT") form.elements.category.value = item.category;
       }
+      fit();
       if (title) title.textContent = item ? "Modifier l'opération" : words.title;
       if (submit) submit.textContent = item ? "Enregistrer" : words.submit;
       if (remove) remove.hidden = !item;
@@ -486,9 +489,10 @@
       const current = parseAmount(amount.value);
       const next = (Number.isFinite(current) ? current : 0) + Number(quick.dataset.quick);
       amount.value = String(Math.round(next * 100) / 100).replace(".", ",");
+      fit();
       mark(false);
     });
-    if (amount) amount.addEventListener("input", () => { if (amountBox && amountBox.classList.contains("is-invalid")) mark(!(parseAmount(amount.value) > 0)); });
+    if (amount) amount.addEventListener("input", () => { fit(); if (amountBox && amountBox.classList.contains("is-invalid")) mark(!(parseAmount(amount.value) > 0)); });
     if (remove) {
       remove.addEventListener("click", () => {
         const id = form.dataset.editing;
