@@ -1861,7 +1861,7 @@ fn console_lines(events: &[Value]) -> Vec<String> {
 }
 
 /// Une erreur de React construit pour la production n'a qu'un numéro (« Minified React
-/// error #185; visit https://react.dev/errors/185 ») : son sens et sa cause habituelle, en
+/// error #185; visit <https://react.dev/errors/185> ») : son sens et sa cause habituelle, en
 /// clair. Vu le 30 octobre 2026 (essai C5) : un sélecteur zustand qui rendait un tableau neuf
 /// faisait boucler l'appli, et la console ne disait que « #185 ».
 fn react_error(text: &str) -> Option<String> {
