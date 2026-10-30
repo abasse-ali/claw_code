@@ -185,6 +185,7 @@ export function EntrySheet({ categories, kinds = { out: "Dépense", in: "Rentré
             autoComplete="off"
             placeholder="0"
             value={amount}
+            style={{ width: `${Math.max(1, amount.length) + 0.4}ch` }}
             aria-invalid={invalid}
             onChange={(event) => {
               setAmount(event.target.value);
