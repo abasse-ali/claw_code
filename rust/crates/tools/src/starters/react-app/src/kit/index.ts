@@ -10,9 +10,9 @@
 // Blocs      Hero (label, amount | value, sub, pills [{ label, value, note }], progress
 //            { value 0..1, label, start, end }), Tiles > Tile (icon, label, value, note),
 //            Card (title, meta, link { label, href | onClick }, level), List > Row (key, icon,
-//            tone "in" | "out" | "accent" | "warn", title, badge, sub, amount, end (un bouton,
+//            avatar (un prénom : ses initiales), tone "in" | "out" | "accent" | "warn", title, badge, sub, amount, end (un bouton,
 //            sous le montant), endNote, action { icon, label, onClick }), Badge (tone), Meters > Meter (name, value 0..1,
-//            valueText, note, tone), Empty (icon, text, action), Amount (value : un montant qui
+//            valueText, note, tone), Empty (icon, text, steps, action), Avatar (name), Amount (value : un montant qui
 //            défile quand il change).
 // Données    useEntries (zustand, gardé sur le téléphone : entries, month, add, update,
 //            remove → annuler, clear → annuler, setMonth), seedOnce([...]) au démarrage,
@@ -20,15 +20,24 @@
 //            (limit, kind, category, emptyText), persistentStore("nom", { … }) pour les
 //            réglages, exportCsv(), pickCsv().
 // Fenêtres   EntrySheet (categories [{ name, icon }], kinds, quick), openEntrySheet(entry?),
-//            Sheet, Modal, ConfirmModal (open, onClose, title, text, confirmLabel, onConfirm).
+//            Sheet, Modal, ConfirmModal (open, onClose, title, text, confirmLabel, onConfirm),
+//            ItemActions (name, onEdit, onDelete : Modifier, et Supprimer qui demande confirmation).
 // Champs     Button (variant "primary" | "danger", small, block, icon), ButtonRow, Segmented,
 //            Chips (value ; une liste pour plusieurs choix : pour qui), TextField (type
-//            "number" garde la virgule), MoneyInput, Switch, Settings > Setting (name, note).
+//            "number" garde la virgule), MoneyInput, Switch, Settings > Setting (name, note),
+//            Select (label, value, options, placeholder), DateField (label, value « 2026-10-28 »),
+//            SearchField (value, onChange), AddField (label, onAdd(texte) → une erreur ou rien :
+//            un prénom, une habitude), Form (onSubmit() → une erreur ou rien, submitLabel).
+// Suivis     WeekChecks (done [jours], onToggle(jour), label : les 7 derniers jours à cocher),
+//            currentStreak(done) (jusqu'à hier tant qu'aujourd'hui n'est pas coché),
+//            bestStreak(done), successRate(done) → 43.
 // Graphiques BarChart (labels, series [{ name, tone, values }]), MonthsChart (months) ; recharts
 //            pour le reste.
 // Messages   toast(message, { tone: "error", action: { label, run } }).
 // Formats    money(1235.15) « 1 235,15 € », signed(), parseAmount("12,50"), today(), monthOf(),
-//            shiftMonth(), monthName(), shortMonth(), dayLabel(), daysLeft().
+//            shiftMonth(), monthName(), shortMonth(), dayLabel(), daysLeft(), shiftDay(jour, ±n),
+//            lastDays(7), weekdayLabel() « lun. 26 », longDayLabel(). Un jour vient toujours de
+//            today() ou shiftDay(), jamais de toISOString() (la veille entre minuit et 2 h).
 // Montants   partout en euros, un nombre à virgule (12.5 pour 12,50 €) : Hero, Tile, Row et
 //            Amount, money(), signed(), useEntries. Une appli qui compte en centimes les divise
 //            par 100 avant de les donner au kit (5149 centimes tels quels : « 5 149,00 € »).
@@ -52,3 +61,4 @@ export * from "./settings";
 export * from "./sheet";
 export * from "./store";
 export * from "./toast";
+export * from "./tracker";
