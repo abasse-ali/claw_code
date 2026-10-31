@@ -972,6 +972,28 @@ trop tôt et juge son propre travail avec indulgence. Pour chaque demande consé
 3. Le vérificateur remplace le contrôle des exigences que le modèle faisait sur son propre
    travail ; la vérification du projet, la relecture par un autre modèle et la persévérance
    restent actives.
+4. **Problème qui revient.** Quand vous redites qu'un problème annoncé réglé est toujours là
+   (« c'est toujours là », « tu mens », « rien n'a changé », « still broken »), ultracode
+   s'active de lui-même pour ce message, même s'il est coupé pour la session :
+   - l'étude et le vérificateur reçoivent vos messages précédents et ce que l'agent avait
+     prétendu, avec la consigne que la correction d'avant n'a pas marché ;
+   - l'étude donne les étapes qui montrent le symptôme et les causes possibles, chacune avec
+     ses lignes ;
+   - le vérificateur rejoue votre scénario pour de vrai : un symptôme qu'il n'a pas vu
+     disparaître est un échec, pas un « non vérifié ».
+
+   `CLAW_ULTRACODE_RELAPSE=0` coupe ce déclenchement. Vu le 31 octobre 2026 (session #46 de
+   Claw Web) : trois « corrigé et vérifié » de suite pour des rentrées toujours en double, et
+   des tests qui ne tournaient même pas (`vitest: not found`).
+5. **Une interface se vérifie en s'en servant.** Quand le tour a modifié une page ou une appli,
+   le vérificateur la construit et l'ouvre avec l'outil `Browser` : il touche les écrans et
+   les boutons concernés, recharge la page pour voir ce qui est gardé, change de mois ou
+   d'écran puis revient. Une commande qui échoue faute d'outil (`not found`, pas de
+   `node_modules`) ne prouve rien : il installe avec la commande du projet et relance.
+6. **Un échec n'est jamais présenté comme une réussite.** Si la troisième vérification échoue
+   encore, l'agent corrige ce qu'il peut, puis sa réponse dit ce qui marche (avec ce qu'il a
+   lancé pour le voir), ce qui échoue encore et ce qu'il essaierait ensuite. Elle ne dit plus
+   « corrigé » ni « vérifié » là où le vérificateur n'est pas d'accord.
 
 Les deux agents apparaissent comme deux étapes « Sous-agent » dans la page, leur rapport lisible
 dans la carte. Ils suivent vos autorisations : le vérificateur peut lancer des commandes, le mode

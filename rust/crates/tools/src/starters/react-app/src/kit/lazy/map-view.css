@@ -1,0 +1,3 @@
+/* Les styles de Leaflet, dans une couche sous celle du kit (components) : le kit les règle
+   sans !important. Chargés avec la carte, jamais avant. */
+@import "leaflet/dist/leaflet.css" layer(components.vendor);

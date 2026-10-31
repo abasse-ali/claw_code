@@ -1258,17 +1258,17 @@ mark { padding: 0 1px; border-radius: 3px; background: color-mix(in srgb, #f2c94
 .theme-toggle__pill { position: absolute; inset: 0; border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
 .theme-toggle__text { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
 
-/* Cartes (map.tsx). Les styles de Leaflet arrivent hors des couches du kit et passent donc
-   avant elles : ce qui doit changer chez eux est marqué !important. */
+/* Cartes (map.tsx). Les styles de Leaflet sont rangés dans la couche components.vendor
+   (lazy/map-view.css), sous celles du kit : le kit les règle sans. */
 .map { display: grid; gap: 6px; }
-.map-view { position: relative; z-index: 0; width: 100%; overflow: hidden; border-radius: var(--radius); background: var(--surface-2) !important; font: inherit !important; }
+.map-view { position: relative; z-index: 0; width: 100%; overflow: hidden; border-radius: var(--radius); background: var(--surface-2); font: inherit; }
 .map-view--loading { display: grid; place-items: center; color: var(--muted); font-size: 0.875rem; }
-.map-view .leaflet-control-attribution { font-size: 10px !important; background: color-mix(in srgb, var(--surface) 80%, transparent) !important; color: var(--muted) !important; }
-.map-view .leaflet-control-attribution a { color: var(--accent-ink) !important; }
-.map-view .leaflet-popup-content-wrapper, .map-view .leaflet-popup-tip { background: var(--surface) !important; color: var(--ink) !important; box-shadow: var(--shadow) !important; }
-.map-view .leaflet-popup-content { margin: 10px 14px !important; font-size: 0.875rem !important; line-height: 1.4 !important; }
-.map-view .leaflet-bar { border: 1px solid var(--line) !important; box-shadow: var(--shadow) !important; }
-.map-view .leaflet-bar a { width: 40px !important; height: 40px !important; line-height: 40px !important; font-size: 20px !important; background: var(--surface) !important; color: var(--ink) !important; border-color: var(--line) !important; }
+.map-view .leaflet-control-attribution { font-size: 10px; background: color-mix(in srgb, var(--surface) 80%, transparent); color: var(--muted); }
+.map-view .leaflet-control-attribution a { color: var(--accent-ink); }
+.map-view .leaflet-popup-content-wrapper, .map-view .leaflet-popup-tip { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.map-view .leaflet-popup-content { margin: 10px 14px; font-size: 0.875rem; line-height: 1.4; }
+.map-view .leaflet-bar { border: 1px solid var(--line); box-shadow: var(--shadow); }
+.map-view .leaflet-bar a { width: 40px; height: 40px; line-height: 40px; font-size: 20px; background: var(--surface); color: var(--ink); border-color: var(--line); }
 .map-route { stroke: var(--accent); }
 .map-pin { background: none; border: 0; }
 .map-pin i { display: block; width: 28px; height: 28px; border: 3px solid #fff; border-radius: 50% 50% 50% 0; background: var(--accent); box-shadow: 0 2px 6px rgb(0 0 0 / 0.35); transform: rotate(-45deg); }
@@ -1279,7 +1279,6 @@ mark { padding: 0 1px; border-radius: 3px; background: color-mix(in srgb, #f2c94
 @media (prefers-color-scheme: dark) { :where(:root:not([data-theme="light"])) .map-view .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.9) contrast(0.9); } }
 .map__offline { margin: 0; color: var(--warn); font-size: 0.875rem; }
 .locate { display: inline-grid; gap: 4px; }
-.locate .btn { display: inline-flex; align-items: center; gap: 6px; }
 .locate__error { color: var(--error); }
 .place-search { display: grid; gap: 8px; }
 .place-search__row { display: flex; gap: 8px; min-width: 0; }
@@ -1296,10 +1295,8 @@ mark { padding: 0 1px; border-radius: 3px; background: color-mix(in srgb, #f2c94
 .qr__code { padding: 8px; border-radius: var(--radius-sm); background: #fff; box-shadow: var(--shadow); }
 .qr__code svg { display: block; width: 100%; height: 100%; }
 .qr figcaption { color: var(--muted); font-size: 0.875rem; overflow-wrap: anywhere; }
-.qr .btn { display: inline-flex; align-items: center; gap: 6px; }
 .qr__error, .qr-scan__error { margin: 0; color: var(--error); font-size: 0.875rem; }
 .qr-scan { display: grid; gap: 10px; }
-.qr-scan .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
 .qr-scan__file { cursor: pointer; }
 .qr-scan__view { position: relative; overflow: hidden; aspect-ratio: 3 / 4; max-height: 70vh; border-radius: var(--radius); background: #000; }
 .qr-scan__video { width: 100%; height: 100%; object-fit: cover; }
@@ -1333,7 +1330,6 @@ mark { padding: 0 1px; border-radius: 3px; background: color-mix(in srgb, #f2c94
 .note-editor__page p.is-editor-empty:first-child::before { content: attr(data-placeholder); float: left; height: 0; color: var(--faint); pointer-events: none; }
 .notes { display: grid; gap: 12px; }
 .notes__top { display: flex; flex-wrap: wrap; gap: 8px; }
-.notes__top .btn { display: inline-flex; align-items: center; gap: 6px; }
 .notes__search { display: flex; flex: 1 1 180px; align-items: center; gap: 8px; min-height: 48px; padding: 0 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--field); color: var(--muted); }
 .notes__search input { flex: 1; min-width: 0; border: 0; background: none; color: var(--ink); font: inherit; outline: none; }
 .notes__list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }

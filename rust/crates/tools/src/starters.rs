@@ -63,6 +63,7 @@ const REACT_APP: &[(&str, &str)] = files!("react-app":
     "src/kit/icons.tsx",
     "src/kit/index.ts",
     "src/kit/layout.tsx",
+    "src/kit/lazy/map-view.css",
     "src/kit/lazy/map-view.tsx",
     "src/kit/lazy/note-editor.tsx",
     "src/kit/life.tsx",

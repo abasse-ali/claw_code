@@ -2,7 +2,7 @@
 // une MapView s'affiche : une appli sans carte ne la télécharge pas. Passez par MapView.
 
 import L from "leaflet";
-import "leaflet/dist/leaflet.css";
+import "./map-view.css";
 import { useEffect, useRef } from "react";
 import type { MapViewProps } from "../map";
 

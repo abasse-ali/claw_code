@@ -10,7 +10,12 @@
 //! juge lui-même et perd de vue la demande. Le déroulé coûte des requêtes
 //! (une dizaine par agent) : il s'active à la demande, pour la session
 //! (`/think ultracode`, `"ultracode": true`, `CLAW_ULTRACODE=1`) ou pour un
-//! seul message qui contient le mot « ultracode ».
+//! seul message qui contient le mot « ultracode » ; et de lui-même quand
+//! l'utilisateur signale de nouveau un problème que l'agent disait réglé
+//! (« c'est toujours là », « tu mens », « still broken ») : vu le 31 octobre
+//! 2026 (session #46 de Claw Web), trois « corrigé et vérifié » de suite
+//! pour un bogue toujours là, et des tests qui ne tournaient même pas
+//! (`vitest: not found`).
 
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,6 +61,89 @@ pub fn substantive(request: &str) -> bool {
     request.split_whitespace().count() >= SUBSTANTIVE_MIN_WORDS
 }
 
+/// Ce que dit un utilisateur dont le problème n'est pas réglé, minuscules et
+/// sans accents.
+const RELAPSE_PHRASES: &[&str] = &[
+    "toujours present",
+    "toujours la",
+    "toujours le meme",
+    "toujours la meme",
+    "toujours pas",
+    "toujours horrible",
+    "toujours casse",
+    "toujours cassee",
+    "toujours en double",
+    "c'est toujours",
+    "ca ne marche toujours",
+    "ne marche toujours",
+    "ne fonctionne toujours",
+    "encore la",
+    "encore le meme",
+    "encore la meme",
+    "encore casse",
+    "ca recommence",
+    "rien n'a change",
+    "rien a change",
+    "pas corrige",
+    "pas regle",
+    "n'est pas corrige",
+    "n'est pas regle",
+    "tu mens",
+    "vous mentez",
+    "mensonge",
+    "meme probleme",
+    "meme bug",
+    "meme erreur",
+    "pourquoi tu ne corriges",
+    "tu n'as pas corrige",
+    "still there",
+    "still broken",
+    "still happening",
+    "still not",
+    "still the same",
+    "not fixed",
+    "same problem",
+    "same bug",
+    "same error",
+    "you lied",
+    "nothing changed",
+    "happens again",
+];
+
+fn folded(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'à' | 'â' | 'ä' => 'a',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'î' | 'ï' => 'i',
+            'ô' | 'ö' => 'o',
+            'ù' | 'û' | 'ü' => 'u',
+            'ç' => 'c',
+            '\u{2019}' => '\'',
+            other => other,
+        })
+        .collect()
+}
+
+/// L'utilisateur dit que le problème est toujours là (ou revenu) après une
+/// correction annoncée.
+#[must_use]
+pub fn relapse(text: &str) -> bool {
+    let text = folded(text);
+    RELAPSE_PHRASES.iter().any(|phrase| text.contains(phrase))
+}
+
+/// Ultracode s'active de lui-même sur une rechute (`CLAW_ULTRACODE_RELAPSE=0`
+/// le coupe ; `CLAW_ULTRACODE=0` coupe tout ultracode).
+#[must_use]
+pub fn relapse_escalation(text: &str, earlier_turn: bool) -> bool {
+    earlier_turn
+        && harness::enabled(Aid::Ultracode)
+        && std::env::var("CLAW_ULTRACODE_RELAPSE").map_or(true, |value| value.trim() != "0")
+        && relapse(text)
+}
+
 /// Vérifications indépendantes au plus par tour (la première, puis une après
 /// chaque correction demandée).
 pub const MAX_VERIFY_RUNS: usize = 3;
@@ -90,12 +178,59 @@ fn request_section(request: &str, earlier: Option<&str>) -> String {
     section
 }
 
+/// Ce que les agents du déroulé savent de la conversation : les messages
+/// précédents de l'utilisateur et la dernière réponse de l'agent. Sans eux,
+/// « c'est toujours là » ne dit ni quoi, ni ce que l'agent prétendait.
+#[derive(Debug, Clone, Default)]
+pub struct Context<'a> {
+    pub earlier: Option<&'a str>,
+    /// Messages précédents de l'utilisateur, du plus ancien au plus récent.
+    pub history: &'a [String],
+    /// La dernière réponse de l'agent avant ce message.
+    pub last_answer: Option<&'a str>,
+    /// L'utilisateur signale un problème (ou une rechute).
+    pub problem: bool,
+    /// L'utilisateur dit que le problème est toujours là après une correction annoncée.
+    pub relapse: bool,
+}
+
+fn history_section(context: &Context) -> String {
+    let mut section = String::new();
+    if !context.history.is_empty() {
+        section.push_str("\nThe user's earlier messages in this conversation, oldest first:\n");
+        for message in context.history {
+            let _ = writeln!(section, "- {}", shortened(message, 700).replace('\n', " "));
+        }
+    }
+    if let Some(answer) = context
+        .last_answer
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        let _ = write!(
+            section,
+            "\nThe agent's previous answer to the user (what it claimed it had done):\n{}\n",
+            shortened(answer, 1_500)
+        );
+    }
+    if context.relapse {
+        section.push_str("\nThe user now says the problem is still there: the earlier fix did not work, whatever the previous answer claimed. Assume the previous diagnosis was wrong or incomplete.\n");
+    }
+    section
+}
+
 /// Mission de l'agent d'exploration (outils en lecture seule, contexte vierge).
 #[must_use]
-pub fn explore_prompt(request: &str, earlier: Option<&str>) -> String {
+pub fn explore_prompt(request: &str, context: &Context) -> String {
+    let problem = if context.problem {
+        "\n7. Reproduction: the user reports a problem. Give the exact steps that show the symptom (commands to run, or what to do in the app, screen by screen, including reloading the page or changing month when the data is kept), what should be seen instead, and ranked hypotheses for the cause, each with the code (file:line) that supports it. Look for every place that produces the symptom, not only the first one."
+    } else {
+        ""
+    };
     format!(
-        "You prepare the ground for a coding agent that will carry out the request below in this workspace. You have a clean context and read-only tools. Do not solve the task and do not write the code: investigate, so that the agent starts with an accurate map.\n\n{}\nWrite a preparation brief with these parts:\n1. Goal: the request restated in one or two sentences.\n2. Requirements: a numbered list (R1, R2, ...) of every part of the request (each feature, page, file, fix, question or explanation asked for), then what it implies without saying it (edge cases, error handling, compatibility, tests, documentation). Mark assumptions as assumptions.\n3. Relevant code: the files, functions and line numbers involved, how they work today, who calls them and which tests cover them. Quote short excerpts when they matter.\n4. Conventions and commands: language, framework, style, and the exact build, type-check and test commands of this project (from its manifests, README or CI).\n5. Risks: what could break, tricky cases, pitfalls you noticed.\n6. Plan: ordered steps, each with how to verify it (an exact command or check).\nOnly state what you checked in the files; say what you could not find. Stay under 900 words.",
-        request_section(request, earlier)
+        "You prepare the ground for a coding agent that will carry out the request below in this workspace. You have a clean context and read-only tools. Do not solve the task and do not write the code: investigate, so that the agent starts with an accurate map.\n\n{}{}\nWrite a preparation brief with these parts:\n1. Goal: the request restated in one or two sentences.\n2. Requirements: a numbered list (R1, R2, ...) of every part of the request (each feature, page, file, fix, question or explanation asked for), then what it implies without saying it (edge cases, error handling, compatibility, tests, documentation). Mark assumptions as assumptions.\n3. Relevant code: the files, functions and line numbers involved, how they work today, who calls them and which tests cover them. Quote short excerpts when they matter.\n4. Conventions and commands: language, framework, style, and the exact build, type-check and test commands of this project (from its manifests, README or CI).\n5. Risks: what could break, tricky cases, pitfalls you noticed.\n6. Plan: ordered steps, each with how to verify it (an exact command or check). If a needed tool is not installed (no node_modules, no virtual environment), the first step installs it with the project's own command.{problem}\nOnly state what you checked in the files; say what you could not find. Stay under 900 words.",
+        request_section(request, context.earlier),
+        history_section(context),
     )
 }
 
@@ -139,19 +274,31 @@ const VERDICT_RULES: &str = "Report one line per requirement: `PASS`, `FAIL` or 
 #[must_use]
 pub fn verify_prompt(
     request: &str,
-    earlier: Option<&str>,
+    context: &Context,
     brief: Option<&str>,
     diffs: &[String],
     answer: &str,
+    interface: bool,
 ) -> String {
+    let interface = if interface {
+        " The changes touch a web page or app: build it if it has a build step, then open it with the Browser tool and use it as the user would (the screens, the buttons and forms the request is about, a reload to check what is kept, changing month or screen and coming back). Reading the code is not enough for an interface."
+    } else {
+        ""
+    };
+    let problem = if context.problem {
+        " The user reported a problem: the first requirement is that the symptom they describe no longer happens. Reproduce their scenario for real, the way they would meet it, and watch for the symptom. If you cannot make the scenario run, that requirement is FAIL, not UNVERIFIED: a fix nobody saw working is not a fix. Look also for other code paths that produce the same symptom."
+    } else {
+        ""
+    };
     let mut changes = diffs.join("\n");
     if changes.chars().count() > MAX_DIFF_CHARS {
         changes = changes.chars().take(MAX_DIFF_CHARS).collect::<String>()
             + "\n… (diff shortened: read the files)";
     }
     format!(
-        "You are an independent verifier with a clean context. A coding agent says it has completed the request below. You did not write this code: your job is to find what is wrong or missing, not to approve it. Do not modify any file; you may run commands that only read or test (test suites, type checkers, builds, small scripts that exercise the code).\n\n{}{}\nChanges the agent made during this turn (unified diff):\n{changes}\n{}\nSteps:\n1. List the requirements: those of the brief if there is one, completed by anything else the request asks for.\n2. For each requirement, read the code that implements it (the changed files in full when needed) and decide whether it really does what is asked, including the edge cases it implies.\n3. Run the project's tests, type checker or build, and exercise the changed behaviour with real inputs when you can.\n4. Check every claim of the agent's final answer against the files and your command outputs: a feature, file, test or result it mentions must exist.\n\n{VERDICT_RULES}",
-        request_section(request, earlier),
+        "You are an independent verifier with a clean context. A coding agent says it has completed the request below. You did not write this code: your job is to find what is wrong or missing, not to approve it. Do not modify the project's source files; you may run commands that read, build or test (test suites, type checkers, builds, installing the project's declared dependencies, small scripts that exercise the code).\n\n{}{}{}\nChanges the agent made during this turn (unified diff):\n{changes}\n{}\nSteps:\n1. List the requirements: those of the brief if there is one, completed by anything else the request asks for.\n2. For each requirement, read the code that implements it (the changed files in full when needed) and decide whether it really does what is asked, including the edge cases it implies.\n3. Run the project's tests, type checker or build, and exercise the changed behaviour with real inputs. A command that fails because a tool is missing (`not found`, no node_modules) proves nothing: install with the project's own command (npm install, pip install -r requirements.txt) and run it again.{interface}{problem}\n4. Check every claim of the agent's final answer against the files and your command outputs: a feature, file, test or result it mentions must exist, and a claim that something was tested or verified needs a command that really ran.\n\n{VERDICT_RULES}",
+        request_section(request, context.earlier),
+        history_section(context),
         brief_section(brief),
         answer_section(answer),
     )
@@ -162,13 +309,14 @@ pub fn verify_prompt(
 #[must_use]
 pub fn fact_check_prompt(
     request: &str,
-    earlier: Option<&str>,
+    context: &Context,
     brief: Option<&str>,
     answer: &str,
 ) -> String {
     format!(
-        "You are an independent verifier with a clean context. An agent answered the request below without changing any file. Your job is to find what is wrong, unsupported or missing in its answer, not to approve it. Do not modify any file.\n\n{}{}{}\nSteps:\n1. List what the request asks for (each question, analysis or explanation): these are the requirements.\n2. Check every factual claim of the answer about this project (files, functions, behaviour, numbers, commands) by reading the code or running read-only commands.\n3. Note what the answer leaves out that the request needs, and any recommendation that rests on a wrong fact.\n\n{VERDICT_RULES}",
-        request_section(request, earlier),
+        "You are an independent verifier with a clean context. An agent answered the request below without changing any file. Your job is to find what is wrong, unsupported or missing in its answer, not to approve it. Do not modify any file.\n\n{}{}{}{}\nSteps:\n1. List what the request asks for (each question, analysis or explanation): these are the requirements.\n2. Check every factual claim of the answer about this project (files, functions, behaviour, numbers, commands) by reading the code or running read-only commands.\n3. Note what the answer leaves out that the request needs, and any recommendation that rests on a wrong fact.\n\n{VERDICT_RULES}",
+        request_section(request, context.earlier),
+        history_section(context),
         brief_section(brief),
         answer_section(answer),
     )
@@ -225,6 +373,19 @@ pub fn verify_feedback(report: &str, changed_files: bool) -> String {
     )
 }
 
+/// Dernière vérification encore en échec : l'agent ne doit pas annoncer un
+/// travail réglé ou vérifié. Il dit à l'utilisateur ce qui marche, ce qui
+/// reste en échec et ce qu'il essaierait ensuite. Avant, Claw ne le notait
+/// que dans la progression, et la réponse pouvait dire « corrigé et vérifié ».
+#[must_use]
+pub fn unresolved_feedback(report: &str) -> String {
+    format!(
+        "[Claw] Ultracode: after {MAX_VERIFY_RUNS} rounds, the independent verifier still reports these problems:\n{}\n\nFix what you still can now and check it by running it. Then write your final answer without saying the work is fixed, done or verified where the verifier disagrees: tell the user plainly what works (with what you ran to see it), what still fails or could not be checked, and what you would try next. {}",
+        shortened(report, MAX_FEEDBACK_CHARS),
+        harness::FINAL_ANSWER_RULE
+    )
+}
+
 /// Arguments de l'outil `Agent` pour une étape du déroulé ; `model` : celui
 /// que le mode équipe choisit pour ce rôle.
 #[must_use]
@@ -260,8 +421,9 @@ pub fn agent_report(output: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_report, brief_block, explore_prompt, keyword_in, substantive, verdict,
-        verify_feedback, verify_prompt, Verdict, BRIEF_PREFIX,
+        agent_report, brief_block, explore_prompt, fact_check_prompt, keyword_in, relapse,
+        substantive, unresolved_feedback, verdict, verify_feedback, verify_prompt, Context,
+        Verdict, BRIEF_PREFIX,
     };
 
     #[test]
@@ -291,16 +453,23 @@ mod tests {
 
     #[test]
     fn the_agents_get_everything_they_need_and_the_brief_is_not_a_claw_note() {
-        let explore = explore_prompt("Ajoute la page de traduction", Some("Traduis des images"));
+        let explore = explore_prompt(
+            "Ajoute la page de traduction",
+            &Context {
+                earlier: Some("Traduis des images"),
+                ..Context::default()
+            },
+        );
         assert!(explore.contains("Do not solve the task"));
         assert!(explore.contains("Requirements: a numbered list (R1, R2, ...)"));
         assert!(explore.contains("Earlier request in the same conversation"));
         let verify = verify_prompt(
             "Ajoute la page",
-            None,
+            &Context::default(),
             Some("R1 la page"),
             &["--- a/x\n+++ b/x\n+page".to_string()],
             "Fait : la page est en place.",
+            false,
         );
         assert!(verify.contains("You did not write this code"));
         assert!(verify.contains("R1 la page"));
@@ -325,5 +494,77 @@ mod tests {
         );
         assert_eq!(agent_report(r#"{"status":"failed","result":null}"#), None);
         assert_eq!(agent_report("pas du JSON"), None);
+    }
+
+    #[test]
+    fn a_problem_said_to_be_still_there_is_a_relapse() {
+        // Les messages de la session #46 de Claw Web (31 octobre 2026).
+        assert!(relapse("Tu mens c'est toujours persent"));
+        assert!(relapse("Toujours horrible pourquoi tu ne corriges pas"));
+        assert!(relapse("Les rentrées sont TOUJOURS en double"));
+        assert!(relapse("ça ne marche toujours pas"));
+        assert!(relapse("Rien n'a changé"));
+        assert!(relapse("It's still broken after your fix"));
+        // Une demande nouvelle, ou « toujours » dans un autre sens, n'en est pas une.
+        assert!(!relapse("Ajoute un graphique des dépenses"));
+        assert!(!relapse("Garde toujours le mois choisi"));
+        assert!(!relapse("Corrige le bug du calendrier"));
+    }
+
+    #[test]
+    fn a_relapse_brings_the_history_and_a_real_reproduction() {
+        let history = vec![
+            "Les rentrées de chaque mois se rajoutent quand je change de mois".to_string(),
+            "Tu mens c'est toujours persent".to_string(),
+        ];
+        let context = Context {
+            earlier: None,
+            history: &history,
+            last_answer: Some("Correction du bug de duplication effectuée et vérifiée."),
+            problem: true,
+            relapse: true,
+        };
+        let explore = explore_prompt("Toujours horrible pourquoi tu ne corriges pas", &context);
+        assert!(explore.contains("se rajoutent quand je change de mois"));
+        assert!(explore.contains("effectuée et vérifiée"));
+        assert!(explore.contains("the earlier fix did not work"));
+        assert!(explore.contains("7. Reproduction"));
+        let verify = verify_prompt(
+            "Toujours horrible pourquoi tu ne corriges pas",
+            &context,
+            None,
+            &["+fix".to_string()],
+            "C'est corrigé.",
+            true,
+        );
+        // Le symptôme doit être vu disparaître, dans l'appli elle-même.
+        assert!(verify.contains("that requirement is FAIL, not UNVERIFIED"));
+        assert!(verify.contains("open it with the Browser tool"));
+        assert!(verify.contains("a reload to check what is kept"));
+        // Un outil absent ne prouve rien (`vitest: not found`).
+        assert!(verify.contains("A command that fails because a tool is missing"));
+        assert!(verify.contains("se rajoutent quand je change de mois"));
+        // Une demande ordinaire ne reçoit ni l'un ni l'autre.
+        let plain = verify_prompt(
+            "Ajoute la page",
+            &Context::default(),
+            None,
+            &[],
+            "Fait.",
+            false,
+        );
+        assert!(!plain.contains("Browser tool"));
+        assert!(!plain.contains("The user reported a problem"));
+        let check = fact_check_prompt("Explique le calcul", &context, None, "Le calcul est juste.");
+        assert!(check.contains("se rajoutent quand je change de mois"));
+    }
+
+    #[test]
+    fn an_unresolved_verdict_forbids_claiming_the_work_is_done() {
+        let feedback = unresolved_feedback("R1 FAIL - toujours en double\nVERDICT: FAIL");
+        assert!(feedback.starts_with("[Claw] Ultracode: after 3 rounds"));
+        assert!(feedback.contains("toujours en double"));
+        assert!(feedback.contains("without saying the work is fixed, done or verified"));
+        assert!(feedback.contains("what still fails"));
     }
 }
