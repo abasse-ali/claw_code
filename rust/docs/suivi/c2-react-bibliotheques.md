@@ -200,3 +200,32 @@ mois, « Tu mens c'est toujours présent »), l'import du relevé, le classement
 - Vérifié : 3 allers-retours entre les mois et 3 rechargements donnent une seule opération par
   mois ; deux relevés qui se chevauchent, rien en double ; essai de bout en bout du projet React
   dans un vrai navigateur.
+
+## Kit : effets, nouveaux widgets et serveurs branchés (31 octobre 2026)
+
+Demande : « Continue à trouver tous les widgets et animations pour le kit et ajoute tous ça au
+kit : React TypeScript Tailwind CSS Vite Framer Motion Node.js Express Python MySQL Redis
+Socket.IO Rust WebAssembly ».
+
+- `kit/fx.tsx` (Framer Motion) : Typewriter, Marquee, Tilt, RippleButton, ShineText,
+  FlipNumber, CountUp, Parallax, Float, Flash, SwipeDeck, SlideView, ScrollProgress. Tous
+  s'arrêtent quand le téléphone demande moins de mouvement.
+- `kit/plus.tsx` : Drawer, Popover (classe `bubble`, `popover` étant celle des menus radix),
+  NumberPad, TimePicker, Kanban, Agenda, Gauge, GoalCard, PullToRefresh, LoadMore,
+  Pagination, Breadcrumbs, Lightbox, SignaturePad, OfflineBanner/useOnline, SafeArea,
+  IconBadge ; et les branchements useApi/sendApi (Express, FastAPI), useLive (Socket.IO,
+  `socket.io-client` ajouté à l'appli), useWasm.
+- `node-api` : les données dans un fichier JSON, MySQL (`DATABASE_URL`, mysql2) ou Redis
+  (`REDIS_URL`, ioredis) ; les méthodes du magasin rendent des promesses ; une base injoignable
+  donne une erreur 503 claire, ou un arrêt clair au démarrage.
+- `python-api` : JSON, base SQL par SQLAlchemy (MySQL par PyMySQL, ou SQLite), ou Redis.
+- Nouveau projet de départ `rust-wasm` : l'appli React plus `wasm/` (crate Rust sans
+  wasm-bindgen, fonctions `extern "C"` sur des nombres), compilée en `public/calc.wasm` par
+  `scripts/wasm.mjs` avant chaque construction (sans dossier `wasm/`, ce script ne fait rien).
+
+Vérifié : galerie au téléphone (390 et 360 px, clair et sombre), sans débordement de page ;
+pavé numérique, Kanban, panneau, visionneuse, bandeau hors ligne, SafeArea et module Rust
+essayés dans Chromium. Serveur Node : 5 tests avec un vrai Redis et un vrai MariaDB (MySQL),
+données gardées après redémarrage. Serveur Python : 6 tests (SQLite, Redis, MariaDB). GitHub
+Pages ne publie que des pages : une appli publiée y garde ses données sur le téléphone, les
+serveurs demandent un hébergeur (Render, Railway, Fly.io…).

@@ -63,6 +63,30 @@
 //            Courses ; ce que l'utilisateur a choisi d'abord), recategorize(opération, catégorie)
 //            (la retient), MoneyCalendar (les jours de rentrée et de dépense du mois, un jour
 //            touché montre ses opérations). N'écrivez jamais ces choses vous-même.
+// Effets   (fx.tsx) Typewriter (text : s'écrit lettre à lettre), Marquee (items, label : un
+//            bandeau qui défile), Tilt (carte qui s'incline sous le doigt), RippleButton (une
+//            onde au toucher), ShineText (un reflet passe sur un titre), FlipNumber (value : les
+//            chiffres tournent), CountUp (to : compte jusqu'au chiffre), Parallax, Float (flotte
+//            doucement), Flash (value : un éclat quand elle change), SwipeDeck (items, render,
+//            onSwipe(item, "yes" | "no") : des cartes à trier à droite ou à gauche), SlideView
+//            (page, back : l'écran suivant glisse), ScrollProgress (barre de lecture en haut).
+// Encore     (plus.tsx) Drawer (open, onClose, title, side : panneau latéral), Popover (trigger,
+//            label : une bulle d'options), NumberPad (value, onChange : clavier de montant) et
+//            padAmount(value), TimePicker (heure « 08:30 »), Kanban (columns, cards, onMove :
+//            tâches en colonnes), Agenda (items { id, date, time, title } : groupés par jour),
+//            Gauge (value 0..1, label : jauge en demi-cercle), GoalCard (title, saved, target,
+//            until « 2027-06 » : objectif d'épargne, combien par mois), PullToRefresh
+//            (onRefresh), LoadMore (items, render : « Voir plus »), Pagination (page, pages,
+//            onPage), Breadcrumbs (items), Lightbox (photos { src, alt } : vignettes ouvertes en
+//            grand), SignaturePad (onChange(image)), useOnline() et OfflineBanner (réseau perdu),
+//            SafeArea (une partie qui plante n'emporte pas l'écran : « Réessayer »), IconBadge
+//            (icon, count, label : cloche à pastille).
+// Serveur    useApi(url) → { data, loading, error, reload } et sendApi(url, "POST", corps) pour
+//            l'API Express ou FastAPI des projets node-api et python-api ; useLive(url, event,
+//            initial) → { value, connected, emit } pour le temps réel Socket.IO ; useWasm()
+//            → { exports, error } pour le module Rust en WebAssembly du projet rust-wasm. Une
+//            appli publiée sur GitHub Pages n'a pas de serveur : useApi et useLive y affichent
+//            leur erreur claire, les données restent sur le téléphone (useEntries).
 // Graphiques BarChart (labels, series [{ name, tone, values }]), MonthsChart (months) ; recharts
 //            pour le reste.
 // Messages   toast(message, { tone: "error", action: { label, run } }).
@@ -87,12 +111,14 @@ export * from "./entries";
 export * from "./extras";
 export * from "./format";
 export * from "./forms";
+export * from "./fx";
 export * from "./icons";
 export * from "./layout";
 export * from "./money";
 export * from "./more";
 export * from "./motion";
 export * from "./offline";
+export * from "./plus";
 export * from "./settings";
 export * from "./sheet";
 export * from "./store";

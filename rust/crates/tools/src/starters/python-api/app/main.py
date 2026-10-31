@@ -1,13 +1,12 @@
 """L'API du serveur (FastAPI) et son temps réel (WebSocket /ws) : chaque changement est envoyé
-à tous les clients connectés. Lancement : uvicorn app.main:app --reload"""
-
-import os
+à tous les clients connectés. Les données : app/store.py (fichier JSON, MySQL ou SQLite avec
+DATABASE_URL, Redis avec REDIS_URL). Lancement : uvicorn app.main:app --reload"""
 
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from .store import Store
+from .store import Store, open_store
 
 
 class NewItem(BaseModel):
@@ -20,7 +19,7 @@ class ItemChange(BaseModel):
 
 
 def create_app(store: Store | None = None) -> FastAPI:
-    store = store if store is not None else Store(os.environ.get("DATA_FILE", "data/items.json"))
+    store = store if store is not None else open_store()
     app = FastAPI(title="Serveur")
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
     clients: set[WebSocket] = set()
