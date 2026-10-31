@@ -4,7 +4,8 @@
 //
 // Cadre      AppShell (bar, tabs, onAdd, addLabel ; enfants : des Screen, écrits là ou dans vos
 //            composants ; sur un ordinateur, les onglets passent dans une colonne à gauche et les
-//            cartes côte à côte), Screen (id, title, onAdd : le bouton + quand cet écran est ouvert),
+//            cartes côte à côte ; au téléphone, au-delà de 4 onglets, les suivants passent dans
+//            « Plus »), Screen (id, title, onAdd : le bouton + quand cet écran est ouvert),
 //            MonthBar (mois affiché), AppBar (title), IconButton (icon, label, onClick | href),
 //            useScreen() → [écran ouvert, go("id")].
 // Blocs      Hero (label, amount | value, sub, pills [{ label, value, note }], progress
@@ -63,6 +64,50 @@
 //            Courses ; ce que l'utilisateur a choisi d'abord), recategorize(opération, catégorie)
 //            (la retient), MoneyCalendar (les jours de rentrée et de dépense du mois, un jour
 //            touché montre ses opérations). N'écrivez jamais ces choses vous-même.
+// Cartes     (map.tsx) MapView (center { lat, lng }, markers { id, lat, lng, label, note,
+//            tone }, route, onPick(lieu), onMarker(id), label : une carte OpenStreetMap avec ses
+//            épingles et un trajet), useGeolocation() → { position, error, locate() },
+//            LocateButton (onLocate), PlaceSearch (onPick : chercher une adresse),
+//            searchPlace(texte), distanceKm(a, b), formatDistance(km) « 2,4 km ». Leaflet n'est
+//            téléchargé qu'au premier affichage d'une carte ; hors ligne, la carte le dit.
+// Codes QR   (qr.tsx) QRCode (value, label : un code QR et « Enregistrer l'image »), QRScanner
+//            (onScan(texte) : lire avec l'appareil photo, ou depuis une photo).
+// Notes      (notes.tsx) NoteEditor (value, onChange : texte mis en forme en HTML, barre Titre,
+//            Gras, listes, liste à cocher, Annuler), useNotes (notes gardées : add, update,
+//            togglePin, remove → annuler), NotesList (onOpen(id) : recherche, épinglées en
+//            haut, supprimer avec Annuler), noteText(html), noteTitle(html).
+// Boutique (social.tsx) PriceTag (price, was : prix barré et remise), ProductCard (name, image,
+//            price, rating, quantity, onChange : Ajouter puis − et +), CartSummary (lines,
+//            delivery, freeFrom, onCheckout : le panier et son total).
+// Réseau     (social.tsx) PostCard (author, time, text, image, likes, liked, onLike : une
+//            publication), CommentList (comments, onSend), ProfileHeader (name, bio, stats,
+//            action), FollowButton, NotificationList (items, onRead, onReadAll : non lues en
+//            avant).
+// Médias     (life.tsx) AudioPlayer (src, title : lecture, pause, position), VideoPlayer,
+//            ImageCompare (before, after : avant/après à faire glisser).
+// Santé      (life.tsx) ActivityRings (rings { label, value 0..1 } : anneaux l'un dans
+//            l'autre), MoodPicker (value 1..5, onChange : l'humeur du jour) et moodOf(note).
+// École, jeu (life.tsx) Quiz (questions { question, options, answer, why } : réponse en vert
+//            ou rouge, score), SpinWheel (items, onResult : roue de la chance).
+// Journée    (life.tsx) DaySchedule (slots { start "09:00", end, title }, from, to, now :
+//            planning heure par heure), AnalogClock (zone, label : horloge à aiguilles).
+// Écrans     (life.tsx) StackView (pages { nom: (page) => écran }, first : des écrans qui
+//            s'empilent dans un onglet, avec le retour du téléphone), useStack() → push("nom:id"),
+//            back(), BackBar (title : flèche retour et titre), SlideToConfirm (label, onConfirm :
+//            glisser pour payer ou envoyer), ScrollTopButton, ThemeToggle (clair, sombre, auto,
+//            retenu), PhoneField (06 12 34 56 78).
+// Animations+ (anim.tsx) TextReveal (text : les mots apparaissent un à un), ScrambleText (text :
+//            les lettres se mélangent puis se posent), Aurora (un fond aux couleurs qui bougent,
+//            ses enfants devant), GlowCard (une lumière suit le doigt), Magnetic (un bouton
+//            attiré par le doigt), Wiggle (active, every : se secoue pour être remarqué),
+//            ExpandCard (children, detail, label : la carte s'agrandit en plein écran),
+//            AnimatedList (items, itemKey, render : des blocs faits à la main qui arrivent,
+//            partent et se replacent ; pour des Row, List le fait déjà), LoadingBar (active : barre de chargement en haut), Twinkle (étoiles qui
+//            scintillent autour), Breathe (inhale, hold, exhale : cercle de respiration),
+//            TypingDots (« en train d'écrire »), LiquidFill (value 0..1 : un verre qui se
+//            remplit), DrawPath (d : un trait qui se dessine), Particles (kind "snow" | "hearts"
+//            | "leaves" | "confetti" : qui tombent sur l'écran), Bump (value : grossit, vert ou
+//            rouge, quand le nombre change).
 // Effets   (fx.tsx) Typewriter (text : s'écrit lettre à lettre), Marquee (items, label : un
 //            bandeau qui défile), Tilt (carte qui s'incline sous le doigt), RippleButton (une
 //            onde au toucher), ShineText (un reflet passe sur un titre), FlipNumber (value : les
@@ -116,8 +161,11 @@
 // Aussi installés, à importer directement : framer-motion (mouvements, motion.div), recharts
 // (courbes, camemberts), date-fns et date-fns/locale/fr (dates), zod (vérifier une saisie),
 // radix-ui (menus, onglets, curseurs, infobulles accessibles, à habiller avec Tailwind),
-// canvas-confetti (célébrer un objectif atteint), clsx (classes conditionnelles).
+// canvas-confetti (célébrer un objectif atteint), clsx (classes conditionnelles), leaflet (cartes,
+// déjà dans MapView), qrcode et jsqr (déjà dans QRCode et QRScanner), Tiptap (texte mis en
+// forme, déjà dans NoteEditor).
 
+export * from "./anim";
 export * from "./blocks";
 export * from "./chart";
 export * from "./csv";
@@ -128,13 +176,18 @@ export * from "./forms";
 export * from "./fx";
 export * from "./icons";
 export * from "./layout";
+export * from "./life";
+export * from "./map";
 export * from "./money";
 export * from "./more";
 export * from "./motion";
+export * from "./notes";
 export * from "./offline";
 export * from "./plus";
+export * from "./qr";
 export * from "./settings";
 export * from "./sheet";
+export * from "./social";
 export * from "./store";
 export * from "./toast";
 export * from "./touch";

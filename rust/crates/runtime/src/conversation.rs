@@ -625,6 +625,14 @@ struct TurnAids {
     ultracode: bool,
     /// Dossier préparé par l'agent d'exploration (ultracode).
     brief: Option<String>,
+    /// L'utilisateur redit qu'un problème annoncé réglé est toujours là :
+    /// ultracode s'active de lui-même pour ce tour.
+    relapse: bool,
+    /// Messages précédents de l'utilisateur dans cette conversation (Claw dans
+    /// le terminal ; Claw Web les joint à la demande).
+    history: Vec<String>,
+    /// La dernière réponse de l'agent avant ce message.
+    last_answer: Option<String>,
     /// Des fichiers ont été modifiés depuis la dernière vérification indépendante.
     workflow_dirty: bool,
     /// Une vérification indépendante a déjà eu lieu pendant ce tour.
@@ -744,6 +752,53 @@ fn earlier_request(messages: &[ConversationMessage], current: &str) -> Option<St
                 .find(|text| text.split_whitespace().count() >= CONTINUATION_MAX_WORDS)
                 .map(|text| crate::compact::clip_request(&text, MAX_EARLIER_REQUEST_CHARS))
         })
+}
+
+/// Messages précédents gardés pour les agents d'ultracode.
+const WORKFLOW_HISTORY_MESSAGES: usize = 6;
+
+/// Les messages précédents de l'utilisateur (ses mots, sans les notes de
+/// Claw ni le dossier d'ultracode), du plus ancien au plus récent, et la
+/// dernière réponse de l'agent.
+fn conversation_context(messages: &[ConversationMessage]) -> (Vec<String>, Option<String>) {
+    let mut history: Vec<String> = messages
+        .iter()
+        .filter(|message| message.role == crate::session::MessageRole::User)
+        .filter_map(|message| match message.blocks.first() {
+            Some(ContentBlock::Text { text }) => {
+                let text = text.trim();
+                let note = text.starts_with(harness::CLAW_NOTE_PREFIX)
+                    || text.starts_with(STOP_HOOK_PREFIX)
+                    || text.starts_with(crate::workflow::BRIEF_PREFIX);
+                let words = crate::project::own_words(text).trim();
+                (!note && !words.is_empty()).then(|| words.to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    let skip = history.len().saturating_sub(WORKFLOW_HISTORY_MESSAGES);
+    history.drain(..skip);
+    let last_answer = messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == crate::session::MessageRole::Assistant)
+        .map(message_text)
+        .find(|text| !text.trim().is_empty());
+    (history, last_answer)
+}
+
+/// Ce que savent les agents d'ultracode de ce tour.
+fn workflow_context<'a>(
+    aids: &'a TurnAids,
+    earlier: Option<&'a str>,
+) -> crate::workflow::Context<'a> {
+    crate::workflow::Context {
+        earlier,
+        history: &aids.history,
+        last_answer: aids.last_answer.as_deref(),
+        problem: aids.report == harness::Report::Problem || aids.relapse,
+        relapse: aids.relapse,
+    }
 }
 
 /// Texte d'un message : ses blocs de texte, à la suite.
@@ -1892,6 +1947,18 @@ where
         let request_text = user_input.clone();
         // « reprendre » : la relecture doit connaître la demande poursuivie.
         let earlier = earlier_request(&self.session.messages, &request_text);
+        // Ce que les agents d'ultracode savent de la conversation, et la
+        // rechute : « c'est toujours là » après une correction annoncée.
+        let (history, last_answer) = conversation_context(&self.session.messages);
+        let relapse = !self.subagent
+            && crate::workflow::relapse_escalation(
+                crate::project::own_words(&request_text),
+                !history.is_empty()
+                    || last_answer.is_some()
+                    || request_text
+                        .lines()
+                        .any(|line| line.trim_end() == "[Your answer]"),
+            );
         let mut user_message = self.user_message_with_hooks(user_input)?;
         let image_count = images.len();
         let guided = !self.subagent && harness::enabled(Aid::ProblemGuide);
@@ -2053,7 +2120,12 @@ where
         let mut superseded_draft: Option<String> = None;
         let team = !self.subagent && crate::team::team();
         let mut aids = TurnAids {
-            ultracode: !self.subagent && !question && crate::workflow::active_for(&request_text),
+            ultracode: !self.subagent
+                && !question
+                && (crate::workflow::active_for(&request_text) || relapse),
+            relapse,
+            history,
+            last_answer,
             team,
             topic: team.then(|| crate::team::topic_of(&request_text)).flatten(),
             report,
@@ -2113,6 +2185,11 @@ where
             ));
         }
         aids.checklisted = aids.ultracode;
+        if aids.relapse && !crate::workflow::active_for(&request_text) {
+            self.api_client.notify(
+                "Ultracode : le problème est signalé de nouveau, la demande est étudiée avant le travail et le résultat vérifié par un agent indépendant",
+            );
+        }
         if aids.ultracode {
             self.explore_stage(&request_text, earlier.as_deref(), &mut aids, &mut prompter);
         }
@@ -5399,13 +5476,14 @@ where
         aids: &mut TurnAids,
         prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) {
-        if !crate::workflow::substantive(request) || interrupt_requested() {
+        // Une rechute (« toujours pas ») est courte mais a toute une histoire.
+        if !(crate::workflow::substantive(request) || aids.relapse) || interrupt_requested() {
             return;
         }
         self.api_client.notify(
             "Ultracode : un agent au contexte vierge étudie la demande et le code avant le travail",
         );
-        let prompt = crate::workflow::explore_prompt(request, earlier);
+        let prompt = crate::workflow::explore_prompt(request, &workflow_context(aids, earlier));
         match self.run_workflow_agent(
             "claw-ultracode-explore".to_string(),
             "Explore",
@@ -5467,9 +5545,26 @@ where
         aids.workflow_checked = true;
         let prompt = if changed {
             let (diffs, _) = Self::turn_diffs(aids);
-            crate::workflow::verify_prompt(request, earlier, aids.brief.as_deref(), &diffs, answer)
+            // Une interface se vérifie en s'en servant, pas seulement en lisant le code.
+            let interface = aids
+                .originals
+                .keys()
+                .any(|path| crate::web_design::is_interface_file(path));
+            crate::workflow::verify_prompt(
+                request,
+                &workflow_context(aids, earlier),
+                aids.brief.as_deref(),
+                &diffs,
+                answer,
+                interface,
+            )
         } else {
-            crate::workflow::fact_check_prompt(request, earlier, aids.brief.as_deref(), answer)
+            crate::workflow::fact_check_prompt(
+                request,
+                &workflow_context(aids, earlier),
+                aids.brief.as_deref(),
+                answer,
+            )
         };
         self.api_client.notify(if changed {
             "Ultracode : un vérificateur indépendant contrôle chaque exigence et lance les tests"
@@ -5511,9 +5606,11 @@ where
                 if aids.workflow_runs >= crate::workflow::MAX_VERIFY_RUNS =>
             {
                 self.api_client.notify(
-                    "Ultracode : le vérificateur signale encore des problèmes après plusieurs corrections : le travail n'est pas validé",
+                    "Ultracode : le vérificateur signale encore des problèmes après plusieurs corrections : le travail n'est pas validé, et la réponse doit le dire",
                 );
-                None
+                // La réponse ne peut plus dire « corrigé et vérifié » : elle dit
+                // ce qui marche, ce qui reste en échec et la suite.
+                Some(crate::workflow::unresolved_feedback(&report))
             }
             crate::workflow::Verdict::Fail => {
                 self.api_client.notify(
@@ -12216,6 +12313,65 @@ mod tests {
         let (mut runtime, observed, _) = aided_runtime(vec![text_step("Bonjour.")], vec![]);
         runtime.run_turn("salut", None).expect("tour");
         assert!(observed.borrow().team_steps.is_empty());
+    }
+
+    #[test]
+    fn a_problem_said_to_be_still_there_turns_ultracode_on_and_forbids_a_false_fixed() {
+        // Session #46 de Claw Web (31 octobre 2026) : « corrigé et vérifié » trois
+        // fois de suite pour un bogue toujours là, sans qu'Ultracode soit actif.
+        let _serial = crate::test_serial();
+        let (path, output) = written_file("rechute");
+        let (mut runtime, observed, agents) = ultracode_runtime(
+            vec![
+                text_step("Correction du bug de duplication effectuée et vérifiée."),
+                tool_step("write_file", r#"{"path":"total.py","content":"a"}"#),
+                text_step("C'est corrigé."),
+                tool_step("write_file", r#"{"path":"total.py","content":"b"}"#),
+                text_step("Corrigé pour de bon."),
+                tool_step("write_file", r#"{"path":"total.py","content":"c"}"#),
+                text_step("Cette fois c'est réglé."),
+                text_step("Le doublon apparaît encore au changement de mois : voici ce qui reste."),
+            ],
+            vec![
+                "R1 plus aucun doublon au changement de mois\n7. Reproduction : changer de mois deux fois",
+                "R1 FAIL - doublon toujours vu au changement de mois\nVERDICT: FAIL",
+                "R1 FAIL - doublon toujours vu au changement de mois\nVERDICT: FAIL",
+                "R1 FAIL - doublon toujours vu au changement de mois\nVERDICT: FAIL",
+            ],
+            output,
+        );
+        runtime
+            .run_turn(
+                "Les rentrées de chaque mois se rajoutent quand je change de mois",
+                None,
+            )
+            .expect("premier tour");
+        assert!(
+            agents.borrow().is_empty(),
+            "pas d'ultracode au premier signalement"
+        );
+        runtime
+            .run_turn("Tu mens c'est toujours persent", None)
+            .expect("rechute");
+        let agents = agents.borrow();
+        assert_eq!(agents.len(), 4, "étude puis trois vérifications");
+        let explore = agents[0]["prompt"].as_str().expect("étude");
+        // L'étude connaît la plainte d'avant et ce que l'agent avait prétendu.
+        assert!(explore.contains("se rajoutent quand je change de mois"));
+        assert!(explore.contains("effectuée et vérifiée"));
+        assert!(explore.contains("the earlier fix did not work"));
+        let verify = agents[1]["prompt"].as_str().expect("vérification");
+        assert!(verify.contains("that requirement is FAIL, not UNVERIFIED"));
+        let observed = observed.borrow();
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.starts_with("Ultracode : le problème est signalé de nouveau")));
+        // Après la dernière vérification en échec, la réponse ne peut plus dire « corrigé ».
+        assert!(observed.requests.last().is_some_and(
+            |request| request.contains("without saying the work is fixed, done or verified")
+        ));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

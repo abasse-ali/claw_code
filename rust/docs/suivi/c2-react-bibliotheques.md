@@ -245,3 +245,72 @@ serveurs demandent un hébergeur (Render, Railway, Fly.io…).
 Vérifié dans Chromium, clair et sombre, 360 et 390 px : chaque geste essayé (maintenir trop
 court n'efface rien, l'accueil ne revient pas, le sondage compte juste, l'étape vide est
 refusée).
+
+### Suite : plus d'animations (31 octobre 2026, « Ajoute plus d'animation »)
+
+`kit/anim.tsx` : TextReveal (mots un à un, sortant d'un flou), ScrambleText (lettres
+mélangées qui se posent), Aurora (fond aux couleurs qui bougent), GlowCard (lumière qui suit
+le doigt), Magnetic, Wiggle, ExpandCard (carte agrandie en plein écran, layoutId), AnimatedList
+(blocs faits à la main ; une List de Row le fait déjà, et un Row dedans ferait un li dans un
+li), LoadingBar, Twinkle, Breathe (cercle de respiration), TypingDots, LiquidFill (verre qui se
+remplit en vagues), DrawPath, Particles (neige, cœurs, feuilles, confettis), Bump. Noms choisis
+pour ne pas croiser une icône de lucide-react (Sparkles, Spotlight en sont).
+
+Vérifié dans Chromium, clair, sombre et « moins de mouvement » (rien ne tombe, le code
+s'affiche d'un coup, la barre de chargement est fixe) : chaque animation essayée, sans erreur.
+
+### Suite : des blocs pour tous les genres d'applis (31 octobre 2026)
+
+Demande : « continue à en trouver des widgets et animations pour le kit soit complet pour tout ».
+
+- `kit/social.tsx` (boutique et réseau) : PriceTag, ProductCard, CartSummary (livraison offerte
+  au-delà d'un montant), PostCard, CommentList, ProfileHeader, FollowButton, NotificationList.
+- `kit/life.tsx` : AudioPlayer, VideoPlayer, ImageCompare ; ActivityRings, MoodPicker/moodOf ;
+  Quiz, SpinWheel (s'arrête sous le repère sur la part annoncée) ; DaySchedule, AnalogClock
+  (fuseaux) ; StackView/useStack/BackBar (écrans empilés, le retour du téléphone revient d'un
+  écran sans quitter l'onglet), SlideToConfirm, ScrollTopButton, ThemeToggle (data-theme,
+  retenu), PhoneField.
+- Corrigé en essayant : durée d'un son inconnue (« Infinity:NaN » → « –:–– ») ; bouton Envoyer
+  des commentaires qui sortait de sa carte.
+
+Vérifié dans Chromium (clair et sombre, 390 px) : chaque bloc essayé, sans erreur.
+
+### Suite : cartes, codes QR et notes (31 octobre 2026)
+
+- `kit/map.tsx` : MapView (Leaflet, fonds OpenStreetMap ; épingles, trajet, onPick, onMarker),
+  useGeolocation, LocateButton, PlaceSearch/searchPlace (Nominatim), distanceKm,
+  formatDistance. En sombre, les fonds sont inversés ; hors ligne, la carte le dit.
+- `kit/qr.tsx` : QRCode (SVG noir sur blanc, « Enregistrer l'image »), QRScanner (appareil
+  photo, ou une photo ; jsQR).
+- `kit/notes.tsx` : NoteEditor (Tiptap : titres, gras, italique, barré, listes, liste à cocher,
+  citation, annuler), useNotes (gardées sur le téléphone), NotesList (recherche sans accents,
+  épinglées en haut, suppression avec Annuler), noteText, noteTitle.
+- Leaflet et Tiptap sont dans `src/kit/lazy/`, chargés au premier affichage (`React.lazy`) ;
+  qrcode et jsQR par `import()` au premier usage. L'appli sans carte ni notes garde sa taille
+  (581 Ko contre 578 Ko) ; la carte (150 Ko) et l'éditeur (404 Ko) viennent à part.
+- Les styles de Leaflet, chargés hors des couches du kit, l'emportaient sur lui (boutons de
+  zoom de 30 px, bulles blanches en sombre) : ses réglages changés sont en !important.
+
+Vérifié dans Chromium (clair, sombre, 360 et 390 px) : fonds de carte et recherche d'adresse
+simulés (OpenStreetMap est bloqué depuis l'environnement de test) ; épingles, trajet, bulle,
+toucher qui pose un lieu, recherche, distance (tour Eiffel – Louvre : 3,2 km) ; code QR
+enregistré puis relu depuis la photo ; lecture par une fausse caméra ; note avec liste à cocher
+et gras, gardée après rechargement, cherchée, supprimée puis rétablie.
+
+### Revue d'affichage de tout le kit (31 octobre 2026, « il y a encore des bugs d'affichage »)
+
+Galerie complète (anciens et nouveaux blocs, 15 écrans), 360, 768 et 1280 px, clair et sombre,
+avec une mesure renforcée : ce qui sort de l'écran ou de sa carte, texte coupé, commandes trop
+petites, chevauchements, contraste (couleurs converties par un canvas : les color-mix du kit
+étaient mal lus). Corrigé :
+- Barre d'onglets : au-delà de 4 onglets, les noms étaient coupés (« Cha… », « Télé… ») ; au
+  téléphone, les 3 premiers restent et les autres passent dans « Plus » (menu au-dessus de la
+  barre, l'onglet ouvert y prend la place du bouton) ; sur ordinateur, la colonne les montre tous.
+- Ordinateur : les cartes côte à côte gardent leur hauteur (plus de grand vide dans une carte
+  étirée à la hauteur de sa voisine).
+- Points du carrousel ronds (ils étaient carrés), zone de toucher de 32 px ; action d'une
+  alerte à 44 px.
+- Glisser pour payer : le texte passait sous la pastille.
+- Avatars : fond plein (transparents, ils se mélangeaient dans un groupe).
+- Roue : les noms du bas à l'endroit. Agenda : « Journée » aligné. Aurore en sombre : plus de
+  tache claire sous un texte blanc. Notification non lue et humeur « Bien » : texte plus lisible.
