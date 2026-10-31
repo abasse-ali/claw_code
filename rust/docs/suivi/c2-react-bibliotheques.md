@@ -174,3 +174,29 @@ Décidé avec l'utilisateur le 29 octobre 2026 (« Oui les deux ») :
   reconstruction après modification, erreur de construction rendue avec sa cause.
 - `cargo test -p runtime --lib -- web_design conception` pour la méthode.
 - `node-api` : `npm test` (3 tests) ; `python-api` : `.venv/bin/python -m pytest` (3 tests).
+
+## Kit : l'argent du mois, et les widgets revus (31 octobre 2026)
+
+Demande : « Lis les kits de Claw code et regarde la session en cours, il me faut plus de widgets
+dans le kit et corrige ceux qui sont déjà en place. » Session en cours : #46 (`claw-projet`,
+appli de budget à partir des relevés de la banque), où le modèle avait écrit lui-même, dans
+`src/kit/`, les dépenses et rentrées de chaque mois (qui se rajoutaient à chaque changement de
+mois, « Tu mens c'est toujours présent »), l'import du relevé, le classement et un calendrier.
+
+- **Nouveau `kit/money.tsx`** :
+  - `RecurringList` et `useRecurring` : chaque rentrée ou dépense de chaque mois devient une vraie
+    opération une fois par mois (identifiant `rec:<id>:<mois>`), jamais dans les mois d'avant sa
+    création ; une opération supprimée ne revient pas.
+  - `BankImport`, `importBankCsv`, `parseBankCsv` : relevé `.csv` (points-virgules ou virgules,
+    JJ/MM/AAAA, « 1 234,56 », colonnes Débit/Crédit) ; une même opération de deux relevés qui se
+    chevauchent n'est comptée qu'une fois, deux opérations pareilles le même jour restent deux.
+  - `categorize` (CARREFOUR → Courses, SNCF → Transport…) et `recategorize`, qui retient le choix
+    de l'utilisateur pour les libellés pareils.
+  - `MoneyCalendar` : les jours de rentrée et de dépense du mois, la dépense du jour en petit,
+    un jour touché montre ses opérations.
+- **Widgets corrigés** (galerie de tous les widgets, mesurée au téléphone en clair et en sombre) :
+  messages qui débordaient de leur carte, points du carrousel (8 px à toucher), croix des
+  étiquettes, titres triables du tableau, action d'une alerte.
+- Vérifié : 3 allers-retours entre les mois et 3 rechargements donnent une seule opération par
+  mois ; deux relevés qui se chevauchent, rien en double ; essai de bout en bout du projet React
+  dans un vrai navigateur.

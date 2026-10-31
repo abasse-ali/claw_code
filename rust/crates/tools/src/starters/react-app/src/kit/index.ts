@@ -56,6 +56,13 @@
 //            Shake (trigger : rebond, secousse d'erreur), Pulse (active : halo), SuccessCheck,
 //            ProgressRing (value 0..1, label), celebrate(big) (confettis). Toutes se calment
 //            quand le téléphone demande moins de mouvement.
+// Argent     RecurringList (kind "in" | "out" : salaire, loyer… posés une fois dans chaque mois,
+//            jamais en double, jamais dans les mois d'avant), useRecurring, recurringTotal(kind),
+//            BankImport (relevé .csv de la banque, sans doublon entre relevés qui se chevauchent),
+//            importBankCsv(fichier), parseBankCsv(texte), categorize(libellé) (CARREFOUR →
+//            Courses ; ce que l'utilisateur a choisi d'abord), recategorize(opération, catégorie)
+//            (la retient), MoneyCalendar (les jours de rentrée et de dépense du mois, un jour
+//            touché montre ses opérations). N'écrivez jamais ces choses vous-même.
 // Graphiques BarChart (labels, series [{ name, tone, values }]), MonthsChart (months) ; recharts
 //            pour le reste.
 // Messages   toast(message, { tone: "error", action: { label, run } }).
@@ -82,6 +89,7 @@ export * from "./format";
 export * from "./forms";
 export * from "./icons";
 export * from "./layout";
+export * from "./money";
 export * from "./more";
 export * from "./motion";
 export * from "./offline";
