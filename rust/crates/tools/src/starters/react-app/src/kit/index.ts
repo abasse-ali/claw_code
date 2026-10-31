@@ -81,6 +81,20 @@
 //            grand), SignaturePad (onChange(image)), useOnline() et OfflineBanner (réseau perdu),
 //            SafeArea (une partie qui plante n'emporte pas l'écran : « Réessayer »), IconBadge
 //            (icon, count, label : cloche à pastille).
+// Gestes   (touch.tsx) FlipCard (front, back, label : une carte qui se retourne), HoldButton
+//            (onDone : maintenir pour un geste sans retour), SpeedDial (actions : le + qui s'ouvre
+//            en plusieurs actions), LikeButton (liked, onChange, count : un cœur qui éclate),
+//            Onboarding (slides : les écrans du premier lancement, une seule fois), Tour (steps
+//            { target: sélecteur, title, text } : visite guidée), Stories (items : des pages
+//            qui avancent seules), useLongPress(action) (appui long).
+// Vues      (views.tsx) WeekStrip (value, onChange, marked : les 7 jours d'une semaine),
+//            RangeSlider (value [de, à]), DateRange (value { from, to } : une période et ses
+//            raccourcis) et inPeriod(date, période), StackedBar (parts : une barre de
+//            répartition), CompareBars (rows { name, planned, actual } : prévu face au réel),
+//            Poll (question, options, votes, voted, onVote : un sondage), Leaderboard (rows
+//            { name, score }, me : un classement), AvatarGroup (names), Highlight (text,
+//            query : les mots cherchés surlignés), Wizard (steps { title, content, check } :
+//            un formulaire en plusieurs étapes).
 // Serveur    useApi(url) → { data, loading, error, reload } et sendApi(url, "POST", corps) pour
 //            l'API Express ou FastAPI des projets node-api et python-api ; useLive(url, event,
 //            initial) → { value, connected, emit } pour le temps réel Socket.IO ; useWasm()
@@ -123,5 +137,7 @@ export * from "./settings";
 export * from "./sheet";
 export * from "./store";
 export * from "./toast";
+export * from "./touch";
 export * from "./tracker";
+export * from "./views";
 export * from "./widgets";

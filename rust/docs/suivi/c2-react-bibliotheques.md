@@ -229,3 +229,19 @@ essayés dans Chromium. Serveur Node : 5 tests avec un vrai Redis et un vrai Mar
 données gardées après redémarrage. Serveur Python : 6 tests (SQLite, Redis, MariaDB). GitHub
 Pages ne publie que des pages : une appli publiée y garde ses données sur le téléphone, les
 serveurs demandent un hébergeur (Render, Railway, Fly.io…).
+
+### Suite : gestes et vues (31 octobre 2026, « Continue »)
+
+- `kit/touch.tsx` : FlipCard (recto/verso), HoldButton (maintenir pour un geste sans retour),
+  SpeedDial (le + à plusieurs actions), LikeButton (cœur qui éclate), Onboarding (écrans du
+  premier lancement, une seule fois), Tour (visite guidée qui éclaire un élément), Stories,
+  useLongPress.
+- `kit/views.tsx` : WeekStrip, RangeSlider, DateRange et inPeriod, StackedBar, CompareBars
+  (prévu face au réel), Poll, Leaderboard, AvatarGroup, Highlight (recherche sans accents ni
+  majuscules), Wizard (formulaire en étapes, avec vérification par étape).
+- Corrigé : en clair, les initiales des avatars étaient trop pâles (clarté 70 % sur fond
+  clair) ; le texte posé sur l'accent prend `--on-accent`, l'accent étant clair en sombre.
+
+Vérifié dans Chromium, clair et sombre, 360 et 390 px : chaque geste essayé (maintenir trop
+court n'efface rien, l'accueil ne revient pas, le sondage compte juste, l'étape vide est
+refusée).
