@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -95,6 +96,29 @@ class TranslatorTest(unittest.TestCase):
         translator(["a"], got.append)
         translator.wait(5)
         self.assertEqual(got, [])
+
+
+    def test_the_end_of_the_run_never_waits_for_a_queue_of_slow_translations(self):
+        # Session #41 : onze traductions en échec en file, 13 minutes de plus à la fin.
+        release = threading.Event()
+        calls = []
+
+        def call(texts):
+            calls.append(list(texts))
+            release.wait(5)
+            return None
+
+        translator = translate.Translator("cle", call=call)
+        for index in range(6):
+            translator([f"défaut {index}"], lambda _: None)
+        started = time.monotonic()
+        translator.wait(0.3)
+        self.assertLess(time.monotonic() - started, 1)
+        release.set()
+        time.sleep(0.2)
+        # Le premier appel était en cours ; les autres ne sont plus demandés.
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(translator.worker is None or not translator.worker.daemon)
 
 
 class JournalTest(unittest.TestCase):

@@ -5,17 +5,22 @@ en français »).
 
 Un petit modèle de NVIDIA traduit, en arrière-plan : le journal n'attend pas, la traduction
 rejoint la capture quand elle arrive. Un même texte n'est traduit qu'une fois par passage.
+
+La traduction ne retient jamais la fin du passage : un fil d'arrière-plan qui meurt avec le
+programme, et une attente de fin bornée en tout. Vu le 28 octobre 2026 (session #41) : onze
+traductions en échec en file, la session finie mais la branche poussée 13 minutes plus tard.
 Vu le 29 octobre 2026 (essai C3) : chaque traduction échouait (délai dépassé, réponse
 illisible) et l'appli montrait l'anglais. Les textes partent maintenant par petits paquets,
 et Gemini Flash-Lite reprend un paquet que NVIDIA n'a pas traduit.
 """
 
 import json
+import queue
 import re
 import threading
+import time
 import urllib.request
 
-from concurrent.futures import ThreadPoolExecutor
 
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 # Rapide et sans quota du jour ; réglable par CLAW_TRANSLATE_MODEL.
@@ -104,9 +109,12 @@ class Translator:
         self.key = key
         self.model = model or MODEL
         self.cache = {}
-        self.pool = ThreadPoolExecutor(max_workers=1)
-        self.pending = []
+        self.jobs = queue.Queue()
         self.lock = threading.Lock()
+        self.idle = threading.Condition(self.lock)
+        self.queued = 0
+        self.stopped = False
+        self.worker = None
         # Le premier traducteur, puis le relais pour un paquet qu'il n'a pas traduit.
         self.calls = [call or self._post] + ([fallback] if fallback else [])
         self.reported = set()
@@ -128,6 +136,8 @@ class Translator:
 
         def work():
             for start in range(0, len(missing), BATCH):
+                if self.stopped:
+                    return
                 chunk = missing[start:start + BATCH]
                 for call in self.calls:
                     try:
@@ -144,17 +154,36 @@ class Translator:
                 done([self.cache.get(text, text) for text in texts])
 
         with self.lock:
-            self.pending.append(self.pool.submit(work))
+            if self.stopped:
+                return
+            self.queued += 1
+            if self.worker is None:
+                # Un fil « démon » : il ne retient pas la fin du programme.
+                self.worker = threading.Thread(target=self._run, daemon=True)
+                self.worker.start()
+        self.jobs.put(work)
+
+    def _run(self):
+        while True:
+            work = self.jobs.get()
+            try:
+                work()
+            finally:
+                with self.idle:
+                    self.queued -= 1
+                    self.idle.notify_all()
 
     def wait(self, timeout):
-        """Attend les traductions en cours, `timeout` secondes au plus (fin du passage)."""
-        with self.lock:
-            pending, self.pending = self.pending, []
-        for future in pending:
-            try:
-                future.result(timeout=timeout)
-            except Exception:  # délai dépassé ou échec : l'anglais reste
-                return
+        """Attend les traductions en cours, `timeout` secondes au plus en tout (fin du
+        passage) ; au-delà, celles qui restent ne sont plus demandées."""
+        deadline = time.monotonic() + timeout
+        with self.idle:
+            while self.queued > 0:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    self.stopped = True
+                    return
+                self.idle.wait(left)
 
     def _post(self, texts):
         return post(NVIDIA_URL, self.key, self.model, texts)

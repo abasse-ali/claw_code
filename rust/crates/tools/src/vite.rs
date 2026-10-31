@@ -239,6 +239,7 @@ pub(crate) fn ensure_built(root: &Path) -> Result<PathBuf, String> {
     if !installed(root) {
         npm_install(root)?;
     }
+    app_icons(root);
     let built = std::fs::metadata(out.join("index.html"))
         .and_then(|meta| meta.modified())
         .ok();
@@ -258,6 +259,91 @@ pub(crate) fn ensure_built(root: &Path) -> Result<PathBuf, String> {
         })?;
     }
     Ok(out)
+}
+
+/// Les icônes PNG d'une appli installable (192, 512, maskable, iPhone),
+/// dessinées par l'outil `AppIcon` depuis `public/icon.svg` quand il est plus
+/// récent qu'elles, puis nommées dans le manifeste et dans `index.html`. Vu le
+/// 28 octobre 2026 (session #41) : le modèle n'a pas appelé `AppIcon`, et
+/// l'appli publiée n'avait que l'icône SVG, que l'iPhone ne prend pas. Sans
+/// navigateur, ou devant un dessin vide, rien ne change.
+fn app_icons(root: &Path) {
+    let public = root.join("public");
+    let Ok(drawn) = std::fs::metadata(public.join("icon.svg")).and_then(|meta| meta.modified())
+    else {
+        return;
+    };
+    let made = std::fs::metadata(public.join("icon-192.png")).and_then(|meta| meta.modified());
+    if made.is_ok_and(|made| made >= drawn) {
+        return;
+    }
+    let (Ok(cwd), Ok(svg)) = (
+        std::env::current_dir().and_then(|cwd| cwd.canonicalize()),
+        public.join("icon.svg").canonicalize(),
+    ) else {
+        return;
+    };
+    let Ok(relative) = svg.strip_prefix(&cwd) else {
+        return;
+    };
+    let input = serde_json::json!({ "svg": relative.to_string_lossy().replace('\\', "/") });
+    let drawn = serde_json::from_value::<crate::screenshot::app_icons::AppIconInput>(input)
+        .map_err(|error| error.to_string())
+        .and_then(|input| crate::screenshot::app_icons::app_icon(&input));
+    if drawn.is_err() {
+        return;
+    }
+    name_png_icons(
+        &public.join("manifest.webmanifest"),
+        &root.join("index.html"),
+    );
+}
+
+/// Les icônes PNG dans le manifeste (sans doubler celles qui y sont), et
+/// celle de l'iPhone dans `index.html`.
+fn name_png_icons(manifest: &Path, page: &Path) {
+    if let Ok(mut value) = std::fs::read_to_string(manifest)
+        .map_err(|error| error.to_string())
+        .and_then(|text| {
+            serde_json::from_str::<serde_json::Value>(&text).map_err(|error| error.to_string())
+        })
+    {
+        if !value["icons"].is_array() {
+            value["icons"] = serde_json::json!([]);
+        }
+        if let Some(icons) = value["icons"].as_array_mut() {
+            for (src, sizes, purpose) in [
+                ("icon-192.png", "192x192", None),
+                ("icon-512.png", "512x512", None),
+                ("icon-maskable-512.png", "512x512", Some("maskable")),
+            ] {
+                if icons.iter().any(|icon| {
+                    icon["src"].as_str().is_some_and(|known| {
+                        known.trim_start_matches("./").trim_start_matches('/') == src
+                    })
+                }) {
+                    continue;
+                }
+                let mut icon =
+                    serde_json::json!({ "src": src, "sizes": sizes, "type": "image/png" });
+                if let Some(purpose) = purpose {
+                    icon["purpose"] = serde_json::json!(purpose);
+                }
+                icons.push(icon);
+            }
+        }
+        if let Ok(text) = serde_json::to_string_pretty(&value) {
+            let _ = std::fs::write(manifest, format!("{text}\n"));
+        }
+    }
+    if let Ok(html) = std::fs::read_to_string(page) {
+        if !html.contains("apple-touch-icon") {
+            if let Some(at) = html.find("</head>") {
+                let line = "  <link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png\" />\n  ";
+                let _ = std::fs::write(page, format!("{}{line}{}", &html[..at], &html[at..]));
+            }
+        }
+    }
 }
 
 /// La page à ouvrir pour `path` : la page construite quand `path` est la page
@@ -343,6 +429,53 @@ mod tests {
             super::tail(output, 40),
             "[UNRESOLVED_IMPORT] Could not resolve './Absent' in src/main.tsx"
         );
+    }
+
+    #[test]
+    fn the_png_icons_are_named_once_in_the_manifest_and_the_page() {
+        let dir = project("icons");
+        let manifest = dir.join("manifest.webmanifest");
+        let page = dir.join("index.html");
+        std::fs::write(&manifest, r#"{"name":"Budget","start_url":"./","icons":[{"src":"icon.svg","sizes":"any","type":"image/svg+xml"},{"src":"./icon-192.png","sizes":"192x192","type":"image/png"}]}"#).expect("manifest");
+        std::fs::write(
+            &page,
+            "<html><head>\n    <title>Budget</title>\n  </head><body></body></html>",
+        )
+        .expect("page");
+        super::name_png_icons(&manifest, &page);
+        super::name_png_icons(&manifest, &page);
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest).expect("manifest"))
+                .expect("json");
+        let sources: Vec<&str> = value["icons"]
+            .as_array()
+            .expect("icons")
+            .iter()
+            .filter_map(|icon| icon["src"].as_str())
+            .collect();
+        assert_eq!(
+            sources,
+            [
+                "icon.svg",
+                "./icon-192.png",
+                "icon-512.png",
+                "icon-maskable-512.png"
+            ]
+        );
+        assert_eq!(value["name"], "Budget");
+        let html = std::fs::read_to_string(&page).expect("page");
+        assert_eq!(
+            html.matches("rel=\"apple-touch-icon\"").count(),
+            1,
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "<link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png\" />\n  </head>"
+            ),
+            "{html}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

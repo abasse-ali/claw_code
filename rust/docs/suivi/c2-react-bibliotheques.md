@@ -62,6 +62,96 @@ Réponses de l'utilisateur aux questions :
    (`kit/app-kit.js`). La note du concepteur et le rappel de `base.css` suivent le même choix.
 7. **Journal de Claw Web** : « Prépare le projet · appli React · 27 fichiers ».
 
+## Essai réel #41 (28 octobre 2026, `budget_claw`, branche `claw/session-15`)
+
+La demande de la session #35, sur `main` après la fusion (#127), sur l'exécuteur `claw-cloud`
+(ARM64). Claw appelle `Starter` au premier tour ; installation, `npm run typecheck` et
+construction marchent ; deux erreurs de TypeScript trouvées et corrigées par le modèle. Mais
+ses captures lui signalaient à tort, à cause du kit React :
+
+- des liens vers des écrans « qui n'existent pas » (`#analyse`, `#reglages`) : seul l'écran
+  ouvert était dans la page. Du même coup la revue ne reconnaissait pas une appli à onglets et
+  réclamait un grand titre. Corrigé : `AppShell` garde chaque écran dans la page, les autres
+  cachés (`hidden`), comme le kit sans React ;
+- des icônes « dessinées à la main » : `settings`, `receipt` et `shopping-cart` de lucide-react
+  1.63 ont un tracé plus récent que celui de Claw. Corrigé : une icône marquée
+  `class="lucide lucide-<nom>"` par un paquet de Lucide vient du jeu (`icon_set::exempt`) ;
+- trois pastilles de la carte du solde serrées (« Revenus prudents » sur 47 px), et des
+  lettres trop rapprochées sous 32 px. Corrigé dans `app-kit.css` (pour les deux kits) : deux
+  pastilles par ligne au téléphone, `letter-spacing: -0.01em` pour les tuiles et les titres.
+
+L'essai de bout en bout vérifie désormais ces défauts aussi, avec trois pastilles.
+
+Bilan du passage (47 min de travail, 124 actions, une seule session) : les chiffres de
+l'utilisateur dès l'ouverture, reste prudent 848,55 €, cas favorable 1 151,55 €, ajout,
+modification, suppression avec « Annuler », onglets, réglages ; note du juge bloquée vers
+6/10 (barre 8), en partie à cause des fausses alertes ci-dessus. Banc t9 : **10/12** (#35 :
+4/12, #36 : 8/12, #39 : 11/12). Manqués : pas d'icône PNG (le modèle n'a pas appelé
+`AppIcon`) ; sombre non imposé (la réponse « sobre foncé » n'est pas dans la demande de
+l'essai). Le banc lui-même avait un défaut : il ne lisait que le dernier écran visité après
+le rechargement (la dépense, gardée, était sous l'onglet Historique) ; il lit maintenant les
+montants de chaque écran, et sert `docs/` pour une appli Vite.
+
+Corrigé ensuite :
+
+- **Icônes PNG automatiques** (`vite::app_icons`) : à chaque construction, quand
+  `public/icon.svg` est plus récent qu'elles, Claw dessine les icônes PNG (192, 512,
+  maskable, iPhone) avec l'outil `AppIcon`, les ajoute au manifeste et lie celle de l'iPhone
+  dans `index.html`.
+- **« La page s'ouvre avec un code »** à tort : le détecteur de codes d'accès lisait
+  `package-lock.json` (`"sourcemap-codec": "^1.5.0"`, `trace-mapping`). Une version n'est plus
+  un code, et les textes de la page ne comprennent plus `package-lock.json` ni la construction
+  d'une appli Vite (`docs/` à côté d'un `vite.config`).
+
+### Où sont passées les 61 minutes de #41
+
+Le modèle a travaillé 47 minutes (116 requêtes, 121 outils), puis la session a mis 14 minutes
+de plus à finir :
+
+| Poste | Temps | Part |
+|---|---|---|
+| Captures demandées par le modèle (13, souvent après une ligne de CSS ; chacune décrite par un modèle qui voit, Nemotron ne lisant pas les images) | 12 min 29 s | 27 % |
+| Revues visuelles du juge (5 : 5,4 puis 6,0, 6,3, 6,0, 5,9/10) | 10 min 37 s | 23 % |
+| Écritures et modifications (40, dont 3 ratées) | 7 min 16 s | 16 % |
+| Vérification des types et construction (33 commandes) | 6 min 04 s | 13 % |
+| Réflexion, réponse, compactage du contexte | 3 min 55 s | 8 % |
+| Lectures (21, surtout le kit au début) | 3 min 16 s | 7 % |
+| Parcours dans le navigateur (9) | 3 min 05 s | 7 % |
+| **Après la fin** : traduction en français des remarques des captures, 11 échecs de 70 à 90 s mis en file, que le programme attendait avant de pousser la branche | 13 min | |
+
+Les défauts visibles viennent de deux causes :
+
+1. Les fausses alertes de Claw (liens, icônes, titre, pastilles, faux code) : une dizaine
+   d'allers-retours sur des défauts qui n'en étaient pas (corrigé ci-dessus).
+2. Le modèle a récrit l'allure du kit dans `src/theme.css` (33 règles sur ses blocs) au lieu
+   d'y poser des couleurs : c'est là que naissent la légende illisible et les pastilles collées
+   à leur bord. Rien ne le lui disait.
+
+Corrigé :
+
+- **Traduction** (`.github/claw-web/translate.py`) : un fil d'arrière-plan qui ne retient plus la
+  fin du programme, une attente finale bornée à 30 s en tout, plus aucun appel après deux échecs
+  de suite, délai de 45 s au lieu de 90.
+- **Kit récrit** (`code_checks::kit_restyled`) : la feuille de l'appli posée à côté de
+  `kit/app-kit.css` (React : `src/theme.css` ; sans React : `styles.css`) qui vise les classes
+  du kit est signalée dès l'écriture, avec ses règles ; des jetons posés pour un bloc
+  (`.hero { --hero-1: … }`) restent permis. Sur le `theme.css` de #41 : 33 règles relevées à la
+  ligne 51, dès la première écriture.
+
+Décidé avec l'utilisateur le 29 octobre 2026 (« Oui les deux ») :
+
+- **Revues en plateau** (`web_design::plateau`, `review_plateau`) : un progrès est une hausse
+  d'un demi-point au moins de la meilleure note d'avant (`MIN_GAIN`, 0,2 auparavant ; en
+  dessous, c'est l'humeur du juge). Après deux revues de suite sans progrès, Claw arrête les
+  revues du tour (ni revue de base, ni poursuite, ni revue « de structure ») et le dit une fois,
+  sauf si le fonctionnement est en train de se réparer. Sur #41 : 6,3 n'aurait pas valu de
+  poursuite simple (+0,3), une revue de structure au plus, puis l'arrêt : 4 revues au lieu de 5.
+- **Captures retenues** (`capture_check`) : le modèle redemande la même capture (même page,
+  thème, tailles, actions) après une seule modification de l'interface alors que la précédente
+  relevait 3 problèmes ou plus : Claw lui rend la liste de ces problèmes à corriger d'abord, sans
+  lancer le navigateur. Redemandée tout de suite, la capture passe (une seule retenue par capture).
+  Sans aucune modification, la même capture rendait déjà son résultat sans nouveau rendu.
+
 ## Non fait, et pourquoi
 
 - **MySQL et Redis** : ni sur le PC de Claw ni sur GitHub Pages ; les serveurs de départ gardent
@@ -84,3 +174,74 @@ Réponses de l'utilisateur aux questions :
   reconstruction après modification, erreur de construction rendue avec sa cause.
 - `cargo test -p runtime --lib -- web_design conception` pour la méthode.
 - `node-api` : `npm test` (3 tests) ; `python-api` : `.venv/bin/python -m pytest` (3 tests).
+
+## Kit : l'argent du mois, et les widgets revus (31 octobre 2026)
+
+Demande : « Lis les kits de Claw code et regarde la session en cours, il me faut plus de widgets
+dans le kit et corrige ceux qui sont déjà en place. » Session en cours : #46 (`claw-projet`,
+appli de budget à partir des relevés de la banque), où le modèle avait écrit lui-même, dans
+`src/kit/`, les dépenses et rentrées de chaque mois (qui se rajoutaient à chaque changement de
+mois, « Tu mens c'est toujours présent »), l'import du relevé, le classement et un calendrier.
+
+- **Nouveau `kit/money.tsx`** :
+  - `RecurringList` et `useRecurring` : chaque rentrée ou dépense de chaque mois devient une vraie
+    opération une fois par mois (identifiant `rec:<id>:<mois>`), jamais dans les mois d'avant sa
+    création ; une opération supprimée ne revient pas.
+  - `BankImport`, `importBankCsv`, `parseBankCsv` : relevé `.csv` (points-virgules ou virgules,
+    JJ/MM/AAAA, « 1 234,56 », colonnes Débit/Crédit) ; une même opération de deux relevés qui se
+    chevauchent n'est comptée qu'une fois, deux opérations pareilles le même jour restent deux.
+  - `categorize` (CARREFOUR → Courses, SNCF → Transport…) et `recategorize`, qui retient le choix
+    de l'utilisateur pour les libellés pareils.
+  - `MoneyCalendar` : les jours de rentrée et de dépense du mois, la dépense du jour en petit,
+    un jour touché montre ses opérations.
+- **Widgets corrigés** (galerie de tous les widgets, mesurée au téléphone en clair et en sombre) :
+  messages qui débordaient de leur carte, points du carrousel (8 px à toucher), croix des
+  étiquettes, titres triables du tableau, action d'une alerte.
+- Vérifié : 3 allers-retours entre les mois et 3 rechargements donnent une seule opération par
+  mois ; deux relevés qui se chevauchent, rien en double ; essai de bout en bout du projet React
+  dans un vrai navigateur.
+
+## Kit : effets, nouveaux widgets et serveurs branchés (31 octobre 2026)
+
+Demande : « Continue à trouver tous les widgets et animations pour le kit et ajoute tous ça au
+kit : React TypeScript Tailwind CSS Vite Framer Motion Node.js Express Python MySQL Redis
+Socket.IO Rust WebAssembly ».
+
+- `kit/fx.tsx` (Framer Motion) : Typewriter, Marquee, Tilt, RippleButton, ShineText,
+  FlipNumber, CountUp, Parallax, Float, Flash, SwipeDeck, SlideView, ScrollProgress. Tous
+  s'arrêtent quand le téléphone demande moins de mouvement.
+- `kit/plus.tsx` : Drawer, Popover (classe `bubble`, `popover` étant celle des menus radix),
+  NumberPad, TimePicker, Kanban, Agenda, Gauge, GoalCard, PullToRefresh, LoadMore,
+  Pagination, Breadcrumbs, Lightbox, SignaturePad, OfflineBanner/useOnline, SafeArea,
+  IconBadge ; et les branchements useApi/sendApi (Express, FastAPI), useLive (Socket.IO,
+  `socket.io-client` ajouté à l'appli), useWasm.
+- `node-api` : les données dans un fichier JSON, MySQL (`DATABASE_URL`, mysql2) ou Redis
+  (`REDIS_URL`, ioredis) ; les méthodes du magasin rendent des promesses ; une base injoignable
+  donne une erreur 503 claire, ou un arrêt clair au démarrage.
+- `python-api` : JSON, base SQL par SQLAlchemy (MySQL par PyMySQL, ou SQLite), ou Redis.
+- Nouveau projet de départ `rust-wasm` : l'appli React plus `wasm/` (crate Rust sans
+  wasm-bindgen, fonctions `extern "C"` sur des nombres), compilée en `public/calc.wasm` par
+  `scripts/wasm.mjs` avant chaque construction (sans dossier `wasm/`, ce script ne fait rien).
+
+Vérifié : galerie au téléphone (390 et 360 px, clair et sombre), sans débordement de page ;
+pavé numérique, Kanban, panneau, visionneuse, bandeau hors ligne, SafeArea et module Rust
+essayés dans Chromium. Serveur Node : 5 tests avec un vrai Redis et un vrai MariaDB (MySQL),
+données gardées après redémarrage. Serveur Python : 6 tests (SQLite, Redis, MariaDB). GitHub
+Pages ne publie que des pages : une appli publiée y garde ses données sur le téléphone, les
+serveurs demandent un hébergeur (Render, Railway, Fly.io…).
+
+### Suite : gestes et vues (31 octobre 2026, « Continue »)
+
+- `kit/touch.tsx` : FlipCard (recto/verso), HoldButton (maintenir pour un geste sans retour),
+  SpeedDial (le + à plusieurs actions), LikeButton (cœur qui éclate), Onboarding (écrans du
+  premier lancement, une seule fois), Tour (visite guidée qui éclaire un élément), Stories,
+  useLongPress.
+- `kit/views.tsx` : WeekStrip, RangeSlider, DateRange et inPeriod, StackedBar, CompareBars
+  (prévu face au réel), Poll, Leaderboard, AvatarGroup, Highlight (recherche sans accents ni
+  majuscules), Wizard (formulaire en étapes, avec vérification par étape).
+- Corrigé : en clair, les initiales des avatars étaient trop pâles (clarté 70 % sur fond
+  clair) ; le texte posé sur l'accent prend `--on-accent`, l'accent étant clair en sombre.
+
+Vérifié dans Chromium, clair et sombre, 360 et 390 px : chaque geste essayé (maintenir trop
+court n'efface rien, l'accueil ne revient pas, le sondage compte juste, l'étape vide est
+refusée).

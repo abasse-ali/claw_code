@@ -247,7 +247,7 @@ def describe(name, data):
     if name == "Ornament":
         return f"Ornement : {short(str(data.get('kind', '')))}"
     if name == "Starter":
-        kinds = {"react-app": "appli React", "node-api": "serveur Node", "python-api": "serveur Python"}
+        kinds = {"react-app": "appli React", "node-api": "serveur Node", "python-api": "serveur Python", "rust-wasm": "appli React avec module Rust"}
         kind = str(data.get("kind") or "react-app")
         return f"Projet de départ : {kinds.get(kind, short(kind))}"
     if name == "Component":

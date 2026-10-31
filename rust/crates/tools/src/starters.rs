@@ -10,6 +10,8 @@
 //!   `app-kit.css`). Construite dans `docs/`, la page que GitHub Pages publie.
 //! - `node-api` : un serveur Express et `Socket.IO` en `TypeScript`, avec ses tests.
 //! - `python-api` : un serveur `FastAPI` avec son `WebSocket` et ses tests (pytest).
+//! - `rust-wasm` : l'appli React, plus un module Rust (`wasm/`) compilé en
+//!   `WebAssembly` dans `public/` avant chaque construction, lu par `useWasm()`.
 //!
 //! Les fichiers du kit (`src/kit/`) sont ceux de Claw : récrits à chaque appel.
 //! Les autres ne sont écrits que s'ils manquent : un second appel ne défait
@@ -44,6 +46,7 @@ const REACT_APP: &[(&str, &str)] = files!("react-app":
     "public/icon.svg",
     "public/manifest.webmanifest",
     "public/sw.js",
+    "scripts/wasm.mjs",
     "src/App.tsx",
     "src/main.tsx",
     "src/index.css",
@@ -55,17 +58,22 @@ const REACT_APP: &[(&str, &str)] = files!("react-app":
     "src/kit/extras.tsx",
     "src/kit/format.ts",
     "src/kit/forms.tsx",
+    "src/kit/fx.tsx",
     "src/kit/icons.tsx",
     "src/kit/index.ts",
     "src/kit/layout.tsx",
+    "src/kit/money.tsx",
     "src/kit/more.tsx",
     "src/kit/motion.tsx",
     "src/kit/offline.ts",
+    "src/kit/plus.tsx",
     "src/kit/settings.ts",
     "src/kit/sheet.tsx",
     "src/kit/store.ts",
     "src/kit/toast.tsx",
+    "src/kit/touch.tsx",
     "src/kit/tracker.tsx",
+    "src/kit/views.tsx",
     "src/kit/widgets.tsx",
 );
 
@@ -96,13 +104,21 @@ const PYTHON_API: &[(&str, &str)] = files!("python-api":
     "tests/test_main.py",
 );
 
-const REACT_GUIDE: &str = "React 19 + TypeScript + Vite 8 + Tailwind CSS 4 + Framer Motion, with lucide-react, zustand, recharts, radix-ui, date-fns, zod and canvas-confetti installed: import them, never write by hand what they do. The app is written in src/App.tsx, which starts as a working example (a monthly budget): rewrite its texts, screens, categories, seed data and settings for this app, and remove what it does not need. Compose every screen with Claw's app kit, imported from \"./kit\" (its full list is at the top of src/kit/index.ts): AppShell (bar, tabs, onAdd; its children are one Screen per tab, written in place or inside your own components) and Screen (id, title, onAdd: what the + button does while that screen is shown, such as opening the sheet that screen keeps in its own state), MonthBar or AppBar, Hero (the main figure on the app's gradient: label, amount, sub, pills, progress), Tiles > Tile, Card (title, meta, link) holding a List of Row (icon, tone, title, badge, sub, amount, end: buttons under the amount, action) or Meters > Meter, Badge, Empty, BarChart and MonthsChart, Settings > Setting with MoneyInput or Switch, Button, ButtonRow, Segmented, Chips (one choice, or several when its value is a list: who an expense is for), TextField (type \"number\" keeps the comma of 12,50), Select, DateField, SearchField, AddField (a field and its Ajouter button on one line: onAdd returns an error such as a duplicate name, or nothing), Form (onSubmit returns an error or nothing; shows it above the button), ItemActions (Modifier and Supprimer, with its own confirmation), Avatar and Row avatar (a person by initials), WeekChecks with currentStreak, bestStreak and successRate (the last 7 days to tick), shiftDay and lastDays (days in the phone's time: never toISOString for a day), Empty steps, and widgets.tsx: Tabs (inside a screen), Accordion, Combobox (a choice list searched by typing), Menu (the ⋯ menu), Hint (tooltip), DataTable (sortable, paged), Skeleton, Spinner, Steps, QuantityInput, Rating, Slider, CodeInput (one-time code), FileDrop, MonthCalendar (marked days), and extras.tsx: TextArea, PasswordField (strength), Alert (a message inside the screen), Chat (message bubbles and a field to send), Timeline, Carousel, Countdown, Stat (a figure and its change in %), DetailList (label: value lines), CopyButton, ToggleButton (favorite), LockScreen (a code before the app), more.tsx: SwipeRow (a Row swiped to delete or mark done), Checklist (tasks to tick, with progress), TagsField, ColorPicker, IconPicker (stores an icon name, drawn by iconByName), Timer, Stopwatch, YearHeatmap (days done as squares, like GitHub), DonutChart (a breakdown with its legend), Sparkline, SortableList (reordered by dragging or arrows), PhotoField (a photo shrunk to keep on the phone), ShareButton, InstallBanner, the animations of motion.tsx: Appear (fades in, onScroll when reached), Stagger (its children one after another), Reveal (open: unfolds), Swap (id, direction: the next month slides in), Pop and Shake (trigger: a bounce when ticked, a shake on an error), Pulse (a halo on what waits for the user), SuccessCheck (a drawn tick after saving), ProgressRing (value 0..1), celebrate() (confetti for a goal reached), EntrySheet (the sheet to add or edit an entry, opened by openEntrySheet()), Sheet, Modal, ConfirmModal, toast(message, { action: { label: \"Annuler\", run } }). Data: useEntries (entries kept on the phone, add, update, remove and clear return an undo), seedOnce(SEED) puts the figures the user gave in the app at its first launch, useMonthEntries and useMonthTotals for the month shown, EntryList fills itself, persistentStore(\"name\", { ... }) keeps the user's settings; a store selector returns stored values (useTrip((s) => s.expenses)), never a value built at each read (s.getBalances(), .filter(), { … }), which makes zustand render again without end: derive figures with useMemo; money(), signed(), parseAmount() and dayLabel() write amounts and dates the French way. On a computer the kit gives the app its own layout (the tabs in a column on the left with the add button on top, two or more cards side by side): keep the screens made of the kit's blocks and let it lay them out, never a phone column stretched by hand. Every amount the kit takes or shows (Hero, Tile, Row and Amount, money(), signed(), useEntries) is in euros, 12.5 for 12,50 €: an app that counts in integer cents divides them by 100 before handing them to the kit (passed as they are, 5149 cents show \"5 149,00 €\"). The app's colors go in src/theme.css (tokens only: --accent and the gradient --hero-1, --hero-2, --hero-3, light and dark); Tailwind classes lay out what the kit lacks (grid, gap-3, mt-4) with the kit's colors (bg-surface, text-muted, text-accent, border-line); use these animations where they help (a list appearing, a goal reached, an error), and motion.div from framer-motion for the rest. Never edit src/kit/ (Claw rewrites it), never write CSS for cards, lists, buttons or fields, never use emoji. Icons: any Lucide icon, import { Wallet } from \"lucide-react\", passed as icon={Wallet}. public/ holds the icon (icon.svg), the manifest and the offline service worker.";
+const REACT_GUIDE: &str = "React 19 + TypeScript + Vite 8 + Tailwind CSS 4 + Framer Motion, with lucide-react, zustand, recharts, radix-ui, date-fns, zod and canvas-confetti installed: import them, never write by hand what they do. The app is written in src/App.tsx, which starts as a working example (a monthly budget): rewrite its texts, screens, categories, seed data and settings for this app, and remove what it does not need. Compose every screen with Claw's app kit, imported from \"./kit\" (its full list is at the top of src/kit/index.ts): AppShell (bar, tabs, onAdd; its children are one Screen per tab, written in place or inside your own components) and Screen (id, title, onAdd: what the + button does while that screen is shown, such as opening the sheet that screen keeps in its own state), MonthBar or AppBar, Hero (the main figure on the app's gradient: label, amount, sub, pills, progress), Tiles > Tile, Card (title, meta, link) holding a List of Row (icon, tone, title, badge, sub, amount, end: buttons under the amount, action) or Meters > Meter, Badge, Empty, BarChart and MonthsChart, Settings > Setting with MoneyInput or Switch, Button, ButtonRow, Segmented, Chips (one choice, or several when its value is a list: who an expense is for), TextField (type \"number\" keeps the comma of 12,50), Select, DateField, SearchField, AddField (a field and its Ajouter button on one line: onAdd returns an error such as a duplicate name, or nothing), Form (onSubmit returns an error or nothing; shows it above the button), ItemActions (Modifier and Supprimer, with its own confirmation), Avatar and Row avatar (a person by initials), WeekChecks with currentStreak, bestStreak and successRate (the last 7 days to tick), shiftDay and lastDays (days in the phone's time: never toISOString for a day), Empty steps, and widgets.tsx: Tabs (inside a screen), Accordion, Combobox (a choice list searched by typing), Menu (the ⋯ menu), Hint (tooltip), DataTable (sortable, paged), Skeleton, Spinner, Steps, QuantityInput, Rating, Slider, CodeInput (one-time code), FileDrop, MonthCalendar (marked days), and extras.tsx: TextArea, PasswordField (strength), Alert (a message inside the screen), Chat (message bubbles and a field to send), Timeline, Carousel, Countdown, Stat (a figure and its change in %), DetailList (label: value lines), CopyButton, ToggleButton (favorite), LockScreen (a code before the app), more.tsx: SwipeRow (a Row swiped to delete or mark done), Checklist (tasks to tick, with progress), TagsField, ColorPicker, IconPicker (stores an icon name, drawn by iconByName), Timer, Stopwatch, YearHeatmap (days done as squares, like GitHub), DonutChart (a breakdown with its legend), Sparkline, SortableList (reordered by dragging or arrows), PhotoField (a photo shrunk to keep on the phone), ShareButton, InstallBanner, the animations of motion.tsx: Appear (fades in, onScroll when reached), Stagger (its children one after another), Reveal (open: unfolds), Swap (id, direction: the next month slides in), Pop and Shake (trigger: a bounce when ticked, a shake on an error), Pulse (a halo on what waits for the user), SuccessCheck (a drawn tick after saving), ProgressRing (value 0..1), celebrate() (confetti for a goal reached), the effects of fx.tsx: Typewriter, Marquee (a scrolling band), Tilt (a card leaning under the finger), RippleButton, ShineText, FlipNumber and CountUp (figures that turn or count up), Parallax, Float, Flash (a glow when a value changes), SwipeDeck (cards sorted right or left), SlideView (the next page slides in), ScrollProgress, and plus.tsx: Drawer (side panel), Popover, NumberPad (a payment-app amount keypad, padAmount), TimePicker, Kanban (task columns), Agenda (events by day), Gauge (half circle), GoalCard (a savings goal and how much per month), PullToRefresh, LoadMore, Pagination, Breadcrumbs, Lightbox (photos opened full screen), SignaturePad, OfflineBanner and useOnline, SafeArea (a part that crashes shows Réessayer instead of a blank screen), IconBadge (a bell with its count), touch.tsx: FlipCard (two faces, flashcards), HoldButton (hold to confirm), SpeedDial (the + opening several actions), LikeButton, Onboarding (first-launch screens, shown once), Tour (a guided tour pointing at elements), Stories, useLongPress, views.tsx: WeekStrip (the days of a week), RangeSlider, DateRange with inPeriod, StackedBar (a breakdown bar), CompareBars (planned against actual), Poll, Leaderboard, AvatarGroup, Highlight (search words marked), Wizard (a form in several steps), useApi, sendApi and useLive (a node-api or python-api server; GitHub Pages has none, so the data of a published app stays in useEntries), useWasm (the rust-wasm module), EntrySheet (the sheet to add or edit an entry, opened by openEntrySheet()), Sheet, Modal, ConfirmModal, toast(message, { action: { label: \"Annuler\", run } }). For money that comes back every month (a salary, a rent, a phone plan), RecurringList (kind \"in\" or \"out\") in the settings: each one becomes a real entry once in every month from now on, never twice, never in the months before; for a bank statement, BankImport (a .csv, never counted twice when statements overlap) and categorize(label); for the days money came in and went out, MoneyCalendar. Never write these yourself: they are where apps broke before. Data: useEntries (entries kept on the phone, add, update, remove and clear return an undo), seedOnce(SEED) puts the figures the user gave in the app at its first launch, useMonthEntries and useMonthTotals for the month shown, EntryList fills itself, persistentStore(\"name\", { ... }) keeps the user's settings; a store selector returns stored values (useTrip((s) => s.expenses)), never a value built at each read (s.getBalances(), .filter(), { … }), which makes zustand render again without end: derive figures with useMemo; money(), signed(), parseAmount() and dayLabel() write amounts and dates the French way. On a computer the kit gives the app its own layout (the tabs in a column on the left with the add button on top, two or more cards side by side): keep the screens made of the kit's blocks and let it lay them out, never a phone column stretched by hand. Every amount the kit takes or shows (Hero, Tile, Row and Amount, money(), signed(), useEntries) is in euros, 12.5 for 12,50 €: an app that counts in integer cents divides them by 100 before handing them to the kit (passed as they are, 5149 cents show \"5 149,00 €\"). The app's colors go in src/theme.css (tokens only: --accent and the gradient --hero-1, --hero-2, --hero-3, light and dark); Tailwind classes lay out what the kit lacks (grid, gap-3, mt-4) with the kit's colors (bg-surface, text-muted, text-accent, border-line); use these animations where they help (a list appearing, a goal reached, an error), and motion.div from framer-motion for the rest. Never edit src/kit/ (Claw rewrites it), never write CSS for cards, lists, buttons or fields, never use emoji. Icons: any Lucide icon, import { Wallet } from \"lucide-react\", passed as icon={Wallet}. public/ holds the icon (icon.svg), the manifest and the offline service worker.";
 
 const REACT_CHECK: &str = "Claw builds the app (npm run build, into docs/, the page GitHub Pages publishes) before every Screenshot, Browser or ViewPage of index.html, and shows the build errors: always open index.html, never a file of docs/, and never edit docs/. npm run typecheck checks the types, then builds; Claw runs it after your changes.";
 
-const NODE_GUIDE: &str = "A Node.js server in TypeScript: Express 5 for the API (src/app.ts: GET, POST, PATCH and DELETE on /api/items, kept in data/items.json by src/store.ts), Socket.IO for live updates (every change is sent to the connected clients as the \"items\" event), cors, tsx to run TypeScript directly. Change the routes and the store for this project; keep createApp() returning { app, server, io, store } so that the tests can start it on a free port. npm start runs it (port 3000, or PORT), npm run dev reloads on every change, npm test runs src/app.test.ts (node:test, fetch and socket.io-client), npm run typecheck checks the types. A page in public/ is served with the API. GitHub Pages only publishes static pages: this server needs a host that runs Node (Render, Railway, Fly.io, a VPS).";
+const NODE_GUIDE: &str = "A Node.js server in TypeScript: Express 5 for the API (src/app.ts: GET, POST, PATCH and DELETE on /api/items, kept by src/store.ts: in data/items.json by default, in MySQL when DATABASE_URL is set (mysql://user:password@host:3306/base, the items table is created), in Redis when REDIS_URL is set (redis://host:6379); every store method returns a promise), Socket.IO for live updates (every change is sent to the connected clients as the \"items\" event), cors, tsx to run TypeScript directly. Change the routes and the store for this project; keep createApp(store) returning { app, server, io, store } and openStore() choosing the store, so that the tests can start it on a free port. npm start runs it (port 3000, or PORT), npm run dev reloads on every change, npm test runs src/app.test.ts (node:test, fetch and socket.io-client; the MySQL and Redis tests run when DATABASE_URL or REDIS_URL is set), npm run typecheck checks the types. A page in public/ is served with the API. The React app reads it with the kit's useApi(url) and sendApi(url, method, body), and its live updates with useLive(url, \"items\", []). GitHub Pages only publishes static pages: this server needs a host that runs Node (Render, Railway, Fly.io, a VPS).";
 
-const PYTHON_GUIDE: &str = "A Python server: FastAPI for the API (app/main.py: GET, POST, PATCH and DELETE on /api/items, kept in data/items.json by app/store.py, input checked by pydantic models), a WebSocket on /ws for live updates (every change is sent to the connected clients), CORS open. Change the routes and the store for this project; keep create_app(store) so that the tests use an in-memory store. Its libraries are installed in .venv: .venv/bin/python -m pytest runs tests/test_main.py (TestClient), .venv/bin/uvicorn app.main:app --reload runs it on port 8000 (on Windows, .venv\\Scripts\\ instead of .venv/bin/). GitHub Pages only publishes static pages: this server needs a host that runs Python (Render, Railway, Fly.io, a VPS).";
+const PYTHON_GUIDE: &str = "A Python server: FastAPI for the API (app/main.py: GET, POST, PATCH and DELETE on /api/items, kept by app/store.py: in data/items.json by default, in a SQL base through SQLAlchemy when DATABASE_URL is set (MySQL with mysql+pymysql://user:password@host:3306/base, or sqlite:///data/app.db), in Redis when REDIS_URL is set; input checked by pydantic models), a WebSocket on /ws for live updates (every change is sent to the connected clients), CORS open. Change the routes and the store for this project; keep create_app(store) and open_store() so that the tests use an in-memory store. Its libraries are installed in .venv: .venv/bin/python -m pytest runs tests/test_main.py (TestClient), .venv/bin/uvicorn app.main:app --reload runs it on port 8000; the React app reads it with the kit's useApi(url) and sendApi(url, method, body) (on Windows, .venv\\Scripts\\ instead of .venv/bin/). GitHub Pages only publishes static pages: this server needs a host that runs Python (Render, Railway, Fly.io, a VPS).";
+
+const RUST_WASM: &[(&str, &str)] = files!("rust-wasm":
+    ".gitignore",
+    "wasm/Cargo.toml",
+    "wasm/src/lib.rs",
+);
+
+const WASM_GUIDE: &str = "The React app above, plus a Rust module in wasm/ (wasm/src/lib.rs, a cdylib crate without wasm-bindgen): every #[no_mangle] pub extern \"C\" fn taking and returning numbers (f64, i32, u32) is callable from the app. npm run wasm (and npm run build, before every build) compiles it with cargo for wasm32-unknown-unknown and copies it to public/calc.wasm, which GitHub Pages publishes with the app. In React: const { exports, error } = useWasm<{ loan_payment(capital: number, rate: number, months: number): number }>(); then exports?.loan_payment(15000, 0.045, 60) (null while it loads; show error if it is set). Keep texts and lists on the React side, numbers in Rust. cargo test in wasm/ checks the Rust functions. Use Rust for heavy computing (simulations, big loops, parsing numbers), React and the kit for everything on screen.";
 
 struct Starter {
     kind: &'static str,
@@ -135,7 +151,19 @@ const STARTERS: &[Starter] = &[
         owned: "",
         guide: PYTHON_GUIDE,
     },
+    Starter {
+        kind: "rust-wasm",
+        purpose: "the React app plus a Rust module compiled to WebAssembly (heavy computing in Rust, called from React; published on GitHub Pages)",
+        files: RUST_WASM,
+        owned: "src/kit/",
+        guide: WASM_GUIDE,
+    },
 ];
+
+/// Une appli React (le projet `rust-wasm` en est une, avec son module Rust).
+fn is_react(starter: &Starter) -> bool {
+    matches!(starter.kind, "react-app" | "rust-wasm")
+}
 
 fn find(kind: &str) -> Option<&'static Starter> {
     let key = kind.trim().to_ascii_lowercase().replace([' ', '_'], "-");
@@ -146,6 +174,9 @@ fn find(kind: &str) -> Option<&'static Starter> {
         "node" | "express" | "socket.io" | "socketio" | "api" | "server" | "node-server"
         | "express-api" => "node-api",
         "python" | "fastapi" | "py" | "python-server" | "fastapi-api" => "python-api",
+        "rust" | "wasm" | "webassembly" | "react-wasm" | "rust-webassembly" | "wasm-app" => {
+            "rust-wasm"
+        }
         other => other,
     };
     STARTERS.iter().find(|starter| starter.kind == key)
@@ -199,12 +230,14 @@ fn react_index_css(folder: &Path, text: &str) -> String {
 fn write_files(starter: &Starter, folder: &Path) -> Result<(Vec<String>, Vec<String>), String> {
     let mut written = Vec::new();
     let mut kept = Vec::new();
-    let extra: &[(&str, &str)] = if starter.kind == "react-app" {
-        std::slice::from_ref(&APP_KIT_CSS)
-    } else {
-        &[]
-    };
-    for (path, text) in starter.files.iter().chain(extra) {
+    let mut extra: Vec<(&str, &str)> = Vec::new();
+    if starter.kind == "rust-wasm" {
+        extra.extend_from_slice(REACT_APP);
+    }
+    if is_react(starter) {
+        extra.push(APP_KIT_CSS);
+    }
+    for (path, text) in starter.files.iter().chain(extra.iter()) {
         let full = folder.join(path);
         let owned = !starter.owned.is_empty() && path.starts_with(starter.owned);
         if full.exists() && !owned {
@@ -316,6 +349,25 @@ fn from_root(root: &Path, folder: &Path, path: &str) -> String {
         .replace('\\', "/")
 }
 
+/// `npm run wasm` : le module Rust compilé en `public/calc.wasm`.
+fn wasm_build(folder: &Path) -> Result<(), String> {
+    let output = Command::new(if cfg!(windows) { "npm.cmd" } else { "npm" })
+        .args(["run", "wasm", "--silent"])
+        .current_dir(folder)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("npm run wasm: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let error = String::from_utf8_lossy(&output.stderr);
+    let tail: Vec<&str> = error.lines().rev().take(12).collect();
+    Err(format!(
+        "npm run wasm failed (the Rust module): {}",
+        tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+    ))
+}
+
 /// Ce que l'outil `Starter` rend au modèle.
 pub(crate) fn starter_tool(input: &StarterInput) -> Result<Value, String> {
     let kind = input.kind.as_deref().unwrap_or("");
@@ -333,7 +385,7 @@ pub(crate) fn starter_tool(input: &StarterInput) -> Result<Value, String> {
     let folder = project_dir(&root, input.dir.as_deref())?;
     // Une page d'avant, sans React, à la place de la page de l'appli : elle
     // resterait la page publiée, et l'appli React ne s'ouvrirait jamais.
-    if starter.kind == "react-app" {
+    if is_react(starter) {
         if let Ok(html) = std::fs::read_to_string(folder.join("index.html")) {
             if !html.contains("/src/main.tsx") {
                 return Err("this folder already has an index.html that is not a React app (a page made without the starter): keep building that page as it is, or give dir a new folder for the React app".to_string());
@@ -343,12 +395,13 @@ pub(crate) fn starter_tool(input: &StarterInput) -> Result<Value, String> {
     let (written, kept) = write_files(starter, &folder)?;
     let install = match starter.kind {
         "python-api" => python_install(&folder),
+        "rust-wasm" => crate::vite::npm_install(&folder).and_then(|()| wasm_build(&folder)),
         _ => crate::vite::npm_install(&folder),
     };
     let mut result = json!({
         "starter": starter.kind,
         "written": written.iter().map(|path| from_root(&root, &folder, path)).collect::<Vec<_>>(),
-        "guide": starter.guide,
+        "guide": if starter.kind == "rust-wasm" { format!("{REACT_GUIDE} {WASM_GUIDE}") } else { starter.guide.to_string() },
     });
     if !kept.is_empty() {
         result["kept"] = json!(kept
@@ -367,7 +420,7 @@ pub(crate) fn starter_tool(input: &StarterInput) -> Result<Value, String> {
             ));
         }
     }
-    if starter.kind == "react-app" {
+    if is_react(starter) {
         result["check"] = json!(REACT_CHECK);
         if let Some(name) = designer_css(&folder) {
             result["design"] = json!(format!("{name} (the design conception's colors) is imported by src/index.css before src/theme.css: keep its colors, and leave src/theme.css as it is."));
@@ -489,6 +542,33 @@ mod tests {
     }
 
     #[test]
+    fn the_rust_wasm_starter_is_the_react_app_with_a_rust_module() {
+        assert_eq!(
+            find("WebAssembly").map(|starter| starter.kind),
+            Some("rust-wasm")
+        );
+        assert_eq!(find("rust").map(|starter| starter.kind), Some("rust-wasm"));
+        let dir = temp("wasm");
+        let starter = find("rust-wasm").expect("wasm");
+        let (written, _) = write_files(starter, &dir).expect("files");
+        for path in [
+            "wasm/Cargo.toml",
+            "wasm/src/lib.rs",
+            "src/App.tsx",
+            "src/kit/plus.tsx",
+            "src/kit/app-kit.css",
+            "scripts/wasm.mjs",
+        ] {
+            assert!(written.contains(&path.to_string()), "{path}");
+        }
+        let ignore = std::fs::read_to_string(dir.join(".gitignore")).expect("ignore");
+        assert!(ignore.contains("wasm/target/") && ignore.contains("node_modules/"));
+        let package = std::fs::read_to_string(dir.join("package.json")).expect("package");
+        assert!(package.contains("\"prebuild\": \"node scripts/wasm.mjs\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_second_call_rewrites_the_kit_and_keeps_the_models_work() {
         let dir = temp("again");
         let starter = find("react-app").expect("react");
@@ -558,6 +638,24 @@ export default function App() {
 "#;
 
     #[test]
+    #[ignore = "installe les bibliothèques (réseau) et compile le module Rust"]
+    fn the_rust_wasm_starter_compiles_its_module_into_public() {
+        // Le module Rust est compilé en WebAssembly par l'outil, puis à chaque
+        // construction de l'appli (prebuild), et publié avec elle dans docs/.
+        let name = format!("claw-wasm-{}", std::process::id());
+        let dir = std::env::current_dir().expect("dossier").join(&name);
+        let _ = std::fs::remove_dir_all(&dir);
+        let input: StarterInput =
+            serde_json::from_value(json!({ "kind": "rust-wasm", "dir": name })).expect("entrée");
+        let result = starter_tool(&input).expect("projet");
+        assert_eq!(result["installed"], json!(true), "{result}");
+        assert!(result["guide"].to_string().contains("useWasm"), "{result}");
+        let module = std::fs::read(dir.join("public/calc.wasm")).expect("calc.wasm");
+        assert_eq!(&module[..4], b"\0asm");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     #[ignore = "installe les bibliothèques (réseau) et lance le navigateur installé"]
     #[allow(clippy::too_many_lines)]
     fn the_react_starter_builds_and_works_in_a_real_browser() {
@@ -592,6 +690,11 @@ export default function App() {
             .replace(
                 "persistentStore(\"budget\", { monthly: 0 })",
                 "persistentStore(\"budget\", { monthly: 900 })",
+            )
+            // Trois pastilles dans la carte du solde, comme dans la session #41.
+            .replace(
+                "{ label: \"Dépensé\", value: money(spending), note: \"ce mois-ci\" },",
+                "{ label: \"Dépensé\", value: money(spending), note: \"ce mois-ci\" },\n              { label: \"Revenus prudents\", value: money(income), note: \"incompressibles\" },",
             );
         assert_ne!(
             seeded, source,
@@ -615,6 +718,20 @@ export default function App() {
             })
             .collect();
         let built = dir.join("docs/index.html").is_file();
+        // Session #41 : l'appli publiée sans icône PNG. Claw les tire de public/icon.svg.
+        let icons = [
+            "icon-192.png",
+            "icon-512.png",
+            "icon-maskable-512.png",
+            "apple-touch-icon.png",
+        ]
+        .iter()
+        .all(|file| {
+            std::fs::read(dir.join("docs").join(file))
+                .is_ok_and(|bytes| bytes.starts_with(b"\x89PNG"))
+        });
+        let manifest =
+            std::fs::read_to_string(dir.join("docs/manifest.webmanifest")).unwrap_or_default();
         let step = |input: serde_json::Value| {
             let input: crate::screenshot::browse::BrowserInput =
                 serde_json::from_value(input).expect("entrée");
@@ -665,6 +782,7 @@ export default function App() {
         let broken = crate::screenshot::take(&broken);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(built, "docs/index.html");
+        assert!(icons && manifest.contains("icon-512.png"), "{manifest}");
         for shot in shots {
             let shot = shot.expect("captures");
             let text = shot.to_string();
@@ -683,6 +801,16 @@ export default function App() {
                 "is shown nowhere",
                 "cut off by the edge of a box",
                 "Not reached",
+                // Session #41 (28 octobre 2026) : défauts que le kit React faisait
+                // signaler à tort (écrans absents de la page, icônes de lucide-react,
+                // trois pastilles serrées, lettres trop rapprochées).
+                "Links to sections that do not exist",
+                "broken links",
+                "drawn by hand",
+                "The main title",
+                "Words that run together",
+                "squeezed into a column",
+                "Text cut off",
             ] {
                 assert!(!text.contains(defect), "{defect}: {text}");
             }

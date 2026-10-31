@@ -518,6 +518,13 @@ struct TurnAids {
     graded_at_continuation: usize,
     /// Notes de fonctionnement des revues du tour (`function_score`).
     function_scores: Vec<u8>,
+    /// Dernière capture demandée par le modèle : ce qu'elle visait (page,
+    /// thème, tailles), les problèmes qu'elle a relevés, les modifications de
+    /// l'interface depuis, et si la suivante a déjà été retenue une fois.
+    capture_key: Option<String>,
+    capture_problems: Vec<String>,
+    edits_since_capture: u32,
+    capture_held: bool,
     /// Poursuites accordées au fonctionnement sous la barre.
     function_extensions: usize,
     function_explained: bool,
@@ -757,6 +764,60 @@ fn capture_key(input: &str) -> Option<String> {
     serde_json::from_str::<std::collections::BTreeMap<String, serde_json::Value>>(input)
         .ok()
         .and_then(|fields| serde_json::to_string(&fields).ok())
+}
+
+/// Problèmes relevés à la suite d'une capture au moins pour retenir la
+/// suivante après une seule modification.
+const CAPTURE_HOLD_PROBLEMS: usize = 3;
+
+/// Ce que vise une capture : la page, le thème, les tailles d'écran et ce qui
+/// change ce qu'elle montre (actions, stockage, éléments examinés). Deux
+/// captures de même clé montrent la même chose.
+fn capture_target(input: &str) -> String {
+    let value: serde_json::Value = serde_json::from_str(input).unwrap_or_default();
+    [
+        "path",
+        "url",
+        "theme",
+        "viewports",
+        "actions",
+        "storage",
+        "inspect",
+        "full_page",
+    ]
+    .iter()
+    .map(|field| {
+        value
+            .get(*field)
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    })
+    .collect::<Vec<_>>()
+    .join("\u{1}")
+}
+
+/// Les problèmes relevés par une capture (`captures[].problems`), sans doublon,
+/// dix au plus.
+fn capture_problems(output: &str) -> Vec<String> {
+    let value: serde_json::Value = serde_json::from_str(output).unwrap_or_default();
+    let mut found: Vec<String> = Vec::new();
+    for capture in value["captures"].as_array().into_iter().flatten() {
+        for problem in capture["problems"].as_array().into_iter().flatten() {
+            if let Some(text) = problem.as_str() {
+                let text = text
+                    .split(" (CSS rules:")
+                    .next()
+                    .unwrap_or(text)
+                    .trim()
+                    .to_string();
+                if !text.is_empty() && !found.contains(&text) {
+                    found.push(text);
+                }
+            }
+        }
+    }
+    found.truncate(10);
+    found
 }
 
 /// Sortie et statut d'un message de résultat d'outil.
@@ -2577,7 +2638,10 @@ where
                     tool_results.push(message);
                     continue;
                 }
-                if let Some(problem) = self.question_check(&tool_name, &input, &mut aids) {
+                if let Some(problem) = self
+                    .question_check(&tool_name, &input, &mut aids)
+                    .or_else(|| self.capture_check(&tool_name, &input, &mut aids))
+                {
                     self.tool_executor.skipped(&tool_name, &input, &problem);
                     let message =
                         ConversationMessage::tool_result(tool_use_id, tool_name, problem, true);
@@ -2870,6 +2934,12 @@ where
         aids.asked |= tool_name == "AskUserQuestion";
         aids.questions_deferred |=
             tool_name == "AskUserQuestion" && output.contains(harness::QUESTIONS_DEFERRED);
+        if tool_name == "Screenshot" && !is_error && !self.subagent {
+            aids.capture_key = Some(capture_target(input));
+            aids.capture_problems = capture_problems(&output);
+            aids.edits_since_capture = 0;
+            aids.capture_held = false;
+        }
         // Page que le modèle a regardée lui-même : la revue visuelle la reprend.
         if matches!(tool_name, "Screenshot" | "ViewPage" | "Browser") && !is_error {
             if let Some(target) = crate::web_design::page_target(input) {
@@ -3127,6 +3197,7 @@ where
         {
             aids.interface_dirty = true;
             aids.blind_edits += 1;
+            aids.edits_since_capture += 1;
         }
         aids.feedback_pending = false;
         aids.verified_commands.clear();
@@ -4484,6 +4555,9 @@ where
         }
         aids.interface_dirty = false;
         aids.interface_commands.extend(by_commands);
+        if self.review_plateau(aids) {
+            return None;
+        }
         let mut rounds = crate::web_design::max_review_rounds() + aids.extra_rounds;
         if aids.interface_rounds >= rounds {
             // Revues du tour épuisées : une de plus si la note monte encore.
@@ -4781,9 +4855,11 @@ where
             return true;
         }
         // La note stagne sous la barre : une poursuite de plus, une seule, où le
-        // juge ne donne que des changements de structure.
+        // juge ne donne que des changements de structure ; pas après deux
+        // revues sans progrès.
         if decision == crate::web_design::Continuation::Stalled
             && !aids.restructured
+            && !crate::web_design::plateau(&aids.graded)
             && self
                 .api_client
                 .free_requests_left()
@@ -4811,6 +4887,34 @@ where
     /// que la note monte (ou à la première note), deux fois au plus, dans le
     /// quota du jour ; les corrections comptent aussi. Sinon l'utilisateur lit
     /// où il s'arrête, une fois.
+    /// Deux revues de suite sans progrès du design, et un fonctionnement qui
+    /// n'est pas en train de se réparer : Claw arrête les revues du tour et le
+    /// dit une fois. Décision de l'utilisateur (29 octobre 2026), après la
+    /// session #41 : cinq revues pour une note restée autour de 6/10.
+    fn review_plateau(&mut self, aids: &mut TurnAids) -> bool {
+        if !crate::web_design::plateau(&aids.graded) {
+            return false;
+        }
+        let bar = crate::web_design::design_bar();
+        let repairing = aids
+            .function_scores
+            .split_last()
+            .is_some_and(|(last, before)| {
+                *last < bar && before.iter().max().is_none_or(|best| last > best)
+            });
+        if repairing {
+            return false;
+        }
+        if !aids.continuation_explained {
+            aids.continuation_explained = true;
+            let trail = crate::web_design::score_trail(&aids.graded);
+            self.api_client.notify(&format!(
+                "Design arrêté sous la barre {bar} (note {trail}/10) : deux revues de suite n'ont pas fait monter la note, Claw arrête les revues de ce tour. Écrivez « continue » pour reprendre"
+            ));
+        }
+        true
+    }
+
     fn continue_function(&mut self, aids: &mut TurnAids, at: &str) -> bool {
         if self.subagent || interrupt_requested() || !harness::enabled(Aid::DesignReview) {
             return false;
@@ -5718,6 +5822,43 @@ where
     /// `localStorage`, `MantleDB` et « endpoint » posée à une boulangère,
     /// sous un texte qui racontait le plan de l'agent (« je vais utiliser
     /// `AskUserQuestion` »), sans le code d'accès qu'elle avait demandé.
+    /// Capture retenue une fois : le modèle redemande la même capture après
+    /// une seule modification alors que la précédente relevait
+    /// plusieurs problèmes. Chaque capture coûte une minute environ (le
+    /// navigateur, le téléphone et l'ordinateur, la description des images).
+    /// Décision de l'utilisateur (29 octobre 2026), après la session #41 : 13
+    /// captures, souvent après une seule ligne de CSS. Redemandée tout de
+    /// suite, elle passe.
+    fn capture_check(
+        &mut self,
+        tool_name: &str,
+        input: &str,
+        aids: &mut TurnAids,
+    ) -> Option<String> {
+        if tool_name != "Screenshot" || self.subagent || aids.capture_held {
+            return None;
+        }
+        let same = aids
+            .capture_key
+            .as_deref()
+            .is_some_and(|key| key == capture_target(input));
+        let problems = aids.capture_problems.len();
+        // Sans aucune modification, la même capture rend déjà son résultat
+        // sans refaire le rendu (`last_capture`).
+        let hold = same && aids.edits_since_capture == 1 && problems >= CAPTURE_HOLD_PROBLEMS;
+        if !hold {
+            return None;
+        }
+        aids.capture_held = true;
+        self.api_client.notify(&format!(
+            "Capture retenue : une seule modification depuis la précédente, qui relevait {problems} problèmes ; Claw les redonne au modèle à corriger d'abord"
+        ));
+        Some(harness::capture_held_note(
+            aids.edits_since_capture,
+            &aids.capture_problems,
+        ))
+    }
+
     fn question_check(
         &mut self,
         tool_name: &str,
@@ -9260,6 +9401,47 @@ mod tests {
     }
 
     #[test]
+    fn the_reviews_stop_after_two_without_progress_unless_the_page_is_being_repaired() {
+        let _serial = crate::test_serial();
+        // Session #41 : 5,4 puis 6,0, 6,3, 6,0 et 5,9 ; décision du 29 octobre 2026.
+        let (mut runtime, observed, _) = aided_runtime(Vec::new(), Vec::new());
+        let graded = |mean: f32| crate::web_design::Graded {
+            mean,
+            under: vec!["finish".to_string()],
+            scores: Vec::new(),
+        };
+        let mut aids = super::TurnAids {
+            design_guided: true,
+            ..super::TurnAids::default()
+        };
+        aids.graded = vec![graded(5.4), graded(6.0), graded(6.3)];
+        assert!(
+            !runtime.review_plateau(&mut aids),
+            "une seule revue sans progrès"
+        );
+        aids.graded.push(graded(6.0));
+        // Le fonctionnement se répare encore : les revues continuent.
+        aids.function_scores = vec![6, 7];
+        assert!(!runtime.review_plateau(&mut aids));
+        aids.function_scores = vec![9, 9];
+        assert!(runtime.review_plateau(&mut aids));
+        assert!(runtime.review_plateau(&mut aids));
+        // Pas de revue « de structure » non plus.
+        assert!(!runtime.continue_design(&mut aids, "revues du tour"));
+        let observed = observed.borrow();
+        let stops: Vec<&String> = observed
+            .notices
+            .iter()
+            .filter(|notice| notice.starts_with("Design arrêté sous la barre"))
+            .collect();
+        assert_eq!(stops.len(), 1, "dit une fois : {stops:?}");
+        assert!(
+            stops[0].contains("5,4 puis 6,0 puis 6,3 puis 6,0")
+                && stops[0].contains("deux revues de suite")
+        );
+    }
+
+    #[test]
     fn a_page_that_works_badly_keeps_the_turn_going_while_it_gets_better() {
         let _serial = crate::test_serial();
         let (mut runtime, observed, _) = aided_runtime(Vec::new(), Vec::new());
@@ -10223,6 +10405,64 @@ mod tests {
 
     const TWO_PROBLEMS: &str = r#"{"captures":[{"screen":"phone 390x844","problems":["Words that run together: a letter-spacing of -0.02em or tighter on text under 32px eats the space between words (h1.hero-title \"U11 vs FC Voisins\" 14px, letter-spacing -0.28px)","The page is 430px wide on a 390px-wide screen and scrolls sideways (because of decorations drawn past the edge: div.hero-card::before)"]}]}"#;
     const WIDE_ONLY: &str = r#"{"captures":[{"screen":"phone 390x844","problems":["The page is 430px wide on a 390px-wide screen and scrolls sideways (because of decorations drawn past the edge: div.hero-card::before)"]}]}"#;
+
+    const THREE_PROBLEMS: &str = r#"{"captures":[{"screen":"phone 390x844","problems":["Text cut off, its box is too small for it: b \"1 438,15 €\" shows 75px of its 84px width (CSS rules: index.css:2 .hero__pill > b)","The main title h1 is 18px on this phone, no bigger than the body text (16px)","In light mode: Text with too little contrast against its background: p.tile__note (3.8:1)"]}]}"#;
+
+    #[test]
+    fn a_capture_after_a_single_change_is_held_once_with_the_problems_left() {
+        let _serial = crate::test_serial();
+        // Session #41 (28 octobre 2026) : 13 captures du modèle, souvent après
+        // une seule ligne de CSS, une minute chacune.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("retenue");
+        let shot = || {
+            tool_step(
+                "Screenshot",
+                &serde_json::json!({ "path": page.display().to_string() }).to_string(),
+            )
+        };
+        let write = || {
+            tool_step(
+                "write_file",
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                    .to_string(),
+            )
+        };
+        let steps = vec![shot(), write(), shot(), shot(), text_step("Corrigé.")];
+        let ((mut runtime, observed, _), _) = measured_runtime(steps, vec![Some(THREE_PROBLEMS)]);
+        runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        let held: Vec<&String> = observed
+            .requests
+            .iter()
+            .filter(|request| request.contains("[Claw] Capture held"))
+            .collect();
+        assert!(!held.is_empty(), "{:?}", observed.requests);
+        let last = held.last().expect("retenue");
+        let start = last.find("[Claw] Capture held").expect("note");
+        let end = last[start..]
+            .find("it will run.")
+            .map_or(last.len(), |end| start + end);
+        let last = &last[start..end];
+        assert!(
+            last.contains("you changed the interface 1 time(s)")
+                && last.contains("found 3 problem(s)")
+                && last.contains("- The main title h1 is 18px")
+                && !last.contains("CSS rules:"),
+            "{last}"
+        );
+        assert_eq!(
+            observed
+                .notices
+                .iter()
+                .filter(|notice| notice.starts_with("Capture retenue"))
+                .count(),
+            1,
+            "redemandée tout de suite, la capture passe : {:?}",
+            observed.notices
+        );
+    }
 
     #[test]
     fn the_visual_check_is_an_aid_that_can_be_switched_off() {

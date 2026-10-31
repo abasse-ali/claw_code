@@ -67,8 +67,12 @@ pub const CONTINUATION_REQUESTS: usize = 60;
 /// Requêtes gratuites gardées pour la journée : en dessous, pas de poursuite.
 pub const CONTINUATION_RESERVE: u64 = 150;
 /// Hausse de la note moyenne en dessous de laquelle une revue n'a rien
-/// gagné : la page ne progresse plus, poursuivre gaspillerait le quota.
-const MIN_GAIN: f32 = 0.2;
+/// gagné : la page ne progresse plus, poursuivre gaspillerait le quota. Un
+/// demi-point : en dessous, c'est l'humeur du juge. Vu le 28 octobre 2026
+/// (session #41) : 5,4 puis 6,0, 6,3, 6,0 et 5,9 ; deux revues de plus,
+/// cinq minutes, pour rien (décision de l'utilisateur, 29 octobre 2026 :
+/// arrêter d'insister après deux revues sans progrès).
+const MIN_GAIN: f32 = 0.5;
 
 /// Poursuites au plus d'un tour de design.
 #[must_use]
@@ -148,6 +152,24 @@ pub fn continuation(
         return Continuation::Stalled;
     }
     Continuation::Continue
+}
+
+/// La note plafonne sous la barre : les deux dernières revues n'ont pas fait
+/// monter la meilleure note d'avant elles d'au moins `MIN_GAIN`. Une revue de
+/// plus ne servirait pas.
+#[must_use]
+pub fn plateau(graded: &[Graded]) -> bool {
+    let count = graded.len();
+    if count < 3 || graded[count - 1].under.is_empty() {
+        return false;
+    }
+    (count - 2..count).all(|index| {
+        let best = graded[..index]
+            .iter()
+            .map(|graded| graded.mean)
+            .fold(f32::MIN, f32::max);
+        graded[index].mean < best + MIN_GAIN
+    })
 }
 
 /// Design atteint : la moyenne des critères à la barre au moins, et aucun
@@ -1158,6 +1180,16 @@ fn texts_of(root: &Path, kinds: &[&str]) -> Vec<String> {
         let Ok(entries) = std::fs::read_dir(&folder) else {
             continue;
         };
+        // La construction d'une appli Vite (`docs/`) : des bibliothèques minifiées,
+        // pas ce que le modèle a écrit (ses sources sont dans `src/`).
+        let vite = [
+            "vite.config.ts",
+            "vite.config.js",
+            "vite.config.mjs",
+            "vite.config.mts",
+        ]
+        .iter()
+        .any(|config| folder.join(config).is_file());
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -1165,10 +1197,13 @@ fn texts_of(root: &Path, kinds: &[&str]) -> Vec<String> {
                 if depth < 4
                     && !name.starts_with('.')
                     && !matches!(name.as_str(), "node_modules" | "dist" | "build" | "target")
+                    && (!vite || name != "docs")
                 {
                     folders.push((path, depth + 1));
                 }
             } else if name != "CREDITS.md"
+                // Les versions figées des bibliothèques, pas une page.
+                && !matches!(name.as_str(), "package-lock.json" | "npm-shrinkwrap.json")
                 && path.extension().is_some_and(|ext| {
                     kinds.contains(&ext.to_string_lossy().to_ascii_lowercase().as_str())
                 })
@@ -1293,7 +1328,7 @@ fn react_app_method(bar: u8) -> String {
     format!("This request builds a personal app: a tool the user opens every day on their phone to keep their own data. The bar is a recent phone app at the level of the best (Revolut, Lydia, Apple's own apps): the figure that matters first, calm surfaces, every screen working, light and dark, never a website. When you finish, Claw has the screens scored by an art director, 1 to 10 on seven criteria (phone, hierarchy, spacing, typography, color, identity, finish), and sends back every criterion under {bar}.
 1. Brief. One line each: who uses it, the figures that matter most, the main daily action (add an expense, log a session). Use the user's own words and figures, in their language. Never write a fact the user did not give (a rule, a promise, an amount): what only the user knows is asked in your answer. No technical word on screen (CSV, JSON, local storage, sync, database).
 2. Plan, in your reply before any code: the app's colors as hex values (the accent; the three hues of the gradient of its main card; the page and card surfaces, light and dark), then each screen with the kit's components from top to bottom and their content, and the add sheet's categories with a Lucide icon each. Data first. The figures the user gave are in the app from the first launch, as values they can change in its settings, never an empty app at 0. A figure given as a range counts at its least favourable end in the prudent total (the low end of an income, the high end of an expense), with the best case shown beside it; a figure marked as not sure stays out of the prudent total until it is received. Never fill the months before with copies of this month.
-3. Build in React, on the Starter tool: one call with kind \"react-app\", at the project's root. Claw writes a React + TypeScript + Vite + Tailwind CSS + Framer Motion project with Claw's app kit as React components, installs its libraries and returns how to use them; src/App.tsx is a working example to rewrite for this app. Compose every screen only with the kit's components, imported from \"./kit\": AppShell with its tabs and add button, MonthBar or AppBar, Hero with the main figure, Tiles, Card holding a List of Row or EntryList, Badge, Meters, BarChart or MonthsChart, Settings with MoneyInput or Switch, Empty, Button, EntrySheet, ConfirmModal, and toast with an Undo: no cards, lists, buttons or fields of your own, which would look different and break. The user's figures go in SEED (seedOnce) and in a persistentStore for their settings. src/theme.css only sets the app's tokens (its accent and its gradient, for light and dark); Tailwind classes lay out the little the kit lacks; never edit src/kit/ or docs/. Use the installed libraries instead of writing their work by hand: framer-motion for motion, recharts for other charts, date-fns for dates, zod to check an input, radix-ui for a menu, a slider or a popover. Keep the phone's own font, the kit's: a web typeface looks out of place in an app and is lost offline. Icons come from lucide-react (import {{ Wallet }} from \"lucide-react\"); emoji are forbidden everywhere, even if the brief sounds playful. Name the app in index.html's <title> and in public/manifest.webmanifest; draw public/icon.svg with the Icon tool on the accent, then the AppIcon tool (folder public) makes the PNG icons: list them in the manifest's icons and link the iPhone's in index.html, written without public/ (\"/apple-touch-icon.png\").
+3. Build in React, on the Starter tool: one call with kind \"react-app\", at the project's root. Claw writes a React + TypeScript + Vite + Tailwind CSS + Framer Motion project with Claw's app kit as React components, installs its libraries and returns how to use them; src/App.tsx is a working example to rewrite for this app. Compose every screen only with the kit's components, imported from \"./kit\": AppShell with its tabs and add button, MonthBar or AppBar, Hero with the main figure, Tiles, Card holding a List of Row or EntryList, Badge, Meters, BarChart or MonthsChart, Settings with MoneyInput or Switch, Empty, Button, EntrySheet, ConfirmModal, toast with an Undo, RecurringList for the money that comes back every month (salary, rent: never twice in a month), BankImport and categorize for a bank statement, MoneyCalendar for the days of income and spending, and the rest of the kit's list at the top of src/kit/index.ts (Gauge, GoalCard, NumberPad, Agenda, Kanban, Drawer, SwipeDeck, CountUp and the other effects) whenever the app needs one: no cards, lists, buttons or fields of your own, which would look different and break. The user's figures go in SEED (seedOnce) and in a persistentStore for their settings. src/theme.css only sets the app's tokens (its accent and its gradient, for light and dark); Tailwind classes lay out the little the kit lacks; never edit src/kit/ or docs/. Use the installed libraries instead of writing their work by hand: framer-motion for motion, recharts for other charts, date-fns for dates, zod to check an input, radix-ui for a menu, a slider or a popover. Keep the phone's own font, the kit's: a web typeface looks out of place in an app and is lost offline. Icons come from lucide-react (import {{ Wallet }} from \"lucide-react\"); emoji are forbidden everywhere, even if the brief sounds playful. Name the app in index.html's <title> and in public/manifest.webmanifest; draw public/icon.svg with the Icon tool on the accent, then the AppIcon tool (folder public) makes the PNG icons: list them in the manifest's icons and link the iPhone's in index.html, written without public/ (\"/apple-touch-icon.png\").
 4. Screens. 3 to 5 tabs, each with one clear job. The first screen leads with the main figure in the Hero (what is left to spend, a streak, a total) and the main action is the add button of the tab bar; the entries are a card of compact rows; summaries are tiles, meters and the chart; the settings hold the user's figures as values to adjust; every list has its empty state. Short labels; amounts in the user's currency and format (1 235,15 €, money()), the cents only where they matter.
 5. Make everything work: every button does what its label says; adding an entry updates every total and list at once; an entry can be changed and deleted, with Undo; the data stay after a reload; nothing shows NaN, Infinity or undefined.
 6. Check before you answer: npm run typecheck until it passes (the types, then the build Claw publishes, in docs/). Then Screenshot of index.html with windows and explore true (phone and desktop: Claw builds the app first, and shows its build errors), then Browser in ONE call with action \"steps\": the user's day in the app (open index.html, add an entry, see it in the list and in the totals, change it, delete it, Undo, open every tab), each step with \"expect\" set to what must then show, so the call proves the results. Fix every measured problem. Say in your answer only what these checks saw.")
@@ -3091,6 +3126,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert!(texts.contains("pain.jpg") && texts.contains("four.jpg"));
         assert!(!texts.contains("seigle.jpg"), "{texts}");
+        // Une appli Vite (session #41) : ses sources, pas sa construction ni ses
+        // versions figées.
+        let app = std::env::temp_dir().join(format!("claw-textes-vite-{}", std::process::id()));
+        std::fs::create_dir_all(app.join("src")).expect("dossiers");
+        std::fs::create_dir_all(app.join("docs/assets")).expect("dossiers");
+        std::fs::write(app.join("vite.config.ts"), "export default {}").expect("config");
+        std::fs::write(app.join("src/App.tsx"), "<img src=\"./pain.jpg\" />").expect("source");
+        std::fs::write(app.join("docs/assets/index-a1.js"), "seigle.jpg").expect("construction");
+        std::fs::write(
+            app.join("package-lock.json"),
+            "{\"sourcemap-codec\": \"^1.5.0\"}",
+        )
+        .expect("versions");
+        let texts = super::page_texts(&app).join("\n");
+        let _ = std::fs::remove_dir_all(&app);
+        assert!(texts.contains("pain.jpg"), "{texts}");
+        assert!(
+            !texts.contains("seigle.jpg") && !texts.contains("codec"),
+            "{texts}"
+        );
     }
 
     #[test]
@@ -3629,6 +3684,39 @@ mod tests {
             Continuation::LowQuota
         );
         assert_eq!(score_trail(&rising), "6,0 puis 7,3");
+        // Session #41 : 5,4 puis 6,0 puis 6,3 (moins d'un demi-point) : plus de
+        // poursuite pour si peu, une revue de structure au plus, puis l'arrêt.
+        let s41 = [
+            graded(5.4, &["finish"]),
+            graded(6.0, &["finish"]),
+            graded(6.3, &["finish"]),
+        ];
+        assert_eq!(
+            continuation(&s41, 2, 0, 2, Some(600)),
+            Continuation::Stalled
+        );
+        assert!(!super::plateau(&s41), "une seule revue sans progrès");
+        let s41 = [
+            s41[0].clone(),
+            s41[1].clone(),
+            s41[2].clone(),
+            graded(6.0, &["finish"]),
+        ];
+        assert!(super::plateau(&s41), "deux revues sans progrès");
+        assert!(!super::plateau(&[
+            graded(5.0, &["finish"]),
+            graded(5.1, &["finish"])
+        ]));
+        assert!(!super::plateau(&[
+            graded(6.0, &["phone"]),
+            graded(7.0, &["phone"]),
+            graded(7.1, &["phone"])
+        ]));
+        assert!(!super::plateau(&[
+            graded(7.9, &["phone"]),
+            graded(7.9, &["phone"]),
+            graded(8.2, &[])
+        ]));
         assert!(stop_reason(Continuation::Stalled).is_some());
         assert_eq!(stop_reason(Continuation::Reached), None);
         assert_eq!(super::max_continuations(), 2);

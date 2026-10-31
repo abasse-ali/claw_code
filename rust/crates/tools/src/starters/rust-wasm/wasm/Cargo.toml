@@ -1,0 +1,17 @@
+[package]
+name = "calc"
+version = "0.1.0"
+edition = "2021"
+
+# Le module Rust de l'appli, compilé en WebAssembly (public/calc.wasm) par
+# `npm run wasm` (et avant chaque `npm run build`), lu dans l'appli par useWasm().
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[workspace]

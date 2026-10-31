@@ -32,6 +32,10 @@ import urllib.request
 from pathlib import Path
 
 project = Path(sys.argv[1]).resolve()
+# Une appli Vite (React) : la page publiée est sa construction, dans docs/.
+if (project / "docs" / "index.html").is_file() and '"vite"' in (
+        (project / "package.json").read_text(encoding="utf-8") if (project / "package.json").is_file() else ""):
+    project = project / "docs"
 checks = []
 
 
@@ -517,7 +521,11 @@ def main():
         tools.pump(2)
         text = tools.js("document.body.innerText + ' ' + [...document.querySelectorAll('input, textarea')].map((f) => f.value).join(' ')") or ""
         values = tools.js(NUMBERS) or []
-        tools.js(SCREENS, timeout=90)
+        # Les montants de chaque écran visité : la dépense peut n'apparaître que dans
+        # l'historique (vu le 28 octobre 2026, session #41 : un accueil sans dernières
+        # opérations, la dépense bien gardée sous l'onglet Historique).
+        visited = tools.js(SCREENS, timeout=90) or {}
+        values = list(values) + list(visited.get("values") or [])
         text += tools.js("document.body.innerText") or ""
         kept = "Essai Claw" in text or close(values, 12.34)
         errors = tools.errors()

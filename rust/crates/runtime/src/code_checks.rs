@@ -314,7 +314,11 @@ pub fn pitfalls(path: &Path) -> Vec<String> {
             })
             .unwrap_or_default(),
         "css" => read(path)
-            .map(|text| css_pitfalls(&text))
+            .map(|text| {
+                let mut found = kit_restyled(path, &text);
+                found.extend(css_pitfalls(&text));
+                found
+            })
             .unwrap_or_default(),
         ext @ ("html" | "htm" | "js" | "mjs" | "jsx" | "ts" | "tsx" | "vue" | "svelte" | "json") => {
             read(path)
@@ -387,10 +391,16 @@ pub fn access_codes(text: &str) -> Vec<String> {
         r#"(?i)\b[\w$]*(?:pin|code|passe?|password|motdepasse|passcode|secret)[\w$]*["']?\s*(?:=|:)\s*["'`]([^"'`\s]{3,32})["'`]"#,
     )
     .expect("regex");
+    // Une version de bibliothèque (`"sourcemap-codec": "^1.5.0"` d'un package-lock) n'est
+    // pas un code : vu le 28 octobre 2026 (session #41), « ^1.5.0 » réclamé à la réponse.
+    let version = Regex::new(r"^[\^~<>=v]*\d+(\.[\dx*]+)+").expect("regex");
     let mut codes: Vec<String> = Vec::new();
     for found in assigned.captures_iter(text) {
         let whole = found[0].to_lowercase();
         let code = found[1].to_string();
+        if version.is_match(&code) {
+            continue;
+        }
         let not_access = [
             "key", "storage", "postal", "zip", "country", "promo", "coupon", "qr", "bar", "color",
             "colour", "lang", "status", "error", "area", "dial", "currency", "event", "http",
@@ -689,6 +699,92 @@ pub fn pitfalls_feedback(path: &str, findings: &[String]) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     )
+}
+
+/// La feuille de l'appli (`src/theme.css` du projet React, `styles.css` à
+/// côté de `kit/`) qui récrit l'allure des blocs du kit d'appli au lieu de n'en
+/// poser que les couleurs. Vu le 28 octobre 2026 (session #41) : 256 lignes sur
+/// `.hero__pill`, `.hero__legend`, `.row__sub`… ; en clair, la légende de la
+/// carte principale illisible et le texte des pastilles collé à leur bord,
+/// pendant que les revues tournaient autour de 6/10.
+#[must_use]
+pub fn kit_restyled(path: &Path, text: &str) -> Vec<String> {
+    let Some(folder) = path.parent() else {
+        return Vec::new();
+    };
+    let Ok(kit) = std::fs::read_to_string(folder.join("kit").join("app-kit.css")) else {
+        return Vec::new();
+    };
+    let class = Regex::new(r"\.([A-Za-z_][\w-]*)").expect("regex");
+    let rule = Regex::new(r"([^{}]+)\{([^{}]*)\}").expect("regex");
+    let comments = Regex::new(r"(?s)/\*.*?\*/").expect("regex");
+    let strip = |text: &str| {
+        comments
+            .replace_all(text, |found: &regex::Captures| {
+                "\n".repeat(found[0].matches('\n').count())
+            })
+            .to_string()
+    };
+    let kit = strip(&kit);
+    let blocks: std::collections::BTreeSet<String> = rule
+        .captures_iter(&kit)
+        .flat_map(|found| {
+            class
+                .captures_iter(&found[1])
+                .map(|name| name[1].to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let text = strip(text);
+    let mut restyled: Vec<(usize, String)> = Vec::new();
+    for found in rule.captures_iter(&text) {
+        let selector = found[1].trim();
+        // Des jetons posés pour un bloc (`.hero { --hero-1: … }`) sont permis.
+        let only_tokens = found[2]
+            .split(';')
+            .map(str::trim)
+            .filter(|declaration| !declaration.is_empty())
+            .all(|declaration| declaration.starts_with("--"));
+        if selector.starts_with('@') || only_tokens {
+            continue;
+        }
+        let hits = class
+            .captures_iter(selector)
+            .any(|name| blocks.contains(&name[1]));
+        if hits {
+            let line = text[..found.get(1).map_or(0, |at| at.start())]
+                .matches('\n')
+                .count()
+                + selector_offset(&found[1]);
+            restyled.push((
+                line + 1,
+                selector.split_whitespace().collect::<Vec<_>>().join(" "),
+            ));
+        }
+    }
+    let Some((line, _)) = restyled.first() else {
+        return Vec::new();
+    };
+    let names: Vec<String> = restyled
+        .iter()
+        .take(6)
+        .map(|(_, selector)| format!("`{selector}`"))
+        .collect();
+    let more = restyled.len().saturating_sub(6);
+    vec![format!(
+        "line {line}: {} rule(s) restyle the app kit's blocks ({}{}): this sheet only sets the app's tokens (the accent, the hero's gradient, the surfaces and text colors, light and dark). The kit's blocks are drawn and checked together in light and dark; a rule of yours on them breaks what you do not see (seen: the main card's legend unreadable in light mode, the pills' text touching their edge). Delete these rules; change a color through its token, and lay out what the kit lacks with Tailwind classes (or your own new classes) in the app's own markup",
+        restyled.len(),
+        names.join(", "),
+        if more > 0 { format!(" and {more} more") } else { String::new() },
+    )]
+}
+
+/// Lignes vides au début d'un sélecteur capturé (sa vraie ligne est plus bas).
+fn selector_offset(captured: &str) -> usize {
+    let trimmed = captured.trim_start();
+    captured[..captured.len() - trimmed.len()]
+        .matches('\n')
+        .count()
 }
 
 /// Règles rapiécées dites au plus par feuille : les plus redites d'abord.
@@ -1609,6 +1705,11 @@ const go = useCallback((event) => event.target.value.split(','), []);
             "const shop = { postalCode: \"75001\", promoCode: 'BIENVENUE', countryCode: 'FR' };"
         )
         .is_empty());
+        // Session #41 : les dépendances d'un package-lock.json ne sont pas des codes.
+        assert!(super::access_codes(
+            "\"@jridgewell/sourcemap-codec\": \"^1.5.0\",\n\"@jridgewell/trace-mapping\": \"0.3.24\""
+        )
+        .is_empty());
     }
 
     #[test]
@@ -1812,6 +1913,41 @@ const go = useCallback((event) => event.target.value.split(','), []);
         assert_eq!(super::css_pitfalls(sheet), Vec::<String>::new());
         let kit = include_str!("../../tools/src/components/app-kit.css");
         assert_eq!(super::css_pitfalls(kit), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_apps_sheet_that_restyles_the_kit_is_told_and_its_tokens_are_not() {
+        // Session #41 (28 octobre 2026) : src/theme.css de 256 lignes sur les blocs du kit.
+        let dir = std::env::temp_dir().join(format!("claw-kit-restyle-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("kit")).expect("dossier");
+        std::fs::write(
+            dir.join("kit/app-kit.css"),
+            include_str!("../../tools/src/components/app-kit.css"),
+        )
+        .expect("kit");
+        let theme = dir.join("theme.css");
+        let tokens = ":root { --accent: #4f46e5; --hero-1: #1e1b4b; }\n\
+            @media (prefers-color-scheme: dark) { :root:not([data-theme=\"light\"]) { --accent: #6366f1; } }\n\
+            .hero { --hero-2: #312e81; }\n\
+            .mon-bloc { display: grid; gap: 12px; }\n";
+        assert!(super::kit_restyled(&theme, tokens).is_empty());
+        let restyled = format!(
+            "{tokens}/* les pastilles */\n.hero__pills {{ grid-template-columns: 1fr; }}\n\
+             @media (min-width: 520px) {{ .hero__pill > b {{ font-size: 1rem; }} }}\n.row__sub {{ color: #666; }}\n"
+        );
+        let found = super::kit_restyled(&theme, &restyled);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].starts_with("line 6: 3 rule(s) restyle the app kit's blocks (`.hero__pills`, `.hero__pill > b`, `.row__sub`)"),
+            "{}",
+            found[0]
+        );
+        // Une feuille loin d'un kit : rien à dire.
+        assert!(
+            super::kit_restyled(std::path::Path::new("/nulle/part/styles.css"), &restyled)
+                .is_empty()
+        );
     }
 
     #[test]
