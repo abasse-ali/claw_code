@@ -2462,12 +2462,23 @@ function showDrawerPane(pane) {
 }
 
 /** Le tiroir repart vers la gauche et le voile s'efface, puis il se cache. */
+/** Grand écran : les sessions restent dans une colonne à gauche, comme dans Linear (refonte du
+ * 31 octobre 2026) ; le tiroir ne se ferme pas. */
+const docked = () => window.matchMedia("(min-width: 1100px)").matches;
+
+/** La colonne suit la largeur : ouverte en large (une fois les sessions lisibles), fermée en étroit. */
+function followDock() {
+  if (docked()) { if (state.github) openDrawer(); }
+  else if (!$("#drawer").hidden) closeDrawer();
+}
+
 function closeDrawer() {
   const drawer = $("#drawer");
   const app = $("#app");
   state.selecting = false;
   state.selected.clear();
   clearTimeout(state.drawerTimer);
+  if (docked() && !drawer.hidden) return;
   const done = () => {
     drawer.hidden = true;
     drawer.classList.remove("closing");
@@ -5624,6 +5635,8 @@ async function boot() {
   }
   $("#quota-button").addEventListener("click", openQuota);
   window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", applyTheme);
+  // Colonne des sessions sur grand écran : ouverte une fois connecté, refermée en repassant en étroit.
+  window.matchMedia("(min-width: 1100px)").addEventListener("change", followDock);
   blockZoom();
   watchComposer();
   watchBottomButton();
@@ -5697,6 +5710,7 @@ async function boot() {
       state.user = user;
       if (!vault()) await lockScreen("create");
       state.github = github;
+      followDock();
       showQuotaLabel();
       refreshQuota();
       watchRequests().catch(() => {});
