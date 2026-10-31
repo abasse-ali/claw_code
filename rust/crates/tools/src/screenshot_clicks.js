@@ -77,15 +77,20 @@
     if (method !== "dialog") event.preventDefault();
   });
   let lastClick = null;
+  // Vrai le temps d'essayer un onglet (#depenses) : ce changement d'écran dans la même page
+  // passe, rien d'autre. `__clawLetHash` : Screenshot rouvre un écran par son onglet dans une
+  // page où ces gardes sont restées (formulaires renvoyés).
+  let letHashThrough = false;
+  const hashFree = () => letHashThrough || window.__clawLetHash === true;
   window.addEventListener("click", (event) => {
     lastClick = { target: event.target, handled: event.defaultPrevented };
     const link = event.target.closest && event.target.closest("a[href]");
-    if (link) event.preventDefault();
+    if (link && !hashFree()) event.preventDefault();
   });
   if (window.navigation) {
     window.navigation.addEventListener("navigate", (event) => {
       count();
-      if (event.cancelable) event.preventDefault();
+      if (event.cancelable && !(hashFree() && event.hashChange)) event.preventDefault();
     });
   }
   // Mode « formulaires seuls » (`clawOnlyForms`) : Screenshot renvoie les
@@ -165,6 +170,8 @@
 
   // --- Liens -----------------------------------------------------------------
   const links = [];
+  // Liens #ecran sans section : essayés plus bas, une fois les écrans repérables.
+  const routeLinks = [];
   const anchors = new Map();
   const pages = new Map();
   const here = location.href.split("#")[0];
@@ -175,9 +182,13 @@
     if (href.startsWith("#") && href.length > 1) {
       let id = href.slice(1);
       try { id = decodeURIComponent(id); } catch (_) { /* laisse tel quel */ }
-      if (!document.getElementById(id) && !document.getElementsByName(id).length) {
-        links.push(`${label(link)} points to #${id}, but the page has no element with that id`);
-      } else if (document.getElementById(id) && !anchors.has(id)) anchors.set(id, link);
+      // Un onglet vers un écran présent mais caché (hidden) en est un aussi : vu le 30 octobre
+      // 2026 (essai C8), tous les écrans dans la page, masqués, et aucun exploré.
+      const target = document.getElementById(id);
+      const tab = link.closest("nav, [role=tablist], .tabbar");
+      if ((!target && !document.getElementsByName(id).length) || (target && tab && !shown(target))) {
+        routeLinks.push({ link, id });
+      } else if (target && !anchors.has(id)) anchors.set(id, link);
     } else if (/^tel:/i.test(href)) {
       const number = href.slice(4).replace(/[\s.()-]/g, "");
       if (!/^\+?\d{6,15}$/.test(number) || /^\+?(\d)\1+$/.test(number)) {
@@ -269,6 +280,8 @@
   // Envois qui changent un compteur sans montrer le nom donne.
   const unnamed = [];
   const tested = new Set();
+  // Les boutons déjà touchés (ou envoyés avec leurs champs) ne s'essaient plus.
+  const tried = new Set();
   // Un nom par formulaire : au rechargement, on sait lequel a perdu son ajout.
   const base = `Camille Claw${Math.floor(1000 + Math.random() * 9000)}`;
   let marker = base;
@@ -301,6 +314,9 @@
     if (type === "month") return day(31).slice(0, 7);
     if (type === "week") return "";
     if (type === "color") return "#336699";
+    // Un montant dans un <input type=number> : tapé à la française, avec sa virgule. Vu le 30
+    // octobre 2026 (essai C9) : « 45,50 » refusé, ou lu 4550 au clavier d'un ordinateur.
+    if (type === "number" && /montant|amount|prix|price|somme|€/.test(words)) return `${12 + tested.size},50`;
     if (type === "number" || type === "range") {
       // Un nombre par formulaire : deux formulaires qui ajoutent autant de places
       // donneraient le meme total, et l'un passerait pour l'autre.
@@ -324,9 +340,17 @@
   };
   // Le champ qui a reçu le nom d'essai du formulaire en cours.
   let markedField = null;
+  // Ce que le dernier remplissage a tapé (le nom d'essai, le montant) : une fenêtre rouverte
+  // ne doit plus le montrer, et le montant doit se lire à la même échelle sur les écrans.
+  let sentValues = [];
+  let sentAmount = null;
+  // Les montants tapés dans un <input type=number>, qui perd la virgule.
+  const commaLost = [];
   const fill = (form) => {
     let named = false;
     markedField = null;
+    sentValues = [];
+    sentAmount = null;
     const refused = [];
     const groups = new Set();
     for (const field of form.querySelectorAll("input, select, textarea")) {
@@ -355,7 +379,25 @@
         // Le nom d'un formulaire precedent, garde par la page, est remplace.
         // Un nombre deja propose (« 3 places ») aussi : chaque formulaire a le sien.
         const counted = field.type === "number" || field.type === "range";
-        if (value && (!field.value || value === marker || counted)) setValue(field, value);
+        // Un montant à « 0 » (le champ d'argent du kit) est vide : il reçoit le montant d'essai.
+        const amount = /^\d+,50$/.test(value);
+        const blank = !field.value || (amount && /^0+([.,]0+)?$/.test(field.value.trim()));
+        if (value && (blank || value === marker || counted)) {
+          setValue(field, value);
+          if (value === marker || amount) sentValues.push(value);
+          if (amount) sentAmount = value;
+          // La virgule refusée par un <input type=number> : c'est dit, puis le montant passe avec
+          // un point pour que l'entrée suive son cours (sa validité, que React règle au rendu
+          // suivant, n'est pas lue ici).
+          if (amount && field.type === "number" && !field.value) {
+            if (!commaLost.length) {
+              const named = field.labels && field.labels[0] ? `"${field.labels[0].innerText.replace(/\s+/g, " ").trim().slice(0, 40)}"` : label(field);
+              commaLost.push(`The amount field ${named} is an <input type=number>: an amount typed the French way ("${value}") is refused there, and typed on a computer keyboard it loses its comma (${value} becomes ${value.replace(",", "")}, a hundred times too much). Use a text field that keeps the comma (inputmode="decimal", read with parseAmount; the kit's TextField type="number" or MoneyInput)`);
+            }
+            setValue(field, value.replace(",", "."));
+            continue;
+          }
+        }
       }
       // Un motif (pattern) que le navigateur ne lit pas lève une erreur ici.
       let valid = true;
@@ -386,6 +428,175 @@
     const text = (title && title.innerText) || (send && (send.innerText || send.value)) || "";
     return text.trim() ? `the form "${text.replace(/\s+/g, " ").trim().slice(0, 40)}"` : "a form";
   };
+  // Les messages passagers (toast) qui remercient d'un envoi : un nom qui n'est que là n'est
+  // montré nulle part.
+  const passing = "[role=status], [role=alert], [aria-live], .toast, .snackbar, .notification, output";
+  const showsText = (text) => {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const holder = node.parentElement;
+      if (node.nodeValue.includes(text) && holder && !holder.closest(passing) && shown(holder)) return true;
+    }
+    return false;
+  };
+  // Le texte de l'écran ouvert et de chaque autre écran de l'appli (ses onglets), puis l'écran
+  // de départ revient.
+  const screensText = async () => {
+    const start = location.hash;
+    const texts = [document.body.innerText];
+    letHashThrough = true;
+    for (const id of [...new Set(routeLinks.map((item) => item.id))].slice(0, 6)) {
+      if (`#${id}` === start) continue;
+      location.hash = `#${id}`;
+      await wait(300);
+      texts.push(document.body.innerText);
+    }
+    if (location.hash !== start) {
+      location.hash = start;
+      await wait(300);
+    }
+    letHashThrough = false;
+    return texts.join("\n");
+  };
+  // Un montant tapé (« 14,50 ») qui se lit cent fois plus grand sur les écrans (« 1 450,00 € ») :
+  // des centimes montrés comme des euros. Vu les 29 et 30 octobre 2026 (essais C2, C6 et C8) :
+  // 100 € affichés 10 000,00 €, et tous les soldes faux d'autant.
+  const scaled = [];
+  const checkScale = async (typed, name) => {
+    if (scaled.length || !typed) return;
+    const euros = Number(typed.replace(",", "."));
+    const big = (euros * 100).toFixed(2);
+    // Les séparateurs de milliers (« 1 450,00 », « 1.450,00 ») s'effacent pour comparer.
+    const text = (await screensText()).replace(/(\d)[\s\u00a0\u202f.](?=\d{3}(?!\d))/g, "$1");
+    const at = (value) => new RegExp(`(^|[^\\d,.])${value.replace(".", "[,.]")}(?![\\d])`);
+    if (at(big).test(text) && !at(euros.toFixed(2)).test(text)) {
+      const shown = `${Number(big.split(".")[0]).toLocaleString("fr-FR")},${big.split(".")[1]}`;
+      scaled.push(`The amount typed in ${name} ("${typed}") shows as "${shown}" on the app's screens, 100 times too much: an amount kept in cents is shown as euros (or converted twice). Divide by 100 where it is shown (the kit's Row, Hero, Tile, Amount and money() take euros), and check that 12,50 typed shows 12,50 €`);
+    }
+  };
+  // Une entrée rangée sur un autre écran de l'appli (l'onglet de sa liste, #participants) :
+  // elle s'y cherche, puis l'écran de départ revient. Rend l'écran où elle se voit.
+  const onOtherScreens = async (text) => {
+    const start = location.hash;
+    let found = null;
+    letHashThrough = true;
+    for (const id of [...new Set(routeLinks.map((item) => item.id))].slice(0, 6)) {
+      if (`#${id}` === start) continue;
+      location.hash = `#${id}`;
+      await wait(300);
+      if (showsText(text)) {
+        found = `#${id}`;
+        break;
+      }
+    }
+    if (location.hash !== start) {
+      location.hash = start;
+      await wait(300);
+    }
+    letHashThrough = false;
+    return found;
+  };
+  // Un envoi qui ajoute une entrée (« Ajouter », « Créer », « Nouvelle dépense ») : ce qui y
+  // est tapé doit se voir quelque part ensuite.
+  const adding = /ajout|cr[ée]e|nouve|\badd\b|\bcreate\b|\bnew\b/i;
+  // Ce que la page a fait d'une entrée envoyée (formulaire ou fenêtre `form`, de nom `name`) :
+  // montrée, rangée sur un autre écran, ou nulle part. Rend { added } : l'entrée se voit.
+  const judgeEntry = async (form, name, personal, prior) => {
+    // Ajoute a la page, hors du message passager (toast) qui le remercie (`passing`).
+    // Ou ajouté à un écran caché que la page ouvre d'un lien, d'un onglet ou
+    // d'un bouton (une appli d'une seule page : la liste des opérations derrière
+    // son onglet). Vu le 27 octobre 2026 (kit d'appli) : l'opération ajoutée
+    // depuis l'accueil, listée dans l'écran « Opérations », passait pour perdue.
+    const openable = (el) => {
+      for (let node = el; node && node !== document.body; node = node.parentElement) {
+        if (!node.id || shown(node)) continue;
+        const id = CSS.escape(node.id);
+        if (document.querySelector(`a[href="#${id}"], [aria-controls="${id}"], [data-screen="${id}"], [data-view="${id}"], [data-tab="${id}"], [data-target="#${id}"]`)) return true;
+      }
+      return false;
+    };
+    const texts = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let added = false;
+    for (let node = texts.nextNode(); node && !added; node = texts.nextNode()) {
+      const holder = node.parentElement;
+      added = node.nodeValue.includes(marker) && holder && !holder.closest(passing) && (shown(holder) || openable(holder));
+    }
+    // Ou la page a change (un compteur, une liste) sans montrer le nom : les
+    // textes apparus a l'envoi.
+    const appeared = personal ? snapshot().filter((text) => !prior.has(text)).slice(0, 8) : [];
+    // Un compteur a bouge (« Il reste 2 places ») mais le nom donne n'est
+    // nulle part : on ne sait pas qui s'est inscrit. Vu le 25 octobre 2026
+    // (session #31) : « Je conduis » enlevait des places, aucun parent ne
+    // voyait qui conduisait.
+    // Un texte du formulaire lui-même (sa quantité remise à 0, son total) n'est
+    // pas une liste que d'autres lisent. Vu le 26 octobre 2026 (session #32) :
+    // « 1,30 € … 0 », la carte du produit dans le formulaire de réservation,
+    // prise pour un compteur ; l'agent a ajouté une section « Mes
+    // réservations » que personne n'avait demandée pour faire taire l'alerte.
+    // Une liste des choses du visiteur lui-même (« Mes réservations », « Votre
+    // commande ») n'a pas à redire son nom : elle est à lui.
+    const own = /^(mes|mon|ma|vos|votre|my|your)\b/i;
+    // Le bloc qui porte ce texte, même écrit en plusieurs morceaux (« mardi 27
+    // octobre » et « 07:00 » dans deux <span>) : le plus profond qui le contient.
+    const flat = (value) => (value || "").replace(/\s+/g, "");
+    const outside = (text) => {
+      const base = flat(text.replace(/ \(in ".*$/, "")).slice(0, 60);
+      if (!base) return true;
+      const holder = [...document.body.querySelectorAll("*")]
+        .filter((el) => !el.closest("script, style, template, noscript") && el.getClientRects().length && flat(el.innerText).includes(base))
+        .pop();
+      if (!holder) return true;
+      if (form.contains(holder)) return false;
+      const region = holder.closest("section, aside, article, [role=region]");
+      const title = region && region.querySelector("h1, h2, h3, h4, [role=heading]");
+      return !(title && own.test((title.textContent || "").trim()));
+    };
+    const counted = appeared.find((text) => /\d/.test(text) && outside(text));
+    // Un nom de personne, ou le libellé d'une entrée (une dépense, une séance) :
+    // le message le dit, sinon l'agent ajoutait un champ « Nom » à une dépense
+    // (vu le 27 octobre 2026, session #36).
+    const person = !markedField || /nom|name|pr[eé]nom|pseudo|qui|conducteur|joueur|parent/.test(nameOf(markedField));
+    if (personal && !added && counted && person) {
+      unnamed.push(`Sending ${name} changes the page ("${counted.slice(0, 90)}") but the name typed in it ("${marker}") is shown nowhere, only in a passing message at best: people cannot see who signed up or who offered. Show each new entry with its name where the people who need it read it (the card or list it changed; for a reservation or an order, the list its owner reads, which need not be public), and keep it after a reload`);
+    } else if (personal && !added && counted) {
+      const field = (markedField.labels && markedField.labels[0] ? markedField.labels[0].innerText : markedField.name || markedField.id || "").replace(/\s+/g, " ").trim().slice(0, 40);
+      unnamed.push(`Sending ${name} changes the page ("${counted.slice(0, 90)}") but the entry typed in it ("${marker}" in the field "${field}") appears in no list, only in a passing message at best: the list of entries does not show the new one. Show each new entry in its list (on the screen or one tap away), and keep it after a reload; do not add fields to the form for this`);
+    }
+    // L'écran de l'appli où le formulaire a été envoyé (#participants) : c'est là que l'ajout
+    // se relit après le rechargement, pas sur l'écran qu'un clic a ouvert ensuite.
+    // Nulle part sur cet écran : peut-être sur un autre (sa liste derrière un onglet).
+    let hash = location.hash;
+    if (personal && !added) {
+      const elsewhere = await onOtherScreens(marker);
+      if (elsewhere) {
+        added = true;
+        hash = elsewhere;
+      }
+    }
+    // Envoyé et accepté (la fenêtre s'est fermée, ou le champ s'est vidé), un ajout dont le nom
+    // tapé ne se voit sur aucun écran : Screenshot le cherche encore après un rechargement, pour
+    // dire si l'écran ne se met pas à jour ou si l'entrée est perdue. Vu le 30 octobre 2026
+    // (essai C7) : participants et dépenses gardés, mais visibles seulement après un rechargement.
+    const closed = !form.isConnected || !(shown(form) || [...form.querySelectorAll("*")].slice(0, 200).some(shown));
+    const accepted = closed || Boolean(markedField && markedField.value !== marker);
+    const lookup = /recherch|search|filtr|connexion|login|mot de passe/i.test(name)
+      || form.querySelector("input[type=search], input[type=password], [role=search]");
+    const sendLabel = [...form.querySelectorAll("button, [role=button], input[type=submit]")].map((el) => el.innerText || el.value || "").join(" ");
+    if (accepted && !lookup) await checkScale(sentAmount, name);
+    if (personal && !added && !counted && accepted && !lookup && adding.test(`${name} ${sendLabel}`)) {
+      kept.push({ form: name, marker, shown: false, missing: true, appeared: [], hash });
+      return { added: false };
+    }
+    if (added || appeared.length) kept.push({ form: name, marker, shown: added, appeared, hash });
+    return { added };
+  };
+  // Les groupes de choix sans choix fait (qui a payé) d'un formulaire ou d'une fenêtre.
+  const emptyChoices = (box) => [...box.querySelectorAll("[role=group], [role=radiogroup]")].filter(shown).map((group) => ({
+    group,
+    choices: [...group.querySelectorAll("button[aria-pressed], [role=radio]")].filter(shown),
+  })).filter(({ choices }) => choices.length
+    && !choices.some((choice) => choice.getAttribute("aria-pressed") === "true" || choice.getAttribute("aria-checked") === "true"));
+  const choiceNames = (groups) => groups.map(({ group }) => `"${(group.getAttribute("aria-label") || label(group)).slice(0, 30)}"`).join(", ");
   const tryForm = async (form) => {
     tested.add(form);
     if (form.getAttribute("method") === "dialog" || !form.querySelector("input, select, textarea")) return;
@@ -448,74 +659,146 @@
       return;
     }
     if (lastSubmit.handled && seen.mutations === 0 && effects === before.effects + 1) {
-      forms.push(`sending ${name} shows nothing: no confirmation, no error, no change in the page`);
-      return;
-    }
-    // Ajoute a la page, hors du message passager (toast) qui le remercie.
-    const passing = "[role=status], [role=alert], [aria-live], .toast, .snackbar, .notification, output";
-    // Ou ajouté à un écran caché que la page ouvre d'un lien, d'un onglet ou
-    // d'un bouton (une appli d'une seule page : la liste des opérations derrière
-    // son onglet). Vu le 27 octobre 2026 (kit d'appli) : l'opération ajoutée
-    // depuis l'accueil, listée dans l'écran « Opérations », passait pour perdue.
-    const openable = (el) => {
-      for (let node = el; node && node !== document.body; node = node.parentElement) {
-        if (!node.id || shown(node)) continue;
-        const id = CSS.escape(node.id);
-        if (document.querySelector(`a[href="#${id}"], [aria-controls="${id}"], [data-screen="${id}"], [data-view="${id}"], [data-tab="${id}"], [data-target="#${id}"]`)) return true;
+      // Un choix manquant (qui a payé) : fait, puis le formulaire renvoyé, comme pour une fenêtre.
+      // Vu le 30 octobre 2026 : la version naïve de l'appli de dépenses refusait sans un mot.
+      const groups = emptyChoices(form);
+      if (!groups.length) {
+        forms.push(`sending ${name} shows nothing: no confirmation, no error, no change in the page`);
+        return;
       }
-      return false;
-    };
-    const texts = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-    let added = false;
-    for (let node = texts.nextNode(); node && !added; node = texts.nextNode()) {
-      const holder = node.parentElement;
-      added = node.nodeValue.includes(marker) && holder && !holder.closest(passing) && (shown(holder) || openable(holder));
+      for (const { choices } of groups) tap(choices[0]);
+      await wait(150);
+      const again = watch();
+      try {
+        const button = form.querySelector("button[type=submit], button:not([type]), input[type=submit]");
+        if (button && shown(button)) tap(button);
+        else form.requestSubmit();
+      } catch (error) { errors.push(String((error && error.message) || error)); }
+      await wait(600);
+      again.stop();
+      if (!again.mutations) {
+        forms.push(`sending ${name} shows nothing, even with a choice made in ${choiceNames(groups)}: no confirmation, no error, no change in the page`);
+        return;
+      }
+      forms.push(`sending ${name} does nothing and says nothing until a choice is made in ${choiceNames(groups)}: choose a sensible default (the first person), or say what is missing`);
     }
-    // Ou la page a change (un compteur, une liste) sans montrer le nom : les
-    // textes apparus a l'envoi.
-    const appeared = personal ? snapshot().filter((text) => !prior.has(text)).slice(0, 8) : [];
-    // Un compteur a bouge (« Il reste 2 places ») mais le nom donne n'est
-    // nulle part : on ne sait pas qui s'est inscrit. Vu le 25 octobre 2026
-    // (session #31) : « Je conduis » enlevait des places, aucun parent ne
-    // voyait qui conduisait.
-    // Un texte du formulaire lui-même (sa quantité remise à 0, son total) n'est
-    // pas une liste que d'autres lisent. Vu le 26 octobre 2026 (session #32) :
-    // « 1,30 € … 0 », la carte du produit dans le formulaire de réservation,
-    // prise pour un compteur ; l'agent a ajouté une section « Mes
-    // réservations » que personne n'avait demandée pour faire taire l'alerte.
-    // Une liste des choses du visiteur lui-même (« Mes réservations », « Votre
-    // commande ») n'a pas à redire son nom : elle est à lui.
-    const own = /^(mes|mon|ma|vos|votre|my|your)\b/i;
-    // Le bloc qui porte ce texte, même écrit en plusieurs morceaux (« mardi 27
-    // octobre » et « 07:00 » dans deux <span>) : le plus profond qui le contient.
-    const flat = (value) => (value || "").replace(/\s+/g, "");
-    const outside = (text) => {
-      const base = flat(text.replace(/ \(in ".*$/, "")).slice(0, 60);
-      if (!base) return true;
-      const holder = [...document.body.querySelectorAll("*")]
-        .filter((el) => !el.closest("script, style, template, noscript") && el.getClientRects().length && flat(el.innerText).includes(base))
-        .pop();
-      if (!holder) return true;
-      if (form.contains(holder)) return false;
-      const region = holder.closest("section, aside, article, [role=region]");
-      const title = region && region.querySelector("h1, h2, h3, h4, [role=heading]");
-      return !(title && own.test((title.textContent || "").trim()));
-    };
-    const counted = appeared.find((text) => /\d/.test(text) && outside(text));
-    // Un nom de personne, ou le libellé d'une entrée (une dépense, une séance) :
-    // le message le dit, sinon l'agent ajoutait un champ « Nom » à une dépense
-    // (vu le 27 octobre 2026, session #36).
-    const person = !markedField || /nom|name|pr[eé]nom|pseudo|qui|conducteur|joueur|parent/.test(nameOf(markedField));
-    if (personal && !added && counted && person) {
-      unnamed.push(`Sending ${name} changes the page ("${counted.slice(0, 90)}") but the name typed in it ("${marker}") is shown nowhere, only in a passing message at best: people cannot see who signed up or who offered. Show each new entry with its name where the people who need it read it (the card or list it changed; for a reservation or an order, the list its owner reads, which need not be public), and keep it after a reload`);
-    } else if (personal && !added && counted) {
-      const field = (markedField.labels && markedField.labels[0] ? markedField.labels[0].innerText : markedField.name || markedField.id || "").replace(/\s+/g, " ").trim().slice(0, 40);
-      unnamed.push(`Sending ${name} changes the page ("${counted.slice(0, 90)}") but the entry typed in it ("${marker}" in the field "${field}") appears in no list, only in a passing message at best: the list of entries does not show the new one. Show each new entry in its list (on the screen or one tap away), and keep it after a reload; do not add fields to the form for this`);
-    }
-    if (added || appeared.length) kept.push({ form: name, marker, shown: added, appeared });
+    return judgeEntry(form, name, personal, prior);
   };
 
-  for (const form of [...document.forms].filter(shown).slice(0, 6)) await tryForm(form);
+  // Une fenêtre sans formulaire (des champs et un bouton « Créer ») : remplie et envoyée comme un
+  // formulaire. Vu le 30 octobre 2026 (essai C7) : « Nouveau voyage » jamais rempli, aucun
+  // voyage créé, et chaque écran de l'appli exploré vide.
+  const sending = /^\s*(\+\s*)?(ajouter|cr[ée]er|enregistrer|valider|ok|envoyer|confirmer|add|create|save|submit)\b/i;
+  const sendWords = (el) => el.innerText || el.value || el.getAttribute("aria-label") || "";
+  const fillable = (field) => shown(field) && !field.closest("form")
+    && !["hidden", "submit", "button", "reset", "file", "image", "checkbox", "radio", "search", "password"].includes((field.type || "").toLowerCase());
+  // `given` : le bouton d'envoi de champs posés dans l'écran, sans <form> ni fenêtre.
+  const tryWindow = async (box, given = null) => {
+    if (tested.has(box) || tested.size >= 10) return null;
+    const fields = [...box.querySelectorAll("input, textarea, select")].filter(fillable);
+    if (!fields.length) return null;
+    if (given && (!given.isConnected || !shown(given))) return null;
+    const send = given || [...box.querySelectorAll("button, [role=button], input[type=button]")]
+      .filter((el) => shown(el) && !el.closest("form"))
+      .find((el) => sending.test(sendWords(el)));
+    if (!send) return null;
+    tested.add(box);
+    marker = `${base}${String.fromCharCode(65 + tested.size)}`;
+    // Le titre des champs libres est souvent celui de leur carte, juste au-dessus.
+    let heading = box.querySelector("h1, h2, h3, [role=heading]");
+    for (let node = box.parentElement, depth = 0; given && !heading && node && depth < 2; node = node.parentElement, depth += 1) {
+      heading = node.querySelector("h1, h2, h3, [role=heading]");
+    }
+    const title = heading ? heading.innerText.replace(/\s+/g, " ").trim().slice(0, 40) : "";
+    const name = given ? (title ? `the fields of "${title}"` : `the fields next to ${label(send)}`)
+      : title ? `the window "${title}"` : `the window of ${label(send)}`;
+    const refused = fill(box);
+    if (refused.length) {
+      forms.push(`${name} refuses plausible entries: ${refused.slice(0, 3).join("; ")}`);
+      return null;
+    }
+    // Le bouton s'active au rendu qui suit la saisie.
+    await wait(150);
+    if (send.disabled || send.getAttribute("aria-disabled") === "true") {
+      forms.push(`${name}: its ${label(send)} stays disabled once every field is filled, so a visitor cannot send it. Enable it when the window can be sent, and say on it what is still missing`);
+      return null;
+    }
+    const personal = fields.some((field) => field.value === marker);
+    if (personal) typed.push(marker);
+    const prior = new Set(snapshot());
+    const seen = watch();
+    const before = { effects, errors: errors.length };
+    try { tap(send); } catch (error) { errors.push(String((error && error.message) || error)); }
+    await wait(600);
+    seen.stop();
+    if (errors.length > before.errors) {
+      forms.push(`sending ${name} raises an error in the page's script: ${errors[errors.length - 1]}`);
+      return null;
+    }
+    if (!seen.mutations && effects === before.effects) {
+      // Un groupe de choix sans choix fait (qui a payé) : le visiteur en touche un et renvoie.
+      // Le refus muet est dit, puis l'entrée suit son cours. Vu le 30 octobre 2026 (essai C8) :
+      // « Ajouter » sans payeur choisi ne faisait rien, et rien ne le disait.
+      const groups = emptyChoices(box);
+      if (!groups.length || !send.isConnected) {
+        forms.push(`sending ${name} does nothing: no change in the page`);
+        return null;
+      }
+      for (const { choices } of groups) tap(choices[0]);
+      await wait(150);
+      const again = watch();
+      try { tap(send); } catch (error) { errors.push(String((error && error.message) || error)); }
+      await wait(600);
+      again.stop();
+      const named = choiceNames(groups);
+      if (!again.mutations) {
+        forms.push(`sending ${name} does nothing, even with a choice made in ${named}: no change in the page`);
+        return null;
+      }
+      forms.push(`sending ${name} does nothing and says nothing until a choice is made in ${named}: choose a sensible default when the window opens (the first person), or say what is missing`);
+    }
+    return judgeEntry(box, name, personal, prior);
+  };
+
+  // Des champs et leur bouton d'envoi posés dans l'écran, sans <form> ni fenêtre : remplis et
+  // envoyés comme une fenêtre. Vu le 30 octobre 2026 (essai C9) : le prénom et son bouton
+  // « Ajouter » dans une carte ; le parcours touchait « Ajouter » champ vide, le disait mort, et
+  // aucun participant, donc aucune dépense, n'était jamais essayé.
+  const looseSend = (el) => shown(el) && !el.closest("form, dialog, [role=dialog], [aria-modal=true], nav, header") && sending.test(sendWords(el));
+  const looseGroups = (scope) => {
+    const groups = [];
+    for (const send of [...scope.querySelectorAll("button, [role=button], input[type=button]")].filter(looseSend)) {
+      if (groups.length >= 3) break;
+      let box = send.parentElement;
+      for (let depth = 0; box && box !== scope && box !== document.body && depth < 4 && ![...box.querySelectorAll("input, textarea, select")].some(fillable); depth += 1) {
+        box = box.parentElement;
+      }
+      if (!box || tested.has(box) || groups.some((group) => group.box === box)) continue;
+      // Un seul bouton d'envoi dans le bloc : « Ajouter le premier » de la liste vide, qui ne fait
+      // que donner la main au champ, n'est pas l'envoi des champs de tout l'écran.
+      const sends = [...box.querySelectorAll("button, [role=button], input[type=button]")].filter(looseSend);
+      const fields = [...box.querySelectorAll("input, textarea, select")].filter(fillable);
+      if (sends.length === 1 && fields.length && fields.length <= 6) groups.push({ box, send });
+    }
+    return groups;
+  };
+
+  // Formulaires et champs libres envoyés dans l'ordre de la page : le participant avant la
+  // dépense qui le demande.
+  const sendInOrder = async (formsHere, groups) => {
+    const items = [...formsHere.map((form) => ({ form, at: form })), ...groups.map((group) => ({ ...group, at: group.box }))]
+      .sort((a, b) => (a.at.compareDocumentPosition(b.at) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+    for (const item of items) {
+      if (tested.size >= 10) break;
+      if (item.form) {
+        if (!tested.has(item.form) && item.form.isConnected) await tryForm(item.form);
+      } else {
+        tried.add(item.send);
+        await tryWindow(item.box, item.send);
+      }
+    }
+  };
+  await sendInOrder([...document.forms].filter(shown).slice(0, 6), looseGroups(document.body));
   if (onlyForms) return { typed, forms };
 
   // --- Boutons ---------------------------------------------------------------
@@ -619,7 +902,6 @@
     const heading = early.querySelector("h1, h2, h3");
     gateOpen.push(`${label(el)} shows "${(heading ? heading.innerText : label(early)).replace(/\s+/g, " ").trim().slice(0, 50)}" behind its code window before any code is typed`);
   };
-  const tried = new Set();
   const deadEls = [];
   const noteScreen = (el, before, code) => {
     if (el.matches("summary, [aria-expanded], [aria-controls]") || el.closest("details")) return null;
@@ -628,14 +910,71 @@
     if (!region) return null;
     const heading = region.querySelector("h1, h2, h3");
     const name = (heading ? heading.innerText : label(region)).replace(/\s+/g, " ").trim().slice(0, 50);
-    if (screens.length < 3 && !screens.some((screen) => screen.name === name)) {
-      screens.push({ label: label(el), selector: path(el), name, code: code || null });
+    // Deux onglets (#depenses, #soldes) sont deux écrans, même sous un même titre (le nom du
+    // voyage en haut de chacun). Vu le 30 octobre 2026 (essai C7) : seul « Membres » exploré.
+    const href = el.matches('a[href^="#"]') ? el.getAttribute("href") : null;
+    if (screens.length < 3 && !screens.some((screen) => screen.name === name && screen.href === href)) {
+      screens.push({ label: label(el), selector: path(el), name, code: code || null, href });
     }
     return region;
+  };
+  // Le bouton qui a ajouté une première entrée disparaît (il n'était que dans la liste vide) et
+  // rien d'autre n'en ajoute une : une seule entrée possible. Vu le 30 octobre 2026 (essais C5
+  // et C7) : « Ajouter une dépense » seulement dans l'écran vide, puis plus aucun moyen.
+  const addGone = [];
+  const words = (el) => `${el.innerText || ""} ${el.getAttribute("aria-label") || ""} ${el.title || ""}`;
+  const addingControl = /^\s*\+\s*$|ajout|nouve|cr[ée]er|\badd\b|\bnew\b/i;
+  const nouns = (text) => text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/[^a-z0-9]+/)
+    .filter((word) => word.length > 2 && !/^(ajouter|nouveau|nouvelle|nouvel|creer|une|des|les|the|add|new|premier|premiere|autre|encore|vos|mes|votre|mon|son)$/.test(word))
+    .map((word) => word.replace(/[sx]$/, ""));
+  // Le bouton qui ajoute encore une entrée comme celle-ci : le premier lui-même, ou un autre
+  // (le + de l'écran, « Ajouter un participant » sous la liste).
+  const addAgain = (opener, openerWords) => {
+    if (opener.isConnected && shown(opener)) return opener;
+    const wanted = nouns(openerWords);
+    return [...document.querySelectorAll("button, [role=button], a[href]")]
+      .filter((item) => item !== opener && shown(item) && !item.disabled && addingControl.test(words(item)))
+      .find((item) => {
+        const own = nouns(words(item));
+        return !own.length || !wanted.length || own.some((word) => wanted.includes(word));
+      }) || null;
+  };
+  const secondAdd = (opener, openerLabel, openerWords) => {
+    if (addGone.length >= 2 || addAgain(opener, openerWords)) return;
+    addGone.push(`After a first entry is added with ${openerLabel}, nothing on the screen adds another: that button only shows while the list is empty, and no other button adds one. Keep a way to add one more on the screen once it has entries (a button under the list, or the screen's + button)`);
+  };
+  // Rouverte par le même bouton après un ajout, la fenêtre montre encore ce qui vient d'être
+  // envoyé : la saisie suivante part de l'ancienne. Vu le 30 octobre 2026 (essais C6 et C8) :
+  // « Pour qui » gardé d'une dépense à l'autre, et des parts fausses.
+  const keptOpen = [];
+  const reopened = async (opener, sent) => {
+    if (keptOpen.length >= 2 || !sent.length || !opener) return;
+    const openerLabel = label(opener);
+    const before = new Set(windows());
+    try { tap(opener); } catch (_) { return; }
+    await wait(400);
+    const box = windows().find((item) => !before.has(item));
+    if (!box) return;
+    const stale = [...box.querySelectorAll("input, textarea")].find((field) => shown(field) && sent.includes(field.value));
+    if (stale) {
+      const field = (stale.labels && stale.labels[0] ? stale.labels[0].innerText : stale.getAttribute("aria-label") || stale.name || stale.id || "").replace(/\s+/g, " ").trim().slice(0, 40);
+      keptOpen.push(`Opened again by ${openerLabel} once an entry was added, its window still holds that entry ("${stale.value}"${field ? ` in the field "${field}"` : ""}): the next entry starts from the previous one, and its choices (who paid, for whom) come along unnoticed. Reset the window's fields and choices each time it opens for a new entry`);
+    }
+    const close = closeButton(box);
+    if (close) tap(close);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    for (const dialog of document.querySelectorAll("dialog[open]")) {
+      try { dialog.close(); } catch (_) { /* deja fermee */ }
+    }
+    await wait(300);
   };
   const tryControl = async (el) => {
     if (!el.isConnected || !shown(el) || tried.has(el)) return null;
     tried.add(el);
+    const openerLabel = label(el);
+    const openerWords = words(el);
+    let addedHere = false;
+    let sentHere = [];
     const shownBefore = regions();
     // A l'ecran avant la mesure : le defilement du toucher ne compte pas comme
     // un effet du bouton.
@@ -676,7 +1015,12 @@
       if (codeField(box)) openedEarly(el, box, shownBefore);
       if (codeField(box) && gated.length < 2 && !gated.some((item) => item.el === el)) gated.push({ el });
       for (const form of [...box.querySelectorAll("form")].filter((item) => shown(item) && !tested.has(item))) {
-        if (tested.size < 10) await tryForm(form);
+        if (tested.size < 10) addedHere = Boolean((await tryForm(form))?.added) || addedHere;
+        sentHere = sentValues;
+      }
+      if (box.isConnected && open(box) && ![...box.querySelectorAll("form")].some(shown)) {
+        addedHere = Boolean((await tryWindow(box))?.added) || addedHere;
+        sentHere = sentValues;
       }
       if (!box.isConnected || !open(box)) continue;
       // Un glissement parti de la fenêtre et fini sur son fond : le navigateur
@@ -725,6 +1069,10 @@
       try { dialog.close(); } catch (_) { /* deja fermee */ }
     }
     await wait(40);
+    if (addedHere) {
+      secondAdd(el, openerLabel, openerWords);
+      await reopened(addAgain(el, openerWords), sentHere);
+    }
     return noteScreen(el, shownBefore);
   };
   for (const el of controls) await tryControl(el);
@@ -742,6 +1090,9 @@
     const inner = () => [...region.querySelectorAll("button, [role=button], input[type=button], summary")]
       .filter((el) => shown(el) && !tried.has(el) && !el.disabled && el.getAttribute("aria-disabled") !== "true"
         && !(el.type === "submit" && el.form));
+    // Ses formulaires et ses champs libres s'envoient d'abord, comme sur l'écran de départ : ses
+    // boutons (« Aucun », une pastille de « pour qui ») changeraient sinon ce qu'ils envoient.
+    await sendInOrder([...region.querySelectorAll("form")].filter((item) => shown(item) && !tested.has(item)).slice(0, 2), looseGroups(region));
     for (let round = 0; round < 10; round += 1) {
       if (!region.isConnected) return;
       if (!shown(region) && !(await reopen())) return;
@@ -867,6 +1218,37 @@
       }
     }
   }
+  // Un lien #ecran sans section : l'onglet d'une appli qui ne met dans la page que l'écran
+  // ouvert (le kit React de Claw, un routeur). Essayé : s'il ouvre un écran, c'est un onglet,
+  // noté pour être exploré et capturé ; sinon le lien est cassé. Vu le 29 octobre 2026 (essai
+  // C3) : les onglets Dépenses, Soldes et Remboursements dits cassés, et jamais capturés.
+  const startHash = location.hash;
+  const routes = new Map();
+  for (const { link, id } of routeLinks) {
+    // Un même écran (#operations par l'onglet et par « Tout voir ») ne s'essaie qu'une fois.
+    if (routes.has(id)) {
+      if (!routes.get(id)) links.push(`${label(link)} points to #${id}, but the page has no element with that id`);
+      continue;
+    }
+    // L'essai d'un écran précédent a pu redessiner la page : le lien se retrouve par son adresse.
+    const current = link.isConnected ? link
+      : [...document.querySelectorAll("a[href]")].find((item) => item.getAttribute("href").trim() === `#${id}` && shown(item));
+    let route = false;
+    if (current && current.isConnected && shown(current)) {
+      const before = regions();
+      const seen = watch();
+      letHashThrough = true;
+      location.hash = `#${id}`;
+      await wait(300);
+      seen.stop();
+      route = Boolean(noteScreen(current, before)) || Boolean(document.getElementById(id))
+        || (location.hash === `#${id}` && seen.mutations > 0);
+      if (location.hash !== startHash) { location.hash = startHash; await wait(300); }
+      letHashThrough = false;
+    }
+    routes.set(id, route);
+    if (!route) links.push(`${label(link)} points to #${id}, but the page has no element with that id`);
+  }
   // Les autres écrans, après l'espace à code : leurs essais (« Annuler ma
   // réservation ») videraient ce que l'espace devait montrer.
   for (const screen of screens.filter((item) => !item.code)) {
@@ -875,8 +1257,10 @@
     const open = async () => {
       if (!(await reveal(opener))) return false;
       const before = regions();
+      letHashThrough = opener.matches('a[href^="#"]');
       tap(opener);
       await wait(300);
+      letHashThrough = false;
       return Boolean(noteScreen(opener, before)) || [...regions()].some((item) => (item.querySelector("h1, h2, h3")?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 50) === screen.name);
     };
     if (!(await open())) continue;
@@ -896,6 +1280,17 @@
       if (seen.mutations && dead.includes(name)) dead.splice(dead.indexOf(name), 1);
     }
   }
+  // Une entrée montrée à l'envoi, que le parcours a lui-même retirée ensuite (son bouton
+  // « Supprimer », essayé comme les autres) : son absence au rechargement ne dit rien. Vu le
+  // 30 octobre 2026 : le participant de la page de référence, supprimé par le parcours, dit
+  // perdu au rechargement.
+  for (let index = kept.length - 1; index >= 0; index -= 1) {
+    const item = kept[index];
+    if (!item.shown || showsText(item.marker)) continue;
+    const there = await onOtherScreens(item.marker);
+    if (there) item.hash = there;
+    else kept.splice(index, 1);
+  }
   const sitePages = [...pages].map(([url, { from }]) => ({ url, from }));
-  return { checked: tried.size, windowLayout, dead, failing, covered, buried, stuck, links, files, forms, unnamed, underBar, kept, openers, dragged, screens, pages: sitePages, typed, codeShown, gateOpen };
+  return { checked: tried.size, windowLayout, dead, failing, covered, buried, stuck, links, files, forms, unnamed, underBar, kept, openers, dragged, screens, pages: sitePages, typed, codeShown, gateOpen, addGone, scaled, keptOpen, commaLost };
 })()

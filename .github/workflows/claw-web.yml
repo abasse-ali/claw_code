@@ -21,6 +21,8 @@ on:
         required: false
       GEMINI_API_KEY:
         required: false
+      CLAW_PUSH_VAPID_PRIVATE:
+        required: false
     inputs:
       claw_source:
         description: Dépôt du code de Claw (compilé, scripts du moteur)
@@ -328,3 +330,16 @@ jobs:
           JOB_TOKEN: ${{ github.token }}
           REPO_TOKEN: ${{ secrets.CLAW_REPO_TOKEN }}
         run: python3 claw-src/.github/claw-web/publish.py
+
+      # Notification sur le téléphone (Web Push) : question de Claw, travail fini ou arrêt. Les
+      # clés et les appareils abonnés sont posés par l'appli (Réglages, Notifications).
+      - name: Prévenir le téléphone
+        if: always() && steps.setup.outcome == 'success' && steps.setup.outputs.skip != 'true'
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          CLAW_PUSH_VAPID_PRIVATE: ${{ secrets.CLAW_PUSH_VAPID_PRIVATE }}
+          CLAW_PUSH_VAPID_PUBLIC: ${{ vars.CLAW_PUSH_VAPID_PUBLIC }}
+          CLAW_PUSH_SUBSCRIPTIONS: ${{ vars.CLAW_PUSH_SUBSCRIPTIONS }}
+          REPO_TOKEN: ${{ secrets.CLAW_REPO_TOKEN }}
+        run: python3 claw-src/.github/claw-web/push.py

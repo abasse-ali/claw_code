@@ -52,16 +52,21 @@ const REACT_APP: &[(&str, &str)] = files!("react-app":
     "src/kit/chart.tsx",
     "src/kit/csv.ts",
     "src/kit/entries.tsx",
+    "src/kit/extras.tsx",
     "src/kit/format.ts",
     "src/kit/forms.tsx",
     "src/kit/icons.tsx",
     "src/kit/index.ts",
     "src/kit/layout.tsx",
+    "src/kit/more.tsx",
+    "src/kit/motion.tsx",
     "src/kit/offline.ts",
     "src/kit/settings.ts",
     "src/kit/sheet.tsx",
     "src/kit/store.ts",
     "src/kit/toast.tsx",
+    "src/kit/tracker.tsx",
+    "src/kit/widgets.tsx",
 );
 
 /// L'allure du kit, la même que celle des applis sans React.
@@ -91,7 +96,7 @@ const PYTHON_API: &[(&str, &str)] = files!("python-api":
     "tests/test_main.py",
 );
 
-const REACT_GUIDE: &str = "React 19 + TypeScript + Vite 8 + Tailwind CSS 4 + Framer Motion, with lucide-react, zustand, recharts, radix-ui, date-fns, zod and canvas-confetti installed: import them, never write by hand what they do. The app is written in src/App.tsx, which starts as a working example (a monthly budget): rewrite its texts, screens, categories, seed data and settings for this app, and remove what it does not need. Compose every screen with Claw's app kit, imported from \"./kit\" (its full list is at the top of src/kit/index.ts): AppShell (bar, tabs, onAdd; its children are one Screen per tab), MonthBar or AppBar, Hero (the main figure on the app's gradient: label, amount, sub, pills, progress), Tiles > Tile, Card (title, meta, link) holding a List of Row (icon, tone, title, badge, sub, amount, action) or Meters > Meter, Badge, Empty, BarChart and MonthsChart, Settings > Setting with MoneyInput or Switch, Button, ButtonRow, Segmented, Chips, TextField, EntrySheet (the sheet to add or edit an entry, opened by openEntrySheet()), Sheet, Modal, ConfirmModal, toast(message, { action: { label: \"Annuler\", run } }). Data: useEntries (entries kept on the phone, add, update, remove and clear return an undo), seedOnce(SEED) puts the figures the user gave in the app at its first launch, useMonthEntries and useMonthTotals for the month shown, EntryList fills itself, persistentStore(\"name\", { ... }) keeps the user's settings; money(), signed(), parseAmount() and dayLabel() write amounts and dates the French way. The app's colors go in src/theme.css (tokens only: --accent and the gradient --hero-1, --hero-2, --hero-3, light and dark); Tailwind classes lay out what the kit lacks (grid, gap-3, mt-4) with the kit's colors (bg-surface, text-muted, text-accent, border-line); motion.div from framer-motion animates the rest. Never edit src/kit/ (Claw rewrites it), never write CSS for cards, lists, buttons or fields, never use emoji. Icons: any Lucide icon, import { Wallet } from \"lucide-react\", passed as icon={Wallet}. public/ holds the icon (icon.svg), the manifest and the offline service worker.";
+const REACT_GUIDE: &str = "React 19 + TypeScript + Vite 8 + Tailwind CSS 4 + Framer Motion, with lucide-react, zustand, recharts, radix-ui, date-fns, zod and canvas-confetti installed: import them, never write by hand what they do. The app is written in src/App.tsx, which starts as a working example (a monthly budget): rewrite its texts, screens, categories, seed data and settings for this app, and remove what it does not need. Compose every screen with Claw's app kit, imported from \"./kit\" (its full list is at the top of src/kit/index.ts): AppShell (bar, tabs, onAdd; its children are one Screen per tab, written in place or inside your own components) and Screen (id, title, onAdd: what the + button does while that screen is shown, such as opening the sheet that screen keeps in its own state), MonthBar or AppBar, Hero (the main figure on the app's gradient: label, amount, sub, pills, progress), Tiles > Tile, Card (title, meta, link) holding a List of Row (icon, tone, title, badge, sub, amount, end: buttons under the amount, action) or Meters > Meter, Badge, Empty, BarChart and MonthsChart, Settings > Setting with MoneyInput or Switch, Button, ButtonRow, Segmented, Chips (one choice, or several when its value is a list: who an expense is for), TextField (type \"number\" keeps the comma of 12,50), Select, DateField, SearchField, AddField (a field and its Ajouter button on one line: onAdd returns an error such as a duplicate name, or nothing), Form (onSubmit returns an error or nothing; shows it above the button), ItemActions (Modifier and Supprimer, with its own confirmation), Avatar and Row avatar (a person by initials), WeekChecks with currentStreak, bestStreak and successRate (the last 7 days to tick), shiftDay and lastDays (days in the phone's time: never toISOString for a day), Empty steps, and widgets.tsx: Tabs (inside a screen), Accordion, Combobox (a choice list searched by typing), Menu (the ⋯ menu), Hint (tooltip), DataTable (sortable, paged), Skeleton, Spinner, Steps, QuantityInput, Rating, Slider, CodeInput (one-time code), FileDrop, MonthCalendar (marked days), and extras.tsx: TextArea, PasswordField (strength), Alert (a message inside the screen), Chat (message bubbles and a field to send), Timeline, Carousel, Countdown, Stat (a figure and its change in %), DetailList (label: value lines), CopyButton, ToggleButton (favorite), LockScreen (a code before the app), more.tsx: SwipeRow (a Row swiped to delete or mark done), Checklist (tasks to tick, with progress), TagsField, ColorPicker, IconPicker (stores an icon name, drawn by iconByName), Timer, Stopwatch, YearHeatmap (days done as squares, like GitHub), DonutChart (a breakdown with its legend), Sparkline, SortableList (reordered by dragging or arrows), PhotoField (a photo shrunk to keep on the phone), ShareButton, InstallBanner, the animations of motion.tsx: Appear (fades in, onScroll when reached), Stagger (its children one after another), Reveal (open: unfolds), Swap (id, direction: the next month slides in), Pop and Shake (trigger: a bounce when ticked, a shake on an error), Pulse (a halo on what waits for the user), SuccessCheck (a drawn tick after saving), ProgressRing (value 0..1), celebrate() (confetti for a goal reached), EntrySheet (the sheet to add or edit an entry, opened by openEntrySheet()), Sheet, Modal, ConfirmModal, toast(message, { action: { label: \"Annuler\", run } }). Data: useEntries (entries kept on the phone, add, update, remove and clear return an undo), seedOnce(SEED) puts the figures the user gave in the app at its first launch, useMonthEntries and useMonthTotals for the month shown, EntryList fills itself, persistentStore(\"name\", { ... }) keeps the user's settings; a store selector returns stored values (useTrip((s) => s.expenses)), never a value built at each read (s.getBalances(), .filter(), { … }), which makes zustand render again without end: derive figures with useMemo; money(), signed(), parseAmount() and dayLabel() write amounts and dates the French way. On a computer the kit gives the app its own layout (the tabs in a column on the left with the add button on top, two or more cards side by side): keep the screens made of the kit's blocks and let it lay them out, never a phone column stretched by hand. Every amount the kit takes or shows (Hero, Tile, Row and Amount, money(), signed(), useEntries) is in euros, 12.5 for 12,50 €: an app that counts in integer cents divides them by 100 before handing them to the kit (passed as they are, 5149 cents show \"5 149,00 €\"). The app's colors go in src/theme.css (tokens only: --accent and the gradient --hero-1, --hero-2, --hero-3, light and dark); Tailwind classes lay out what the kit lacks (grid, gap-3, mt-4) with the kit's colors (bg-surface, text-muted, text-accent, border-line); use these animations where they help (a list appearing, a goal reached, an error), and motion.div from framer-motion for the rest. Never edit src/kit/ (Claw rewrites it), never write CSS for cards, lists, buttons or fields, never use emoji. Icons: any Lucide icon, import { Wallet } from \"lucide-react\", passed as icon={Wallet}. public/ holds the icon (icon.svg), the manifest and the offline service worker.";
 
 const REACT_CHECK: &str = "Claw builds the app (npm run build, into docs/, the page GitHub Pages publishes) before every Screenshot, Browser or ViewPage of index.html, and shows the build errors: always open index.html, never a file of docs/, and never edit docs/. npm run typecheck checks the types, then builds; Claw runs it after your changes.";
 
@@ -511,6 +516,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Une appli dont chaque écran est un composant, avec son propre bouton +.
+    const WRAPPED_SCREENS: &str = r#"import { useState } from "react";
+import { House, NotebookPen } from "lucide-react";
+import { AppBar, AppShell, Card, Screen, Sheet } from "./kit";
+
+function Accueil() {
+  return (
+    <Screen id="accueil" label="Accueil">
+      <Card title="Bienvenue">Premier écran</Card>
+    </Screen>
+  );
+}
+
+function Notes() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Screen id="notes" title="Notes" onAdd={() => setOpen(true)}>
+        <Card title="Liste des notes">Aucune note</Card>
+      </Screen>
+      <Sheet open={open} onClose={() => setOpen(false)} title="Nouvelle note">
+        <p>Texte de la note</p>
+      </Sheet>
+    </>
+  );
+}
+
+export default function App() {
+  const tabs = [
+    { id: "accueil", label: "Accueil", icon: House },
+    { id: "notes", label: "Notes", icon: NotebookPen },
+  ];
+  return (
+    <AppShell bar={<AppBar title="Carnet" />} tabs={tabs} addLabel="Ajouter une note">
+      <Accueil />
+      <Notes />
+    </AppShell>
+  );
+}
+"#;
+
     #[test]
     #[ignore = "installe les bibliothèques (réseau) et lance le navigateur installé"]
     #[allow(clippy::too_many_lines)]
@@ -617,6 +663,16 @@ mod tests {
             { "action": "open", "path": page, "expect": "Disponible ce mois-ci" }
         ] }));
         let _ = step(json!({ "action": "close" }));
+        // Des écrans écrits dans des composants à soi suivent les onglets, et le bouton + fait
+        // ce que l'écran ouvert lui donne. Vu le 30 octobre 2026 (essai C5) : l'AppShell
+        // montrait toujours le premier écran et le + ne pouvait pas ouvrir la fenêtre d'un écran.
+        std::fs::write(&app, WRAPPED_SCREENS).expect("App.tsx");
+        let wrapped = step(json!({ "action": "steps", "steps": [
+            { "action": "open", "path": page, "expect": "Premier écran" },
+            { "action": "click", "target": ".tabbar__tab[href=\"#notes\"]", "expect": "Liste des notes", "absent": "Premier écran" },
+            { "action": "click", "target": ".tabbar__add", "expect": "Texte de la note" }
+        ] }));
+        let _ = step(json!({ "action": "close" }));
         // Une erreur de construction revient au modèle, avec sa cause.
         std::fs::write(
             dir.join("src/main.tsx"),
@@ -675,6 +731,10 @@ mod tests {
         assert!(
             view.get("failed").is_none() && view.get("error").is_none(),
             "{view}"
+        );
+        assert!(
+            wrapped.get("failed").is_none() && wrapped.get("error").is_none(),
+            "{wrapped}"
         );
         let error = broken.expect_err("construction en échec");
         assert!(

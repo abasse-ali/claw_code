@@ -19,6 +19,12 @@ class ParseTest(unittest.TestCase):
         answer = "<think>Je traduis [deux] textes.</think>\nVoici : [\"Le titre est coupé \u2014 en haut\", \"Bouton inactif\"]"
         self.assertEqual(translate.parse(answer, 2), ["Le titre est coupé - en haut", "Bouton inactif"])
 
+    def test_a_wrapped_answer_is_read(self):
+        # Un bloc de code, un objet autour du tableau, un raisonnement sans balise ouvrante.
+        self.assertEqual(translate.parse('```json\n["un", "deux"]\n```', 2), ["un", "deux"])
+        self.assertEqual(translate.parse('{"translations": ["un", "deux"]}', 2), ["un", "deux"])
+        self.assertEqual(translate.parse('je traduis [x]</think>["un"]', 1), ["un"])
+
     def test_a_wrong_count_or_no_array_gives_nothing(self):
         self.assertIsNone(translate.parse('["un seul"]', 2))
         self.assertIsNone(translate.parse("Je ne sais pas.", 1))
@@ -41,6 +47,45 @@ class TranslatorTest(unittest.TestCase):
         translator.wait(5)
         self.assertEqual(got, [["fr:a", "fr:b", "fr:a"], ["fr:b", "fr:c"]])
         self.assertEqual(calls, [["a", "b"], ["c"]])
+
+    def test_texts_go_in_small_batches_and_the_relay_takes_a_failed_one(self):
+        """Vu le 29 octobre 2026 (essai C3) : chaque liste entière dépassait le délai."""
+        nvidia, relay = [], []
+
+        def first(texts):
+            nvidia.append(list(texts))
+            if "b7" in texts:
+                raise TimeoutError()
+            return [f"fr:{text}" for text in texts]
+
+        def second(texts):
+            relay.append(list(texts))
+            return [f"gemini:{text}" for text in texts]
+
+        translator = translate.Translator("cle", call=first, fallback=second)
+        got = []
+        texts = [f"b{number}" for number in range(9)]
+        printed = []
+        translator._report = printed.append
+        translator(texts, got.append)
+        translator.wait(5)
+        self.assertEqual([len(batch) for batch in nvidia], [translate.BATCH, 9 - translate.BATCH])
+        self.assertEqual(relay, [texts[translate.BATCH:]])
+        self.assertEqual(got[0][:2], ["fr:b0", "fr:b1"])
+        self.assertEqual(got[0][-1], "gemini:b8")
+        self.assertEqual(printed, ["Traduction des problèmes impossible : TimeoutError"])
+
+    def test_a_batch_nobody_translates_keeps_its_english_and_the_others_their_french(self):
+        def call(texts):
+            return None if "x" in texts else [f"fr:{text}" for text in texts]
+
+        translator = translate.Translator("cle", call=call)
+        translator._report = lambda line: None
+        got = []
+        texts = [f"t{number}" for number in range(translate.BATCH)] + ["x"]
+        translator(texts, got.append)
+        translator.wait(5)
+        self.assertEqual(got, [[f"fr:t{number}" for number in range(translate.BATCH)] + ["x"]])
 
     def test_a_failed_translation_leaves_the_english(self):
         def call(texts):
@@ -74,19 +119,6 @@ class TranslatorTest(unittest.TestCase):
         # Le premier appel était en cours ; les autres ne sont plus demandés.
         self.assertEqual(len(calls), 1)
         self.assertFalse(translator.worker is None or not translator.worker.daemon)
-
-    def test_two_failures_in_a_row_stop_the_translation_for_the_run(self):
-        calls = []
-
-        def call(texts):
-            calls.append(list(texts))
-            raise TimeoutError
-
-        translator = translate.Translator("cle", call=call)
-        for index in range(5):
-            translator([f"défaut {index}"], lambda _: None)
-        translator.wait(5)
-        self.assertEqual(len(calls), translate.MAX_FAILURES)
 
 
 class JournalTest(unittest.TestCase):

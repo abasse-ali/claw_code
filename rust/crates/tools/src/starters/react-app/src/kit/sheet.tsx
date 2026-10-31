@@ -2,7 +2,7 @@
 // au centre (Modal), la confirmation d'un geste qui efface (ConfirmModal), et le volet d'ajout
 // et de modification d'une opération (EntrySheet, ouvert par openEntrySheet()).
 
-import { X } from "lucide-react";
+import { Pencil, Trash2, X } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { create } from "zustand";
 import { money, monthOf, parseAmount, today } from "./format";
@@ -185,6 +185,7 @@ export function EntrySheet({ categories, kinds = { out: "Dépense", in: "Rentré
             autoComplete="off"
             placeholder="0"
             value={amount}
+            style={{ width: `${Math.max(1, amount.length) + 0.4}ch` }}
             aria-invalid={invalid}
             onChange={(event) => {
               setAmount(event.target.value);
@@ -233,5 +234,19 @@ export function EntrySheet({ categories, kinds = { out: "Dépense", in: "Rentré
         {entry && <button className="btn btn--danger btn--block" type="button" onClick={removeEntry}>Supprimer l'opération</button>}
       </form>
     </Sheet>
+  );
+}
+
+/** Les boutons d'une entrée : « Modifier » (s'il y a de quoi) et « Supprimer », qui demande
+ * d'abord confirmation (« Supprimer « Taxi » ? »). */
+export function ItemActions({ name, onEdit, onDelete, text }: { name: string; onEdit?: () => void; onDelete: () => void; text?: string }) {
+  const [asking, setAsking] = useState(false);
+  return (
+    <span className="actions">
+      {onEdit && <button type="button" className="btn btn--small" onClick={onEdit}><Icon icon={Pencil} size={16} />Modifier</button>}
+      <button type="button" className="btn btn--small btn--danger" onClick={() => setAsking(true)}><Icon icon={Trash2} size={16} />Supprimer</button>
+      <ConfirmModal open={asking} onClose={() => setAsking(false)} title={`Supprimer « ${name} » ?`} text={text ?? "Cette action ne peut pas être annulée."}
+        confirmLabel="Supprimer" onConfirm={() => { setAsking(false); onDelete(); }} />
+    </span>
   );
 }

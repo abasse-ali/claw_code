@@ -132,6 +132,11 @@ pub enum Aid {
     /// construis… ») alors que rien n'a été écrit pendant le tour : le
     /// modèle est renvoyé le faire.
     AnnouncedWork,
+    /// Interface modifiée : Claw ouvre la page sur un téléphone après chaque
+    /// réponse qui l'a changée, la mesure et dit au modèle ce qui est cassé ;
+    /// une réponse qui la dit « vérifiée » sans l'avoir regardée, ou un tour
+    /// qui s'arrête avant, la fait mesurer aussi.
+    VisualCheck,
 }
 
 impl Aid {
@@ -183,6 +188,7 @@ impl Aid {
             Self::WorkQuestions => "CLAW_WORK_QUESTIONS",
             Self::OpenTasks => "CLAW_OPEN_TASKS",
             Self::AnnouncedWork => "CLAW_ANNOUNCED_WORK",
+            Self::VisualCheck => "CLAW_VISUAL_CHECK",
         }
     }
 }

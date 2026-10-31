@@ -7,9 +7,11 @@ Un petit modèle de NVIDIA traduit, en arrière-plan : le journal n'attend pas, 
 rejoint la capture quand elle arrive. Un même texte n'est traduit qu'une fois par passage.
 
 La traduction ne retient jamais la fin du passage : un fil d'arrière-plan qui meurt avec le
-programme, l'attente de fin bornée en tout, et plus aucun appel après deux échecs de suite. Vu
-le 28 octobre 2026 (session #41) : onze traductions en échec mises en file, une minute et demie
-chacune, la session finie mais la branche poussée 13 minutes plus tard.
+programme, et une attente de fin bornée en tout. Vu le 28 octobre 2026 (session #41) : onze
+traductions en échec en file, la session finie mais la branche poussée 13 minutes plus tard.
+Vu le 29 octobre 2026 (essai C3) : chaque traduction échouait (délai dépassé, réponse
+illisible) et l'appli montrait l'anglais. Les textes partent maintenant par petits paquets,
+et Gemini Flash-Lite reprend un paquet que NVIDIA n'a pas traduit.
 """
 
 import json
@@ -19,12 +21,16 @@ import threading
 import time
 import urllib.request
 
+
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 # Rapide et sans quota du jour ; réglable par CLAW_TRANSLATE_MODEL.
 MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
+# Le relais : rapide, et d'un quota gratuit moins serré que celui de Gemini Flash.
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+GEMINI_MODEL = "gemini-3.1-flash-lite"
+# Un paquet de quelques textes se traduit vite ; une liste entière dépassait le délai.
 TIMEOUT = 45
-# Échecs de suite après lesquels le passage garde l'anglais sans plus rien demander.
-MAX_FAILURES = 2
+BATCH = 6
 PROMPT = (
     "Traduis en français chacun des textes du tableau JSON ci-dessous. Ce sont des défauts "
     "relevés sur une page web, lus par une personne qui n'est pas informaticienne : écris un "
@@ -45,33 +51,79 @@ def parse(answer, count):
     """Le tableau de `count` traductions dans la réponse du modèle (son raisonnement éventuel,
     entre <think> et </think>, est ignoré) ; None s'il n'y est pas."""
     answer = re.sub(r"<think>.*?</think>", "", str(answer or ""), flags=re.S)
+    # Un raisonnement dont la balise ouvrante manque, un bloc de code autour du tableau.
+    if "</think>" in answer:
+        answer = answer.rsplit("</think>", 1)[1]
+    answer = re.sub(r"```(?:json)?", "", answer)
+    items = None
     start, end = answer.find("["), answer.rfind("]")
-    if start < 0 or end <= start:
-        return None
-    try:
-        items = json.loads(answer[start:end + 1])
-    except json.JSONDecodeError:
-        return None
+    if 0 <= start < end:
+        try:
+            items = json.loads(answer[start:end + 1])
+        except json.JSONDecodeError:
+            items = None
+    # {"translations": [...]} : le tableau est la seule liste de l'objet.
+    if not isinstance(items, list) and "{" in answer:
+        try:
+            whole = json.loads(answer[answer.find("{"):answer.rfind("}") + 1])
+        except json.JSONDecodeError:
+            whole = None
+        lists = [value for value in whole.values() if isinstance(value, list)] if isinstance(whole, dict) else []
+        items = lists[0] if len(lists) == 1 else None
     if not isinstance(items, list) or len(items) != count or not all(isinstance(item, str) for item in items):
         return None
     return [plain(item) for item in items]
 
 
+def post(url, key, model, texts):
+    """Les traductions de `texts` par le modèle `model` d'une API compatible OpenAI ; None si
+    la réponse ne les donne pas toutes."""
+    body = json.dumps({
+        "model": model,
+        # Les modèles Nemotron raisonnent longuement sans cette consigne, et les jetons
+        # pouvaient manquer à la réponse elle-même.
+        "messages": [{"role": "system", "content": "detailed thinking off"},
+                     {"role": "user", "content": PROMPT + json.dumps(texts, ensure_ascii=False)}],
+        "temperature": 0.2,
+        "max_tokens": 4096,
+    }).encode("utf-8")
+    request = urllib.request.Request(url, data=body, headers={
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    })
+    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+        answer = json.loads(response.read().decode("utf-8"))
+    message = (answer.get("choices") or [{}])[0].get("message") or {}
+    return parse(message.get("content"), len(texts))
+
+
+def gemini(key, model=GEMINI_MODEL):
+    """Le relais de Gemini, à donner comme `fallback` au traducteur."""
+    return lambda texts: post(GEMINI_URL, key, model, texts)
+
+
 class Translator:
     """Traduit des listes de textes en arrière-plan, un appel à la fois."""
 
-    def __init__(self, key, model=MODEL, call=None):
+    def __init__(self, key, model=MODEL, call=None, fallback=None):
         self.key = key
         self.model = model or MODEL
         self.cache = {}
-        self.call = call or self._post
         self.jobs = queue.Queue()
         self.lock = threading.Lock()
         self.idle = threading.Condition(self.lock)
         self.queued = 0
-        self.failures = 0
         self.stopped = False
         self.worker = None
+        # Le premier traducteur, puis le relais pour un paquet qu'il n'a pas traduit.
+        self.calls = [call or self._post] + ([fallback] if fallback else [])
+        self.reported = set()
+
+    def _report(self, line):
+        """Un échec dit une fois par passage, pas à chaque capture."""
+        if line not in self.reported:
+            self.reported.add(line)
+            print(line, flush=True)
 
     def __call__(self, texts, done):
         """`done(traductions)` reçoit les traductions de `texts`, dans l'ordre, dès qu'elles
@@ -83,24 +135,26 @@ class Translator:
             return
 
         def work():
-            if self.stopped or self.failures >= MAX_FAILURES:
-                return
-            try:
-                translated = self.call(missing)
-            except Exception as error:  # le journal garde l'anglais
-                self.failures += 1
-                print(f"Traduction des problèmes impossible : {type(error).__name__}", flush=True)
-                return
-            if not translated or len(translated) != len(missing):
-                self.failures += 1
-                print("Traduction des problèmes illisible : l'anglais reste", flush=True)
-                return
-            self.failures = 0
-            self.cache.update(zip(missing, translated))
-            done([self.cache[text] for text in texts])
+            for start in range(0, len(missing), BATCH):
+                if self.stopped:
+                    return
+                chunk = missing[start:start + BATCH]
+                for call in self.calls:
+                    try:
+                        translated = call(chunk)
+                    except Exception as error:  # le relais essaie, sinon l'anglais reste
+                        self._report(f"Traduction des problèmes impossible : {type(error).__name__}")
+                        continue
+                    if translated and len(translated) == len(chunk):
+                        self.cache.update(zip(chunk, translated))
+                        break
+                    self._report("Traduction des problèmes illisible : l'anglais reste")
+            # Un paquet traduit suffit : les textes restés en anglais gardent leur place.
+            if any(text in self.cache for text in texts):
+                done([self.cache.get(text, text) for text in texts])
 
         with self.lock:
-            if self.stopped or self.failures >= MAX_FAILURES:
+            if self.stopped:
                 return
             self.queued += 1
             if self.worker is None:
@@ -132,20 +186,4 @@ class Translator:
                 self.idle.wait(left)
 
     def _post(self, texts):
-        body = json.dumps({
-            "model": self.model,
-            # Les modèles Nemotron raisonnent longuement sans cette consigne, et les jetons
-            # pouvaient manquer à la réponse elle-même.
-            "messages": [{"role": "system", "content": "detailed thinking off"},
-                         {"role": "user", "content": PROMPT + json.dumps(texts, ensure_ascii=False)}],
-            "temperature": 0.2,
-            "max_tokens": 8192,
-        }).encode("utf-8")
-        request = urllib.request.Request(NVIDIA_URL, data=body, headers={
-            "Authorization": f"Bearer {self.key}",
-            "Content-Type": "application/json",
-        })
-        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
-            answer = json.loads(response.read().decode("utf-8"))
-        message = (answer.get("choices") or [{}])[0].get("message") or {}
-        return parse(message.get("content"), len(texts))
+        return post(NVIDIA_URL, self.key, self.model, texts)

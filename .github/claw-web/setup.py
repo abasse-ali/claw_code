@@ -18,8 +18,8 @@ from pathlib import Path
 import urllib.request
 
 from common import (ANSWER, ANSWERED, API, FILES_BRANCH, MCP_TOKEN_FILE, NOTES, QUESTIONS, QUESTIONS_END, WORK,
-                    GitHubError, answer_marks, answered_up_to, api, comments, effort_of, images_of, kind_of, output,
-                    post_comment, run_url, settings, task_text, web_command)
+                    GitHubError, aids_of, answer_marks, answered_up_to, api, comments, effort_of, images_of, kind_of,
+                    output, post_comment, run_url, settings, task_text, web_command)
 from on_github import STATE_FILE, describe, read_state
 from sessions import origin_of
 import memory
@@ -117,6 +117,15 @@ def incoming(body):
         return (f"Routine {ident} :\n{text}\n\n[Claw] Sent by a routine scheduled earlier (by the user, or by you "
                 "at their request): do what it asks.")
     return f"Suivi {ident} :\n{text}"
+
+
+def message_options(request, history):
+    """Les marques de l'appli retirées du message et de la conversation (elles ne vont jamais au
+    modèle), et les options qu'elles portent : niveau de réflexion, aides de Claw."""
+    request, effort = effort_of(request)
+    request, aids = aids_of(request)
+    history = aids_of(effort_of(history)[0])[0]
+    return request, history, {"effort": effort, "aids": aids}
 
 
 def conversation(issue, notes):
@@ -381,10 +390,10 @@ def main():
     # Les mots de l'utilisateur d'abord : Claw ne décide le mode projet que sur ce qui
     # précède la première ligne `[Claw]`.
     request, history, images, processed, retry = conversation(issue, notes)
-    # Niveau de réflexion choisi pour ce message dans l'appli : run.py le donne à Claw.
-    request, effort = effort_of(request)
-    history = effort_of(history)[0]
-    (WORK / "options.json").write_text(json.dumps({"effort": effort}), encoding="utf-8")
+    # Niveau de réflexion et aides de Claw choisis pour ce message dans l'appli : run.py les
+    # donne à Claw.
+    request, history, options = message_options(request, history)
+    (WORK / "options.json").write_text(json.dumps(options), encoding="utf-8")
     # Commande de l'appli (« /jtest », « /pages ») : sa demande en mots.
     request = web_command(request) or request
     # Les mots de l'utilisateur seuls (sans les notes de Claw) : publish.py y cherche s'il veut

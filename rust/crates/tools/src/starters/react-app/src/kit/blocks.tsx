@@ -8,7 +8,7 @@ import { Icon, type LucideIcon } from "./icons";
 
 export type Tone = "in" | "out" | "accent" | "warn";
 
-/** Un montant qui défile jusqu'à sa nouvelle valeur quand il change. */
+/** Un montant en euros qui défile jusqu'à sa nouvelle valeur quand il change. */
 export function Amount({ value, format = money }: { value: number; format?: (value: number) => string }) {
   const motionValue = useMotionValue(value);
   const text = useTransform(motionValue, (current) => format(current));
@@ -128,16 +128,27 @@ export function List({ children, label }: { children: ReactNode; label?: string 
   );
 }
 
+/** Les initiales d'une personne dans une pastille ronde, d'une couleur qui ne dépend que du nom. */
+export function Avatar({ name, size = 40 }: { name: string; size?: number }) {
+  const letters = name.trim().split(/\s+/).map((word) => word.charAt(0)).join("").slice(0, 2).toUpperCase() || "?";
+  const hue = [...name].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 360;
+  return <span className="avatar" aria-hidden="true" style={{ width: size, height: size, ["--avatar-hue" as string]: hue } as CSSProperties}>{letters}</span>;
+}
+
 type RowProps = {
   icon?: LucideIcon;
+  /** Une personne : ses initiales à la place de l'icône. */
+  avatar?: string;
   /** La couleur de la pastille de l'icône. */
   tone?: Tone;
   title: ReactNode;
   badge?: ReactNode;
   sub?: ReactNode;
-  /** Un montant à droite, signé (+100,00 €, −8,00 €), vert quand il est positif. */
+  /** Un montant à droite en euros (12.5, pas 1250 centimes), signé (+100,00 €, −8,00 €), vert
+   * quand il est positif. */
   amount?: number;
-  /** Ou autre chose à droite, avec une petite note dessous. */
+  /** Autre chose à droite (un badge, un bouton), sous le montant s'il y en a un, avec une petite
+   * note dessous. */
   end?: ReactNode;
   endNote?: ReactNode;
   /** Un bouton au bout de la ligne (modifier, supprimer). */
@@ -146,7 +157,7 @@ type RowProps = {
 };
 
 /** Une ligne de liste : pastille d'icône, titre et détail, montant à droite. */
-export function Row({ icon, tone = "accent", title, badge, sub, amount, end, endNote, action, done }: RowProps) {
+export function Row({ icon, avatar, tone = "accent", title, badge, sub, amount, end, endNote, action, done }: RowProps) {
   return (
     <motion.li
       layout="position"
@@ -156,18 +167,17 @@ export function Row({ icon, tone = "accent", title, badge, sub, amount, end, end
       exit={{ opacity: 0, transition: { duration: 0.15 } }}
       transition={{ duration: 0.25, ease: "easeOut" }}
     >
-      {icon && <span className={`row__icon row__icon--${tone}`}><Icon icon={icon} /></span>}
+      {avatar !== undefined ? <Avatar name={avatar} /> : icon && <span className={`row__icon row__icon--${tone}`}><Icon icon={icon} /></span>}
       <span className="row__main">
         <span className="row__title"><span className="row__text">{title}</span>{badge}</span>
         {sub && <span className="row__sub">{sub}</span>}
       </span>
       {(amount !== undefined || end !== undefined) && (
         <span className="row__end">
-          {amount !== undefined ? (
-            <span className={`row__amount${amount > 0 ? " row__amount--in" : ""}`}>{signed(amount)}</span>
-          ) : (
-            end
-          )}
+          {/* Le montant et ce qui suit : un bouton « Supprimer » donné avec le montant restait
+              caché, sans un mot (essais C7 et C9 de Claw Web, 30 octobre 2026). */}
+          {amount !== undefined && <span className={`row__amount${amount > 0 ? " row__amount--in" : ""}`}>{signed(amount)}</span>}
+          {end}
           {endNote && <small>{endNote}</small>}
         </span>
       )}
@@ -207,12 +217,14 @@ export function Meter({ name, value, valueText, note, tone }: { name: ReactNode;
   );
 }
 
-/** Rien encore : une icône, une phrase, et l'action qui remplit (« Ajouter une opération »). */
-export function Empty({ icon, text, action }: { icon?: LucideIcon; text: ReactNode; action?: { label: string; onClick: () => void } }) {
+/** Rien encore : une icône, une phrase, les premiers pas s'il y en a (« Ajoutez les participants »,
+ * « Puis une dépense »), et l'action qui remplit (« Ajouter une opération »). */
+export function Empty({ icon, text, steps, action }: { icon?: LucideIcon; text: ReactNode; steps?: ReactNode[]; action?: { label: string; onClick: () => void } }) {
   return (
     <div className="empty">
       {icon && <Icon icon={icon} size={36} />}
       <p>{text}</p>
+      {steps && steps.length > 0 && <ol className="empty__steps">{steps.map((step, index) => <li key={index}>{step}</li>)}</ol>}
       {action && (
         <button className="btn btn--primary btn--small" type="button" onClick={action.onClick}>{action.label}</button>
       )}

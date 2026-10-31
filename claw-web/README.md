@@ -187,6 +187,30 @@ Auto (celui de Claw), Aucune, Faible, Moyenne, Élevée ou Maximale. Le choix re
 messages suivants ; il est noté dans le message (une marque invisible), et le moteur le donne à
 Claw (`CLAW_REASONING`).
 
+## Aides de Claw : essayer un modèle seul
+
+Autour du modèle, Claw vérifie, guide et recadre son travail : ses « aides au raisonnement »
+(voir `rust/README.md`). Réglages, « Aides de Claw » (ou la pastille « Sans aides » de la saisie)
+les montre toutes, 42 en six familles (vérifier le travail, guider le modèle, le remettre sur les
+rails, protéger les fichiers, contexte et outils, appeler d'autres modèles), chacune avec ce
+qu'elle fait et son interrupteur, « Tout couper » et « Tout rallumer ».
+
+Demandé le 29 octobre 2026 : elles sont **toutes coupées** tant que rien n'est choisi, pour voir
+chaque modèle seul, puis les rallumer une à une et garder celles qui lui vont. Le choix part avec
+chaque message (une marque invisible) ; le moteur coupe les autres (`CLAW_VERIFY=0`…, pas
+`CLAW_HARNESS=0`, qui couperait aussi les options de la saisie), et chaque réponse dit à son pied
+avec quelles aides elle a été faite (« Sans aides », « 3 aides sur 42 », leurs noms avec le modèle
+et les requêtes). Toutes allumées, la pastille disparaît et le message part sans marque : ce sont
+celles de Claw. Le mode projet, le mode équipe et Ultracode restent dans le menu ✦ ; la lecture des
+images pour un modèle qui ne les voit pas et le passage à un autre modèle en panne restent actifs.
+
+Claw Web ne consulte d'habitude aucun autre modèle (`CLAW_ADVISOR_MODELS=off`,
+`CLAW_ESCALATION_MODEL=off`) : « Conseil et second avis » cochée rallume les autres modèles,
+« Escalade » le modèle qui reprend la main, pour le passage qui les a choisies. La « Relecture à
+froid » n'en a pas besoin : le modèle de la session relit lui-même ses modifications, dans une
+conversation neuve (demandé le 29 octobre 2026 : attendre les relecteurs gratuits prenait des
+minutes).
+
 ## Ce que Claw compte faire
 
 Pendant qu'il travaille, la progression de la session commence par **Ce que Claw compte faire** :
@@ -378,6 +402,22 @@ Il prend une minute d'Actions par heure au plus ; aucune sur « Ma machine » (v
 `CLAW_RUNNER` = `claw-pc`). Les routines et les suivis sont rangés sur `claw-web-fichiers`,
 dans `routines/`.
 
+## Notifications
+
+Réglages, Notifications, « Activer les notifications » : chaque appareil abonné est prévenu quand
+Claw lui pose une question, quand il a fini un passage, ou s'il s'est arrêté (pas pour un passage
+que vous avez annulé), même l'appli fermée. Toucher la notification ouvre la session. Sur iPhone,
+ajoutez d'abord Claw Web à l'écran d'accueil (Partager, « Sur l'écran d'accueil ») et ouvrez-le
+depuis son icône : Safari n'envoie de notifications qu'aux applis installées.
+
+Ce sont des notifications Web Push : la première activation crée la paire de clés VAPID du
+moteur ; la clé privée part chiffrée dans le secret `CLAW_PUSH_VAPID_PRIVATE` du dépôt des
+sessions (elle ne reste pas sur l'appareil), la clé publique et les appareils abonnés vont dans
+ses variables `CLAW_PUSH_VAPID_PUBLIC` et `CLAW_PUSH_SUBSCRIPTIONS` (le jeton a besoin de
+l'autorisation Variables). À la fin d'un passage, le moteur (`.github/claw-web/push.py`) chiffre
+la notification pour chaque appareil (RFC 8291) et l'envoie ; un appareil désabonné ou effacé
+est retiré de la liste. « Couper les notifications ici » ne coupe que cet appareil.
+
 ## JTest : essayer sur le téléphone
 
 « JTest » (sous la conversation d'une session) lance le travail de la session sur votre serveur
@@ -417,6 +457,8 @@ Une appli perso (budget, suivi, habitudes, collection) se construit en **React**
 d'un projet prêt, avec ses bibliothèques déjà installées (React, TypeScript, Vite, Tailwind
 CSS, Framer Motion, des icônes, des graphiques, des menus et des curseurs accessibles), et
 compose les écrans avec les composants de son kit d'appli au lieu de tout écrire à la main.
+Chaque écran peut vivre dans son propre composant, avec son bouton + à lui (ouvrir la fenêtre
+d'ajout de cet écran) : les onglets les suivent de la même façon.
 Le journal le dit en une ligne : « Prépare le projet · appli React ». Avant de regarder l'appli,
 Claw la construit dans le dossier `docs/`, celui que « Mettre en ligne » publie. Pour une page
 sans React, demandez-la « en HTML simple ». Claw sait aussi poser un serveur Node (Express,

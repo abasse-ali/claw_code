@@ -10,6 +10,8 @@ import { LOG, changesHtml, decodeLog, photoLink, photoView, recentActions, toggl
 import { highlightLines, languageOf } from "./highlight.js";
 import { accountStatus, allFreeModels, freeModels, resetTime } from "./openrouter.js";
 import { emptyState, extras } from "./tools.js";
+import { AID_GROUPS, AID_KEYS } from "./aides.js";
+import { currentSubscription, disableNotifications, enableNotifications, pushSupport, testNotification } from "./notifications.js";
 import {
   LOCK_AFTER_MS, MIN_CODE, SECRET_FIELDS, codeFromFace, createFaceKey, createVault, disableFace, enableFace,
   faceAvailable, faceEnabled, openVault, removeVault, seal, vault, waitLeft,
@@ -71,6 +73,8 @@ const ICON = {
   bug: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="6.5" width="8" height="13" rx="4"/><path d="M12 11v8.5M8 13H4.5M19.5 13H16M9.5 6.5 7.5 4.5M14.5 6.5l2-2M8.3 17.5 5 19.5M15.7 17.5l3.3 2"/></svg>',
   calendar: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5.5" width="16" height="14.5" rx="2.5"/><path d="M4 10h16M8.5 3.5v4M15.5 3.5v4"/></svg>',
   // Icons: Lucide, ISC license (lightbulb, square-slash).
+  bell: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15L6 16Z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg>',
+  lifebuoy: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.5"/><path d="M6 6l3.5 3.5M14.5 14.5L18 18M18 6l-3.5 3.5M9.5 14.5L6 18"/></svg>',
   bulb: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6M10 22h4"/></svg>',
   slash: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 15l6-6"/></svg>',
 };
@@ -1777,6 +1781,23 @@ const effortLabel = () => {
 /** Le niveau choisi, noté dans le message pour le moteur (rien en Auto). */
 const effortMark = () => (state.settings.effort ? `\n\n<!-- claw-web:effort ${state.settings.effort} -->` : "");
 
+// --- Aides de Claw ------------------------------------------------------------------------------
+
+/** Les aides au raisonnement de Claw choisies (clés, dans l'ordre de la liste). Sans choix
+ * enregistré : aucune. Demandé le 29 octobre 2026 : essayer chaque modèle seul, puis rallumer les
+ * aides une à une pour trouver celles qui lui vont. */
+const chosenAids = () => (Array.isArray(state.settings.aids) ? AID_KEYS.filter((key) => state.settings.aids.includes(key)) : []);
+const allAids = () => chosenAids().length === AID_KEYS.length;
+
+/** La marque des aides d'un message, que le moteur lit (.github/claw-web/common.py, aids_of) ;
+ * rien quand elles sont toutes là : celles de Claw. */
+const aidsMark = () => (allAids() ? "" : `\n\n<!-- claw-web:aides ${chosenAids().join(",") || "aucune"} -->`);
+
+const aidsLabel = () => {
+  const count = chosenAids().length;
+  return !count ? "Sans aides" : allAids() ? "Toutes les aides" : `${count} aide${count > 1 ? "s" : ""}`;
+};
+
 function pickEffort() {
   openPicker({
     title: "Niveau de réflexion",
@@ -2089,6 +2110,9 @@ function renderComposer() {
     if (textarea.placeholder !== promptPlaceholder(followUp, repo)) textarea.placeholder = promptPlaceholder(followUp, repo);
     chip("effort", effortLabel());
     composer.querySelector('[data-action="effort"]')?.classList.toggle("on", Boolean(state.settings.effort));
+    chip("claw-aids", aidsLabel());
+    const aidsChip = composer.querySelector('[data-action="claw-aids"]');
+    if (aidsChip) aidsChip.hidden = allAids();
     drawAids();
     renderDock();
     composer.refresh?.();
@@ -2103,6 +2127,7 @@ function renderComposer() {
     <div class="chips">
       <button class="chip" data-action="model">${ICON.model}<span>${escapeHtml(modelLabel(state.settings.model))}</span></button>
       <button class="chip${state.settings.effort ? " on" : ""}" data-action="effort" aria-label="Niveau de réflexion">${ICON.bulb}<span>${escapeHtml(effortLabel())}</span></button>
+      <a class="chip on" data-action="claw-aids" href="#/reglages/aides" aria-label="Aides de Claw"${allAids() ? " hidden" : ""}>${ICON.lifebuoy}<span>${escapeHtml(aidsLabel())}</span></a>
     </div>
     <div class="attachments" hidden></div>
     <form class="prompt" autocomplete="off">
@@ -2210,7 +2235,7 @@ async function startSession(text, textarea) {
       work = `claw/session-${n}-${suffix}`;
     }
     const block = `<!-- claw-web ${JSON.stringify({ repo, base: branch, model: model || "", n, branch: work })} -->`;
-    const issue = await state.github.createIssue(engine, title, `${text}${images}${effortMark()}\n\n${block}`);
+    const issue = await state.github.createIssue(engine, title, `${text}${images}${effortMark()}${aidsMark()}\n\n${block}`);
     state.attachments = [];
     textarea.value = "";
     clearDraft("home");
@@ -2239,7 +2264,7 @@ async function followUpSession(text, textarea) {
   renderSending(true);
   try {
     const images = await uploadAttachments();
-    const posted = await state.github.comment(state.settings.engine, session.number, `${text}${images}${effortMark()}`);
+    const posted = await state.github.comment(state.settings.engine, session.number, `${text}${images}${effortMark()}${aidsMark()}`);
     state.attachments = [];
     if (textarea.isConnected) clearDraft(`session:${session.number}`);
     textarea.value = "";
@@ -3107,6 +3132,15 @@ function answerFoot(foot) {
     if (match) {
       chips.push(`<span class="foot-chip">${ICON.diff}<span>${match[1]} fichier${match[1] === "1" ? "" : "s"} `
         + `<b class="add">+${escapeHtml(match[2].trim())}</b> <b class="del">−${escapeHtml(match[3].trim())}</b></span></span>`);
+      continue;
+    }
+    // Aides de Claw du passage (.github/claw-web/common.py, aids_line) : en pastille, leurs noms
+    // avec le modèle et les requêtes.
+    match = item.match(/^Aides de Claw : (?:aucune|(\d+) sur (\d+))/);
+    if (match) {
+      const count = Number(match[1] || 0);
+      chips.push(`<a class="foot-chip" href="#/reglages/aides">${ICON.lifebuoy}<span>${count ? `${count} aide${count > 1 ? "s" : ""} sur ${match[2]}` : "Sans aides"}</span></a>`);
+      lines.push(item);
       continue;
     }
     match = item.match(/^\[Détail du job\]\((https:\/\/github\.com\/\S+)\)$/);
@@ -4454,6 +4488,54 @@ async function showChanges(number) {
 
 // --- Réglages --------------------------------------------------------------------------------
 
+/** Le groupe Notifications des réglages : état de cet appareil, et ses trois boutons. */
+function wirePush() {
+  const group = $("#view .push-group");
+  if (!group) return;
+  const engine = state.settings.engine;
+  const sub = group.querySelector(".row .row-sub");
+  const pill = group.querySelector(".pill");
+  const button = (action) => group.querySelector(`[data-action="${action}"]`);
+  const show = async () => {
+    const support = pushSupport();
+    const subscription = await currentSubscription().catch(() => null);
+    // Un abonnement n'existe qu'avec la permission donnée.
+    const on = Boolean(subscription);
+    sub.textContent = support === "home-screen" ? "Ouvrez Claw Web depuis l'écran d'accueil pour les activer"
+      : support !== "ok" ? "Ce navigateur ne reçoit pas de notifications"
+        : on ? "Question, travail fini ou arrêt d'une session"
+          : window.Notification?.permission === "denied" ? "Refusées : autorisez-les dans les réglages du téléphone" : "Coupées";
+    pill.hidden = !on;
+    pill.className = "pill ok";
+    pill.textContent = "Actives";
+    button("push-on").hidden = on || support !== "ok";
+    button("push-test").hidden = !on;
+    button("push-off").hidden = !on;
+  };
+  const act = (action, run) => button(action).addEventListener("click", async (event) => {
+    const target = event.currentTarget;
+    target.disabled = true;
+    try {
+      await run();
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      target.disabled = false;
+      await show();
+    }
+  });
+  act("push-on", async () => {
+    const count = await enableNotifications(state.github, engine, sealedBox);
+    toast(`Notifications activées${count > 1 ? ` (${count} appareils abonnés)` : ""}`);
+  });
+  act("push-test", testNotification);
+  act("push-off", async () => {
+    await disableNotifications(state.github, engine);
+    toast("Notifications coupées sur cet appareil");
+  });
+  show();
+}
+
 /** Étiquette des sessions et secrets du moteur (chiffrés ici pour sa clé publique) ; rend les
  * noms des secrets posés. */
 async function configureEngine(openrouterKey, shareToken, providerKeys = {}) {
@@ -4556,6 +4638,84 @@ function showEngineState() {
   }
 }
 
+/** Où en sont les aides de Claw, en une ligne. */
+function aidsSummary() {
+  const count = chosenAids().length;
+  return !count ? "Toutes coupées : le modèle travaille seul"
+    : allAids() ? `Toutes allumées (les ${AID_KEYS.length} de Claw)` : `${count} allumée${count > 1 ? "s" : ""} sur ${AID_KEYS.length}`;
+}
+
+/** Page « Aides de Claw » : chaque aide au raisonnement, à couper ou à rallumer. Le choix part
+ * avec chaque message (aidsMark) ; la réponse dit avec quelles aides le passage a travaillé. */
+function showAids() {
+  state.session = null;
+  $("#composer").hidden = true;
+  const text = (title, sub) => `<span class="row-main"><span class="row-title">${title}</span>${sub ? `<span class="row-sub">${sub}</span>` : ""}</span>`;
+  const chosen = new Set(chosenAids());
+  $("#view").innerHTML = `
+    <section class="settings aids-page">
+      <a class="back" href="#/reglages">${ICON.back}<span>Réglages</span></a>
+      <h1>Aides de Claw</h1>
+      <p class="intro">Autour du modèle, Claw vérifie, guide et recadre son travail. Coupez tout pour voir le modèle seul, puis rallumez une aide à la fois pour trouver celles qui lui vont.</p>
+      <div class="aids-meter">
+        <div class="aids-head">
+          <span class="aids-count"><strong></strong><span></span></span>
+          <span class="aids-actions">
+            <button type="button" class="small-link" data-aids="none">Tout couper</button>
+            <button type="button" class="small-link" data-aids="all">Tout rallumer</button>
+          </span>
+        </div>
+        <span class="aids-bar" aria-hidden="true"><span></span></span>
+        <p class="aids-note"></p>
+      </div>
+      ${AID_GROUPS.map((group, at) => `
+        <h2 class="group-title aids-title" data-group="${at}"><span>${escapeHtml(group.title)}</span><small></small></h2>
+        <div class="group">${group.items.map(([key, name, detail]) => `
+          <label class="row switch-row">${text(escapeHtml(name), escapeHtml(detail))}<input name="${key}" type="checkbox" role="switch"${chosen.has(key) ? " checked" : ""}></label>`).join("")}
+        </div>`).join("")}
+      <div class="group-foot">
+        <p>Le choix part avec chaque message : chaque réponse de Claw dit, à son pied, avec quelles aides elle a été faite. Le mode projet, le mode équipe et Ultracode restent dans le menu ✦ de la saisie. Toujours là : la lecture des images pour un modèle qui ne les voit pas, et le passage à un autre modèle quand le sien est en panne ou à court de quota.</p>
+      </div>
+    </section>`;
+  const view = $("#view");
+  const draw = () => {
+    const on = chosenAids();
+    view.querySelector(".aids-count strong").textContent = String(on.length);
+    view.querySelector(".aids-count span").textContent = ` sur ${AID_KEYS.length} allumée${on.length > 1 ? "s" : ""}`;
+    view.querySelector(".aids-bar span").style.width = `${(on.length / AID_KEYS.length) * 100}%`;
+    view.querySelector(".aids-note").textContent = !on.length ? "Le modèle travaille seul : Claw ne vérifie, ne guide ni ne recadre rien."
+      : allAids() ? "Toutes les aides de Claw, comme d'habitude." : `Allumées : ${AID_GROUPS.flatMap((group) => group.items).filter(([key]) => on.includes(key)).map(([, name]) => name).join(", ")}.`;
+    view.querySelector('[data-aids="none"]').disabled = !on.length;
+    view.querySelector('[data-aids="all"]').disabled = allAids();
+    AID_GROUPS.forEach((group, at) => {
+      const count = group.items.filter(([key]) => on.includes(key)).length;
+      view.querySelector(`.aids-title[data-group="${at}"] small`).textContent = `${count} sur ${group.items.length}`;
+    });
+    for (const input of view.querySelectorAll(".aids-page input[role=switch]")) input.checked = on.includes(input.name);
+  };
+  const choose = (keys) => {
+    state.settings.aids = AID_KEYS.filter((key) => keys.includes(key));
+    saveSettings();
+    draw();
+  };
+  view.querySelector(".aids-page").addEventListener("change", (event) => {
+    const input = event.target.closest("input[role=switch]");
+    if (!input) return;
+    const on = chosenAids().filter((key) => key !== input.name);
+    choose(input.checked ? [...on, input.name] : on);
+  });
+  view.querySelector('[data-aids="none"]').addEventListener("click", () => {
+    choose([]);
+    toast("Toutes les aides coupées : le modèle travaille seul");
+  });
+  view.querySelector('[data-aids="all"]').addEventListener("click", () => {
+    choose(AID_KEYS);
+    toast("Toutes les aides de Claw rallumées");
+  });
+  draw();
+  animateIn(view.querySelector(".aids-page"));
+}
+
 function showSettings(first = false, justConnected = false) {
   state.session = null;
   $("#composer").hidden = true;
@@ -4575,6 +4735,7 @@ function showSettings(first = false, justConnected = false) {
   const perms = [
     ["Toujours", ["Actions", "Contents", "Issues", "Pull requests", "Secrets"]],
     ["Serveur gratuit et robot", ["Administration", "Variables"]],
+    ["Notifications", ["Variables"]],
     ["Créer des dépôts", ["All repositories", "Administration"]],
     ["Mettre un site en ligne", ["Pages"]],
   ];
@@ -4664,6 +4825,22 @@ function showSettings(first = false, justConnected = false) {
           <summary>Où créer ces clés</summary>
           <p>NVIDIA : build.nvidia.com (profil, Settings, API Keys). Gemini : aistudio.google.com/apikey, dans un projet sans facturation (sinon chaque requête est payante). Les clés NVIDIA et Gemini ne sont jamais gardées sur cet appareil ; la clé OpenRouter seulement si « Garder la clé OpenRouter ici » est activé.</p>
         </details>
+      </div>
+
+      <h2 class="group-title">Claw</h2>
+      <div class="group">
+        <a class="row link-row" href="#/reglages/aides"><span class="row-icon">${ICON.lifebuoy}</span>${text("Aides de Claw", aidsSummary())}${ICON.chevron}</a>
+      </div>
+
+      <h2 class="group-title">Notifications</h2>
+      <div class="group push-group">
+        <div class="row"><span class="row-icon">${ICON.bell}</span>${text("Sur cet appareil", "Vérification…")}<span class="pill" hidden></span></div>
+        <button type="button" class="row" data-action="push-on" hidden><span class="row-icon">${ICON.bell}</span>${text("Activer les notifications", "Quand Claw a une question, quand il a fini, ou s'il s'arrête")}</button>
+        <button type="button" class="row" data-action="push-test" hidden><span class="row-icon">${ICON.bell}</span>${text("Montrer une notification d'essai", "")}</button>
+        <button type="button" class="row" data-action="push-off" hidden><span class="row-icon">${ICON.bell}</span>${text("Couper les notifications ici", "Les autres appareils abonnés les gardent")}</button>
+      </div>
+      <div class="group-foot">
+        <p>Même l'appli fermée. Sur iPhone : ajoutez d'abord Claw Web à l'écran d'accueil (Partager, « Sur l'écran d'accueil ») et ouvrez-le depuis son icône.</p>
       </div>
 
       <h2 class="group-title">Sessions</h2>
@@ -4840,6 +5017,7 @@ function showSettings(first = false, justConnected = false) {
       }
     });
     $("#view").querySelector('[data-action="cloud-runner"]')?.addEventListener("click", openCloudRunner);
+    wirePush();
     for (const radio of $("#view").querySelectorAll('input[name="runner"]')) {
       radio.addEventListener("change", async () => {
         if (radio.value) state.settings.runner = radio.value;
@@ -5160,7 +5338,7 @@ async function sendToSession(number, text) {
   const engine = state.settings.engine;
   const issue = await state.github.issue(engine, number);
   const settings = settingsOf(issue);
-  await state.github.comment(engine, number, text);
+  await state.github.comment(engine, number, `${text}${aidsMark()}`);
   launching(Number(number), settings.repo);
   await state.github.dispatch(engine, state.engineRef, {
     repo: settings.repo,
@@ -5222,7 +5400,8 @@ function route() {
     return;
   }
   if (onSettings) {
-    showSettings();
+    if (hash.startsWith("#/reglages/aides")) showAids();
+    else showSettings();
     return;
   }
   const files = filesParams(hash);
@@ -5485,6 +5664,10 @@ async function boot() {
   });
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("sw.js").catch(() => {});
+    // Une notification touchée alors que l'appli était ouverte : sa session s'affiche ici.
+    navigator.serviceWorker.addEventListener("message", (event) => {
+      if (event.data && event.data.open) location.hash = new URL(event.data.open).hash || "#/";
+    });
   }
   // Verrou : sans le code, aucune clé ; un jeton encore en clair (avant le verrou) le fait poser.
   // Sans verrou ni jeton (appareil neuf, autre navigateur) : la connexion d'abord, aucune page

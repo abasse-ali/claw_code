@@ -445,6 +445,11 @@ struct TurnAids {
     /// Défauts relevés par la vérification précédente : la suivante dit ce
     /// que la modification a cassé ou réparé.
     last_checked: Option<Vec<String>>,
+    /// Erreur de construction déjà transmise par la vérification : la même
+    /// n'est pas redite à chaque modification.
+    build_error: Option<String>,
+    /// Erreur de la dernière capture faite par Claw, pour la vérification.
+    check_error: Option<String>,
     /// Une réponse « vérifié » sans regard sur la page a déjà été renvoyée.
     claim_checked: bool,
     /// Recherches dans les styles à la suite, sans modification ni capture.
@@ -2203,9 +2208,13 @@ where
             // sans aucun contrôle.
             // Sans page à capturer (un module `TypeScript`, un script), rien
             // n'est annoncé : vu dans un essai réel, l'annonce revenait à
-            // chaque modification d'un `.ts`, sans aucune revue.
+            // chaque modification d'un `.ts`, sans aucune revue. Revue coupée
+            // (aide « Revue visuelle ») : rien non plus, la revue ne viendrait
+            // jamais ; vu le 30 octobre 2026 (essai C6), l'annonce redite à
+            // chacune des quarante dernières requêtes.
             if !wrapping_up
                 && limit > 0
+                && harness::enabled(Aid::DesignReview)
                 && aids.interface_dirty
                 && aids.interface_rounds == 0
                 && iterations >= crate::web_design::early_review_at(limit)
@@ -3385,6 +3394,7 @@ where
         if aids.style_searches < harness::STYLE_SEARCHES_BEFORE_NOTE
             || aids.style_search_notes >= harness::MAX_STYLE_SEARCH_NOTES
             || self.subagent
+            || !harness::enabled(Aid::BatchCalls)
             || self.page_to_review(aids).is_none()
         {
             return None;
@@ -3827,7 +3837,8 @@ where
         notes.push(crate::web_design::design_base_restored(&name, react));
     }
 
-    /// Revue du plan de design avant le code : un autre modèle juge la
+    /// Revue du plan de design avant le code : le modèle, dans une conversation
+    /// neuve, juge la
     /// direction (identité, hiérarchie, typographie, couleur, composition)
     /// quand le modèle s'apprête à écrire un fichier d'interface après l'avoir
     /// posée. Changer un plan ne coûte rien ; changer une page faite coûte une
@@ -3921,11 +3932,8 @@ where
             }
             _ => request.to_string(),
         };
-        if !self.api_client.can_consult() {
-            return None;
-        }
         self.api_client
-            .notify("Revue du plan de design par un autre modèle, avant le code…");
+            .notify("Revue du plan de design dans une conversation neuve, avant le code…");
         let consultation = self.api_client.consult(
             ConsultPurpose::Design,
             crate::web_design::PLAN_CRITIC_SYSTEM,
@@ -4117,6 +4125,7 @@ where
         let images = std::mem::take(&mut self.tool_images);
         let (output, is_error) = tool_result_parts(&message)?;
         if is_error {
+            aids.check_error = Some(output.to_string());
             return None;
         }
         aids.blind_edits = 0;
@@ -4148,6 +4157,7 @@ where
         if aids.blind_edits == 0
             || aids.blind_measures >= harness::MAX_VISUAL_CHECKS
             || aids.pending_check.is_some()
+            || !harness::enabled(Aid::VisualCheck)
         {
             return None;
         }
@@ -4179,8 +4189,14 @@ where
             return None;
         }
         let Some((target, audit, images)) = self.render_page(aids, prompter, true) else {
-            // La page ne s'ouvre pas en fichier (une appli qui veut son
+            // La capture a échoué : même suite qu'en arrière-plan. Sans erreur
+            // (page qui ne s'ouvre pas en fichier, une appli qui veut son
             // serveur) : pas d'autre essai pendant ce tour.
+            if let Some(error) = aids.check_error.take() {
+                return self
+                    .check_failed(aids, &target, &error)
+                    .map(|(message, _)| message);
+            }
             aids.blind_measures = harness::MAX_VISUAL_CHECKS;
             return None;
         };
@@ -4265,18 +4281,24 @@ where
 
     /// La vérification lancée en arrière-plan, attendue (le plus souvent déjà
     /// finie : elle a tourné pendant la requête du modèle) : son message et le
-    /// nombre de défauts nouveaux. Une page qui ne s'ouvre pas arrête les
-    /// vérifications du tour, comme avant.
+    /// nombre de défauts nouveaux. Une appli qui ne se construit pas : son
+    /// erreur va au modèle, et la vérification reprend après sa prochaine
+    /// modification. L'adresse d'un serveur que le modèle a lancé puis arrêté :
+    /// la vérification revient à la page du projet. Une page qui ne s'ouvre
+    /// pas du tout arrête les vérifications du tour, et l'utilisateur le voit.
+    /// Vu le 30 octobre 2026 (essai C6) : trois vérifications au début, puis
+    /// cinquante minutes sans aucune, sans un mot, pendant que l'appli changeait.
     fn finish_visual_check(&mut self, aids: &mut TurnAids) -> Option<(ConversationMessage, usize)> {
         let pending = aids.pending_check.take()?;
         let (result, images) = pending
             .handle
             .join()
             .unwrap_or_else(|_| (Err("la vérification s'est arrêtée".to_string()), Vec::new()));
-        let Ok(output) = result else {
-            aids.blind_measures = harness::MAX_VISUAL_CHECKS;
-            return None;
+        let output = match result {
+            Ok(output) => output,
+            Err(error) => return self.check_failed(aids, &pending.target, &error),
         };
+        aids.build_error = None;
         let audit = crate::web_design::read_audit(&output);
         aids.last_checked = Some(
             audit
@@ -4293,6 +4315,58 @@ where
             &audit,
             images,
         ))
+    }
+
+    /// Une vérification de la page qui n'a pas abouti (voir
+    /// `finish_visual_check`) : l'erreur de construction pour le modèle, une
+    /// fois ; ou rien, et la suivante essaie la page du projet ; ou la fin des
+    /// vérifications du tour, dite à l'utilisateur.
+    fn check_failed(
+        &mut self,
+        aids: &mut TurnAids,
+        target: &str,
+        error: &str,
+    ) -> Option<(ConversationMessage, usize)> {
+        if error.contains("did not build") {
+            if aids.build_error.as_deref() == Some(error) {
+                return None;
+            }
+            aids.build_error = Some(error.to_string());
+            self.api_client.notify(
+                "Claw vérifie la page après la modification : l'appli ne se construit pas, l'erreur est transmise à l'agent",
+            );
+            let text = format!(
+                "[Claw] {target} was checked after your change: {error}\nClaw checks the page again after your next change."
+            );
+            return Some((ConversationMessage::user_text(text), 1));
+        }
+        // L'adresse d'un serveur que le modèle a regardée (`url:http://localhost:5173`) : le
+        // serveur arrêté, la vérification revient à la page du projet. Vu le 30 octobre 2026
+        // (essai C10) : le test lisait `http://` au début de `url:http://…`, ne le trouvait
+        // jamais, et dix-sept minutes de modifications sont passées sans vérification.
+        if self
+            .page_target
+            .as_deref()
+            .is_some_and(|page| page.starts_with("url:"))
+        {
+            self.page_target = None;
+            self.api_client.notify(
+                "Claw vérifie la page après la modification : son serveur ne répond plus, la vérification revient à la page du projet",
+            );
+            return None;
+        }
+        aids.blind_measures = harness::MAX_VISUAL_CHECKS;
+        let reason: String = error
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(160)
+            .collect();
+        self.api_client.notify(&format!(
+            "Claw ne peut pas ouvrir la page pour la vérifier ({reason}) : plus de vérification après chaque modification dans ce tour"
+        ));
+        None
     }
 
     /// La première version complète d'une page créée dans ce tour (tous ses
@@ -4402,7 +4476,7 @@ where
         aids: &mut TurnAids,
         prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> String {
-        if aids.blind_edits == 0 {
+        if aids.blind_edits == 0 || !harness::enabled(Aid::VisualCheck) {
             return String::new();
         }
         self.api_client
@@ -4427,7 +4501,12 @@ where
         answer: &str,
         prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> Option<String> {
-        if aids.claim_checked || aids.blind_edits == 0 || self.subagent || interrupt_requested() {
+        if aids.claim_checked
+            || aids.blind_edits == 0
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::VisualCheck)
+        {
             return None;
         }
         let sentence = harness::verification_claim(answer)?;
@@ -5208,6 +5287,60 @@ where
             .notify("Claw fait confronter le travail à chaque exigence avant de conclure");
         let mut prompt =
             harness::checklist_prompt(request, earlier, crate::permissions::user_away());
+        // Une fonction écrite pour l'utilisateur et jamais branchée (la suppression d'une
+        // dépense sans bouton, essais C1 et C2 du 29 octobre 2026) : la partie de la demande
+        // qu'elle fait n'est pas faite, même quand ses tests passent.
+        let unwired: Vec<(String, Vec<String>)> = aids
+            .originals
+            .keys()
+            .filter(|path| {
+                let lower = path.to_lowercase();
+                [".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".html"]
+                    .iter()
+                    .any(|extension| lower.ends_with(extension))
+                    && !lower.contains(".test.")
+                    && !lower.contains(".spec.")
+            })
+            .filter_map(|path| {
+                let text = std::fs::read_to_string(path).ok()?;
+                let found = crate::code_checks::unwired_handlers(&text);
+                (!found.is_empty()).then(|| (harness::shown_path(path), found))
+            })
+            .collect();
+        if !unwired.is_empty() {
+            self.api_client.notify(&format!(
+                "Fonctions écrites pour l'utilisateur et jamais branchées : {}, signalées au modèle",
+                unwired.iter().map(|(_, found)| found.len()).sum::<usize>()
+            ));
+        }
+        prompt.push_str(&crate::code_checks::unwired_handlers_note(&unwired));
+        // Des centimes donnés au kit, qui montre des euros : tous les montants cent fois trop
+        // grands (essais C2, C6 et C8, 29 et 30 octobre 2026).
+        let cents: Vec<(String, Vec<String>)> = aids
+            .originals
+            .keys()
+            .filter(|path| {
+                let lower = path.to_lowercase();
+                [".jsx", ".tsx", ".js", ".ts"]
+                    .iter()
+                    .any(|extension| lower.ends_with(extension))
+                    && !lower.contains(".test.")
+                    && !lower.contains(".spec.")
+                    && !lower.contains("/kit/")
+            })
+            .filter_map(|path| {
+                let text = std::fs::read_to_string(path).ok()?;
+                let found = crate::code_checks::cents_shown_as_euros(&text);
+                (!found.is_empty()).then(|| (harness::shown_path(path), found))
+            })
+            .collect();
+        if !cents.is_empty() {
+            self.api_client.notify(&format!(
+                "Montants en centimes donnés au kit, qui montre des euros : {}, signalés au modèle",
+                cents.iter().map(|(_, found)| found.len()).sum::<usize>()
+            ));
+        }
+        prompt.push_str(&crate::code_checks::cents_shown_as_euros_note(&cents));
         if let Some(reference) = Self::project_reference(aids) {
             prompt.push_str("\n\n");
             prompt.push_str(&reference);
@@ -5732,7 +5865,11 @@ where
         input: &str,
         aids: &mut TurnAids,
     ) -> Option<String> {
-        if tool_name != "AskUserQuestion" || aids.questions_checked || self.subagent {
+        if tool_name != "AskUserQuestion"
+            || aids.questions_checked
+            || self.subagent
+            || !harness::enabled(Aid::Questions)
+        {
             return None;
         }
         aids.questions_checked = true;
@@ -5868,7 +6005,11 @@ where
     /// (session #32) : 19 photos (11 Mo) dans images/, aucune dans la page,
     /// dont « baguette-1.jpg » qui montrait un pot d'ajvar.
     fn unused_photos_gate(&mut self, aids: &mut TurnAids) -> Option<String> {
-        if aids.photos_checked || self.subagent || interrupt_requested() {
+        if aids.photos_checked
+            || self.subagent
+            || interrupt_requested()
+            || !harness::enabled(Aid::Photos)
+        {
             return None;
         }
         let cwd = std::env::current_dir().ok()?;
@@ -6214,7 +6355,7 @@ where
     }
 
     /// Mode projet : le cahier des charges et le plan sont écrits et lisibles.
-    /// Avant le code, un autre modèle les relit, une fois par contenu (de
+    /// Avant le code, le modèle les relit dans une conversation neuve, une fois par contenu (de
     /// nouveau si des exigences ou des jalons changent) ; ses remarques vont au
     /// modèle. Sans relecteur, elle sera tentée au tour suivant.
     fn design_review(&mut self, turn: &mut project::Turn) -> Option<String> {
@@ -6222,7 +6363,6 @@ where
             || !self.review
             || interrupt_requested()
             || !harness::enabled(Aid::Review)
-            || !self.api_client.can_consult()
         {
             return None;
         }
@@ -6239,7 +6379,7 @@ where
         }
         turn.design_review_tried = true;
         self.api_client.notify(
-            "Mode projet : un autre modèle relit le cahier des charges et le plan avant le code…",
+            "Mode projet : le cahier des charges et le plan sont relus dans une conversation neuve avant le code…",
         );
         let environment = match &self.environment {
             EnvironmentProbe::Done(note) => Some(note.as_str()),
@@ -6769,7 +6909,7 @@ where
     }
 
     /// Relecture imposée : quand le tour a modifié assez de code et que la
-    /// vérification passe, un autre modèle relit le diff et la réponse que
+    /// vérification passe, le modèle relit dans une conversation neuve le diff et la réponse que
     /// l'agent s'apprête à donner. Ses remarques sont renvoyées au modèle
     /// (une relecture par tour). `None` : rien à corriger.
     fn review_gate(
@@ -6786,7 +6926,6 @@ where
             || !self.review
             || interrupt_requested()
             || !harness::enabled(Aid::Review)
-            || !self.api_client.can_consult()
         {
             return None;
         }
@@ -6798,7 +6937,7 @@ where
             return None;
         }
         self.api_client
-            .notify("Relecture des modifications par un autre modèle…");
+            .notify("Relecture des modifications dans une conversation neuve…");
         let reference = Self::project_reference(aids);
         let prompt =
             harness::review_prompt_with(request, earlier, answer, &diffs, reference.as_deref());
@@ -6808,10 +6947,10 @@ where
         harness::log_review(&consultation.model, &consultation.text);
         // Une approbation sans aucune analyse ne prouve pas que le travail a
         // été relu (rejoué sur un vrai travail : « LGTM » en 8 s, quand un
-        // autre relecteur y trouvait un bogue) : un second relecteur la remplace.
+        // autre relecteur y trouvait un bogue) : une seconde relecture la remplace.
         if harness::bare_approval(&consultation.text) {
             self.api_client.notify(&format!(
-                "Relecture par {} : approbation sans analyse, un autre modèle relit",
+                "Relecture par {} : approbation sans analyse, nouvelle relecture dans une autre conversation neuve",
                 consultation.model
             ));
             if let Some(second) = self.api_client.consult_again(
@@ -10167,6 +10306,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn no_visual_review_is_announced_when_the_review_is_switched_off() {
+        let _serial = crate::test_serial();
+        // Essai C6 du 30 octobre 2026 : aide « Revue visuelle » coupée,
+        // l'annonce « revue maintenant » redite à chacune des quarante
+        // dernières requêtes, sans aucune revue.
+        std::env::set_var("CLAW_DESIGN_REVIEW", "0");
+        let page = measured_page("revue-coupee");
+        let mut steps: Vec<Vec<AssistantEvent>> = (0..14)
+            .map(|_| {
+                tool_step(
+                    "write_file",
+                    &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                        .to_string(),
+                )
+            })
+            .collect();
+        steps.push(text_step("Page écrite."));
+        let ((runtime, observed, _), _) = measured_runtime(steps, vec![Some(MEASURED)]);
+        let mut runtime = runtime.with_turn_request_limit(20);
+        runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW");
+        let observed = observed.borrow();
+        assert!(
+            !observed
+                .notices
+                .iter()
+                .any(|notice| notice.contains("sans revue visuelle")),
+            "{:?}",
+            observed.notices
+        );
+    }
+
     /// Un runtime d'essai dont l'outil `Screenshot` rend les mesures données,
     /// et une page `index.html` réelle dans un dossier temporaire.
     fn measured_page(tag: &str) -> std::path::PathBuf {
@@ -10178,7 +10350,8 @@ mod tests {
     }
 
     /// `measured` : ce que rend chaque appel de `Screenshot`, dans l'ordre
-    /// (`None` : une erreur) ; le dernier se répète.
+    /// (`None` : une erreur ; `ERR:` devant un texte : cette erreur) ; le
+    /// dernier se répète.
     fn measured_runtime(
         steps: Vec<Vec<AssistantEvent>>,
         measured: Vec<Option<&'static str>>,
@@ -10198,9 +10371,13 @@ mod tests {
             .register("Screenshot", move |_| {
                 let index = (counted.get() as usize).min(measured.len() - 1);
                 counted.set(counted.get() + 1);
-                measured[index]
-                    .map(ToString::to_string)
-                    .ok_or_else(|| super::ToolError::new("la page ne s'ouvre pas"))
+                match measured[index] {
+                    Some(text) if text.starts_with("ERR:") => {
+                        Err(super::ToolError::new(&text["ERR:".len()..]))
+                    }
+                    Some(text) => Ok(text.to_string()),
+                    None => Err(super::ToolError::new("la page ne s'ouvre pas")),
+                }
             });
         let runtime = ConversationRuntime::new(
             Session::new(),
@@ -10288,6 +10465,35 @@ mod tests {
     }
 
     #[test]
+    fn the_visual_check_is_an_aid_that_can_be_switched_off() {
+        let _serial = crate::test_serial();
+        // Demandé le 29 octobre 2026 : essayer un modèle sans aucune aide de
+        // Claw ; la vérification visuelle tournait même avec toutes coupées.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        std::env::set_var("CLAW_VISUAL_CHECK", "0");
+        let page = measured_page("coupee");
+        let write = || {
+            tool_step(
+                "write_file",
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                    .to_string(),
+            )
+        };
+        let steps = vec![write(), write(), text_step("Corrigé.")];
+        let ((mut runtime, observed, _), shots) =
+            measured_runtime(steps, vec![Some(MEASURED), Some(MEASURED)]);
+        runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_VISUAL_CHECK");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        assert_eq!(shots.get(), 0);
+        assert!(observed
+            .borrow()
+            .requests
+            .iter()
+            .all(|request| !request.contains("Claw looked at")));
+    }
+
+    #[test]
     fn claw_looks_at_the_page_after_each_change_and_says_what_it_broke_or_fixed() {
         let _serial = crate::test_serial();
         // Demandé le 25 octobre 2026 : « À chaque modification il doit
@@ -10341,6 +10547,93 @@ mod tests {
         assert!(!third.contains("Broken by your last change"), "{third}");
         assert!(observed.notices.iter().any(|notice| notice
             .contains("Claw vérifie la page après la modification : 1 défaut(s) nouveau(x)")));
+    }
+
+    #[test]
+    fn an_app_that_does_not_build_is_said_once_and_the_checks_go_on() {
+        let _serial = crate::test_serial();
+        // Essai C6 du 30 octobre 2026 : trois vérifications au début, puis
+        // cinquante minutes sans aucune et sans un mot, l'appli changeant encore.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("construction");
+        let write = || {
+            tool_step(
+                "write_file",
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                    .to_string(),
+            )
+        };
+        const BROKEN: &str = "ERR:the app did not build (npm run build in .), so it cannot be shown. Fix this error, then look again:\nsrc/App.tsx: \"Badge\" is not exported by \"src/kit/index.ts\"";
+        let steps = vec![write(), write(), write(), text_step("Corrigé.")];
+        let ((mut runtime, observed, _), shots) =
+            measured_runtime(steps, vec![Some(BROKEN), Some(BROKEN), Some(MEASURED)]);
+        runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        // La vérification continue après l'erreur : trois captures, la dernière lue.
+        assert_eq!(shots.get(), 3);
+        let told = |index: usize| {
+            observed.requests[index]
+                .matches("is not exported by")
+                .count()
+        };
+        assert_eq!((told(1), told(2)), (1, 1), "{:?}", observed.requests);
+        assert!(observed.requests[1].contains("Claw checks the page again after your next change"));
+        assert!(
+            observed.requests[3].contains("Claw looked at"),
+            "{}",
+            observed.requests[3]
+        );
+        assert_eq!(
+            observed
+                .notices
+                .iter()
+                .filter(|notice| notice.contains("l'appli ne se construit pas"))
+                .count(),
+            1,
+            "{:?}",
+            observed.notices
+        );
+        assert!(!observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("plus de vérification")));
+    }
+
+    #[test]
+    fn a_stopped_server_sends_the_checks_back_to_the_project_page() {
+        let _serial = crate::test_serial();
+        // Essai C10 du 30 octobre 2026 : le modèle regarde son serveur de développement, puis
+        // l'arrête ; la vérification suivante échouait sur cette adresse, et plus aucune n'avait
+        // lieu pendant dix-sept minutes de modifications.
+        std::env::set_var("CLAW_DESIGN_REVIEW_ROUNDS", "0");
+        let page = measured_page("serveur");
+        let write = || {
+            tool_step(
+                "write_file",
+                &serde_json::json!({ "path": page.display().to_string(), "content": "<h1>Club</h1>" })
+                    .to_string(),
+            )
+        };
+        const STOPPED: &str = "ERR:http://localhost:5173 could not be opened (net::ERR_CONNECTION_REFUSED): is the server running and the address right?";
+        let steps = vec![write(), write(), text_step("Corrigé.")];
+        let ((mut runtime, observed, _), shots) =
+            measured_runtime(steps, vec![Some(STOPPED), Some(MEASURED)]);
+        runtime.page_target = Some("url:http://localhost:5173".to_string());
+        runtime.run_turn("corrige le site", None).expect("tour");
+        std::env::remove_var("CLAW_DESIGN_REVIEW_ROUNDS");
+        let observed = observed.borrow();
+        // Deux vérifications : l'adresse arrêtée, puis la page du projet.
+        assert_eq!(shots.get(), 2, "{:?}", observed.notices);
+        assert_eq!(runtime.page_target, None);
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("son serveur ne répond plus")));
+        assert!(!observed
+            .notices
+            .iter()
+            .any(|notice| notice.contains("plus de vérification")));
     }
 
     #[test]
@@ -12012,7 +12305,7 @@ mod tests {
     }
 
     #[test]
-    fn no_other_model_is_asked_or_announced_when_the_user_turned_them_off() {
+    fn with_other_models_turned_off_the_session_model_still_reviews_its_work() {
         let _serial = crate::test_serial();
         NO_ADVISORS.with(|off| off.set(true));
         let (path, output) = written_file("sans-conseillers");
@@ -12029,7 +12322,20 @@ mod tests {
         let _ = runtime.run_turn("écris total.py", None);
         NO_ADVISORS.with(|off| off.set(false));
         let observed = observed.borrow();
-        assert!(observed.consults.is_empty(), "{:?}", observed.consults);
+        // La relecture à froid n'a besoin d'aucun autre modèle : le modèle de la session
+        // relit, dans une conversation neuve (demandé le 29 octobre 2026).
+        assert!(
+            observed
+                .consults
+                .iter()
+                .all(|(purpose, _)| *purpose == super::ConsultPurpose::Review),
+            "{:?}",
+            observed.consults
+        );
+        assert!(observed
+            .notices
+            .iter()
+            .any(|notice| notice == "Relecture des modifications dans une conversation neuve…"));
         assert!(
             !observed
                 .notices
@@ -12065,7 +12371,7 @@ mod tests {
         let observed = observed.borrow();
         assert_eq!(observed.consults.len(), 2);
         assert!(observed.notices.iter().any(|notice| notice
-            == "Relecture par relecteur : approbation sans analyse, un autre modèle relit"));
+            == "Relecture par relecteur : approbation sans analyse, nouvelle relecture dans une autre conversation neuve"));
         // Les remarques du second relecteur reviennent à l'agent.
         assert!(observed.requests[3].contains("liste vide non gérée"));
         let _ = std::fs::remove_file(path);

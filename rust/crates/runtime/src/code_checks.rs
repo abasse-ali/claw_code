@@ -7,7 +7,7 @@
 //! Chaque constat dit sa ligne et la correction : un petit modèle corrige ce
 //! qu'on lui montre, rarement ce qu'il ne voit pas.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Read as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -320,13 +320,18 @@ pub fn pitfalls(path: &Path) -> Vec<String> {
                 found
             })
             .unwrap_or_default(),
-        "html" | "htm" | "js" | "mjs" | "jsx" | "ts" | "tsx" | "vue" | "svelte" | "json" => read(path)
-            .map(|text| {
-                let mut found = injected_test_data(&text);
-                found.extend(past_dates(&text, &crate::prompt::current_date_iso()));
-                found
-            })
-            .unwrap_or_default(),
+        ext @ ("html" | "htm" | "js" | "mjs" | "jsx" | "ts" | "tsx" | "vue" | "svelte" | "json") => {
+            read(path)
+                .map(|text| {
+                    let mut found = injected_test_data(&text);
+                    found.extend(past_dates(&text, &crate::prompt::current_date_iso()));
+                    if matches!(ext, "js" | "mjs" | "jsx" | "ts" | "tsx") {
+                        found.extend(fresh_selectors(&text));
+                    }
+                    found
+                })
+                .unwrap_or_default()
+        }
         _ => Vec::new(),
     };
     found.into_iter().take(MAX_FINDINGS).collect()
@@ -408,6 +413,233 @@ pub fn access_codes(text: &str) -> Vec<String> {
     codes.sort_by_key(|code| !code.chars().all(|c| c.is_ascii_digit()));
     codes.truncate(4);
     codes
+}
+
+/// Débuts de nom d'une fonction qui répond à l'utilisateur : un bouton, un lien
+/// ou un événement de la page l'appelle (`handleRemoveExpense`, `onDelete`,
+/// `confirmRemove`…), suivis d'une majuscule.
+const HANDLER_PREFIXES: &[&str] = &[
+    "handle", "on", "remove", "delete", "add", "edit", "update", "save", "confirm", "toggle",
+    "open", "close", "clear", "reset", "submit", "select", "undo", "cancel", "ask", "request",
+    "export", "import", "share", "move", "rename", "archive",
+];
+
+/// Fonctions d'une page qui répondent à l'utilisateur, définies et jamais
+/// appelées ni passées à un bouton : ce qu'elles font est hors de sa portée.
+/// Vu le 29 octobre 2026 (essais C1 et C2 de Claw Web, deux fois de suite) :
+/// la suppression d'une dépense écrite avec sa fenêtre de confirmation, aucun
+/// bouton pour l'ouvrir, et la réponse la disait faite. Une fonction exportée
+/// sert à d'autres fichiers : elle n'est pas comptée. Un nom défini dans
+/// plusieurs composants (`handleDelete` des participants et des dépenses) est
+/// cherché dans le composant de chaque définition. Au plus `MAX_FINDINGS`.
+#[must_use]
+pub fn unwired_handlers(text: &str) -> Vec<String> {
+    let declaration = Regex::new(
+        r"(?m)^[ \t]*(?:(?:const|let)[ \t]+([A-Za-z_$][\w$]*)[ \t]*(?::[^=\n]+)?=[ \t]*(?:useCallback\([ \t]*)?(?:async[ \t]*)?(?:\([^)\n]*\)|[A-Za-z_$][\w$]*)[ \t]*(?::[^=\n]+)?=>|(?:async[ \t]+)?function[ \t]+([A-Za-z_$][\w$]*)[ \t]*\()",
+    )
+    .expect("regex");
+    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let uses = |within: &str, name: &str| {
+        within
+            .match_indices(name)
+            .filter(|(at, _)| {
+                !within[..*at].chars().next_back().is_some_and(word)
+                    && !within[at + name.len()..].chars().next().is_some_and(word)
+            })
+            .count()
+    };
+    let mut defined: HashMap<&str, usize> = HashMap::new();
+    for captures in declaration.captures_iter(text) {
+        if let Some(name) = captures.get(1).or_else(|| captures.get(2)) {
+            *defined.entry(name.as_str()).or_default() += 1;
+        }
+    }
+    // Débuts des lignes de premier niveau (`function ParticipantsScreen() {`) : le
+    // composant d'une définition va de celle qui la précède à la suivante.
+    let top_level: Vec<usize> = std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(at, _)| at + 1))
+        .filter(|&start| text[start..].starts_with(|c: char| c.is_ascii_alphabetic()))
+        .collect();
+    let mut found = Vec::new();
+    for captures in declaration.captures_iter(text) {
+        let Some(name) = captures.get(1).or_else(|| captures.get(2)) else {
+            continue;
+        };
+        let (at, name) = (name.start(), name.as_str());
+        let handler = HANDLER_PREFIXES.iter().any(|prefix| {
+            name.strip_prefix(prefix)
+                .and_then(|rest| rest.chars().next())
+                .is_some_and(char::is_uppercase)
+        });
+        let within = if defined.get(name).copied().unwrap_or(0) > 1 {
+            let start = top_level.iter().rev().find(|&&line| line <= at);
+            let end = top_level.iter().find(|&&line| line > at);
+            &text[start.copied().unwrap_or(0)..end.copied().unwrap_or(text.len())]
+        } else {
+            text
+        };
+        if !handler || uses(within, name) > 1 {
+            continue;
+        }
+        let line = text[..captures.get(0).map_or(0, |whole| whole.start())]
+            .matches('\n')
+            .count()
+            + 1;
+        found.push(format!(
+            "line {line}: `{name}` is defined but nothing calls it (no button, link or event of the page uses it), so what it does is out of the user's reach"
+        ));
+        if found.len() == MAX_FINDINGS {
+            break;
+        }
+    }
+    found
+}
+
+/// Hooks de React qui prennent une fonction sans être le sélecteur d'un magasin, et
+/// `useShallow` de zustand, qui compare déjà les valeurs neuves.
+const REACT_HOOKS: &[&str] = &[
+    "useShallow",
+    "useCallback",
+    "useEffect",
+    "useLayoutEffect",
+    "useInsertionEffect",
+    "useMemo",
+    "useState",
+    "useReducer",
+    "useRef",
+    "useImperativeHandle",
+    "useTransition",
+    "useDeferredValue",
+    "useSyncExternalStore",
+    "useId",
+    "useContext",
+    "useOptimistic",
+    "useActionState",
+    "useEffectEvent",
+];
+
+/// Sélecteurs d'un magasin (zustand) qui calculent une valeur neuve à chaque lecture : un
+/// tableau ou un objet neuf à chaque fois, et zustand 5 rend le composant à nouveau sans fin
+/// (erreur React #185, une page blanche). Vu le 30 octobre 2026 (essai C5) :
+/// `useTripStore((state) => state.getBalances())`, les écrans des soldes et des
+/// remboursements plantaient l'appli dès leur ouverture. `useShallow` est laissé au modèle.
+#[must_use]
+pub fn fresh_selectors(text: &str) -> Vec<String> {
+    let selector = Regex::new(
+        r"\b(use[A-Z][\w$]*)\(\s*\(?\s*([A-Za-z_$][\w$]*)\s*(?::[^)=\n]*)?\)?\s*=>\s*([^\n]*)",
+    )
+    .expect("regex");
+    let mut found = Vec::new();
+    for captures in selector.captures_iter(text) {
+        let (hook, state, body) = (&captures[1], &captures[2], captures[3].trim());
+        if REACT_HOOKS.contains(&hook) {
+            continue;
+        }
+        let call =
+            Regex::new(&format!(r"\b{}(?:\.[\w$]+)+\(", regex::escape(state))).expect("regex");
+        let fresh = body.starts_with('{')
+            || body.starts_with("({")
+            || body.starts_with('[')
+            || body.contains("Object.keys(")
+            || body.contains("Object.values(")
+            || body.contains("Object.entries(")
+            || body.contains("Array.from(")
+            || (call.is_match(body)
+                && !body.trim_end_matches([')', ';', ' ']).ends_with(".length"));
+        if !fresh {
+            continue;
+        }
+        let at = captures.get(0).map_or(0, |whole| whole.start());
+        let line = text[..at].matches('\n').count() + 1;
+        let shown: String = captures[0].trim_end().chars().take(90).collect();
+        found.push(format!(
+            "line {line}: `{shown}` computes a new value at each read: when it is an array or an object, zustand renders the component again without end (React error #185, a blank page); select the stored values (state.items) and compute the result with useMemo"
+        ));
+        if found.len() == MAX_FINDINGS {
+            break;
+        }
+    }
+    found
+}
+
+/// Des centimes passés tels quels à ce qui montre des euros (le kit de Claw : `amount=` de Row,
+/// Hero, Tile et Amount, `money()`, `signed()`) : 1250 centimes s'affichent « 1 250,00 € ». Vu
+/// les 29 et 30 octobre 2026 (essais C2, C6 et C8) : 100 € affichés 10 000,00 €, malgré le
+/// guide du kit. Au plus `MAX_FINDINGS`.
+#[must_use]
+pub fn cents_shown_as_euros(text: &str) -> Vec<String> {
+    let shown = Regex::new(
+        r"\bamount=\{([^}\n]*)\}|\b(?:money|signed)\(([^()\n]*(?:\([^()\n]*\))?[^()\n]*)\)",
+    )
+    .expect("regex");
+    let cents = Regex::new(r"(?i)cents?\b|cents?[A-Z_.]|centimes").expect("regex");
+    let mut found = Vec::new();
+    for captures in shown.captures_iter(text) {
+        let Some(value) = captures.get(1).or_else(|| captures.get(2)) else {
+            continue;
+        };
+        let value = value.as_str();
+        let divided = [
+            "/ 100", "/100", "* 0.01", "*0.01", "format", "toEuros", "euros(",
+        ]
+        .iter()
+        .any(|sign| value.contains(sign));
+        if divided || !cents.is_match(value) {
+            continue;
+        }
+        let at = captures.get(0).map_or(0, |whole| whole.start());
+        let line = text[..at].matches('\n').count() + 1;
+        let whole: String = captures[0].chars().take(80).collect();
+        found.push(format!(
+            "line {line}: `{whole}` hands an amount in cents to what shows euros, so 1250 cents show \"1 250,00 €\": divide it by 100 there"
+        ));
+        if found.len() == MAX_FINDINGS {
+            break;
+        }
+    }
+    found
+}
+
+/// Les centimes passés au kit dans les fichiers modifiés, pour le contrôle des exigences :
+/// `(chemin montré, constats)`. Vide quand il n'y en a pas.
+#[must_use]
+pub fn cents_shown_as_euros_note(files: &[(String, Vec<String>)]) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let listed = files
+        .iter()
+        .flat_map(|(path, findings)| {
+            findings
+                .iter()
+                .map(move |finding| format!("- {path}, {finding}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "\n\nClaw also read how amounts are shown: these give amounts in cents to the kit, which takes euros (12.5 for 12,50 €).\n{listed}\nEvery amount on the screens is then 100 times too much: divide by 100 where it is shown, and check that 12,50 typed shows 12,50 €."
+    )
+}
+
+/// Les fonctions jamais branchées des fichiers modifiés, pour le contrôle des
+/// exigences : `(chemin montré, constats)`. Vide quand il n'y en a pas.
+#[must_use]
+pub fn unwired_handlers_note(files: &[(String, Vec<String>)]) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let listed = files
+        .iter()
+        .flat_map(|(path, findings)| {
+            findings
+                .iter()
+                .map(move |finding| format!("- {path}, {finding}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "\n\nClaw also read the files you changed: these functions are written for the user and nothing calls them.\n{listed}\nA part of the request that one of them implements is not done until the user can reach it: wire it to the control the request asks for (a button on the row, in the sheet or in the menu) and check it, or remove the function if the request does not need it."
+    )
 }
 
 /// Dates d'un fichier toutes passées (`AAAA-MM-JJ`, trois au moins) : les
@@ -1342,6 +1574,124 @@ mod tests {
             "2026-10-25"
         )
         .is_empty());
+    }
+
+    #[test]
+    fn functions_written_for_the_user_and_never_wired_are_found() {
+        // Essai C2 du 29 octobre 2026 : la suppression d'une dépense, sans bouton.
+        let page = r"
+export default function App() {
+  const [confirm, setConfirm] = useState<Expense | null>(null);
+  const handleRemoveExpense = (expense: Expense) => {
+    setConfirm(expense);
+  };
+  const confirmRemoveExpense = () => { remove(confirm.id); };
+  const openAddExpense = useCallback(() => setOpen(true), []);
+  function handleSubmit(event: FormEvent) { event.preventDefault(); }
+  const formatted = (value: number) => money(value);
+  return <form onSubmit={handleSubmit}><Button onClick={openAddExpense} /><ConfirmModal onConfirm={confirmRemoveExpense} /></form>;
+}
+export const onShared = () => {};
+";
+        let found = super::unwired_handlers(page);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].starts_with("line 4: `handleRemoveExpense` is defined but nothing calls it"),
+            "{found:?}"
+        );
+        // Essai C5 du 30 octobre 2026 : `handleDelete` dans deux écrans, aucun branché ;
+        // celui des participants était la seule façon d'en supprimer un.
+        let screens = r"
+function ParticipantsScreen() {
+  const handleDelete = (id: string) => {
+    remove(id);
+  };
+  const handleEdit = (p: Participant) => setEditId(p.id);
+  return <Row action={{ onClick: () => handleEdit(p) }} />;
+}
+
+// --- Écran Dépenses ---
+function ExpensesScreen() {
+  const handleDelete = (id: string) => {
+    deleteExpense(id);
+  };
+  return <Button onClick={() => handleDelete(editId)} />;
+}
+";
+        let twice = super::unwired_handlers(screens);
+        assert_eq!(twice.len(), 1, "{twice:?}");
+        assert!(
+            twice[0].starts_with("line 3: `handleDelete` is defined but nothing calls it"),
+            "{twice:?}"
+        );
+        // Sans constat, rien n'est ajouté au contrôle des exigences.
+        assert!(super::unwired_handlers_note(&[]).is_empty());
+        let note = super::unwired_handlers_note(&[("src/App.tsx".to_string(), found)]);
+        assert!(
+            note.contains("- src/App.tsx, line 4: `handleRemoveExpense`"),
+            "{note}"
+        );
+        assert!(
+            note.contains("wire it to the control the request asks for"),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn amounts_in_cents_handed_to_the_kit_are_found() {
+        // Essai C8 du 30 octobre 2026 : 100 € affichés 10 000,00 €.
+        let page = r"
+<Row title={expense.label} amount={-expense.amountCents} />
+<Row title={balance.name} amount={balance.amountCents / 100} />
+<Hero label=Total amount={totalCents} />
+<p>{money(totalCents)}</p>
+<p>{money(total)}</p>
+<p>{formatCents(totalCents)}</p>
+<Tile value={money(sumCents / 100)} />
+";
+        let found = super::cents_shown_as_euros(page);
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(
+            found[0].starts_with("line 2: `amount={-expense.amountCents}`"),
+            "{found:?}"
+        );
+        assert!(
+            found[1].starts_with("line 4: `amount={totalCents}`"),
+            "{found:?}"
+        );
+        assert!(
+            found[2].starts_with("line 5: `money(totalCents)`"),
+            "{found:?}"
+        );
+        assert!(super::cents_shown_as_euros_note(&[]).is_empty());
+        let note = super::cents_shown_as_euros_note(&[("src/App.tsx".to_string(), found)]);
+        assert!(note.contains("- src/App.tsx, line 2:"), "{note}");
+    }
+
+    #[test]
+    fn store_selectors_that_build_a_new_value_at_each_read_are_found() {
+        // Essai C5 du 30 octobre 2026 : soldes et remboursements, appli bloquée (#185).
+        let store = r"
+export function useBalances() {
+  return useTripStore((state) => state.getBalances());
+}
+const open = useTrip((s: TripState) => s.expenses.filter((e) => e.open));
+const pair = useTrip((s) => ({ a: s.a, b: s.b }));
+const count = useTrip((s) => s.expenses.filter((e) => e.open).length);
+const expenses = useTrip((state) => state.expenses);
+const add = useTrip((state) => state.addExpense);
+const both = useTrip(useShallow((s) => ({ a: s.a, b: s.b })));
+const go = useCallback((event) => event.target.value.split(','), []);
+";
+        let found = super::fresh_selectors(store);
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(
+            found[0].starts_with("line 3: `useTripStore((state) => state.getBalances());`"),
+            "{found:?}"
+        );
+        assert!(found[1].starts_with("line 5: "), "{found:?}");
+        assert!(found[2].starts_with("line 6: "), "{found:?}");
+        assert!(found[0].contains("React error #185"), "{found:?}");
     }
 
     #[test]

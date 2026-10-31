@@ -5,10 +5,14 @@ import { MotionConfig } from "framer-motion";
 import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
 import {
   Children,
-  cloneElement,
+  createContext,
   isValidElement,
+  useCallback,
+  useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
+  useState,
   useSyncExternalStore,
   type ReactElement,
   type ReactNode,
@@ -32,12 +36,36 @@ export function useScreen(): [string, (id: string) => void] {
   return [hash, (id: string) => { window.location.hash = id; }];
 }
 
-type ScreenProps = { id: string; title?: string; label?: string; hidden?: boolean; children: ReactNode };
+type ScreenProps = {
+  id: string;
+  title?: string;
+  label?: string;
+  /** Ce que fait le bouton + quand cet écran est ouvert (ouvrir sa fenêtre d'ajout). */
+  onAdd?: () => void;
+  children: ReactNode;
+};
+
+/** Ce que l'AppShell dit à ses écrans : celui qui est ouvert, et où se signaler. */
+type Shell = { shown: string | undefined; register: (id: string, add?: () => void) => () => void };
+const ShellContext = createContext<Shell | null>(null);
 
 /** Un écran de l'appli ; `title` s'affiche en haut (l'accueil n'en a souvent pas, `label` le nomme alors). */
-export function Screen({ id, title, label, hidden, children }: ScreenProps) {
+export function Screen({ id, title, label, onAdd, children }: ScreenProps) {
+  // Chaque écran se signale à l'AppShell et ne s'affiche que s'il est l'écran ouvert : un écran
+  // écrit dans un composant à soi (<DepensesScreen />) suit l'adresse comme un autre. Vu le
+  // 30 octobre 2026 (essai C5) : l'AppShell cherchait l'id sur ses enfants directs, ne le
+  // trouvait pas sur ces composants et montrait toujours le premier écran, onglets sans effet.
+  const shell = useContext(ShellContext);
+  const add = useRef(onAdd);
+  useLayoutEffect(() => {
+    add.current = onAdd;
+  });
+  const hasAdd = Boolean(onAdd);
+  const register = shell?.register;
+  useLayoutEffect(() => register?.(id, hasAdd ? () => add.current?.() : undefined), [register, id, hasAdd]);
+  if (shell && shell.shown !== id) return null;
   return (
-    <section className="app-screen" id={id} data-screen hidden={hidden} aria-label={title ? undefined : label ?? id} aria-labelledby={title ? `${id}-titre` : undefined}>
+    <section className="app-screen" id={id} data-screen aria-label={title ? undefined : label ?? id} aria-labelledby={title ? `${id}-titre` : undefined}>
       {title && <h2 className="app-screen__title" id={`${id}-titre`}>{title}</h2>}
       {children}
     </section>
@@ -86,19 +114,36 @@ type AppShellProps = {
   bar?: ReactNode;
   /** 3 à 5 onglets, dans l'ordre des écrans. */
   tabs: Tab[];
-  /** Le bouton + au milieu de la barre d'onglets (l'action principale). */
+  /** Le bouton + au milieu de la barre d'onglets (l'action principale) ; un écran qui a son
+   *  propre onAdd le remplace quand il est ouvert. */
   onAdd?: () => void;
   addLabel?: string;
-  /** Les <Screen>, un par onglet (et d'autres écrans qu'on ouvre par go("id")). */
+  /** Les <Screen>, un par onglet (et d'autres écrans qu'on ouvre par go("id")), écrits ici
+   *  ou dans des composants à soi. */
   children: ReactNode;
 };
 
 /** Toute l'appli : la barre du haut, l'écran ouvert, la barre d'onglets et les messages. */
 export function AppShell({ bar, tabs, onAdd, addLabel = "Ajouter", children }: AppShellProps) {
   const [hash] = useScreen();
-  const screens = Children.toArray(children).filter(isValidElement) as ReactElement<ScreenProps>[];
-  const shown = screens.find((screen) => screen.props.id === hash) ?? screens[0];
-  const shownId = shown?.props.id;
+  // Les écrans signalés (et leur bouton +), dans l'ordre où ils sont rendus.
+  const [screens, setScreens] = useState<Record<string, (() => void) | undefined>>({});
+  const register = useCallback((id: string, add?: () => void) => {
+    setScreens((all) => ({ ...all, [id]: add }));
+    return () =>
+      setScreens((all) => {
+        const rest = { ...all };
+        delete rest[id];
+        return rest;
+      });
+  }, []);
+  const direct = Children.toArray(children)
+    .filter(isValidElement)
+    .map((child) => (child as ReactElement<Partial<ScreenProps>>).props.id)
+    .filter((id): id is string => typeof id === "string");
+  const known = [...direct, ...Object.keys(screens), ...tabs.map((item) => item.id)];
+  const shownId = known.includes(hash) ? hash : direct[0] ?? tabs[0]?.id ?? Object.keys(screens)[0];
+  const add = (shownId !== undefined ? screens[shownId] : undefined) ?? onAdd;
   const first = useRef(true);
   useEffect(() => {
     if (first.current) {
@@ -106,7 +151,7 @@ export function AppShell({ bar, tabs, onAdd, addLabel = "Ajouter", children }: A
       return;
     }
     window.scrollTo({ top: 0 });
-    const title = document.querySelector<HTMLElement>(".app-screen:not([hidden]) h1, .app-screen:not([hidden]) h2");
+    const title = document.querySelector<HTMLElement>(".app-screen h1, .app-screen h2");
     if (title) {
       title.tabIndex = -1;
       title.focus({ preventScroll: true });
@@ -123,13 +168,13 @@ export function AppShell({ bar, tabs, onAdd, addLabel = "Ajouter", children }: A
     <MotionConfig reducedMotion="user">
       <div className="app">
         {bar}
-        {/* Chaque écran reste dans la page, les autres cachés : un lien vers #bilan trouve
-            son écran, et chacun garde son état d'un onglet à l'autre. */}
-        <main>{screens.map((screen) => cloneElement(screen, { key: screen.props.id, hidden: screen !== shown }))}</main>
+        <ShellContext.Provider value={{ shown: shownId, register }}>
+          <main key={shownId}>{children}</main>
+        </ShellContext.Provider>
         <nav className="tabbar" aria-label="Écrans de l'appli">
           {tabs.slice(0, half).map(tab)}
-          {onAdd && (
-            <button className="tabbar__add" type="button" aria-label={addLabel} onClick={onAdd}>
+          {add && (
+            <button className="tabbar__add" type="button" aria-label={addLabel} onClick={add}>
               <Icon icon={Plus} size={28} />
             </button>
           )}

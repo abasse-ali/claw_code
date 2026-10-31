@@ -1783,7 +1783,7 @@ fn console_lines(events: &[Value]) -> Vec<String> {
                             .join(" ")
                     })
                     .unwrap_or_default();
-                format!("{kind}: {text}")
+                format!("{kind}: {}", react_error(&text).unwrap_or(text))
             }
             Some("Runtime.exceptionThrown") => {
                 let details = &params["exceptionDetails"];
@@ -1809,7 +1809,11 @@ fn console_lines(events: &[Value]) -> Vec<String> {
                         line.map_or_else(String::new, |line| format!(":{}", line + 1))
                     )
                 });
-                format!("uncaught: {}{at}", text.lines().next().unwrap_or(text))
+                let first = text.lines().next().unwrap_or(text);
+                format!(
+                    "uncaught: {}{at}",
+                    react_error(first).unwrap_or_else(|| first.to_owned())
+                )
             }
             Some("Log.entryAdded") => {
                 let entry = &params["entry"];
@@ -1854,6 +1858,29 @@ fn console_lines(events: &[Value]) -> Vec<String> {
     }
     lines.truncate(MAX_CONSOLE);
     lines
+}
+
+/// Une erreur de React construit pour la production n'a qu'un numéro (« Minified React
+/// error #185; visit <https://react.dev/errors/185> ») : son sens et sa cause habituelle, en
+/// clair. Vu le 30 octobre 2026 (essai C5) : un sélecteur zustand qui rendait un tableau neuf
+/// faisait boucler l'appli, et la console ne disait que « #185 ».
+fn react_error(text: &str) -> Option<String> {
+    let code: String = text
+        .split("Minified React error #")
+        .nth(1)?
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    let meaning = match code.as_str() {
+        "185" => "maximum update depth: a component updates state at every render, often a store selector returning a new array or object at each read (s.getItems(), .filter(), .map(), {…}); select stored values, compute the rest with useMemo",
+        "301" => "too many re-renders: state is set while rendering, such as onClick={setOpen(true)} instead of onClick={() => setOpen(true)}",
+        "130" => "a JSX tag names something that is not a component (undefined): a missing or misspelled import, or a component the module does not export",
+        "31" => "an object is rendered as text in JSX: show one of its fields, or format it",
+        "300" | "310" => "a component calls a different number of hooks than at its previous render: a hook after an early return or inside a condition",
+        "321" => "a hook is called outside the body of a component (in a callback, a loop or a plain function)",
+        _ => return None,
+    };
+    Some(format!("React error #{code}: {meaning}"))
 }
 
 /// Le nom du fichier d'une adresse, sans dossier, requête ni ancre.
@@ -2096,6 +2123,10 @@ fn click_problems(devtools: &mut DevTools) -> (Vec<String>, Vec<(String, String)
         ));
     }
     problems.extend(strings(&result["underBar"]));
+    problems.extend(strings(&result["addGone"]));
+    problems.extend(strings(&result["scaled"]));
+    problems.extend(strings(&result["keptOpen"]));
+    problems.extend(strings(&result["commaLost"]));
     problems.extend(lost_on_reload(devtools, &result["kept"]));
     (problems, openers, explore)
 }
@@ -2252,10 +2283,35 @@ fn lost_on_reload(devtools: &mut DevTools, kept: &Value) -> Vec<String> {
         && devtools
             .wait_for("Page.loadEventFired", LOAD_LIMIT)
             .unwrap_or(false);
+    // Une appli à écrans (#participants, #soldes) : le parcours a pu en ouvrir un autre après
+    // l'envoi ; l'ajout se relit sur l'écran du formulaire. Vu le 29 octobre 2026 (essai C3) :
+    // un participant bien gardé, dit perdu parce que la page rechargée montrait les virements.
+    let hash = kept
+        .iter()
+        .find_map(|item| item["hash"].as_str().filter(|hash| hash.len() > 1))
+        .unwrap_or("");
+    // Le texte de chaque écran de l'appli (ses onglets, et l'écran de chaque ajout) : une entrée
+    // se relit là où elle est rangée, pas seulement sur l'écran du formulaire.
+    let hashes: Vec<&str> = kept
+        .iter()
+        .filter_map(|item| item["hash"].as_str().filter(|hash| hash.len() > 1))
+        .collect();
     let text = if reloaded {
         let _ = devtools.pump(Duration::from_millis(800));
         devtools.evaluate(&format!(
-            "({{ text: document.body ? document.body.innerText : '', snapshot: {SNAPSHOT_SCRIPT} }})"
+            "(async () => {{
+  const pause = () => new Promise((done) => setTimeout(done, 400));
+  const texts = [document.body ? document.body.innerText : ''];
+  const tabs = [...document.querySelectorAll('nav a[href^=\"#\"], [role=tablist] a[href^=\"#\"], .tabbar a[href^=\"#\"]')].map((link) => link.getAttribute('href'));
+  for (const hash of [...new Set([...{hashes}, ...tabs])].filter((hash) => hash && hash.length > 1).slice(0, 8)) {{
+    if (location.hash !== hash) {{ location.hash = hash; await pause(); }}
+    texts.push(document.body ? document.body.innerText : '');
+  }}
+  if ({first} && location.hash !== {first}) {{ location.hash = {first}; await pause(); }}
+  return {{ text: texts.join('\\n'), snapshot: {SNAPSHOT_SCRIPT} }};
+}})()",
+            hashes = json!(hashes),
+            first = json!(hash),
         ))
     } else {
         Err(String::new())
@@ -2275,6 +2331,17 @@ fn lost_on_reload(devtools: &mut DevTools, kept: &Value) -> Vec<String> {
         .filter_map(|item| {
             let marker = item["marker"].as_str()?;
             let form = item["form"].as_str().unwrap_or("a form");
+            // Envoyé et accepté, mais visible sur aucun écran : après le rechargement, l'entrée
+            // se voit (l'écran ne se met pas à jour) ou non (elle est perdue). Vu le 30 octobre
+            // 2026 (essai C7) : participants et dépenses gardés, visibles après un rechargement
+            // seulement.
+            if item["missing"].as_bool() == Some(true) {
+                return Some(if text.contains(marker) {
+                    format!("{form} was sent and accepted (its window closed or its field emptied), but \"{marker}\" showed on no screen of the app until the page was reloaded: the screen does not update when an entry is added. What shows the list reads a copy taken before the entry was added (a useMemo or a variable the add does not change): read the list from where it is kept at each render, so the new entry shows at once")
+                } else {
+                    format!("{form} was sent and accepted (its window closed or its field emptied), but \"{marker}\" shows on no screen of the app, not even after a reload: the entry is lost or never listed. Keep it and show it in its list, right after sending")
+                });
+            }
             if item["shown"].as_bool().unwrap_or(true) {
                 (!text.contains(marker)).then(|| {
                     format!("{form} adds \"{marker}\" to the page, but it is gone after a reload: {advice}")
@@ -2329,8 +2396,7 @@ fn capture(
         .map_err(|error| format!("the layout check failed in the page: {error}"))?;
     // Les vues de la page à son arrivée, avant que les essais la changent : la
     // suite n'a pas à rouvrir la page pour les chercher.
-    let views = (session.windows && viewport.mobile && session.actions.is_empty())
-        .then(|| found_views(devtools));
+    let views = (viewport.mobile && session.actions.is_empty()).then(|| found_views(devtools));
     let mut problems = strings(&audit["problems"]);
     problems.extend(drawn_icons_problem(&audit["svgIcons"]));
     if session.actions.is_empty() {
@@ -2845,12 +2911,17 @@ const VIEWS_SCRIPT: &str = r#"(() => {
   const seenViews = new Set();
   const views = [];
   for (const el of document.querySelectorAll("a[href^='#'], [data-tab], [data-view], [data-screen], [data-page], [data-target]")) {
-    if (views.length >= 3 || el.closest("dialog, [role=dialog]")) continue;
+    if (views.length >= 4 || el.closest("dialog, [role=dialog]")) continue;
     const key = (el.getAttribute("href") || "").slice(1) || el.dataset.tab || el.dataset.view || el.dataset.screen || el.dataset.page || (el.dataset.target || "").replace(/^#/, "");
     if (!key || seenViews.has(key)) continue;
     let target = null;
     try { target = document.getElementById(decodeURIComponent(key)) || document.querySelector(`[data-view="${CSS.escape(key)}"], [data-screen="${CSS.escape(key)}"], [data-tab-panel="${CSS.escape(key)}"]`); } catch (_) { target = null; }
-    if (!target || shown(target) || target.contains(el)) continue;
+    // Un onglet d'appli (#depenses dans une barre d'onglets) : son écran n'est dans la page
+    // qu'une fois ouvert (le kit React de Claw, un routeur). Vu le 29 octobre 2026 (essai C3) :
+    // seul l'accueil était capturé, jamais les écrans Dépenses, Soldes et Remboursements.
+    const tab = !target && el.matches("a[href^='#']") && el.closest("nav, [role=tablist], [data-app-tabs], .tabbar, .app-tabs")
+      && el.getAttribute("aria-current") !== "page" && el.getAttribute("aria-selected") !== "true" && shown(el);
+    if (!tab && (!target || shown(target) || target.contains(el))) continue;
     seenViews.add(key);
     views.push({ kind: "view", label: label(el), selector: path(el) });
   }
@@ -2937,13 +3008,15 @@ fn view_shots(
         }
         // Une fenêtre doit s'être ouverte ; un menu, un onglet ou un écran se
         // montre tel quel.
-        let check = if view.kind == "window" {
-            "[...document.querySelectorAll('dialog[open], [role=dialog], [aria-modal=true]')].some((box) => { const s = getComputedStyle(box); if (s.display === 'none' || s.visibility === 'hidden') return false; return [box, ...[...box.querySelectorAll('*')].slice(0, 300)].some((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'; }); })"
-        } else {
-            "true"
+        // Un écran (#depenses) doit avoir changé ce que la page montre : un lien vers une
+        // section absente ne s'y capture pas une seconde fois.
+        let check = match view.kind {
+            "window" => "[...document.querySelectorAll('dialog[open], [role=dialog], [aria-modal=true]')].some((box) => { const s = getComputedStyle(box); if (s.display === 'none' || s.visibility === 'hidden') return false; return [box, ...[...box.querySelectorAll('*')].slice(0, 300)].some((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'; }); })",
+            "view" => "document.body.innerText !== before",
+            _ => "true",
         };
         let open = format!(
-            "(async () => {{ const el = document.querySelector({}); if (!el) return false; el.scrollIntoView({{ block: '{}' }}); el.click(); await new Promise((done) => setTimeout(done, 500)); return {check}; }})()",
+            "(async () => {{ const el = document.querySelector({}); if (!el) return false; const before = document.body.innerText; el.scrollIntoView({{ block: '{}' }}); el.click(); await new Promise((done) => setTimeout(done, 500)); return {check}; }})()",
             json!(view.selector),
             if matches!(view.kind, "tab" | "view") { "start" } else { "center" }
         );
@@ -3129,7 +3202,17 @@ const SCREEN_SCRIPT: &str = r#"(async () => {
   }
   if (!shown(el)) return { ok: false, errors, text: "" };
   el.scrollIntoView({ block: "center" });
-  press(el);
+  // Un onglet (#reglages) : l'adresse change, même quand un formulaire renvoyé a laissé une
+  // fenêtre ouverte qui rend le reste de la page inerte. Vu le 29 octobre 2026 : l'écran
+  // Réglages du kit, « Not reached ».
+  const href = el.matches("a[href^='#']") ? el.getAttribute("href").trim() : "";
+  if (href.length > 1) {
+    for (const box of document.querySelectorAll("dialog[open]")) box.close();
+    window.__clawLetHash = true;
+    location.hash = href;
+  } else {
+    press(el);
+  }
   await wait(500);
   if (code) {
     const box = [...document.querySelectorAll("dialog[open], [role=dialog], [aria-modal=true]")].find((item) => [...item.querySelectorAll("input")].some(shown));
@@ -3843,15 +3926,25 @@ pub(crate) fn take(input: &ScreenshotInput) -> Result<Value, String> {
         }
         coverage.push("Only what is listed here was seen: do not say in your answer that anything else was checked.".to_string());
     }
-    // Fenêtres, menu et onglets, au téléphone de préférence : là où un parent les ouvre.
-    if session.windows {
+    // Fenêtres, menu et onglets, au téléphone de préférence : là où un parent les ouvre. Les
+    // écrans d'une appli (onglets, #depenses) toujours, les fenêtres et le menu quand ils sont
+    // demandés (`windows`). Vu le 29 octobre 2026 (essai C3) : appelé sans `windows`, Screenshot
+    // ne capturait que l'accueil, et ni le modèle ni l'utilisateur ne voyaient les autres écrans.
+    let screens_only = !session.windows;
+    let arrival = arrival.take().map(|views| {
+        views
+            .into_iter()
+            .filter(|view| !screens_only || matches!(view.kind, "view" | "tab"))
+            .collect::<Vec<_>>()
+    });
+    if session.windows || arrival.as_ref().is_some_and(|views| !views.is_empty()) {
         if let Some(viewport) = sizes.iter().find(|size| size.mobile).or(sizes.first()) {
             let shots = view_shots(
                 &mut devtools,
                 &session,
                 viewport,
-                &openers,
-                arrival.take(),
+                if screens_only { &[] } else { &openers },
+                arrival,
                 &known,
             );
             for (number, extra) in shots.into_iter().enumerate() {
@@ -4718,6 +4811,139 @@ mod tests {
         assert!(
             !all.contains("A <dialog> keeps the browser's max-width"),
             "{all}"
+        );
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn entries_sent_from_a_window_without_a_form_are_followed_until_they_show() {
+        // Essai C7 du 30 octobre 2026 : « Nouveau voyage » (des champs et un bouton « Créer »,
+        // sans <form>) jamais rempli ; les participants gardés mais visibles après un
+        // rechargement seulement ; « Ajouter une dépense » dans la liste vide seulement.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-carnet-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |shown: &str, opener: &str| {
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Carnet</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button, input {{ font: inherit; padding: 10px; }} dialog {{ max-width: calc(100vw - 32px); }}</style></head><body><h1>Carnet</h1>{opener}<ul id=\"notes\"></ul><dialog id=\"fenetre\"><h2>Nouvelle note</h2><label for=\"titre\">Titre</label> <input id=\"titre\"> <button id=\"creer\">Créer</button> <button id=\"fermer\">Fermer</button></dialog><script>const notes = JSON.parse(localStorage.getItem('notes') || '[]'); const list = document.getElementById('notes'); const draw = () => {{ list.replaceChildren(...notes.map((note) => {{ const item = document.createElement('li'); item.textContent = note; return item; }})); const empty = document.getElementById('vide'); if (empty) empty.hidden = notes.length > 0; }}; draw(); const box = document.getElementById('fenetre'); document.querySelectorAll('[data-ouvre]').forEach((button) => button.addEventListener('click', () => box.showModal())); document.getElementById('fermer').addEventListener('click', () => box.close()); document.getElementById('creer').addEventListener('click', () => {{ const field = document.getElementById('titre'); if (!field.value.trim()) return; notes.push(field.value.trim()); localStorage.setItem('notes', JSON.stringify(notes)); field.value = ''; box.close(); {shown} }});</script></body></html>"),
+            )
+            .expect("html");
+        };
+        let page = format!("claw-carnet-{}/index.html", std::process::id());
+        let capture = || {
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            request.windows = Some(true);
+            super::take(&request).expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let header = "<button data-ouvre>Nouvelle note</button>";
+        let empty = "<p id=\"vide\">Aucune note. <button data-ouvre>Ajouter une note</button></p>";
+        write("draw();", header);
+        let sound = capture();
+        write("", header);
+        let stale = capture();
+        write("draw();", empty);
+        let single = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        for absent in [
+            "until the page was reloaded",
+            "shows on no screen",
+            "nothing on the screen adds another",
+        ] {
+            assert!(!sound.contains(absent), "{absent}: {sound}");
+        }
+        assert!(
+            stale.contains("the window \\\"Nouvelle note\\\" was sent and accepted")
+                && stale.contains("showed on no screen of the app until the page was reloaded"),
+            "{stale}"
+        );
+        assert!(
+            single.contains("After a first entry is added with button \\\"Ajouter une note\\\", nothing on the screen adds another"),
+            "{single}"
+        );
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn amounts_shown_a_hundred_times_too_big_and_a_window_that_keeps_its_entry_are_found() {
+        // Essai C8 du 30 octobre 2026 : « Ajouter » sans payeur choisi ne faisait rien, 100 €
+        // s'affichaient 10 000,00 €, et la fenêtre gardait la dépense précédente.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-depenses-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |payer: &str, scale: &str, reset: &str| {
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Dépenses</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button, input {{ font: inherit; padding: 10px; }} dialog {{ max-width: calc(100vw - 32px); }} [aria-pressed=true] {{ font-weight: 700; }}</style></head><body><h1>Dépenses</h1><button id=\"nouvelle\">Nouvelle dépense</button><ul id=\"liste\"></ul><dialog id=\"fenetre\"><h2>Nouvelle dépense</h2><label for=\"libelle\">Libellé</label> <input id=\"libelle\"> <label for=\"montant\">Montant</label> <input id=\"montant\" inputmode=\"decimal\"><div role=\"group\" aria-label=\"Payé par\"><button type=\"button\" aria-pressed=\"false\">Alice</button><button type=\"button\" aria-pressed=\"false\">Bob</button></div><button id=\"ajouter\">Ajouter</button> <button id=\"fermer\">Fermer</button></dialog><script>const box = document.getElementById('fenetre'); const choices = [...box.querySelectorAll('[role=group] button')]; let payer = null; const choose = (button) => {{ payer = button ? button.textContent : null; choices.forEach((item) => item.setAttribute('aria-pressed', String(item === button))); }}; choices.forEach((button) => button.addEventListener('click', () => choose(button))); document.getElementById('nouvelle').addEventListener('click', () => {{ {reset} {payer} box.showModal(); }}); document.getElementById('fermer').addEventListener('click', () => box.close()); document.getElementById('ajouter').addEventListener('click', () => {{ const label = document.getElementById('libelle').value.trim(); const cents = Math.round(Number(document.getElementById('montant').value.replace(',', '.')) * 100); if (!label || !(cents > 0) || !payer) return; const item = document.createElement('li'); item.textContent = label + ' : ' + ({scale}).toLocaleString('fr-FR', {{ minimumFractionDigits: 2 }}) + ' € (' + payer + ')'; document.getElementById('liste').append(item); box.close(); }});</script></body></html>"),
+            )
+            .expect("html");
+        };
+        let page = format!("claw-depenses-{}/index.html", std::process::id());
+        let capture = || {
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            request.windows = Some(true);
+            super::take(&request).expect("capture")["captures"][0]["problems"].to_string()
+        };
+        write(
+            "choose(choices[0]);",
+            "cents / 100",
+            "document.getElementById('libelle').value = ''; document.getElementById('montant').value = '';",
+        );
+        let sound = capture();
+        write("", "cents", "");
+        let broken = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        for absent in [
+            "until a choice is made",
+            "100 times too much",
+            "still holds that entry",
+        ] {
+            assert!(!sound.contains(absent), "{absent}: {sound}");
+        }
+        for expected in [
+            "until a choice is made in \\\"Payé par\\\"",
+            "100 times too much",
+            "its window still holds that entry",
+        ] {
+            assert!(broken.contains(expected), "{expected}: {broken}");
+        }
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn loose_fields_are_filled_and_an_amount_typed_in_a_number_field_is_found() {
+        // Essai C9 du 30 octobre 2026 : le prénom et son bouton « Ajouter » posés dans une carte,
+        // sans <form> : le parcours disait « Ajouter » mort et n'ajoutait personne ; et « 45,50 »
+        // tapé dans un <input type=number> était refusé, ou lu 4550 au clavier.
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-champs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        let write = |amount: &str| {
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Voyage</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button, input {{ font: inherit; padding: 10px; }}</style></head><body><h1>Voyage</h1><section><h2>Ajouter un participant</h2><div class=\"ajout\"><label for=\"prenom\">Prénom</label> <input id=\"prenom\"> <button id=\"ajouter\">Ajouter</button></div><ul id=\"gens\"></ul></section><form id=\"depense\"><h2>Nouvelle dépense</h2><label for=\"libelle\">Libellé</label> <input id=\"libelle\"> <label for=\"montant\">Montant</label> <input id=\"montant\" {amount}> <button>Ajouter la dépense</button></form><ul id=\"depenses\"></ul><script>const saved = JSON.parse(localStorage.getItem('voyage') || '{{\"gens\":[],\"depenses\":[]}}'); const show = () => {{ document.getElementById('gens').innerHTML = saved.gens.map((name) => '<li>' + name + '</li>').join(''); document.getElementById('depenses').innerHTML = saved.depenses.map((item) => '<li>' + item + '</li>').join(''); }}; show(); document.getElementById('ajouter').addEventListener('click', () => {{ const field = document.getElementById('prenom'); const name = field.value.trim(); if (!name) return; saved.gens.push(name); localStorage.setItem('voyage', JSON.stringify(saved)); field.value = ''; show(); }}); document.getElementById('depense').addEventListener('submit', (event) => {{ event.preventDefault(); const label = document.getElementById('libelle').value.trim(); const value = Number(document.getElementById('montant').value.replace(',', '.')); if (!label || !(value > 0)) return; saved.depenses.push(label + ' : ' + value.toLocaleString('fr-FR', {{ minimumFractionDigits: 2 }}) + ' €'); localStorage.setItem('voyage', JSON.stringify(saved)); event.target.reset(); show(); }});</script></body></html>"),
+            )
+            .expect("html");
+        };
+        let page = format!("claw-champs-{}/index.html", std::process::id());
+        let capture = || {
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            super::take(&request).expect("capture")["captures"][0]["problems"].to_string()
+        };
+        write("inputmode=\"decimal\"");
+        let sound = capture();
+        write("type=\"number\"");
+        let broken = capture();
+        let _ = std::fs::remove_dir_all(&dir);
+        for absent in ["do nothing when clicked", "type=number", "gone after"] {
+            assert!(!sound.contains(absent), "{absent}: {sound}");
+        }
+        assert!(
+            broken.contains("The amount field \\\"Montant\\\" is an <input type=number>"),
+            "{broken}"
         );
     }
 
@@ -5999,6 +6225,9 @@ mod tests {
             // La commande ouverte dans l'application SMS du visiteur.
             json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Failed to launch 'sms:0612345678?body=Commande' because the scheme does not have a registered handler.", "url": "file:///C:/site/index.html" } } }),
             json!({ "method": "Log.entryAdded", "params": { "entry": { "level": "error", "text": "Not allowed to launch 'sms:+33612345678?body=Commande' because a user gesture is required.", "url": "file:///C:/site/index.html" } } }),
+            // React construit pour la production : un numéro seul, dit en clair.
+            json!({ "method": "Runtime.exceptionThrown", "params": { "exceptionDetails": { "text": "Uncaught", "exception": { "description": "Error: Minified React error #185; visit https://react.dev/errors/185 for the full message or use the non-minified dev environment for full errors and additional helpful warnings.\n    at Vp (index-BA5eOwFN.js:9:1)" } } } }),
+            json!({ "method": "Runtime.consoleAPICalled", "params": { "type": "error", "args": [{ "type": "string", "value": "Minified React error #9999; visit https://react.dev/errors/9999" }] } }),
         ];
         assert_eq!(
             console_lines(&events),
@@ -6009,6 +6238,8 @@ mod tests {
                 "error: Failed to load resource: 404 (http://h/a.css)",
                 "error: Failed to load resource: net::ERR_FAILED (http://h/b.js)",
                 "error: the page loads manifest.json, which is not in the project: add the file, or remove what asks for it",
+                "uncaught: React error #185: maximum update depth: a component updates state at every render, often a store selector returning a new array or object at each read (s.getItems(), .filter(), .map(), {…}); select stored values, compute the rest with useMemo",
+                "error: Minified React error #9999; visit https://react.dev/errors/9999",
             ]
         );
     }
