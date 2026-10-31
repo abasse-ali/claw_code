@@ -2,7 +2,7 @@
 // l'adresse, #bilan) et la barre d'onglets flottante avec son bouton d'ajout au milieu.
 
 import { MotionConfig } from "framer-motion";
-import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
+import { ChevronLeft, ChevronRight, Ellipsis, Plus } from "lucide-react";
 import {
   Children,
   createContext,
@@ -157,12 +157,47 @@ export function AppShell({ bar, tabs, onAdd, addLabel = "Ajouter", children }: A
       title.focus({ preventScroll: true });
     }
   }, [shownId]);
-  const half = Math.ceil(tabs.length / 2);
-  const tab = (item: Tab) => (
-    <a key={item.id} className="tabbar__tab" href={`#${item.id}`} aria-current={item.id === shownId ? "page" : undefined}>
+  // Au téléphone, la barre garde 4 places autour du + : au-delà de 4 onglets, les 3 premiers
+  // restent et les autres passent dans « Plus » (sur ordinateur, la colonne les montre tous).
+  // Vu le 31 octobre 2026 : à 6 onglets et plus, leurs noms étaient coupés (« Cha… », « Télé… »).
+  const crowded = tabs.length > 4;
+  const kept = crowded ? tabs.slice(0, 3) : tabs;
+  const extra = crowded ? tabs.slice(3) : [];
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreBox = useRef<HTMLDivElement>(null);
+  useEffect(() => setMoreOpen(false), [shownId]);
+  useEffect(() => {
+    if (!moreOpen) return;
+    const away = (event: PointerEvent) => { if (moreBox.current && !moreBox.current.contains(event.target as Node)) setMoreOpen(false); };
+    const key = (event: KeyboardEvent) => { if (event.key === "Escape") setMoreOpen(false); };
+    document.addEventListener("pointerdown", away);
+    document.addEventListener("keydown", key);
+    return () => { document.removeEventListener("pointerdown", away); document.removeEventListener("keydown", key); };
+  }, [moreOpen]);
+  const half = Math.ceil((kept.length + (crowded ? 1 : 0)) / 2);
+  const tab = (item: Tab, more = false) => (
+    <a key={item.id} className={`tabbar__tab${more ? " tabbar__tab--extra" : ""}`} href={`#${item.id}`} aria-current={item.id === shownId ? "page" : undefined}>
       <Icon icon={item.icon} size={22} />
       <span>{item.label}</span>
     </a>
+  );
+  const shownExtra = extra.find((item) => item.id === shownId);
+  const more = crowded && (
+    <div className="tabbar__more" ref={moreBox} key="plus">
+      <button type="button" className="tabbar__tab" aria-expanded={moreOpen} aria-haspopup="menu" aria-current={shownExtra ? "page" : undefined} onClick={() => setMoreOpen(!moreOpen)}>
+        <Icon icon={shownExtra?.icon ?? Ellipsis} size={22} />
+        <span>{shownExtra?.label ?? "Plus"}</span>
+      </button>
+      {moreOpen && (
+        <div className="tabbar__menu" role="menu" aria-label="Autres écrans">
+          {extra.map((item) => (
+            <a key={item.id} role="menuitem" href={`#${item.id}`} className="tabbar__menu-item" aria-current={item.id === shownId ? "page" : undefined} onClick={() => setMoreOpen(false)}>
+              <Icon icon={item.icon} size={20} />{item.label}
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
   );
   return (
     <MotionConfig reducedMotion="user">
@@ -172,13 +207,15 @@ export function AppShell({ bar, tabs, onAdd, addLabel = "Ajouter", children }: A
           <main key={shownId}>{children}</main>
         </ShellContext.Provider>
         <nav className="tabbar" aria-label="Écrans de l'appli">
-          {tabs.slice(0, half).map(tab)}
+          {kept.slice(0, half).map((item) => tab(item))}
           {add && (
             <button className="tabbar__add" type="button" aria-label={addLabel} onClick={add}>
               <Icon icon={Plus} size={28} />
             </button>
           )}
-          {tabs.slice(half).map(tab)}
+          {kept.slice(half).map((item) => tab(item))}
+          {extra.map((item) => tab(item, true))}
+          {more}
         </nav>
       </div>
       <Toaster />

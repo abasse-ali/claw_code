@@ -4,7 +4,8 @@
 //
 // Cadre      AppShell (bar, tabs, onAdd, addLabel ; enfants : des Screen, écrits là ou dans vos
 //            composants ; sur un ordinateur, les onglets passent dans une colonne à gauche et les
-//            cartes côte à côte), Screen (id, title, onAdd : le bouton + quand cet écran est ouvert),
+//            cartes côte à côte ; au téléphone, au-delà de 4 onglets, les suivants passent dans
+//            « Plus »), Screen (id, title, onAdd : le bouton + quand cet écran est ouvert),
 //            MonthBar (mois affiché), AppBar (title), IconButton (icon, label, onClick | href),
 //            useScreen() → [écran ouvert, go("id")].
 // Blocs      Hero (label, amount | value, sub, pills [{ label, value, note }], progress

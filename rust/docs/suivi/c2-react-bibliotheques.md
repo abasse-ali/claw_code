@@ -296,3 +296,21 @@ simulés (OpenStreetMap est bloqué depuis l'environnement de test) ; épingles,
 toucher qui pose un lieu, recherche, distance (tour Eiffel – Louvre : 3,2 km) ; code QR
 enregistré puis relu depuis la photo ; lecture par une fausse caméra ; note avec liste à cocher
 et gras, gardée après rechargement, cherchée, supprimée puis rétablie.
+
+### Revue d'affichage de tout le kit (31 octobre 2026, « il y a encore des bugs d'affichage »)
+
+Galerie complète (anciens et nouveaux blocs, 15 écrans), 360, 768 et 1280 px, clair et sombre,
+avec une mesure renforcée : ce qui sort de l'écran ou de sa carte, texte coupé, commandes trop
+petites, chevauchements, contraste (couleurs converties par un canvas : les color-mix du kit
+étaient mal lus). Corrigé :
+- Barre d'onglets : au-delà de 4 onglets, les noms étaient coupés (« Cha… », « Télé… ») ; au
+  téléphone, les 3 premiers restent et les autres passent dans « Plus » (menu au-dessus de la
+  barre, l'onglet ouvert y prend la place du bouton) ; sur ordinateur, la colonne les montre tous.
+- Ordinateur : les cartes côte à côte gardent leur hauteur (plus de grand vide dans une carte
+  étirée à la hauteur de sa voisine).
+- Points du carrousel ronds (ils étaient carrés), zone de toucher de 32 px ; action d'une
+  alerte à 44 px.
+- Glisser pour payer : le texte passait sous la pastille.
+- Avatars : fond plein (transparents, ils se mélangeaient dans un groupe).
+- Roue : les noms du bas à l'endroit. Agenda : « Journée » aligné. Aurore en sombre : plus de
+  tache claire sous un texte blanc. Notification non lue et humeur « Bien » : texte plus lisible.

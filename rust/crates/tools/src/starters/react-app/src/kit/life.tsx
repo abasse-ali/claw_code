@@ -198,6 +198,8 @@ export function SpinWheel({ items, onResult, label = "Tourner" }: { items: strin
     animate(rotation, target, { duration: still ? 0.01 : 3.2, ease: [0.12, 0.8, 0.2, 1] }).then(() => { setSpinning(false); onResult(items[winner]); });
   };
   const turn = useTransform(rotation, (value) => `rotate(${value}deg)`);
+  // Le nom d'une part du bas est retourné pour se lire à l'endroit.
+  const upright = (angle: number) => (angle > 90 && angle < 270 ? angle + 180 : angle);
   const point = (angle: number, radius: number) => [50 + radius * Math.sin((angle * Math.PI) / 180), 50 - radius * Math.cos((angle * Math.PI) / 180)];
   return (
     <div className="wheel">
@@ -210,7 +212,7 @@ export function SpinWheel({ items, onResult, label = "Tourner" }: { items: strin
           return (
             <g key={item + index}>
               <path d={items.length === 1 ? "M50 2 A48 48 0 1 1 49.99 2 Z" : `M50 50 L${x1} ${y1} A48 48 0 ${slice > 180 ? 1 : 0} 1 ${x2} ${y2} Z`} fill={colors[index % colors.length]} />
-              <text x={tx} y={ty} transform={`rotate(${index * slice + slice / 2} ${tx} ${ty})`} textAnchor="middle" dominantBaseline="middle" className="wheel__text">{item.length > 12 ? `${item.slice(0, 11)}…` : item}</text>
+              <text x={tx} y={ty} transform={`rotate(${upright(index * slice + slice / 2)} ${tx} ${ty})`} textAnchor="middle" dominantBaseline="middle" className="wheel__text">{item.length > 12 ? `${item.slice(0, 11)}…` : item}</text>
             </g>
           );
         })}
