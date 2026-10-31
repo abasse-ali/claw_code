@@ -63,6 +63,26 @@
 //            Courses ; ce que l'utilisateur a choisi d'abord), recategorize(opération, catégorie)
 //            (la retient), MoneyCalendar (les jours de rentrée et de dépense du mois, un jour
 //            touché montre ses opérations). N'écrivez jamais ces choses vous-même.
+// Boutique (social.tsx) PriceTag (price, was : prix barré et remise), ProductCard (name, image,
+//            price, rating, quantity, onChange : Ajouter puis − et +), CartSummary (lines,
+//            delivery, freeFrom, onCheckout : le panier et son total).
+// Réseau     (social.tsx) PostCard (author, time, text, image, likes, liked, onLike : une
+//            publication), CommentList (comments, onSend), ProfileHeader (name, bio, stats,
+//            action), FollowButton, NotificationList (items, onRead, onReadAll : non lues en
+//            avant).
+// Médias     (life.tsx) AudioPlayer (src, title : lecture, pause, position), VideoPlayer,
+//            ImageCompare (before, after : avant/après à faire glisser).
+// Santé      (life.tsx) ActivityRings (rings { label, value 0..1 } : anneaux l'un dans
+//            l'autre), MoodPicker (value 1..5, onChange : l'humeur du jour) et moodOf(note).
+// École, jeu (life.tsx) Quiz (questions { question, options, answer, why } : réponse en vert
+//            ou rouge, score), SpinWheel (items, onResult : roue de la chance).
+// Journée    (life.tsx) DaySchedule (slots { start "09:00", end, title }, from, to, now :
+//            planning heure par heure), AnalogClock (zone, label : horloge à aiguilles).
+// Écrans     (life.tsx) StackView (pages { nom: (page) => écran }, first : des écrans qui
+//            s'empilent dans un onglet, avec le retour du téléphone), useStack() → push("nom:id"),
+//            back(), BackBar (title : flèche retour et titre), SlideToConfirm (label, onConfirm :
+//            glisser pour payer ou envoyer), ScrollTopButton, ThemeToggle (clair, sombre, auto,
+//            retenu), PhoneField (06 12 34 56 78).
 // Animations+ (anim.tsx) TextReveal (text : les mots apparaissent un à un), ScrambleText (text :
 //            les lettres se mélangent puis se posent), Aurora (un fond aux couleurs qui bougent,
 //            ses enfants devant), GlowCard (une lumière suit le doigt), Magnetic (un bouton
@@ -141,6 +161,7 @@ export * from "./forms";
 export * from "./fx";
 export * from "./icons";
 export * from "./layout";
+export * from "./life";
 export * from "./money";
 export * from "./more";
 export * from "./motion";
@@ -148,6 +169,7 @@ export * from "./offline";
 export * from "./plus";
 export * from "./settings";
 export * from "./sheet";
+export * from "./social";
 export * from "./store";
 export * from "./toast";
 export * from "./touch";

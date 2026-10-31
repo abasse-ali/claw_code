@@ -258,3 +258,19 @@ pour ne pas croiser une icône de lucide-react (Sparkles, Spotlight en sont).
 
 Vérifié dans Chromium, clair, sombre et « moins de mouvement » (rien ne tombe, le code
 s'affiche d'un coup, la barre de chargement est fixe) : chaque animation essayée, sans erreur.
+
+### Suite : des blocs pour tous les genres d'applis (31 octobre 2026)
+
+Demande : « continue à en trouver des widgets et animations pour le kit soit complet pour tout ».
+
+- `kit/social.tsx` (boutique et réseau) : PriceTag, ProductCard, CartSummary (livraison offerte
+  au-delà d'un montant), PostCard, CommentList, ProfileHeader, FollowButton, NotificationList.
+- `kit/life.tsx` : AudioPlayer, VideoPlayer, ImageCompare ; ActivityRings, MoodPicker/moodOf ;
+  Quiz, SpinWheel (s'arrête sous le repère sur la part annoncée) ; DaySchedule, AnalogClock
+  (fuseaux) ; StackView/useStack/BackBar (écrans empilés, le retour du téléphone revient d'un
+  écran sans quitter l'onglet), SlideToConfirm, ScrollTopButton, ThemeToggle (data-theme,
+  retenu), PhoneField.
+- Corrigé en essayant : durée d'un son inconnue (« Infinity:NaN » → « –:–– ») ; bouton Envoyer
+  des commentaires qui sortait de sa carte.
+
+Vérifié dans Chromium (clair et sombre, 390 px) : chaque bloc essayé, sans erreur.
