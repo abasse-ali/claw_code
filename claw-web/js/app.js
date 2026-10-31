@@ -938,12 +938,19 @@ async function engineProviderSecrets() {
   return found;
 }
 
+/** La machine des sessions : toujours la vôtre (serveur gratuit dans le nuage, ou PC). Le
+ * choix « Machine de GitHub » est retiré le 31 octobre 2026 : sans minutes GitHub Actions pour
+ * le dépôt privé, un passage y échouait en deux secondes, sans journal. Un ancien réglage qui
+ * la nommait ne compte plus. */
+const SESSION_RUNNER = "claw-pc";
+const sessionRunner = () => state.settings.runner || SESSION_RUNNER;
+
 /** État d'un passage du moteur, pour l'affichage. */
 function runStatus(run) {
   if (!run) return null;
   if (run.status === "queued" || run.status === "waiting" || run.status === "pending" || run.status === "requested") {
     // Sur le PC, une session attend tant que le PC et Docker Desktop ne sont pas lancés.
-    return { key: "queued", label: state.settings.runner ? "En attente d'une machine (serveur, ou PC allumé avec Docker Desktop)" : "En file d'attente" };
+    return { key: "queued", label: "En attente d'une machine (serveur, ou PC allumé avec Docker Desktop)" };
   }
   if (run.status === "in_progress") return { key: "running", label: "Claw travaille" };
   if (run.conclusion === "success") return { key: "done", label: "Terminé" };
@@ -1599,7 +1606,7 @@ async function searchCatalogue(provider) {
   // Sur la machine des sessions (la vôtre si elle est choisie), comme un passage.
   await state.github.dispatch(engine, ref, {
     repo: engine, base: ref, session: CATALOGUE_SESSION, model: provider,
-    ...(state.settings.runner ? { runner: state.settings.runner } : {}),
+    runner: sessionRunner(),
   });
   const title = runTitle(engine, CATALOGUE_SESSION);
   let run = null;
@@ -1904,7 +1911,7 @@ const aidInputs = () => ({
   // choix refuserait l'entrée.
   ...(state.settings.project ? { project: "1" } : {}),
   // La machine, seulement pour le PC : un workflow des sessions d'avant ce choix la refuserait.
-  ...(state.settings.runner ? { runner: state.settings.runner } : {}),
+  runner: sessionRunner(),
 });
 
 function toggleAid(name) {
@@ -2942,6 +2949,7 @@ async function dispatchJtest(session, stop = false) {
     base: branchOf(session.issue),
     session: `jtest-${stop ? "stop-" : ""}${session.number}`,
     model: "",
+    runner: sessionRunner(),
   });
   // Le commentaire de JTest arrive en une à trois minutes : la session est relue plus souvent.
   state.jtestWatch = { session: session.number, until: Date.now() + 5 * 60_000 };
@@ -3917,8 +3925,8 @@ async function failureOf(engine, run) {
   if (!job.runner_name && !steps.length) {
     return (job.labels || []).includes("claw-pc")
       ? "votre machine n'a pas pris le passage. Vérifiez qu'elle est en ligne (Réglages, Sessions), puis relancez."
-      : "GitHub n'a donné aucune machine à ce passage, sans doute faute de minutes GitHub Actions pour ce dépôt privé "
-        + "(quota du mois épuisé, ou facturation bloquée). Choisissez « Ma machine » dans Réglages, Sessions, puis relancez.";
+      : "ce passage a été demandé sur une machine de GitHub, que les sessions n'utilisent plus (pas de minutes GitHub Actions "
+        + "pour ce dépôt privé) : relancez-le, il partira sur votre machine.";
   }
   const step = steps.find((each) => each.conclusion === "failure");
   return step ? `étape « ${step.name} » en échec (détail dans l'exécution sur GitHub, menu •••).` : "";
@@ -4594,10 +4602,10 @@ async function engineChecks() {
     }
   }
   // Sessions sur vos machines (PC, serveur dans le nuage) : un exécuteur `claw-pc` en ligne.
-  if (state.settings.runner) {
+  {
     try {
       const mine = (await state.github.runners(engine))
-        .filter((runner) => (runner.labels || []).some((label) => label.name === state.settings.runner));
+        .filter((runner) => (runner.labels || []).some((label) => label.name === sessionRunner()));
       const online = mine.filter((runner) => runner.status === "online");
       const offline = mine.filter((runner) => runner.status !== "online").map((runner) => runner.name);
       state.machinesOnline = online.map((runner) => runner.name);
@@ -4641,9 +4649,9 @@ function showEngineState() {
     ? `<span class="row-title">${failed} point${failed > 1 ? "s" : ""} à régler</span><span class="row-sub">Touchez pour le détail</span>`
     : `<span class="row-title">Moteur prêt</span><span class="row-sub">${passed} vérifications au vert</span>`;
   if (failed) view.querySelector(".engine-state").open = true;
-  const machine = view.querySelector('.choice input[value="claw-pc"]')?.closest(".choice")?.querySelector(".row-sub");
+  const machine = view.querySelector("[data-machine] .row-sub");
   if (machine) {
-    const online = state.settings.runner ? state.machinesOnline : null;
+    const online = state.machinesOnline;
     machine.textContent = !online ? MACHINE_NOTE
       : online.length ? `Aucune minute ; en ligne : ${online.join(", ")}` : "Aucune minute ; aucune machine en ligne";
   }
@@ -4855,10 +4863,8 @@ function showSettings(first = false, justConnected = false) {
       </div>
 
       <h2 class="group-title">Sessions</h2>
-      <div class="group runner-choice" role="radiogroup" aria-label="Machine des sessions">
-        ${[["", ICON.globe, "Machine de GitHub", "Prend les minutes GitHub Actions du compte"],
-          ["claw-pc", ICON.server, "Ma machine", MACHINE_NOTE]].map(([value, icon, title, sub]) => `
-          <label class="row choice"><span class="row-icon">${icon}</span>${text(title, sub)}<input type="radio" name="runner" value="${value}"${(settings.runner || "") === value ? " checked" : ""}></label>`).join("")}
+      <div class="group">
+        <div class="row" data-machine><span class="row-icon">${ICON.server}</span>${text("Ma machine", MACHINE_NOTE)}</div>
       </div>
       <div class="group">
         <button type="button" class="row link-row" data-action="cloud-runner"><span class="row-icon">${ICON.cloud}</span>${text("Serveur gratuit dans le nuage", "Oracle Cloud, allumé jour et nuit")}${ICON.chevron}</button>
@@ -5029,17 +5035,6 @@ function showSettings(first = false, justConnected = false) {
     });
     $("#view").querySelector('[data-action="cloud-runner"]')?.addEventListener("click", openCloudRunner);
     wirePush();
-    for (const radio of $("#view").querySelectorAll('input[name="runner"]')) {
-      radio.addEventListener("change", async () => {
-        if (radio.value) state.settings.runner = radio.value;
-        else delete state.settings.runner;
-        saveSettings();
-        toast(radio.value ? "Sessions sur votre machine (serveur gratuit ou PC)" : "Sessions sur une machine de GitHub");
-        const list = $("#view .checks");
-        if (list) list.innerHTML = await engineChecks().catch((error) => `<li class="ko">${escapeHtml(error.message)}</li>`);
-        showEngineState();
-      });
-    }
     for (const radio of $("#view").querySelectorAll('input[name="theme"]')) {
       radio.addEventListener("change", () => {
         state.settings.theme = radio.value;

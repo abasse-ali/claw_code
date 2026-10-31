@@ -1,15 +1,15 @@
 # Sessions de Claw Web sur votre machine : serveur gratuit ou PC
 
-Les sessions de Claw Web tournent d'ordinaire sur une machine de GitHub, dans le dépôt privé des
-sessions (`claw-sessions`) : elles consomment les minutes GitHub Actions du compte (2 000 par mois
-avec GitHub Free). Ici, elles tournent sur votre machine, avec un exécuteur auto-hébergé de
-GitHub : aucune minute n'est comptée. Deux machines possibles, qui peuvent coexister :
+Les sessions de Claw Web tournent sur votre machine, avec un exécuteur auto-hébergé de GitHub :
+aucune minute GitHub Actions n'est comptée. Depuis le 31 octobre 2026, c'est la seule machine des
+sessions : sur une machine de GitHub, sans minutes Actions pour le dépôt privé des sessions
+(`claw-sessions`), un passage échouait en deux secondes, sans journal. Deux machines possibles, qui peuvent coexister :
 
 - **un serveur gratuit dans le nuage** (Oracle Cloud, offre « Always Free »), allumé jour et
   nuit, sans votre PC : `claw-cloud.sh` ;
 - **votre PC**, dans Docker Desktop : `claw-pc.ps1`.
 
-Les deux portent l'étiquette `claw-pc`, celle que choisit l'appli (Réglages, Sessions, « Ma
+Les deux portent l'étiquette `claw-pc`, celle de toutes les sessions de l'appli (Réglages, Sessions, « Ma
 machine ») : une session part sur celle qui est libre.
 
 ## Serveur gratuit d'Oracle Cloud
@@ -31,7 +31,7 @@ Tout se fait depuis le téléphone, sans PC :
    *Management*, collez le script dans *Initialization script* (cloud-init). Créez l'instance.
 4. Le serveur installe seul Docker, inscrit l'exécuteur `claw-cloud` dans les premières minutes
    (tant que le jeton est valable), puis construit l'image complète : il apparaît en ligne dans
-   l'appli au bout de 15 à 25 minutes. Choisissez « Ma machine » dans Sessions.
+   l'appli au bout de 15 à 25 minutes, sous « Ma machine » dans Sessions.
 
 Ce qu'il faut savoir :
 
