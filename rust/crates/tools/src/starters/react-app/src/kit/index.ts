@@ -63,6 +63,18 @@
 //            Courses ; ce que l'utilisateur a choisi d'abord), recategorize(opération, catégorie)
 //            (la retient), MoneyCalendar (les jours de rentrée et de dépense du mois, un jour
 //            touché montre ses opérations). N'écrivez jamais ces choses vous-même.
+// Cartes     (map.tsx) MapView (center { lat, lng }, markers { id, lat, lng, label, note,
+//            tone }, route, onPick(lieu), onMarker(id), label : une carte OpenStreetMap avec ses
+//            épingles et un trajet), useGeolocation() → { position, error, locate() },
+//            LocateButton (onLocate), PlaceSearch (onPick : chercher une adresse),
+//            searchPlace(texte), distanceKm(a, b), formatDistance(km) « 2,4 km ». Leaflet n'est
+//            téléchargé qu'au premier affichage d'une carte ; hors ligne, la carte le dit.
+// Codes QR   (qr.tsx) QRCode (value, label : un code QR et « Enregistrer l'image »), QRScanner
+//            (onScan(texte) : lire avec l'appareil photo, ou depuis une photo).
+// Notes      (notes.tsx) NoteEditor (value, onChange : texte mis en forme en HTML, barre Titre,
+//            Gras, listes, liste à cocher, Annuler), useNotes (notes gardées : add, update,
+//            togglePin, remove → annuler), NotesList (onOpen(id) : recherche, épinglées en
+//            haut, supprimer avec Annuler), noteText(html), noteTitle(html).
 // Boutique (social.tsx) PriceTag (price, was : prix barré et remise), ProductCard (name, image,
 //            price, rating, quantity, onChange : Ajouter puis − et +), CartSummary (lines,
 //            delivery, freeFrom, onCheckout : le panier et son total).
@@ -148,7 +160,9 @@
 // Aussi installés, à importer directement : framer-motion (mouvements, motion.div), recharts
 // (courbes, camemberts), date-fns et date-fns/locale/fr (dates), zod (vérifier une saisie),
 // radix-ui (menus, onglets, curseurs, infobulles accessibles, à habiller avec Tailwind),
-// canvas-confetti (célébrer un objectif atteint), clsx (classes conditionnelles).
+// canvas-confetti (célébrer un objectif atteint), clsx (classes conditionnelles), leaflet (cartes,
+// déjà dans MapView), qrcode et jsqr (déjà dans QRCode et QRScanner), Tiptap (texte mis en
+// forme, déjà dans NoteEditor).
 
 export * from "./anim";
 export * from "./blocks";
@@ -162,11 +176,14 @@ export * from "./fx";
 export * from "./icons";
 export * from "./layout";
 export * from "./life";
+export * from "./map";
 export * from "./money";
 export * from "./more";
 export * from "./motion";
+export * from "./notes";
 export * from "./offline";
 export * from "./plus";
+export * from "./qr";
 export * from "./settings";
 export * from "./sheet";
 export * from "./social";

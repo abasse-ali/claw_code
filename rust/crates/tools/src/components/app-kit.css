@@ -1242,3 +1242,89 @@ mark { padding: 0 1px; border-radius: 3px; background: color-mix(in srgb, #f2c94
 .theme-toggle button.is-on { color: var(--ink); }
 .theme-toggle__pill { position: absolute; inset: 0; border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
 .theme-toggle__text { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+
+/* Cartes (map.tsx). Les styles de Leaflet arrivent hors des couches du kit et passent donc
+   avant elles : ce qui doit changer chez eux est marqué !important. */
+.map { display: grid; gap: 6px; }
+.map-view { position: relative; z-index: 0; width: 100%; overflow: hidden; border-radius: var(--radius); background: var(--surface-2) !important; font: inherit !important; }
+.map-view--loading { display: grid; place-items: center; color: var(--muted); font-size: 0.875rem; }
+.map-view .leaflet-control-attribution { font-size: 10px !important; background: color-mix(in srgb, var(--surface) 80%, transparent) !important; color: var(--muted) !important; }
+.map-view .leaflet-control-attribution a { color: var(--accent-ink) !important; }
+.map-view .leaflet-popup-content-wrapper, .map-view .leaflet-popup-tip { background: var(--surface) !important; color: var(--ink) !important; box-shadow: var(--shadow) !important; }
+.map-view .leaflet-popup-content { margin: 10px 14px !important; font-size: 0.875rem !important; line-height: 1.4 !important; }
+.map-view .leaflet-bar { border: 1px solid var(--line) !important; box-shadow: var(--shadow) !important; }
+.map-view .leaflet-bar a { width: 40px !important; height: 40px !important; line-height: 40px !important; font-size: 20px !important; background: var(--surface) !important; color: var(--ink) !important; border-color: var(--line) !important; }
+.map-route { stroke: var(--accent); }
+.map-pin { background: none; border: 0; }
+.map-pin i { display: block; width: 28px; height: 28px; border: 3px solid #fff; border-radius: 50% 50% 50% 0; background: var(--accent); box-shadow: 0 2px 6px rgb(0 0 0 / 0.35); transform: rotate(-45deg); }
+.map-pin--in i { background: var(--income); }
+.map-pin--out i { background: var(--error); }
+.map-pin--warn i { background: var(--warn); }
+:where(:root[data-theme="dark"]) .map-view .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.9) contrast(0.9); }
+@media (prefers-color-scheme: dark) { :where(:root:not([data-theme="light"])) .map-view .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.9) contrast(0.9); } }
+.map__offline { margin: 0; color: var(--warn); font-size: 0.875rem; }
+.locate { display: inline-grid; gap: 4px; }
+.locate .btn { display: inline-flex; align-items: center; gap: 6px; }
+.locate__error { color: var(--error); }
+.place-search { display: grid; gap: 8px; }
+.place-search__row { display: flex; gap: 8px; min-width: 0; }
+.place-search__input { flex: 1 1 0; width: auto; min-width: 0; min-height: 48px; padding: 0 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--field); color: var(--ink); font: inherit; }
+.place-search__row > .btn { flex: none; min-width: 48px; min-height: 48px; padding: 0 12px; }
+.place-search__note { margin: 0; color: var(--muted); font-size: 0.875rem; }
+.place-search__results { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.place-search__results button { display: flex; align-items: flex-start; gap: 8px; width: 100%; min-height: 44px; padding: 8px 10px; border: 0; border-radius: 12px; background: none; color: var(--ink); font: inherit; font-size: 0.875rem; text-align: left; }
+.place-search__results button:hover { background: var(--surface-2); }
+.place-search__results svg { flex: none; margin-top: 2px; color: var(--accent); }
+
+/* Codes QR (qr.tsx). */
+.qr { display: grid; justify-items: center; gap: 8px; margin: 0; text-align: center; }
+.qr__code { padding: 8px; border-radius: var(--radius-sm); background: #fff; box-shadow: var(--shadow); }
+.qr__code svg { display: block; width: 100%; height: 100%; }
+.qr figcaption { color: var(--muted); font-size: 0.875rem; overflow-wrap: anywhere; }
+.qr .btn { display: inline-flex; align-items: center; gap: 6px; }
+.qr__error, .qr-scan__error { margin: 0; color: var(--error); font-size: 0.875rem; }
+.qr-scan { display: grid; gap: 10px; }
+.qr-scan .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.qr-scan__file { cursor: pointer; }
+.qr-scan__view { position: relative; overflow: hidden; aspect-ratio: 3 / 4; max-height: 70vh; border-radius: var(--radius); background: #000; }
+.qr-scan__video { width: 100%; height: 100%; object-fit: cover; }
+.qr-scan__frame { position: absolute; top: 50%; left: 50%; width: 62%; aspect-ratio: 1; border: 3px solid #fff; border-radius: 20px; box-shadow: 0 0 0 100vmax rgb(0 0 0 / 0.45); translate: -50% -50%; }
+.qr-scan__hint { position: absolute; bottom: 14px; left: 0; right: 0; margin: 0; color: #fff; font-weight: 600; text-align: center; }
+.qr-scan__close { position: absolute; top: 8px; right: 8px; color: #fff; background: rgb(0 0 0 / 0.35); }
+
+/* Notes (notes.tsx). */
+.note-editor { display: grid; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.note-editor--loading { min-height: 160px; place-items: center; color: var(--muted); font-size: 0.875rem; }
+.note-editor__bar { position: sticky; top: 0; z-index: 1; display: flex; gap: 2px; padding: 4px; overflow-x: auto; border-bottom: 1px solid var(--line); background: var(--surface); scrollbar-width: none; }
+.note-editor__tool { display: grid; place-items: center; flex: none; width: 40px; height: 40px; border: 0; border-radius: 10px; background: none; color: var(--muted); }
+.note-editor__tool:hover { background: var(--surface-2); color: var(--ink); }
+.note-editor__tool.is-on { background: var(--accent-soft); color: var(--accent-ink); }
+.note-editor__tool:disabled { opacity: 0.35; }
+.note-editor__sep { flex: none; width: 1px; margin: 8px 4px; background: var(--line); }
+.note-editor__page { min-height: 200px; padding: 14px 16px; outline: none; line-height: 1.55; overflow-wrap: anywhere; }
+.note-editor__page > * + * { margin-top: 0.55em; }
+.note-editor__page p { margin: 0; }
+.note-editor__page h2 { margin: 0.4em 0 0; font: 800 1.375rem/1.25 var(--font-display); }
+.note-editor__page h3 { margin: 0.4em 0 0; font: 700 1.125rem/1.3 var(--font-display); }
+.note-editor__page ul, .note-editor__page ol { margin: 0; padding-left: 1.4em; }
+.note-editor__page blockquote { margin: 0; padding-left: 12px; border-left: 3px solid var(--accent); color: var(--muted); }
+.note-editor__page a { color: var(--accent-ink); }
+.note-editor__page ul[data-type="taskList"] { padding-left: 0; list-style: none; }
+.note-editor__page ul[data-type="taskList"] li { display: flex; align-items: flex-start; gap: 8px; }
+.note-editor__page ul[data-type="taskList"] li > label { flex: none; margin-top: 0.2em; }
+.note-editor__page ul[data-type="taskList"] li > label input { width: 20px; height: 20px; accent-color: var(--accent); }
+.note-editor__page ul[data-type="taskList"] li > div { flex: 1; min-width: 0; }
+.note-editor__page ul[data-type="taskList"] li[data-checked="true"] > div { color: var(--muted); text-decoration: line-through; }
+.note-editor__page p.is-editor-empty:first-child::before { content: attr(data-placeholder); float: left; height: 0; color: var(--faint); pointer-events: none; }
+.notes { display: grid; gap: 12px; }
+.notes__top { display: flex; flex-wrap: wrap; gap: 8px; }
+.notes__top .btn { display: inline-flex; align-items: center; gap: 6px; }
+.notes__search { display: flex; flex: 1 1 180px; align-items: center; gap: 8px; min-height: 48px; padding: 0 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--field); color: var(--muted); }
+.notes__search input { flex: 1; min-width: 0; border: 0; background: none; color: var(--ink); font: inherit; outline: none; }
+.notes__list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.notes__list li { display: flex; align-items: center; gap: 2px; padding-right: 4px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface); overflow: hidden; }
+.notes__list li.is-pinned { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.notes__open { display: grid; flex: 1; gap: 2px; min-width: 0; padding: 12px 14px; border: 0; background: none; color: var(--ink); font: inherit; text-align: left; }
+.notes__open b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notes__open span { display: -webkit-box; overflow: hidden; color: var(--muted); font-size: 0.875rem; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.notes__open small { color: var(--faint); font-weight: 600; }

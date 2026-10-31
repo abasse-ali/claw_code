@@ -274,3 +274,25 @@ Demande : « continue à en trouver des widgets et animations pour le kit soit c
   des commentaires qui sortait de sa carte.
 
 Vérifié dans Chromium (clair et sombre, 390 px) : chaque bloc essayé, sans erreur.
+
+### Suite : cartes, codes QR et notes (31 octobre 2026)
+
+- `kit/map.tsx` : MapView (Leaflet, fonds OpenStreetMap ; épingles, trajet, onPick, onMarker),
+  useGeolocation, LocateButton, PlaceSearch/searchPlace (Nominatim), distanceKm,
+  formatDistance. En sombre, les fonds sont inversés ; hors ligne, la carte le dit.
+- `kit/qr.tsx` : QRCode (SVG noir sur blanc, « Enregistrer l'image »), QRScanner (appareil
+  photo, ou une photo ; jsQR).
+- `kit/notes.tsx` : NoteEditor (Tiptap : titres, gras, italique, barré, listes, liste à cocher,
+  citation, annuler), useNotes (gardées sur le téléphone), NotesList (recherche sans accents,
+  épinglées en haut, suppression avec Annuler), noteText, noteTitle.
+- Leaflet et Tiptap sont dans `src/kit/lazy/`, chargés au premier affichage (`React.lazy`) ;
+  qrcode et jsQR par `import()` au premier usage. L'appli sans carte ni notes garde sa taille
+  (581 Ko contre 578 Ko) ; la carte (150 Ko) et l'éditeur (404 Ko) viennent à part.
+- Les styles de Leaflet, chargés hors des couches du kit, l'emportaient sur lui (boutons de
+  zoom de 30 px, bulles blanches en sombre) : ses réglages changés sont en !important.
+
+Vérifié dans Chromium (clair, sombre, 360 et 390 px) : fonds de carte et recherche d'adresse
+simulés (OpenStreetMap est bloqué depuis l'environnement de test) ; épingles, trajet, bulle,
+toucher qui pose un lieu, recherche, distance (tour Eiffel – Louvre : 3,2 km) ; code QR
+enregistré puis relu depuis la photo ; lecture par une fausse caméra ; note avec liste à cocher
+et gras, gardée après rechargement, cherchée, supprimée puis rétablie.
