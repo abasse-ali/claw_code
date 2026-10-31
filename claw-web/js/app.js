@@ -4875,8 +4875,8 @@ function showSettings(first = false, justConnected = false) {
 
       <h2 class="group-title">Apparence</h2>
       <div class="segmented" role="radiogroup" aria-label="Thème">
-        ${[["", "Sombre"], ["light", "Clair"], ["system", "Auto"]].map(([value, label]) => `
-          <label><input type="radio" name="theme" value="${value}"${(settings.theme || "") === value ? " checked" : ""}><span>${label}</span></label>`).join("")}
+        ${[["system", "Auto"], ["dark", "Sombre"], ["light", "Clair"]].map(([value, label]) => `
+          <label><input type="radio" name="theme" value="${value}"${themeOf(settings) === value ? " checked" : ""}><span>${label}</span></label>`).join("")}
       </div>
       <div class="group-foot"><p>Auto : comme le téléphone.</p></div>
 
@@ -5446,13 +5446,15 @@ function route() {
   showHome();
 }
 
-/** Thème : sombre (par défaut), clair, ou celui du téléphone ; la barre du téléphone suit. */
+/** Thème choisi : celui du téléphone par défaut (refonte du 31 octobre 2026), sombre ou clair.
+ * L'ancien réglage vide (« Sombre » par défaut d'avant) suit lui aussi le téléphone. */
+const themeOf = (settings) => (["dark", "light"].includes(settings.theme) ? settings.theme : "system");
+
+/** Thème : celui du téléphone, sombre ou clair ; la barre du téléphone suit. */
 function applyTheme() {
-  const theme = state.settings.theme || "";
-  if (theme) document.documentElement.dataset.theme = theme;
-  else delete document.documentElement.dataset.theme;
+  document.documentElement.dataset.theme = themeOf(state.settings);
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() || "#0c0b11";
+  if (meta) meta.content = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim() || "#0b0b0e";
 }
 
 /** La zone de saisie est fixée en bas : le contenu garde en dessous la place qu'elle prend
