@@ -245,3 +245,16 @@ serveurs demandent un hébergeur (Render, Railway, Fly.io…).
 Vérifié dans Chromium, clair et sombre, 360 et 390 px : chaque geste essayé (maintenir trop
 court n'efface rien, l'accueil ne revient pas, le sondage compte juste, l'étape vide est
 refusée).
+
+### Suite : plus d'animations (31 octobre 2026, « Ajoute plus d'animation »)
+
+`kit/anim.tsx` : TextReveal (mots un à un, sortant d'un flou), ScrambleText (lettres
+mélangées qui se posent), Aurora (fond aux couleurs qui bougent), GlowCard (lumière qui suit
+le doigt), Magnetic, Wiggle, ExpandCard (carte agrandie en plein écran, layoutId), AnimatedList
+(blocs faits à la main ; une List de Row le fait déjà, et un Row dedans ferait un li dans un
+li), LoadingBar, Twinkle, Breathe (cercle de respiration), TypingDots, LiquidFill (verre qui se
+remplit en vagues), DrawPath, Particles (neige, cœurs, feuilles, confettis), Bump. Noms choisis
+pour ne pas croiser une icône de lucide-react (Sparkles, Spotlight en sont).
+
+Vérifié dans Chromium, clair, sombre et « moins de mouvement » (rien ne tombe, le code
+s'affiche d'un coup, la barre de chargement est fixe) : chaque animation essayée, sans erreur.

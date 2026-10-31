@@ -63,6 +63,18 @@
 //            Courses ; ce que l'utilisateur a choisi d'abord), recategorize(opération, catégorie)
 //            (la retient), MoneyCalendar (les jours de rentrée et de dépense du mois, un jour
 //            touché montre ses opérations). N'écrivez jamais ces choses vous-même.
+// Animations+ (anim.tsx) TextReveal (text : les mots apparaissent un à un), ScrambleText (text :
+//            les lettres se mélangent puis se posent), Aurora (un fond aux couleurs qui bougent,
+//            ses enfants devant), GlowCard (une lumière suit le doigt), Magnetic (un bouton
+//            attiré par le doigt), Wiggle (active, every : se secoue pour être remarqué),
+//            ExpandCard (children, detail, label : la carte s'agrandit en plein écran),
+//            AnimatedList (items, itemKey, render : des blocs faits à la main qui arrivent,
+//            partent et se replacent ; pour des Row, List le fait déjà), LoadingBar (active : barre de chargement en haut), Twinkle (étoiles qui
+//            scintillent autour), Breathe (inhale, hold, exhale : cercle de respiration),
+//            TypingDots (« en train d'écrire »), LiquidFill (value 0..1 : un verre qui se
+//            remplit), DrawPath (d : un trait qui se dessine), Particles (kind "snow" | "hearts"
+//            | "leaves" | "confetti" : qui tombent sur l'écran), Bump (value : grossit, vert ou
+//            rouge, quand le nombre change).
 // Effets   (fx.tsx) Typewriter (text : s'écrit lettre à lettre), Marquee (items, label : un
 //            bandeau qui défile), Tilt (carte qui s'incline sous le doigt), RippleButton (une
 //            onde au toucher), ShineText (un reflet passe sur un titre), FlipNumber (value : les
@@ -118,6 +130,7 @@
 // radix-ui (menus, onglets, curseurs, infobulles accessibles, à habiller avec Tailwind),
 // canvas-confetti (célébrer un objectif atteint), clsx (classes conditionnelles).
 
+export * from "./anim";
 export * from "./blocks";
 export * from "./chart";
 export * from "./csv";
