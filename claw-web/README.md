@@ -185,7 +185,10 @@ commandes ; la suite du mot la filtre, un toucher ou Entrée la met dans le cham
 La pastille « Réflexion », à côté du modèle, règle le niveau de réflexion du prochain message :
 Auto (celui de Claw), Aucune, Faible, Moyenne, Élevée ou Maximale. Le choix reste pour les
 messages suivants ; il est noté dans le message (une marque invisible), et le moteur le donne à
-Claw (`CLAW_REASONING`).
+Claw (`CLAW_REASONING`). Au-dessus de Maximale, **Ultracode** (comme `/effort ultracode` dans
+Claude Code) : la réflexion maximale, et le déroulé ultracode en plus. Un agent neuf étudie la
+demande avant le travail, un vérificateur indépendant contrôle le résultat. C'est le même
+interrupteur que celui du menu ✦ : l'un allume l'autre, et choisir un autre niveau le coupe.
 
 ## Aides de Claw : essayer un modèle seul
 
