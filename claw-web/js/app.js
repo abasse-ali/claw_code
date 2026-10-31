@@ -1771,10 +1771,17 @@ const EFFORTS = [
   { value: "medium", label: "Moyenne", detail: "Un équilibre entre vitesse et soin" },
   { value: "high", label: "Élevée", detail: "Réfléchit longuement avant d'agir" },
   { value: "max", label: "Maximale", detail: "Le plus haut niveau que le modèle accepte : plus lent, pour les problèmes difficiles" },
+  // Le niveau au-dessus, comme `/effort ultracode` de Claude Code : réflexion maximale, et le
+  // déroulé ultracode (le même interrupteur que dans le menu ✦). Demandé le 31 octobre 2026.
+  { value: "ultracode", label: "Ultracode", detail: "Réflexion maximale, et en plus : un agent neuf étudie la demande avant le travail, un vérificateur indépendant contrôle le résultat (une à trois dizaines de requêtes de plus, plus lent)" },
 ];
 
+/** Le niveau montré : Ultracode quand il est allumé (ici ou dans le menu ✦). */
+const effortValue = () => (state.settings.ultracode ? "ultracode" : state.settings.effort || "");
+
 const effortLabel = () => {
-  const effort = EFFORTS.find((entry) => entry.value === (state.settings.effort || "")) || EFFORTS[0];
+  const effort = EFFORTS.find((entry) => entry.value === effortValue()) || EFFORTS[0];
+  if (effort.value === "ultracode") return "Ultracode";
   return effort.value ? `Réflexion ${effort.label.toLowerCase()}` : "Réflexion";
 };
 
@@ -1801,10 +1808,12 @@ const aidsLabel = () => {
 function pickEffort() {
   openPicker({
     title: "Niveau de réflexion",
-    current: state.settings.effort || "",
+    current: effortValue(),
     items: EFFORTS.map((effort) => ({ value: effort.value, label: effort.label, detail: effort.detail })),
     onPick: (value) => {
-      state.settings.effort = value;
+      // Ultracode : la réflexion maximale avec le déroulé ; un autre niveau le coupe.
+      state.settings.ultracode = value === "ultracode";
+      state.settings.effort = value === "ultracode" ? "max" : value;
       saveSettings();
       renderComposer();
     },
@@ -1902,6 +1911,8 @@ function toggleAid(name) {
   state.settings[name] = !state.settings[name];
   saveSettings();
   drawAids();
+  // Ultracode se lit aussi sur le bouton de réflexion.
+  if (name === "ultracode") renderComposer();
 }
 
 /** Bouton des options à côté du trombone (allumé si l'une est active) et les cases de son menu. */
@@ -2109,7 +2120,7 @@ function renderComposer() {
     const textarea = composer.querySelector("textarea");
     if (textarea.placeholder !== promptPlaceholder(followUp, repo)) textarea.placeholder = promptPlaceholder(followUp, repo);
     chip("effort", effortLabel());
-    composer.querySelector('[data-action="effort"]')?.classList.toggle("on", Boolean(state.settings.effort));
+    composer.querySelector('[data-action="effort"]')?.classList.toggle("on", Boolean(effortValue()));
     chip("claw-aids", aidsLabel());
     const aidsChip = composer.querySelector('[data-action="claw-aids"]');
     if (aidsChip) aidsChip.hidden = allAids();
@@ -2126,7 +2137,7 @@ function renderComposer() {
     <div class="dock" hidden></div>
     <div class="chips">
       <button class="chip" data-action="model">${ICON.model}<span>${escapeHtml(modelLabel(state.settings.model))}</span></button>
-      <button class="chip${state.settings.effort ? " on" : ""}" data-action="effort" aria-label="Niveau de réflexion">${ICON.bulb}<span>${escapeHtml(effortLabel())}</span></button>
+      <button class="chip${effortValue() ? " on" : ""}" data-action="effort" aria-label="Niveau de réflexion">${ICON.bulb}<span>${escapeHtml(effortLabel())}</span></button>
       <a class="chip on" data-action="claw-aids" href="#/reglages/aides" aria-label="Aides de Claw"${allAids() ? " hidden" : ""}>${ICON.lifebuoy}<span>${escapeHtml(aidsLabel())}</span></a>
     </div>
     <div class="attachments" hidden></div>
