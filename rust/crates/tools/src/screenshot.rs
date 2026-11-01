@@ -2052,7 +2052,7 @@ fn click_problems(devtools: &mut DevTools) -> (Vec<String>, Vec<(String, String)
     if !dead.is_empty() {
         let more = dead.len().saturating_sub(6);
         problems.push(format!(
-            "{} button(s) do nothing when clicked (no change in the page, no scroll, no message, nothing sent or copied): {}{}: give each one its real action (open, filter, add, copy, send, scroll to its section), or make it a link to where it leads",
+            "{} button(s) do nothing when clicked (no change in the page, no scroll, no message, nothing sent or copied): {}{}: give each one its real action (open, filter, add, copy, send, scroll to its section), or make it a link to where it leads; a button with nothing to do in the present state (− at the minimum quantity) is disabled, and a button with no action at all is removed",
             dead.len(),
             dead.iter().take(6).cloned().collect::<Vec<_>>().join("; "),
             if more > 0 { format!("; and {more} more") } else { String::new() }
@@ -4504,6 +4504,44 @@ mod tests {
             "document.getElementById('details').addEventListener('click', () => window.print());",
         );
         assert!(!printed.contains("do nothing when clicked"), "{printed}");
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn a_dead_button_during_the_animation_of_the_previous_one_is_found_in_a_real_browser() {
+        // Session #62 (1er novembre 2026) : le + de la barre d'onglets appelait une fonction vide.
+        // Le total, animé par le bouton touché juste avant, changeait encore : le + passait pour
+        // vivant.
+        let cwd = std::env::current_dir().expect("dossier");
+        let problems = |name: &str, script: &str| {
+            let dir = cwd.join(format!("claw-anime-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Courses</title><style>body {{ margin: 0; padding: 16px; font: 16px/1.5 sans-serif; }} button {{ font: inherit; padding: 12px; }}</style></head><body><main><h1>Courses</h1><p>Total : <span id=\"total\">0</span> €</p><button id=\"plus\">Ajouter un kilo</button><button id=\"add\">Ajouter</button></main><script>let shown = 0; document.getElementById('plus').addEventListener('click', () => {{ const end = shown + 50; const step = () => {{ if (shown < end) {{ shown += 1; document.getElementById('total').textContent = String(shown); setTimeout(step, 20); }} }}; step(); }}); {script}</script></body></html>"),
+            )
+            .expect("html");
+            let page = format!("claw-anime-{name}-{}/index.html", std::process::id());
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let empty = problems(
+            "vide",
+            "document.getElementById('add').addEventListener('click', () => {});",
+        );
+        assert!(
+            empty.contains("do nothing when clicked") && empty.contains("button#add"),
+            "{empty}"
+        );
+        assert!(!empty.contains("button#plus"), "{empty}");
+        let wired = problems(
+            "branche",
+            "document.getElementById('add').addEventListener('click', () => {{ const p = document.createElement('p'); p.textContent = 'Article ajouté'; document.querySelector('main').append(p); }});",
+        );
+        assert!(!wired.contains("do nothing when clicked"), "{wired}");
     }
 
     /// Session #36 (28 octobre 2026), l'appli de budget « qui fait vieux,

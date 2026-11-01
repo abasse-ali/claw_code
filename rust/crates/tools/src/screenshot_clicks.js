@@ -109,14 +109,29 @@
   // Changements de la page pendant un essai. Un attribut récrit avec la même
   // valeur n'en est pas un (un gestionnaire de toute la page qui « referme »
   // à chaque toucher un menu déjà fermé) : le bouton touché n'a rien fait.
-  const watch = () => {
-    const seen = { mutations: 0 };
+  // `noise` : les changements que la page faisait déjà seule juste avant le toucher (un total
+  // qui défile, une ligne qui finit de glisser, laissés par le bouton précédent). Ils ne
+  // comptent pas comme l'effet du bouton. Vu le 1er novembre 2026 (session #62) : le + de la
+  // barre, branché sur une fonction vide, passait pour vivant grâce à l'animation du total.
+  const signature = (record) => {
+    const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+    const where = target ? `${target.tagName}.${typeof target.className === "string" ? target.className : ""}` : "";
+    return `${record.type}|${record.attributeName || ""}|${where}`;
+  };
+  const watch = (noise) => {
+    const seen = { mutations: 0, signatures: new Set() };
     const changed = (record) => {
       if (record.type === "childList") return record.addedNodes.length + record.removedNodes.length > 0;
       if (record.type === "attributes") return record.target.getAttribute(record.attributeName) !== record.oldValue;
       return record.target.data !== record.oldValue;
     };
-    const observer = new MutationObserver((records) => { seen.mutations += records.filter(changed).length; });
+    const observer = new MutationObserver((records) => {
+      for (const record of records.filter(changed)) {
+        const sign = signature(record);
+        seen.signatures.add(sign);
+        if (!noise || !noise.has(sign)) seen.mutations += 1;
+      }
+    });
     observer.observe(document.documentElement, {
       subtree: true, childList: true, attributes: true, characterData: true, attributeOldValue: true, characterDataOldValue: true,
     });
@@ -981,7 +996,10 @@
     el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
     await wait(40);
     const opened = new Set(windows());
-    const seen = watch();
+    const idle = watch();
+    await wait(150);
+    idle.stop();
+    const seen = watch(idle.signatures);
     const before = { url: location.href, x: scrollX, y: scrollY, effects, scrolled, errors: errors.length, focus: document.activeElement };
     try { tap(el); } catch (error) { errors.push(String((error && error.message) || error)); }
     await wait(300);
