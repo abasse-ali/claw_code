@@ -502,6 +502,8 @@
 .claw-edit-grid{position:fixed;z-index:2147483644;pointer-events:none;display:grid}
 .claw-edit-grid span{position:relative;background:rgba(47,128,237,.08);border-left:1px dashed rgba(47,128,237,.55);border-right:1px dashed rgba(47,128,237,.55)}
 .claw-edit-grid span b{position:absolute;left:50%;top:-18px;transform:translateX(-50%);padding:0 4px;border-radius:4px;background:rgba(47,128,237,.9);color:#fff;font:600 10px/15px system-ui,sans-serif;white-space:nowrap}
+.claw-edit-grid > s{position:absolute;left:0;right:0;border-top:1px dashed rgba(47,128,237,.75);border-bottom:1px dashed rgba(47,128,237,.75);background:rgba(47,128,237,.05);text-decoration:none}
+.claw-edit-grid > s b{position:absolute;right:4px;bottom:2px;padding:0 4px;border-radius:4px;background:rgba(47,128,237,.85);color:#fff;font:600 9px/14px system-ui,sans-serif;white-space:nowrap}
 .claw-edit-grid > i{position:absolute;right:0;bottom:-20px;padding:0 6px;border-radius:4px;background:rgba(47,128,237,.9);color:#fff;font:600 10px/16px system-ui,sans-serif;font-style:normal;white-space:nowrap}
 .claw-edit-drop.cell{height:auto;background:rgba(47,128,237,.18);border:2px dashed #2f80ed;border-radius:8px}
 html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;user-select:none}`;
@@ -582,7 +584,17 @@ html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;us
       left: `${metrics.left}px`, top: `${metrics.rect.top}px`, width: `${metrics.width}px`, height: `${metrics.rect.height}px`,
       gridTemplateColumns: `repeat(${metrics.n}, minmax(0, 1fr))`, columnGap: `${metrics.gap}px`,
     });
-    const html = `${Array.from({ length: metrics.n }, (_, index) => `<span>${index === 0 || metrics.n <= 6 ? `<b>${Math.round(metrics.col)} px</b>` : ""}</span>`).join("")}<i>${metrics.n} colonnes · ${Math.round(metrics.width)} px · écart ${Math.round(metrics.gap)} px</i>`;
+    // Les lignes de la grille : la bande de chaque ligne, sa hauteur, et l'écart entre deux lignes.
+    const bands = new Map();
+    for (const child of childrenOf(owner)) {
+      const place = peek(child) && peek(child).place;
+      if (!place) continue;
+      const rect = child.getBoundingClientRect();
+      const known = bands.get(place.row);
+      bands.set(place.row, known ? { top: Math.min(known.top, rect.top), bottom: Math.max(known.bottom, rect.bottom) } : { top: rect.top, bottom: rect.bottom });
+    }
+    const rows = [...bands.entries()].sort((a, b) => a[0] - b[0]).map(([row, band]) => `<s style="top:${Math.round(band.top - metrics.rect.top)}px;height:${Math.round(band.bottom - band.top)}px"><b>L${row} · ${Math.round(band.bottom - band.top)} px</b></s>`).join("");
+    const html = `${Array.from({ length: metrics.n }, (_, index) => `<span>${index === 0 || metrics.n <= 6 ? `<b>${Math.round(metrics.col)} px</b>` : ""}</span>`).join("")}${rows}<i>${metrics.n} colonnes · ${bands.size} lignes · ${Math.round(metrics.width)} px · écart ${Math.round(metrics.gap)} px</i>`;
     if (gridView.__html !== html) {
       gridView.innerHTML = html;
       gridView.__html = html;
