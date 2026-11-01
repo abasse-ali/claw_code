@@ -279,6 +279,27 @@ export class GitHub {
     return this.request("PUT", `/repos/${repo}/contents/${path}`, { message, content: base64, branch });
   }
 
+  /** Plusieurs fichiers texte écrits sur une branche en un seul commit (`files` : chemin →
+   * contenu). Une branche qui avance entre-temps : on repart d'elle, deux fois au plus. */
+  async commitFiles(repo, branch, files, message) {
+    for (let attempt = 0; ; attempt += 1) {
+      const ref = await this.request("GET", `/repos/${repo}/git/ref/heads/${encodePath(branch)}`);
+      const head = await this.request("GET", `/repos/${repo}/git/commits/${ref.object.sha}`);
+      const tree = await this.request("POST", `/repos/${repo}/git/trees`, {
+        base_tree: head.tree.sha,
+        tree: Object.entries(files).map(([path, content]) => ({ path, mode: "100644", type: "blob", content })),
+      });
+      const commit = await this.request("POST", `/repos/${repo}/git/commits`, { message, tree: tree.sha, parents: [head.sha] });
+      try {
+        await this.request("PATCH", `/repos/${repo}/git/refs/heads/${encodePath(branch)}`, { sha: commit.sha });
+        return commit;
+      } catch (error) {
+        if (attempt < 2 && error instanceof GitHubError && error.status === 422) continue;
+        throw error;
+      }
+    }
+  }
+
   /** Contenu d'un dossier (liste) ou d'un fichier (objet) sur une branche. */
   contents(repo, path, ref) {
     return this.request("GET", `/repos/${repo}/contents/${encodePath(path)}?ref=${encodeURIComponent(ref)}`);

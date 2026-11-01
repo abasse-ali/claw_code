@@ -10,6 +10,7 @@ import { LOG, changesHtml, decodeLog, photoLink, photoView, recentActions, toggl
 import { highlightLines, languageOf } from "./highlight.js";
 import { accountStatus, allFreeModels, freeModels, resetTime } from "./openrouter.js";
 import { emptyState, extras } from "./tools.js";
+import { editor } from "./editor.js";
 import { AID_GROUPS, AID_KEYS } from "./aides.js";
 import { currentSubscription, disableNotifications, enableNotifications, pushSupport, testNotification } from "./notifications.js";
 import {
@@ -2116,7 +2117,8 @@ function renderComposer() {
   const repo = followUp ? session.settings.repo : state.settings.repo;
   const branch = followUp ? branchOf(session.issue) : state.settings.branch;
   composer.hidden = !state.github || location.hash.startsWith("#/reglages") || location.hash.includes("/modifications")
-    || location.hash.includes("/fichiers") || /^#\/(outils|documents|document\/|routines)/.test(location.hash);
+    || location.hash.includes("/fichiers") || /^#\/(outils|documents|document\/|routines|editeur)/.test(location.hash)
+    || /^#\/session\/\d+\/design/.test(location.hash);
   const key = draftKey();
   if (composer.dataset.key === key && composer.querySelector("textarea")) {
     const chip = (action, text) => {
@@ -2640,6 +2642,9 @@ async function openDeleteSessions(issues) {
  * envoyer telles quelles (les commandes « / » de Claw). */
 const STARTERS = [
   { icon: "spark", title: "Créer une appli", detail: "De l'idée à une appli qui marche", text: "Crée une application web qui " },
+  // Éditeur visuel (editor.js) : retoucher l'appli de l'espace de travail, ou en faire une à la main.
+  { icon: "edit", title: "Retoucher l'appli à la main", detail: "Couleurs, tailles, textes, glisser-déposer", action: "edit" },
+  { icon: "plus", title: "Créer une appli visuelle", detail: "Assembler des widgets, sans demande à Claw", action: "visual" },
   { icon: "bug", title: "Corriger un problème", detail: "Claw trouve la cause et répare", text: "/fix " },
   { icon: "diff", title: "Relire mes changements", detail: "Une revue, sans rien modifier", text: "/review " },
   { icon: "check", title: "Vérifier que tout marche", detail: "Tests, lancement, essai", text: "/verify " },
@@ -2833,6 +2838,13 @@ async function showHome() {
   view.querySelector(".home").addEventListener("click", (event) => {
     const starter = event.target.closest("[data-starter]");
     if (starter) {
+      const chosen = STARTERS[Number(starter.dataset.starter)];
+      if (chosen.action === "edit") {
+        if (!state.settings.repo) { pickRepo(); return; }
+        location.hash = editorHash(state.settings.repo, state.settings.branch || "main");
+        return;
+      }
+      if (chosen.action === "visual") { openVisualApp(); return; }
       const textarea = document.querySelector("#composer textarea");
       if (!textarea) return;
       textarea.value = STARTERS[Number(starter.dataset.starter)].text;
@@ -3603,6 +3615,7 @@ function sessionTabs(number, current) {
   const tabs = [
     ["discussion", `#/session/${number}`, ICON.chat, "Discussion"],
     ["modifications", `#/session/${number}/modifications`, ICON.diff, "Modifications"],
+    ["design", `#/session/${number}/design`, ICON.edit, "Design"],
   ];
   return `<nav class="session-tabs" aria-label="Session">${tabs.map(([key, href, icon, label]) => `
     <a class="session-tab${key === current ? " current" : ""}" href="${href}"${key === current ? ' aria-current="page"' : ""}>${icon}<span>${label}</span></a>`).join("")}</nav>`;
@@ -5367,6 +5380,77 @@ async function sendToSession(number, text) {
   });
 }
 
+const visual = editor({
+  toast,
+  failure,
+  github: () => state.github,
+  leavePage() {
+    state.session = null;
+    renderComposer();
+  },
+});
+
+/** Adresse de l'éditeur visuel pour une branche d'un dépôt. */
+const editorHash = (repo, branch) => `#/editeur/${repo}/${encodeURIComponent(branch)}`;
+
+/** L'onglet Design d'une session : l'éditeur sur la branche de la session. */
+async function showSessionEditor(number) {
+  try {
+    const issue = await state.github.issue(state.settings.engine, number);
+    const settings = settingsOf(issue);
+    if (!location.hash.startsWith(`#/session/${number}/design`)) return;
+    visual.showEditor({ repo: settings.repo, branch: branchOf(issue), back: `#/session/${number}`, title: issue.title });
+  } catch (error) {
+    failure(error);
+  }
+}
+
+/** Nouvelle appli faite à la main : son nom, privée ou non, puis l'éditeur. */
+function openVisualApp() {
+  const sheet = $("#sheet");
+  sheet.innerHTML = `
+    <div class="sheet-panel" role="dialog" aria-modal="true" aria-label="Créer une appli visuelle">
+      <div class="sheet-head">
+        <strong>Créer une appli visuelle</strong>
+        <button class="icon-button" data-close aria-label="Fermer">${ICON.close}</button>
+      </div>
+      <form class="create-repo" autocomplete="off">
+        <label>Nom de l'appli
+          <input name="app_name" type="text" required maxlength="60" placeholder="Mes courses">
+        </label>
+        <p class="hint">Un dépôt neuf est créé sur votre compte GitHub, puis l'éditeur s'ouvre : vous assemblez l'appli avec des widgets. Claw pourra ensuite y ajouter ce qui fonctionne (enregistrer, calculer…).</p>
+        <fieldset class="visibility">
+          <label class="check"><input type="radio" name="visibility" value="public" checked><span>Public (site en ligne gratuit)</span></label>
+          <label class="check"><input type="radio" name="visibility" value="private"><span>Privé</span></label>
+        </fieldset>
+        <button class="primary" type="submit">Créer et ouvrir l'éditeur</button>
+      </form>
+    </div>`;
+  const form = sheet.querySelector("form");
+  sheet.onclick = (event) => {
+    if (backdropTap(event, sheet) || event.target.closest("[data-close]")) hideSheet();
+  };
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = form.querySelector("button[type=submit]");
+    button.disabled = true;
+    button.textContent = "Création…";
+    try {
+      const repo = await visual.createVisualApp(form.elements.app_name.value.trim(), form.elements.visibility.value === "private");
+      if (state.repos) state.repos.unshift(repo);
+      hideSheet();
+      useRepo(repo.full_name, repo.default_branch || "main");
+      location.hash = editorHash(repo.full_name, repo.default_branch || "main");
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = "Créer et ouvrir l'éditeur";
+      failure(error);
+    }
+  });
+  sheet.hidden = false;
+  form.elements.app_name.focus();
+}
+
 const pages = extras({
   icon: ICON,
   toast,
@@ -5443,6 +5527,17 @@ function route() {
   }
   if (hash.startsWith("#/routines")) {
     pages.showRoutines();
+    return;
+  }
+  document.body.classList.remove("editing-app");
+  const edited = hash.match(/^#\/editeur\/([^/]+)\/([^/]+)\/(.+)$/);
+  if (edited) {
+    visual.showEditor({ repo: `${edited[1]}/${edited[2]}`, branch: decodeURIComponent(edited[3]) });
+    return;
+  }
+  const designed = hash.match(/^#\/session\/(\d+)\/design/);
+  if (designed) {
+    showSessionEditor(Number(designed[1]));
     return;
   }
   const changes = hash.match(/^#\/session\/(\d+)\/modifications/);
@@ -5688,6 +5783,11 @@ async function boot() {
     navigator.serviceWorker.register("sw.js").catch(() => {});
     // Une notification touchée alors que l'appli était ouverte : sa session s'affiche ici.
     navigator.serviceWorker.addEventListener("message", (event) => {
+      // Aperçu de l'éditeur visuel : le service hors ligne redemande le jeton après une pause.
+      if (event.data && event.data.type === "claw-preview-token-request" && event.ports[0]) {
+        event.ports[0].postMessage({ token: state.github ? state.github.token : "" });
+        return;
+      }
       if (event.data && event.data.open) location.hash = new URL(event.data.open).hash || "#/";
     });
   }

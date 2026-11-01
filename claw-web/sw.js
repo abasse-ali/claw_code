@@ -2,7 +2,7 @@
 // requêtes à GitHub et OpenRouter, elles, ne passent jamais par le cache).
 // Réseau d'abord : une nouvelle version publiée est prise dès qu'elle est là.
 
-const CACHE = "claw-web-v81";
+const CACHE = "claw-web-v82";
 const SHELL = [
   "./",
   "index.html",
@@ -21,6 +21,8 @@ const SHELL = [
   "js/lock.js",
   "js/mcp-tools.js",
   "js/notifications.js",
+  "js/editor.js",
+  "claw-design.js",
   "vendor/nacl-fast.min.js",
   "manifest.webmanifest",
   "icons/icon.svg",
@@ -43,9 +45,61 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+// Aperçu d'une branche dans l'éditeur visuel : `apercu/<propriétaire>/<dépôt>/<branche>/<chemin>`
+// sert les fichiers de la branche lus par l'API GitHub, avec le jeton que la page donne (gardé
+// en mémoire seulement ; redemandé à la page si le service s'est endormi). Aucune publication
+// n'est nécessaire, et la page est de la même origine que l'appli : l'éditeur la touche.
+let previewToken = "";
+const TYPES = {
+  html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8", mjs: "text/javascript; charset=utf-8",
+  css: "text/css; charset=utf-8", json: "application/json; charset=utf-8", webmanifest: "application/manifest+json",
+  svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif",
+  ico: "image/x-icon", woff2: "font/woff2", woff: "font/woff", wasm: "application/wasm", txt: "text/plain; charset=utf-8",
+  mp3: "audio/mpeg", mp4: "video/mp4",
+};
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "claw-preview-token") previewToken = event.data.token || "";
+});
+async function askToken() {
+  const windows = await self.clients.matchAll({ type: "window" });
+  for (const client of windows.filter((item) => !item.url.includes("/apercu/"))) {
+    const token = await new Promise((resolve) => {
+      const channel = new MessageChannel();
+      const timer = setTimeout(() => resolve(""), 3000);
+      channel.port1.onmessage = (reply) => { clearTimeout(timer); resolve((reply.data && reply.data.token) || ""); };
+      client.postMessage({ type: "claw-preview-token-request" }, [channel.port2]);
+    });
+    if (token) return token;
+  }
+  return "";
+}
+async function preview(url) {
+  const parts = url.pathname.slice(new URL(self.registration.scope).pathname.length).split("/").slice(1);
+  const [owner, repo, ref] = parts;
+  let path = parts.slice(3).map(decodeURIComponent).join("/");
+  if (!path || path.endsWith("/")) path += "index.html";
+  // Le service hors ligne de l'appli ne s'installe pas dans l'aperçu : il prendrait la main sur
+  // ses propres adresses et ne trouverait rien derrière.
+  if (/(^|\/)(sw|service-worker)\.js$/.test(path)) return new Response("", { status: 404 });
+  if (!previewToken) previewToken = await askToken();
+  const encoded = path.split("/").map(encodeURIComponent).join("/");
+  const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${encoded}?ref=${ref}`, {
+    cache: "no-store",
+    headers: { Authorization: `Bearer ${previewToken}`, Accept: "application/vnd.github.raw", "X-GitHub-Api-Version": "2022-11-28" },
+  });
+  if (!response.ok) return new Response(`Introuvable dans la branche : ${path}`, { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" } });
+  const type = TYPES[path.split(".").pop().toLowerCase()] || "application/octet-stream";
+  return new Response(await response.arrayBuffer(), { status: 200, headers: { "Content-Type": type, "Cache-Control": "no-store" } });
+}
+
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   if (request.method !== "GET" || new URL(request.url).origin !== self.location.origin) return;
+  const url = new URL(request.url);
+  if (url.pathname.startsWith(`${new URL(self.registration.scope).pathname}apercu/`)) {
+    event.respondWith(preview(url));
+    return;
+  }
   event.respondWith(
     fetch(request)
       .then((response) => {
