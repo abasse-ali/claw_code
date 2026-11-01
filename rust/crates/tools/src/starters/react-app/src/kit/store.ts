@@ -35,7 +35,12 @@ type EntriesState = {
 
 let counter = 0;
 const newId = () => `${Date.now().toString(36)}-${(counter++).toString(36)}`;
+// Les champs qu'une appli ajoute à ses opérations (une marque, une note, un lien) restent : seuls
+// les champs du kit sont remis en forme. Vu le 1er novembre 2026 (session #46) : `recurring: true`
+// disparaissait ici, la synchronisation ne retrouvait jamais ses opérations et les recréait à
+// chaque ouverture et à chaque changement de mois.
 const clean = (entry: NewEntry, id = newId()): Entry => ({
+  ...(entry as Partial<Entry>),
   id,
   label: String(entry.label || "").trim() || "Sans nom",
   amount: Number.isFinite(entry.amount) ? Math.round(entry.amount * 100) / 100 : 0,
