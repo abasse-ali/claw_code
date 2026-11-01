@@ -2367,3 +2367,18 @@ body.editing-app .topbar, body.editing-app #composer { display: none !important;
 .editor-steps output { min-width: 2ch; text-align: center; color: var(--text); font-variant-numeric: tabular-nums; }
 .editor-grid-on { justify-self: start; }
 .editor-grid-on svg, .editor-body .small-link svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+/* Panneau réduit : l'appli prend toute la hauteur, une bulle en bas à droite le rouvre. */
+.editor-tabs .editor-fold { margin-left: auto; display: grid; place-items: center; width: 38px; flex: none; border-bottom: 0; }
+.editor-fold svg, .editor-bubble svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.editor.folded { grid-template-rows: auto minmax(0, 1fr); }
+.editor.folded .editor-panel { display: none; }
+@media (min-width: 960px) { .editor.folded { grid-template-columns: minmax(0, 1fr); } }
+.editor-bubble {
+  position: fixed; right: 14px; bottom: calc(96px + env(safe-area-inset-bottom)); z-index: 41;
+  display: grid; place-items: center; width: 52px; height: 52px; padding: 0;
+  border: 0; border-radius: 50%; background: var(--fill); color: #fff; box-shadow: 0 8px 24px rgb(0 0 0 / .25);
+  font: 600 .9rem/1 var(--font); cursor: pointer; animation: bubble-in .18s var(--ease);
+}
+.editor-bubble[hidden] { display: none; }
+.editor-bubble-name { display: none; }
+@keyframes bubble-in { from { opacity: 0; transform: scale(.85); } to { opacity: 1; transform: none; } }
