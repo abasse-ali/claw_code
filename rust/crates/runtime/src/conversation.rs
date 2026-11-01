@@ -3018,7 +3018,7 @@ where
             aids.capture_held = false;
         }
         // Page que le modèle a regardée lui-même : la revue visuelle la reprend.
-        if matches!(tool_name, "Screenshot" | "ViewPage" | "Browser") && !is_error {
+        if matches!(tool_name, "Screenshot" | "ViewPage" | "Browser" | "Design") && !is_error {
             if let Some(target) = crate::web_design::page_target(input) {
                 self.page_target = Some(target);
             }

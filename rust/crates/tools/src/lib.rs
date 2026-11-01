@@ -838,6 +838,24 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "Design",
+            description:
+                "Retouch the look of a page the way the user does in Claw Web's visual editor, without touching its code: the edits go to claw-design.json (public/ of a Vite app, else next to the page), applied over the app at every display, and the user can change them again by hand. One call opens the page in the browser (path, default index.html; screen: the #hash of the screen to show), applies `edits` in order and answers with what each one did, the grids of the page with the place of every block, and the view of the page afterwards. Each edit is an object: {\"target\": T, \"style\": {\"color\": \"#0a7d4f\", \"background\": \"…\", \"width\": \"120px\", \"height\", \"padding\", \"margin\", \"gap\", \"border-radius\", \"font-size\", \"font-weight\", \"font-family\", \"text-align\", \"box-shadow\", \"opacity\"…} (null removes one), \"text\": \"new words\", \"icon\": a Lucide name, \"hidden\": true or false, \"reset\": true}; {\"target\": T, \"grid\": {\"columns\": 4, \"gap\": 12}} lays the children of T on a grid of columns (false removes it); {\"target\": T, \"place\": {\"col\": 1, \"span\": 2, \"row\": 1, \"new_row\": false}} puts a block of a grid at a column, a width in columns and a row (a block already there moves down; new_row opens a row there), so that two blocks of span 2 sit side by side; {\"theme\": {\"accent\", \"background\", \"cards\", \"text\", \"muted\" (colors), \"font\" (Inter, Manrope, DM Sans, Poppins, Space Grotesk, Nunito, Playfair Display, Newsreader, Fraunces, JetBrains Mono), \"radius\" (px)}}; {\"add\": title | text | button | button-soft | card | stat | row | badge | progress | image | field | icon | divider | spacer | group, \"props\": {…}, \"in\": T or \"after\": T, \"place\": {…}} adds a widget (only visual: a button added this way does nothing until the app's code gives it an action); {\"remove\": \"w…\"} removes an added widget. T is a reference from the latest Browser view (e12), an added widget's id (w…), a CSS selector or the element's visible text. Use it when the user asks to change how something looks or where it sits (a color, a size, the order or the layout of blocks on a screen) in an app that has claw-design.js, rather than rewriting the app's CSS; keep code for behavior.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "The page of the project (default index.html)." },
+                    "url": { "type": "string", "description": "Or an http address of a local server." },
+                    "screen": { "type": "string", "description": "The screen to show first, by its #hash (\"#budget\")." },
+                    "device": { "type": "string", "description": "phone (default), tablet, desktop or WIDTHxHEIGHT." },
+                    "edits": { "type": "array", "items": { "type": "object" }, "description": "The edits, applied in order (see the tool description)." }
+                },
+                "required": ["edits"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::WorkspaceWrite,
+        },
+        ToolSpec {
             name: "Icon",
             description: "Polished SVG icons for a web page, ready to paste: 1539 line icons from Lucide (ISC license), drawn on a 24px grid in the text color (currentColor). Use them instead of drawing icons by hand, and never use emoji. Give `names` to get several icons in one call (\"map-pin\", \"phone\", \"clock\", \"croissant\", \"leaf\", \"calendar\", \"star\", \"menu\", \"x\", \"arrow-right\"), or `search` with English words (\"bread pastry\", \"location\") to find names. Each icon comes as a complete <svg> with width, height and aria-hidden; color and size it with CSS.",
             input_schema: json!({
@@ -1534,6 +1552,9 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
             .and_then(to_pretty_json),
         "Browser" => from_value::<screenshot::browse::BrowserInput>(input)
             .and_then(|input| screenshot::browse::browse(&input))
+            .and_then(to_pretty_json),
+        "Design" => from_value::<screenshot::browse::DesignInput>(input)
+            .and_then(|input| screenshot::browse::design(&input))
             .and_then(to_pretty_json),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
         "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
