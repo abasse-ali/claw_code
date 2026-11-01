@@ -84,7 +84,7 @@ export function editor(app) {
             <button type="button" role="tab" aria-selected="false" data-tab="screens" hidden>Écrans</button>
             <button type="button" class="editor-fold" data-fold aria-label="Réduire le panneau en bulle">${I.fold}</button>
           </nav>
-          <div class="editor-body"><p class="editor-hint">Touchez un élément de l'appli pour le régler. Gardez le doigt dessus et glissez pour le déplacer ; la poignée ronde change sa taille.</p></div>
+          <div class="editor-body"><p class="editor-hint">Touchez un élément de l'appli pour le régler ; la poignée ✥ le déplace, la poignée ronde change sa taille. Touchez encore un bouton déjà choisi pour vous en servir : le + ouvre sa fenêtre, que vous pouvez retoucher aussi.</p></div>
         </aside>
         <button type="button" class="editor-bubble" data-unfold aria-label="Ouvrir le panneau de réglages" hidden>${I.panel}<span class="editor-bubble-name"></span></button>
       </section>`;
@@ -229,7 +229,7 @@ export function editor(app) {
       if (tab === "add") return renderAdd();
       if (tab === "screens") return renderScreens();
       if (!selected) {
-        body.innerHTML = `<p class="editor-hint">Touchez un élément de l'appli pour le régler. Gardez le doigt dessus et glissez pour le déplacer ; la poignée ronde change sa taille.</p>
+        body.innerHTML = `<p class="editor-hint">Touchez un élément de l'appli pour le régler ; la poignée ✥ le déplace, la poignée ronde change sa taille. Touchez encore un bouton déjà choisi pour vous en servir : le + ouvre sa fenêtre, que vous pouvez retoucher aussi.</p>
           ${hiddenList()}`;
         return;
       }

@@ -359,7 +359,7 @@
     if (records.some((record) => !(record.target.nodeType === 1 && record.target.closest && record.target.closest(`[${OWN}]:not([data-claw-id])`)))) later();
   });
   const start = () => {
-    observer.observe(document.body, { subtree: true, childList: true, characterData: true });
+    observer.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["open"] });
     addEventListener("hashchange", later);
     apply();
   };
@@ -491,6 +491,8 @@
   let selected = null;
   let box = null;
   const EDITOR_CSS = `
+.claw-edit-box,.claw-edit-hover,.claw-edit-drop,.claw-edit-grid{inset:auto;margin:0;padding:0;overflow:visible;color:inherit;background:transparent;border:0}
+.claw-edit-box[hidden],.claw-edit-hover[hidden],.claw-edit-drop[hidden],.claw-edit-grid[hidden]{display:none!important}
 .claw-edit-box{position:fixed;z-index:2147483646;pointer-events:none;border:2px solid #2f80ed;border-radius:6px;box-shadow:0 0 0 9999px rgba(15,23,42,.06);transition:all .08s}
 .claw-edit-box b{position:absolute;left:-2px;top:-24px;max-width:240px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;padding:2px 8px;border-radius:6px 6px 6px 0;background:#2f80ed;color:#fff;font:600 12px/18px system-ui,sans-serif}
 .claw-edit-box i{position:absolute;right:-9px;bottom:-9px;width:18px;height:18px;border-radius:50%;background:#fff;border:2px solid #2f80ed;pointer-events:auto;cursor:nwse-resize;touch-action:none}
@@ -555,8 +557,25 @@ html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;us
       computed: Object.fromEntries(["color", "background-color", "font-size", "font-weight", "font-family", "text-align", "width", "height", "padding-top", "padding-left", "margin-top", "margin-bottom", "border-radius", "display", "opacity"].map((prop) => [prop, style.getPropertyValue(prop)])),
     };
   };
+  // Les fenêtres (<dialog> ouvert par showModal) passent au-dessus de toute la page : le cadre, la
+  // grille et la poignée y repassent par-dessus (popover), chaque fois qu'une fenêtre s'ouvre.
+  let windowsOpen = -1;
+  const raise = () => {
+    const overlays = [gridView, box, hover, drop].filter(Boolean);
+    if (!overlays.length || typeof overlays[0].showPopover !== "function") return;
+    const count = document.querySelectorAll("dialog[open]").length;
+    if (count === windowsOpen) return;
+    windowsOpen = count;
+    for (const el of overlays) {
+      try {
+        if (el.matches(":popover-open")) el.hidePopover();
+        el.showPopover();
+      } catch (_) { /* ancien navigateur : sous la fenêtre */ }
+    }
+  };
   const frame = () => {
     if (!box) return;
+    raise();
     if (!selected || !selected.isConnected) {
       box.hidden = true;
       return;
@@ -628,6 +647,14 @@ html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;us
     }
     const el = pick(event.target);
     if (!el) return;
+    // Un bouton déjà choisi, touché encore : il sert, comme dans l'appli (le + ouvre sa fenêtre,
+    // la croix la ferme), sans quitter le mode Modifier.
+    if (el === selected && el.matches("button, a[href], [role=button], [role=tab], summary, label, select")) {
+      passing = true;
+      try { el.click(); } finally { passing = false; }
+      gesture = null;
+      return;
+    }
     if (el !== selected) select(el);
     // Au doigt, le bloc se déplace par sa poignée (le doigt posé sur l'appli la fait défiler).
     gesture = event.pointerType === "touch" ? null : { kind: "press", x: event.clientX, y: event.clientY, el, grab: 0 };
@@ -749,8 +776,9 @@ html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;us
     }
     if (done.kind === "drag" && done.to != null && host.onReorder) host.onReorder(keyOf(done.el), done.to);
   };
+  let passing = false;
   const swallow = (event) => {
-    if (!host || host.mode !== "select") return;
+    if (!host || host.mode !== "select" || passing) return;
     event.preventDefault();
     event.stopPropagation();
   };
@@ -775,6 +803,7 @@ html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;us
       drop.className = "claw-edit-drop";
       drop.setAttribute(OWN, "");
       drop.hidden = true;
+      for (const el of [gridView, box, hover, drop]) if ("showPopover" in el) el.setAttribute("popover", "manual");
       document.documentElement.append(gridView, box, hover, drop);
       addEventListener("pointerdown", onDown, true);
       addEventListener("pointermove", onMove, { capture: true, passive: false });
