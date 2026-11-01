@@ -95,6 +95,17 @@
   const elements = [...document.body.querySelectorAll("*")].filter((el) => !SKIP.has(el.tagName)).slice(0, 3000);
   const visible = elements.filter(shown);
   const box = new Map(visible.map((el) => [el, el.getBoundingClientRect()]));
+  // Éléments de texte à lire : les visibles, plus ceux écrasés à 0 px de large (ou de haut) dont
+  // le texte déborde et se lit quand même (session #62 : « Budget mensuel » et sa précision, à
+  // côté d'un champ à width: 100 %). Les mesures par boîte ne les voient pas.
+  const readable = elements.filter((el) => box.has(el) || (css(el).display !== "none" && css(el).visibility === "visible"
+    && [...el.childNodes].some((node) => node.nodeType === 3 && node.textContent.trim()) && (() => {
+      for (let node = el.parentElement; node && node !== document.body; node = node.parentElement) {
+        if (box.has(node)) return true;
+        if (css(node).display === "none") return false;
+      }
+      return false;
+    })()));
   const pinned = (el) => {
     for (let node = el; node && node !== document.body; node = node.parentElement) {
       if (node === modal) return false;
@@ -296,6 +307,46 @@
     }
   }
   if (overlaps.length) problems.push(`Elements drawn on top of each other: ${list(overlaps)}`);
+
+  // 3 bis. Lignes de texte sous un champ ou un bouton. La mesure par boîtes (plus haut) laisse
+  // passer un libellé écrasé à 0 px de large que le champ couvre en partie (vu le 1er novembre
+  // 2026, session #62 : « Budget mensuel » à côté d'un champ à width: 100 %, qui passait sur sa
+  // précision ; rien de mesuré). Ici, chaque ligne de texte compte seule.
+  {
+    const lineControls = visible.filter((el) => el.matches("input:not([type=hidden]), textarea, select, button, [role=button], img") && !pinned(el)).slice(0, 120);
+    // Texte réservé aux lecteurs d'écran (boîte de 1 px découpée) : invisible, jamais « couvert ».
+    const srOnly = (el) => {
+      const r = el.getBoundingClientRect();
+      const style = css(el);
+      return (r.width <= 2 && r.height <= 2) || (style.position === "absolute" && (style.clip !== "auto" || style.clipPath !== "none") && r.width * r.height <= 4);
+    };
+    const covered = [];
+    for (const el of readable.filter((el) => ownText(el) && !pinned(el) && !el.closest("svg, button, [role=button], select, option") && !srOnly(el)).slice(0, 600)) {
+      if (covered.length >= 6) break;
+      const range = document.createRange();
+      const lines = [];
+      for (const node of el.childNodes) {
+        if (node.nodeType !== 3 || !node.textContent.trim()) continue;
+        range.selectNodeContents(node);
+        for (const r of range.getClientRects()) if (r.width > 1 && r.height > 1) lines.push(r);
+      }
+      if (!lines.length) continue;
+      const hit = lineControls.find((control) => {
+        if (control.contains(el) || el.contains(control)) return false;
+        const rc = visibleBox(control);
+        return lines.some((line) => {
+          const width = Math.min(line.right, rc.right) - Math.max(line.left, rc.left);
+          const height = Math.min(line.bottom, rc.bottom) - Math.max(line.top, rc.top);
+          return width > 4 && height > line.height * 0.4;
+        });
+      });
+      if (hit) covered.push([el, hit]);
+    }
+    if (covered.length) {
+      blame(covered.map(([el]) => el));
+      problems.push(`Text lines hidden under a field or a button: ${list(covered.map(([el, control]) => `${name(el)} under ${name(control)}`), 3)}. Give the field a width that fits beside its label (max-width, flex: none), or put it on its own line below the label`);
+    }
+  }
 
   // 4. Élément marqué `hidden` qui s'affiche quand même.
   const hiddenShown = [...document.querySelectorAll("[hidden]")].filter((el) => {
@@ -1404,7 +1455,7 @@
   // Chaque bout de texte est mesuré ligne par ligne : dans un paragraphe en
   // display: flex, « Fait avec » est un élément anonyme qu'aucune boîte ne nomme.
   const squeezed = [];
-  for (const el of visible) {
+  for (const el of readable) {
     if (squeezed.length >= 3) break;
     if (!ownText(el) || /^H[1-6]$/.test(el.tagName) || el.closest("button, a, label, th, td, nav, pre, code")) continue;
     for (const node of el.childNodes) {
