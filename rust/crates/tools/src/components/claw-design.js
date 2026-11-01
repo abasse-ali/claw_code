@@ -19,7 +19,7 @@
     "width", "height", "min-height", "max-width", "padding", "margin", "gap", "border-radius", "background", "color",
     "border", "box-shadow", "opacity", "font-size", "font-weight", "font-family", "font-style", "letter-spacing",
     "line-height", "text-align", "text-transform", "display", "flex-direction", "align-items", "justify-content",
-    "order", "flex", "align-self",
+    "order", "flex", "align-self", "grid-template-columns", "grid-column", "grid-row", "min-width",
   ];
   const FONTS = {
     "Inter": "Inter:wght@400;500;600;700", "Manrope": "Manrope:wght@400;500;600;700",
@@ -180,8 +180,26 @@
       el.insertBefore(svg, el.firstChild);
     }
   };
+  // Grille : un bloc dont les enfants se placent sur des colonnes (`grid`), et la place de chaque
+  // enfant (`place` : colonne de départ, largeur en colonnes, ligne). Un enfant sans place prend
+  // toute la largeur.
+  let gridParents = new Set();
+  const gridStyle = (el, entry) => {
+    const style = {};
+    if (entry && entry.grid) {
+      const columns = Math.max(1, Math.min(12, Number(entry.grid.columns) || 4));
+      Object.assign(style, { display: "grid", "grid-template-columns": `repeat(${columns}, minmax(0, 1fr))`, gap: `${Number(entry.grid.gap ?? 12)}px`, "align-items": "start" });
+    }
+    if (el.parentElement && gridParents.has(el.parentElement)) {
+      const place = entry && entry.place;
+      Object.assign(style, place
+        ? { "grid-column": `${place.col} / span ${place.span}`, "grid-row": String(place.row), "min-width": "0" }
+        : { "grid-column": "1 / -1", "min-width": "0" });
+    }
+    return style;
+  };
   const applyItem = (el, item) => {
-    const style = { ...(item.style || {}) };
+    const style = { ...gridStyle(el, item), ...(item.style || {}) };
     if (item.hidden && !(host && host.showHidden)) style.display = "none";
     if (item.hidden && host && host.showHidden) style.opacity = "0.35";
     setStyles(el, style);
@@ -225,7 +243,14 @@
       } else if (el.parentElement !== parent) {
         parent.appendChild(el);
       }
-      setStyles(el, widget.hidden ? { ...(widget.style || {}), display: "none" } : widget.style);
+    }
+  };
+  const styleWidgets = () => {
+    for (const widget of design.added) {
+      const el = document.querySelector(`[data-claw-id="${widget.id}"]`);
+      if (!el) continue;
+      const style = { ...gridStyle(el, widget), ...(widget.style || {}) };
+      setStyles(el, widget.hidden ? { ...style, display: "none" } : style);
     }
   };
   // Appli construite à la main : ses écrans et sa barre d'onglets.
@@ -296,9 +321,24 @@
       applyTokens();
       placeScreens();
       placeWidgets();
+      gridParents = new Set();
+      for (const [key, item] of Object.entries(design.items)) {
+        if (item && item.grid) { const el = find(key); if (el) gridParents.add(el); }
+      }
+      for (const widget of design.added) {
+        if (widget.grid) { const el = document.querySelector(`[data-claw-id="${widget.id}"]`); if (el) gridParents.add(el); }
+      }
+      styleWidgets();
+      const done = new Set();
       for (const [key, item] of Object.entries(design.items)) {
         const el = find(key);
-        if (el && item && typeof item === "object") applyItem(el, item);
+        if (el && item && typeof item === "object") { applyItem(el, item); done.add(el); }
+      }
+      // Les enfants d'une grille que rien ne règle : toute la largeur.
+      for (const parent of gridParents) {
+        for (const child of parent.children) {
+          if (!own(child) && !child.hasAttribute("data-claw-id") && !done.has(child)) setStyles(child, gridStyle(child, null));
+        }
       }
       if (host) frame();
     } finally {
@@ -358,6 +398,94 @@
     return target;
   };
   const indexIn = (el) => visualOrder(el.parentElement).indexOf(el);
+  /** Ce qui règle un élément dans `target` : son widget ajouté, ou son entrée (créée au besoin). */
+  const entryOf = (target, el) => {
+    const id = el.getAttribute("data-claw-id");
+    const widget = id ? target.added.find((entry) => entry.id === id) : null;
+    return widget || itemOf(target, keyOf(el));
+  };
+  const peek = (el) => {
+    const id = el.getAttribute("data-claw-id");
+    return (id ? design.added.find((entry) => entry.id === id) : design.items[keyOf(el)]) || null;
+  };
+  /** Les enfants du bloc `key` passent sur une grille de `columns` colonnes, chacun sur sa ligne. */
+  const enableGrid = (target, key, columns = 4, gap = 12) => {
+    const el = find(key);
+    if (!el) return target;
+    const entry = entryOf(target, el);
+    entry.grid = { columns, gap };
+    if (entry.style) { delete entry.style.display; delete entry.style["flex-direction"]; delete entry.style["flex-wrap"]; }
+    visualOrder(el).forEach((child, index) => {
+      const kid = entryOf(target, child);
+      kid.place = { col: 1, span: columns, row: index + 1 };
+      if (kid.style) { delete kid.style.order; delete kid.style.width; }
+    });
+    return target;
+  };
+  const disableGrid = (target, key) => {
+    const el = find(key);
+    if (!el) return target;
+    delete entryOf(target, el).grid;
+    for (const child of childrenOf(el)) delete entryOf(target, child).place;
+    return target;
+  };
+  const setGrid = (target, key, { columns, gap }) => {
+    const el = find(key);
+    if (!el) return target;
+    const entry = entryOf(target, el);
+    entry.grid = { columns: columns ?? entry.grid.columns, gap: gap ?? entry.grid.gap };
+    const n = entry.grid.columns;
+    for (const child of childrenOf(el)) {
+      const kid = entryOf(target, child);
+      if (!kid.place) continue;
+      kid.place.span = Math.min(kid.place.span, n);
+      kid.place.col = Math.min(kid.place.col, n - kid.place.span + 1);
+    }
+    return target;
+  };
+  /** Place `key` sur la grille de son parent : colonne, largeur (span), ligne ; `insert` ouvre une
+   * ligne neuve à cet endroit. Un bloc déjà là descend d'une ligne ; les lignes vides se referment. */
+  const placeAt = (target, key, spec) => {
+    const el = find(key);
+    if (!el || !el.parentElement) return target;
+    const parent = el.parentElement;
+    const grid = entryOf(target, parent).grid;
+    if (!grid) return target;
+    const n = grid.columns;
+    const kids = childrenOf(parent).map((child) => ({ child, entry: entryOf(target, child) }));
+    let last = Math.max(0, ...kids.filter((kid) => kid.entry.place).map((kid) => kid.entry.place.row));
+    for (const kid of kids) if (!kid.entry.place) kid.entry.place = { col: 1, span: n, row: (last += 1) };
+    const mine = kids.find((kid) => kid.child === el).entry;
+    const span = Math.max(1, Math.min(n, Math.round(spec.span ?? mine.place.span)));
+    const col = Math.max(1, Math.min(n - span + 1, Math.round(spec.col ?? mine.place.col)));
+    const row = Math.max(1, Math.round(spec.row ?? mine.place.row));
+    if (spec.insert) for (const kid of kids) if (kid.entry !== mine && kid.entry.place.row >= row) kid.entry.place.row += 1;
+    mine.place = { col, span, row };
+    const clash = kids.filter((kid) => kid.entry !== mine && kid.entry.place.row === row
+      && kid.entry.place.col < col + span && col < kid.entry.place.col + kid.entry.place.span);
+    if (clash.length) {
+      for (const kid of kids) if (kid.entry !== mine && kid.entry.place.row > row) kid.entry.place.row += 1;
+      for (const kid of clash) kid.entry.place.row = row + 1;
+    }
+    const rows = [...new Set(kids.map((kid) => kid.entry.place.row))].sort((a, b) => a - b);
+    for (const kid of kids) kid.entry.place.row = rows.indexOf(kid.entry.place.row) + 1;
+    if (spec.height) {
+      mine.style = mine.style || {};
+      mine.style.height = spec.height;
+    }
+    return target;
+  };
+  const gridMetrics = (parent) => {
+    const entry = peek(parent);
+    if (!entry || !entry.grid) return null;
+    const rect = parent.getBoundingClientRect();
+    const style = getComputedStyle(parent);
+    const n = entry.grid.columns;
+    const gap = parseFloat(style.columnGap) || 0;
+    const left = rect.left + (parseFloat(style.paddingLeft) || 0);
+    const width = rect.width - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0);
+    return { n, gap, left, width, rect, col: (width - gap * (n - 1)) / n };
+  };
 
   // --- Éditeur ---------------------------------------------------------------------------------
   let selected = null;
@@ -368,6 +496,14 @@
 .claw-edit-box i{position:absolute;right:-9px;bottom:-9px;width:18px;height:18px;border-radius:50%;background:#fff;border:2px solid #2f80ed;pointer-events:auto;cursor:nwse-resize;touch-action:none}
 .claw-edit-hover{position:fixed;z-index:2147483645;pointer-events:none;border:1px dashed #2f80ed;border-radius:6px}
 .claw-edit-drop{position:fixed;z-index:2147483647;pointer-events:none;height:3px;border-radius:3px;background:#2f80ed}
+.claw-edit-box u{position:absolute;right:-2px;top:-34px;display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:#2f80ed;color:#fff;pointer-events:auto;cursor:grab;touch-action:none;box-shadow:0 2px 6px rgba(0,0,0,.25)}
+.claw-edit-box u svg{width:18px;height:18px}
+.claw-edit-box em{position:absolute;left:-2px;bottom:-22px;padding:1px 6px;border-radius:0 0 6px 6px;background:#2f80ed;color:#fff;font:600 11px/18px system-ui,sans-serif;font-style:normal;white-space:nowrap}
+.claw-edit-grid{position:fixed;z-index:2147483644;pointer-events:none;display:grid}
+.claw-edit-grid span{position:relative;background:rgba(47,128,237,.08);border-left:1px dashed rgba(47,128,237,.55);border-right:1px dashed rgba(47,128,237,.55)}
+.claw-edit-grid span b{position:absolute;left:50%;top:-18px;transform:translateX(-50%);padding:0 4px;border-radius:4px;background:rgba(47,128,237,.9);color:#fff;font:600 10px/15px system-ui,sans-serif;white-space:nowrap}
+.claw-edit-grid > i{position:absolute;right:0;bottom:-20px;padding:0 6px;border-radius:4px;background:rgba(47,128,237,.9);color:#fff;font:600 10px/16px system-ui,sans-serif;font-style:normal;white-space:nowrap}
+.claw-edit-drop.cell{height:auto;background:rgba(47,128,237,.18);border:2px dashed #2f80ed;border-radius:8px}
 html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;user-select:none}`;
   const NAMES = { button: "Bouton", a: "Lien", h1: "Titre", h2: "Titre", h3: "Sous-titre", h4: "Sous-titre", p: "Texte", span: "Texte", strong: "Texte", small: "Petit texte", img: "Image", svg: "Icône", input: "Champ", label: "Libellé", section: "Section", nav: "Barre", header: "En-tête", footer: "Pied", ul: "Liste", li: "Élément de liste", main: "Contenu", form: "Formulaire", hr: "Séparateur" };
   const nameOf = (el) => {
@@ -387,6 +523,14 @@ html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;us
     // Un texte nu dans un bouton : le bouton est l'élément qui compte.
     const control = el.closest("button, a, [role=button], label, input, select, textarea");
     if (control && control !== el && control.contains(el)) el = control;
+    // Le premier toucher prend le bloc entier (case d'une grille, widget ajouté) ; un second
+    // toucher dans le bloc déjà choisi va dedans.
+    for (let node = el; node && node !== document.body; node = node.parentElement) {
+      if (node.hasAttribute("data-claw-id") || (node.parentElement && gridParents.has(node.parentElement))) {
+        if (node !== el && !(selected && (selected === node || node.contains(selected)))) el = node;
+        break;
+      }
+    }
     return el === document.documentElement ? document.body : el;
   };
   const info = (el) => {
@@ -402,6 +546,10 @@ html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;us
       container: el.children.length > 0 || /^(div|section|main|ul|ol|nav|header|footer|form|article|aside)$/i.test(el.tagName),
       parentKey: parent ? keyOf(parent) : null, index: parent ? indexIn(el) : 0, count: parent ? visualOrder(parent).length : 1,
       item: JSON.parse(JSON.stringify(design.items[key] || {})),
+      grid: peek(el) && peek(el).grid ? { ...peek(el).grid } : null,
+      place: peek(el) && peek(el).place ? { ...peek(el).place } : null,
+      parentGrid: parent && peek(parent) && peek(parent).grid ? { ...peek(parent).grid } : null,
+      size: [Math.round(el.getBoundingClientRect().width), Math.round(el.getBoundingClientRect().height)],
       computed: Object.fromEntries(["color", "background-color", "font-size", "font-weight", "font-family", "text-align", "width", "height", "padding-top", "padding-left", "margin-top", "margin-bottom", "border-radius", "display", "opacity"].map((prop) => [prop, style.getPropertyValue(prop)])),
     };
   };
@@ -415,6 +563,30 @@ html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;us
     box.hidden = false;
     Object.assign(box.style, { left: `${rect.left - 2}px`, top: `${rect.top - 2}px`, width: `${rect.width + 4}px`, height: `${rect.height + 4}px` });
     box.querySelector("b").textContent = nameOf(selected);
+    const place = peek(selected) && peek(selected).place;
+    const parentGrid = selected.parentElement && peek(selected.parentElement) && peek(selected.parentElement).grid;
+    box.querySelector("em").textContent = `${Math.round(rect.width)} × ${Math.round(rect.height)} px${place && parentGrid ? ` · ${place.span}/${parentGrid.columns} col.` : ""}`;
+    drawGrid();
+  };
+  let gridView = null;
+  const drawGrid = () => {
+    if (!gridView) return;
+    const owner = selected && (peek(selected) && peek(selected).grid ? selected : selected.parentElement && peek(selected.parentElement) && peek(selected.parentElement).grid ? selected.parentElement : null);
+    const metrics = owner && host && host.showGrid !== false ? gridMetrics(owner) : null;
+    if (!metrics) {
+      gridView.hidden = true;
+      return;
+    }
+    gridView.hidden = false;
+    Object.assign(gridView.style, {
+      left: `${metrics.left}px`, top: `${metrics.rect.top}px`, width: `${metrics.width}px`, height: `${metrics.rect.height}px`,
+      gridTemplateColumns: `repeat(${metrics.n}, minmax(0, 1fr))`, columnGap: `${metrics.gap}px`,
+    });
+    const html = `${Array.from({ length: metrics.n }, (_, index) => `<span>${index === 0 || metrics.n <= 6 ? `<b>${Math.round(metrics.col)} px</b>` : ""}</span>`).join("")}<i>${metrics.n} colonnes · ${Math.round(metrics.width)} px · écart ${Math.round(metrics.gap)} px</i>`;
+    if (gridView.__html !== html) {
+      gridView.innerHTML = html;
+      gridView.__html = html;
+    }
   };
   const select = (el) => {
     selected = el;
@@ -427,8 +599,16 @@ html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;us
   const onDown = (event) => {
     if (!host || host.mode !== "select") return;
     const handle = event.target.closest && event.target.closest(".claw-edit-box i");
+    const mover = event.target.closest && event.target.closest(".claw-edit-box u");
     event.preventDefault();
     event.stopPropagation();
+    if (mover && selected) {
+      const metrics = selected.parentElement && gridMetrics(selected.parentElement);
+      const rect = selected.getBoundingClientRect();
+      gesture = { kind: "drag", el: selected, x: event.clientX, y: event.clientY,
+        grab: metrics ? Math.floor((event.clientX - rect.left) / (metrics.col + metrics.gap)) : 0 };
+      return;
+    }
     if (handle && selected) {
       const rect = selected.getBoundingClientRect();
       gesture = { kind: "resize", x: event.clientX, y: event.clientY, w: rect.width, h: rect.height };
@@ -437,7 +617,39 @@ html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;us
     const el = pick(event.target);
     if (!el) return;
     if (el !== selected) select(el);
-    gesture = { kind: "press", x: event.clientX, y: event.clientY, el };
+    // Au doigt, le bloc se déplace par sa poignée (le doigt posé sur l'appli la fait défiler).
+    gesture = event.pointerType === "touch" ? null : { kind: "press", x: event.clientX, y: event.clientY, el, grab: 0 };
+  };
+  /** La case de la grille sous le doigt : colonne, ligne existante ou ligne neuve à ouvrir. */
+  const gridTarget = (event) => {
+    const el = gesture.el;
+    const parent = el.parentElement;
+    const metrics = parent && gridMetrics(parent);
+    if (!metrics) return null;
+    const mine = peek(el) && peek(el).place;
+    const span = mine ? mine.span : metrics.n;
+    const pointerCol = Math.floor((event.clientX - metrics.left) / (metrics.col + metrics.gap)) + 1;
+    const col = Math.max(1, Math.min(metrics.n - span + 1, pointerCol - (gesture.grab || 0)));
+    const rows = new Map();
+    for (const child of childrenOf(parent)) {
+      if (child === el) continue;
+      const place = peek(child) && peek(child).place;
+      if (!place) continue;
+      const rect = child.getBoundingClientRect();
+      const known = rows.get(place.row);
+      rows.set(place.row, known ? { top: Math.min(known.top, rect.top), bottom: Math.max(known.bottom, rect.bottom) } : { top: rect.top, bottom: rect.bottom });
+    }
+    const sorted = [...rows.entries()].sort((a, b) => a[0] - b[0]);
+    const x = metrics.left + (col - 1) * (metrics.col + metrics.gap);
+    const w = span * metrics.col + (span - 1) * metrics.gap;
+    const y = event.clientY;
+    for (const [row, band] of sorted) {
+      const edge = Math.min(18, (band.bottom - band.top) * 0.25);
+      if (y < band.top + edge) return { col, row, insert: true, shape: { left: x, top: band.top - 4, width: w, height: 6 } };
+      if (y <= band.bottom - edge) return { col, row, insert: false, shape: { left: x, top: band.top, width: w, height: band.bottom - band.top } };
+    }
+    const end = sorted.length ? sorted[sorted.length - 1] : null;
+    return { col, row: end ? end[0] + 1 : 1, insert: true, shape: { left: x, top: (end ? end[1].bottom : metrics.rect.top) + 2, width: w, height: 6 } };
   };
   const dropTarget = (event) => {
     const el = gesture.el;
@@ -471,8 +683,19 @@ html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;us
     }
     event.preventDefault();
     if (gesture.kind === "resize") {
-      const width = Math.max(16, Math.round(gesture.w + event.clientX - gesture.x));
-      const height = Math.max(8, Math.round(gesture.h + event.clientY - gesture.y));
+      let width = Math.max(16, Math.round(gesture.w + event.clientX - gesture.x));
+      const height = Math.max(8, Math.round((gesture.h + event.clientY - gesture.y) / 4) * 4);
+      const metrics = selected.parentElement && gridMetrics(selected.parentElement);
+      if (metrics) {
+        const place = (peek(selected) && peek(selected).place) || { col: 1 };
+        const span = Math.max(1, Math.min(metrics.n - place.col + 1, Math.round((width + metrics.gap) / (metrics.col + metrics.gap))));
+        gesture.span = span;
+        selected.style.setProperty("grid-column", `${place.col} / span ${span}`, "important");
+        selected.style.setProperty("height", `${height}px`, "important");
+        gesture.size = { height: `${height}px` };
+        frame();
+        return;
+      }
       selected.style.setProperty("width", `${width}px`, "important");
       selected.style.setProperty("height", `${height}px`, "important");
       gesture.size = { width: `${width}px`, height: `${height}px` };
@@ -480,6 +703,16 @@ html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;us
       return;
     }
     if (gesture.kind === "press" && Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 8) gesture.kind = "drag";
+    if (gesture.kind === "drag" && gesture.el.parentElement && gridMetrics(gesture.el.parentElement)) {
+      const target = gridTarget(event);
+      gesture.cell = target;
+      if (target) {
+        drop.hidden = false;
+        drop.classList.toggle("cell", !target.insert);
+        Object.assign(drop.style, { left: `${target.shape.left}px`, top: `${target.shape.top}px`, width: `${target.shape.width}px`, height: `${target.shape.height}px` });
+      }
+      return;
+    }
     if (gesture.kind === "drag") {
       const target = dropTarget(event);
       gesture.to = target ? target.index : null;
@@ -495,8 +728,13 @@ html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;us
     event.stopPropagation();
     const done = gesture;
     gesture = null;
-    if (drop) drop.hidden = true;
-    if (done.kind === "resize" && done.size && host.onResize) host.onResize(keyOf(selected), done.size);
+    if (drop) { drop.hidden = true; drop.classList.remove("cell"); }
+    if (done.kind === "resize" && done.span && host.onPlace) host.onPlace(keyOf(selected), { span: done.span, height: done.size.height });
+    else if (done.kind === "resize" && done.size && host.onResize) host.onResize(keyOf(selected), done.size);
+    if (done.kind === "drag" && done.cell && host.onPlace) {
+      host.onPlace(keyOf(done.el), { col: done.cell.col, row: done.cell.row, insert: done.cell.insert });
+      return;
+    }
     if (done.kind === "drag" && done.to != null && host.onReorder) host.onReorder(keyOf(done.el), done.to);
   };
   const swallow = (event) => {
@@ -511,7 +749,11 @@ html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;us
       box = document.createElement("div");
       box.className = "claw-edit-box";
       box.setAttribute(OWN, "");
-      box.innerHTML = "<b></b><i></i>";
+      box.innerHTML = `<b></b><em></em><i title="Taille"></i><u title="Déplacer">${icon("move", 18) || '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M2 12h20M12 2l-3 3M12 2l3 3M12 22l-3-3M12 22l3-3M2 12l3-3M2 12l3 3M22 12l-3-3M22 12l-3 3"/></svg>'}</u>`;
+      gridView = document.createElement("div");
+      gridView.className = "claw-edit-grid";
+      gridView.setAttribute(OWN, "");
+      gridView.hidden = true;
       box.hidden = true;
       hover = document.createElement("div");
       hover.className = "claw-edit-hover";
@@ -521,7 +763,7 @@ html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;us
       drop.className = "claw-edit-drop";
       drop.setAttribute(OWN, "");
       drop.hidden = true;
-      document.documentElement.append(box, hover, drop);
+      document.documentElement.append(gridView, box, hover, drop);
       addEventListener("pointerdown", onDown, true);
       addEventListener("pointermove", onMove, { capture: true, passive: false });
       addEventListener("pointerup", onUp, true);
@@ -539,6 +781,7 @@ html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;us
     if (mode !== "select") {
       if (hover) hover.hidden = true;
       if (box) box.hidden = true;
+      if (gridView) gridView.hidden = true;
     } else frame();
   };
 
@@ -556,7 +799,7 @@ html.claw-editing,html.claw-editing *{cursor:default;-webkit-user-select:none;us
     widgets: Object.fromEntries(Object.entries(WIDGETS).map(([type, kind]) => [type, { label: kind.label, props: kind.props }])),
     get design() { return JSON.parse(JSON.stringify(design)); },
     set(next) { touched = true; design = normalize(JSON.parse(JSON.stringify(next))); apply(); if (selected && !selected.isConnected) select(null); else frame(); },
-    apply, keyOf, find, reorder, edit, setMode, info: (key) => { const el = find(key); return el ? info(el) : null; },
+    apply, keyOf, find, reorder, enableGrid, disableGrid, setGrid, placeAt, edit, setMode, refresh: () => frame(), info: (key) => { const el = find(key); return el ? info(el) : null; },
     select: (key) => select(key ? find(key) : null), normalize,
   };
   if (document.body) start(); else addEventListener("DOMContentLoaded", start);
