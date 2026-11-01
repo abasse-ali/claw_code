@@ -2360,3 +2360,10 @@ body.editing-app .topbar, body.editing-app #composer { display: none !important;
   .editor-stage { padding: 20px; }
   .editor-device { max-height: 860px; }
 }
+.editor-icon[aria-pressed="true"] { background: var(--panel-3); color: var(--accent); }
+.editor-steps { display: flex; align-items: center; gap: 8px; }
+.editor-steps button { display: grid; place-items: center; min-width: 40px; min-height: 36px; padding: 0 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: var(--text); font: 500 .85rem/1 var(--font); cursor: pointer; }
+.editor-steps button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.editor-steps output { min-width: 2ch; text-align: center; color: var(--text); font-variant-numeric: tabular-nums; }
+.editor-grid-on { justify-self: start; }
+.editor-grid-on svg, .editor-body .small-link svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }

@@ -3703,6 +3703,7 @@ function renderSessionView() {
           ${!active && !unsent ? `<button class="small-link" data-action="retry">${ICON.retry}<span>Relancer</span></button>` : ""}
           ${!active ? `<button class="small-link" data-action="publish-site">${ICON.globe}<span>Mettre en ligne</span></button>` : ""}
           ${!active ? `<button class="small-link" data-action="jtest">${ICON.phone}<span>JTest</span></button>` : ""}
+          ${!active ? `<a class="small-link" href="#/session/${session.number}/design">${ICON.edit}<span>Retoucher</span></a>` : ""}
           <details class="more-menu">
             <summary class="small-link" aria-label="Autres actions"><span class="dots" aria-hidden="true">•••</span></summary>
             <div class="menu-list">

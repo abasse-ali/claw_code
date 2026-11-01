@@ -2,7 +2,7 @@
 // requêtes à GitHub et OpenRouter, elles, ne passent jamais par le cache).
 // Réseau d'abord : une nouvelle version publiée est prise dès qu'elle est là.
 
-const CACHE = "claw-web-v82";
+const CACHE = "claw-web-v83";
 const SHELL = [
   "./",
   "index.html",
@@ -81,6 +81,9 @@ async function preview(url) {
   // Le service hors ligne de l'appli ne s'installe pas dans l'aperçu : il prendrait la main sur
   // ses propres adresses et ne trouverait rien derrière.
   if (/(^|\/)(sw|service-worker)\.js$/.test(path)) return new Response("", { status: 404 });
+  // La couche de l'éditeur : toujours celle de Claw Web, la plus récente (« Enregistrer » la
+  // met ensuite à jour dans la branche).
+  if (/(^|\/)claw-design\.js$/.test(path)) return fetch(new URL("claw-design.js", self.registration.scope), { cache: "no-store" });
   if (!previewToken) previewToken = await askToken();
   const encoded = path.split("/").map(encodeURIComponent).join("/");
   const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${encoded}?ref=${ref}`, {

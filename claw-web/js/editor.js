@@ -22,6 +22,7 @@ const I = {
   eye: svg('<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>'),
   trash: svg('<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>'),
   reset: svg('<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>'),
+  grid: svg('<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M15 3v18M3 9h18M3 15h18"/>'),
 };
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const px = (value) => {
@@ -68,6 +69,7 @@ export function editor(app) {
             <button type="button" role="radio" aria-checked="true" data-mode="select">${I.cursor}<span>Modifier</span></button>
             <button type="button" role="radio" aria-checked="false" data-mode="try">${I.play}<span>Essayer</span></button>
           </div>
+          <button type="button" class="editor-icon" data-grid-view aria-pressed="true" aria-label="Montrer la grille et les dimensions">${I.grid}</button>
           <button type="button" class="editor-icon" data-undo aria-label="Annuler" disabled>${I.undo}</button>
           <button type="button" class="primary editor-save" data-save disabled>${I.save}<span>Enregistrer</span></button>
         </header>
@@ -131,6 +133,8 @@ export function editor(app) {
     const host = {
       mode: "select",
       showHidden: false,
+      showGrid: true,
+      onPlace(key, spec) { change((target) => api().placeAt(target, key, spec)); render(); },
       onSelect(info) {
         selected = info;
         if (tab !== "element") switchTab("element");
@@ -241,6 +245,7 @@ export function editor(app) {
             <button type="button" data-act="reset" aria-label="Tout remettre comme avant">${I.reset}</button>
           </div>
         </div>
+        ${gridPanel(s)}
         ${props ? Object.keys(props).filter((key) => key !== "icon").map((key) => field(PROP_LABELS[key] || key,
           key === "value" && s.widget.type === "progress"
             ? `<input type="range" min="0" max="100" value="${escapeHtml(props[key])}" data-prop="${key}">`
@@ -271,6 +276,31 @@ export function editor(app) {
         </div>
         ${slider("opacity", "Opacité", Math.round((own.opacity != null ? Number(own.opacity) : Number(c.opacity || 1)) * 100), 100, "%")}
         ${hiddenList()}`;
+    }
+    // La grille : celle que porte le bloc choisi, et sa place dans la grille de son parent.
+    function gridPanel(s) {
+      let html = "";
+      if (s.parentGrid && s.place) {
+        const n = s.parentGrid.columns;
+        html += `<h3>Place sur la grille</h3>
+          <div class="editor-grid">
+            ${field("Colonne de départ", `<span class="editor-range"><input type="range" min="1" max="${n - s.place.span + 1}" value="${s.place.col}" data-place="col" aria-label="Colonne de départ"><output>${s.place.col}</output></span>`, true)}
+            ${field("Largeur", `<span class="editor-range"><input type="range" min="1" max="${n}" value="${s.place.span}" data-place="span" aria-label="Largeur en colonnes"><output>${s.place.span}/${n}</output></span>`, true)}
+          </div>
+          ${field("Ligne", `<span class="editor-steps"><button type="button" data-row="-1" aria-label="Ligne au-dessus">${I.up}</button><output>${s.place.row}</output><button type="button" data-row="1" aria-label="Ligne en dessous">${I.down}</button><button type="button" data-row="new" class="editor-small">Seul sur une ligne</button></span>`, true)}
+          <p class="editor-hint">${s.size[0]} × ${s.size[1]} px. Glissez la poignée ✥ pour le poser dans une autre case, la poignée ronde pour changer sa largeur en colonnes.</p>`;
+      }
+      if (s.container) {
+        html += s.grid
+          ? `<h3>Grille de ce bloc</h3>
+            <div class="editor-grid">
+              ${field("Colonnes", `<span class="editor-range"><input type="range" min="1" max="12" value="${s.grid.columns}" data-grid="columns" aria-label="Colonnes"><output>${s.grid.columns}</output></span>`, true)}
+              ${field("Écart", `<span class="editor-range"><input type="range" min="0" max="40" value="${s.grid.gap}" data-grid="gap" aria-label="Écart entre les cases"><output>${s.grid.gap}px</output></span>`, true)}
+            </div>
+            <button type="button" class="small-link" data-grid-off>Retirer la grille</button>`
+          : `<button type="button" class="small-link editor-grid-on" data-grid-on>${I.grid}<span>Placer ses blocs sur une grille</span></button>`;
+      }
+      return html;
     }
     function hiddenList() {
       const hidden = Object.entries(design.items).filter(([, item]) => item && item.hidden);
@@ -330,6 +360,14 @@ export function editor(app) {
       } else if (el.dataset.style && el.type === "color") {
         el.nextElementSibling.textContent = el.value;
         setStyle(el.dataset.style, el.value);
+      } else if (el.dataset.place) {
+        const value = Number(el.value);
+        el.nextElementSibling.textContent = el.dataset.place === "span" ? `${value}/${selected.parentGrid.columns}` : String(value);
+        change((target) => api().placeAt(target, selected.key, { [el.dataset.place]: value }), { coalesce: true });
+      } else if (el.dataset.grid) {
+        const value = Number(el.value);
+        el.nextElementSibling.textContent = el.dataset.grid === "gap" ? `${value}px` : String(value);
+        change((target) => api().setGrid(target, selected.key, { [el.dataset.grid]: value }), { coalesce: true });
       } else if (el.matches("[data-text]")) {
         change((target) => { itemOf(target, selected.key).text = el.value; }, { coalesce: true });
       } else if (el.dataset.prop) {
@@ -370,6 +408,16 @@ export function editor(app) {
       const el = event.target.closest("button");
       if (!el || !api()) return;
       if (el.dataset.clear) { setStyle(el.dataset.clear, ""); render(); return; }
+      if (el.matches("[data-grid-on]")) { change((target) => api().enableGrid(target, selected.key, 4, 12)); render(); return; }
+      if (el.matches("[data-grid-off]")) { change((target) => api().disableGrid(target, selected.key)); render(); return; }
+      if (el.dataset.row) {
+        const row = selected.place.row;
+        change((target) => api().placeAt(target, selected.key, el.dataset.row === "new"
+          ? { row: row + 1, insert: true, col: 1, span: selected.parentGrid.columns }
+          : { row: Math.max(1, row + Number(el.dataset.row)), insert: false }));
+        render();
+        return;
+      }
       if (el.dataset.tokenClear) { change((target) => { delete target.tokens[el.dataset.tokenClear]; }); renderTheme(); return; }
       if (el.matches("[data-theme-reset]")) { change((target) => { target.tokens = {}; }); renderTheme(); return; }
       if (el.dataset.align != null) { setStyle("text-align", el.dataset.align); render(); return; }
@@ -399,6 +447,10 @@ export function editor(app) {
           }
           target.added.push(widget);
         });
+        const added = api().info(`[data-claw-id="${id}"]`);
+        if (added && added.parentGrid) {
+          change((target) => api().placeAt(target, added.key, { row: 9999, insert: true, col: 1, span: added.parentGrid.columns }), { coalesce: true });
+        }
         api().select(`[data-claw-id="${id}"]`);
         return;
       }
@@ -416,7 +468,12 @@ export function editor(app) {
         return;
       }
       if (el.matches("[data-screen-add]")) {
-        change((target) => { const screens = screensOf(target); screens.push({ id: `ecran-${screens.length + 1}-${Date.now().toString(36).slice(-3)}`, label: `Écran ${screens.length + 1}`, icon: "circle" }); });
+        change((target) => {
+          const screens = screensOf(target);
+          const id = `ecran-${screens.length + 1}-${Date.now().toString(36).slice(-3)}`;
+          screens.push({ id, label: `Écran ${screens.length + 1}`, icon: "circle" });
+          target.items[`[data-claw-screen="${id}"]`] = { grid: { columns: 4, gap: 12 } };
+        });
         renderScreens();
         return;
       }
@@ -447,6 +504,11 @@ export function editor(app) {
       for (const item of root.querySelectorAll("[data-mode]")) item.setAttribute("aria-checked", String(item === button));
       api().setMode(button.dataset.mode);
       root.classList.toggle("trying", button.dataset.mode === "try");
+    });
+    root.querySelector("[data-grid-view]").addEventListener("click", (event) => {
+      host.showGrid = !host.showGrid;
+      event.currentTarget.setAttribute("aria-pressed", String(host.showGrid));
+      if (api()) api().refresh();
     });
     root.querySelector("[data-undo]").addEventListener("click", () => {
       if (!history.length || !api()) return;
@@ -500,10 +562,12 @@ export function editor(app) {
     const repo = await github.createRepository({ name: slug, description: `${name} : appli faite dans l'éditeur visuel de Claw`, isPrivate });
     const layer = await (await fetch("claw-design.js", { cache: "no-store" })).text();
     const design = {
-      version: 1, tokens: {}, fonts: [], items: {}, screens: [{ id: "accueil", label: "Accueil", icon: "house" }],
+      version: 1, tokens: {}, fonts: [], screens: [{ id: "accueil", label: "Accueil", icon: "house" }],
+      // Chaque écran est une grille de 4 colonnes : les blocs s'y posent et s'y déplacent.
+      items: { '[data-claw-screen="accueil"]': { grid: { columns: 4, gap: 12 } } },
       added: [
-        { id: "w1", type: "title", props: { text: name }, in: "screen:accueil" },
-        { id: "w2", type: "text", props: { text: "Touchez un élément pour le modifier, ou ajoutez des widgets depuis l'onglet « Ajouter »." }, in: "screen:accueil" },
+        { id: "w1", type: "title", props: { text: name }, in: "screen:accueil", place: { col: 1, span: 4, row: 1 } },
+        { id: "w2", type: "text", props: { text: "Touchez un élément pour le modifier, ou ajoutez des widgets depuis l'onglet « Ajouter »." }, in: "screen:accueil", place: { col: 1, span: 4, row: 2 } },
       ],
     };
     const page = `<!doctype html>
