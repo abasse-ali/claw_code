@@ -5648,6 +5648,41 @@ mod tests {
 
     #[test]
     #[ignore = "lance le navigateur installé"]
+    fn a_label_crushed_by_a_full_width_field_is_found_in_a_real_browser() {
+        // Session #62 du 31 octobre 2026 : « Budget mensuel » écrasé à 0 px de large à côté d'un
+        // champ à width: 100 %, qui passait sur sa précision. Rien n'était mesuré.
+        let cwd = std::env::current_dir().expect("dossier");
+        let problems = |name: &str, field: &str| {
+            let dir = cwd.join(format!("claw-reglage-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("dossier");
+            std::fs::write(
+                dir.join("index.html"),
+                format!("<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Budget</title><style>body {{ margin: 0; padding: 16px; font: 16px sans-serif; }} .setting {{ display: flex; align-items: center; gap: 12px; }} .name {{ flex: 1; min-width: 0; }} .name small {{ display: block; }} input {{ font: inherit; padding: 12px; {field} }}</style></head><body><h1>Budget</h1><div class=\"setting\"><span class=\"name\">Budget mensuel<small>Plafond pour les courses</small></span><input id=\"b\" aria-label=\"Budget mensuel\" type=\"number\" value=\"120\"></div></body></html>"),
+            )
+            .expect("html");
+            let page = format!("claw-reglage-{name}-{}/index.html", std::process::id());
+            let mut request = input(None, Some(&page));
+            request.viewports = Some(json!(["phone"]));
+            let result = super::take(&request);
+            let _ = std::fs::remove_dir_all(&dir);
+            result.expect("capture")["captures"][0]["problems"].to_string()
+        };
+        let crushed = problems("ecrase", "width: 100%;");
+        assert!(
+            crushed.contains("Text lines hidden under a field")
+                && crushed.contains("Plafond pour les courses"),
+            "{crushed}"
+        );
+        assert!(crushed.contains("Text squeezed"), "{crushed}");
+        let room = problems("place", "width: 132px; flex: none;");
+        assert!(
+            !room.contains("hidden under a field") && !room.contains("Text squeezed"),
+            "{room}"
+        );
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
     fn buttons_icons_and_reveals_are_tried_in_a_real_browser() {
         let cwd = std::env::current_dir().expect("dossier");
         let dir = cwd.join(format!("claw-clicks-{}", std::process::id()));

@@ -312,7 +312,10 @@
 .settings { display: grid; }
 .settings > .setting { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 8px 0; border-top: 1px solid var(--line); }
 .settings > .setting:first-child { border-top: 0; }
-.setting__name { flex: 1; min-width: 0; font-weight: 600; font-size: 0.9375rem; }
+/* Le nom garde toujours sa place (session #62 : un champ à width: 100 % l'écrasait à 0 px et
+   passait sur sa précision) ; ce qui est à droite ne prend jamais plus de 55 % de la ligne. */
+.setting__name { flex: 1 1 8rem; min-width: 7rem; font-weight: 600; font-size: 0.9375rem; }
+.setting > :not(.setting__name) { flex: 0 1 auto; min-width: 0; max-width: 55%; }
 .setting__name small { display: block; color: var(--faint); font-size: 0.75rem; font-weight: 500; }
 .setting > .money, .setting > .input { flex: none; width: 132px; }
 
