@@ -60,7 +60,7 @@ concurrency:
 
 jobs:
   routines:
-    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runner || 'claw-pc' }}
     timeout-minutes: 10
     steps:
       - name: Scripts du moteur

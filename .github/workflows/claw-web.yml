@@ -63,7 +63,7 @@ on:
         type: string
         default: ""
       runner:
-        description: "Machine (vide : une machine de GitHub ; claw-pc : l'exécuteur de votre PC, voir .github/claw-web/pc)"
+        description: "Machine des sessions (vide : claw-pc, votre serveur gratuit ou votre PC ; voir .github/claw-web/pc). Plus de machine de GitHub : sans minutes Actions pour le dépôt privé, le passage y échouait"
         required: false
         type: string
         default: ""
@@ -90,7 +90,7 @@ jobs:
     if: inputs.session == 'catalogue-modeles'
     # Même machine que les sessions : celle de l'utilisateur quand il en a une (vu le
     # 21 octobre 2026 : les machines de GitHub refusées au dépôt privé, limite de dépense).
-    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runner || 'claw-pc' }}
     timeout-minutes: 20
     steps:
       - name: Scripts du moteur
@@ -143,7 +143,7 @@ jobs:
   task:
     if: inputs.session != 'catalogue-modeles' && !startsWith(inputs.session, 'jtest-')
     # Sur votre PC (exécuteur auto-hébergé `claw-pc`), aucune minute de GitHub n'est comptée.
-    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runner || 'claw-pc' }}
     timeout-minutes: 120
     steps:
       # Heure de départ du job : run.py en tire l'heure à laquelle Claw doit conclure, avant que

@@ -1,0 +1,8 @@
+Polices de Claw Web, hébergées ici : la politique de sécurité de l'appli refuse les polices
+extérieures. Toutes deux sous licence SIL Open Font License 1.1 (https://openfontlicense.org),
+téléchargées depuis Google Fonts (sous-ensembles latin et latin-ext, polices variables).
+
+- Newsreader (titres) : Copyright 2020 The Newsreader Project Authors
+  (https://github.com/productiontype/Newsreader).
+- Hanken Grotesk (texte) : Copyright 2021 The Hanken Grotesk Project Authors
+  (https://github.com/marcologous/hanken-grotesk).
