@@ -2802,6 +2802,7 @@ async function showHome() {
   view.innerHTML = `
     <section class="home">
       <header class="hello">
+        <span class="logo hello-logo" aria-hidden="true"></span>
         <p class="hello-date">${ICON.calendar}<span>${escapeHtml(today.charAt(0).toUpperCase() + today.slice(1))}</span></p>
         <h1 class="hello-title">${greetingWord()}${name ? `, <span class="name">${escapeHtml(name.split(" ")[0])}</span>` : ""}</h1>
         <p class="hello-sub">Claw est prêt. Que construit-on aujourd'hui ?</p>
