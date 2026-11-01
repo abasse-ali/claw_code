@@ -22,6 +22,8 @@ const I = {
   eye: svg('<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>'),
   trash: svg('<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>'),
   reset: svg('<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>'),
+  fold: svg('<path d="M6 9l6 6 6-6"/>'),
+  panel: svg('<path d="M4 6h16M4 12h10M4 18h7"/><circle cx="18" cy="16" r="3"/>'),
   grid: svg('<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M15 3v18M3 9h18M3 15h18"/>'),
 };
 const clone = (value) => JSON.parse(JSON.stringify(value));
@@ -80,9 +82,11 @@ export function editor(app) {
             <button type="button" role="tab" aria-selected="false" data-tab="theme">Thème</button>
             <button type="button" role="tab" aria-selected="false" data-tab="add">Ajouter</button>
             <button type="button" role="tab" aria-selected="false" data-tab="screens" hidden>Écrans</button>
+            <button type="button" class="editor-fold" data-fold aria-label="Réduire le panneau en bulle">${I.fold}</button>
           </nav>
           <div class="editor-body"><p class="editor-hint">Touchez un élément de l'appli pour le régler. Gardez le doigt dessus et glissez pour le déplacer ; la poignée ronde change sa taille.</p></div>
         </aside>
+        <button type="button" class="editor-bubble" data-unfold aria-label="Ouvrir le panneau de réglages" hidden>${I.panel}<span class="editor-bubble-name"></span></button>
       </section>`;
     const root = view().querySelector(".editor");
     const body = root.querySelector(".editor-body");
@@ -137,6 +141,7 @@ export function editor(app) {
       onPlace(key, spec) { change((target) => api().placeAt(target, key, spec)); render(); },
       onSelect(info) {
         selected = info;
+        root.querySelector(".editor-bubble-name").textContent = info ? info.name : "";
         if (tab !== "element") switchTab("element");
         else render();
       },
@@ -510,6 +515,16 @@ export function editor(app) {
       event.currentTarget.setAttribute("aria-pressed", String(host.showGrid));
       if (api()) api().refresh();
     });
+    // Le panneau se réduit en une bulle en bas à droite : l'appli prend tout l'écran.
+    const fold = (folded) => {
+      root.classList.toggle("folded", folded);
+      root.querySelector("[data-unfold]").hidden = !folded;
+      try { localStorage.setItem("claw-web.editor.folded", folded ? "1" : ""); } catch (_) { /* rien */ }
+      if (api()) setTimeout(() => api().refresh(), 220);
+    };
+    root.querySelector("[data-fold]").addEventListener("click", () => fold(true));
+    root.querySelector("[data-unfold]").addEventListener("click", () => fold(false));
+    try { if (localStorage.getItem("claw-web.editor.folded")) fold(true); } catch (_) { /* rien */ }
     root.querySelector("[data-undo]").addEventListener("click", () => {
       if (!history.length || !api()) return;
       design = history.pop();

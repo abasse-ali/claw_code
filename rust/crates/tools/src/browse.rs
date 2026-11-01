@@ -804,6 +804,148 @@ fn quoted(texts: &[&String]) -> String {
         .join(", ")
 }
 
+// --- Outil `Design` --------------------------------------------------------------------------------
+
+/// La couche de l'éditeur visuel (la même que Claw Web et les applis) et le script qui y passe
+/// les retouches du modèle.
+const DESIGN_LAYER: &str = include_str!("components/claw-design.js");
+const DESIGN_EDIT: &str = include_str!("design_edit.js");
+const DESIGN_TAG: &str = r#"<script src="./claw-design.js" defer></script>"#;
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DesignInput {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    screen: Option<String>,
+    #[serde(default)]
+    device: Option<String>,
+    edits: Vec<Value>,
+}
+
+/// Retouches visuelles posées comme dans l'éditeur de Claw Web : appliquées sur la page ouverte
+/// dans le navigateur, puis écrites dans claw-design.json (public/ d'une appli Vite, sinon à côté
+/// de la page), avec la couche et sa balise si l'appli ne les a pas encore.
+pub(crate) fn design(input: &DesignInput) -> Result<Value, String> {
+    if input.edits.is_empty() {
+        return Err("`edits` is empty: give at least one edit".to_string());
+    }
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let page = input
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .unwrap_or("index.html")
+        .to_string();
+    let vite = cwd.join("package.json").is_file() && cwd.join("public").is_dir();
+    let folder = if vite {
+        cwd.join("public")
+    } else {
+        cwd.join(&page)
+            .parent()
+            .map_or_else(|| cwd.clone(), std::path::Path::to_path_buf)
+    };
+    let json_path = folder.join("claw-design.json");
+    let start: Value = std::fs::read_to_string(&json_path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(Value::Null);
+    let mut open =
+        json!({ "action": "open", "device": input.device.as_deref().unwrap_or("phone") });
+    match input
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        Some(url) => open["url"] = json!(url),
+        None => open["path"] = json!(page),
+    }
+    browse(&serde_json::from_value(open).map_err(|error| error.to_string())?)?;
+    let result = {
+        let mut guard = SESSION
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let session = guard.as_mut().ok_or("the browser did not start")?;
+        if let Some(screen) = input
+            .screen
+            .as_deref()
+            .map(str::trim)
+            .filter(|screen| !screen.is_empty())
+        {
+            let hash = if screen.starts_with('#') {
+                screen.to_string()
+            } else {
+                format!("#{screen}")
+            };
+            session
+                .devtools
+                .evaluate(&format!("location.hash = {}", json!(hash)))?;
+            session.devtools.pump(SETTLE)?;
+        }
+        if session.devtools.evaluate("Boolean(window.clawDesign)")? != json!(true) {
+            session.devtools.evaluate(DESIGN_LAYER)?;
+            session.devtools.pump(Duration::from_millis(200))?;
+        }
+        let result = session.devtools.evaluate(&format!(
+            "{{ const clawStart = {start};\nconst clawEdits = {};\n{DESIGN_EDIT} }}",
+            Value::Array(input.edits.clone())
+        ))?;
+        session.devtools.pump(SETTLE)?;
+        result
+    };
+    if let Some(error) = result["error"].as_str() {
+        return Err(error.to_string());
+    }
+    let mut written = Vec::new();
+    std::fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
+    let text =
+        serde_json::to_string_pretty(&result["design"]).map_err(|error| error.to_string())?;
+    std::fs::write(&json_path, format!("{text}\n")).map_err(|error| error.to_string())?;
+    written.push(relative(&cwd, &json_path));
+    let layer = folder.join("claw-design.js");
+    if std::fs::read_to_string(&layer).ok().as_deref() != Some(DESIGN_LAYER) {
+        std::fs::write(&layer, DESIGN_LAYER).map_err(|error| error.to_string())?;
+        written.push(relative(&cwd, &layer));
+    }
+    let index = if vite {
+        cwd.join("index.html")
+    } else {
+        cwd.join(&page)
+    };
+    if let Ok(html) = std::fs::read_to_string(&index) {
+        if !html.contains("claw-design.js") {
+            if let Some(at) = html.to_ascii_lowercase().find("</head>") {
+                let html = format!("{}  {DESIGN_TAG}\n{}", &html[..at], &html[at..]);
+                std::fs::write(&index, html).map_err(|error| error.to_string())?;
+                written.push(relative(&cwd, &index));
+            }
+        }
+    }
+    let view = browse(
+        &serde_json::from_value(json!({ "action": "look" })).map_err(|error| error.to_string())?,
+    )
+    .unwrap_or(Value::Null);
+    Ok(json!({
+        "done": result["done"],
+        "failed": result["errors"],
+        "grids": result["grids"],
+        "written": written,
+        "note": "These edits live in claw-design.json and are applied over the app at every display; the page below already shows them (Claw rebuilds the app before the next Screenshot).",
+        "view": view,
+    }))
+}
+
+fn relative(cwd: &std::path::Path, path: &std::path::Path) -> String {
+    path.strip_prefix(cwd)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};
@@ -811,6 +953,66 @@ mod tests {
     fn step(input: Value) -> Value {
         let input: super::BrowserInput = serde_json::from_value(input).expect("entrée");
         super::browse(&input).unwrap_or_else(|error| json!({ "error": error }))
+    }
+
+    #[test]
+    #[ignore = "lance le navigateur installé"]
+    fn the_model_retouches_a_page_like_the_visual_editor() {
+        // Demandé le 1er novembre 2026 : « que le modèle puisse utiliser cette fonctionnalité ».
+        let cwd = std::env::current_dir().expect("dossier");
+        let dir = cwd.join(format!("claw-design-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dossier");
+        std::fs::write(
+            dir.join("index.html"),
+            "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Courses</title><style>body { margin: 0; font: 16px/1.5 sans-serif; } main { padding: 16px; } .card { padding: 16px; border-radius: 12px; background: #eee; } button { font: inherit; min-height: 44px; }</style></head><body><main><h1>Mes courses</h1><div class=\"card a\">Panier</div><div class=\"card b\">Budget</div><button type=\"button\">Ajouter</button></main></body></html>",
+        )
+        .expect("html");
+        let page = format!("claw-design-{}/index.html", std::process::id());
+        let input: super::DesignInput = serde_json::from_value(json!({ "path": page, "edits": [
+            { "theme": { "accent": "#0a7d4f", "font": "Poppins" } },
+            { "target": "main", "grid": { "columns": 4, "gap": 12 } },
+            { "target": ".a", "place": { "span": 2 } },
+            { "target": ".b", "place": { "col": 3, "span": 2, "row": 2 } },
+            { "target": "Ajouter", "text": "Valider", "style": { "background": "#0a7d4f", "color": "#ffffff" } },
+            { "add": "stat", "props": { "label": "Reste", "value": "42 €" }, "in": "main" },
+            { "target": "nulle part", "hidden": true }
+        ] }))
+        .expect("entrée");
+        let result = super::design(&input).expect("design");
+        let _ =
+            super::browse(&serde_json::from_value(json!({ "action": "close" })).expect("close"));
+        let saved = std::fs::read_to_string(dir.join("claw-design.json")).unwrap_or_default();
+        let html = std::fs::read_to_string(dir.join("index.html")).unwrap_or_default();
+        let layer = dir.join("claw-design.js").is_file();
+        let _ = std::fs::remove_dir_all(&dir);
+        let done = result["done"].to_string();
+        let failed = result["failed"].to_string();
+        let grids = result["grids"].to_string();
+        assert!(
+            done.contains("grid of 4 columns")
+                && done.contains("text \\\"Valider\\\"")
+                && done.contains("stat added"),
+            "{result}"
+        );
+        assert!(
+            failed.contains("edit 7")
+                && failed.contains("nulle part")
+                && !failed.contains("edit 4"),
+            "{result}"
+        );
+        assert!(
+            grids.contains("\\\"Panier\\\" at row 2, col 1, span 2")
+                && grids.contains("\\\"Budget\\\" at row 2, col 3, span 2"),
+            "{result}"
+        );
+        assert!(
+            saved.contains("\"--accent\": \"#0a7d4f\"")
+                && saved.contains("\"columns\": 4")
+                && saved.contains("\"Valider\""),
+            "{saved}"
+        );
+        assert!(html.contains("claw-design.js") && layer, "{html}");
+        assert!(result["view"].to_string().contains("Valider"), "{result}");
     }
 
     #[test]

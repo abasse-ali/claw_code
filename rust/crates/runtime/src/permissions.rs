@@ -951,7 +951,7 @@ impl ToolTarget {
                 Self::Path(field("path").unwrap_or_else(|| ".".to_string()))
             }
             "WebFetch" | "ViewPage" | "http_request" => field("url").map_or(Self::Other, Self::Url),
-            "Screenshot" | "Browser" => field("url")
+            "Screenshot" | "Browser" | "Design" => field("url")
                 .map(Self::Url)
                 .or_else(|| field("path").map(Self::Path))
                 .unwrap_or(Self::Other),

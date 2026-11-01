@@ -2642,7 +2642,7 @@ fn filter_tool_specs(
         name if SELDOM_USED_TOOLS.contains(&name) => false,
         "BashOutput" | "KillShell" => background,
         // Sans navigateur installé, l'outil ne pourrait rien montrer.
-        "ViewPage" | "Screenshot" | "Browser" => tools::page_viewer_available(),
+        "ViewPage" | "Screenshot" | "Browser" | "Design" => tools::page_viewer_available(),
         "PowerShell" => !posix_shell,
         "NotebookEdit" => project_has_notebooks(),
         "Consult" => {
