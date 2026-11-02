@@ -38,6 +38,15 @@
 //            rowKey : triable, paginé), Skeleton, Spinner, Steps (steps, current), QuantityInput,
 //            Rating, Slider, CodeInput (code reçu par SMS), FileDrop (onFiles), MonthCalendar
 //            (value, onChange, marked : jours marqués).
+// Vitrine  BentoGrid > BentoCard (title, text, icon, visual, size "wide" | "tall" | "big",
+//            onClick), BorderBeam (une lumière fait le tour de la carte), ShimmerButton (le bouton
+//            principal, un reflet passe dessus), WordRotate (words : un mot qui change dans un
+//            titre), ScrollWords (text : les mots s'allument au défilement), ScrollStack (cartes
+//            qui s'empilent en défilant), ZoomIn (s'avance en arrivant), PillTabs (tabs, value,
+//            onChange : pastille qui glisse), CommandPalette (open, onClose, commands [{ id,
+//            label, icon, hint, group, run }]) avec useCommandK() (⌘K), Dock (items : icônes qui
+//            grossissent), DotBackground (grid), Meteors (étoiles filantes, sur un fond sombre),
+//            Spotlight (faisceau de lumière), GlassPanel (verre dépoli), Orbit (center, icons).
 // Encore     TextArea (max : caractères restants), PasswordField (strength : solidité),
 //            Alert (tone "info" | "success" | "warn" | "error", title, action, onClose), Chat
 //            (messages [{ id, mine, name, text, time }], onSend), Timeline (items [{ id, title,
@@ -186,6 +195,7 @@ export * from "./offline";
 export * from "./plus";
 export * from "./qr";
 export * from "./settings";
+export * from "./showcase";
 export * from "./sheet";
 export * from "./social";
 export * from "./store";
