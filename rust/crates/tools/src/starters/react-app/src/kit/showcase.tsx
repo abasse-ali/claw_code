@@ -7,9 +7,10 @@
 // moins de mouvement ; app-kit.css les habille en clair et en sombre.
 
 import { AnimatePresence, motion, useMotionTemplate, useMotionValue, useReducedMotion, useScroll, useSpring, useTransform, type MotionValue } from "framer-motion";
-import { Search, type LucideIcon } from "lucide-react";
-import { Children, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { Check, ChevronLeft, ChevronRight, LoaderCircle, Search, type LucideIcon } from "lucide-react";
+import { Children, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Icon } from "./icons";
+import { money } from "./format";
 
 const EASE = [0.2, 0.9, 0.3, 1] as const;
 
@@ -384,5 +385,276 @@ export function Orbit({ center, icons, size = 260, duration = 24 }: { center: Re
       {two && ring(inner, outerRadius - 56, false)}
       <span className="orbit__center" style={{ width: core, height: core }}>{center}</span>
     </div>
+  );
+}
+
+// --- Widgets de vitrine -----------------------------------------------------------------------
+
+/** Le bouton d'une action qui prend du temps (payer, envoyer, enregistrer) : il tourne pendant
+ * l'attente, puis montre une coche et `done` (« Payé »), et revient. `onClick` rend une promesse ;
+ * une erreur le remet en place avec `failed`. */
+export function ActionButton({ children, onClick, done = "C'est fait", failed = "Réessayer", icon }: {
+  children: ReactNode; onClick: () => Promise<unknown> | unknown; done?: string; failed?: string; icon?: LucideIcon;
+}) {
+  const [state, setState] = useState<"idle" | "busy" | "done" | "failed">("idle");
+  const press = async () => {
+    if (state === "busy") return;
+    setState("busy");
+    try {
+      await onClick();
+      setState("done");
+      setTimeout(() => setState("idle"), 2200);
+    } catch {
+      setState("failed");
+    }
+  };
+  return (
+    <motion.button type="button" layout className={`action-btn action-btn--${state}`} onClick={press} aria-busy={state === "busy"} transition={{ duration: 0.25, ease: EASE }}>
+      <AnimatePresence mode="popLayout" initial={false}>
+        <motion.span key={state} className="action-btn__face" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.2 }}>
+          {state === "busy" ? <Icon icon={LoaderCircle} size={20} /> : state === "done" ? <><Icon icon={Check} size={20} />{done}</> : <>{icon && state === "idle" && <Icon icon={icon} size={18} />}{state === "failed" ? failed : children}</>}
+        </motion.span>
+      </AnimatePresence>
+      <span className="visually-hidden" role="status">{state === "busy" ? "En cours" : state === "done" ? done : ""}</span>
+    </motion.button>
+  );
+}
+
+export type Plan = { name: string; monthly: number; yearly: number; text?: string; features: string[]; best?: boolean; action: string; onChoose: () => void };
+
+/** Les forfaits côte à côte, avec la bascule « Mensuel / Annuel » dont les prix défilent ; le
+ * forfait `best` est mis en avant par la bordure lumineuse. Prix en euros. */
+export function PricingTable({ plans, saving }: { plans: Plan[]; saving?: string }) {
+  const [yearly, setYearly] = useState(false);
+  return (
+    <div className="pricing">
+      <PillTabs label="Facturation" value={yearly ? "an" : "mois"} onChange={(value) => setYearly(value === "an")}
+        tabs={[{ id: "mois", label: "Mensuel" }, { id: "an", label: saving ? `Annuel · ${saving}` : "Annuel" }]} />
+      <div className="pricing__plans">
+        {plans.map((plan) => {
+          const body = (
+            <div className="pricing__plan">
+              <span className="pricing__name">{plan.name}{plan.best && <span className="badge badge--accent">Conseillé</span>}</span>
+              <span className="pricing__price">
+                <AnimatePresence mode="popLayout" initial={false}>
+                  <motion.strong key={yearly ? "y" : "m"} initial={{ y: 14, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: -14, opacity: 0 }} transition={{ duration: 0.25, ease: EASE }}>
+                    {money(yearly ? plan.yearly / 12 : plan.monthly)}
+                  </motion.strong>
+                </AnimatePresence>
+                <small>par mois{yearly ? `, ${money(plan.yearly)} par an` : ""}</small>
+              </span>
+              {plan.text && <p className="pricing__text">{plan.text}</p>}
+              <FeatureList items={plan.features} />
+              {plan.best ? <ShimmerButton onClick={plan.onChoose}>{plan.action}</ShimmerButton>
+                : <button type="button" className="btn btn--block" onClick={plan.onChoose}>{plan.action}</button>}
+            </div>
+          );
+          return <div key={plan.name} className={`pricing__slot${plan.best ? " is-best" : ""}`}>{plan.best ? <BorderBeam>{body}</BorderBeam> : body}</div>;
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** Une liste d'avantages dont les coches se dessinent une à une quand elle arrive à l'écran. */
+export function FeatureList({ items }: { items: string[] }) {
+  const still = useReducedMotion();
+  return (
+    <ul className="feature-list">
+      {items.map((item, index) => (
+        <li key={item}>
+          <svg className="feature-list__tick" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+            <motion.path d="M7 12.5l3.2 3.2L17 9" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"
+              initial={still ? false : { pathLength: 0 }} whileInView={{ pathLength: 1 }} viewport={{ once: true }} transition={{ duration: 0.35, delay: 0.15 + index * 0.08 }} />
+          </svg>
+          <span>{item}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** Une galerie en mosaïque, comme Pinterest : les images gardent leurs proportions et se rangent
+ * en colonnes (2 au téléphone, 3 puis 4 plus large). `onOpen` : toucher une image (la Lightbox). */
+export function Masonry({ images, onOpen }: { images: { src: string; alt: string }[]; onOpen?: (index: number) => void }) {
+  const still = useReducedMotion();
+  return (
+    <div className="masonry">
+      {images.map((image, index) => (
+        <motion.button key={image.src} type="button" className="masonry__item" onClick={() => onOpen?.(index)} aria-label={image.alt}
+          initial={still ? false : { opacity: 0, y: 16 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.45, delay: (index % 4) * 0.06 }}>
+          <img src={image.src} alt="" loading="lazy" />
+        </motion.button>
+      ))}
+    </div>
+  );
+}
+
+/** Un carrousel en 3D (Cover Flow) : la carte du milieu en avant, les voisines inclinées
+ * derrière ; on glisse ou on touche les flèches. */
+export function Coverflow({ items, label }: { items: { id: string; content: ReactNode }[]; label: string }) {
+  const [index, setIndex] = useState(0);
+  const still = useReducedMotion();
+  const go = (next: number) => setIndex(Math.max(0, Math.min(items.length - 1, next)));
+  return (
+    <div className="coverflow" role="region" aria-roledescription="carrousel" aria-label={label}>
+      <motion.div className="coverflow__stage" drag="x" dragConstraints={{ left: 0, right: 0 }} dragElastic={0.2}
+        onDragEnd={(_, info) => { if (info.offset.x < -40) go(index + 1); if (info.offset.x > 40) go(index - 1); }}>
+        {items.map((item, position) => {
+          const offset = position - index;
+          const hidden = Math.abs(offset) > 2;
+          return (
+            <motion.div key={item.id} className="coverflow__card" aria-hidden={offset !== 0}
+              animate={{ x: `${offset * 96}%`, rotateY: still ? 0 : offset * -38, scale: offset === 0 ? 1 : 0.82, opacity: hidden ? 0 : 1 - Math.abs(offset) * 0.25, zIndex: 10 - Math.abs(offset) }}
+              transition={{ type: "spring", stiffness: 260, damping: 30 }} onClick={() => go(position)}>
+              {item.content}
+            </motion.div>
+          );
+        })}
+      </motion.div>
+      <div className="coverflow__nav">
+        <button type="button" className="icon-btn" onClick={() => go(index - 1)} disabled={index === 0} aria-label="Précédent"><Icon icon={ChevronLeft} size={20} /></button>
+        <span>{index + 1} / {items.length}</span>
+        <button type="button" className="icon-btn" onClick={() => go(index + 1)} disabled={index === items.length - 1} aria-label="Suivant"><Icon icon={ChevronRight} size={20} /></button>
+      </div>
+    </div>
+  );
+}
+
+/** Des panneaux côte à côte : celui qu'on touche s'élargit et montre son texte (les saisons, les
+ * destinations, les collections). `items` : [{ title, text, image }]. */
+export function ExpandingPanels({ items }: { items: { title: string; text?: string; image: string }[] }) {
+  const [open, setOpen] = useState(0);
+  return (
+    <div className="panels">
+      {items.map((item, index) => (
+        <motion.button key={item.title} type="button" layout className={`panels__panel${index === open ? " is-open" : ""}`} aria-expanded={index === open}
+          onClick={() => setOpen(index)} style={{ backgroundImage: `url("${item.image}")` }} transition={{ duration: 0.45, ease: EASE }}>
+          <span className="panels__text">
+            <strong>{item.title}</strong>
+            {index === open && item.text && <motion.span initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}>{item.text}</motion.span>}
+          </span>
+        </motion.button>
+      ))}
+    </div>
+  );
+}
+
+/** Un mot souligné au surligneur, le trait se dessine quand il arrive à l'écran. */
+export function Marker({ children }: { children: ReactNode }) {
+  const still = useReducedMotion();
+  return (
+    <span className="marker">
+      <span className="marker__text">{children}</span>
+      <svg className="marker__stroke" viewBox="0 0 200 20" preserveAspectRatio="none" aria-hidden="true">
+        <motion.path d="M3 13 C 40 6, 90 16, 130 9 S 185 8, 197 11" fill="none" strokeWidth="7" strokeLinecap="round"
+          initial={still ? false : { pathLength: 0 }} whileInView={{ pathLength: 1 }} viewport={{ once: true }} transition={{ duration: 0.7, ease: EASE, delay: 0.2 }} />
+      </svg>
+    </span>
+  );
+}
+
+/** Un texte écrit en cercle qui tourne lentement autour d'une icône (« NOUVEAU · 2026 · »), le
+ * badge des pages de lancement. */
+export function CircleText({ text, icon, size = 112 }: { text: string; icon?: LucideIcon; size?: number }) {
+  const id = useId().replace(/:/g, "");
+  return (
+    <span className="circle-text" style={{ width: size, height: size }} role="img" aria-label={text}>
+      <svg viewBox="0 0 100 100" aria-hidden="true">
+        <defs><path id={`${id}-c`} d="M50 50 m-38 0 a38 38 0 1 1 76 0 a38 38 0 1 1 -76 0" /></defs>
+        <text><textPath href={`#${id}-c`} textLength="236" lengthAdjust="spacing">{text}</textPath></text>
+      </svg>
+      {icon && <span className="circle-text__icon"><Icon icon={icon} size={Math.round(size / 4)} /></span>}
+    </span>
+  );
+}
+
+/** Une carte à gratter : on frotte du doigt la couche argentée pour découvrir ce qu'il y a
+ * dessous (un code promo, une surprise) ; `onReveal` quand plus de la moitié est grattée. */
+export function ScratchCard({ children, onReveal, label = "Grattez ici" }: { children: ReactNode; onReveal?: () => void; label?: string }) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const [revealed, setRevealed] = useState(false);
+  const drawing = useRef(false);
+  useEffect(() => {
+    const el = canvas.current;
+    const context = el?.getContext("2d");
+    if (!el || !context) return;
+    const box = el.getBoundingClientRect();
+    el.width = box.width * devicePixelRatio;
+    el.height = box.height * devicePixelRatio;
+    context.scale(devicePixelRatio, devicePixelRatio);
+    const gradient = context.createLinearGradient(0, 0, box.width, box.height);
+    gradient.addColorStop(0, "#c9ccd3"); gradient.addColorStop(0.5, "#eef0f3"); gradient.addColorStop(1, "#b9bdc6");
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, box.width, box.height);
+    context.fillStyle = "#6b6f78";
+    context.font = "600 15px system-ui, sans-serif";
+    context.textAlign = "center";
+    context.fillText(label, box.width / 2, box.height / 2 + 5);
+  }, [label]);
+  const scratch = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!drawing.current || revealed) return;
+    const el = event.currentTarget;
+    const context = el.getContext("2d");
+    if (!context) return;
+    const box = el.getBoundingClientRect();
+    context.globalCompositeOperation = "destination-out";
+    context.beginPath();
+    context.arc(event.clientX - box.left, event.clientY - box.top, 22, 0, Math.PI * 2);
+    context.fill();
+    const data = context.getImageData(0, 0, el.width, el.height).data;
+    let clear = 0;
+    for (let i = 3; i < data.length; i += 64) if (data[i] === 0) clear += 1;
+    if (clear / (data.length / 64) > 0.5) {
+      setRevealed(true);
+      onReveal?.();
+    }
+  };
+  return (
+    <div className="scratch">
+      <div className="scratch__prize">{children}</div>
+      {!revealed && (
+        <canvas ref={canvas} className="scratch__cover" aria-label={label} role="img"
+          onPointerDown={(event) => { drawing.current = true; event.currentTarget.setPointerCapture(event.pointerId); scratch(event); }}
+          onPointerMove={scratch} onPointerUp={() => { drawing.current = false; }} />
+      )}
+      {!revealed && <button type="button" className="scratch__skip" onClick={() => { setRevealed(true); onReveal?.(); }}>Tout découvrir</button>}
+    </div>
+  );
+}
+
+/** Une loupe qui s'ouvre en champ de recherche quand on la touche (et se referme vide). */
+export function ExpandSearch({ value, onChange, placeholder = "Rechercher" }: { value: string; onChange: (value: string) => void; placeholder?: string }) {
+  const [open, setOpen] = useState(Boolean(value));
+  const input = useRef<HTMLInputElement>(null);
+  return (
+    <motion.div className={`expand-search${open ? " is-open" : ""}`} layout transition={{ duration: 0.3, ease: EASE }}>
+      <button type="button" className="expand-search__btn" aria-label={placeholder} aria-expanded={open}
+        onClick={() => { setOpen(true); setTimeout(() => input.current?.focus(), 50); }}>
+        <Icon icon={Search} size={20} />
+      </button>
+      {open && (
+        <motion.input ref={input} value={value} placeholder={placeholder} aria-label={placeholder}
+          initial={{ opacity: 0 }} animate={{ opacity: 1 }} onChange={(event) => onChange(event.target.value)}
+          onBlur={() => { if (!value) setOpen(false); }} onKeyDown={(event) => { if (event.key === "Escape") { onChange(""); setOpen(false); } }} />
+      )}
+    </motion.div>
+  );
+}
+
+/** Un en-tête collé en haut dont le grand titre rétrécit et dont le fond se floute quand on fait
+ * défiler (les titres d'iOS). `end` : un bouton à droite. */
+export function ShrinkHeader({ title, end }: { title: string; end?: ReactNode }) {
+  const { scrollY } = useScroll();
+  const still = useReducedMotion();
+  const size = useTransform(scrollY, [0, 80], [30, 18]);
+  const shade = useTransform(scrollY, [0, 80], [0, 1]);
+  const fontSize = useMotionTemplate`${size}px`;
+  return (
+    <header className="shrink-header">
+      <motion.span className="shrink-header__shade" style={{ opacity: still ? 1 : shade }} aria-hidden="true" />
+      <motion.h1 style={still ? undefined : { fontSize }}>{title}</motion.h1>
+      {end}
+    </header>
   );
 }

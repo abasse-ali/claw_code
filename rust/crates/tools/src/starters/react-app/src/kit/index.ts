@@ -47,6 +47,13 @@
 //            label, icon, hint, group, run }]) avec useCommandK() (⌘K), Dock (items : icônes qui
 //            grossissent), DotBackground (grid), Meteors (étoiles filantes, sur un fond sombre),
 //            Spotlight (faisceau de lumière), GlassPanel (verre dépoli), Orbit (center, icons).
+//            ActionButton (onClick → promesse : tourne, puis coche et `done`), PricingTable (plans
+//            [{ name, monthly, yearly, features, best, action, onChoose }], saving : bascule
+//            mensuel/annuel), FeatureList (items : coches qui se dessinent), Masonry (images,
+//            onOpen : mosaïque), Coverflow (items, label : carrousel en 3D), ExpandingPanels
+//            (items [{ title, text, image }]), Marker (un mot surligné), CircleText (text, icon :
+//            badge qui tourne), ScratchCard (onReveal : carte à gratter), ExpandSearch (value,
+//            onChange : loupe qui s'ouvre), ShrinkHeader (title, end : grand titre qui rétrécit).
 // Encore     TextArea (max : caractères restants), PasswordField (strength : solidité),
 //            Alert (tone "info" | "success" | "warn" | "error", title, action, onClose), Chat
 //            (messages [{ id, mine, name, text, time }], onSend), Timeline (items [{ id, title,

@@ -1324,8 +1324,12 @@
     const ref = use && (use.getAttribute("href") || use.getAttribute("xlink:href") || "");
     const art = ref && ref.startsWith("#") ? document.getElementById(ref.slice(1)) : el;
     if (!art || !lineArt(art)) return false;
-    const style = getComputedStyle(use || el);
-    return style.fill !== "none" && (style.stroke === "none" || parseFloat(style.strokeWidth) === 0);
+    const blob = (style) => style.fill !== "none" && (style.stroke === "none" || parseFloat(style.strokeWidth) === 0);
+    if (use) return blob(getComputedStyle(use));
+    // Dans l'icône même : ce sont ses traits qui comptent (fill="none" et stroke posés sur chaque
+    // tracé, pas sur le <svg>, comme le font les icônes animées).
+    const shapes = [...el.querySelectorAll("path, line, polyline")];
+    return shapes.length > 0 && shapes.filter((shape) => blob(getComputedStyle(shape))).length * 2 > shapes.length;
   });
   if (blobs.length) {
     blame(blobs);
@@ -1424,7 +1428,8 @@
   const splitWords = [];
   for (const el of visible) {
     if (splitWords.length >= 4) break;
-    if (!ownText(el) || el.closest("pre, code, textarea")) continue;
+    // Texte écrit le long d'un tracé (un badge en cercle) : ses mots tournent, ils ne passent pas à la ligne.
+    if (!ownText(el) || el.closest("pre, code, textarea, svg")) continue;
     const text = words(el);
     if (text.length > 60 && !/^H[1-6]$/.test(el.tagName)) continue;
     for (const node of el.childNodes) {
@@ -1457,7 +1462,7 @@
   const squeezed = [];
   for (const el of readable) {
     if (squeezed.length >= 3) break;
-    if (!ownText(el) || /^H[1-6]$/.test(el.tagName) || el.closest("button, a, label, th, td, nav, pre, code")) continue;
+    if (!ownText(el) || /^H[1-6]$/.test(el.tagName) || el.closest("button, a, label, th, td, nav, pre, code, svg")) continue;
     for (const node of el.childNodes) {
       if (node.nodeType !== 3) continue;
       const count = node.textContent.trim().split(/\s+/).filter(Boolean).length;
@@ -1496,12 +1501,16 @@
     for (const groups of families.values()) {
       for (const items of groups.values()) {
         if (items.length < 4) continue;
+        // Une image de fond (des panneaux de photos) est un contenu ; des blocs côte à côte sur une
+        // même ligne ne font pas défiler.
         const tall = items.filter((el) => box.get(el).height > window.innerHeight * 0.25 && words(el).length < 40
+          && !/url\(/.test(css(el).backgroundImage)
           && ![...el.querySelectorAll("img, video, picture, canvas")].some((media) => {
             const rect = media.getBoundingClientRect();
             return rect.height > box.get(el).height * 0.35;
           }));
-        if (tall.length >= 4 && tall.length >= items.length * 0.75) hollow.push(tall);
+        const rows = new Set(tall.map((el) => Math.round(box.get(el).top / 20)));
+        if (tall.length >= 4 && tall.length >= items.length * 0.75 && rows.size >= 3) hollow.push(tall);
       }
     }
     if (hollow.length) {
