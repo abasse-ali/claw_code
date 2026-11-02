@@ -54,6 +54,13 @@
 //            (items [{ title, text, image }]), Marker (un mot surligné), CircleText (text, icon :
 //            badge qui tourne), ScratchCard (onReveal : carte à gratter), ExpandSearch (value,
 //            onChange : loupe qui s'ouvre), ShrinkHeader (title, end : grand titre qui rétrécit).
+// iPhone     WalletStack (items [{ id, title, sub, amount, colors, content }] : pile de Wallet),
+//            BankCard (number, name, expiry, cvc, flipped : la carte suit la saisie), TicketCard
+//            (title, sub, rows, code : billet à QR code), Receipt (title, date, lines [{ label,
+//            amount, qty }] : ticket de caisse), NotificationStack (items [{ id, icon, app, title,
+//            text, time }]), DynamicIsland (active, start, end, children : pastille du haut),
+//            SnapSheet (title, peek, snap : volet à crans comme Plans), WheelPicker (options,
+//            value, onChange, label : roue de sélection).
 // Encore     TextArea (max : caractères restants), PasswordField (strength : solidité),
 //            Alert (tone "info" | "success" | "warn" | "error", title, action, onClose), Chat
 //            (messages [{ id, mine, name, text, time }], onSend), Timeline (items [{ id, title,
@@ -191,6 +198,7 @@ export * from "./format";
 export * from "./forms";
 export * from "./fx";
 export * from "./icons";
+export * from "./iphone";
 export * from "./layout";
 export * from "./life";
 export * from "./map";

@@ -32,7 +32,7 @@ export function QRCode({ value, label, size = 200, download = true }: { value: s
   return (
     <figure className="qr">
       <div className="qr__code" style={{ width: size, height: size }} role="img" aria-label={`Code QR : ${label}`}
-        dangerouslySetInnerHTML={svg ? { __html: svg } : undefined} />
+        dangerouslySetInnerHTML={svg ? { __html: svg.replace("<svg ", `<svg width="${size - 16}" height="${size - 16}" `) } : undefined} />
       <figcaption>{label}</figcaption>
       {download && svg && <button className="btn btn--small" type="button" onClick={save}><Icon icon={Download} size={16} />Enregistrer l'image</button>}
     </figure>

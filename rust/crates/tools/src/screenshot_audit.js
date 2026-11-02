@@ -1096,6 +1096,8 @@
   // lignes des opérations de l'appli de budget.
   const flowing = (el) => css(el).display.startsWith("inline");
   const texts = visible.filter((el) => ownText(el) && !pinned(el) && !el.closest("svg, select, option"))
+    // Un texte caché par le défilement de son cadre (les lignes d'une roue de sélection) ne touche rien.
+    .filter((el) => { const seen = visibleBox(el); return seen.width > 1 && seen.height > 1; })
     .slice(0, 500).map((el) => ({ el, r: lettersOf(el) })).filter(({ r }) => r.width > 1 && r.height > 1)
     .sort((x, y) => x.r.top - y.r.top);
   const touchingTexts = [];
@@ -1290,6 +1292,8 @@
   const giants = visible.filter((el) => el.tagName.toLowerCase() === "svg").filter((el) => {
     const rect = box.get(el);
     if (!rect || rect.width <= 120 || rect.height <= 120) return false;
+    // Une taille donnée exprès (width égal à ce qui est dessiné : un code QR, une illustration).
+    if (el.hasAttribute("width") && Math.abs(parseFloat(el.getAttribute("width")) - rect.width) < 2) return false;
     const view = el.viewBox && el.viewBox.baseVal;
     const iconGrid = Boolean(view) && view.width > 0 && view.width <= 64 && view.height <= 64;
     const label = `${el.id} ${el.getAttribute("class") || ""} ${el.parentElement ? `${el.parentElement.id} ${el.parentElement.getAttribute("class") || ""}` : ""}`;
